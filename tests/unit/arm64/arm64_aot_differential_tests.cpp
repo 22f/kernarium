@@ -14,6 +14,7 @@
 
 #include "cpu/arm64/aot/aot_diagnostics.hpp"
 #include "cpu/arm64/aot/aot_runtime.hpp"
+#include "cpu/arm64/engine_adapters.hpp"
 #include "cpu/arm64/fp_environment.hpp"
 #include "cpu/arm64/gadgets/executor.hpp"
 #include "cpu/host_capabilities.hpp"
@@ -58,6 +59,9 @@ using namespace uml::emulator::tests::gadget_runtime;
 
 namespace {
 
+/* Every row that main() calls is [[gnu::noinline]]: inlined, their locals (an
+ * executor and an address space each) would share one frame of main, which
+ * then takes most of the thread's stack. */
 constexpr std::uint64_t page_bytes = 4096;
 constexpr std::uint64_t stub_offset = 0x4000'0000ULL;
 /* Beyond the text of the largest library under test. */
@@ -482,20 +486,46 @@ struct Case final {
 	bool faulting;
 };
 
+/* What a guest can observe of a vCPU at an instruction boundary: the
+ * registers, the flags, the floating-point control and status words, the
+ * thread pointer, all vector registers and the arena (the last two as
+ * hashes). `memory` is zero where the caller did not hash the arena. */
 struct Snapshot final {
 	std::uint64_t pc, sp, x[31];
-	std::uint32_t nzcv;
+	std::uint32_t nzcv, fpcr, fpsr;
+	std::uint64_t tls, vectors, memory;
 	bool operator==(const Snapshot &) const = default;
 };
 
-[[nodiscard]] Snapshot snapshot_of(const arm64::CpuState &cpu)
+/* The guest's FPSR where the state is between blocks: the gadget engine
+ * may keep it in the host register until the run ends (the exit restores
+ * it into the state, restore_native_fp_environment). */
+[[nodiscard]] std::uint32_t guest_fpsr(const arm64::CpuState &cpu) noexcept
+{
+	if (!cpu.gadget_fp_active)
+		return cpu.effective_fpsr();
+	std::uint64_t native;
+	asm volatile("mrs %0, fpsr" : "=r"(native));
+	return static_cast<std::uint32_t>(native) & arm64::fpsr_writable_mask;
+}
+
+[[nodiscard]] Snapshot snapshot_of(const arm64::CpuState &cpu,
+	std::uint64_t memory = 0)
 {
 	Snapshot s{};
 	s.pc = cpu.pc;
 	s.sp = cpu.sp;
 	s.nzcv = cpu.nzcv;
+	s.fpcr = cpu.effective_fpcr();
+	s.fpsr = guest_fpsr(cpu);
+	s.tls = cpu.tls;
 	for (std::size_t i = 0; i < 31; ++i)
 		s.x[i] = cpu.registers[i];
+	s.vectors = hash_of(cpu.fp_loaded || cpu.deferred_vectors == nullptr ?
+		static_cast<const void *>(cpu.vectors.data()) :
+		static_cast<const void *>(cpu.deferred_vectors),
+		sizeof(cpu.vectors));
+	s.memory = memory;
 	return s;
 }
 
@@ -529,7 +559,7 @@ struct BlockLog final {
 [[nodiscard]] Result run_from(gadgets::GadgetExecutor &executor,
 	StaticGuestMemory &memory, unsigned long generation, Arena &arena,
 	arm64::CpuState cpu, std::size_t blocks, const Observer &observer = {},
-	bool stop_at_fault = false)
+	bool stop_at_fault = false, const Observer &on_fault = {})
 {
 	Result r;
 	std::size_t faults_taken = 0;
@@ -559,6 +589,8 @@ struct BlockLog final {
 		if (out.event != EngineEvent::memory_fault)
 			break;
 		const auto address = executor.fault_address();
+		if (on_fault)
+			on_fault(cpu);
 		Fault fault{cpu.pc, address,
 			static_cast<std::uint32_t>(executor.fault_access()),
 			executor.fault_alignment(),
@@ -589,7 +621,7 @@ struct BlockLog final {
 [[nodiscard]] Result drive_on(gadgets::GadgetExecutor &executor,
 	StaticGuestMemory &memory, unsigned long generation, std::uint64_t bias,
 	Arena &arena, Case c, std::size_t blocks, const Observer &observer = {},
-	bool stop_at_fault = false)
+	bool stop_at_fault = false, const Observer &on_fault = {})
 {
 	c.cpu.pc = bias + c.pc_offset;
 	for (std::size_t i = 0; i < arena.total(); ++i)
@@ -598,14 +630,15 @@ struct BlockLog final {
 	SplitMix fill{c.seed};
 	arena.fill(fill);
 	return run_from(executor, memory, generation, arena, c.cpu, blocks,
-		observer, stop_at_fault);
+		observer, stop_at_fault, on_fault);
 }
 
 [[nodiscard]] Result drive(Environment &env, Arena &arena, Case c,
-	std::size_t blocks, const Observer &observer = {})
+	std::size_t blocks, const Observer &observer = {},
+	const Observer &on_fault = {})
 {
 	return drive_on(env.executor, env.memory, env.generation, env.bias,
-		arena, std::move(c), blocks, observer);
+		arena, std::move(c), blocks, observer, false, on_fault);
 }
 
 void describe(const char *what, const Case &c)
@@ -998,6 +1031,9 @@ struct Config final {
 	/* seed:pc_offset:faulting:tbi of one case to run alone. */
 	std::string only;
 	std::size_t starts{12}, interior{8}, sp_sites{6}, site_cases{4};
+	/* Cases the stepped-trace row follows, and the longest stepped run it
+	 * records (a case that takes more is left out). */
+	std::size_t trace_cases{48}, trace_cap{20000};
 	std::uint64_t master{0x5eed};
 };
 
@@ -1017,6 +1053,10 @@ struct Config final {
 			c.sp_sites = std::strtoul(argv[i + 1], nullptr, 0);
 		else if (key == "--site-cases")
 			c.site_cases = std::strtoul(argv[i + 1], nullptr, 0);
+		else if (key == "--trace-cases")
+			c.trace_cases = std::strtoul(argv[i + 1], nullptr, 0);
+		else if (key == "--trace-cap")
+			c.trace_cap = std::strtoul(argv[i + 1], nullptr, 0);
 		else if (key == "--master")
 			c.master = std::strtoull(argv[i + 1], nullptr, 0);
 		else if (key == "--case")
@@ -1032,6 +1072,7 @@ struct Config final {
 /* Every function of the library, from its first instruction and from random
  * interior ones, and a sample of every kind of instruction the rewriter
  * inlined, against random states and fault patterns. */
+[[gnu::noinline]]
 Totals differential(const Config &config, const LibraryImage &image,
 	const std::vector<Function> &functions, const std::vector<Site> &sites)
 {
@@ -1128,6 +1169,7 @@ struct Fixture final {
 	Arena arena;
 };
 
+[[gnu::noinline]]
 void default_off_and_single_step(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -1158,6 +1200,7 @@ void default_off_and_single_step(const LibraryImage &image,
 	require(false);
 }
 
+[[gnu::noinline]]
 void preemption_is_bounded(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -1192,6 +1235,7 @@ void preemption_is_bounded(const LibraryImage &image,
 	require(longest <= 4096 + 1024);
 }
 
+[[gnu::noinline]]
 void two_load_biases(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -1230,6 +1274,7 @@ void two_load_biases(const LibraryImage &image,
 
 /* The same bytes at a covered address are not what the AOT code stands for
  * when a page differs: no entry, the engine runs it as usual. */
+[[gnu::noinline]]
 void other_bytes_fall_back(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -1276,6 +1321,7 @@ void other_bytes_fall_back(const LibraryImage &image,
  * page it changed is no longer the code the framework stands for, so the
  * engine runs it, and the pages that did not change are still entered. When
  * the bytes are back the page is compared again and entered. */
+[[gnu::noinline]]
 void changed_text_falls_back(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -1354,6 +1400,7 @@ void changed_text_falls_back(const LibraryImage &image,
 /* A loop over a buffer takes the inline hit path: adler32_z over 40000 bytes
  * (the library's own checksum loop, 0xd020), tagged or not, steps only for
  * the pages it first touches. */
+[[gnu::noinline]]
 void inline_hit_path_is_taken(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -1394,6 +1441,7 @@ void inline_hit_path_is_taken(const LibraryImage &image,
 /* Every access that leaves the page of the last one refills, and the
  * refill callback leaves every register and flag the thunk saves scrambled:
  * the results must still be the engine's. */
+[[gnu::noinline]]
 void refill_keeps_state(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -1436,6 +1484,7 @@ void refill_keeps_state(const LibraryImage &image,
 /* A library whose last code page is not mapped yet: the code on the pages
  * that are mapped is entered, a function on the missing page is the
  * engine's, and once the page is mapped its code is entered too. */
+[[gnu::noinline]]
 void partially_mapped_library(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -1533,6 +1582,7 @@ void partially_mapped_library(const LibraryImage &image,
 
 /* Two vCPUs of one address space run rewritten code at once, each with its
  * own binder, TLB and arena; every case ends as the engine's would. */
+[[gnu::noinline]]
 void two_vcpus(const LibraryImage &image, const std::vector<Function> &functions)
 {
 	constexpr std::uint64_t bias = 0x7163'0000'0000ULL;
@@ -1601,6 +1651,7 @@ void two_vcpus(const LibraryImage &image, const std::vector<Function> &functions
 /* Two libraries in one address space, each reaching the other through a
  * register (as a call through a PLT does): the branch stays in rewritten
  * code when the other library is verified. */
+[[gnu::noinline]]
 void cross_library_branches(const LibraryImage &image,
 	const std::vector<Function> &functions, const LibraryImage &other,
 	const std::vector<Function> &other_functions)
@@ -1660,6 +1711,7 @@ void cross_library_branches(const LibraryImage &image,
  * (tools/aot/fixture.py): every pass through it is charged against the
  * entry's budget, so a long run comes back to the engine about every 4096
  * instructions and ends where the engine's run ends. */
+[[gnu::noinline]]
 void loop_through_another_range(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -1712,6 +1764,7 @@ void enterable(Case &c)
 
 /* Forty instructions and a RET that returns to the start of the run: a lap
  * the budget used to charge four for (libz 0x11638..0x116d8). */
+[[gnu::noinline]]
 void return_loop_is_bounded(const LibraryImage &image)
 {
 	constexpr std::uint64_t first = 0x11638, last = 0x116d8;
@@ -1740,6 +1793,7 @@ void return_loop_is_bounded(const LibraryImage &image)
 
 /* STP X29, X30, [SP, #-32]! (libz 0x8028) entered with SP = 8 (mod 16): the
  * engine faults without writing, so rewritten code is not entered. */
+[[gnu::noinline]]
 void misaligned_sp_at_a_pair_store(const LibraryImage &image)
 {
 	constexpr std::uint64_t at = 0x8028;
@@ -1765,6 +1819,7 @@ void misaligned_sp_at_a_pair_store(const LibraryImage &image)
 
 /* An exclusive monitor the gadget engine opened (LDXR, then a branch into
  * the library) is the engine's to complete: nothing is entered. */
+[[gnu::noinline]]
 void open_exclusive_is_not_entered(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -1795,6 +1850,7 @@ void open_exclusive_is_not_entered(const LibraryImage &image,
  * the same state without them is entered, whatever the stale value holds
  * (both directions: stale zero under current bits, stale bits under a
  * current zero), and either way the result is the engine's. */
+[[gnu::noinline]]
 void deferred_fp_state_is_judged_by_its_guest_fpcr(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -1872,6 +1928,7 @@ void publish_in_the_window(void *context)
  * engine's ISB sees the change (it compares with the sequence the dispatcher
  * read), so the run must leave at the ISB and look the MOV up again at the
  * new sequence, which finds it changed; rewritten code must not run it. */
+[[gnu::noinline]]
 void code_change_in_the_dispatch_window(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -1962,6 +2019,7 @@ constexpr std::uint64_t edge_next_page = 0x4000, edge_target = 0x4100;
  * edge ends the entry, and the engine runs the other page's bytes; an edge
  * that went on in the rewritten code of that page would add the old
  * amount. */
+[[gnu::noinline]]
 void edges_into_a_page_that_differs(const LibraryImage &image)
 {
 	const auto other = with_next_page_changed(image);
@@ -1992,6 +2050,7 @@ void edges_into_a_page_that_differs(const LibraryImage &image)
 
 /* The same edges into a page that matches: it is compared when the edge
  * first reaches it, and the code on it is entered. */
+[[gnu::noinline]]
 void edges_into_a_page_that_matches(const LibraryImage &image)
 {
 	const auto bias = Fixture::bias;
@@ -2019,6 +2078,7 @@ void edges_into_a_page_that_matches(const LibraryImage &image)
 /* A page that changes after the page it is entered from was compared: the
  * edge into it is the engine's from then on; when the bytes are back, it is
  * compared again. */
+[[gnu::noinline]]
 void next_page_changes_after_its_neighbour_was_compared(
 	const LibraryImage &image)
 {
@@ -2076,6 +2136,7 @@ void next_page_changes_after_its_neighbour_was_compared(
  * address in the same address space) lands on a page that matches, or on
  * one that differs: either way the result is the engine's, and the code of
  * a page that differs is not entered. */
+[[gnu::noinline]]
 void edge_into_another_instance(const LibraryImage &image)
 {
 	const auto other = with_next_page_changed(image);
@@ -2205,6 +2266,7 @@ std::size_t run_until_stub(GadgetExecutor &executor, StaticGuestMemory &memory,
  * vCPU runs a copy of the library whose bytes differ from the framework's
  * (so the engine runs every instruction of it), or the same copy as the
  * first. A lost update would leave the count short. */
+[[gnu::noinline]]
 void atomics_are_shared_between_aot_and_engine(const LibraryImage &image)
 {
 	constexpr std::uint64_t bias_a = 0x7173'0000'0000ULL;
@@ -2300,6 +2362,7 @@ void atomics_are_shared_between_aot_and_engine(const LibraryImage &image)
  * one and a misaligned address. Rewritten code and the engine end in the
  * same registers, memory and fault; the engine's own results are checked
  * against the architecture's too. */
+[[gnu::noinline]]
 void cas_outcomes_and_permissions(const LibraryImage &image)
 {
 	constexpr unsigned long generation_ref = 4530, generation_aot = 4531;
@@ -2378,6 +2441,7 @@ void cas_outcomes_and_permissions(const LibraryImage &image)
  * it under the baseline profile (no FEAT_LSE2) and performs it under the
  * profile the runtime probes. Rewritten code leaves such an
  * access to the engine, so it ends as the engine does under either. */
+[[gnu::noinline]]
 void misaligned_cas_follows_the_profile(const LibraryImage &image)
 {
 	const auto bias = Fixture::bias;
@@ -2416,6 +2480,7 @@ void misaligned_cas_follows_the_profile(const LibraryImage &image)
 /* More instances than the binder holds: the library mapped at 70 biases is
  * run copy by copy, twice. The ones it dropped are bound again, and every
  * run ends as the engine's does. */
+[[gnu::noinline]]
 void more_instances_than_the_binder_holds(const LibraryImage &image)
 {
 	constexpr std::size_t copies = 70;
@@ -2467,6 +2532,7 @@ void more_instances_than_the_binder_holds(const LibraryImage &image)
  * code runs a long loop: the vCPU leaves at its next return to the
  * dispatcher, the writer is never kept waiting, and the loop ends in the
  * state the engine reaches. */
+[[gnu::noinline]]
 void a_shootdown_reaches_a_native_loop(const LibraryImage &image)
 {
 	constexpr unsigned long generation = 4560;
@@ -2645,6 +2711,7 @@ void cancel_crc_with_word(std::array<std::byte, page_bytes> &work,
 	return other;
 }
 
+[[gnu::noinline]]
 void equal_digest_is_not_equal_code(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -2683,6 +2750,7 @@ void equal_digest_is_not_equal_code(const LibraryImage &image,
  * The positions: the first and last byte, the byte before the middle, the
  * middle, the bytes either side of every 512-byte boundary, both bits at the
  * ends of a byte, and a seeded spread. */
+[[gnu::noinline]]
 void a_changed_bit_anywhere_in_a_page_is_refused(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -2760,6 +2828,7 @@ void a_changed_bit_anywhere_in_a_page_is_refused(const LibraryImage &image,
  * page digest does not show (the page's digest is the framework's), so the
  * exact comparison is all that stands between the stored code and the
  * guest's. */
+[[gnu::noinline]]
 void code_change_history_overflows(const LibraryImage &image,
 	const std::vector<Function> &functions)
 {
@@ -2931,6 +3000,7 @@ void compare_case(Fixture &ref, Fixture &got, const Case &c, const char *what)
 	}
 }
 
+[[gnu::noinline]]
 void memory_copy_and_set_match_the_engine(const LibraryImage &image)
 {
 	const auto bias = Fixture::bias;
@@ -3098,6 +3168,7 @@ void memory_copy_and_set_match_the_engine(const LibraryImage &image)
  * never formats: the flags clear with bytes left (an exception), N set on a
  * forward copy (ignored), a count above the limit. The engine decides each;
  * rewritten code must agree, including the exception syndrome. */
+[[gnu::noinline]]
 void memory_copy_and_set_started_at_the_epilogue(const LibraryImage &image)
 {
 	constexpr std::uint32_t flag_n = 0x8000'0000U, flag_z = 0x4000'0000U,
@@ -3151,6 +3222,7 @@ void memory_copy_and_set_started_at_the_epilogue(const LibraryImage &image)
  * of one of them already filled by an earlier byte load: the first page
  * unmapped and the last cached, and the reverse, for loads and stores, at
  * every split of the access. */
+[[gnu::noinline]]
 void structure_accesses_over_a_boundary_match_the_engine(
 	const LibraryImage &image)
 {
@@ -3195,6 +3267,7 @@ void structure_accesses_over_a_boundary_match_the_engine(
 /* A function that retires a handful of instructions costs more to enter than
  * the engine takes to run it: after two such entries in a row the engine runs
  * it, and rewritten code is entered again one time in 64. */
+[[gnu::noinline]]
 void short_entries_are_left_to_the_engine(const LibraryImage &image)
 {
 	const auto bias = Fixture::bias;
@@ -3232,6 +3305,7 @@ void short_entries_are_left_to_the_engine(const LibraryImage &image)
  * space, so the rows below warm it without ever toggling diagnostics (which
  * resets it) and then change each of those: the run must be the engine's,
  * and entering must resume once the text is the framework's again. */
+[[gnu::noinline]]
 void admission_history_survives_changes_as_a_hint_only(
 	const LibraryImage &image)
 {
@@ -3337,6 +3411,7 @@ void admission_history_survives_changes_as_a_hint_only(
  * resets the hint). The run must be what the engine alone does, whatever the
  * hint says, and rewritten code must be entered again once the guest has
  * moved on. */
+[[gnu::noinline]]
 void a_stepped_fault_hint_survives_changes_as_a_hint_only(
 	const LibraryImage &image)
 {
@@ -3497,6 +3572,7 @@ void a_stepped_fault_hint_survives_changes_as_a_hint_only(
  * for a longer one, a fault that is resolved and resumed, a step the
  * engine takes (an exception), and structure accesses that span a
  * boundary. */
+[[gnu::noinline]]
 void rewritten_code_stays_within_a_stack_budget(const LibraryImage &image)
 {
 	constexpr std::size_t stack_bytes = 64 * 1024;
@@ -3613,6 +3689,705 @@ void rewritten_code_stays_within_a_stack_budget(const LibraryImage &image)
 		start_up, high_water, budget);
 	require(aot::stats().enters > 0);
 	require(high_water <= start_up + budget);
+}
+
+/* ---- Every exit lies on the stepped trace ---------------------------------
+ *
+ * The engine run one instruction at a time visits, in order, every state a
+ * guest can observe of a vCPU. A run through rewritten code returns the
+ * engine at some of them and never at another: whatever ends a run (the
+ * budget, an interrupt, a fault, a breakpoint, a system call) leaves the
+ * registers, flags, FPCR and FPSR, thread pointer, vector registers and
+ * memory of one instruction boundary of that trace, and later exits come
+ * later on it. A debugger, a signal frame, ptrace and a crash report see
+ * only such states. (The exclusive monitor is not guest-visible state and is
+ * not part of the comparison.) */
+
+/* The index of the first state at or after `from` that is `now`, or the size
+ * of the trace. */
+[[nodiscard]] std::size_t find_on_trace(const std::vector<Snapshot> &trace,
+	std::size_t from, const Snapshot &now) noexcept
+{
+	for (std::size_t i = from; i < trace.size(); ++i)
+		if (trace[i] == now)
+			return i;
+	return trace.size();
+}
+
+void print_difference(const char *tag, const Snapshot &want,
+	const Snapshot &have)
+{
+	const auto word = [&](const char *name, std::uint64_t a,
+	                      std::uint64_t b) {
+		if (a != b)
+			std::fprintf(stderr, "    %s %s: trace %llx, exit %llx\n", tag,
+				name, static_cast<unsigned long long>(a),
+				static_cast<unsigned long long>(b));
+	};
+	word("pc", want.pc, have.pc);
+	word("sp", want.sp, have.sp);
+	for (std::size_t i = 0; i < 31; ++i) {
+		char name[8];
+		std::snprintf(name, sizeof(name), "x%zu", i);
+		word(name, want.x[i], have.x[i]);
+	}
+	word("nzcv", want.nzcv, have.nzcv);
+	word("fpcr", want.fpcr, have.fpcr);
+	word("fpsr", want.fpsr, have.fpsr);
+	word("tls", want.tls, have.tls);
+	word("vectors", want.vectors, have.vectors);
+	word("memory", want.memory, have.memory);
+}
+
+void prepare_arena(Arena &arena, const Case &c)
+{
+	for (std::size_t i = 0; i < arena.total(); ++i)
+		if (i < c.kinds.size())
+			arena.set_kind(i, c.kinds[i]);
+	SplitMix fill{c.seed};
+	arena.fill(fill);
+}
+
+/* `c` run one instruction at a time by the engine: the state at the start
+ * and after each instruction, with the arena hashed where `hash_memory`. */
+struct Stepped final {
+	std::vector<Snapshot> states;
+	Result result;
+};
+
+[[nodiscard, gnu::noinline]]
+Stepped run_stepped(Environment &env, Arena &arena, const Case &c, std::size_t cap, bool hash_memory)
+{
+	Stepped out;
+	aot::set_enabled(false);
+	auto start = c;
+	start.cpu.pc = env.bias + c.pc_offset;
+	prepare_arena(arena, start);
+	const auto memory = [&]() -> std::uint64_t {
+		return hash_memory ? hash_bytes(arena.snapshot()) : 0;
+	};
+	out.states.push_back(snapshot_of(start.cpu, memory()));
+	env.executor.set_single_step(true);
+	out.result = run_from(env.executor, env.memory, env.generation, arena,
+		start.cpu, cap, [&](const arm64::CpuState &cpu) {
+		out.states.push_back(snapshot_of(cpu, memory()));
+	});
+	env.executor.set_single_step(false);
+	out.states.push_back(snapshot_of(out.result.cpu,
+		hash_memory ? hash_bytes(out.result.memory) : 0));
+	return out;
+}
+
+/* The number of instructions after which `c`, run one at a time on the
+ * engine, is in `target` (arena included), or SIZE_MAX if it is not within
+ * `cap` of them. The arena is hashed only where the rest matches. */
+[[nodiscard, gnu::noinline]] std::size_t step_to(Environment &env,
+	Arena &arena, const Case &c, std::size_t cap, const Snapshot &target)
+{
+	aot::set_enabled(false);
+	auto start = c;
+	start.cpu.pc = env.bias + c.pc_offset;
+	prepare_arena(arena, start);
+	std::size_t index = SIZE_MAX, steps = 0;
+	auto without_memory = target;
+	without_memory.memory = 0;
+	const auto look = [&](const arm64::CpuState &cpu) {
+		if (index != SIZE_MAX || snapshot_of(cpu) != without_memory)
+			return;
+		auto now = snapshot_of(cpu, hash_bytes(arena.snapshot()));
+		if (now == target)
+			index = steps;
+	};
+	look(start.cpu);
+	env.executor.set_single_step(true);
+	(void)run_from(env.executor, env.memory, env.generation, arena,
+		start.cpu, cap, [&](const arm64::CpuState &cpu) {
+		++steps;
+		look(cpu);
+	});
+	env.executor.set_single_step(false);
+	return index;
+}
+
+/* The comparison must see a difference in any one field. Each of the fields
+ * of a state in the middle of a trace is changed in turn, and the changed
+ * state must be on no part of the trace. */
+[[gnu::noinline]]
+void the_matcher_notices_every_field(
+	const std::vector<Snapshot> &trace)
+{
+	require(trace.size() >= 8);
+	const auto middle = trace[trace.size() / 2];
+	std::size_t fields = 0;
+	const auto mutate = [&](const char *what, auto &&change) {
+		auto now = middle;
+		change(now);
+		++fields;
+		if (find_on_trace(trace, 0, now) != trace.size()) {
+			std::fprintf(stderr, "the trace comparison does not see a "
+				"changed %s\n", what);
+			require(false);
+		}
+	};
+	constexpr std::uint64_t flip = 0x5a5a'5a5a'5a5a'5a5aULL;
+	mutate("pc", [](Snapshot &s) { s.pc ^= flip; });
+	mutate("sp", [](Snapshot &s) { s.sp ^= flip; });
+	mutate("x0", [](Snapshot &s) { s.x[0] ^= flip; });
+	mutate("x15", [](Snapshot &s) { s.x[15] ^= flip; });
+	mutate("x30", [](Snapshot &s) { s.x[30] ^= flip; });
+	mutate("nzcv", [](Snapshot &s) { s.nzcv ^= 0xf000'0000U; });
+	mutate("fpcr", [](Snapshot &s) { s.fpcr ^= 0x00c0'0000U; });
+	mutate("fpsr", [](Snapshot &s) { s.fpsr ^= 0x0000'0010U; });
+	mutate("tls", [](Snapshot &s) { s.tls ^= flip; });
+	mutate("vectors", [](Snapshot &s) { s.vectors ^= flip; });
+	mutate("memory", [](Snapshot &s) { s.memory ^= flip; });
+	require(fields == 11);
+}
+
+struct TraceTotals final {
+	std::size_t candidates{}, tried{}, traced{}, unbounded{},
+		unsteppable{}, exits{}, steps{};
+};
+
+/* A sample of the starts the differential uses, each run on the engine one
+ * instruction at a time (recording every state, arena included) and then
+ * through rewritten code, where every state the engine is returned at, each
+ * fault, and the end must be on the recorded path in order. A case whose
+ * stepped run is not the engine's ordinary run (it ends differently) says
+ * nothing about the path and is left out; the count is reported. */
+[[gnu::noinline]]
+TraceTotals exits_lie_on_the_stepped_trace(
+	const Config &config, const LibraryImage &image,
+	const std::vector<Function> &functions, const std::vector<Site> &sites)
+{
+	constexpr std::uint64_t bias = 0x7123'0000'0000ULL;
+	Environment ref{4111, bias, image};
+	Environment step{4112, bias, image};
+	Environment test{4113, bias, image};
+	Arena ref_arena{ref.generation, arena_base(bias)};
+	Arena step_arena{step.generation, arena_base(bias)};
+	Arena test_arena{test.generation, arena_base(bias)};
+	SplitMix rng{config.master ^ 0x57e9ULL};
+	std::vector<std::uint64_t> starts;
+	for (const auto &f : functions) {
+		starts.push_back(f.start);
+		starts.push_back(f.start + 4 * rng.below((f.end - f.start) / 4));
+	}
+	for (const auto &site : sites)
+		starts.push_back(site.offset);
+	for (std::size_t i = starts.size(); i > 1; --i)
+		std::swap(starts[i - 1], starts[rng.below(i)]);
+	TraceTotals t;
+	t.candidates = starts.size();
+	bool matcher_tried = false;
+	for (const auto start : starts) {
+		if (t.traced >= config.trace_cases)
+			break;
+		++t.tried;
+		const bool faulting = rng.below(3) == 0;
+		const bool tbi = rng.below(4) != 0;
+		const auto c = make_case(rng, bias, start, faulting, tbi,
+			arena_base(bias));
+		aot::set_enabled(false);
+		const auto want = drive(ref, ref_arena, c, max_blocks);
+		if (!want.done()) {
+			++t.unbounded;
+			continue;
+		}
+		const auto stepped = run_stepped(step, step_arena, c,
+			config.trace_cap, true);
+		if (!stepped.result.done()) {
+			++t.unbounded;
+			continue;
+		}
+		if (!identical(want, stepped.result)) {
+			++t.unsteppable;
+			continue;
+		}
+		const auto &trace = stepped.states;
+		std::size_t at = 0, exits = 0;
+		bool off = false;
+		const auto check = [&](const arm64::CpuState &cpu, const char *what) {
+			if (off)
+				return;
+			++exits;
+			const auto now = snapshot_of(cpu,
+				hash_bytes(test_arena.snapshot()));
+			const auto found = find_on_trace(trace, at, now);
+			if (found != trace.size()) {
+				at = found;
+				return;
+			}
+			off = true;
+			describe("an exit is off the stepped trace", c);
+			std::fprintf(stderr, "  %s %zu, after trace state %zu of %zu, "
+				"start %llx\n", what, exits, at, trace.size(),
+				static_cast<unsigned long long>(start));
+			print_difference("trace state", trace[at], now);
+			if (at + 1 < trace.size())
+				print_difference("next trace state", trace[at + 1], now);
+			const auto earlier = find_on_trace(trace, 0, now);
+			if (earlier != trace.size())
+				std::fprintf(stderr, "  the state is on the trace, "
+					"earlier, at %zu\n", earlier);
+		};
+		aot::set_enabled(true);
+		const auto got = drive(test, test_arena, c, aot_max_blocks,
+			[&](const arm64::CpuState &cpu) { check(cpu, "block exit"); },
+			[&](const arm64::CpuState &cpu) { check(cpu, "fault"); });
+		aot::set_enabled(false);
+		check(got.cpu, "end");
+		require(!off);
+		require(same(want, got, c));
+		t.exits += exits;
+		t.steps += trace.size();
+		++t.traced;
+		if (!matcher_tried && trace.size() >= 8) {
+			the_matcher_notices_every_field(trace);
+			matcher_tried = true;
+		}
+	}
+	return t;
+}
+
+/* ---- An interrupt token flipped during a native loop -----------------------
+ *
+ * The production entry (the engine adapter) runs a long loop of rewritten code
+ * while another thread flips the token that interrupts the vCPU, either the
+ * stop flag or the sequence word, after the vCPU has run `after` blocks and a
+ * delay that lands it anywhere in the one that follows. The vCPU waits for
+ * the flip only once it has run `within` more blocks, so the exit is
+ * bounded whatever the host does with the flipping thread; the race is real
+ * for as long as the flipper is quicker than that. */
+
+struct FlipPlan final {
+	bool sequence;
+	std::size_t after, within;
+	unsigned delay_ns;
+};
+
+struct FlipState final {
+	std::atomic_bool stop{false};
+	unsigned int sequence{0};
+	std::atomic<std::size_t> polls{0};
+	std::atomic_bool go{false}, flipped{false};
+	std::atomic<std::size_t> polls_at_flip{0};
+	std::size_t release_at{}, park_at{};
+};
+
+[[nodiscard]] bool wait_for(const std::atomic_bool &flag,
+	std::chrono::milliseconds limit) noexcept
+{
+	const auto deadline = std::chrono::steady_clock::now() + limit;
+	while (!flag.load(std::memory_order_acquire))
+		if (std::chrono::steady_clock::now() >= deadline)
+			return false;
+	return true;
+}
+
+/* The interrupt callback of the engine's loop: called once at the top of each
+ * round of it, while no token is pending. */
+[[nodiscard]] bool flip_poll(void *context) noexcept
+{
+	auto &state = *static_cast<FlipState *>(context);
+	const auto n = state.polls.fetch_add(1, std::memory_order_relaxed) + 1;
+	if (n == state.release_at)
+		state.go.store(true, std::memory_order_release);
+	if (n == state.park_at)
+		(void)wait_for(state.flipped, std::chrono::milliseconds{5000});
+	return false;
+}
+
+enum class FlipLoop { alu, add };
+
+/* The two loops of the fixture: four instructions to a lap of registers
+ * alone, and an atomic add to a cell of the arena. */
+[[nodiscard]] Case flip_case(FlipLoop loop, std::uint64_t bias,
+	std::uint64_t iterations)
+{
+	if (loop == FlipLoop::alu) {
+		auto c = loop_case(77, bias, 0x1000, arena_base(bias));
+		c.cpu.registers[3] = iterations;
+		return c;
+	}
+	auto c = loop_case(78, bias, hammer_add, arena_base(bias));
+	c.cpu.registers[0] = iterations;
+	c.cpu.registers[2] = arena_base(bias) + 0x100;
+	return c;
+}
+
+struct Flipped final {
+	bool flipped{};
+	uml::cpu::ExecutionResult first, last;
+	arm64::CpuState stopped, ended;
+	std::vector<std::byte> stopped_memory, ended_memory;
+	std::size_t polls_at_flip{}, polls_total{};
+	std::uint64_t longest_entry{}, enters{};
+};
+
+/* `c` on the gadget engine's own entry with rewritten code on. With `resume`,
+ * the token is then cleared and the run goes on to the guest's system call. */
+[[nodiscard, gnu::noinline]] Flipped flip_through_the_engine(
+	const LibraryImage &image, unsigned long generation, const Case &c,
+	const FlipPlan &plan, bool resume)
+{
+	Flipped out;
+	Fixture got{generation, image};
+	prepare_arena(got.arena, c);
+	FlipState state;
+	state.release_at = plan.after;
+	state.park_at = plan.after + plan.within;
+	aot::reset_stats();
+	aot::set_enabled(true);
+	/* The entry is chosen when the engine is made. */
+	auto engine = arm64::detail::make_gadget_engine({});
+	auto cpu = c.cpu;
+	uml::cpu::ExecutionRequest request{
+		.cpu = cpu,
+		.memory = got.env.memory,
+		.translated_memory = &got.env.memory,
+		.generation = generation,
+		.instruction_budget = std::size_t{1} << 60,
+		.interrupt = {
+			.sequence = plan.sequence ? &state.sequence : nullptr,
+			.snapshot = 0,
+			.stop = plan.sequence ? nullptr : &state.stop,
+			.poll = flip_poll,
+			.poll_context = &state,
+		},
+	};
+	std::thread flipper{[&] {
+		if (!wait_for(state.go, std::chrono::milliseconds{5000}))
+			return;
+		const auto until = std::chrono::steady_clock::now() +
+			std::chrono::nanoseconds{plan.delay_ns};
+		while (std::chrono::steady_clock::now() < until) {
+		}
+		if (plan.sequence)
+			__atomic_add_fetch(&state.sequence, 1U, __ATOMIC_RELEASE);
+		else
+			state.stop.store(true, std::memory_order_release);
+		state.polls_at_flip.store(state.polls.load(
+			std::memory_order_relaxed), std::memory_order_relaxed);
+		state.flipped.store(true, std::memory_order_release);
+	}};
+	out.first = engine->run(request);
+	flipper.join();
+	out.flipped = state.flipped.load();
+	out.stopped = cpu;
+	out.stopped_memory = got.arena.snapshot();
+	out.polls_at_flip = state.polls_at_flip.load();
+	out.polls_total = state.polls.load();
+	const auto st = aot::stats();
+	out.longest_entry = st.max_retired;
+	out.enters = st.enters;
+	if (resume) {
+		if (plan.sequence)
+			request.interrupt.snapshot = state.sequence;
+		else
+			state.stop.store(false);
+		request.interrupt.poll = nullptr;
+		request.interrupt.poll_context = nullptr;
+		out.last = engine->run(request);
+		out.ended = cpu;
+		out.ended_memory = got.arena.snapshot();
+	}
+	aot::set_enabled(false);
+	return out;
+}
+
+/* The flipped token ends the run in a state on the engine's own path, and the
+ * run then goes on to the same end as the engine alone reaches. */
+[[gnu::noinline]]
+void interrupt_flips_leave_the_engine_on_the_stepped_trace(
+	const LibraryImage &image)
+{
+	constexpr std::uint64_t iterations = 400'000;
+	constexpr std::size_t within = 6;
+	const auto bias = Fixture::bias;
+	unsigned long generation = 6000;
+	std::size_t cases = 0, longest = 0;
+	for (const auto loop : {FlipLoop::alu, FlipLoop::add}) {
+		const auto c = flip_case(loop, bias, iterations);
+		aot::set_enabled(false);
+		Fixture ref{++generation, image};
+		const auto want = drive(ref.env, ref.arena, c, 4'000'000);
+		require(want.finished);
+		const auto want_end = snapshot_of(want.cpu, hash_bytes(want.memory));
+		for (const bool sequence : {false, true})
+		for (const std::size_t after : {std::size_t{1}, std::size_t{4},
+		     std::size_t{16}})
+		for (const unsigned delay : {0U, 1500U}) {
+			const FlipPlan plan{sequence, after, within, delay};
+			const auto out = flip_through_the_engine(image, ++generation,
+				c, plan, true);
+			require(out.flipped);
+			require(out.first.reason == uml::cpu::ExitReason::interrupt);
+			require(out.enters > 0);
+			const auto target = snapshot_of(out.stopped,
+				hash_bytes(out.stopped_memory));
+			Fixture step{++generation, image};
+			const auto cap = (after + within + 2) * entry_bound + 64;
+			const auto at = step_to(step.env, step.arena, c, cap, target);
+			if (at == SIZE_MAX) {
+				describe("an interrupt exit is off the stepped trace", c);
+				std::fprintf(stderr, "  %s token, after %zu, delay %u ns, "
+					"loop %d, pc %llx\n", sequence ? "sequence" : "stop",
+					after, delay, static_cast<int>(loop),
+					static_cast<unsigned long long>(target.pc));
+				require(false);
+			}
+			require(out.last.reason == uml::cpu::ExitReason::system_call);
+			const auto end = snapshot_of(out.ended,
+				hash_bytes(out.ended_memory));
+			if (!(end == want_end)) {
+				describe("a run resumed after the interrupt ends elsewhere",
+					c);
+				print_difference("resumed", want_end, end);
+				require(false);
+			}
+			longest = std::max(longest, at);
+			++cases;
+		}
+	}
+	std::fprintf(stderr, "interrupt flips: %zu on the stepped trace "
+		"(longest %zu instructions)\n", cases, longest);
+	require(cases == 24);
+}
+
+/* A stop takes effect within one block: the token is looked at at the top of
+ * each round of the engine's loop, a round runs one block, and a block of
+ * rewritten code is bounded by its budget. So after the flip at most the
+ * round in flight (its poll counted before or after the flipper's read) can
+ * come before the exit, no entry is longer than the budget allows, and the
+ * run ends where it was waiting for the flip or earlier. */
+[[gnu::noinline]]
+void a_stop_takes_effect_within_one_run_block(
+	const LibraryImage &image)
+{
+	constexpr std::uint64_t iterations = 400'000;
+	constexpr std::size_t flips = 96, within = 10;
+	const auto bias = Fixture::bias;
+	SplitMix rng{0x5709};
+	unsigned long generation = 6500;
+	std::size_t latest = 0, waited = 0;
+	for (std::size_t i = 0; i < flips; ++i) {
+		const auto loop = rng.below(2) != 0 ? FlipLoop::alu : FlipLoop::add;
+		const FlipPlan plan{rng.below(2) != 0, 1 + rng.below(40), within,
+			static_cast<unsigned>(rng.below(4000))};
+		const auto c = flip_case(loop, bias, iterations);
+		const auto out = flip_through_the_engine(image, ++generation, c,
+			plan, false);
+		require(out.flipped);
+		require(out.first.reason == uml::cpu::ExitReason::interrupt);
+		require(out.enters > 0);
+		require(out.polls_total >= plan.after);
+		require(out.polls_total <= plan.after + plan.within);
+		require(out.polls_total >= out.polls_at_flip);
+		if (out.polls_total - out.polls_at_flip > 1) {
+			std::fprintf(stderr, "a stop took %zu rounds: %s token, after "
+				"%zu, delay %u ns\n",
+				out.polls_total - out.polls_at_flip,
+				plan.sequence ? "sequence" : "stop", plan.after,
+				plan.delay_ns);
+			require(false);
+		}
+		require(out.longest_entry <= entry_bound);
+		latest = std::max(latest, out.polls_total - plan.after);
+		waited += out.polls_total == plan.after + plan.within ? 1 : 0;
+	}
+	std::fprintf(stderr, "stop latency: %zu flips, every stop within one "
+		"round of the flip; furthest run after the release %zu blocks, %zu "
+		"flips arrived only after the vCPU waited\n", flips, latest, waited);
+}
+
+/* The loop of the fixture runs on this vCPU, rewritten code on, while another
+ * thread writes a breakpoint into its text and publishes it by the bridge
+ * once the vCPU has run `publish_at` blocks. The vCPU waits for the
+ * publication at block `park_at`, so the run is short whatever the other
+ * thread does. The vCPU must reach the breakpoint within the block in
+ * flight and one lap of the loop, having started rewritten code at most once
+ * after the publication, in a state on the engine's own path, and once the
+ * word is back the loop goes on, in rewritten code, to the end the engine
+ * alone reaches from the same state. Returns whether the vCPU ran a block
+ * while the publication was in progress. */
+[[gnu::noinline]]
+bool breakpoint_on_a_running_loop(const LibraryImage &image,
+	unsigned long generation, std::size_t publish_at, std::size_t park_at)
+{
+	constexpr std::uint32_t brk = 0xd4200000U;
+	constexpr std::uint64_t spot = 0x1004;
+	const auto bias = Fixture::bias;
+	std::uint32_t original;
+	std::memcpy(&original, &image.bytes[spot], 4);
+	auto race = loop_case(93, bias, 0x1000, arena_base(bias));
+	race.cpu.registers[3] = std::uint64_t{1} << 40;
+	Fixture got{generation, image};
+	prepare_arena(got.arena, race);
+	aot::reset_stats();
+	aot::set_enabled(true);
+	std::atomic<std::size_t> blocks{0}, blocks_before_call{0},
+		blocks_at_publish{0}, enters_at_publish{0};
+	std::atomic_bool published{false};
+	std::atomic<int> published_rc{-1};
+	std::thread patcher{[&] {
+		const auto deadline = std::chrono::steady_clock::now() +
+			std::chrono::seconds{5};
+		while (blocks.load(std::memory_order_acquire) < publish_at)
+			if (std::chrono::steady_clock::now() >= deadline)
+				return;
+		got.env.backing.put32(spot, brk);
+		blocks_before_call.store(blocks.load(std::memory_order_acquire));
+		published_rc.store(darwin_uml_static_vm_invalidate_code_generation(
+			got.env.generation, bias + spot, 4));
+		enters_at_publish.store(aot::stats().enters);
+		blocks_at_publish.store(blocks.load(std::memory_order_acquire));
+		published.store(true, std::memory_order_release);
+	}};
+	auto cpu = race.cpu;
+	EngineEvent last = EngineEvent::continued;
+	for (;;) {
+		const auto n = blocks.fetch_add(1, std::memory_order_acq_rel) + 1;
+		if (n == park_at)
+			(void)wait_for(published, std::chrono::milliseconds{5000});
+		require(n < 100000);
+		last = run_selected(got.env.executor, got.env.memory,
+			got.env.generation, cpu).event;
+		if (last != EngineEvent::continued && last != EngineEvent::interrupt)
+			break;
+	}
+	patcher.join();
+	arm64::restore_native_fp_environment(cpu);
+	require(published_rc.load() == 0);
+	require(last == EngineEvent::breakpoint);
+	require(cpu.pc == bias + spot);
+	const auto after = blocks.load() - blocks_at_publish.load();
+	const auto entered_after =
+		aot::stats().enters - enters_at_publish.load();
+	const bool raced = blocks_at_publish.load() > blocks_before_call.load();
+	require(after <= 8);
+	require(entered_after <= 1);
+	const auto target = snapshot_of(cpu, hash_bytes(got.arena.snapshot()));
+	Fixture step{generation + 1000, image};
+	const auto cap = (park_at + 2) * entry_bound + 64;
+	if (step_to(step.env, step.arena, race, cap, target) == SIZE_MAX) {
+		describe("the breakpoint stop is off the stepped trace", race);
+		std::fprintf(stderr, "  pc %llx x0 %llx, published after %zu blocks\n",
+			static_cast<unsigned long long>(target.pc),
+			static_cast<unsigned long long>(target.x[0]), publish_at);
+		require(false);
+	}
+	/* The word is back; the vCPU goes on to the loop's end, a little further
+	 * on, and so does the engine alone from the same state. */
+	got.env.backing.put32(spot, original);
+	require(darwin_uml_static_vm_invalidate_code_generation(
+		got.env.generation, bias + spot, 4) == 0);
+	auto resumed = cpu;
+	resumed.registers[3] = resumed.registers[0] + 20000;
+	aot::set_enabled(false);
+	Fixture ref{generation + 2000, image};
+	prepare_arena(ref.arena, race);
+	const auto want = run_from(ref.env.executor, ref.env.memory,
+		ref.env.generation, ref.arena, resumed, 2'000'000);
+	require(want.finished);
+	aot::set_enabled(true);
+	const auto entered_before_resume = aot::stats().enters;
+	(void)run_until_stub(got.env.executor, got.env.memory,
+		got.env.generation, resumed);
+	aot::set_enabled(false);
+	require(aot::stats().enters > entered_before_resume);
+	require(aot::stats().poisoned == 0);
+	const auto end = snapshot_of(resumed, hash_bytes(got.arena.snapshot()));
+	const auto want_end = snapshot_of(want.cpu, hash_bytes(want.memory));
+	if (!(end == want_end)) {
+		describe("a loop resumed after the breakpoint ends elsewhere", race);
+		print_difference("resumed", want_end, end);
+		require(false);
+	}
+	return raced;
+}
+
+/* ---- A breakpoint published through the generation bridge -------------------
+ *
+ * What ptrace does to the guest's text: write the instruction, then publish
+ * the change by `darwin_uml_static_vm_invalidate_code_generation`. The page
+ * must not be entered while the breakpoint is in it, the run must stop at the
+ * breakpoint with the state of the engine alone (an exit event, pc at the
+ * instruction), and rewritten code must be entered again once the original
+ * word is back. And with the loop running on a vCPU when the breakpoint is
+ * published, the vCPU must reach it within a bounded number of blocks,
+ * having started rewritten code at most once more, in a state on the
+ * engine's own path. */
+[[gnu::noinline]]
+void a_breakpoint_published_through_the_bridge_stops_rewritten_code(
+	const LibraryImage &image)
+{
+	constexpr std::uint32_t brk = 0xd4200000U;
+	const auto bias = Fixture::bias;
+	const auto publish = [&](Fixture &f, std::uint64_t at,
+	                         std::uint32_t word) {
+		f.env.backing.put32(at, word);
+		return darwin_uml_static_vm_invalidate_code_generation(
+			f.env.generation, bias + at, 4);
+	};
+	const auto original_at = [&](std::uint64_t at) {
+		std::uint32_t word;
+		std::memcpy(&word, &image.bytes[at], 4);
+		return word;
+	};
+	unsigned long generation = 7000;
+	/* The four instructions of the loop: add, b, cmp, b.lo. */
+	constexpr std::uint64_t spots[] = {0x1004, 0x1008, 0x1024, 0x1028};
+	auto c = loop_case(91, bias, 0x1004, arena_base(bias));
+	c.cpu.registers[0] = 300;
+	c.cpu.registers[3] = 2000;
+	for (const auto spot : spots) {
+		aot::set_enabled(false);
+		Fixture ref_original{++generation, image};
+		Fixture ref_patched{++generation, image};
+		const auto want_original = drive(ref_original.env,
+			ref_original.arena, c, 2'000'000);
+		require(want_original.finished);
+		require(publish(ref_patched, spot, brk) == 0);
+		const auto want_stopped = drive(ref_patched.env, ref_patched.arena,
+			c, 2'000'000);
+		require(want_stopped.last == EngineEvent::breakpoint);
+		require(want_stopped.cpu.pc == bias + spot);
+
+		Fixture got{++generation, image};
+		aot::reset_stats();
+		aot::set_enabled(true);
+		require(same(want_original, drive(got.env, got.arena, c,
+			aot_max_blocks), c));
+		const auto entered = aot::stats().enters;
+		require(entered > 0);
+		/* The breakpoint is in the page. */
+		require(publish(got, spot, brk) == 0);
+		const auto stopped = drive(got.env, got.arena, c, aot_max_blocks);
+		require(same(want_stopped, stopped, c));
+		require(stopped.last == EngineEvent::breakpoint);
+		require(stopped.cpu.pc == bias + spot);
+		require(aot::stats().enters == entered);
+		/* The original word is back. */
+		require(publish(got, spot, original_at(spot)) == 0);
+		require(same(want_original, drive(got.env, got.arena, c,
+			aot_max_blocks), c));
+		require(aot::stats().enters > entered);
+		aot::set_enabled(false);
+	}
+
+	/* The loop runs on this vCPU while another thread publishes. */
+	std::size_t raced = 0, attempts = 0;
+	for (const std::size_t publish_at : {std::size_t{3}, std::size_t{8},
+	     std::size_t{16}, std::size_t{5}, std::size_t{12}, std::size_t{2}}) {
+		for (int again = 0; again < 4 && raced < 3; ++again) {
+			++attempts;
+			raced += breakpoint_on_a_running_loop(image, ++generation,
+				publish_at, publish_at + 24) ? 1 : 0;
+		}
+	}
+	std::fprintf(stderr, "breakpoint on a running loop: %zu runs, %zu with the "
+		"vCPU running during the publication\n", attempts, raced);
 }
 
 } // namespace
@@ -3735,6 +4510,23 @@ int main(int argc, char **argv)
 		/* Both entry refusals are exercised by every library's cases. */
 		require(st.refusals[1] > 0);
 		require(st.refusals[3] > 0);
+		/* Every state rewritten code returns the engine at is on the
+		 * engine's own path. */
+		aot::reset_stats();
+		const auto traced =
+			exits_lie_on_the_stepped_trace(cfg, image, sample, sites);
+		const auto trace_stats = aot::stats();
+		std::fprintf(stderr, "stepped trace: %zu of %zu starts followed "
+			"(%zu tried, %zu unbounded, %zu not steppable), %zu exits on "
+			"%zu recorded states; enters %llu\n", traced.traced,
+			traced.candidates, traced.tried, traced.unbounded,
+			traced.unsteppable, traced.exits, traced.steps,
+			static_cast<unsigned long long>(trace_stats.enters));
+		require(traced.traced * 3 >=
+			std::min(cfg.trace_cases, traced.candidates));
+		require(traced.exits >= traced.traced);
+		require(trace_stats.enters * 4 >= traced.traced);
+		require(trace_stats.poisoned == 0);
 		if (file.guest.ends_with("/libaotfixture.so")) {
 			/* The same cases under the profile the runtime probes, named
 			 * here whatever default the test binary installs (LSE2 among
@@ -3774,6 +4566,10 @@ int main(int argc, char **argv)
 			admission_history_survives_changes_as_a_hint_only(image);
 			a_stepped_fault_hint_survives_changes_as_a_hint_only(image);
 			rewritten_code_stays_within_a_stack_budget(image);
+			interrupt_flips_leave_the_engine_on_the_stepped_trace(image);
+			a_stop_takes_effect_within_one_run_block(image);
+			a_breakpoint_published_through_the_bridge_stops_rewritten_code(
+				image);
 		}
 		/* The scenarios are about the mechanism, not about the code:
 		 * they run on one library, whatever order the build lists. */

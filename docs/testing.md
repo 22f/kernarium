@@ -766,6 +766,17 @@ blocker in every one of them.
   not need more than a bounded part of the 64 KiB stack the guest kernel's
   threads run on: a row runs the paths on a painted stack and holds the
   high-water mark to a budget.
+  Every state rewritten code returns the engine at, every fault and the end
+  of a run lie, in order, on the path of the same run one instruction at a
+  time (registers, flags, FPCR and FPSR, thread pointer, vector registers
+  and memory; a comparison with one field changed in turn must fail). An
+  interrupt token flipped during a native loop through the engine adapter,
+  as the stop flag or the sequence word, ends the run on that path within
+  one block of the flip, and the run then goes on to the end the engine
+  alone reaches. A breakpoint written into the text and published through
+  the generation bridge keeps the page from being entered and stops at the
+  instruction in the engine's state, also when it is published while a vCPU
+  runs the loop, and rewritten code is entered again once the word is back.
   `arm64-aot-tools` checks the generator's encoders, classifier, byte census
   and fixture layout, including which forms are left to the engine.
 - `arm64-aot-runtime-product` checks that the product compilation of the AOT

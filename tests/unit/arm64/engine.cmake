@@ -481,8 +481,11 @@
     # The differential harness drives the executor with the AOT component on
     # and off and reads the diagnostics build's counters.
     if(TARGET uml_arm64_aot_framework AND UML_AOT_DIAGNOSTICS)
+        # The engine adapter is in it for the rows that drive the production
+        # entry (an interrupt token flipped during a native loop).
         uml_add_arm64_unit_test(aot_differential WITHOUT_HARNESS
-            OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS})
+            OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS}
+                $<TARGET_OBJECTS:uml_arm64_gadget_engine>)
         get_property(_uml_aot_libraries GLOBAL PROPERTY UML_AOT_LIBRARY_FILES)
         get_property(_uml_aot_functions GLOBAL PROPERTY UML_AOT_FUNCTIONS)
         get_property(_uml_aot_sites GLOBAL PROPERTY UML_AOT_SITES)
