@@ -10,8 +10,7 @@
 	mov w25, w25
 	.endif
 	mov x7, x25
-	page_cross_check (\width / 8), Lx86_enter_push_cross\@
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, (\width / 8)
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, (\width / 8), cross=Lx86_enter_push_cross\@
 	\store \host_register\()27, [x7]
 	b Lx86_enter_push_done\@
 Lx86_enter_push_cross\@:
@@ -22,8 +21,7 @@ Lx86_enter_push_done\@:
 
 .macro enter_load width, load, host_register
 	mov x7, x24
-	page_cross_check (\width / 8), Lx86_enter_load_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8)
+	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8), cross=Lx86_enter_load_cross\@
 	\load \host_register\()27, [x7]
 	b Lx86_enter_load_done\@
 Lx86_enter_load_cross\@:
@@ -135,8 +133,7 @@ Lx86_segment_trap:
 .macro iret_load width, load, host_register, destination, offset
 	ldr x7, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
 	add x7, x7, #((\width / 8) * \offset)
-	page_cross_check (\width / 8), Lx86_iret_load_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8), 0, Lx86_memory_fault_at
+	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8), 0, Lx86_memory_fault_at, cross=Lx86_iret_load_cross\@
 	\load \host_register\()\destination, [x7]
 	b Lx86_iret_load_done\@
 Lx86_iret_load_cross\@:

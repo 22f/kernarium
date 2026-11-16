@@ -226,8 +226,7 @@ gadget \operation\()_\width\()_rrm
 	effective_address
 	mov x27, x7
 	ldr x25, [_stream], #8
-	page_cross_check (\width / 8), Lx86_bmi_ternary_read_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8)
+	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8), cross=Lx86_bmi_ternary_read_cross\@
 	\load \host_register\()26, [x7]
 	b Lx86_bmi_ternary_loaded\@
 Lx86_bmi_ternary_read_cross\@:

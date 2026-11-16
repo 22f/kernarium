@@ -3803,6 +3803,369 @@ void execute_addressing_shapes()
 		"the address-generation zero slot is not zero");
 }
 
+/* Four pages high enough that their page numbers have bits above the
+ * software TLB's index, which an index must leave out. The middle two are a
+ * pair that an index folding those bits in would put in one entry. */
+constexpr std::uint64_t tlb_test_base = std::uint64_t{0x1ffffffe} << 12U;
+
+/* Every gadget looks a page up where the miss handler fills it, so a block
+ * of accesses to one page asks the address space for that page once: baked
+ * and segment-override loads and stores, a vector move and an
+ * element-masked one, each of which indexes the table itself, and the
+ * accesses that end on their page's last byte, whose key is still that
+ * page. */
+void each_translation_finds_the_entry_its_miss_filled()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t code = tlb_test_base;
+	const std::uint64_t source = tlb_test_base + 4096U;
+	const std::uint64_t destination = tlb_test_base + 3U * 4096U;
+	TestMemory memory{tlb_test_base};
+	memory.load(code, {
+		0x48, 0x8b, 0x03,                   // mov rax,[rbx]
+		0x48, 0x8b, 0x4b, 0x08,             // mov rcx,[rbx+8]
+		0x64, 0x48, 0x8b, 0x53, 0x10,       // mov rdx,fs:[rbx+16]
+		0x64, 0x48, 0x8b, 0x7b, 0x18,       // mov rdi,fs:[rbx+24]
+		0xf3, 0x0f, 0x6f, 0x43, 0x20,       // movdqu xmm0,[rbx+32]
+		0xc4, 0xe2, 0x71, 0x8c, 0x53, 0x30, // vpmaskmovd xmm2,xmm1,[rbx+48]
+		0xc4, 0xe2, 0x71, 0x8c, 0x5b, 0x40, // vpmaskmovd xmm3,xmm1,[rbx+64]
+		0x48, 0x89, 0x06,                   // mov [rsi],rax
+		0x48, 0x89, 0x4e, 0x08,             // mov [rsi+8],rcx
+		0x64, 0x48, 0x89, 0x56, 0x10,       // mov fs:[rsi+16],rdx
+		0x64, 0x48, 0x89, 0x7e, 0x18,       // mov fs:[rsi+24],rdi
+		0xf3, 0x0f, 0x7f, 0x46, 0x20,       // movdqu [rsi+32],xmm0
+		0xc4, 0xe2, 0x71, 0x8e, 0x56, 0x30, // vpmaskmovd [rsi+48],xmm1,xmm2
+		0xc4, 0xe2, 0x71, 0x8e, 0x5e, 0x40, // vpmaskmovd [rsi+64],xmm1,xmm3
+		0x48, 0x8b, 0x83, 0xf8, 0x0f, 0x00, 0x00, // mov rax,[rbx+0xff8]
+		0x48, 0x89, 0x86, 0xf8, 0x0f, 0x00, 0x00, // mov [rsi+0xff8],rax
+		0x64, 0x4c, 0x8b, 0x83, 0xf8, 0x0f, 0x00, 0x00, // mov r8,fs:[rbx+0xff8]
+		0x64, 0x4c, 0x89, 0x86, 0xf8, 0x0f, 0x00, 0x00, // mov fs:[rsi+0xff8],r8
+		0xc4, 0xe2, 0x71, 0x8c, 0x93, 0xf0, 0x0f, 0x00, 0x00, // vpmaskmovd xmm2,xmm1,[rbx+0xff0]
+		0xc4, 0xe2, 0x71, 0x8e, 0x96, 0xf0, 0x0f, 0x00, 0x00, // vpmaskmovd [rsi+0xff0],xmm1,xmm2
+		0x0f, 0x05,                         // syscall
+	});
+	for (unsigned index = 0; index < 80U; ++index)
+		memory.load(source + index,
+			{static_cast<std::uint8_t>(index * 7U + 3U)});
+	for (unsigned index = 4080U; index < 4096U; ++index)
+		memory.load(source + index,
+			{static_cast<std::uint8_t>(index * 5U + 1U)});
+	const auto built = require_built(gadgets::build(memory, code),
+		"the one-page access sequence did not build");
+	gadgets::Executor executor;
+	executor.prepare(memory);
+	CpuState cpu{};
+	cpu.rip = code;
+	cpu.gpr(Register::rbx) = source;
+	cpu.gpr(Register::rsi) = destination;
+	std::fill(cpu.vectors[1].begin(), cpu.vectors[1].begin() + 16,
+		std::byte{0x80});
+	memory.reset_atomic_pointers();
+	const auto result = gadgets::execute(built.program, cpu, memory,
+		executor, 64);
+	require(result.event == uml::cpu::EngineEvent::system_call &&
+			result.retired_instructions == 21,
+		"the one-page access sequence did not reach SYSCALL");
+	bool copied = true;
+	for (const auto [first, end] : {std::pair{0U, 80U}, std::pair{4080U, 4096U}})
+		for (auto index = first; index < end; ++index)
+			copied = copied && memory.byte(destination + index) ==
+				memory.byte(source + index);
+	require(copied, "the one-page access sequence lost bytes");
+	/* The stores to the last bytes overlap, so the loads that end on them
+	 * are checked in their registers. */
+	const auto last = memory.qword(source + 4088U);
+	bool last_bytes = cpu.gpr(Register::rax) == last &&
+		cpu.gpr(Register::r8) == last;
+	for (unsigned index = 0; index < 16U; ++index)
+		last_bytes = last_bytes && static_cast<std::uint8_t>(
+			cpu.vectors[2][index]) == memory.byte(source + 4080U + index);
+	require(last_bytes, "a load ending on its page's last byte lost bytes");
+	require(memory.atomic_pointers() == 2,
+		"a gadget did not find the translation its page's miss filled");
+}
+
+/* An access is keyed by the page of its last byte and looked up at the
+ * entry of its first byte's, and an entry holds only its own page, so an
+ * access across a page edge matches nothing and its miss takes the
+ * crossing path. Entries for both pages that point somewhere else entirely
+ * are passed over, and the address space is never asked to map the range in
+ * one piece, which it need not be able to. Each case runs at every amount
+ * it can cross by, its last byte alone on the next page included. An
+ * element-masked access selects only its element across the edge: the
+ * others are on one page, where those entries rightly answer. */
+void a_page_crossing_access_matches_no_translation()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t edge = tlb_test_base + 2U * 4096U;
+	/* Each encoding ends in its displacement from RBX, the edge. */
+	struct Case final {
+		const char *name;
+		std::vector<std::uint8_t> code;
+		unsigned size;
+		bool vector;
+		bool store;
+		bool add;
+		bool masked;
+	};
+	const Case cases[] = {
+		{"a baked load", {0x48, 0x8b, 0x43, 0x00}, 8, false, false, false,
+			false},
+		{"a segment-override load", {0x64, 0x48, 0x8b, 0x43, 0x00}, 8,
+			false, false, false, false},
+		{"a vector load", {0xf3, 0x0f, 0x6f, 0x43, 0x00}, 16, true, false,
+			false, false},
+		{"an element-masked load", {0xc4, 0xe2, 0x71, 0x8c, 0x43, 0x00}, 16,
+			true, false, false, true},
+		{"a memory-destination add", {0x48, 0x01, 0x43, 0x00}, 8, false,
+			true, true, false},
+		{"a baked store", {0x48, 0x89, 0x43, 0x00}, 8, false, true, false,
+			false},
+		{"a segment-override store", {0x64, 0x48, 0x89, 0x43, 0x00}, 8,
+			false, true, false, false},
+		{"a vector store", {0xf3, 0x0f, 0x7f, 0x43, 0x00}, 16, true, true,
+			false, false},
+		{"an element-masked store", {0xc4, 0xe2, 0x71, 0x8e, 0x43, 0x00}, 16,
+			true, true, false, true},
+	};
+	/* Each case at every amount its crossing bytes, the access or the
+	 * masked access's dword 1, can cross by. */
+	std::vector<std::pair<const Case *, unsigned>> runs;
+	for (const auto &test : cases)
+		for (unsigned over = 1; over < (test.masked ? 4U : test.size); ++over)
+			runs.emplace_back(&test, over);
+	for (const auto &[test_pointer, over] : runs) {
+		const auto &test = *test_pointer;
+		const auto before_edge = test.masked ? 8U - over : test.size - over;
+		const std::string what = std::string{test.name} + " across a page by " +
+			std::to_string(over);
+		TestMemory memory{tlb_test_base};
+		auto code = test.code;
+		code.back() = static_cast<std::uint8_t>(0x100U - before_edge);
+		code.insert(code.end(), {0x0f, 0x05}); // syscall
+		memory.fill(tlb_test_base, std::as_bytes(std::span{code}));
+		const auto address = edge - before_edge;
+		for (unsigned index = 0; index < 16U; ++index)
+			memory.load(address + index,
+				{static_cast<std::uint8_t>(0x31U + index)});
+		const auto built = require_built(
+			gadgets::build(memory, tlb_test_base), what + " did not build");
+		gadgets::Executor executor;
+		executor.prepare(memory);
+		std::vector<std::byte> elsewhere(3U * 4096U, std::byte{0xee});
+		const auto delta = reinterpret_cast<std::uintptr_t>(
+			elsewhere.data()) - (edge - 4096U);
+		for (const auto page : {edge - 4096U, edge})
+			executor.tlb_entries()[native_tlb_index(page)] = {
+				.read_page = page,
+				.read_data_minus_address = delta,
+				.write_page = page,
+				.write_data_minus_address = delta,
+			};
+		CpuState cpu{};
+		cpu.rip = tlb_test_base;
+		cpu.gpr(Register::rbx) = edge;
+		constexpr std::uint64_t value = 0x1122334455667788ULL;
+		cpu.gpr(Register::rax) = value;
+		/* The mask selects dword 1, the one across the edge. */
+		const auto selected = [&test](unsigned index) {
+			return !test.masked || index / 4U == 1U;
+		};
+		for (unsigned index = 0; index < 16U; ++index) {
+			cpu.vectors[0][index] = static_cast<std::byte>(0xc0U + index);
+			cpu.vectors[1][index] = selected(index) ? std::byte{0x80} :
+				std::byte{};
+		}
+		const auto before = memory.qword(address);
+		memory.reset_atomic_pointers();
+		const auto result = gadgets::execute(built.program, cpu, memory,
+			executor, 4);
+		require(result.event == uml::cpu::EngineEvent::system_call &&
+				result.retired_instructions == 2,
+			what + " did not reach SYSCALL");
+		std::array<std::uint8_t, 16> expected{};
+		std::array<std::uint8_t, 16> actual{};
+		for (unsigned index = 0; index < test.size; ++index) {
+			if (test.store)
+				expected[index] = static_cast<std::uint8_t>(
+					selected(index) ? 0xc0U + index : 0x31U + index);
+			else if (selected(index))
+				expected[index] = static_cast<std::uint8_t>(0x31U + index);
+			actual[index] = test.store || !test.vector ?
+				memory.byte(address + index) :
+				static_cast<std::uint8_t>(cpu.vectors[0][index]);
+		}
+		if (test.store && !test.vector)
+			std::memcpy(expected.data(), &value, sizeof(value));
+		if (test.add) {
+			const auto sum = before + value;
+			std::memcpy(expected.data(), &sum, sizeof(sum));
+		}
+		if (!test.store && !test.vector)
+			std::memcpy(actual.data(), &cpu.gpr(Register::rax),
+				sizeof(value));
+		require(expected == actual,
+			what + " used another page's translation");
+		require(std::all_of(elsewhere.begin(), elsewhere.end(),
+				[](std::byte byte) { return byte == std::byte{0xee}; }),
+			what + " wrote through another page's translation");
+		require(memory.atomic_pointers() == 0,
+			what + " asked for one mapping of both pages");
+	}
+}
+
+/* TestMemory with more pages, each at its `far` address kept in the span's
+ * page at its `near`: guest pages as far apart as a test needs. */
+class FarPageMemory final : public TestMemory {
+public:
+	struct Page final {
+		std::uint64_t far;
+		std::uint64_t near;
+	};
+
+	FarPageMemory(std::uint64_t base, std::initializer_list<Page> pages)
+		: TestMemory{base}, pages_{pages} {}
+
+	[[nodiscard]] bool read(std::uint64_t address,
+		std::span<std::byte> destination) override
+	{
+		return TestMemory::read(backing(address), destination);
+	}
+
+	[[nodiscard]] bool write(std::uint64_t address,
+		std::span<const std::byte> source) override
+	{
+		return TestMemory::write(backing(address), source);
+	}
+
+	[[nodiscard]] std::byte *atomic_pointer(std::uint64_t address,
+		std::size_t size, uml::memory::MemoryAccess access) override
+	{
+		return TestMemory::atomic_pointer(backing(address), size, access);
+	}
+
+private:
+	[[nodiscard]] std::uint64_t backing(std::uint64_t address) const noexcept
+	{
+		for (const auto &page : pages_)
+			if (address - page.far < 4096U)
+				return address - page.far + page.near;
+		return address;
+	}
+
+	std::vector<Page> pages_;
+};
+
+/* The nearest page above `page` by a multiple of `step` pages that shares
+ * its entry. */
+[[nodiscard]] std::uint64_t page_sharing_entry(std::uint64_t page,
+	std::uint64_t step)
+{
+	using namespace uml::cpu::x86_64;
+	for (std::uint64_t apart = step;
+		apart <= 2U * native_tlb_entry_count * step; apart += step)
+		if (native_tlb_index(page + apart * 4096U) == native_tlb_index(page))
+			return page + apart * 4096U;
+	require(false, "no page within two table reaches shares an entry");
+	return page;
+}
+
+/* Pages that share an entry each read and write their own page: the
+ * nearest page that shares the near page's entry, and one apart only above
+ * bit 31, which a tag compare of 32 bits would take for the near page. The
+ * baked, the segment-override and the element-masked translations each
+ * visit near, high and far in turn, so every access but the first follows
+ * one to another page of that entry. */
+void pages_sharing_an_entry_keep_their_own_bytes()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t code = tlb_test_base;
+	const std::uint64_t near = tlb_test_base + 4096U;
+	const auto far = page_sharing_entry(near, 1U);
+	const auto high = page_sharing_entry(near, std::uint64_t{1} << 20U);
+	require(native_tlb_index(far) == native_tlb_index(near) &&
+			native_tlb_index(high) == native_tlb_index(near) &&
+			(high & 0xffffffffU) == (near & 0xffffffffU),
+		"the far pages do not share the near page's entry");
+	const std::uint64_t high_backing = tlb_test_base + 2U * 4096U;
+	const std::uint64_t far_backing = tlb_test_base + 3U * 4096U;
+	FarPageMemory memory{tlb_test_base,
+		{{high, high_backing}, {far, far_backing}}};
+	memory.load(code, {
+		0x48, 0x8b, 0x03,                   // mov rax,[rbx]
+		0x48, 0x8b, 0x3e,                   // mov rdi,[rsi]
+		0x4c, 0x8b, 0x12,                   // mov r10,[rdx]
+		0x4c, 0x8b, 0x63, 0x08,             // mov r12,[rbx+8]
+		0x4c, 0x8b, 0x76, 0x08,             // mov r14,[rsi+8]
+		0x4c, 0x8b, 0x6a, 0x08,             // mov r13,[rdx+8]
+		0x48, 0x89, 0x7b, 0x10,             // mov [rbx+16],rdi
+		0x4c, 0x89, 0x56, 0x10,             // mov [rsi+16],r10
+		0x48, 0x89, 0x42, 0x10,             // mov [rdx+16],rax
+		0x64, 0x4c, 0x8b, 0x03,             // mov r8,fs:[rbx]
+		0x64, 0x4c, 0x8b, 0x3e,             // mov r15,fs:[rsi]
+		0x64, 0x4c, 0x8b, 0x0a,             // mov r9,fs:[rdx]
+		0x64, 0x4c, 0x89, 0x7b, 0x18,       // mov fs:[rbx+24],r15
+		0x64, 0x4c, 0x89, 0x4e, 0x18,       // mov fs:[rsi+24],r9
+		0x64, 0x4c, 0x89, 0x42, 0x18,       // mov fs:[rdx+24],r8
+		0xc4, 0xe2, 0x71, 0x8c, 0x53, 0x20, // vpmaskmovd xmm2,xmm1,[rbx+32]
+		0xc4, 0xe2, 0x71, 0x8c, 0x66, 0x20, // vpmaskmovd xmm4,xmm1,[rsi+32]
+		0xc4, 0xe2, 0x71, 0x8c, 0x5a, 0x20, // vpmaskmovd xmm3,xmm1,[rdx+32]
+		0xc4, 0xe2, 0x71, 0x8e, 0x63, 0x30, // vpmaskmovd [rbx+48],xmm1,xmm4
+		0xc4, 0xe2, 0x71, 0x8e, 0x5e, 0x30, // vpmaskmovd [rsi+48],xmm1,xmm3
+		0xc4, 0xe2, 0x71, 0x8e, 0x52, 0x30, // vpmaskmovd [rdx+48],xmm1,xmm2
+		0x0f, 0x05,                         // syscall
+	});
+	/* Each page's bytes, in the span, in the order the accesses visit them;
+	 * a page's stores take the next page's bytes. */
+	const std::array<std::uint64_t, 3> pages{near, high_backing, far_backing};
+	for (unsigned page = 0; page < pages.size(); ++page)
+		for (unsigned index = 0; index < 48U; ++index)
+			memory.load(pages[page] + index, {static_cast<std::uint8_t>(
+				0x10U + 0x40U * page + index)});
+	const auto built = require_built(gadgets::build(memory, code),
+		"the alternating sequence did not build");
+	gadgets::Executor executor;
+	executor.prepare(memory);
+	CpuState cpu{};
+	cpu.rip = code;
+	cpu.gpr(Register::rbx) = near;
+	cpu.gpr(Register::rsi) = high;
+	cpu.gpr(Register::rdx) = far;
+	std::fill(cpu.vectors[1].begin(), cpu.vectors[1].begin() + 16,
+		std::byte{0x80});
+	const auto result = gadgets::execute(built.program, cpu, memory,
+		executor, 32);
+	require(result.event == uml::cpu::EngineEvent::system_call &&
+			result.retired_instructions == 22,
+		"the alternating sequence did not reach SYSCALL");
+	const auto first = [&](unsigned page) {
+		return memory.qword(pages[page]);
+	};
+	const auto second = [&](unsigned page) {
+		return memory.qword(pages[page] + 8U);
+	};
+	require(cpu.gpr(Register::rax) == first(0) &&
+			cpu.gpr(Register::rdi) == first(1) &&
+			cpu.gpr(Register::r10) == first(2) &&
+			cpu.gpr(Register::r12) == second(0) &&
+			cpu.gpr(Register::r14) == second(1) &&
+			cpu.gpr(Register::r13) == second(2) &&
+			cpu.gpr(Register::r8) == first(0) &&
+			cpu.gpr(Register::r15) == first(1) &&
+			cpu.gpr(Register::r9) == first(2),
+		"a load read another page that shares its entry");
+	bool kept = true;
+	for (unsigned page = 0; page < pages.size(); ++page) {
+		const auto taken = pages[(page + 1U) % pages.size()];
+		kept = kept && memory.qword(pages[page] + 16U) == memory.qword(taken) &&
+			memory.qword(pages[page] + 24U) == memory.qword(taken);
+		for (unsigned index = 0; index < 16U; ++index)
+			kept = kept && memory.byte(pages[page] + 48U + index) ==
+				memory.byte(taken + 32U + index);
+	}
+	require(kept, "a store wrote another page that shares its entry");
+}
+
 /* PMOVMSKB collapses one sign bit per byte into a bit mask. The corpus carries
  * only one or two cases per width, which a lane-ordering mistake can survive,
  * so walk a single set bit through every position instead.
@@ -10988,6 +11351,9 @@ int main(int argc, char **argv)
 	lazy_shift_flags_match_the_definition();
 	execute_segment_memory();
 	execute_addressing_shapes();
+	each_translation_finds_the_entry_its_miss_filled();
+	a_page_crossing_access_matches_no_translation();
+	pages_sharing_an_entry_keep_their_own_bytes();
 	execute_byte_sign_masks();
 	execute_call_and_return();
 	decode_compat32_defaults();

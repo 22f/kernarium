@@ -35,8 +35,7 @@ scalar_move_ri move_64_ri, str, x
 gadget move_\width\()_rm
 	effective_address
 	mov x25, x7
-	page_cross_check (\width / 8), Lx86_load_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8)
+	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8), cross=Lx86_load_cross\@
 	\load \host_register\()11, [x7]
 Lx86_load_write\@:
 	and x8, x23, #0xffff
@@ -59,8 +58,7 @@ gadget move_\width\()_m\form
 	.ifc \form,i
 	ldr x24, [_stream], #8
 	.endif
-	page_cross_check (\width / 8), Lx86_store_cross\@
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, (\width / 8)
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, (\width / 8), cross=Lx86_store_cross\@
 	\store \host_register\()24, [x7]
 	finish_store (\width / 8)
 Lx86_store_cross\@:
@@ -112,8 +110,7 @@ gadget lea_64
 	mov w25, w25
 	.endif
 	mov x7, x25
-	page_cross_check (\width / 8), Lx86_push_value_cross\@
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, (\width / 8)
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, (\width / 8), cross=Lx86_push_value_cross\@
 	\store \host_register\()24, [x7]
 Lx86_push_value_done\@:
 	str x25, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
@@ -145,8 +142,7 @@ gadget pop_\width\()_r
 	mov w25, w25
 	.endif
 	mov x7, x25
-	page_cross_check (\width / 8), Lx86_pop_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8)
+	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8), cross=Lx86_pop_cross\@
 	\load \host_register\()24, [x7]
 Lx86_pop_done\@:
 	add x9, x25, #(\width / 8)
@@ -202,8 +198,7 @@ gadget pop_flags_\width
 	mov w25, w25
 	.endif
 	mov x7, x25
-	page_cross_check (\width / 8), Lx86_pop_flags_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8)
+	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8), cross=Lx86_pop_flags_cross\@
 	\load \host_register\()24, [x7]
 Lx86_pop_flags_done\@:
 	bl uml_x86_64_gadget_materialize_flags
@@ -263,8 +258,7 @@ gadget leave_\width
 	mov w25, w25
 	.endif
 	mov x7, x25
-	page_cross_check (\width / 8), Lx86_leave_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8)
+	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8), cross=Lx86_leave_cross\@
 	\load \host_register\()24, [x7]
 Lx86_leave_done\@:
 	add x9, x25, #(\width / 8)
@@ -290,8 +284,7 @@ leave 64, ldr, str, x
 gadget push_\width\()_m
 	effective_address
 	mov x26, x7
-	page_cross_check (\width / 8), Lx86_push_memory_source_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8)
+	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8), cross=Lx86_push_memory_source_cross\@
 	\load \load_register\()24, [x7]
 	b Lx86_push_memory_source_done\@
 Lx86_push_memory_source_cross\@:
@@ -329,8 +322,7 @@ gadget pop_\width\()_m
 	effective_address
 	str x25, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
 	mov x27, x7
-	page_cross_check (\width / 8), Lx86_pop_memory_destination_cross\@
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, (\width / 8)
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, (\width / 8), cross=Lx86_pop_memory_destination_cross\@
 	\store \store_register\()24, [x7]
 Lx86_pop_memory_done\@:
 	str x26, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
@@ -673,8 +665,7 @@ scalar_extend sext_32_64_rr, ldrsw, x, str, x
 gadget \name
 	effective_address
 	mov x25, x7
-	page_cross_check (\source_width / 8), Lx86_extend_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, (\source_width / 8)
+	translate 0, UML_X86_64_TLB_READ_PAGE, (\source_width / 8), cross=Lx86_extend_cross\@
 	\load \load_register\()11, [x7]
 	b Lx86_extend_write\@
 Lx86_extend_cross\@:

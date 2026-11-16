@@ -313,8 +313,7 @@ gadget store_machine_status_16_m
 	mov x25, x7
 	mov w24, #0x0033
 	movk w24, #0x8005, lsl #16
-	page_cross_check 2, Lx86_store_machine_status_cross
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, 2
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, 2, cross=Lx86_store_machine_status_cross
 	strh w24, [x7]
 Lx86_store_machine_status_done:
 	finish_store 2
@@ -325,8 +324,7 @@ Lx86_store_machine_status_cross:
 gadget mxcsr_load
 	effective_address
 	mov x25, x7
-	page_cross_check 4, Lx86_mxcsr_load_cross
-	translate 0, UML_X86_64_TLB_READ_PAGE, 4
+	translate 0, UML_X86_64_TLB_READ_PAGE, 4, cross=Lx86_mxcsr_load_cross
 	ldr w24, [x7]
 Lx86_mxcsr_load_done:
 	/* A value with a reserved bit, one of 31:16, raises #GP(0) and loads
@@ -350,8 +348,7 @@ gadget mxcsr_store
 	ldr w24, [_vcpu, #UML_X86_64_CPU_MXCSR]
 	fold_host_flags w24, 9, 10
 	str w24, [_vcpu, #UML_X86_64_CPU_MXCSR]
-	page_cross_check 4, Lx86_mxcsr_store_cross
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, 4
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, 4, cross=Lx86_mxcsr_store_cross
 	str w24, [x7]
 Lx86_mxcsr_store_done:
 	finish_store 4
