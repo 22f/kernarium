@@ -139,6 +139,11 @@ private:
 	bool every_{};
 };
 
+/* Starts the periodic counters report the process asked for with
+ * DARWIN_UML_CODE_HOLDER_COUNTERS, once; a no-op without it, and in an App
+ * Store runtime. A table's first leaf calls it. */
+void report_counters_once() noexcept;
+
 /* What the mechanism did since the process began. Each counter is bumped on a
  * cold path (a registration that changed a word, a publication that found
  * other holders), never per fetch or per instruction-cache line. */

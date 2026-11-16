@@ -43,6 +43,7 @@ target_compile_definitions(uml_memory_shared_backing PRIVATE
 set(_uml_static_mmu_sources
     mmu/address_layout.cpp
     mmu/address_space.cpp
+    mmu/code_holders.cpp
     mmu/execution_gate.cpp
     mmu/mapped_backing.cpp)
 

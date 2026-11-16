@@ -142,6 +142,7 @@ code_holders::Leaf *MappedBacking::make_holder_leaf(
 			return nullptr;
 		root.store(leaf, std::memory_order_release);
 		code_holders::count(&code_holders::detail::CounterStore::leaves);
+		code_holders::report_counters_once();
 		return leaf;
 	} catch (...) {
 		return nullptr;
