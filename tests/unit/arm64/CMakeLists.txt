@@ -77,6 +77,11 @@ uml_add_arm64_unit_test(no_sve WITHOUT_HARNESS
 # executes: its definition and the words both engines translate from.
 uml_add_arm64_unit_test(sm0_vector_length WITHOUT_HARNESS)
 
+# The verdict table the ahead-of-time component's address spaces would share
+# and the decision around it, against a stub of the memory layer's stamp
+# (header only; sharing is not enabled).
+uml_add_arm64_unit_test(aot_verdicts WITHOUT_HARNESS NO_OBJECTS)
+
 # The AArch32 foundation: the state CpuState appends, the engines' levels,
 # the AArch32 identification registers and compat HWCAPs, and the engines'
 # AArch32 entry.
