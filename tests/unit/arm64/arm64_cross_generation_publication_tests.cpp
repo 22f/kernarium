@@ -12,6 +12,11 @@
  *             version.
  *   overflow  Three processes run the page and A rewrites it, twice: all three
  *             run each version, which a word of two generations cannot name.
+ *   own-flush Process B runs the page and holds it through a writable view as
+ *             well, and so does process M. B synchronizes that view without
+ *             a store (a flush of code it did not change), which takes the
+ *             word; then A rewrites and synchronizes the page. B, which never
+ *             fetched the page again, runs the new version.
  *
  * Both engines, with the writer on the reader's vCPU or on a second one.
  */
@@ -22,6 +27,7 @@
 #include <cstdio>
 #include <memory>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -128,6 +134,65 @@ void overflow(uml::cpu::EngineKind kind, bool second_vcpu, unsigned long &next)
 		require(darwin_uml_static_vm_destroy(generation) == 0);
 }
 
+/* ic ivau, x3; dsb ish; isb; svc: a flush of x3's view, no store. */
+inline const std::vector<std::uint32_t> flush_program{
+	0xd50b'7523U, 0xd503'3b9fU, 0xd503'3fdfU, svc0,
+};
+
+constexpr std::uint64_t flush_base = 0x5500'0000U;
+
+void own_flush(uml::cpu::EngineKind kind, bool second_vcpu, unsigned long &next)
+{
+	const auto m = next++;
+	const auto b = next++;
+	const auto a = next++;
+	for (const auto generation : {m, b, a})
+		require(darwin_uml_static_vm_activate(generation) == 0);
+	{
+		uml::testing::ScratchBacking shared{"uml-ownflush-code.XXXXXX", page};
+		uml::testing::ScratchBacking writer{"uml-ownflush-writer.XXXXXX",
+			page};
+		uml::testing::ScratchBacking flush{"uml-ownflush-flush.XXXXXX", page};
+		const std::uint32_t old_words[] = {movz_x0(1), svc0};
+		shared.put(0, std::as_bytes(std::span{old_words}));
+		writer.put(0, std::as_bytes(std::span{writer_program}));
+		flush.put(0, std::as_bytes(std::span{flush_program}));
+		Vcpu holder_m{kind};
+		Vcpu holder_b{kind};
+		const Map m_code{m, shared_base, shared.descriptor(),
+			PROT_READ | PROT_EXEC, true};
+		const Map b_code{b, shared_base, shared.descriptor(),
+			PROT_READ | PROT_EXEC, true};
+		const Map b_view{b, alias_base, shared.descriptor(),
+			PROT_READ | PROT_WRITE, false};
+		const Map b_flush{b, flush_base, flush.descriptor(),
+			PROT_READ | PROT_EXEC, true};
+		const Map a_view{a, shared_base, shared.descriptor(),
+			PROT_READ | PROT_WRITE, false};
+		const Map a_writer{a, writer_base, writer.descriptor(),
+			PROT_READ | PROT_EXEC, true};
+		require(holder_m.call(m, shared_base) == 1);
+		require(holder_b.call(b, shared_base) == 1);
+		require(holder_b.call(b, shared_base) == 1);
+		/* B flushes its writable view of a page it did not change. */
+		arm64::CpuState cpu{};
+		cpu.pc = flush_base;
+		cpu.registers[3] = alias_base;
+		const auto flushed = run(*holder_b.engine, b, cpu);
+		require(flushed.reason == uml::cpu::ExitReason::system_call);
+		on_vcpu(kind, *holder_b.engine, second_vcpu,
+			[&](uml::cpu::CpuEngine &engine) {
+				write_and_synchronize(engine, a, shared_base, movz_x0(2));
+			});
+		expect(holder_b.call(b, shared_base), 2, engine_name(kind),
+			"own-flush", second_vcpu, 2);
+		expect(holder_m.call(m, shared_base), 2, engine_name(kind),
+			"own-flush-other", second_vcpu, 2);
+	}
+	for (const auto generation : {a, b, m})
+		require(darwin_uml_static_vm_destroy(generation) == 0);
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -138,6 +203,7 @@ int main(int argc, char **argv)
 		for (const bool second_vcpu : {false, true}) {
 			repeat(kind, second_vcpu, generation);
 			overflow(kind, second_vcpu, generation);
+			own_flush(kind, second_vcpu, generation);
 		}
 	});
 	std::printf("arm64-cross-generation-publication: %d stale\n", failures);
