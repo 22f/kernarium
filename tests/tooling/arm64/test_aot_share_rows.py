@@ -49,8 +49,7 @@ class RunTest(unittest.TestCase):
 
     def test_a_row_that_answers_no_fails(self):
         with self.assertRaises(rows.ShareFailure):
-            rows.run_mode(shell_of(record("evict", 18, tail="\nround 0: the page cache dropped some of libz.so: NO")),
-                          "evict")
+            rows.run_mode(shell_of(record("fork", 16, tail="\nround 0: the pressure took effect: NO")), "fork")
 
     def test_no_closing_record_fails(self):
         with self.assertRaises(rows.ShareFailure):
@@ -73,6 +72,12 @@ class CompareTest(unittest.TestCase):
             rows.compare("fork", self.lines(), self.lines(sums={7: 0x99}))
         self.assertIn("line 8", str(caught.exception))
 
+    def test_informational_lines_are_not_compared(self):
+        off = self.lines(tail="\n# round 0: libz.so pages cached 30 before, 12 after")
+        on = self.lines(tail="\n# round 0: libz.so pages cached 30 before, 25 after")
+        self.assertEqual(rows.compare("fork", off, on), 17)
+        self.assertEqual(len(rows.informational(on)), 1)
+
     def test_a_shorter_record_fails(self):
         with self.assertRaises(rows.ShareFailure):
             rows.compare("fork", self.lines(), self.lines()[:-1])
@@ -80,21 +85,21 @@ class CompareTest(unittest.TestCase):
 
 class CountsTest(unittest.TestCase):
     def test_the_fork_mode_needs_reused_verdicts(self):
-        rows.check_counts("fork", {"shared_hits": rows.FORK_MIN_SHARED, "verifications": 3}, None)
+        rows.check_counts("fork", {"shared": rows.FORK_MIN_SHARED, "verified": 3}, None)
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("fork", {"shared_hits": rows.FORK_MIN_SHARED - 1}, None)
+            rows.check_counts("fork", {"shared": rows.FORK_MIN_SHARED - 1}, None)
 
     def test_the_copy_mode_shares_a_fraction_of_the_fork_mode_and_hashes(self):
-        rows.check_counts("copy", {"shared_hits": 5, "verifications": 20}, 100)
+        rows.check_counts("copy", {"shared": 5, "verified": 20}, 100)
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("copy", {"shared_hits": 60, "verifications": 20}, 100)
+            rows.check_counts("copy", {"shared": 60, "verified": 20}, 100)
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("copy", {"shared_hits": 0, "verifications": 11}, 100)
+            rows.check_counts("copy", {"shared": 0, "verified": 11}, 100)
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("copy", {"shared_hits": 0, "verifications": 20}, None)
+            rows.check_counts("copy", {"shared": 0, "verified": 20}, None)
 
     def test_the_other_modes_only_report(self):
-        for mode in ("cow", "mprotect", "evict"):
+        for mode in ("cow", "mprotect", "pressure"):
             self.assertIn(mode, rows.check_counts(mode, {}, 100))
 
 

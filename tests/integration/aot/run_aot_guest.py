@@ -514,7 +514,11 @@ class Arm:
         if pushed.returncode != 0:
             raise Failure(f"pushing the share program exited "
                           f"{pushed.returncode}:\n{pushed.stdout}")
-        counting = self.options.diagnostics and self.aot
+        counting = self.options.diagnostics and self.aot and self.options.manifest
+        libz = None
+        if counting:
+            names = library_names(self.options.manifest)
+            libz = names.index("/system/lib64/libz.so")
 
         def counters() -> dict[str, int]:
             # The report is written a few times a second.
@@ -532,8 +536,9 @@ class Arm:
             self.share[mode] = record
             if counting:
                 after = counters()
-                self.share_counts[mode] = {key: after.get(key, 0) - before.get(key, 0)
-                                           for key in after}
+                self.share_counts[mode] = {
+                    key: after.get(f"library.{libz}.{field}", 0) - before.get(f"library.{libz}.{field}", 0)
+                    for key, field in (("shared", "shared"), ("verified", "verified"))}
 
 
 def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
@@ -585,12 +590,14 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
             try:
                 lines = share_rows.compare(mode, off.share[mode], on.share[mode])
                 print(f"share row {mode}: {lines} lines, identical")
-                if options.diagnostics:
+                for note in share_rows.informational(on.share[mode]):
+                    print("  " + note)
+                if on.share_counts:
                     print(share_rows.check_counts(mode, on.share_counts[mode], fork_shared))
             except share_rows.ShareFailure as problem:
                 raise Failure(f"share row {problem}")
-            if mode == "fork" and options.diagnostics:
-                fork_shared = on.share_counts[mode].get("shared_hits", 0)
+            if mode == "fork" and on.share_counts:
+                fork_shared = on.share_counts[mode].get("shared", 0)
     if not options.diagnostics:
         assert off.resident is not None and on.resident is not None
         if on.resident < MIN_RESIDENT_BYTES:

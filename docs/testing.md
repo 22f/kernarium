@@ -818,8 +818,11 @@ blocker in every one of them.
   `share_rows.py`) runs libz in many processes: the read-only file system's
   library, a byte-identical copy on the writable data file system, a text
   page copied by a write and one patched in a single child, a changed page
-  protection, and rounds in which the page cache's pages of the library are
-  dropped and other files read to reuse the frames. Each mode prints the same
+  protection, and rounds in which a child takes more memory than is free, so
+  that the kernel may reclaim and reuse the library's frames (the guest is not
+  rooted: no `drop_caches`, no compaction, and a page another process maps
+  stays through `fadvise`, so a frame's free cannot be forced; the row prints
+  how many pages stayed cached). Each mode prints the same
   sums with the component on and off; in a diagnostics build the fork mode
   must find verdicts to reuse (`shared_hits`) and the copy, which the kernel
   does not declare immutable, must hash its own pages. Execution evidence exists

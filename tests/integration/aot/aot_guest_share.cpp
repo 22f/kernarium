@@ -22,9 +22,11 @@
  *             others that do not; and after it an untouched child.
  *   mprotect  children that change the protection of a text page to writable
  *             and back, and one that then writes it.
- *   evict     rounds of children, then the page cache's pages of libz.so are
- *             dropped, other files are read to reuse the frames, and the next
- *             round runs the library again.
+ *   pressure  rounds of children, each followed by a child that takes more
+ *             memory than is free, so that the kernel reclaims file pages (the
+ *             library's among them) and reuses their frames; the next round
+ *             runs the library again. The guest is not rooted, so there is no
+ *             drop_caches or compaction to do it exactly.
  *
  * Every line it prints is a function of the guest's architectural behaviour
  * alone: the runner (run_aot_guest.py) requires the same lines with the
@@ -45,7 +47,6 @@ long write(int, const void *, size_t);
 int close(int);
 int pipe(int *);
 int unlink(const char *);
-int posix_fadvise(int, long, long, int);
 int dprintf(int, const char *, ...);
 void *dlopen(const char *, int);
 void *dlsym(void *, const char *);
@@ -93,14 +94,10 @@ constexpr int kExec = 4;
 constexpr int kMapPrivateAnonymous = 0x22;
 constexpr int kMapShared = 1;
 constexpr int kOpenWriteCreateTruncate = 1 | 0x40 | 0x200;
-constexpr int kFadvDontNeed = 4;
 constexpr int kRtldNow = 2;
 
 constexpr const char *kSystemZ = "/system/lib64/libz.so";
 constexpr const char *kCopyZ = "/data/local/tmp/libz_share_copy.so";
-// Files read to take over the frames the page cache gave up. Both belong to
-// the image's read-only file system.
-constexpr const char *kChurn[] = {"/system/lib64/libhwui.so", "/system/lib64/libandroid_runtime.so"};
 
 void fail(const char *what) {
     dprintf(1, "FAIL %s\n", what);
@@ -415,22 +412,75 @@ long cached_pages(const char *path, long *total) {
     return count;
 }
 
-void churn() {
-    static uint8_t buffer[1 << 16];
-    for (const char *path : kChurn) {
-        const int fd = open(path, 0);
-        if (fd < 0) {
+// A number from /proc/meminfo, in kB, or -1.
+long meminfo_kb(const char *key) {
+    const int fd = open("/proc/meminfo", 0);
+    if (fd < 0) {
+        return -1;
+    }
+    static char text[4096];
+    const long got = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (got <= 0) {
+        return -1;
+    }
+    text[got] = 0;
+    for (long i = 0; i < got; ++i) {
+        if (i != 0 && text[i - 1] != '\n') {
             continue;
         }
-        while (read(fd, buffer, sizeof(buffer)) > 0) {
+        long k = 0;
+        while (key[k] != 0 && text[i + k] == key[k]) {
+            ++k;
         }
-        close(fd);
+        if (key[k] != 0 || text[i + k] != ':') {
+            continue;
+        }
+        long value = 0;
+        for (long j = i + k + 1; j < got && text[j] != '\n'; ++j) {
+            if (text[j] >= '0' && text[j] <= '9') {
+                value = value * 10 + (text[j] - '0');
+            }
+        }
+        return value;
     }
+    return -1;
 }
 
-void evict_mode() {
+// A child that takes memory from the page cache: it touches anonymous pages
+// up to what is free and a share of what the page cache holds, so that the
+// kernel reclaims file pages, mapped ones included, and later reuses their
+// frames. The guest is not rooted (no drop_caches, no compaction), and a page
+// that another process maps stays through fadvise, so reclaim under pressure
+// is the way a frame of the library is freed.
+void pressure_child(long extra_kb) {
+    const long free_kb = meminfo_kb("MemFree");
+    if (free_kb < 0) {
+        _exit(1);
+    }
+    const size_t bytes = static_cast<size_t>(free_kb + extra_kb) * 1024UL;
+    uint8_t *region = static_cast<uint8_t *>(mmap(nullptr, bytes, kRead | kWrite, kMapPrivateAnonymous, -1, 0));
+    if (region == reinterpret_cast<uint8_t *>(-1L)) {
+        _exit(2);
+    }
+    for (size_t at = 0; at < bytes; at += kPage) {
+        region[at] = 1;
+    }
+    _exit(0);
+}
+
+// How many pages of the library the page cache holds.
+long libz_cached() {
+    long total = 0;
+    return cached_pages(kSystemZ, &total);
+}
+
+// The rounds are comments the runner prints and does not compare: how many
+// pages of libz.so the page cache held before and after the pressure depends
+// on the guest's memory, not on the engine.
+void pressure_mode() {
     const Zlib z = system_zlib();
-    for (int round = 0; round < 5; ++round) {
+    for (int round = 0; round < 4; ++round) {
         char label[16];
         label[0] = 'r';
         label[1] = static_cast<char>('0' + round);
@@ -438,21 +488,17 @@ void evict_mode() {
         if (!children_in_turn(label, round * 3, 3, z, Prep::None)) {
             return;
         }
-        const int fd = open(kSystemZ, 0);
-        if (fd < 0) {
-            fail("open libz.so");
-            return;
+        const long before = libz_cached();
+        const int pid = fork();
+        if (pid == 0) {
+            pressure_child(static_cast<long>(meminfo_kb("Cached")) / 2);
         }
-        posix_fadvise(fd, 0, 0, kFadvDontNeed);
-        close(fd);
-        long total = 0;
-        const long held = cached_pages(kSystemZ, &total);
-        // Pages another process maps stay; those only the children used go.
-        dprintf(1, "round %d: the page cache dropped some of libz.so: %s\n", round,
-                held >= 0 && held < total ? "yes" : "NO");
-        churn();
+        int status = 0;
+        waitpid(pid, &status, 0);
+        dprintf(1, "# round %d: libz.so pages cached %ld before, %ld after; the pressure child exited %d\n", round,
+                before, libz_cached(), status);
     }
-    children_in_turn("last", 15, 3, z, Prep::None);
+    children_in_turn("last", 12, 3, z, Prep::None);
 }
 
 __attribute__((constructor)) void run() {
@@ -470,8 +516,8 @@ __attribute__((constructor)) void run() {
         cow_mode();
     } else if (strcmp(mode, "mprotect") == 0) {
         protect_mode();
-    } else if (strcmp(mode, "evict") == 0) {
-        evict_mode();
+    } else if (strcmp(mode, "pressure") == 0) {
+        pressure_mode();
     } else {
         dprintf(1, "FAIL unknown mode\n");
     }

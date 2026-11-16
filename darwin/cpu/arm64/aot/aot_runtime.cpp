@@ -210,6 +210,10 @@ std::array<std::atomic<std::uint64_t>, step_slots> step_key{};
 std::array<std::atomic<std::uint64_t>, step_slots> step_count{};
 std::array<std::atomic<std::uint64_t>, 64> library_enters{};
 std::array<std::atomic<std::uint64_t>, 64> library_steps{};
+/* Pages of a library compared with their stored hash, and pages whose
+ * verification the shared table answered. */
+std::array<std::atomic<std::uint64_t>, 64> library_verifications{};
+std::array<std::atomic<std::uint64_t>, 64> library_shared_hits{};
 /* What find() answered: an entry, or why not (FindResult), in all and per
  * library where the answer names one; and what a cross-library lookup that
  * found no entry looked at (CrossMiss). */
@@ -222,6 +226,12 @@ std::atomic<bool> reporter_started{false};
 
 #define UML_AOT_COUNT(name, amount) \
 	counters::name.fetch_add((amount), std::memory_order_relaxed)
+#define UML_AOT_COUNT_LIBRARY(name, library) \
+	do { \
+		if ((library) < 64) \
+			counters::name[(library)].fetch_add(1, \
+				std::memory_order_relaxed); \
+	} while (0)
 
 constexpr std::uint32_t no_library = 0xffffffffU;
 
@@ -330,11 +340,14 @@ void write_report() noexcept
 		for (const auto &counter : counters::library_finds[library])
 			finds += get(counter);
 		const auto cross = get(counters::library_cross_misses[library]);
-		if (enters == 0 && finds == 0 && cross == 0)
+		const auto hashed = get(counters::library_verifications[library]);
+		const auto shared = get(counters::library_shared_hits[library]);
+		if (enters == 0 && finds == 0 && cross == 0 && hashed == 0 &&
+		    shared == 0)
 			continue;
 		std::fprintf(file, "library %zu enters %llu steps %llu cross_misses "
-			"%llu", library, enters, get(counters::library_steps[library]),
-			cross);
+			"%llu verified %llu shared %llu", library, enters,
+			get(counters::library_steps[library]), cross, hashed, shared);
 		for (std::size_t kind = 0;
 		     kind < counters::library_finds[library].size(); ++kind)
 			std::fprintf(file, " %s %llu", find_result_name(kind),
@@ -370,6 +383,7 @@ void start_reporter() noexcept
 #else
 #define UML_AOT_COUNT(name, amount) ((void)0)
 inline void note_find(FindResult, std::uint32_t) noexcept {}
+#define UML_AOT_COUNT_LIBRARY(name, library) ((void)0)
 constexpr std::uint32_t no_library = 0xffffffffU;
 #endif
 
@@ -687,6 +701,7 @@ Binder::Verdict Binder::verify_page(
 			if (!memory.fetch(address, page))
 				return SharedOutcome::unreadable;
 			UML_AOT_COUNT(verifications, 1);
+			UML_AOT_COUNT_LIBRARY(library_verifications, instance.library);
 			/* The stored page is a SHA-256 of the bytes the code was built
 			 * from: rewritten code runs for other bytes only on a collision
 			 * of the hash. CC_SHA256 is CommonCrypto's one-shot digest,
@@ -709,6 +724,7 @@ Binder::Verdict Binder::verify_page(
 		return Verdict::mismatch;
 	case SharedOutcome::shared_hit:
 		UML_AOT_COUNT(shared_hits, 1);
+		UML_AOT_COUNT_LIBRARY(library_shared_hits, instance.library);
 		break;
 	case SharedOutcome::match:
 		break;
