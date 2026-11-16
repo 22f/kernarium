@@ -35,7 +35,9 @@ public:
     void* reallocate(void* pointer, size_t size);
 
     // A free chunk keeps its list links in the first bytes of its payload; a user of the arena that reads memory it has freed
-    // (the byte[] blocks' stale references) keeps the fields it reads past this many bytes.
+    // (the byte[] blocks' stale references) keeps the fields it reads past this many bytes, and then finds them while the chunk
+    // stays free as it is. Once the chunk is merged and cut again, or another allocation covers it, the arena promises nothing
+    // about what the old addresses hold.
     static constexpr size_t kFreeLinkBytes = 2 * sizeof(uint32_t);
 
     bool contains(const void* pointer) const {

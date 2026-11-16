@@ -451,6 +451,7 @@ void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* b
     }
 }
 Hook<> g_after_get;  // runs inside a GetByteArrayRegion, after it copied: another thread acts meanwhile
+std::atomic<const void*> g_last_get_buffer{nullptr};  // where the latest GetByteArrayRegion that was not refused copied to
 void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
     WorldGuard guard;
     on_the_list("GetByteArrayRegion");
@@ -463,6 +464,7 @@ void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
         return;
     }
     std::memcpy(buf, bytes.data() + start, size_t(len));
+    g_last_get_buffer.store(buf, std::memory_order_release);
     if (auto hook = g_after_get.take()) {
         WorldUnlocked unlocked;
         hook();
@@ -4143,6 +4145,44 @@ void check_a_release_of_a_pointer_inside_a_block_is_harmless() {
     require(std::memcmp(raw_of(made), before.data(), 4096) == 0, "and the block is as it was");
 }
 
+// A block that only a weak reference holds (ended, no pin) has no array to reach while no reference can be made, as with an
+// exception pending: its reference converts to nothing, as for a null array (README: no elements, no copy). A region read then
+// copies nothing: the block's bytes are not the array's once Java has gone on with it, and nothing holds the block, so a sweep
+// may free it while it is read. The row has Java change the array after the block ended and, in its second case, lets the
+// array be collected (the layer cannot tell with an exception pending). Fails on a layer that copies the block's bytes.
+void check_a_block_nothing_holds_gives_no_bytes_while_no_reference_can_be_made() {
+    for (int collected = 0; collected < 2; ++collected) {
+        Fixture f = make();
+        const std::vector<uint8_t> payload = sample(100);
+        Made kept = make_held(f, payload);
+        end_ref(f, kept.shadow);
+        require(is_ended_block(kept.shadow) && block_weaks() == 1 && world.globals.empty(),
+                "an ended block that only a weak reference holds");
+        for (uint8_t& byte : kept.object->bytes) byte = uint8_t(~byte);  // Java went on with the array
+        if (collected != 0) {
+            kept.object->held = false;
+            collect();
+        }
+        world.exception_pending = true;
+        world.get_calls = 0;
+        world.set_calls = 0;
+        jbyte buffer[100];
+        std::memset(buffer, 0x77, sizeof(buffer));
+        fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, kept.shadow, 0, 100, buffer);
+        bool untouched = true;
+        for (jbyte byte : buffer) untouched = untouched && byte == jbyte(0x77);
+        require(untouched, "a region read of a block nothing holds copies nothing");
+        require(get_elements(f, kept.shadow) == nullptr, "and gives no elements");
+        const jbyte patch[3] = {1, 2, 3};
+        fn<SetRegion>(*f.table, slot::SetByteArrayRegion)(f.env, kept.shadow, 0, 3, patch);
+        require(world.get_calls == 0 && world.set_calls == 0, "and a region write reaches nothing: the layer called the runtime for none of them");
+        world.exception_pending = false;
+        require(kept.object->bytes[0] == uint8_t(~payload[0]) && std::memcmp(raw_of(kept), payload.data(), 100) == 0,
+                "neither the array nor the block changed");
+        require(is_ended_block(kept.shadow), "the block is as it was");
+    }
+}
+
 // The ids of the layer's own calls are resolved at the installation, before the first block can be made.
 void check_the_ids_are_resolved_before_the_first_block() {
     Fixture f = make();
@@ -4205,12 +4245,16 @@ void check_live_blocks_of_many_threads_count_against_the_cap() {
 
 // A header is published whole. A thread that reads a block's address without the mutex (is_shadow_block, is_ended_block, and the
 // length of a reference, which the wrapper answers from the header) and finds the block live finds the block that was made
-// there, with its fields, Dalvik words, contents and tail, never what the address held before. One thread makes a block, waits
+// there, with its fields, Dalvik words, contents and tail, never what the address held before; and a block that is still being
+// made is no block yet.
+// Two parts. The proof of the order is deterministic: the maker pauses inside the fake's GetByteArrayRegion, which the layer
+// calls for the contents after the header's fields and before the publication, the reader looks at the block under
+// construction while it is paused, and finds no block (neither live nor ended, length 0). A layer that publishes the live magic
+// before it builds the header fails that look every time. The stress part is the stale reader: one thread makes a block, waits
 // until the other has looked at it whole, ends it and has the runtime collect its array, so that the next block is made at the
 // address of the one before; the other thread reads that address all the while, in the stage the first publishes: while a block
 // is being made, a live block at the address can only be the one being made. (Fails under ThreadSanitizer, and by its checks
-// without it, when make_shadow stores the live magic before the header's other fields: the reader finds a live block with the
-// length, the words or the contents of the one before.)
+// without it, when make_shadow stores the live magic before the header's other fields.)
 void check_a_header_is_published_whole_to_readers_without_the_mutex() {
     constexpr const char* kCase = "check_a_header_is_published_whole_to_readers_without_the_mutex";
     constexpr int kGenerations = 1500;
@@ -4227,6 +4271,12 @@ void check_a_header_is_published_whole_to_readers_without_the_mutex() {
     std::atomic<const void*> first{nullptr};    // the address of the first block: the reader's stale reference
     std::atomic<const void*> current{nullptr};  // the block of the latest generation made
     std::atomic<bool> stop{false};
+    // The pause inside the construction of generation g: the maker names the block under construction and waits for the reader.
+    std::atomic<int> paused{0};                      // the generation whose block is under construction and waits for the look
+    std::atomic<int> looked{0};                      // the generation the reader has looked at while it was paused
+    std::atomic<const void*> candidate{nullptr};     // the block under construction
+    std::atomic<bool> candidate_live{false}, candidate_ended{false};
+    std::atomic<jsize> candidate_length{-1};
     std::thread looker([&] {
         // The block as it was made for the generation: the length word, the contents and the zeroes behind them.
         const auto whole = [&](const void* block, int generation) {
@@ -4242,6 +4292,16 @@ void check_a_header_is_published_whole_to_readers_without_the_mutex() {
         int done = 0;
         unsigned looks = 0;
         while (!stop.load(std::memory_order_acquire)) {
+            const int pause = paused.load(std::memory_order_acquire);
+            if (pause > looked.load(std::memory_order_relaxed)) {
+                // The maker is inside the construction of a block and waits: look at it, without the mutex.
+                const void* block = candidate.load(std::memory_order_acquire);
+                candidate_live.store(is_shadow_block(block), std::memory_order_relaxed);
+                candidate_ended.store(is_ended_block(block), std::memory_order_relaxed);
+                candidate_length.store(length_of_block(block), std::memory_order_relaxed);
+                looked.store(pause, std::memory_order_release);
+                continue;
+            }
             const int at = stage.load(std::memory_order_acquire);
             const void* address = first.load(std::memory_order_acquire);
             if (address == nullptr) {
@@ -4272,7 +4332,16 @@ void check_a_header_is_published_whole_to_readers_without_the_mutex() {
     int reused = 0;
     for (int generation = 1; generation <= kGenerations; ++generation) {
         stage.store(2 * generation - 1, std::memory_order_release);
+        g_after_get = [&, generation] {  // the layer has copied the contents into the block under construction and has not published it
+            const uint8_t* contents = static_cast<const uint8_t*>(g_last_get_buffer.load(std::memory_order_acquire));
+            candidate.store(contents - 16, std::memory_order_release);  // the object starts 16 bytes before its contents
+            paused.store(generation, std::memory_order_release);
+            wait_for_counter(kCase, "looked", looked, generation, "the maker (paused inside the construction of a block; the reader looks at it)");
+            require(!candidate_live.load() && !candidate_ended.load() && candidate_length.load() == 0,
+                    "a block that is still being made is no block yet: neither live nor ended, and no length");
+        };
         Made made = make_shadow_of(f, std::vector<uint8_t>(size_of(generation), fill_of(generation)));
+        require(made.shadow == candidate.load(std::memory_order_acquire), "the block that was paused is the block that was made");
         require(is_shadow_block(made.shadow), "a block");
         if (generation == 1) {
             first.store(made.shadow, std::memory_order_release);
@@ -5303,6 +5372,7 @@ int main(int argc, char** argv) {
     check_a_collection_the_step_sweep_saw_is_swept_in_full();
     check_a_kept_reference_gives_a_critical_pointer();
     check_a_release_of_a_pointer_inside_a_block_is_harmless();
+    check_a_block_nothing_holds_gives_no_bytes_while_no_reference_can_be_made();
     check_the_ids_are_resolved_before_the_first_block();
     check_live_blocks_of_many_threads_count_against_the_cap();
     check_a_header_is_published_whole_to_readers_without_the_mutex();

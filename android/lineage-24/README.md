@@ -714,9 +714,12 @@ patches ART's one JNI function table in place and gives the application:
   moves no block, so a thread outside any native method, or one at the limit, can
   use it. Only an array that arrives as a result makes a reference again, and
   `DeleteLocalRef` and the releases do not. A reference whose array was collected
-  means nothing, as a reference to a freed block did (a length of 0, no elements).
-  A block is made whole before it says it is live, so a thread that looks at a
-  reference without the lock (its kind, its length) finds a complete block or none.
+  means nothing, as a reference to a freed block did: it gives no elements and no
+  copy, and its length is 0 where the layer finds the block freed; once the freed
+  memory is used again nothing is promised, and the reference can read whatever is
+  there. A block is made whole before it says it is live, so a thread that looks
+  without the lock at the reference of a live or ended block (its kind, its
+  length) finds a complete block.
   A pointer from `Get...Elements` or `Get...Critical` pins its block as Dalvik
   pinned the array: the block keeps its place, and a strong reference to the
   array, until the pointer is released (mode 0 or `JNI_ABORT`; `JNI_COMMIT`
