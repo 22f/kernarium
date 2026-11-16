@@ -4235,17 +4235,23 @@ def check_media_codecs_c2(payload: bytes) -> None:
         )
 
 
-def cil_attribute_members(policy: bytes, attribute: str) -> set[str]:
-    """Types of a CIL attribute, platform version suffixes removed."""
+@functools.lru_cache(maxsize=64)
+def _cil_attribute_members(policy: bytes, attribute: str) -> frozenset[str]:
     pattern = re.compile(
         rb"^\(typeattributeset " + re.escape(attribute.encode()) + rb" \(([^)]*)\)\)$",
         re.MULTILINE,
     )
-    return {
+    return frozenset(
         CIL_PLATFORM_VERSION_SUFFIX.sub("", name.decode())
         for match in pattern.finditer(policy)
         for name in match.group(1).split()
-    }
+    )
+
+
+def cil_attribute_members(policy: bytes, attribute: str) -> set[str]:
+    """Types of a CIL attribute, platform version suffixes removed. A policy is scanned once for an
+    attribute; each call returns a set of its own."""
+    return set(_cil_attribute_members(policy, attribute))
 
 
 def check_property_writers(
@@ -4837,12 +4843,12 @@ def check_oldapp_switch_policy(
     for domain in applications:
         sources = cil_types_and_attributes(policies, domain)
         if not any(
-            CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode()) in sources
-            and CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(2).decode()) in targets
-            and match.group(3) == b"property_service"
-            and b"set" in match.group(4).split()
+            cil_type_name(source) in sources
+            and cil_type_name(target) in targets
+            and object_class == b"property_service"
+            and b"set" in permissions
             for policy in policies
-            for match in CIL_NEVERALLOW_RULE.finditer(policy)
+            for source, target, object_class, permissions in cil_rules(policy, CIL_NEVERALLOW_RULE)
         ):
             fail(
                 f"system_ext policy has no neverallow that keeps application domains from setting "
@@ -5045,6 +5051,33 @@ def cil_attribute_sets(
     return tuple(lists), tuple(expressions)
 
 
+@functools.lru_cache(maxsize=32)
+def cil_rules(
+    policy: bytes, rule: re.Pattern[bytes]
+) -> tuple[tuple[bytes, bytes, bytes, tuple[bytes, ...]], ...]:
+    """The rules that |rule| matches in a policy, each as (source, target, object class,
+    permissions) of raw bytes, the permissions split in the order they stand. A rule pattern with no
+    object class group (CIL_FILE_ALLOW_RULE, CIL_PROPERTY_SET_RULE) yields an empty class. Nothing
+    is decoded here: a caller decodes the names it compares (cil_type_name), when it compares them,
+    so a line no query reaches is never decoded. A policy is scanned once for each pattern, not
+    once for each query."""
+    if rule.groups not in (3, 4):
+        raise ValueError(
+            f"a CIL rule pattern has a source, a target, optionally an object class, and permissions "
+            f"as its groups; {rule.pattern!r} has {rule.groups}"
+        )
+    return tuple(
+        (groups[0], groups[1], groups[2] if rule.groups == 4 else b"", tuple(groups[-1].split()))
+        for groups in (match.groups() for match in rule.finditer(policy))
+    )
+
+
+@functools.lru_cache(maxsize=1 << 16)
+def cil_type_name(raw: bytes) -> str:
+    """A type name of a CIL rule, platform version suffix removed."""
+    return CIL_PLATFORM_VERSION_SUFFIX.sub("", raw.decode())
+
+
 def cil_set_contains(members: object, names: set[str]) -> bool:
     """Whether a CIL set includes a type whose own name and attributes are |names|."""
     if isinstance(members, str):
@@ -5098,11 +5131,9 @@ def cil_allows_file_read(policies: tuple[bytes, ...], domain: str, label: str) -
     readers = cil_types_and_attributes(policies, domain)
     readable = cil_types_and_attributes(policies, label)
     return any(
-        CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode()) in readers
-        and CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(2).decode()) in readable
-        and b"read" in match.group(3).split()
+        cil_type_name(source) in readers and cil_type_name(target) in readable and b"read" in permissions
         for policy in policies
-        for match in CIL_FILE_ALLOW_RULE.finditer(policy)
+        for source, target, _object_class, permissions in cil_rules(policy, CIL_FILE_ALLOW_RULE)
     )
 
 
@@ -5172,11 +5203,9 @@ def cil_allows_property_set(policies: tuple[bytes, ...], domain: str, label: str
     setters = cil_types_and_attributes(policies, domain)
     settable = cil_types_and_attributes(policies, label)
     return any(
-        CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode()) in setters
-        and CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(2).decode()) in settable
-        and b"set" in match.group(3).split()
+        cil_type_name(source) in setters and cil_type_name(target) in settable and b"set" in permissions
         for policy in policies
-        for match in CIL_PROPERTY_SET_RULE.finditer(policy)
+        for source, target, _object_class, permissions in cil_rules(policy, CIL_PROPERTY_SET_RULE)
     )
 
 
@@ -5249,14 +5278,16 @@ def cil_allows(
     subjects = cil_types_and_attributes(policies, domain)
     objects = cil_types_and_attributes(policies, label)
     granted: set[str] = set()
+    # The pattern's class group is \w+ over bytes: ASCII, so equal bytes are equal names.
+    wanted = object_class.encode()
     for policy in policies:
-        for match in CIL_ALLOW_RULE.finditer(policy):
+        for source, target, rule_class, rule_permissions in cil_rules(policy, CIL_ALLOW_RULE):
             if (
-                match.group(3).decode() == object_class
-                and CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode()) in subjects
-                and CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(2).decode()) in objects
+                rule_class == wanted
+                and cil_type_name(source) in subjects
+                and cil_type_name(target) in objects
             ):
-                granted.update(permission.decode() for permission in match.group(4).split())
+                granted.update(permission.decode() for permission in rule_permissions)
     return permissions <= granted
 
 

@@ -35,6 +35,7 @@ from unittest import mock
 import warnings
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import automation_shards  # noqa: E402
 from automation_fakes import (  # noqa: E402
     FakeDevice, LAUNCH_FAILED_BLOCK, LOST_BLOCK)
 
@@ -3254,4 +3255,4 @@ class LogSignalTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    automation_shards.main()

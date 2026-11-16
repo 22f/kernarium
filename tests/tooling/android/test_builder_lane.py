@@ -664,6 +664,26 @@ def verify_target_files_fixtures(verifier: Path) -> None:
     ):
         if tool.init_commands(text) != commands:
             fail(f"init_commands({text!r}) is {tool.init_commands(text)}, not {commands}")
+    # The scan of a policy's CIL rules decodes nothing (a query decodes the names it compares, when it
+    # compares them, so a rule it never reaches may hold any byte), and it takes the rule patterns of the
+    # file, neverallow and allow rules: three groups (source, target, permissions) or four (with an
+    # object class). A pattern of another count is refused, not mapped onto those.
+    scanned = tool.cil_rules(b"(allow a b\xff (file (read \xff)))\n(allow c d (file (open)))\n",
+                             tool.CIL_FILE_ALLOW_RULE)
+    if scanned != ((b"a", b"b\xff", b"", (b"read", b"\xff")), (b"c", b"d", b"", (b"open",))):
+        fail(f"the CIL rule scan of a file allow rule is {scanned}")
+    scanned = tool.cil_rules(b"(neverallow a b (property_service (set \xff)))\n", tool.CIL_NEVERALLOW_RULE)
+    if scanned != ((b"a", b"b", b"property_service", (b"set", b"\xff")),):
+        fail(f"the CIL rule scan of a neverallow rule is {scanned}")
+    for groups in (0, 1, 2, 5):
+        odd = re.compile(rb"".join(rb"(\S+) " for _ in range(groups)))
+        try:
+            tool.cil_rules(b"x y\n", odd)
+        except ValueError as refused:
+            if str(odd.pattern) not in str(refused) or f"has {groups}" not in str(refused):
+                fail(f"the CIL rule scan refuses a pattern of {groups} groups without saying so: {refused}")
+        else:
+            fail(f"the CIL rule scan takes a pattern of {groups} groups")
     # The camera HAL's grant on the composer's file descriptors, in the forms the compiled vendor policy has (the
     # attribute, and the six-digit version of a platform symbol) and in the near misses it must not accept.
     camera_fence = b"(allow hal_camera_default hal_graphics_composer (fd (use)))"
@@ -6117,12 +6137,21 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         # What the checks accept besides the baseline: the grant to every application domain by its
         # own rule and not through the attribute, and the command's code preoptimized beside a jar
         # that holds none.
-        for label, options in (
-            ("oldapp-per-domain-reads", {"oldswitch_variant": "per-domain-reads"}),
-            ("oldapp-preoptimized-code", {"oldswitch_variant": "preopt-code"}),
+        system_ext_policy_entry = "SYSTEM_EXT/etc/selinux/system_ext_sepolicy.cil"
+        for label, options, appended in (
+            ("oldapp-per-domain-reads", {"oldswitch_variant": "per-domain-reads"}, b""),
+            ("oldapp-preoptimized-code", {"oldswitch_variant": "preopt-code"}, b""),
+            # A byte that is no UTF-8 in a rule that no check looks at (a type of no check, a
+            # permission none compares) is no reason to refuse the policy: the checks decode what
+            # they compare, when they compare it.
+            ("oldapp-unrelated-non-utf8-rule", {}, b"(neverallow zz_unrelated foo (property_service (set \xff)))\n"),
         ):
             fixture = root / f"good-{label}.zip"
             write_fixture(fixture, **options)
+            if appended:
+                with zipfile.ZipFile(fixture) as written:
+                    policy = written.read(system_ext_policy_entry)
+                adjust_archive(fixture, {system_ext_policy_entry: policy + appended})
             result = run_in_process(tool, "--target-files", fixture, *kernel_options)
             if result.returncode != 0:
                 fail(f"target-files verifier rejected the {label} fixture: {result.stdout}")

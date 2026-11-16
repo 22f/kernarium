@@ -221,6 +221,12 @@ block.
 - The scheme's Archive action uses AppStore. The archive for the App Store is
   made with `-configuration AppStore` and the archive for TestFlight with
   `-configuration TestFlight`; both are the builds offered to Macs.
+- The app icon is `DuskJade` (`Shared/DuskJade.icon`) in every configuration
+  but TestFlight, whose icon is `DuskEmber` (`Shared/DuskEmber.icon`).
+  `APP_ICON_NAME` in `Config/Andarium.xcconfig` names the document a build
+  compiles and the other is left out; the bundle check requires each bundle
+  to have its own icon in Info.plist and as the one app icon of the compiled
+  `Assets.car`, so an AppStore bundle holds nothing of DuskEmber.
 - It refuses an embedded artifact that is behind the archived commit: a build
   phase runs [`scripts/check-embedded-artifacts.py`](../scripts/check-embedded-artifacts.py),
   which compares the accepted Android release and kernel descriptors with the
@@ -623,9 +629,19 @@ control out.
   `SnapshotWords` says every refusal, plan and figure in one place. A restore
   closes the sheet and Home says what happened, Start being next. The preview
   plays the same screens on mock snapshots (`-screen snapshots-…`).
-- **Release notes.** `Shared/WhatsNew.json` bundles the notes per build,
-  from build 9 (build 5, the first public release, and builds 6 to 8 and
-  10 have none).
+- **Release notes.** The notes have two tracks, each a file of `Shared`
+  that lists them per build: the beta track, `WhatsNew.json`, for Debug,
+  Release and TestFlight builds (from build 9: build 5, the first public
+  release, and builds 6 to 8 and 10 have none), and the App Store track,
+  `WhatsNewAppStore.json`, for AppStore builds (empty until the App Store
+  version has notes, and then keyed by its own builds). A build bundles and
+  reads its configuration's track alone (`WHATS_NEW_TRACK` in
+  `Config/Andarium.xcconfig` leaves the other's file out and picks the file
+  `WhatsNewTrack` loads, and any value but `BETA` or `APP_STORE` stops the
+  compile), which the bundle check of an AppStore or TestFlight build
+  requires; `andarium-whats-new-track` runs the loader's source under each
+  configuration's resolved condition and holds the icon settings. One string table, `Localization/WhatsNew.xcstrings`,
+  serves both.
   The first launch of an update that carries notes shows a ribbon above Start,
   on at most three launches, that opens them; a build shows the notes up to its
   own number and no later ones. An entry can name the devices it is for (more
@@ -634,10 +650,13 @@ control out.
   An entry can also name a feature the build may lack (Send feedback): a build
   without it shows the entry nowhere, though the notes and their strings are
   bundled whole, so the bundle check leaves that entry's strings, and no other
-  of the notes' table, out of its search for Send feedback text. Info keeps
+  of the notes' table, out of its search for Send feedback text (the table of
+  an AppStore bundle holds the beta track's strings too, which the check names
+  from `WhatsNew.json` in the source). Info keeps
   every other entry as written (`WhatsNewRules`, `WhatsNewStore`). A launch
   with a launch setting, or one a test runs, shows no ribbon and keeps no
-  record.
+  record, and neither does a track with no notes, whose build also has no
+  What's New row in Info.
 
 ## Runtime
 

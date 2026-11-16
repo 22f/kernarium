@@ -60,7 +60,10 @@ application that must:
     with it has the table in Japanese and both Chinese. The What's New
     notes are the one exception: the entry about Send feedback is bundled
     in every product and hidden by one without it, so the strings of that
-    entry, and no other string of the notes' table, may stay; and
+    entry, and no other string of the notes' table, may stay. The table is
+    one for both tracks, so an AppStore bundle holds the beta track's strings
+    too: those of its entries about Send feedback are read from the beta
+    track's source file (--beta-notes); and
   - carry Buy me tokens (Andarium/README.md#buy-me-tokens) only when the build
     names its four product identifiers: the feature is compiled in exactly where
     the ignored local configuration holds all four, in this configuration alone.
@@ -115,6 +118,17 @@ application that must:
     build named, and the number in no other file. The local number is in no
     file of a bundle whose build does not name it, as UTF-8 or as the UTF-16 of
     a property list, and is never printed; and
+  - bundle the What's New notes of its own track alone: the AppStore bundle
+    holds the App Store track's file (WhatsNewAppStore.json) and not the beta
+    track's, a TestFlight bundle the beta track's (WhatsNew.json) and not the
+    App Store track's, each a list of releases; and
+  - have the app icon of its own configuration alone: DuskJade in AppStore,
+    DuskEmber in TestFlight, as the primary icon of the iPhone and the iPad in
+    Info.plist and as the one app icon of the compiled asset catalog
+    (Assets.car, read by its typed renditions with assetutil), and no other
+    icon: none in Info.plist's icon keys, a nested catalog or an icon file or
+    document of the other icon's name, so an AppStore bundle holds nothing of
+    DuskEmber; and
   - open the files of the two document pickers (Install APK and the file
     browser's Import) in place, through SwiftUI's fileImporter, and hold no
     trace of the copy-mode presenter every other configuration uses
@@ -224,7 +238,8 @@ CHECKER = Path(__file__).resolve().parents[2] / "scripts" / "check-privacy-manif
 # the AppStore product without Buy me tokens, Review on the App Store and the
 # ICP filing number: it carries none of the three, whatever its build names.
 TESTFLIGHT = "TestFlight"
-STORE_CONFIGURATIONS = ("AppStore", TESTFLIGHT)
+APP_STORE = "AppStore"
+STORE_CONFIGURATIONS = (APP_STORE, TESTFLIGHT)
 
 
 def is_store(configuration: str) -> bool:
@@ -285,12 +300,16 @@ FEEDBACK_FRAGMENTS = (
     b"SendFeedback", b"MFMailCompose", b"PhotosUI.framework", *FEEDBACK_REQUIRED)
 # Words the feature puts in a String Catalog.
 FEEDBACK_WORDS = ("Send feedback", "Andarium feedback")
-# The What's New notes (Shared/WhatsNew.json, bundled whole in every build) have
-# an entry about Send feedback, marked with the feature it is about. A build
-# without the feature hides the entry at run time (WhatsNewFeature in
-# AndariumCore), so its strings stay in that table, which a String Catalog
-# compiles whole, and are the one place the words may remain.
-NOTES_FILE = "WhatsNew.json"
+# The What's New notes have two tracks, each its own file of Shared that the
+# configurations bundle alone: the beta track (Shared/WhatsNew.json) in every
+# configuration but AppStore, and the App Store track (Shared/WhatsNewAppStore.json)
+# in AppStore. A track's entry about Send feedback is marked with the feature it
+# is about. A build without the feature hides the entry at run time
+# (WhatsNewFeature in AndariumCore), so its strings stay in the notes' table,
+# which a String Catalog compiles whole for both tracks, and are the one place
+# the words may remain.
+BETA_NOTES_FILE = "WhatsNew.json"
+APP_STORE_NOTES_FILE = "WhatsNewAppStore.json"
 NOTES_TABLE = "WhatsNew"
 NOTES_FEATURE = "sendFeedback"
 # The feature's own table (Localization/Feedback.xcstrings), which a String
@@ -1116,34 +1135,54 @@ def info_source_problems(app: Path, source: Path) -> list[str]:
     return found
 
 
-def hidden_notes(app: Path) -> frozenset[str]:
-    """The strings (title, text and points) of the entries of the bundled What's
-    New notes that are about Send feedback, which the notes' table holds under
-    their English text. Empty if the notes are missing or unreadable, so
-    nothing is then exempt."""
+def notes_file(configuration: str) -> str:
+    """The notes file a configuration bundles: the App Store track's in AppStore,
+    the beta track's in every other configuration (TestFlight included)."""
+    return APP_STORE_NOTES_FILE if configuration == APP_STORE else BETA_NOTES_FILE
+
+
+def note_strings(path: Path) -> tuple[frozenset[str], frozenset[str]]:
+    """The strings (title, text and points) of the entries of a notes file, which the
+    notes' table holds under their English text: those of the entries about Send
+    feedback (marked with its requirement), and those of every other entry. Both
+    are empty if the file is missing or unreadable, so nothing is then exempt."""
     try:
-        releases = json.loads((app / NOTES_FILE).read_text(encoding="utf-8"))
+        releases = json.loads(path.read_text(encoding="utf-8"))
         entries = [entry for release in releases for entry in release["entries"]]
     except (OSError, ValueError, KeyError, TypeError):
-        return frozenset()
-    found: set[str] = set()
+        return frozenset(), frozenset()
+    marked: set[str] = set()
+    shown: set[str] = set()
     for entry in entries:
         requirement = entry.get("requirement") if isinstance(entry, dict) else None
-        if not isinstance(requirement, dict) or requirement.get("feature") != NOTES_FEATURE:
-            continue
-        points = entry.get("points")
-        for note in (entry.get("title"), entry.get("text"), *(points if isinstance(points, list) else ())):
+        about = isinstance(requirement, dict) and requirement.get("feature") == NOTES_FEATURE
+        points = entry.get("points") if isinstance(entry, dict) else None
+        for note in (entry.get("title"), entry.get("text"), *(points if isinstance(points, list) else ())) \
+                if isinstance(entry, dict) else ():
             if isinstance(note, str):
-                found.add(note)
-    return frozenset(found)
+                (marked if about else shown).add(note)
+    return frozenset(marked), frozenset(shown)
 
 
-def feedback_strings(app: Path) -> list[str]:
+def hidden_notes(app: Path, configuration: str, beta_notes: Path | None = None) -> frozenset[str]:
+    """The strings of the entries about Send feedback in the notes the bundle
+    carries (`notes_file`). The table is one for both tracks, so an AppStore
+    bundle holds the beta track's strings too, and `beta_notes`, the beta
+    track's source file, says which of them are about Send feedback. A string
+    that an entry of the bundled notes without the mark uses is shown by that
+    entry, whichever track has it marked, so it is never hidden."""
+    marked, shown = note_strings(app / notes_file(configuration))
+    if configuration == APP_STORE and beta_notes is not None:
+        marked |= note_strings(beta_notes)[0]
+    return marked - shown
+
+
+def feedback_strings(app: Path, configuration: str, beta_notes: Path | None = None) -> list[str]:
     """The String Catalog tables of the application that mention Send feedback,
-    leaving out the strings of the notes' entry about it (`hidden_notes`) and
+    leaving out the strings of the notes' entries about it (`hidden_notes`) and
     nothing else of the notes' table."""
     found = []
-    hidden = hidden_notes(app)
+    hidden = hidden_notes(app, configuration, beta_notes)
     for path in sorted(app.glob("*.lproj/*.strings")):
         try:
             with path.open("rb") as handle:
@@ -1160,6 +1199,184 @@ def feedback_strings(app: Path) -> list[str]:
     return found
 
 
+# What the application's decoder (WhatsNewRelease, WhatsNewEntry and
+# WhatsNewCatalog in AndariumCore) accepts of a notes file, in the part that a bundle
+# can break: the keys of a release and of an entry, what each holds, and a build or
+# an entry's id that appears once. A requirement and a date are the application's
+# own tests' to read.
+RELEASE_KEYS = frozenset({"build", "version", "date", "entries"})
+ENTRY_KEYS = frozenset({"id", "title", "text", "points", "symbol", "place", "requirement"})
+
+
+def release_problem(releases: list) -> str | None:
+    """Why the application would not accept this list of releases, or None."""
+    def text(value: object) -> bool:
+        return isinstance(value, str) and bool(value)
+
+    builds: set[int] = set()
+    ids: set[str] = set()
+    for release in releases:
+        if not isinstance(release, dict) or not set(release) <= RELEASE_KEYS:
+            return "a release is not an object with only build, version, date and entries"
+        build = release.get("build")
+        if isinstance(build, bool) or not isinstance(build, int) or not isinstance(release.get("version"), str):
+            return "a release has no build number or version"
+        if build in builds:
+            return f"build {build} has two releases"
+        builds.add(build)
+        entries = release.get("entries")
+        if not isinstance(entries, list) or not entries:
+            return f"the release of build {build} has no entry"
+        for entry in entries:
+            if not isinstance(entry, dict) or not set(entry) <= ENTRY_KEYS:
+                return "an entry is not an object with only the keys the application reads"
+            if not (text(entry.get("id")) and text(entry.get("title")) and text(entry.get("symbol"))):
+                return "an entry lacks its id, title or symbol"
+            points = entry.get("points")
+            if "text" in entry and not text(entry["text"]):
+                return f"the entry {entry['id']} has an empty text"
+            if points is not None and (not isinstance(points, list) or not points
+                                       or not all(text(point) for point in points)):
+                return f"the entry {entry['id']} has an empty list of points or an empty point"
+            if "text" not in entry and points is None:
+                return f"the entry {entry['id']} has neither text nor points"
+            if entry["id"] in ids:
+                return f"the entry {entry['id']} appears twice"
+            ids.add(entry["id"])
+    return None
+
+
+def notes_problems(app: Path, configuration: str) -> tuple[list[str], str]:
+    """Whether the bundle carries the notes file of its configuration's track at its
+    root, and not the other track's or a copy elsewhere, and the line that says which
+    it carries. Each file is a list of releases the application accepts (it
+    refuses anything else, and shows no notes)."""
+    own = notes_file(configuration)
+    other = BETA_NOTES_FILE if own == APP_STORE_NOTES_FILE else APP_STORE_NOTES_FILE
+    track = "App Store" if own == APP_STORE_NOTES_FILE else "beta"
+    problems = []
+    try:
+        releases = json.loads((app / own).read_text(encoding="utf-8"))
+        if not isinstance(releases, list):
+            raise ValueError
+        why = release_problem(releases)
+        if why:
+            problems.append(f"{own}: {why}; the application accepts no such release")
+    except OSError:
+        problems.append(f"{own}: is missing; {configuration} bundles the {track} track of the What's New notes")
+    except ValueError:
+        problems.append(f"{own}: is not a list of releases; {configuration} bundles the {track} track of the "
+                        "What's New notes")
+    if (app / other).exists():
+        problems.append(f"{other}: is the other track's What's New notes; {configuration} bundles {own} alone")
+    for directory, _names, files in os.walk(app):
+        for name in sorted(files):
+            if name in (BETA_NOTES_FILE, APP_STORE_NOTES_FILE) and Path(directory) != app:
+                problems.append(f"{(Path(directory) / name).relative_to(app)}: is a copy of a What's New notes "
+                                f"file; {configuration} bundles {own} at the bundle root alone")
+    return problems, f"What's New notes are the {track} track ({own})"
+
+
+# The app icon: DuskJade (Shared/DuskJade.icon) in every configuration but
+# TestFlight, which has DuskEmber (Shared/DuskEmber.icon). The build compiles
+# the one document its configuration names and leaves the other out.
+ICON_JADE = "DuskJade"
+ICON_EMBER = "DuskEmber"
+# Info.plist's icon blocks, for the iPhone and for the iPad.
+ICON_KEYS = ("CFBundleIcons", "CFBundleIcons~ipad")
+# The files an icon's name begins: its renditions and its document.
+ICON_SUFFIXES = (".png", ".icon", ".icns", ".jpg", ".jpeg", ".heic", ".pdf", ".svg")
+# The asset types of an app icon in a compiled catalog (`assetutil --info`).
+ICON_ASSET_TYPES = ("Icon Image", "IconImageStack")
+
+
+def app_icons(configuration: str) -> tuple[str, str]:
+    """The icon a configuration compiles, and the other one."""
+    return (ICON_EMBER, ICON_JADE) if configuration == TESTFLIGHT else (ICON_JADE, ICON_EMBER)
+
+
+@functools.lru_cache(maxsize=None)
+def catalog_icons(catalog: Path) -> frozenset[str] | None:
+    """The app icons a compiled asset catalog holds, by the names of its typed icon
+    renditions as the platform's own reader (`assetutil --info`) lists them; None
+    if the catalog cannot be read."""
+    try:
+        done = subprocess.run(
+            ["xcrun", "assetutil", "--info", str(catalog)], check=False, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=120)
+        entries = json.loads(done.stdout) if done.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    return frozenset(entry["Name"] for entry in entries
+                     if isinstance(entry, dict) and entry.get("AssetType") in ICON_ASSET_TYPES
+                     and isinstance(entry.get("Name"), str))
+
+
+def strings_of(value: object) -> list[str]:
+    """Every string of a property list value, nested ones included."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in strings_of(item)]
+    if isinstance(value, list):
+        return [text for item in value for text in strings_of(item)]
+    return []
+
+
+def icon_problems(app: Path, configuration: str) -> tuple[list[str], str]:
+    """Whether the bundle has its configuration's app icon and no other. The icon is
+    the primary icon of both Info.plist blocks, which name no other icon, and the one
+    app icon of the application's compiled asset catalog, read by its typed
+    renditions; no catalog of a nested bundle holds the other icon, and no icon file
+    or document of the other icon's name is in the bundle. Text that only mentions
+    an icon's name is no icon. The line says which icon the bundle has."""
+    own, other = app_icons(configuration)
+    problems = []
+    try:
+        with (app / "Info.plist").open("rb") as handle:
+            info = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        info = {}
+    for key in ICON_KEYS:
+        block = info.get(key) if isinstance(info, dict) else None
+        primary = block.get("CFBundlePrimaryIcon") if isinstance(block, dict) else None
+        named = primary.get("CFBundleIconName") if isinstance(primary, dict) else None
+        if named != own:
+            problems.append(f"Info.plist: {key} names {named or 'no icon'} as the primary icon; "
+                            f"{configuration} has {own}")
+        elif any(other.lower() in text.lower() for text in strings_of(block)):
+            problems.append(f"Info.plist: {key} names the {other} icon though {configuration} has {own}")
+    # What a catalog states is the icon's name: artwork compiled under the other icon's
+    # name is not told from it.
+    catalogs = bundle_tree(app).catalog_names
+    if "Assets.car" not in catalogs:
+        problems.append(f"Assets.car: lacks the {own} icon; {configuration} has it")
+    for relative in sorted(catalogs):
+        icons = catalog_icons(app / relative)
+        if icons is None:
+            # A nested catalog the platform cannot read draws no icon; the application's must be read.
+            if relative == "Assets.car":
+                problems.append(f"Assets.car: cannot be read for its app icons; {configuration} has {own}")
+        elif relative == "Assets.car":
+            if own not in icons:
+                problems.append(f"Assets.car: lacks the {own} icon; {configuration} has it")
+            for name in sorted(icons - {own}):
+                problems.append(f"Assets.car: holds the {name} icon though {configuration} has {own} alone")
+        elif other in icons:
+            problems.append(f"{relative}: holds the {other} icon though {configuration} has {own}")
+    for directory in bundle_tree(app).directories:
+        try:
+            names = sorted(path for path in directory.iterdir()
+                           if path.name.lower().startswith(other.lower()) and path.suffix.lower() in ICON_SUFFIXES)
+        except OSError:
+            continue
+        problems.extend(f"{path.relative_to(app)}: is a file of the {other} icon though {configuration} has {own}"
+                        for path in names)
+    return problems, f"app icon is {own}"
+
+
 def feedback_tables(app: Path) -> list[Path]:
     """The Feedback table of any language, found by its file name."""
     return sorted(path for path in app.glob("*.lproj/*")
@@ -1167,7 +1384,7 @@ def feedback_tables(app: Path) -> list[Path]:
 
 
 def feedback_problems(
-    app: Path, configuration: str, address: str, receiver: str = "",
+    app: Path, configuration: str, address: str, receiver: str = "", beta_notes: Path | None = None,
 ) -> tuple[list[str], bool]:
     """Whether the product holds Send feedback as the build said it would, and
     whether it holds it. `address` is the build setting FEEDBACK_ADDRESS: the
@@ -1175,7 +1392,8 @@ def feedback_problems(
     otherwise, or the example address a test or capture script arranged.
     `receiver` is the local configuration's own receiver, whatever the
     configuration: wherever the build does not name it, no file of the
-    bundle holds it."""
+    bundle holds it. `beta_notes` is the beta track's source file (see
+    `hidden_notes`)."""
     problems = feedback_address_problems(configuration, address)
     expected = bool(address) and not problems
     if receiver and (not expected or receiver != address):
@@ -1199,7 +1417,7 @@ def feedback_problems(
             keyed = plistlib.load(handle).get(FEEDBACK_KEY)
     except (OSError, plistlib.InvalidFileException, ValueError):
         keyed = None
-    words = feedback_strings(app)
+    words = feedback_strings(app, configuration, beta_notes)
     tables = feedback_tables(app)
     compiled = bool(fragments) or keyed is not None or bool(words) or bool(tables)
     if not expected:
@@ -1898,6 +2116,10 @@ def main() -> int:
         "--info-source", type=Path, default=None,
         help="Config/Info.plist, whose values the built Info.plist keeps")
     parser.add_argument(
+        "--beta-notes", type=Path, default=None,
+        help="Shared/WhatsNew.json, the beta track's notes, whose entries about Send feedback an AppStore "
+             "bundle's notes table may still hold")
+    parser.add_argument(
         "--follow-x-handle", default="",
         help="the build setting FOLLOW_X_HANDLE: the handle the build names, "
              "empty when it names none")
@@ -1996,7 +2218,8 @@ def check(options: argparse.Namespace) -> int:
         lines = []
         if options.feedback:
             more, compiled = feedback_problems(
-                app, options.configuration, options.feedback_address, options.feedback_receiver)
+                app, options.configuration, options.feedback_address, options.feedback_receiver,
+                options.beta_notes)
             found.extend(more)
             lines.append(f"{app.name}: Send feedback is {'compiled in' if compiled else 'not compiled in'}"
                          f" ({options.configuration})")
@@ -2087,9 +2310,17 @@ def check(options: argparse.Namespace) -> int:
     if options.info_source is not None:
         problems.extend(info_source_problems(app, options.info_source))
     feedback, compiled = feedback_problems(
-        app, options.configuration, options.feedback_address, options.feedback_receiver)
+        app, options.configuration, options.feedback_address, options.feedback_receiver, options.beta_notes)
     problems.extend(feedback)
     emit(f"{app.name}: Send feedback is {'compiled in' if compiled else 'not compiled in'}")
+    notes, bundled = notes_problems(app, options.configuration)
+    problems.extend(f"{app.name}: {problem}" for problem in notes)
+    if not notes:
+        emit(f"{app.name}: {bundled}")
+    icon, icon_line = icon_problems(app, options.configuration)
+    problems.extend(f"{app.name}: {problem}" for problem in icon)
+    if not icon:
+        emit(f"{app.name}: {icon_line}")
     follow, compiled = follow_x_problems(
         app, options.configuration, options.follow_x_handle, options.developer_x_handle, options.developer_x)
     problems.extend(follow)

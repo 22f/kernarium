@@ -645,10 +645,13 @@ patches ART's one JNI function table in place and gives the application:
   own native code returns (a method registered with the return type `[B`, or a
   field of that type): the value is a block with the length at offset 8 and the
   bytes at offset 16 that stands for the real array and holds a global reference
-  to it. Every JNI function that takes an object turns a block back into that
-  array for any caller, so identity (`IsSameObject`, `NewGlobalRef`, monitors)
-  and writes (`SetByteArrayRegion`, `Release*Elements`,
-  `ReleasePrimitiveArrayCritical`) keep their meaning. The layer reads the
+  to it. The JNI functions that take an object accept a reference to a block, from
+  any caller, as a reference to that array: the wrapper makes a local reference of
+  its own to the array, under the layer's lock, whichever thread's block it is,
+  and gives the runtime only that, never the block's own reference (Java code that
+  runs during a call can end the block), so identity
+  (`IsSameObject`, `NewGlobalRef`, monitors) and writes (`SetByteArrayRegion`,
+  `Release*Elements`, `ReleasePrimitiveArrayCritical`) keep their meaning. The layer reads the
   length from its own record, never from the length word, which the application
   can overwrite. The block and its array behave as one memory at the points
   where the application meets Java: before and after a call that is passed the
@@ -657,26 +660,99 @@ patches ART's one JNI function table in place and gives the application:
   (`Get...Elements`, `Get...Critical`, `GetByteArrayRegion`), around
   `SetByteArrayRegion` and at a release. The block keeps a copy of its bytes as
   of the last such point. At each point, in chunks of 4 KiB, a chunk whose block
-  differs from that copy was written through the raw pointer and goes to the
-  array, and any other chunk takes the array's bytes; where both sides changed
-  the same chunk, the application's bytes win for that chunk. A committing
-  release (mode 0 or `JNI_COMMIT`) is such a point and keeps Java's bytes in the
-  chunks the application did not write; `JNI_ABORT` discards the working copy,
+  differs from that copy was written through the raw pointer and is merged with
+  the array byte by byte: a byte the application wrote goes to the array, every
+  other byte takes the array's if Java changed it, and a byte both sides wrote
+  takes the application's. Any other chunk takes the bytes Java changed. The
+  block never takes a byte Java did not change, and the array never takes one
+  the application did not write (the merge stores those bytes, one byte store
+  each, into the array's own memory through the real array's critical pair, and
+  a block the application did not write is read through region calls and makes no
+  critical get), so a write by either side to such a byte that races a
+  synchronization survives it. A byte of the array that a point takes is read
+  once, and that one value goes to the block and to its copy, so a Java write
+  that lands meanwhile is taken at the next point, never reverted. A committing
+  release (mode 0 or `JNI_COMMIT`) is such a point and keeps Java's bytes
+  wherever the application did not write; `JNI_ABORT` discards the working copy,
   and the block takes the array's bytes. `Get...Elements` and `Get...Critical`
   of a block report a copy (`isCopy` is `JNI_TRUE`), so an application that
   commits when told so makes its writes visible through any other reference to
   the array; a real array keeps the runtime's own flag. Bytes Java writes
   outside those points (another thread, a callback after the native method
-  returned) show at the next one, and a raw write from another thread while a
-  point is running can be lost. The same array returned again to the same thread is the same block
-  (among the thread's most recent ones), freed by the last of its
-  `DeleteLocalRef` calls. A thread holds at most 512 blocks over its life, not
-  per native method: a block lasts until its reference is deleted or its thread
-  ends, so a native method that takes a new array on every call and never
-  deletes it reaches the limit. The process holds 32 MiB of blocks, and each
-  block's copy takes as many bytes again in the ordinary heap. Beyond the
-  limits the result is ART's own reference. A block is never recycled. An array
-  the application creates itself (`NewByteArray`) stays ART's own;
+  returned) show at the next one, also when they land while a point runs. A
+  byte both sides write in the same interval keeps one of the two values, the
+  application's unless its write lands while a point stores Java's: that is
+  the one case in which a racing write is lost. A reference to a block ends where a Dalvik local
+  reference did: at `DeleteLocalRef` of a reference the innermost frame holds (a
+  reference of an outer frame is left alone, as both runtimes leave it), at
+  `PopLocalFrame`, at the return of a native
+  method of the application's own libraries (found by name or registered; those
+  installed with the application or in its private data directories; another
+  package's library keeps the runtime's binding) and when its thread detaches. A
+  thread holds at most 512 live references; a result beyond the limit stays ART's
+  own reference. The same array returned again to the thread is the same block
+  (among its eight most recent). A block whose references have all ended stays at
+  its address with its bytes as of that end (what the application wrote through
+  the pointer reaches the array then) until the runtime collects the array; the
+  same array obtained again as a result, on any thread, is that block again, so
+  Java's later writes and the application's later raw writes meet in it, and until
+  then they reach neither side. A reference to a block that ended, or that another
+  thread holds, still means the array wherever the application kept it (a native
+  variable, from any thread): a function that is handed it works on the array for
+  the length of the call, and the use makes no reference of the calling thread and
+  moves no block, so a thread outside any native method, or one at the limit, can
+  use it. Only an array that arrives as a result makes a reference again, and
+  `DeleteLocalRef` and the releases do not. A reference whose array was collected
+  means nothing, as a reference to a freed block did (a length of 0, no elements).
+  A pointer from `Get...Elements` or `Get...Critical` pins its block as Dalvik
+  pinned the array: the block keeps its place, and a strong reference to the
+  array, until the pointer is released (mode 0 or `JNI_ABORT`; `JNI_COMMIT`
+  keeps it). `GetPrimitiveArrayCritical` of a kept reference works like
+  `Get...Elements` unless the thread already has a runtime critical region open
+  (`GetPrimitiveArrayCritical`, `GetStringCritical`), where no call that makes a
+  reference may be made: it then returns the block as it is when a pin or a live
+  reference keeps its array, and NULL otherwise. With an exception pending a
+  conversion uses the block's strong reference under a pin of the wrapper's own,
+  and synchronizes nothing; `MonitorExit` of a block's reference, which JNI
+  allows then, takes the exception out, releases the monitor with the array and
+  puts the exception back (one `MonitorExit` raised itself stays). A monitor
+  call on a block whose array is gone is refused with `JNI_ERR`. Two threads
+  that use one block at once share its memory as on Dalvik. Every
+  synchronization of a block with its array, its own thread's included, runs
+  under one process-wide lock that no call into Java holds, so the
+  synchronizations of all threads run one at a time. Nothing under it waits for
+  the runtime's collector (a critical get, nested in a region the thread holds
+  or not, since the runtime raises a thread's count only for a movable array or
+  string; an allocation in the Java heap): those are made before it is taken, on
+  a reference that is valid outside it, so a thread that waits for it inside a
+  critical region never holds up a collection. Between a critical get and its
+  release the layer makes no runtime call except that release. A release goes to the block whose data
+  starts at its pointer, whichever reference comes with it, and never reaches
+  the runtime for a pointer in the region; a pointer inside the region that is
+  not at a block's start is not read as a header, copies nothing, and counts as
+  the release of the block of the reference that comes with it. A pointer the
+  runtime itself handed out for a real reference to the array (the layer records
+  those from `Get...Elements` and `Get...Critical` once the process has had a
+  block, under a lock of their own, until their release with mode 0 or
+  `JNI_ABORT`) goes to the runtime's
+  own Release when it comes with a block's reference, with the block's array,
+  and closes its critical region; any other pointer that comes with a block's
+  reference is the application's own buffer, and is copied into the block. At
+  most 16384 blocks exist at once, live, ended or pinned, since each ends with a
+  weak global reference and an end never frees a block whose pointer the
+  application may hold. Ended and pinned blocks do not count toward the 512 of a
+  thread. When the region or the 16384 are used up, a result first makes room:
+  the blocks whose arrays are gone are freed (a full pass is made whenever the
+  runtime has collected since a full pass last ran, and otherwise once a second)
+  and, once in ten seconds, the runtime is asked to collect; a result that still
+  finds none stays ART's own reference. Where no weak global reference can be
+  had for an ended block it stays strong and is tried again; where the array's
+  identity cannot be had (`System.identityHashCode` and `Runtime.gc()` are
+  looked up when the layer installs, before any block exists, and again once a
+  second after a failure) the result stays ART's own reference. The process
+  holds 32 MiB of blocks, and each block's copy takes as many bytes again in the
+  ordinary heap.
+  An array the application creates itself (`NewByteArray`) stays ART's own;
 - an allocator below 2 GiB for the libraries the application ships: their
   `malloc`, `calloc`, `strdup`, `strndup`, `operator new` and `operator
   delete` imports are redirected as the library is first seen.
@@ -691,7 +767,10 @@ mapping its return address is in, so the platform's libraries in the same
 process see the real arrays. Page protection is restored after each write, and
 a library whose pages cannot all be opened is left untouched. The library logs
 under the tag `kernarium_oldapp` the first `byte[]` result that stayed ART's own
-reference (with the blocks and bytes its thread held), the first allocation
+reference (with the blocks and bytes its thread held, and the ended blocks that
+waited), the first time it asked the runtime to collect, a package it could
+not learn (the runtime's `ActivityThread.currentPackageName()`, else the process
+name; every library but the platform's then counts as the application's), the first allocation
 that went to libc because the low arena had no room, and, at most every 30 s
 while it grows, the most blocks any one thread has held.
 
@@ -708,9 +787,10 @@ without a call into JNI (found by the next periodic scan), which until then
 keeps libc's `free` and can abort on a block another library allocated; a
 library with an allocator import in executable code (a text relocation) or
 whose relocation pages cannot be reopened, which keeps libc's allocator,
-`realloc` included, for its own blocks; a freed block's address reused while
-the application still holds the old pointer; and more than 512 loaded
-libraries.
+`realloc` included, for its own blocks; a block's address reused after its array was
+collected, while the application still holds the old pointer or reference (a stale
+reference reaches the array of the block now at its address, as a dangling pointer
+could); and more than 512 loaded libraries.
 `tests/integration/android/run_android_oldapp.py` qualifies it
 ([testing](../../docs/testing.md#android)).
 
@@ -901,9 +981,14 @@ Android's Vulkan dEQP must-pass list, and the verifier refuses a declaration
 until those lists pass. One gap is known: `vkMapMemory` of host-visible memory
 exported as a hardware buffer fails with `VK_ERROR_MEMORY_MAP_FAILED`, because
 gralloc backs such a buffer with a classic 3D resource that Venus refuses to map
-by design. `overlay/tools` ships pass-or-fail checks of the presentation and
-buffer paths (`kernarium_vk_present`, `kernarium_vk_ahb_import` and the
-`kernarium_ahb_*` and `kernarium_egl_configs` programs).
+by design. Memory an application shares as a file descriptor is not that case:
+the driver offers `VK_KHR_external_memory_fd` and `VK_EXT_external_memory_dma_buf`
+(the opaque-fd and dma-buf handle types) next to the hardware buffer extensions,
+and host-visible memory exported as either is a blob that maps, imports and is
+read by the GPU. `overlay/tools` ships pass-or-fail checks of the presentation
+and buffer paths (`kernarium_vk_present`, `kernarium_vk_ahb_import`, which
+covers both ways of sharing memory, and the `kernarium_ahb_*` and
+`kernarium_egl_configs` programs).
 
 ## Hardware video encoding and decoding
 
