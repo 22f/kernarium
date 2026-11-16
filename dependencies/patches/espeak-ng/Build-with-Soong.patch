@@ -20,16 +20,34 @@ namespace are written beside the sources, in android/soong.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
+ .gitignore                                    |   2 +
  Android.bp                                    | 269 ++++++++++++++++++
  android/soong/AndroidManifest.xml             |  98 +++++++
+ android/soong/config/device/config.h          |  18 ++
+ android/soong/config/host/config.h            |  18 ++
  android/soong/espeak-data.sh                  |  68 +++++
  .../com/reecedunn/espeak/BuildConfig.java     |  13 +
- 4 files changed, 448 insertions(+)
+ 7 files changed, 486 insertions(+)
  create mode 100644 Android.bp
  create mode 100644 android/soong/AndroidManifest.xml
+ create mode 100644 android/soong/config/device/config.h
+ create mode 100644 android/soong/config/host/config.h
  create mode 100755 android/soong/espeak-data.sh
  create mode 100644 android/soong/java/com/reecedunn/espeak/BuildConfig.java
 
+diff --git a/.gitignore b/.gitignore
+index 71b9c8079166f33e65a5075d1fd12062a7f5a65d..0c6f19040808d52de4ed236914cdaf3698827919 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -66,6 +66,8 @@ aclocal.m4
+ autom4te.cache/
+ compile
+ config.*
++# the fixed configuration of the Android image build (Android.bp)
++!/android/soong/config/*/config.h
+ configure
+ depcomp
+ install-sh
 diff --git a/Android.bp b/Android.bp
 new file mode 100644
 index 0000000000000000000000000000000000000000..ee791aa5a5b00d34d6932298d3b0efef15a7f06c
@@ -409,6 +427,54 @@ index 0000000000000000000000000000000000000000..025974ce421801e4840c51befab0fdcc
 +    </application>
 +
 +</manifest>
+diff --git a/android/soong/config/device/config.h b/android/soong/config/device/config.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..299813086a11dc33f343e8d8754b05139b2754da
+--- /dev/null
++++ b/android/soong/config/device/config.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later */
++/* What cmake/config.cmake and src/libespeak-ng/config.h.in produce for the device build
++   of the Android image: no async speech, no MBROLA, no PCAudio; libsonic, klatt and
++   speechPlayer on. */
++#define HAVE_MKSTEMP 1
++#define HAVE_NBTOOL_CONFIG_H 0
++#define HAVE_DECL_OPTRESET 0
++#define HAVE_SYS_ENDIAN_H 1
++#define HAVE_ISWBLANK 1
++
++#define USE_ASYNC 0
++#define USE_KLATT 1
++#define USE_LIBPCAUDIO 0
++#define USE_LIBSONIC 1
++#define USE_MBROLA 0
++#define USE_SPEECHPLAYER 1
++
++#define PACKAGE_VERSION "1.53.0"
+diff --git a/android/soong/config/host/config.h b/android/soong/config/host/config.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a3a99219e015d6ef275bec52bb362e825aba53b5
+--- /dev/null
++++ b/android/soong/config/host/config.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later */
++/* What cmake/config.cmake and src/libespeak-ng/config.h.in produce for the host build
++   of the Android image: no async speech, no MBROLA, no PCAudio; libsonic, klatt and
++   speechPlayer on. */
++#define HAVE_MKSTEMP 1
++#define HAVE_NBTOOL_CONFIG_H 0
++#define HAVE_DECL_OPTRESET 0
++#define HAVE_SYS_ENDIAN_H 0
++#define HAVE_ISWBLANK 1
++
++#define USE_ASYNC 0
++#define USE_KLATT 1
++#define USE_LIBPCAUDIO 0
++#define USE_LIBSONIC 1
++#define USE_MBROLA 0
++#define USE_SPEECHPLAYER 1
++
++#define PACKAGE_VERSION "1.53.0"
 diff --git a/android/soong/espeak-data.sh b/android/soong/espeak-data.sh
 new file mode 100755
 index 0000000000000000000000000000000000000000..fda30719a92b73f293cd696ef522a06a4bed1244
