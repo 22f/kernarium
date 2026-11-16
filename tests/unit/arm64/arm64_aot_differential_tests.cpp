@@ -303,6 +303,17 @@ public:
 		return out;
 	}
 
+	/* The kinds and contents of another arena, as a run left them. */
+	void adopt(const Arena &other)
+	{
+		std::array<std::byte, page_bytes> bytes;
+		for (std::size_t i = 0; i < backings_.size(); ++i) {
+			set_kind(i, other.kinds_[i]);
+			other.backings_[i]->get(0, bytes);
+			backings_[i]->put(0, bytes);
+		}
+	}
+
 	[[nodiscard]] std::uint64_t base() const noexcept { return base_; }
 	[[nodiscard]] std::uint8_t kind(std::size_t page) const
 	{
@@ -510,35 +521,35 @@ struct BlockLog final {
 	std::vector<std::array<std::uint64_t, 5>> blocks;
 } g_log;
 
-[[nodiscard]] Result drive_on(gadgets::GadgetExecutor &executor,
-	StaticGuestMemory &memory, unsigned long generation, std::uint64_t bias,
-	Arena &arena, Case c, std::size_t blocks, const Observer &observer = {})
+/* The blocks of a run from the state in `cpu`, until the guest makes a system
+ * call, an exit it sees, a fault no page can repair or `blocks` of them have
+ * run. A fault inside the arena gets its page (writable) and the run goes on
+ * at the same address, unless `stop_at_fault`: the run then ends at the first
+ * memory fault, with the state it leaves, to be resumed by another call. */
+[[nodiscard]] Result run_from(gadgets::GadgetExecutor &executor,
+	StaticGuestMemory &memory, unsigned long generation, Arena &arena,
+	arm64::CpuState cpu, std::size_t blocks, const Observer &observer = {},
+	bool stop_at_fault = false)
 {
 	Result r;
-	c.cpu.pc = bias + c.pc_offset;
-	for (std::size_t i = 0; i < arena.total(); ++i)
-		if (i < c.kinds.size())
-			arena.set_kind(i, c.kinds[i]);
-	SplitMix fill{c.seed};
-	arena.fill(fill);
 	std::size_t faults_taken = 0;
 	for (; r.blocks < blocks; ++r.blocks) {
-		const auto before = c.cpu.pc;
+		const auto before = cpu.pc;
 		const auto out = run_selected(
-			executor, memory, generation, c.cpu);
+			executor, memory, generation, cpu);
 		if (g_log.enabled)
 			g_log.blocks.push_back({before,
 				static_cast<std::uint64_t>(out.event), out.executed,
-				c.cpu.pc, aot::stats().enters});
+				cpu.pc, aot::stats().enters});
 		r.max_block = std::max(r.max_block, out.executed);
 		r.last = out.event;
 		if (out.event == EngineEvent::continued ||
 		    out.event == EngineEvent::interrupt) {
 			if (observer)
-				observer(c.cpu);
+				observer(cpu);
 			continue;
 		}
-		arm64::restore_native_fp_environment(c.cpu);
+		arm64::restore_native_fp_environment(cpu);
 		r.end_syndrome = executor.floating_point_syndrome();
 		r.end_alignment = executor.fault_alignment();
 		if (out.event == EngineEvent::system_call) {
@@ -548,15 +559,17 @@ struct BlockLog final {
 		if (out.event != EngineEvent::memory_fault)
 			break;
 		const auto address = executor.fault_address();
-		Fault fault{c.cpu.pc, address,
+		Fault fault{cpu.pc, address,
 			static_cast<std::uint32_t>(executor.fault_access()),
 			executor.fault_alignment(),
-			executor.floating_point_syndrome(), {}, c.cpu.sp, c.cpu.nzcv,
-			hash_of(c.cpu.vectors.data(), sizeof(c.cpu.vectors)),
+			executor.floating_point_syndrome(), {}, cpu.sp, cpu.nzcv,
+			hash_of(cpu.vectors.data(), sizeof(cpu.vectors)),
 			hash_bytes(arena.snapshot())};
 		for (std::size_t i = 0; i < fault.registers.size(); ++i)
-			fault.registers[i] = c.cpu.registers[i];
+			fault.registers[i] = cpu.registers[i];
 		r.faults.push_back(fault);
+		if (stop_at_fault)
+			break;
 		const auto untagged = address & 0x00ff'ffff'ffff'ffffULL;
 		if (untagged < arena.base() ||
 		    untagged >= arena.base() + arena.total() * page_bytes ||
@@ -567,10 +580,25 @@ struct BlockLog final {
 			break;
 		arena.set_kind(page, 2);
 	}
-	arm64::restore_native_fp_environment(c.cpu);
-	r.cpu = c.cpu;
+	arm64::restore_native_fp_environment(cpu);
+	r.cpu = cpu;
 	r.memory = arena.snapshot();
 	return r;
+}
+
+[[nodiscard]] Result drive_on(gadgets::GadgetExecutor &executor,
+	StaticGuestMemory &memory, unsigned long generation, std::uint64_t bias,
+	Arena &arena, Case c, std::size_t blocks, const Observer &observer = {},
+	bool stop_at_fault = false)
+{
+	c.cpu.pc = bias + c.pc_offset;
+	for (std::size_t i = 0; i < arena.total(); ++i)
+		if (i < c.kinds.size())
+			arena.set_kind(i, c.kinds[i]);
+	SplitMix fill{c.seed};
+	arena.fill(fill);
+	return run_from(executor, memory, generation, arena, c.cpu, blocks,
+		observer, stop_at_fault);
 }
 
 [[nodiscard]] Result drive(Environment &env, Arena &arena, Case c,
@@ -3299,6 +3327,166 @@ void admission_history_survives_changes_as_a_hint_only(
 	require(st.poisoned == 0);
 }
 
+/* The address a stepped instruction faulted at is kept as a hint too: the
+ * guest resumes at it once the fault is handled, and the engine runs it
+ * again rather than entering rewritten code. Nothing resets it when the text
+ * at that address changes, the page is replaced, or the executor goes on in
+ * another address space, so each row stops on a stepped memory fault, changes
+ * what is under the faulting address in one of those ways, and resumes at the
+ * same address on the same executor without toggling diagnostics (which
+ * resets the hint). The run must be what the engine alone does, whatever the
+ * hint says, and rewritten code must be entered again once the guest has
+ * moved on. */
+void a_stepped_fault_hint_survives_changes_as_a_hint_only(
+	const LibraryImage &image)
+{
+	const auto bias = Fixture::bias;
+	const auto base = arena_base(bias);
+	const auto row_pc = mops_at + row_cpyf * mops_step;
+	/* ldr x3, [x0]: x0 is the destination the row's first instruction
+	 * faults at, so the address faults again, now as a plain load. */
+	constexpr std::uint32_t load = 0xf9400003U;
+	const std::size_t row_page = row_pc / page_bytes;
+	SplitMix rng{59};
+	auto c = make_case_from_seed(rng.next(), bias, row_pc, true, true, base);
+	enterable(c);
+	c.kinds.assign(arena_pages + stack_pages, 2);
+	c.kinds[4] = 0;
+	c.cpu.registers[0] = base + 4 * page_bytes + 0x300;
+	c.cpu.registers[1] = base + 2 * page_bytes + 0x100;
+	c.cpu.registers[2] = 16;
+	/* Where the engine stops: the instruction of the row that faults. */
+	std::uint64_t fault_at = 0;
+	{
+		aot::set_enabled(false);
+		Fixture probe{4999, image};
+		const auto first = drive_on(probe.env.executor, probe.env.memory,
+			probe.env.generation, bias, probe.arena, c, max_blocks, {}, true);
+		require(first.last == EngineEvent::memory_fault);
+		require(first.faults.size() == 1);
+		fault_at = first.faults[0].pc - bias;
+		require(fault_at >= row_pc && fault_at < row_pc + mops_step);
+	}
+	LibraryImage changed = image;
+	std::memcpy(&changed.bytes[fault_at], &load, 4);
+
+	enum Change : std::size_t {
+		nothing, text_patched, page_replaced, other_space, page_unmapped,
+		changes,
+	};
+	static constexpr const char *what[changes] = {"nothing changed",
+		"text patched and published", "page replaced",
+		"another address space with other text",
+		"another address space without the page"};
+	struct Ending final {
+		Result stopped, ended;
+	};
+	/* Stop at the fault, change what is under it, resume there. */
+	const auto sequence = [&](Change change,
+	                          gadgets::GadgetExecutor &executor,
+	                          unsigned long id, std::size_t blocks) {
+		Environment env{id, bias, image};
+		Arena arena{id, base};
+		JitBacking replacement{1};
+		replacement.put(0, std::span{changed.bytes}.subspan(
+			row_page * page_bytes, page_bytes));
+		Environment other{id + 1, bias, changed};
+		Arena other_arena{id + 1, base};
+		Environment hole{id + 2, bias, image, row_page};
+		Arena hole_arena{id + 2, base};
+		Ending out;
+		out.stopped = drive_on(executor, env.memory, env.generation, bias,
+			arena, c, blocks, {}, true);
+		auto *memory = &env.memory;
+		auto generation = env.generation;
+		auto *where = &arena;
+		switch (change) {
+		case nothing:
+			break;
+		case text_patched:
+			env.backing.put32(fault_at, load);
+			require(darwin_uml_static_vm_invalidate_code_generation(
+				env.generation, bias + fault_at, 4) == 0);
+			break;
+		case page_replaced:
+			env.map.replace_page(bias + row_page * page_bytes,
+				replacement);
+			break;
+		case other_space:
+			other_arena.adopt(arena);
+			memory = &other.memory;
+			generation = other.generation;
+			where = &other_arena;
+			break;
+		case page_unmapped:
+			hole_arena.adopt(arena);
+			memory = &hole.memory;
+			generation = hole.generation;
+			where = &hole_arena;
+			break;
+		case changes:
+			break;
+		}
+		out.ended = run_from(executor, *memory, generation, *where,
+			out.stopped.cpu, blocks);
+		return out;
+	};
+	/* What the engine does, on fresh guests, before AOT is on. */
+	aot::set_enabled(false);
+	gadgets::GadgetExecutor ref_executor;
+	std::array<Ending, changes> want;
+	for (std::size_t i = 0; i < changes; ++i)
+		want[i] = sequence(static_cast<Change>(i), ref_executor,
+			5000 + 10 * i, max_blocks);
+	for (const auto &w : want) {
+		require(w.stopped.last == EngineEvent::memory_fault);
+		require(w.stopped.faults.size() == 1);
+		require(w.stopped.faults[0].pc == bias + fault_at);
+		require(w.ended.done());
+	}
+	require(!identical(want[nothing].ended, want[text_patched].ended));
+	require(!identical(want[nothing].ended, want[page_unmapped].ended));
+
+	gadgets::GadgetExecutor executor;
+	aot::reset_stats();
+	aot::set_enabled(true);
+	for (std::size_t i = 0; i < changes; ++i) {
+		const auto steps = aot::stats().steps;
+		const auto have = sequence(static_cast<Change>(i), executor,
+			5100 + 10 * i, aot_max_blocks);
+		/* The fault was a stepped instruction's, which is what arms the
+		 * hint. */
+		if (aot::stats().steps <= steps) {
+			std::fprintf(stderr, "  %s: no stepped instruction\n", what[i]);
+			require(false);
+		}
+		if (!same(want[i].stopped, have.stopped, c) ||
+		    !same(want[i].ended, have.ended, c)) {
+			std::fprintf(stderr, "  %s\n", what[i]);
+			require(false);
+		}
+	}
+	const auto after_changes = aot::stats();
+	require(after_changes.poisoned == 0);
+	/* Back in an address space with the framework's text, with every page
+	 * mapped: the guest has moved on, and rewritten code is entered. */
+	auto ok = c;
+	ok.kinds.assign(arena_pages + stack_pages, 2);
+	Fixture again{5200, image};
+	aot::set_enabled(true);
+	for (int i = 0; i < 200; ++i)
+		(void)drive_on(executor, again.env.memory, again.env.generation,
+			bias, again.arena, ok, aot_max_blocks);
+	aot::set_enabled(false);
+	const auto st = aot::stats();
+	std::fprintf(stderr, "stepped fault hint: %zu changes, enters %llu, "
+		"steps %llu\n", static_cast<std::size_t>(changes),
+		static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.steps));
+	require(st.enters > after_changes.enters);
+	require(st.poisoned == 0);
+}
+
 /* The guest kernel's threads run the executor on a 64 KiB stack, with its own
  * frames and a signal frame above ours: nothing on the way into rewritten
  * code may need much of it (a 64 KiB temporary in the executor killed the
@@ -3584,6 +3772,7 @@ int main(int argc, char **argv)
 			structure_accesses_over_a_boundary_match_the_engine(image);
 			short_entries_are_left_to_the_engine(image);
 			admission_history_survives_changes_as_a_hint_only(image);
+			a_stepped_fault_hint_survives_changes_as_a_hint_only(image);
 			rewritten_code_stays_within_a_stack_budget(image);
 		}
 		/* The scenarios are about the mechanism, not about the code:
