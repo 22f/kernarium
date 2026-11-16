@@ -22,6 +22,15 @@ uml_add_tooling_test(
     LABELS dependency;andarium
     TIMEOUT 60)
 
+# The accessibility artifact's identity: what the tracked inputs expect, what
+# an APK may hold, and how a signed APK links back to the unsigned one.
+uml_add_tooling_test(
+    NAME dependency-andarium-accessibility-identity
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/dependencies/test_accessibility_identity.py
+    LABELS dependency;andarium
+    TIMEOUT 60)
+
 uml_add_tooling_test(
     NAME dependency-build-manifest
     COMMAND ${PROJECT_SOURCE_DIR}/tests/tooling/dependencies/test_build_manifest.sh

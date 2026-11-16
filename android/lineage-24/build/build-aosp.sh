@@ -40,7 +40,8 @@ Run locally on the x86_64 Linux builder after applying the routed AOSP patch
 series. The kernel is a published Android kernel artifact of the tracked
 mainline source, whose vmlinux is the runtime image without DWARF. The
 accessibility artifact is the TalkBack and eSpeak NG APKs that
-dependencies/build-andarium-accessibility.sh writes on the Mac. The output
+dependencies/build-andarium-accessibility.sh writes on the Mac, accepted in
+metadata/accepted-accessibility.env and built from this tree's pins. The output
 directory must be an ignored directory inside the AOSP Repo
 workspace; the pinned Android 17 Soong tree rejects generated host-tool paths
 from an external absolute OUT_DIR. Reusing the same output path lets the
@@ -176,7 +177,7 @@ python3 -B "$KERNEL_ARTIFACT_VERIFIER" --artifact "$KERNEL_ARTIFACT" \
 # TalkBack and eSpeak NG: the product imports the APKs from the directory this
 # writes (overlay/accessibility/Android.bp).
 python3 -B "$ACCESSIBILITY_STAGER" --artifact "$ACCESSIBILITY_ARTIFACT" \
-	--aosp-source "$AOSP_SOURCE"
+	--repo-root "$OUTER_ROOT" --aosp-source "$AOSP_SOURCE"
 SOONG_BUILD_GRAPH="$OUT_DIR/soong/build.${LINEAGE24_PRODUCT}.ninja"
 mkdir -p -- "$OUT_DIR"
 # One output directory per build variant: a switch between user and userdebug is

@@ -12,7 +12,11 @@
 # dependencies/andarium-accessibility/archives.tsv (the Gradle distributions
 # and every Maven artifact). Gradle runs with --offline, a Gradle user home of
 # its own and a Maven repository laid out from those archives, to which an
-# init script points every repository the builds name.
+# init script points every repository the builds name. The JDK and the SDK
+# components are those dependencies/andarium-accessibility/toolchain.tsv
+# names, each read from its own metadata (identity.py), and artifact.json
+# records them with the pins, series trees, archive list and this script's
+# identity, which the stager checks against the tree.
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -23,10 +27,10 @@ OUTPUT="$ROOT_DIR/.build/andarium-accessibility"
 WORK_ROOT="$ROOT_DIR/.build/dependency-build/andarium-accessibility"
 TALKBACK_GRADLE=gradle-8.14.3
 ESPEAK_GRADLE=gradle-9.6.1
+IDENTITY="$ROOT_DIR/dependencies/andarium-accessibility/identity.py"
 # The packages Andarium's ScreenReader recognises and the voice it speaks with.
 TALKBACK_PACKAGE=com.android.talkback
 SPEECH_PACKAGE=com.reecedunn.espeak
-NDK_VERSION=29.0.14206865
 
 fail()
 {
@@ -48,9 +52,9 @@ Prepare its inputs first:
   dependencies/prepare.sh --product andarium-accessibility
   dependencies/prepare.sh --archive-manifest dependencies/andarium-accessibility/archives.tsv
 
-Requires JAVA_HOME (JDK 17 or later) and ANDROID_HOME, an Android SDK with
-platform 36, build-tools, CMake 3.22.1 and NDK 29.0.14206865, on an Apple
-silicon Mac, the host the pinned AAPT2 runs on.
+Requires JAVA_HOME and ANDROID_HOME naming the JDK and the Android SDK whose
+versions dependencies/andarium-accessibility/toolchain.tsv pins, on an Apple
+silicon Mac, the host the pinned AAPT2 runs on. Any other version is refused.
 EOF
 }
 
@@ -71,9 +75,11 @@ done
 
 [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ] || fail "JAVA_HOME must name a JDK"
 [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME" ] || fail "ANDROID_HOME must name an Android SDK"
-[ -d "$ANDROID_HOME/ndk/$NDK_VERSION" ] || fail "the SDK has no NDK $NDK_VERSION"
-BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/*/ 2>/dev/null | sort -V | tail -n 1)
-[ -n "$BUILD_TOOLS" ] && [ -x "$BUILD_TOOLS/aapt2" ] || fail "the SDK has no build-tools"
+python3 -B "$IDENTITY" archives --require "$TALKBACK_GRADLE-bin.zip" --require "$ESPEAK_GRADLE-bin.zip" ||
+	fail "the archive list lacks a Gradle distribution the builds need"
+python3 -B "$IDENTITY" toolchain --java-home "$JAVA_HOME" --android-home "$ANDROID_HOME" ||
+	fail "the JDK and SDK are not the toolchain dependencies/andarium-accessibility/toolchain.tsv pins"
+BUILD_TOOLS="$ANDROID_HOME/build-tools/$(python3 -B "$IDENTITY" tracked build-tools)"
 
 "$ROOT_DIR/dependencies/prepare.sh" --product andarium-accessibility --verify >/dev/null ||
 	fail "the andarium-accessibility sources are not prepared; run dependencies/prepare.sh --product andarium-accessibility"
@@ -82,6 +88,8 @@ BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/*/ 2>/dev/null | sort -V | tail 
 
 rm -rf "$WORK_ROOT"
 mkdir -p "$WORK_ROOT"
+python3 -B "$IDENTITY" toolchain --java-home "$JAVA_HOME" --android-home "$ANDROID_HOME" \
+	--output "$WORK_ROOT/toolchain.json"
 
 # The Maven repository and the Gradle distributions, from the verified cache.
 # Each module's maven-metadata.xml lists the versions pinned, so a dynamic
@@ -192,40 +200,15 @@ stage_apk "$WORK_ROOT/espeak-ng/android/build/outputs/apk/release/espeak-release
 stage_apk "$WORK_ROOT/talkback/build/outputs/apk/phone/release/talkback-phone-release-unsigned.apk" \
 	TalkBack.apk "$TALKBACK_PACKAGE"
 
-python3 -B - "$OUTPUT.partial" "$SOURCE_ROOT" "$ARCHIVES" \
-	"$TALKBACK_PACKAGE" "$SPEECH_PACKAGE" <<'PY_ARTIFACT'
-import hashlib
-import json
-import pathlib
-import subprocess
-import sys
+# No APK may hold a value of this machine: its checkout, its work root, its
+# home directory or its user name.
+set -- --forbid "$ROOT_DIR" --forbid "$WORK_ROOT"
+[ "${#HOME}" -gt 3 ] && set -- "$@" --forbid "$HOME"
+python3 -B "$IDENTITY" scan "$@" "$OUTPUT.partial/TalkBack.apk" "$OUTPUT.partial/eSpeakNG.apk" ||
+	fail "an APK holds a value of this machine"
 
-output, sources, archives = (pathlib.Path(argument) for argument in sys.argv[1:4])
-talkback, speech = sys.argv[4:6]
-
-
-def sha256(path: pathlib.Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def tree(source: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(sources / source), "rev-parse", "HEAD^{tree}"],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
-
-
-artifact = {
-    "schema": 1,
-    "apks": {
-        "TalkBack.apk": {"package": talkback, "sha256": sha256(output / "TalkBack.apk")},
-        "eSpeakNG.apk": {"package": speech, "sha256": sha256(output / "eSpeakNG.apk")},
-    },
-    "source_trees": {source: tree(source) for source in ("talkback", "espeak-ng", "sonic")},
-    "archives_sha256": sha256(archives),
-}
-(output / "artifact.json").write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
-PY_ARTIFACT
+python3 -B "$IDENTITY" describe --sources "$SOURCE_ROOT" --apks "$OUTPUT.partial" \
+	--toolchain "$WORK_ROOT/toolchain.json" --output "$OUTPUT.partial/artifact.json"
 
 rm -rf "$OUTPUT"
 mv "$OUTPUT.partial" "$OUTPUT"
