@@ -258,6 +258,54 @@ public final class SmsServiceTest {
         }
     }
 
+    private static boolean accepts(String argument) {
+        try {
+            Message.parse(argument);
+            return true;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /** What Message.parse accepts of the sender and the text, as it did before the identifier. */
+    private static void parserRules() {
+        final String[] senders = {
+            "+15551234567", "12345", "1", "+1", "12345678901234567890", "+12345678901234567890", "Bank", "My Bank 24",
+            "ElevenChars", "A B", "12 34", " x",
+        };
+        for (String sender : senders) check(accepts(argument(sender, "hi")), "accepted sender <" + sender + ">");
+        final String[] notSenders = {
+            "", " ", "           ", "+", "123456789012345678901", "+123456789012345678901", "TwelveChars!", "Twelve Chars",
+            "B\u00E4nk", "a-b", "+12 34", "a.b", "\u0661\u0662", "Bank\n",
+        };
+        for (String sender : notSenders) check(!accepts(argument(sender, "hi")), "refused sender <" + sender + ">");
+        final String[] texts = {
+            "h", "hello", "x".repeat(670), "\uD83D\uDE00".repeat(335), "line\nbreak\r\n", "\uFEFFmark", "tab\tnul\u0000",
+            "\uFFFF", "\u0645\u0631\u062D\u0628\u0627",
+        };
+        for (String text : texts) check(accepts(argument("Bank", text)), "accepted text " + describe(text));
+        final String[] notTexts = {"", "x".repeat(671), "\uD83D\uDE00".repeat(336), "x".repeat(669) + "\uD83D\uDE00"};
+        for (String text : notTexts) check(!accepts(argument("Bank", text)), "refused text " + describe(text));
+        // The shape of the argument.
+        check(!accepts(null), "no argument");
+        check(!accepts(""), "empty argument");
+        check(!accepts(base64("Bank") + base64("hi") + "." + ID), "a dot missing");
+        check(!accepts("!!!." + base64("hi") + "." + ID), "sender not base64");
+        check(!accepts(base64("Bank") + ".!!!." + ID), "text not base64");
+        check(!accepts(base64("Bank") + "." + java.util.Base64.getEncoder().encodeToString(new byte[] {(byte) 0xc3, 0x28})
+                + "." + ID), "text not UTF-8");
+        check(!accepts(java.util.Base64.getEncoder().encodeToString(new byte[] {(byte) 0xc3, 0x28})
+                + "." + base64("hi") + "." + ID), "sender not UTF-8");
+        check(!accepts(java.util.Base64.getEncoder().encodeToString(new byte[] {(byte) 0xed, (byte) 0xa0, (byte) 0x80})
+                + "." + base64("hi") + "." + ID), "an encoded surrogate is not UTF-8");
+        check(!accepts(base64("Bank") + "." + java.util.Base64.getEncoder().encodeToString(
+                new byte[] {(byte) 0xed, (byte) 0xa0, (byte) 0x80}) + "." + ID), "an encoded lone surrogate in the text");
+        // What came through is what was sent.
+        final Message message = Message.parse(argument("+15551234567", "caf\u00E9 \uD83D\uDE00"));
+        same("+15551234567", message.sender, "sender");
+        same("caf\u00E9 \uD83D\uDE00", message.body, "text");
+    }
+
     /** The host sends the same identifier again when it did not see the answer: the message is stored once. */
     private static void retryAfterALostReply() {
         final DeliveredIdentifiers identifiers = new DeliveredIdentifiers();
@@ -414,6 +462,7 @@ public final class SmsServiceTest {
         reversedMark();
         partCount();
         random();
+        parserRules();
         identifierRequired();
         retryAfterALostReply();
         messagesInFlight();

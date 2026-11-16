@@ -114,8 +114,9 @@ public enum GuestSms {
     }
 
     public enum Outcome: Equatable, Sendable {
-        /// Delivered in this many parts.
-        case delivered(parts: Int)
+        /// Android took the message, in this many parts. That is all the
+        /// service reports: it does not wait for an application to read it.
+        case handedToAndroid(parts: Int)
         /// The system image has no SMS service.
         case unsupported
         case failed
@@ -126,7 +127,7 @@ public enum GuestSms {
     public static func outcome(_ result: ShellResult) -> Outcome {
         let output = String(decoding: result.stdout, as: UTF8.self) + String(decoding: result.stderr, as: UTF8.self)
         if let match = output.firstMatch(of: /Result: Bundle\[\{parts=([0-9]+)\}\]/), let parts = Int(match.1) {
-            return .delivered(parts: parts)
+            return .handedToAndroid(parts: parts)
         }
         if output.contains("Could not find provider") || output.contains("Unknown authority") {
             return .unsupported

@@ -17,10 +17,11 @@ import java.util.List;
 import java.util.TimeZone;
 
 /**
- * Hands a message to the guest the way InboundSmsHandler hands one from the
- * network: SMS_DELIVER to the default SMS application, which stores it and
- * notifies, then SMS_RECEIVED to every application that may receive SMS. With
- * no SMS application the message is stored in the inbox here.
+ * Hands a message to Android: SMS_DELIVER to the default SMS application, which
+ * stores it and notifies, then SMS_RECEIVED to the applications that may receive
+ * SMS. With no SMS application the message is stored in the inbox here. The
+ * broadcasts are sent, not awaited: what the service reports is that Android
+ * took the message, not that an application has read or stored it.
  */
 final class Delivery {
     private static final String TAG = "AndariumSms";
@@ -29,7 +30,7 @@ final class Delivery {
 
     private Delivery() {}
 
-    /** Returns how many parts the message took. */
+    /** Returns how many parts were handed to Android. */
     static int deliver(Context context, Message message) {
         final long now = System.currentTimeMillis();
         final byte[][] pdus = DeliverPdu.encode(
@@ -46,7 +47,7 @@ final class Delivery {
         }
         context.sendBroadcastAsUser(intent(Telephony.Sms.Intents.SMS_RECEIVED_ACTION, pdus), user,
                 Manifest.permission.RECEIVE_SMS, AppOpsManager.OP_RECEIVE_SMS);
-        Log.i(TAG, "delivered a message of " + pdus.length + " part(s) to "
+        Log.i(TAG, "handed a message of " + pdus.length + " part(s) to "
                 + (application != null ? application : "the inbox"));
         return pdus.length;
     }

@@ -77,7 +77,7 @@ struct GuestSmsTests {
     }
 
     @Test func outcomesComeFromWhatContentPrinted() {
-        #expect(GuestSms.outcome(ShellResult(stdout: Data("Result: Bundle[{parts=2}]\n".utf8), exitCode: 0)) == .delivered(parts: 2))
+        #expect(GuestSms.outcome(ShellResult(stdout: Data("Result: Bundle[{parts=2}]\n".utf8), exitCode: 0)) == .handedToAndroid(parts: 2))
         #expect(GuestSms.outcome(ShellResult(stderr: Data("Error while accessing provider:android.kernarium.sms\njava.lang.IllegalArgumentException: Unknown authority android.kernarium.sms\n".utf8), exitCode: 0)) == .unsupported)
         #expect(GuestSms.outcome(ShellResult(stderr: Data("java.lang.SecurityException: no\n".utf8), exitCode: 0)) == .failed)
         #expect(GuestSms.outcome(ShellResult(exitCode: 1)) == .failed)

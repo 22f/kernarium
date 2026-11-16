@@ -1040,7 +1040,7 @@ final class AppModel {
         // Only a send that was not confirmed may have reached Android: sent again, it keeps its identifier.
         smsRetries.settle(sender: sender, text: text, identifier: identifier, confirmed: outcome != .failed)
         return switch outcome {
-        case .delivered(let parts): .delivered(SmsMessages.delivered(parts: parts))
+        case .handedToAndroid(let parts): .delivered(SmsMessages.delivered(parts: parts))
         case .unsupported: .refused(SmsMessages.unsupported)
         case .failed: .refused(SmsMessages.failed)
         }
