@@ -408,6 +408,15 @@ public final class SmsServiceTest {
         })));
         otherB.start();
         retryA.start();
+        // Both wait for A's delivery: the lock is what holds them. Without it
+        // they run to their end at once and A is handed over twice, which the
+        // check below states directly instead of leaving it to a race.
+        final long deadline = System.nanoTime() + 10_000_000_000L;
+        while ((!waiting(otherB) || !waiting(retryA)) && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        check(otherB.getState() != Thread.State.TERMINATED, "B was held while A was being handed over");
+        check(retryA.getState() != Thread.State.TERMINATED, "the retry of A was held while A was being handed over");
         release.countDown();
         slowA.join(20_000);
         otherB.join(20_000);
@@ -426,6 +435,13 @@ public final class SmsServiceTest {
         for (DeliveredIdentifiers.Result result : results) {
             check(result.parts == 1 || result.parts == DeliverPdu.split(a.body).size(), "parts " + result.parts);
         }
+    }
+
+    /** Whether {@code thread} stands behind a lock or a wait, or has ended. */
+    private static boolean waiting(Thread thread) {
+        final Thread.State state = thread.getState();
+        return state == Thread.State.BLOCKED || state == Thread.State.WAITING
+                || state == Thread.State.TIMED_WAITING || state == Thread.State.TERMINATED;
     }
 
     /** The memory is bounded: the oldest identifier goes first. */
