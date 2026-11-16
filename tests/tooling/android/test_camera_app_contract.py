@@ -51,6 +51,7 @@ FINALIZE_RETIRE = "videoRecording.compareAndSet(started.get(), null)"
 FINALIZE_IDLE = "cameraState.value = CameraState.IDLE"
 FINALIZE_DROP = "videoRecording.value = null"
 FINALIZE_FLAG = "finalized.set(true)"
+CANCEL_START = "videoRecordingStart?.cancel()"
 # The start's own steps after startRecording() returns.
 START_STORE_STARTED = "started.set(recording)"
 START_STORE_HANDLE = "videoRecording.value = recording"
@@ -174,7 +175,9 @@ def finalize_order(patches: str) -> bool:
     the start's two steps below retires nothing and flags too late for the start to see it.
 
     The start stores the handle it got in `started` and in the state flow, both BEFORE it looks at the flag, and retires the
-    handle after that look. Then, whichever of the two threads goes first, one of them retires the handle."""
+    handle after that look. Then, whichever of the two threads goes first, one of them retires the handle.
+
+    The pin is structural: it reads the order of the patch's code lines, it is no compiler and no concurrency test."""
     for hunk in file_diffs(patches).get(VIEW_MODEL_FILE, []):
         body = code_of(body_of(hunk))
         for index, (added, code) in enumerate(body):
@@ -191,9 +194,23 @@ def finalize_order(patches: str) -> bool:
                     late = after.index(START_RETIRE)
                 except ValueError:
                     return False
-                return (flag < retire < idle and FINALIZE_DROP not in texts
+                return (flag < retire < idle and FINALIZE_IDLE not in texts[:retire] and FINALIZE_DROP not in texts
                         and stored_started < check and stored_handle < check < late)
     return False
+
+
+def idle_published_only_by_the_cancel(patches: str) -> bool:
+    """The only idle that the patch ADDS to the view model is the cancel of a start that waits for its sound (it follows the
+    cancel of the start's job). The Finalize handler's own idle is upstream's line, which finalize_order puts after the retire: an
+    extra idle added anywhere else, before the retire or not, lets the next recording start while the old handle stands."""
+    for hunk in file_diffs(patches).get(VIEW_MODEL_FILE, []):
+        previous = ""
+        for added, code in code_of(body_of(hunk)):
+            if added and code == FINALIZE_IDLE and previous != CANCEL_START:
+                return False
+            if code:
+                previous = code
+    return True
 
 
 def load_verifier(path: Path):
@@ -252,6 +269,9 @@ def check(android_root: Path) -> None:
             fail(f"the camera application's patches add {needle!r} as code on {found} line(s) of the view model, {count} needed")
     if "endVideoRecording()" not in model:
         fail("the camera application's patches do not stop a recording from the shutter through endVideoRecording()")
+    if not idle_published_only_by_the_cancel(patches):
+        fail("the camera application's patches add a state reset to idle to the view model other than the cancel of a start that "
+             "waits for its sound")
     if not finalize_order(patches):
         fail("the camera application's patches do not end the Finalize handler as the contract says: retire the handle of its own "
              "recording, publish idle, then clear the ending mark, with no plain write of a null handle")
@@ -377,6 +397,11 @@ def fixtures(android_root: Path) -> None:
                 ("a patch whose start stores its handle in the holder after it looks at the flag", move(stored_started, late + 1)),
                 ("a patch whose start stores its handle in the state flow after it looks at the flag", move(stored_handle, late + 1)),
                 ("a patch whose start retires the handle before it looks at the flag", swap(look, late)),
+                ("a patch that publishes an extra idle before the retire, then the sequence", lines[:flag] + ["+" + " " * 24 + FINALIZE_IDLE] + lines[flag:]),
+                ("a patch that publishes an extra idle between the flag and the retire",
+                 lines[:retire] + ["+" + " " * 24 + FINALIZE_IDLE] + lines[retire:]),
+                ("a Finalize handler without the flag", lines[:flag] + lines[flag + 1:]),
+                ("a Finalize handler whose flag is a comment", lines[:flag] + [lines[flag].replace(FINALIZE_FLAG, "// " + FINALIZE_FLAG)] + lines[flag + 1:]),
             ):
                 patch.write_text("\n".join(variant), encoding="utf-8")
                 expect_failure(lambda: check(copy), label)

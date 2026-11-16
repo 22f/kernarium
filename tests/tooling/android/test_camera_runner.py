@@ -3116,6 +3116,8 @@ class VideoLostTests(unittest.TestCase):
             # leaves (movie() options).
             self.second_options: dict = {}
             self.short_options: dict = {}
+            # The same for the clip of one attempt (by its number from 1), over second_options.
+            self.attempt_options: dict[int, dict] = {}
 
         def note(self, offset: float, tag: str, message: str, level: str = "D") -> None:
             self.app_log += f"{self.now + offset:.3f}  2179  2179 {level} {tag}: {message}\n"
@@ -3182,10 +3184,10 @@ class VideoLostTests(unittest.TestCase):
                 if self.crash:
                     self.events_log += "11-15 16:50:00.000 I am_crash: [4711,0,org.lineageos.aperture]\n"
 
-        def add_clip(self, name: str, seconds: float, unfinished_pulls: int = 0) -> str:
+        def add_clip(self, name: str, seconds: float, unfinished_pulls: int = 0, attempt: int = 0) -> str:
             self.window_clips += 1
             path = f"/sdcard/window{self.window_clips}-{name}.mp4"
-            options = {"second": self.second_options, "short": self.short_options}.get(name, {})
+            options = {"second": {**self.second_options, **self.attempt_options.get(attempt, {})}, "short": self.short_options}.get(name, {})
             self.files[path] = movie(seconds, audio=sound(seconds), **options)
             self.unfinished[path] = unfinished_pulls
             identity = str(100 + self.window_clips)
@@ -3205,7 +3207,7 @@ class VideoLostTests(unittest.TestCase):
                 if index == 1:
                     self.add_clip("survivor", self.survivor_seconds)
                 else:
-                    self.add_clip("second", self.second_seconds, self.second_unfinished_pulls)
+                    self.add_clip("second", self.second_seconds, self.second_unfinished_pulls, (self.window_keys - 1) // 3 + 1)
                 self.note(0.1, "CameraViewModel", "Video capture succeeded: content://media/external/video/media/9")
             else:
                 self.recording = True
@@ -3495,7 +3497,7 @@ class VideoLostTests(unittest.TestCase):
         text = self.run_check(guest)
         for number in range(1, runner.START_WINDOW_ATTEMPTS + 1):
             self.assertIn(f"start window {number} of 5: the start was cancelled; clips: window{number}-second.mp4 3.40 s", text)
-        self.assertIn("the loss cancelled the start in 5 of 5 attempts; the application stayed in front", text)
+        self.assertIn("the loss cancelled the start in 5 of 5 attempts (5 conclusive); the application stayed in front", text)
         # Each attempt: the start key, the loss at once, the return, the key that starts, the key that stops.
         loop = guest.commands[guest.commands.index("<control resume>", guest.commands.index("<control resume>",
                                                    guest.commands.index("<control resume>") + 1) + 1) + 1:]
@@ -3590,7 +3592,7 @@ class VideoLostTests(unittest.TestCase):
         guest = self.Guest(self.plan())
         guest.window_modes = ["nothing", "cancel"]
         text = self.run_check(guest)
-        self.assertIn("start window 1 of 5: the loss cancelled and stopped nothing in the log; clips: window1-second.mp4", text)
+        self.assertIn("start window 1 of 5: inconclusive, the loss cancelled and stopped nothing in the log; clips: window1-second.mp4", text)
         self.assertIn("start window 2 of 5: the start was cancelled", text)
         self.assertNotIn("the recording had started and the loss stopped it", text)
 
@@ -3604,6 +3606,45 @@ class VideoLostTests(unittest.TestCase):
         text = self.run_check(guest)
         self.assertIn("start window 1 of 5: the recording had started and the loss stopped it; clips: window1-short.mp4 0.40 s, "
                       "window2-second.mp4 3.40 s", text)
+
+    def test_the_clip_of_an_inconclusive_attempt_is_not_credited(self) -> None:
+        # The log says neither a cancel nor a stop for the loss of attempt 1: the clip there is not judged as the recording after
+        # the return, even when it holds no video, and the attempt is printed as inconclusive. The conclusive ones decide.
+        guest = self.Guest(self.plan())
+        guest.window_modes = ["nothing", "cancel"]
+        guest.attempt_options = {1: {"samples": False}}
+        text = self.run_check(guest)
+        self.assertIn("start window 1 of 5: inconclusive, the loss cancelled and stopped nothing in the log", text)
+        self.assertIn("the loss cancelled the start in 4 of 5 attempts (4 conclusive)", text)
+        # The same clip after a conclusive attempt is judged.
+        guest = self.Guest(self.plan())
+        guest.window_modes = ["cancel"]
+        guest.attempt_options = {1: {"samples": False}}
+        with self.assertRaisesRegex(runner.Failure, r"window1-second\.mp4 has a video track but no encoded video samples"):
+            self.run_check(guest)
+
+    def test_an_inconclusive_attempt_does_not_hide_a_clip_that_went_on(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.window_modes = ["survives", "cancel"]
+        with self.assertRaisesRegex(runner.Failure, r"window1-survivor\.mp4 lasts 7\.50 s"):
+            self.run_check(guest)
+
+    def test_the_row_needs_its_number_of_conclusive_attempts(self) -> None:
+        # Two attempts of five say what the loss did: the clips of the others are not credited and the row proves nothing.
+        guest = self.Guest(self.plan())
+        guest.window_modes = ["nothing", "nothing", "nothing", "cancel", "cancel"]
+        with self.assertRaisesRegex(runner.Failure, r"says what the loss did in 2 of 5 attempts, 3 needed: the other clips are not credited"):
+            self.run_check(guest)
+        guest = self.Guest(self.plan())
+        guest.window_modes = ["nothing", "nothing", "cancel", "cancel", "cancel"]
+        text = self.run_check(guest)
+        self.assertIn("the loss cancelled the start in 3 of 5 attempts (3 conclusive)", text)
+
+    def test_losses_after_the_recording_was_created_count_as_conclusive_but_prove_no_cancel(self) -> None:
+        guest = self.Guest(self.plan())
+        guest.window_modes = ["stopped", "stopped", "stopped", "stopped", "stopped"]
+        with self.assertRaisesRegex(runner.Failure, "no loss cancelled a start in 5 attempts"):
+            self.run_check(guest)
 
     def test_presses_that_found_no_recording_are_counted(self) -> None:
         guest = self.Guest(self.plan())

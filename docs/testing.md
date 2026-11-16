@@ -1200,9 +1200,11 @@ not finalized yet; the application's log must show that presses landed in that
 window and were ignored, and the application must not crash. A last case presses
 the start key and ends the camera at once, in a loop: a loss in the half second
 before the recording exists cancels the start, the application's log must show
-that at least once, and the recording the next key press starts must be an
-ordinary clip (encoded video, no longer than the time between the keys that
-start and stop it allows), not one that went on over the loss. Two more
+that at least once and say what the loss did (a cancelled start or a stopped
+recording) in three of the five attempts, and the recording the next key press
+starts after such an attempt must be an ordinary clip (encoded video, no longer
+than the time between the keys that start and stop it allows), not one that
+went on over the loss. Two more
 cases leave a viewfinder with no recording, the video mode's (which binds an
 encoder surface) and the photo mode's, and expect each live again within 45 s of
 the return (one deadline for the camera, the picture and the frame counters), in

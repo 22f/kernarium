@@ -367,6 +367,11 @@ START_WINDOW_SETTLE_SECONDS = 4
 START_WINDOW_HOLD_SECONDS = 3
 START_WINDOW_MINIMUM_SECONDS = 2.0
 START_WINDOW_MARGIN_SECONDS = 1.5
+# An attempt is conclusive when the application's log says what the loss did: it cancelled the start, or it stopped a recording that
+# had started. Without either (the loss came before the key reached the application, or the image lacks the topic) the clip of the
+# attempt is not credited as the recording after the return. The attempts are a probabilistic hit on a window half a second wide: the
+# row needs START_WINDOW_CONCLUSIVE_MINIMUM conclusive ones, and one of them must have cancelled a start.
+START_WINDOW_CONCLUSIVE_MINIMUM = 3
 # The longest time between two samples of a video track that a recording may have: a camera that stalls or is away leaves a
 # step of its length, where the encoder's own steps are a frame (a few hundredths of a second).
 VIDEO_JUMP_MAXIMUM_SECONDS = 0.5
@@ -2596,12 +2601,13 @@ def check_start_window(guest: Guest, plan: Plan) -> None:
     starts the recording that is held and the third stops it: one clip of about START_WINDOW_HOLD_SECONDS, no longer than the
     measured time between those two keys and START_WINDOW_MARGIN_SECONDS, and with encoded video in it. A start that was not
     cancelled makes a recording that goes on over the loss, which the second key stops: a clip as long as the wait. The
-    application's log says which attempts cancelled a start; the loop needs one."""
+    application's log says which attempts cancelled a start or stopped a recording (the conclusive ones: START_WINDOW_CONCLUSIVE_MINIMUM
+    are needed, one of them a cancel) and the clip of any other attempt is not credited."""
     camera = plan.camera_ids[0]
     leaks = guest.stream_leaks()
     start_camera_application(guest, VIDEO_ACTION, front=PROFILE_CAMERAS[plan.profile][0] == "front")
     wait_for_chart(guest, camera, "video")
-    cancelled = 0
+    cancelled = concluded = 0
     for number in range(1, START_WINDOW_ATTEMPTS + 1):
         before, _ = guest.videos()
         since = guest_time(guest)
@@ -2629,8 +2635,10 @@ def check_start_window(guest: Guest, plan: Plan) -> None:
                    else "the loss cancelled and stopped nothing in the log" if stops == 1
                    else "no cancel or stop in the log")
         cancelled += verdict == "the start was cancelled"
+        conclusive = verdict in ("the start was cancelled", "the recording had started and the loss stopped it")
+        concluded += conclusive
         clips = ", ".join(f"{row.get('_display_name', '')} {movie.seconds:.2f} s" for row, movie in movies)
-        print(f"  start window {number} of {START_WINDOW_ATTEMPTS}: {verdict}; clips: {clips}")
+        print(f"  start window {number} of {START_WINDOW_ATTEMPTS}: {verdict if conclusive else 'inconclusive, ' + verdict}; clips: {clips}")
         for row, movie in movies:
             if movie.seconds > longest:
                 raise Failure(f"{row.get('_data', '')} lasts {movie.seconds:.2f} s (above {longest:.1f} s: the {held:.1f} s between "
@@ -2638,7 +2646,9 @@ def check_start_window(guest: Guest, plan: Plan) -> None:
                               "that was started just before the loss went on over the camera's reopening instead of ending, and "
                               "the key that should have started a recording stopped it")
         recordings = [(row, movie) for row, movie in movies if movie.seconds >= START_WINDOW_MINIMUM_SECONDS]
-        if not recordings:
+        if not conclusive:
+            recordings = []  # not credited as the recording after the return, and not judged: see START_WINDOW_CONCLUSIVE_MINIMUM
+        elif not recordings:
             raise Failure(f"the recording started after the loss in attempt {number} lasts under {START_WINDOW_MINIMUM_SECONDS:g} s "
                           f"({clips}): the key did not start a recording")
         # The recording that follows the loss holds encoded video, not only a container of the right length.
@@ -2651,8 +2661,12 @@ def check_start_window(guest: Guest, plan: Plan) -> None:
         if not foreground.resumed.startswith(CAMERA_PACKAGE):
             raise Failure(f"the camera application is not in front after start window attempt {number}: {foreground.describe()}")
     require_no_stream_leak(guest, leaks, "start window")
-    print(f"  the loss cancelled the start in {cancelled} of {START_WINDOW_ATTEMPTS} attempts; the application stayed in front and a "
-          "recording worked after each")
+    print(f"  the loss cancelled the start in {cancelled} of {START_WINDOW_ATTEMPTS} attempts ({concluded} conclusive); the application "
+          "stayed in front and a recording worked after each conclusive one")
+    if concluded < START_WINDOW_CONCLUSIVE_MINIMUM:
+        raise Failure(f"the application's log says what the loss did in {concluded} of {START_WINDOW_ATTEMPTS} attempts, "
+                      f"{START_WINDOW_CONCLUSIVE_MINIMUM} needed: the other clips are not credited as the recording after the return "
+                      "(the loss came before the key reached the application, or the image lacks the application's topic of route p0031)")
     if not cancelled:
         raise Failure(f"no loss cancelled a start in {START_WINDOW_ATTEMPTS} attempts (the application's log): the loss came after "
                       "the recording was created each time, or the image lacks the application's topic of route p0031")
