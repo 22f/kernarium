@@ -6532,28 +6532,6 @@
         }
       }
     },
-    "Not confirmed" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未確認"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未确认"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未確認"
-          }
-        }
-      }
-    },
     "Not enough free space" : {
       "localizations" : {
         "ja" : {

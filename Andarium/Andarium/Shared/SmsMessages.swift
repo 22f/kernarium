@@ -53,7 +53,6 @@ nonisolated enum SmsMessages {
     /// Android took the message. That is all that is known of it, so that is
     /// all these words say.
     static var sentToAndroid: String { String(localized: "Sent to Android") }
-    static var notConfirmed: String { String(localized: "Not confirmed") }
     /// What a send that was not confirmed says: the message may have arrived.
     static var notConfirmedAdvice: String {
         String(localized: "Android didn\u{2019}t confirm the message. Check whether it arrived before you send it again.")

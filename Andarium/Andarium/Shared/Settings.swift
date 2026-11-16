@@ -312,41 +312,53 @@ struct SessionSettingsSheet: View {
 
     // MARK: Developer
 
+    /// ADB over network with its footer, and, as a group of its own under that
+    /// footer, the entrance to the text message bar, so the footer describes
+    /// the toggle alone.
+    @ViewBuilder
     private func developer(_ session: SessionState) -> some View {
+        if model.capabilities.adbOverNetwork { adbOverNetwork(session) }
+        if model.offersTextMessage {
+            Section {
+                textMessageRow
+            } header: {
+                // The group stands alone only where there is no ADB section above it.
+                if !model.capabilities.adbOverNetwork { Text("Developer") }
+            }
+            .id(model.capabilities.adbOverNetwork ? "text-message" : "developer")
+        }
+    }
+
+    private func adbOverNetwork(_ session: SessionState) -> some View {
         Section {
-            if model.capabilities.adbOverNetwork {
-                Toggle(isOn: Binding(get: { session.adb }, set: { model.setAdbOverNetwork($0) })) {
-                    HStack(spacing: 12) {
-                        IconTile(symbol: "terminal.fill", color: session.adb ? .accentColor : .gray)
-                        Text("ADB over network")
-                    }
-                }
-                .disabled(!session.adb && !model.adbOverNetworkAvailable)
-                if session.adb {
-                    if let address = session.adbAddress {
-                        connectCommand("adb connect \(address):\(AdbNetworkBridge.defaultPort)")
-                    } else {
-                        Text(AdbNetworkMessages.noAddress)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .padding(.vertical, 4)
-                    }
+            Toggle(isOn: Binding(get: { session.adb }, set: { model.setAdbOverNetwork($0) })) {
+                HStack(spacing: 12) {
+                    IconTile(symbol: "terminal.fill", color: session.adb ? .accentColor : .gray)
+                    Text("ADB over network")
                 }
             }
-            if model.offersTextMessage { textMessageRow }
+            .disabled(!session.adb && !model.adbOverNetworkAvailable)
+            if session.adb {
+                if let address = session.adbAddress {
+                    connectCommand("adb connect \(address):\(AdbNetworkBridge.defaultPort)")
+                } else {
+                    Text(AdbNetworkMessages.noAddress)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+                }
+            }
         } header: {
             Text("Developer")
         } footer: {
-            if model.capabilities.adbOverNetwork {
-                if let problem = session.adbProblem {
-                    Text(problem).foregroundStyle(.red)
-                } else if session.adb {
-                    Text("The virtual machine asks to allow the computer the first time it connects. ADB turns off when the virtual machine stops or USB debugging is turned off.")
-                } else if !model.adbOverNetworkAvailable {
-                    Text("Turn on USB debugging in the virtual machine\u{2019}s Developer options to use ADB over network.")
-                } else {
-                    Text("Lets a computer on the same network connect to the virtual machine with adb.")
-                }
+            if let problem = session.adbProblem {
+                Text(problem).foregroundStyle(.red)
+            } else if session.adb {
+                Text("The virtual machine asks to allow the computer the first time it connects. ADB turns off when the virtual machine stops or USB debugging is turned off.")
+            } else if !model.adbOverNetworkAvailable {
+                Text("Turn on USB debugging in the virtual machine\u{2019}s Developer options to use ADB over network.")
+            } else {
+                Text("Lets a computer on the same network connect to the virtual machine with adb.")
             }
         }
         .id("developer")

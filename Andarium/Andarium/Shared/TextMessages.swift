@@ -59,6 +59,10 @@ final class TextMessageState {
     /// The sender and text of the last send, for the words about it to
     /// apply to that draft alone.
     private(set) var attempt: (sender: String, text: String)?
+    /// The system image has no service to take a message. The answer cannot
+    /// change within a run, so Send stays off for the rest of it and the reason
+    /// stays shown.
+    private(set) var unsupported = false
     /// The run is over: nothing of this is shown, and a late answer is lost.
     private(set) var ended = false
     @ObservationIgnored var sendTask: Task<Void, Never>?
@@ -139,11 +143,13 @@ final class TextMessageState {
             if text == sent { text = "" }
             return SmsMessages.sentToAndroid
         case .unsupported:
+            unsupported = true
             progress = .unsupported
             return SmsMessages.unsupported
         case .notConfirmed:
             progress = .notConfirmed
-            return SmsMessages.notConfirmed
+            // The short words are for the eye; what the person is to do is what is heard.
+            return SmsMessages.notConfirmedAdvice
         }
     }
 
@@ -163,6 +169,7 @@ final class TextMessageState {
         case .paused: return TextMessageStatus(words: SmsMessages.paused, tone: .info)
         case .ready: break
         }
+        if unsupported { return TextMessageStatus(words: SmsMessages.unsupported, tone: .problem) }
         switch progress {
         case .sending:
             return nil
@@ -170,8 +177,6 @@ final class TextMessageState {
             return TextMessageStatus(words: SmsMessages.sentToAndroid, tone: .good)
         case .notConfirmed where isAttemptedDraft:
             return TextMessageStatus(words: SmsMessages.notConfirmedAdvice, tone: .problem)
-        case .unsupported where isAttemptedDraft:
-            return TextMessageStatus(words: SmsMessages.unsupported, tone: .problem)
         default:
             break
         }
@@ -218,7 +223,7 @@ extension AppModel {
     /// busy with a transfer.
     var canSendTextMessage: Bool {
         let state = session.textMessage
-        return textMessageAvailability == .ready && state.progress != .sending
+        return textMessageAvailability == .ready && state.progress != .sending && !state.unsupported
             && GuestSms.refusal(sender: state.sender, text: state.text) == nil && fileBrowser?.busy != true
     }
 

@@ -186,7 +186,8 @@ struct TextMessageTests {
         #expect(await eventually { state.progress == .notConfirmed })
         #expect(state.text == "one")
         #expect(state.status(availability: .ready) == TextMessageStatus(words: SmsMessages.notConfirmedAdvice, tone: .problem))
-        #expect(rig.said.lines == [SmsMessages.notConfirmed])
+        // What VoiceOver hears is what the person is to do.
+        #expect(rig.said.lines == [SmsMessages.notConfirmedAdvice])
         // Another text is not what the words are about; the same text is.
         model.setTextMessageText("one!")
         #expect(state.status(availability: .ready) == nil)
@@ -222,6 +223,21 @@ struct TextMessageTests {
         #expect(state.text == "one")
         #expect(state.status(availability: .ready) == TextMessageStatus(words: SmsMessages.unsupported, tone: .problem))
         #expect(rig.said.lines == [SmsMessages.unsupported])
+        // The answer cannot change within a run: Send stays off, whatever is typed or
+        // reopened, and the reason stays shown.
+        #expect(!model.canSendTextMessage)
+        model.setTextMessageText("two")
+        #expect(!model.canSendTextMessage)
+        #expect(state.status(availability: .ready) == TextMessageStatus(words: SmsMessages.unsupported, tone: .problem))
+        model.sendTextMessage()
+        model.closeTextMessage()
+        model.openTextMessage()
+        model.setTextMessageText("three")
+        model.sendTextMessage()
+        #expect(!model.canSendTextMessage)
+        #expect(state.status(availability: .ready)?.words == SmsMessages.unsupported)
+        await settle()
+        #expect(rig.driver.smsSent.count == 1)
     }
 
     // MARK: The run
@@ -354,12 +370,20 @@ struct TextMessageTests {
 
     // MARK: Where it is offered
 
-    @Test func theApplicationThatDoesNotCarryItOffersNoEntranceAndOpensNoBar() throws {
+    @Test func theApplicationThatDoesNotCarryItOffersNoEntranceAndOpensNoBar() async throws {
         let rig = try rig(capabilities: .device)
         defer { rig.cleanUp() }
         #expect(!rig.model.offersTextMessage)
         rig.model.openTextMessage()
+        #expect(!rig.state.isOpen)
+        // The row's own path opens the bar from a task: it is asserted once the task has run, and
+        // the same path opens it where the application carries text messages.
         rig.model.presentTextMessage()
+        let carrying = try self.rig()
+        defer { carrying.cleanUp() }
+        carrying.model.presentTextMessage()
+        #expect(await eventually { carrying.state.isOpen })
+        await settle()
         #expect(!rig.state.isOpen)
     }
 
@@ -480,7 +504,9 @@ struct TextMessageTests {
     /// labels and UIKit text inputs it draws once it has settled.
     private func draw<Content: View>(
         _ view: Content, height: CGFloat = 900
-    ) async throws -> (labels: [String], inputs: [(placeholder: String?, type: UITextContentType?)]) {
+    ) async throws -> (
+        labels: [String], inputs: [(placeholder: String?, type: UITextContentType?)], frames: [(label: String, y: CGFloat)]
+    ) {
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let container = UIViewController()
@@ -505,8 +531,8 @@ struct TextMessageTests {
             node.subviews.forEach(walk)
         }
         walk(hosting.view)
-        let labels = SideKeysTouchTests.elements(in: hosting.view).map(\.label)
-        return (labels, inputs)
+        let elements = SideKeysTouchTests.elements(in: hosting.view)
+        return (elements.map(\.label), inputs, elements.map { ($0.label, $0.frame.minY) })
     }
 
     @Test func onlyTheMessageBoxHasTheOneTimeCodeContentType() async throws {
@@ -590,5 +616,12 @@ struct TextMessageTests {
         defer { offered.cleanUp() }
         let offeredLabels = try await draw(SessionSettingsSheet(large: true).environment(offered.model), height: 2600).labels
         #expect(offeredLabels.contains { $0.contains(SmsMessages.row) }, "\(offeredLabels)")
+        // The row is a group of its own under ADB over network's footer, so the footer describes the toggle alone.
+        let ys = try await draw(SessionSettingsSheet(large: true).environment(offered.model), height: 2600).frames
+        let toggleY = try #require(ys.first { $0.label.contains("ADB over network") }?.y, "\(ys)")
+        let footerY = try #require(
+            ys.first { $0.label.contains("USB debugging") || $0.label.contains("same network") }?.y, "\(ys)")
+        let rowY = try #require(ys.first { $0.label.contains(SmsMessages.row) }?.y)
+        #expect(toggleY < footerY && footerY < rowY, "\(ys)")
     }
 }
