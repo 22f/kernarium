@@ -230,8 +230,10 @@ set_tests_properties(android17-oldapp-switch-command PROPERTIES
     SKIP_RETURN_CODE 77)
 
 # The text message service's logic on a plain JVM: the PDUs it builds, read back
-# with the platform's own UTF-16 decoder, the argument's parsing and the memory
-# of the identifiers it has delivered. It skips (77) where the host has no JDK.
+# with the platform's own UTF-16 decoder, the request's parsing and the answers,
+# the delivery record (never twice, at every point a request can end at), and the
+# host channel's server, frame and admission over stand-ins for the platform's
+# socket classes. It skips (77) where the host has no JDK.
 uml_add_tooling_test(
     NAME android17-sms-service
     COMMAND ${Python3_EXECUTABLE} -B

@@ -234,10 +234,9 @@ public final class SmsServiceTest {
                 // refused
             }
             try {
-                Message.parse(argument("Bank", body));
-                check(false, "the parser took U+FFFE at " + p);
-            } catch (IllegalArgumentException expected) {
-                // refused
+                check(!accepts("Bank", body), "the rules took U+FFFE at " + p);
+            } catch (RuntimeException e) {
+                check(false, "the rules threw " + e);
             }
         }
     }
@@ -246,220 +245,109 @@ public final class SmsServiceTest {
         return Base64.getEncoder().encodeToString(text.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static final String ID = "0123456789abcdef0123456789abcdef";
+    static final String ID = "0123456789abcdef0123456789abcdef";
 
-    private static String argument(String sender, String body) {
-        return argument(sender, body, ID);
+    /** A request as the host makes it, with an encoder of the test's own. */
+    static byte[] request(String attempt, String identifier, String sender, String body) {
+        return ("2." + attempt + "." + identifier + "." + base64(sender) + "." + base64(body))
+                .getBytes(StandardCharsets.US_ASCII);
     }
 
-    private static String argument(String sender, String body, String identifier) {
-        return base64(sender) + "." + base64(body) + "." + identifier;
+    private static Message.Parsed parse(String sender, String body) {
+        return Message.parse(request("first", ID, sender, body));
     }
 
-    private static String identifier(int number) {
-        return String.format("%032x", number);
+    /** Whether the request parses and its sender and text pass the rules. */
+    private static boolean accepts(String sender, String body) {
+        final Message.Parsed parsed = parse(sender, body);
+        return parsed.kind == Message.Kind.REQUEST && parsed.message.broken() == null;
     }
 
-    /** The inbox of a stand-in for Delivery: what the service handed to Android, in order. */
-    private static final class Inbox {
-        final List<String> messages = new ArrayList<>();
-
-        int deliver(Message message) {
-            synchronized (messages) {
-                messages.add(message.sender + ": " + message.body);
-            }
-            return DeliverPdu.split(message.body).size();
-        }
-    }
-
-    private static DeliveredIdentifiers.Result handOver(DeliveredIdentifiers identifiers, Inbox inbox, String argument) {
-        final Message message = Message.parse(argument);
-        return identifiers.deliver(message.identifier, () -> inbox.deliver(message));
-    }
-
-    private static void identifierRequired() {
-        final String ok = argument("Bank", "hi");
-        same(ID, Message.parse(ok).identifier, "the identifier is carried");
-        final String[] bad = {
-            base64("Bank") + "." + base64("hi"), // none
-            base64("Bank") + "." + base64("hi") + ".", // empty
-            ok.substring(0, ok.length() - 1), // short
-            ok + "0", // long
-            argument("Bank", "hi", "0123456789ABCDEF0123456789ABCDEF"), // upper case
-            argument("Bank", "hi", "0123456789abcdef0123456789abcdeg"), // not hex
-            argument("Bank", "hi", "0123456789abcdef0123456789abcde-"),
-            ok + ".00", // a fourth field
-        };
-        for (String argument : bad) {
-            try {
-                Message.parse(argument);
-                check(false, "the parser took <" + argument + ">");
-            } catch (IllegalArgumentException expected) {
-                // refused
-            }
-        }
-    }
-
-    private static boolean accepts(String argument) {
-        try {
-            Message.parse(argument);
-            return true;
-        } catch (IllegalArgumentException e) {
-            return false;
-        }
-    }
-
-    /** What Message.parse accepts of the sender and the text, as it did before the identifier. */
+    /** What the rules accept of the sender and the text. */
     private static void parserRules() {
         final String[] senders = {
             "+15551234567", "12345", "1", "+1", "12345678901234567890", "+12345678901234567890", "Bank", "My Bank 24",
             "ElevenChars", "A B", "12 34", " x",
         };
-        for (String sender : senders) check(accepts(argument(sender, "hi")), "accepted sender <" + sender + ">");
+        for (String sender : senders) check(accepts(sender, "hi"), "accepted sender <" + sender + ">");
         final String[] notSenders = {
             "", " ", "           ", "+", "123456789012345678901", "+123456789012345678901", "TwelveChars!", "Twelve Chars",
             "B\u00E4nk", "a-b", "+12 34", "a.b", "\u0661\u0662", "Bank\n",
         };
-        for (String sender : notSenders) check(!accepts(argument(sender, "hi")), "refused sender <" + sender + ">");
+        for (String sender : notSenders) check(!accepts(sender, "hi"), "refused sender <" + sender + ">");
         final String[] texts = {
             "h", "hello", "x".repeat(670), "\uD83D\uDE00".repeat(335), "line\nbreak\r\n", "\uFEFFmark", "tab\tnul\u0000",
             "\uFFFF", "\u0645\u0631\u062D\u0628\u0627",
         };
-        for (String text : texts) check(accepts(argument("Bank", text)), "accepted text " + describe(text));
+        for (String text : texts) check(accepts("Bank", text), "accepted text " + describe(text));
         final String[] notTexts = {"", "x".repeat(671), "\uD83D\uDE00".repeat(336), "x".repeat(669) + "\uD83D\uDE00"};
-        for (String text : notTexts) check(!accepts(argument("Bank", text)), "refused text " + describe(text));
-        // The shape of the argument.
-        check(!accepts(null), "no argument");
-        check(!accepts(""), "empty argument");
-        check(!accepts(base64("Bank") + base64("hi") + "." + ID), "a dot missing");
-        check(!accepts("!!!." + base64("hi") + "." + ID), "sender not base64");
-        check(!accepts(base64("Bank") + ".!!!." + ID), "text not base64");
-        check(!accepts(base64("Bank") + "." + java.util.Base64.getEncoder().encodeToString(new byte[] {(byte) 0xc3, 0x28})
-                + "." + ID), "text not UTF-8");
-        check(!accepts(java.util.Base64.getEncoder().encodeToString(new byte[] {(byte) 0xc3, 0x28})
-                + "." + base64("hi") + "." + ID), "sender not UTF-8");
-        check(!accepts(java.util.Base64.getEncoder().encodeToString(new byte[] {(byte) 0xed, (byte) 0xa0, (byte) 0x80})
-                + "." + base64("hi") + "." + ID), "an encoded surrogate is not UTF-8");
-        check(!accepts(base64("Bank") + "." + java.util.Base64.getEncoder().encodeToString(
-                new byte[] {(byte) 0xed, (byte) 0xa0, (byte) 0x80}) + "." + ID), "an encoded lone surrogate in the text");
-        // What came through is what was sent.
-        final Message message = Message.parse(argument("+15551234567", "caf\u00E9 \uD83D\uDE00"));
+        for (String text : notTexts) check(!accepts("Bank", text), "refused text " + describe(text));
+        // What came through is what was sent, and the attempt and the identifier with it.
+        final Message message = parse("+15551234567", "caf\u00E9 \uD83D\uDE00").message;
         same("+15551234567", message.sender, "sender");
         same("caf\u00E9 \uD83D\uDE00", message.body, "text");
+        same(ID, message.identifier, "identifier");
+        check(!message.retry, "a first attempt");
+        check(Message.parse(request("retry", ID, "Bank", "hi")).message.retry, "a retry");
     }
 
-    /** The host sends the same identifier again when it did not see the answer: the message is stored once. */
-    private static void retryAfterALostReply() {
-        final DeliveredIdentifiers identifiers = new DeliveredIdentifiers();
-        final Inbox inbox = new Inbox();
-        final String argument = argument("+15551234567", "code 123456", identifier(1));
-        final DeliveredIdentifiers.Result first = handOver(identifiers, inbox, argument);
-        same(1, first.parts, "parts of the first call");
-        check(!first.repeat, "the first call hands the message over");
-        // The reply was lost: the same call again.
-        final DeliveredIdentifiers.Result second = handOver(identifiers, inbox, argument);
-        check(second.repeat, "the second call is a repeat");
-        same(first.parts, second.parts, "a repeat answers with the first call's parts");
-        same(List.of("+15551234567: code 123456"), inbox.messages, "stored once");
-        // The same text under a new identifier is a new message.
-        handOver(identifiers, inbox, argument("+15551234567", "code 123456", identifier(2)));
-        same(2, inbox.messages.size(), "the same text again, as a new message");
-        // A call that fails is not remembered: its retry hands the message over.
-        final String failing = argument("Bank", "later", identifier(3));
-        try {
-            identifiers.deliver(Message.parse(failing).identifier, () -> {
-                throw new IllegalStateException("broadcast refused");
-            });
-            check(false, "the failure was swallowed");
-        } catch (IllegalStateException expected) {
-            // passed on to the caller
+    /** The request parser against the golden vectors (the host's encoder is tested against the same bytes). */
+    private static void goldenRequests() throws Exception {
+        final Golden golden = Golden.load();
+        int requests = 0;
+        for (String name : golden.names("request-")) {
+            final String[] fields = golden.fields(name);
+            final byte[] payload = Golden.bytes(golden.after(name));
+            final Message.Parsed parsed = Message.parse(payload);
+            same(Message.Kind.REQUEST, parsed.kind, name + " is a request");
+            if (parsed.kind != Message.Kind.REQUEST) continue;
+            ++requests;
+            same(fields[0].equals("retry"), parsed.message.retry, name + " attempt");
+            same(fields[1], parsed.message.identifier, name + " identifier");
+            same(new String(Golden.bytes(fields[2]), StandardCharsets.UTF_8), parsed.message.sender, name + " sender");
+            same(new String(Golden.bytes(fields[3]), StandardCharsets.UTF_8), parsed.message.body, name + " text");
+            // The test's own encoder makes the same bytes.
+            same(new String(payload, StandardCharsets.US_ASCII), new String(request(fields[0], fields[1],
+                    parsed.message.sender, parsed.message.body), StandardCharsets.US_ASCII), name + " encodes as golden");
         }
-        check(!handOver(identifiers, inbox, failing).repeat, "a failed call is tried again");
-        same(3, inbox.messages.size(), "stored after the retry of a failure");
+        check(requests >= 6, "the golden requests were read (" + requests + ")");
+        same(2750, Golden.bytes(golden.after("request-first-longest")).length, "the longest request");
+        for (String name : golden.names("refuse-")) {
+            same(Message.Kind.NOT_A_REQUEST, Message.parse(Golden.bytes(golden.fields(name)[0])).kind, name);
+        }
+        for (String name : golden.names("version-")) {
+            same(Message.Kind.REFUSED_VERSION, Message.parse(Golden.bytes(golden.fields(name)[0])).kind, name);
+        }
+        check(golden.names("refuse-").size() >= 15, "the golden refusals were read");
+        check(Message.parse(new byte[0]).kind == Message.Kind.NOT_A_REQUEST, "an empty payload");
+        check(Message.parse(null).kind == Message.Kind.NOT_A_REQUEST, "no payload");
     }
 
-    /** Messages in flight at once never share a call, and one identifier is never handed over twice. */
-    private static void messagesInFlight() throws InterruptedException {
-        final DeliveredIdentifiers identifiers = new DeliveredIdentifiers();
-        final Inbox inbox = new Inbox();
-        final java.util.concurrent.CountDownLatch inside = new java.util.concurrent.CountDownLatch(1);
-        final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
-        final java.util.concurrent.atomic.AtomicInteger deliveries = new java.util.concurrent.atomic.AtomicInteger();
-        final List<DeliveredIdentifiers.Result> results = java.util.Collections.synchronizedList(new ArrayList<>());
-        final Message a = Message.parse(argument("Alice", "first " + "a".repeat(100), identifier(10)));
-        final Message b = Message.parse(argument("Bob", "second", identifier(11)));
-        // A is handed over slowly; B and a retry of A arrive meanwhile.
-        final Thread slowA = new Thread(() -> results.add(identifiers.deliver(a.identifier, () -> {
-            deliveries.incrementAndGet();
-            inside.countDown();
-            try {
-                release.await();
-            } catch (InterruptedException e) {
-                throw new IllegalStateException(e);
-            }
-            return inbox.deliver(a);
-        })));
-        slowA.start();
-        inside.await();
-        final Thread otherB = new Thread(() -> results.add(identifiers.deliver(b.identifier, () -> {
-            deliveries.incrementAndGet();
-            return inbox.deliver(b);
-        })));
-        final Thread retryA = new Thread(() -> results.add(identifiers.deliver(a.identifier, () -> {
-            deliveries.incrementAndGet();
-            return inbox.deliver(a);
-        })));
-        otherB.start();
-        retryA.start();
-        // Both wait for A's delivery: the lock is what holds them. Without it
-        // they run to their end at once and A is handed over twice, which the
-        // check below states directly instead of leaving it to a race.
-        final long deadline = System.nanoTime() + 10_000_000_000L;
-        while ((!waiting(otherB) || !waiting(retryA)) && System.nanoTime() < deadline) {
-            Thread.sleep(5);
+    /** Every form of an answer, byte for byte, and the longest. */
+    private static void goldenAnswers() throws Exception {
+        final Golden golden = Golden.load();
+        final String id = golden.fields("answer-handed-over-1")[0];
+        final Object[][] cases = {
+            {"answer-handed-over-1", Answer.handedOver(id, 1)},
+            {"answer-handed-over-11", Answer.handedOver(id, 11)},
+            {"answer-handed-over-earlier-1", Answer.handedOverEarlier(id, 1)},
+            {"answer-handed-over-earlier-11", Answer.handedOverEarlier(id, 11)},
+            {"answer-not-handed-over-invalid", Answer.notHandedOver(id, Answer.INVALID)},
+            {"answer-not-handed-over-plan", Answer.notHandedOver(id, Answer.PLAN)},
+            {"answer-not-handed-over-store", Answer.notHandedOver(id, Answer.STORE)},
+            {"answer-uncertain-interrupted", Answer.uncertain(id, Answer.INTERRUPTED)},
+            {"answer-uncertain-unknown", Answer.uncertain(id, Answer.UNKNOWN)},
+            {"answer-uncertain-conflict", Answer.uncertain(id, Answer.CONFLICT)},
+            {"answer-unsettled-store", Answer.unsettled(id)},
+            {"answer-refused-version", Answer.refusedVersion()},
+        };
+        for (Object[] one : cases) {
+            final String name = (String) one[0];
+            check(Arrays.equals(Golden.bytes(golden.after(name)), (byte[]) one[1]), name + " is the golden bytes");
         }
-        check(otherB.getState() != Thread.State.TERMINATED, "B was held while A was being handed over");
-        check(retryA.getState() != Thread.State.TERMINATED, "the retry of A was held while A was being handed over");
-        release.countDown();
-        slowA.join(20_000);
-        otherB.join(20_000);
-        retryA.join(20_000);
-        check(!slowA.isAlive() && !otherB.isAlive() && !retryA.isAlive(), "the calls finish");
-        same(2, deliveries.get(), "A and B are each handed over once");
-        same(3, results.size(), "three answers");
-        same(2, inbox.messages.size(), "two messages stored");
-        check(inbox.messages.contains("Alice: " + a.body) && inbox.messages.contains("Bob: second"),
-                "each message is stored as it was sent: " + inbox.messages);
-        int repeats = 0;
-        for (DeliveredIdentifiers.Result result : results) {
-            if (result.repeat) ++repeats;
-        }
-        same(1, repeats, "the retry of A is the one repeat");
-        for (DeliveredIdentifiers.Result result : results) {
-            check(result.parts == 1 || result.parts == DeliverPdu.split(a.body).size(), "parts " + result.parts);
-        }
-    }
-
-    /** Whether {@code thread} stands behind a lock or a wait, or has ended. */
-    private static boolean waiting(Thread thread) {
-        final Thread.State state = thread.getState();
-        return state == Thread.State.BLOCKED || state == Thread.State.WAITING
-                || state == Thread.State.TIMED_WAITING || state == Thread.State.TERMINATED;
-    }
-
-    /** The memory is bounded: the oldest identifier goes first. */
-    private static void identifierMemory() {
-        final DeliveredIdentifiers identifiers = new DeliveredIdentifiers();
-        final Inbox inbox = new Inbox();
-        for (int i = 0; i < DeliveredIdentifiers.CAPACITY; ++i) {
-            handOver(identifiers, inbox, argument("Bank", "m" + i, identifier(1000 + i)));
-        }
-        check(handOver(identifiers, inbox, argument("Bank", "m0", identifier(1000))).repeat,
-                "the oldest is still known at the capacity");
-        handOver(identifiers, inbox, argument("Bank", "new", identifier(5000)));
-        check(!handOver(identifiers, inbox, argument("Bank", "m0", identifier(1000))).repeat,
-                "past the capacity the oldest is forgotten");
-        check(handOver(identifiers, inbox, argument("Bank", "new", identifier(5000))).repeat, "the newest is known");
+        same(58, ((byte[]) cases[4][1]).length, "the longest answer");
+        same(57, ((byte[]) cases[3][1]).length, "the longest answer but one");
+        same(0, Answer.EMPTY.length, "the empty answer");
     }
 
     /** The most parts: the bound in Message, reached by a text of surrogate pairs on every split. */
@@ -592,10 +480,8 @@ public final class SmsServiceTest {
         partCount();
         random();
         parserRules();
-        identifierRequired();
-        retryAfterALostReply();
-        messagesInFlight();
-        identifierMemory();
+        goldenRequests();
+        goldenAnswers();
         if (failures != 0) {
             System.out.println(failures + " failure(s)");
             System.exit(1);

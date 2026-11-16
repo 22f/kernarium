@@ -533,7 +533,7 @@ PRODUCT_PACKAGES += KernariumWifiOverlay
 PRODUCT_PACKAGES += KernariumPinnerOverlay
 
 # Text messages come from the host only: the Andarium application sends one
-# over its adb channel to KernariumSms (sms/), which delivers it as the radio
+# over its own vsock port to KernariumSms (sms/), which delivers it as the radio
 # stack delivers one from the network. Messaging is the SMS application and
 # TelephonyProvider stores the messages. The product declares
 # android.hardware.telephony.messaging and config_sms_capable, which the SMS
