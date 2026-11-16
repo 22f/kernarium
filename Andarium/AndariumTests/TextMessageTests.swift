@@ -372,6 +372,78 @@ struct TextMessageTests {
         #expect(await eventually { state.awaiting == nil && noticeText(rig) == header })
     }
 
+    /// The line is what is told: a result nobody was told stays on it whatever is typed after the result, so a
+    /// count, a refusal or the cap never stands where the result was, and VoiceOver's focus or Send's repeat
+    /// reaches the result's words.
+    @Test func anUntoldResultStaysOnTheLineWhateverIsTypedAfterIt() async throws {
+        let rig = try rig(voiceOver: true)
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        #expect(await send(rig, "one", .uncertain("unknown")))
+        // The announcement was dropped: the result is still to be told.
+        rig.said.finishLast(false)
+        await settle()
+        #expect(state.awaiting != nil && rig.driver.textMessageNotice.currentEntries.count == 1)
+        let drafts: [(sender: String, text: String)] = [
+            (GuestSms.defaultSender, String(repeating: "a", count: GuestSms.maximumUnits - 40)),
+            (GuestSms.defaultSender, String(repeating: "a", count: GuestSms.maximumUnits + 12)),
+            (GuestSms.defaultSender, "Code \u{FFFE} 482913"),
+            ("Shop & Go", "two"),
+        ]
+        let awaited = TextMessageStatus(words: SmsMessages.uncertain, tone: .problem)
+        for draft in drafts {
+            model.setTextMessageSender(draft.sender)
+            model.setTextMessageText(draft.text)
+            #expect(state.status(availability: .ready) == awaited, "the line shows the result under \(draft.text.prefix(12))")
+        }
+        // Send, with the result untold, sends nothing and names it again.
+        let focuses = state.statusFocusRequests
+        model.sendTextMessage()
+        await settle()
+        #expect(rig.driver.smsSent.count == 1)
+        #expect(rig.said.lines.last == SmsMessages.uncertain && state.statusFocusRequests == focuses + 1)
+        // Focus reached the line, which says the result: it is told, and the draft's own line follows.
+        model.textMessageLineFocused()
+        #expect(await eventually { state.awaiting == nil && noticeText(rig) == header })
+        #expect(state.status(availability: .ready)?.words != SmsMessages.uncertain)
+    }
+
+    /// A line that is not the result's (Android is paused, and says so) is never counted as the result told:
+    /// not by VoiceOver's focus, and not without VoiceOver, where the result waits for its line to be on screen.
+    @Test func aLineThatIsNotTheResultsIsNeverCountedAsTheResultTold() async throws {
+        let withVoiceOver = try rig(voiceOver: true)
+        defer { withVoiceOver.cleanUp() }
+        withVoiceOver.model.openTextMessage()
+        #expect(await send(withVoiceOver, "one", .uncertain("unknown")))
+        withVoiceOver.said.finishLast(false)
+        withVoiceOver.model.guestPausingForSpace(freeBytes: 100_000_000)
+        #expect(withVoiceOver.state.status(availability: withVoiceOver.model.textMessageAvailability)?.words == SmsMessages.paused)
+        withVoiceOver.model.textMessageLineFocused()
+        await settle()
+        #expect(withVoiceOver.state.awaiting != nil && withVoiceOver.driver.textMessageNotice.currentEntries.count == 1)
+        withVoiceOver.model.spacePause = nil
+        withVoiceOver.model.textMessageLineFocused()
+        #expect(await eventually { withVoiceOver.state.awaiting == nil && noticeText(withVoiceOver) == header })
+
+        // Without VoiceOver the answer comes while Android is paused: the pause's line is on screen, not the
+        // result's, and the result is told once the pause ends (the bar asks the model when availability changes).
+        let plain = try rig()
+        defer { plain.cleanUp() }
+        plain.model.openTextMessage()
+        plain.model.setTextMessageText("one")
+        plain.model.sendTextMessage()
+        #expect(await eventually { plain.answers.pending == 1 })
+        plain.model.guestPausingForSpace(freeBytes: 100_000_000)
+        plain.answers.release(.uncertain("unknown"))
+        #expect(await eventually { plain.state.progress == .uncertain })
+        await settle()
+        #expect(plain.state.awaiting != nil && plain.driver.textMessageNotice.currentEntries.count == 1)
+        plain.model.spacePause = nil
+        plain.model.presentTextMessageLine()
+        #expect(await eventually { plain.state.awaiting == nil && noticeText(plain) == header })
+    }
+
     @Test func aRunThatEndedWithTheAnswerAwaitedLeavesTheCutOffLineForTheNextOpening() async throws {
         for restart in [false, true] {
             let rig = try rig()

@@ -255,9 +255,10 @@ final class TextMessageState {
         announced = true
     }
 
-    /// VoiceOver focus reached the status line.
-    func statusLineFocused() {
-        if awaiting != nil { announced = true }
+    /// VoiceOver focus reached the status line, which shows `shown`: only the
+    /// awaited line's own words are the result told.
+    func statusLineFocused(shown: String?) {
+        if awaiting != nil, shown == words { announced = true }
     }
 
     func requestStatusFocus() { statusFocusRequests += 1 }
@@ -283,6 +284,9 @@ final class TextMessageState {
         case .paused: return TextMessageStatus(words: SmsMessages.paused, tone: .info)
         case .ready: break
         }
+        // A result that waits to be presented keeps the line, whatever is typed
+        // after it: counts and refusals wait, so what is told is what was shown.
+        if awaiting != nil, let awaited = awaitedStatus { return awaited }
         switch progress {
         case .sending:
             return nil
@@ -302,6 +306,16 @@ final class TextMessageState {
             break
         }
         return senderStatus ?? textProblem ?? waitingStatus ?? textStatus
+    }
+
+    /// The awaited result's line.
+    private var awaitedStatus: TextMessageStatus? {
+        guard let words else { return nil }
+        switch progress {
+        case .sent, .deliveredEarlier: return TextMessageStatus(words: words, tone: .good)
+        case .certainlyNotSent, .notConfirmed, .uncertain, .cutOff: return TextMessageStatus(words: words, tone: .problem)
+        case .idle, .sending: return nil
+        }
     }
 
     /// Sixteen sends wait: this draft is not one of them, and waits for a restart.
@@ -424,6 +438,8 @@ extension AppModel {
     func presentTextMessageLine() {
         let state = session.textMessage
         guard state.awaiting != nil, state.isOpen, textMessageSceneActive else { return }
+        // On screen means the awaited line itself: a pause or a refusal in its place tells nothing.
+        guard state.status(availability: textMessageAvailability)?.words == state.words else { return }
         if textMessageVoiceOver(), !state.announced { return }
         let notice = textMessageNotice
         switch state.presented() {
@@ -441,7 +457,8 @@ extension AppModel {
 
     /// VoiceOver focus reached the status line.
     func textMessageLineFocused() {
-        session.textMessage.statusLineFocused()
+        let state = session.textMessage
+        state.statusLineFocused(shown: state.status(availability: textMessageAvailability)?.words)
         presentTextMessageLine()
     }
 

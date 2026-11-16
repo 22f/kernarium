@@ -164,6 +164,8 @@ struct TextMessageBar: View {
         // pause card does not cover the bar's title and Close.
         .onChange(of: model.textMessageAvailability) { _, now in
             if now == .paused { focus = nil }
+            // A result that waited for its line while Android was paused is shown now.
+            model.presentTextMessageLine()
         }
         // A request to take VoiceOver to the status line: a result that was not
         // told yet, asked about again, or the cut-off line.
