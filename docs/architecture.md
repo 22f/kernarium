@@ -552,7 +552,8 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   immutable, cannot execute, or has no stamp is compared as before, and the
   table (process-global, direct-mapped) is a hint that may forget.
   `UML_AOT_SHARED_VERDICTS=OFF` builds a runtime that never asks, to measure
-  what sharing buys.
+  what sharing buys; the differential's shared rows expect a second hash
+  there and pass in both settings.
 - Entry: only at an instruction the framework covers, in a state the engine
   would run the same way: no single step, PSTATE.SM clear, no FPCR trap
   enable, FPCR.FIZ, AH and NEP clear (read as the guest's, whether or not its

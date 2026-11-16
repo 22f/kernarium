@@ -1478,6 +1478,21 @@ struct SharedRun final {
 	return {std::move(result), aot::stats()};
 }
 
+#ifndef AOT_TEST_SHARED_VERDICTS
+#define AOT_TEST_SHARED_VERDICTS 1
+#endif
+
+/* Whether a second address space on a shared immutable frame is answered by
+ * the table (the default) or hashes the page again, which is all a build
+ * with UML_AOT_SHARED_VERDICTS off does: every row that expects an answer
+ * expects the other outcome there, and the results stay the same. */
+[[nodiscard]] bool answered_by_the_table(const aot::Stats &s)
+{
+	if (AOT_TEST_SHARED_VERDICTS != 0)
+		return s.shared_hits >= 1 && s.verifications == 0;
+	return s.shared_hits == 0 && s.verifications >= 1;
+}
+
 /* A verdict that a physical page held a library page's bytes is shared by
  * the address spaces that map the page, but only while the kernel says the
  * page is immutable in the mapping asked, the memory layer says nothing has
@@ -1540,8 +1555,8 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 		auto second = guest(frame, true);
 		const auto b = run_shared(*second, c);
 		require(same(want, b.result, c));
-		require(b.stats.enters > 0 && b.stats.shared_hits >= 1 &&
-			b.stats.verifications == 0 && b.stats.poisoned == 0);
+		require(b.stats.enters > 0 && answered_by_the_table(b.stats) &&
+			b.stats.poisoned == 0);
 		/* The first guest, asked again, finds its pages compared. */
 		std::fprintf(stderr, "hits %llu; ",
 			static_cast<unsigned long long>(b.stats.shared_hits));
@@ -1571,7 +1586,7 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 		auto fourth = guest(frame, true);
 		const auto e = run_shared(*fourth, c);
 		require(same(want, e.result, c));
-		require(e.stats.shared_hits >= 1 && e.stats.verifications == 0);
+		require(answered_by_the_table(e.stats));
 		auto fifth = guest(frame, false);
 		const auto f = run_shared(*fifth, c);
 		require(same(want, f.result, c));
@@ -1633,7 +1648,9 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 		const auto a = run_shared(*first, c);
 		const auto b = run_shared(*second, c);
 		require(same(want, a.result, c) && same(want, b.result, c));
-		require(a.stats.enters > 0 && b.stats.shared_hits >= 1);
+		require(a.stats.enters > 0 && b.stats.enters > 0 &&
+			(AOT_TEST_SHARED_VERDICTS != 0 ? b.stats.shared_hits >= 1 :
+			 b.stats.shared_hits == 0));
 		put_changed_page(frame);
 		require(darwin_uml_static_vm_activate(first->env.generation) == 0);
 		first->env.memory.invalidate_code(first->env.bias + fn.start);
@@ -1656,7 +1673,9 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 		const auto a = run_shared(*first, c);
 		const auto b = run_shared(*second, c);
 		require(same(want, a.result, c) && same(want, b.result, c));
-		require(a.stats.enters > 0 && b.stats.shared_hits >= 1);
+		require(a.stats.enters > 0 && b.stats.enters > 0 &&
+			(AOT_TEST_SHARED_VERDICTS != 0 ? b.stats.shared_hits >= 1 :
+			 b.stats.shared_hits == 0));
 		unmap_page(*first);
 		unmap_page(*second);
 		put_changed_page(frame);

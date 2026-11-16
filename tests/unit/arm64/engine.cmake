@@ -492,6 +492,7 @@
         target_compile_definitions(uml_arm64_aot_differential_tests PRIVATE
             UML_AOT_DIAGNOSTICS=1
             AOT_TEST_COUNT_RETIRED=$<BOOL:${UML_AOT_COUNT_RETIRED}>
+            AOT_TEST_SHARED_VERDICTS=$<BOOL:${UML_AOT_SHARED_VERDICTS}>
             AOT_TEST_LIBRARIES="${_uml_aot_libraries}"
             AOT_TEST_FUNCTIONS="${_uml_aot_functions}"
             AOT_TEST_SITES="${_uml_aot_sites}")
