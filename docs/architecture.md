@@ -396,7 +396,8 @@ store to the reserved granule; a store of the guest's own to another granule
 leaves it standing, as on hardware (`arm64-exclusive-progress`,
 `arm64-exclusive-events`, `arm64-jit-exclusive_completion`,
 `arm64-jit-reservation_alias`, `arm64-jit-exclusive_run_fetch`,
-`arm64-jit-exclusive_run_runtime`, `arm64-jit-a32-exclusive`,
+`arm64-jit-exclusive_run_runtime`, `arm64-jit-exclusive_run_contention`,
+`arm64-jit-a32-exclusive`,
 `guest-exclusive-progress-gadgets`/`-jit`).
 
 Both engines complete WFE and WFI at once and treat SEV and SEVL as no-ops, so
