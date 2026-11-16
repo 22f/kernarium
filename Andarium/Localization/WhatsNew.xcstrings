@@ -1,6 +1,29 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "A camera recording now ends and is saved when you leave Andarium" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumを離れると、カメラの録画が終了して保存されるようになりました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "离开Andarium时，相机录制现在会结束并保存"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "離開Andarium時，相機錄影現在會結束並儲存"
+          }
+        }
+      }
+    },
     "Browse the virtual machine’s internal storage, and import or export files and folders." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -47,6 +70,29 @@
         }
       }
     },
+    "Camera lenses" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "カメラのレンズ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相机镜头"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相機鏡頭"
+          }
+        }
+      }
+    },
     "Email the developer from the Info menu on Home, or from Settings while the virtual machine runs, with screenshots and a bug report if you like." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -89,6 +135,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "檔案瀏覽器"
+          }
+        }
+      }
+    },
+    "Fixed 3D graphics failing to start in apps that run PC programs" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PC用のプログラムを実行するアプリで3Dグラフィックスが起動しない問題を修正しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修复了在运行PC程序的应用中3D图形无法启动的问题"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修正在執行PC程式的應用程式中3D圖形無法啟動的問題"
           }
         }
       }
@@ -277,6 +346,75 @@
         }
       }
     },
+    "Fixed the camera preview freezing after you take a photo" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "写真を撮ったあとにカメラのプレビューが止まる問題を修正しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修复了拍照后相机预览画面卡住的问题"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修正拍照後相機預覽畫面停住的問題"
+          }
+        }
+      }
+    },
+    "Fixed the camera preview lagging behind in video mode" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ビデオモードでカメラのプレビューが遅れる問題を修正しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修复了视频模式下相机预览画面延迟的问题"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修正錄影模式下相機預覽畫面延遲的問題"
+          }
+        }
+      }
+    },
+    "Fixed the first half second of a video recording having no sound" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ビデオ録画の最初の約0.5秒に音が入らない問題を修正しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修复了视频录制开头约半秒没有声音的问题"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修正錄影開頭約半秒沒有聲音的問題"
+          }
+        }
+      }
+    },
     "Fixed the virtual machine crashing on many iPhones" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -346,6 +484,29 @@
         }
       }
     },
+    "Fixes and improvements" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修正と改善"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修复与改进"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修正與改進"
+          }
+        }
+      }
+    },
     "Haptics" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -365,6 +526,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "觸覺回饋"
+          }
+        }
+      }
+    },
+    "If an app built for an Android version before 4.0 crashes, turn on Old app compatibility for it. Android then runs that app more like older versions did." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android 4.0より前のバージョン向けに作られたアプリがクラッシュする場合は、そのアプリの“古いアプリの互換性”をオンにしてください。Androidがそのアプリを以前のバージョンに近い方法で実行します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "如果为Android 4.0之前的版本开发的应用闪退，请为它打开“旧版应用兼容”。Android会以更接近旧版本的方式运行该应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "若為Android 4.0之前的版本開發的應用程式閃退，請為它開啟「舊版應用程式相容性」。Android會以更接近舊版本的方式執行該應用程式。"
+          }
+        }
+      }
+    },
+    "Improved how sound and the microphone come back after you leave Andarium and return" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumを離れて戻ったあとに、サウンドとマイクが復帰する仕組みを改善しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "改进了离开Andarium后返回时声音和麦克风的恢复方式"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "改進了離開Andarium後返回時聲音和麥克風的恢復方式"
           }
         }
       }
@@ -480,6 +687,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "更多記憶體"
+          }
+        }
+      }
+    },
+    "Old app compatibility" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "古いアプリの互換性"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "旧版应用兼容"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "舊版應用程式相容性"
           }
         }
       }
@@ -756,6 +986,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "穩定性修正"
+          }
+        }
+      }
+    },
+    "The virtual machine’s camera app now has a button for each of this device’s back lenses, such as ultra wide, main and telephoto. Pinch to zoom is off; choose a lens instead." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンのカメラアプリに、このデバイスの背面レンズ（超広角、メイン、望遠など）ごとのボタンが表示されるようになりました。ピンチでのズームはオフです。代わりにレンズを選んでください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机的相机应用现在为此设备的每个后置镜头（如超广角、主摄和长焦）提供一个按钮。双指张合缩放已关闭，请改为选择镜头。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器的相機應用程式現在為此裝置的每個後置鏡頭（如超廣角、主鏡頭和長焦）提供一個按鈕。雙指縮放已關閉，請改為選擇鏡頭。"
           }
         }
       }
