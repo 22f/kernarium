@@ -83,6 +83,10 @@ REPORT_SECONDS = 3
 # has megabytes. It is residency evidence, not proof of execution.
 MIN_RESIDENT_BYTES = 1 << 20
 WORKLOAD_SECONDS = 900
+# The stack the memory layer's calls below a refill and a signal frame need,
+# which the sampling points above them cannot see (the differential test
+# paints a 64 KiB stack and measures the calls).
+MIN_STACK_FREE = 16 * 1024
 PROBE_SECONDS = 120
 TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
@@ -361,7 +365,7 @@ def read_report(path: pathlib.Path) -> dict[str, int]:
             prefix, rest = f"library.{rest[0]}.", rest[1:]
         elif head in ("find", "cross_miss", "refused"):
             prefix = head + "."
-        elif head in ("binds", "max_retired"):
+        elif head in ("binds", "max_retired", "stack_free"):
             rest = fields
         else:
             continue
@@ -617,6 +621,15 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
         print("report: enters {enters}, steps {steps}, poisoned {poisoned}, "
               "refills {refills}".format(**{k: on.report.get(k, 0) for k in (
                   "enters", "steps", "poisoned", "refills")}))
+        left = on.report.get("stack_free")
+        if left is not None:
+            print(f"stack: the least a thread had left where the runtime is deepest "
+                  f"(entry, refill, page verification): {left} bytes of "
+                  f"{on.report.get('stack_size', 0)}")
+            if left < MIN_STACK_FREE:
+                raise Failure(f"a thread had {left} bytes of stack left in the runtime, "
+                              f"less than the {MIN_STACK_FREE} the memory layer's own calls "
+                              "and a signal frame need")
         report_libraries(on.report, options)
 
 

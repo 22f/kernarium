@@ -341,6 +341,14 @@ class RunnerTest(unittest.TestCase):
         scenario["report"]["off"] = "binds 3 enters 4 steps 0 poisoned 0\n"
         self.fails(scenario, "ran with the component off", "--diagnostics")
 
+    def test_the_stack_the_runtime_left_is_judged(self):
+        scenario = good_scenario()
+        scenario["report"]["on"] += "stack_free 60000 stack_size 65536\n"
+        self.passes(scenario, "--diagnostics")
+        scenario["report"]["on"] = scenario["report"]["on"].replace(
+            "stack_free 60000", "stack_free 4096")
+        self.fails(scenario, "bytes of stack left", "--diagnostics")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

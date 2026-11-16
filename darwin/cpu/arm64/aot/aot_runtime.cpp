@@ -19,6 +19,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <pthread.h>
+#include <signal.h>
 #include <thread>
 #endif
 
@@ -230,7 +232,67 @@ std::array<std::array<std::atomic<std::uint64_t>, 7>, 64> library_finds{};
 std::array<std::atomic<std::uint64_t>, 3> cross_miss_kinds{};
 std::array<std::atomic<std::uint64_t>, 64> library_cross_misses{};
 std::atomic<bool> reporter_started{false};
+/* The least stack any sampled thread had left at the points where the
+ * runtime is deepest (entry, refill, page verification), and the stack size
+ * of the thread that had it. */
+std::atomic<std::uint64_t> stack_min_free{~std::uint64_t{0}};
+std::atomic<std::uint64_t> stack_size_at_min{0};
 } // namespace counters
+
+/* A Linux task stack: CONFIG_KERNEL_STACK_ORDER 4 at 4 KiB pages, in guest
+ * memory (never a host stack), aligned to its size like every page-order
+ * allocation. The guest kernel's threads run the executor on one. */
+constexpr std::uint64_t kernel_stack_bytes = 64 * 1024;
+
+/* Record how much of the stack the caller's frame is on is left. A frame on
+ * the thread's own host stack or its signal stack measures against that
+ * stack; any other is a Linux task stack, whose base is the frame rounded
+ * down to the stack size. */
+#define UML_AOT_SAMPLE_STACK() sample_stack(__builtin_frame_address(0))
+#define UML_AOT_SAMPLE_STACK_AT(lowest) sample_stack(lowest)
+
+[[gnu::noinline]] void sample_stack(const void *frame) noexcept
+{
+	struct HostStacks {
+		std::uintptr_t low[2];
+		std::uintptr_t high[2];
+	};
+	thread_local const HostStacks host = [] {
+		HostStacks stacks{};
+		const auto self = pthread_self();
+		const auto top = reinterpret_cast<std::uintptr_t>(
+			pthread_get_stackaddr_np(self));
+		stacks.high[0] = top;
+		stacks.low[0] = top - pthread_get_stacksize_np(self);
+		stack_t alternate;
+		if (sigaltstack(nullptr, &alternate) == 0 &&
+		    (alternate.ss_flags & SS_DISABLE) == 0) {
+			stacks.low[1] = reinterpret_cast<std::uintptr_t>(
+				alternate.ss_sp);
+			stacks.high[1] = stacks.low[1] + alternate.ss_size;
+		}
+		return stacks;
+	}();
+	const auto here = reinterpret_cast<std::uintptr_t>(frame);
+	std::uint64_t left = here & (kernel_stack_bytes - 1);
+	std::uint64_t size = kernel_stack_bytes;
+	for (int i = 0; i < 2; ++i) {
+		if (here >= host.low[i] && here < host.high[i]) {
+			left = here - host.low[i];
+			size = host.high[i] - host.low[i];
+			break;
+		}
+	}
+	auto least = counters::stack_min_free.load(std::memory_order_relaxed);
+	while (left < least) {
+		if (counters::stack_min_free.compare_exchange_weak(
+		        least, left, std::memory_order_relaxed)) {
+			counters::stack_size_at_min.store(size,
+				std::memory_order_relaxed);
+			break;
+		}
+	}
+}
 
 #define UML_AOT_COUNT(name, amount) \
 	counters::name.fetch_add((amount), std::memory_order_relaxed)
@@ -329,6 +391,8 @@ void write_report() noexcept
 		get(counters::code_bumps), get(counters::history_queries),
 		get(counters::mops_slow), get(counters::mops_fault),
 		get(counters::mops_illegal), get(counters::shared_hits));
+	std::fprintf(file, "stack_free %llu stack_size %llu\n",
+		get(counters::stack_min_free), get(counters::stack_size_at_min));
 	std::fprintf(file, "refused tbi %llu sp %llu exclusive %llu fp %llu "
 		"short %llu\n",
 		get(counters::refusals[0]), get(counters::refusals[1]),
@@ -392,6 +456,8 @@ void start_reporter() noexcept
 #define UML_AOT_COUNT(name, amount) ((void)0)
 inline void note_find(FindResult, std::uint32_t) noexcept {}
 #define UML_AOT_COUNT_LIBRARY(name, library) ((void)0)
+#define UML_AOT_SAMPLE_STACK() ((void)0)
+#define UML_AOT_SAMPLE_STACK_AT(lowest) ((void)0)
 constexpr std::uint32_t no_library = 0xffffffffU;
 #endif
 
@@ -414,6 +480,7 @@ std::uint64_t refill(void *tlb_pointer, std::uint64_t address,
 	std::uint64_t code) noexcept
 {
 	UML_AOT_COUNT(refills, 1);
+	UML_AOT_SAMPLE_STACK();
 	auto &tlb = *static_cast<::uml::memory::Tlb *>(tlb_pointer);
 	const auto kind = (code & 0xff) == 1 ? ::uml::memory::Access::write :
 		::uml::memory::Access::read;
@@ -713,6 +780,7 @@ Binder::Verdict Binder::verify_page(
 				return SharedOutcome::unreadable;
 			UML_AOT_COUNT(verifications, 1);
 			UML_AOT_COUNT_LIBRARY(library_verifications, instance.library);
+			UML_AOT_SAMPLE_STACK_AT(page.data());
 			/* The stored page is a SHA-256 of the bytes the code was built
 			 * from: rewritten code runs for other bytes only on a collision
 			 * of the hash. CC_SHA256 is CommonCrypto's one-shot digest,
@@ -1041,6 +1109,7 @@ EnterResult enter(CpuState &cpu, ::uml::memory::Tlb &tlb, const Hit &hit,
 	const auto function = reinterpret_cast<Entry>(
 		const_cast<std::uint8_t *>(uml_aot_blob) + directory().enter);
 	UML_AOT_COUNT(enters, 1);
+	UML_AOT_SAMPLE_STACK();
 #if UML_AOT_DIAGNOSTICS
 	if (hit.library < 64)
 		counters::library_enters[hit.library].fetch_add(
