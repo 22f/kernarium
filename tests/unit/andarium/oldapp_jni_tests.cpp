@@ -4806,8 +4806,12 @@ void check_the_record_follows_makes_ends_collections_and_revivals() {
 // length that a block published at exactly that address had. Two readers hammer GetArrayLength, GetObjectRefType and the
 // state queries on a fixed set of addresses (the starts of 24 reclaimed blocks, places inside the blocks made after, and a place that
 // is not 16-byte aligned) while the maker churns blocks of mixed sizes whose contents are forged headers; the maker logs the length of
-// each block it makes at an address, and the readers' observations are checked against the log after both have been joined. (Under
-// ThreadSanitizer this is the proof that no reader reads a byte of the region.)
+// each block it makes at an address, and the readers' observations are checked against the log after both have been joined. The
+// row cannot pass without the readers having answered: before the churn each reader must have looked at the block that stays live and
+// at the places inside it, and every 50 steps the maker makes a block and holds it live until each reader has acknowledged a live
+// answer of exactly its length, then ends it and holds it ended until each has acknowledged an ended answer of that length; it goes
+// on only then, so each answer is checked against the one state that holds at that moment. (Under ThreadSanitizer this is the proof
+// that no reader reads a byte of the region.)
 void check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_length() {
     constexpr const char* kCase = "check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_length";
     constexpr int kSteps = 4000;
@@ -4855,6 +4859,12 @@ void check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_l
     std::vector<Seen> seen[kReaders];
     std::atomic<size_t> anchor_seen[kReaders] = {};
     std::atomic<size_t> inside_seen[kReaders] = {};
+    // The maker's hold: held_phase is 2n - 1 while the n-th block is held live and 2n while it is held ended; the maker changes it
+    // only after both readers wrote that phase to their acknowledgment, and a reader acknowledges after it checked its answers.
+    std::atomic<uint32_t> held_phase{0};
+    std::atomic<const void*> held_address{nullptr};
+    std::atomic<jsize> held_length{0};
+    std::atomic<uint32_t> acknowledged[kReaders] = {};
     std::atomic<int> started{0};
     std::atomic<bool> stop{false};
     std::vector<std::unique_ptr<Other>> readers;
@@ -4866,6 +4876,23 @@ void check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_l
             ++started;
             size_t rounds = 0;
             while (!stop.load(std::memory_order_acquire)) {
+                const uint32_t phase = held_phase.load(std::memory_order_acquire);
+                if (phase != 0 && acknowledged[i].load(std::memory_order_relaxed) != phase) {
+                    const void* const address = held_address.load(std::memory_order_relaxed);
+                    const jsize length = held_length.load(std::memory_order_relaxed);
+                    const bool is_live = is_shadow_block(address);
+                    const bool is_ended = is_ended_block(address);
+                    const jsize got = length_of(reader.f, const_cast<void*>(address));
+                    if ((phase & 1u) != 0) {
+                        require(is_live && !is_ended && got == length &&
+                                    fn<jint (*)(Env*, jobject)>(*reader.f.table, slot::GetObjectRefType)(
+                                        reader.f.env, const_cast<void*>(address)) == kRefTypeLocal,
+                                "a block held live is a live block of its length");
+                    } else {
+                        require(!is_live && is_ended && got == length, "a block held ended is an ended block of its length");
+                    }
+                    acknowledged[i].store(phase, std::memory_order_release);
+                }
                 for (const void* address : watched) {
                     Seen now{address, is_shadow_block(address), is_ended_block(address), length_of(reader.f, const_cast<void*>(address)),
                              fn<jint (*)(Env*, jobject)>(*reader.f.table, slot::GetObjectRefType)(reader.f.env, const_cast<void*>(address))};
@@ -4890,7 +4917,30 @@ void check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_l
         });
     }
     wait_for_counter(kCase, "started", started, kReaders, "the maker (the readers start)");
+    const auto wait_for_readers = [&](const char* what, const std::function<bool(int)>& done) {
+        for (int i = 0; i < kReaders; ++i) {
+            if (!waitUntil([&] { return done(i); }, kHandOffLimit, std::chrono::microseconds(100))) {
+                uml::testing::fail(std::string(kCase) + ": the maker waited " + std::to_string(kHandOffLimit.count()) + " s for reader " +
+                                   std::to_string(i) + " to " + what);
+            }
+        }
+    };
+    wait_for_readers("look at the block that stays live and at the places inside it",
+                     [&](int i) { return anchor_seen[i].load() > 0 && inside_seen[i].load() > 0; });
+    uint32_t held_count = 0;
     for (int step = 0; step < kSteps; ++step) {
+        if (step % 50 == 0) {
+            Made held = make_logged(1 + rng() % 300);
+            require(is_shadow_block(held.shadow), "the block to hold is made");
+            held_address.store(held.shadow, std::memory_order_relaxed);
+            held_length.store(length_of(f, held.shadow), std::memory_order_relaxed);
+            const uint32_t live_phase = 2 * ++held_count - 1;
+            held_phase.store(live_phase, std::memory_order_release);
+            wait_for_readers("acknowledge the live block", [&](int i) { return acknowledged[i].load() == live_phase; });
+            end_ref(f, held.shadow);
+            held_phase.store(live_phase + 1, std::memory_order_release);
+            wait_for_readers("acknowledge the ended block", [&](int i) { return acknowledged[i].load() == live_phase + 1; });
+        }
         const size_t size = rng() % 3 == 0 ? rng() % 4096 : rng() % 200;
         Made made = make_logged(size);
         end_ref(f, made.shadow);
@@ -4902,13 +4952,11 @@ void check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_l
     require(g_ref_type_asked_with_a_reference == 0,
             "GetObjectRefType of an address of the region that no block started at reached the runtime as the null reference: it was not looked up a second time");
     for (int i = 0; i < kReaders; ++i) {
-        require(anchor_seen[i].load() > 0 && inside_seen[i].load() > 0, "each reader looked at the block that stayed live, and at the places inside it");
+        require(acknowledged[i].load() == 2 * held_count, "each reader acknowledged every block held live and every one held ended");
     }
     require(is_shadow_block(anchor.shadow) && length_of(f, anchor.shadow) == jsize(kAnchorBytes), "and it is live and whole after the churn");
-    size_t observations = 0;
     for (int i = 0; i < kReaders; ++i) {
         for (const Seen& now : seen[i]) {
-            ++observations;
             const auto found = published.find(now.address);
             const bool started_there = found != published.end();
             require(now.length != jsize(kForgedLength), "a length read is never a forged header's");
@@ -4918,7 +4966,6 @@ void check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_l
                     "an address is a block (of either kind, or a local reference) only where a block started");
         }
     }
-    (void)observations;
 }
 
 // The block record has its own memory, which the platform gives and the layer never clears; a region it cannot cover gets no
