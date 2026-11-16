@@ -32,6 +32,11 @@ Homebrew `erofs-utils` is built without libzstd and cannot read the release
 (CMake fails the configure step when the tool's `--help` does not list
 `zstd`).
 
+The blob's magic names its layout and the word after it the layout's version.
+A change a runtime built for the old layout would misread changes the magic; an
+addition it can ignore raises the version (`BLOB_VERSION`), and a runtime
+accepts any version at or above the one it was built for.
+
 `UML_AOT_MEMORY_CALL` (`--memory-call`) selects how a plain load or store
 reaches its TLB probe: `inline` (the product), `probe` (a call to a routine of
 the same unit that returns the compare; the miss exit stays at the site) or

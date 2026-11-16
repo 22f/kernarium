@@ -34,6 +34,12 @@ constexpr std::uint64_t page_size = 4096;
  * can outlive the address space that filed it and never be answered wrongly. */
 VerdictTable g_verdicts;
 constexpr char blob_magic[8] = {'U', 'M', 'L', 'A', 'O', 'T', 'B', '2'};
+/* The magic names the layout, and the word after it the version of that
+ * layout: a change an older runtime would misread changes the magic, and an
+ * addition it can ignore raises the version, which a runtime accepts at or
+ * above the one it was built for (tools/aot/rewrite.py: BLOB_VERSION). */
+constexpr std::size_t header_version = 8;
+constexpr std::uint32_t blob_version = 1;
 /* The stored hash of a text page: SHA-256 (tools/aot/rewrite.py:
  * page_hashes). */
 constexpr std::size_t page_hash_size = CC_SHA256_DIGEST_LENGTH;
@@ -98,6 +104,8 @@ struct Directory final {
 	static const Directory value = []() noexcept {
 		Directory d;
 		if (std::memcmp(uml_aot_blob, blob_magic, sizeof(blob_magic)) != 0)
+			return d;
+		if (read<std::uint32_t>(header_version) < blob_version)
 			return d;
 		d.libraries = read<std::uint32_t>(header_library_count);
 		d.records = read<std::uint32_t>(header_records);
@@ -398,7 +406,10 @@ constexpr std::uint32_t no_library = 0xffffffffU;
  * thunk in tools/aot/rewrite.py): fill it as the engine does and say whether
  * the entry now holds the page. A fault is not recorded for the guest here;
  * the instruction steps and the engine takes it. An access that crosses a
- * page also steps: the probe found it as a miss. */
+ * page also steps: the probe found it as a miss. This is noexcept although
+ * Tlb::translate is not: the thunk that calls it has no unwind information,
+ * so an exception could not be handled there, and one that escaped the fill
+ * would end the process (std::terminate) rather than reach the guest. */
 std::uint64_t refill(void *tlb_pointer, std::uint64_t address,
 	std::uint64_t code) noexcept
 {

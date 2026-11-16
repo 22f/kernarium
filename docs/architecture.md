@@ -566,8 +566,9 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   the engine runs exactly that instruction, so faults, system calls, signals
   and debugger exits are the engine's own. When such an instruction faults,
   the engine also runs it again where the guest resumes, without entering
-  rewritten code for it. An entry runs at most the engine's chaining limit of
-  instructions, and the executor goes on into the next entry only while
+  rewritten code for it. An entry runs at most the engine's chaining limit, plus one unpaid run of
+  at most `RUN_LIMIT` (32) instructions and two more (the differential test's
+  `entry_bound`), and the executor goes on into the next entry only while
   nothing the dispatcher checks has changed (the interrupt, mapping and
   code-change sequences, SVCR, the FPCR trap enables), so interrupts and
   shootdowns are noticed as they are in the engine. The limit counts
