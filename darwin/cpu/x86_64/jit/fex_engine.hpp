@@ -100,6 +100,11 @@ public:
 	FexEngine(const FexEngine &) = delete;
 	FexEngine &operator=(const FexEngine &) = delete;
 
+	/* The types the runtime's hand-over names through the engine, so that
+	 * header includes no engine (x86_jit_sync.hpp). */
+	using Changes = AddressSpaceChanges;
+	using Range = GuestRange;
+
 	/* The sequences this engine last consumed for `generation`, so the
 	 * runtime can ask the address space only for what is new. Returns false
 	 * when the engine holds nothing for it yet. */

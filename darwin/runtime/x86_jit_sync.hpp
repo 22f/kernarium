@@ -4,9 +4,10 @@
 /* What a vCPU hands the x86-64 JIT before each run. It is a template over
  * the engine and the execution scope so that a unit test can drive the order
  * of its calls with stubs; the runtime instantiates it with FexEngine and
- * X86StaticExecutionScope. */
+ * X86StaticExecutionScope. The engine names the types it takes (`Changes`
+ * and `Range`), so this header includes no engine. */
 
-#include "cpu/x86_64/jit/fex_engine.hpp"
+#include "cpu/x86_64/cpu_state.hpp"
 #include "uml_darwin_static_mmu.h"
 
 #include <array>
@@ -18,8 +19,6 @@ namespace uml::runtime {
 
 namespace x86_jit_sync_detail {
 
-namespace x86_64 = ::uml::cpu::x86_64;
-
 /* The most changes of either kind the engine is handed as ranges; a reader
  * further behind retires everything instead. A vCPU that was inside the
  * guest kernel while it mapped a large buffer is a few thousand mapping
@@ -30,10 +29,10 @@ constexpr std::size_t code_change_capacity = 1024;
 
 /* The first `count` records of `records` as the engine's ranges, in
  * `ranges`. */
-template<typename Record, std::size_t Capacity>
-[[gnu::always_inline]] std::span<const x86_64::jit::GuestRange> guest_ranges(
+template<typename Range, typename Record, std::size_t Capacity>
+[[gnu::always_inline]] std::span<const Range> guest_ranges(
 	const std::array<Record, Capacity> &records, std::size_t count,
-	std::array<x86_64::jit::GuestRange, Capacity> &ranges) noexcept
+	std::array<Range, Capacity> &ranges) noexcept
 {
 	for (std::size_t index = 0; index < count; ++index)
 		ranges[index] = {records[index].address, records[index].length};
@@ -54,7 +53,7 @@ void sync_x86_jit_engine(Engine &engine, const Scope &execution,
 	/* First, before either early return below: it concerns code that no
 	 * address-space change describes. */
 	engine.settle_stuck_participants(generation, mode);
-	::uml::cpu::x86_64::jit::AddressSpaceChanges changes{};
+	typename Engine::Changes changes{};
 	changes.mapping_sequence = sequences.mapping_changes;
 	changes.code_sequence = sequences.code_changes;
 	std::uint64_t mapping_seen = 0;
@@ -70,7 +69,7 @@ void sync_x86_jit_engine(Engine &engine, const Scope &execution,
 	thread_local std::array<darwin_uml_static_mapping_change,
 		x86_jit_sync_detail::mapping_change_capacity>
 		mapped;
-	thread_local std::array<::uml::cpu::x86_64::jit::GuestRange,
+	thread_local std::array<typename Engine::Range,
 		x86_jit_sync_detail::mapping_change_capacity>
 		mapping_ranges;
 	if (mapping_seen != sequences.mapping_changes) {
@@ -88,7 +87,7 @@ void sync_x86_jit_engine(Engine &engine, const Scope &execution,
 	thread_local std::array<darwin_uml_static_code_change,
 		x86_jit_sync_detail::code_change_capacity>
 		coded;
-	thread_local std::array<::uml::cpu::x86_64::jit::GuestRange,
+	thread_local std::array<typename Engine::Range,
 		x86_jit_sync_detail::code_change_capacity>
 		code_ranges;
 	if (code_seen != sequences.code_changes) {

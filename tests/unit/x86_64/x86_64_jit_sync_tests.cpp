@@ -20,6 +20,8 @@ using uml::testing::require;
 
 /* The calls the engine receives, in order. */
 struct StubEngine final {
+	using Changes = uml::cpu::x86_64::jit::AddressSpaceChanges;
+	using Range = uml::cpu::x86_64::jit::GuestRange;
 	std::string calls;
 	bool consumed{};
 	std::uint64_t mapping_seen{};
