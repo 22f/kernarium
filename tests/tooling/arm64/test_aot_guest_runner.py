@@ -12,6 +12,7 @@ pair of arms and fail every incomplete or failed one.
 __import__("sys").dont_write_bytecode = True
 
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -19,13 +20,16 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import types
 import unittest
+import unittest.mock
 
 RUNNER_DIRECTORY = (pathlib.Path(__file__).resolve().parents[2] /
                     "integration" / "aot")
 sys.path.insert(0, str(RUNNER_DIRECTORY))
 sys.path.insert(0, str(RUNNER_DIRECTORY.parent / "support"))
 import run_aot_guest as runner  # noqa: E402
+import share_rows  # noqa: E402
 
 FAKE_LAUNCHER = """\
 import os, pathlib, signal, sys, time
@@ -444,6 +448,93 @@ class RunnerTest(unittest.TestCase):
             config.write_text("CONFIG_PAGE_SIZE_4KB=y\n")
             with self.assertRaises(runner.Failure):
                 runner.kernel_stack_bytes(config)
+
+
+def study_record(mode: str, before: int = 33, after: int = 8, faults: int = 3) -> list[str]:
+    """What the share program prints for a mode, as a guest returned it."""
+    count = share_rows.EXPECTED_CHILDREN[mode]
+    lines = [f"sequential child {i} sum={0x1000 + i:#x}" for i in range(count)]
+    if mode == "reclaim":
+        lines += [f"# reclaim: libz.so {before} pages cached before the eviction, {after} after; "
+                  f"{faults} faults read them back"] * share_rows.RECLAIM_ROUNDS
+    return lines + [f"done mode={mode}"]
+
+
+def study_arm(label: str, **eviction) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        label=label, workloads={}, probe=[], debug={}, report={}, resident=(1 << 20) if label == "on" else 0,
+        share={mode: study_record(mode, **eviction) for mode in share_rows.modes(True)},
+        share_counts={}, share_rounds={})
+
+
+def study_options(**changes) -> types.SimpleNamespace:
+    values = dict(probe=None, debug_program=None, share_program=pathlib.Path("libaotshare.so"),
+                  study_eviction=True, diagnostics=False, manifest=None, expect_entered=[])
+    values.update(changes)
+    return types.SimpleNamespace(**values)
+
+
+class StudyEvictionTest(unittest.TestCase):
+    """The study's reclaim row on a guest whose kernel does not evict (a
+    stock one) fails whichever way the runner was invoked."""
+
+    STOCK = dict(before=33, after=33, faults=0)
+
+    def judged(self, off: types.SimpleNamespace, on: types.SimpleNamespace, **options):
+        runner.check(off, on, study_options(**options))
+
+    def test_a_stock_kernel_fails_in_product_mode(self):
+        # No diagnostics: nothing was counted, and the records alone must say
+        # that the guest evicted the library's pages.
+        with self.assertRaises(runner.Failure) as caught:
+            self.judged(study_arm("off", **self.STOCK), study_arm("on", **self.STOCK))
+        self.assertIn("evicted 0 of 33 pages", str(caught.exception))
+
+    def test_a_stock_kernel_fails_in_diagnostics_without_counts(self):
+        with self.assertRaises(runner.Failure) as caught:
+            self.judged(study_arm("off", **self.STOCK), study_arm("on", **self.STOCK),
+                        diagnostics=True)
+        self.assertIn("evicted 0 of 33 pages", str(caught.exception))
+
+    def test_either_arm_that_evicted_nothing_fails(self):
+        good = dict(before=33, after=8, faults=3)
+        for off, on in ((self.STOCK, good), (good, self.STOCK)):
+            with self.assertRaises(runner.Failure):
+                self.judged(study_arm("off", **off), study_arm("on", **on))
+
+    def test_a_guest_that_evicted_passes_the_records_without_counts(self):
+        self.judged(study_arm("off"), study_arm("on"))
+
+    def test_the_study_option_names_what_it_needs_before_a_guest_starts(self):
+        parser = runner.build_parser()
+        for arguments, needs in ((["--study-eviction"], "--share-program"),
+                                 (["--study-eviction", "--share-program", "p.so"], "--diagnostics"),
+                                 (["--study-eviction", "--share-program", "p.so", "--diagnostics"],
+                                  "--manifest")):
+            options = parser.parse_args(arguments)
+            with self.assertRaises(SystemExit) as caught, \
+                    unittest.mock.patch("sys.stderr", new=io.StringIO()) as error:
+                runner.check_options(parser, options)
+            self.assertEqual(caught.exception.code, 2)
+            self.assertIn(needs, error.getvalue())
+        options = parser.parse_args(["--study-eviction", "--share-program", "p.so", "--diagnostics",
+                                     "--manifest", "m.json"])
+        runner.check_options(parser, options)
+
+    def test_main_refuses_before_it_starts_a_guest(self):
+        # The arms are replaced, so that a main which got as far as starting
+        # one fails here and does not boot anything.
+        started = unittest.mock.Mock(side_effect=AssertionError("a guest was started"))
+        for arguments in (["--study-eviction"],
+                          ["--study-eviction", "--share-program", "p.so"],
+                          ["--study-eviction", "--share-program", "p.so", "--diagnostics"]):
+            with unittest.mock.patch.object(runner, "Arm", started), \
+                    unittest.mock.patch.object(runner.signal, "signal"), \
+                    unittest.mock.patch("sys.argv", ["run_aot_guest.py", *arguments]), \
+                    unittest.mock.patch("sys.stderr", new=io.StringIO()):
+                with self.assertRaises(SystemExit) as caught:
+                    runner.main()
+            self.assertEqual(caught.exception.code, 2)
 
 
 if __name__ == "__main__":

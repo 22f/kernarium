@@ -188,19 +188,12 @@ def check_counts(mode: str, delta: dict[str, int], fork_shared: int | None,
     return text
 
 
-def reclaim_check(record: list[str], hashed: int, shared: int, refused: int,
-                  per_round: list[dict[str, int]] | None = None) -> str:
-    """The reclaim mode: in each round the study kernel must have evicted most
-    of libz.so's pages from every address space (the row fails on a guest that
-    spares them) and reading them back must have taken faults; the children
-    that run it again must have had pages verified by hash (never a verdict
-    taken for a frame the page cache gave up, in the round that gives a frame
-    back to the page it held two rounds before as much as in the first) and
-    the later ones must share what the first left. Whether a frame was given
-    back is not assumed of the guest's allocator: the framework counts the
-    pages it hashed because the epoch of their frame had moved (a verdict of
-    the same frame for the same page under an older epoch), and each round
-    after the first must have had one. Returns what to add to the line."""
+def reclaim_evicted(record: list[str]) -> int:
+    """What the reclaim mode's record alone must show, with or without the
+    framework's counts: in each round the guest evicted most of libz.so's
+    pages from every address space and reading them back took faults. A stock
+    kernel does neither, so a run on one fails here however it was started.
+    Returns the pages evicted over the rounds."""
     rounds = [m for m in map(RECLAIM.match, record) if m]
     if len(rounds) != RECLAIM_ROUNDS:
         raise ShareFailure(f"the reclaim record has {len(rounds)} rounds, not {RECLAIM_ROUNDS}")
@@ -219,6 +212,23 @@ def reclaim_check(record: list[str], hashed: int, shared: int, refused: int,
             raise ShareFailure(f"round {number}: {before - after} pages of libz.so were evicted and "
                                "reading them back took no fault: the pages never left the page cache")
         lost += before - after
+    return lost
+
+
+def reclaim_check(record: list[str], hashed: int, shared: int, refused: int,
+                  per_round: list[dict[str, int]] | None = None) -> str:
+    """The reclaim mode: in each round the study kernel must have evicted most
+    of libz.so's pages from every address space (the row fails on a guest that
+    spares them) and reading them back must have taken faults; the children
+    that run it again must have had pages verified by hash (never a verdict
+    taken for a frame the page cache gave up, in the round that gives a frame
+    back to the page it held two rounds before as much as in the first) and
+    the later ones must share what the first left. Whether a frame was given
+    back is not assumed of the guest's allocator: the framework counts the
+    pages it hashed because the epoch of their frame had moved (a verdict of
+    the same frame for the same page under an older epoch), and each round
+    after the first must have had one. Returns what to add to the line."""
+    lost = reclaim_evicted(record)
     if refused:
         raise ShareFailure("a page of the read-only library was refused")
     due = max(RECLAIM_MIN_HASHED * RECLAIM_ROUNDS, lost // 2)

@@ -706,6 +706,14 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
             try:
                 lines = share_rows.compare(mode, off.share[mode], on.share[mode])
                 print(f"share row {mode}: {lines} lines, identical")
+                if mode == "reclaim":
+                    # What the records say, whether or not anything was
+                    # counted: a guest that did not evict is not the study's.
+                    for arm in (off, on):
+                        try:
+                            share_rows.reclaim_evicted(arm.share[mode])
+                        except share_rows.ShareFailure as problem:
+                            raise share_rows.ShareFailure(f"{mode} ({arm.label} arm): {problem}")
                 for note in share_rows.informational(on.share[mode]):
                     print("  " + note)
                 if on.share_counts:
@@ -794,7 +802,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the guest's kernel is the study's, which pages out "
                         "file pages whoever maps them (never shipped): add the "
                         "share program's reclaim row, which evicts libz.so's "
-                        "pages and asserts the framework verifies them afresh")
+                        "pages and asserts the framework verifies them afresh "
+                        "(needs --share-program, --diagnostics and --manifest)")
     parser.add_argument("--vmmap", default="vmmap",
                         help="the tool that lists the emulator's regions "
                         "(the product mode reads the framework's residency)")
@@ -810,8 +819,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def check_options(parser: argparse.ArgumentParser, options: argparse.Namespace) -> None:
+    """Refuses, before any guest starts, an option whose row cannot run or
+    cannot be judged in this invocation."""
+    if options.study_eviction:
+        if not options.share_program:
+            parser.error("--study-eviction adds a row of the share program: it needs --share-program")
+        if not (options.diagnostics and options.manifest):
+            parser.error("--study-eviction needs --diagnostics and --manifest: its row requires "
+                         "the framework's counts around each round")
+
+
 def main() -> int:
-    options = build_parser().parse_args()
+    parser = build_parser()
+    options = parser.parse_args()
+    check_options(parser, options)
     options.adb = shutil.which(options.adb) or options.adb
     for name in TERMINATION_SIGNALS:
         signal.signal(name, terminate_on_signal)
