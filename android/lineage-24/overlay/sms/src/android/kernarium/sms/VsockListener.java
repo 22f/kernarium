@@ -126,6 +126,8 @@ final class VsockListener implements Server.Listener {
         Peer(FileDescriptor fd) throws ErrnoException {
             this.fd = fd;
             try {
+                // accept does not set close-on-exec on the descriptor it returns.
+                Os.fcntlInt(fd, OsConstants.F_SETFD, OsConstants.FD_CLOEXEC);
                 Os.fcntlInt(fd, OsConstants.F_SETFL, OsConstants.O_NONBLOCK);
             } catch (ErrnoException e) {
                 closeQuietly(fd);

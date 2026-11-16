@@ -24,6 +24,8 @@ public final class OsConstants {
     public static final int EADDRINUSE = 98;
     public static final int ECONNABORTED = 103;
     public static final int ECONNRESET = 104;
+    public static final int F_SETFD = 2;
+    public static final int FD_CLOEXEC = 1;
     public static final int F_SETFL = 4;
     public static final int O_NONBLOCK = 2048;
     public static final int SHUT_RDWR = 2;

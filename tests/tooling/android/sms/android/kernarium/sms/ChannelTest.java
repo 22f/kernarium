@@ -458,6 +458,7 @@ public final class ChannelTest {
             boolean shutdown;
             boolean closed;
             boolean nonblocking;
+            boolean closeOnExec;
         }
 
         final List<String> calls = Collections.synchronizedList(new ArrayList<>());
@@ -564,7 +565,12 @@ public final class ChannelTest {
         @Override
         public int fcntlInt(FileDescriptor fd, int command, int argument) {
             calls.add("fcntl");
-            socks.get(fd).nonblocking = command == OsConstants.F_SETFL && argument == OsConstants.O_NONBLOCK;
+            final Sock sock = socks.get(fd);
+            if (command == OsConstants.F_SETFD) {
+                sock.closeOnExec = argument == OsConstants.FD_CLOEXEC;
+            } else {
+                sock.nonblocking = command == OsConstants.F_SETFL && argument == OsConstants.O_NONBLOCK;
+            }
             return 0;
         }
     }
@@ -601,6 +607,7 @@ public final class ChannelTest {
         same(1, handling.payloads.size(), "the host's request is dispatched");
         check(Arrays.equals(answer, host.written.toByteArray()), "the answer arrived whole over short writes");
         check(host.shutdown && host.closed && host.nonblocking, "shut down, closed, and non-blocking");
+        check(host.closeOnExec, "the accepted descriptor is close-on-exec");
         check(world.bound instanceof VmSocketAddress && ((VmSocketAddress) world.bound).getSvmPort() == 5560
                 && ((VmSocketAddress) world.bound).getSvmCid() == OsConstants.VMADDR_CID_ANY, "listening on port 5560, any CID");
         same("socket " + OsConstants.AF_VSOCK, world.calls.get(0), "a vsock socket");
