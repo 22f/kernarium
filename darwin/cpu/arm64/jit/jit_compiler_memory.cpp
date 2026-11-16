@@ -111,10 +111,11 @@ void JitCompiler::emit_misalignment_check(unsigned address, std::size_t alignmen
 
 /*
  * Ends the software monitor where the guest's pair ends: after a fused
- * store-exclusive and on a fused run's mismatch exit. An ordinary store of the
- * guest's own leaves it standing (see the monitor contract in
- * docs/architecture.md); reservation versions fail a store-exclusive that a
- * store to the reserved granule has beaten.
+ * store-exclusive. A fused run's mismatch exit does not end it here: it rolls
+ * back to the load, whose semantic re-execution arms the monitor afresh. An
+ * ordinary store of the guest's own leaves it standing (see the monitor
+ * contract in docs/architecture.md); reservation versions fail a
+ * store-exclusive that a store to the reserved granule has beaten.
  */
 void JitCompiler::clear_local_exclusive_monitor() {
     emitter_.store_b(31, 15, offsetof(CpuState, exclusive_size));
@@ -240,6 +241,17 @@ void JitCompiler::clear_local_exclusive_monitor() {
                                 ColdPath::Action::deferred_exclusive_slow);
     const auto fault =
         cold_exit(load_instruction, pc, ColdPath::Action::memory_fault);
+    /*
+     * A compare mismatch rolls the run back to the load-exclusive, as a slow
+     * exit before the host monitor does. The label is made here, before any
+     * register is bound or flag changed, so its cold arm publishes the state at
+     * the load and the discarded attempt retires nothing. Continuing at the
+     * branch target after clearing the reservation would starve a loop whose
+     * mismatch path reaches a store-exclusive without a new load.
+     */
+    const auto mismatch = compare_retry
+        ? cold_exit(load_instruction, pc, ColdPath::Action::exclusive_rollback)
+        : slow;
 
     load_gpr(8, base, true);
     if (base == 31U)
@@ -319,11 +331,6 @@ void JitCompiler::clear_local_exclusive_monitor() {
       ++count_;
     }
     if (compare_retry) {
-      const auto target = pc + 8U +
-          sign_extend((instructions[2] >> 5) & 0x7ffffU, 19) * 4;
-      const auto mismatch =
-          cold_exit(instructions[2], target,
-                    ColdPath::Action::exclusive_compare_mismatch);
       load_flags();
       emitter_.branch_condition(mismatch, 1); // NE
       ++count_;
