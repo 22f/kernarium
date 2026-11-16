@@ -80,6 +80,16 @@ struct ResolutionScreenTests {
             found, "no accessibility element is labelled \(label); is ApplicationAccessibilityEnabled on? \(seen) \(labels(in: root))")
     }
 
+    /// What VoiceOver's double tap does. A UIKit control of an iPad app on a
+    /// Mac declines it, so there the control is tapped; elsewhere a control
+    /// that declines it is a failure.
+    private func activate(_ node: NSObject) -> Bool {
+        if node.accessibilityActivate() { return true }
+        guard ProcessInfo.processInfo.isiOSAppOnMac, let control = node as? UIControl else { return false }
+        control.sendActions(for: .touchUpInside)
+        return true
+    }
+
     private func hostRow(_ model: AppModel, in lease: HostWindow.Lease) -> UIHostingController<some View> {
         let controller = UIHostingController(rootView: SystemSection().environment(model).frame(width: 390))
         lease.window.rootViewController = controller
@@ -221,7 +231,7 @@ struct ResolutionScreenTests {
         let enabled = try await waitFor("Save", in: sheet.view)
         #expect(await eventually { !enabled.accessibilityTraits.contains(.notEnabled) })
         #expect(model.chosenScale == .native, "ticking changes nothing yet")
-        #expect(enabled.accessibilityActivate())
+        #expect(activate(enabled))
         #expect(await eventually { model.chosenScale == .factor(1.5) })
         #expect(await eventually { model.sheet == nil })
         #expect(model.resolution == .factor(1.5))
@@ -231,7 +241,7 @@ struct ResolutionScreenTests {
         let fastest = try await waitFor("402 by 778, 160 dpi, Fastest", in: again.view)
         #expect(fastest.accessibilityActivate())
         let cancel = try await waitFor("Cancel", in: again.view)
-        #expect(cancel.accessibilityActivate())
+        #expect(activate(cancel))
         #expect(await eventually { model.sheet == nil })
         #expect(model.chosenScale == .factor(1.5))
     }
@@ -245,7 +255,7 @@ struct ResolutionScreenTests {
         #expect(native.accessibilityActivate())
         let save = try await waitFor("Save", in: sheet.view)
         #expect(await eventually { !save.accessibilityTraits.contains(.notEnabled) })
-        #expect(save.accessibilityActivate())
+        #expect(activate(save))
         #expect(await eventually { model.chosenScale == .native })
         #expect(model.displayOptions == DisplayOptions(chosenScale: .native))
     }
