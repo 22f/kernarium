@@ -33,12 +33,20 @@
  *             memory than is free, so that the kernel reclaims file pages (the
  *             library's among them) and reuses their frames; the next round
  *             runs the library again. The guest is not rooted, so there is no
- *             drop_caches or compaction to do it exactly.
+ *             drop_caches or compaction to do it exactly; the faults that
+ *             reading the library back takes say whether it lost pages.
  *   evict     the one way a frame is freed without pressure, after the last
  *             mapping leaves: posix_fadvise(DONTNEED) on a file nothing maps
- *             (a control, which must lose its pages) and on libz.so, whose
- *             pages are mapped by the system's own processes. Whatever it
- *             evicts is run again by children, which must verify it afresh.
+ *             (a control, which must lose its pages) and on libz.so, which
+ *             loses the pages no process has mapped at that moment (the
+ *             system's own processes map the rest). Whatever it evicts is run
+ *             again by children, which must verify it afresh.
+ *   reclaim   the same eviction done for real on the study's own guest only:
+ *             a kernel whose madvise(MADV_PAGEOUT) pages out file pages
+ *             whoever maps them and whoever owns the file, and whose mincore
+ *             tells the truth about them (a stock kernel does neither).
+ *             libz.so's pages are evicted from every address space and
+ *             children run it again.
  *
  * Every line it prints is a function of the guest's architectural behaviour
  * alone: the runner (run_aot_guest.py) requires the same lines with the
@@ -97,6 +105,8 @@ int deflateEnd(ZStream *);
 long lseek(int, long, int);
 int posix_fadvise(int, long, long, int);
 int fsync(int);
+int madvise(void *, size_t, int);
+int getrusage(int, void *);
 }
 
 namespace {
@@ -413,6 +423,11 @@ void cow_parent_mode() {
 }
 
 // How many of the file's pages the page cache holds, and how many it has.
+// mincore tells only about a file the caller owns or could write: for any other
+// file, every file of the read-only system image among them, a stock kernel
+// reports every page as resident (the study's kernel does not). A stock guest
+// learns whether a system file lost pages from the faults that reading it back
+// takes (libz_readbacks).
 long cached_pages(const char *path, long *total) {
     const int fd = open(path, 0);
     if (fd < 0) {
@@ -496,10 +511,57 @@ void pressure_child(long extra_kb) {
     _exit(0);
 }
 
-// How many pages of the library the page cache holds.
-long libz_cached() {
-    long total = 0;
-    return cached_pages(kSystemZ, &total);
+// The major faults of this process so far: faults that found no page in the
+// page cache and read one (getrusage's ru_majflt).
+long major_faults() {
+    long usage[18] = {};
+    return getrusage(0, usage) == 0 ? usage[9] : -1;
+}
+
+// libz.so mapped privately and read-only.
+struct LibzMap {
+    void *map = nullptr;
+    long size = 0;
+};
+
+LibzMap map_libz() {
+    constexpr int kMapPrivate = 2;
+    LibzMap m;
+    const int fd = open(kSystemZ, 0);
+    m.size = fd >= 0 ? lseek(fd, 0, 2) : -1;
+    if (m.size > 0) {
+        void *p = mmap(nullptr, static_cast<size_t>(m.size), kRead, kMapPrivate, fd, 0);
+        if (p != reinterpret_cast<void *>(-1L)) {
+            m.map = p;
+        }
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
+    return m;
+}
+
+// Touches every page of the mapping, which leaves them all in the page cache,
+// and returns the major faults it took: how many runs of pages the page cache
+// did not hold (the file system reads a run at a time), 0 when it held all.
+long touch_readbacks(const LibzMap &m) {
+    const long before = major_faults();
+    for (long offset = 0; offset < m.size; offset += static_cast<long>(kPage)) {
+        (void)static_cast<const volatile uint8_t *>(m.map)[offset];
+    }
+    return major_faults() - before;
+}
+
+// The faults it takes to read libz.so's absent pages back; the pages stay in
+// the page cache afterwards.
+long libz_readbacks() {
+    const LibzMap m = map_libz();
+    if (m.map == nullptr) {
+        return -1;
+    }
+    const long faults = touch_readbacks(m);
+    munmap(m.map, static_cast<size_t>(m.size));
+    return faults;
 }
 
 // The rounds are comments the runner prints and does not compare: how many
@@ -515,15 +577,14 @@ void pressure_mode() {
         if (!children_in_turn(label, round * 3, 3, z, Prep::None)) {
             return;
         }
-        const long before = libz_cached();
         const int pid = fork();
         if (pid == 0) {
             pressure_child(static_cast<long>(meminfo_kb("Cached")) / 2);
         }
         int status = 0;
         waitpid(pid, &status, 0);
-        dprintf(1, "# round %d: libz.so pages cached %ld before, %ld after; the pressure child exited %d\n", round,
-                before, libz_cached(), status);
+        dprintf(1, "# round %d: %ld faults read libz.so's pages back; the pressure child exited %d\n", round,
+                libz_readbacks(), status);
     }
     children_in_turn("last", 12, 3, z, Prep::None);
 }
@@ -572,9 +633,46 @@ void evict_mode() {
     if (!children_in_turn("before", 0, 3, z, Prep::None)) {
         return;
     }
-    long libz_before = 0;
-    const long libz_after = evict(kSystemZ, libz_before);
-    dprintf(1, "# libz.so: %ld pages cached before the eviction, %ld after\n", libz_before, libz_after);
+    const long libz_before = libz_readbacks();
+    const int libz_fd = open(kSystemZ, 0);
+    if (libz_fd >= 0) {
+        posix_fadvise(libz_fd, 0, 0, 4);  // POSIX_FADV_DONTNEED
+        close(libz_fd);
+    }
+    dprintf(1, "# libz.so: %ld faults read pages back before the eviction, %ld after\n", libz_before,
+            libz_readbacks());
+    children_in_turn("after", 3, 3, z, Prep::None);
+}
+
+// The study kernel's eviction: map libz.so, touch every page so that this
+// address space has them, and page them out. The kernel unmaps each folio from
+// every address space that maps it and drops it from the page cache, which
+// frees the frame; the second round of children runs the library again, and
+// the framework must verify what it reads back from its bytes. The counts are
+// comments the runner reads; on a kernel that spares shared file pages (the
+// stock one) nothing is evicted and the runner fails the row.
+void reclaim_mode() {
+    constexpr int kMadvPageout = 21;
+    const Zlib z = system_zlib();
+    if (!children_in_turn("before", 0, 3, z, Prep::None)) {
+        return;
+    }
+    const LibzMap m = map_libz();
+    if (m.map == nullptr) {
+        fail("map libz.so");
+        return;
+    }
+    touch_readbacks(m);
+    long total = 0;
+    const long before = cached_pages(kSystemZ, &total);
+    if (madvise(m.map, static_cast<size_t>(m.size), kMadvPageout) != 0) {
+        fail("madvise(MADV_PAGEOUT)");
+    }
+    const long after = cached_pages(kSystemZ, &total);
+    const long readbacks = touch_readbacks(m);
+    munmap(m.map, static_cast<size_t>(m.size));
+    dprintf(1, "# reclaim: libz.so %ld pages cached before the eviction, %ld after; %ld faults read them back\n", before,
+            after, readbacks);
     children_in_turn("after", 3, 3, z, Prep::None);
 }
 
@@ -601,6 +699,8 @@ __attribute__((constructor)) void run() {
         pressure_mode();
     } else if (strcmp(mode, "evict") == 0) {
         evict_mode();
+    } else if (strcmp(mode, "reclaim") == 0) {
+        reclaim_mode();
     } else {
         dprintf(1, "FAIL unknown mode\n");
     }

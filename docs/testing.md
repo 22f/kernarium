@@ -825,12 +825,23 @@ blocker in every one of them.
   pressure. In a diagnostics build each mode states what the framework's
   counts must show: verdicts reused for the file system's pages, a copied or
   writable-file-system page refused and never shared, a page nothing wrote
-  never refused. The kernel's page cache cannot be made to give up a covered
-  library's frames in an unrooted guest (the system's processes map them,
-  and `fadvise` dropped none of any covered library's pages), so the
-  `evict` row asserts that a file nothing maps loses its pages, reports what
-  the library lost, and requires what it lost to be verified again; the
-  frame's last departure and reuse are the memory layer's unit rows.
+  never refused. The kernel's page cache does give up some of a covered
+  library's frames in an unrooted guest (under pressure, and to `fadvise` for
+  pages no process has mapped at that moment), but a read-only system file's
+  residency is observable only through the faults that reading it back takes
+  (`mincore` and `cachestat` report every page of a file the caller cannot
+  write as resident). The `pressure` and `evict` rows print that count and
+  require the pages that stayed to share their verdicts, and `evict` also
+  requires that a file nothing maps loses its pages; the frame's last
+  departure and reuse are the memory layer's unit rows.
+  `--study-eviction` adds the `reclaim` row, for a guest kernel that treats
+  every caller as the owner of every file for the page cache (a study-only
+  change to `madvise(MADV_PAGEOUT)` and `mincore`; no artifact of it is
+  accepted or published). It evicts the library's pages from every address
+  space that maps them, asserts from `mincore` that most of them left and that
+  reading them back took faults, and requires the children which run the
+  library afterwards to have pages verified by hash again and then to share
+  those verdicts. On a stock kernel the row fails, as designed.
   Execution evidence exists only in a diagnostics build, where the libraries
   the run names must have been entered, and where the memory layer recounts
   the executable mappings of every physical-page record against the

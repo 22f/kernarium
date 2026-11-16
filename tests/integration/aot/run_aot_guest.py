@@ -26,6 +26,9 @@ Checked:
   (share_rows.py) print the same records in both arms, and, with
   --diagnostics, the AOT arm reuses verdicts of the read-only file system
   across address spaces and hashes the pages of a copy on a writable one;
+  --study-eviction (a guest kernel that pages out every file page, never
+  shipped) adds the row that evicts the covered library and requires the
+  pages read back to be verified by hash again;
 - every adb command and push reports success;
 - without --diagnostics (the product emulator, which states nothing itself):
   residency evidence that the AOT arm touched the framework, judged from
@@ -620,7 +623,7 @@ class Arm:
             time.sleep(REPORT_SECONDS)
             return read_report(report)
 
-        for mode in share_rows.MODES:
+        for mode in share_rows.modes(self.options.study_eviction):
             before = counters() if counting else {}
             try:
                 record = share_rows.run_mode(
@@ -680,7 +683,7 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
                   f"{compared} fields compared, {masked} masked, identical")
     if options.share_program:
         fork_shared = None
-        for mode in share_rows.MODES:
+        for mode in share_rows.modes(options.study_eviction):
             if mode not in off.share or mode not in on.share:
                 raise Failure(f"share row {mode} did not run in both arms")
             try:
@@ -770,6 +773,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "(libaotshare.so): the rewritten libz.so run in many "
                         "processes, a copy of it, a copied page, and a "
                         "library whose page cache was dropped")
+    parser.add_argument("--study-eviction", action="store_true",
+                        help="the guest's kernel is the study's, which pages out "
+                        "file pages whoever maps them (never shipped): add the "
+                        "share program's reclaim row, which evicts libz.so's "
+                        "pages and asserts the framework verifies them afresh")
     parser.add_argument("--vmmap", default="vmmap",
                         help="the tool that lists the emulator's regions "
                         "(the product mode reads the framework's residency)")

@@ -7,7 +7,9 @@ a byte-identical copy on a writable one, a page of the library copied by a
 write (in the children, or in their parent before they are made), one whose
 protection changed with and without a store, a library whose pages the kernel
 was made to reclaim between rounds, and one whose pages were dropped from the
-page cache. Every mode runs once without the component and once with it, and
+page cache. On the study's own privileged guest (`--study-eviction`) one more
+mode evicts the library's pages from every address space that maps them.
+Every mode runs once without the component and once with it, and
 the lines it prints must be equal. In a diagnostics build the runner also
 reads how often the framework hashed a page, how often a verdict it kept
 answered instead (`shared_hits`) and how often it refused a page whose mapping
@@ -23,6 +25,13 @@ from typing import Callable
 
 PROGRAM = "/data/local/tmp/libaotshare.so"
 MODES = ("fork", "copy", "cow", "cow-parent", "mprotect", "mprotect-write", "pressure", "evict")
+# The mode that needs a kernel which pages out file pages whoever maps them
+# (the study's, never shipped); the runner adds it only on request.
+STUDY_MODES = ("reclaim",)
+# What a study eviction must show: pages the guest held before it, the share of
+# them it lost, and the pages the children afterwards must have hashed again.
+RECLAIM_MIN_CACHED = 16
+RECLAIM_MIN_HASHED = 4
 MODE_SECONDS = 300
 # The children of a mode, one after another or together, and the sums they print.
 CHILD = re.compile(r"^(\S+(?: \S+)*) child (\d+) sum=0x[0-9a-f]+$")
@@ -41,11 +50,17 @@ def command(mode: str) -> str:
 
 
 EXPECTED_CHILDREN = {"fork": 16, "copy": 16, "cow": 10, "cow-parent": 7, "mprotect": 6,
-                     "mprotect-write": 6, "pressure": 15, "evict": 6}
+                     "mprotect-write": 6, "pressure": 15, "evict": 6, "reclaim": 6}
 # Children that write a text page of their own copy, in the modes that make them,
 # and the children that run the library's unchanged pages.
 COW_WRITERS = {"cow": 3, "cow-parent": 7, "mprotect-write": 3}
-UNCHANGED_CHILDREN = {"cow": 7, "cow-parent": 0, "mprotect": 6, "mprotect-write": 3, "pressure": 15, "evict": 6}
+UNCHANGED_CHILDREN = {"cow": 7, "cow-parent": 0, "mprotect": 6, "mprotect-write": 3, "pressure": 15, "evict": 6,
+                      "reclaim": 6}
+
+
+def modes(study: bool) -> tuple[str, ...]:
+    """The modes a run makes: the study's own only when it is asked for."""
+    return MODES + STUDY_MODES if study else MODES
 
 
 def run_mode(shell: Callable[..., str], mode: str) -> list[str]:
@@ -89,7 +104,9 @@ def compare(mode: str, off: list[str], on: list[str]) -> int:
 
 
 CONTROL = re.compile(r"^# control: (\d+) of 256 pages cached before, (\d+) after$")
-LIBZ = re.compile(r"^# libz\.so: (\d+) pages cached before the eviction, (\d+) after$")
+LIBZ = re.compile(r"^# libz\.so: (\d+) faults read pages back before the eviction, (\d+) after$")
+RECLAIM = re.compile(r"^# reclaim: libz\.so (\d+) pages cached before the eviction, (\d+) after; "
+                     r"(\d+) faults read them back$")
 
 
 def check_counts(mode: str, delta: dict[str, int], fork_shared: int | None,
@@ -140,29 +157,56 @@ def check_counts(mode: str, delta: dict[str, int], fork_shared: int | None,
                                "(or one was refused)")
     elif mode == "evict":
         text += evict_check(record or [], hashed, shared, refused)
+    elif mode == "reclaim":
+        text += reclaim_check(record or [], hashed, shared, refused)
     return text
+
+
+def reclaim_check(record: list[str], hashed: int, shared: int, refused: int) -> str:
+    """The reclaim mode: the study kernel must have evicted most of libz.so's
+    pages from every address space (the row fails on a guest that spares them),
+    the children that run it again must have had pages verified by hash, never
+    taken a verdict of a frame the page cache gave up, and the first of them
+    must have left verdicts the others share. Returns what to add to the line."""
+    found = next((m for m in map(RECLAIM.match, record) if m), None)
+    if found is None:
+        raise ShareFailure("the reclaim record lacks its libz.so counts")
+    before, after, readbacks = (int(found.group(i)) for i in (1, 2, 3))
+    if before < RECLAIM_MIN_CACHED:
+        raise ShareFailure(f"libz.so had {before} pages cached, fewer than {RECLAIM_MIN_CACHED}: "
+                           "the row cannot observe an eviction")
+    if (before - after) * 2 < before:
+        raise ShareFailure(f"the guest evicted {before - after} of {before} pages of libz.so: it is "
+                           "not the study's privileged one (a stock kernel spares mapped file pages and "
+                           "reports every page of a read-only file resident)")
+    if refused:
+        raise ShareFailure("a page of the read-only library was refused")
+    if readbacks < 1:
+        raise ShareFailure(f"{before - after} pages of libz.so were evicted and reading them "
+                           "back took no fault: the pages never left the page cache")
+    if hashed < RECLAIM_MIN_HASHED:
+        raise ShareFailure(f"{before - after} pages of libz.so were evicted and the children that "
+                           f"ran it again hashed only {hashed} pages: a verdict of a frame the page "
+                           "cache gave up answered for the page read back")
+    if shared < 2:
+        raise ShareFailure("the children after the eviction shared no verdict")
+    return f"; libz.so lost {before - after} of {before} pages, read back in {readbacks} faults"
 
 
 def evict_check(record: list[str], hashed: int, shared: int, refused: int) -> str:
     """The evict mode: the control must have lost its pages (the program fails
-    itself otherwise), the pages libz.so lost are counted, and children that
-    run it again must verify what it lost afresh, never take a verdict of the
-    frames it had. Returns what to add to the line."""
+    itself otherwise), whether libz.so lost any shows in the faults that read
+    its pages back (a read-only system file's residency is not observable any
+    other way), and the pages of the library that were not evicted still share
+    their verdicts. Returns what to add to the line."""
     control = next((m for m in map(CONTROL.match, record) if m), None)
     libz = next((m for m in map(LIBZ.match, record) if m), None)
     if control is None or libz is None:
         raise ShareFailure("the evict record lacks its control or libz.so counts")
     if int(control.group(1)) < 128 or int(control.group(2)) != 0:
         raise ShareFailure("the control file was not evicted: the row cannot observe eviction")
-    evicted = int(libz.group(1)) - int(libz.group(2))
     if refused:
         raise ShareFailure("a page of the read-only library was refused")
-    if evicted > 0:
-        # The children after the eviction run pages the page cache had to read
-        # again: each of them is verified from its bytes at least once.
-        if hashed < 1:
-            raise ShareFailure(f"{evicted} pages of libz.so were evicted and no page "
-                               "was hashed again")
-    elif shared < 3:
+    if shared < 3:
         raise ShareFailure("the pages of the read-only library were not shared")
-    return f"; the control lost its pages, libz.so lost {max(evicted, 0)} of {libz.group(1)}"
+    return f"; the control lost its pages, {libz.group(2)} faults read libz.so's pages back"
