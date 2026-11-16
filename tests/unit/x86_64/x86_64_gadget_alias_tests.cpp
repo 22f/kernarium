@@ -182,6 +182,12 @@ public:
 		return executor_.code_page_registry();
 	}
 
+	/* The dispatches the last run_to_system_call made. */
+	[[nodiscard]] unsigned last_dispatches() const noexcept
+	{
+		return last_dispatches_;
+	}
+
 	/* One dispatch from `cpu`: the block at its RIP, run to its exit. */
 	[[nodiscard]] Run step(CpuState &cpu)
 	{
@@ -225,6 +231,7 @@ public:
 		cpu.gpr(Register::rdx) = rdx;
 		for (unsigned dispatch = 0; dispatch < 8; ++dispatch) {
 			const auto result = step(cpu);
+			last_dispatches_ = dispatch + 1;
 			if (result.event == EngineEvent::system_call)
 				return result;
 		}
@@ -258,6 +265,7 @@ public:
 private:
 	unsigned long generation_;
 	void *context_;
+	unsigned last_dispatches_{};
 	StaticGuestMemory memory_;
 	gadgets::Executor executor_;
 };
@@ -486,13 +494,13 @@ void test_flush_serial()
 	require(first_after.unheld_runnable == 0 && second_after.unheld_runnable == 0);
 }
 
-/* A registration that fails runs the instruction as a transient program of
- * one, and registers on the next dispatch. */
 /* E7: units that link to each other stay safe when the frame of one of them
- * is written through W. W stores into B's frame and then jumps to A, which
- * jumps to B, all within one dispatch: B was cached and linked from A before
- * the store, and runs the new bytes. A store that touches none of B's code
- * leaves the cached units and their links alone. */
+ * is written through W. The chain W -> A -> B is armed first: W stores past
+ * B's code (no store of the warm-up touches B), jumps to A, which jumps to
+ * B, and a round is one dispatch. Then W makes the one store into B's frame
+ * with the chain armed, and B returns the new immediate: the store cools
+ * the link A holds to B. A store that touches none of B's code leaves the
+ * cached units and their links alone. */
 void test_links_follow_alias_stores()
 {
 	const Clean clean;
@@ -513,11 +521,16 @@ void test_links_follow_alias_stores()
 	space.map(a, frame_a, 0, rx, 1);
 	space.map(b, frame_b, 0, rx, 1);
 	space.map(alias, frame_b, 0, rw, 0);
-	for (unsigned round = 0; round < 4; ++round)
-		require(space.run_to_system_call(w, 1, alias + 1).rax == 1);
+	/* The warm-up stores past B's code: nothing invalidates B, and the
+	 * links form. */
+	for (unsigned round = 0; round < 8; ++round)
+		require(space.run_to_system_call(w, 1, alias + 0x400).rax == 1);
+	require(space.last_dispatches() == 1,
+		"the chain W -> A -> B was not armed before the store");
+	/* The one store into B's code, through W, with the chain armed. */
 	require(space.run_to_system_call(w, 2, alias + 1).rax == 2,
 		"a store through W did not reach a unit another unit links to");
-	/* Past B's code: the cached units and their links are kept. */
+	/* Past B's code again: the cached units and their links are kept. */
 	const auto built = space.diagnostics().translations;
 	require(space.run_to_system_call(w, 9, alias + 0x400).rax == 2);
 	require(space.diagnostics().translations == built,
