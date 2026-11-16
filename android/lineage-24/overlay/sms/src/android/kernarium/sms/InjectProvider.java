@@ -8,15 +8,22 @@ import android.net.Uri;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Process;
+import android.util.Log;
 
 /**
  * The host's way in: `content call --uri content://android.kernarium.sms
  * --method deliver --arg <message>` in the adb shell (Message has the
  * argument's form). Only the shell's uid is served: the host application
  * reaches it over its own adb channel, and an application in the guest cannot.
- * The result holds "parts", how many PDUs the message took.
+ * The result holds "parts", how many PDUs the message took. A message whose
+ * identifier was handed over before is not handed over again; the answer is
+ * the first one's (DeliveredIdentifiers).
  */
 public final class InjectProvider extends ContentProvider {
+    private static final String TAG = "AndariumSms";
+
+    private final DeliveredIdentifiers delivered = new DeliveredIdentifiers();
+
     @Override
     public boolean onCreate() {
         return true;
@@ -32,8 +39,11 @@ public final class InjectProvider extends ContentProvider {
         final Message message = Message.parse(argument);
         final long identity = Binder.clearCallingIdentity();
         try {
+            final DeliveredIdentifiers.Result done = delivered.deliver(
+                    message.identifier, () -> Delivery.deliver(getContext(), message));
+            if (done.repeat) Log.i(TAG, "a message handed over before was not handed over again");
             final Bundle result = new Bundle();
-            result.putInt("parts", Delivery.deliver(getContext(), message));
+            result.putInt("parts", done.parts);
             return result;
         } finally {
             Binder.restoreCallingIdentity(identity);

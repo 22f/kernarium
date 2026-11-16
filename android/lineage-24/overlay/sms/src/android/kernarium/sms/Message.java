@@ -6,9 +6,10 @@ import java.util.Base64;
 import java.util.regex.Pattern;
 
 /**
- * One message from the host: its sender and its text. The host sends it as the
- * provider call's argument, the sender and the text each in base64 of UTF-8,
- * joined by a dot, so the shell command carries no character it would read.
+ * One message from the host: its sender, its text and the identifier the host
+ * chose for it. The host sends it as the provider call's argument, the sender
+ * and the text each in base64 of UTF-8 and the identifier in hex, joined by
+ * dots, so the shell command carries no character it would read.
  */
 final class Message {
     /** A number of at most 20 digits, international when it starts with +. */
@@ -26,19 +27,23 @@ final class Message {
      * same (GuestSms.maximumParts).
      */
     static final int MAXIMUM_PARTS = 11;
+    /** The identifier: 128 bits the host drew, in lower-case hex. */
+    static final Pattern IDENTIFIER = Pattern.compile("[0-9a-f]{32}");
 
     final String sender;
     final String body;
+    final String identifier;
 
-    private Message(String sender, String body) {
+    private Message(String sender, String body, String identifier) {
         this.sender = sender;
         this.body = body;
+        this.identifier = identifier;
     }
 
     static Message parse(String argument) {
         if (argument == null) throw new IllegalArgumentException("no message");
         final String[] fields = argument.split("\\.", -1);
-        if (fields.length != 2) throw new IllegalArgumentException("not a sender and a text");
+        if (fields.length != 3) throw new IllegalArgumentException("not a sender, a text and an identifier");
         final String sender = decode(fields[0]);
         final String body = decode(fields[1]);
         if (!NUMBER.matcher(sender).matches() && !NAME.matcher(sender).matches()
@@ -50,7 +55,8 @@ final class Message {
         }
         // Android's SMS code cannot return U+FFFE (see DeliverPdu).
         if (body.indexOf('\uFFFE') >= 0) throw new IllegalArgumentException("the text has U+FFFE");
-        return new Message(sender, body);
+        if (!IDENTIFIER.matcher(fields[2]).matches()) throw new IllegalArgumentException("not an identifier");
+        return new Message(sender, body, fields[2]);
     }
 
     private static String decode(String field) {

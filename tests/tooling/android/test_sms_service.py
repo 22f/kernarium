@@ -24,7 +24,7 @@ REPOSITORY = HERE.parents[2]
 SOURCES = REPOSITORY / "android" / "lineage-24" / "overlay" / "sms" / "src" / "android" / "kernarium" / "sms"
 TEST = HERE / "sms" / "android" / "kernarium" / "sms" / "SmsServiceTest.java"
 ANDROID_GLUE = ("Delivery.java", "InjectProvider.java")
-PLATFORM_FREE = {"DeliverPdu.java", "Message.java"}
+PLATFORM_FREE = {"DeliveredIdentifiers.java", "DeliverPdu.java", "Message.java"}
 SKIP = 77
 
 

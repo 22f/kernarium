@@ -204,8 +204,9 @@ protocol RuntimeDriver: AnyObject, OldAppsSource {
     /// nil when it cannot be read now. Android's boot ends before it does.
     func storageReady() async -> Bool?
     /// Delivers a text message to the guest as if from the network
-    /// (`GuestSms`); the sender and text are ones `GuestSms` accepts.
-    func sendSms(sender: String, text: String) async -> GuestSms.Outcome
+    /// (`GuestSms`); the sender and text are ones `GuestSms` accepts, and the
+    /// identifier is the message's (`GuestSms.Retries`).
+    func sendSms(sender: String, text: String, identifier: String) async -> GuestSms.Outcome
     /// TalkBack in the guest; nil when the guest cannot be asked now.
     func readScreenReader() async -> ScreenReaderState?
     /// Turns TalkBack on or off in the guest whose state is `state`, keeping

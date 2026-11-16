@@ -204,8 +204,156 @@ public final class SmsServiceTest {
         return Base64.getEncoder().encodeToString(text.getBytes(StandardCharsets.UTF_8));
     }
 
+    private static final String ID = "0123456789abcdef0123456789abcdef";
+
     private static String argument(String sender, String body) {
-        return base64(sender) + "." + base64(body);
+        return argument(sender, body, ID);
+    }
+
+    private static String argument(String sender, String body, String identifier) {
+        return base64(sender) + "." + base64(body) + "." + identifier;
+    }
+
+    private static String identifier(int number) {
+        return String.format("%032x", number);
+    }
+
+    /** The inbox of a stand-in for Delivery: what the service handed to Android, in order. */
+    private static final class Inbox {
+        final List<String> messages = new ArrayList<>();
+
+        int deliver(Message message) {
+            synchronized (messages) {
+                messages.add(message.sender + ": " + message.body);
+            }
+            return DeliverPdu.split(message.body).size();
+        }
+    }
+
+    private static DeliveredIdentifiers.Result handOver(DeliveredIdentifiers identifiers, Inbox inbox, String argument) {
+        final Message message = Message.parse(argument);
+        return identifiers.deliver(message.identifier, () -> inbox.deliver(message));
+    }
+
+    private static void identifierRequired() {
+        final String ok = argument("Bank", "hi");
+        same(ID, Message.parse(ok).identifier, "the identifier is carried");
+        final String[] bad = {
+            base64("Bank") + "." + base64("hi"), // none
+            base64("Bank") + "." + base64("hi") + ".", // empty
+            ok.substring(0, ok.length() - 1), // short
+            ok + "0", // long
+            argument("Bank", "hi", "0123456789ABCDEF0123456789ABCDEF"), // upper case
+            argument("Bank", "hi", "0123456789abcdef0123456789abcdeg"), // not hex
+            argument("Bank", "hi", "0123456789abcdef0123456789abcde-"),
+            ok + ".00", // a fourth field
+        };
+        for (String argument : bad) {
+            try {
+                Message.parse(argument);
+                check(false, "the parser took <" + argument + ">");
+            } catch (IllegalArgumentException expected) {
+                // refused
+            }
+        }
+    }
+
+    /** The host sends the same identifier again when it did not see the answer: the message is stored once. */
+    private static void retryAfterALostReply() {
+        final DeliveredIdentifiers identifiers = new DeliveredIdentifiers();
+        final Inbox inbox = new Inbox();
+        final String argument = argument("+15551234567", "code 123456", identifier(1));
+        final DeliveredIdentifiers.Result first = handOver(identifiers, inbox, argument);
+        same(1, first.parts, "parts of the first call");
+        check(!first.repeat, "the first call hands the message over");
+        // The reply was lost: the same call again.
+        final DeliveredIdentifiers.Result second = handOver(identifiers, inbox, argument);
+        check(second.repeat, "the second call is a repeat");
+        same(first.parts, second.parts, "a repeat answers with the first call's parts");
+        same(List.of("+15551234567: code 123456"), inbox.messages, "stored once");
+        // The same text under a new identifier is a new message.
+        handOver(identifiers, inbox, argument("+15551234567", "code 123456", identifier(2)));
+        same(2, inbox.messages.size(), "the same text again, as a new message");
+        // A call that fails is not remembered: its retry hands the message over.
+        final String failing = argument("Bank", "later", identifier(3));
+        try {
+            identifiers.deliver(Message.parse(failing).identifier, () -> {
+                throw new IllegalStateException("broadcast refused");
+            });
+            check(false, "the failure was swallowed");
+        } catch (IllegalStateException expected) {
+            // passed on to the caller
+        }
+        check(!handOver(identifiers, inbox, failing).repeat, "a failed call is tried again");
+        same(3, inbox.messages.size(), "stored after the retry of a failure");
+    }
+
+    /** Messages in flight at once never share a call, and one identifier is never handed over twice. */
+    private static void messagesInFlight() throws InterruptedException {
+        final DeliveredIdentifiers identifiers = new DeliveredIdentifiers();
+        final Inbox inbox = new Inbox();
+        final java.util.concurrent.CountDownLatch inside = new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.atomic.AtomicInteger deliveries = new java.util.concurrent.atomic.AtomicInteger();
+        final List<DeliveredIdentifiers.Result> results = java.util.Collections.synchronizedList(new ArrayList<>());
+        final Message a = Message.parse(argument("Alice", "first " + "a".repeat(100), identifier(10)));
+        final Message b = Message.parse(argument("Bob", "second", identifier(11)));
+        // A is handed over slowly; B and a retry of A arrive meanwhile.
+        final Thread slowA = new Thread(() -> results.add(identifiers.deliver(a.identifier, () -> {
+            deliveries.incrementAndGet();
+            inside.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                throw new IllegalStateException(e);
+            }
+            return inbox.deliver(a);
+        })));
+        slowA.start();
+        inside.await();
+        final Thread otherB = new Thread(() -> results.add(identifiers.deliver(b.identifier, () -> {
+            deliveries.incrementAndGet();
+            return inbox.deliver(b);
+        })));
+        final Thread retryA = new Thread(() -> results.add(identifiers.deliver(a.identifier, () -> {
+            deliveries.incrementAndGet();
+            return inbox.deliver(a);
+        })));
+        otherB.start();
+        retryA.start();
+        release.countDown();
+        slowA.join(20_000);
+        otherB.join(20_000);
+        retryA.join(20_000);
+        check(!slowA.isAlive() && !otherB.isAlive() && !retryA.isAlive(), "the calls finish");
+        same(2, deliveries.get(), "A and B are each handed over once");
+        same(3, results.size(), "three answers");
+        same(2, inbox.messages.size(), "two messages stored");
+        check(inbox.messages.contains("Alice: " + a.body) && inbox.messages.contains("Bob: second"),
+                "each message is stored as it was sent: " + inbox.messages);
+        int repeats = 0;
+        for (DeliveredIdentifiers.Result result : results) {
+            if (result.repeat) ++repeats;
+        }
+        same(1, repeats, "the retry of A is the one repeat");
+        for (DeliveredIdentifiers.Result result : results) {
+            check(result.parts == 1 || result.parts == DeliverPdu.split(a.body).size(), "parts " + result.parts);
+        }
+    }
+
+    /** The memory is bounded: the oldest identifier goes first. */
+    private static void identifierMemory() {
+        final DeliveredIdentifiers identifiers = new DeliveredIdentifiers();
+        final Inbox inbox = new Inbox();
+        for (int i = 0; i < DeliveredIdentifiers.CAPACITY; ++i) {
+            handOver(identifiers, inbox, argument("Bank", "m" + i, identifier(1000 + i)));
+        }
+        check(handOver(identifiers, inbox, argument("Bank", "m0", identifier(1000))).repeat,
+                "the oldest is still known at the capacity");
+        handOver(identifiers, inbox, argument("Bank", "new", identifier(5000)));
+        check(!handOver(identifiers, inbox, argument("Bank", "m0", identifier(1000))).repeat,
+                "past the capacity the oldest is forgotten");
+        check(handOver(identifiers, inbox, argument("Bank", "new", identifier(5000))).repeat, "the newest is known");
     }
 
     /** The most parts: the bound in Message, reached by a text of surrogate pairs on every split. */
@@ -260,12 +408,16 @@ public final class SmsServiceTest {
         }
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         decoderContract();
         byteOrderMark();
         reversedMark();
         partCount();
         random();
+        identifierRequired();
+        retryAfterALostReply();
+        messagesInFlight();
+        identifierMemory();
         if (failures != 0) {
             System.out.println(failures + " failure(s)");
             System.exit(1);

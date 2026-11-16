@@ -472,6 +472,8 @@ final class AppModel {
     #endif
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
     private var restoringUpdate = false
+    /// The identifiers of the text messages whose send was not confirmed.
+    private var smsRetries = GuestSms.Retries()
     /// The guest is paused because the device is nearly out of space; the
     /// screen over the session asks what to do.
     var spacePause: SpacePause?
@@ -1033,7 +1035,11 @@ final class AppModel {
         if let refusal = GuestSms.refusal(sender: sender, text: text) { return .refused(SmsMessages.refusal(refusal)) }
         guard case .running(.normal) = phase else { return .refused(SmsMessages.notRunning) }
         guard let driver else { return .delivered(SmsMessages.delivered(parts: 1)) }
-        return switch await driver.sendSms(sender: sender, text: text) {
+        let identifier = smsRetries.identifier(sender: sender, text: text)
+        let outcome = await driver.sendSms(sender: sender, text: text, identifier: identifier)
+        // Only a send that was not confirmed may have reached Android: sent again, it keeps its identifier.
+        smsRetries.settle(sender: sender, text: text, identifier: identifier, confirmed: outcome != .failed)
+        return switch outcome {
         case .delivered(let parts): .delivered(SmsMessages.delivered(parts: parts))
         case .unsupported: .refused(SmsMessages.unsupported)
         case .failed: .refused(SmsMessages.failed)

@@ -47,13 +47,70 @@ public enum GuestSms {
         return nil
     }
 
-    /// The shell command that delivers the message; nil when it is refused.
-    /// The sender and the text travel as base64 of UTF-8, so the shell reads
-    /// no character of theirs.
-    public static func command(sender typed: String, text: String) -> String? {
-        guard refusal(sender: typed, text: text) == nil, let sender = sender(typed) else { return nil }
-        let argument = Data(sender.utf8).base64EncodedString() + "." + Data(text.utf8).base64EncodedString()
+    /// An identifier for one message: 128 random bits in lower-case hex. The
+    /// service hands a message over once for each identifier it is given.
+    public static func newIdentifier() -> String {
+        (0..<16).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max)) }.joined()
+    }
+
+    public static func isIdentifier(_ text: String) -> Bool {
+        text.wholeMatch(of: /[0-9a-f]{32}/) != nil
+    }
+
+    /// The shell command that delivers the message; nil when it is refused
+    /// or the identifier is not one. The sender and the text travel as base64
+    /// of UTF-8, so the shell reads no character of theirs.
+    public static func command(sender typed: String, text: String, identifier: String) -> String? {
+        guard refusal(sender: typed, text: text) == nil, let sender = sender(typed), isIdentifier(identifier) else { return nil }
+        let argument = [Data(sender.utf8).base64EncodedString(), Data(text.utf8).base64EncodedString(), identifier]
+            .joined(separator: ".")
         return "content call --uri content://\(authority) --method deliver --arg '\(argument)'"
+    }
+
+    /// The identifiers of drafts whose send was not confirmed. When the
+    /// person sends the same draft again the service may already have it, so
+    /// the send carries the identifier of the first one and the service
+    /// answers it without handing the message over twice. A send that was
+    /// confirmed, or could not have been taken, forgets its draft: the same
+    /// words sent again are a new message.
+    public struct Retries: Sendable {
+        /// The drafts kept; the oldest is forgotten first.
+        public static let capacity = 16
+
+        private struct Draft: Hashable, Sendable {
+            let sender: [UInt8]
+            let text: [UInt8]
+        }
+
+        private var unconfirmed: [Draft: String] = [:]
+        private var order: [Draft] = []
+        private let make: @Sendable () -> String
+
+        public init(makeIdentifier: @escaping @Sendable () -> String = GuestSms.newIdentifier) {
+            make = makeIdentifier
+        }
+
+        private static func draft(_ sender: String, _ text: String) -> Draft {
+            Draft(sender: Array((GuestSms.sender(sender) ?? sender).utf8), text: Array(text.utf8))
+        }
+
+        /// The identifier to send this draft with now.
+        public func identifier(sender: String, text: String) -> String {
+            unconfirmed[Self.draft(sender, text)] ?? make()
+        }
+
+        /// Records how the send with `identifier` ended.
+        public mutating func settle(sender: String, text: String, identifier: String, confirmed: Bool) {
+            let draft = Self.draft(sender, text)
+            order.removeAll { $0 == draft }
+            guard !confirmed else {
+                unconfirmed[draft] = nil
+                return
+            }
+            unconfirmed[draft] = identifier
+            order.append(draft)
+            while order.count > Self.capacity { unconfirmed[order.removeFirst()] = nil }
+        }
     }
 
     public enum Outcome: Equatable, Sendable {

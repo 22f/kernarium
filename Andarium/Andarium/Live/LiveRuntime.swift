@@ -897,8 +897,8 @@ final class LiveRuntime: RuntimeDriver {
         await oldApps.isOpen(package: package)
     }
 
-    func sendSms(sender: String, text: String) async -> GuestSms.Outcome {
-        await operations.sendSms(sender: sender, text: text)
+    func sendSms(sender: String, text: String, identifier: String) async -> GuestSms.Outcome {
+        await operations.sendSms(sender: sender, text: text, identifier: identifier)
     }
 
     // MARK: TalkBack
