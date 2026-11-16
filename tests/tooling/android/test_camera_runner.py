@@ -557,6 +557,8 @@ HAL_LOG = """\
 11-12 12:38:32.200  2194  2204 W V4l2Stream: Wait: the camera did not deliver the buffer of slot 0; the stream starts over
 11-12 12:38:32.300  2194  2204 W V4l2FrameSource: QueueBuffer: the node refused the dma-buf; the 1x1 stream copies
 11-12 12:38:32.400  2194  2204 E SomeOtherTag: unrelated error
+11-12 12:38:32.500  2194  2204 E V4l2FrameSource: WaitFor: the camera did not deliver a buffer (-32)
+11-12 12:38:32.600  2194  2204 E V4l2FrameSource: WaitFor: the camera did not deliver a buffer (-110)
 """
 
 
@@ -828,8 +830,11 @@ class VideoAndFrontTests(unittest.TestCase):
 
     def test_the_hal_log_failures(self) -> None:
         failures = runner.hal_failures(HAL_LOG)
-        self.assertEqual(len(failures), 5)
+        self.assertEqual(len(failures), 6)
         self.assertTrue(all("SomeOtherTag" not in line and "dma-buf" not in line for line in failures))
+        # A wait the framework's flush interrupted is no failed buffer; one that timed out is.
+        self.assertTrue(all("(-32)" not in line for line in failures))
+        self.assertTrue(any("(-110)" in line for line in failures))
         self.assertEqual(runner.hal_failures(HAL_LOG.split("\n")[0] + "\n"), [])
         self.assertEqual(runner.hal_failures(""), [])
 
@@ -2045,7 +2050,7 @@ class VideoAndFrontFlowTests(unittest.TestCase):
         guest = FakeGuest(None)
         runner.check_hal_log(guest)
         guest.log = HAL_LOG
-        with self.assertRaisesRegex(runner.Failure, "5 failed buffer lines; the first: .*every buffer"):
+        with self.assertRaisesRegex(runner.Failure, "6 failed buffer lines; the first: .*every buffer"):
             runner.check_hal_log(guest)
 
     def test_the_new_steps_run_in_live_mode_only(self) -> None:
