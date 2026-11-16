@@ -14,6 +14,7 @@ import pathlib
 import struct
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "tools" /
                        "aot"))
@@ -547,6 +548,26 @@ class CensusTests(unittest.TestCase):
         census = library.stats.census
         self.assertEqual(sum(census.values()), len(unit))
         self.assertEqual(census["other"], 0)
+
+    def test_a_build_with_an_untagged_word_is_refused(self) -> None:
+        # Every framework build holds the census invariant, not only this
+        # test: an emitter that stops tagging its words fails the build.
+        elf = elf64.Elf(fixture.build())
+        library = rewrite.Library(
+            0, "/aot-test/libaotfixture.so", elf,
+            a64decode.Decoder(a64decode.DEFAULT_TABLE),
+            rewrite.read_layout(rewrite.LAYOUT_HEADER))
+        original = rewrite.Library.tag
+
+        def skip_exit_stubs(self, kind, start):
+            if kind != "stub.xu":
+                original(self, kind, start)
+
+        with mock.patch.object(rewrite.Library, "tag", skip_exit_stubs):
+            with self.assertRaises(RuntimeError) as raised:
+                library.build([1] * ((library.table_end -
+                                      library.table_base) // 4096))
+        self.assertIn("no census kind", str(raised.exception))
 
     def test_functions_that_leave_for_one_target_share_its_stub(self) -> None:
         # Three functions, each ending in a branch to the same uncovered

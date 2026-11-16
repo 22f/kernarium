@@ -489,6 +489,12 @@ class Library:
             for name, code in CENSUS_CODE.items()}
         # Conditional branches out of range grew by one word each.
         self.stats.census["relax"] = len(unit) - 4 * len(asm._w)
+        # Every word has a kind: a framework build holds what the tooling
+        # test holds for the fixture library.
+        if self.stats.census["other"]:
+            raise RuntimeError(
+                f"{self.name}: {self.stats.census['other']} bytes of the "
+                "unit have no census kind")
         table_at = asm.label_address("TAB")
         view = memoryview(unit)[table_at:table_at + 4 * self.table_words
                                 ].cast("I")
