@@ -71,6 +71,12 @@ public:
 	 * any executor holds it. */
 	[[nodiscard]] static std::shared_ptr<CodePageRegistry> acquire(
 		std::uint64_t generation);
+	/* The registry of `generation` while some executor holds it, and null
+	 * otherwise; it never makes one. The caller's reference keeps the
+	 * registry alive, so a registry cannot go away under a caller that
+	 * found it. */
+	[[nodiscard]] static std::shared_ptr<CodePageRegistry> find(
+		std::uint64_t generation);
 
 	CodePageRegistry();
 	~CodePageRegistry();
@@ -82,6 +88,10 @@ public:
 	 * entries through `retire`. */
 	void join(Participant &participant, RetireWriteTranslation retire,
 		void *context);
+	/* Takes `participant` out of the registry. A waiter that is waiting for
+	 * it stops waiting, and the participant may be destroyed once this
+	 * returns. The caller is outside the engine: every store the participant
+	 * translated has landed. A test build checks that. */
 	void leave(Participant &participant) noexcept;
 
 	[[nodiscard]] bool holds(std::uint64_t address) const noexcept
@@ -117,6 +127,16 @@ private:
 	void wait_for_participants(const Participant *self) noexcept;
 	void retire_write_translations(std::uint64_t page) noexcept;
 
+	/* A participant is named by where it lives and by the join that made it
+	 * a member. A waiter may only touch the participant while it finds that
+	 * pair among the members, under the lock; a participant constructed at
+	 * a departed one's address joins with a serial no earlier member had,
+	 * so it is never mistaken for it. */
+	struct Member final {
+		Participant *participant{};
+		std::uint64_t serial{};
+	};
+
 	/* Neighbouring pages hash to neighbouring bits, so they land in
 	 * different stripes. A stripe guards the page counts, the bit counts and
 	 * the membership bits of its bits; it is taken before
@@ -139,7 +159,10 @@ private:
 
 	std::array<Stripe, stripe_count> stripes_;
 	::uml::memory::WordSharedMutex participants_mutex_;
-	std::vector<Participant *> participants_;
+	std::vector<Member> participants_;
+	/* The serial of the next join; 64 bits, so never reused. Guarded by
+	 * participants_mutex_ like the list. */
+	std::uint64_t next_serial_{1};
 	std::unique_ptr<std::atomic<std::uint64_t>[]> bits_;
 	std::unique_ptr<std::uint8_t[]> counts_;
 	std::atomic<std::uint64_t> changes_{0};
@@ -152,6 +175,8 @@ private:
 	 * participants_mutex_ like the list above. */
 	struct Retirer final {
 		Participant *participant{};
+		/* The serial of the join that made the participant a member. */
+		std::uint64_t serial{};
 		RetireWriteTranslation retire{};
 		void *context{};
 	};

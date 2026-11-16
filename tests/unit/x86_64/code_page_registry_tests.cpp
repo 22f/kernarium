@@ -4,6 +4,8 @@
 #include "require.hpp"
 
 #include <malloc/malloc.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
@@ -13,14 +15,18 @@
 #endif
 
 #include <atomic>
+#include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <new>
 #include <thread>
 #include <vector>
 
 namespace {
 
+using Clock = std::chrono::steady_clock;
 using uml::cpu::x86_64::CodePageRegistry;
 using uml::cpu::x86_64::NativeTlbEntry;
 using uml::cpu::x86_64::native_tlb_entry_count;
@@ -183,6 +189,175 @@ void test_concurrent_holders_stay_exact()
 	require(registry.holds(pinned), "the pinned page was released");
 }
 
+/* A member the waiter is waiting for, and the retirer that orders the test
+ * with the waiter's snapshot: the waiter retires the page's write
+ * translations immediately before it snapshots the members, in its own
+ * thread. */
+struct SnapshotSignal final {
+	std::atomic<bool> retired{false};
+
+	static void retire(void *context, std::uint64_t) noexcept
+	{
+		static_cast<SnapshotSignal *>(context)->retired.store(
+			true, std::memory_order_release);
+	}
+
+	/* The waiter has retired, and then had time to take its snapshot and
+	 * start polling. */
+	void settle() const
+	{
+		const auto deadline = Clock::now() + std::chrono::seconds{10};
+		while (!retired.load(std::memory_order_acquire)) {
+			require(Clock::now() < deadline,
+				"the waiter never started its wait");
+			std::this_thread::yield();
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds{40});
+	}
+};
+
+/* Well under the registry's 200 ms bound, and well over what a woken thread
+ * needs. */
+constexpr auto prompt = std::chrono::milliseconds{100};
+
+/* A waiter that is waiting for a second member must not read it once it has
+ * left the registry and been freed. The sanitizer run of this row
+ * (`ctest --preset unit-asan-ubsan -R '^x86-64-code-page-registry$'`) is the
+ * regression row for the read of the freed member; the plain run also fails
+ * it when the freed member still reads as inside the engine, because the
+ * waiter then waits out its whole bound.
+ */
+void test_waiter_does_not_read_a_member_that_was_freed()
+{
+	CodePageRegistry registry;
+	SnapshotSignal signal;
+	CodePageRegistry::Participant first;
+	CodePageRegistry::Participant self;
+	auto second = std::make_unique<CodePageRegistry::Participant>();
+	registry.join(first, &SnapshotSignal::retire, &signal);
+	registry.join(*second);
+	registry.join(self);
+	first.engine_epoch.store(1, std::memory_order_release);
+	second->engine_epoch.store(1, std::memory_order_release);
+
+	Clock::time_point returned{};
+	std::thread waiter{[&] {
+		registry.add(page_at(21), &self);
+		returned = Clock::now();
+	}};
+	signal.settle();
+	/* The second member leaves the engine, then the registry, and is freed,
+	 * while the waiter is still polling the first. */
+	second->engine_epoch.fetch_add(1, std::memory_order_release);
+	registry.leave(*second);
+	second.reset();
+	const auto moved = Clock::now();
+	first.engine_epoch.fetch_add(1, std::memory_order_release);
+	waiter.join();
+	require(returned - moved < prompt,
+		"the waiter waited for a member that had left the registry");
+	registry.leave(first);
+	registry.leave(self);
+}
+
+/* The storage of a departed member is reused by a new participant whose
+ * epoch is the odd one the waiter recorded. The waiter does not wait for the
+ * newcomer, joined or not: it is not the member that was waited for. Main
+ * returns only after its bound, because it keeps waiting while the epoch at
+ * the old address equals the recorded one. The storage is kept alive, so the
+ * row has defined behaviour on every build.
+ */
+void test_waiter_ignores_a_new_participant_at_a_departed_address(bool join)
+{
+	CodePageRegistry registry;
+	SnapshotSignal signal;
+	CodePageRegistry::Participant first;
+	CodePageRegistry::Participant self;
+	alignas(CodePageRegistry::Participant)
+		std::byte storage[sizeof(CodePageRegistry::Participant)];
+	auto *held = std::construct_at(
+		reinterpret_cast<CodePageRegistry::Participant *>(storage));
+	registry.join(first, &SnapshotSignal::retire, &signal);
+	registry.join(*held);
+	registry.join(self);
+	constexpr std::uint64_t recorded = 1;
+	first.engine_epoch.store(recorded, std::memory_order_release);
+	held->engine_epoch.store(recorded, std::memory_order_release);
+
+	Clock::time_point returned{};
+	std::thread waiter{[&] {
+		registry.add(page_at(22), &self);
+		returned = Clock::now();
+	}};
+	signal.settle();
+	held->engine_epoch.fetch_add(1, std::memory_order_release);
+	registry.leave(*held);
+	std::destroy_at(held);
+	held = std::construct_at(
+		reinterpret_cast<CodePageRegistry::Participant *>(storage));
+	held->engine_epoch.store(recorded, std::memory_order_release);
+	if (join)
+		registry.join(*held);
+	const auto moved = Clock::now();
+	first.engine_epoch.fetch_add(1, std::memory_order_release);
+	waiter.join();
+	require(returned - moved < prompt,
+		"the waiter waited for a participant that took a departed one's place");
+	/* The newcomer leaves the engine, as a member must before it leaves. */
+	held->engine_epoch.fetch_add(1, std::memory_order_release);
+	if (join)
+		registry.leave(*held);
+	std::destroy_at(held);
+	registry.leave(first);
+	registry.leave(self);
+}
+
+/* A registry found by generation stays valid for as long as the finder holds
+ * it, and a generation nobody holds is not found and not made. */
+void test_find_shares_the_registry_without_making_one()
+{
+	constexpr std::uint64_t generation = (std::uint64_t{1} << 41U) + 7;
+	require(CodePageRegistry::find(generation) == nullptr,
+		"a registry nobody holds was found");
+	require(CodePageRegistry::find(generation) == nullptr,
+		"finding a registry made it");
+	auto held = CodePageRegistry::acquire(generation);
+	auto found = CodePageRegistry::find(generation);
+	require(found == held, "a held registry was not the one found");
+	held.reset();
+	require(CodePageRegistry::find(generation) == found,
+		"a registry a finder still holds was lost");
+	found->add(page_at(23), nullptr);
+	require(found->holds(page_at(23)),
+		"a registry outlived by its acquirer is unusable");
+	found.reset();
+	require(CodePageRegistry::find(generation) == nullptr,
+		"a released registry was found");
+}
+
+/* A participant is out of the engine when it leaves the registry. The unit
+ * builds enforce it by ending the process; the child proves that. */
+void test_leave_inside_the_engine_is_refused()
+{
+	const auto child = fork();
+	require(child >= 0, "fork failed");
+	if (child == 0) {
+		alarm(10);
+		/* The refusal says why on stderr. */
+		(void)freopen("/dev/null", "w", stderr);
+		CodePageRegistry registry;
+		CodePageRegistry::Participant participant;
+		registry.join(participant);
+		participant.engine_epoch.store(1, std::memory_order_release);
+		registry.leave(participant);
+		_exit(0);
+	}
+	int status = 0;
+	require(waitpid(child, &status, 0) == child, "waitpid failed");
+	require(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
+		"leaving the registry inside the engine was accepted");
+}
+
 /* The bytes the process's live allocations hold. A sanitizer replaces the
  * allocator, and the malloc zone statistics it reports then measure something
  * else: AddressSanitizer's count every byte ever allocated, freed or not, and
@@ -235,5 +410,10 @@ int main()
 	test_participant_retires_its_own_translations();
 	test_concurrent_holders_stay_exact();
 	test_acquired_registries_are_released();
+	test_find_shares_the_registry_without_making_one();
+	test_leave_inside_the_engine_is_refused();
+	test_waiter_does_not_read_a_member_that_was_freed();
+	test_waiter_ignores_a_new_participant_at_a_departed_address(false);
+	test_waiter_ignores_a_new_participant_at_a_departed_address(true);
 	return 0;
 }

@@ -3,10 +3,18 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
 #include <unordered_map>
+
+/* Whether leave() checks that its caller is outside the engine. The unit-test
+ * build turns it on; a product has no use for the load. */
+#ifndef UML_CODE_PAGE_REGISTRY_CHECKS
+#define UML_CODE_PAGE_REGISTRY_CHECKS 0
+#endif
 
 namespace uml::cpu::x86_64 {
 namespace {
@@ -30,6 +38,15 @@ Table &table()
 constexpr auto quiescence_bound = std::chrono::milliseconds{200};
 
 } // namespace
+
+std::shared_ptr<CodePageRegistry> CodePageRegistry::find(
+	std::uint64_t generation)
+{
+	auto &shared = table();
+	const std::lock_guard lock{shared.mutex};
+	const auto entry = shared.entries.find(generation);
+	return entry == shared.entries.end() ? nullptr : entry->second.lock();
+}
 
 std::shared_ptr<CodePageRegistry> CodePageRegistry::acquire(
 	std::uint64_t generation)
@@ -72,36 +89,56 @@ CodePageRegistry::~CodePageRegistry()
 void CodePageRegistry::join(Participant &participant)
 {
 	const std::lock_guard lock{participants_mutex_};
-	if (std::find(participants_.begin(), participants_.end(),
-		    &participant) == participants_.end())
-		participants_.push_back(&participant);
+	if (std::find_if(participants_.begin(), participants_.end(),
+		    [&](const Member &member) {
+			    return member.participant == &participant;
+		    }) == participants_.end())
+		participants_.push_back({&participant, next_serial_++});
 }
 
 void CodePageRegistry::join(Participant &participant,
 	RetireWriteTranslation retire, void *context)
 {
 	const std::lock_guard lock{participants_mutex_};
-	if (std::find(participants_.begin(), participants_.end(),
-		    &participant) != participants_.end())
+	if (std::find_if(participants_.begin(), participants_.end(),
+		    [&](const Member &member) {
+			    return member.participant == &participant;
+		    }) != participants_.end())
 		return;
-	retirers_.push_back({&participant, retire, context});
+	const auto serial = next_serial_;
+	retirers_.push_back({&participant, serial, retire, context});
 	try {
-		participants_.push_back(&participant);
+		participants_.push_back({&participant, serial});
 	} catch (...) {
 		retirers_.pop_back();
 		throw;
 	}
+	++next_serial_;
 }
 
 void CodePageRegistry::leave(Participant &participant) noexcept
 {
+#if UML_CODE_PAGE_REGISTRY_CHECKS
+	/* A departure must follow the participant's last leave of the engine,
+	 * in its own thread or after it: a waiter treats a departed member as
+	 * having left the engine, and every store the member translated must
+	 * have landed by then. */
+	if ((participant.engine_epoch.load(std::memory_order_acquire) & 1U) != 0) {
+		std::fputs("CodePageRegistry::leave inside the engine\n", stderr);
+		std::abort();
+	}
+#endif
 	const std::lock_guard lock{participants_mutex_};
-	const auto found = std::find(
-		participants_.begin(), participants_.end(), &participant);
-	if (found != participants_.end())
-		participants_.erase(found);
+	const auto found = std::find_if(participants_.begin(),
+		participants_.end(), [&](const Member &member) {
+			return member.participant == &participant;
+		});
+	if (found == participants_.end())
+		return;
+	const auto serial = found->serial;
+	participants_.erase(found);
 	std::erase_if(retirers_, [&](const Retirer &retirer) {
-		return retirer.participant == &participant;
+		return retirer.serial == serial;
 	});
 }
 
@@ -109,11 +146,11 @@ void CodePageRegistry::retire_write_translations(std::uint64_t page) noexcept
 {
 	const auto index = native_tlb_index(page);
 	const std::shared_lock lock{participants_mutex_};
-	for (auto *participant : participants_) {
-		if (participant->write_translations == nullptr)
+	for (const auto &member : participants_) {
+		if (member.participant->write_translations == nullptr)
 			continue;
 		std::atomic_ref<std::uint64_t>{
-			participant->write_translations[index].write_page}
+			member.participant->write_translations[index].write_page}
 			.store(1, std::memory_order_relaxed);
 	}
 	for (const auto &retirer : retirers_)
@@ -165,24 +202,44 @@ void CodePageRegistry::add(std::uint64_t page, const Participant *self) noexcept
 
 void CodePageRegistry::wait_for_participants(const Participant *self) noexcept
 {
-	std::vector<std::pair<Participant *, std::uint64_t>> waiting;
+	/* A participant is read only while the lock is held and the pair named
+	 * here is still a member: `leave()` waits for nobody, and the owner
+	 * frees a participant once it has left. */
+	struct Awaited final {
+		Participant *participant;
+		std::uint64_t serial;
+		std::uint64_t epoch;
+	};
+	std::vector<Awaited> waiting;
 	{
 		const std::shared_lock lock{participants_mutex_};
-		for (auto *participant : participants_) {
-			if (participant == self)
+		for (const auto &member : participants_) {
+			if (member.participant == self)
 				continue;
-			const auto epoch = participant->engine_epoch.load(
+			const auto epoch = member.participant->engine_epoch.load(
 				std::memory_order_acquire);
 			if ((epoch & 1U) != 0)
-				waiting.emplace_back(participant, epoch);
+				waiting.push_back({member.participant, member.serial, epoch});
 		}
 	}
 	if (waiting.empty())
 		return;
 	const auto deadline = std::chrono::steady_clock::now() + quiescence_bound;
-	for (const auto &[participant, epoch] : waiting) {
-		while (participant->engine_epoch.load(std::memory_order_acquire) ==
-			epoch) {
+	for (const auto &awaited : waiting) {
+		for (;;) {
+			{
+				const std::shared_lock lock{participants_mutex_};
+				const auto member = std::find_if(participants_.begin(),
+					participants_.end(), [&](const Member &candidate) {
+						return candidate.participant == awaited.participant &&
+							candidate.serial == awaited.serial;
+					});
+				/* Gone: it left the engine before it left the registry. */
+				if (member == participants_.end() ||
+				    member->participant->engine_epoch.load(
+					    std::memory_order_acquire) != awaited.epoch)
+					break;
+			}
 			if (std::chrono::steady_clock::now() >= deadline)
 				return;
 			std::this_thread::yield();
