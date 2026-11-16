@@ -103,9 +103,9 @@ struct RootView: View {
     static func spoken(_ phase: Phase) -> String? {
         switch phase {
         case .running(.normal):
-            "Android is running. The side keys on the screen edge have Back, Home and Settings, where TalkBack is."
+            String(localized: "Android is running. The side keys on the screen edge have Back, Home and Settings.")
         case .running(.recovery):
-            "Recovery is running. The side keys\u{2019} volume keys move, and Power chooses."
+            String(localized: "Recovery is running. The side keys\u{2019} volume keys move, and Power chooses.")
         case .home, .booting, .failed:
             nil
         }
@@ -137,6 +137,11 @@ struct RootView: View {
             if let busy = model.busy, !model.busyOverSheet {
                 BusyOverlay(state: busy)
             }
+            // While VoiceOver runs and Android's screen reader is off, the
+            // card that asks about it; the model puts it away as it ends.
+            if let card = model.session.reader.card, case .running = model.phase {
+                ScreenReaderCard(card: card)
+            }
             // Over everything the session shows, a Settings sheet aside: the
             // model closes it when the guest pauses.
             if let pause = model.spacePause {
@@ -156,6 +161,7 @@ struct RootView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: model.busy != nil)
         .animation(.easeInOut(duration: 0.2), value: model.spacePause != nil)
+        .animation(.easeInOut(duration: 0.2), value: model.session.reader.card)
         .alert(
             model.alert?.title ?? "",
             isPresented: Binding(get: { model.alert != nil }, set: { if !$0 { model.alert = nil } }),

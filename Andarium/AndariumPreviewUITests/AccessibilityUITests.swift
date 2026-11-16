@@ -1,17 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import XCTest
 
-/// The Simulator preview driven as VoiceOver drives it: every screen passes
-/// Apple's audit for element descriptions and traits, TalkBack's switch sits
-/// in the session's Settings, and a first start under VoiceOver turns TalkBack
-/// on by itself. `-screen` names a screen of `AppEntry`.
+/// The Simulator preview driven as VoiceOver drives it: the screens listed
+/// here pass Apple's audit for element descriptions and traits (the audit
+/// waits for the sheet or card a screen opens on), the switch for Android's
+/// screen reader sits last in the session's Settings with every state told,
+/// and under VoiceOver a card asks before the screen reader is turned on. The
+/// Simulator has no VoiceOver: a test drives the interface, not the speech.
+/// `-screen` names a screen of `AppEntry`.
 final class AccessibilityUITests: XCTestCase {
-    private static let screens = [
-        "welcome", "home", "home-new", "home-update", "home-update-failed", "home-blocked", "home-ended",
-        "home-memory-warning", "home-mic-denied", "create", "resize", "system-edit", "info",
-        "info-acknowledgements", "info-license", "boot", "boot-first", "boot-recovery", "session",
-        "session-open", "session-stats", "session-graphics-notice", "settings", "settings-adb",
-        "install-done", "install-failed", "space-pause", "space-pause-running", "recovery-open", "failed",
+    /// Each screen with what it shows once it is up, which the audit waits for.
+    private static let screens: [(name: String, ready: String)] = [
+        ("welcome", ""), ("home", ""), ("home-new", ""), ("home-update", ""), ("home-update-failed", ""),
+        ("home-blocked", ""), ("home-ended", ""), ("home-memory-warning", ""), ("home-mic-denied", ""),
+        ("create", ""), ("resize", ""), ("system-edit", ""), ("info", ""), ("info-acknowledgements", ""),
+        ("info-license", ""), ("boot", ""), ("boot-first", ""), ("boot-recovery", ""),
+        ("session", "side-keys"), ("session-open", "side-keys-power"), ("session-stats", ""),
+        ("session-graphics-notice", ""), ("settings", "Settings"),
+        ("settings-accessibility", "settings-talkback"), ("settings-adb", "Settings"),
+        ("install-done", ""), ("install-failed", ""), ("space-pause", "space-pause"),
+        ("space-pause-running", "space-pause"), ("recovery-open", "side-keys-power"), ("failed", ""),
     ]
 
     override func setUp() {
@@ -33,11 +41,18 @@ final class AccessibilityUITests: XCTestCase {
         wait(for: [holds], timeout: timeout)
     }
 
-    /// Settings' TalkBack switch, in the sheet `screen` opens on.
+    /// Settings' switch for Android's screen reader, scrolled to if the sheet
+    /// opened above it: it is the last section of a long list, which draws a
+    /// row only once it is near the screen.
     @MainActor
     private func talkBackSwitch(in app: XCUIApplication) -> XCUIElement {
         let toggle = app.switches["settings-talkback"]
-        XCTAssertTrue(toggle.waitForExistence(timeout: 10), "Settings has no TalkBack switch")
+        var swipes = 0
+        while !(toggle.waitForExistence(timeout: swipes == 0 ? 10 : 1) && toggle.isHittable), swipes < 12 {
+            app.swipeUp()
+            swipes += 1
+        }
+        XCTAssertTrue(toggle.exists && toggle.isHittable, "Settings has no switch for the screen reader on screen")
         return toggle
     }
 
@@ -65,10 +80,21 @@ final class AccessibilityUITests: XCTestCase {
     @MainActor
     func testEveryScreenHasDescriptionsAndTraits() throws {
         continueAfterFailure = true
-        for screen in Self.screens {
-            let app = launch(screen)
-            // The audit reads what is on screen once the first frame settles.
-            _ = app.descendants(matching: .any).firstMatch.waitForExistence(timeout: 10)
+        let cases = Self.screens.map { ($0.name, $0.ready, [String]()) }
+            + [("session", "screen-reader-card", ["-voiceOver", "YES"])]
+        for (screen, ready, arguments) in cases {
+            let app = XCUIApplication()
+            app.launchArguments = ["-screen", screen] + arguments
+            app.launch()
+            XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20), "\(screen) did not open")
+            // The audit reads what the screen shows once it is up: the sheet or
+            // the card it opens on, else the first element.
+            if ready.isEmpty {
+                _ = app.descendants(matching: .any).firstMatch.waitForExistence(timeout: 10)
+            } else {
+                XCTAssertTrue(
+                    app.descendants(matching: .any)[ready].waitForExistence(timeout: 20), "\(screen) has no \(ready)")
+            }
             try app.performAccessibilityAudit(for: [.sufficientElementDescription, .trait]) { issue in
                 let element = issue.element.map { "\($0.label) (\($0.identifier))" } ?? "no element"
                 XCTFail("\(screen): \(issue.compactDescription): \(element)")
@@ -87,8 +113,8 @@ final class AccessibilityUITests: XCTestCase {
     }
 
     @MainActor
-    func testTheSwitchTurnsTalkBackOnAndOff() {
-        let app = launch("settings")
+    func testTheSwitchTurnsTheScreenReaderOnAndOff() {
+        let app = launch("settings-accessibility")
         let toggle = talkBackSwitch(in: app)
         XCTAssertEqual(toggle.value as? String, "0")
         XCTAssertTrue(toggle.isEnabled)
@@ -99,14 +125,14 @@ final class AccessibilityUITests: XCTestCase {
     }
 
     @MainActor
-    func testTheSwitchShowsTalkBackOnWhereAndroidHasIt() {
-        let app = launch("settings", "-talkBack", "on")
+    func testTheSwitchShowsTheScreenReaderOnWhereAndroidHasItOn() {
+        let app = launch("settings-accessibility", "-talkBack", "on")
         expect(talkBackSwitch(in: app), value: "1")
     }
 
     @MainActor
-    func testASystemWithoutTalkBackShowsTheSwitchUnavailable() {
-        let app = launch("settings", "-talkBack", "missing")
+    func testASystemWithoutAScreenReaderShowsTheSwitchUnavailableWithItsReason() {
+        let app = launch("settings-accessibility", "-talkBack", "missing")
         let toggle = talkBackSwitch(in: app)
         XCTAssertFalse(toggle.isEnabled)
         XCTAssertEqual(toggle.value as? String, "0")
@@ -114,35 +140,132 @@ final class AccessibilityUITests: XCTestCase {
     }
 
     @MainActor
-    func testAccessibilitySettingsLeavesTheSheetForAndroid() {
-        let app = launch("settings")
+    func testAReadThatGetsNoAnswerSaysSoAndOffersTryAgain() {
+        let app = launch("settings-accessibility", "-talkBack", "unreadable")
+        let toggle = talkBackSwitch(in: app)
+        XCTAssertTrue(app.staticTexts["Couldn\u{2019}t check"].waitForExistence(timeout: 10))
+        XCTAssertFalse(toggle.isEnabled)
+        XCTAssertTrue(app.buttons["settings-talkback-try-again"].exists)
+    }
+
+    @MainActor
+    func testAChangeThatFailsSaysSoOnTheRowAndKeepsSettingsOpen() {
+        let app = launch("settings-accessibility", "-talkBack", "fails")
+        let toggle = talkBackSwitch(in: app)
+        flip(toggle)
+        XCTAssertTrue(app.staticTexts["Didn\u{2019}t turn on"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["settings-talkback-try-again"].exists)
+        XCTAssertEqual(toggle.value as? String, "0")
+        // No alert took Settings away.
+        XCTAssertTrue(toggle.exists)
+    }
+
+    @MainActor
+    func testAChangeUnderWayDimsTheSwitchAndSaysSo() {
+        let app = launch("settings-accessibility", "-talkBack", "slow")
+        let toggle = talkBackSwitch(in: app)
+        flip(toggle)
+        XCTAssertTrue(app.staticTexts["Turning on\u{2026}"].waitForExistence(timeout: 10))
+        XCTAssertFalse(toggle.isEnabled)
+    }
+
+    @MainActor
+    func testAFileTransferHoldsTheSwitchAndSaysUntilWhen() {
+        let app = launch("settings-accessibility", "-talkBack", "transfer")
+        let toggle = talkBackSwitch(in: app)
+        XCTAssertTrue(app.staticTexts["Available when the file transfer ends"].waitForExistence(timeout: 10))
+        XCTAssertFalse(toggle.isEnabled)
+    }
+
+    @MainActor
+    func testAndroidsAccessibilitySettingsOpenOnlyWhileTheScreenReaderIsOn() {
+        let off = launch("settings-accessibility")
+        _ = talkBackSwitch(in: off)
+        XCTAssertFalse(off.buttons["settings-accessibility-settings"].isEnabled)
+        off.terminate()
+        let app = launch("settings-accessibility", "-talkBack", "on")
         let toggle = talkBackSwitch(in: app)
         let button = app.buttons["settings-accessibility-settings"]
-        XCTAssertTrue(button.exists)
-        XCTAssertEqual(button.label, "Accessibility settings")
+        XCTAssertTrue(button.isEnabled)
+        XCTAssertEqual(button.label, "Android\u{2019}s accessibility settings")
         button.tap()
         let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: toggle)
         wait(for: [gone], timeout: 10)
     }
 
+    // MARK: The card
+
     @MainActor
-    func testAFirstStartUnderVoiceOverTurnsTalkBackOn() {
-        let app = launch("home-new", "-voiceOver", "YES")
-        let start = app.buttons["Start and set up"]
-        XCTAssertTrue(start.waitForExistence(timeout: 10))
-        start.tap()
+    func testUnderVoiceOverACardAsksBeforeTheScreenReaderIsTurnedOn() {
+        let app = launch("session", "-voiceOver", "YES")
+        let turnOn = app.buttons["screen-reader-card-turn-on"]
+        XCTAssertTrue(turnOn.waitForExistence(timeout: 20), "no card asks")
+        XCTAssertTrue(app.buttons["screen-reader-card-not-now"].exists)
+        turnOn.tap()
+        let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: turnOn)
+        wait(for: [gone], timeout: 10)
         openSettings(in: app)
         expect(talkBackSwitch(in: app), value: "1")
     }
 
     @MainActor
-    func testAFirstStartWithoutVoiceOverLeavesTalkBackOff() {
+    func testNotNowLeavesTheScreenReaderOffAndTheCardAway() {
+        let app = launch("session", "-voiceOver", "YES")
+        let notNow = app.buttons["screen-reader-card-not-now"]
+        XCTAssertTrue(notNow.waitForExistence(timeout: 20), "no card asks")
+        notNow.tap()
+        let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: notNow)
+        wait(for: [gone], timeout: 10)
+        openSettings(in: app)
+        XCTAssertEqual(talkBackSwitch(in: app).value as? String, "0")
+    }
+
+    @MainActor
+    func testACardThatCannotTurnItOnKeepsTheReasonAndTryAgain() {
+        let app = launch("session", "-voiceOver", "YES", "-talkBack", "fails")
+        let turnOn = app.buttons["screen-reader-card-turn-on"]
+        XCTAssertTrue(turnOn.waitForExistence(timeout: 20), "no card asks")
+        turnOn.tap()
+        XCTAssertTrue(app.staticTexts["screen-reader-card-failure"].waitForExistence(timeout: 10))
+        XCTAssertEqual(turnOn.label, "Try Again")
+    }
+
+    @MainActor
+    func testASystemWithoutAScreenReaderIsToldSoOnTheCard() {
+        let app = launch("session", "-voiceOver", "YES", "-talkBack", "missing")
+        let ok = app.buttons["screen-reader-card-ok"]
+        XCTAssertTrue(ok.waitForExistence(timeout: 20))
+        XCTAssertFalse(app.buttons["screen-reader-card-turn-on"].exists)
+    }
+
+    @MainActor
+    func testWithoutVoiceOverThereIsNoCard() {
+        let app = launch("session")
+        XCTAssertTrue(app.descendants(matching: .any)["side-keys"].waitForExistence(timeout: 20))
+        XCTAssertFalse(app.buttons["screen-reader-card-turn-on"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testAFirstStartUnderVoiceOverAsksFirstAndTurnsNothingOn() {
+        let app = launch("home-new", "-voiceOver", "YES")
+        let start = app.buttons["Start and set up"]
+        XCTAssertTrue(start.waitForExistence(timeout: 10))
+        start.tap()
+        let notNow = app.buttons["screen-reader-card-not-now"]
+        XCTAssertTrue(notNow.waitForExistence(timeout: 90), "no card asks")
+        notNow.tap()
+        openSettings(in: app)
+        XCTAssertEqual(talkBackSwitch(in: app).value as? String, "0")
+    }
+
+    @MainActor
+    func testAFirstStartWithoutVoiceOverLeavesTheScreenReaderOff() {
         let app = launch("home-new")
         let start = app.buttons["Start and set up"]
         XCTAssertTrue(start.waitForExistence(timeout: 10))
         start.tap()
         openSettings(in: app)
-        let toggle = talkBackSwitch(in: app)
-        XCTAssertEqual(toggle.value as? String, "0")
+        XCTAssertEqual(talkBackSwitch(in: app).value as? String, "0")
+        XCTAssertFalse(app.buttons["screen-reader-card-turn-on"].exists)
     }
 }

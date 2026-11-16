@@ -99,8 +99,10 @@ application that draws controls over the display passes `touchDidBegin`, which
 the display calls after it has sent the contacts of each touch that begins on
 it; Kernarium passes none. An application that passes `accessibility`
 (`GuestDisplayAccessibility`, in its own words) makes the display one VoiceOver
-element, and with `directTouch` a direct-touch area whose touches reach the
-guest as they do with VoiceOver off; without it the display is no element.
+element with the application's `value`, and with `directTouch` a direct-touch
+area whose touches reach the guest as they do with VoiceOver off; activating the
+element sends the guest no touch. Without `accessibility` the display is no
+element.
 Kernarium passes none.
 
 - The display takes hardware keys and the system pointer only for an

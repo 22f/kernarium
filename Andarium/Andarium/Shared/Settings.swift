@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 /// the guest, which keeps running behind it: install an app from Files and
 /// browse the guest's files (the first sections, where the side keys' tip
 /// points), watch the stats, connect a computer with adb, make a bug report
-/// and, last, turn TalkBack on and off. An operation on the guest dismisses
+/// and, last, turn Android's screen reader (TalkBack) on and off. An operation on the guest dismisses
 /// Settings and shows the full-screen progress, and then how it ended.
 struct SessionSettingsSheet: View {
     @Environment(AppModel.self) private var model
@@ -183,42 +183,62 @@ struct SessionSettingsSheet: View {
 
     /// TalkBack, Android's screen reader, and Android's own Accessibility
     /// page. The switch follows what Android reports, read while Settings is
-    /// open (`AppModel.watchSettings`).
+    /// open (`AppModel.watchSettings`), and the line under it says every state
+    /// the switch cannot: not read yet, no answer, no screen reader in the
+    /// image, a change under way or failed, a transfer that holds the channel.
     private func accessibility(_ session: SessionState) -> some View {
-        let offer = model.screenReaderOffer
+        let reader = session.reader
+        let row = model.screenReaderRow
+        let unavailable = row == .unavailable
         return Section {
-            Toggle(isOn: Binding(get: { offer.isOn }, set: { model.setScreenReader($0) })) {
+            Toggle(isOn: Binding(get: { reader.isOn }, set: { model.setScreenReader($0) })) {
                 HStack(spacing: 12) {
-                    IconTile(symbol: "accessibility", color: offer == .unavailable ? .gray : .accentColor)
+                    IconTile(symbol: "accessibility", color: unavailable ? .gray : .accentColor)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(ScreenReaderWords.name)
-                        if let detail = offer.detail {
-                            Text(detail)
+                        if let line = row.line {
+                            Text(line)
+                                .font(.footnote)
+                                .foregroundStyle(row.isFailure ? Color.red : Color.secondary)
+                        }
+                        if case .failed(_, let reason) = row {
+                            Text(reason)
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
                     }
                 }
             }
-            .disabled(!offer.canChange || session.screenReaderChanging)
+            .disabled(!model.screenReaderCanChange)
             .accessibilityIdentifier("settings-talkback")
+            if row.offersTryAgain {
+                Button(ScreenReaderWords.tryAgain) {
+                    switch row {
+                    case .failed(let on, _): model.setScreenReader(on)
+                    default: Task { await model.refreshScreenReader() }
+                    }
+                }
+                .accessibilityIdentifier("settings-talkback-try-again")
+            }
             Button {
-                // Android's page opens on the guest's screen, behind the sheet.
+                // Android's page opens on the virtual machine's screen, behind the sheet.
                 dismiss()
                 model.openAccessibilitySettings()
             } label: {
                 HStack(spacing: 12) {
-                    IconTile(symbol: "slider.horizontal.3")
-                    Text(ScreenReaderWords.settings)
-                        .foregroundStyle(Color.accentColor)
+                    IconTile(symbol: "slider.horizontal.3", color: reader.isOn ? .accentColor : .gray)
+                    Text(ScreenReaderWords.androidSettings)
+                        .foregroundStyle(reader.isOn ? Color.accentColor : Color.secondary)
                     Spacer()
                 }
             }
+            // VoiceOver can read Android's page only while the screen reader is on.
+            .disabled(!reader.isOn)
             .accessibilityIdentifier("settings-accessibility-settings")
         } header: {
             Text(ScreenReaderWords.section)
         } footer: {
-            Text(offer == .unavailable ? ScreenReaderWords.footerUnavailable : ScreenReaderWords.footer)
+            Text(unavailable ? ScreenReaderWords.footerUnavailable : ScreenReaderWords.footer)
         }
         .id("accessibility")
     }

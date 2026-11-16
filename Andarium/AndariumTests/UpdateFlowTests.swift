@@ -165,23 +165,40 @@ final class StubDriver: RuntimeDriver {
         return installOutcome
     }
 
-    /// TalkBack as the stub plays it: what the guest reports, nil while it
-    /// cannot be asked, and the calls the model made. The system carries
-    /// TalkBack, off.
+    /// Android's screen reader as the stub plays it: what the guest holds
+    /// (every service it has on), nil while it cannot be asked, how long each
+    /// reply takes, and the calls the model made. The system carries TalkBack,
+    /// off.
     var screenReaderState: ScreenReaderState? = ScreenReaderState(
         installedService: ScreenReader.services[0], enabledServices: [])
     var screenReaderError: Error?
+    /// Each read's delay in turn; a read past the list answers at once.
+    var screenReaderReadDelays: [Duration] = []
+    var screenReaderChangeDelay = Duration.zero
+    struct ScreenReaderCall: Equatable {
+        var on: Bool
+        var service: String
+    }
     private(set) var screenReaderReads = 0
-    private(set) var screenReaderChanges: [Bool] = []
+    private(set) var screenReaderChanges: [ScreenReaderCall] = []
     private(set) var accessibilitySettingsOpened = 0
     func readScreenReader() async -> ScreenReaderState? {
+        let index = screenReaderReads
         screenReaderReads += 1
-        return screenReaderState
+        // The guest answers with what it holds when asked, however late the
+        // reply reaches the model.
+        let answer = screenReaderState
+        if index < screenReaderReadDelays.count { try? await Task.sleep(for: screenReaderReadDelays[index]) }
+        return answer
     }
-    func setScreenReader(_ on: Bool, in state: ScreenReaderState) async throws -> ScreenReaderState {
-        screenReaderChanges.append(on)
+    func changeScreenReader(_ on: Bool, service: String) async throws -> ScreenReaderState {
+        screenReaderChanges.append(ScreenReaderCall(on: on, service: service))
+        if screenReaderChangeDelay > .zero { try? await Task.sleep(for: screenReaderChangeDelay) }
         if let screenReaderError { throw screenReaderError }
-        let after = ScreenReader.state(afterTurningOn: on, state)
+        // The change edits what the guest holds now, as the command does, so
+        // a service turned on meanwhile stays on.
+        guard let current = screenReaderState else { throw AdbFailure(.io(EIO), activity: .screenReader) }
+        let after = ScreenReader.state(afterTurningOn: on, current)
         screenReaderState = after
         return after
     }

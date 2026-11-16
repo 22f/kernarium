@@ -16,9 +16,12 @@ struct GuestDisplayGeometry {
 /// With `directTouch`, the display is a direct-touch area: a touch on it
 /// reaches the guest as it does with VoiceOver off, so a screen reader in the
 /// guest takes it. Without it, VoiceOver's own gestures work over the
-/// display, which reads as one element.
+/// display, which reads as one element. Activating the element, a VoiceOver
+/// double-tap, sends the guest no touch.
 struct GuestDisplayAccessibility: Equatable {
     var label: String
+    /// What the display says of the guest, as its value.
+    var value: String?
     var hint: String?
     var directTouch = false
 }
@@ -309,8 +312,15 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     func applyAccessibility(_ accessibility: GuestDisplayAccessibility?) {
         isAccessibilityElement = accessibility != nil
         accessibilityLabel = accessibility?.label
+        accessibilityValue = accessibility?.value
         accessibilityHint = accessibility?.hint
         accessibilityTraits = accessibility?.directTouch == true ? .allowsDirectInteraction : .none
+    }
+
+    /// A VoiceOver activation of the display is no touch: the default would tap
+    /// the guest at the element's activation point.
+    override func accessibilityActivate() -> Bool {
+        isAccessibilityElement ? true : super.accessibilityActivate()
     }
 
     func setKeyboardVisible(_ visible: Bool) {

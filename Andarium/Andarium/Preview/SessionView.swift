@@ -70,7 +70,7 @@ struct SessionView: View {
                     guest
                         .frame(width: plan.guest.width, height: plan.guest.height)
                         .clipped()
-                        .guestScreenAccessibility(talkBackOn: model.screenReaderOffer.isOn)
+                        .guestScreenAccessibility(model.session.reader, offered: model.offersScreenReader)
                         // As on the device, a touch on the guest closes the keys
                         // and still reaches the guest.
                         .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in model.session.closeSideKeys() })
@@ -89,7 +89,7 @@ struct SessionView: View {
                     // The keyboard of the text message bar leaves the guest still.
                     .ignoresSafeArea(.keyboard)
                     .clipped()
-                    .guestScreenAccessibility(talkBackOn: model.screenReaderOffer.isOn)
+                    .guestScreenAccessibility(model.session.reader, offered: model.offersScreenReader)
                     // As on the device, a touch on the guest closes the keys and
                     // still reaches the guest.
                     .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in model.session.closeSideKeys() })
@@ -254,12 +254,14 @@ struct SessionView: View {
 
 private extension View {
     /// The mock guest reads as the device's display does: Android's screen as
-    /// one element, a direct-touch area while TalkBack is on.
-    func guestScreenAccessibility(talkBackOn: Bool) -> some View {
+    /// one element with the screen reader's state as its value, a direct-touch
+    /// area while the screen reader is on, and no action on activation.
+    func guestScreenAccessibility(_ reader: ScreenReaderSession, offered: Bool) -> some View {
         accessibilityElement(children: .ignore)
             .accessibilityLabel(ScreenReaderWords.displayLabel)
-            .accessibilityHint(talkBackOn ? ScreenReaderWords.displayHintDirect : ScreenReaderWords.displayHint)
-            .accessibilityAddTraits(talkBackOn ? .allowsDirectInteraction : [])
+            .accessibilityValue(offered ? ScreenReaderWords.displayValue(reader) : "")
+            .accessibilityHint(offered ? ScreenReaderWords.displayHint(reader) ?? "" : "")
+            .accessibilityAddTraits(reader.isOn ? .allowsDirectInteraction : [])
             .accessibilityIdentifier("guest-display")
     }
 }

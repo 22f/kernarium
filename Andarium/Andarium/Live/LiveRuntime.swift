@@ -901,14 +901,14 @@ final class LiveRuntime: RuntimeDriver {
         await operations.sendSms(sender: sender, text: text, identifier: identifier)
     }
 
-    // MARK: TalkBack
+    // MARK: Android's screen reader
 
     func readScreenReader() async -> ScreenReaderState? {
         await operations.screenReader()
     }
 
-    func setScreenReader(_ on: Bool, in state: ScreenReaderState) async throws -> ScreenReaderState {
-        try await operations.setScreenReader(on, in: state)
+    func changeScreenReader(_ on: Bool, service: String) async throws -> ScreenReaderState {
+        try await operations.changeScreenReader(on, service: service)
     }
 
     func openAccessibilitySettings() async throws {

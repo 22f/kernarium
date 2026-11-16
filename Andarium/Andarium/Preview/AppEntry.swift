@@ -57,10 +57,13 @@ struct AppEntry {
     /// limit, as on a Mac.
     var memoryLimitMiB: Int?
     /// The model takes VoiceOver as running, which the Simulator never has,
-    /// so a first start plays TalkBack turning on by itself.
+    /// so a run shows the card that asks about Android's screen reader.
     var voiceOver: Bool
-    /// The mock guest's TalkBack: "on", or "missing" for a system without
-    /// it; absent, the system carries it and it is off.
+    /// The mock guest's screen reader: "on", "missing" for a system without
+    /// one, "unreadable" for a guest whose answer never comes, "fails" for one
+    /// that refuses a change, "slow" for a change that takes long and
+    /// "transfer" for a file transfer that holds the channel; absent, the
+    /// system carries it and it is off.
     var talkBack: String?
 
     static func fromArguments() -> AppEntry {
@@ -113,6 +116,7 @@ struct AppEntry {
         "settings-stats": "stats",
         "settings-feedback": "diagnostics",
         "settings-text-message": "developer",
+        "settings-accessibility": "accessibility",
     ]
 
     /// The page of Info a screen opens on.
@@ -179,6 +183,10 @@ struct AppEntry {
             model.previewScreenReader.enabledServices = [ScreenReader.services[0]]
         case "missing":
             model.previewScreenReader = ScreenReaderState(installedService: nil, enabledServices: [])
+        case "unreadable": model.previewScreenReaderFault = .unreadable
+        case "fails": model.previewScreenReaderFault = .refusesChange
+        case "slow": model.previewScreenReaderFault = .slow
+        case "transfer": model.previewScreenReaderFault = .transfer
         default:
             break
         }
@@ -383,7 +391,7 @@ struct AppEntry {
             model.phase = .running(.normal)
             model.previewTextMessage(screen)
         case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
-             "settings-feedback", "settings-text-message", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
+             "settings-feedback", "settings-text-message", "settings-accessibility", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
              "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container",
              "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split",
              "install-part-too-large", "install-legacy-hint", "install-legacy-hint-data",
@@ -467,6 +475,9 @@ struct AppEntry {
         if systemLocation { useSystemLocation(in: model) }
         if systemCamera { useSystemCamera(in: model) }
         SnapshotPreview.apply(screen: screen, to: model)
+        // A run in the preview reads the mock guest's screen reader as a run
+        // does; under VoiceOver the card follows.
+        if case .running = model.phase { model.screenReaderBootFinished() }
         return model
     }
 

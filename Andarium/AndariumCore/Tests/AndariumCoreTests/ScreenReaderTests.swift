@@ -10,50 +10,61 @@ struct ScreenReaderTests {
     private let googleTalkBack = ScreenReader.services[1]
     private let switchAccess = "com.example.switch/.SwitchService"
 
+    private func report(
+        packages: [String] = [], services: String, pm: Int = 0, settings: Int = 0
+    ) -> String {
+        (["pm=\(pm)", "sg=\(settings)"] + packages.map { "package:\($0)" } + ["services=\(services)"])
+            .joined(separator: "\n")
+    }
+
     // MARK: Reading
 
     @Test func readsAGuestWithTalkBackOn() throws {
-        let output = """
-            package:com.android.talkback
-            services=\(switchAccess):\(talkBack)
-            """
-        let state = try #require(ScreenReader.parse(output))
+        let state = try #require(ScreenReader.parse(
+            report(packages: ["com.android.talkback"], services: "\(switchAccess):\(talkBack)")))
         #expect(state.installedService == talkBack)
         #expect(state.enabledServices == [switchAccess, talkBack])
         #expect(state.isOn)
     }
 
     @Test func readsAGuestThatNeverHadAService() throws {
-        let state = try #require(ScreenReader.parse("services=null\n"))
+        let state = try #require(ScreenReader.parse(report(services: "null")))
         #expect(state.installedService == nil)
         #expect(state.enabledServices.isEmpty)
         #expect(!state.isOn && !state.isInstalled)
     }
 
     @Test func recognisesGooglesTalkBack() throws {
-        let state = try #require(ScreenReader.parse("package:com.google.android.marvin.talkback\nservices=\n"))
+        let state = try #require(ScreenReader.parse(
+            report(packages: ["com.google.android.marvin.talkback"], services: "")))
         #expect(state.installedService == googleTalkBack)
         #expect(!state.isOn)
     }
 
     @Test func prefersTheSystemBuildWhenBothAreInstalled() throws {
-        let output = "package:com.google.android.marvin.talkback\npackage:com.android.talkback\nservices=\(googleTalkBack)"
-        let state = try #require(ScreenReader.parse(output))
+        let state = try #require(ScreenReader.parse(report(
+            packages: ["com.google.android.marvin.talkback", "com.android.talkback"], services: googleTalkBack)))
         #expect(state.installedService == talkBack)
         // The Google build is on, not the one the switch drives.
         #expect(!state.isOn)
     }
 
     @Test func anotherPackageNamedLikeTalkBackIsNotTalkBack() throws {
-        let state = try #require(ScreenReader.parse("package:com.example.talkbackhelper\nservices=null"))
+        let state = try #require(ScreenReader.parse(report(packages: ["com.example.talkbackhelper"], services: "null")))
         #expect(!state.isInstalled)
     }
 
-    @Test func outputWithoutTheSettingIsNotAState() {
+    @Test func aReadWhoseCommandFailedIsNotAState() {
+        // The services line alone, or with either command's status not zero,
+        // is what an old answer or a failing command prints; none is "off".
         #expect(ScreenReader.parse("") == nil)
-        #expect(ScreenReader.parse("package:com.android.talkback\n") == nil)
-        #expect(ScreenReader.parse(ShellResult(stdout: Data("services=null".utf8), exitCode: 1)) == nil)
-        #expect(ScreenReader.parse(ShellResult(stdout: Data("services=null".utf8), exitCode: 0)) != nil)
+        #expect(ScreenReader.parse("services=null\n") == nil)
+        #expect(ScreenReader.parse(report(services: "", pm: 1)) == nil)
+        #expect(ScreenReader.parse(report(services: "", settings: 255)) == nil)
+        #expect(ScreenReader.parse("pm=0\nsg=0\npackage:com.android.talkback\n") == nil)
+        let ok = Data(report(services: "null").utf8)
+        #expect(ScreenReader.parse(ShellResult(stdout: ok, exitCode: 1)) == nil)
+        #expect(ScreenReader.parse(ShellResult(stdout: ok, exitCode: 0)) != nil)
     }
 
     @Test func theListIgnoresEmptyEntries() {
@@ -61,46 +72,23 @@ struct ScreenReaderTests {
         #expect(ScreenReader.serviceList("a/.A::b/.B:") == ["a/.A", "b/.B"])
     }
 
-    // MARK: Turning on and off
-
-    @Test func turningOnAddsTalkBackAfterTheOtherServices() throws {
-        let state = ScreenReaderState(installedService: talkBack, enabledServices: [switchAccess])
-        let command = try #require(ScreenReader.command(turningOn: true, in: state))
-        #expect(command == "settings put secure enabled_accessibility_services '\(switchAccess):\(talkBack)' && settings put secure accessibility_enabled 1")
-        #expect(ScreenReader.state(afterTurningOn: true, state).enabledServices == [switchAccess, talkBack])
-    }
-
-    @Test func turningOnTwiceDoesNotListTalkBackTwice() throws {
-        let state = ScreenReaderState(installedService: talkBack, enabledServices: [talkBack])
-        let command = try #require(ScreenReader.command(turningOn: true, in: state))
-        #expect(command.contains("'\(talkBack)'"))
-        #expect(ScreenReader.state(afterTurningOn: true, state).enabledServices == [talkBack])
-    }
-
-    @Test func turningOffKeepsTheOtherServicesOn() throws {
-        let state = ScreenReaderState(installedService: talkBack, enabledServices: [talkBack, switchAccess])
-        let command = try #require(ScreenReader.command(turningOn: false, in: state))
-        #expect(command == "settings put secure enabled_accessibility_services '\(switchAccess)' && settings put secure accessibility_enabled 1")
-        #expect(!ScreenReader.state(afterTurningOn: false, state).isOn)
-    }
-
-    @Test func turningOffTheLastServiceTurnsAccessibilityOff() throws {
-        let state = ScreenReaderState(installedService: talkBack, enabledServices: [talkBack, googleTalkBack])
-        let command = try #require(ScreenReader.command(turningOn: false, in: state))
-        #expect(command == "settings delete secure enabled_accessibility_services >/dev/null; settings put secure accessibility_enabled 0")
-        #expect(ScreenReader.state(afterTurningOn: false, state).enabledServices.isEmpty)
-    }
-
-    @Test func thereIsNothingToTurnOnWithoutTalkBack() {
-        let state = ScreenReaderState(installedService: nil, enabledServices: [])
-        #expect(ScreenReader.command(turningOn: true, in: state) == nil)
-    }
-
-    @Test func aServiceNameCannotBreakOutOfTheCommand() throws {
-        let hostile = "x/.Y';reboot;'"
-        let state = ScreenReaderState(installedService: talkBack, enabledServices: [hostile])
-        let command = try #require(ScreenReader.command(turningOn: true, in: state))
-        #expect(command.contains("'x/.Y'\\'';reboot;'\\''"))
+    @Test func everyCommandStartsByNamingTheForegroundUser() {
+        let commands = [
+            ScreenReader.stateCommand, ScreenReader.settingsCommand,
+            ScreenReader.changeCommand(turningOn: true, service: talkBack),
+            ScreenReader.changeCommand(turningOn: false, service: talkBack),
+        ]
+        for command in commands {
+            #expect(command.hasPrefix("user=$(am get-current-user)"))
+            // Every `pm list packages`, `settings` and `am start` carries its --user.
+            for word in ["pm list packages", "settings", "am start"].map({ $0 + " " }) {
+                let all = command.components(separatedBy: word).count - 1
+                let named = command.components(separatedBy: "\(word)--user $user").count - 1
+                #expect(all == named, "\(word) without --user in \(command)")
+            }
+        }
+        #expect(ScreenReader.stateCommand.contains("pm list packages --user $user"))
+        #expect(ScreenReader.settingsCommand.contains("am start --user $user"))
     }
 
     // MARK: The switch
@@ -115,21 +103,23 @@ struct ScreenReaderTests {
         #expect(ScreenReaderOffer(state: none) == .unavailable)
     }
 
-    @Test func aFirstStartUnderVoiceOverTurnsTalkBackOn() {
-        #expect(ScreenReader.turnsOnByItself(firstStart: true, voiceOverRunning: true, offer: .off))
-        // Already on, not in the system, or not known yet: nothing to do.
-        #expect(!ScreenReader.turnsOnByItself(firstStart: true, voiceOverRunning: true, offer: .on))
-        #expect(!ScreenReader.turnsOnByItself(firstStart: true, voiceOverRunning: true, offer: .unavailable))
-        #expect(!ScreenReader.turnsOnByItself(firstStart: true, voiceOverRunning: true, offer: .unknown))
-        // Without VoiceOver, or on a later start, the person decides.
-        #expect(!ScreenReader.turnsOnByItself(firstStart: true, voiceOverRunning: false, offer: .off))
-        #expect(!ScreenReader.turnsOnByItself(firstStart: false, voiceOverRunning: true, offer: .off))
+    @Test func aReadThatFailedIsNotTheStateBeforeIt() {
+        let on = ScreenReaderState(installedService: talkBack, enabledServices: [talkBack])
+        #expect(ScreenReaderOffer(state: on, readFailed: true) == .failed)
+        #expect(ScreenReaderOffer(state: nil, readFailed: true) == .failed)
     }
 
     @Test func onlyAKnownStateCanBeChanged() {
         #expect(ScreenReaderOffer.on.canChange && ScreenReaderOffer.off.canChange)
         #expect(!ScreenReaderOffer.unknown.canChange && !ScreenReaderOffer.unavailable.canChange)
+        #expect(!ScreenReaderOffer.failed.canChange)
         #expect(ScreenReaderOffer.on.isOn && !ScreenReaderOffer.off.isOn)
-        #expect(ScreenReaderOffer.on.detail == nil && ScreenReaderOffer.unavailable.detail != nil)
+    }
+
+    @Test func aMockGuestChangesAsTheShellWould() {
+        let state = ScreenReaderState(installedService: talkBack, enabledServices: [switchAccess, talkBack])
+        #expect(ScreenReader.state(afterTurningOn: false, state).enabledServices == [switchAccess])
+        #expect(ScreenReader.state(afterTurningOn: true, ScreenReaderState(
+            installedService: talkBack, enabledServices: [switchAccess])).enabledServices == [switchAccess, talkBack])
     }
 }
