@@ -21,8 +21,10 @@
 //   under LINUX_2.6.39 resolve through the SysV hash and through the GNU
 //   hash to the same addresses, and the signal-return entry and a wrong
 //   version do not resolve;
-// - the unwind tables cover each entry, so an unwinder that stops in one
-//   finds its caller through the link register;
+// - the unwind tables cover each entry and their call frame programs, run
+//   here, leave the CFA at the stack pointer and the return address in x30
+//   over all of its bytes, so an unwinder that stops in one finds its caller
+//   through the link register;
 // - each entry agrees with the raw system call it stands for: for every
 //   clock the vDSO's time lies between two reads by the call, an invalid
 //   clock and a bad pointer fail as the call fails, and the resolution is the
