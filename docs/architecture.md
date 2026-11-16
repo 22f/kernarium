@@ -541,6 +541,16 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   alias or from another process, because only the address space's own
   code-change history reaches the binder; today only the Android image's own
   read-only files are covered.
+- Shared verdicts: the SHA-256 comparison of a physical page is kept for
+  every address space that maps the page, under the page's identity and
+  epoch, only when the kernel reports the page immutable in the mapping
+  being verified (bit 1 of the map call's `guest_code`) and the page's record
+  counts its executable mappings exactly. The epoch moves at every
+  publication of a change to the page's code and when its last executable
+  mapping departs, so a verdict is answered only while the page has stayed
+  executable in some address space since it was filed. A mapping that is not
+  immutable, cannot execute, or has no stamp is compared as before, and the
+  table (process-global, direct-mapped) is a hint that may forget.
 - Entry: only at an instruction the framework covers, in a state the engine
   would run the same way: no single step, PSTATE.SM clear, no FPCR trap
   enable, FPCR.FIZ, AH and NEP clear (read as the guest's, whether or not its

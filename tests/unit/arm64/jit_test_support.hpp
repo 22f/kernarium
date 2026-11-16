@@ -38,17 +38,20 @@ public:
 
 class JitMapping final {
 public:
+	/* `guest_code` is the argument of the map call: 1 for guest code, 3 when
+	 * the kernel also declares the page immutable. */
 	JitMapping(unsigned long generation, std::uint64_t base,
 		   const ::uml::testing::ScratchBacking &backing,
 		   std::size_t pages,
-		   int protection = PROT_READ | PROT_WRITE | PROT_EXEC)
+		   int protection = PROT_READ | PROT_WRITE | PROT_EXEC,
+		   int guest_code = 1)
 		: generation_{generation}
 		, protection_{protection}
 	{
 		require(darwin_uml_static_vm_activate(generation) == 0);
 		require(darwin_uml_static_vm_map(
 			reinterpret_cast<void *>(base), backing.descriptor(), 0,
-			pages * DARWIN_UML_GUEST_PAGE_SIZE, protection, 1,
+			pages * DARWIN_UML_GUEST_PAGE_SIZE, protection, guest_code,
 			(protection & PROT_WRITE) != 0) == 0);
 	}
 

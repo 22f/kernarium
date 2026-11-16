@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "cpu/arm64/aot/aot_runtime.hpp"
 
+#include "cpu/arm64/aot/shared_verdicts.hpp"
 #include "cpu/arm64/detail/memory_copy_set.hpp"
 
 #include <CommonCrypto/CommonDigest.h>
@@ -28,6 +29,10 @@ namespace uml::cpu::arm64::aot {
 namespace {
 
 constexpr std::uint64_t page_size = 4096;
+/* The verdicts of every address space of the process (shared_verdicts.hpp).
+ * A verdict names a physical-page record that is never reused, so an entry
+ * can outlive the address space that filed it and never be answered wrongly. */
+VerdictTable g_verdicts;
 constexpr char blob_magic[8] = {'U', 'M', 'L', 'A', 'O', 'T', 'B', '2'};
 /* The stored hash of a text page: SHA-256 (tools/aot/rewrite.py:
  * page_hashes). */
@@ -196,7 +201,8 @@ std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
 	unreadable{0}, poisoned{0}, enters{0}, steps{0}, retired{0}, refills{0},
 	refill_failures{0}, cross_hits{0}, cross_misses{0}, max_retired{0},
 	verify_nanos{0}, step_nanos{0}, steps_run{0}, code_bumps{0},
-	history_queries{0}, mops_slow{0}, mops_fault{0}, mops_illegal{0};
+	history_queries{0}, mops_slow{0}, mops_fault{0}, mops_illegal{0},
+	shared_hits{0};
 std::array<std::atomic<std::uint64_t>, 5> refusals{};
 /* The guest addresses AOT code stepped at most: library << 40 | offset. */
 constexpr std::size_t step_slots = 32768;
@@ -299,12 +305,12 @@ void write_report() noexcept
 	std::fprintf(file,
 		"max_retired %llu verify_nanos %llu step_nanos %llu steps_run %llu "
 		"code_bumps %llu history_queries %llu mops_slow %llu mops_fault %llu "
-		"mops_illegal %llu\n",
+		"mops_illegal %llu shared_hits %llu\n",
 		get(counters::max_retired), get(counters::verify_nanos),
 		get(counters::step_nanos), get(counters::steps_run),
 		get(counters::code_bumps), get(counters::history_queries),
 		get(counters::mops_slow), get(counters::mops_fault),
-		get(counters::mops_illegal));
+		get(counters::mops_illegal), get(counters::shared_hits));
 	std::fprintf(file, "refused tbi %llu sp %llu exclusive %llu fp %llu "
 		"short %llu\n",
 		get(counters::refusals[0]), get(counters::refusals[1]),
@@ -563,6 +569,11 @@ void set_run_hook(void (*hook)(void *), void *context) noexcept
 	g_run_hook.store(hook, std::memory_order_release);
 }
 
+void clear_shared_verdicts() noexcept
+{
+	g_verdicts.clear();
+}
+
 Stats stats() noexcept
 {
 	auto get = [](const std::atomic<std::uint64_t> &value) {
@@ -587,6 +598,7 @@ Stats stats() noexcept
 	result.mops_illegal = get(counters::mops_illegal);
 	for (std::size_t i = 0; i < result.finds.size(); ++i)
 		result.finds[i] = get(counters::find_results[i]);
+	result.shared_hits = get(counters::shared_hits);
 	return result;
 }
 
@@ -601,7 +613,8 @@ void reset_stats() noexcept
 		     &counters::verify_nanos, &counters::step_nanos,
 		     &counters::steps_run, &counters::code_bumps,
 		     &counters::history_queries, &counters::mops_slow,
-		     &counters::mops_fault, &counters::mops_illegal})
+		     &counters::mops_fault, &counters::mops_illegal,
+		     &counters::shared_hits})
 		counter->store(0, std::memory_order_relaxed);
 	for (auto &counter : counters::refusals)
 		counter.store(0, std::memory_order_relaxed);
@@ -653,22 +666,47 @@ Binder::Verdict Binder::verify_page(
 	std::uint64_t index) noexcept
 {
 	const auto library = directory().library(instance.library);
-	alignas(8) std::array<std::byte, page_size> page;
 	const auto address =
 		instance.bias + library.table_base + index * page_size;
-	if (!memory.fetch(address, page))
+	const auto outcome = verify_through_table(g_verdicts,
+		[&](std::uint64_t at, PageStamp &stamp) noexcept {
+			::uml::memory::ExtendedCodePageStamp seen;
+			if (!memory.extended_code_page_stamp(at, nullptr, seen))
+				return false;
+			stamp = {seen.stamp.identity, seen.epoch, seen.shareable};
+			return true;
+		},
+		[&]() noexcept {
+			alignas(8) std::array<std::byte, page_size> page;
+			if (!memory.fetch(address, page))
+				return SharedOutcome::unreadable;
+			UML_AOT_COUNT(verifications, 1);
+			/* The stored page is a SHA-256 of the bytes the code was built
+			 * from: rewritten code runs for other bytes only on a collision
+			 * of the hash. CC_SHA256 is CommonCrypto's one-shot digest,
+			 * part of libSystem on macOS, iOS and the iOS Simulator, and
+			 * runs on the SHA-2 instructions of the host. */
+			std::array<std::uint8_t, page_hash_size> hash;
+			CC_SHA256(page.data(), static_cast<CC_LONG>(page_size),
+				hash.data());
+			return std::memcmp(hash.data(), uml_aot_blob +
+				library.page_hashes + index * page_hash_size,
+				page_hash_size) == 0 ? SharedOutcome::match :
+				SharedOutcome::mismatch;
+		},
+		address, VerdictTable::where(instance.library,
+			static_cast<std::uint32_t>(index)));
+	switch (outcome) {
+	case SharedOutcome::unreadable:
 		return Verdict::unreadable;
-	UML_AOT_COUNT(verifications, 1);
-	/* The stored page is a SHA-256 of the bytes the code was built from:
-	 * rewritten code runs for other bytes only on a collision of the hash.
-	 * CC_SHA256 is CommonCrypto's one-shot digest, part of libSystem on
-	 * macOS, iOS and the iOS Simulator, and runs on the SHA-2 instructions
-	 * of the host. */
-	std::array<std::uint8_t, page_hash_size> hash;
-	CC_SHA256(page.data(), static_cast<CC_LONG>(page_size), hash.data());
-	if (std::memcmp(hash.data(), uml_aot_blob + library.page_hashes +
-	    index * page_hash_size, page_hash_size) != 0)
+	case SharedOutcome::mismatch:
 		return Verdict::mismatch;
+	case SharedOutcome::shared_hit:
+		UML_AOT_COUNT(shared_hits, 1);
+		break;
+	case SharedOutcome::match:
+		break;
+	}
 	instance.pages[index] = 1;
 	return Verdict::match;
 }

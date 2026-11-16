@@ -15,7 +15,7 @@
 #include <thread>
 #include <vector>
 
-namespace aot = uml::arm64::aot;
+namespace aot = uml::cpu::arm64::aot;
 using aot::PageStamp;
 using aot::SharedOutcome;
 using aot::VerdictTable;

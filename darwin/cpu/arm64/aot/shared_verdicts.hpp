@@ -25,7 +25,7 @@
 #include <cstdint>
 #include <thread>
 
-namespace uml::arm64::aot {
+namespace uml::cpu::arm64::aot {
 
 struct PageStamp final {
 	std::uint64_t identity{};
@@ -171,4 +171,4 @@ template <class Stamp, class Hash>
 	return result;
 }
 
-} // namespace uml::arm64::aot
+} // namespace uml::cpu::arm64::aot

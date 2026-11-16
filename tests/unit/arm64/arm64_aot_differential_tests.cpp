@@ -347,15 +347,21 @@ struct Vcpu final {
  * pages of the library (map_rest() maps the others, as a loader would
  * later); add_library() maps a second library into the same address space. */
 struct Environment final {
+	/* `shared` is a backing several generations map (the library's bytes are
+	 * its owner's to put); `guest_code` is the map call's argument for the
+	 * library (3: the kernel calls the pages immutable); `protection` is
+	 * what the library's pages grant. */
 	Environment(unsigned long generation_, std::uint64_t bias_,
 		const LibraryImage &image_,
-		std::size_t mapped_pages = SIZE_MAX)
+		std::size_t mapped_pages = SIZE_MAX,
+		const JitBacking *shared = nullptr, int guest_code = 1,
+		int protection = PROT_READ | PROT_EXEC)
 		: generation{generation_}, bias{bias_},
 		  backing{image_.pages},
 		  stub_backing{1},
 		  mapped{std::min(mapped_pages, image_.pages)},
-		  map{generation, bias, backing, mapped,
-			PROT_READ | PROT_EXEC},
+		  map{generation, bias, shared != nullptr ? *shared : backing, mapped,
+			protection, guest_code},
 		  stub_map{generation, bias + stub_offset, stub_backing, 1,
 			PROT_READ | PROT_EXEC, true}
 	{
@@ -1438,6 +1444,239 @@ void changed_text_falls_back(const LibraryImage &image,
 	st = aot::stats();
 	require(st.enters > entered);
 	require(st.poisoned == 0);
+}
+
+/* A frame several address spaces map: the library's bytes in one backing,
+ * pinned by a mapping that is not code so that the records of its pages (and
+ * their counts and epochs) outlive the executable mappings that come and go.
+ * Each guest maps it at the same bias; `immutable` is the kernel's fact for
+ * the mapping. */
+struct SharedFrame final {
+	SharedFrame(const LibraryImage &image, unsigned long pin_generation)
+		: backing{image.pages}, pin{pin_generation, 0x1000, backing, 1,
+			PROT_READ, false}
+	{
+		backing.put(0, image.bytes);
+	}
+	JitBacking backing;
+	GenerationMapping pin;
+};
+
+struct SharedGuest final {
+	SharedGuest(unsigned long generation, const LibraryImage &image,
+		const SharedFrame &frame, bool immutable,
+		int protection = PROT_READ | PROT_EXEC)
+		: env{generation, Fixture::bias, image, SIZE_MAX, &frame.backing,
+			immutable ? 3 : 1, protection},
+		  arena{generation, arena_base(Fixture::bias)}
+	{
+	}
+	Environment env;
+	Arena arena;
+};
+
+struct SharedRun final {
+	Result result;
+	aot::Stats stats;
+};
+
+[[nodiscard]] SharedRun run_shared(SharedGuest &guest, const Case &c)
+{
+	aot::reset_stats();
+	aot::set_enabled(true);
+	auto result = drive(guest.env, guest.arena, c, aot_max_blocks);
+	aot::set_enabled(false);
+	return {std::move(result), aot::stats()};
+}
+
+/* A verdict that a physical page held a library page's bytes is shared by
+ * the address spaces that map the page, but only while the kernel says the
+ * page is immutable in the mapping asked, the memory layer says nothing has
+ * published or ended it, and the mapping can still execute. */
+void enterable(Case &c);
+[[nodiscard]] LibraryImage with_equal_digest(const LibraryImage &image,
+	std::uint64_t start);
+
+[[gnu::noinline]]
+void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
+	const std::vector<Function> &functions)
+{
+	SplitMix rng{23};
+	const auto bias = Fixture::bias;
+	const auto fn = functions[5];
+	auto c = make_case(rng, bias, fn.start, false, true, arena_base(bias));
+	enterable(c);
+	unsigned long generation = 5100;
+	/* The same library with the first word of fn changed and the last word
+	 * of its page chosen so that the page has the stored digest: the digest
+	 * binds it and only the stored hash tells it from the stored page. */
+	const auto changed = with_equal_digest(image, fn.start);
+	aot::set_enabled(false);
+	/* An environment is large (its memory keeps a TLB): the rows hold them
+	 * on the heap, one at a time where they can. */
+	auto ref = std::make_unique<Fixture>(generation++, image);
+	const auto want = drive(ref->env, ref->arena, c, max_blocks);
+	ref.reset();
+	auto ref_changed = std::make_unique<Fixture>(generation++, changed);
+	const auto want_changed = drive(ref_changed->env, ref_changed->arena, c,
+		max_blocks);
+	ref_changed.reset();
+	require(want.done());
+	require(!same(want, want_changed, c));
+	auto ref_noexec = std::make_unique<Environment>(generation++, bias, image,
+		SIZE_MAX, nullptr, 1, PROT_READ);
+	auto ref_noexec_arena = std::make_unique<Arena>(ref_noexec->generation,
+		arena_base(bias));
+	const auto want_noexec = drive(*ref_noexec, *ref_noexec_arena, c,
+		max_blocks);
+	ref_noexec_arena.reset();
+	ref_noexec.reset();
+	require(!same(want, want_noexec, c));
+	const auto guest = [&](const SharedFrame &frame, bool immutable,
+			       int protection = PROT_READ | PROT_EXEC) {
+		return std::make_unique<SharedGuest>(generation++, image, frame,
+			immutable, protection);
+	};
+	std::fprintf(stderr, "shared verdicts: ");
+
+	/* Two address spaces, one immutable frame: the second is answered. */
+	{
+		aot::clear_shared_verdicts();
+		SharedFrame frame{image, generation++};
+		auto first = guest(frame, true);
+		const auto a = run_shared(*first, c);
+		require(same(want, a.result, c));
+		require(a.stats.enters > 0 && a.stats.verifications > 0 &&
+			a.stats.shared_hits == 0);
+		auto second = guest(frame, true);
+		const auto b = run_shared(*second, c);
+		require(same(want, b.result, c));
+		require(b.stats.enters > 0 && b.stats.shared_hits >= 1 &&
+			b.stats.verifications == 0 && b.stats.poisoned == 0);
+		/* The first guest, asked again, finds its pages compared. */
+		std::fprintf(stderr, "hits %llu; ",
+			static_cast<unsigned long long>(b.stats.shared_hits));
+	}
+
+	/* A mapping without the fact is never answered and never files, also
+	 * beside mappings that have it. */
+	{
+		aot::clear_shared_verdicts();
+		SharedFrame frame{image, generation++};
+		auto first = guest(frame, false);
+		const auto a = run_shared(*first, c);
+		auto second = guest(frame, false);
+		const auto b = run_shared(*second, c);
+		require(same(want, a.result, c) && same(want, b.result, c));
+		require(b.stats.shared_hits == 0 &&
+			b.stats.verifications == a.stats.verifications);
+
+		/* The third guest has the fact; nothing was filed for it. */
+		auto third = guest(frame, true);
+		const auto d = run_shared(*third, c);
+		require(same(want, d.result, c));
+		require(d.stats.shared_hits == 0 &&
+			d.stats.verifications == a.stats.verifications);
+		/* It filed its own: a fourth with the fact is answered; a fifth
+		 * without it is not. */
+		auto fourth = guest(frame, true);
+		const auto e = run_shared(*fourth, c);
+		require(same(want, e.result, c));
+		require(e.stats.shared_hits >= 1 && e.stats.verifications == 0);
+		auto fifth = guest(frame, false);
+		const auto f = run_shared(*fifth, c);
+		require(same(want, f.result, c));
+		require(f.stats.shared_hits == 0 &&
+			f.stats.verifications == a.stats.verifications);
+	}
+
+	/* A mapping that cannot execute gets no answer from the table, however
+	 * warm it is, and the page is never entered. */
+	{
+		aot::clear_shared_verdicts();
+		SharedFrame frame{image, generation++};
+		auto warm = guest(frame, true);
+		const auto a = run_shared(*warm, c);
+		require(same(want, a.result, c) && a.stats.enters > 0);
+		auto locked = guest(frame, true, PROT_READ);
+		const auto b = run_shared(*locked, c);
+		require(same(want_noexec, b.result, c));
+		require(b.stats.enters == 0 && b.stats.shared_hits == 0);
+		/* And a mapping that loses execute after its pages were compared:
+		 * the table is asked again and the stamp query refuses. */
+		require(darwin_uml_static_vm_activate(warm->env.generation) == 0);
+		require(darwin_uml_static_vm_protect(
+			reinterpret_cast<void *>(warm->env.bias),
+			image.pages * page_bytes, PROT_READ) == 0);
+		const auto d = run_shared(*warm, c);
+		require(same(want_noexec, d.result, c));
+		require(d.stats.enters == 0 && d.stats.shared_hits == 0);
+	}
+
+	/* The page under test, as one guest maps it again after it lost it. */
+	const auto page_offset = fn.start & ~(page_bytes - 1);
+	const auto unmap_page = [&](SharedGuest &guest) {
+		require(darwin_uml_static_vm_unmap_generation(
+			guest.env.generation,
+			reinterpret_cast<void *>(guest.env.bias + page_offset),
+			page_bytes) == 0);
+	};
+	const auto put_changed_page = [&](SharedFrame &frame) {
+		frame.backing.put(page_offset, std::span{changed.bytes}.subspan(
+			page_offset, page_bytes));
+	};
+	const auto map_page = [&](SharedGuest &guest, const SharedFrame &frame) {
+		require(darwin_uml_static_vm_map_generation(guest.env.generation,
+			reinterpret_cast<void *>(guest.env.bias + page_offset),
+			frame.backing.descriptor(), page_offset, page_bytes,
+			PROT_READ | PROT_EXEC, 3, 0) == 0);
+	};
+
+	/* A publication moves the epoch. A guest that was not told (the code
+	 * change history of its own address space has nothing) and compares
+	 * the page again later, after a mapping change of its own, is not
+	 * answered from the verdict filed for the old bytes. */
+	{
+		aot::clear_shared_verdicts();
+		SharedFrame frame{image, generation++};
+		auto first = guest(frame, true);
+		auto second = guest(frame, true);
+		const auto a = run_shared(*first, c);
+		const auto b = run_shared(*second, c);
+		require(same(want, a.result, c) && same(want, b.result, c));
+		require(a.stats.enters > 0 && b.stats.shared_hits >= 1);
+		put_changed_page(frame);
+		require(darwin_uml_static_vm_activate(first->env.generation) == 0);
+		first->env.memory.invalidate_code(first->env.bias + fn.start);
+		unmap_page(*second);
+		map_page(*second, frame);
+		const auto d = run_shared(*second, c);
+		require(same(want_changed, d.result, c));
+		require(d.stats.verifications >= 1 && d.stats.poisoned >= 1);
+	}
+
+	/* The last executable mapping of the page goes, the frame is reused for
+	 * other bytes with no publication at all, and a guest that kept its
+	 * place in the library maps the frame again: the epoch moved at the last
+	 * departure, so the verdict filed for the old bytes is not answered. */
+	{
+		aot::clear_shared_verdicts();
+		SharedFrame frame{image, generation++};
+		auto first = guest(frame, true);
+		auto second = guest(frame, true);
+		const auto a = run_shared(*first, c);
+		const auto b = run_shared(*second, c);
+		require(same(want, a.result, c) && same(want, b.result, c));
+		require(a.stats.enters > 0 && b.stats.shared_hits >= 1);
+		unmap_page(*first);
+		unmap_page(*second);
+		put_changed_page(frame);
+		map_page(*second, frame);
+		const auto d = run_shared(*second, c);
+		require(same(want_changed, d.result, c));
+		require(d.stats.verifications >= 1 && d.stats.poisoned >= 1);
+	}
+	std::fprintf(stderr, "ok\n");
 }
 
 /* A loop over a buffer takes the inline hit path: adler32_z over 40000 bytes
@@ -4710,6 +4949,7 @@ int main(int argc, char **argv)
 			two_load_biases(image, sample);
 			other_bytes_fall_back(image, sample);
 			changed_text_falls_back(image, functions);
+			verdicts_are_shared_between_address_spaces(image, functions);
 			refill_keeps_state(image, sample);
 			partially_mapped_library(image, functions);
 			two_vcpus(image, sample);

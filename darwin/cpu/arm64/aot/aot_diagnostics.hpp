@@ -57,6 +57,9 @@ struct Stats final {
 	/* What binder lookups answered: hit, uncovered, not_ready, poisoned,
 	 * unverified, no_entry, stale. */
 	std::array<std::uint64_t, 7> finds{};
+	/* Pages whose verification the shared table answered: nothing was
+	 * fetched or hashed for them, so they are not in `verifications`. */
+	std::uint64_t shared_hits{};
 };
 
 /* Override DARWIN_UML_AOT (nullopt: read the environment again). */
@@ -69,6 +72,8 @@ void set_refill_stress(bool on) noexcept;
  * it read the address space's sequences (nullptr: none). The hook may
  * publish a code change, as another vCPU would at that moment. */
 void set_run_hook(void (*hook)(void *), void *context) noexcept;
+/* Forget every verdict the address spaces share. */
+void clear_shared_verdicts() noexcept;
 [[nodiscard]] Stats stats() noexcept;
 void reset_stats() noexcept;
 
