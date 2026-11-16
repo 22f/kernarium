@@ -67,15 +67,51 @@ private:
         return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
     }
 
+    /* Says when the gate closes: `holdRequests` closes it at once and then waits for a request that is running, so the time
+     * the call returns can be a second later than the hold. The line comes before the one the leaving ends with. */
+    class ClosureWatch final {
+    public:
+        explicit ClosureWatch(uml::gpu::InProcessGpuService& gpu) : gpu_(gpu), thread_([this] { watch(); }) {}
+        ~ClosureWatch()
+        {
+            done_ = true;
+            thread_.join();
+        }
+        ClosureWatch(const ClosureWatch&) = delete;
+        ClosureWatch& operator=(const ClosureWatch&) = delete;
+
+    private:
+        void watch()
+        {
+            for (;;) {
+                const bool finished = done_.load();
+                if (gpu_.requestsHeld()) {
+                    std::fprintf(stderr, "edge control: %.3f the GPU gate closed\n", clock());
+                    std::fflush(stderr);
+                    return;
+                }
+                if (finished) return;
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+        }
+
+        uml::gpu::InProcessGpuService& gpu_;
+        std::atomic<bool> done_ {};
+        std::thread thread_;
+    };
+
     void leave()
     {
         std::fprintf(stderr, "edge control: %.3f the application leaves the foreground\n", clock());
         const auto began = uml::camera::BackgroundVideo::Clock::now();
-        const auto result = uml::camera::holdAfterVideoEnds(
-            *video_, [this] { return gpu_.holdRequests(holdBudget) ? 1 : 0; }, uml::camera::backgroundVideoBound,
-            [](const std::string& line) { std::fprintf(stderr, "edge control: %s; the GPU is held as it is\n", line.c_str()); });
+        const auto result = [&] {
+            ClosureWatch closing(gpu_);
+            return uml::camera::holdAfterVideoEnds(
+                *video_, [this] { return gpu_.holdRequests(holdBudget) ? 1 : 0; }, uml::camera::backgroundVideoBound,
+                [](const std::string& line) { std::fprintf(stderr, "edge control: %s; the GPU is held as it is\n", line.c_str()); });
+        }();
         const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(uml::camera::BackgroundVideo::Clock::now() - began);
-        std::fprintf(stderr, "edge control: %.3f GPU requests held (%d) after %lld ms: video streams %u, stopped %s, answered %s\n",
+        std::fprintf(stderr, "edge control: %.3f GPU requests drained (%d) after %lld ms: video streams %u, stopped %s, answered %s\n",
                      clock(), result.held, static_cast<long long>(waited.count()), result.video.streams,
                      result.video.stopped ? "yes" : "no", result.video.answered ? "yes" : "no");
         std::fflush(stderr);

@@ -1228,8 +1228,10 @@ camera's running video, waits for the guest to stop its video streams (the same
 sequence as the applications', `holdAfterVideoEnds`) and holds the guest's GPU
 requests for three seconds through the launcher's own request gate. Every trial
 expects the camera to have answered and found a video to end, the HAL's report
-of the loss and the recorder's stop to come before the hold landed (the guest's
-clock set against the launcher's by the shortest of seven round trips), the loss
+of the loss and the recorder's stop to come before the hold landed (the gate's
+closing, which the launcher times apart from the end of its wait for a request
+that runs; the guest's clock set against the launcher's by the shortest of seven
+round trips), the loss
 to be the HAL's first failed buffer, the camera device not to have given up on the
 guest's reading of the interrupted record, and the clip's audio not to run on
 past its video by more than a second. Whether the guest stopped its streams

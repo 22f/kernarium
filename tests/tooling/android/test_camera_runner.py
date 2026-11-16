@@ -4176,30 +4176,34 @@ class VideoLeaveTests(unittest.TestCase):
     log says of the loss, and the reasons a leaving fails (the live row needs a guest and is run by CTest)."""
 
     LEFT = "edge control: 1000.000 the application leaves the foreground\n"
-    HELD = "edge control: 1001.250 GPU requests held (1) after 1250 ms: video streams 2, stopped yes, answered yes\n"
+    CLOSED = "edge control: 1001.000 the GPU gate closed\n"
+    DRAINED = "edge control: 1001.250 GPU requests drained (1) after 1250 ms: video streams 2, stopped yes, answered yes\n"
 
     def edge(self, **changes) -> runner.Edge:
-        edge = runner.Edge(left=1000.0, held=1001.25, result=1, waited_ms=1250, streams=2, stopped=True, answered=True)
+        edge = runner.Edge(left=1000.0, closed=1001.0, drained=1001.25, result=1, waited_ms=1250, streams=2, stopped=True,
+                           answered=True)
         return dataclasses.replace(edge, **changes)
 
     def trial(self, edge: runner.Edge | None = None, events: dict[str, float] | None = None, skew: float = 0.4,
               video_end: float = 5.0, audio_end: float = 5.1, clock_error: float = 0.01,
               record_bound_hit: bool = False) -> runner.LeaveTrial:
-        # The guest's clock is `skew` ahead: the loss at 1000 is 1000.4 on it, the hold at 1001.25 is 1001.65.
+        # The guest's clock is `skew` ahead: the loss at 1000 is 1000.4 on it, the gate's closing at 1001 is 1001.4.
         found = {"hal_end": 1000.42, "rec_stopping": 1000.5, "venc_stopped": 1001.5, "finalize": 1001.7} if events is None else events
         return runner.LeaveTrial(1, 0.0, edge or self.edge(), 1000.0, skew, clock_error, found, 5.2, video_end, audio_end,
                                  record_bound_hit)
 
     def test_the_leaving_is_read_from_the_launchers_log_after_a_point(self) -> None:
-        log = "before\n" + self.LEFT + "noise\n" + self.HELD
+        log = "before\n" + self.LEFT + "noise\n" + self.CLOSED + self.DRAINED
         self.assertEqual(runner.parse_edge(log), self.edge())
-        self.assertIsNone(runner.parse_edge(log[:log.index("edge control: 1001")]), "no hold yet: no leaving to judge")
-        self.assertIsNone(runner.parse_edge(log, log.index(self.HELD)), "a hold alone is not a leaving")
+        self.assertIsNone(runner.parse_edge(log[:log.index(self.CLOSED)]), "no closing yet: no leaving to judge")
+        self.assertIsNone(runner.parse_edge(log[:log.index(self.DRAINED)]), "a closed gate whose wait has not ended is not done")
+        self.assertIsNone(runner.parse_edge(log, log.index(self.CLOSED)), "a hold alone is not a leaving")
         self.assertIsNone(runner.parse_edge(log, len(log)), "nothing after the point")
-        second = log + "edge control: 2000.000 the application leaves the foreground\n" + self.HELD.replace("1001.250", "2001.000") \
-            .replace("stopped yes", "stopped no")
+        second = log + "edge control: 2000.000 the application leaves the foreground\n" + \
+            self.CLOSED.replace("1001.000", "2000.500") + self.DRAINED.replace("1001.250", "2001.000").replace("stopped yes", "stopped no")
         found = runner.parse_edge(second, len(log))
-        self.assertEqual((found.left, found.held, found.stopped), (2000.0, 2001.0, False), "the first leaving after the point")
+        self.assertEqual((found.left, found.closed, found.drained, found.stopped), (2000.0, 2000.5, 2001.0, False),
+                         "the first leaving after the point")
 
     def test_the_loss_is_read_from_the_guests_log(self) -> None:
         log = ("--------- beginning of main\n"
@@ -4218,12 +4222,23 @@ class VideoLeaveTests(unittest.TestCase):
 
     def test_a_leaving_that_ended_the_recording_before_the_hold_passes(self) -> None:
         self.assertEqual(runner.leave_failures(self.trial()), [])
-        # The report may come a little before the hold in the guest's clock and still within the margin after it.
-        self.assertEqual(runner.leave_failures(self.trial(events={"hal_end": 1001.7, "rec_stopping": 1001.7})), [])
+        # The report may come a little before the gate's closing in the guest's clock and still within the margin after it.
+        self.assertEqual(runner.leave_failures(self.trial(events={"hal_end": 1001.5, "rec_stopping": 1001.5})), [])
         # A busy host's round trips make the offset less certain: the margin follows them, never below the least.
-        late = {"hal_end": 1002.2, "rec_stopping": 1002.2}
+        late = {"hal_end": 1001.8, "rec_stopping": 1001.8}
         self.assertNotEqual(runner.leave_failures(self.trial(events=late)), [])
         self.assertEqual(runner.leave_failures(self.trial(events=late, clock_error=0.6)), [])
+
+    def test_a_stop_after_the_gate_closed_is_not_before_the_hold_when_the_wait_for_a_request_ended_later(self) -> None:
+        # The gate closed at 1001.0 and the launcher's call returned at 1002.0, a second later, after waiting for a request that
+        # was running. The HAL's report (1001.5) and the recorder's stop (1001.6) came after the gate closed: they did not
+        # beat the hold, though both are before the time the call returned.
+        trial = self.trial(edge=self.edge(closed=1001.0, drained=1002.0, result=0, waited_ms=2000), skew=0.0,
+                           events={"hal_end": 1001.5, "rec_stopping": 1001.6})
+        reasons = "; ".join(runner.leave_failures(trial))
+        self.assertIn("the camera HAL's report of the loss came", reasons)
+        self.assertIn("the recorder's stop came", reasons)
+        self.assertIn("after the gate closed", reasons)
 
     def test_every_reason_a_leaving_fails_is_said(self) -> None:
         def reasons(**changes) -> str:
@@ -4273,7 +4288,7 @@ class VideoLeaveTests(unittest.TestCase):
     def test_a_trial_is_described_in_milliseconds_from_the_loss(self) -> None:
         line = runner.describe_leave(self.trial())
         for part in ("waited 1250 ms for 2 stream(s) (stopped)", "HAL report +20", "Recorder STOPPING +100", "Finalize +1300",
-                     "GPU held +1250", "audio ends 5.10 s (+0.10 s)"):
+                     "GPU gate closed +1000", "drained +1250", "audio ends 5.10 s (+0.10 s)"):
             self.assertIn(part, line)
 
 

@@ -346,7 +346,8 @@ CONTROL_VARIABLE = "UML_SYNTHETIC_CAMERA_CONTROL"
 # in silence for as long as the hold lasts. The row makes LEAVE_TRIALS recordings and leaves each, with the platform's
 # notice of the departure (`interrupt background`) first or LEAVE_NOTICE_GAPS later, and expects of every one: the launcher
 # found a video to end and the camera answered, the camera HAL's report of the loss and the recorder's stop came before the
-# hold landed, the loss was the HAL's first failed buffer, and the clip's audio ends with its video. Whether the guest had
+# hold landed (the gate's closing, which the launcher times on its own; not the end of its wait for a request that was
+# running), the loss was the HAL's first failed buffer, and the clip's audio ends with its video. Whether the guest had
 # stopped its video streams when the hold landed is told, not required: a loaded host can outlast the wait's bound, and the
 # recording that ended before the hold is what the row is for.
 EDGE_VARIABLE = "UML_BACKGROUND_EDGE_CONTROL"
@@ -2562,8 +2563,11 @@ def guest_time(guest: Guest) -> float:
 
 # The launcher's own lines about the leaving (background_edge_control.hpp); the time is the host's clock, in seconds since the epoch.
 EDGE_LEFT = re.compile(r"edge control: (\d+\.\d+) the application leaves the foreground")
-EDGE_HELD = re.compile(r"edge control: (\d+\.\d+) GPU requests held \((-?\d+)\) after (\d+) ms: video streams (\d+), "
-                       r"stopped (yes|no), answered (yes|no)")
+# The gate closes at once; the launcher's call then waits (a second at most) for a request that is running, and says when it
+# returned. The ordering of the guest's events against the hold is judged against the closing.
+EDGE_CLOSED = re.compile(r"edge control: (\d+\.\d+) the GPU gate closed")
+EDGE_DRAINED = re.compile(r"edge control: (\d+\.\d+) GPU requests drained \((-?\d+)\) after (\d+) ms: video streams (\d+), "
+                          r"stopped (yes|no), answered (yes|no)")
 # What the guest's log says of the loss, by tag and message: the camera HAL's report of it, an ordinary failed buffer (the
 # loss must come first), the recorder's stop, the video encoder's, and the clip's finalization.
 LEAVE_LOG_TAGS = ("V4l2FrameSource:W EmulatedSensorHost:W Camera3-Device:E CameraActivity:E CameraViewModel:D Recorder:D "
@@ -2579,10 +2583,12 @@ LEAVE_EVENTS = (
 
 @dataclass
 class Edge:
-    """What the launcher said of one leaving: the host's time of the leaving and of the hold, how long the launcher waited
-    for the guest, the video streams it ended, whether the guest stopped them and whether the camera device answered."""
+    """What the launcher said of one leaving: the host's time of the leaving, of the gate's closing and of the end of the wait
+    for a request that was running (the hold's return), how long the launcher waited for the guest, the video streams it
+    ended, whether the guest stopped them and whether the camera device answered."""
     left: float
-    held: float
+    closed: float
+    drained: float
     result: int
     waited_ms: int
     streams: int
@@ -2596,10 +2602,14 @@ def parse_edge(log: str, since: int = 0) -> Edge | None:
     left = EDGE_LEFT.search(text)
     if not left:
         return None
-    held = EDGE_HELD.search(text, left.end())
-    if not held:
+    closed = EDGE_CLOSED.search(text, left.end())
+    if not closed:
         return None
-    return Edge(float(left[1]), float(held[1]), int(held[2]), int(held[3]), int(held[4]), held[5] == "yes", held[6] == "yes")
+    drained = EDGE_DRAINED.search(text, closed.end())
+    if not drained:
+        return None
+    return Edge(float(left[1]), float(closed[1]), float(drained[1]), int(drained[2]), int(drained[3]), int(drained[4]),
+                drained[5] == "yes", drained[6] == "yes")
 
 
 def leave_events(log: str, since: float) -> dict[str, float]:
@@ -2632,7 +2642,7 @@ def leave_failures(trial: LeaveTrial) -> list[str]:
     reasons = []
     edge, events = trial.edge, trial.events
     margin = max(LEAVE_CLOCK_MARGIN_SECONDS, trial.clock_error)
-    held = edge.held + trial.skew + margin
+    closed = edge.closed + trial.skew + margin
     if not edge.answered:
         reasons.append("the camera device did not answer the end of the video")
     elif edge.streams < 1:
@@ -2640,8 +2650,8 @@ def leave_failures(trial: LeaveTrial) -> list[str]:
     for key, what in (("hal_end", "the camera HAL's report of the loss"), ("rec_stopping", "the recorder's stop")):
         if key not in events:
             reasons.append(f"{what} is not in the guest's log")
-        elif events[key] > held:
-            reasons.append(f"{what} came {events[key] - held + margin:.2f} s after the hold landed")
+        elif events[key] > closed:
+            reasons.append(f"{what} came {events[key] - closed + margin:.2f} s after the gate closed")
     if "hal_end" in events and events.get("hal_frame_failed", events["hal_end"]) < events["hal_end"]:
         reasons.append("the first failed buffer of the camera HAL was an ordinary failure, not the loss")
     if trial.record_bound_hit:
@@ -2696,7 +2706,7 @@ def leave_trial(guest: Guest, plan: Plan, number: int, notice_gap: float) -> Lea
     wait_for("the hold of the guest's GPU requests", LEAVE_EDGE_SECONDS, held, guest)
     edge = found[0]
     # The person is away LEAVE_AWAY_SECONDS from the hold, then back: the requests are released and the camera is the guest's again.
-    time.sleep(max(0.0, edge.held + LEAVE_AWAY_SECONDS - time.time()))
+    time.sleep(max(0.0, edge.drained + LEAVE_AWAY_SECONDS - time.time()))
     guest.edge_control("return")
     guest.camera_control("resume")
     row = new_movie(guest, before, LOST_WAIT_SECONDS, settle=0)
@@ -2730,8 +2740,9 @@ def describe_leave(trial: LeaveTrial) -> str:
     return (f"leave {trial.number} (notice {trial.notice_gap * 1000:+.0f} ms): the launcher waited {edge.waited_ms} ms for "
             f"{edge.streams} stream(s) ({'stopped' if edge.stopped else 'NOT stopped'}); ms from the loss: HAL report "
             f"{rel('hal_end')}, first ordinary failure {rel('hal_frame_failed')}, Recorder STOPPING {rel('rec_stopping')}, "
-            f"VideoEncoder stopped {rel('venc_stopped')}, Finalize {rel('finalize')}, GPU held "
-            f"{(edge.held + trial.skew - base) * 1000:+.0f}, released {(edge.held + trial.skew - base + LEAVE_AWAY_SECONDS) * 1000:+.0f}; "
+            f"VideoEncoder stopped {rel('venc_stopped')}, Finalize {rel('finalize')}, GPU gate closed "
+            f"{(edge.closed + trial.skew - base) * 1000:+.0f}, drained {(edge.drained + trial.skew - base) * 1000:+.0f}, released "
+            f"{(edge.drained + trial.skew - base + LEAVE_AWAY_SECONDS) * 1000:+.0f}; "
             f"clip {trial.clip_seconds:.2f} s, video ends {trial.video_end:.2f} s, audio ends {trial.audio_end:.2f} s "
             f"({trial.audio_end - trial.video_end:+.2f} s)")
 
