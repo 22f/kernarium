@@ -832,6 +832,113 @@ void test_a_batch_cannot_commit_into_a_generation_being_destroyed()
 }
 
 
+std::atomic<int> immediate_window{};
+
+/* Holds the first immediate map, protect or unmap that gets here, after it has
+ * taken its generation's state and before it takes the state's lock, until
+ * the test lets it go. */
+void hold_immediate_change(testing::AllocationSite site) noexcept
+{
+	if (site != testing::AllocationSite::immediate_change)
+		return;
+	int open = window_open;
+	if (!immediate_window.compare_exchange_strong(open, window_held))
+		return;
+	const auto deadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds{20};
+	while (immediate_window.load(std::memory_order_acquire) != window_released &&
+	       std::chrono::steady_clock::now() < deadline)
+		std::this_thread::yield();
+}
+
+/* Runs `change` on a thread that is held after it took the state of
+ * `generation`, destroys the generation meanwhile, lets the change go on, and
+ * returns what it returned. */
+template <typename Change>
+int change_across_a_destroy(unsigned long generation, Change change)
+{
+	int result = -1;
+	immediate_window.store(window_open, std::memory_order_release);
+	testing::set_allocation_observer(hold_immediate_change);
+	std::thread changer{[&] { result = change(); }};
+	const auto deadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds{20};
+	while (immediate_window.load(std::memory_order_acquire) != window_held &&
+	       std::chrono::steady_clock::now() < deadline)
+		std::this_thread::yield();
+	require(immediate_window.load(std::memory_order_acquire) == window_held);
+	destroy(generation);
+	immediate_window.store(window_released, std::memory_order_release);
+	changer.join();
+	testing::set_allocation_observer(nullptr);
+	return result;
+}
+
+/* A map, protect or unmap that took its generation's state before destroy()
+ * retired it takes the state's lock after: it must leave the state alone and
+ * return what it would have returned. A map that wrote there would count its
+ * words into a state that is no longer in the table, which no audit walks and
+ * nothing flushes, and leave the frame's count high for good. (Protect and
+ * unmap find the cleared state empty, so for them the row holds the same
+ * result before the guard as after it.) */
+void test_an_immediate_change_cannot_write_into_a_destroyed_generation()
+{
+	/* A generation is never used again once destroyed: one for each change. */
+	constexpr unsigned long mapper = 728;
+	constexpr unsigned long protector = 730;
+	constexpr unsigned long unmapper = 731;
+	constexpr unsigned long later = 732;
+	constexpr unsigned long other = 729;
+	constexpr unsigned long base = 0x3300'0000;
+	ScratchBacking backing{backing_name, 6 * page};
+	Pin pin{1051, backing};
+	must_map(other, base, backing, 0, 6, rwx, 1);
+	std::array<void *, 6> records{};
+	for (unsigned long index = 0; index < records.size(); ++index)
+		records[index] = record_of(other, base + index * page);
+
+	const auto stage = [&](unsigned long generation) {
+		must_map(generation, base, backing, 0, 1, rwx, 1);
+		must_map(generation, base + page, backing, page, 1, rw, 1);
+		require(count_of(records[0]) == 2 && count_of(records[1]) == 1);
+	};
+
+	stage(mapper);
+	require(change_across_a_destroy(mapper, [&] {
+		return map(mapper, base + 2 * page, backing, 2 * page, 1, rwx, 1);
+	}) == 0);
+	require(count_of(records[0]) == 1);
+	require(count_of(records[2]) == 1);
+	audit();
+
+	stage(protector);
+	require(change_across_a_destroy(protector, [&] {
+		return protect(protector, base + page, 1, rwx);
+	}) == 0);
+	require(count_of(records[0]) == 1 && count_of(records[1]) == 1);
+	audit();
+
+	stage(unmapper);
+	require(change_across_a_destroy(unmapper, [&] {
+		return darwin_uml_static_vm_unmap_generation(unmapper, at(base),
+			page);
+	}) == 0);
+	require(count_of(records[0]) == 1);
+	audit();
+
+	/* A generation that was not destroyed is counted as before. */
+	must_map(later, base + 3 * page, backing, 3 * page, 1, rwx, 1);
+	require(count_of(records[3]) == 2);
+	audit();
+	destroy(later);
+	require(count_of(records[3]) == 1);
+	destroy(other);
+	for (void *record : records)
+		require(count_of(record) == 0);
+	audit();
+}
+
+
 /* A whole-space flush and destroy count every executable mapping out,
  * whatever the number of pages: the sizes around one leaf of the fill index
  * (512 words) and past several of them. The mappings of a second generation
@@ -901,6 +1008,7 @@ int main()
 	test_threads_that_come_and_go_return_the_count_to_zero();
 	test_an_exact_audit_is_exact_while_generations_come_and_go();
 	test_a_batch_cannot_commit_into_a_generation_being_destroyed();
+	test_an_immediate_change_cannot_write_into_a_destroyed_generation();
 	test_a_large_space_counts_every_mapping_out();
 	std::puts("Static MMU executable count tests passed");
 	return 0;

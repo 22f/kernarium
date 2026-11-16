@@ -35,6 +35,7 @@ enum class AllocationSite : std::uint8_t {
 	destroy_cleared,
 	generation,
 	history,
+	immediate_change,
 	reserve,
 	software_domain_registry,
 	native_after_mmap,

@@ -727,8 +727,17 @@ public:
 			return 0;
 		}
 		auto state = state_for(generation);
+		UML_MEMORY_ALLOCATION_CHECKPOINT(
+			testing::AllocationSite::immediate_change);
 		ExecutionQuiesce quiesce{state, generation};
 		std::lock_guard lock{state->mappings_mutex};
+		/* A destroy() that ran between taking the state and its lock has
+		 * cleared it, retired it and dropped it from the table. The
+		 * generation is gone, so nothing observable is lost by leaving it
+		 * alone; a write here would count words into a state that no audit
+		 * walks and nothing clears. */
+		if (state->retired.load(std::memory_order_acquire))
+			return 0;
 		map_locked(*state, address, length,
 			Mapping{std::move(backing), offset, fd, protection,
 				guest_code, guest_writable, guest_immutable});
@@ -747,8 +756,13 @@ public:
 				active.generation : 0);
 		protection &= protection_mask;
 		auto state = state_for(generation);
+		UML_MEMORY_ALLOCATION_CHECKPOINT(
+			testing::AllocationSite::immediate_change);
 		ExecutionQuiesce quiesce{state, generation};
 		std::lock_guard lock{state->mappings_mutex};
+		/* Retired by a destroy() since the state was taken: see map(). */
+		if (state->retired.load(std::memory_order_acquire))
+			return 0;
 		bool changed = false;
 		CodeSpan code;
 		(void)state->fill_index.scan(address, address + length,
@@ -839,8 +853,13 @@ public:
 			return 0;
 		}
 		auto state = state_for(generation);
+		UML_MEMORY_ALLOCATION_CHECKPOINT(
+			testing::AllocationSite::immediate_change);
 		ExecutionQuiesce quiesce{state, generation};
 		std::lock_guard lock{state->mappings_mutex};
+		/* Retired by a destroy() since the state was taken: see map(). */
+		if (state->retired.load(std::memory_order_acquire))
+			return 0;
 		/* Linux invalidates after it changes a PTE and before it frees the
 		 * page.  A walker which sampled the old PTE may not have published it
 		 * yet, so the range can be absent here and the snapshot still stale:
