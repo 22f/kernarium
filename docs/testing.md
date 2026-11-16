@@ -852,7 +852,11 @@ blocker in every one of them.
   assumed: the framework counts the pages it hashed because the epoch of
   their frame had moved (the table held that frame's verdict for the same
   page under an older epoch), and every round after the first must have at
-  least one. On a stock kernel the row fails, as designed.
+  least one. The option needs `--share-program`, `--diagnostics` and
+  `--manifest` (the runner refuses it before a guest starts without them),
+  and the records of both arms must show the eviction whether or not
+  anything was counted, so on a stock kernel the row fails however the
+  runner was invoked.
   Execution evidence exists only in a diagnostics build, where the libraries
   the run names must have been entered, and where the memory layer recounts
   the executable mappings of every physical-page record against the
