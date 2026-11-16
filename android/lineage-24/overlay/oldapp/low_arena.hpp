@@ -34,11 +34,12 @@ public:
     // Null `pointer` allocates. nullptr (the old block untouched) when exhausted.
     void* reallocate(void* pointer, size_t size);
 
-    // A free chunk keeps its list links in the first bytes of its payload; a user of the arena that reads memory it has freed
-    // (the byte[] blocks' stale references) keeps the fields it reads past this many bytes, and then finds them while the chunk
-    // stays free as it is. Once the chunk is merged and cut again, or another allocation covers it, the arena promises nothing
-    // about what the old addresses hold.
+    // A free chunk keeps its list links in the first bytes of its payload. The arena promises nothing about what the address
+    // of a freed block holds: a user that must tell whether an address is a block keeps its own record, and reads no byte of
+    // the arena for it.
     static constexpr size_t kFreeLinkBytes = 2 * sizeof(uint32_t);
+    // The bytes a chunk adds to its payload: a chunk of a request of n bytes is n + kChunkHeaderBytes rounded up to 16.
+    static constexpr uint32_t kChunkHeaderBytes = 8;
 
     bool contains(const void* pointer) const {
         return pointer >= static_cast<const void*>(first_) && pointer < static_cast<const void*>(end_);
@@ -61,7 +62,7 @@ private:
     static constexpr uint32_t kUsed = 1;
     static constexpr uint32_t kPrevUsed = 2;
     static constexpr uint32_t kSizeMask = ~15u;
-    static constexpr uint32_t kHeader = 8;
+    static constexpr uint32_t kHeader = kChunkHeaderBytes;
     static constexpr uint32_t kMinChunk = 16;
     static constexpr uint32_t kNone = 0xffffffffu;
     static constexpr unsigned kBins = 108;

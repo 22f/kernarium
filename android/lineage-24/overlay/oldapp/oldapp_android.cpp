@@ -76,6 +76,7 @@ using namespace oldapp;
 
 constexpr size_t kArenaBytes = 64u << 20;
 constexpr size_t kShadowBytes = 32u << 20;
+static_assert(kShadowBytes <= kMaxShadowBytes, "the shadow region is within what the layer's block record covers");
 constexpr uintptr_t kLowLimit = 0x7ff00000u;
 constexpr unsigned kMaxModules = 512;
 constexpr unsigned kMaxSlots = 160;
@@ -116,6 +117,16 @@ void yield_thread() { oldapp_sched_yield(); }
 // The baselines of the byte[] blocks live in libc's heap: they need no low address.
 void* alloc_baseline(size_t bytes) { return oldapp_malloc(bytes); }
 void free_baseline(void* baseline) { oldapp_free(baseline); }
+
+// The memory of the shadow blocks' record (jni_shim.cpp): a mapping of its own, fresh and so zero-filled, that the layer never
+// clears. It is resident by page only where block starts have been recorded, and a page stays resident after its blocks go.
+// It needs no low address: only the layer's own code reads it.
+void* map_record(size_t bytes) {
+    constexpr int kProtReadWrite = 3;
+    constexpr int kMapPrivateAnonymous = 0x02 | 0x20;
+    void* mapped = oldapp_mmap(nullptr, bytes, kProtReadWrite, kMapPrivateAnonymous, -1, 0);
+    return mapped == reinterpret_cast<void*>(-1) ? nullptr : mapped;
+}
 
 // The first allocation the arena could not serve: one log line, for the sessions of real games.
 uint32_t g_fallback_logged = 0;
@@ -1033,7 +1044,7 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
     const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method, now_ms,
                             alloc_baseline, free_baseline, region != nullptr ? thunk_address : nullptr,
                             region != nullptr ? thunk_count() : 0, is_own_library, ended_lock, ended_unlock, now_ns,
-                            yield_thread};
+                            yield_thread, map_record};
     refresh_modules(true);  // every library the application loaded before this one
     void** table = const_cast<void**>(env->functions);
     const bool jni_ok = install_jni_wrappers(table, platform, region != nullptr ? region + kArenaBytes : nullptr,

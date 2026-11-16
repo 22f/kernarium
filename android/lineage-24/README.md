@@ -713,13 +713,19 @@ patches ART's one JNI function table in place and gives the application:
   the length of the call, and the use makes no reference of the calling thread and
   moves no block, so a thread outside any native method, or one at the limit, can
   use it. Only an array that arrives as a result makes a reference again, and
-  `DeleteLocalRef` and the releases do not. A reference whose array was collected
-  means nothing, as a reference to a freed block did: it gives no elements and no
-  copy, and its length is 0 where the layer finds the block freed; once the freed
-  memory is used again nothing is promised, and the reference can read whatever is
-  there. A block is made whole before it says it is live, so a thread that looks
-  without the lock at the reference of a live or ended block (its kind, its
-  length) finds a complete block.
+  `DeleteLocalRef` and the releases do not. The layer keeps its own record of
+  where each block starts, and an address is a block only when that record says a
+  block starts exactly there; no byte of the region decides it. A block whose
+  array the collector has cleared is still an ended block of its length until the
+  layer reclaims it, and a wrapper that finds no array behind it acts as for a null
+  reference (no elements, no copy). The reference of a reclaimed block is no
+  block, however the memory it points into has been used since: its length is 0,
+  and it is a block again only if a new block starts at exactly that address. A
+  block is complete before the record names it, so a thread that looks without the
+  lock at the reference of a live or ended block (its kind, its length) finds it
+  whole. The record is up to 2 MiB of address space, a mapping of its own, resident
+  by page only where block starts have been recorded; a page stays resident after
+  its blocks are gone.
   A pointer from `Get...Elements` or `Get...Critical` pins its block as Dalvik
   pinned the array: the block keeps its place, and a strong reference to the
   array, until the pointer is released (mode 0 or `JNI_ABORT`; `JNI_COMMIT`

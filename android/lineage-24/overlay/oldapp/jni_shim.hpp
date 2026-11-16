@@ -64,7 +64,16 @@ struct Platform {
     // Gives the calling thread's processor up for a moment: a waiter of the pointer table's spin lock calls it after a short
     // spin. Null: it spins on.
     void (*yield_thread)();
+    // The memory of the block record (see jni_shim.cpp): `bytes` of zero-filled memory (shadow_record_bytes of the shadow
+    // region), kept for the life of the process. The layer never clears it. A fresh anonymous mapping is the memory wanted: it
+    // is resident only where block starts have been recorded. Null, or a null result: nothing is intercepted.
+    void* (*map_record)(size_t bytes);
 };
+
+// The block record covers a shadow region below 2^28 bytes (a block's length fits 28 bits of its word): one 32-bit word for
+// each 64 bytes of the region, up to 2 MiB for the 32 MiB region of the old-application layer.
+constexpr size_t kMaxShadowBytes = (size_t{1} << 28) - 1;
+constexpr size_t shadow_record_bytes(size_t shadow_size) { return ((shadow_size + 63) / 64) * sizeof(uint32_t); }
 
 struct Counters {
     uint32_t shadows_created;
@@ -90,8 +99,10 @@ struct Counters {
 
 // `table` is the shared function table (kSlotCount entries), `shadow_region` the memory of the byte[]
 // blocks (null: nothing to intercept). Returns false, changing nothing, when the table cannot be
-// written. `env` (the environment of the loading thread, when there is one) resolves the classes and methods the layer calls
-// itself (System.identityHashCode, Runtime.gc) before the table is patched, so that no block can exist without them.
+// written. A region larger than kMaxShadowBytes, or not 16-byte aligned, gets no shadows, nor does one whose record
+// (Platform::map_record) cannot be had. `env` (the environment of the loading thread, when there is one) resolves the
+// classes and methods the layer calls itself (System.identityHashCode, Runtime.gc) before the table is patched, so that no
+// block can exist without them.
 bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_region, size_t shadow_size,
                           jni::Env* env = nullptr);
 
