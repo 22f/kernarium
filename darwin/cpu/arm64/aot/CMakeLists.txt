@@ -247,7 +247,8 @@ function(_uml_aot_add_runtime TARGET DIAGNOSTICS)
     target_include_directories(${TARGET} PRIVATE
         ${PROJECT_SOURCE_DIR}/darwin)
     target_compile_definitions(${TARGET} PRIVATE
-        UML_AOT_DIAGNOSTICS=${DIAGNOSTICS})
+        UML_AOT_DIAGNOSTICS=${DIAGNOSTICS}
+        UML_AOT_SHARED_VERDICTS=$<BOOL:${UML_AOT_SHARED_VERDICTS}>)
 endfunction()
 
 _uml_aot_add_runtime(uml_arm64_aot_runtime 0)

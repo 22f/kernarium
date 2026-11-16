@@ -66,6 +66,8 @@ set_property(CACHE UML_AOT_MEMORY_CALL PROPERTY STRINGS
     inline probe probe-miss)
 set(UML_AOT_HOT_LIST "" CACHE FILEPATH
     "With a call UML_AOT_MEMORY_CALL, the hot list (tools/aot/hot_list.py) naming the functions that keep the inline probe")
+option(UML_AOT_SHARED_VERDICTS
+    "Let address spaces share what they verified about a page the kernel declares immutable; OFF hashes every page in every address space (a measurement variant)" ON)
 option(UML_AOT_COUNT_RETIRED
     "With UML_AOT_DIAGNOSTICS, rewrite the libraries to count each instruction an entry runs (the blob then differs from the product's)" OFF)
 set(UML_AOT OFF)

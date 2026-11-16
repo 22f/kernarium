@@ -22,6 +22,10 @@ Checked:
   patch covered text; it prints the same text in both arms. Registers that
   differ between two runs of the same engine (stack addresses under ASLR) are
   masked; the others are compared for each fault, and at least one must be;
+- when given, the debug rows (debug_rows.py) and the share rows
+  (share_rows.py) print the same records in both arms, and, with
+  --diagnostics, the AOT arm reuses verdicts of the read-only file system
+  across address spaces and hashes the pages of a copy on a writable one;
 - every adb command and push reports success;
 - without --diagnostics (the product emulator, which states nothing itself):
   residency evidence that the AOT arm touched the framework, judged from
@@ -68,6 +72,7 @@ LAUNCHER = REPOSITORY / "tools" / "boot_android.py"
 sys.path.insert(0, str(REPOSITORY / "tests" / "integration" / "support"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import debug_rows  # noqa: E402
+import share_rows  # noqa: E402
 import slot_ports  # noqa: E402
 
 DEFAULT_ADB_PORT = 5585
@@ -384,6 +389,8 @@ class Arm:
         self.workloads: dict[tuple[str, int], Run] = {}
         self.probe: list[str] = []
         self.debug: dict[str, list[list[str]]] = {}
+        self.share: dict[str, list[str]] = {}
+        self.share_counts: dict[str, dict[str, int]] = {}
         self.report: dict[str, int] = {}
         self.resident: int | None = None
 
@@ -447,6 +454,8 @@ class Arm:
                     self.probe.append(ran.stdout)
             if options.debug_program:
                 self.run_debug_rows(device, serial)
+            if options.share_program:
+                self.run_share_rows(device, serial, report)
             if guest.poll() is not None:
                 raise Failure(f"the launcher exited ({guest.returncode}) "
                               "before the guest's work was done")
@@ -495,6 +504,38 @@ class Arm:
                 self.debug.setdefault(mode, []).append(record)
 
 
+    def run_share_rows(self, device: "Device", serial: str,
+                       report: pathlib.Path) -> None:
+        """The shared-verification rows (share_rows.py): every mode once. In
+        a diagnostics build of the component the report's counters are read
+        around each mode."""
+        pushed = device.run("-s", serial, "push", str(self.options.share_program),
+                            share_rows.PROGRAM, timeout=60)
+        if pushed.returncode != 0:
+            raise Failure(f"pushing the share program exited "
+                          f"{pushed.returncode}:\n{pushed.stdout}")
+        counting = self.options.diagnostics and self.aot
+
+        def counters() -> dict[str, int]:
+            # The report is written a few times a second.
+            time.sleep(REPORT_SECONDS)
+            return read_report(report)
+
+        for mode in share_rows.MODES:
+            before = counters() if counting else {}
+            try:
+                record = share_rows.run_mode(
+                    lambda text, seconds=60: device.shell(text, timeout=seconds),
+                    mode)
+            except (share_rows.ShareFailure, subprocess.TimeoutExpired) as problem:
+                raise Failure(f"{self.label}: share row {mode}: {problem}")
+            self.share[mode] = record
+            if counting:
+                after = counters()
+                self.share_counts[mode] = {key: after.get(key, 0) - before.get(key, 0)
+                                           for key in after}
+
+
 def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
     names = sorted({name for name, _ in off.workloads})
     for arm in (off, on):
@@ -536,6 +577,20 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
                 raise Failure(f"debug row {problem}")
             print(f"debug row {mode}: {len(on.debug[mode][0])} lines, "
                   f"{compared} fields compared, {masked} masked, identical")
+    if options.share_program:
+        fork_shared = None
+        for mode in share_rows.MODES:
+            if mode not in off.share or mode not in on.share:
+                raise Failure(f"share row {mode} did not run in both arms")
+            try:
+                lines = share_rows.compare(mode, off.share[mode], on.share[mode])
+                print(f"share row {mode}: {lines} lines, identical")
+                if options.diagnostics:
+                    print(share_rows.check_counts(mode, on.share_counts[mode], fork_shared))
+            except share_rows.ShareFailure as problem:
+                raise Failure(f"share row {problem}")
+            if mode == "fork" and options.diagnostics:
+                fork_shared = on.share_counts[mode].get("shared_hits", 0)
     if not options.diagnostics:
         assert off.resident is not None and on.resident is not None
         if on.resident < MIN_RESIDENT_BYTES:
@@ -604,6 +659,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the built guest debug program "
                         "(libaotdebug.so): breakpoints, single steps, a "
                         "thread nobody stops, and crash reports")
+    parser.add_argument("--share-program", type=pathlib.Path,
+                        help="the built guest share program "
+                        "(libaotshare.so): the rewritten libz.so run in many "
+                        "processes, a copy of it, a copied page, and a "
+                        "library whose page cache was dropped")
     parser.add_argument("--vmmap", default="vmmap",
                         help="the tool that lists the emulator's regions "
                         "(the product mode reads the framework's residency)")

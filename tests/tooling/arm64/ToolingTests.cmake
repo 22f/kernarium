@@ -34,6 +34,16 @@ uml_add_tooling_test(
     LABELS cpu
     TIMEOUT 60)
 
+# The shared-verification rows of the guest runner: a run's record, the
+# comparison of the arm without the component with the arm with it, and the
+# counter bounds of a diagnostics build.
+uml_add_tooling_test(
+    NAME arm64-aot-share-rows
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/arm64/test_aot_share_rows.py
+    LABELS cpu
+    TIMEOUT 60)
+
 # The product compilation of the AOT runtime holds none of the counters,
 # report or test switches that a diagnostics build composes in separately.
 if(TARGET uml_arm64_aot_runtime)

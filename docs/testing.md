@@ -794,6 +794,8 @@ blocker in every one of them.
   debug rows on scripted tombstones and records: a moved frame, a register
   that changes only with the component and an incomplete mode fail, and only
   a field that two runs of one engine already differ in is masked.
+  `arm64-aot-share-rows` does the same for the share rows' records and
+  counter bounds.
 - `aot-guest-workloads` (integration, opt-in like the other Android guest
   tests: it exists where `UML_AOT_IMAGE` and the Android launcher target do)
   boots the release twice, without and with `DARWIN_UML_AOT=1`, runs the
@@ -812,7 +814,15 @@ blocker in every one of them.
   the runs without it (an address under ASLR, a process id) is masked, and
   everything else, frame for frame, must be equal. The image is a user build,
   so `debuggerd -b` and `kill -3` of a system process (which need root) are
-  not run. Execution evidence exists
+  not run. The share program (`aot_guest_share.cpp`, rows in
+  `share_rows.py`) runs libz in many processes: the read-only file system's
+  library, a byte-identical copy on the writable data file system, a text
+  page copied by a write and one patched in a single child, a changed page
+  protection, and rounds in which the page cache's pages of the library are
+  dropped and other files read to reuse the frames. Each mode prints the same
+  sums with the component on and off; in a diagnostics build the fork mode
+  must find verdicts to reuse (`shared_hits`) and the copy, which the kernel
+  does not declare immutable, must hash its own pages. Execution evidence exists
   only in a diagnostics build, where the libraries the run names must have
   been entered. A product build has residency evidence: the framework's text
   became resident in the emulator process (`vmmap`, macOS) and was not with

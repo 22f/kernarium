@@ -670,11 +670,17 @@ Binder::Verdict Binder::verify_page(
 		instance.bias + library.table_base + index * page_size;
 	const auto outcome = verify_through_table(g_verdicts,
 		[&](std::uint64_t at, PageStamp &stamp) noexcept {
+#if !UML_AOT_SHARED_VERDICTS
+			(void)at;
+			(void)stamp;
+			return false;
+#else
 			::uml::memory::ExtendedCodePageStamp seen;
 			if (!memory.extended_code_page_stamp(at, nullptr, seen))
 				return false;
 			stamp = {seen.stamp.identity, seen.epoch, seen.shareable};
 			return true;
+#endif
 		},
 		[&]() noexcept {
 			alignas(8) std::array<std::byte, page_size> page;
