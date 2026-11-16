@@ -48,11 +48,10 @@ min(256 MiB, budget / executors); the shared translation tier takes what is
 left when that is at least 768 MiB and two or more executors run, and does
 not exist otherwise (what is left below that is not allocated). Without a
 tier no executor looks in it, publishes to it, locks it or sweeps it, and each
-keeps its own validation words; with one, it serves only while two executors
-live. A tier under the floor costs more in lookups, publications and reclaim
-sweeps than the compilations it saves. An iOS device's budget (160 to 304 MiB
-at 1 to 8 vCPUs) is all private; half of a 4 GiB guest's memory funds a tier
-of about 1 GiB at 4 vCPUs and none at 8
+keeps its own validation words; with one, it admits new translations only
+while two executors live. A tier under the floor costs more in lookups,
+publications and reclaim sweeps than the compilations it saves. An iOS
+device's budget is all private
 ([`jit_cache_geometry.hpp`](jit_cache_geometry.hpp)).
 
 ## Top-byte ignore
