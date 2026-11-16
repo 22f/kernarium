@@ -29,7 +29,8 @@ The runner checks, in this order:
   activity's resume and capture after them were seen, and the camera service logged no "Unable to submit
   capture request" and the camera HAL's domain no denial of the composer's file descriptors in the whole
   interval), and the camera HAL has logged no failed buffer ("every buffer of the stream is in flight", a
-  request "not queued completely", a buffer "never collected");
+  request "not queued completely", a buffer "never collected"; a wait that the framework's flush cut short
+  is not one);
 - a still while the preview runs leaves the preview's stream open: the guest is stopped for a second inside the
   request of the still (three rounds that count, at a delay after the key that the step finds from the camera HAL's
   own report of what it waits for: the synthetic still makes its request in a tenth of a second or so, and a host
@@ -706,15 +707,22 @@ def made_up_frames(text: str) -> list[int]:
     return [int(count) for count in re.findall(r"the device delivers again, after (\d+) frames of silence made up", text)]
 
 
+# A wait that the framework's flush or the sensor's shutdown cut short (the wait returns DEAD_OBJECT, -32): the
+# request was being dropped already, as when the application leaves photo mode, so no buffer failed. The other
+# way to that status, a slot that an earlier wait's reset took back, follows a line this check counts.
+INTERRUPTED_WAIT = re.compile(r"^WaitFor: the camera did not deliver a buffer \(-32\)$")
+
+
 def hal_failures(text: str) -> list[str]:
     """`logcat -d` lines of the camera HAL's tags that say a buffer failed: an error of any of them, a request
-    that was not queued completely, a buffer that never arrived or was never collected."""
+    that was not queued completely, a buffer that never arrived or was never collected. An interrupted wait
+    is not one."""
     failures = []
     for line in text.splitlines():
         if not (match := re.search(r"\s([EW])\s+(\w+)\s*: (.*)$", line)):
             continue
         level, tag, message = match.groups()
-        if tag not in HAL_TAGS:
+        if tag not in HAL_TAGS or INTERRUPTED_WAIT.match(message.strip()):
             continue
         if level == "E" or any(part in message for part in (
                 "was not queued completely", "did not deliver", "never collected")):
