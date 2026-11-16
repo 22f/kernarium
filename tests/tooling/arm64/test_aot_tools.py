@@ -450,6 +450,43 @@ class ExitAddressWidthTests(unittest.TestCase):
         self.assertGreater(len(unit_words(library)), 0)
 
 
+class PcRelativeWidthTests(unittest.TestCase):
+    """ADR and ADRP form a 64-bit address, which wraps for a target below
+    zero: the constant the rewritten code adds to the bias must keep every
+    bit (a 48-bit constant gave the wrong address)."""
+
+    @staticmethod
+    def constants(words: list[int]) -> list[int]:
+        """The values the movz and movk runs of `words` build, in order."""
+        values: dict[int, int] = {}
+        built: list[int] = []
+        for word in words:
+            rd = word & 31
+            move = (word >> 23) & 0x1ff
+            if move == 0b110100101:  # movz x, #imm16, lsl #(16 * hw)
+                values[rd] = ((word >> 5) & 0xffff) << (16 * ((word >> 21) & 3))
+                built.append(rd)
+            elif move == 0b111100101 and rd in values:  # movk
+                shift = 16 * ((word >> 21) & 3)
+                values[rd] = (values[rd] & ~(0xffff << shift)) | \
+                    (((word >> 5) & 0xffff) << shift)
+        return [values[rd] for rd in built if rd in values]
+
+    def test_an_adrp_below_zero_keeps_all_64_bits(self) -> None:
+        # adrp x0, #-2 pages from page 1: the target is -0x1000.
+        adrp = 0xd0ffffe0
+        library = library_of([adrp, RET], [(0, 8)])
+        built = self.constants(unit_words(library))
+        self.assertIn(0xfffffffffffff000, built)
+
+    def test_an_adrp_inside_the_library_is_unchanged(self) -> None:
+        # adrp x0, #1 page from page 1: the target is 0x2000.
+        adrp = 0x90000000 | (1 << 29)
+        library = library_of([adrp, RET], [(0, 8)])
+        built = self.constants(unit_words(library))
+        self.assertNotIn(0xfffffffffffff000, built)
+
+
 class SimdRegisterFieldTests(unittest.TestCase):
     """A vector field must never be treated as a general register (the
     register substitution applies only to x18, x24-x28 and sp)."""

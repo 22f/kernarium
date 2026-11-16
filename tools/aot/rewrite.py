@@ -77,6 +77,8 @@ ABSOLUTE = 0x100
 
 PAGE = 4096
 ENTRY_MAGIC = b"UMLAOTB2"
+# The version of the layout the magic names (see the runtime's blob_version).
+BLOB_VERSION = 1
 HEADER_SIZE = 256
 # How a plain load or store reaches its software-TLB probe: inline (the
 # reference), by a call that returns the compare (the miss exit stays at the
@@ -753,6 +755,8 @@ class Library:
             asm.word(A.movk(scratch, (vaddr >> 16) & 0xffff, 1))
             if vaddr >> 32:
                 asm.word(A.movk(scratch, (vaddr >> 32) & 0xffff, 2))
+            if vaddr >> 48:
+                asm.word(A.movk(scratch, (vaddr >> 48) & 0xffff, 3))
             asm.word(A.add_reg(host, host, scratch))
             return
         if low:
@@ -2161,7 +2165,7 @@ def build_blob(units: list[dict], layout: dict[str, int],
             struct.pack_into("<QII", blob, hash_at + 16 * slot, digest,
                              unit["index"], page_index)
     record_at = HEADER_SIZE
-    struct.pack_into("<8sIIIIIII", blob, 0, ENTRY_MAGIC, 1, HEADER_SIZE,
+    struct.pack_into("<8sIIIIIII", blob, 0, ENTRY_MAGIC, BLOB_VERSION, HEADER_SIZE,
                      len(units), record_at, enter_at, hash_at, slots)
     struct.pack_into("96s", blob, 0x30, release_id.encode()[:96])
     for unit, base in zip(units, bases):
