@@ -248,6 +248,12 @@ public:
 	[[nodiscard]] static Publication publish_store(GenerationState &writer,
 		std::uint64_t page, std::uint64_t in_page, std::uint64_t length,
 		std::uint64_t *own, std::size_t capacity) noexcept;
+	/* The holder addresses in the writer's own generation that a store of
+	 * `length` bytes at `in_page` would publish at, before the store: the
+	 * same answer as publish_store's, with nothing published. */
+	[[nodiscard]] static Publication own_holders(GenerationState &writer,
+		std::uint64_t page, std::uint64_t in_page, std::uint64_t length,
+		std::uint64_t *own, std::size_t capacity) noexcept;
 	/* The same for a write the kernel made through its own alias of the
 	 * frame. */
 	static void publish_kernel_write(MappedBacking &backing,

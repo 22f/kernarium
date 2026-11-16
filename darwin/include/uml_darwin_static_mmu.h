@@ -252,6 +252,14 @@ int darwin_uml_static_vm_publish_frame_store(
 	void *context, unsigned long generation, unsigned long address,
 	unsigned long length, uint64_t *own, size_t capacity,
 	struct darwin_uml_static_frame_publication *publication);
+/* Before a store: the holder addresses of its frame in the writer's own
+ * generation that darwin_uml_static_vm_publish_frame_store would publish at,
+ * with nothing published. The same result and `publication` fields, bar the
+ * record count. */
+int darwin_uml_static_vm_frame_own_holders(
+	void *context, unsigned long generation, unsigned long address,
+	unsigned long length, uint64_t *own, size_t capacity,
+	struct darwin_uml_static_frame_publication *publication);
 /* The generation's flush serial; see FrameAccounting::walk. 0 for no
  * context. */
 uint64_t darwin_uml_static_vm_execution_context_flush_serial(void *context);

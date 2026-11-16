@@ -147,6 +147,14 @@ public:
 	{
 		return false;
 	}
+	/* Before a store: the holder addresses of its frame in the writer's own
+	 * generation that publish_frame_store would publish at, with nothing
+	 * published. Same results. */
+	[[nodiscard]] virtual bool frame_own_holders(std::uint64_t, std::uint64_t,
+		void *, std::uint64_t *, std::size_t, FramePublication &) noexcept
+	{
+		return false;
+	}
 	/* The generation's flush serial (frame_accounting.hpp), 0 when the
 	 * memory has none. */
 	[[nodiscard]] virtual std::uint64_t flush_serial(void *) noexcept

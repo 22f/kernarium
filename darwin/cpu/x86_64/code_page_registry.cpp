@@ -2,6 +2,7 @@
 #include "code_page_registry.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -409,6 +410,54 @@ void CodePageRegistry::remove(std::uint64_t page) noexcept
 	 * publishing; retire it so the next store refills it untagged. A
 	 * translation retired under a store in flight only publishes once more. */
 	retire_write_translations(page);
+}
+
+FrameRegistrationOutcome register_frame(
+	::uml::memory::GuestAddressSpace &memory, void *execution_context,
+	const CodePageRegistry::Participant *self, std::uint64_t page) noexcept
+{
+	FrameRegistrationOutcome outcome;
+	std::array<::uml::memory::FrameDebt, 16> debts{};
+	const auto hold = memory.hold_code_frame(
+		page, execution_context, debts.data(), debts.size());
+	switch (hold.result) {
+	case ::uml::memory::FrameHoldResult::settled:
+		outcome.status = FrameRegistration::settled;
+		return outcome;
+	case ::uml::memory::FrameHoldResult::refused:
+		outcome.status = FrameRegistration::refused;
+		return outcome;
+	case ::uml::memory::FrameHoldResult::failed:
+		outcome.status = FrameRegistration::failed;
+		return outcome;
+	case ::uml::memory::FrameHoldResult::owed:
+		break;
+	}
+	bool complete = true;
+	for (std::size_t index = 0; index < std::min(hold.owed, debts.size());
+	     ++index) {
+		/* A generation no executor holds a registry for has no write
+		 * translation to retire. */
+		auto registry = CodePageRegistry::find(debts[index].generation);
+		if (!registry)
+			continue;
+		auto settlement = registry->retire_and_wait(debts[index].page, self);
+		if (settlement.settled)
+			continue;
+		complete = false;
+		try {
+			outcome.stuck.push_back({std::move(registry), std::move(settlement)});
+		} catch (...) {
+			outcome.stuck_lost = true;
+		}
+	}
+	if (!complete) {
+		outcome.status = FrameRegistration::unsettled;
+		return outcome;
+	}
+	memory.clear_code_debt(page, execution_context, hold);
+	outcome.status = FrameRegistration::settled;
+	return outcome;
 }
 
 } // namespace uml::cpu::x86_64

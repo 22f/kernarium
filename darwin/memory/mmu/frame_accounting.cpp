@@ -812,7 +812,7 @@ namespace {
 FrameAccounting::Publication publish_at_holders(MappedBacking &backing,
 	std::uint64_t frame_offset, std::uint64_t in_page, std::uint64_t length,
 	const GenerationState *writer_state, const WriterLocation *writer,
-	std::uint64_t *own, std::size_t capacity) noexcept
+	std::uint64_t *own, std::size_t capacity, bool publish = true) noexcept
 {
 	FrameAccounting::Publication result{};
 	auto *record = backing.find_frame_record(frame_offset);
@@ -826,18 +826,22 @@ FrameAccounting::Publication publish_at_holders(MappedBacking &backing,
 	    std::all_of(holders.begin(), holders.end(),
 		    [&](const WriterLocation &holder) { return holder == *writer; }))
 		return result;
-	MappedBacking::move_stamp(*record);
+	if (publish) {
+		MappedBacking::move_stamp(*record);
+		publications.fetch_add(1, std::memory_order_relaxed);
+	}
 	result.handled = true;
-	publications.fetch_add(1, std::memory_order_relaxed);
 	for (const auto &holder : holders) {
 		auto *state = backing.domain().state_of(holder.alias);
 		if (state == nullptr)
 			continue;
 		const auto address = holder.page + in_page;
-		publish_code_change(*state, address, length);
+		if (publish)
+			publish_code_change(*state, address, length);
 		if (state != writer_state)
 			continue;
-		++result.own_records;
+		if (publish)
+			++result.own_records;
 		if (result.own_count < capacity && own != nullptr)
 			own[result.own_count++] = address;
 		else
@@ -858,6 +862,18 @@ FrameAccounting::Publication FrameAccounting::publish_store(
 	const WriterLocation here{writer.accounting.alias, page};
 	return publish_at_holders(*frame.backing, frame.offset, in_page, length,
 		&writer, &here, own, capacity);
+}
+
+FrameAccounting::Publication FrameAccounting::own_holders(
+	GenerationState &writer, std::uint64_t page, std::uint64_t in_page,
+	std::uint64_t length, std::uint64_t *own, std::size_t capacity) noexcept
+{
+	const auto frame = frame_of_word(writer, page, writer.fill_index.lookup(page));
+	if (frame.backing == nullptr)
+		return {};
+	const WriterLocation here{writer.accounting.alias, page};
+	return publish_at_holders(*frame.backing, frame.offset, in_page, length,
+		&writer, &here, own, capacity, false);
 }
 
 void FrameAccounting::publish_kernel_write(MappedBacking &backing,

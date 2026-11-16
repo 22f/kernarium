@@ -122,7 +122,19 @@ public:
 		/* Pages dropped at a hand-over because a participant a registration
 		 * waited out had not left the engine since. */
 		std::uint64_t escalation_invalidations{};
+		/* Frame registrations made, for pages a query asked for that the
+		 * space did not already hold. */
+		std::uint64_t frame_registrations{};
+		/* Registrations that failed or were refused, each answered with a
+		 * fetch fault the kernel resolves; the longest run of them in a
+		 * row, in any space, since a registration last succeeded; and the
+		 * spaces that reached the limit and take the failed-space outcome. */
+		std::uint64_t registration_failures{};
+		std::uint64_t consecutive_registration_failures{};
+		std::uint64_t failed_spaces{};
 	};
+	/* Failed or refused registrations in a row after which a space gives up. */
+	static constexpr std::uint64_t registration_failure_limit = 64;
 	[[nodiscard]] Diagnostics diagnostics() const noexcept;
 
 	/* Retires the software-TLB entries the mapping changes cover and the

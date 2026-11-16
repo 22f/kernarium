@@ -302,6 +302,21 @@ if(TARGET uml_x86_64_jit)
         COMMAND uml_x86_64_jit_code_change_tests
         LABELS cpu;x86-64
         TIMEOUT 300)
+    # The JIT over a frame that more than one address maps, on the real static
+    # MMU: a store through another address reaches the compiled code, the
+    # running unit leaves before such a store, and a failed registration
+    # reports a fetch fault the kernel resolves.
+    uml_add_x86_64_test_binary(uml_x86_64_jit_alias_tests
+        x86_64_jit_alias_tests.cpp JIT
+        LIBRARIES UML::MemoryTestComponent UML::BridgeAbi)
+    target_include_directories(uml_x86_64_jit_alias_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/darwin/memory
+        ${PROJECT_SOURCE_DIR}/darwin/memory/mmu)
+    uml_add_unit_test(
+        NAME x86-64-jit-alias
+        COMMAND uml_x86_64_jit_alias_tests
+        LABELS cpu;x86-64
+        TIMEOUT 300)
     # CPUID through the JIT answers every leaf and subleaf as cpuid.hpp does,
     # AVX-VNNI's included.
     uml_add_x86_64_test_binary(uml_x86_64_jit_cpuid_tests

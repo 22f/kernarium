@@ -51,6 +51,10 @@ public:
 		std::uint64_t length, void *execution_context, std::uint64_t *own,
 		std::size_t capacity,
 		::uml::memory::FramePublication &publication) noexcept override;
+	[[nodiscard]] bool frame_own_holders(std::uint64_t address,
+		std::uint64_t length, void *execution_context, std::uint64_t *own,
+		std::size_t capacity,
+		::uml::memory::FramePublication &publication) noexcept override;
 	[[nodiscard]] std::uint64_t flush_serial(
 		void *execution_context) noexcept override;
 #endif

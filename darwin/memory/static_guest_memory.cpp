@@ -193,6 +193,19 @@ bool StaticGuestMemory::publish_frame_store(std::uint64_t address,
 	return status > 0;
 }
 
+bool StaticGuestMemory::frame_own_holders(std::uint64_t address,
+	std::uint64_t length, void *execution_context, std::uint64_t *own,
+	std::size_t capacity,
+	::uml::memory::FramePublication &publication) noexcept
+{
+	darwin_uml_static_frame_publication done{};
+	const auto status = darwin_uml_static_vm_frame_own_holders(
+		execution_context, generation_, static_cast<unsigned long>(address),
+		static_cast<unsigned long>(length), own, capacity, &done);
+	publication = {done.overflow != 0, done.own_count, 0};
+	return status > 0;
+}
+
 std::uint64_t StaticGuestMemory::flush_serial(
 	void *execution_context) noexcept
 {

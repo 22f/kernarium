@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cpu/x86_64/software_tlb.hpp"
+#include "memory/guest_address_space.hpp"
 #include "memory/mmu/word_shared_mutex.hpp"
 
 #include <array>
@@ -256,5 +257,43 @@ private:
 	};
 	std::vector<Retirer> retirers_;
 };
+
+/* What registering the frame of a page returned. */
+enum class FrameRegistration : std::uint8_t {
+	/* The holder stands and nothing is owed. */
+	settled,
+	/* The holder stands, but a participant that could still land a store
+	 * through a write translation retired for it is stuck inside the engine
+	 * (or the memory cannot say the debt was cleared). */
+	unsettled,
+	/* Nothing was registered. */
+	failed,
+	/* The page is not translatable at this location, or the generation is
+	 * gone. */
+	refused,
+};
+
+/* The outcome of `register_frame`, with the waits that did not settle, so a
+ * translator that keeps code compiled before a stuck participant moves can
+ * name that participant. */
+struct FrameRegistrationOutcome final {
+	FrameRegistration status{FrameRegistration::failed};
+	struct Wait final {
+		std::shared_ptr<CodePageRegistry> registry;
+		CodePageRegistry::Settlement settlement;
+	};
+	std::vector<Wait> stuck;
+	/* An unsettled wait could not be recorded in `stuck`. */
+	bool stuck_lost{};
+};
+
+/* Registers the frame the page at `page` maps as held by the generation the
+ * execution context belongs to, and retires and waits out the write
+ * translations the registration owes (frame_accounting.hpp), all before the
+ * caller reads a byte of the page. `self` is the participant that registers,
+ * which the waits do not wait for. */
+[[nodiscard]] FrameRegistrationOutcome register_frame(
+	::uml::memory::GuestAddressSpace &memory, void *execution_context,
+	const CodePageRegistry::Participant *self, std::uint64_t page) noexcept;
 
 } // namespace uml::cpu::x86_64

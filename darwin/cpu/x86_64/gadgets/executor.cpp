@@ -348,58 +348,17 @@ struct CodePageRegistries final {
 	}
 };
 
-/* What registering the frame of a page returned. */
-enum class FrameRegistration : std::uint8_t {
-	/* The holder stands and nothing is owed. */
-	settled,
-	/* The holder stands, but a participant that could still land a store
-	 * through a write translation retired for it is stuck inside the engine
-	 * (or the memory cannot say the debt was cleared). */
-	unsettled,
-	/* Nothing was registered. */
-	failed,
-	/* The page is not translatable at this location, or the generation is
-	 * gone. */
-	refused,
-};
-
-/* Registers the frame the page at `page` maps as held by this generation, and
- * retires and waits out the write translations the registration owes
- * (frame_accounting.hpp), all before the caller reads a byte of the page. */
+/* Registers the frame the page at `page` maps as held by this generation
+ * (register_frame), all before the caller reads a byte of the page. */
 [[nodiscard]] FrameRegistration hold_frame(
 	::uml::memory::GuestAddressSpace &memory, void *execution_context,
 	CodePageRegistries *registries, std::uint64_t page,
 	ProgramCacheDiagnostics &diagnostics) noexcept
 {
 	++diagnostics.holder_registrations;
-	std::array<::uml::memory::FrameDebt, 16> debts{};
-	const auto hold = memory.hold_code_frame(
-		page, execution_context, debts.data(), debts.size());
-	switch (hold.result) {
-	case ::uml::memory::FrameHoldResult::settled:
-		return FrameRegistration::settled;
-	case ::uml::memory::FrameHoldResult::refused:
-		return FrameRegistration::refused;
-	case ::uml::memory::FrameHoldResult::failed:
-		return FrameRegistration::failed;
-	case ::uml::memory::FrameHoldResult::owed:
-		break;
-	}
-	const auto *self =
-		registries != nullptr ? &registries->participant : nullptr;
-	bool complete = true;
-	for (std::size_t index = 0; index < std::min(hold.owed, debts.size());
-	     ++index) {
-		/* A generation no executor holds a registry for has no write
-		 * translation to retire. */
-		if (const auto registry = CodePageRegistry::find(debts[index].generation);
-		    registry && !registry->retire_and_wait(debts[index].page, self).settled)
-			complete = false;
-	}
-	if (!complete)
-		return FrameRegistration::unsettled;
-	memory.clear_code_debt(page, execution_context, hold);
-	return FrameRegistration::settled;
+	return register_frame(memory, execution_context,
+		registries != nullptr ? &registries->participant : nullptr, page)
+		.status;
 }
 
 /* Holds a translation's possible pages in the registry while their bytes are

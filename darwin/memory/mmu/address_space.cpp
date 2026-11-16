@@ -1365,6 +1365,23 @@ public:
 		return 0;
 	}
 
+	int frame_own_holders(void *context, std::uint64_t generation,
+		std::uint64_t address, std::uint64_t length, std::uint64_t *own,
+		std::size_t capacity, darwin_uml_static_frame_publication *result)
+	{
+		if (result == nullptr || length == 0)
+			return -1;
+		*result = {};
+		const auto page = address & ~(page_size - 1);
+		auto reference = frame_call_state(context, generation, page);
+		std::shared_lock lock{reference.state->mappings_mutex};
+		const auto done = FrameAccounting::own_holders(*reference.state, page,
+			address & (page_size - 1), length, own, capacity);
+		result->own_count = done.own_count;
+		result->overflow = done.overflow ? 1 : 0;
+		return done.handled ? 1 : 0;
+	}
+
 	int publish_frame_store(void *context, std::uint64_t generation,
 		std::uint64_t address, std::uint64_t length, std::uint64_t *own,
 		std::size_t capacity, darwin_uml_static_frame_publication *result)
@@ -2938,6 +2955,17 @@ extern "C" int darwin_uml_static_vm_publish_frame_store(
 	return with_address_space([&](auto &space) {
 		return space.publish_frame_store(context, generation, address,
 			length, own, capacity, publication);
+	});
+}
+
+extern "C" int darwin_uml_static_vm_frame_own_holders(
+	void *context, unsigned long generation, unsigned long address,
+	unsigned long length, uint64_t *own, size_t capacity,
+	struct darwin_uml_static_frame_publication *publication)
+{
+	return with_address_space([&](auto &space) {
+		return space.frame_own_holders(context, generation, address, length,
+			own, capacity, publication);
 	});
 }
 
