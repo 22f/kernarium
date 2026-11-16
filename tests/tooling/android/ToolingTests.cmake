@@ -141,6 +141,15 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 60)
 
+# The Vulkan smoke runner's reading of what the image's check prints, rendered from
+# the check's own formats.
+uml_add_tooling_test(
+    NAME android17-vulkan-smoke-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_vulkan_smoke_runner.py
+    LABELS android
+    TIMEOUT 60)
+
 uml_add_tooling_test(
     NAME android17-installation-identity-runner
     COMMAND ${Python3_EXECUTABLE} -B

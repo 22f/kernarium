@@ -993,9 +993,14 @@ Android's Vulkan dEQP must-pass list, and the verifier refuses a declaration
 until those lists pass. One gap is known: `vkMapMemory` of host-visible memory
 exported as a hardware buffer fails with `VK_ERROR_MEMORY_MAP_FAILED`, because
 gralloc backs such a buffer with a classic 3D resource that Venus refuses to map
-by design. `overlay/tools` ships pass-or-fail checks of the presentation and
-buffer paths (`kernarium_vk_present`, `kernarium_vk_ahb_import` and the
-`kernarium_ahb_*` and `kernarium_egl_configs` programs).
+by design. Memory an application shares as a file descriptor is not that case:
+the driver offers `VK_KHR_external_memory_fd` and `VK_EXT_external_memory_dma_buf`
+(the opaque-fd and dma-buf handle types) next to the hardware buffer extensions,
+and host-visible memory exported as either is a blob that maps, imports and is
+read by the GPU. `overlay/tools` ships pass-or-fail checks of the presentation
+and buffer paths (`kernarium_vk_present`, `kernarium_vk_ahb_import`, which
+covers both ways of sharing memory, and the `kernarium_ahb_*` and
+`kernarium_egl_configs` programs).
 
 ## Hardware video encoding and decoding
 
