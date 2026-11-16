@@ -25,8 +25,44 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
+// What each prebuilt carries, which the image's NOTICE reports. TalkBack:
+// Apache-2.0, the braille libraries BRLTTY and liblouis (LGPL-2.1-or-later),
+// and the Maven libraries it bundles: protobuf-javalite (BSD-3-Clause),
+// checker-qual (MIT) and javax.annotation-api (CDDL-1.1 or GPL-2.0 with the
+// classpath exception).
+license {
+    name: "kernarium_accessibility_talkback_license",
+    visibility: [":__subpackages__"],
+    license_kinds: [
+        "SPDX-license-identifier-Apache-2.0",
+        "SPDX-license-identifier-LGPL-2.1-or-later",
+        "SPDX-license-identifier-BSD-3-Clause",
+        "SPDX-license-identifier-MIT",
+        "SPDX-license-identifier-CDDL-1.1",
+        "SPDX-license-identifier-GPL-2.0-with-classpath-exception",
+    ],
+    license_text: [
+        "licenses/LGPL-2.1.txt",
+    ],
+}
+
+// eSpeak NG: GPL-3.0-or-later, with Apache-2.0 for parts of its Android
+// application and for libsonic.
+license {
+    name: "kernarium_accessibility_espeak_ng_license",
+    visibility: [":__subpackages__"],
+    license_kinds: [
+        "SPDX-license-identifier-GPL-3.0-or-later",
+        "SPDX-license-identifier-Apache-2.0",
+    ],
+    license_text: [
+        "licenses/GPL-3.0.txt",
+    ],
+}
+
 android_app_import {
     name: "TalkBack",
+    licenses: ["kernarium_accessibility_talkback_license"],
     apk: ":kernarium_accessibility_talkback",
     default_dev_cert: true,
     product_specific: true,
@@ -34,6 +70,7 @@ android_app_import {
 
 android_app_import {
     name: "eSpeakNG",
+    licenses: ["kernarium_accessibility_espeak_ng_license"],
     apk: ":kernarium_accessibility_espeak_ng",
     default_dev_cert: true,
     product_specific: true,
