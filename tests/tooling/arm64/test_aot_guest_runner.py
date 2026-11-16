@@ -16,6 +16,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -38,8 +39,26 @@ arm = "on" if os.environ.get("DARWIN_UML_AOT") == "1" else "off"
 (state / "arm").write_text(arm)
 scenario = json.loads((state / "scenario.json").read_text())
 report = os.environ.get("DARWIN_UML_AOT_REPORT")
-if report and scenario.get("report", {}).get(arm) is not None:
-    pathlib.Path(report).write_text(scenario["report"][arm])
+template = scenario.get("report", {}).get(arm)
+clock = scenario.get("audit_clock")
+begun = time.monotonic()
+def write_report():
+    # What the diagnostics runtime writes: a whole report each time, in which
+    # the audits begin and finish as the clock says (one every tenth of a
+    # second; with a stop_at, none finishes after that many seconds).
+    text = template
+    if clock is not None:
+        elapsed = time.monotonic() - begun
+        started = 1 + int(elapsed / 0.1)
+        finished = started - 1
+        if clock.get("stop_at") is not None:
+            finished = min(finished, int(clock["stop_at"] / 0.1))
+        text = (text.replace("{started}", str(started)).replace("{last_exact}", str(finished))
+                .replace("{runs}", str(finished)))
+    pathlib.Path(report + ".part").write_text(text)
+    os.replace(report + ".part", report)
+if report and template is not None:
+    write_report()
 # The emulator: a process of that name below the launcher.
 import subprocess
 link = state / "uml-darwin-android17"
@@ -53,6 +72,8 @@ signal.signal(signal.SIGTERM, stop)
 deadline = time.monotonic() + 120
 while time.monotonic() < deadline:
     time.sleep(0.05)
+    if clock is not None and report and template is not None:
+        write_report()
 child.kill()
 """
 
@@ -112,6 +133,7 @@ import run_aot_guest as runner
 runner.LAUNCHER = {launcher!r}
 runner.SETTLE_SECONDS = 0
 runner.REPORT_SECONDS = 0
+runner.AUDIT_WAIT_SECONDS = 2
 sys.exit(runner.main())
 """
 
@@ -141,8 +163,16 @@ def good_probe() -> str:
     return "\n".join(lines) + "\n"
 
 
-GOOD_AUDIT = ("count_audit runs 5 skipped 1 records 40 mismatches 0 "
-              "last_mismatches 0 anomalies 0 nanos_total 9000000 nanos_max 3200000\n")
+def audit_line(runs: str = "{runs}", records: int = 40, mismatches: int = 0, anomalies: int = 0,
+               last_mismatches: int = 0, skipped: int = 1, nanos: str = "nanos_total 9000000 nanos_max 3200000",
+               sequence: str = "started {started} last_exact {last_exact}") -> str:
+    """A report's count-audit line; `runs`, `started` and `last_exact` follow the
+    scripted guest's clock unless a row pins them."""
+    return (f"count_audit runs {runs} skipped {skipped} records {records} mismatches {mismatches} "
+            f"last_mismatches {last_mismatches} anomalies {anomalies} {nanos} {sequence}\n")
+
+
+GOOD_AUDIT = audit_line()
 GOOD_STACK = ("stack_free 59200 stack_size 65536 stack_kind 0 "
               "stack_task_bytes 65536 stack_engine_free 62000 stack_growth 2800\n")
 
@@ -150,6 +180,7 @@ GOOD_STACK = ("stack_free 59200 stack_size 65536 stack_kind 0 "
 def good_scenario() -> dict:
     text = workload_text(good_workloads())
     return {"workloads": {"off": text, "on": text},
+            "audit_clock": {"stop_at": None},
             "probe": {"off": [good_probe()], "on": [good_probe()]},
             "report": {"on": "binds 3 enters 9 steps 2 poisoned 0 refills 0\n" +
                        GOOD_AUDIT + GOOD_STACK,
@@ -361,35 +392,56 @@ class RunnerTest(unittest.TestCase):
         scenario = good_scenario()
         scenario["report"]["on"] = scenario["report"]["on"].replace(
             " nanos_total 9000000 nanos_max 3200000", "")
-        self.fails(scenario, "no duration of the count audit", "--diagnostics")
+        self.fails(scenario, "lacks nanos_total, nanos_max", "--diagnostics")
+
+    BASE = "binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
 
     def test_the_count_audit_is_judged(self):
         """The run recounts the executable-mapping counts and fails on a
         mismatch, on an anomaly, or when nothing was recounted."""
         for report, expected in (
-                ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n",
-                 "no count audit"),
-                ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
-                 "count_audit runs 1 skipped 0 records 40 mismatches 0 "
-                 "last_mismatches 0 anomalies 0\n", "needs at least two"),
-                ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
-                 "count_audit runs 6 skipped 0 records 40 mismatches 2 "
-                 "last_mismatches 0 anomalies 0\n", "2 records whose"),
+                (self.BASE, "no count audit"),
+                (self.BASE + audit_line(runs="1", skipped=0), "needs at least two"),
+                (self.BASE + audit_line(skipped=0, mismatches=2), "2 records whose"),
                 # What the last mismatching audit saw is in the failure.
-                ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
-                 "count_audit runs 6 skipped 0 records 40 mismatches 2 "
-                 "last_mismatches 2 anomalies 0\n"
+                (self.BASE + audit_line(skipped=0, mismatches=2, last_mismatches=2) +
                  "count_audit_detail generations 7 unnamed 0 c0 3 e0 2 c1 1 e1 0 "
                  "c2 0 e2 0 c3 0 e3 0\n", "c0 3, c1 1, c2 0, c3 0, e0 2"),
-                ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
-                 "count_audit runs 6 skipped 0 records 40 mismatches 0 "
-                 "last_mismatches 0 anomalies 3\n", "3 accounting anomalies"),
-                ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
-                 "count_audit runs 6 skipped 0 records 0 mismatches 0 "
-                 "last_mismatches 0 anomalies 0\n", "compared no record")):
+                (self.BASE + audit_line(skipped=0, anomalies=3), "3 accounting anomalies"),
+                (self.BASE + audit_line(skipped=0, records=0), "compared no record")):
             scenario = good_scenario()
             scenario["report"]["on"] = report
             self.fails(scenario, expected, "--diagnostics")
+
+    def test_a_count_audit_without_its_results_is_not_a_clean_one(self):
+        """A report that names runs and records but not what the audit found
+        is not a run that found nothing."""
+        results = ("skipped", "mismatches", "last_mismatches", "anomalies", "nanos_total",
+                   "nanos_max", "started", "last_exact")
+        scenario = good_scenario()
+        scenario["report"]["on"] = self.BASE + "count_audit runs 5 records 40\n"
+        self.fails(scenario, "lacks", "--diagnostics")
+        for field in results:
+            scenario = good_scenario()
+            scenario["report"]["on"] = re.sub(rf" {field} (\{{\w+\}}|\d+)", "",
+                                              scenario["report"]["on"], count=1)
+            self.assertNotIn(f" {field} ", scenario["report"]["on"])
+            result = self.run_runner(scenario, "--diagnostics")
+            self.assertEqual(result.returncode, 1, f"{field}: " + result.stdout + result.stderr)
+            self.assertIn(field, result.stderr)
+
+    def test_an_audit_must_have_finished_after_the_work_was_done(self):
+        """The lifetime count of audits cannot say that one looked at the state
+        the work left: the report names the audit it last finished, by its
+        sequence number, and the runner needs one that began after the work."""
+        result = self.passes(good_scenario(), "--diagnostics")
+        self.assertIn("count audit:", result.stdout)
+        # No audit finishes after the first third of a second: the report keeps
+        # showing audits that began before the guest's work was done.
+        scenario = good_scenario()
+        scenario["audit_clock"] = {"stop_at": 0.3}
+        self.fails(scenario, "no exact count audit finished after the guest's work was done",
+                   "--diagnostics")
 
     def with_stack(self, stack: str) -> dict:
         scenario = good_scenario()

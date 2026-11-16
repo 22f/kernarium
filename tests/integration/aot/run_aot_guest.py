@@ -81,6 +81,10 @@ import slot_ports  # noqa: E402
 DEFAULT_ADB_PORT = 5585
 SETTLE_SECONDS = 20
 REPORT_SECONDS = 3
+# How long the diagnostics arm waits, after the guest's work is done, for an
+# exact count audit that began after it (the runtime audits every two seconds
+# and the audit is skipped when an address space is busy).
+AUDIT_WAIT_SECONDS = 60
 # The resident size of the framework's text that separates "loaded" from
 # "touched": a component that is off leaves a few pages, one that was used
 # has megabytes. It is residency evidence, not proof of execution.
@@ -436,6 +440,17 @@ def judge_stack(report: dict[str, int], expected_task_bytes: int | None = None) 
             f"{growth} bytes deeper than the engine's own frame at the start of the run")
 
 
+# What a report's count-audit line carries: the audits that ran and were
+# skipped, the records compared, what they found, how long they took, and the
+# sequence numbers that tell which audit finished last.
+COUNT_AUDIT_FIELDS = ("skipped", "records", "mismatches", "last_mismatches", "anomalies",
+                      "nanos_total", "nanos_max", "started", "last_exact")
+
+
+def missing_audit_fields(report: dict[str, int]) -> list[str]:
+    return [field for field in COUNT_AUDIT_FIELDS if f"count_audit.{field}" not in report]
+
+
 def judge_count_audit(report: dict[str, int]) -> str:
     """The audit of the memory layer's executable-mapping counts that a
     diagnostics build runs every two seconds while the guest runs and once at
@@ -449,11 +464,17 @@ def judge_count_audit(report: dict[str, int]) -> str:
     if runs is None:
         raise Failure("the report has no count audit: the run did not recount "
                       "the executable-mapping counts")
+    # What the audit found is as much a part of it as that it ran: a report that
+    # names the runs and records but not the mismatches is not a clean audit.
+    absent = missing_audit_fields(report)
+    if absent:
+        raise Failure("the report's count audit lacks " + ", ".join(absent) +
+                      ": what it found cannot be read as a clean run")
     if runs < 2:
         raise Failure(f"the count audit ran {runs} times; it needs at least two "
                       "(one while the guest ran, one after its work was done)")
-    mismatches = report.get("count_audit.mismatches", 0)
-    anomalies = report.get("count_audit.anomalies", 0)
+    mismatches = report["count_audit.mismatches"]
+    anomalies = report["count_audit.anomalies"]
     if mismatches or anomalies:
         seen = ", ".join(f"{key.split('.', 1)[1]} {value}" for key, value in sorted(report.items())
                          if key.startswith("count_audit_detail."))
@@ -461,16 +482,13 @@ def judge_count_audit(report: dict[str, int]) -> str:
                       f"executable-mapping count differs from the recount and "
                       f"{anomalies} accounting anomalies"
                       + (f" (the last mismatching audit: {seen})" if seen else ""))
-    if report.get("count_audit.records", 0) == 0:
+    if report["count_audit.records"] == 0:
         raise Failure("the count audit compared no record")
     # An exact audit holds every address space's mapping changes still while
     # it scans, so what a diagnostics run measured is read with its duration.
-    if "count_audit.nanos_total" not in report or "count_audit.nanos_max" not in report:
-        raise Failure("the report has no duration of the count audit: the timing of "
-                      "a diagnostics run cannot be read without it")
     return (f"count audit: {runs} audits "
-            f"({report.get('count_audit.skipped', 0)} skipped for a busy address "
-            f"space), {report.get('count_audit.records', 0)} records, "
+            f"({report['count_audit.skipped']} skipped for a busy address "
+            f"space), {report['count_audit.records']} records, "
             "0 mismatches, 0 anomalies; each exact audit holds every address "
             f"space still while it scans: longest {report['count_audit.nanos_max'] / 1e6:.1f} ms, "
             f"total {report['count_audit.nanos_total'] / 1e6:.1f} ms")
@@ -571,8 +589,7 @@ class Arm:
                 if pid is None:
                     raise Failure("no emulator process below the launcher")
                 self.resident = framework_resident(options.vmmap, pid)
-            time.sleep(REPORT_SECONDS)
-            self.report = read_report(report)
+            self.report = self.settled_report(report)
         except (Failure, subprocess.TimeoutExpired, OSError) as problem:
             tail = ""
             if log_path.is_file():
@@ -591,6 +608,35 @@ class Arm:
             for name in TERMINATION_SIGNALS:
                 signal.signal(name, terminate_on_signal)
 
+
+    def settled_report(self, report: pathlib.Path) -> dict[str, int]:
+        """The report once the guest's work is done. In the diagnostics arm
+        it is the first that shows an exact count audit which began after
+        that work: the report is written twice a second, so one read after
+        REPORT_SECONDS is of a report written after the work, and the audits
+        it counts as begun are the ones that began before; the report that
+        names a later one as the last it finished is the evidence. The
+        lifetime count of audits is not: it cannot tell the ones that saw
+        the state the work left from the ones that saw the state before."""
+        time.sleep(REPORT_SECONDS)
+        seen = read_report(report)
+        if not (self.options.diagnostics and self.aot) or "count_audit.runs" not in seen:
+            return seen
+        absent = missing_audit_fields(seen)
+        if absent:
+            raise Failure("the report's count audit lacks " + ", ".join(absent) +
+                          ": what it found cannot be read as a clean run")
+        begun = seen["count_audit.started"]
+        deadline = time.monotonic() + AUDIT_WAIT_SECONDS
+        while seen.get("count_audit.last_exact", 0) <= begun:
+            if time.monotonic() > deadline:
+                raise Failure(f"no exact count audit finished after the guest's work was done "
+                              f"({AUDIT_WAIT_SECONDS} s after audit {begun} had begun, the last "
+                              f"exact one was number {seen.get('count_audit.last_exact', 0)}, "
+                              f"{seen.get('count_audit.skipped', 0)} skipped)")
+            time.sleep(max(REPORT_SECONDS, 0.05))
+            seen = read_report(report)
+        return seen
 
     def run_debug_rows(self, device: "Device", serial: str) -> None:
         """The debugger and crash-report rows (debug_rows.py): every mode

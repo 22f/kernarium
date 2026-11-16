@@ -254,6 +254,11 @@ std::atomic<std::uint64_t> audit_runs{0}, audit_skipped{0}, audit_records{0},
  * for the length of its scan, so the timing of a diagnostics run is read
  * with it. */
 std::atomic<std::uint64_t> audit_nanos_total{0}, audit_nanos_max{0};
+/* Audits that have begun, and the sequence number of the latest exact audit
+ * that finished: a reader that saw `started` equal to n when the guest's
+ * work was done knows that an exact audit with a number above n began after
+ * it. */
+std::atomic<std::uint64_t> audit_started{0}, audit_last_exact{0};
 /* What the last audit that found a mismatch saw: its generations, the
  * executable words that named no record, and the first mismatches as the
  * record's count and the recount. */
@@ -442,6 +447,8 @@ void note_step(std::uint64_t key) noexcept
  * run that sees one fails (tests/integration/aot/run_aot_guest.py). */
 void run_count_audit() noexcept
 {
+	const auto sequence =
+		counters::audit_started.fetch_add(1, std::memory_order_relaxed) + 1;
 	const auto started = std::chrono::steady_clock::now();
 	const auto audit = ::uml::memory::audit_executable_counts();
 	const auto nanos = static_cast<std::uint64_t>(
@@ -474,6 +481,13 @@ void run_count_audit() noexcept
 			counters::audit_detail_expected[i].store(
 				audit.sample_expected[i], std::memory_order_relaxed);
 		}
+	}
+	/* Last, so that a report that shows this audit as finished shows what
+	 * it found. */
+	auto newest = counters::audit_last_exact.load(std::memory_order_relaxed);
+	while (sequence > newest &&
+	       !counters::audit_last_exact.compare_exchange_weak(newest, sequence,
+			       std::memory_order_release, std::memory_order_relaxed)) {
 	}
 }
 
@@ -526,12 +540,13 @@ void write_report() noexcept
 		get(counters::stack_engine_free), get(counters::stack_max_growth));
 	std::fprintf(file, "count_audit runs %llu skipped %llu records %llu "
 		"mismatches %llu last_mismatches %llu anomalies %llu "
-		"nanos_total %llu nanos_max %llu\n",
+		"nanos_total %llu nanos_max %llu started %llu last_exact %llu\n",
 		get(counters::audit_runs), get(counters::audit_skipped),
 		get(counters::audit_records), get(counters::audit_mismatches),
 		get(counters::audit_last_mismatches),
 		static_cast<unsigned long long>(::uml::memory::count_anomalies()),
-		get(counters::audit_nanos_total), get(counters::audit_nanos_max));
+		get(counters::audit_nanos_total), get(counters::audit_nanos_max),
+		get(counters::audit_started), get(counters::audit_last_exact));
 	std::fprintf(file, "count_audit_detail generations %llu unnamed %llu "
 		"c0 %llu e0 %llu c1 %llu e1 %llu c2 %llu e2 %llu c3 %llu e3 %llu\n",
 		get(counters::audit_detail_generations),

@@ -863,7 +863,10 @@ blocker in every one of them.
   the executable mappings of every physical-page record against the
   executable words of every address space (every two seconds, holding them
   all at once, and at exit): a mismatch or an accounting anomaly fails the
-  run, and so does a run that never audited. A product build has residency
+  run, and so does a run that never audited, a report without every result
+  of the audit, and one in which no exact audit finished after the guest's
+  work was done (the report names the last exact audit it finished by its
+  sequence number, and the runner waits for one that began after the work). A product build has residency
   evidence: the framework's text became resident in the emulator process
   (`vmmap`, macOS) and was not with the component off. Reading the text
   raises residency too, so that proves the framework was touched and not that
