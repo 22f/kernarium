@@ -1482,6 +1482,14 @@ public:
 	struct CountTally final {
 		std::size_t records{};
 		std::size_t mismatches{};
+		/* What a mismatch looked like, for the first few: the record's count
+		 * and the recount; the generations held; and the executable words
+		 * that named no record. */
+		std::size_t generations{};
+		std::size_t unnamed{};
+		std::size_t samples{};
+		std::array<std::uint64_t, 4> sample_count{};
+		std::array<std::uint64_t, 4> sample_expected{};
 	};
 
 	/* Recounts the executable guest-code words of every generation of this
@@ -1547,6 +1555,9 @@ public:
 						backings.push_back(std::move(backing));
 				}
 			}
+			tally.generations += generations.size();
+			if (const auto none = recount.find(nullptr); none != recount.end())
+				tally.unnamed += none->second;
 			tally.mismatches += recount.contains(nullptr) ? 1 : 0;
 			std::unordered_map<const void *, bool> seen;
 			for (const auto &backing : backings) {
@@ -1563,9 +1574,16 @@ public:
 						const auto found = recount.find(record);
 						const auto expected =
 							found == recount.end() ? 0 : found->second;
-						if (MappedBacking::executable_mappings(record) !=
-						    expected)
+						const auto counted =
+							MappedBacking::executable_mappings(record);
+						if (counted != expected) {
+							if (tally.samples < tally.sample_count.size()) {
+								tally.sample_count[tally.samples] = counted;
+								tally.sample_expected[tally.samples] = expected;
+								++tally.samples;
+							}
 							++tally.mismatches;
+						}
 					});
 			}
 			return true;
@@ -2376,6 +2394,11 @@ CountAuditResult audit_executable_counts() noexcept
 	if (result.exact) {
 		result.records = tally.records;
 		result.mismatches = tally.mismatches;
+		result.generations = tally.generations;
+		result.unnamed = tally.unnamed;
+		result.samples = tally.samples;
+		result.sample_count = tally.sample_count;
+		result.sample_expected = tally.sample_expected;
 	}
 	return result;
 }

@@ -360,6 +360,12 @@ class RunnerTest(unittest.TestCase):
                 ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
                  "count_audit runs 6 skipped 0 records 40 mismatches 2 "
                  "last_mismatches 0 anomalies 0\n", "2 records whose"),
+                # What the last mismatching audit saw is in the failure.
+                ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
+                 "count_audit runs 6 skipped 0 records 40 mismatches 2 "
+                 "last_mismatches 2 anomalies 0\n"
+                 "count_audit_detail generations 7 unnamed 0 c0 3 e0 2 c1 1 e1 0 "
+                 "c2 0 e2 0 c3 0 e3 0\n", "c0 3, c1 1, c2 0, c3 0, e0 2"),
                 ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
                  "count_audit runs 6 skipped 0 records 40 mismatches 0 "
                  "last_mismatches 0 anomalies 3\n", "3 accounting anomalies"),

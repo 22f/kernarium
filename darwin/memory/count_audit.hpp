@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include <array>
 #include <cstdint>
 
 /* Set by the build for a diagnostics build of the AOT runtime; the memory
@@ -31,6 +32,14 @@ struct CountAuditResult final {
 	 * count differs from the recount. */
 	std::uint64_t records{};
 	std::uint64_t mismatches{};
+	/* What the audit held and what a mismatch looked like: the generations
+	 * held, the executable words that named no record, and for the first few
+	 * mismatching records the count it had and the recount. */
+	std::uint64_t generations{};
+	std::uint64_t unnamed{};
+	std::uint64_t samples{};
+	std::array<std::uint64_t, 4> sample_count{};
+	std::array<std::uint64_t, 4> sample_expected{};
 };
 
 /* One audit of every software address space of the process. */

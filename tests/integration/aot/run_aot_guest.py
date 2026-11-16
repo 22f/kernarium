@@ -370,7 +370,7 @@ def read_report(path: pathlib.Path) -> dict[str, int]:
         prefix = ""
         if head == "library" and rest:
             prefix, rest = f"library.{rest[0]}.", rest[1:]
-        elif head in ("find", "cross_miss", "refused", "count_audit"):
+        elif head in ("find", "cross_miss", "refused", "count_audit", "count_audit_detail"):
             prefix = head + "."
         elif head in ("binds", "max_retired", "stack_free"):
             rest = fields
@@ -452,9 +452,12 @@ def judge_count_audit(report: dict[str, int]) -> str:
     mismatches = report.get("count_audit.mismatches", 0)
     anomalies = report.get("count_audit.anomalies", 0)
     if mismatches or anomalies:
+        seen = ", ".join(f"{key.split('.', 1)[1]} {value}" for key, value in sorted(report.items())
+                         if key.startswith("count_audit_detail."))
         raise Failure(f"the count audit found {mismatches} records whose "
                       f"executable-mapping count differs from the recount and "
-                      f"{anomalies} accounting anomalies")
+                      f"{anomalies} accounting anomalies"
+                      + (f" (the last mismatching audit: {seen})" if seen else ""))
     if report.get("count_audit.records", 0) == 0:
         raise Failure("the count audit compared no record")
     return (f"count audit: {runs} audits "

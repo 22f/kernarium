@@ -245,6 +245,12 @@ std::atomic<bool> reporter_started{false};
  * differed from the recount in all of them and in the last. */
 std::atomic<std::uint64_t> audit_runs{0}, audit_skipped{0}, audit_records{0},
 	audit_mismatches{0}, audit_last_mismatches{0};
+/* What the last audit that found a mismatch saw: its generations, the
+ * executable words that named no record, and the first mismatches as the
+ * record's count and the recount. */
+std::atomic<std::uint64_t> audit_detail_generations{0}, audit_detail_unnamed{0};
+std::array<std::atomic<std::uint64_t>, 4> audit_detail_count{},
+	audit_detail_expected{};
 /* The least stack any sampled thread had left at the points where the
  * runtime is deepest (entry, refill, page verification), and the stack size
  * of the thread that had it. */
@@ -438,6 +444,18 @@ void run_count_audit() noexcept
 		std::memory_order_relaxed);
 	counters::audit_mismatches.fetch_add(audit.mismatches,
 		std::memory_order_relaxed);
+	if (audit.mismatches != 0) {
+		counters::audit_detail_generations.store(audit.generations,
+			std::memory_order_relaxed);
+		counters::audit_detail_unnamed.store(audit.unnamed,
+			std::memory_order_relaxed);
+		for (std::size_t i = 0; i < audit.sample_count.size(); ++i) {
+			counters::audit_detail_count[i].store(audit.sample_count[i],
+				std::memory_order_relaxed);
+			counters::audit_detail_expected[i].store(
+				audit.sample_expected[i], std::memory_order_relaxed);
+		}
+	}
 }
 
 /* Written from a thread of its own: it allocates and does file I/O. */
@@ -487,6 +505,18 @@ void write_report() noexcept
 		get(counters::audit_records), get(counters::audit_mismatches),
 		get(counters::audit_last_mismatches),
 		static_cast<unsigned long long>(::uml::memory::count_anomalies()));
+	std::fprintf(file, "count_audit_detail generations %llu unnamed %llu "
+		"c0 %llu e0 %llu c1 %llu e1 %llu c2 %llu e2 %llu c3 %llu e3 %llu\n",
+		get(counters::audit_detail_generations),
+		get(counters::audit_detail_unnamed),
+		get(counters::audit_detail_count[0]),
+		get(counters::audit_detail_expected[0]),
+		get(counters::audit_detail_count[1]),
+		get(counters::audit_detail_expected[1]),
+		get(counters::audit_detail_count[2]),
+		get(counters::audit_detail_expected[2]),
+		get(counters::audit_detail_count[3]),
+		get(counters::audit_detail_expected[3]));
 	std::fprintf(file, "refused tbi %llu sp %llu exclusive %llu fp %llu "
 		"short %llu\n",
 		get(counters::refusals[0]), get(counters::refusals[1]),
