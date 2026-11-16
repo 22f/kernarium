@@ -29,6 +29,9 @@
  *   enter,     a later store of an instruction that already reached the
  *   stos       running block (ENTER's next push, the next element of a
  *              repeated STOS) publishes for itself.
+ *   writer     an executor with no registry tags every write fill, so a
+ *              frame translated afterwards, at an address of another
+ *              generation, still sees its stores.
  *   registry   a registry that could not be made is made again by the next
  *              prepare of its generation.
  */
@@ -922,6 +925,43 @@ void test_repeated_stores_publish_each()
 	require(space.diagnostics().unheld_runnable == 0);
 }
 
+/* A writer whose executor has no registry (its allocation failed) is not
+ * named by a registration that retires write translations, so every write
+ * entry it fills is tagged: W's store, made before any frame holder exists,
+ * must still reach the block that X, of another generation, translates
+ * afterwards. */
+void test_a_writer_without_a_registry()
+{
+	const Clean clean;
+	constexpr std::uint64_t executable = 0x1d00'0000;
+	constexpr std::uint64_t alias = 0x2d00'0000;
+	constexpr std::uint64_t writer = 0x3d00'0000;
+	ScratchBacking frame{"uml-x86-alias-bare-XXXXXX", page};
+	ScratchBacking code{"uml-x86-alias-bare-code-XXXXXX", page};
+	load_return(frame, 1);
+	load_writer(code);
+	Space w{9440};
+	Space x{9441};
+	w.map(writer, code, 0, rx, 1);
+	w.map(alias, frame, 0, rw, 0);
+	x.map(executable, frame, 0, rx, 1);
+	failing_array_size.store(registry_page_counts);
+	/* W's first store: no holder of the frame exists yet. */
+	require(w.run(writer, 1, alias + 1).event == EngineEvent::system_call);
+	require(failing_array_size.load() == 0 && w.registry() == nullptr,
+		"the writer's registry was made");
+	/* X translates, which registers its frame. */
+	require((x.run_to_system_call(executable).rax & 0xff) == 1);
+	/* W stores again through the entry it filled before X existed. */
+	require(w.run(writer, 2, alias + 1).event == EngineEvent::system_call);
+	require((x.run_to_system_call(executable).rax & 0xff) == 2,
+		"a store of an executor with no registry did not reach a block "
+		"translated after its first store");
+	require((w.write_tags(alias) & write_code_tag) != 0,
+		"a write entry of an executor with no registry was not tagged");
+	require(x.diagnostics().unheld_runnable == 0);
+}
+
 /* A registry that could not be made is made again: the executor prepared for
  * a generation whose registry failed, then for another, and again for the
  * first, finds nothing left from the failure. */
@@ -994,6 +1034,10 @@ int main(int argc, char **argv)
 	if (selected("stos")) {
 		test_repeated_stores_publish_each();
 		std::puts("repeated stores ok");
+	}
+	if (selected("writer")) {
+		test_a_writer_without_a_registry();
+		std::puts("writer without a registry ok");
 	}
 	if (selected("registry")) {
 		test_a_failed_registry_is_made_again();

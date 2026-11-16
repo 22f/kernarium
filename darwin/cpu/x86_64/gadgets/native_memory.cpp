@@ -216,8 +216,12 @@ extern "C" std::byte *uml_x86_64_gadget_tlb_miss(
 			address, context->execution_context, frame);
 		other_holder = framed && frame.other_holder;
 #endif
-		writes_code = (executable &&
-			(registry == nullptr || registry->holds(address))) || other_holder;
+		/* An executor with no registry cannot be retired from a holder's
+		 * registration (register_frame finds no registry for its
+		 * generation), so every one of its write fills is tagged: an
+		 * untagged entry filled before a holder existed would outlive it. */
+		writes_code = registry == nullptr ||
+			(executable && registry->holds(address)) || other_holder;
 		const bool caches_code = writes_code && executor != nullptr &&
 			executor->page_holds_cached_code(address);
 		std::atomic_ref<std::uintptr_t>{entry.write_data_minus_address}
