@@ -408,6 +408,95 @@ def load_tool(path: Path):
     return module
 
 
+_SMS_TOOL = None
+
+
+def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
+    """The text message service's part of the policy a target-files fixture carries: the platform's vsock
+    and property rules as the reviewed lists give them, the service's own domain, data type and rules (as
+    overlay/sepolicy/system_ext/private/kernarium_sms.te makes them), the seapp_contexts lines and the property
+    label. A variant breaks one thing, in the way the verifier's check must catch. The lists come from the
+    verifier, so that the fixture is the baseline the check accepts and the variants differ from it by one
+    defect."""
+    global _SMS_TOOL
+    if _SMS_TOOL is None:
+        _SMS_TOOL = load_tool(verifier)
+    tool = _SMS_TOOL
+    plat = ""
+    for name in sorted(tool.VSOCK_SOCKET_TYPES):
+        permissions = "create bind connect read write getattr getopt shutdown"
+        if name not in tool.VSOCK_TYPES_WITHOUT_LISTEN:
+            permissions += " listen accept"
+        # adbd has its compatibility type of the platform version, which the verifier counts as adbd.
+        plat += f"(allow {name}{'_202604' if name == 'adbd' else ''} self (vsock_socket ({permissions})))\n"
+    for setter in sorted(tool.ADB_LISTEN_ADDRS_SETTERS):
+        plat += f"(allow {setter} system_prop (property_service (set)))\n"
+    ext = (
+        "(type kernarium_sms)\n(type kernarium_sms_data_file)\n"
+        "(typeattributeset domain (kernarium_sms))\n"
+        "(typeattributeset data_file_type (kernarium_sms_data_file))\n"
+        "(typeattributeset core_data_file_type (kernarium_sms_data_file))\n"
+        "(typeattributeset app_data_file_type (kernarium_sms_data_file))\n"
+        "(allow kernarium_sms kernarium_sms_data_file (dir (create getattr open read search write add_name remove_name "
+        "rename reparent rmdir setattr lock)))\n"
+        "(allow kernarium_sms kernarium_sms_data_file (file (create getattr open read write append rename setattr "
+        "unlink lock map)))\n"
+        "(allow kernarium_sms activity_service (service_manager (find)))\n"
+        "(allow kernarium_sms package_service (service_manager (find)))\n"
+        "(allow kernarium_sms role_service (service_manager (find)))\n"
+        "(allow kernarium_sms self (vsock_socket (create bind listen accept read write shutdown getattr getopt)))\n"
+        "(allow installd app_data_file_type (dir (create getattr open read search write)))\n"
+        "(allow installd app_data_file_type (file (create getattr open read write unlink)))\n"
+    )
+    if variant != "no-vsock-attribute":
+        ext += "(typeattributeset unconstrained_vsock_violators (kernarium_sms))\n"
+    if variant != "no-core-domain":
+        ext += "(typeattributeset coredomain (kernarium_sms))\n"
+    if variant != "no-app-domain":
+        ext += "(typeattributeset appdomain (kernarium_sms))\n"
+    seapp_plat = (
+        "user=system seinfo=platform domain=system_app type=system_app_data_file\n"
+        "user=_app seinfo=platform domain=platform_app type=app_data_file levelFrom=user\n"
+        "isSystemServer=true domain=system_server_app\n"
+    )
+    seapp_ext = (
+        "" if variant == "no-seapp-line" else
+        "user=system seinfo=platform name=android.kernarium.sms domain=kernarium_sms type=kernarium_sms_data_file\n"
+    )
+    property_context = "" if variant == "no-property-label" else (
+        "service.adb.listen_addrs  u:object_r:system_prop:s0 exact string\n")
+    # What each variant adds: one defect.
+    if variant == "listener-through-attribute":
+        ext += ("(typeattributeset base_typeattr_77 (untrusted_app))\n"
+                "(allow base_typeattr_77 self (vsock_socket (create bind listen accept)))\n")
+    elif variant == "creator-by-name":
+        plat += "(allow hal_audio_default self (vsock_socket (create bind connect)))\n"
+    elif variant == "listener-without-the-service":
+        ext = ext.replace("(allow kernarium_sms self (vsock_socket (create bind listen accept read write shutdown "
+                          "getattr getopt)))\n", "")
+    elif variant == "sockets-through-domain":
+        ext += "(allow domain kernarium_sms (vsock_socket (read write)))\n"
+    elif variant == "service-on-another-sockets":
+        ext += "(allow kernarium_sms virtualizationservice (vsock_socket (read write)))\n"
+    elif variant == "data-through-app-data-file-type":
+        ext += "(allow untrusted_app app_data_file_type (file (read write open create)))\n"
+    elif variant == "data-by-another-domain":
+        ext += "(allow hal_audio_default kernarium_sms_data_file (file (getattr)))\n"
+    elif variant == "property-through-attribute":
+        plat += ("(typeattributeset base_typeattr_88 (shell))\n"
+                 "(allow base_typeattr_88 system_prop (property_service (set)))\n")
+    elif variant == "property-by-another-domain":
+        plat += "(allow vendor_init system_prop (property_service (set)))\n"
+    elif variant == "extra-service":
+        ext += "(allow kernarium_sms window_service (service_manager (find)))\n"
+    elif variant == "system-app-data":
+        ext += "(allow kernarium_sms system_app_data_file (file (read)))\n"
+    elif variant == "settings-in-the-domain":
+        seapp_ext += "user=system seinfo=platform name=com.android.settings domain=kernarium_sms type=kernarium_sms_data_file\n"
+    return {"plat": plat, "ext": ext, "seapp_plat": seapp_plat, "seapp_ext": seapp_ext,
+            "property_context": property_context}
+
+
 def tracked_fstab(android_root: Path) -> str:
     """The UML fstab the product installs, which the verifiers compare against."""
     return (android_root / "overlay/config/fstab.uml").read_text()
@@ -1147,6 +1236,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           missing_net_library: bool = False,
                           net_policy_variant: str | None = None,
                           gamepad_policy_variant: str | None = None,
+                          sms_policy_variant: str | None = None,
                           wifi_network_variant: str | None = None,
                           wifi_hal_variant: str | None = None,
                           wifi_dirs_variant: str | None = None,
@@ -1973,6 +2063,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         "u:object_r:kernarium_keyboard_default_exec:s0\n"
                     ),
                 )
+                sms_policy = sms_policy_fixture(verifier, sms_policy_variant)
+                archive.writestr("SYSTEM/etc/selinux/plat_seapp_contexts", sms_policy["seapp_plat"])
+                archive.writestr("SYSTEM_EXT/etc/selinux/system_ext_seapp_contexts", sms_policy["seapp_ext"])
                 # Platform, vendor and system_ext policy as the builder emits them: the
                 # platform's core domains, a vendor-owned property that only
                 # vendor_init sets, and the system-owned property adbd reports its host in.
@@ -2025,6 +2118,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     + "))\n"
                     + ("(typepermissive su)\n"
                        if build_variant != "user" or user_permissive_su else "")
+                    + sms_policy["plat"]
                     + "; padding to the size of a real platform policy\n" * (
                         (17 << 20 if oversize_platform_policy else 3_441_569) // 48
                     ),
@@ -2042,6 +2136,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "debug.  u:object_r:debug_prop:s0\n"
                     "ro.hardware.  u:object_r:vendor_default_prop:s0\n"
                     "ro.hardware.audio.primary  u:object_r:exported_default_prop:s0 exact string\n"
+                    + sms_policy["property_context"]
                     + ("ro.lmk.low  u:object_r:lmkd_config_prop:s0 exact int\n"
                        if lmkd_variant == "no-property-label" else
                        "ro.lmk.gpu_reclaim  u:object_r:lmkd_config_prop:s0 exact bool\n"),
@@ -2099,7 +2194,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 )
                 archive.writestr(
                     "SYSTEM_EXT/etc/selinux/system_ext_sepolicy.cil",
-                    "(typeattributeset vendor_property_type (vendor_aware_available_prop ))\n"
+                    sms_policy["ext"]
+                    + "(typeattributeset vendor_property_type (vendor_aware_available_prop ))\n"
                     # The report file's type (sysfs_gpu_memory.te) and what lmkd may do with it and
                     # with the directories of the virtio-gpu device that lead to it.
                     + ("" if lmkd_variant == "type-not-sysfs"
@@ -2304,7 +2400,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                                 "untrusted_app_29", "untrusted_app_25", "gmscore_app", "mediaprovider_app",
                                 "platform_app", "platform_app_36", "priv_app", "priv_app_36", "isolated_app",
                                 "ephemeral_app", "system_app", "sdk_sandbox_34", "sdk_sandbox_audit",
-                                "sdk_sandbox_next",
+                                "sdk_sandbox_next", "kernarium_sms",
                             )
                         )
                         if oldswitch_variant == "per-domain-reads"
@@ -5604,6 +5700,42 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "does not give the gamepad relay vsock sockets to listen on"),
             ("gamepad-policy-without-the-vsock-attribute", {"gamepad_policy_variant": "no-attribute"},
              "does not classify the gamepad relay as an unconstrained vsock user"),
+            # The text message service: only the host can cause a delivery. Each row is one defect
+            # of the policy that the baseline fixture does not have.
+            ("sms-listener-through-an-attribute", {"sms_policy_variant": "listener-through-attribute"},
+             "vsock socket are not the reviewed ones \\(unreviewed: \\['untrusted_app"),
+            ("sms-vsock-creator-by-name", {"sms_policy_variant": "creator-by-name"},
+             "unreviewed: \\['hal_audio_default'\\]"),
+            ("sms-service-without-its-vsock-rule", {"sms_policy_variant": "listener-without-the-service"},
+             "reviewed and missing: \\['kernarium_sms'\\]"),
+            ("sms-sockets-through-domain", {"sms_policy_variant": "sockets-through-domain"},
+             "hold \\['read', 'write'\\] on a vsock socket of kernarium_sms"),
+            ("sms-service-on-other-sockets", {"sms_policy_variant": "service-on-another-sockets"},
+             "kernarium_sms holds .* on the vsock sockets of"),
+            ("sms-data-through-app-data-file-type", {"sms_policy_variant": "data-through-app-data-file-type"},
+             "may .* kernarium_sms_data_file"),
+            ("sms-data-by-another-domain", {"sms_policy_variant": "data-by-another-domain"},
+             "hold rights on kernarium_sms_data_file"),
+            ("sms-property-through-attribute", {"sms_policy_variant": "property-through-attribute"},
+             "may set service.adb.listen_addrs"),
+            ("sms-property-by-another-domain", {"sms_policy_variant": "property-by-another-domain"},
+             "\\['vendor_init'\\] may set service.adb.listen_addrs"),
+            ("sms-property-without-a-label", {"sms_policy_variant": "no-property-label"},
+             "do not label service.adb.listen_addrs"),
+            ("sms-service-finds-another-service", {"sms_policy_variant": "extra-service"},
+             "may find \\['window_service'\\]"),
+            ("sms-service-on-system-app-data", {"sms_policy_variant": "system-app-data"},
+             "has a rule on system_app_data_file"),
+            ("sms-service-not-a-core-domain", {"sms_policy_variant": "no-core-domain"},
+             "kernarium_sms is not in coredomain"),
+            ("sms-service-not-an-app-domain", {"sms_policy_variant": "no-app-domain"},
+             "kernarium_sms is not in appdomain"),
+            ("sms-service-without-the-vsock-attribute", {"sms_policy_variant": "no-vsock-attribute"},
+             "kernarium_sms is not in unconstrained_vsock_violators"),
+            ("sms-package-selects-no-domain", {"sms_policy_variant": "no-seapp-line"},
+             "seapp_contexts do not select kernarium_sms"),
+            ("sms-domain-for-another-package", {"sms_policy_variant": "settings-in-the-domain"},
+             "seapp_contexts select .* for com.android.settings"),
             ("missing-location-feature", {"missing_location_feature": "android.hardware.location"},
              "feature is not declared: android.hardware.location(?!\\.gps)"),
             ("missing-gps-feature", {"missing_location_feature": "android.hardware.location.gps"},

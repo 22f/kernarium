@@ -4209,6 +4209,16 @@ def check_kernel_policy(
     check_lmkd_gpu_policy(contexts, (platform_policy, vendor_policy, system_ext_policy), vendor_policy)
     check_venus_option_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
     check_audio_ring_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
+    check_sms_policy(
+        contexts,
+        (platform_policy, vendor_policy, system_ext_policy)
+        + tuple(read_small(archive, infos[name]) for name in APP_POLICY_CIL if name in infos),
+        "\n".join(
+            read_small(archive, infos[name], PLATFORM_POLICY_LIMIT).decode("utf-8", errors="strict")
+            for name in SEAPP_CONTEXT_FILES
+            if name in infos
+        ),
+    )
 
 
 def media_codec_limit(codec: ET.Element, name: str) -> ET.Element:
@@ -5155,6 +5165,287 @@ def cil_allows_file_read(policies: tuple[bytes, ...], domain: str, label: str) -
         for policy in policies
         for source, target, _object_class, permissions in cil_rules(policy, CIL_FILE_ALLOW_RULE)
     )
+
+
+# The text message service listens on a vsock port itself, in a domain of its own: KernariumSms
+# (overlay/sms) in kernarium_sms with its data in kernarium_sms_data_file (overlay/sepolicy/system_ext/
+# private/kernarium_sms.te and seapp_contexts). It reads a request only from the host's CID, so what
+# keeps an adb shell or an installed application from causing a delivery is that none of them can
+# make a vsock socket or listen on one, and that none can reach the service's record or sockets.
+SMS_DOMAIN = "kernarium_sms"
+SMS_DATA_TYPE = "kernarium_sms_data_file"
+SMS_PACKAGE = "android.kernarium.sms"
+SMS_SERVICES = frozenset({"activity_service", "package_service", "role_service"})
+# The types the platform's policy lets create, bind or listen on a vsock socket, platform version suffixes
+# removed (adbd and its compatibility type adbd_<version> are one). A platform update that adds a
+# listener fails the image build here until someone has looked at it.
+VSOCK_SOCKET_TYPES = frozenset({
+    "adbd", "adbd_tradeinmode", "aisealhostservice", "aisealhostservice_virtualizationmanager", "compos_fd_server",
+    "compos_verify_virtualizationmanager", "composd_virtualizationmanager", "early_virtmgr_vendor",
+    "hal_camera_default", "hal_graphics_composer_default", "hal_light_cuttlefish", "hal_sensors_default",
+    "hal_thermal_default", "hal_vibrator_default", "kernarium_gamepad", "libcuttlefish_rild",
+    "platform_app_all_virtualizationmanager", "priv_app_all_virtualizationmanager", "shell_virtualizationmanager",
+    "socket_vsock_proxy", "storageproxyd_system", "tombstone_transmit", "traced",
+    "trusty_security_vm_launcher_early_virtmgr", "untrusted_app_all_virtualizationmanager",
+    "virtualizationmanager_vendor", "virtualizationservice", "virtualizationservice_virtualizationmanager",
+    "vmlauncher_app",
+})
+# Of those, the ones whose rules have no listen: they connect.
+VSOCK_TYPES_WITHOUT_LISTEN = frozenset({
+    "aisealhostservice", "hal_graphics_composer_default", "libcuttlefish_rild", "storageproxyd_system",
+    "tombstone_transmit",
+})
+# The domains that manage every application's data directories, and so reach the service's: the platform's own
+# rules through the attributes of an application data type. The first image build with the service shows the
+# set; a holder that is not named here fails the check until someone has looked at it.
+SMS_DATA_MANAGERS = frozenset({
+    "artd", "dex2oat", "dexopt_chroot_setup", "dumpstate", "init", "installd", "otapreopt_chroot", "otapreopt_slot",
+    "system_server", "vold", "vold_prepare_subdirs", "zygote",
+})
+# service.adb.listen_addrs moves adbd's own listener: only init and these domains set it, and no adb shell or
+# installed application does.
+ADB_LISTEN_ADDRS_PROPERTY = "service.adb.listen_addrs"
+ADB_LISTEN_ADDRS_SETTERS = frozenset({"charger", "init", "surfaceflinger", "system_app", "system_server"})
+SEAPP_CONTEXT_FILES = (
+    "SYSTEM/etc/selinux/plat_seapp_contexts",
+    "SYSTEM_EXT/etc/selinux/system_ext_seapp_contexts",
+    "PRODUCT/etc/selinux/product_seapp_contexts",
+    "VENDOR/etc/selinux/vendor_seapp_contexts",
+)
+
+
+class CilSets:
+    """The members of the types and attributes of a set of policies, with every set expression expanded."""
+
+    def __init__(self, policies: tuple[bytes, ...]) -> None:
+        self.definitions: dict[str, list[object]] = {}
+        for policy in policies:
+            lists, expressions = cil_attribute_sets(policy)
+            for attribute, members in lists:
+                self.definitions.setdefault(attribute, []).append(sorted(members))
+            for attribute, members in expressions:
+                self.definitions.setdefault(attribute, []).append(members)
+        self._members: dict[str, frozenset[str]] = {}
+        self._universe: frozenset[str] | None = None
+
+    @property
+    def universe(self) -> frozenset[str]:
+        """Every type the policies name: the leaves of the attribute sets and the declared types."""
+        if self._universe is None:
+            names: set[str] = set()
+            for definition in self.definitions.values():
+                for members in definition:
+                    names |= self._leaves(members)
+            self._universe = frozenset(n for n in names if n not in self.definitions)
+        return self._universe
+
+    def _leaves(self, expression: object) -> set[str]:
+        if isinstance(expression, str):
+            return set() if expression in CIL_SET_OPERATORS else {expression}
+        assert isinstance(expression, list)
+        return {leaf for member in expression for leaf in self._leaves(member)}
+
+    def members(self, name: str) -> frozenset[str]:
+        """The types a name stands for: itself for a type, the expanded set for an attribute."""
+        known = self._members.get(name)
+        if known is not None:
+            return known
+        if name not in self.definitions:
+            self._members[name] = frozenset({name})
+            return self._members[name]
+        self._members[name] = frozenset()  # a cycle adds nothing
+        found: set[str] = set()
+        for definition in self.definitions[name]:
+            found |= self.expand(definition)
+        self._members[name] = frozenset(found)
+        return self._members[name]
+
+    def expand(self, expression: object) -> frozenset[str]:
+        if isinstance(expression, str):
+            return self.members(expression)
+        assert isinstance(expression, list)
+        operator = expression[0] if expression and isinstance(expression[0], str) else None
+        if operator not in CIL_SET_OPERATORS:
+            return frozenset().union(*(self.expand(member) for member in expression))
+        operands = [self.expand(operand) for operand in expression[1:]]
+        if operator == "all":
+            return self.universe
+        if operator == "not":
+            return self.universe - frozenset().union(*operands)
+        if operator == "and":
+            return frozenset.intersection(*operands) if operands else frozenset()
+        if operator == "or":
+            return frozenset().union(*operands)
+        return frozenset(member for member in frozenset().union(*operands)
+                         if sum(member in operand for operand in operands) == 1)
+
+
+def cil_domain_rules(
+    policies: tuple[bytes, ...], sets: CilSets, object_class: str
+) -> list[tuple[frozenset[str], frozenset[str] | None, frozenset[str]]]:
+    """The allow rules of an object class as (source types, target types, permissions); a target of
+    None is the rule's own domain (self)."""
+    wanted = object_class.encode()
+    return [
+        (
+            sets.members(cil_type_name(source)),
+            None if target == b"self" else sets.members(cil_type_name(target)),
+            frozenset(permission.decode() for permission in permissions),
+        )
+        for policy in policies
+        for source, target, rule_class, permissions in cil_rules(policy, CIL_ALLOW_RULE)
+        if rule_class == wanted
+    ]
+
+
+def parse_seapp_contexts(text: str) -> list[dict[str, str]]:
+    """The entries of seapp_contexts files, in the order they stand: key=value fields."""
+    entries = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        entry = dict(field.split("=", 1) for field in line.split() if "=" in field)
+        if entry:
+            entries.append(entry)
+    return entries
+
+
+def seapp_context_for(entries: list[dict[str, str]], user: str, seinfo: str, name: str) -> dict[str, str] | None:
+    """The entry the platform picks for a system-uid application that is neither privileged nor
+    ephemeral: those that match, the most specific first (an exact user before a prefix, a seinfo, an exact
+    name before a prefix before none), the earlier one of equals."""
+    def rank(value: str | None, wanted: str) -> int | None:
+        if value is None:
+            return 0
+        if value.endswith("*"):
+            return 1 if wanted.startswith(value[:-1]) else None
+        return 2 if value == wanted else None
+
+    best: tuple[tuple[int, ...], int, dict[str, str]] | None = None
+    for index, entry in enumerate(entries):
+        if any(entry.get(key) not in (None, "false") for key in
+               ("isSystemServer", "isEphemeralApp", "isPrivApp", "fromRunAs")):
+            continue
+        if any(key in entry for key in ("minTargetSdkVersion", "maxTargetSdkVersion", "isIsolatedComputeApp")):
+            continue
+        scores = (rank(entry.get("user"), user), 1 if entry.get("seinfo") == seinfo else (0 if "seinfo" not in entry else None),
+                  rank(entry.get("name"), name))
+        if None in scores:
+            continue
+        key = tuple(score for score in scores if score is not None)
+        if best is None or key > best[0]:
+            best = (key, index, entry)
+    return best[2] if best else None
+
+
+def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_contexts: str) -> None:
+    """Only the host can cause a text message to be delivered: of the types that may create, bind or listen
+    on a vsock socket exactly the reviewed ones and the service's may, whatever attribute grants it; nothing
+    else holds the service's sockets or its data; the service finds only the services it needs; its
+    package selects its domain and no other package does; and the shell cannot move adbd's own listener.
+    Every grant counts, through attributes and set expressions."""
+    sets = CilSets(policies)
+    if not sets.members("appdomain") or not sets.members("coredomain"):
+        fail("the policy lists no type for appdomain or coredomain: the check could not tell who runs applications")
+    vsock = cil_domain_rules(policies, sets, "vsock_socket")
+
+    def holders(wanted: set[str]) -> set[str]:
+        found: set[str] = set()
+        for sources, targets, permissions in vsock:
+            if wanted & permissions:
+                found |= sources if targets is None else sources & targets
+        return found
+
+    creators = holders({"create", "bind", "listen"})
+    reviewed = VSOCK_SOCKET_TYPES | {SMS_DOMAIN}
+    if creators != reviewed:
+        fail(
+            "the types that may create, bind or listen on a vsock socket are not the reviewed ones "
+            f"(unreviewed: {sorted(creators - reviewed)}; reviewed and missing: {sorted(reviewed - creators)})"
+        )
+    listeners = holders({"listen"})
+    reviewed_listeners = (VSOCK_SOCKET_TYPES - VSOCK_TYPES_WITHOUT_LISTEN) | {SMS_DOMAIN}
+    if listeners != reviewed_listeners:
+        fail(
+            "the types that may listen on a vsock socket are not the reviewed ones "
+            f"(unreviewed: {sorted(listeners - reviewed_listeners)}; "
+            f"reviewed and missing: {sorted(reviewed_listeners - listeners)})"
+        )
+    shut_out = {"shell", "system_app", "platform_app", "priv_app"} | set(sets.members("untrusted_app_all"))
+    if creators & shut_out:
+        fail(f"{sorted(creators & shut_out)} may create, bind or listen on a vsock socket")
+
+    everything = (sets.members("appdomain"), sets.members("coredomain"), sets.universe)
+
+    def specific(sources: frozenset[str]) -> bool:
+        """A rule for the service alone, or for a group of its own: not one that every application or
+        core domain has."""
+        return SMS_DOMAIN in sources and not any(sources >= group for group in everything)
+
+    # The service's sockets: nothing but the service holds a permission on them, and what the service holds
+    # on the sockets of other types is only what every application domain holds.
+    for sources, targets, permissions in vsock:
+        if targets is not None and SMS_DOMAIN in targets and sources - {SMS_DOMAIN}:
+            fail(f"{sorted(sources - {SMS_DOMAIN})} hold {sorted(permissions)} on a vsock socket of {SMS_DOMAIN}")
+        if targets is not None and SMS_DOMAIN not in targets and specific(sources):
+            fail(f"{SMS_DOMAIN} holds {sorted(permissions)} on the vsock sockets of {sorted(targets)}: only what "
+                 "every application domain holds is allowed")
+
+    attributes = cil_types_and_attributes(policies, SMS_DOMAIN)
+    for attribute in ("coredomain", "appdomain", "unconstrained_vsock_violators"):
+        if attribute not in attributes:
+            fail(f"{SMS_DOMAIN} is not in {attribute}")
+    found: set[str] = set()
+    for sources, targets, permissions in cil_domain_rules(policies, sets, "service_manager"):
+        if targets is not None and "find" in permissions and specific(sources):
+            found |= targets
+    if found - SMS_SERVICES:
+        fail(f"{SMS_DOMAIN} may find {sorted(found - SMS_SERVICES)}; it needs only {sorted(SMS_SERVICES)}")
+    for object_class in ("file", "dir", "lnk_file", "sock_file", "fifo_file", "chr_file", "blk_file"):
+        for sources, targets, permissions in cil_domain_rules(policies, sets, object_class):
+            if targets is not None and "system_app_data_file" in targets and specific(sources):
+                fail(f"{SMS_DOMAIN} has a rule on system_app_data_file ({sorted(permissions)}): "
+                     "its data has a type of its own")
+
+    # Who may touch the service's data, through any attribute it carries.
+    data_holders: set[str] = set()
+    touching = {"read", "write", "open", "create", "rename", "unlink"}
+    for object_class in ("file", "dir", "lnk_file", "sock_file", "fifo_file", "chr_file", "blk_file"):
+        for sources, targets, permissions in cil_domain_rules(policies, sets, object_class):
+            if targets is None or SMS_DATA_TYPE not in targets:
+                continue
+            data_holders |= sources
+            if sources & shut_out and permissions & touching:
+                fail(f"{sorted(sources & shut_out)} may {sorted(permissions & touching)} {SMS_DATA_TYPE}")
+    if data_holders - {SMS_DOMAIN} - SMS_DATA_MANAGERS:
+        fail(f"{sorted(data_holders - {SMS_DOMAIN} - SMS_DATA_MANAGERS)} hold rights on {SMS_DATA_TYPE}: only "
+             f"{SMS_DOMAIN} and the managers of application data may")
+
+    # service.adb.listen_addrs: who may set it.
+    label = property_label(ADB_LISTEN_ADDRS_PROPERTY, contexts)
+    if label is None:
+        fail(f"the property contexts do not label {ADB_LISTEN_ADDRS_PROPERTY}")
+    setters: set[str] = set()
+    for policy in policies:
+        for source, target, _object_class, permissions in cil_rules(policy, CIL_PROPERTY_SET_RULE):
+            if b"set" in permissions and label in sets.members(cil_type_name(target)):
+                setters |= sets.members(cil_type_name(source))
+    if setters - ADB_LISTEN_ADDRS_SETTERS:
+        fail(f"{sorted(setters - ADB_LISTEN_ADDRS_SETTERS)} may set {ADB_LISTEN_ADDRS_PROPERTY}, labelled {label}: "
+             "that moves adbd's own listener")
+    if setters & ((set(sets.members("appdomain")) | {"shell"}) - {"system_app"}):
+        fail(f"an adb shell or an application may set {ADB_LISTEN_ADDRS_PROPERTY}")
+
+    # Which package selects which domain.
+    entries = parse_seapp_contexts(seapp_contexts)
+    selected = seapp_context_for(entries, "system", "platform", SMS_PACKAGE)
+    if selected is None or (selected.get("domain"), selected.get("type")) != (SMS_DOMAIN, SMS_DATA_TYPE):
+        fail(f"seapp_contexts do not select {SMS_DOMAIN} and {SMS_DATA_TYPE} for {SMS_PACKAGE}: {selected}")
+    for package in ("com.android.settings", "com.android.systemui", "android.kernarium.other"):
+        other = seapp_context_for(entries, "system", "platform", package)
+        if other is None or other.get("domain") != "system_app":
+            fail(f"seapp_contexts select {other} for {package}: it stays in system_app")
 
 
 def check_adbd_launch_policy(contexts: list[str], policies: tuple[bytes, ...]) -> None:
