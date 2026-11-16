@@ -23,11 +23,13 @@
 namespace uml::app {
 
 /* The application's leaving and returning to the foreground, played to a launcher by a test through a named pipe (the
- * variable `UML_BACKGROUND_EDGE_CONTROL` names it, a line each: `leave`, `return`). The launcher has no application to
- * leave: `leave` does what the Kernarium runtime does when the application holds the guest's GPU requests as it enters the
- * background (the camera's running video ends and the guest has stopped it before the hold, `holdAfterVideoEnds`), and
- * `return` releases the requests. Only a run with the synthetic camera reads it, and nothing else does. Every line the
- * edge says carries the host's clock in seconds since the epoch, for the test to set against the guest's. */
+ * variable `UML_BACKGROUND_EDGE_CONTROL` names it, a line each: `leave`, `return`). Only the test-only launcher
+ * (`uml-darwin-android17-edge-test`, `UML_APP_EDGE_TEST`) compiles it; no product launcher has it. The launcher has no
+ * application to leave: `leave` does what the Kernarium runtime does when the application holds the guest's GPU requests
+ * as it enters the background (the camera's running video ends and the guest has stopped it before the hold,
+ * `holdAfterVideoEnds` over the real request gate), and `return` releases the requests. Only a run with the synthetic
+ * camera reads it, and nothing else does. Every line the edge says carries the host's clock in seconds since the epoch,
+ * for the test to set against the guest's. */
 class BackgroundEdgeControl final {
 public:
     static constexpr const char* variable = "UML_BACKGROUND_EDGE_CONTROL";

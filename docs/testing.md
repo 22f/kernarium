@@ -1219,8 +1219,9 @@ close of a device whose requests the HAL ended without a request error. The
 release must carry the HAL topic that handles the host's end of a camera's
 video and the camera application topic that ends the recording.
 `android-camera-video-leave` (`--mode video-leave`) plays the application's
-leaving the foreground to the launcher through its edge pipe
-(`UML_BACKGROUND_EDGE_CONTROL`, test-only, read with the synthetic camera only)
+leaving the foreground to the test-only launcher `uml-darwin-android17-edge-test`
+(which no product has; it is built where a release is named) through its edge
+pipe (`UML_BACKGROUND_EDGE_CONTROL`, read with the synthetic camera only)
 while the video mode records, `--leave-trials` times (ten by default), with the
 platform's notice first or twenty milliseconds after: the launcher ends the
 camera's running video, waits for the guest to stop its video streams (the same

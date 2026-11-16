@@ -339,7 +339,7 @@ MODES = ("live", "blocked", "none", "restart", "video-lost", "video-leave")
 # None of it looks at the pictures: the recording does not go on over the camera's reopening is what the row shows.
 CONTROL_VARIABLE = "UML_SYNTHETIC_CAMERA_CONTROL"
 # The video-leave mode: the launcher plays the application's leaving the foreground to the guest through a second pipe
-# (EDGE_VARIABLE, darwin/app/macos/background_edge_control.hpp): the camera's running video ends, the launcher waits until
+# (EDGE_VARIABLE, darwin/app/macos/edge_test/background_edge_control.hpp): the camera's running video ends, the launcher waits until
 # the guest has stopped its video streams, and then it holds the guest's GPU requests (the request gate the application
 # closes as it enters the background) for LEAVE_AWAY_SECONDS. A guest that had not acted on the lost video when the hold
 # landed stalls its camera pipeline until the requests are released: the recording stops only then, and its sound goes on

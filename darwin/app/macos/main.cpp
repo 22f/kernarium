@@ -2,7 +2,6 @@
 #include "audio/in_process_service.hpp"
 #include "audio/microphone_switch.hpp"
 #include "audio/protocol.hpp"
-#include "background_edge_control.hpp"
 #include "battery/in_process_service.hpp"
 #include "battery/protocol.hpp"
 #include "camera/camera_diagnostics.hpp"
@@ -39,6 +38,9 @@
 #include "uml/emulator.h"
 #if UML_APP_HAS_SLIRP
 #include "uml_slirp_net.h"
+#endif
+#if UML_APP_EDGE_TEST
+#include "edge_test/background_edge_control.hpp"
 #endif
 
 #include <algorithm>
@@ -1903,16 +1905,20 @@ private:
 		options.onRotateAndCrop = uml::camera::printRotateAndCrop;
 		options.onFlash = uml::camera::printFlash;
 		options.onCheckpoint = uml::camera::printCheckpoint;
-		/* A test that plays the application's leaving the foreground to the
-		 * synthetic camera's run (BackgroundEdgeControl). */
-		const char *const edge_pipe =
-			prepared_.camera == CameraSource::synthetic && gpu_service_ ?
-				std::getenv(uml::app::BackgroundEdgeControl::variable) :
-				nullptr;
-		if (edge_pipe != nullptr && *edge_pipe != '\0')
+#if UML_APP_EDGE_TEST
+		/* The test launcher plays the application's leaving the foreground to
+		 * the synthetic camera's run (BackgroundEdgeControl). */
+		if (const char *const edge_pipe =
+			    prepared_.camera == CameraSource::synthetic && gpu_service_ ?
+				    std::getenv(uml::app::BackgroundEdgeControl::variable) :
+				    nullptr;
+		    edge_pipe != nullptr && *edge_pipe != '\0') {
 			options.background =
 				std::make_shared<uml::camera::BackgroundVideo>();
-		const auto background = options.background;
+			edge_control_ = std::make_unique<uml::app::BackgroundEdgeControl>(
+				edge_pipe, options.background, *gpu_service_);
+		}
+#endif
 		uml::camera::CameraSourceHandle source;
 		if (!make_camera_source(source))
 			return false;
@@ -1944,19 +1950,14 @@ private:
 				{uml::input::virtio::protocol::switchCameraLensCover,
 				 uml::camera::lensCoverAdvertised(options.mode, layout)});
 		}
-		if (!start_virtio_device(
-			    kernel, services_.camera, uml::camera::cameraDeviceId,
-			    [&] {
-				    return uml::camera::makeInProcessCameraService(
-					    std::move(source), std::move(options),
-					    gpu_service_ ? shared_memory_regions_ : nullptr);
-			    },
-			    "--camera", "Virtio camera"))
-			return false;
-		if (background)
-			edge_control_ = std::make_unique<uml::app::BackgroundEdgeControl>(
-				edge_pipe, background, *gpu_service_);
-		return true;
+		return start_virtio_device(
+			kernel, services_.camera, uml::camera::cameraDeviceId,
+			[&] {
+				return uml::camera::makeInProcessCameraService(
+					std::move(source), std::move(options),
+					gpu_service_ ? shared_memory_regions_ : nullptr);
+			},
+			"--camera", "Virtio camera");
 	}
 
 	static const char *camera_state_name(
@@ -2033,9 +2034,10 @@ private:
 	 * ends between them. */
 	std::unique_ptr<GuestWaker> waker_;
 	BootServices services_;
-	/* After the camera and the GPU service it works on, so it ends before
-	 * them. */
+#if UML_APP_EDGE_TEST
+	/* After the GPU service it works on, so it ends before it. */
 	std::unique_ptr<uml::app::BackgroundEdgeControl> edge_control_;
+#endif
 	/* What the camera has learned about the host's lenses; it outlives the
 	 * boots, so a restarted guest keeps it. */
 	std::shared_ptr<uml::camera::CalibrationStore> camera_calibration_;
