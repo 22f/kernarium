@@ -1049,15 +1049,31 @@ public:
 #if DARWIN_UML_X86_64_GUEST
 		/* The bytes are in the shared backing at the write, so the
 		 * publication follows them: at every holder of the frame, whichever
-		 * generation and address registered it. */
+		 * generation and address registered it. The frame is the one the
+		 * user word names when it is present, and the one the kernel's alias
+		 * names when the table resolves it: normally one frame, and each is
+		 * published when they differ. */
 		if (kernel_write && kernel_code_write_publishes()) {
+			constexpr auto frame_mask = ~(page_size - 1);
+			MappedBacking *user_backing = nullptr;
+			std::uint64_t user_offset = 0;
+			if (const auto mapping = decode_page(*reference.state, page, word)) {
+				user_backing = mapping->backing;
+				user_offset = mapping->offset & frame_mask;
+			}
+			const auto alias_frame = alias_offset & frame_mask;
+			const bool same_frame = user_backing != nullptr &&
+				user_backing == alias_backing.get() &&
+				user_offset == alias_frame;
+			if (user_backing != nullptr && !same_frame)
+				FrameAccounting::publish_kernel_write(*user_backing,
+					user_offset, in_page, length);
 			if (alias_backing) {
 				FrameAccounting::publish_kernel_write(*alias_backing,
-					alias_offset & ~(page_size - 1),
-					alias_offset & (page_size - 1), length);
-			} else if (word == 0) {
-				/* Neither the frame nor the user word is known: every
-				 * generation reads every translation again. */
+					alias_frame, alias_offset & (page_size - 1), length);
+			} else {
+				/* The buffer names no frame, whether or not the user word
+				 * does: every generation reads every translation again. */
 				FrameAccounting::note_unresolved_kernel_write();
 				lock.unlock();
 				publish_all_generations();

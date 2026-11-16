@@ -181,6 +181,18 @@ bool covers(const Changes &changes, unsigned long address, unsigned long length)
 	return false;
 }
 
+/* Whether the generation was told of the range itself and not only that
+ * everything changed. */
+bool precisely(const Changes &changes, unsigned long address,
+	unsigned long length)
+{
+	for (const auto &range : changes.ranges)
+		if (range.length != 0 && range.address <= address &&
+		    range.address + range.length >= address + length)
+			return true;
+	return false;
+}
+
 std::uint64_t flush_serial_of(unsigned long generation)
 {
 	void *context = darwin_uml_static_vm_execution_context_create(generation);
@@ -799,6 +811,164 @@ void test_store_against_registration()
 	baseline.clean("M10");
 }
 
+/* The ranges of the kernel's linear map the host knows, as the table answers
+ * for one address. */
+bool resolves(const void *address, int expected_fd, std::uint64_t expected_offset)
+{
+	int fd = -1;
+	std::uint64_t offset = 0;
+	return FrameAccounting::resolve_direct(address, fd, offset) &&
+		fd == expected_fd && offset == expected_offset;
+}
+
+bool unresolved(const void *address)
+{
+	int fd = -1;
+	std::uint64_t offset = 0;
+	return !FrameAccounting::resolve_direct(address, fd, offset);
+}
+
+/* K3 (table): an unmap inside a range splits it and keeps both ends, a map
+ * over part of a range keeps what it does not cover, a range that continues
+ * its neighbour joins it, and a range the table has no slot for is counted
+ * and not lost silently. */
+void test_direct_table()
+{
+	const auto drops = FrameAccounting::diagnostics().direct_range_drops;
+	void *area = mmap(nullptr, 80 * page, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+	require(area != MAP_FAILED);
+	const auto at = [&](unsigned long frame) {
+		return static_cast<unsigned char *>(area) + frame * page;
+	};
+	FrameAccounting::note_direct_map(at(0), 16 * page, 5, 0x1000);
+	require(resolves(at(0), 5, 0x1000) && resolves(at(15) + 7, 5, 0x1000 + 15 * page + 7));
+	/* The middle goes; both ends stay. */
+	FrameAccounting::note_direct_unmap(at(4), 2 * page);
+	require(resolves(at(3) + 9, 5, 0x1000 + 3 * page + 9),
+		"a partial unmap lost the range below it");
+	require(unresolved(at(4)) && unresolved(at(5) + page - 1));
+	require(resolves(at(6), 5, 0x1000 + 6 * page),
+		"a partial unmap lost the range above it");
+	require(resolves(at(15), 5, 0x1000 + 15 * page));
+	/* A map over a middle part keeps the rest of the range it overlaps. */
+	FrameAccounting::note_direct_map(at(8), 2 * page, 6, 0x9000);
+	require(resolves(at(7), 5, 0x1000 + 7 * page) && resolves(at(10), 5, 0x1000 + 10 * page),
+		"an overlapping map dropped what it does not cover");
+	require(resolves(at(8) + 3, 6, 0x9000 + 3) && resolves(at(9), 6, 0x9000 + page));
+	/* An unmap that spans several ranges and holes. */
+	FrameAccounting::note_direct_unmap(at(2), 9 * page);
+	require(resolves(at(1), 5, 0x1000 + page) && unresolved(at(2)) &&
+		unresolved(at(8)) && unresolved(at(10)) && resolves(at(11), 5, 0x1000 + 11 * page));
+	FrameAccounting::note_direct_unmap(at(0), 16 * page);
+	require(unresolved(at(0)) && unresolved(at(11)) && unresolved(at(15)));
+	require(FrameAccounting::diagnostics().direct_range_drops == drops,
+		"a range was dropped while the table had room");
+
+	/* Ranges that continue each other join, so a long linear map in many
+	 * calls takes one slot. */
+	for (unsigned long frame = 0; frame < 40; ++frame)
+		FrameAccounting::note_direct_map(at(frame), page, 7,
+			0x20000 + frame * page);
+	require(FrameAccounting::diagnostics().direct_range_drops == drops,
+		"adjacent ranges of one descriptor took a slot each");
+	require(resolves(at(0), 7, 0x20000) && resolves(at(39) + 5, 7, 0x20000 + 39 * page + 5));
+	FrameAccounting::note_direct_unmap(at(0), 40 * page);
+	require(unresolved(at(20)));
+
+	/* More separate ranges than slots: each one that finds no slot is
+	 * counted, and every other range still answers. */
+	for (unsigned long index = 0; index < 33; ++index)
+		FrameAccounting::note_direct_map(at(2 * index), page, 8,
+			0x40000 + index * 3 * page);
+	require(FrameAccounting::diagnostics().direct_range_drops == drops + 1,
+		"a range the table had no slot for was not counted");
+	unsigned long answered = 0;
+	for (unsigned long index = 0; index < 33; ++index)
+		if (!unresolved(at(2 * index)))
+			++answered;
+	require(answered == 32, "the table lost more than the range it dropped");
+	FrameAccounting::note_direct_unmap(at(0), 80 * page);
+	for (unsigned long index = 0; index < 33; ++index)
+		require(unresolved(at(2 * index)));
+	munmap(area, 80 * page);
+}
+
+/* K1 and K2: a kernel write is published at the frame of the user word
+ * whenever it is present, and at the frame the kernel's alias names when the
+ * table resolves it; a buffer the table does not resolve is counted and
+ * takes the fallback, whether or not the word is present. */
+void test_kernel_write_frames()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0x600'0000;
+	ScratchBacking backing{"uml-frame-kernel-XXXXXX", 16 * page};
+	Domain domain{73'006};
+	darwin_uml_static_vm_require_coherent_kernel_code_writes();
+	void *alias = mmap(nullptr, 16 * page, PROT_READ | PROT_WRITE, MAP_SHARED,
+		backing.descriptor(), 0);
+	require(alias != MAP_FAILED);
+	domain.run([&] {
+		/* Frame 2 is translated in 801 and 803; 802 writes it through a
+		 * data mapping (its word is present). */
+		require(map(801, base, backing, 2, 1, rx) == 0);
+		require(map(803, base + 8 * page, backing, 2, 1, rx) == 0);
+		require(map(802, base + page, backing, 2, 1, rw, 0) == 0);
+		require(hold_frame(801, base).result != DARWIN_UML_STATIC_FRAME_FAILED);
+		require(hold_frame(803, base + 8 * page).result !=
+			DARWIN_UML_STATIC_FRAME_FAILED);
+		require(darwin_uml_static_vm_activate(802) == 0);
+
+		/* K1: the buffer is no alias, and the word is present. */
+		std::array<unsigned char, 8> loose{};
+		loose.fill(0xe9);
+		const auto stamp = stamp_of(801, base);
+		const auto seq801 = sequence_of(801);
+		const auto seq803 = sequence_of(803);
+		const auto serial = flush_serial_of(803);
+		const auto counted = FrameAccounting::diagnostics().unresolved_kernel_writes;
+		require(darwin_uml_static_vm_copy_kernel_write(
+			base + page + 0x40, loose.data(), loose.size()) == 0);
+		require(FrameAccounting::diagnostics().unresolved_kernel_writes ==
+			counted + 1, "a buffer outside the table was not counted");
+		require(flush_serial_of(803) != serial,
+			"a buffer outside the table took no fallback");
+		require(stamp_of(801, base) > stamp,
+			"the word's frame was not published");
+		require(precisely(changes_since(801, seq801), base + 0x40, 8) &&
+			precisely(changes_since(803, seq803), base + 8 * page + 0x40, 8),
+			"a holder at another address was not told the range");
+
+		/* K2: the buffer names frame 3, the word frame 4: both are
+		 * published. */
+		FrameAccounting::note_direct_map(alias, 16 * page, backing.descriptor(), 0);
+		require(map(811, base + 2 * page, backing, 3, 1, rx) == 0);
+		require(map(812, base + 3 * page, backing, 4, 1, rx) == 0);
+		require(map(813, base + 4 * page, backing, 4, 1, rw, 0) == 0);
+		require(hold_frame(811, base + 2 * page).result !=
+			DARWIN_UML_STATIC_FRAME_FAILED);
+		require(hold_frame(812, base + 3 * page).result !=
+			DARWIN_UML_STATIC_FRAME_FAILED);
+		require(darwin_uml_static_vm_activate(813) == 0);
+		auto *bytes = static_cast<unsigned char *>(alias) + 3 * page + 0x20;
+		std::memset(bytes, 0xcc, 4);
+		const auto seq811 = sequence_of(811);
+		const auto seq812 = sequence_of(812);
+		const auto counted2 = FrameAccounting::diagnostics().unresolved_kernel_writes;
+		require(darwin_uml_static_vm_copy_kernel_write(
+			base + 4 * page + 0x20, bytes, 4) == 0);
+		require(precisely(changes_since(812, seq812), base + 3 * page + 0x20, 4),
+			"the frame the word names was not published");
+		require(precisely(changes_since(811, seq811), base + 2 * page + 0x20, 4),
+			"the frame the alias names was not published");
+		require(FrameAccounting::diagnostics().unresolved_kernel_writes == counted2,
+			"a write through the table was counted unresolved");
+	});
+	FrameAccounting::note_direct_unmap(alias, 16 * page);
+	domain.retire();
+	munmap(alias, 16 * page);
+	baseline.clean("K1 K2");
+}
+
 } // namespace
 
 int main()
@@ -809,6 +979,8 @@ int main()
 	test_holders_follow_every_primitive();
 	test_debts();
 	test_publication();
+	test_direct_table();
+	test_kernel_write_frames();
 	test_unknown_frame();
 	test_flush_serial();
 	test_registration_allocation_failures();

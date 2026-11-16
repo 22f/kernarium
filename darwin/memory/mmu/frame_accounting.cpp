@@ -161,6 +161,7 @@ std::atomic_uint64_t walked_refusals{};
 std::atomic_uint64_t registration_failures{};
 std::atomic_uint64_t publications{};
 std::atomic_uint64_t unresolved_writes{};
+std::atomic_uint64_t direct_range_drops{};
 
 /* The source of every flush serial. The 64-bit value moves once per walk of
  * a generation, and once for each state made; at a million moves a second it
@@ -550,7 +551,8 @@ FrameAccounting::Diagnostics FrameAccounting::diagnostics() noexcept
 		walked_refusals.load(std::memory_order_relaxed),
 		registration_failures.load(std::memory_order_relaxed),
 		publications.load(std::memory_order_relaxed),
-		unresolved_writes.load(std::memory_order_relaxed)};
+		unresolved_writes.load(std::memory_order_relaxed),
+		direct_range_drops.load(std::memory_order_relaxed)};
 }
 
 void FrameAccounting::note_nonempty_state_destruction() noexcept
@@ -884,43 +886,155 @@ void FrameAccounting::publish_kernel_write(MappedBacking &backing,
 		nullptr, nullptr, 0);
 }
 
+namespace {
+
+/* One contiguous host range of the direct table, as the mutex's holder sees
+ * it. */
+struct DirectPiece final {
+	std::uintptr_t begin;
+	std::uintptr_t end;
+	int fd;
+	std::uint64_t offset;
+
+	[[nodiscard]] bool operator==(const DirectPiece &other) const noexcept
+	{
+		return begin == other.begin && end == other.end && fd == other.fd &&
+			offset == other.offset;
+	}
+};
+
+/* A range holds at most one piece of what a mapping or an unmap covers
+ * and leaves at most two outside it, and the ranges never overlap. */
+constexpr std::size_t direct_piece_limit = direct_range_count + 2;
+
+/* Makes [first, last) map to `replacement` (nothing when null) and leaves the
+ * rest of every range it overlapped as it was: a range that extends past
+ * either end keeps that part, split in two when both ends remain. Adjacent
+ * pieces of one descriptor that continue each other are one range. When the
+ * table is still full, the smallest ranges go and are counted: a kernel write
+ * through a range the table lost names no frame, which the fallback covers. */
+void reshape_direct(std::uintptr_t first, std::uintptr_t last,
+	const DirectPiece *replacement) noexcept
+{
+	auto &table = direct_table();
+	const std::lock_guard lock{table.mutex};
+	std::array<DirectPiece, direct_piece_limit> pieces{};
+	std::size_t count = 0;
+	for (const auto &range : table.ranges) {
+		const auto begin = range.begin.load(std::memory_order_relaxed);
+		const auto end = range.end.load(std::memory_order_relaxed);
+		if (begin == end)
+			continue;
+		const auto descriptor = range.fd.load(std::memory_order_relaxed);
+		const auto offset = range.offset.load(std::memory_order_relaxed);
+		if (end <= first || begin >= last) {
+			pieces[count++] = {begin, end, descriptor, offset};
+			continue;
+		}
+		if (begin < first)
+			pieces[count++] = {begin, first, descriptor, offset};
+		if (end > last)
+			pieces[count++] = {last, end, descriptor, offset + (last - begin)};
+	}
+	if (replacement != nullptr)
+		pieces[count++] = *replacement;
+	std::sort(pieces.begin(), pieces.begin() + static_cast<std::ptrdiff_t>(count),
+		[](const DirectPiece &a, const DirectPiece &b) {
+			return a.begin < b.begin;
+		});
+	std::size_t merged = 0;
+	for (std::size_t index = 0; index < count; ++index) {
+		if (merged != 0) {
+			auto &before = pieces[merged - 1];
+			if (before.end == pieces[index].begin &&
+			    before.fd == pieces[index].fd &&
+			    before.offset + (before.end - before.begin) ==
+				    pieces[index].offset) {
+				before.end = pieces[index].end;
+				continue;
+			}
+		}
+		pieces[merged++] = pieces[index];
+	}
+	count = merged;
+	while (count > direct_range_count) {
+		std::size_t smallest = 0;
+		for (std::size_t index = 1; index < count; ++index)
+			if (pieces[index].end - pieces[index].begin <
+			    pieces[smallest].end - pieces[smallest].begin)
+				smallest = index;
+		pieces[smallest] = pieces[--count];
+		direct_range_drops.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	/* A slot that already holds a piece is left alone. Each other piece takes
+	 * the slot of a range it overlaps, so that readers see the old range or
+	 * the new one for every address both cover, and then a free slot. */
+	std::array<bool, direct_range_count> kept{};
+	std::array<bool, direct_piece_limit> placed{};
+	for (std::size_t slot = 0; slot < direct_range_count; ++slot) {
+		const auto &range = table.ranges[slot];
+		const DirectPiece now{range.begin.load(std::memory_order_relaxed),
+			range.end.load(std::memory_order_relaxed),
+			range.fd.load(std::memory_order_relaxed),
+			range.offset.load(std::memory_order_relaxed)};
+		if (now.begin == now.end)
+			continue;
+		for (std::size_t index = 0; index < count; ++index)
+			if (!placed[index] && pieces[index] == now) {
+				placed[index] = true;
+				kept[slot] = true;
+				break;
+			}
+	}
+	for (std::size_t index = 0; index < count; ++index) {
+		if (placed[index])
+			continue;
+		std::size_t chosen = direct_range_count;
+		for (std::size_t slot = 0; slot < direct_range_count; ++slot) {
+			if (kept[slot])
+				continue;
+			const auto &range = table.ranges[slot];
+			const auto begin = range.begin.load(std::memory_order_relaxed);
+			const auto end = range.end.load(std::memory_order_relaxed);
+			if (begin != end && begin < pieces[index].end &&
+			    end > pieces[index].begin) {
+				chosen = slot;
+				break;
+			}
+			if (chosen == direct_range_count || begin == end)
+				chosen = slot;
+		}
+		kept[chosen] = true;
+		table.ranges[chosen].store(pieces[index].begin, pieces[index].end,
+			pieces[index].fd, pieces[index].offset);
+	}
+	for (std::size_t slot = 0; slot < direct_range_count; ++slot)
+		if (!kept[slot] &&
+		    table.ranges[slot].begin.load(std::memory_order_relaxed) !=
+			    table.ranges[slot].end.load(std::memory_order_relaxed))
+			table.ranges[slot].store(0, 0, -1, 0);
+}
+
+} // namespace
+
 void FrameAccounting::note_direct_map(const void *address,
 	std::uint64_t length, int fd, std::uint64_t offset) noexcept
 {
 	const auto first = reinterpret_cast<std::uintptr_t>(address);
 	if (length == 0 || first + length < first)
 		return;
-	auto &table = direct_table();
-	const std::lock_guard lock{table.mutex};
-	DirectRange *free_range = nullptr;
-	for (auto &range : table.ranges) {
-		const auto begin = range.begin.load(std::memory_order_relaxed);
-		const auto end = range.end.load(std::memory_order_relaxed);
-		if (begin == end) {
-			if (free_range == nullptr)
-				free_range = &range;
-		} else if (first < end && first + length > begin) {
-			/* A new mapping over an old one replaces it. */
-			range.store(first, first + length, fd, offset);
-			return;
-		}
-	}
-	if (free_range != nullptr)
-		free_range->store(first, first + length, fd, offset);
+	const DirectPiece piece{first, first + length, fd, offset};
+	reshape_direct(first, first + length, &piece);
 }
 
 void FrameAccounting::note_direct_unmap(const void *address,
 	std::uint64_t length) noexcept
 {
 	const auto first = reinterpret_cast<std::uintptr_t>(address);
-	auto &table = direct_table();
-	const std::lock_guard lock{table.mutex};
-	for (auto &range : table.ranges) {
-		const auto begin = range.begin.load(std::memory_order_relaxed);
-		const auto end = range.end.load(std::memory_order_relaxed);
-		if (begin != end && first < end && first + length > begin)
-			range.store(0, 0, -1, 0);
-	}
+	if (length == 0 || first + length < first)
+		return;
+	reshape_direct(first, first + length, nullptr);
 }
 
 bool FrameAccounting::resolve_direct(const void *address, int &fd,

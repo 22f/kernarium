@@ -164,6 +164,8 @@ public:
 		std::uint64_t publications;
 		/* Kernel writes whose buffer named no frame. */
 		std::uint64_t unresolved_kernel_writes;
+		/* Direct ranges the table had no slot for. */
+		std::uint64_t direct_range_drops;
 	};
 	[[nodiscard]] static Diagnostics diagnostics() noexcept;
 	static void note_nonempty_state_destruction() noexcept;

@@ -262,6 +262,10 @@ the frame. The memory layer (`memory/mmu/frame_accounting.hpp`) keeps, for each
 A write fill tags a store for publication when the frame has a holder other
 than the writer's own location, and a tagged store, a kernel write through the
 kernel's own alias of the frame, and `invalidate_code` publish at every holder.
+A kernel write publishes at the frame its user word names and at the frame the
+host's table of the kernel's direct ranges (32 of them, split on a partial unmap
+and counted when full) resolves its buffer to; a buffer the table does not
+resolve is counted and makes every generation read every translation again.
 
 Every change of a frame's locations happens under that frame's stripe lock, and
 nothing under it allocates, makes a record or takes another lock: the index
