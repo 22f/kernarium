@@ -15,8 +15,17 @@ final class Message {
     static final Pattern NUMBER = Pattern.compile("\\+?[0-9]{1,20}");
     /** A name of at most 11 letters, digits and spaces, as a network sends one. */
     static final Pattern NAME = Pattern.compile("[A-Za-z0-9 ]{1,11}");
-    /** Ten parts of 67 UTF-16 units each. */
+    /** The longest text, in UTF-16 units. */
     static final int MAXIMUM_UNITS = 670;
+    /**
+     * The most parts a text of {@link #MAXIMUM_UNITS} takes. A part holds 67
+     * units; DeliverPdu gives one back for the U+FEFF it puts before a part
+     * that starts with one, and a part ends a unit early rather than split a
+     * surrogate pair. So every part but the last takes at least 65 units of
+     * the text, and 670 units take at most 11 parts. The host counts the
+     * same (GuestSms.maximumParts).
+     */
+    static final int MAXIMUM_PARTS = 11;
 
     final String sender;
     final String body;

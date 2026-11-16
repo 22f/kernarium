@@ -32,6 +32,7 @@ final class DeliverPdu {
         if (body.isEmpty()) throw new IllegalArgumentException("no text");
         if (body.indexOf(REVERSED_MARK) >= 0) throw new IllegalArgumentException("U+FFFE cannot be sent");
         final List<String> parts = split(body);
+        if (parts.size() > Message.MAXIMUM_PARTS) throw new IllegalArgumentException("too many parts");
         final byte[][] pdus = new byte[parts.size()][];
         for (int i = 0; i < parts.size(); ++i) {
             pdus[i] = pdu(sender, parts.get(i), millis, zone,

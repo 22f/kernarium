@@ -208,6 +208,46 @@ public final class SmsServiceTest {
         return base64(sender) + "." + base64(body);
     }
 
+    /** The most parts: the bound in Message, reached by a text of surrogate pairs on every split. */
+    private static void partCount() {
+        same(11, Message.MAXIMUM_PARTS, "the stated maximum");
+        // Every part but the last takes at least 65 units of the text (a part that starts with a mark and
+        // ends before a surrogate pair), so 670 units cannot take a twelfth part, and 11 parts need more
+        // than the 10 * 65 units that the first ten parts take.
+        check((Message.MAXIMUM_PARTS - 1) * 65 + 1 <= Message.MAXIMUM_UNITS, "the maximum is reachable");
+        check(Message.MAXIMUM_PARTS * 65 + 1 > Message.MAXIMUM_UNITS, "the maximum cannot be exceeded");
+        // 66 units, then ten pairs that each begin a part and end the one before it a unit early.
+        final String pair = "" + HIGH + LOW;
+        final StringBuilder worst = new StringBuilder("a".repeat(66));
+        for (int part = 2; part <= 10; ++part) worst.append(pair).append("a".repeat(64));
+        worst.append(pair);
+        same(662, worst.length(), "the worst case");
+        same(11, DeliverPdu.split(worst.toString()).size(), "parts of the worst case");
+        roundTrip(worst.toString());
+        // The same with a mark first: its part takes 65 units of the text and 66 on the wire.
+        final StringBuilder marked = new StringBuilder(MARK + "a".repeat(64));
+        for (int part = 2; part <= 10; ++part) marked.append(pair).append("a".repeat(64));
+        marked.append(pair);
+        same(11, DeliverPdu.split(marked.toString()).size(), "parts of the worst case with a mark");
+        roundTrip(marked.toString());
+        // A mark at the start of every part: 66 units of the text each.
+        final String chain = (MARK + "a".repeat(65)).repeat(10) + "b";
+        same(11, DeliverPdu.split(chain).size(), "parts of marks");
+        roundTrip(chain);
+        // Nothing of the longest length takes more.
+        final String[] stuffing = {"a", "" + HIGH + LOW, "" + MARK};
+        for (String filler : stuffing) {
+            for (int offset = 0; offset < 4; ++offset) {
+                final StringBuilder text = new StringBuilder("c".repeat(offset));
+                while (text.length() < Message.MAXIMUM_UNITS) text.append(filler);
+                final String body = text.substring(0, Message.MAXIMUM_UNITS)
+                        .replaceAll("[\uD800-\uDBFF]$", "");
+                check(DeliverPdu.split(body).size() <= Message.MAXIMUM_PARTS, "parts of " + describe(body));
+                roundTrip(body);
+            }
+        }
+    }
+
     private static void random() {
         final Random random = new Random(0x5eed);
         final String[] pieces = {"a", "b", "\u00E9", "\u3042", "\u0000", "\n", "" + MARK, "" + MARK, "" + HIGH + LOW, "\uD83D\uDC4D"};
@@ -224,6 +264,7 @@ public final class SmsServiceTest {
         decoderContract();
         byteOrderMark();
         reversedMark();
+        partCount();
         random();
         if (failures != 0) {
             System.out.println(failures + " failure(s)");

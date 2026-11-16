@@ -497,7 +497,7 @@ The guest receives text messages from the host and sends none. `KernariumSms`
 (`overlay/sms/`) runs as the system user and serves one provider call,
 `content call --uri content://android.kernarium.sms --method deliver`, to the
 adb shell's uid alone. It encodes the message as 3GPP SMS-DELIVER PDUs (UCS-2,
-up to ten concatenated parts) and broadcasts `SMS_DELIVER` to the SMS role
+concatenated when the text needs more than one part) and broadcasts `SMS_DELIVER` to the SMS role
 holder and `SMS_RECEIVED` as the radio stack does, so Messaging stores and
 notifies and applications holding `RECEIVE_SMS` get it. The product carries
 Messaging and TelephonyProvider and declares

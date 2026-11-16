@@ -15,6 +15,16 @@ struct GuestSmsTests {
         #expect(GuestSms.sender("") == nil)
     }
 
+    /// The service states the same numbers once (Message.MAXIMUM_UNITS and MAXIMUM_PARTS), and its own test
+    /// builds the text that takes the most parts.
+    @Test func theLimitsAreTheServices() {
+        #expect(GuestSms.maximumUnits == 670)
+        #expect(GuestSms.maximumParts == 11)
+        // Every part but the last takes at least 65 units of the text.
+        #expect((GuestSms.maximumParts - 1) * 65 + 1 <= GuestSms.maximumUnits)
+        #expect(GuestSms.maximumParts * 65 + 1 > GuestSms.maximumUnits)
+    }
+
     @Test func refusalsNameWhatIsWrong() {
         #expect(GuestSms.refusal(sender: " ", text: "hi") == .noSender)
         #expect(GuestSms.refusal(sender: "a@b", text: "hi") == .badSender)

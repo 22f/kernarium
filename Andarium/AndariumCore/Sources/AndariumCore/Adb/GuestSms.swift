@@ -7,8 +7,14 @@ import Foundation
 /// shell and delivers it as the radio stack would; the rules here are that
 /// service's, so the guest refuses nothing the host lets through.
 public enum GuestSms {
-    /// Ten concatenated parts of 67 UTF-16 units.
+    /// The longest text, in UTF-16 units.
     public static let maximumUnits = 670
+    /// The most parts a text of `maximumUnits` takes. The service puts 67
+    /// units in a part, gives one back for the U+FEFF it adds before a part
+    /// that starts with one, and ends a part a unit early rather than split
+    /// a surrogate pair: every part but the last takes at least 65 units, so
+    /// 670 take at most 11. Message.MAXIMUM_PARTS is the service's own count.
+    public static let maximumParts = 11
     /// The authority of the guest's service.
     public static let authority = "android.kernarium.sms"
 
