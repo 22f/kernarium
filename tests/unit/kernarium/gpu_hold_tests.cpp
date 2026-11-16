@@ -165,6 +165,24 @@ void aHoldWithADeadlineWaitsForTheCameraOnlyWithinIt()
     require(bound.deadlines.empty() && bound.abandons == 1, "the bound's hold waits for nothing and ends a wait that is pending");
 }
 
+/* A guest with no camera (the desktop Linux guest) is held and released as any, with no wait. */
+void aGuestWithNoCameraIsHeldAndReleasedWithoutAWait()
+{
+    Runtime runtime {Timing {1000ms, 2000ms}};
+    const auto began = Clock::now();
+    require(runtime.gate.set(kernarium::gpu_hold::withCamera, nullptr, saysNothing) == 1, "the hold is in effect");
+    require(runtime.gpu.requestsHeld() && runtime.lifecycle.gpuHoldRequested(), "the gate is held and the hold is asked for");
+    require(since(began) < 500ms, "with no wait for a camera");
+    require(runtime.gate.set(kernarium::gpu_hold::atOnce, nullptr, saysNothing) == 1, "a hold at once of a held gate is in effect");
+    require(runtime.gate.set(kernarium::gpu_hold::released, nullptr, saysNothing) == 1, "the requests are given back");
+    require(!runtime.gpu.requestsHeld() && !runtime.lifecycle.gpuHoldRequested(), "the gate is open and nothing is asked for");
+    runtime.active = nullptr;
+    require(runtime.gate.set(kernarium::gpu_hold::withCamera, nullptr, saysNothing) == -1, "no guest runs: the hold waits for the next");
+    require(runtime.lifecycle.gpuHoldRequested(), "and is kept");
+    require(runtime.gate.set(kernarium::gpu_hold::released, nullptr, saysNothing) == -1 && !runtime.lifecycle.gpuHoldRequested(),
+            "and given back");
+}
+
 /* ---- The edge's own bound and the hold that waits for the camera. A job whose display stays on, a video that never
  * stops and one GPU request that never ends: the clock starts at the edge. */
 
@@ -347,6 +365,7 @@ int main(int argc, char** argv)
     if (only == nullptr || std::string(only) == #name) name()
     ROW(aDeadlineLeavesTheCameraWhatIsLeftAfterTheDrain);
     ROW(aHoldWithADeadlineWaitsForTheCameraOnlyWithinIt);
+    ROW(aGuestWithNoCameraIsHeldAndReleasedWithoutAWait);
     ROW(theBoundHoldsByItsTimeAndTheMainPathEndsInsideTheEdge);
     ROW(aMainPathThatCameLateWaitsForTheCameraOnlyWhatTheEdgeLeaves);
     ROW(aGuestThatRestartsWhileTheHoldWaitsForTheCameraBootsAfterTheRelease);
