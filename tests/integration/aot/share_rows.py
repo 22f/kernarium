@@ -30,9 +30,9 @@ MODES = ("fork", "copy", "cow", "cow-parent", "mprotect", "mprotect-write", "pre
 STUDY_MODES = ("reclaim",)
 # What a study eviction must show, in each of its rounds: pages the guest held
 # before it, the share of them it lost, and over the rounds the pages the
-# children afterwards must have hashed again (a quarter of the pages lost, and
-# four a round at the least; an engine that answers for a frame it gave back
-# hashes a tenth of that).
+# children afterwards must have hashed again (half the pages lost, and four a
+# round at the least; the engine hashes more pages than it lost, and one that
+# answers for a frame it gave back hashes a fifth of them).
 RECLAIM_ROUNDS = 3
 RECLAIM_MIN_CACHED = 16
 RECLAIM_MIN_HASHED = 4
@@ -195,7 +195,7 @@ def reclaim_check(record: list[str], hashed: int, shared: int, refused: int) -> 
         lost += before - after
     if refused:
         raise ShareFailure("a page of the read-only library was refused")
-    due = max(RECLAIM_MIN_HASHED * RECLAIM_ROUNDS, lost // 4)
+    due = max(RECLAIM_MIN_HASHED * RECLAIM_ROUNDS, lost // 2)
     if hashed < due:
         raise ShareFailure(f"{lost} pages of libz.so were evicted in {RECLAIM_ROUNDS} rounds and the "
                            f"children that ran it again hashed only {hashed} pages (at least "
