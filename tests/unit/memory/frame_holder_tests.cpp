@@ -588,6 +588,17 @@ void test_unknown_frame()
 		require(FrameAccounting::diagnostics().registration_failures == failures,
 			"the fallback was counted as a failure");
 		require(holders_of(kept, 1).size() == 1, "the fallback did not register");
+		/* The first holder's wait has not completed. A frame of unknown
+		 * writers carries no debt of its own, so every holder after the
+		 * first takes the fallback by itself and waits for what it must:
+		 * the unknown kind does not go away, and nothing is left owed to
+		 * one that registers meanwhile. */
+		require(map(732, base + 2 * page, backing, 1, 1, rx) == 0);
+		require(hold_frame(732, base + 2 * page).result ==
+			DARWIN_UML_STATIC_FRAME_GLOBAL,
+			"a later holder of a frame of unknown writers did not take the "
+			"fallback while the first one's wait was pending");
+		require(holders_of(kept, 1).size() == 2);
 		darwin_uml_static_vm_clear_code_debt(nullptr, 731, base,
 			first.hold.record_identity, first.hold.debt_sequence);
 		require(hold_frame(731, base).result == DARWIN_UML_STATIC_FRAME_GLOBAL,
@@ -595,6 +606,7 @@ void test_unknown_frame()
 		/* The unknown frame is a test's doing: its error is the one counted
 		 * above. */
 		require(unmap(731, base, 1) == 0);
+		require(unmap(732, base + 2 * page, 1) == 0);
 	});
 	domain.retire();
 	const auto now = FrameAccounting::diagnostics();
