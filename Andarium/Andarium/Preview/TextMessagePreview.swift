@@ -23,8 +23,13 @@ extension AppModel {
         case "sms-bar-near-limit":
             state.setText(String(repeating: "a", count: GuestSms.maximumUnits - 40))
         case "sms-bar-sending":
+            // The bar's message box takes the keyboard 300 ms after the bar rises,
+            // and the keyboard stays up through a send: the send begins after that.
             state.setText(code)
-            state.begin()
+            Task { @MainActor [weak state] in
+                try? await Task.sleep(for: .milliseconds(1500))
+                state?.begin()
+            }
         case "sms-bar-sent":
             send(.handedToAndroid(parts: 1))
         case "sms-bar-not-confirmed":

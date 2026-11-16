@@ -505,7 +505,8 @@ struct TextMessageTests {
     private func draw<Content: View>(
         _ view: Content, height: CGFloat = 900
     ) async throws -> (
-        labels: [String], inputs: [(placeholder: String?, type: UITextContentType?)], frames: [(label: String, y: CGFloat)]
+        labels: [String], inputs: [(placeholder: String?, type: UITextContentType?)], frames: [(label: String, y: CGFloat)],
+        traits: [(label: String, traits: UIAccessibilityTraits)]
     ) {
         let lease = try await HostWindow.take()
         defer { lease.give() }
@@ -532,7 +533,18 @@ struct TextMessageTests {
         }
         walk(hosting.view)
         let elements = SideKeysTouchTests.elements(in: hosting.view)
-        return (elements.map(\.label), inputs, elements.map { ($0.label, $0.frame.minY) })
+        // The same walk, for the traits of each labelled element.
+        var traits: [(label: String, traits: UIAccessibilityTraits)] = []
+        var seen = Set<ObjectIdentifier>()
+        func walkTraits(_ node: NSObject, depth: Int) {
+            guard depth < 64, seen.insert(ObjectIdentifier(node)).inserted else { return }
+            if let label = node.accessibilityLabel, !label.isEmpty { traits.append((label, node.accessibilityTraits)) }
+            var children = (node.accessibilityElements ?? []).compactMap { $0 as? NSObject }
+            if let view = node as? UIView { children += view.subviews }
+            for child in children { walkTraits(child, depth: depth + 1) }
+        }
+        walkTraits(hosting.view, depth: 0)
+        return (elements.map(\.label), inputs, elements.map { ($0.label, $0.frame.minY) }, traits)
     }
 
     @Test func onlyTheMessageBoxHasTheOneTimeCodeContentType() async throws {
@@ -585,22 +597,56 @@ struct TextMessageTests {
         #expect(box is UITextView, "the keyboard is on the sender, not the message box")
         (box as? UIKeyInput)?.insertText("7")
         #expect(state.text == "123456")
+        // And the field shows what the model holds: a refused edit does not stay on the screen.
+        try await Task.sleep(for: .milliseconds(300))
+        #expect((box as? UITextView)?.text == "123456", "the box shows \((box as? UITextView)?.text ?? "nothing")")
         // Android answers: the keys are still there, and the message box has them.
         rig.answers.release(.handedToAndroid(parts: 1))
         #expect(await eventually { state.progress == .sent })
         #expect(await eventually { focusedInput(in: hosting.view) is UITextView })
     }
 
+    /// The initial VoiceOver focus (the title, 700 ms after the bar rises) cannot be
+    /// tested without VoiceOver (docs/testing.md); what the focus lands on can: the
+    /// title is a heading and the first labelled element of the bar, and the caption
+    /// follows it. Whether the tile's symbol is an element of its own is not seen
+    /// here: an image with no label does not appear in this walk.
     @Test func theBarsTitleIsItsHeadingAndTheCaptionFollowsIt() async throws {
         let rig = try rig()
         defer { rig.cleanUp() }
         rig.model.openTextMessage()
         let drawn = try await draw(TextMessageBar().environment(rig.model))
         let title = try #require(drawn.labels.firstIndex(of: SmsMessages.name))
+        #expect(title == 0, "an element comes before the title: \(drawn.labels)")
+        let traits = try #require(drawn.traits.first { $0.label == SmsMessages.name })
+        #expect(traits.traits.contains(.header), "the title is not a heading")
         // The title, then the line under it, then Close, then the fields.
         #expect(drawn.labels.contains(SmsMessages.caption))
         #expect(drawn.labels.firstIndex(of: SmsMessages.caption) == title + 1, "\(drawn.labels)")
         #expect(drawn.labels.firstIndex(of: SmsMessages.close).map { $0 > title } == true)
+    }
+
+    /// Send is where it was while the message goes, disabled and labelled Sending: the
+    /// element VoiceOver focus is on stays in the tree.
+    @Test func sendStaysInPlaceDisabledAndSayingSendingWhileAMessageGoes() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        rig.model.openTextMessage()
+        rig.model.setTextMessageText("123456")
+        let idle = try await draw(TextMessageBar().environment(rig.model))
+        let before = try #require(idle.traits.first { $0.label == SmsMessages.send })
+        #expect(before.traits.contains(.button) && !before.traits.contains(.notEnabled))
+        let beforeY = try #require(idle.frames.first { $0.label == SmsMessages.send }?.y)
+        rig.model.sendTextMessage()
+        #expect(await eventually { rig.answers.pending == 1 })
+        let during = try await draw(TextMessageBar().environment(rig.model))
+        #expect(!during.labels.contains(SmsMessages.send), "Send went while the message goes")
+        let sending = try #require(during.traits.first { $0.label == SmsMessages.sending })
+        #expect(sending.traits.contains(.button) && sending.traits.contains(.notEnabled))
+        let duringY = try #require(during.frames.first { $0.label == SmsMessages.sending }?.y)
+        #expect(abs(duringY - beforeY) < 1, "Send moved from \(beforeY) to \(duringY)")
+        rig.answers.release(.handedToAndroid(parts: 1))
+        #expect(await eventually { rig.state.progress == .sent })
     }
 
     @Test func settingsHasTheRowOnlyWhereTheApplicationCarriesTextMessages() async throws {

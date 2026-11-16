@@ -67,18 +67,40 @@ final class TextMessageState {
     private(set) var ended = false
     @ObservationIgnored var sendTask: Task<Void, Never>?
 
+    /// What a field took that the model refused (a character typed while a
+    /// message is being sent), until the next turn of the main loop. A field
+    /// that took a character the model refused would go on showing it: the
+    /// field shows this for that one turn and then the model's own text, which
+    /// is a change for it to redraw.
+    private(set) var refusedSender: String?
+    private(set) var refusedText: String?
+
+    /// What the sender and the message box show.
+    var shownSender: String { refusedSender ?? sender }
+    var shownText: String { refusedText ?? text }
+
     /// A field writes its text back as it is when it is laid out or focused:
     /// only a change is typing. While a message is being sent the fields
     /// refuse edits, so the text that goes is the text that stays until
     /// Android has answered; they keep the keyboard's focus (the bar's view).
     func setSender(_ typed: String) {
-        guard typed != sender, progress != .sending else { return }
+        guard typed != sender, typed != refusedSender else { return }
+        guard progress != .sending else {
+            refusedSender = typed
+            Task { @MainActor [weak self] in self?.refusedSender = nil }
+            return
+        }
         sender = typed
         edited()
     }
 
     func setText(_ typed: String) {
-        guard typed != text, progress != .sending else { return }
+        guard typed != text, typed != refusedText else { return }
+        guard progress != .sending else {
+            refusedText = typed
+            Task { @MainActor [weak self] in self?.refusedText = nil }
+            return
+        }
         text = typed
         edited()
     }

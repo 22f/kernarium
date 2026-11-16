@@ -69,7 +69,7 @@ private struct TextMessageBarHeader: View {
                     .accessibilityHidden(true)
                 // No content type: iOS would offer the person's own number.
                 TextField(SmsMessages.senderPlaceholder, text: Binding(
-                    get: { state.sender }, set: { model.setTextMessageSender($0) }))
+                    get: { state.shownSender }, set: { model.setTextMessageSender($0) }))
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .submitLabel(.next)
@@ -109,7 +109,8 @@ struct TextMessageBar: View {
                 // The one-time code type lets iOS offer a code that has just
                 // come to the person's phone.
                 TextField(SmsMessages.name, text: Binding(
-                    get: { state.text }, set: { model.setTextMessageText($0) }), axis: .vertical)
+                    get: { state.shownText }, set: { model.setTextMessageText($0) }),
+                    axis: .vertical)
                     .lineLimit(1...4)
                     .textContentType(.oneTimeCode)
                     .focused($focus, equals: .text)
@@ -119,27 +120,28 @@ struct TextMessageBar: View {
                     .background(Color(.tertiarySystemFill), in: .rect(cornerRadius: 20))
                     .accessibilityLabel(SmsMessages.message)
                     .accessibilityIdentifier("text-message-text")
-                Group {
-                    if sending {
-                        ProgressView()
-                            .frame(width: 44, height: 44)
-                            .accessibilityLabel(SmsMessages.sending)
-                    } else {
-                        Button {
-                            model.sendTextMessage()
-                        } label: {
+                // Send stays where it is while the message goes, disabled and
+                // labelled "Sending…", so VoiceOver focus is kept on it and the
+                // result follows on the same element.
+                Button {
+                    model.sendTextMessage()
+                } label: {
+                    Group {
+                        if sending {
+                            ProgressView()
+                        } else {
                             Image(systemName: "arrow.up")
                                 .font(.body.weight(.semibold))
-                                .frame(width: 30, height: 30)
                         }
-                        .buttonStyle(.glassProminent)
-                        .buttonBorderShape(.circle)
-                        .disabled(!model.canSendTextMessage)
-                        .keyboardShortcut(.return, modifiers: .command)
-                        .accessibilityLabel(SmsMessages.send)
-                        .accessibilityIdentifier("text-message-send")
                     }
+                    .frame(width: 30, height: 30)
                 }
+                .buttonStyle(.glassProminent)
+                .buttonBorderShape(.circle)
+                .disabled(sending || !model.canSendTextMessage)
+                .keyboardShortcut(.return, modifiers: .command)
+                .accessibilityLabel(sending ? SmsMessages.sending : SmsMessages.send)
+                .accessibilityIdentifier("text-message-send")
             }
         }
         .padding(12)
