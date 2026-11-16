@@ -46,16 +46,32 @@ set(_uml_static_mmu_sources
     mmu/execution_gate.cpp
     mmu/mapped_backing.cpp)
 
-add_library(uml_static_mmu OBJECT ${_uml_static_mmu_sources})
-uml_declare_architecture_target(uml_static_mmu memory)
-target_link_libraries(uml_static_mmu PRIVATE UML::BridgeAbi UML::MemoryContract)
-target_include_directories(uml_static_mmu PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/mmu)
-# A diagnostics build of the AOT runtime audits the executable-mapping counts
-# of a real guest run (darwin/memory/count_audit.hpp); no other build has it.
-target_compile_definitions(uml_static_mmu PRIVATE
-    UML_MEMORY_ALLOCATION_TESTING=0
-    UML_MEMORY_COUNT_AUDIT=$<BOOL:${UML_AOT_DIAGNOSTICS}>)
+# The static MMU, compiled twice at most. The compilation every product links
+# carries no count audit in any configuration. A diagnostics build of the AOT
+# runtime reports the executable-mapping counts of a real guest run
+# (darwin/memory/count_audit.hpp) and links a second compilation of the same
+# sources with the audit instead; UML_STATIC_MMU_TARGET names the one a
+# composition links, as UML_AOT_RUNTIME_TARGET does for the runtime. The audit
+# exists only where the diagnostics runtime that reads it is built.
+function(_uml_add_static_mmu TARGET AUDIT)
+    add_library(${TARGET} OBJECT ${_uml_static_mmu_sources})
+    uml_declare_architecture_target(${TARGET} memory)
+    target_link_libraries(${TARGET} PRIVATE UML::BridgeAbi UML::MemoryContract)
+    target_include_directories(${TARGET} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/mmu)
+    target_compile_definitions(${TARGET} PRIVATE
+        UML_MEMORY_ALLOCATION_TESTING=0
+        UML_MEMORY_COUNT_AUDIT=${AUDIT})
+endfunction()
+
+_uml_add_static_mmu(uml_static_mmu 0)
+if(UML_AOT_DIAGNOSTICS AND UML_AOT_IMAGE)
+    _uml_add_static_mmu(uml_static_mmu_audited 1)
+    set_property(GLOBAL PROPERTY UML_STATIC_MMU_TARGET uml_static_mmu_audited)
+else()
+    set_property(GLOBAL PROPERTY UML_STATIC_MMU_TARGET uml_static_mmu)
+endif()
+get_property(_uml_static_mmu_target GLOBAL PROPERTY UML_STATIC_MMU_TARGET)
 
 add_library(uml_static_guest_memory OBJECT static_guest_memory.cpp)
 uml_declare_architecture_target(uml_static_guest_memory memory)
@@ -111,7 +127,7 @@ target_link_libraries(uml_memory_component INTERFACE
     UML::MemorySharedBacking)
 target_sources(uml_memory_component INTERFACE
     $<TARGET_OBJECTS:uml_memory_shared_backing>
-    $<TARGET_OBJECTS:uml_static_mmu>
+    $<TARGET_OBJECTS:${_uml_static_mmu_target}>
     $<TARGET_OBJECTS:uml_static_guest_memory>
     $<TARGET_OBJECTS:uml_memory_vm_bridge>)
 if(TARGET uml_native_mmu)

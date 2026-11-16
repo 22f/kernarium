@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # This family manifest is included by the ARM64 unit-test directory.
+# The static MMU a composition links: the audited compilation where the AOT
+# runtime is the diagnostics one (darwin/memory/CMakeLists.txt).
+get_property(_uml_static_mmu GLOBAL PROPERTY UML_STATIC_MMU_TARGET)
     # Compose ordinary tests from the production engine targets. Focused JIT
     # diagnostic tests substitute the counter-enabled executor variant;
     # common conformance stays on the ordinary runtime path.
@@ -50,7 +53,7 @@
         $<TARGET_OBJECTS:uml_arm64_aarch32_decoder>
         $<TARGET_OBJECTS:uml_arm64_aarch32_semantics>
         $<TARGET_OBJECTS:uml_arm64_execution_helpers>
-        $<TARGET_OBJECTS:uml_static_mmu>
+        $<TARGET_OBJECTS:${_uml_static_mmu}>
         ${UML_STATIC_RUNTIME_TEST_OBJECTS})
     set(UML_ARM64_RUNTIME_DIAGNOSTIC_TEST_OBJECTS
         $<TARGET_OBJECTS:uml_runtime_guest_selector>
@@ -58,14 +61,14 @@
         $<TARGET_OBJECTS:uml_arm64_aarch32_decoder>
         $<TARGET_OBJECTS:uml_arm64_aarch32_semantics>
         $<TARGET_OBJECTS:uml_arm64_execution_helpers>
-        $<TARGET_OBJECTS:uml_static_mmu>
+        $<TARGET_OBJECTS:${_uml_static_mmu}>
         ${UML_STATIC_RUNTIME_DIAGNOSTIC_TEST_OBJECTS})
     set(UML_ARM64_STATIC_TEST_OBJECTS
         $<TARGET_OBJECTS:uml_arm64_gadgets>
         $<TARGET_OBJECTS:uml_arm64_aarch32_decoder>
         $<TARGET_OBJECTS:uml_arm64_aarch32_semantics>
         $<TARGET_OBJECTS:uml_arm64_execution_helpers>
-        $<TARGET_OBJECTS:uml_static_mmu>
+        $<TARGET_OBJECTS:${_uml_static_mmu}>
         ${UML_STATIC_RUNTIME_TEST_OBJECTS})
     # The tests that read the AArch32 library-exit counters, with the
     # semantic library variant that has them in place of the library.
@@ -468,7 +471,7 @@
     # address space. The static MMU and gadget objects precede the runtime's,
     # unlike UML_ARM64_STATIC_TEST_OBJECTS.
     set(UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS
-        $<TARGET_OBJECTS:uml_static_mmu>
+        $<TARGET_OBJECTS:${_uml_static_mmu}>
         $<TARGET_OBJECTS:uml_arm64_gadgets>
         $<TARGET_OBJECTS:uml_arm64_aarch32_decoder>
         $<TARGET_OBJECTS:uml_arm64_aarch32_semantics>

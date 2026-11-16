@@ -607,11 +607,14 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   dispatcher boundary.
 - Diagnostics: the CMake option `UML_AOT_DIAGNOSTICS` (off) composes a second
   compilation of the runtime with counters, a report file written by a thread
-  of its own, and the test switches. The product target holds none of it in
-  any configuration (`arm64-aot-runtime-product` checks the object;
+  of its own, and the test switches, and links a second compilation of the
+  static MMU with the executable-mapping count audit the report reads
+  (`UML_STATIC_MMU_TARGET` names the one a composition links). The product
+  targets hold none of it in any configuration (`arm64-aot-runtime-product`
+  and `memory-product-carries-no-count-audit` check the objects;
   `scripts/check-no-aot-diagnostics.py` fails the XCFramework and Kernarium
-  packaging on a binary that linked the diagnostics compilation), and in no
-  build does a vCPU thread do file I/O or allocate while it is inside
+  packaging on a binary that linked a diagnostics compilation of either), and
+  in no build does a vCPU thread do file I/O or allocate while it is inside
   rewritten code.
 
 Build and tests: `tools/aot/README.md`.

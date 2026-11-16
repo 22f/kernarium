@@ -790,7 +790,11 @@ blocker in every one of them.
   `arm64-aot-tools` checks the generator's encoders, classifier, byte census
   and fixture layout, including which forms are left to the engine.
 - `arm64-aot-runtime-product` checks that the product compilation of the AOT
-  runtime holds none of the diagnostics or test switches.
+  runtime holds none of the diagnostics or test switches, and
+  `memory-product-carries-no-count-audit` that the product compilation of the
+  static MMU holds none of the count audit a diagnostics build links in a
+  second compilation (`memory-audit-compilation-fails-packaging` shows the
+  packaging check refuses that one).
 - `arm64-aot-guest-runner` drives the guest runner of the next test against
   scripted guests: a complete pair of arms passes, and every failed or
   incomplete one (an exit status, a missing or empty workload row, a probe

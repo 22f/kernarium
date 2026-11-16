@@ -61,6 +61,31 @@ uml_add_tooling_test(
     LABELS audit;package
     TIMEOUT 60)
 
+# The memory layer's executable-mapping count audit (darwin/memory/
+# count_audit.hpp) belongs to the diagnostics compilation of the AOT runtime.
+# The production compilation of the static MMU holds none of it in any
+# configuration, and the packaging check refuses the compilation that does.
+if(TARGET uml_static_mmu)
+    uml_add_tooling_test(
+        NAME memory-product-carries-no-count-audit
+        COMMAND ${Python3_EXECUTABLE} -B
+            ${PROJECT_SOURCE_DIR}/scripts/check-no-aot-diagnostics.py
+            $<TARGET_PROPERTY:uml_static_mmu,BINARY_DIR>/CMakeFiles/uml_static_mmu.dir
+        LABELS audit;package
+        TIMEOUT 60)
+endif()
+if(TARGET uml_static_mmu_audited)
+    uml_add_tooling_test(
+        NAME memory-audit-compilation-fails-packaging
+        COMMAND ${Python3_EXECUTABLE} -B
+            ${PROJECT_SOURCE_DIR}/scripts/check-no-aot-diagnostics.py
+            $<TARGET_PROPERTY:uml_static_mmu_audited,BINARY_DIR>/CMakeFiles/uml_static_mmu_audited.dir
+        LABELS audit;package
+        TIMEOUT 60)
+    set_tests_properties(memory-audit-compilation-fails-packaging
+        PROPERTIES WILL_FAIL TRUE)
+endif()
+
 # The software renderer is the Simulator's alone. The Kernarium framework
 # packaging runs this check on every device slice, and requires it in the
 # Simulator's GL provider; the fixtures show it finds either Gallium screen as a

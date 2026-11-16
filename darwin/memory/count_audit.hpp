@@ -4,8 +4,11 @@
 #include <array>
 #include <cstdint>
 
-/* Set by the build for a diagnostics build of the AOT runtime; the memory
- * layer's test variant has it as well. */
+/* Set by the build for the memory layer's audited compilation, which only a
+ * diagnostics build of the AOT runtime links (darwin/memory/CMakeLists.txt);
+ * the memory layer's test variant has it as well. The compilation every
+ * product links never does, and the packaging check refuses a binary that
+ * carries the audit. */
 #ifndef UML_MEMORY_COUNT_AUDIT
 #if defined(UML_MEMORY_ALLOCATION_TESTING) && UML_MEMORY_ALLOCATION_TESTING
 #define UML_MEMORY_COUNT_AUDIT 1

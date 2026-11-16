@@ -19,6 +19,19 @@ AR = b"!<arch>\n" + bytes(60)
 CLEAN = b"_uml_aot_enter _ZN3uml3cpu5arm643aot5enterE" + bytes(16)
 SYMBOL = b"__ZN3uml3cpu5arm643aot11diagnostics5resetEv" + bytes(16)
 STRING = b"DARWIN_UML_AOT_REPORT\0" + bytes(16)
+# The memory layer's compilation with the executable-mapping count audit
+# (darwin/memory/count_audit.hpp): its three entry points, and the string it
+# keeps once the symbols are stripped. The production memory layer holds
+# neither, and the checker reads the audit as a diagnostics build whatever
+# else the product linked.
+AUDIT_SYMBOLS = (
+    b"__ZN3uml6memory22audit_executable_countsEv",
+    b"__ZN3uml6memory14count_anomaliesEv",
+    b"__ZN3uml6memory18note_count_anomalyEv",
+)
+AUDIT_STRING = b"UML_MEMORY_COUNT_AUDIT_BUILD\0" + bytes(16)
+# The memory layer's own names the audit does not own.
+MEMORY = b"__ZN3uml6memory18latch_sharing_offEv" + bytes(16)
 # The gadget engine's own diagnostics namespace is not the AOT's.
 GADGETS = b"__ZN3uml3cpu5arm647gadgets11diagnostics5resetEv" + bytes(16)
 
@@ -49,6 +62,12 @@ def main() -> int:
         symbol.write_bytes(MACHO + SYMBOL)
         gadgets = root / "gadgets.o"
         gadgets.write_bytes(MACHO + GADGETS)
+        memory = root / "memory.o"
+        memory.write_bytes(MACHO + MEMORY)
+        audit_archive = root / "libaudit.a"
+        audit_archive.write_bytes(AR + CLEAN + AUDIT_SYMBOLS[0] + bytes(16))
+        audit_stripped = root / "audit-stripped.o"
+        audit_stripped.write_bytes(MACHO + AUDIT_STRING)
         stripped = root / "stripped.o"
         stripped.write_bytes(MACHO + STRING)
         archive = root / "libplanted.a"
@@ -63,6 +82,11 @@ def main() -> int:
         empty.mkdir()
         (empty / "notes.txt").write_bytes(STRING)
 
+        audit_objects = []
+        for number, symbol_text in enumerate(AUDIT_SYMBOLS):
+            audit_object = root / f"audit-{number}.o"
+            audit_object.write_bytes(MACHO + symbol_text + bytes(16))
+            audit_objects.append(audit_object)
         cases = (
             ("clean object", [clean], 0, "no AOT diagnostics build in 1"),
             ("gadget diagnostics", [gadgets], 0,
@@ -72,6 +96,15 @@ def main() -> int:
             ("archive member", [archive], 1, "3aot11diagnostics"),
             ("nested framework", [root / "Fixture.app"], 1,
              "DARWIN_UML_AOT_REPORT"),
+            ("memory layer without the audit", [memory], 0,
+             "no AOT diagnostics build in 1"),
+            *(
+                (f"audit entry point {number}", [audit_object], 1,
+                 "count audit")
+                for number, audit_object in enumerate(audit_objects)
+            ),
+            ("audit in an archive member", [audit_archive], 1, "count audit"),
+            ("audit once stripped", [audit_stripped], 1, "count audit"),
             ("bundle without binaries", [empty], 1, "no Mach-O binary"),
             ("missing path", [root / "absent"], 1, "does not exist"),
         )
@@ -85,7 +118,7 @@ def main() -> int:
 
     if failures:
         raise SystemExit("\n".join(failures))
-    print("the AOT packaging check accepted 2 and rejected 6 products")
+    print("the AOT packaging check accepted 3 and rejected 11 products")
     return 0
 
 

@@ -2379,6 +2379,11 @@ std::size_t audit_executable_counts() noexcept
 
 #if UML_MEMORY_COUNT_AUDIT
 namespace {
+/* What scripts/check-no-aot-diagnostics.py finds in a linked binary whose
+ * symbols were stripped: only the compilation that has the audit holds it. */
+[[gnu::used]] const char count_audit_build_marker[] =
+	"UML_MEMORY_COUNT_AUDIT_BUILD";
+
 std::atomic<std::uint64_t> &anomaly_total() noexcept
 {
 	static std::atomic<std::uint64_t> total{};

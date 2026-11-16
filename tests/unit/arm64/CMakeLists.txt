@@ -27,8 +27,9 @@ function(uml_add_arm64_unit_test STEM)
         "NAME" "SOURCES;OBJECTS;LABELS;ARGS")
     set(_target uml_arm64_${STEM}_tests)
     if(NOT DEFINED _arm64_test_OBJECTS AND NOT _arm64_test_NO_OBJECTS)
+        get_property(_uml_static_mmu GLOBAL PROPERTY UML_STATIC_MMU_TARGET)
         set(_arm64_test_OBJECTS
-            $<TARGET_OBJECTS:uml_static_mmu>
+            $<TARGET_OBJECTS:${_uml_static_mmu}>
             $<TARGET_OBJECTS:uml_arm64_gadgets>
             $<TARGET_OBJECTS:uml_arm64_aarch32_decoder>
             $<TARGET_OBJECTS:uml_arm64_aarch32_semantics>
