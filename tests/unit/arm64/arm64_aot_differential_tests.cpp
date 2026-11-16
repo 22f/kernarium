@@ -1563,6 +1563,18 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 			b.stats.poisoned == 0);
 		/* Nothing was filed under another epoch: no hash is blamed on one. */
 		require(a.stats.epoch_rehashes == 0 && b.stats.epoch_rehashes == 0);
+		/* A verification reads the page's stamp once to admit the page,
+		 * which is also the stamp it holds before the fetch, and once more
+		 * after a hash that matched: the page that was answered cost one
+		 * query, the page that was hashed two (a build that shares
+		 * nothing reads no second stamp). */
+		if (AOT_TEST_SHARED_VERDICTS != 0) {
+			require(a.stats.stamp_queries == 2 * a.stats.verifications);
+			require(b.stats.stamp_queries == b.stats.shared_hits);
+		} else {
+			require(a.stats.stamp_queries == a.stats.verifications &&
+				b.stats.stamp_queries == b.stats.verifications);
+		}
 		/* The memory layer's count of this frame's executable mappings is
 		 * what the two guests' words say, as a guest run audits it. */
 		const auto audit = ::uml::memory::audit_executable_counts();

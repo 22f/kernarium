@@ -218,7 +218,7 @@ std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
 	refill_failures{0}, cross_hits{0}, cross_misses{0}, max_retired{0},
 	verify_nanos{0}, step_nanos{0}, steps_run{0}, code_bumps{0},
 	history_queries{0}, mops_slow{0}, mops_fault{0}, mops_illegal{0},
-	shared_hits{0}, mutable_pages{0}, epoch_rehashes{0};
+	shared_hits{0}, mutable_pages{0}, epoch_rehashes{0}, stamp_queries{0};
 std::array<std::atomic<std::uint64_t>, 5> refusals{};
 /* The guest addresses AOT code stepped at most: library << 40 | offset. */
 constexpr std::size_t step_slots = 32768;
@@ -495,13 +495,14 @@ void write_report() noexcept
 		"max_retired %llu verify_nanos %llu step_nanos %llu steps_run %llu "
 		"code_bumps %llu history_queries %llu mops_slow %llu mops_fault %llu "
 		"mops_illegal %llu shared_hits %llu mutable_pages %llu "
-		"epoch_rehashes %llu\n",
+		"epoch_rehashes %llu stamp_queries %llu\n",
 		get(counters::max_retired), get(counters::verify_nanos),
 		get(counters::step_nanos), get(counters::steps_run),
 		get(counters::code_bumps), get(counters::history_queries),
 		get(counters::mops_slow), get(counters::mops_fault),
 		get(counters::mops_illegal), get(counters::shared_hits),
-		get(counters::mutable_pages), get(counters::epoch_rehashes));
+		get(counters::mutable_pages), get(counters::epoch_rehashes),
+		get(counters::stamp_queries));
 	std::fprintf(file, "stack_free %llu stack_size %llu stack_kind %llu "
 		"stack_task_bytes %llu stack_engine_free %llu stack_growth %llu\n",
 		get(counters::stack_min_free), get(counters::stack_size_at_min),
@@ -841,6 +842,7 @@ Stats stats() noexcept
 	result.shared_hits = get(counters::shared_hits);
 	result.mutable_pages = get(counters::mutable_pages);
 	result.epoch_rehashes = get(counters::epoch_rehashes);
+	result.stamp_queries = get(counters::stamp_queries);
 	result.stack_min_free = get(counters::stack_min_free);
 	result.stack_size_at_min = get(counters::stack_size_at_min);
 	result.stack_kind_at_min = get(counters::stack_kind_at_min);
@@ -863,7 +865,7 @@ void reset_stats() noexcept
 		     &counters::history_queries, &counters::mops_slow,
 		     &counters::mops_fault, &counters::mops_illegal,
 		     &counters::shared_hits, &counters::mutable_pages,
-		     &counters::epoch_rehashes})
+		     &counters::epoch_rehashes, &counters::stamp_queries})
 		counter->store(0, std::memory_order_relaxed);
 	for (auto *counter : {&counters::stack_min_free, &counters::stack_engine_free})
 		counter->store(~std::uint64_t{0}, std::memory_order_relaxed);
@@ -922,31 +924,33 @@ Binder::Verdict Binder::verify_page(
 	const auto library = directory().library(instance.library);
 	const auto address =
 		instance.bias + library.table_base + index * page_size;
-	/* Rewritten code runs only for a page whose mapping carries the kernel's
-	 * immutable fact. A page without it can be rewritten through another
-	 * mapping of the frame with no publication this address space sees, and
-	 * rewritten code would go on running the bytes it was hashed as. A page
-	 * that cannot be stamped is one nothing can be fetched from either. */
-	{
-		::uml::memory::ExtendedCodePageStamp admission;
-		if (!memory.extended_code_page_stamp(address, nullptr, admission))
-			return Verdict::unreadable;
-		if (!admission.immutable) {
-			UML_AOT_COUNT(mutable_pages, 1);
-			UML_AOT_COUNT_LIBRARY(library_mutable_pages, instance.library);
-			return Verdict::mutable_page;
-		}
-	}
 	/* The bytes fetched below are the frame the stamps name only while the
 	 * address space's mappings stand still, which the execution gate this
 	 * runs inside keeps true; the sequence is read to check it, not to rely
-	 * on it. */
+	 * on it. It is read before the first stamp, as the stamps are before the
+	 * fetch. */
 	const auto mapping_sequence = [context]() noexcept -> std::uint64_t {
 		return context == nullptr ? 0 :
 			darwin_uml_static_vm_execution_context_sequences(context)
 				.mapping_changes;
 	};
 	const auto sequence_at_start = mapping_sequence();
+	/* Rewritten code runs only for a page whose mapping carries the kernel's
+	 * immutable fact. A page without it can be rewritten through another
+	 * mapping of the frame with no publication this address space sees, and
+	 * rewritten code would go on running the bytes it was hashed as. A page
+	 * that cannot be stamped is one nothing can be fetched from either. This
+	 * stamp is also the one the verification holds before the fetch. */
+	::uml::memory::ExtendedCodePageStamp admission;
+	UML_AOT_COUNT(stamp_queries, 1);
+	if (!memory.extended_code_page_stamp(address, nullptr, admission))
+		return Verdict::unreadable;
+	if (!admission.immutable) {
+		UML_AOT_COUNT(mutable_pages, 1);
+		UML_AOT_COUNT_LIBRARY(library_mutable_pages, instance.library);
+		return Verdict::mutable_page;
+	}
+	[[maybe_unused]] bool admission_unused = true;
 	const auto outcome = verify_through_table(g_verdicts,
 		[&](std::uint64_t at, PageStamp &stamp) noexcept {
 #if !UML_AOT_SHARED_VERDICTS
@@ -954,7 +958,18 @@ Binder::Verdict Binder::verify_page(
 			(void)stamp;
 			return false;
 #else
+			/* The first stamp asked for is the one that admitted the page,
+			 * read after the sequence above and before any fetch, which is
+			 * where the stamp before the fetch is read; the second, after a
+			 * hash that matched, is read afresh. */
+			if (admission_unused && at == address) {
+				admission_unused = false;
+				stamp = {admission.stamp.identity, admission.epoch,
+					admission.shareable};
+				return true;
+			}
 			::uml::memory::ExtendedCodePageStamp seen;
+			UML_AOT_COUNT(stamp_queries, 1);
 			if (!memory.extended_code_page_stamp(at, nullptr, seen))
 				return false;
 			stamp = {seen.stamp.identity, seen.epoch, seen.shareable};

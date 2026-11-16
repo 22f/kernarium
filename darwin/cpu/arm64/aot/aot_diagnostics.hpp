@@ -68,6 +68,9 @@ struct Stats final {
 	 * under an older epoch. A frame given back to the page it held, or one
 	 * whose code was published, shows here. */
 	std::uint64_t epoch_rehashes{};
+	/* Queries of a page's stamp that verifying pages made: one to admit the
+	 * page, and a second after a hash that matched. */
+	std::uint64_t stamp_queries{};
 	/* The stack the runtime measured (see the report's stack_ fields): the
 	 * least left at a sample site (all ones: none sampled), the size of the
 	 * stack that was on, its kind (0 task, 1 host, 2 signal), the task stack
