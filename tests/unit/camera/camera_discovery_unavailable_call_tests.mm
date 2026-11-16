@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// A discovery that raises an Objective-C exception (an iPad app on a Mac meets one where the platform's own call is
-// unavailable): the host presents no cameras, says so on one line, and the process lives, where a C++ handler would not
-// have seen the exception and the process would have ended. The platform's raise is stood in by a replacement of the
-// discovery session's device list for the length of the call; no camera is opened.
+// A platform call a host lacks, in camera discovery (an iPad app on a Mac or on a Vision Pro meets one: the rotation
+// coordinator's angles are unavailable there). An object that does not take the call is not sent it, and one that does
+// states its angles in the order asked (where an iPhone or an iPad takes it nothing changes). A discovery that raises
+// an Objective-C exception anyway presents no cameras, says so on one line, and the process lives, where a C++ handler
+// would not have seen the exception and the process would have ended. The platform's raise is stood in by a replacement
+// of the discovery session's device list for the length of the call; no camera is opened.
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 
 #include "camera.hpp"
 #include "require.hpp"
+#include "rotation_angles.h"
 
+#include <array>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -16,6 +20,25 @@
 
 using namespace uml::platform;
 using uml::testing::require;
+
+// What a coordinator that takes the call states: a number of its own for each orientation asked, so that the order
+// the angles come back in is the order of the question.
+@interface TakesTheCall : NSObject
+- (double)videoRotationAngleRelativeToDeviceOrientation:(NSInteger)orientation;
+@end
+@implementation TakesTheCall
+- (double)videoRotationAngleRelativeToDeviceOrientation:(NSInteger)orientation
+{
+    return double(orientation) * 90.0 + 0.5;
+}
+@end
+
+// A coordinator that does not (the class an iPad app on a Mac has): sending it the selector raises, which ends this
+// test, so a pass is also a proof that the selector was never sent.
+@interface LacksTheCall : NSObject
+@end
+@implementation LacksTheCall
+@end
 
 namespace {
 
@@ -80,10 +103,26 @@ void aDiscoveryThatRaisesPresentsNoCameras()
     require(camera != nullptr && quiet.find("discovery raised") == std::string::npos, "the host's own discovery is untouched");
 }
 
+void aCoordinatorStatesItsAnglesWhereItTakesTheCallAndNowhereElse()
+{
+    const std::array<NSInteger, 4> asked {1, 2, 3, 4};
+    const auto angles = uml::platform::apple::rotationAnglesOf([TakesTheCall new], asked);
+    require(angles.has_value(), "a coordinator that takes the call states its angles");
+    require((*angles)[0] == 90.5 && (*angles)[1] == 180.5 && (*angles)[2] == 270.5 && (*angles)[3] == 360.5,
+            "in the order of the orientations asked");
+    const std::array<NSInteger, 4> reversed {4, 3, 2, 1};
+    const auto turned = uml::platform::apple::rotationAnglesOf([TakesTheCall new], reversed);
+    require(turned.has_value() && (*turned)[0] == 360.5 && (*turned)[3] == 90.5, "whatever the order asked");
+    require(!uml::platform::apple::rotationAnglesOf([LacksTheCall new], asked).has_value(),
+            "a coordinator that does not take the call states none");
+    require(!uml::platform::apple::rotationAnglesOf(nil, asked).has_value(), "no coordinator states none");
+}
+
 } // namespace
 
 int main()
 {
+    aCoordinatorStatesItsAnglesWhereItTakesTheCallAndNowhereElse();
     aDiscoveryThatRaisesPresentsNoCameras();
     return 0;
 }

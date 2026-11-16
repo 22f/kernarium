@@ -13,6 +13,7 @@
 #include "key_path_observer.h"
 #include "photo_metadata.hpp"
 #include "photo_dimensions.hpp"
+#include "rotation_angles.h"
 #include "still_exposure.hpp"
 #include "video_stabilization.hpp"
 
@@ -513,19 +514,14 @@ std::vector<Entry> discover()
         entry.discovered.deviceType = deviceTypeOf(type);
         // The platform states each camera's mounting, which is what the guest is told (presentedMountingOf); the
         // connections present the pictures in it (keepSensorOrientation). Its fixed angle for each interface
-        // orientation is noted for the record. An iPad app on a Mac has no such angles (the call is unavailable on
-        // macOS and raises there): its cameras keep the mounting their sensor states, as a Mac's own do.
-        if (!NSProcessInfo.processInfo.isiOSAppOnMac) {
-            AVCaptureDeviceRotationCoordinator* rotation = [[AVCaptureDeviceRotationCoordinator alloc] initWithDevice:device previewLayer:nil];
-            const AVCaptureVideoOrientation orientations[4] = {AVCaptureVideoOrientationPortrait, AVCaptureVideoOrientationPortraitUpsideDown,
-                                                               AVCaptureVideoOrientationLandscapeRight, AVCaptureVideoOrientationLandscapeLeft};
-            double portraitAngle = 0;
-            for (int index = 0; index < 4; ++index) {
-                const double angle = [rotation videoRotationAngleRelativeToDeviceOrientation:orientations[index]];
-                if (index == 0) portraitAngle = angle;
-                entry.discovered.coordinatorAngles[std::size_t(index)] = angleNumber(angle);
-            }
-            entry.mounting = presentedMountingOf(info.position, portraitAngle);
+        // orientation is noted for the record. Where the coordinator does not take the call (an iPad app on a Mac or on a
+        // Vision Pro: it is unavailable there and raises), the camera keeps the mounting its sensor states, as a Mac's own
+        // do.
+        AVCaptureDeviceRotationCoordinator* rotation = [[AVCaptureDeviceRotationCoordinator alloc] initWithDevice:device previewLayer:nil];
+        if (const auto angles = apple::rotationAnglesOf(rotation, {AVCaptureVideoOrientationPortrait, AVCaptureVideoOrientationPortraitUpsideDown,
+                                                                     AVCaptureVideoOrientationLandscapeRight, AVCaptureVideoOrientationLandscapeLeft})) {
+            for (std::size_t index = 0; index < angles->size(); ++index) entry.discovered.coordinatorAngles[index] = angleNumber((*angles)[index]);
+            entry.mounting = presentedMountingOf(info.position, (*angles)[0]);
             info.sensorOrientation = entry.mounting.stated;
         }
 #endif

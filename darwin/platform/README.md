@@ -128,8 +128,10 @@ interface to the wire.
   portrait (`sensorOrientationOf`; an external camera states 90), never a value
   per position, and every frame and still is delivered in that orientation,
   unmirrored, whatever turn, mirroring or still compensation the system would
-  apply by default; a Mac's cameras, and an iPad app on a Mac's (the call is
-  unavailable there), state 0 and take none of this. A built-in
+  apply by default; a Mac's cameras take none of this and state 0, and so do
+  an iPad app's on a Mac or a Vision Pro, where the coordinator does not take
+  the call (it is unavailable there and raises: it is asked, never sent, so the
+  camera keeps the mounting its sensor states). A built-in
   front camera mounted with its sensor's top at the device's top (portrait 0 or
   180) is presented like an earlier front camera instead
   (`presentedMountingOf`): the guest is told 90, the video connection is turned
@@ -309,8 +311,10 @@ interface to the wire.
 
 Tests: `camera-frame-transform` and `camera-dng-color` need nothing;
 `camera-key-path-observer` runs the key-value observer on a stand-in object;
-`camera-discovery-exception` makes the platform's device list raise and
-requires no cameras and one log line;
+`camera-discovery-unavailable-call` requires that a coordinator that does not
+take the angles call is never sent it (and one that does states its angles in
+the order asked), and makes the platform's device list raise and requires no
+cameras and one log line;
 `camera-synthetic` exercises the synthetic camera through the interface; and
 `camera-apple-discovery` reads the host's own cameras on any host. The Apple
 backend's sessions are not run by a test, because a test must never capture from
