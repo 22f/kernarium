@@ -12,6 +12,8 @@ nonisolated enum SmsMessages {
 
     /// The feature's name, and the placeholder of its message box.
     static var name: String { String(localized: "Text message") }
+    /// The line under the bar's title: who receives the message, and as what.
+    static var caption: String { String(localized: "Android receives it as an incoming text.") }
     /// Settings' row, which closes Settings and raises the bar over Android.
     static var row: String { String(localized: "Send text message\u{2026}") }
     /// The sender field's label for VoiceOver, and the label before it.

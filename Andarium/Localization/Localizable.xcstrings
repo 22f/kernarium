@@ -2153,6 +2153,28 @@
         }
       }
     },
+    "Android receives it as an incoming text." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidに受信したSMSとして届きます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android会像收到短信一样收到它。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android會像收到簡訊一樣收到它。"
+          }
+        }
+      }
+    },
     "Android refused to power off (%lld)." : {
       "localizations" : {
         "ja" : {

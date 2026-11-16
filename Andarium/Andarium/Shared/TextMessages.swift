@@ -64,15 +64,17 @@ final class TextMessageState {
     @ObservationIgnored var sendTask: Task<Void, Never>?
 
     /// A field writes its text back as it is when it is laid out or focused:
-    /// only a change is typing.
+    /// only a change is typing. While a message is being sent the fields
+    /// refuse edits, so the text that goes is the text that stays until
+    /// Android has answered; they keep the keyboard's focus (the bar's view).
     func setSender(_ typed: String) {
-        guard typed != sender else { return }
+        guard typed != sender, progress != .sending else { return }
         sender = typed
         edited()
     }
 
     func setText(_ typed: String) {
-        guard typed != text else { return }
+        guard typed != text, progress != .sending else { return }
         text = typed
         edited()
     }

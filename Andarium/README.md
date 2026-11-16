@@ -995,8 +995,11 @@ requires reopening Andarium.
   carries the service (`Capabilities.device`); no shipped configuration offers
   it. Pressed, the row closes Settings and a bar rises over the running
   Android, above the keyboard, which does not move Android. The bar has a
+  title (the row's symbol, "Text message" as the heading VoiceOver starts on,
+  and a line saying Android receives it as an incoming text) with Close, a
   sender (the last one used, else Andarium; it is cleaned before it is judged),
-  a message box, which alone asks iOS for a one-time code, and Send. The
+  a message box, which alone asks iOS for a one-time code, and Send. While a
+  message is being sent the fields refuse edits and keep the keyboard. The
   session owns the bar (`TextMessageState`): a send that is under way ends
   with the run, and its late answer is dropped. Send waits while the adb
   channel is busy with a transfer or Android is paused for lack of space.

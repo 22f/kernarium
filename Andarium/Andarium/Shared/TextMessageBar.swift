@@ -25,16 +25,44 @@ private enum TextMessageField: Hashable {
     case sender, text
 }
 
-/// The bar's top edge: who the message is from, and Close. It is one view so
-/// that the edge can change without the fields under it changing.
+/// The bar's top edge: what the bar is (the Settings row's symbol, "Text
+/// message" and a line of who receives it) with Close beside it, and under
+/// that who the message is from. It is one view so that the edge can change
+/// without the fields under it changing.
 private struct TextMessageBarHeader: View {
     @Environment(AppModel.self) private var model
     var focus: FocusState<TextMessageField?>.Binding
+    /// VoiceOver starts on the title when the bar comes up.
+    var titleFocused: AccessibilityFocusState<Bool>.Binding
 
     var body: some View {
         let state = model.session.textMessage
         let sending = state.progress == .sending
-        HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                IconTile(symbol: "message.fill")
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(SmsMessages.name)
+                        .font(.subheadline.weight(.semibold))
+                        .accessibilityAddTraits(.isHeader)
+                        .accessibilityFocused(titleFocused)
+                    Text(SmsMessages.caption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                }
+                Spacer(minLength: 0)
+                Button(SmsMessages.close, systemImage: "xmark") { model.closeTextMessage() }
+                    .disabled(sending)
+                    .labelStyle(.iconOnly)
+                    .font(.footnote.weight(.semibold))
+                    .frame(width: 32, height: 32)
+                    .background(Color(.tertiarySystemFill), in: Circle())
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("text-message-close")
+            }
             HStack(spacing: 6) {
                 Text(SmsMessages.fromLabel)
                     .foregroundStyle(.secondary)
@@ -47,25 +75,16 @@ private struct TextMessageBarHeader: View {
                     .submitLabel(.next)
                     .onSubmit { focus.wrappedValue = .text }
                     .focused(focus, equals: .sender)
+                    .opacity(sending ? 0.5 : 1)
                     .accessibilityLabel(SmsMessages.from)
                     .accessibilityHint(SmsMessages.senderHint)
                     .accessibilityIdentifier("text-message-sender")
                     .frame(maxWidth: 200)
             }
             .font(.subheadline)
-            .disabled(sending)
             .padding(.horizontal, 14)
             .frame(height: 36)
             .background(Color(.tertiarySystemFill), in: Capsule())
-            Spacer(minLength: 0)
-            Button(SmsMessages.close, systemImage: "xmark") { model.closeTextMessage() }
-                .disabled(sending)
-                .labelStyle(.iconOnly)
-                .font(.subheadline.weight(.semibold))
-                .frame(width: 36, height: 36)
-                .background(Color(.tertiarySystemFill), in: Circle())
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("text-message-close")
         }
     }
 }
@@ -76,12 +95,13 @@ private struct TextMessageBarHeader: View {
 struct TextMessageBar: View {
     @Environment(AppModel.self) private var model
     @FocusState private var focus: TextMessageField?
+    @AccessibilityFocusState private var titleFocused: Bool
 
     var body: some View {
         let state = model.session.textMessage
         let sending = state.progress == .sending
         VStack(alignment: .leading, spacing: 10) {
-            TextMessageBarHeader(focus: $focus)
+            TextMessageBarHeader(focus: $focus, titleFocused: $titleFocused)
             if let status = state.status(availability: model.textMessageAvailability) {
                 statusLine(status)
             }
@@ -93,7 +113,7 @@ struct TextMessageBar: View {
                     .lineLimit(1...4)
                     .textContentType(.oneTimeCode)
                     .focused($focus, equals: .text)
-                    .disabled(sending)
+                    .opacity(sending ? 0.5 : 1)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .background(Color(.tertiarySystemFill), in: .rect(cornerRadius: 20))
@@ -128,9 +148,8 @@ struct TextMessageBar: View {
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(SmsMessages.name)
-        // The message box was disabled for the send, which put the keyboard
-        // away: it comes back when Android has answered.
+        // The fields kept the keyboard through the send; once Android has
+        // answered, the message box is where the typing goes on.
         .onChange(of: sending) { was, now in
             if was && !now { focus = .text }
         }
@@ -139,6 +158,10 @@ struct TextMessageBar: View {
             guard state.progress != .sending else { return }
             try? await Task.sleep(for: .milliseconds(300))
             focus = .text
+            // After the keyboard's focus, which VoiceOver would follow: it
+            // starts on the title, then reads the line under it.
+            try? await Task.sleep(for: .milliseconds(400))
+            titleFocused = true
         }
     }
 

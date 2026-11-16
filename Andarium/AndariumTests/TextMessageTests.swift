@@ -93,22 +93,26 @@ struct TextMessageTests {
 
     // MARK: A send and what is typed meanwhile
 
-    @Test func aLateAnswerForAnEarlierMessageLeavesWhatWasTypedSince() async throws {
+    @Test func theFieldsRefuseEditsWhileAMessageIsBeingSent() async throws {
         let rig = try rig()
         defer { rig.cleanUp() }
         let (model, state) = (rig.model, rig.state)
         model.openTextMessage()
         model.setTextMessageText("one")
+        let sender = state.sender
         model.sendTextMessage()
         #expect(await eventually { rig.answers.pending == 1 })
         #expect(state.progress == .sending && !model.canSendTextMessage)
-        // Typing goes on while Android has not answered.
+        // Nothing is typed while Android has not answered: what goes is what stays.
         model.setTextMessageText("two")
+        model.setTextMessageSender("Other")
+        #expect(state.text == "one" && state.sender == sender)
         rig.answers.release(.handedToAndroid(parts: 1))
         #expect(await eventually { state.progress == .sent })
-        #expect(state.text == "two")
+        #expect(state.text.isEmpty)
         #expect(rig.said.lines == [SmsMessages.sentToAndroid])
-        // Nothing says the new text was sent, and it can go.
+        // Typing after the answer is a new message, which nothing says was sent, and it can go.
+        model.setTextMessageText("two")
         #expect(state.status(availability: .ready) == nil)
         #expect(model.canSendTextMessage)
         model.sendTextMessage()
@@ -515,6 +519,62 @@ struct TextMessageTests {
         #expect(typed.count == 1 && typed.first?.type == .oneTimeCode, "\(drawn.inputs)")
         #expect(drawn.labels.contains(SmsMessages.from) && drawn.labels.contains(SmsMessages.message))
         #expect(drawn.labels.contains(SmsMessages.send) && drawn.labels.contains(SmsMessages.close))
+    }
+
+    /// The text input that has the keyboard in `root`, if one does: the sender is a
+    /// text field and the message box, which grows, a text view.
+    private func focusedInput(in root: UIView) -> UIView? {
+        if root.isFirstResponder, root is UITextField || root is UITextView { return root }
+        for child in root.subviews { if let found = focusedInput(in: child) { return found } }
+        return nil
+    }
+
+    @Test func theKeyboardStaysWithTheFieldsWhileAMessageIsBeingSent() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        model.setTextMessageText("123456")
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let container = UIViewController()
+        lease.window.rootViewController = container
+        let hosting = UIHostingController(rootView: TextMessageBar().environment(model))
+        container.addChild(hosting)
+        hosting.view.frame = CGRect(x: 0, y: 0, width: 390, height: 600)
+        container.view.addSubview(hosting.view)
+        hosting.didMove(toParent: container)
+        defer {
+            hosting.willMove(toParent: nil)
+            hosting.view.removeFromSuperview()
+            hosting.removeFromParent()
+        }
+        // The message box takes the keys once the bar has come up.
+        #expect(await eventually { focusedInput(in: hosting.view) is UITextView })
+        model.sendTextMessage()
+        #expect(await eventually { rig.answers.pending == 1 })
+        try await Task.sleep(for: .milliseconds(300))
+        // The keyboard is still up for the message box, locked: a typed character changes nothing.
+        let box = try #require(focusedInput(in: hosting.view), "the keyboard went down at Send")
+        #expect(box is UITextView, "the keyboard is on the sender, not the message box")
+        (box as? UIKeyInput)?.insertText("7")
+        #expect(state.text == "123456")
+        // Android answers: the keys are still there, and the message box has them.
+        rig.answers.release(.handedToAndroid(parts: 1))
+        #expect(await eventually { state.progress == .sent })
+        #expect(await eventually { focusedInput(in: hosting.view) is UITextView })
+    }
+
+    @Test func theBarsTitleIsItsHeadingAndTheCaptionFollowsIt() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        rig.model.openTextMessage()
+        let drawn = try await draw(TextMessageBar().environment(rig.model))
+        let title = try #require(drawn.labels.firstIndex(of: SmsMessages.name))
+        // The title, then the line under it, then Close, then the fields.
+        #expect(drawn.labels.contains(SmsMessages.caption))
+        #expect(drawn.labels.firstIndex(of: SmsMessages.caption) == title + 1, "\(drawn.labels)")
+        #expect(drawn.labels.firstIndex(of: SmsMessages.close).map { $0 > title } == true)
     }
 
     @Test func settingsHasTheRowOnlyWhereTheApplicationCarriesTextMessages() async throws {
