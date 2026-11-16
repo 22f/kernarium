@@ -307,6 +307,18 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 60)
 
+# The text-message runner without a guest: its frames and requests against the
+# golden file, the record file it writes, its readers of the guest's logs and
+# dumps, its judgements of a round of rows, its host and adb-server client
+# against fakes on loopback, the catalogue of rows, and a parse of the probe's
+# sources and build script.
+uml_add_tooling_test(
+    NAME android17-sms-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_sms_runner.py
+    LABELS android
+    TIMEOUT 120)
+
 # The keyboard and mouse runner's reading of the guest's input dump and of the
 # probe's log, its VNC client's wire, and its key table against the launcher's.
 uml_add_tooling_test(

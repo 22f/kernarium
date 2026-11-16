@@ -439,6 +439,41 @@ if(UML_ANDROID_GAMEPAD_RELEASE AND UML_ANDROID_GAMEPAD_PROBE_APK AND TARGET uml-
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# The text-message service (android/lineage-24/overlay/sms): the runner plays the
+# host application over a vsock forward to the service's port and sends the
+# contract's frames. Its channel mode checks the channel (what the host may and
+# what adb and the guest may not do, the service's domain, life and denials,
+# every vsock listener of the guest); its record mode checks the delivery record
+# across a crash, a reboot and fifty kills. Both boot Android with the macOS
+# launcher, so they are opt-in: name the release under test and the probe's APK
+# and DEX (tests/integration/android/sms/build-apk.sh). The runner's other modes
+# and options (a proof build's rows, the variants with no Messaging or no SMS
+# provider, the adbd topic, the kernel configuration) are run by hand.
+set(UML_ANDROID_SMS_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-sms tests boot")
+set(UML_ANDROID_SMS_PROBE_APK "" CACHE FILEPATH
+    "AndariumSmsProbe.apk that the android-sms channel test installs")
+set(UML_ANDROID_SMS_VSOCKPROBE_DEX "" CACHE FILEPATH
+    "vsockprobe.dex that the android-sms channel test runs as the shell")
+if(UML_ANDROID_SMS_RELEASE AND UML_ANDROID_SMS_PROBE_APK AND UML_ANDROID_SMS_VSOCKPROBE_DEX
+        AND TARGET uml-darwin-android17)
+    foreach(mode channel record)
+        uml_add_integration_test(
+            NAME android-sms-${mode}
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_android_sms.py
+                --release ${UML_ANDROID_SMS_RELEASE}
+                --emulator $<TARGET_FILE:uml-darwin-android17>
+                --probe-apk ${UML_ANDROID_SMS_PROBE_APK}
+                --vsockprobe-dex ${UML_ANDROID_SMS_VSOCKPROBE_DEX}
+                --mode ${mode}
+            LABELS guest;boot;android
+            TIMEOUT 3600
+            PROCESSORS 4
+            RESOURCE_GROUPS cpus:4)
+    endforeach()
+endif()
+
 # The management console's sync on an Android guest, whose init leaves SysRq
 # off: a file the guest holds dirty reaches the host's data image once sync
 # replies, and survives a hard kill of the emulator. It boots Android with the
