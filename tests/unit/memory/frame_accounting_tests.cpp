@@ -20,6 +20,7 @@
 #include "uml_darwin_guest.h"
 #include "uml_darwin_static_mmu.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -220,8 +221,9 @@ void test_locations_follow_every_primitive()
 		require(doomed != nullptr);
 		require(darwin_uml_static_vm_destroy(601) == 0);
 		audit("destroy 601", 1);
-		require(doomed->accounting.walked && doomed->accounting.alias == 0,
-			"destroy did not mark the state walked");
+		require(doomed->accounting.walked &&
+				kept->domain().state_of(doomed->accounting.alias) == nullptr,
+			"destroy did not mark the state walked and free its id");
 		require(uml::memory::testing::generation_state(601) == nullptr);
 	});
 	/* A retired domain: its states are walked without their words going. */
@@ -264,8 +266,9 @@ void test_flush_and_destroy_walk_differently()
 		require(writes(backing, 1, 611, base + page));
 		require(darwin_uml_static_vm_destroy(611) == 0);
 		audit("destroy", 0);
-		require(state->accounting.walked && state->accounting.alias == 0,
-			"destroy did not mark the state walked");
+		require(state->accounting.walked &&
+				kept->domain().state_of(alias) == nullptr,
+			"destroy did not mark the state walked and free its id");
 	});
 	/* The state outlives its generation, as an old reference would hold it. */
 	bool refused = false;
@@ -512,6 +515,66 @@ void test_a_large_plan_makes_room_geometrically()
 	baseline.clean("M8 growth");
 }
 
+/* E9 (ids): a state's alias id is the one its entry in the domain's table
+ * names from the state's creation, before any writable page; it stays the
+ * same until the state is destroyed, then is free for the lowest-first reuse.
+ * A state whose id cannot be had is not made, and nothing stays taken. */
+void test_a_states_alias_id_is_fixed_from_its_creation()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0x1200'0000;
+	constexpr unsigned long states = 2500;
+	ScratchBacking backing{"uml-frame-accounting-ids-XXXXXX", 2 * page};
+	Domain domain{71'007};
+	std::shared_ptr<uml::memory::MappedBacking> kept;
+	std::vector<std::uint32_t> ids;
+	domain.run([&] {
+		for (unsigned long index = 0; index < states; ++index) {
+			/* Read only: the state exists, and no reservation was made. */
+			require(map(700 + index, base, backing, 0, 1, ro, 0) == 0);
+			if (!kept)
+				kept = uml::memory::testing::mapped_backing(
+					backing.descriptor());
+			const auto state =
+				uml::memory::testing::generation_state(700 + index);
+			require(state != nullptr && state->accounting.alias != 0,
+				"a state without an id");
+			ids.push_back(state->accounting.alias);
+			require(kept->domain().state_of(ids.back()) == state.get(),
+				"an entry does not name its state");
+		}
+		std::vector<std::uint32_t> sorted = ids;
+		std::sort(sorted.begin(), sorted.end());
+		require(std::adjacent_find(sorted.begin(), sorted.end()) ==
+			sorted.end(), "two states share an id");
+		require(sorted.front() == 1 && sorted.back() == states,
+			"ids are not handed out lowest first");
+
+		/* A flush keeps the id; destroy frees it. */
+		require(darwin_uml_static_vm_flush_generation(700 + 5) == 0);
+		require(uml::memory::testing::generation_state(700 + 5)
+				->accounting.alias == ids[5]);
+		require(darwin_uml_static_vm_destroy(700 + 5) == 0);
+		require(kept->domain().state_of(ids[5]) == nullptr,
+			"a destroyed state's entry still names it");
+		require(kept->domain().state_of(ids[6]) != nullptr);
+
+		/* The lowest free id is the next one's, and an id that cannot be
+		 * had makes no state and takes nothing. */
+		uml::memory::testing::fail_next_allocation(AllocationSite::writers);
+		require(map(9000, base, backing, 0, 1, ro, 0) != 0,
+			"a state was made without an id");
+		uml::memory::testing::clear_allocation_failure();
+		require(uml::memory::testing::generation_state(9000) == nullptr);
+		require(map(9000, base, backing, 0, 1, ro, 0) == 0);
+		require(uml::memory::testing::generation_state(9000)
+				->accounting.alias == ids[5],
+			"the freed id was not reused first");
+	});
+	domain.retire();
+	baseline.clean("E9 ids");
+}
+
 } // namespace
 
 int main()
@@ -524,6 +587,7 @@ int main()
 	test_overflow_replacement_keeps_the_old_backing_for_the_removal();
 	test_writer_lists_grow_and_nothing_allocates_under_a_stripe_lock();
 	test_a_large_plan_makes_room_geometrically();
+	test_a_states_alias_id_is_fixed_from_its_creation();
 	uml::memory::set_domain_provider(nullptr);
 	std::puts("frame accounting tests passed");
 	return EXIT_SUCCESS;

@@ -87,7 +87,7 @@ constexpr std::uint64_t page_number_mask = (std::uint64_t{1} << alias_shift) - 1
 [[nodiscard]] constexpr WriterLocation location_of(std::uint64_t word) noexcept
 {
 	return {static_cast<std::uint32_t>(
-			(word >> alias_shift) & FrameAccounting::maximum_alias),
+			(word >> alias_shift) & FrameAccountingDomain::maximum_alias),
 		(word & page_number_mask) * frame_bytes};
 }
 
@@ -97,94 +97,6 @@ std::atomic_uint64_t writer_additions{};
 std::atomic_uint64_t writer_removals{};
 std::atomic_uint64_t reservation_rollbacks{};
 std::atomic_uint64_t reservation_growths{};
-
-/* The alias ids: which state a location names. Process-wide and never
- * destroyed, because an id that a leak keeps reserved outlives the address
- * space that leaked it. Id 0 is unused.
- *
- * The entries sit in stable chunks that a reader finds without a lock, so a
- * publication under a stripe lock takes none. Allocating and freeing an id
- * takes a mutex, which no stripe lock is held across. The chunks come from a
- * heap of their own, not the default malloc zone. */
-constexpr std::uint32_t alias_chunk_entries = 1024;
-constexpr std::size_t alias_chunk_count =
-	(std::size_t{FrameAccounting::maximum_alias} + alias_chunk_entries) /
-	alias_chunk_entries;
-
-struct AliasEntry final {
-	std::atomic<GenerationState *> state{};
-	/* The next free id while this one is on the free list. */
-	std::uint32_t next_free{};
-};
-using AliasChunk = std::array<AliasEntry, alias_chunk_entries>;
-
-struct AliasTable final {
-	std::mutex mutex;
-	/* Chunks are published before any id in them is handed out. */
-	std::array<std::atomic<AliasChunk *>, alias_chunk_count> chunks{};
-	/* Guarded by `mutex`. */
-	std::uint32_t free_head{};
-	std::uint32_t next_new{1};
-	DomainHeap heap;
-};
-
-[[nodiscard]] AliasTable &alias_table() noexcept
-{
-	static auto *table = new AliasTable;
-	return *table;
-}
-
-[[nodiscard]] AliasEntry *alias_entry(std::uint32_t alias) noexcept
-{
-	if (alias == 0 || alias > FrameAccounting::maximum_alias)
-		return nullptr;
-	auto *chunk = alias_table().chunks[alias / alias_chunk_entries].load(
-		std::memory_order_acquire);
-	return chunk == nullptr ? nullptr : &(*chunk)[alias % alias_chunk_entries];
-}
-
-[[nodiscard]] std::uint32_t allocate_alias(GenerationState &state)
-{
-	auto &table = alias_table();
-	const std::lock_guard lock{table.mutex};
-	UML_MEMORY_ALLOCATION_CHECKPOINT(testing::AllocationSite::writers);
-	std::uint32_t id = 0;
-	if (table.free_head != 0) {
-		id = table.free_head;
-		table.free_head = alias_entry(id)->next_free;
-	} else {
-		if (table.next_new > FrameAccounting::maximum_alias)
-			throw std::bad_alloc{};
-		id = table.next_new;
-		if (table.chunks[id / alias_chunk_entries].load(
-			    std::memory_order_relaxed) == nullptr) {
-			auto *chunk = static_cast<AliasChunk *>(frame_allocate(
-				&table.heap, sizeof(AliasChunk), alignof(AliasChunk)));
-			new (chunk) AliasChunk{};
-			table.chunks[id / alias_chunk_entries].store(
-				chunk, std::memory_order_release);
-		}
-		++table.next_new;
-	}
-	alias_entry(id)->state.store(&state, std::memory_order_release);
-	return id;
-}
-
-/* Gives the id back for reuse, or with `leaked` retires it for good: a
- * location may still name it, and the entry then names no state. */
-void release_alias(std::uint32_t alias, bool leaked) noexcept
-{
-	auto &table = alias_table();
-	const std::lock_guard lock{table.mutex};
-	auto *entry = alias_entry(alias);
-	if (entry == nullptr)
-		return;
-	entry->state.store(nullptr, std::memory_order_release);
-	if (leaked)
-		return;
-	entry->next_free = table.free_head;
-	table.free_head = alias;
-}
 
 /* Adds `location` to the frame's writers, under the frame's stripe lock.
  * `record` is the frame's record, found before the lock was taken; null if it
@@ -395,7 +307,8 @@ void FrameAccounting::settle(GenerationState &state) noexcept
 
 void FrameAccounting::walk(GenerationState &state) noexcept
 {
-	if (state.accounting.alias != 0)
+	/* A walked state gave its id back, which another state may hold now. */
+	if (!state.accounting.walked)
 		(void)state.fill_index.scan(0, ~std::uint64_t{0},
 			[&](std::uint64_t page, std::uintptr_t word) {
 				release_word(state, page, word);
@@ -405,11 +318,11 @@ void FrameAccounting::walk(GenerationState &state) noexcept
 
 void FrameAccounting::finish(GenerationState &state) noexcept
 {
-	state.accounting.walked = true;
-	if (state.accounting.alias != 0) {
-		release_alias(state.accounting.alias, false);
-		state.accounting.alias = 0;
-	}
+	auto &accounting = state.accounting;
+	if (accounting.walked)
+		return;
+	accounting.walked = true;
+	accounting.domain->release(accounting.alias, false);
 }
 
 void FrameAccounting::retire(GenerationState &state) noexcept
@@ -433,18 +346,25 @@ void FrameAccounting::note_nonempty_state_destruction() noexcept
 	nonempty_destructions.fetch_add(1, std::memory_order_relaxed);
 }
 
-StateAccounting::~StateAccounting()
+StateAccounting::StateAccounting(
+	std::shared_ptr<FrameAccountingDomain> frame_domain,
+	GenerationState &state, std::uint64_t generation)
+	: domain{std::move(frame_domain)},
+	  alias{domain->allocate(state, generation)}
 {
-	/* A state is destroyed after its walk, which gave the alias id back. */
-	if (alias != 0)
-		FrameAccounting::note_nonempty_state_destruction();
 }
 
-GenerationState *FrameAccounting::state_of(std::uint32_t alias) noexcept
+StateAccounting::~StateAccounting()
 {
-	const auto *entry = alias_entry(alias);
-	return entry == nullptr ? nullptr :
-		entry->state.load(std::memory_order_acquire);
+	/* A state is destroyed after its walk, which gave its id back. One whose
+	 * walk did not run and that reserved locations may still have them naming
+	 * the id: it is counted and the id retired for good. One that never
+	 * reserved gives its id back. */
+	if (walked)
+		return;
+	if (used)
+		FrameAccounting::note_nonempty_state_destruction();
+	domain->release(alias, used);
 }
 
 #if UML_MEMORY_ALLOCATION_TESTING
@@ -486,6 +406,105 @@ bool FrameAccounting::locations_for_testing(MappedBacking &backing,
 }
 #endif
 
+FrameAccountingDomain::~FrameAccountingDomain()
+{
+	auto *root = root_.load(std::memory_order_acquire);
+	if (root == nullptr)
+		return;
+	for (auto &mid_slot : *root) {
+		auto *mid = mid_slot.load(std::memory_order_relaxed);
+		if (mid == nullptr)
+			continue;
+		for (auto &leaf_slot : *mid)
+			if (auto *leaf = leaf_slot.load(std::memory_order_relaxed);
+			    leaf != nullptr) {
+				leaf->~Leaf();
+				frame_deallocate(heap(), leaf, sizeof(Leaf), alignof(Leaf));
+			}
+		mid->~Mid();
+		frame_deallocate(heap(), mid, sizeof(Mid), alignof(Mid));
+	}
+	root->~Root();
+	frame_deallocate(heap(), root, sizeof(Root), alignof(Root));
+}
+
+FrameAccountingDomain::Entry *FrameAccountingDomain::entry(
+	std::uint32_t id) const noexcept
+{
+	if (id == 0 || id > maximum_alias)
+		return nullptr;
+	const auto *root = root_.load(std::memory_order_acquire);
+	if (root == nullptr)
+		return nullptr;
+	const auto *mid = (*root)[id >> (leaf_bits + mid_bits)].load(
+		std::memory_order_acquire);
+	if (mid == nullptr)
+		return nullptr;
+	const auto *leaf = (*mid)[(id >> leaf_bits) & ((1U << mid_bits) - 1U)].load(
+		std::memory_order_acquire);
+	if (leaf == nullptr)
+		return nullptr;
+	return const_cast<Entry *>(&(*leaf)[id & ((1U << leaf_bits) - 1U)]);
+}
+
+std::uint32_t FrameAccountingDomain::allocate(
+	GenerationState &state, std::uint64_t generation)
+{
+	const std::lock_guard lock{mutex_};
+	UML_MEMORY_ALLOCATION_CHECKPOINT(testing::AllocationSite::writers);
+	auto id = lowest_free_;
+	while (id < next_new_ && entry(id)->taken)
+		++id;
+	if (id == next_new_) {
+		if (id > maximum_alias)
+			throw std::bad_alloc{};
+		/* The chunks that cover the id, each made before it is published. */
+		auto *root = root_.load(std::memory_order_relaxed);
+		if (root == nullptr) {
+			auto *made = static_cast<Root *>(
+				frame_allocate(heap(), sizeof(Root), alignof(Root)));
+			root = new (made) Root{};
+			root_.store(root, std::memory_order_release);
+		}
+		auto &mid_slot = (*root)[id >> (leaf_bits + mid_bits)];
+		auto *mid = mid_slot.load(std::memory_order_relaxed);
+		if (mid == nullptr) {
+			auto *made = static_cast<Mid *>(
+				frame_allocate(heap(), sizeof(Mid), alignof(Mid)));
+			mid = new (made) Mid{};
+			mid_slot.store(mid, std::memory_order_release);
+		}
+		auto &leaf_slot =
+			(*mid)[(id >> leaf_bits) & ((1U << mid_bits) - 1U)];
+		if (leaf_slot.load(std::memory_order_relaxed) == nullptr) {
+			auto *made = static_cast<Leaf *>(
+				frame_allocate(heap(), sizeof(Leaf), alignof(Leaf)));
+			leaf_slot.store(new (made) Leaf{}, std::memory_order_release);
+		}
+		++next_new_;
+	}
+	auto *slot = entry(id);
+	slot->taken = true;
+	slot->holders.store(0, std::memory_order_relaxed);
+	slot->generation.store(generation, std::memory_order_relaxed);
+	slot->state.store(&state, std::memory_order_release);
+	lowest_free_ = id + 1U;
+	return id;
+}
+
+void FrameAccountingDomain::release(std::uint32_t id, bool leaked) noexcept
+{
+	auto *slot = entry(id);
+	if (slot == nullptr)
+		return;
+	const std::lock_guard lock{mutex_};
+	slot->state.store(nullptr, std::memory_order_release);
+	if (leaked)
+		return;
+	slot->taken = false;
+	lowest_free_ = std::min(lowest_free_, id);
+}
+
 WriterSettler::~WriterSettler()
 {
 	FrameAccounting::settle(state_);
@@ -500,8 +519,7 @@ void WriterReservation::add(GenerationState &state, MappedBacking &backing,
 	 * fails the primitive like any other the primitive cannot complete. */
 	if (accounting.walked)
 		throw std::bad_alloc{};
-	if (accounting.alias == 0)
-		accounting.alias = allocate_alias(state);
+	accounting.used = true;
 	UML_MEMORY_ALLOCATION_CHECKPOINT(testing::AllocationSite::writers);
 	/* The room for the entry is had before the location is added, so that
 	 * recording it cannot fail. The entries live in the thread's scratch

@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -46,8 +47,8 @@ struct FrameRef final {
  */
 class FrameAccounting final {
 public:
-	/* Alias ids are 26 bits so that a location fits a frame's word. */
-	static constexpr std::uint32_t maximum_alias = (1U << 26) - 1U;
+	static constexpr std::uint32_t maximum_alias =
+		FrameAccountingDomain::maximum_alias;
 
 	/* Only a page an entered context can fill is a location: the fill never
 	 * serves a page at or above the guest address limit. */
@@ -116,8 +117,6 @@ public:
 	};
 	[[nodiscard]] static Diagnostics diagnostics() noexcept;
 	static void note_nonempty_state_destruction() noexcept;
-	/* The state that holds `alias`, or null. */
-	[[nodiscard]] static GenerationState *state_of(std::uint32_t alias) noexcept;
 #if UML_MEMORY_ALLOCATION_TESTING
 	/* The locations of the frame at `offset`; false when its accounting is in
 	 * error. For a test that excludes every change. */
@@ -174,13 +173,21 @@ private:
 
 /* A generation state's part of the accounting. */
 struct StateAccounting final {
-	/* 0 until the state first reserves a location. */
-	std::uint32_t alias{};
+	/* Holds the domain's alias table for as long as the state exists. */
+	const std::shared_ptr<FrameAccountingDomain> domain;
+	/* The id the state's locations name: allocated when the state is made, the
+	 * same until it is destroyed, never 0. After `finish` the id is free for
+	 * another state, and this state no longer uses it. */
+	const std::uint32_t alias;
 	/* Set once the generation is gone; a walked state refuses reservations. */
 	bool walked{};
+	/* A location may name the id: the state has reserved one. */
+	bool used{};
 	WriterReservation reservation;
 
-	StateAccounting() = default;
+	/* Throws std::bad_alloc, with nothing taken, when no id can be had. */
+	StateAccounting(std::shared_ptr<FrameAccountingDomain> frame_domain,
+		GenerationState &state, std::uint64_t generation);
 	StateAccounting(const StateAccounting &) = delete;
 	StateAccounting &operator=(const StateAccounting &) = delete;
 	~StateAccounting();

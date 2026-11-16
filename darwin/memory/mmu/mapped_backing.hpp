@@ -4,7 +4,7 @@
 #include "../shared_backing.hpp"
 #include "writer_location.hpp"
 #if DARWIN_UML_X86_64_GUEST
-#include "frame_heap.hpp"
+#include "frame_domain.hpp"
 #endif
 
 #include <array>
@@ -27,10 +27,11 @@ public:
 	static std::shared_ptr<MappedBacking> create(int fd,
 		const struct stat &status);
 #if DARWIN_UML_X86_64_GUEST
-	/* The same, with the frame accounting's metadata for the backing in
-	 * `heap`, the heap of the address space that makes it. */
+	/* The same, with the frame accounting's metadata for the backing in the
+	 * heap of `domain`, the domain of the address space that makes it. */
 	static std::shared_ptr<MappedBacking> create(int fd,
-		const struct stat &status, std::shared_ptr<DomainHeap> heap);
+		const struct stat &status,
+		std::shared_ptr<FrameAccountingDomain> domain);
 #endif
 
 	MappedBacking(const MappedBacking &) = delete;
@@ -82,7 +83,7 @@ private:
 	using LeafOwner = HeapOwned<CodeIndexLeaf>;
 	using RootOwner = HeapArray<std::atomic<CodeIndexLeaf *>>;
 	MappedBacking(SharedBackingView mapping, std::size_t size,
-		std::shared_ptr<DomainHeap> heap) noexcept;
+		std::shared_ptr<FrameAccountingDomain> domain) noexcept;
 #else
 	template <typename T>
 	using Allocator = std::allocator<T>;
@@ -95,7 +96,7 @@ private:
 
 #if DARWIN_UML_X86_64_GUEST
 	/* Declared before everything it serves, so that it outlives it. */
-	std::shared_ptr<DomainHeap> heap_;
+	std::shared_ptr<FrameAccountingDomain> domain_;
 #endif
 	SharedBackingView mapping_;
 	std::size_t size_;
@@ -146,7 +147,12 @@ public:
 	 * index is all that is looked in. */
 	[[nodiscard]] FrameRecord *find_frame_record(std::uint64_t offset) noexcept;
 	/* The heap the frames' lists live in, or null for the process's. */
-	[[nodiscard]] DomainHeap *heap() const noexcept { return heap_.get(); }
+	[[nodiscard]] DomainHeap *heap() const noexcept { return domain_->heap(); }
+	/* The domain whose alias table resolves the locations in the frames. */
+	[[nodiscard]] FrameAccountingDomain &domain() const noexcept
+	{
+		return *domain_;
+	}
 	/* Calls visit(frame_offset, word) for each frame whose word is not 0.
 	 * For a caller that excludes every change, a test. */
 	template <typename Visit>

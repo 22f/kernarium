@@ -1499,7 +1499,7 @@ private:
 			}
 		}
 #if DARWIN_UML_X86_64_GUEST
-		auto backing = MappedBacking::create(fd, status, heap_);
+		auto backing = MappedBacking::create(fd, status, frame_domain_);
 #else
 		auto backing = MappedBacking::create(fd, status);
 #endif
@@ -1524,7 +1524,12 @@ private:
 		}
 		UML_MEMORY_ALLOCATION_CHECKPOINT(
 			testing::AllocationSite::generation);
+#if DARWIN_UML_X86_64_GUEST
+		auto state = std::make_shared<GenerationState>(
+			heap_, frame_domain_, generation);
+#else
 		auto state = std::make_shared<GenerationState>(heap_);
+#endif
 		state->address_space_lifetime = lifetime_;
 		states_.emplace(generation, state);
 		return state;
@@ -1819,6 +1824,12 @@ private:
 
 	/* Shared with every generation: the last holder gives the pages back. */
 	std::shared_ptr<DomainHeap> heap_{std::make_shared<DomainHeap>()};
+#if DARWIN_UML_X86_64_GUEST
+	/* The alias table of the frame accounting and the heap of its metadata
+	 * (frame_accounting.hpp); held by every state and backing of the space. */
+	std::shared_ptr<FrameAccountingDomain> frame_domain_{
+		std::make_shared<FrameAccountingDomain>(heap_)};
+#endif
 	mutable WordSharedMutex states_mutex_;
 	WordSharedMutex backing_mutex_;
 	std::unordered_map<std::uint64_t, std::shared_ptr<GenerationState>> states_;

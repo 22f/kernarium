@@ -54,11 +54,13 @@ std::shared_ptr<MappedBacking> MappedBacking::create(
 #if DARWIN_UML_X86_64_GUEST
 	/* A backing made outside an address space keeps its metadata in a heap
 	 * of its own. */
-	return create(fd, status, std::make_shared<DomainHeap>());
+	return create(fd, status,
+		std::make_shared<FrameAccountingDomain>(
+			std::make_shared<DomainHeap>()));
 }
 
-std::shared_ptr<MappedBacking> MappedBacking::create(
-	int fd, const struct stat &status, std::shared_ptr<DomainHeap> heap)
+std::shared_ptr<MappedBacking> MappedBacking::create(int fd,
+	const struct stat &status, std::shared_ptr<FrameAccountingDomain> domain)
 {
 #endif
 	if (status.st_size <= 0 ||
@@ -81,7 +83,7 @@ std::shared_ptr<MappedBacking> MappedBacking::create(
 	UML_MEMORY_ALLOCATION_CHECKPOINT(
 		testing::AllocationSite::backing);
 #if DARWIN_UML_X86_64_GUEST
-	auto *backing = new MappedBacking{std::move(mapping), size, std::move(heap)};
+	auto *backing = new MappedBacking{std::move(mapping), size, std::move(domain)};
 #else
 	auto *backing = new MappedBacking{std::move(mapping), size};
 #endif
@@ -91,12 +93,12 @@ std::shared_ptr<MappedBacking> MappedBacking::create(
 
 #if DARWIN_UML_X86_64_GUEST
 MappedBacking::MappedBacking(SharedBackingView mapping, std::size_t size,
-	std::shared_ptr<DomainHeap> heap) noexcept
-	: heap_(std::move(heap)), mapping_(std::move(mapping)), size_(size),
+	std::shared_ptr<FrameAccountingDomain> domain) noexcept
+	: domain_(std::move(domain)), mapping_(std::move(mapping)), size_(size),
 	  code_pages_(0, std::hash<std::uint64_t>{}, std::equal_to<std::uint64_t>{},
-		Allocator<std::pair<const std::uint64_t, RecordOwner>>{heap_.get()}),
-	  code_index_leaves_(Allocator<LeafOwner>{heap_.get()}),
-	  writer_leaves_(FrameAllocator<HeapOwned<WriterLeaf>>{heap_.get()})
+		Allocator<std::pair<const std::uint64_t, RecordOwner>>{domain_->heap()}),
+	  code_index_leaves_(Allocator<LeafOwner>{domain_->heap()}),
+	  writer_leaves_(FrameAllocator<HeapOwned<WriterLeaf>>{domain_->heap()})
 #else
 MappedBacking::MappedBacking(
 	SharedBackingView mapping, std::size_t size) noexcept
@@ -114,7 +116,7 @@ MappedBacking::MappedBacking(
 	 * records' mutex. */
 	try {
 		code_index_ = make_array_in_heap<std::atomic<CodeIndexLeaf *>>(
-			heap_.get(), roots);
+			domain_->heap(), roots);
 	} catch (...) {
 	}
 #else
@@ -166,7 +168,7 @@ void *MappedBacking::install_code_page(std::uint64_t page) noexcept
 		auto &slot = code_pages_[page];
 		if (!slot)
 #if DARWIN_UML_X86_64_GUEST
-			slot = make_in_heap<CodePage>(heap_.get(), heap_.get());
+			slot = make_in_heap<CodePage>(domain_->heap(), domain_->heap());
 #else
 			slot = std::make_unique<CodePage>();
 #endif
@@ -177,7 +179,7 @@ void *MappedBacking::install_code_page(std::uint64_t page) noexcept
 		auto *leaf = root.load(std::memory_order_relaxed);
 		if (leaf == nullptr) {
 #if DARWIN_UML_X86_64_GUEST
-			auto owned = make_in_heap<CodeIndexLeaf>(heap_.get());
+			auto owned = make_in_heap<CodeIndexLeaf>(domain_->heap());
 #else
 			auto owned = std::make_unique<CodeIndexLeaf>();
 #endif
@@ -259,7 +261,7 @@ bool MappedBacking::prepare_writers(
 				(size_ / frame_bytes + 1U + writer_leaf_frames - 1U) /
 				writer_leaf_frames;
 			auto storage = make_array_in_heap<std::atomic<WriterLeaf *>>(
-				heap_.get(), leaves);
+				domain_->heap(), leaves);
 			writer_index_leaves_ = leaves;
 			index = storage.get();
 			writer_index_storage_ = std::move(storage);
@@ -268,7 +270,7 @@ bool MappedBacking::prepare_writers(
 		if (leaf >= writer_index_leaves_)
 			return false;
 		if (index[leaf].load(std::memory_order_relaxed) == nullptr) {
-			auto owned = make_in_heap<WriterLeaf>(heap_.get());
+			auto owned = make_in_heap<WriterLeaf>(domain_->heap());
 			owned->fill(0);
 			auto *words = owned.get();
 			writer_leaves_.push_back(std::move(owned));
