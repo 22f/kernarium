@@ -68,7 +68,9 @@ private:
     }
 
     /* Says when the gate closes: `holdRequests` closes it at once and then waits for a request that is running, so the time
-     * the call returns can be a second later than the hold. The line comes before the one the leaving ends with. */
+     * the call returns can be a second later than the hold. The line comes before the one the leaving ends with. The time
+     * is when this thread saw the gate held, an observation: it polls every 100 microseconds, and the line is never earlier
+     * than the closing, so a closure it saw late can only make a stop that came before it look earlier than it was. */
     class ClosureWatch final {
     public:
         explicit ClosureWatch(uml::gpu::InProcessGpuService& gpu) : gpu_(gpu), thread_([this] { watch(); }) {}

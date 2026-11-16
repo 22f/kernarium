@@ -164,6 +164,20 @@ void aHoldWithADeadlineWaitsForTheCameraOnlyWithinIt()
     RecordingVideo bound;
     (void)runtime.gate.set(kernarium::gpu_hold::atOnce, &bound, saysNothing);
     require(bound.deadlines.empty() && bound.abandons == 1, "the bound's hold waits for nothing and ends a wait that is pending");
+
+    /* A deadline that leaves less than the drain does not shorten the drain: on a gate that is not held yet, with a request
+     * that runs, the gate waits its whole drain and the camera is not asked. */
+    Runtime fresh {Timing {500ms, 1000ms}};
+    std::optional<uml::gpu::RequestGate::Entry> stuck;
+    stuck.emplace(fresh.gpu.gate.enter());
+    require(bool(*stuck), "a request is running");
+    RecordingVideo none;
+    const auto freshBegan = Clock::now();
+    const int outcome = fresh.gate.set(300, &none, saysNothing);
+    const auto took = since(freshBegan);
+    require(none.deadlines.empty(), "nothing is left for the camera");
+    require(outcome == 0 && fresh.gpu.requestsHeld(), "the gate is held, with the request still running");
+    require(took >= 450ms && took < 800ms, "after the whole drain, not after the 300 ms the deadline left");
 }
 
 /* A guest with no camera (the desktop Linux guest) is held and released as any, with no wait. */
@@ -274,6 +288,10 @@ void aMainPathThatCameLateWaitsForTheCameraOnlyWhatTheEdgeLeaves()
     const auto run = theEdge(-1ms, boundAfterTheEdge);
     require(run.closed >= boundAfterTheEdge + 600ms, "the main path waited for the camera");
     require(run.closed <= edgeBudget - 500ms + 150ms, "but only until the edge budget less the drain, so the drain ends inside the edge");
+    /* The allowance is nominal: the camera's wait and the drain together use what the edge left, so the hold is back at
+     * the deadline, to within the wake-ups of its timers. */
+    require(run.returned <= edgeBudget + 150ms, "and the hold is back at the edge's deadline");
+    require(run.returned <= run.closed + halfTiming.drain + 200ms, "after the one drain the request that runs costs");
 }
 
 /* ---- A guest that restarts while the hold waits for the camera does not boot behind the gate. */

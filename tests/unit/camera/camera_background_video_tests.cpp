@@ -336,9 +336,13 @@ void aCallQueuedBehindAnotherEndsAtItsOwnDeadline()
     while (!asked.load() && Clock::now() < until) std::this_thread::sleep_for(1ms);
     require(asked.load(), "the first call asked the device");
     const auto began = Clock::now();
-    const auto outcome = control.end(began + 50ms);
+    bool held = false;
+    const auto result = uml::camera::holdAfterVideoEnds(
+        control, [&] { held = true; return 1; }, 50ms, [](const std::string&) {});
+    const auto& outcome = result.video;
     require(!outcome.answered && !outcome.stopped && outcome.streams == 0, "the queued call was not answered");
     require(since(began) >= 40ms && since(began) < 300ms, "and returned at its own deadline, not after the first call's");
+    require(held && result.held == 1, "and its caller held the gate, as it does after any wait that ran out");
     first.join();
     control.detach();
 }
