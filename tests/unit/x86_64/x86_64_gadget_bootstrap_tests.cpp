@@ -3811,7 +3811,9 @@ constexpr std::uint64_t tlb_test_base = std::uint64_t{0x1ffffffe} << 12U;
 /* Every gadget looks a page up where the miss handler fills it, so a block
  * of accesses to one page asks the address space for that page once: baked
  * and segment-override loads and stores, a vector move and an
- * element-masked one, each of which indexes the table itself. */
+ * element-masked one, each of which indexes the table itself, and the
+ * accesses that end on their page's last byte, whose key is still that
+ * page. */
 void each_translation_finds_the_entry_its_miss_filled()
 {
 	using namespace uml::cpu::x86_64;
@@ -3834,11 +3836,20 @@ void each_translation_finds_the_entry_its_miss_filled()
 		0xf3, 0x0f, 0x7f, 0x46, 0x20,       // movdqu [rsi+32],xmm0
 		0xc4, 0xe2, 0x71, 0x8e, 0x56, 0x30, // vpmaskmovd [rsi+48],xmm1,xmm2
 		0xc4, 0xe2, 0x71, 0x8e, 0x5e, 0x40, // vpmaskmovd [rsi+64],xmm1,xmm3
+		0x48, 0x8b, 0x83, 0xf8, 0x0f, 0x00, 0x00, // mov rax,[rbx+0xff8]
+		0x48, 0x89, 0x86, 0xf8, 0x0f, 0x00, 0x00, // mov [rsi+0xff8],rax
+		0x64, 0x48, 0x8b, 0x8b, 0xf8, 0x0f, 0x00, 0x00, // mov rcx,fs:[rbx+0xff8]
+		0x64, 0x48, 0x89, 0x8e, 0xf8, 0x0f, 0x00, 0x00, // mov fs:[rsi+0xff8],rcx
+		0xc4, 0xe2, 0x71, 0x8c, 0x93, 0xf0, 0x0f, 0x00, 0x00, // vpmaskmovd xmm2,xmm1,[rbx+0xff0]
+		0xc4, 0xe2, 0x71, 0x8e, 0x96, 0xf0, 0x0f, 0x00, 0x00, // vpmaskmovd [rsi+0xff0],xmm1,xmm2
 		0x0f, 0x05,                         // syscall
 	});
 	for (unsigned index = 0; index < 80U; ++index)
 		memory.load(source + index,
 			{static_cast<std::uint8_t>(index * 7U + 3U)});
+	for (unsigned index = 4080U; index < 4096U; ++index)
+		memory.load(source + index,
+			{static_cast<std::uint8_t>(index * 5U + 1U)});
 	const auto built = require_built(gadgets::build(memory, code),
 		"the one-page access sequence did not build");
 	gadgets::Executor executor;
@@ -3853,12 +3864,13 @@ void each_translation_finds_the_entry_its_miss_filled()
 	const auto result = gadgets::execute(built.program, cpu, memory,
 		executor, 64);
 	require(result.event == uml::cpu::EngineEvent::system_call &&
-			result.retired_instructions == 15,
+			result.retired_instructions == 21,
 		"the one-page access sequence did not reach SYSCALL");
 	bool copied = true;
-	for (unsigned index = 0; index < 80U; ++index)
-		copied = copied && memory.byte(destination + index) ==
-			memory.byte(source + index);
+	for (const auto [first, end] : {std::pair{0U, 80U}, std::pair{4080U, 4096U}})
+		for (auto index = first; index < end; ++index)
+			copied = copied && memory.byte(destination + index) ==
+				memory.byte(source + index);
 	require(copied, "the one-page access sequence lost bytes");
 	require(memory.atomic_pointers() == 2,
 		"a gadget did not find the translation its page's miss filled");
@@ -3869,17 +3881,18 @@ void each_translation_finds_the_entry_its_miss_filled()
  * access across a page edge matches nothing and its miss takes the
  * crossing path. Entries for both pages that point somewhere else entirely
  * are passed over, and the address space is never asked to map the range in
- * one piece, which it need not be able to. An element-masked access selects
- * only its element across the edge: the others are on one page, where those
- * entries rightly answer. */
+ * one piece, which it need not be able to. Each case runs at every amount
+ * it can cross by, its last byte alone on the next page included. An
+ * element-masked access selects only its element across the edge: the
+ * others are on one page, where those entries rightly answer. */
 void a_page_crossing_access_matches_no_translation()
 {
 	using namespace uml::cpu::x86_64;
 	const std::uint64_t edge = tlb_test_base + 2U * 4096U;
+	/* Each encoding ends in its displacement from RBX, the edge. */
 	struct Case final {
 		const char *name;
 		std::vector<std::uint8_t> code;
-		int offset;
 		unsigned size;
 		bool vector;
 		bool store;
@@ -3887,33 +3900,42 @@ void a_page_crossing_access_matches_no_translation()
 		bool masked;
 	};
 	const Case cases[] = {
-		{"a baked load", {0x48, 0x8b, 0x43, 0xfc}, -4, 8, false, false,
-			false, false},
-		{"a segment-override load", {0x64, 0x48, 0x8b, 0x43, 0xfc}, -4, 8,
+		{"a baked load", {0x48, 0x8b, 0x43, 0x00}, 8, false, false, false,
+			false},
+		{"a segment-override load", {0x64, 0x48, 0x8b, 0x43, 0x00}, 8,
 			false, false, false, false},
-		{"a vector load", {0xf3, 0x0f, 0x6f, 0x43, 0xf8}, -8, 16, true,
-			false, false, false},
-		{"an element-masked load", {0xc4, 0xe2, 0x71, 0x8c, 0x43, 0xfa},
-			-6, 16, true, false, false, true},
-		{"a memory-destination add", {0x48, 0x01, 0x43, 0xfc}, -4, 8,
-			false, true, true, false},
-		{"a baked store", {0x48, 0x89, 0x43, 0xfc}, -4, 8, false, true,
+		{"a vector load", {0xf3, 0x0f, 0x6f, 0x43, 0x00}, 16, true, false,
 			false, false},
-		{"a segment-override store", {0x64, 0x48, 0x89, 0x43, 0xfc}, -4, 8,
+		{"an element-masked load", {0xc4, 0xe2, 0x71, 0x8c, 0x43, 0x00}, 16,
+			true, false, false, true},
+		{"a memory-destination add", {0x48, 0x01, 0x43, 0x00}, 8, false,
+			true, true, false},
+		{"a baked store", {0x48, 0x89, 0x43, 0x00}, 8, false, true, false,
+			false},
+		{"a segment-override store", {0x64, 0x48, 0x89, 0x43, 0x00}, 8,
 			false, true, false, false},
-		{"a vector store", {0xf3, 0x0f, 0x7f, 0x43, 0xf8}, -8, 16, true,
-			true, false, false},
-		{"an element-masked store", {0xc4, 0xe2, 0x71, 0x8e, 0x43, 0xfa},
-			-6, 16, true, true, false, true},
+		{"a vector store", {0xf3, 0x0f, 0x7f, 0x43, 0x00}, 16, true, true,
+			false, false},
+		{"an element-masked store", {0xc4, 0xe2, 0x71, 0x8e, 0x43, 0x00}, 16,
+			true, true, false, true},
 	};
-	for (const auto &test : cases) {
-		const std::string what = std::string{test.name} + " across a page";
+	/* Each case at every amount its crossing bytes, the access or the
+	 * masked access's dword 1, can cross by. */
+	std::vector<std::pair<const Case *, unsigned>> runs;
+	for (const auto &test : cases)
+		for (unsigned over = 1; over < (test.masked ? 4U : test.size); ++over)
+			runs.emplace_back(&test, over);
+	for (const auto &[test_pointer, over] : runs) {
+		const auto &test = *test_pointer;
+		const auto before_edge = test.masked ? 8U - over : test.size - over;
+		const std::string what = std::string{test.name} + " across a page by " +
+			std::to_string(over);
 		TestMemory memory{tlb_test_base};
 		auto code = test.code;
+		code.back() = static_cast<std::uint8_t>(0x100U - before_edge);
 		code.insert(code.end(), {0x0f, 0x05}); // syscall
 		memory.fill(tlb_test_base, std::as_bytes(std::span{code}));
-		const auto address = edge + static_cast<std::uint64_t>(
-			static_cast<std::int64_t>(test.offset));
+		const auto address = edge - before_edge;
 		for (unsigned index = 0; index < 16U; ++index)
 			memory.load(address + index,
 				{static_cast<std::uint8_t>(0x31U + index)});
@@ -3981,6 +4003,97 @@ void a_page_crossing_access_matches_no_translation()
 		require(memory.atomic_pointers() == 0,
 			what + " asked for one mapping of both pages");
 	}
+}
+
+/* TestMemory with one more page, at `far`, kept in the span's page at
+ * `near`: two guest pages as far apart as a test needs. */
+class FarPageMemory final : public TestMemory {
+public:
+	FarPageMemory(std::uint64_t base, std::uint64_t far, std::uint64_t near)
+		: TestMemory{base}, far_{far}, near_{near} {}
+
+	[[nodiscard]] bool read(std::uint64_t address,
+		std::span<std::byte> destination) override
+	{
+		return TestMemory::read(backing(address), destination);
+	}
+
+	[[nodiscard]] bool write(std::uint64_t address,
+		std::span<const std::byte> source) override
+	{
+		return TestMemory::write(backing(address), source);
+	}
+
+	[[nodiscard]] std::byte *atomic_pointer(std::uint64_t address,
+		std::size_t size, uml::memory::MemoryAccess access) override
+	{
+		return TestMemory::atomic_pointer(backing(address), size, access);
+	}
+
+private:
+	[[nodiscard]] std::uint64_t backing(std::uint64_t address) const noexcept
+	{
+		return address - far_ < 4096U ? address - far_ + near_ : address;
+	}
+
+	std::uint64_t far_;
+	std::uint64_t near_;
+};
+
+/* Pages the table's reach apart agree in every bit the index of the low
+ * bits reads: accesses alternating between them each read and write their
+ * own page, through the baked and the ordinary translations. */
+void pages_a_table_reach_apart_keep_their_own_bytes()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t code = tlb_test_base;
+	const std::uint64_t near = tlb_test_base + 4096U;
+	const std::uint64_t far = near + native_tlb_entry_count * 4096U;
+	const std::uint64_t far_backing = tlb_test_base + 2U * 4096U;
+	FarPageMemory memory{tlb_test_base, far, far_backing};
+	memory.load(code, {
+		0x48, 0x8b, 0x03,       // mov rax,[rbx]
+		0x4c, 0x8b, 0x12,       // mov r10,[rdx]
+		0x48, 0x8b, 0x73, 0x08, // mov rsi,[rbx+8]
+		0x48, 0x8b, 0x7a, 0x08, // mov rdi,[rdx+8]
+		0x4c, 0x89, 0x53, 0x10, // mov [rbx+16],r10
+		0x48, 0x89, 0x42, 0x10, // mov [rdx+16],rax
+		0x64, 0x4c, 0x8b, 0x03, // mov r8,fs:[rbx]
+		0x64, 0x4c, 0x8b, 0x0a, // mov r9,fs:[rdx]
+		0x0f, 0x05,             // syscall
+	});
+	for (unsigned index = 0; index < 16U; ++index) {
+		memory.load(near + index, {static_cast<std::uint8_t>(0x10U + index)});
+		memory.load(far_backing + index,
+			{static_cast<std::uint8_t>(0x80U + index)});
+	}
+	const auto near_first = memory.qword(near);
+	const auto near_second = memory.qword(near + 8U);
+	const auto far_first = memory.qword(far_backing);
+	const auto far_second = memory.qword(far_backing + 8U);
+	const auto built = require_built(gadgets::build(memory, code),
+		"the alternating sequence did not build");
+	gadgets::Executor executor;
+	executor.prepare(memory);
+	CpuState cpu{};
+	cpu.rip = code;
+	cpu.gpr(Register::rbx) = near;
+	cpu.gpr(Register::rdx) = far;
+	const auto result = gadgets::execute(built.program, cpu, memory,
+		executor, 16);
+	require(result.event == uml::cpu::EngineEvent::system_call &&
+			result.retired_instructions == 9,
+		"the alternating sequence did not reach SYSCALL");
+	require(cpu.gpr(Register::rax) == near_first &&
+			cpu.gpr(Register::r10) == far_first &&
+			cpu.gpr(Register::rsi) == near_second &&
+			cpu.gpr(Register::rdi) == far_second &&
+			cpu.gpr(Register::r8) == near_first &&
+			cpu.gpr(Register::r9) == far_first,
+		"a load read the page a table reach away");
+	require(memory.qword(near + 16U) == far_first &&
+			memory.qword(far_backing + 16U) == near_first,
+		"a store wrote the page a table reach away");
 }
 
 /* PMOVMSKB collapses one sign bit per byte into a bit mask. The corpus carries
@@ -11170,6 +11283,7 @@ int main(int argc, char **argv)
 	execute_addressing_shapes();
 	each_translation_finds_the_entry_its_miss_filled();
 	a_page_crossing_access_matches_no_translation();
+	pages_a_table_reach_apart_keep_their_own_bytes();
 	execute_byte_sign_masks();
 	execute_call_and_return();
 	decode_compat32_defaults();
