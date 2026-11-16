@@ -53,6 +53,10 @@ enum class Reason : std::uint64_t {
 	step = 2,
 };
 
+/* `retired` is the budget the entry used up. In the product layout charge
+ * points pay for the run that follows them in advance, so it is not a count
+ * of instructions (a single RET reports 33); a build rewritten with
+ * UML_AOT_COUNT_RETIRED reports the exact count. */
 struct EnterResult final {
 	Reason reason;
 	std::uint64_t retired;

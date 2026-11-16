@@ -1642,6 +1642,9 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     if library.count_retired:
         asm.word(A.ldr_x(1, 31, SLOT_COUNT))
     else:
+        # The budget the entry used up. Charge points pay for the run that
+        # follows them in advance, so this is not a count of instructions
+        # (one guest RET reports 33); a counting build is the exact count.
         asm.word(A.ldr_x(TLB, 31, SLOT_BUD0))
         asm.word(A.add_reg(1, TLB, BUD, sub=True))
     for index in range(4):

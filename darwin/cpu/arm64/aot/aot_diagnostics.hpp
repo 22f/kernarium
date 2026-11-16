@@ -27,6 +27,8 @@ struct Stats final {
 	std::uint64_t poisoned{};
 	std::uint64_t enters{};
 	std::uint64_t steps{};
+	/* Budget used up by entries: instructions only in a counting build
+	 * (UML_AOT_COUNT_RETIRED), otherwise the prepaid charge. */
 	std::uint64_t retired{};
 	std::uint64_t refills{};
 	std::uint64_t refill_failures{};
