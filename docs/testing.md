@@ -833,9 +833,12 @@ blocker in every one of them.
   never refused. The kernel's page cache does give up some of a covered
   library's frames in an unrooted guest (under pressure, and to `fadvise` for
   pages no process has mapped at that moment), but a read-only system file's
-  residency is observable only through the faults that reading it back takes
-  (`mincore` and `cachestat` report every page of a file the caller cannot
-  write as resident). The `pressure` and `evict` rows print that count and
+  residency is observable only through the faults that reading it back takes:
+  for a file the caller neither owns, has a capability over, nor could open
+  for writing, `mincore` reports every page as resident and `cachestat`
+  refuses with `EPERM` (the guest's shell owns neither the system image's
+  files nor `libz.so`, and the owner and capability exceptions do not apply
+  to it). The `pressure` and `evict` rows print that count and
   require the pages that stayed to share their verdicts, and `evict` also
   requires that a file nothing maps loses its pages; the frame's last
   departure and reuse are the memory layer's unit rows.
