@@ -13,8 +13,9 @@ import android.util.Log;
 /**
  * The host's way in: `content call --uri content://android.kernarium.sms
  * --method deliver --arg <message>` in the adb shell (Message has the
- * argument's form). Only the shell's uid is served: the host application
- * reaches it over its own adb channel, and an application in the guest cannot.
+ * argument's form). Only the shell's uid and root's are served: the host
+ * application reaches it over its own adb channel, and an application in the
+ * guest cannot.
  * The result holds "parts", how many PDUs the message took. A message whose
  * identifier was handed over before is not handed over again; the answer is
  * the first one's (DeliveredIdentifiers).

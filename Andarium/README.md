@@ -989,9 +989,22 @@ requires reopening Andarium.
   prints, at most about twice a second, the Core Motion sample behind the
   guest's field with iOS's own attitude and heading; App Store builds compile it
   out.
-- **Text messages.** Settings' Text message section sends a sender and a text
-  over the adb channel, and Android receives it as an SMS from that sender
-  (`GuestSms`); the system image must include the
+- **Text messages.** The Developer section of Settings has Send text
+  message… under ADB over network, in every build configuration, but the
+  device application holds the capability back until an accepted release image
+  carries the service (`Capabilities.device`); no shipped configuration offers
+  it. Pressed, the row closes Settings and a bar rises over the running
+  Android, above the keyboard, which does not move Android. The bar has a
+  sender (the last one used, else Andarium; it is cleaned before it is judged),
+  a message box, which alone asks iOS for a one-time code, and Send. The
+  session owns the bar (`TextMessageState`): a send that is under way ends
+  with the run, and its late answer is dropped. Send waits while the adb
+  channel is busy with a transfer or Android is paused for lack of space.
+  The words say only what is known, that Android took the message or did not
+  confirm it, and VoiceOver hears them. A message that was not confirmed is
+  sent again with the same identifier, so the service hands it over once
+  (`GuestSms.Retries`). The sender and text rules, the limits and the command
+  are `GuestSms`'s; the system image must include the
   [SMS service](../android/lineage-24/README.md#text-messages).
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and
