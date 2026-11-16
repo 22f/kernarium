@@ -34,6 +34,10 @@ public:
     // Null `pointer` allocates. nullptr (the old block untouched) when exhausted.
     void* reallocate(void* pointer, size_t size);
 
+    // A free chunk keeps its list links in the first bytes of its payload; a user of the arena that reads memory it has freed
+    // (the byte[] blocks' stale references) keeps the fields it reads past this many bytes.
+    static constexpr size_t kFreeLinkBytes = 2 * sizeof(uint32_t);
+
     bool contains(const void* pointer) const {
         return pointer >= static_cast<const void*>(first_) && pointer < static_cast<const void*>(end_);
     }

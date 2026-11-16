@@ -4203,6 +4203,93 @@ void check_live_blocks_of_many_threads_count_against_the_cap() {
     require(block_weaks() <= 16384, "the weak references the layer holds are bounded by the cap");
 }
 
+// A header is published whole. A thread that reads a block's address without the mutex (is_shadow_block, is_ended_block, and the
+// length of a reference, which the wrapper answers from the header) and finds the block live finds the block that was made
+// there, with its fields, Dalvik words, contents and tail, never what the address held before. One thread makes a block, waits
+// until the other has looked at it whole, ends it and has the runtime collect its array, so that the next block is made at the
+// address of the one before; the other thread reads that address all the while, in the stage the first publishes: while a block
+// is being made, a live block at the address can only be the one being made. (Fails under ThreadSanitizer, and by its checks
+// without it, when make_shadow stores the live magic before the header's other fields: the reader finds a live block with the
+// length, the words or the contents of the one before.)
+void check_a_header_is_published_whole_to_readers_without_the_mutex() {
+    constexpr const char* kCase = "check_a_header_is_published_whole_to_readers_without_the_mutex";
+    constexpr int kGenerations = 1500;
+    // Both sizes take the same chunk of the arena, so that the freed block's address is the next block's.
+    const auto size_of = [](int generation) -> size_t { return generation % 2 != 0 ? 100 : 101; };
+    const auto fill_of = [](int generation) -> uint8_t { return generation % 2 != 0 ? 0xA1 : 0x5E; };
+    Fixture f = make();
+    Other reader(f);
+    const auto length_of_block = [&](const void* block) {
+        return fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(reader.f.env, const_cast<void*>(block));
+    };
+    std::atomic<int> stage{0};  // 2g - 1: block g is being made; 2g: it is made and the reader is to look at it; then the maker ends it
+    std::atomic<int> acked{0};  // the last block the reader looked at whole
+    std::atomic<const void*> first{nullptr};    // the address of the first block: the reader's stale reference
+    std::atomic<const void*> current{nullptr};  // the block of the latest generation made
+    std::atomic<bool> stop{false};
+    std::thread looker([&] {
+        // The block as it was made for the generation: the length word, the contents and the zeroes behind them.
+        const auto whole = [&](const void* block, int generation) {
+            const uint8_t* raw = static_cast<const uint8_t*>(block);
+            uint32_t length_word;
+            std::memcpy(&length_word, raw + 8, sizeof(length_word));
+            require(length_word == size_of(generation), "a live block's length word is its own");
+            for (size_t i = 0; i < size_of(generation); ++i) {
+                require(raw[16 + i] == fill_of(generation), "a live block's contents are its own");
+            }
+            for (size_t i = 0; i < 16; ++i) require(raw[16 + size_of(generation) + i] == 0, "a live block's tail is zeroes");
+        };
+        int done = 0;
+        unsigned looks = 0;
+        while (!stop.load(std::memory_order_acquire)) {
+            const int at = stage.load(std::memory_order_acquire);
+            const void* address = first.load(std::memory_order_acquire);
+            if (address == nullptr) {
+                std::this_thread::yield();
+                continue;
+            }
+            const bool live = is_shadow_block(address);
+            (void)is_ended_block(address);
+            const jsize length = length_of_block(address);
+            require(length == 0 || length == 100 || length == 101,
+                    "a length read without the mutex is the length of a block that was or is at the address, never a link");
+            if (at % 2 != 0 && live) {
+                // Block g is being made and the one before it has ended: the live block is g, and nothing of it is old.
+                const int generation = (at + 1) / 2;
+                require(length == jsize(size_of(generation)), "a live block's length is its own");
+                whole(address, generation);
+            } else if (at != 0 && at % 2 == 0 && at / 2 > done) {
+                const int generation = at / 2;
+                const void* block = current.load(std::memory_order_acquire);
+                require(is_shadow_block(block) && length_of_block(block) == jsize(size_of(generation)), "the block made is live");
+                whole(block, generation);
+                done = generation;
+                acked.store(generation, std::memory_order_release);
+            }
+            if ((++looks & 15u) == 0) std::this_thread::yield();
+        }
+    });
+    int reused = 0;
+    for (int generation = 1; generation <= kGenerations; ++generation) {
+        stage.store(2 * generation - 1, std::memory_order_release);
+        Made made = make_shadow_of(f, std::vector<uint8_t>(size_of(generation), fill_of(generation)));
+        require(is_shadow_block(made.shadow), "a block");
+        if (generation == 1) {
+            first.store(made.shadow, std::memory_order_release);
+        } else if (made.shadow == first.load(std::memory_order_acquire)) {
+            ++reused;
+        }
+        current.store(made.shadow, std::memory_order_release);
+        stage.store(2 * generation, std::memory_order_release);
+        wait_for_counter(kCase, "acked", acked, generation, "the maker (the reader looks at each block)");
+        end_ref(f, made.shadow);
+        collect();  // nothing holds the array: the next creation frees the ended block
+    }
+    stop.store(true, std::memory_order_release);
+    looker.join();
+    require(reused >= kGenerations * 9 / 10, "the freed block's address was the next block's: the reader's reference was stale");
+}
+
 
 // ---- the mutex holder never waits for the collector
 
@@ -5218,6 +5305,7 @@ int main(int argc, char** argv) {
     check_a_release_of_a_pointer_inside_a_block_is_harmless();
     check_the_ids_are_resolved_before_the_first_block();
     check_live_blocks_of_many_threads_count_against_the_cap();
+    check_a_header_is_published_whole_to_readers_without_the_mutex();
     check_a_block_critical_get_does_not_hold_the_mutex_while_it_waits_for_the_collector();
     check_a_block_critical_release_does_not_hold_the_mutex_while_it_waits_for_the_collector();
     check_the_mutex_is_free_while_the_first_critical_get_is_in_the_runtime();
