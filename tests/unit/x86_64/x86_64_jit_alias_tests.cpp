@@ -281,6 +281,8 @@ void load_writer(ScratchBacking &backing)
  * outlived its state, and no removal found its location missing. */
 struct Clean final {
 	FrameAccounting::Diagnostics start{FrameAccounting::diagnostics()};
+	/* The accounting errors a row causes on purpose. */
+	std::uint64_t errors{};
 
 	~Clean()
 	{
@@ -289,7 +291,8 @@ struct Clean final {
 			start.nonempty_state_destructions,
 			"a state was destroyed without its walk");
 		require(now.holder_leaks == start.holder_leaks, "a holder leaked");
-		require(now.errors == start.errors, "an accounting error was counted");
+		require(now.errors == start.errors + errors,
+			"an accounting error was counted");
 	}
 };
 
@@ -493,6 +496,47 @@ void test_two_spaces_registering_owed_frames()
 			"a registration left a participant counted stuck");
 		require(diagnostics.registration_failures == 0);
 	}
+}
+
+/* The retire-all sentinel at the JIT's own callback: a frame whose writers
+ * are not known is registered with every write translation of every
+ * participant retired, and the JIT retires its own through the callback
+ * `retire_all_and_wait` calls with `all_pages`. W's store entry, filled before
+ * the frame had a holder (so that it publishes nothing), is the one entry
+ * that can only go that way: a store through W after the registration must
+ * reach the unit at X. */
+void test_retire_all_reaches_the_jit_callback()
+{
+	Clean clean;
+	constexpr std::uint64_t executable = 0x1b00'0000;
+	/* A different TLB index from the unit's, so that only the retire-all can
+	 * retire W's entry. */
+	constexpr std::uint64_t alias = 0x2b00'5000;
+	constexpr std::uint64_t writer = 0x3b00'0000;
+	ScratchBacking frame{"uml-x86-jit-all-XXXXXX", page};
+	ScratchBacking code{"uml-x86-jit-all-code-XXXXXX", page};
+	load_return(frame, 1);
+	load_writer(code);
+	Space space{9212};
+	space.map(writer, code, 0, rx, 1);
+	space.map(executable, frame, 0, rx, 1);
+	space.map(alias, frame, 0, rw, 0);
+	const auto backing = uml::memory::testing::mapped_backing(frame.descriptor());
+	require(backing != nullptr);
+
+	/* W's entry is filled while the frame has no holder. */
+	(void)space.to_system_call(writer, 1, alias + 1);
+	/* The writers of the frame are no longer known (an accounting error the
+	 * row causes). */
+	clean.errors = 1;
+	FrameAccounting::remove_writer(*backing, 0, {777'777, alias});
+
+	require(space.to_system_call(executable) == 1);
+	require(held_at(backing, space.generation(), executable));
+	(void)space.to_system_call(writer, 2, alias + 1);
+	require(space.to_system_call(executable) == 2,
+		"the JIT did not retire its write translations for the retire-all "
+		"sentinel");
 }
 
 /* E7: a store through W into a unit that other units link to reaches the
@@ -804,6 +848,8 @@ int main()
 	std::puts("decoder spanning ok");
 	test_two_spaces_registering_owed_frames();
 	std::puts("twin spaces ok");
+	test_retire_all_reaches_the_jit_callback();
+	std::puts("retire all ok");
 	test_links_follow_alias_stores();
 	std::puts("links ok");
 	test_a_stuck_writer_of_another_generation_drops_the_code();
@@ -818,7 +864,8 @@ int main()
 	require(now.holder_leaks == start.holder_leaks, "a holder leaked");
 	require(now.unquiesced_holder_removals == start.unquiesced_holder_removals);
 	require(now.unmarked_holder_removals == start.unmarked_holder_removals);
-	require(now.errors == start.errors, "an accounting error was counted");
+	/* The retire-all row makes one on purpose. */
+	require(now.errors == start.errors + 1, "an accounting error was counted");
 	std::puts("x86-64 JIT alias tests passed");
 	return EXIT_SUCCESS;
 }
