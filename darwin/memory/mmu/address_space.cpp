@@ -922,8 +922,16 @@ public:
 			PendingMappingChanges pending{*state, changes};
 			clear_mappings(*state);
 			pending.commit();
+			/* Under the lock that cleared the generation. A batch that
+			 * began earlier takes this lock to commit, and sees either the
+			 * mappings it was made against or a generation that is gone;
+			 * were the store after the unlock, it could count its words in
+			 * between and have them erased with the state, leaving a
+			 * frame's count too high for good. */
+			state->retired.store(true, std::memory_order_release);
 		}
-		state->retired.store(true, std::memory_order_release);
+		UML_MEMORY_ALLOCATION_CHECKPOINT(
+			testing::AllocationSite::destroy_cleared);
 		{
 			std::lock_guard lock{states_mutex_};
 			if (const auto found = states_.find(generation);

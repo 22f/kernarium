@@ -19,6 +19,8 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -765,6 +767,70 @@ void test_an_exact_audit_is_exact_while_generations_come_and_go()
 	audit();
 }
 
+
+std::atomic<int> destroy_window{};
+constexpr int window_open = 1;
+constexpr int window_held = 2;
+constexpr int window_released = 3;
+
+/* Holds the first destroy() that gets here, between the clearing of its
+ * generation and the retirement of the state, until the test lets it go. */
+void hold_destroy_in_the_window(testing::AllocationSite site) noexcept
+{
+	if (site != testing::AllocationSite::destroy_cleared)
+		return;
+	int open = window_open;
+	if (!destroy_window.compare_exchange_strong(open, window_held))
+		return;
+	const auto deadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds{20};
+	while (destroy_window.load(std::memory_order_acquire) != window_released &&
+	       std::chrono::steady_clock::now() < deadline)
+		std::this_thread::yield();
+}
+
+/* A walker batch that began before destroy() and commits while destroy has
+ * cleared its generation and not yet retired it must be refused: its words
+ * would count in and the state, with them, be erased, leaving the frame's
+ * count high for good. */
+void test_a_batch_cannot_commit_into_a_generation_being_destroyed()
+{
+	constexpr unsigned long generation = 726;
+	constexpr unsigned long other = 727;
+	constexpr unsigned long base = 0x3000'0000;
+	ScratchBacking backing{backing_name, 4 * page};
+	Pin pin{1026, backing};
+	must_map(other, base, backing, 0, 1, rwx, 1);
+	auto *record = record_of(other, base);
+	require(count_of(record) == 1);
+
+	require(darwin_uml_static_vm_walker_lock(generation) == 0);
+	require(darwin_uml_static_vm_batch_begin(generation) == 0);
+	must_map(generation, base, backing, 0, 1, rwx, 1);
+
+	destroy_window.store(window_open, std::memory_order_release);
+	testing::set_allocation_observer(hold_destroy_in_the_window);
+	std::thread destroyer{[&] { destroy(generation); }};
+	const auto deadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds{20};
+	while (destroy_window.load(std::memory_order_acquire) != window_held &&
+	       std::chrono::steady_clock::now() < deadline)
+		std::this_thread::yield();
+	require(destroy_window.load(std::memory_order_acquire) == window_held);
+	const int result = darwin_uml_static_vm_batch_end();
+	destroy_window.store(window_released, std::memory_order_release);
+	destroyer.join();
+	testing::set_allocation_observer(nullptr);
+	require(darwin_uml_static_vm_walker_unlock(generation) == 0);
+
+	require(result == -EAGAIN);
+	require(count_of(record) == 1);
+	audit();
+	destroy(other);
+	require(count_of(record) == 0);
+	audit();
+}
+
 } // namespace
 
 int main()
@@ -786,6 +852,7 @@ int main()
 	test_threads_mapping_one_frame_keep_the_count_exact();
 	test_threads_that_come_and_go_return_the_count_to_zero();
 	test_an_exact_audit_is_exact_while_generations_come_and_go();
+	test_a_batch_cannot_commit_into_a_generation_being_destroyed();
 	std::puts("Static MMU executable count tests passed");
 	return 0;
 }

@@ -32,6 +32,7 @@ enum class AllocationSite : std::uint8_t {
 	batch_commit,
 	batch_index,
 	code_record,
+	destroy_cleared,
 	generation,
 	history,
 	reserve,
