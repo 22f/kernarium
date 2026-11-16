@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cpu/arm64/aarch32/guest_key.hpp"
+#include "cpu/arm64/code_synchronization.hpp"
 #include "cpu/arm64/fp_environment.hpp"
 #include "cpu/engine.hpp"
 #include "memory/static_guest_memory.hpp"
@@ -192,6 +193,7 @@ template<typename Entry, bool PollCallback, typename Executor>
 	};
 
 	std::size_t retired = 0;
+	discard_unmapped_code_synchronization();
 	try {
 		for (;;) {
 			if (interrupt_pending())
@@ -222,6 +224,20 @@ template<typename Entry, bool PollCallback, typename Executor>
 				return finish(ExitReason::fatal, retired);
 			}
 			retired += block_instructions;
+			/* An IC IVAU that named an address the address space maps
+			 * nothing at faults as a load does, so that the kernel maps
+			 * the page and the instruction publishes the code change of
+			 * the frame it names. The block ended at the instruction, with
+			 * the PC after it: report the fault at the instruction, which
+			 * has not retired. */
+			if (std::uint64_t unmapped = 0;
+			    take_unmapped_code_synchronization(unmapped)) [[unlikely]] {
+				request.cpu.pc -= sizeof(std::uint32_t);
+				if (retired != 0)
+					--retired;
+				return finish(ExitReason::memory_fault, retired, unmapped,
+					::uml::memory::MemoryAccess::read);
+			}
 			if (executor.preempted())
 				return finish(ExitReason::interrupt, retired);
 			if (request.boundary != nullptr &&

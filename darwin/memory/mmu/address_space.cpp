@@ -1126,8 +1126,10 @@ public:
 	}
 
 	/* A guest code synchronization (IC IVAU) at `address`, in the thread's
-	 * active generation. */
-	void invalidate_code(std::uint64_t address)
+	 * active generation. False when the address names a guest page that the
+	 * generation maps nothing at: the instruction would have faulted on
+	 * hardware, and which frame it meant is unknown. */
+	bool invalidate_code(std::uint64_t address)
 	{
 		const auto &active = active_thread_generation();
 		/* Translated execution normally publishes through its cached context.
@@ -1137,15 +1139,15 @@ public:
 		if (AddressLayout::is_guest(address) &&
 		    active.address_space == this && active.state &&
 		    !active.state->retired.load(std::memory_order_acquire)) {
-			synchronize_code(*active.state, active.generation, address);
-			return;
+			return synchronize_code(
+				*active.state, active.generation, address);
 		}
 		const auto generation = generation_for(address,
 			active.address_space == this && active.state &&
 				!active.state->retired.load(std::memory_order_acquire) ?
 				active.generation : 0);
 		auto state = state_for(generation);
-		synchronize_code(*state, generation, address);
+		return synchronize_code(*state, generation, address);
 	}
 
 	/* Linux wrote a user page through its own mapping of the frame -- a
@@ -1761,7 +1763,7 @@ private:
 	 * address, so a writable alias that cannot execute reaches the frame the
 	 * executable aliases hold. The caller's fence (a code synchronization
 	 * issues one after the bytes land) orders the holder words after them. */
-	static void synchronize_code_in(GenerationState &state,
+	static bool synchronize_code_in(GenerationState &state,
 		std::uint64_t generation, std::uint64_t address,
 		code_holders::HolderList &others)
 	{
@@ -1769,22 +1771,25 @@ private:
 		std::shared_lock lock{state.mappings_mutex};
 		const auto mapping = find_page(state, page);
 		if (!mapping)
-			return;
+			return !AddressLayout::is_guest(page);
 		if (mapping->guest_code)
 			MappedBacking::invalidate_code_page(
 				mapping->backing->code_page_handle(mapping->offset));
 		if (AddressLayout::is_guest(page))
 			take_holders(*mapping, generation, others);
+		return true;
 	}
 
-	void synchronize_code(GenerationState &state, std::uint64_t generation,
+	bool synchronize_code(GenerationState &state, std::uint64_t generation,
 		std::uint64_t address)
 	{
 		code_holders::HolderList others;
-		synchronize_code_in(state, generation, address, others);
+		const bool found =
+			synchronize_code_in(state, generation, address, others);
 		::uml::memory::publish_code_change(
 			state, address & ~(page_size - 1), page_size);
 		publish_to_holders(generation, others);
+		return found;
 	}
 
 	/* Takes the holder word of the frame `mapping` names and adds the
@@ -2605,7 +2610,15 @@ extern "C" int darwin_uml_static_vm_invalidate_code_generation(
 extern "C" void darwin_uml_static_vm_invalidate_code(unsigned long address)
 {
 	(void)with_address_space([&](auto &space) {
-		space.invalidate_code(address);
+		(void)space.invalidate_code(address);
 		return 0;
+	});
+}
+
+extern "C" int darwin_uml_static_vm_synchronize_code(unsigned long address)
+{
+	/* A host that cannot say (no address space) has nothing to fault in. */
+	return with_address_space([&](auto &space) {
+		return space.invalidate_code(address) ? 0 : 1;
 	});
 }

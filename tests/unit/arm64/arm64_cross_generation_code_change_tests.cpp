@@ -22,131 +22,17 @@
  *   one-vcpu / two-vcpus: whether one engine object (one vCPU) runs both
  *                processes, or each has its own.
  */
-#include "jit_test_support.hpp"
-#include "require.hpp"
-#include "runtime_test_route.hpp"
-#include "scratch_backing.hpp"
-#include "static_mmu_test_support.hpp"
+#include "arm64_cross_generation_test_support.hpp"
 
-#include "cpu/arm64/jit/jit_cache_geometry.hpp"
-#include "cpu/engine.hpp"
-#include "cpu/engine_factory.hpp"
-#include "memory/static_guest_memory.hpp"
-
-#include "uml_darwin_static_mmu.h"
-
-#include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <memory>
-#include <span>
 #include <string_view>
-#include <sys/mman.h>
-#include <thread>
-#include <vector>
 
 namespace {
 
-namespace arm64 = uml::cpu::arm64;
+using namespace uml::testing::cross;
 using uml::testing::require;
-
-constexpr std::uint64_t page = DARWIN_UML_GUEST_PAGE_SIZE;
-constexpr std::uint64_t shared_base = 0x4f00'0000U;
-constexpr std::uint64_t alias_base = 0x5300'0000U;
-constexpr std::uint64_t writer_base = 0x5100'0000U;
-
-[[nodiscard]] constexpr std::uint32_t movz_x0(std::uint32_t value) noexcept
-{
-	return 0xd280'0000U | value << 5;
-}
-constexpr std::uint32_t svc0 = 0xd400'0001U;
-
-/* x1 = the new word, x2 = where to write it in the writer's view. */
-const std::vector<std::uint32_t> writer_program{
-	0xb900'0041U, // str w1, [x2]
-	0xd50b'7b22U, // dc cvau, x2
-	0xd503'3b9fU, // dsb ish
-	0xd50b'7522U, // ic ivau, x2
-	0xd503'3b9fU, // dsb ish
-	0xd503'3fdfU, // isb
-	svc0,
-};
-
-struct Map final {
-	unsigned long generation;
-	std::uint64_t address;
-	int fd;
-	int protection;
-	bool code;
-	Map(unsigned long g, std::uint64_t a, int f, int p, bool c)
-		: generation{g}, address{a}, fd{f}, protection{p}, code{c}
-	{
-		require(darwin_uml_static_vm_map_generation(generation,
-			reinterpret_cast<void *>(address), fd, 0, page, protection,
-			code ? 1 : 0, (protection & PROT_WRITE) != 0 ? 1 : 0) == 0);
-	}
-	~Map()
-	{
-		require(darwin_uml_static_vm_unmap_generation(generation,
-			reinterpret_cast<void *>(address), page) == 0);
-	}
-	Map(const Map &) = delete;
-	Map &operator=(const Map &) = delete;
-};
-
-uml::cpu::ExecutionResult run(uml::cpu::CpuEngine &engine,
-	unsigned long generation, arm64::CpuState &cpu)
-{
-	require(darwin_uml_static_vm_activate(generation) == 0);
-	uml::cpu::ExecutionResult result{};
-	for (int attempt = 0; attempt < 64; ++attempt) {
-		uml::memory::StaticGuestMemory memory;
-		memory.prepare(generation,
-			darwin_uml_static_vm_sequences(generation)
-				.mapping_changes);
-		uml::cpu::ExecutionRequest request{
-			.cpu = cpu,
-			.memory = memory,
-			.translated_memory = &memory,
-			.generation = generation,
-			.instruction_budget = std::size_t{1} << 16,
-		};
-		result = engine.run(request);
-		if (result.reason != uml::cpu::ExitReason::instruction_budget &&
-		    result.reason != uml::cpu::ExitReason::interrupt)
-			break;
-	}
-	if (result.reason != uml::cpu::ExitReason::system_call)
-		std::printf("  exit reason %d at pc %#llx\n",
-			static_cast<int>(result.reason),
-			static_cast<unsigned long long>(cpu.pc));
-	return result;
-}
-
-/* Run B's function at `pc` in `generation`: what it put in x0. */
-std::uint64_t call(uml::cpu::CpuEngine &engine, unsigned long generation,
-	std::uint64_t pc)
-{
-	arm64::CpuState cpu{};
-	cpu.pc = pc;
-	const auto result = run(engine, generation, cpu);
-	require(result.reason == uml::cpu::ExitReason::system_call);
-	return cpu.registers[0];
-}
-
-/* Process A's guest program: write `word` at `target` in its own view and
- * synchronize it. */
-void write_and_synchronize(uml::cpu::CpuEngine &engine,
-	unsigned long generation, std::uint64_t target, std::uint32_t word)
-{
-	arm64::CpuState cpu{};
-	cpu.pc = writer_base;
-	cpu.registers[1] = word;
-	cpu.registers[2] = target;
-	const auto result = run(engine, generation, cpu);
-	require(result.reason == uml::cpu::ExitReason::system_call);
-}
 
 enum class Case { cross_rw, cross_rwx, ptrace_third, same_alias };
 

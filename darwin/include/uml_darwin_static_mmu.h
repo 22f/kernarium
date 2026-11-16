@@ -179,6 +179,14 @@ int darwin_uml_static_vm_execution_context_code_change_ranges(
 	struct darwin_uml_static_code_change *changes, size_t capacity,
 	uint64_t *current_sequence);
 void darwin_uml_static_vm_invalidate_code(unsigned long address);
+/* darwin_uml_static_vm_invalidate_code() for a guest's own code
+ * synchronization (IC IVAU) that must say whether it found the frame: 1 when
+ * the active generation maps nothing at `address`, a guest page whose page
+ * table entry the walker has not installed yet. Hardware faults such an
+ * instruction like a load; the caller reports that fault so the kernel maps
+ * the page, and runs the instruction again. Everything else publishes as
+ * darwin_uml_static_vm_invalidate_code() does and answers 0. */
+int darwin_uml_static_vm_synchronize_code(unsigned long address);
 int darwin_uml_static_vm_invalidate_code_generation(
 	unsigned long generation, unsigned long address, unsigned long length);
 
