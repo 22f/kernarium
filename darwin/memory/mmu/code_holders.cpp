@@ -29,7 +29,7 @@ void write_counters(const std::string &path)
 		"registrations=%llu overflows=%llu exchanges=%llu "
 		"publications=%llu all_publications=%llu "
 		"generations_published=%llu leaves=%llu leaf_bytes=%llu "
-		"unknown_backings=%llu\n",
+		"unknown_backings=%llu overlap_widenings=%llu\n",
 		static_cast<unsigned long long>(now.registrations),
 		static_cast<unsigned long long>(now.overflows),
 		static_cast<unsigned long long>(now.exchanges),
@@ -38,7 +38,8 @@ void write_counters(const std::string &path)
 		static_cast<unsigned long long>(now.generations_published),
 		static_cast<unsigned long long>(now.leaves),
 		static_cast<unsigned long long>(now.leaves * sizeof(Leaf)),
-		static_cast<unsigned long long>(now.unknown_backings));
+		static_cast<unsigned long long>(now.unknown_backings),
+		static_cast<unsigned long long>(now.overlap_widenings));
 	std::fclose(out);
 }
 

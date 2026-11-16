@@ -516,9 +516,12 @@ space's generation. So each frame of a mapped backing has a holder word
 registers the fetching generation in it before it reads the frame's bytes, and
 a guest code synchronization or the kernel's `invalidate_code()` path takes the
 word and publishes a whole-space code change in every generation it named. A
-publication consumes the word, so a reader registers again at its next fetch,
-and the words live in 4 KiB leaves made on a frame's first registration (a
-leaf per 512 frames). A backing whose leaf cannot be made, or a word that names
+publication consumes the word, so a reader registers again at its next fetch;
+a publisher that has emptied a word stays counted until its publication
+finishes, and one that meets such a count publishes to every generation, so an
+empty word never hides a reader another publisher has yet to tell. The words
+live in 4 KiB leaves made on a frame's first registration (a leaf per 512
+frames). A backing whose leaf cannot be made, or a word that names
 more generations than it holds, publishes to every live generation instead.
 The x86 engines neither register nor consult it.
 

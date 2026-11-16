@@ -1195,7 +1195,8 @@ public:
 					MappedBacking::invalidate_code_page(
 						mapping->backing->code_page_handle(
 							mapping->offset));
-					take_holders(*mapping, target, others);
+					take_holders(*mapping, target, others,
+						holder_takes_in_flight_);
 				}
 				publish_first = std::min(publish_first, page);
 				publish_end = page + page_size;
@@ -1767,7 +1768,8 @@ private:
 	 * issues one after the bytes land) orders the holder words after them. */
 	static bool synchronize_code_in(GenerationState &state,
 		std::uint64_t generation, std::uint64_t address,
-		code_holders::HolderList &others)
+		code_holders::HolderList &others,
+		std::atomic<std::uint64_t> &in_flight)
 	{
 		const auto page = address & ~(page_size - 1);
 		std::shared_lock lock{state.mappings_mutex};
@@ -1778,7 +1780,7 @@ private:
 			MappedBacking::invalidate_code_page(
 				mapping->backing->code_page_handle(mapping->offset));
 		if (AddressLayout::is_guest(page))
-			take_holders(*mapping, generation, others);
+			take_holders(*mapping, generation, others, in_flight);
 		return true;
 	}
 
@@ -1786,8 +1788,8 @@ private:
 		std::uint64_t address)
 	{
 		code_holders::HolderList others;
-		const bool found =
-			synchronize_code_in(state, generation, address, others);
+		const bool found = synchronize_code_in(state, generation, address,
+			others, holder_takes_in_flight_);
 		::uml::memory::publish_code_change(
 			state, address & ~(page_size - 1), page_size);
 		publish_to_holders(generation, others);
@@ -1798,31 +1800,50 @@ private:
 	 * generations it held, but `generation`'s own, to `others`. A word that
 	 * is empty or names only the writer's generation is left alone: the common
 	 * frame, held by its writer alone, costs one load and no exchange. For a
-	 * holder of the writer's mapping lock; nothing here waits. */
+	 * holder of the writer's mapping lock; nothing here waits.
+	 *
+	 * An empty word says only that nobody has registered since a publisher
+	 * emptied it: that publisher may not have published yet. So whoever
+	 * empties a word is counted in `in_flight` until its list is destroyed
+	 * (after its publication), and a take that finds more than its own share
+	 * counted publishes to every generation: the readers the unfinished take
+	 * consumed are among them. The word is read before the counter, and its
+	 * emptying is ordered after the count, so a word read empty by a later
+	 * publisher comes with the count of the one that emptied it. */
 	static void take_holders(const PageMapping &mapping,
-		std::uint64_t generation, code_holders::HolderList &others) noexcept
+		std::uint64_t generation, code_holders::HolderList &others,
+		std::atomic<std::uint64_t> &in_flight) noexcept
 	{
 		const auto *backing = mapping.backing;
 		if (backing->holders_unknown()) {
 			others.add_every();
 			return;
 		}
-		auto *word = backing->find_holder_word(mapping.offset);
-		if (word == nullptr)
-			return;
-		const auto slot = code_holders::slot_of(generation);
-		auto held = word->load(std::memory_order_relaxed);
-		if (held == code_holders::none ||
-		    code_holders::holds_only(held, slot))
-			return;
-		code_holders::count(&code_holders::detail::CounterStore::exchanges);
-		held = word->exchange(code_holders::none, std::memory_order_acq_rel);
-		others.add(held, slot);
+		if (auto *word = backing->find_holder_word(mapping.offset)) {
+			const auto slot = code_holders::slot_of(generation);
+			auto held = word->load(std::memory_order_acquire);
+			if (held != code_holders::none &&
+			    !code_holders::holds_only(held, slot)) {
+				others.begin_take(in_flight);
+				code_holders::count(
+					&code_holders::detail::CounterStore::exchanges);
+				held = word->exchange(code_holders::none,
+					std::memory_order_acq_rel);
+				others.add(held, slot);
+			}
+		}
+		if (!others.every() &&
+		    in_flight.load(std::memory_order_acquire) > others.own_take()) {
+			others.add_every();
+			code_holders::count(
+				&code_holders::detail::CounterStore::overlap_widenings);
+		}
 	}
 
 	/* A whole-space code change in each generation `holders` names, or in
 	 * every live generation but `except`, the writer's own, which its caller
-	 * published. A generation that is gone is skipped, and none is made: only
+	 * published. The caller's list stays counted as in flight until this
+	 * returns (take_holders). A generation that is gone is skipped, and none is made: only
 	 * a find, so a dead holder does not come back. Never under a mapping lock;
 	 * it takes the table of generations shared, and everything it does there
 	 * is an atomic update. A whole-space change costs a reader no more than
@@ -1833,6 +1854,10 @@ private:
 	{
 		if (holders.empty())
 			return;
+		/* Test variant only: where a test holds a publisher that has taken
+		 * its words and not yet published. */
+		UML_MEMORY_ALLOCATION_CHECKPOINT(
+			testing::AllocationSite::holder_publication);
 		std::uint64_t published = 0;
 		{
 			std::shared_lock lock{states_mutex_};
@@ -1868,6 +1893,9 @@ private:
 	std::shared_ptr<DomainHeap> heap_{std::make_shared<DomainHeap>()};
 	mutable WordSharedMutex states_mutex_;
 	WordSharedMutex backing_mutex_;
+	/* Publishers that have emptied a holder word and not finished publishing
+	 * to the generations it named (code_holders::HolderList). */
+	std::atomic<std::uint64_t> holder_takes_in_flight_{0};
 	std::unordered_map<std::uint64_t, std::shared_ptr<GenerationState>> states_;
 	std::unordered_map<BackingKey, std::weak_ptr<MappedBacking>, BackingKeyHash>
 		backings_;

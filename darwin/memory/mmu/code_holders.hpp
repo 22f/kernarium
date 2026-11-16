@@ -25,6 +25,9 @@
  * stale, and the holder cannot run them again without fetching, and so
  * registering again. That keeps a word from holding every process that ever
  * ran the frame.
+ * Until the publication that took a word has finished, though, an empty word
+ * does not mean its readers are told: HolderList counts such a publisher, and
+ * a publisher that meets the count publishes to every generation.
  *
  * The two sides are a store and then a load of the other's variable (the
  * translator stores its registration and loads the bytes, the writer stores
@@ -90,10 +93,42 @@ using Leaf = std::array<Word, leaf_frames>;
 }
 
 /* The generations a publication goes to, or every one. A word names two, so
- * a few words' worth are kept before the set widens to every generation. */
+ * a few words' worth are kept before the set widens to every generation.
+ *
+ * Emptying a word makes its readers the list's to tell: until the list's
+ * publication has finished, an empty word does not mean its readers know.
+ * So a list that has emptied a word is counted in a takes-in-flight counter
+ * (begin_take) until it is destroyed, and a publisher that finds the counter
+ * above its own share publishes to every generation (AddressSpace::
+ * take_holders). Keep the list alive until its publication returns. */
 class HolderList final {
 public:
 	static constexpr std::size_t capacity = 8;
+
+	HolderList() = default;
+	HolderList(const HolderList &) = delete;
+	HolderList &operator=(const HolderList &) = delete;
+	~HolderList()
+	{
+		if (in_flight_ != nullptr)
+			in_flight_->fetch_sub(1, std::memory_order_release);
+	}
+
+	/* Counts this list in `counter`, once, before its first word is emptied.
+	 * The increment is ordered before the exchange that empties the word, so
+	 * whoever reads that word empty reads the count too. */
+	void begin_take(std::atomic<std::uint64_t> &counter) noexcept
+	{
+		if (in_flight_ != nullptr)
+			return;
+		counter.fetch_add(1, std::memory_order_seq_cst);
+		in_flight_ = &counter;
+	}
+	/* How many takes in flight the list's own, if any, accounts for. */
+	[[nodiscard]] std::uint64_t own_take() const noexcept
+	{
+		return in_flight_ != nullptr ? 1 : 0;
+	}
 
 	/* Adds what a consumed word named, but `except`'s slot. */
 	void add(std::uint64_t word, std::uint32_t except) noexcept
@@ -137,6 +172,7 @@ private:
 	std::array<std::uint32_t, capacity> slots_{};
 	std::size_t count_{};
 	bool every_{};
+	std::atomic<std::uint64_t> *in_flight_{};
 };
 
 /* Starts the periodic counters report the process asked for with
@@ -164,6 +200,9 @@ struct Counters final {
 	 * so publish to every generation. */
 	std::uint64_t leaves{};
 	std::uint64_t unknown_backings{};
+	/* Publications that found another publisher's take unfinished and so went
+	 * to every generation. */
+	std::uint64_t overlap_widenings{};
 };
 
 namespace detail {
@@ -177,6 +216,7 @@ struct CounterStore final {
 	std::atomic_uint64_t generations_published{};
 	std::atomic_uint64_t leaves{};
 	std::atomic_uint64_t unknown_backings{};
+	std::atomic_uint64_t overlap_widenings{};
 };
 
 [[nodiscard]] inline CounterStore &counter_store() noexcept
@@ -203,7 +243,8 @@ inline void count(std::atomic_uint64_t detail::CounterStore::*counter,
 	return {read(store.registrations), read(store.overflows),
 		read(store.exchanges), read(store.publications),
 		read(store.all_publications), read(store.generations_published),
-		read(store.leaves), read(store.unknown_backings)};
+		read(store.leaves), read(store.unknown_backings),
+		read(store.overlap_widenings)};
 }
 
 } // namespace uml::memory::code_holders

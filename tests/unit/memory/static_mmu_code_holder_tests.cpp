@@ -20,6 +20,10 @@
  *                once, and a second publication finds it empty.
  *   no leaf      a backing that cannot make a leaf of its table registers
  *                nothing, and a publication on it goes to every generation.
+ *   overlap      a publisher has taken a frame's word and not yet published;
+ *                a second synchronization of the frame meets an empty word
+ *                (or a word of its own) and must still reach the first one's
+ *                holders, with and without a holder that registered between.
  */
 #include "uml_darwin_guest.h"
 #include "uml_darwin_static_mmu.h"
@@ -53,6 +57,7 @@ constexpr unsigned long code_address = 0x4a00'0000;
 constexpr unsigned long writer_address = 0x4b00'0000;
 constexpr std::uint32_t old_word = 0xd280'0020U; // movz x0, #1
 constexpr std::uint32_t new_word = 0xd280'0040U; // movz x0, #2
+constexpr std::uint32_t third_word = 0xd280'0060U; // movz x0, #3
 
 void map(unsigned long generation, unsigned long address,
 	ScratchBacking &backing, int protection, int code)
@@ -135,7 +140,8 @@ holders::Counters since(const holders::Counters &before)
 		now.all_publications - before.all_publications,
 		now.generations_published - before.generations_published,
 		now.leaves - before.leaves,
-		now.unknown_backings - before.unknown_backings};
+		now.unknown_backings - before.unknown_backings,
+		now.overlap_widenings - before.overlap_widenings};
 }
 
 void test_the_word_fills_two_slots_then_reads_every_generation()
@@ -307,6 +313,8 @@ void test_a_frame_held_by_its_writer_alone_is_published_without_an_exchange()
 	before = holders::counters();
 	synchronize(writer);
 	require(since(before).exchanges == 1 && since(before).publications == 1);
+	require(since(before).overlap_widenings == 0,
+		"a publication that overlapped nothing widened");
 	require(code_changes(reader) > reader_before);
 	before = holders::counters();
 	synchronize(writer);
@@ -347,6 +355,90 @@ void test_a_backing_without_a_leaf_publishes_to_every_generation()
 	destroy(writer);
 }
 
+/* The first publisher has taken the frame's word, so the reader that held it
+ * is no longer named there, and has not yet published to it (the observer
+ * holds it at the start of its publication). A second synchronization of the
+ * same frame then finds the word empty, or holding only a generation that
+ * registered after the take. The reader must hear of the second change before
+ * the first publisher goes on: a completed synchronization cannot leave a
+ * holder that another publisher consumed unannounced. */
+std::atomic<bool> publisher_paused;
+std::atomic<bool> publisher_released;
+thread_local bool holds_at_publication;
+
+void hold_the_publisher(memory_testing::AllocationSite site) noexcept
+{
+	if (site != memory_testing::AllocationSite::holder_publication ||
+	    !holds_at_publication)
+		return;
+	publisher_paused.store(true, std::memory_order_release);
+	const auto limit =
+		std::chrono::steady_clock::now() + std::chrono::seconds{30};
+	while (!publisher_released.load(std::memory_order_acquire)) {
+		if (std::chrono::steady_clock::now() > limit)
+			uml::testing::fail("the held publisher was never released");
+		std::this_thread::yield();
+	}
+}
+
+void two_publishers(bool late_holder, unsigned long base)
+{
+	ScratchBacking backing{backing_name, page};
+	backing.put32(0, old_word);
+	const unsigned long reader = base, late = base + 1, first = base + 2,
+		second = base + 3;
+	map_code(reader, backing);
+	map_code(late, backing);
+	map_writer(first, backing);
+	map_writer(second, backing);
+	(void)fetch(reader);
+	const auto changes_before = code_changes(reader);
+	const auto before = holders::counters();
+
+	publisher_paused.store(false);
+	publisher_released.store(false);
+	memory_testing::set_allocation_observer(&hold_the_publisher);
+	std::thread first_writer{[&] {
+		holds_at_publication = true;
+		backing.put32(0, new_word);
+		synchronize(first);
+	}};
+	const auto limit =
+		std::chrono::steady_clock::now() + std::chrono::seconds{30};
+	while (!publisher_paused.load(std::memory_order_acquire)) {
+		if (std::chrono::steady_clock::now() > limit) {
+			publisher_released.store(true);
+			first_writer.join();
+			uml::testing::fail("the first publisher never took the word");
+		}
+		std::this_thread::yield();
+	}
+	if (late_holder)
+		(void)fetch(late);
+	backing.put32(0, third_word);
+	synchronize(second);
+	const bool heard = code_changes(reader) > changes_before;
+	publisher_released.store(true, std::memory_order_release);
+	first_writer.join();
+	memory_testing::set_allocation_observer(nullptr);
+
+	require(heard, late_holder ?
+		"a publication that took a late holder missed the reader the "
+		"first publisher had consumed" :
+		"a publication that found the word empty missed the reader the "
+		"first publisher had consumed");
+	require(since(before).overlap_widenings == 1,
+		"the overlap did not widen exactly one publication");
+	for (const auto generation : {reader, late, first, second})
+		destroy(generation);
+}
+
+void test_a_publication_that_overlaps_an_unfinished_one_reaches_its_holders()
+{
+	two_publishers(false, 1061);
+	two_publishers(true, 1071);
+}
+
 } // namespace
 
 int main()
@@ -358,6 +450,7 @@ int main()
 	test_a_holder_that_is_gone_is_skipped_and_not_brought_back();
 	test_a_frame_held_by_its_writer_alone_is_published_without_an_exchange();
 	test_a_backing_without_a_leaf_publishes_to_every_generation();
+	test_a_publication_that_overlaps_an_unfinished_one_reaches_its_holders();
 	std::puts("static-mmu-code-holder: ok");
 	return 0;
 }
