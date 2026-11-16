@@ -22,11 +22,11 @@ fast path is a topic of its own. __kernel_rt_sigreturn is not exported;
 a handler without SA_RESTORER keeps returning through the [sigpage].
 
 exec maps the image as a special mapping where the address space has
-room, beside the [sigpage], and records a move by mremap(). ARCH_DLINFO
-puts its address in AT_SYSINFO_EHDR; it is now defined in every
-configuration and holds AT_MINSIGSTKSZ only with SME. An AArch32 task
-keeps its kuser helpers and compat sigpage and gets neither a vDSO nor
-the entry, as on native arm64.
+room, in addition to the [sigpage], and records a move by mremap().
+ARCH_DLINFO puts its address in AT_SYSINFO_EHDR; it is now defined in
+every configuration and holds AT_MINSIGSTKSZ only with SME. An AArch32
+task keeps its kuser helpers and compat sigpage and gets neither a vDSO
+nor the entry, as on native arm64.
 
 UML_ARM64_VDSO selects it. The x86-64 userspace slice clears it, since
 its tasks run x86 code. The comments of the time-data headers that said
