@@ -3954,6 +3954,44 @@ void check_the_record_of_a_runtime_pointer_ends_with_its_release() {
     require(world.released.size() == start + 5, "each release reached the runtime");
 }
 
+// Two threads get and release the runtime's pointers at the same time: the count of the records, which the unlocked fast path
+// reads, is changed by each Get and Release under the table's lock, so that every access to it must be atomic. (The row's
+// weight is under ThreadSanitizer, which reports a plain write against the unlocked read; in a plain build it checks that the
+// pointers of both threads come back to the runtime and that nothing is left recorded.)
+void check_two_threads_getting_and_releasing_pointers_race_on_no_count() {
+    constexpr const char* kCase = "check_two_threads_getting_and_releasing_pointers_race_on_no_count";
+    Fixture f = make();
+    Other a(f);
+    Other b(f);
+    Made made = make_held(f, sample(100));
+    jobject real_a = fn<jobject (*)(Env*, jobject)>(*f.table, slot::NewGlobalRef)(a.f.env, made.shadow);
+    jobject real_b = fn<jobject (*)(Env*, jobject)>(*f.table, slot::NewGlobalRef)(b.f.env, byte_array(sample(90)));
+    const size_t start = world.released.size();
+    std::atomic<int> ready{0};
+    std::atomic<int> go{0};
+    constexpr int kRounds = 4000;
+    const auto work = [&](Fixture& local, jobject real) {
+        ++ready;
+        wait_for_counter(kCase, "go", go, 1, "a worker (the other worker is starting)");
+        for (int n = 0; n < kRounds; ++n) {
+            jbyte* pointer = get_elements(local, real);
+            release_elements(local, real, pointer, 0);
+        }
+    };
+    std::thread one([&] { work(a.f, real_a); });
+    std::thread two([&] { work(b.f, real_b); });
+    wait_for_counter(kCase, "ready", ready, 2, "the case (the workers start)");
+    go = 1;
+    one.join();
+    two.join();
+    require(world.released.size() == start + 2u * kRounds, "every release of both threads reached the runtime");
+    const size_t after = world.released.size();
+    jbyte* last = get_elements(f, real_a);
+    release_elements(f, made.shadow, last, 0);
+    release_elements(f, made.shadow, last, 0);
+    require(world.released.size() == after + 1, "and nothing stayed recorded: a second release is the application's own");
+}
+
 // ---- DeleteLocalRef only reaches the innermost frame
 
 // A nested native method (called from Java by the outer one, which holds the block's entry) deletes a reference of the
@@ -6569,6 +6607,7 @@ int main(int argc, char** argv) {
     check_a_runtime_elements_pointer_got_before_the_first_block_is_released_by_the_runtime();
     check_a_runtime_critical_pointer_got_before_the_first_block_closes_its_region_at_the_release();
     check_the_record_of_a_runtime_pointer_ends_with_its_release();
+    check_two_threads_getting_and_releasing_pointers_race_on_no_count();
     check_a_nested_native_method_cannot_delete_its_callers_reference();
     check_monitor_exit_with_an_exception_pending();
     check_a_pull_does_not_overwrite_a_raw_write_to_another_byte();

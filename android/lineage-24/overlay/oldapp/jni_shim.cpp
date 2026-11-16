@@ -2699,7 +2699,7 @@ void erase_record(unsigned i) {
         }
     }
     g.records[i] = PointerRecord{nullptr, kRecordFree, 0};
-    --g.records_in_use;
+    __atomic_fetch_sub(&g.records_in_use, 1u, __ATOMIC_RELAXED);
 }
 void record_runtime_pointer(const void* pointer, uint32_t kind) {
     if (pointer == nullptr) {
@@ -2711,13 +2711,13 @@ void record_runtime_pointer(const void* pointer, uint32_t kind) {
             ++record->count;
             return;
         }
-        if (g.records_in_use < kRecordSlots / 2) {
+        if (__atomic_load_n(&g.records_in_use, __ATOMIC_RELAXED) < kRecordSlots / 2) {
             unsigned i = record_slot(pointer);
             while (g.records[i].kind != kRecordFree) {
                 i = (i + 1) % kRecordSlots;
             }
             g.records[i] = PointerRecord{pointer, kind, 1};
-            ++g.records_in_use;
+            __atomic_fetch_add(&g.records_in_use, 1u, __ATOMIC_RELAXED);
             return;
         }
     }
@@ -2728,6 +2728,12 @@ void record_runtime_pointer(const void* pointer, uint32_t kind) {
                        static_cast<long>(kRecordSlots / 2), static_cast<long>(kRecordSlots));
     }
 }
+// The count of the records is changed under the table's lock and read, atomically (relaxed) everywhere, also without it: a count of
+// zero answers "not recorded" for a pointer without the lock, and that answer is exact. A caller asks about a pointer it holds. It
+// holds it because the runtime handed it out to this thread, which recorded it (a store under the lock) before it used the pointer,
+// or because another thread passed it on through the application's own synchronization, which orders that store before this load.
+// A load ordered after a store reads it or a later value of the count, and the count is lower than the store made it only by the
+// release of a record, which is then gone. So zero means that no record of the pointer exists; any other count takes the lock.
 bool is_recorded_pointer(const void* pointer, uint32_t kind) {
     if (pointer == nullptr || __atomic_load_n(&g.records_in_use, __ATOMIC_RELAXED) == 0) {
         return false;
@@ -2738,7 +2744,7 @@ bool is_recorded_pointer(const void* pointer, uint32_t kind) {
 // A release of the pointer (any reference): the record goes with the last Get unless the mode is JNI_COMMIT.
 void forget_runtime_pointer(const void* pointer, uint32_t kind, jint mode) {
     if (mode == kReleaseCommit || pointer == nullptr || __atomic_load_n(&g.records_in_use, __ATOMIC_RELAXED) == 0) {
-        return;
+        return;  // (no record exists: see is_recorded_pointer)
     }
     TableLock lock;
     PointerRecord* record = find_record(pointer, kind);
