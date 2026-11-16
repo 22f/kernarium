@@ -125,11 +125,17 @@ share:
   `--gadget-cache-budget=`; it is also the gadget-cache term of the host GPU's
   budget
   ([architecture](../docs/architecture.md#memory-and-executable-code)).
-- **Code writes.** In both arm64 engines, code another vCPU changed and
-  synchronized takes effect at this vCPU's next context synchronization point.
-  A kernel write into a guest-code page reaches arm64 code only through the
-  guest's own `IC IVAU` or `cacheflush()`, as on hardware that advertises
-  neither DIC nor IDC.
+- **Code writes.** In both arm64 engines, code another vCPU or another process
+  changed and synchronized takes effect at this vCPU's next context
+  synchronization point, including through a shared frame under another
+  address space: a per-frame holder word on the mapped backing names the
+  address spaces that fetched the frame, and the synchronization (or a
+  `ptrace` and `process_vm_writev()` write) publishes to them
+  ([architecture](../docs/architecture.md#translation-caches-and-guest-debugging)).
+  A kernel write into a guest-code page by `uaccess` reaches arm64 code only
+  through the guest's own `IC IVAU` or `cacheflush()`, as on hardware that
+  advertises neither DIC nor IDC. `DARWIN_UML_CODE_HOLDER_COUNTERS=<path>`
+  writes the mechanism's counters once a second.
 - **Forwarding and diagnostics.** Scalar and vector result forwarding are
   template-owned and can be disabled per program through `BuildOptions`.
   `UML_GADGET_EXECUTION_HISTOGRAM` is a default-off diagnostic build whose
