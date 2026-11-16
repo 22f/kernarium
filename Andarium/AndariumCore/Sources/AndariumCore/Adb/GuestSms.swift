@@ -14,6 +14,10 @@ public enum GuestSms {
 
     public enum Refusal: Equatable, Sendable {
         case noSender, badSender, noText, tooLong
+        /// The text holds U+FFFE, which Android's decoder cannot return: it
+        /// swaps the bytes after it or replaces it (see the service's
+        /// DeliverPdu), so the text would not arrive as typed.
+        case unsendableCharacter
     }
 
     /// The sender as the guest takes it: a phone number of at most 20 digits,
@@ -33,6 +37,7 @@ public enum GuestSms {
         if sender(typed) == nil { return .badSender }
         if text.isEmpty { return .noText }
         if text.utf16.count > maximumUnits { return .tooLong }
+        if text.unicodeScalars.contains("\u{FFFE}") { return .unsendableCharacter }
         return nil
     }
 

@@ -39,6 +39,8 @@ final class Message {
         if (body.isEmpty() || body.length() > MAXIMUM_UNITS) {
             throw new IllegalArgumentException("the text must have 1 to " + MAXIMUM_UNITS + " characters");
         }
+        // Android's SMS code cannot return U+FFFE (see DeliverPdu).
+        if (body.indexOf('\uFFFE') >= 0) throw new IllegalArgumentException("the text has U+FFFE");
         return new Message(sender, body);
     }
 

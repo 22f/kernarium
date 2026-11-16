@@ -20,6 +20,7 @@ enum SmsMessages {
         case .badSender: "The sender must be a phone number, or a name of up to 11 letters, digits and spaces."
         case .noText: "Enter the message."
         case .tooLong: "The message is longer than \(GuestSms.maximumUnits) characters."
+        case .unsendableCharacter: "The message has a character that Android would change on the way."
         }
     }
 

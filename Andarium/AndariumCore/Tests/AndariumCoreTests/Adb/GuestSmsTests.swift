@@ -25,6 +25,19 @@ struct GuestSmsTests {
         #expect(GuestSms.refusal(sender: "Bank", text: String(repeating: "x", count: 670)) == nil)
     }
 
+    /// Android decodes each part as UTF-16 with a byte order mark: U+FEFF travels (the service doubles it
+    /// at a part's start) and U+FFFE cannot, anywhere in the text.
+    @Test func theReversedMarkIsRefusedAndTheMarkIsNot() {
+        #expect(GuestSms.refusal(sender: "Bank", text: "\u{FFFE}") == .unsendableCharacter)
+        #expect(GuestSms.refusal(sender: "Bank", text: "ab\u{FFFE}cd") == .unsendableCharacter)
+        #expect(GuestSms.refusal(sender: "Bank", text: String(repeating: "x", count: 300) + "\u{FFFE}") == .unsendableCharacter)
+        #expect(GuestSms.command(sender: "Bank", text: "a\u{FFFE}") == nil)
+        #expect(GuestSms.refusal(sender: "Bank", text: "\u{FEFF}abc") == nil)
+        #expect(GuestSms.refusal(sender: "Bank", text: "\u{FEFF}") == nil)
+        #expect(GuestSms.refusal(sender: "Bank", text: "ab\u{FEFF}") == nil)
+        #expect(GuestSms.refusal(sender: "Bank", text: "\u{FFFF}") == nil)
+    }
+
     @Test func theCommandCarriesOnlyBase64() throws {
         let command = try #require(GuestSms.command(sender: "+1 555", text: "it's $HOME; `x`\nسلام"))
         let argument = try #require(command.firstMatch(of: /--arg '([A-Za-z0-9+\/=.]+)'$/)?.1)

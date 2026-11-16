@@ -220,6 +220,18 @@ uml_add_tooling_test(
 set_tests_properties(android17-oldapp-switch-command PROPERTIES
     SKIP_RETURN_CODE 77)
 
+# The text message service's logic on a plain JVM: the PDUs it builds, read back
+# with the platform's own UTF-16 decoder, the argument's parsing and the memory
+# of the identifiers it has delivered. It skips (77) where the host has no JDK.
+uml_add_tooling_test(
+    NAME android17-sms-service
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_sms_service.py
+    LABELS android
+    TIMEOUT 300)
+set_tests_properties(android17-sms-service PROPERTIES
+    SKIP_RETURN_CODE 77)
+
 # The old-application runner without a guest: the probe application's two
 # packages (manifest, DEX file, libraries built for armv7 when the host has the
 # tools), the verdicts, the permission review and the commands it sends.

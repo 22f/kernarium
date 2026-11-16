@@ -11,14 +11,26 @@ import java.util.TimeZone;
  * text, one PDU when it fits 70 units and otherwise concatenated parts of 67,
  * never splitting a surrogate pair. Each PDU starts with an empty service
  * centre address, as the "3gpp" format of SmsMessage.createFromPdu expects.
+ *
+ * <p>Android decodes the user data of each PDU as "UTF-16", which reads a
+ * leading byte order mark and drops it. A part that starts with U+FEFF would
+ * lose that character, so such a part carries a second U+FEFF in front, which
+ * the decoder takes as the mark; that unit comes out of the part's 67. U+FFFE
+ * cannot be sent at all: at the start of a part the decoder reads it as the
+ * reversed mark and swaps every byte after it, and elsewhere as a malformed
+ * unit that it replaces with U+FFFD. Message refuses it.
  */
 final class DeliverPdu {
     private static final int SINGLE_UNITS = 70;
     private static final int PART_UNITS = 67;
+    private static final char BYTE_ORDER_MARK = '\uFEFF';
+    private static final char REVERSED_MARK = '\uFFFE';
 
     private DeliverPdu() {}
 
     static byte[][] encode(String sender, String body, long millis, TimeZone zone, int reference) {
+        if (body.isEmpty()) throw new IllegalArgumentException("no text");
+        if (body.indexOf(REVERSED_MARK) >= 0) throw new IllegalArgumentException("U+FFFE cannot be sent");
         final List<String> parts = split(body);
         final byte[][] pdus = new byte[parts.size()][];
         for (int i = 0; i < parts.size(); ++i) {
@@ -28,20 +40,31 @@ final class DeliverPdu {
         return pdus;
     }
 
+    /** The user data of each part, as the decoder will read it: a leading U+FEFF is doubled. */
     static List<String> split(String body) {
         final List<String> parts = new ArrayList<>();
-        if (body.length() <= SINGLE_UNITS) {
-            parts.add(body);
+        if (body.length() + markUnits(body, 0) <= SINGLE_UNITS) {
+            parts.add(onWire(body));
             return parts;
         }
         int start = 0;
         while (start < body.length()) {
-            int end = Math.min(start + PART_UNITS, body.length());
+            final int budget = PART_UNITS - markUnits(body, start);
+            int end = Math.min(start + budget, body.length());
             if (end < body.length() && Character.isHighSurrogate(body.charAt(end - 1))) --end;
-            parts.add(body.substring(start, end));
+            parts.add(onWire(body.substring(start, end)));
             start = end;
         }
         return parts;
+    }
+
+    /** How many units the part that starts at {@code start} adds for the decoder. */
+    private static int markUnits(String body, int start) {
+        return body.charAt(start) == BYTE_ORDER_MARK ? 1 : 0;
+    }
+
+    private static String onWire(String text) {
+        return text.charAt(0) == BYTE_ORDER_MARK ? BYTE_ORDER_MARK + text : text;
     }
 
     private static byte[] pdu(String sender, String text, long millis, TimeZone zone, int[] concat) {
