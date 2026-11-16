@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "jit_test_support.hpp"
 #include "runtime_test_route.hpp"
+#include "cpu/arm64/jit/jit_arena.hpp"
 #include "cpu/arm64/jit/jit_cache_geometry.hpp"
+#include "cpu/arm64/jit/jit_compiler.hpp"
 #include "cpu/arm64/jit/jit_executor.hpp"
 #include "cpu/arm64/jit/jit_semantic_memory.hpp"
 #include "cpu/arm64/jit/jit_test_api.hpp"
@@ -15,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <sys/mman.h>
 #include <thread>
 #include <vector>
@@ -307,6 +310,251 @@ void concurrent_compare_retry_case(bool mixed_semantic) {
   for (auto &thread : threads)
     thread.join();
   require(backing.get64(page) == workers * iterations);
+}
+
+/*
+ * A compare-retry whose mismatch path reaches a store-exclusive of its own,
+ * with no new load-exclusive. On hardware the mismatch leaves the monitor
+ * armed, so that store succeeds (the architecture guarantees such a loop
+ * progress, and single-stepping completes it in six instructions). A fused run
+ * that cleared the monitor on the mismatch and continued at the target made
+ * the store fail on every pass.
+ */
+constexpr std::array<std::uint32_t, 9> mismatch_store_words{
+    load_exclusive,
+    0xeb04'007fU, // cmp x3, x4
+    0x5400'0081U, // b.ne pc + 16, the alternate store
+    0xc805'7c22U, // stxr w5, x2, [x1]
+    0x35ff'ff85U, // cbnz w5, pc - 16
+    system_call,
+    0xc806'7c27U, // stxr w6, x7, [x1]
+    0x35ff'ff26U, // cbnz w6, pc - 28
+    system_call,
+};
+constexpr std::uint32_t mismatch_flags = 0x8000'0000U; // cmp 41, 42
+
+void put_mismatch_store_words(JitBacking &backing) {
+  for (std::size_t index = 0; index < mismatch_store_words.size(); ++index)
+    backing.put32(index * 4U, mismatch_store_words[index]);
+}
+
+struct MismatchStoreOutcome final {
+  ::uml::cpu::EngineEvent event{};
+  std::size_t retired{};
+  std::array<std::uint64_t, 31> registers{};
+  std::uint32_t nzcv{};
+  std::uint8_t exclusive_size{};
+  std::uint64_t memory{};
+};
+
+/* F1: runs the loop to its end in at most 60 dispatches, the semantic
+ * single-step path as the control. */
+MismatchStoreOutcome run_mismatch_store_loop(unsigned long generation,
+                                             std::uint64_t base,
+                                             bool single_step) {
+  constexpr auto page = DARWIN_UML_GUEST_PAGE_SIZE;
+  JitBacking backing{2};
+  put_mismatch_store_words(backing);
+  backing.put64(page, 41);
+  JitMapping mapping{generation, base, backing, 2};
+  uml::cpu::arm64::JitExecutor executor;
+  uml::memory::StaticGuestMemory memory;
+  uml::cpu::arm64::CpuState cpu{};
+  cpu.pc = base;
+  cpu.registers[1] = base + page;
+  cpu.registers[4] = 42;
+  cpu.registers[6] = 9;
+  cpu.registers[7] = 43;
+  require(executor.begin_execution(generation, cpu.pc));
+  executor.set_single_step(single_step);
+  MismatchStoreOutcome outcome;
+  outcome.event = ::uml::cpu::EngineEvent::continued;
+  for (unsigned dispatch = 0; dispatch < 60U &&
+       outcome.event == ::uml::cpu::EngineEvent::continued; ++dispatch) {
+    std::size_t executed = 0;
+    outcome.event = executor.run_block(cpu, memory, generation, executed);
+    outcome.retired += executed;
+  }
+  outcome.registers = cpu.registers;
+  outcome.nzcv = cpu.nzcv;
+  outcome.exclusive_size = cpu.exclusive_size;
+  outcome.memory = backing.get64(page);
+  executor.end_execution();
+  return outcome;
+}
+
+void mismatch_path_store_exclusive_makes_progress() {
+  const auto control = run_mismatch_store_loop(10'120U, 0x140'0000U, true);
+  require(control.event == ::uml::cpu::EngineEvent::system_call);
+  require(control.retired == 6U);
+  require(control.registers[6] == 0U && control.memory == 43U);
+  const auto native = run_mismatch_store_loop(10'121U, 0x140'0000U, false);
+  require(native.event == ::uml::cpu::EngineEvent::system_call);
+  require(native.retired == control.retired);
+  require(native.registers == control.registers);
+  require(native.nzcv == control.nzcv && native.nzcv == mismatch_flags);
+  require(native.exclusive_size == control.exclusive_size);
+  require(native.memory == control.memory);
+}
+
+/*
+ * F2: on a translation first shown to be fused, a mismatch pass rolls back
+ * to the guest state at the load. The discarded native attempt retires
+ * nothing and leaves no register or flag behind; the semantic load-exclusive
+ * then executes in its place.
+ */
+void mismatch_rolls_back_to_a_semantic_load() {
+  constexpr auto page = DARWIN_UML_GUEST_PAGE_SIZE;
+  constexpr unsigned long generation = 10'122U;
+  constexpr std::uint64_t base = 0x142'0000U;
+  constexpr std::uint64_t target = base + 24U;
+  JitBacking backing{2};
+  put_mismatch_store_words(backing);
+  backing.put64(page, 42);
+  JitMapping mapping{generation, base, backing, 2};
+  uml::cpu::arm64::JitExecutor executor;
+  uml::memory::StaticGuestMemory memory;
+  uml::cpu::arm64::CpuState cpu{};
+  cpu.pc = base;
+  cpu.registers[1] = base + page;
+  cpu.registers[2] = 100;
+  cpu.registers[4] = 42;
+  cpu.registers[5] = 7;
+  cpu.registers[7] = 43;
+  require(executor.begin_execution(generation, cpu.pc));
+
+  // The pair fuses: the load, the compare, the branch, the store and the
+  // retry are one native pass, and the monitor is clear when it ends. A host
+  // store-exclusive may fail spuriously, which repeats a complete pass.
+  std::size_t executed = 0;
+  require(executor.run_block(cpu, memory, generation, executed) ==
+          ::uml::cpu::EngineEvent::continued);
+  require(executed >= 5U && (executed - 5U) % 5U == 0U);
+  require(cpu.exclusive_size == 0U && cpu.registers[5] == 0U);
+  require(backing.get64(page) == 100U);
+
+  // The same translation, now taking the mismatch branch.
+  backing.put64(page, 41);
+  cpu.pc = base;
+  cpu.registers[3] = 0x5555U;
+  cpu.registers[5] = 7;
+  cpu.nzcv = 0x3000'0000U;
+  const auto before = cpu.registers;
+  executed = 0;
+  require(executor.run_block(cpu, memory, generation, executed) ==
+          ::uml::cpu::EngineEvent::continued);
+  require(executed == 1U);
+  require(cpu.pc == base + 4U);
+  require(cpu.exclusive_size == 8U);
+  require(cpu.registers[3] == 41U);
+  for (unsigned index = 0; index < 31U; ++index)
+    require(index == 3U || cpu.registers[index] == before[index]);
+  require(cpu.nzcv == 0x3000'0000U);
+  require(backing.get64(page) == 41U);
+
+  // The following blocks compare, reach the target with the compare's flags,
+  // and complete its store-exclusive on the monitor the load armed.
+  std::size_t retired = 0;
+  auto event = ::uml::cpu::EngineEvent::continued;
+  for (unsigned dispatch = 0; dispatch < 8U &&
+       event == ::uml::cpu::EngineEvent::continued; ++dispatch) {
+    executed = 0;
+    event = executor.run_block(cpu, memory, generation, executed);
+    retired += executed;
+  }
+  require(event == ::uml::cpu::EngineEvent::system_call);
+  require(retired == 5U && cpu.pc == target + 12U);
+  require(cpu.registers[3] == 41U && cpu.registers[6] == 0U);
+  require(cpu.nzcv == mismatch_flags);
+  require(backing.get64(page) == 43U);
+  executor.end_execution();
+}
+
+/* The generated block alone: one native pair in the hot code, and a mismatch
+ * that returns at the load with nothing retired, every register and flag as
+ * they were, and the original load-exclusive handed to the deferred path. */
+void rollback_block_retires_nothing() {
+  namespace arm64 = uml::cpu::arm64;
+  constexpr auto page = DARWIN_UML_GUEST_PAGE_SIZE;
+  constexpr unsigned long generation = 10'123U;
+  constexpr std::uint64_t base = 0x143'0000U;
+  constexpr std::uint64_t data = base + page;
+  JitBacking backing{2};
+  backing.put64(page, 41);
+  JitMapping mapping{generation, base, backing, 2};
+  uml::memory::Tlb tlb;
+  tlb.prepare(generation, darwin_uml_static_vm_changes(generation));
+  require(tlb.translate(data, uml::memory::Access::read) != nullptr);
+  require(tlb.translate(data, uml::memory::Access::write) != nullptr);
+
+  const auto words = std::span{mismatch_store_words}.first(5);
+  arm64::JitCompiler compiler;
+  const auto compiled = compiler.compile(base, words);
+  require(!compiled.words.empty() && compiled.relocations.empty());
+  unsigned loads = 0;
+  unsigned stores = 0;
+  for (const auto word : compiled.words.first(compiled.hot_words)) {
+    loads += (word & 0x3fe0'0000U) == 0x0840'0000U ? 1U : 0U;
+    stores += (word & 0x3fe0'0000U) == 0x0800'0000U ? 1U : 0U;
+  }
+  require(loads == 1U && stores == 1U);
+
+  arm64::jit::detail::ExecutableArena arena{256U * 1024U};
+  require(arena.valid());
+  auto *const code = arena.store(compiled.words);
+  require(code != nullptr);
+  arm64::CpuState cpu{};
+  for (unsigned index = 0; index < 31U; ++index)
+    cpu.registers[index] = 0xabc0'0000U + index;
+  cpu.pc = base;
+  cpu.registers[1] = data;
+  cpu.registers[4] = 42;
+  cpu.nzcv = 0x3000'0000U;
+  const auto before = cpu.registers;
+  arm64::JitChainState chain{};
+  const auto result = arm64::unpack_jit_result(
+      arm64::sign_jit_function<arm64::JitFunction>(code)(&cpu, &tlb, &chain));
+  require(result.event == ::uml::cpu::EngineEvent::continued);
+  require(result.retired == 0U);
+  require(cpu.pc == base);
+  require(cpu.registers == before);
+  require(cpu.nzcv == 0x3000'0000U);
+  require(cpu.exclusive_size == 0U);
+  require(chain.deferred_exclusive_instruction == load_exclusive);
+  require(backing.get64(page) == 41U);
+}
+
+/* A compare-retry whose load is the last three words of a page and whose
+ * store is on the next mapped page still fuses. */
+void compare_retry_across_a_page_boundary_fuses() {
+  constexpr auto page = DARWIN_UML_GUEST_PAGE_SIZE;
+  constexpr unsigned long generation = 10'124U;
+  constexpr std::uint64_t base = 0x145'0000U;
+  constexpr std::uint64_t start = base + page - 12U;
+  JitBacking backing{3};
+  const std::array<std::uint32_t, 6> program{
+      load_exclusive, 0xeb04'007fU, 0x5400'0061U,
+      0xc805'7c22U, // stxr w5, x2, [x1]
+      0x35ff'ff85U, system_call};
+  for (std::size_t index = 0; index < program.size(); ++index)
+    backing.put32(page - 12U + index * 4U, program[index]);
+  backing.put64(2U * page, 41);
+  JitMapping mapping{generation, base, backing, 3};
+  uml::cpu::arm64::JitExecutor executor;
+  uml::memory::StaticGuestMemory memory;
+  uml::cpu::arm64::CpuState cpu{};
+  cpu.pc = start;
+  cpu.registers[1] = base + 2U * page;
+  cpu.registers[2] = 43;
+  cpu.registers[4] = 41;
+  require(executor.begin_execution(generation, cpu.pc));
+  std::size_t executed = 0;
+  require(executor.run_block(cpu, memory, generation, executed) ==
+          ::uml::cpu::EngineEvent::continued);
+  require(executed >= 5U && (executed - 5U) % 5U == 0U);
+  require(cpu.exclusive_size == 0U && cpu.registers[5] == 0U);
+  require(backing.get64(2U * page) == 43U);
+  executor.end_execution();
 }
 
 enum class AliasStore : unsigned { plain, release };
@@ -974,6 +1222,10 @@ int main() {
   compare_lookahead_preserves_fetch_faults(true);
   concurrent_compare_retry_case(false);
   concurrent_compare_retry_case(true);
+  mismatch_path_store_exclusive_makes_progress();
+  mismatch_rolls_back_to_a_semantic_load();
+  rollback_block_retires_nothing();
+  compare_retry_across_a_page_boundary_fuses();
   same_backing_alias_case(true);
   same_backing_alias_case(false);
   same_backing_alias_case(true, true);

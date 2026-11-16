@@ -508,8 +508,10 @@
     # What the retry must refuse, made on purpose: the first attempt at
     # chosen exclusive cases ends as a lost reservation with another
     # register or TPIDRURO wrong, as a store that reports success and wrote
-    # nothing, or as an expected failure with a register wrong, and each must
-    # fail unretried while a plain loss is retried and passes.
+    # nothing, or as an expected failure with a register wrong, or as a retry
+    # loop that retires something other than whole passes more, and each must
+    # fail unretried while a plain loss is retried and passes; a whole pass
+    # made on every attempt must fail at the attempt bound.
     uml_add_unit_test(NAME arm64-gadget-a32-corpus-injected
         COMMAND uml_arm64_gadget_a32_corpus_tests ${UML_ARM64_AARCH32_CORPUS}
             --inject)
