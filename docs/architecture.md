@@ -946,7 +946,12 @@ application can re-apply what belongs to a kernel. After Android powers off
 cleanly the runtime releases the guest through `uml_emulator_release_guest` and
 returns success only once another run can start. An application that can be
 backgrounded holds the guest's GPU requests (`set_gpu_hold`) before it quiesces
-and releases them before it resumes.
+and releases them before it resumes. On an Android guest the hold is preceded by
+the camera's end of the guest's running video: the camera device ends it as the
+platform's notice of the departure would and the hold waits (two seconds at most,
+inside the edge's budget, never added to it) until the guest has stopped its
+video streams, so a recording that runs ends before the guest's GPU requests
+stop (`uml::camera::BackgroundVideo`, the camera device's README).
 
 The kernel's whole-file disk locks pass through the host's guest-file registry
 (`platform/guest_files`). On iOS, iPadOS, the Simulator and in Designed for

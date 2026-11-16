@@ -60,6 +60,10 @@ constexpr std::uint64_t captureTimeoutNanoseconds = 10'000'000'000;
 constexpr std::uint64_t abandonedCaptureNanoseconds = 30'000'000'000;
 /* How long a session that failed to open waits before it is tried again. */
 constexpr std::uint64_t sessionRetryNanoseconds = 1'000'000'000;
+/* The guest is still acting on a camera's lost video this long after the loss: the application that leaves the foreground
+ * then waits for the guest to stop the streams of that video (`BackgroundVideo`). A loss older than this was not acted on,
+ * and a later departure does not wait for it. */
+constexpr std::uint64_t lossBeingActedOnNanoseconds = 5'000'000'000;
 constexpr std::uint32_t userIdent = 0;
 constexpr std::uint32_t groupTimerIdent = 0xffffff00u;
 constexpr std::uint32_t reservedStreamIds = 0xffff0000u;
@@ -214,6 +218,8 @@ public:
          * guest has closed its last video stream of the camera: the guest's camera layer decides what to do with that news.
          * It is not a state the platform's recovery ends. */
         bool lost {};
+        /* When the video was lost, on the device's clock. */
+        std::uint64_t lostAt {};
         /* The guest has been told the camera is interrupted (or gone) and not
          * yet that it is back; it is told once each way. */
         bool told {};
@@ -296,6 +302,9 @@ public:
     bool sessionFailed {};
     /* The format each platform camera runs in, which a session is told when it opens. */
     std::vector<std::optional<std::size_t>> anchors;
+    /* The video streams the guest has yet to stop after the application's departure ended their camera's video, which the
+     * application waits for (`options.background`); on the worker. */
+    std::set<std::uint32_t> pendingStops;
 
     // The platform's side: any thread, under the mutex.
     std::mutex inboxMutex;
@@ -341,10 +350,12 @@ public:
         struct kevent change {};
         EV_SET(&change, userIdent, EVFILT_USER, EV_ADD | EV_ENABLE | EV_CLEAR, 0, 0, nullptr);
         if (::kevent(queue.get(), &change, 1, nullptr, 0, nullptr) < 0) throw std::runtime_error("Virtio camera wake-up failed");
+        if (options.background) options.background->attach([this] { wake(); });
     }
 
     ~Implementation() override
     {
+        if (options.background) options.background->detach();
         closeSession();
         reportVideoMode(false);
     }
@@ -494,6 +505,14 @@ public:
     [[nodiscard]] bool endsVideoWhenAppLeaves(const Runtime& runtime) const
     {
         return !blocked() && !runtime.lost && hasVideoStream(runtime);
+    }
+
+    /* Whether the guest runs a video stream on a camera (a stream it has started and not stopped). */
+    [[nodiscard]] bool runsVideo(const Runtime& runtime) const
+    {
+        return std::any_of(streams.begin(), streams.end(), [&](const auto& entry) {
+            return entry.second.camera == runtime.description.index && startedVideo(entry.second);
+        });
     }
 
     /* The guest closed its last video stream of a camera: the loss ends with it, and the camera, if it was told it is down
@@ -1740,6 +1759,7 @@ public:
                                                                                           : Interruption::interrupted;
                 if (ends) {
                     runtime.lost = ended = true;
+                    runtime.lostAt = now();
                     std::fprintf(stderr, "camera %u: the video ended: the application left the foreground\n",
                                  unsigned(runtime.description.index));
                 }
@@ -1790,9 +1810,52 @@ public:
         reportState();
     }
 
+    /* The application leaves the foreground and asks for the guest's running video to end now (`options.background`): the
+     * video of every camera the guest runs a video stream on ends as the platform's notice of the departure ends it, which
+     * finds those cameras lost when it comes. The streams the guest has yet to stop (those of the cameras ended here, and of
+     * one whose video ended a moment ago, when the notice came first) are what the application waits for. A blocked session
+     * runs no video, and a camera with no running stream is left as it is: the departure is not its news, and no notice
+     * of it is made up. */
+    void endVideoForBackground(std::uint64_t request)
+    {
+        pendingStops.clear();
+        if (!blocked()) {
+            for (auto& runtime : runtimes) {
+                if (!runsVideo(runtime) || !endsVideoWhenAppLeaves(runtime)) continue;
+                std::uint64_t serial;
+                {
+                    std::lock_guard lock(inboxMutex);
+                    serial = ++inboxSerial;
+                }
+                handlePlatformEvent({CameraEvent {runtime.description.platformIndex, CameraEventKind::interruptedInBackground}, serial});
+            }
+            const auto time = now();
+            for (const auto& [id, stream] : streams) {
+                const auto* runtime = runtimeOf(stream.camera);
+                if (runtime && startedVideo(stream) && runtime->lost && time - runtime->lostAt <= lossBeingActedOnNanoseconds)
+                    pendingStops.insert(id);
+            }
+        }
+        if (!pendingStops.empty())
+            std::fprintf(stderr, "camera: the application left the foreground: %zu video stream(s) of the guest to stop\n",
+                         pendingStops.size());
+        options.background->ended(request, std::uint32_t(pendingStops.size()));
+    }
+
+    /* The guest stopped a video stream: the application no longer waits for it. */
+    void videoStreamStopped(std::uint32_t id)
+    {
+        if (pendingStops.erase(id) == 0 || !options.background) return;
+        std::fprintf(stderr, "camera: the guest stopped video stream %u after the application left the foreground (%zu left)\n", id,
+                     pendingStops.size());
+        options.background->remaining(std::uint32_t(pendingStops.size()));
+    }
+
     /* Takes what the platform produced since the last pass. */
     void pump()
     {
+        std::uint64_t request;
+        if (options.background && options.background->take(request)) endVideoForBackground(request);
         std::vector<InboxFrame> newest;
         std::deque<InboxStill> stills;
         std::deque<InboxEvent> platformEvents;
@@ -2102,6 +2165,7 @@ public:
                 reconfigure(*runtime);
                 updateBlackTimers(*runtime);
             }
+            videoStreamStopped(stream.id);
         }
         releaseSessionIfIdle();
         reportState();
@@ -2290,6 +2354,8 @@ public:
         }
         closeSession();
         streams.clear();
+        pendingStops.clear();
+        if (options.background) options.background->remaining(0);
         groups.clear();
         events.clear();
         completions.clear();

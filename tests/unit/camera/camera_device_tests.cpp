@@ -326,6 +326,7 @@ struct Rig final {
         options.automaticRotation = [this](const uml::platform::CameraInfo&) { return automaticDegrees ? *automaticDegrees : 0u; };
         options.onCheckpoint = [this](CameraCheckpoint where) { checkpoints.push_back(where); };
         options.onStillFailure = [this](const CameraStillFailure& failure) { stillFailures.push_back(failure); };
+        options.background = background;
         options.onCameraPresentation = [this](const CameraPresentation& presentation) {
             presentations.push_back(presentation);
             if (presentationThrows) throw std::runtime_error("the owner's record failed");
@@ -354,6 +355,8 @@ struct Rig final {
     std::shared_ptr<SyntheticCamera> camera;
     std::shared_ptr<WatchedCamera> watched;
     std::shared_ptr<CalibrationStore> store;
+    /* The application's way to end the guest's video when it leaves the foreground (`CameraDeviceOptions::background`). */
+    std::shared_ptr<BackgroundVideo> background {std::make_shared<BackgroundVideo>()};
     std::unique_ptr<VirtioCameraDevice> device;
     std::vector<CameraState> states;
     /* What the device told onVideoMode, in order. */
@@ -1825,6 +1828,223 @@ void testOnlyTheBackgroundEndsAVideoAndOnlyOfACameraWithAVideoStream()
         const auto a = rig.queue(1, 2);
         require(rig.waitFor([&] { return rig.done(a); }), "answered");
         require(rig.result(a).base.flags == (blackFlag | blockedFlag), "a blocked session is black and blocked, never lost");
+    }
+}
+
+/* The application's thread that asks for the guest's video to end as it leaves the foreground, and waits for the guest to
+ * stop it (`BackgroundVideo::end`), on a thread of its own: the test thread is the device's worker. */
+class Departure final {
+public:
+    Departure(BackgroundVideo& control, std::chrono::milliseconds bound) : began_(BackgroundVideo::Clock::now())
+    {
+        thread_ = std::thread([this, &control, deadline = began_ + bound] {
+            outcome_ = control.end(deadline);
+            finished_ = BackgroundVideo::Clock::now();
+            returned_.store(true);
+        });
+    }
+    ~Departure()
+    {
+        if (thread_.joinable()) thread_.join();
+    }
+    bool returned() const { return returned_.load(); }
+    BackgroundVideo::Outcome join()
+    {
+        thread_.join();
+        return outcome_;
+    }
+    std::chrono::milliseconds took() const { return std::chrono::duration_cast<std::chrono::milliseconds>(finished_ - began_); }
+
+private:
+    BackgroundVideo::Clock::time_point began_, finished_;
+    std::atomic<bool> returned_ {};
+    BackgroundVideo::Outcome outcome_;
+    std::thread thread_;
+};
+
+/* A video stream with a meta stream beside it and a few buffers running, as a camera application's recording has. */
+void runningVideo(Rig& rig, std::uint32_t video = 1, std::uint32_t camera = 0)
+{
+    videoStream(rig, video, camera, 640, 480, 8);
+    rig.create(video + 1, camera, metaKind);
+    for (std::uint32_t resource = 1; resource <= 8; ++resource) rig.attach(video + 1, resource, metaSize);
+    rig.setOk(video, {{UML_V4L2_CID_IMAGE_STABILIZATION, 1, {}}});
+    rig.queue(video + 1, 1);
+    rig.queue(video + 1, 2);
+    rig.queue(video, 1);
+    rig.queue(video, 2);
+    rig.pumpSteps(camera, 2);
+}
+
+/* The application leaves the foreground while the guest records: the device ends the video at once, as the platform's
+ * notice would, and the application's call returns only when the guest has stopped the video stream it ran, which the
+ * guest's camera layer does when it has seen the loss. The platform's notice, which comes later, finds the camera lost. */
+void testTheDepartureEndsTheRunningVideoAndWaitsForTheGuestToStopIt()
+{
+    Rig rig;
+    runningVideo(rig);
+    require(rig.camera->videoRunning(0) && rig.states.back() == CameraState::streaming, "the video runs");
+    Departure leaving(*rig.background, std::chrono::seconds(8));
+    require(rig.waitFor([&] { return rig.states.back() == CameraState::interrupted; }), "the application is told at once");
+    require(!rig.camera->videoRunning(0) && !rig.videoModes.back(), "the platform's capture is stopped, and the video mode ends");
+    require(!leaving.returned(), "the application waits: the guest has not acted on the loss");
+    const auto a = rig.queue(1, 3), b = rig.queue(1, 4);
+    require(rig.waitFor([&] { return rig.done(a) && rig.done(b); }), "the buffers of the lost video are answered");
+    require(rig.result(a).base.flags == endedFlags && rig.result(b).base.flags == endedFlags, "and fail, interrupted");
+    require(!leaving.returned(), "answering the guest's buffers is not the guest's stopping the stream");
+    clearStream(rig, 1);
+    const auto outcome = leaving.join();
+    require(outcome.answered && outcome.stopped && outcome.streams == 1, "the call returns when the guest has stopped its stream");
+    require(leaving.took() < std::chrono::seconds(8), "within the deadline");
+
+    // The platform's own notice comes after: the camera is lost already, and nothing is undone or told twice.
+    const auto states = rig.states.size();
+    rig.camera->interrupt(CameraEventKind::interruptedInBackground);
+    rig.step();
+    require(rig.states.size() == states || rig.states.back() == CameraState::interrupted, "the notice finds the camera down");
+    const auto c = rig.queue(1, 5);
+    require(rig.waitFor([&] { return rig.done(c); }) && rig.result(c).base.flags == endedFlags && !rig.camera->videoRunning(0),
+            "and the video stays lost");
+    // The guest closes its video: the camera is its again.
+    rig.destroy(1);
+    require(rig.states.back() == CameraState::idle, "closed, the host is idle");
+}
+
+/* No video runs: the call returns at once with nothing ended, whatever else the guest has open on the camera. */
+void testTheDepartureWithNoRunningVideoEndsAndWaitsForNothing()
+{
+    {
+        Rig rig;
+        Departure leaving(*rig.background, std::chrono::seconds(8));
+        require(rig.waitFor([&] { return leaving.returned(); }), "a guest with no stream is not waited for");
+        const auto outcome = leaving.join();
+        require(outcome.answered && outcome.stopped && outcome.streams == 0, "nothing was ended");
+    }
+    {
+        // A video stream the guest has created and not started, and a still stream, run no video.
+        Rig rig;
+        videoStream(rig, 1, 0, 640, 480, 4);
+        rig.create(2, 0, stillKind);
+        const auto states = rig.states.size();
+        Departure leaving(*rig.background, std::chrono::seconds(8));
+        require(rig.waitFor([&] { return leaving.returned(); }), "no wait");
+        const auto outcome = leaving.join();
+        require(outcome.answered && outcome.stopped && outcome.streams == 0, "nothing was ended");
+        require(rig.states.size() == states, "the application is told nothing");
+        // The camera is not lost: the stream starts as any does.
+        const auto a = rig.queue(1, 1);
+        require(rig.camera->videoRunning(0), "the camera opens when the guest asks");
+        rig.camera->pump(0, 1);
+        rig.step();
+        require(rig.done(a) && rig.result(a).base.flags != endedFlags, "an ordinary stream, not a lost one");
+    }
+    {
+        // A stream the guest stopped before the departure is not running either.
+        Rig rig;
+        runningVideo(rig);
+        clearStream(rig, 1);
+        Departure leaving(*rig.background, std::chrono::seconds(8));
+        require(rig.waitFor([&] { return leaving.returned(); }), "a stopped stream is not waited for");
+        require(leaving.join().streams == 0, "and ends nothing");
+    }
+    {
+        // A blocked session runs no video.
+        RigOptions options;
+        options.mode = CameraMode::blocked;
+        Rig rig(options);
+        videoStream(rig, 1, 0, 640, 480, 3);
+        rig.queue(1, 1);
+        Departure leaving(*rig.background, std::chrono::seconds(8));
+        require(rig.waitFor([&] { return leaving.returned(); }), "a blocked session is not waited for");
+        require(leaving.join().streams == 0, "and ends nothing");
+        const auto a = rig.queue(1, 2);
+        require(rig.waitFor([&] { return rig.done(a); }) && rig.result(a).base.flags == (blackFlag | blockedFlag), "it stays blocked");
+    }
+}
+
+/* The deadline is the call's own: a guest that never stops its stream, and a device that never answers, hold the
+ * application for the deadline and no longer. */
+void testTheDepartureEndsAtItsDeadline()
+{
+    {
+        Rig rig;
+        runningVideo(rig);
+        Departure leaving(*rig.background, std::chrono::milliseconds(300));
+        require(rig.waitFor([&] { return leaving.returned(); }, 3000), "the call returns by its deadline");
+        const auto outcome = leaving.join();
+        require(outcome.answered && !outcome.stopped && outcome.streams == 1, "the guest did not stop its stream");
+        require(leaving.took() >= std::chrono::milliseconds(280) && leaving.took() < std::chrono::milliseconds(2500),
+                "after the deadline and not much later");
+        require(rig.states.back() == CameraState::interrupted, "the video was ended all the same");
+    }
+    {
+        // The device's worker does not run: the request is not taken.
+        Rig rig;
+        runningVideo(rig);
+        Departure leaving(*rig.background, std::chrono::milliseconds(200));
+        const auto outcome = leaving.join();
+        require(!outcome.answered && !outcome.stopped && outcome.streams == 0, "an unanswered request is said so");
+        require(leaving.took() < std::chrono::milliseconds(2500), "by the deadline");
+    }
+}
+
+/* The platform's notice may come first: the camera is lost already, the guest has not stopped its stream, and the
+ * application waits for that. A loss the guest has had its time for is not waited for again. */
+void testTheDepartureWaitsForALossTheNoticeBegan()
+{
+    {
+        Rig rig;
+        runningVideo(rig);
+        rig.camera->interrupt(CameraEventKind::interruptedInBackground);
+        rig.step();
+        require(rig.states.back() == CameraState::interrupted, "the notice ended the video");
+        Departure leaving(*rig.background, std::chrono::seconds(8));
+        // The request is taken within this time, and the call still waits for the guest.
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+        require(rig.waitFor([&] { return leaving.returned() || std::chrono::steady_clock::now() > until; }), "stepped");
+        require(!leaving.returned(), "the application waits for the guest's stop of the stream the notice began");
+        clearStream(rig, 1);
+        const auto outcome = leaving.join();
+        require(outcome.answered && outcome.stopped && outcome.streams == 1, "and goes on when it is stopped");
+    }
+    {
+        Rig rig;
+        runningVideo(rig);
+        rig.camera->interrupt(CameraEventKind::interruptedInBackground);
+        rig.step();
+        rig.camera->advanceClock(6'000'000'000);
+        Departure leaving(*rig.background, std::chrono::seconds(8));
+        require(rig.waitFor([&] { return leaving.returned(); }), "an old loss is not waited for");
+        require(leaving.join().streams == 0, "the guest has had its time for it");
+    }
+}
+
+/* What the guest's end of the run, or the device's, does to a call that waits: it returns, with nothing left to wait for. */
+void testTheDepartureEndsWithTheGuestOrTheDevice()
+{
+    {
+        Rig rig;
+        runningVideo(rig);
+        Departure leaving(*rig.background, std::chrono::seconds(8));
+        require(rig.waitFor([&] { return rig.states.back() == CameraState::interrupted; }), "ended");
+        require(!leaving.returned(), "waiting");
+        rig.resetByTransport();
+        const auto outcome = leaving.join();
+        require(outcome.stopped && outcome.answered, "a reset of the device ends the wait");
+        require(leaving.took() < std::chrono::seconds(4), "at once");
+    }
+    {
+        Rig rig;
+        runningVideo(rig);
+        Departure leaving(*rig.background, std::chrono::seconds(8));
+        require(rig.waitFor([&] { return rig.states.back() == CameraState::interrupted; }), "ended");
+        rig.device.reset();
+        const auto outcome = leaving.join();
+        require(outcome.stopped, "a device that goes away ends the wait");
+        require(leaving.took() < std::chrono::seconds(4), "at once");
+        // And with no device the call waits for nothing.
+        const auto none = rig.background->end(BackgroundVideo::Clock::now() + std::chrono::seconds(8));
+        require(none.streams == 0 && none.stopped && none.answered, "no device, no wait");
     }
 }
 
@@ -3966,6 +4186,11 @@ int main()
     testTheApplicationLeavingTheForegroundEndsTheVideoOfACamera();
     testTheLossDoesNotDependOnTheStabilization();
     testOnlyTheBackgroundEndsAVideoAndOnlyOfACameraWithAVideoStream();
+    testTheDepartureEndsTheRunningVideoAndWaitsForTheGuestToStopIt();
+    testTheDepartureWithNoRunningVideoEndsAndWaitsForNothing();
+    testTheDepartureEndsAtItsDeadline();
+    testTheDepartureWaitsForALossTheNoticeBegan();
+    testTheDepartureEndsWithTheGuestOrTheDevice();
     testASessionOpenedWhileTheApplicationIsAwayIsHeldUntilItIsBack();
     testAccessDenied();
     testStillsAndCalibration();

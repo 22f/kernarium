@@ -41,6 +41,7 @@
 #include "battery/in_process_service.hpp"
 #include "battery/protocol.hpp"
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
+#include "camera/background_video.hpp"
 #include "camera/in_process_service.hpp"
 #endif
 #include "console/in_process_service.hpp"
@@ -397,6 +398,16 @@ kernarium::camera::StateReceiver& cameraStateReceiver()
 kernarium::camera::Rotation& cameraRotation()
 {
     static auto& instance = *new kernarium::camera::Rotation;
+    return instance;
+}
+
+/* The application's way to end the guest's camera video when it leaves the
+ * foreground: the GPU hold (`runtimeSetGpuHold`) ends the video and waits for
+ * the guest to stop it first. A device of any boot attaches to it. */
+const std::shared_ptr<uml::camera::BackgroundVideo>& cameraBackgroundVideo()
+{
+    static const auto& instance = *new std::shared_ptr<uml::camera::BackgroundVideo>(
+        std::make_shared<uml::camera::BackgroundVideo>());
     return instance;
 }
 #endif
@@ -1931,7 +1942,8 @@ private:
         if (cameras_.hasCameras()) {
             auto cameraOptions = kernarium::camera::deviceOptions(
                 cameras_, request_.camera.mode,
-                cameraStateReceiver(), cameraRotation());
+                cameraStateReceiver(), cameraRotation(),
+                cameraBackgroundVideo());
             /* A still that does not end in a picture says why in the session
              * record's camera slot, which a bug report carries (numbers and
              * fixed words only). */
@@ -2924,19 +2936,50 @@ int runtimeSetNetworkNotice(int notice)
     }
 }
 
-int runtimeSetGpuHold(int held)
+/* Holds the guest's GPU requests: 1 when it is held, 0 when a request that was
+ * running outlasted the budget, -1 when no guest runs (the hold then waits for
+ * the next one). */
+int holdGpuRequests()
 {
     std::lock_guard lock(activeGpuMutex);
-    gpuHoldRequested = held != 0;
+    gpuHoldRequested = true;
     if (activeGpu == nullptr)
         return -1;
-    if (held == 0) {
-        activeGpu->releaseRequests();
-        /* A restarted guest waits for this. */
-        lifecycle.changed();
-        return 1;
-    }
     return activeGpu->holdRequests(gpuHoldBudget) ? 1 : 0;
+}
+
+int runtimeSetGpuHold(int held)
+{
+    if (held != 0) {
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        /* A camera video that runs as the application leaves the foreground
+         * ends first, and the guest has stopped it before the hold lands: a
+         * guest that has not acted on the lost video when its GPU requests
+         * stop stalls its camera pipeline until the application is back, and
+         * a recording that runs stops only then. The wait is the one bound
+         * the edge allots it (`backgroundVideoBound`), taken out of the
+         * application's edge budget, and no video running means no wait. */
+        return uml::camera::holdAfterVideoEnds(
+                   *cameraBackgroundVideo(), holdGpuRequests,
+                   uml::camera::backgroundVideoBound,
+                   [](const std::string& line) {
+                       std::fprintf(stderr,
+                                    "Kernarium: %s; the GPU is held as it is\n",
+                                    line.c_str());
+                   })
+            .held;
+#else
+        return holdGpuRequests();
+#endif
+    }
+    std::lock_guard lock(activeGpuMutex);
+    gpuHoldRequested = false;
+    if (activeGpu == nullptr)
+        return -1;
+    activeGpu->releaseRequests();
+    /* A restarted guest waits for this. */
+    lifecycle.changed();
+    return 1;
 }
 
 int runtimeGuestDisplayActive()

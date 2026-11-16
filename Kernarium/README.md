@@ -355,8 +355,10 @@ request that reached Metal afterwards would make the guest's Vulkan device
 lost for good. The application therefore holds the guest's GPU requests
 (`GuestGPUHold`) inside `didEnterBackground`, before it quiesces, and releases
 them when it returns to the foreground. The hold and the quiesce share the
-handler's four-second budget; the quiesce carries on under the `guest-sync`
-background task. Guest page-cache trimming stays off in the foreground, and
+handler's four-second budget (the hold's own wait for a running request, and
+for an Android guest a camera video that runs, which the hold ends and waits for
+the guest to stop, two seconds at most, are taken out of it); the quiesce carries
+on under the `guest-sync` background task. Guest page-cache trimming stays off in the foreground, and
 quiescing trims once by itself.
 
 On a device the quiesce ends by hibernating the guest's RAM, so that a paused

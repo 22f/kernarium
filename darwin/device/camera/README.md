@@ -231,6 +231,21 @@ application's statements (the sensor orientation, the rotation that
   session whose frames are dark and interrupted and whose stills fail until the
   application is back, not a loss for each reopening. A blocked session hears of
   none. The report line names the camera and says the video ended.
+- **The application's departure.** The application holds the guest's GPU requests
+  as it enters the background, and a guest whose camera layer has not acted on
+  the lost video by then stalls in its next GPU request until the application is
+  back: a recording runs on, in silence, until the return. A
+  `BackgroundVideo` (`CameraDeviceOptions::background`, one for the process, safe
+  from any thread) lets the application end the guest's video first:
+  `end(deadline)` has the device handle every running video as the platform's
+  notice does, and waits until the guest has stopped the video streams of the
+  cameras it ended (and of those whose video ended a moment ago and is still being
+  acted on), or until the deadline, which covers the device's answer as well.
+  With no video running nothing is waited for; with no device attached nothing is
+  ended. `holdAfterVideoEnds` is the application's sequence (end, wait at most
+  `backgroundVideoBound`, then hold whatever the wait found, and say once on a
+  wait that ran out); the hold's own budget and this bound together stay inside
+  the application's edge budget.
 - **Video mode.** The device tells its owner (`onVideoMode`) whether the guest
   is in video mode: a live camera's video runs, uninterrupted, and the guest
   asks for the picture stabilized, which Android's record template does and its

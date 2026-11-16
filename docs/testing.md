@@ -1218,6 +1218,10 @@ the camera service's log must hold no leaked stream, the line it prints at the
 close of a device whose requests the HAL ended without a request error. The
 release must carry the HAL topic that handles the host's end of a camera's
 video and the camera application topic that ends the recording.
+`camera-background-video` (unit) is the ordering of the application's departure
+(video running: end, wait, hold; none: hold at once; a wait that runs out: hold
+and one log line; the wait inside the bound) with a fake camera device and a
+fake GPU gate, and `camera-device` drives the device's side of it.
 `android17-camera-runner` (tooling) runs its
 parsers and the expectations of every layout without a guest,
 `android17-camera-layouts` (tooling) the layout set, its fallback order and the
