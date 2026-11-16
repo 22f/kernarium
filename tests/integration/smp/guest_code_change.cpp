@@ -18,6 +18,9 @@
  *			once the other side has gone, reused in place;
  *	remap		MAP_FIXED, munmap and mmap, and mremap put other
  *			instructions at the address;
+ *	shared		a process rewrites and synchronizes code on a page it
+ *			shares with another process, which only runs it and
+ *			has translated it since the fork;
  *	vcpu		threads on other vCPUs ran the function, and the caller
  *			that links to it, before the store and run them after;
  *	flood		another vCPU publishes many code changes while this one
@@ -37,10 +40,12 @@ using u32 = unsigned int;
 using u64 = unsigned long;
 
 constexpr long nr_read = 63, nr_write = 64, nr_pipe2 = 59, nr_exit_group = 94,
-	nr_futex = 98, nr_munmap = 215, nr_mremap = 216, nr_clone = 220,
-	nr_mmap = 222, nr_mprotect = 226, nr_wait4 = 260;
+	nr_ftruncate = 46, nr_futex = 98, nr_munmap = 215, nr_mremap = 216,
+	nr_clone = 220, nr_mmap = 222, nr_mprotect = 226, nr_wait4 = 260,
+	nr_memfd_create = 279;
 constexpr long prot_none = 0, prot_read = 1, prot_write = 2, prot_exec = 4;
-constexpr long map_private = 0x02, map_fixed = 0x10, map_anonymous = 0x20;
+constexpr long map_shared = 0x01, map_private = 0x02, map_fixed = 0x10,
+	map_anonymous = 0x20;
 constexpr long mremap_maymove = 1, mremap_fixed = 2;
 constexpr long futex_wait_private = 128, futex_wake_private = 129;
 constexpr long sigchld = 17;
@@ -440,6 +445,88 @@ void case_remap()
 	expect("remap-old-address-unchanged", 4, call_caller(region));
 }
 
+/* Code two processes share. A page of a memfd is mapped writable and
+ * executable, MAP_SHARED, and the process forks. The parent only runs the
+ * function; the child rewrites it through the writable view and synchronizes
+ * it for the executable one, as __clear_cache does, and tells the parent. The
+ * parent warms after the fork, which flushes its own translations, so the
+ * translation it holds is the one the child's change must reach. */
+void case_shared_code()
+{
+	constexpr u32 rounds = 8;
+	constexpr u32 warm_calls = 200;
+	const long fd = raw_syscall(nr_memfd_create,
+		reinterpret_cast<long>("code-change"), 0);
+	if (fd < 0 || raw_syscall(nr_ftruncate, fd, static_cast<long>(page)) != 0) {
+		print("code-change: memfd failed\n");
+		leave(4);
+	}
+	const long writable = raw_syscall(nr_mmap, 0, static_cast<long>(page),
+		prot_read | prot_write, map_shared, fd, 0);
+	const long executable = raw_syscall(nr_mmap, 0, static_cast<long>(page),
+		prot_read | prot_exec, map_shared, fd, 0);
+	if ((writable < 0 && writable > -4096) ||
+	    (executable < 0 && executable > -4096)) {
+		print("code-change: shared mmap failed\n");
+		leave(4);
+	}
+	auto *rw = reinterpret_cast<volatile u32 *>(writable);
+	const auto write_function = [&](u32 value) {
+		rw[0] = movz_w(0, value);
+		rw[1] = ret;
+		__asm__ volatile("dc cvau, %0\n\tdsb ish\n\tic ivau, %1\n\t"
+			"dsb ish\n\tisb"
+			:
+			: "r"(rw), "r"(executable)
+			: "memory");
+	};
+	const auto run = [&]() -> long {
+		register long x0 __asm__("x0");
+		__asm__ volatile("isb\n\tblr %1"
+			: "=r"(x0)
+			: "r"(executable)
+			: "x1", "x2", "x3", "x30", "memory", "cc");
+		return x0;
+	};
+	write_function(1);
+
+	int to_child[2];
+	int to_parent[2];
+	raw_syscall(nr_pipe2, reinterpret_cast<long>(to_child), 0);
+	raw_syscall(nr_pipe2, reinterpret_cast<long>(to_parent), 0);
+	const long child = raw_syscall(nr_clone, sigchld, 0, 0, 0, 0);
+	if (child < 0) {
+		print("code-change: fork failed\n");
+		leave(4);
+	}
+	char token = 0;
+	if (child == 0) {
+		for (u32 round = 1; round <= rounds; ++round) {
+			if (raw_syscall(nr_read, to_child[0],
+				    reinterpret_cast<long>(&token), 1) != 1)
+				leave(3);
+			write_function(10 + round);
+			raw_syscall(nr_write, to_parent[1],
+				reinterpret_cast<long>(&token), 1);
+		}
+		leave(0);
+	}
+	for (u32 round = 1; round <= rounds; ++round) {
+		for (u32 call = 0; call < warm_calls; ++call)
+			(void)run();
+		raw_syscall(nr_write, to_child[1], reinterpret_cast<long>(&token), 1);
+		if (raw_syscall(nr_read, to_parent[0],
+			    reinterpret_cast<long>(&token), 1) != 1) {
+			print("code-change: shared read failed\n");
+			leave(4);
+		}
+		expect("shared-memfd", 10 + round, run());
+	}
+	int status = 0;
+	raw_syscall(nr_wait4, child, reinterpret_cast<long>(&status), 0, 0);
+	expect("shared-memfd-child", 0, status);
+}
+
 void futex_wait(volatile int *address, int expected)
 {
 	raw_syscall(nr_futex, reinterpret_cast<long>(address), futex_wait_private, expected, 0);
@@ -735,6 +822,7 @@ int guest_main()
 	case_fork("fork-child-first", false, false);
 	case_fork("fork-child-gone", true, true);
 	case_remap();
+	case_shared_code();
 	case_vcpu(false);
 	case_vcpu(true);
 	case_flood();

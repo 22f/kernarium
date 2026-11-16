@@ -153,6 +153,9 @@ uml_add_arm64_unit_test(exclusive_events)
 # After an ISB, both engines run the code another vCPU changed and
 # synchronized, in A64 and A32.
 uml_add_arm64_unit_test(isb_code_change)
+# Code one process changed and synchronized on a page another process
+# translated runs in both, on both engines.
+uml_add_arm64_unit_test(cross_generation_code_change)
 uml_add_arm64_unit_test(simd_ordinary_memory_gadget)
 uml_add_arm64_unit_test(simd_structure_gadget)
 uml_add_arm64_unit_test(simd_baseline_inventory WITHOUT_HARNESS
