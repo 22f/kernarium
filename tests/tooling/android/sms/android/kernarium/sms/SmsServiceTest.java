@@ -45,6 +45,12 @@ public final class SmsServiceTest {
         int total = 1;
         int sequence = 1;
         int dataCodingScheme;
+        int protocolIdentifier;
+        int firstOctet;
+        int addressType;
+        String sender;
+        /** Year, month, day, hour, minute, second, and the zone in quarter hours. */
+        int[] time = new int[7];
         byte[] userData;
 
         /** What SmsMessage does with the user data of a UCS-2 message. */
@@ -59,13 +65,22 @@ public final class SmsServiceTest {
         final int first = pdu[i++] & 0xff;
         final boolean header = (first & 0x40) != 0;
         check((first & 0x03) == 0, "SMS-DELIVER");
-        final int addressDigits = pdu[i++] & 0xff;
-        i++; // type of address
-        i += (addressDigits + 1) / 2;
-        i++; // protocol identifier
         final Part part = new Part();
+        part.firstOctet = first;
+        final int addressLength = pdu[i++] & 0xff;
+        part.addressType = pdu[i++] & 0xff;
+        final int addressOctets = (addressLength + 1) / 2;
+        part.sender = address(part.addressType, addressLength, Arrays.copyOfRange(pdu, i, i + addressOctets));
+        i += addressOctets;
+        part.protocolIdentifier = pdu[i++] & 0xff;
         part.dataCodingScheme = pdu[i++] & 0xff;
-        i += 7; // time stamp
+        for (int field = 0; field < 7; ++field) {
+            final int octet = pdu[i++] & 0xff;
+            final int low = octet & 0x0f;
+            final int high = octet >> 4;
+            part.time[field] = field < 6 ? low * 10 + high
+                    : ((low & 0x07) * 10 + high) * ((low & 0x08) != 0 ? -1 : 1);
+        }
         final int length = pdu[i++] & 0xff;
         int dataLength = length;
         if (header) {
@@ -81,6 +96,30 @@ public final class SmsServiceTest {
         check(dataLength >= 0 && i + dataLength == pdu.length, "the user data length is the rest of the PDU");
         part.userData = Arrays.copyOfRange(pdu, i, pdu.length);
         return part;
+    }
+
+    /** The address field as a receiver reads it: digits of a number, or a name of GSM 7-bit characters. */
+    private static String address(int type, int length, byte[] octets) {
+        final StringBuilder out = new StringBuilder();
+        if ((type & 0x70) == 0x50) { // alphanumeric
+            same(0xd0, type, "alphanumeric type of address");
+            final int septets = octets.length * 8 / 7;
+            for (int n = 0; n < septets && out.length() < length * 4 / 7; ++n) {
+                final int bit = n * 7;
+                int value = (octets[bit / 8] & 0xff) >> (bit % 8);
+                if (bit % 8 > 1) value |= (octets[bit / 8 + 1] & 0xff) << (8 - bit % 8);
+                out.append((char) (value & 0x7f));
+            }
+            return out.toString();
+        }
+        check(type == 0x91 || type == 0x81, "numeric type of address " + type);
+        if (type == 0x91) out.append('+');
+        for (int n = 0; n < length; ++n) {
+            final int octet = octets[n / 2] & 0xff;
+            final int digit = n % 2 == 0 ? octet & 0x0f : octet >> 4;
+            out.append((char) ('0' + digit));
+        }
+        return out.toString();
     }
 
     /** The message as the receiver puts it together: the parts in order, each decoded as the platform does. */
@@ -405,6 +444,75 @@ public final class SmsServiceTest {
     }
 
     /** The most parts: the bound in Message, reached by a text of surrogate pairs on every split. */
+    private static String hex(byte[] bytes) {
+        final StringBuilder out = new StringBuilder();
+        for (byte b : bytes) out.append(String.format("%02X", b & 0xff));
+        return out.toString();
+    }
+
+    /** One PDU byte for byte, worked out from the specification by hand. */
+    private static void goldenPdu() {
+        // 2023-11-14 22:13:20 UTC. No service centre, SMS-DELIVER; 11 digits from an international number;
+        // protocol 0, UCS-2; the time stamp; 4 octets of user data.
+        final byte[][] single = DeliverPdu.encode("+15551234567", "Hi", NOW, ZONE, 0x5a);
+        same(1, single.length, "one part");
+        same("00040B91515521436" + "5F7" + "0008" + "32114122310200" + "04" + "00480069", hex(single[0]), "numeric sender, short text");
+        // Alphanumeric: 4 characters pack into 4 octets, 7 useful semi-octets, type 0xD0.
+        final byte[][] named = DeliverPdu.encode("Bank", "Hi", NOW, ZONE, 0x5a);
+        same("0004" + "07D0C2B07B0D" + "0008" + "32114122310200" + "04" + "00480069", hex(named[0]), "alphanumeric sender");
+        // A number without + is a national number (type 0x81), and an odd count of digits ends with a filler.
+        final byte[][] national = DeliverPdu.encode("12345", "Hi", NOW, ZONE, 0x5a);
+        same("0004" + "05" + "81" + "2143F5" + "0008" + "32114122310200" + "04" + "00480069", hex(national[0]), "national number");
+        // Concatenated: the header 05 00 03 reference total sequence counts in the length, and sets bit 6.
+        final byte[][] two = DeliverPdu.encode("12345", "a".repeat(71), NOW, ZONE, 0x1ff);
+        final String head = "0044" + "05" + "81" + "2143F5" + "0008" + "32114122310200";
+        check(hex(two[0]).startsWith(head + "8C" + "050003FF0201" + "0061"), "the first part of two: " + hex(two[0]));
+        same(16 + 1 + 6 + 134, two[0].length, "the first part is 67 units and the header");
+        same(head + "0E" + "050003FF0202" + "0061006100610061", hex(two[1]), "the second part, 4 units");
+        same(2, two.length, "71 units take two parts");
+    }
+
+    private static void fields() {
+        final String[] senders = {"+15551234567", "15551234567", "1", "+12", "12345678901234567890", "+98912123456",
+            "Bank", "My Bank 24", "A", "ElevenChars", "0"};
+        for (String sender : senders) {
+            for (String text : new String[] {"Hi", "a".repeat(100)}) {
+                final byte[][] pdus = DeliverPdu.encode(sender, text, NOW, ZONE, 7);
+                for (byte[] pdu : pdus) {
+                    final Part part = read(pdu);
+                    same(sender, part.sender, "sender <" + sender + ">");
+                    same(0, part.protocolIdentifier, "protocol identifier");
+                    same(pdus.length == 1 ? 0x04 : 0x44, part.firstOctet, "first octet");
+                    if (pdus.length > 1) same(7, part.reference, "reference");
+                }
+            }
+        }
+        // The thresholds of one part, two and three, and of a text that is not the first alphabet's.
+        same(1, encode("a".repeat(70)).length, "70 units");
+        same(2, encode("a".repeat(71)).length, "71 units");
+        same(2, encode("a".repeat(134)).length, "134 units");
+        same(3, encode("a".repeat(135)).length, "135 units");
+        same(140, read(encode("a".repeat(70))[0]).userData.length, "a full single part");
+        same(134, read(encode("a".repeat(71))[0]).userData.length, "a full concatenated part");
+        // The reference is one octet.
+        same(0xff, read(DeliverPdu.encode("12345", "a".repeat(100), NOW, ZONE, -1)[0]).reference, "reference masked");
+        // A surrogate pair is never split between parts.
+        for (int p = 55; p < 75; ++p) {
+            final String body = filled(140, new int[] {p, p + 1}, HIGH, LOW);
+            for (String piece : DeliverPdu.split(body)) {
+                check(!Character.isHighSurrogate(piece.charAt(piece.length() - 1)), "a part ends in a high surrogate, pair at " + p);
+                check(!Character.isLowSurrogate(piece.charAt(0)), "a part starts with a low surrogate, pair at " + p);
+            }
+            roundTrip(body);
+        }
+        // The time stamp is the local time of the zone, with the zone in quarter hours.
+        final TimeZone india = TimeZone.getTimeZone("GMT+05:30");
+        final TimeZone pacific = TimeZone.getTimeZone("GMT-08:00");
+        same("[23, 11, 14, 22, 13, 20, 0]", Arrays.toString(read(DeliverPdu.encode("12345", "Hi", NOW, ZONE, 1)[0]).time), "UTC");
+        same("[23, 11, 15, 3, 43, 20, 22]", Arrays.toString(read(DeliverPdu.encode("12345", "Hi", NOW, india, 1)[0]).time), "+05:30");
+        same("[23, 11, 14, 14, 13, 20, -32]", Arrays.toString(read(DeliverPdu.encode("12345", "Hi", NOW, pacific, 1)[0]).time), "-08:00");
+    }
+
     private static void partCount() {
         same(11, Message.MAXIMUM_PARTS, "the stated maximum");
         // Every part but the last takes at least 65 units of the text (a part that starts with a mark and
@@ -460,6 +568,8 @@ public final class SmsServiceTest {
         decoderContract();
         byteOrderMark();
         reversedMark();
+        goldenPdu();
+        fields();
         partCount();
         random();
         parserRules();

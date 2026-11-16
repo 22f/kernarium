@@ -981,6 +981,11 @@ packages, install times and processes, and `android17-oldapp-switch-command`
 (tooling; skipped without a JDK) runs the command's rule, listing, cleanup,
 lock file (on real files), writes and exit statuses on a plain JVM; the Android
 calls need a built image.
+`android17-sms-service` (tooling; skipped without a JDK) runs the text message
+service's encoder, argument parser and identifier memory on a plain JVM: it reads
+the PDUs back with a parser of its own and the JDK's `UTF-16` decoder, the one
+Android applies to a UCS-2 message, which drops a leading byte order mark; the
+broadcasts and the inbox need a built image.
 `android-vulkan-smoke` (integration) registers when `UML_ANDROID_VULKAN_SMOKE_RELEASE`
 names a release and runs the image's `kernarium_vk_ahb_import` in a guest: hardware
 buffers imported and read back, and the guest memory file descriptors
