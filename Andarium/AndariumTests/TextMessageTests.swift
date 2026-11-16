@@ -36,25 +36,36 @@ struct TextMessageTests {
         }
     }
 
+    /// What VoiceOver was told, and the reports of how each announcement ended, which a test sends by hand.
     @MainActor
     private final class Said {
         var lines: [String] = []
+        var finishes: [@MainActor @Sendable (Bool) -> Void] = []
+        /// Reports the last announcement as spoken to its end, or dropped.
+        func finishLast(_ successfully: Bool) { finishes.last?(successfully) }
     }
 
     private struct Rig {
         let model: AppModel
         let driver: StubDriver
-        let answers: Held<GuestSms.Outcome>
+        let answers: Held<SmsReply>
         let said: Said
         let memory: GuestSms.SenderMemory
         let cleanUp: () -> Void
 
         var state: TextMessageState { model.session.textMessage }
+        var files: RecordingNoticeFiles { driver.noticeFiles }
     }
+
+    private static let noticeURL = TextMessageNotice.url(in: URL(fileURLWithPath: "/instance"))
 
     /// A running session of an application that carries text messages, whose
     /// sends wait for the test and whose kept sender is in a database of its own.
-    private func rig(capabilities: Capabilities = .preview, mode: StartMode = .normal) throws -> Rig {
+    /// `files` is another launch's notice file, when a test relaunches.
+    private func rig(
+        capabilities: Capabilities = .preview, mode: StartMode = .normal, voiceOver: Bool = false,
+        files: RecordingNoticeFiles? = nil
+    ) throws -> Rig {
         let suite = "TextMessageTests-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
         let memory = GuestSms.SenderMemory(defaults: defaults)
@@ -65,11 +76,17 @@ struct TextMessageTests {
         )
         model.smsSender = memory
         let said = Said()
-        model.textMessageAnnouncer = { said.lines.append($0) }
+        model.textMessageAnnouncer = { words, finished in
+            said.lines.append(words)
+            said.finishes.append(finished)
+        }
+        model.textMessageVoiceOver = { voiceOver }
         model.textMessageSleep = { _ in }
-        let answers = Held<GuestSms.Outcome>()
+        let answers = Held<SmsReply>()
         let driver = StubDriver(plan: .normal)
-        driver.smsAnswer = { _, _, _ in await answers.wait() }
+        driver.smsAnswer = { _ in await answers.wait() }
+        // Another launch over the same instance: its notice reads what the first wrote.
+        if let files { driver.noticeFiles = files }
         model.driver = driver
         model.phase = .running(mode)
         return Rig(model: model, driver: driver, answers: answers, said: said, memory: memory, cleanUp: {
@@ -107,7 +124,7 @@ struct TextMessageTests {
         model.setTextMessageText("two")
         model.setTextMessageSender("Other")
         #expect(state.text == "one" && state.sender == sender)
-        rig.answers.release(.handedToAndroid(parts: 1))
+        rig.answers.release(.handedOver(1))
         #expect(await eventually { state.progress == .sent })
         #expect(state.text.isEmpty)
         #expect(rig.said.lines == [SmsMessages.sentToAndroid])
@@ -117,7 +134,7 @@ struct TextMessageTests {
         #expect(model.canSendTextMessage)
         model.sendTextMessage()
         #expect(await eventually { rig.answers.pending == 1 })
-        rig.answers.release(.handedToAndroid(parts: 1))
+        rig.answers.release(.handedOver(1))
         #expect(await eventually { state.progress == .sent && state.text.isEmpty })
         #expect(rig.driver.smsSent.map(\.text) == ["one", "two"])
         #expect(state.status(availability: .ready) == TextMessageStatus(words: SmsMessages.sentToAndroid, tone: .good))
@@ -132,7 +149,7 @@ struct TextMessageTests {
         model.setTextMessageText("one")
         model.sendTextMessage()
         #expect(await eventually { rig.answers.pending == 1 })
-        rig.answers.release(.handedToAndroid(parts: 1))
+        rig.answers.release(.handedOver(1))
         #expect(await eventually { state.progress == .sent })
         // Laying the emptied field out writes the same text and sender back.
         model.setTextMessageText("")
@@ -154,7 +171,7 @@ struct TextMessageTests {
         #expect(await eventually { rig.answers.pending == 1 })
         await settle()
         #expect(rig.driver.smsSent.count == 1)
-        rig.answers.release(.handedToAndroid(parts: 1))
+        rig.answers.release(.handedOver(1))
         #expect(await eventually { rig.state.progress == .sent })
     }
 
@@ -168,76 +185,490 @@ struct TextMessageTests {
         #expect(await eventually { rig.answers.pending == 1 })
         model.closeTextMessage()
         #expect(rig.state.isOpen && rig.state.text == "one")
-        rig.answers.release(.handedToAndroid(parts: 1))
+        rig.answers.release(.handedOver(1))
         #expect(await eventually { rig.state.progress == .sent })
         model.closeTextMessage()
         #expect(!rig.state.isOpen && rig.state.text.isEmpty && rig.state.progress == .idle)
     }
 
-    @Test func aMessageThatWasNotConfirmedStaysAndItsWordsAreAboutThatDraftAlone() async throws {
-        let rig = try rig()
-        defer { rig.cleanUp() }
-        let (model, state) = (rig.model, rig.state)
-        model.openTextMessage()
-        model.setTextMessageText("one")
-        model.sendTextMessage()
-        #expect(await eventually { rig.answers.pending == 1 })
-        rig.answers.release(.notConfirmed)
-        #expect(await eventually { state.progress == .notConfirmed })
-        #expect(state.text == "one")
-        #expect(state.status(availability: .ready) == TextMessageStatus(words: SmsMessages.notConfirmedAdvice, tone: .problem))
-        // What VoiceOver hears is what the person is to do.
-        #expect(rig.said.lines == [SmsMessages.notConfirmedAdvice])
-        // Another text is not what the words are about; the same text is.
-        model.setTextMessageText("one!")
-        #expect(state.status(availability: .ready) == nil)
-        model.setTextMessageText("one")
-        #expect(state.status(availability: .ready)?.words == SmsMessages.notConfirmedAdvice)
-        // The same draft sent again carries the same identifier, so Android's
-        // service answers it once if the first did arrive.
-        model.sendTextMessage()
-        #expect(await eventually { rig.answers.pending == 1 })
-        rig.answers.release(.handedToAndroid(parts: 1))
-        #expect(await eventually { state.progress == .sent })
-        let identifiers = rig.driver.smsSent.map(\.identifier)
-        #expect(identifiers.count == 2 && identifiers[0] == identifiers[1] && GuestSms.isIdentifier(identifiers[0]))
-        // Once confirmed, the same words sent again are a new message.
-        model.setTextMessageText("one")
-        model.sendTextMessage()
-        #expect(await eventually { rig.answers.pending == 1 })
-        rig.answers.release(.handedToAndroid(parts: 1))
-        #expect(await eventually { rig.driver.smsSent.count == 3 && state.progress == .sent })
-        #expect(rig.driver.smsSent[2].identifier != identifiers[0])
+    // MARK: How a send ends (S4, S5)
+
+    /// Types `text`, sends, lets the guest's reply go and waits until the send ended.
+    private func send(_ rig: Rig, _ text: String, _ reply: SmsReply) async -> Bool {
+        rig.model.setTextMessageText(text)
+        rig.model.sendTextMessage()
+        guard await eventually({ rig.answers.pending == 1 }) else { return false }
+        rig.answers.release(reply)
+        return await eventually { rig.state.progress != .sending }
     }
 
-    @Test func anImageWithoutTheServiceSaysSoAndKeepsTheText() async throws {
+    private func noticeText(_ rig: Rig) -> String {
+        rig.files.contents(Self.noticeURL).map { String(decoding: $0, as: UTF8.self) } ?? "(none)"
+    }
+
+    private let header = "kernarium-sms-pending 1\n"
+
+    /// Each reply to a first attempt is the state the table says, says its own words, keeps or empties the
+    /// box, and decides whether the next press of the draft is a retry (only a message not confirmed) or a
+    /// new message.
+    @Test func eachAnswerToAFirstAttemptIsTheStateTheTableSays() async throws {
+        let other = String(repeating: "c", count: 32)
+        typealias Row = (String, SmsReply, TextMessageState.Progress, String)
+        let rows: [Row] = [
+            ("not sent", .notSent, .certainlyNotSent, SmsMessages.notSent),
+            ("not taken", .notTaken, .certainlyNotSent, SmsMessages.notSent),
+            ("no answer", .noAnswer, .notConfirmed, SmsMessages.notConfirmed),
+            ("handed over", .handedOver(2), .sent, SmsMessages.sentToAndroid),
+            ("handed over earlier", .handedOverEarlier(1), .deliveredEarlier, SmsMessages.deliveredEarlier),
+            ("not handed over, invalid", .notHandedOver("invalid"), .certainlyNotSent, SmsMessages.notSent),
+            ("not handed over, plan", .notHandedOver("plan"), .certainlyNotSent, SmsMessages.notSent),
+            ("not handed over, store", .notHandedOver("store"), .certainlyNotSent, SmsMessages.notSent),
+            ("uncertain, interrupted", .uncertain("interrupted"), .uncertain, SmsMessages.uncertain),
+            ("uncertain, unknown", .uncertain("unknown"), .uncertain, SmsMessages.uncertain),
+            ("uncertain, conflict", .uncertain("conflict"), .uncertain, SmsMessages.uncertain),
+            ("version refusal", .refusedVersion, .certainlyNotSent, SmsMessages.notSent),
+            ("unsettled", .unsettled, .notConfirmed, SmsMessages.notConfirmed),
+            ("malformed", .bytes("garbage"), .notConfirmed, SmsMessages.notConfirmed),
+            ("another identifier's", .bytes("2.handed-over.\(other).1"), .notConfirmed, SmsMessages.notConfirmed),
+        ]
+        for (name, reply, progress, words) in rows {
+            let rig = try rig()
+            defer { rig.cleanUp() }
+            let (model, state) = (rig.model, rig.state)
+            model.openTextMessage()
+            #expect(await send(rig, "one", reply), Comment(rawValue: name))
+            #expect(state.progress == progress, Comment(rawValue: name))
+            // Its own words, said once, when it was reached.
+            #expect(rig.said.lines == [words], Comment(rawValue: name))
+            // The box is emptied only by a message that went.
+            let went = progress == .sent || progress == .deliveredEarlier
+            #expect((state.text == "one") == !went, Comment(rawValue: name))
+            if !went { #expect(state.status(availability: .ready) == TextMessageStatus(words: words, tone: .problem), Comment(rawValue: name)) }
+            // The notice: a message not confirmed waits for its answer; a final one was shown and is forgotten.
+            #expect(await eventually { (progress == .notConfirmed) == (noticeText(rig) != header) }, Comment(rawValue: name))
+            // The next press of the same draft.
+            model.setTextMessageText("one")
+            model.sendTextMessage()
+            #expect(await eventually { rig.answers.pending == 1 }, Comment(rawValue: name))
+            let first = rig.driver.smsSent[0], second = rig.driver.smsSent[1]
+            if progress == .notConfirmed {
+                #expect(second.attempt == .retry && second.identifier == first.identifier, Comment(rawValue: name))
+            } else {
+                #expect(second.attempt == .first && second.identifier != first.identifier, Comment(rawValue: name))
+            }
+            rig.answers.release(.noAnswer)
+        }
+    }
+
+    /// The first attempt's answer is lost and its retries cannot get through: one identifier throughout, and
+    /// the press after those asks, and is answered that it was handed over earlier.
+    @Test func aRetryThatCannotGetThroughNeverMakesTheMessageANewOne() async throws {
         let rig = try rig()
         defer { rig.cleanUp() }
         let (model, state) = (rig.model, rig.state)
         model.openTextMessage()
+        #expect(await send(rig, "one", .noAnswer))
+        #expect(state.progress == .notConfirmed)
+        for reply in [SmsReply.notSent, .notTaken, .noAnswer, .unsettled, .refusedVersion] {
+            model.sendTextMessage()
+            #expect(await eventually { rig.answers.pending == 1 })
+            rig.answers.release(reply)
+            #expect(await eventually { state.progress != .sending })
+            #expect(state.progress == .notConfirmed, "\(reply)")
+            #expect(state.status(availability: .ready)?.words == SmsMessages.notConfirmed)
+        }
+        model.sendTextMessage()
+        #expect(await eventually { rig.answers.pending == 1 })
+        rig.answers.release(.handedOverEarlier(1))
+        #expect(await eventually { state.progress == .deliveredEarlier })
+        #expect(state.text.isEmpty)
+        let sent = rig.driver.smsSent
+        #expect(sent.count == 7 && Set(sent.map(\.identifier)).count == 1)
+        #expect(sent.map(\.attempt) == [.first] + Array(repeating: GuestSms.Attempt.retry, count: 6))
+        // The identifier is forgotten once the result was shown: the same words are a new message.
+        #expect(await send(rig, "one", .handedOver(1)))
+        #expect(rig.driver.smsSent[7].attempt == .first && rig.driver.smsSent[7].identifier != sent[0].identifier)
+    }
+
+    /// An answer a retry cannot get (handed over, not handed over, another identifier's) is not confirmed, and
+    /// the identifier is kept.
+    @Test func aRetryIsNeverToldItHandedTheMessageOver() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        #expect(await send(rig, "one", .noAnswer))
+        for reply in [SmsReply.handedOver(1), .notHandedOver("store"), .bytes("2.uncertain.\(String(repeating: "d", count: 32)).unknown")] {
+            model.sendTextMessage()
+            #expect(await eventually { rig.answers.pending == 1 })
+            rig.answers.release(reply)
+            #expect(await eventually { state.progress != .sending })
+            #expect(state.progress == .notConfirmed, "\(reply)")
+        }
+        #expect(Set(rig.driver.smsSent.map(\.identifier)).count == 1)
+    }
+
+    // MARK: Uncertain and cut off (S7, S8)
+
+    @Test func theSameWordsAfterUncertainAreANewMessage() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        #expect(await send(rig, "one", .uncertain("unknown")))
+        #expect(state.progress == .uncertain && state.text == "one")
+        // The result was shown at once (no VoiceOver), so the same words go as a first attempt with a new identifier.
+        model.sendTextMessage()
+        #expect(await eventually { rig.answers.pending == 1 })
+        let sent = rig.driver.smsSent
+        #expect(sent.count == 2 && sent[1].attempt == .first && sent[1].identifier != sent[0].identifier)
+        rig.answers.release(.handedOver(1))
+        #expect(await eventually { state.progress == .sent })
+    }
+
+    /// Under VoiceOver a result nobody was told is not superseded: Send sends nothing, says it again and takes
+    /// VoiceOver to the line; once the announcement ended, or focus reached the line, Send works.
+    @Test func aResultNobodyWasToldIsNotSupersededUnderVoiceOver() async throws {
+        let rig = try rig(voiceOver: true)
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        #expect(await send(rig, "one", .uncertain("unknown")))
+        #expect(rig.said.lines == [SmsMessages.uncertain])
+        #expect(state.awaiting != nil)
+        // The entry stays in the notice until the announcement is done.
+        #expect(rig.driver.textMessageNotice.currentEntries.count == 1)
+        let focuses = state.statusFocusRequests
+        model.sendTextMessage()
+        await settle()
+        #expect(rig.driver.smsSent.count == 1, "a send went before the result was told")
+        #expect(rig.said.lines == [SmsMessages.uncertain, SmsMessages.uncertain])
+        #expect(state.statusFocusRequests == focuses + 1)
+        // An announcement VoiceOver dropped does not count.
+        rig.said.finishLast(false)
+        await settle()
+        #expect(state.awaiting != nil && rig.driver.textMessageNotice.currentEntries.count == 1)
+        model.sendTextMessage()
+        await settle()
+        #expect(rig.driver.smsSent.count == 1)
+        // Spoken to its end: it is told, and the entry goes.
+        rig.said.finishLast(true)
+        #expect(await eventually { state.awaiting == nil && noticeText(rig) == header })
+        model.sendTextMessage()
+        #expect(await eventually { rig.answers.pending == 1 })
+        #expect(rig.driver.smsSent.count == 2 && rig.driver.smsSent[1].attempt == .first)
+        rig.answers.release(.handedOver(1))
+    }
+
+    /// Focus reaching the line counts as told, announcement or not.
+    @Test func voiceOverFocusOnTheLineCountsAsTold() async throws {
+        let rig = try rig(voiceOver: true)
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        #expect(await send(rig, "one", .handedOver(1)))
+        #expect(state.awaiting != nil)
+        model.textMessageLineFocused()
+        #expect(await eventually { state.awaiting == nil && noticeText(rig) == header })
+    }
+
+    @Test func aRunThatEndedWithTheAnswerAwaitedLeavesTheCutOffLineForTheNextOpening() async throws {
+        for restart in [false, true] {
+            let rig = try rig()
+            defer { rig.cleanUp() }
+            let model = rig.model
+            model.openTextMessage()
+            model.setTextMessageText("one")
+            model.sendTextMessage()
+            #expect(await eventually { rig.answers.pending == 1 })
+            if restart { model.restart() } else { model.runEnded(RunEnd(result: 0), uptimeSeconds: 1) }
+            rig.answers.release(.handedOver(1))
+            await settle()
+            // The notice was written before the dispatch and outlives the run.
+            #expect(noticeText(rig).contains(rig.driver.smsSent[0].identifier))
+            model.phase = .running(.normal)
+            model.openTextMessage()
+            let state = model.session.textMessage
+            #expect(state.progress == .cutOff && state.text.isEmpty)
+            #expect(state.status(availability: .ready) == TextMessageStatus(words: SmsMessages.cutOff, tone: .problem))
+            #expect(rig.said.lines == [SmsMessages.cutOff])
+            // Shown at once (no VoiceOver): the flag goes and the file with it.
+            #expect(await eventually { noticeText(rig) == header })
+            #expect(!rig.driver.textMessageNotice.cutOffPending)
+            // The same words sent now are a new message.
+            #expect(await send(rig, "one", .handedOver(1)))
+            #expect(rig.driver.smsSent.count == 2 && rig.driver.smsSent[1].attempt == .first)
+            #expect(rig.driver.smsSent[1].identifier != rig.driver.smsSent[0].identifier)
+        }
+    }
+
+    // MARK: The notice (S10)
+
+    @Test func theNoticeIsWrittenAndFlushedBeforeAnythingIsDispatched() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        let model = rig.model
+        let seen = SeenText()
+        rig.driver.smsAnswer = { [files = rig.files] _ in
+            seen.set(files.contents(Self.noticeURL).map { String(decoding: $0, as: UTF8.self) })
+            return .handedOver(1)
+        }
+        model.openTextMessage()
+        model.setTextMessageText("one")
+        model.sendTextMessage()
+        #expect(await eventually { rig.state.progress == .sent })
+        let identifier = rig.driver.smsSent[0].identifier
+        #expect(seen.value == header + identifier + "\n")
+        // The sequence: replace, flush the file, flush the directory, then the channel; and the same three for the removal.
+        let three = ["replace", "flushFile", "flushDirectory"]
+        #expect(await eventually { rig.files.calls == three + three })
+    }
+
+    private final class SeenText: @unchecked Sendable {
+        private let lock = NSLock()
+        private var text: String?
+        var value: String? { lock.withLock { text } }
+        func set(_ value: String?) { lock.withLock { text = value } }
+    }
+
+    @Test func aNoticeThatCannotBeWrittenSendsNothingAndTheMessageCertainlyDidNotGo() async throws {
+        for step in ["replace", "flushFile", "flushDirectory"] {
+            let rig = try rig()
+            defer { rig.cleanUp() }
+            let (model, state) = (rig.model, rig.state)
+            model.openTextMessage()
+            rig.files.fail(step)
+            model.setTextMessageText("one")
+            model.sendTextMessage()
+            #expect(await eventually { state.progress == .certainlyNotSent }, Comment(rawValue: step))
+            #expect(rig.driver.smsSent.isEmpty && rig.answers.pending == 0, Comment(rawValue: step))
+            #expect(rig.said.lines == [SmsMessages.notSent], Comment(rawValue: step))
+            #expect(rig.driver.textMessageNotice.currentEntries.isEmpty, Comment(rawValue: step))
+            #expect(!state.retries.holds(sender: state.sender, text: "one"), Comment(rawValue: step))
+            #expect(state.text == "one", Comment(rawValue: step))
+        }
+    }
+
+    /// X unresolved; the add of Y fails; the add of Z succeeds: the file kept X through the failure and holds X and Z.
+    @Test func aFailedAddKeepsTheEarlierEntriesInTheFile() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        #expect(await send(rig, "x", .noAnswer))
+        let x = rig.driver.smsSent[0].identifier
+        rig.files.fail("replace")
+        model.setTextMessageText("y")
+        model.sendTextMessage()
+        #expect(await eventually { state.progress == .certainlyNotSent })
+        #expect(noticeText(rig) == header + x + "\n")
+        rig.files.stop()
+        #expect(await send(rig, "z", .noAnswer))
+        let z = rig.driver.smsSent[1].identifier
+        #expect(rig.driver.smsSent.map(\.text) == ["x", "z"])
+        #expect(noticeText(rig) == header + x + "\n" + z + "\n")
+    }
+
+    /// An answer that comes while the application is inactive is not told: the entry stays, a new launch says
+    /// cut off, and the line is told once the application is active again.
+    @Test func aResultThatCameWhileTheApplicationWasInactiveIsNotToldYet() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        model.textMessageSceneChanged(active: false)
+        #expect(await send(rig, "one", .handedOver(1)))
+        await settle()
+        let identifier = rig.driver.smsSent[0].identifier
+        #expect(state.awaiting == .result(identifier))
+        #expect(noticeText(rig) == header + identifier + "\n")
+        // Another launch over the same file: cut off.
+        let relaunched = try self.rig(files: rig.files)
+        defer { relaunched.cleanUp() }
+        relaunched.model.openTextMessage()
+        #expect(relaunched.state.progress == .cutOff)
+        // The application is active again, and the line is on screen: told.
+        model.textMessageSceneChanged(active: true)
+        #expect(await eventually { state.awaiting == nil })
+        #expect(await eventually { noticeText(rig) == header })
+    }
+
+    @Test func aLateAnswerOfAnEndedSessionTouchesNothingOfANewerSend() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        let model = rig.model
+        model.openTextMessage()
         model.setTextMessageText("one")
         model.sendTextMessage()
         #expect(await eventually { rig.answers.pending == 1 })
-        rig.answers.release(.unsupported)
-        #expect(await eventually { state.progress == .unsupported })
-        #expect(state.text == "one")
-        #expect(state.status(availability: .ready) == TextMessageStatus(words: SmsMessages.unsupported, tone: .problem))
-        #expect(rig.said.lines == [SmsMessages.unsupported])
-        // The answer cannot change within a run: Send stays off, whatever is typed or
-        // reopened, and the reason stays shown.
-        #expect(!model.canSendTextMessage)
-        model.setTextMessageText("two")
-        #expect(!model.canSendTextMessage)
-        #expect(state.status(availability: .ready) == TextMessageStatus(words: SmsMessages.unsupported, tone: .problem))
-        model.sendTextMessage()
-        model.closeTextMessage()
+        model.restart()
+        model.phase = .running(.normal)
+        // The new session's send, under way while the old one's answer is still to come.
         model.openTextMessage()
-        model.setTextMessageText("three")
+        model.setTextMessageText("two")
         model.sendTextMessage()
-        #expect(!model.canSendTextMessage)
-        #expect(state.status(availability: .ready)?.words == SmsMessages.unsupported)
+        #expect(await eventually { rig.driver.textMessageNotice.currentEntries.count == 1 })
+        let entry = rig.driver.textMessageNotice.currentEntries
+        rig.answers.release(.handedOver(1))
         await settle()
-        #expect(rig.driver.smsSent.count == 1)
+        #expect(rig.driver.textMessageNotice.currentEntries == entry)
+        #expect(model.session.textMessage.progress == .sending)
+    }
+
+    @Test func anotherInstanceHasNoNoticeOfThisOnesMessages() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        rig.model.openTextMessage()
+        #expect(await send(rig, "one", .noAnswer))
+        rig.model.runEnded(RunEnd(result: 0), uptimeSeconds: 1)
+        let other = try self.rig()
+        defer { other.cleanUp() }
+        other.model.openTextMessage()
+        #expect(other.state.progress == .idle && !other.driver.textMessageNotice.cutOffPending)
+    }
+
+    @Test func aDamagedNoticeSaysCutOffOnceAndTheFileIsValidAfterwards() async throws {
+        let files = RecordingNoticeFiles()
+        files.put(Data("garbage".utf8), at: Self.noticeURL)
+        let rig = try rig(files: files)
+        defer { rig.cleanUp() }
+        rig.model.openTextMessage()
+        #expect(rig.state.progress == .cutOff)
+        #expect(await eventually { noticeText(rig) == header })
+        let again = try self.rig(files: files)
+        defer { again.cleanUp() }
+        again.model.openTextMessage()
+        #expect(again.state.progress == .idle)
+    }
+
+    /// A removal that cannot be written changes nothing for this session; a new launch says cut off once.
+    @Test func aRemovalThatFailedMakesTheNextLaunchSayCutOffOnce() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        rig.driver.smsAnswer = { [files = rig.files] _ in
+            // The removal is the write after this answer: it fails.
+            files.fail("replace")
+            return .handedOver(1)
+        }
+        model.setTextMessageText("one")
+        model.sendTextMessage()
+        #expect(await eventually { state.progress == .sent })
+        await settle()
+        #expect(state.awaiting == nil && rig.driver.textMessageNotice.currentEntries.isEmpty)
+        rig.files.stop()
+        let relaunched = try self.rig(files: rig.files)
+        defer { relaunched.cleanUp() }
+        relaunched.model.openTextMessage()
+        #expect(relaunched.state.progress == .cutOff)
+        #expect(await eventually { noticeText(relaunched) == header })
+        let third = try self.rig(files: rig.files)
+        defer { third.cleanUp() }
+        third.model.openTextMessage()
+        #expect(third.state.progress == .idle)
+    }
+
+    /// A session that ends without the bar opening adds nothing and clears nothing.
+    @Test func aSessionThatNeverOpenedTheBarClearsNothing() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        let model = rig.model
+        model.openTextMessage()
+        model.setTextMessageText("one")
+        model.sendTextMessage()
+        #expect(await eventually { rig.answers.pending == 1 })
+        model.restart()
+        rig.answers.release(.noAnswer)
+        await settle()
+        model.phase = .running(.normal)
+        // The next session runs and ends without the bar.
+        model.restart()
+        model.phase = .running(.normal)
+        model.openTextMessage()
+        #expect(model.session.textMessage.progress == .cutOff)
+    }
+
+    @Test func aResultNotToldBeforeTheBarClosedBecomesTheCutOffLine() async throws {
+        let rig = try rig(voiceOver: true)
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        #expect(await send(rig, "one", .handedOver(1)))
+        #expect(state.awaiting != nil)
+        model.closeTextMessage()
+        #expect(!state.isOpen && rig.driver.textMessageNotice.currentEntries.isEmpty)
+        #expect(rig.driver.textMessageNotice.cutOffPending)
+        model.openTextMessage()
+        #expect(model.session.textMessage.progress == .cutOff)
+    }
+
+    /// Under VoiceOver the cut-off line is read first: no keyboard focus move, the words announced and VoiceOver
+    /// sent to the line; it counts as told only when its announcement ended or focus reached it.
+    @Test func theCutOffLineUnderVoiceOverIsToldOnlyWhenItWasSpoken() async throws {
+        let files = RecordingNoticeFiles()
+        files.put(Data((header + "cut-off\n").utf8), at: Self.noticeURL)
+        let rig = try rig(voiceOver: true, files: files)
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        #expect(state.skipsKeyboardFocus && state.progress == .cutOff)
+        #expect(rig.said.lines == [SmsMessages.cutOff] && state.statusFocusRequests == 1)
+        rig.said.finishLast(false)
+        await settle()
+        #expect(rig.driver.textMessageNotice.cutOffPending)
+        // No Send for a new draft before it was told: the press says the line again.
+        model.setTextMessageText("one")
+        model.sendTextMessage()
+        await settle()
+        #expect(rig.driver.smsSent.isEmpty && rig.said.lines == [SmsMessages.cutOff, SmsMessages.cutOff])
+        #expect(state.statusFocusRequests == 2)
+        rig.said.finishLast(true)
+        #expect(await eventually { !rig.driver.textMessageNotice.cutOffPending && noticeText(rig) == header })
+        // Without VoiceOver the line has no such rule: the bar opens, the line is told at once.
+        let plain = try self.rig(files: { let f = RecordingNoticeFiles(); f.put(Data((header + "cut-off\n").utf8), at: Self.noticeURL); return f }())
+        defer { plain.cleanUp() }
+        plain.model.openTextMessage()
+        #expect(!plain.state.skipsKeyboardFocus)
+        #expect(await eventually { !plain.driver.textMessageNotice.cutOffPending })
+    }
+
+    // MARK: Sixteen unresolved (S11)
+
+    @Test func sixteenUnresolvedMessagesRefuseANewDraftAndStillSendAHeldOneAsARetry() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        for number in 0..<GuestSms.Retries.capacity {
+            #expect(await send(rig, "draft \(number)", .noAnswer), "\(number)")
+        }
+        #expect(rig.driver.textMessageNotice.currentEntries.count == 16)
+        // A new draft: the waiting line before Send, and Send unavailable. Nothing is dispatched, no identifier
+        // is made and nothing enters the notice.
+        model.setTextMessageText("a new one")
+        #expect(state.status(availability: .ready) == TextMessageStatus(words: SmsMessages.waiting, tone: .problem))
+        #expect(!model.canSendTextMessage)
+        model.sendTextMessage()
+        await settle()
+        #expect(rig.driver.smsSent.count == 16 && rig.driver.textMessageNotice.currentEntries.count == 16)
+        // A held draft goes as a retry, with the identifier it had.
+        model.setTextMessageText("draft 3")
+        #expect(model.canSendTextMessage)
+        model.sendTextMessage()
+        #expect(await eventually { rig.answers.pending == 1 })
+        #expect(rig.driver.smsSent[16].attempt == .retry && rig.driver.smsSent[16].identifier == rig.driver.smsSent[3].identifier)
+        rig.answers.release(.handedOverEarlier(1))
+        #expect(await eventually { state.progress == .deliveredEarlier })
+        // Its result, shown, lowers the count: the new draft can go.
+        model.setTextMessageText("a new one")
+        #expect(model.canSendTextMessage)
+        // A restart clears the count, and the next opening says cut off.
+        model.restart()
+        model.phase = .running(.normal)
+        model.openTextMessage()
+        #expect(model.session.textMessage.retries.unresolvedCount == 0)
+        #expect(model.session.textMessage.progress == .cutOff)
     }
 
     // MARK: The run
@@ -254,7 +685,7 @@ struct TextMessageTests {
         model.runEnded(RunEnd(result: 0), uptimeSeconds: 1)
         #expect(model.session.textMessage !== earlier)
         #expect(earlier.ended && !earlier.isOpen && earlier.text.isEmpty)
-        rig.answers.release(.handedToAndroid(parts: 1))
+        rig.answers.release(.handedOver(1))
         await settle()
         #expect(rig.said.lines.isEmpty)
         #expect(earlier.progress == .idle)
@@ -272,16 +703,17 @@ struct TextMessageTests {
         #expect(await eventually { rig.answers.pending == 1 })
         model.restart()
         #expect(earlier.ended && !earlier.isOpen)
-        rig.answers.release(.handedToAndroid(parts: 1))
+        rig.answers.release(.handedOver(1))
         await settle()
         #expect(rig.said.lines.isEmpty)
-        // The run that follows has its own bar: nothing typed, nothing said.
+        // The run that follows has its own bar: nothing typed, and the one thing it says of the earlier
+        // run is that a message sent then may or may not have arrived.
         model.phase = .running(.normal)
         #expect(!model.session.textMessage.isOpen)
         model.openTextMessage()
         #expect(model.session.textMessage.isOpen && model.session.textMessage.text.isEmpty)
-        #expect(model.session.textMessage.progress == .idle)
-        #expect(model.session.textMessage.status(availability: .ready) == nil)
+        #expect(model.session.textMessage.progress == .cutOff)
+        #expect(model.session.textMessage.status(availability: .ready)?.words == SmsMessages.cutOff)
     }
 
     @Test func aRunThatFailedLeavesNoBarEither() async throws {
@@ -351,11 +783,12 @@ struct TextMessageTests {
         #expect(model.textMessageAvailability == .ready && model.canSendTextMessage)
         model.sendTextMessage()
         #expect(await eventually { rig.answers.pending == 1 })
-        rig.answers.release(.handedToAndroid(parts: 1))
+        rig.answers.release(.handedOver(1))
         #expect(await eventually { state.progress == .sent })
     }
 
-    @Test func aTransferOnTheAdbChannelHoldsTheSendToo() async throws {
+    /// The channel shares nothing with adb: a transfer that holds adb's one connection holds nothing here.
+    @Test func aTransferOnTheAdbChannelDoesNotHoldTheSend() async throws {
         let rig = try rig()
         defer { rig.cleanUp() }
         let model = rig.model
@@ -365,7 +798,7 @@ struct TextMessageTests {
         #expect(model.canSendTextMessage)
         // An import that asks what to do with a name already there holds the channel.
         model.fileBrowser?.conflict = ImportConflict(picks: [], clashing: [], folder: "/sdcard")
-        #expect(!model.canSendTextMessage)
+        #expect(model.canSendTextMessage)
     }
 
     // MARK: Where it is offered
@@ -416,7 +849,7 @@ struct TextMessageTests {
         model.sendTextMessage()
         #expect(rig.memory.sender == "My Bank")
         #expect(await eventually { rig.answers.pending == 1 })
-        rig.answers.release(.handedToAndroid(parts: 1))
+        rig.answers.release(.handedOver(1))
         #expect(await eventually { rig.state.progress == .sent })
         // A new run opens with the sender of the last.
         model.runEnded(RunEnd(result: 0), uptimeSeconds: 1)
@@ -442,7 +875,7 @@ struct TextMessageTests {
         model.sendTextMessage()
         #expect(rig.memory.sender == "My Bank")
         #expect(await eventually { rig.answers.pending == 1 })
-        rig.answers.release(.handedToAndroid(parts: 1))
+        rig.answers.release(.handedOver(1))
         #expect(await eventually { rig.state.progress == .sent })
     }
 
@@ -601,7 +1034,7 @@ struct TextMessageTests {
         try await Task.sleep(for: .milliseconds(300))
         #expect((box as? UITextView)?.text == "123456", "the box shows \((box as? UITextView)?.text ?? "nothing")")
         // Android answers: the keys are still there, and the message box has them.
-        rig.answers.release(.handedToAndroid(parts: 1))
+        rig.answers.release(.handedOver(1))
         #expect(await eventually { state.progress == .sent })
         #expect(await eventually { focusedInput(in: hosting.view) is UITextView })
     }
@@ -645,8 +1078,90 @@ struct TextMessageTests {
         #expect(sending.traits.contains(.button) && sending.traits.contains(.notEnabled))
         let duringY = try #require(during.frames.first { $0.label == SmsMessages.sending }?.y)
         #expect(abs(duringY - beforeY) < 1, "Send moved from \(beforeY) to \(duringY)")
-        rig.answers.release(.handedToAndroid(parts: 1))
+        rig.answers.release(.handedOver(1))
         #expect(await eventually { rig.state.progress == .sent })
+    }
+
+    /// Hosts the bar in a window and gives `body` the view; the window goes after.
+    private func withHostedBar(_ model: AppModel, _ body: (UIView) async throws -> Void) async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let container = UIViewController()
+        lease.window.rootViewController = container
+        let hosting = UIHostingController(rootView: TextMessageBar().environment(model))
+        container.addChild(hosting)
+        hosting.view.frame = CGRect(x: 0, y: 0, width: 390, height: 600)
+        container.view.addSubview(hosting.view)
+        hosting.didMove(toParent: container)
+        defer {
+            hosting.willMove(toParent: nil)
+            hosting.view.removeFromSuperview()
+            hosting.removeFromParent()
+        }
+        try await body(hosting.view)
+    }
+
+    /// While Android is paused the keyboard stays down, so that the pause card does not cover the bar's
+    /// title row and Close.
+    @Test func noKeyboardComesUpWhileAndroidIsPaused() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        rig.model.openTextMessage()
+        rig.model.guestPausingForSpace(freeBytes: 100_000_000)
+        try await withHostedBar(rig.model) { view in
+            try await Task.sleep(for: .milliseconds(1500))
+            #expect(focusedInput(in: view) == nil, "the keyboard came up under the pause card")
+        }
+        // Not paused: the message box takes the keys.
+        let running = try self.rig()
+        defer { running.cleanUp() }
+        running.model.openTextMessage()
+        try await withHostedBar(running.model) { view in
+            #expect(await eventually { focusedInput(in: view) is UITextView })
+        }
+    }
+
+    /// Under VoiceOver the bar that opens with the cut-off line gives the line VoiceOver focus first: the
+    /// keyboard's focus move is skipped.
+    @Test func theCutOffOpeningUnderVoiceOverTakesNoKeyboardFocus() async throws {
+        let files = RecordingNoticeFiles()
+        files.put(Data((header + "cut-off\n").utf8), at: Self.noticeURL)
+        let rig = try rig(voiceOver: true, files: files)
+        defer { rig.cleanUp() }
+        rig.model.openTextMessage()
+        try await withHostedBar(rig.model) { view in
+            try await Task.sleep(for: .milliseconds(1500))
+            #expect(focusedInput(in: view) == nil, "the keyboard took the focus from the cut-off line")
+        }
+        // Without VoiceOver the same opening puts the cursor in the box.
+        let plain = try self.rig(files: { let f = RecordingNoticeFiles(); f.put(Data((header + "cut-off\n").utf8), at: Self.noticeURL); return f }())
+        defer { plain.cleanUp() }
+        plain.model.openTextMessage()
+        try await withHostedBar(plain.model) { view in
+            #expect(await eventually { focusedInput(in: view) is UITextView })
+        }
+    }
+
+    // MARK: The connectors (U3)
+
+    /// The text message connector names port 5560 and no other; the adb connector, which the network bridge
+    /// opens its streams with, names 5555 and no other.
+    @Test func eachConnectorNamesItsOwnPortAndNoOther() throws {
+        final class Ports: @unchecked Sendable {
+            private let lock = NSLock()
+            private var seen: [UInt32] = []
+            func add(_ port: UInt32) { lock.withLock { seen.append(port) } }
+            var value: [UInt32] { lock.withLock { seen } }
+        }
+        let sms = Ports()
+        let connector = TextMessageConnector(connect: { port, _ in sms.add(port); return -Int32(ECONNREFUSED) })
+        for _ in 0..<3 { #expect(throws: POSIXError.self) { try connector.open(timeoutMilliseconds: 250) } }
+        #expect(sms.value == [5560, 5560, 5560] && GuestSmsChannel.port == 5560)
+        let adb = Ports()
+        let vsock = VsockConnector(connect: { port, _ in adb.add(port); return -Int32(ECONNREFUSED) })
+        #expect(throws: AdbError.self) { try vsock.openStream() }
+        #expect(throws: AdbError.self) { _ = try vsock.connect() }
+        #expect(adb.value == [5555, 5555] && VsockConnector.adbPort == 5555)
     }
 
     @Test func settingsHasTheRowOnlyWhereTheApplicationCarriesTextMessages() async throws {

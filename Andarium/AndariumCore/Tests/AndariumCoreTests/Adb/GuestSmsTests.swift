@@ -146,52 +146,17 @@ struct GuestSmsTests {
         #expect(GuestSms.refusal(sender: "Bank", text: "\u{FFFE}") == .unsendableCharacter)
         #expect(GuestSms.refusal(sender: "Bank", text: "ab\u{FFFE}cd") == .unsendableCharacter)
         #expect(GuestSms.refusal(sender: "Bank", text: String(repeating: "x", count: 300) + "\u{FFFE}") == .unsendableCharacter)
-        #expect(GuestSms.command(sender: "Bank", text: "a\u{FFFE}", identifier: Self.identifier) == nil)
+        #expect(GuestSmsRequest(sender: "Bank", text: "a\u{FFFE}", identifier: Self.identifier, attempt: .first) == nil)
         #expect(GuestSms.refusal(sender: "Bank", text: "\u{FEFF}abc") == nil)
         #expect(GuestSms.refusal(sender: "Bank", text: "\u{FEFF}") == nil)
         #expect(GuestSms.refusal(sender: "Bank", text: "ab\u{FEFF}") == nil)
         #expect(GuestSms.refusal(sender: "Bank", text: "\u{FFFF}") == nil)
     }
 
-    @Test func theCommandCarriesOnlyBase64() throws {
-        let command = try #require(GuestSms.command(sender: "+1 555", text: "it's $HOME; `x`\nسلام", identifier: Self.identifier))
-        let argument = try #require(command.firstMatch(of: /--arg '([A-Za-z0-9+\/=.]+)'$/)?.1)
-        let fields = argument.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-        #expect(fields.count == 3)
-        #expect(fields[2] == Self.identifier)
-        #expect(String(decoding: try #require(Data(base64Encoded: fields[0])), as: UTF8.self) == "+1555")
-        #expect(String(decoding: try #require(Data(base64Encoded: fields[1])), as: UTF8.self) == "it's $HOME; `x`\nسلام")
-        #expect(command.hasPrefix("content call --uri content://android.kernarium.sms --method deliver "))
-        #expect(GuestSms.command(sender: "", text: "hi", identifier: Self.identifier) == nil)
-        // The identifier is 32 lower-case hex digits, nothing the shell could read.
-        for identifier in ["", "0123", Self.identifier.uppercased(), Self.identifier + "0", String(Self.identifier.dropLast()) + "'", String(Self.identifier.dropLast()) + "g"] {
-            #expect(GuestSms.command(sender: "Bank", text: "hi", identifier: identifier) == nil)
-        }
-    }
-
-    /// The shell reads nothing of the sender or the text: whatever is typed or pasted travels as base64, so the
-    /// command is the same shape for every message.
-    @Test func hostileTextReachesTheShellOnlyAsBase64() throws {
-        let texts = [
-            "'; rm -rf /; '", "$(id)", "`id`", "\\'\"", "a\nb\r\nc", "tab\there", "nul\u{0}byte", "|&;<>(){}[]*?~#!",
-            "--arg x", "\u{2028}\u{2029}", "\u{202E}reversed", "\u{FEFF}\u{FEFF}", "😀 and 日本語 and العربية",
-            "\u{0301}\u{200D}\u{200B}", "%s %n %d", "../../etc/passwd", "content://other", " ",
-        ]
-        for text in texts {
-            let command = try #require(GuestSms.command(sender: "Bank", text: text, identifier: Self.identifier), "\(text.debugDescription)")
-            let argument = try #require(command.firstMatch(of: /--arg '([A-Za-z0-9+\/=.]+)'$/)?.1, "\(text.debugDescription)")
-            // One quoted argument, three fields, and nothing outside the quotes but the fixed words.
-            #expect(command.filter { $0 == "'" }.count == 2)
-            let fields = argument.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-            #expect(fields.count == 3)
-            #expect(String(decoding: try #require(Data(base64Encoded: fields[1])), as: UTF8.self) == text)
-        }
-    }
-
     /// A sender is a number or a short name: nothing else becomes one, whatever it would mean to a shell.
     /// What cleans to a valid sender is listed with the exact value it is sent as; every other input is
     /// refused, and the row asserts that for each of them whether or not the validator agrees.
-    @Test func hostileSendersAreRefusedAndNeverBuildACommand() throws {
+    @Test func hostileSendersAreRefusedAndNeverBuildARequest() throws {
         let cleaned: [(typed: String, sent: String)] = [
             ("\u{202E}Bank\u{200E}", "Bank"), ("Bank\u{202E}", "Bank"), ("Bank\u{200B}", "Bank"),
             ("\u{FF21}\u{FF22}", "AB"), ("\u{FF0B}\u{FF11}", "+1"),
@@ -199,8 +164,9 @@ struct GuestSmsTests {
         for (typed, sent) in cleaned {
             #expect(GuestSms.sender(typed) == sent, "\(typed.debugDescription)")
             #expect(GuestSms.senderRefusal(typed) == nil, "\(typed.debugDescription)")
-            let command = try #require(GuestSms.command(sender: typed, text: "hi", identifier: Self.identifier))
-            #expect(command == GuestSms.command(sender: sent, text: "hi", identifier: Self.identifier), "\(typed.debugDescription)")
+            let request = try #require(GuestSmsRequest(sender: typed, text: "hi", identifier: Self.identifier, attempt: .first))
+            #expect(request.sender == sent, "\(typed.debugDescription)")
+            #expect(request == GuestSmsRequest(sender: sent, text: "hi", identifier: Self.identifier, attempt: .first), "\(typed.debugDescription)")
         }
         let refused = [
             "'; id; '", "$(id)", "`id`", "a\nb", "Bank\u{0}", "a|b", "a&b", "\"Bank\"", "a;b", "a b\\", "../x", "a/b",
@@ -210,7 +176,7 @@ struct GuestSmsTests {
         for sender in refused {
             #expect(GuestSms.sender(sender) == nil, "\(sender.debugDescription)")
             #expect(GuestSms.senderRefusal(sender) != nil, "\(sender.debugDescription)")
-            #expect(GuestSms.command(sender: sender, text: "hi", identifier: Self.identifier) == nil, "\(sender.debugDescription)")
+            #expect(GuestSmsRequest(sender: sender, text: "hi", identifier: Self.identifier, attempt: .first) == nil, "\(sender.debugDescription)")
         }
     }
 
@@ -228,73 +194,223 @@ struct GuestSmsTests {
         #expect(refusal("") == .noText)
     }
 
-    /// The longest command is well inside the guest console's line, whatever the text is made of.
-    @Test func theLongestCommandFitsTheConsoleLine() throws {
-        // Three UTF-8 bytes for each unit is the most the units allow.
-        let text = String(repeating: "\u{20AC}", count: GuestSms.maximumUnits)
-        let sender = String(repeating: "1", count: GuestSms.maximumNumberDigits)
-        let command = try #require(GuestSms.command(sender: sender, text: text, identifier: Self.identifier))
-        #expect(command.utf8.count < 4096, "\(command.utf8.count)")
+    // MARK: The request bytes (S2)
+
+    /// The payload the host sends is the golden one, for every vector: the same bytes the service's own test
+    /// parses to the same fields.
+    @Test func theRequestBytesAreTheGoldenOnes() throws {
+        let vectors = try SmsFixture.vectors(prefix: "request-")
+        #expect(vectors.count >= 6)
+        for vector in vectors {
+            let attempt = try #require(GuestSms.Attempt(rawValue: vector.fields[0]), Comment(rawValue: vector.name))
+            let sender = String(decoding: SmsFixture.bytes(ofHex: vector.fields[2]), as: UTF8.self)
+            let text = String(decoding: SmsFixture.bytes(ofHex: vector.fields[3]), as: UTF8.self)
+            let request = try #require(
+                GuestSmsRequest(sender: sender, text: text, identifier: vector.fields[1], attempt: attempt),
+                Comment(rawValue: vector.name))
+            #expect(request.payload == vector.bytes, Comment(rawValue: vector.name))
+            // Printable ASCII, five fields.
+            #expect(request.payload.allSatisfy { (0x21...0x7E).contains($0) }, Comment(rawValue: vector.name))
+            #expect(String(decoding: request.payload, as: UTF8.self).split(separator: ".", omittingEmptySubsequences: false).count == 5)
+        }
+        // The longest request has 2,750 bytes.
+        #expect(try SmsFixture.vector("request-first-longest").bytes.count == 2750)
     }
 
-    private static func shell(_ stdout: String = "", stderr: String = "", exit: Int? = 0) -> ShellResult {
-        ShellResult(stdout: Data(stdout.utf8), stderr: Data(stderr.utf8), exitCode: exit)
+    /// A retry is its first attempt with the attempt field changed and nothing else.
+    @Test func aRetryDiffersFromItsFirstAttemptInTheAttemptFieldOnly() throws {
+        let first = try #require(GuestSmsRequest(sender: "+1 555", text: "it's $HOME; `x`\nسلام", identifier: Self.identifier, attempt: .first))
+        let retry = try #require(GuestSmsRequest(sender: "+1 555", text: "it's $HOME; `x`\nسلام", identifier: Self.identifier, attempt: .retry))
+        #expect(String(decoding: first.payload, as: UTF8.self).replacing(".first.", with: ".retry.", maxReplacements: 1)
+            == String(decoding: retry.payload, as: UTF8.self))
+        #expect(first.sender == "+1555")
     }
 
-    @Test func aCompleteResultOnStdoutIsHandedToAndroid() {
-        #expect(GuestSms.outcome(Self.shell("Result: Bundle[{parts=2}]\n")) == .handedToAndroid(parts: 2))
-        #expect(GuestSms.outcome(Self.shell("Result: Bundle[{parts=1}]\r\n")) == .handedToAndroid(parts: 1))
-        #expect(GuestSms.outcome(Self.shell("Result: Bundle[{parts=1}]")) == .handedToAndroid(parts: 1))
-        #expect(GuestSms.outcome(Self.shell("Result: Bundle[{parts=\(GuestSms.maximumParts)}]\n"))
-            == .handedToAndroid(parts: GuestSms.maximumParts))
-        // A newline of stderr alone is not an error.
-        #expect(GuestSms.outcome(Self.shell("Result: Bundle[{parts=3}]\n", stderr: "\n")) == .handedToAndroid(parts: 3))
-    }
-
-    /// Whatever is short of that is not confirmed: the message may have arrived, or not.
-    @Test func anythingElseIsNotConfirmed() {
-        let result = "Result: Bundle[{parts=2}]\n"
-        let cases: [(String, ShellResult)] = [
-            ("no output", Self.shell()),
-            ("no exit status", Self.shell(result, exit: nil)),
-            ("a failing exit", Self.shell(result, exit: 1)),
-            ("success beside an error", Self.shell(result, stderr: "java.lang.SecurityException: no\n")),
-            ("the result on stderr", Self.shell(stderr: result)),
-            ("a line before", Self.shell("Starting\n" + result)),
-            ("a line after", Self.shell(result + "Done\n")),
-            ("two results", Self.shell(result + result)),
-            ("a space before", Self.shell(" " + result)),
-            ("a truncated result", Self.shell("Result: Bundle[{parts=2")),
-            ("another key", Self.shell("Result: Bundle[{parts=2, x=1}]\n")),
-            ("another key alone", Self.shell("Result: Bundle[{count=2}]\n")),
-            ("no parts", Self.shell("Result: Bundle[{}]\n")),
-            ("no part count", Self.shell("Result: Bundle[{parts=}]\n")),
-            ("zero parts", Self.shell("Result: Bundle[{parts=0}]\n")),
-            ("a sign", Self.shell("Result: Bundle[{parts=+2}]\n")),
-            ("a negative count", Self.shell("Result: Bundle[{parts=-1}]\n")),
-            ("more parts than a text takes", Self.shell("Result: Bundle[{parts=\(GuestSms.maximumParts + 1)}]\n")),
-            ("a count that overflows", Self.shell("Result: Bundle[{parts=99999999999999999999}]\n")),
-            ("full-width digits", Self.shell("Result: Bundle[{parts=\u{FF12}}]\n")),
-            ("a null result", Self.shell("Result: null\n")),
-            ("an error on stdout", Self.shell("Error while accessing provider:android.kernarium.sms\n")),
-            ("a security exception", Self.shell(stderr: "java.lang.SecurityException: only the adb shell may deliver a message\n")),
-            ("an illegal argument", Self.shell(stderr: "java.lang.IllegalArgumentException: not an identifier\n")),
-            ("not UTF-8", ShellResult(stdout: Data([0xff, 0xfe]), exitCode: 0)),
-            ("a failing exit alone", Self.shell(exit: 1)),
+    /// Whatever is typed or pasted travels as base64 in the fifth field: the payload is the same shape for every text.
+    @Test func hostileTextTravelsOnlyAsBase64() throws {
+        let texts = [
+            "'; rm -rf /; '", "$(id)", "`id`", "\\'\"", "a\nb\r\nc", "tab\there", "nul\u{0}byte", "|&;<>(){}[]*?~#!",
+            "--arg x", "\u{2028}\u{2029}", "\u{202E}reversed", "\u{FEFF}\u{FEFF}", "😀 and 日本語 and العربية",
+            "\u{0301}\u{200D}\u{200B}", "%s %n %d", "../../etc/passwd", "content://other", " ", "a.b.c", "...",
         ]
-        for (name, result) in cases {
-            #expect(GuestSms.outcome(result) == .notConfirmed, Comment(rawValue: name))
+        for text in texts {
+            let request = try #require(GuestSmsRequest(sender: "Bank", text: text, identifier: Self.identifier, attempt: .first), "\(text.debugDescription)")
+            let fields = String(decoding: request.payload, as: UTF8.self).split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+            #expect(fields.count == 5, "\(text.debugDescription)")
+            #expect(fields[0] == "2" && fields[1] == "first" && fields[2] == Self.identifier)
+            #expect(String(decoding: try #require(Data(base64Encoded: fields[4])), as: UTF8.self) == text)
+            #expect(request.payload.allSatisfy { (0x21...0x7E).contains($0) }, "\(text.debugDescription)")
+        }
+        // The identifier is 32 lower-case hex digits and nothing else.
+        for identifier in ["", "0123", Self.identifier.uppercased(), Self.identifier + "0", String(Self.identifier.dropLast()) + "'", String(Self.identifier.dropLast()) + "g"] {
+            #expect(GuestSmsRequest(sender: "Bank", text: "hi", identifier: identifier, attempt: .first) == nil)
+        }
+        #expect(GuestSmsRequest(sender: "", text: "hi", identifier: Self.identifier, attempt: .first) == nil)
+        #expect(GuestSmsRequest(sender: "Bank", text: "", identifier: Self.identifier, attempt: .first) == nil)
+    }
+
+    // MARK: The answer bytes (S1)
+
+    /// Every golden answer parses to the form it is, and only for its own identifier.
+    @Test func theGoldenAnswersParse() throws {
+        let vectors = try SmsFixture.vectors(prefix: "answer-")
+        #expect(vectors.count == 12)
+        for vector in vectors {
+            let identifier = vector.fields[0] == "-" ? Self.identifier : vector.fields[0]
+            let parsed = GuestSms.answer(vector.bytes, identifier: identifier)
+            let expected: GuestSms.Answer? = switch vector.name {
+            case "answer-handed-over-1": .handedOver(parts: 1)
+            case "answer-handed-over-11": .handedOver(parts: 11)
+            case "answer-handed-over-earlier-1": .handedOverEarlier(parts: 1)
+            case "answer-handed-over-earlier-11": .handedOverEarlier(parts: 11)
+            case "answer-not-handed-over-invalid": .notHandedOver(.invalid)
+            case "answer-not-handed-over-plan": .notHandedOver(.plan)
+            case "answer-not-handed-over-store": .notHandedOver(.store)
+            case "answer-uncertain-interrupted": .uncertain(.interrupted)
+            case "answer-uncertain-unknown": .uncertain(.unknown)
+            case "answer-uncertain-conflict": .uncertain(.conflict)
+            case "answer-unsettled-store": .unsettled
+            case "answer-refused-version": .refusedVersion
+            default: nil
+            }
+            #expect(parsed == expected, Comment(rawValue: vector.name))
+            #expect(parsed != nil, Comment(rawValue: vector.name))
+            // Another identifier's answer is nobody's.
+            if vector.fields[0] != "-" {
+                #expect(GuestSms.answer(vector.bytes, identifier: String(repeating: "a", count: 32)) == nil, Comment(rawValue: vector.name))
+            }
+        }
+        // The longest answer, 58 bytes.
+        #expect(try SmsFixture.vector("answer-not-handed-over-invalid").bytes.count == 58)
+    }
+
+    /// Anything that is not exactly one of the forms is not an answer.
+    @Test func anythingElseIsNotAnAnswer() {
+        let id = Self.identifier
+        let other = String(repeating: "b", count: 32)
+        let cases: [(String, String)] = [
+            ("another identifier", "2.handed-over.\(other).1"),
+            ("version 1", "1.handed-over.\(id).1"),
+            ("version 3", "3.handed-over.\(id).1"),
+            ("version 02", "02.handed-over.\(id).1"),
+            ("an unknown outcome", "2.delivered.\(id).1"),
+            ("parts 0", "2.handed-over.\(id).0"),
+            ("parts 12", "2.handed-over.\(id).12"),
+            ("parts 01", "2.handed-over.\(id).01"),
+            ("parts +1", "2.handed-over.\(id).+1"),
+            ("parts a letter", "2.handed-over.\(id).x"),
+            ("parts where a reason belongs", "2.uncertain.\(id).1"),
+            ("a reason where parts belong", "2.handed-over.\(id).unknown"),
+            ("a missing reason", "2.uncertain.\(id)"),
+            ("an empty reason", "2.uncertain.\(id)."),
+            ("an unknown reason", "2.uncertain.\(id).maybe"),
+            ("an unknown not-handed-over reason", "2.not-handed-over.\(id).busy"),
+            ("an unsettled with another reason", "2.unsettled.\(id).invalid"),
+            ("a sixth field", "2.handed-over.\(id).1.x"),
+            ("a fifth field", "2.uncertain.\(id).unknown.x"),
+            ("a cut payload", "2.handed-over.\(id)"),
+            ("a trailing dot", "2.handed-over.\(id).1."),
+            ("the refusal with a field after it", "2.refused-version.x"),
+            ("the refusal without a version", "refused-version"),
+            ("the refusal of a version with a sign", "+2.refused-version"),
+            ("the refusal of ten digits", "1234567890.refused-version"),
+            ("a space", "2.handed-over.\(id).1 "),
+            ("a line end", "2.handed-over.\(id).1\n"),
+            ("upper case", "2.HANDED-OVER.\(id).1"),
+            ("empty", ""),
+        ]
+        for (name, text) in cases {
+            #expect(GuestSms.answer(Data(text.utf8), identifier: id) == nil, Comment(rawValue: name))
+        }
+        #expect(GuestSms.answer(Data([0x32, 0x2E, 0x80]), identifier: id) == nil)
+        // The refusal is accepted whatever the service's version is.
+        for version in ["0", "1", "2", "3", "999999999"] {
+            #expect(GuestSms.answer(Data("\(version).refused-version".utf8), identifier: id) == .refusedVersion)
         }
     }
 
-    @Test func noServiceIsKnownFromWhatContentSaysOfTheAuthority() {
-        let missing = "Error while accessing provider:android.kernarium.sms\njava.lang.IllegalArgumentException: Unknown authority android.kernarium.sms\n"
-        #expect(GuestSms.outcome(Self.shell(stderr: missing)) == .unsupported)
-        #expect(GuestSms.outcome(Self.shell(stderr: "Could not find provider: android.kernarium.sms\n")) == .unsupported)
-        // A result beside it, or a failing exit, says something else happened.
-        #expect(GuestSms.outcome(Self.shell("Result: Bundle[{parts=2}]\n", stderr: missing)) == .notConfirmed)
-        #expect(GuestSms.outcome(Self.shell("Starting\n", stderr: missing)) == .notConfirmed)
+    // MARK: The adapter (S4, S5)
+
+    private func request(_ attempt: GuestSms.Attempt) -> GuestSmsRequest {
+        GuestSmsRequest(sender: "Bank", text: "code", identifier: Self.identifier, attempt: attempt)!
     }
+
+    private func answered(_ form: String) -> GuestSmsChannel.Outcome {
+        .answered(Data("2.\(form)".utf8))
+    }
+
+    /// Each row of the adapter's table: what the attempt, the channel's outcome and the service's answer come to.
+    @Test func theAdapterMapsEveryRowOfTheTable() {
+        let id = Self.identifier
+        let first = request(.first)
+        let retry = request(.retry)
+        typealias R = GuestSms.Result
+        let rows: [(String, GuestSmsRequest, GuestSmsChannel.Outcome, R)] = [
+            // A first attempt.
+            ("first, not sent", first, .notSent, .certainlyNotSent),
+            ("first, not taken", first, .notTaken, .certainlyNotSent),
+            ("first, no answer", first, .noAnswer, .notConfirmed),
+            ("first, handed over", first, answered("handed-over.\(id).2"), .sent(parts: 2)),
+            ("first, handed over earlier", first, answered("handed-over-earlier.\(id).3"), .deliveredEarlier(parts: 3)),
+            ("first, not handed over (invalid)", first, answered("not-handed-over.\(id).invalid"), .certainlyNotSent),
+            ("first, not handed over (plan)", first, answered("not-handed-over.\(id).plan"), .certainlyNotSent),
+            ("first, not handed over (store)", first, answered("not-handed-over.\(id).store"), .certainlyNotSent),
+            ("first, uncertain (interrupted)", first, answered("uncertain.\(id).interrupted"), .uncertain),
+            ("first, uncertain (unknown)", first, answered("uncertain.\(id).unknown"), .uncertain),
+            ("first, uncertain (conflict)", first, answered("uncertain.\(id).conflict"), .uncertain),
+            ("first, version refusal", first, .answered(Data("2.refused-version".utf8)), .certainlyNotSent),
+            ("first, another version's refusal", first, .answered(Data("3.refused-version".utf8)), .certainlyNotSent),
+            ("first, unsettled", first, answered("unsettled.\(id).store"), .notConfirmed),
+            ("first, malformed", first, .answered(Data("garbage".utf8)), .notConfirmed),
+            ("first, another identifier's", first, answered("handed-over.\(String(repeating: "c", count: 32)).1"), .notConfirmed),
+            ("first, an empty answer", first, .answered(Data()), .notConfirmed),
+            // A retry.
+            ("retry, not sent", retry, .notSent, .notConfirmed),
+            ("retry, not taken", retry, .notTaken, .notConfirmed),
+            ("retry, no answer", retry, .noAnswer, .notConfirmed),
+            ("retry, handed over earlier", retry, answered("handed-over-earlier.\(id).1"), .deliveredEarlier(parts: 1)),
+            ("retry, uncertain", retry, answered("uncertain.\(id).unknown"), .uncertain),
+            ("retry, unsettled", retry, answered("unsettled.\(id).store"), .notConfirmed),
+            ("retry, version refusal", retry, .answered(Data("2.refused-version".utf8)), .notConfirmed),
+            ("retry, handed over", retry, answered("handed-over.\(id).1"), .notConfirmed),
+            ("retry, not handed over", retry, answered("not-handed-over.\(id).store"), .notConfirmed),
+            ("retry, malformed", retry, .answered(Data("2.uncertain.\(id)".utf8)), .notConfirmed),
+            ("retry, another identifier's", retry, answered("uncertain.\(String(repeating: "c", count: 32)).unknown"), .notConfirmed),
+        ]
+        for (name, request, outcome, expected) in rows {
+            #expect(GuestSms.result(for: request, outcome: outcome) == expected, Comment(rawValue: name))
+        }
+        // Only a result that is not confirmed keeps its identifier.
+        #expect(R.notConfirmed.isFinal == false)
+        for result in [R.sent(parts: 1), .deliveredEarlier(parts: 1), .certainlyNotSent, .uncertain] {
+            #expect(result.isFinal)
+        }
+    }
+
+    /// The first attempt is handed over and its answer lost; the retry cannot connect: one identifier throughout,
+    /// and the answer to a later press says it was handed over earlier.
+    @Test func aRetryThatCannotReachAndroidNeverForgetsTheFirstAttempt() {
+        var retries = GuestSms.Retries { Self.identifier }
+        let first = retries.next(sender: "Bank", text: "code")
+        #expect(first.attempt == .first)
+        func settle(_ attempt: GuestSms.Attempt, _ outcome: GuestSmsChannel.Outcome) -> GuestSms.Result {
+            let request = GuestSmsRequest(sender: "Bank", text: "code", identifier: first.identifier, attempt: attempt)!
+            let result = GuestSms.result(for: request, outcome: outcome)
+            retries.settle(sender: "Bank", text: "code", identifier: first.identifier, result: result)
+            return result
+        }
+        #expect(settle(.first, .noAnswer) == .notConfirmed)
+        for outcome in [GuestSmsChannel.Outcome.notSent, .notTaken] {
+            let next = retries.next(sender: "Bank", text: "code")
+            #expect(next.attempt == .retry && next.identifier == first.identifier)
+            #expect(settle(.retry, outcome) == .notConfirmed)
+        }
+        let next = retries.next(sender: "Bank", text: "code")
+        #expect(next.attempt == .retry && next.identifier == first.identifier)
+        #expect(settle(.retry, answered("handed-over-earlier.\(first.identifier).1")) == .deliveredEarlier(parts: 1))
+    }
+
+    // MARK: The identifiers (S3, S6)
 
     @Test func identifiersAreRandomHex() {
         let identifiers = Set((0..<50).map { _ in GuestSms.newIdentifier() })
@@ -302,41 +418,60 @@ struct GuestSmsTests {
         #expect(identifiers.allSatisfy(GuestSms.isIdentifier))
     }
 
-    /// The same draft sent again after an unconfirmed result keeps its identifier, so the service can answer
-    /// it without handing the message over twice; two different messages never share one.
-    @Test func anUnconfirmedDraftKeepsItsIdentifier() {
+    /// A draft that was not confirmed keeps its identifier and goes again as a retry; a final result keeps it
+    /// until it has been shown, and only then are the same words a new message.
+    @Test func aDraftKeepsItsIdentifierUntilItsResultIsShown() {
         let counter = Counter()
         var retries = GuestSms.Retries { counter.next() }
-        let first = retries.identifier(sender: "Bank", text: "code 1")
-        // Not settled yet: nothing is kept.
-        #expect(retries.identifier(sender: "Bank", text: "code 1") != first)
-        retries.settle(sender: "Bank", text: "code 1", identifier: first, confirmed: false)
-        #expect(retries.identifier(sender: "Bank", text: "code 1") == first)
+        let first = retries.next(sender: "Bank", text: "code 1")
+        #expect(first.attempt == .first)
+        // Not settled yet: nothing is kept, and the next press is another first attempt.
+        #expect(retries.next(sender: "Bank", text: "code 1").identifier != first.identifier)
+        retries.settle(sender: "Bank", text: "code 1", identifier: first.identifier, result: .notConfirmed)
+        let again = retries.next(sender: "Bank", text: "code 1")
+        #expect(again.attempt == .retry && again.identifier == first.identifier)
         // The sender as typed differs, the sender sent does not.
-        #expect(retries.identifier(sender: " Bank ", text: "code 1") == first)
-        // Another draft in flight has an identifier of its own, and the first stays.
-        let other = retries.identifier(sender: "Bank", text: "code 2")
-        #expect(other != first)
-        retries.settle(sender: "Bank", text: "code 2", identifier: other, confirmed: false)
-        #expect(retries.identifier(sender: "Bank", text: "code 1") == first)
-        #expect(retries.identifier(sender: "Bank", text: "code 2") == other)
-        #expect(retries.identifier(sender: "Other", text: "code 1") != first)
-        // A confirmed send forgets its draft: the same words again are a new message.
-        retries.settle(sender: "Bank", text: "code 1", identifier: first, confirmed: true)
-        #expect(retries.identifier(sender: "Bank", text: "code 1") != first)
-        #expect(retries.identifier(sender: "Bank", text: "code 2") == other)
+        #expect(retries.next(sender: " Bank ", text: "code 1").identifier == first.identifier)
+        // Another draft has an identifier of its own, and the first stays.
+        let other = retries.next(sender: "Bank", text: "code 2")
+        #expect(other.attempt == .first && other.identifier != first.identifier)
+        retries.settle(sender: "Bank", text: "code 2", identifier: other.identifier, result: .uncertain)
+        #expect(retries.next(sender: "Other", text: "code 1").attempt == .first)
+        // A final result keeps its identifier until it is shown: receipt alone forgets nothing.
+        let held = retries.next(sender: "Bank", text: "code 2")
+        #expect(held.attempt == .retry && held.identifier == other.identifier)
+        retries.presented(identifier: other.identifier)
+        let fresh = retries.next(sender: "Bank", text: "code 2")
+        #expect(fresh.attempt == .first && fresh.identifier != other.identifier)
+        // Showing a result touches no other draft.
+        #expect(retries.next(sender: "Bank", text: "code 1").identifier == first.identifier)
+        // An identifier that is not confirmed is not forgotten by a presentation of the same words.
+        retries.presented(identifier: first.identifier)
+        #expect(retries.next(sender: "Bank", text: "code 1").identifier == first.identifier)
     }
 
-    @Test func theRetryMemoryIsBounded() {
+    /// Sixteen identifiers wait for an answer at most, none is dropped, and a new draft is refused while they do;
+    /// a held draft still goes, as a retry.
+    @Test func sixteenUnresolvedIdentifiersRefuseANewDraftAndDropNone() {
         var retries = GuestSms.Retries()
-        var first = ""
-        for number in 0...GuestSms.Retries.capacity {
-            let identifier = retries.identifier(sender: "Bank", text: "m\(number)")
-            if number == 0 { first = identifier }
-            retries.settle(sender: "Bank", text: "m\(number)", identifier: identifier, confirmed: false)
+        var identifiers: [String] = []
+        for number in 0..<GuestSms.Retries.capacity {
+            #expect(!retries.refuses(sender: "Bank", text: "m\(number)"))
+            let next = retries.next(sender: "Bank", text: "m\(number)")
+            identifiers.append(next.identifier)
+            retries.settle(sender: "Bank", text: "m\(number)", identifier: next.identifier, result: .notConfirmed)
         }
-        #expect(retries.identifier(sender: "Bank", text: "m0") != first)
-        #expect(retries.identifier(sender: "Bank", text: "m\(GuestSms.Retries.capacity)") != "")
+        #expect(retries.unresolvedCount == GuestSms.Retries.capacity && retries.isFull)
+        #expect(retries.refuses(sender: "Bank", text: "new"))
+        for (number, identifier) in identifiers.enumerated() {
+            #expect(!retries.refuses(sender: "Bank", text: "m\(number)"))
+            #expect(retries.next(sender: "Bank", text: "m\(number)").identifier == identifier)
+        }
+        // A result that is final lowers the count once it is shown.
+        retries.settle(sender: "Bank", text: "m0", identifier: identifiers[0], result: .deliveredEarlier(parts: 1))
+        #expect(!retries.refuses(sender: "Bank", text: "new"))
+        retries.presented(identifier: identifiers[0])
+        #expect(retries.unresolvedCount == GuestSms.Retries.capacity - 1)
     }
 
     /// Two texts that Swift treats as equal can be different bytes on the wire.
@@ -345,9 +480,38 @@ struct GuestSmsTests {
         let composed = "caf\u{E9}"
         let decomposed = "cafe\u{301}"
         #expect(composed == decomposed)
-        let identifier = retries.identifier(sender: "Bank", text: composed)
-        retries.settle(sender: "Bank", text: composed, identifier: identifier, confirmed: false)
-        #expect(retries.identifier(sender: "Bank", text: decomposed) != identifier)
+        let identifier = retries.next(sender: "Bank", text: composed).identifier
+        retries.settle(sender: "Bank", text: composed, identifier: identifier, result: .notConfirmed)
+        #expect(retries.next(sender: "Bank", text: decomposed).attempt == .first)
+    }
+
+    /// A seeded run of a thousand presses over a few drafts with edits and every result: no identifier is a first
+    /// attempt twice, and every retry's identifier was a first attempt earlier in the run.
+    @Test func noIdentifierIsAFirstAttemptTwice() {
+        var generator = SeededGenerator(seed: 0x5EED)
+        var retries = GuestSms.Retries()
+        var firsts: Set<String> = []
+        let drafts = (0..<6).map { "draft \($0)" }
+        let results: [GuestSms.Result] = [.sent(parts: 1), .deliveredEarlier(parts: 1), .certainlyNotSent, .notConfirmed, .uncertain, .notConfirmed]
+        var inFlight: [String: String] = [:]
+        for _ in 0..<1000 {
+            let text = drafts.randomElement(using: &generator)!
+            if retries.refuses(sender: "Bank", text: text) { continue }
+            let next = retries.next(sender: "Bank", text: text)
+            switch next.attempt {
+            case .first: #expect(firsts.insert(next.identifier).inserted)
+            case .retry: #expect(firsts.contains(next.identifier))
+            }
+            inFlight[text] = next.identifier
+            let result = results.randomElement(using: &generator)!
+            retries.settle(sender: "Bank", text: text, identifier: next.identifier, result: result)
+            if result.isFinal, Bool.random(using: &generator) {
+                retries.presented(identifier: next.identifier)
+            }
+            // The words are edited now and then: a draft that is not held is a new one.
+            if Int.random(in: 0..<10, using: &generator) == 0 { retries.forget(identifier: next.identifier) }
+        }
+        #expect(!firsts.isEmpty)
     }
 
     @Test func theSenderIsKeptUntilTheVirtualMachineIsErased() throws {
@@ -365,5 +529,17 @@ struct GuestSmsTests {
         memory.forget()
         #expect(memory.sender == nil)
         #expect(defaults.object(forKey: GuestSms.SenderMemory.key) == nil)
+    }
+}
+
+/// A repeatable stream of numbers for a row that shuffles.
+private struct SeededGenerator: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) { state = seed }
+
+    mutating func next() -> UInt64 {
+        state = state &* 6364136223846793005 &+ 1442695040888963407
+        return state ^ (state >> 29)
     }
 }

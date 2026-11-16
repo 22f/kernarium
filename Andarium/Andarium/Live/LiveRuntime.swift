@@ -88,6 +88,7 @@ final class LiveRuntime: RuntimeDriver {
     /// on disk beside the guest's other files: the sweep below is made only
     /// when it does.
     let partials: PartialSweepLedger
+    let textMessageNotice: TextMessageNotice
     /// The sweep of the partial files earlier runs left in the guest, which a
     /// normal run makes once per boot that owes it, after Android has booted.
     private(set) var partialSweep: PartialFileSweep?
@@ -241,6 +242,7 @@ final class LiveRuntime: RuntimeDriver {
         self.preferences = PreferenceKeeper(model: model)
         self.storage = storage
         partials = PartialSweepLedger(directory: storage.locations.directory)
+        textMessageNotice = TextMessageNotice(directory: storage.locations.directory)
         self.keyStore = keyStore
         self.sessionRecord = sessionRecord
         self.cameraDirectory = cameraDirectory
@@ -897,8 +899,8 @@ final class LiveRuntime: RuntimeDriver {
         await oldApps.isOpen(package: package)
     }
 
-    func sendSms(sender: String, text: String, identifier: String) async -> GuestSms.Outcome {
-        await operations.sendSms(sender: sender, text: text, identifier: identifier)
+    func sendSms(_ request: GuestSmsRequest) async -> GuestSmsChannel.Outcome {
+        await GuestSmsChannel(connector: TextMessageConnector()).send(request.payload)
     }
 
     // MARK: Android's screen reader

@@ -1130,6 +1130,28 @@
         }
       }
     },
+    "A message sent earlier may or may not have reached Android. Check before you send it again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "以前に送信したSMSがAndroidに届いたかどうかはわかりません。もう一度送信する前に、届いていないか確認してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "之前发送的短信可能已送达Android，也可能没有。再次发送前，请先查看它是否已收到。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "先前傳送的簡訊可能已送達Android，也可能沒有。再次傳送前，請先查看是否已收到。"
+          }
+        }
+      }
+    },
     "A name can have at most %lld characters." : {
       "localizations" : {
         "ja" : {
@@ -1887,6 +1909,28 @@
         }
       }
     },
+    "Android already had this message." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このSMSはすでにAndroidに届いています。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android此前已收到这条短信。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android先前已收到這則簡訊。"
+          }
+        }
+      }
+    },
     "Android can’t reach the internet over %@. Allow wireless data for Andarium in Settings." : {
       "comment" : "Text of the notice shown when iOS blocks Andarium's Wi-Fi. The argument is the name Wi-Fi. Wireless Data is the name of the setting under Andarium in the iOS Settings app.",
       "localizations" : {
@@ -1929,6 +1973,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Android無法透過行動數據連線到網際網路。請在「設定」中為Andarium開啟「行動數據」。"
+          }
+        }
+      }
+    },
+    "Android can’t tell whether the message arrived. Check before you send it again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AndroidではSMSが届いたかどうかを確認できません。もう一度送信する前に、届いていないか確認してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android无法确定此短信是否已送达。再次发送前，请先查看它是否已收到。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android無法確定此簡訊是否已送達。再次傳送前，請先查看是否已收到。"
           }
         }
       }
@@ -1977,24 +2043,24 @@
         }
       }
     },
-    "Android didn’t confirm the message. Check whether it arrived before you send it again." : {
+    "Android didn’t confirm the message. Send it again to ask whether it arrived; it won’t arrive twice." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "AndroidでSMSの受信を確認できませんでした。もう一度送信する前に、届いていないか確認してください。"
+            "value" : "AndroidでSMSの受信を確認できませんでした。もう一度送信すると届いたかどうかを確認でき、二重に届くことはありません。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android未确认收到此短信。再次发送前，请先查看它是否已收到。"
+            "value" : "Android未确认收到此短信。再次发送即可询问是否已送达，短信不会重复送达。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android未確認收到此簡訊。再次傳送前，請先查看是否已收到。"
+            "value" : "Android未確認收到此簡訊。再次傳送即可詢問是否已送達，簡訊不會重複送達。"
           }
         }
       }
@@ -2153,28 +2219,6 @@
         }
       }
     },
-    "Android on this system image can’t receive text messages." : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このシステムイメージのAndroidはSMSを受信できません。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此系统镜像中的Android无法接收短信。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此系統映像檔中的Android無法接收簡訊。"
-          }
-        }
-      }
-    },
     "Android receives it as an incoming text." : {
       "localizations" : {
         "ja" : {
@@ -2186,13 +2230,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android会像收到短信一样收到它。"
+            "value" : "Android会将它作为收到的短信接收。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android會像收到簡訊一樣收到它。"
+            "value" : "Android會將它作為收到的簡訊接收。"
           }
         }
       }
@@ -9616,6 +9660,28 @@
         }
       }
     },
+    "The message wasn’t sent. Android didn’t receive it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SMSは送信されませんでした。Androidには届いていません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "短信未发送，Android没有收到。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "簡訊未傳送，Android沒有收到。"
+          }
+        }
+      }
+    },
     "The next start updates it to %@." : {
       "comment" : "Follows the note above when a restore brings an older system back; %@ is the release.",
       "localizations" : {
@@ -11563,6 +11629,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "若要重新啟動，請在App切換器中關閉Andarium後重新打開。"
+          }
+        }
+      }
+    },
+    "Too many messages are waiting for Android to confirm them. Restart Android to send a new one." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidの確認を待っているSMSが多すぎます。新しいSMSを送信するには、Androidを再起動してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "等待Android确认的短信过多。请先重启Android，再发送新短信。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "等待Android確認的簡訊過多。請先重新啟動Android，再傳送新簡訊。"
           }
         }
       }

@@ -3,9 +3,10 @@
 import Foundation
 
 /// A text message sent to the guest as if from the network. The guest's
-/// KernariumSms service (android/lineage-24/overlay/sms) takes it from the adb
-/// shell and delivers it as the radio stack would; the rules here are that
-/// service's, so the guest refuses nothing the host lets through.
+/// KernariumSms service (android/lineage-24/overlay/sms) takes it from the host
+/// over its own vsock port (`GuestSmsChannel`) and delivers it as the radio
+/// stack would; the rules here are that service's, so the guest refuses
+/// nothing the host lets through.
 public enum GuestSms {
     /// The longest text, in UTF-16 units.
     public static let maximumUnits = 670
@@ -19,9 +20,6 @@ public enum GuestSms {
     /// a number (the service's `Message.NAME` and `Message.NUMBER`).
     public static let maximumNameLength = 11
     public static let maximumNumberDigits = 20
-    /// The authority of the guest's service.
-    public static let authority = "android.kernarium.sms"
-
     /// The sender a message carries when the person has kept none.
     public static let defaultSender = "Andarium"
 
@@ -162,24 +160,126 @@ public enum GuestSms {
         text.wholeMatch(of: /[0-9a-f]{32}/) != nil
     }
 
-    /// The shell command that delivers the message; nil when it is refused
-    /// or the identifier is not one. The sender and the text travel as base64
-    /// of UTF-8, so the shell reads no character of theirs.
-    public static func command(sender typed: String, text: String, identifier: String) -> String? {
-        guard refusal(sender: typed, text: text) == nil, let sender = sender(typed), isIdentifier(identifier) else { return nil }
-        let argument = [Data(sender.utf8).base64EncodedString(), Data(text.utf8).base64EncodedString(), identifier]
-            .joined(separator: ".")
-        return "content call --uri content://\(authority) --method deliver --arg '\(argument)'"
+    // MARK: The request
+
+    /// The version of the payload (the service's `Message` and `Answer`). The
+    /// frame around it has a version of its own (`GuestSmsChannel`).
+    public static let payloadVersion = 2
+
+    /// Whether a request is the first the host makes for its identifier or a
+    /// later one. Only a first attempt can make the service hand the message
+    /// over; a retry only asks what became of the first.
+    public enum Attempt: String, Equatable, Sendable {
+        case first, retry
     }
 
-    /// The identifiers of drafts whose send was not confirmed. When the
-    /// person sends the same draft again the service may already have it, so
-    /// the send carries the identifier of the first one and the service
-    /// answers it without handing the message over twice. A send that was
-    /// confirmed, or could not have been taken, forgets its draft: the same
-    /// words sent again are a new message.
+    // MARK: The adapter
+
+    /// What a send came to, as the bar tells it: the request, the channel's
+    /// outcome and the service's answer decide it (`result(for:outcome:)`).
+    public enum Result: Equatable, Sendable {
+        /// This request handed the message to Android, in this many parts.
+        /// That is all the service reports: it does not wait for an
+        /// application to read it.
+        case sent(parts: Int)
+        /// An earlier request with this identifier handed it over once.
+        case deliveredEarlier(parts: Int)
+        /// This first attempt did not reach Android and none ever will: the
+        /// identifier is closed.
+        case certainlyNotSent
+        /// Nothing is known of this request, or of an earlier one: the
+        /// identifier is kept, and sending the draft again asks about it.
+        case notConfirmed
+        /// The service closed the identifier and cannot say whether its attempt
+        /// acted.
+        case uncertain
+
+        /// The identifier is settled for good once the result has been shown.
+        public var isFinal: Bool { self != .notConfirmed }
+    }
+
+    /// The service's answer to a request (`Answer.java`).
+    public enum Answer: Equatable, Sendable {
+        case handedOver(parts: Int)
+        case handedOverEarlier(parts: Int)
+        case notHandedOver(NotHandedOverReason)
+        case uncertain(UncertainReason)
+        case unsettled
+        /// The service speaks another payload version and did nothing.
+        case refusedVersion
+    }
+
+    public enum NotHandedOverReason: String, Equatable, Sendable {
+        case invalid, plan, store
+    }
+
+    public enum UncertainReason: String, Equatable, Sendable {
+        case interrupted, unknown, conflict
+    }
+
+    /// The answer in `bytes`, only when it is exactly one of the service's forms
+    /// for this identifier and nothing is left over; nil for anything else. The
+    /// version refusal is accepted in its form for every version number.
+    public static func answer(_ bytes: Data, identifier: String) -> Answer? {
+        guard !bytes.isEmpty, bytes.allSatisfy({ (0x21...0x7E).contains($0) }) else { return nil }
+        let text = String(decoding: bytes, as: UTF8.self)
+        let fields = text.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        func isVersion(_ field: String) -> Bool { field.wholeMatch(of: /0|[1-9][0-9]{0,8}/) != nil }
+        func parts(_ field: String) -> Int? {
+            guard field.wholeMatch(of: /[1-9]|1[01]/) != nil else { return nil }
+            return Int(field)
+        }
+        if fields.count == 2 {
+            return isVersion(fields[0]) && fields[1] == "refused-version" ? .refusedVersion : nil
+        }
+        guard fields.count == 4, fields[0] == String(payloadVersion), fields[2] == identifier else { return nil }
+        let detail = fields[3]
+        switch fields[1] {
+        case "handed-over": return parts(detail).map { .handedOver(parts: $0) }
+        case "handed-over-earlier": return parts(detail).map { .handedOverEarlier(parts: $0) }
+        case "not-handed-over": return NotHandedOverReason(rawValue: detail).map { .notHandedOver($0) }
+        case "uncertain": return UncertainReason(rawValue: detail).map { .uncertain($0) }
+        case "unsettled": return detail == "store" ? .unsettled : nil
+        default: return nil
+        }
+    }
+
+    /// What a send came to. `notSent`, `notTaken` and the refusals are
+    /// definitive only for a first attempt: on a retry they say nothing of the
+    /// first, so the identifier is kept and the next press asks again. An
+    /// answer that is malformed, another identifier's or not one the attempt
+    /// can get is not confirmed too.
+    public static func result(for request: GuestSmsRequest, outcome: GuestSmsChannel.Outcome) -> Result {
+        let first = request.attempt == .first
+        switch outcome {
+        case .notSent, .notTaken:
+            return first ? .certainlyNotSent : .notConfirmed
+        case .noAnswer:
+            return .notConfirmed
+        case .answered(let bytes):
+            guard let answer = answer(bytes, identifier: request.identifier) else { return .notConfirmed }
+            switch answer {
+            case .handedOver(let parts): return first ? .sent(parts: parts) : .notConfirmed
+            case .handedOverEarlier(let parts): return .deliveredEarlier(parts: parts)
+            case .notHandedOver: return first ? .certainlyNotSent : .notConfirmed
+            case .uncertain: return .uncertain
+            case .unsettled: return .notConfirmed
+            case .refusedVersion: return first ? .certainlyNotSent : .notConfirmed
+            }
+        }
+    }
+
+    // MARK: The identifiers
+
+    /// The drafts whose send has no final answer yet, with their identifiers.
+    /// A draft sent again after a send that was not confirmed keeps its
+    /// identifier and goes as a retry: the service answers it from its record
+    /// and never hands the message over twice. A final result keeps the
+    /// identifier until it has been shown (`presented`); then the same words
+    /// sent again are a new message. A new draft is refused while
+    /// `capacity` identifiers are unresolved, and none is dropped in silence.
     public struct Retries: Sendable {
-        /// The drafts kept; the oldest is forgotten first.
+        /// The most identifiers waiting for an answer.
         public static let capacity = 16
 
         private struct Draft: Hashable, Sendable {
@@ -187,8 +287,12 @@ public enum GuestSms {
             let text: [UInt8]
         }
 
-        private var unconfirmed: [Draft: String] = [:]
-        private var order: [Draft] = []
+        private struct Held: Sendable {
+            var identifier: String
+            var final: Bool
+        }
+
+        private var held: [Draft: Held] = [:]
         private let make: @Sendable () -> String
 
         public init(makeIdentifier: @escaping @Sendable () -> String = GuestSms.newIdentifier) {
@@ -199,60 +303,76 @@ public enum GuestSms {
             Draft(sender: Array((GuestSms.sender(sender) ?? sender).utf8), text: Array(text.utf8))
         }
 
-        /// The identifier to send this draft with now.
-        public func identifier(sender: String, text: String) -> String {
-            unconfirmed[Self.draft(sender, text)] ?? make()
+        /// The identifiers still unresolved: sent without a final answer.
+        public var unresolvedCount: Int { held.values.filter { !$0.final }.count }
+
+        /// There is no room for a draft the service has not been asked about.
+        public var isFull: Bool { unresolvedCount >= Self.capacity }
+
+        /// This draft has an identifier already.
+        public func holds(sender: String, text: String) -> Bool {
+            held[Self.draft(sender, text)] != nil
+        }
+
+        /// A new draft cannot be sent now: the identifiers are used up and
+        /// this one holds none.
+        public func refuses(sender: String, text: String) -> Bool {
+            isFull && !holds(sender: sender, text: text)
+        }
+
+        /// The identifier to send this draft with now, and the attempt: a
+        /// first attempt with an identifier made now, or a retry with the one
+        /// the draft holds. An identifier is never a first attempt twice.
+        public func next(sender: String, text: String) -> (identifier: String, attempt: Attempt) {
+            if let held = held[Self.draft(sender, text)] { return (held.identifier, .retry) }
+            return (make(), .first)
         }
 
         /// Records how the send with `identifier` ended.
-        public mutating func settle(sender: String, text: String, identifier: String, confirmed: Bool) {
-            let draft = Self.draft(sender, text)
-            order.removeAll { $0 == draft }
-            guard !confirmed else {
-                unconfirmed[draft] = nil
-                return
-            }
-            unconfirmed[draft] = identifier
-            order.append(draft)
-            while order.count > Self.capacity { unconfirmed[order.removeFirst()] = nil }
+        public mutating func settle(sender: String, text: String, identifier: String, result: Result) {
+            held[Self.draft(sender, text)] = Held(identifier: identifier, final: result.isFinal)
+        }
+
+        /// The final result of `identifier` has been shown: it is forgotten.
+        public mutating func presented(identifier: String) {
+            held = held.filter { !($0.value.final && $0.value.identifier == identifier) }
+        }
+
+        /// Forgets `identifier` whatever it came to, for a result the bar
+        /// closed on before it was shown.
+        public mutating func forget(identifier: String) {
+            held = held.filter { $0.value.identifier != identifier }
         }
     }
+}
 
-    public enum Outcome: Equatable, Sendable {
-        /// Android took the message, in this many parts. That is all the
-        /// service reports: it does not wait for an application to read it.
-        case handedToAndroid(parts: Int)
-        /// The system image has no SMS service.
-        case unsupported
-        /// Anything else: the message may or may not have reached Android.
-        case notConfirmed
+/// One message to the guest: the cleaned sender, the text, the identifier and
+/// the attempt, which are the service's request (`GuestSms.Attempt`).
+public struct GuestSmsRequest: Equatable, Sendable {
+    public let sender: String
+    public let text: String
+    public let identifier: String
+    public let attempt: GuestSms.Attempt
+
+    /// nil when the sender or text is refused or the identifier is not one.
+    public init?(sender typed: String, text: String, identifier: String, attempt: GuestSms.Attempt) {
+        guard GuestSms.refusal(sender: typed, text: text) == nil, let sender = GuestSms.sender(typed),
+              GuestSms.isIdentifier(identifier) else { return nil }
+        self.sender = sender
+        self.text = text
+        self.identifier = identifier
+        self.attempt = attempt
     }
 
-    /// What the command did. The service's answer is its result bundle on
-    /// stdout, alone, after a command that exited 0 and wrote nothing to
-    /// stderr, and its part count is one a text can take. `content` reports a
-    /// failure on stderr whatever its exit status, and a stream can end
-    /// part way, so anything short of that whole is not confirmed.
-    public static func outcome(_ result: ShellResult) -> Outcome {
-        let output = String(decoding: result.stdout, as: UTF8.self)
-        let errors = String(decoding: result.stderr, as: UTF8.self)
-        let silent = errors.allSatisfy(\.isWhitespace)
-        if silent, result.exitCode == 0, let parts = resultParts(output), (1...maximumParts).contains(parts) {
-            return .handedToAndroid(parts: parts)
-        }
-        if output.allSatisfy(\.isWhitespace), errors.contains("Could not find provider") || errors.contains("Unknown authority") {
-            return .unsupported
-        }
-        return .notConfirmed
-    }
-
-    /// The part count of stdout when stdout is exactly the result bundle
-    /// `content call` prints, and nil for any other text.
-    private static func resultParts(_ output: String) -> Int? {
-        var line = Substring(output)
-        // "\r\n" is one Character in Swift.
-        if let last = line.last, last == "\n" || last == "\r\n" { line = line.dropLast() }
-        guard let match = line.wholeMatch(of: /Result: Bundle\[\{parts=([0-9]+)\}\]/) else { return nil }
-        return Int(match.1)
+    /// `2.<attempt>.<identifier>.<sender64>.<text64>`: printable ASCII, the
+    /// sender and the text as base64 of UTF-8 so that no character of theirs
+    /// can break the form. Only the attempt differs between a first attempt
+    /// and its retry.
+    public var payload: Data {
+        let fields = [
+            String(GuestSms.payloadVersion), attempt.rawValue, identifier,
+            Data(sender.utf8).base64EncodedString(), Data(text.utf8).base64EncodedString(),
+        ]
+        return Data(fields.joined(separator: ".").utf8)
     }
 }

@@ -14,17 +14,29 @@ nonisolated struct VsockConnector: AdbConnector, GuestStreamOpener {
     /// itself when this one fails.
     static let networkAttemptTimeoutMilliseconds: UInt32 = 5000
 
+    /// The runtime's connect, which takes the port and the timeout in
+    /// milliseconds; a test names a recording one.
+    var connectVsock: @Sendable (UInt32, UInt32) -> Int32 = { port, timeout in
+        kernarium_runtime_loader_connect_vsock(port, timeout)
+    }
+
+    init() {}
+
+    init(connect: @escaping @Sendable (UInt32, UInt32) -> Int32) {
+        connectVsock = connect
+    }
+
     func connect() throws -> any AdbTransport {
-        DescriptorTransport(descriptor: try Self.open(timeout: Self.attemptTimeoutMilliseconds))
+        DescriptorTransport(descriptor: try open(timeout: Self.attemptTimeoutMilliseconds))
     }
 
     /// A stream for a computer on the network; the bridge owns it.
     func openStream() throws -> Int32 {
-        try Self.open(timeout: Self.networkAttemptTimeoutMilliseconds)
+        try open(timeout: Self.networkAttemptTimeoutMilliseconds)
     }
 
-    private static func open(timeout: UInt32) throws -> Int32 {
-        let result = kernarium_runtime_loader_connect_vsock(adbPort, timeout)
+    private func open(timeout: UInt32) throws -> Int32 {
+        let result = connectVsock(Self.adbPort, timeout)
         if result >= 0 { return result }
         switch -result {
         case ECONNREFUSED: throw AdbError.refused
@@ -281,13 +293,6 @@ nonisolated struct AdbGuestOperations: Sendable {
     func storageReady() async -> Bool? {
         guard let result = try? await shell(InternalStorage.command, limit: .seconds(15)) else { return nil }
         return InternalStorage.parse(result)
-    }
-
-    /// Delivers a text message as if from the network (`GuestSms`).
-    func sendSms(sender: String, text: String, identifier: String) async -> GuestSms.Outcome {
-        guard let command = GuestSms.command(sender: sender, text: text, identifier: identifier),
-              let result = try? await shell(command, limit: .seconds(30)) else { return .notConfirmed }
-        return GuestSms.outcome(result)
     }
 
     /// Runs a command in the guest's shell and returns what it printed.

@@ -53,11 +53,28 @@ nonisolated enum SmsMessages {
     /// Android took the message. That is all that is known of it, so that is
     /// all these words say.
     static var sentToAndroid: String { String(localized: "Sent to Android") }
-    /// What a send that was not confirmed says: the message may have arrived.
-    static var notConfirmedAdvice: String {
-        String(localized: "Android didn\u{2019}t confirm the message. Check whether it arrived before you send it again.")
+    /// An earlier send of this message was handed to Android, and this one asked about it.
+    static var deliveredEarlier: String { String(localized: "Android already had this message.") }
+    /// Nothing was handed to Android and nothing ever will be for this send.
+    static var notSent: String {
+        String(localized: "The message wasn\u{2019}t sent. Android didn\u{2019}t receive it.")
     }
-    static var unsupported: String { String(localized: "Android on this system image can\u{2019}t receive text messages.") }
+    /// Android did not confirm: sending the draft again asks, and cannot hand it over twice.
+    static var notConfirmed: String {
+        String(localized: "Android didn\u{2019}t confirm the message. Send it again to ask whether it arrived; it won\u{2019}t arrive twice.")
+    }
+    /// Android closed the message and cannot say whether it arrived.
+    static var uncertain: String {
+        String(localized: "Android can\u{2019}t tell whether the message arrived. Check before you send it again.")
+    }
+    /// A message sent in a session that ended before its result was shown.
+    static var cutOff: String {
+        String(localized: "A message sent earlier may or may not have reached Android. Check before you send it again.")
+    }
+    /// Sixteen sends wait for Android to confirm them, and a new one cannot be sent.
+    static var waiting: String {
+        String(localized: "Too many messages are waiting for Android to confirm them. Restart Android to send a new one.")
+    }
     static var notRunning: String { String(localized: "Android isn\u{2019}t running.") }
     static var paused: String { String(localized: "Android is paused for lack of space.") }
 

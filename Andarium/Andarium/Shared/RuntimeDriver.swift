@@ -203,10 +203,15 @@ protocol RuntimeDriver: AnyObject, OldAppsSource {
     /// Whether Android has mounted its internal storage (`InternalStorage`);
     /// nil when it cannot be read now. Android's boot ends before it does.
     func storageReady() async -> Bool?
-    /// Delivers a text message to the guest as if from the network
-    /// (`GuestSms`); the sender and text are ones `GuestSms` accepts, and the
-    /// identifier is the message's (`GuestSms.Retries`).
-    func sendSms(sender: String, text: String, identifier: String) async -> GuestSms.Outcome
+    /// Delivers a text message to the guest as if from the network, over the
+    /// service's own channel (`GuestSmsChannel`), and returns what is known of
+    /// the request. The request's identifier and attempt are the message's
+    /// (`GuestSms.Retries`); `GuestSms.result` says what the outcome means.
+    /// Cancelling the task ends the exchange at once.
+    func sendSms(_ request: GuestSmsRequest) async -> GuestSmsChannel.Outcome
+    /// What the bar owes the person about a message whose result was not yet
+    /// shown (`TextMessageNotice`), in this instance's directory.
+    var textMessageNotice: TextMessageNotice { get }
     /// Android's screen reader in the guest; nil when the guest did not
     /// answer (a read that fails is not a state).
     func readScreenReader() async -> ScreenReaderState?

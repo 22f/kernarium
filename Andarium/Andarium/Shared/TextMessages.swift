@@ -9,8 +9,8 @@ enum TextMessageAvailability: Equatable {
     /// No normal run: the virtual machine is off, starting, or in Recovery,
     /// which runs no adb.
     case notRunning
-    /// The virtual machine is paused for lack of space, and the adb channel
-    /// waits for it.
+    /// The virtual machine is paused for lack of space, and the guest
+    /// takes nothing until it resumes.
     case paused
 }
 
@@ -33,7 +33,8 @@ struct TextMessageStatus: Equatable {
 /// A text message for the virtual machine, being written in the bar over
 /// Android. It belongs to the run: `SessionState` makes one for each run, a
 /// send that is under way ends with it, and what a run's send came to is
-/// never shown in another.
+/// told once, in this run or by the notice (`TextMessageNotice`) at the next
+/// opening of the bar, and never twice.
 @Observable
 final class TextMessageState {
     /// How the last send ended.
@@ -42,10 +43,22 @@ final class TextMessageState {
         case sending
         /// Android took the message.
         case sent
-        /// Android did not confirm it: it may have arrived.
+        /// An earlier send of the message had been handed over.
+        case deliveredEarlier
+        /// This first attempt did not reach Android, and none ever will.
+        case certainlyNotSent
+        /// Android did not confirm it: sending the draft again asks.
         case notConfirmed
-        /// The system image has no service to take it.
-        case unsupported
+        /// Android closed the message and cannot say whether it arrived.
+        case uncertain
+        /// The bar opened over a session that ended before a send's result was shown.
+        case cutOff
+    }
+
+    /// A line nobody has been told yet: the result of a send that is final, or the cut-off line.
+    enum Awaiting: Equatable {
+        case result(String)
+        case cutOff
     }
 
     /// The bar is up over Android.
@@ -54,18 +67,25 @@ final class TextMessageState {
     private(set) var sender = GuestSms.defaultSender
     private(set) var text = ""
     var progress = Progress.idle
-    /// The identifiers of the drafts whose send was not confirmed.
+    /// The identifiers of the drafts whose send has no final result, and of the final results not yet shown.
     var retries = GuestSms.Retries()
     /// The sender and text of the last send, for the words about it to
     /// apply to that draft alone.
     private(set) var attempt: (sender: String, text: String)?
-    /// The system image has no service to take a message. The answer cannot
-    /// change within a run, so Send stays off for the rest of it and the reason
-    /// stays shown.
-    private(set) var unsupported = false
     /// The run is over: nothing of this is shown, and a late answer is lost.
     private(set) var ended = false
     @ObservationIgnored var sendTask: Task<Void, Never>?
+    /// The line that has not been presented yet. It counts as presented once it
+    /// was on screen in the open bar while the application was active and,
+    /// under VoiceOver, announced or focused (`AppModel.presentTextMessageLine`).
+    private(set) var awaiting: Awaiting?
+    /// VoiceOver announced the awaited line to its end, or its focus reached the line.
+    private(set) var announced = false
+    /// The bar opened with the cut-off line while VoiceOver ran: the keyboard's
+    /// focus move is skipped, so that it cannot cut the announcement short.
+    private(set) var skipsKeyboardFocus = false
+    /// Each request to give VoiceOver focus to the status line; the bar follows it.
+    private(set) var statusFocusRequests = 0
 
     /// What a field took that the model refused (a character typed while a
     /// message is being sent), until the next turn of the main loop. A field
@@ -106,35 +126,61 @@ final class TextMessageState {
     }
 
     /// Typing after a send began a new message: the words of the earlier
-    /// one are not about it.
+    /// one are not about it. A line nobody has been told yet stays.
     private func edited() {
-        if progress == .sent { progress = .idle }
+        guard awaiting == nil else { return }
+        switch progress {
+        case .sent, .deliveredEarlier, .cutOff: progress = .idle
+        default: break
+        }
     }
 
     /// Opens the bar with the sender the person last used, and nothing typed.
-    func open(sender: String) {
+    /// With `cutOff` it opens with the cut-off line, which is awaited until it
+    /// has been presented.
+    func open(sender: String, cutOff: Bool = false, voiceOver: Bool = false) {
         guard !ended else { return }
         if !isOpen {
             self.sender = sender
             text = ""
             progress = .idle
             attempt = nil
+            awaiting = nil
+            announced = false
+            skipsKeyboardFocus = false
+            if cutOff {
+                progress = .cutOff
+                awaiting = .cutOff
+                skipsKeyboardFocus = voiceOver
+            }
         }
         isOpen = true
     }
 
     /// Closes the bar and forgets the text. A send under way keeps it up.
-    func close() {
-        guard progress != .sending else { return }
+    /// Returns the identifier of a final result that was not shown, which the
+    /// notice keeps for the next opening.
+    @discardableResult
+    func close() -> String? {
+        guard progress != .sending else { return nil }
+        var unshown: String?
+        if case .result(let identifier)? = awaiting {
+            unshown = identifier
+            retries.forget(identifier: identifier)
+        }
+        // A cut-off line nobody was told stays in the notice, and shows at the next opening.
         isOpen = false
         text = ""
         progress = .idle
+        awaiting = nil
         attempt = nil
+        announced = false
+        return unshown
     }
 
     /// The run ended: the bar goes, a send under way is dropped, and the
-    /// identifiers of the run's unconfirmed drafts are forgotten with the
-    /// service's own memory of them.
+    /// identifiers of the run's drafts are forgotten with the service's own
+    /// memory of them; the notice keeps what the person is owed.
     func end() {
         ended = true
         sendTask?.cancel()
@@ -143,6 +189,8 @@ final class TextMessageState {
         text = ""
         progress = .idle
         attempt = nil
+        awaiting = nil
+        announced = false
         retries = GuestSms.Retries()
     }
 
@@ -150,35 +198,79 @@ final class TextMessageState {
     func begin() {
         attempt = (sender, text)
         progress = .sending
+        awaiting = nil
+        announced = false
     }
 
-    /// The send of `sender` and `sent` with `identifier` ended in `outcome`.
-    /// Returns what to say aloud, or nil when the run is over and nothing is
-    /// to be said.
-    func finish(outcome: GuestSms.Outcome, sender: String, text sent: String, identifier: String) -> String? {
+    /// The send of `request` ended in `result`. Returns what to say aloud, or
+    /// nil when the run is over and nothing is to be said.
+    func finish(result: GuestSms.Result, request: GuestSmsRequest) -> String? {
         guard !ended, progress == .sending else { return nil }
-        retries.settle(sender: sender, text: sent, identifier: identifier, confirmed: outcome != .notConfirmed)
-        switch outcome {
-        case .handedToAndroid:
+        retries.settle(sender: request.sender, text: request.text, identifier: request.identifier, result: result)
+        switch result {
+        case .sent:
             progress = .sent
             // Only the text that went: what was typed since stays.
-            if text == sent { text = "" }
-            return SmsMessages.sentToAndroid
-        case .unsupported:
-            unsupported = true
-            progress = .unsupported
-            return SmsMessages.unsupported
-        case .notConfirmed:
-            progress = .notConfirmed
-            // The short words are for the eye; what the person is to do is what is heard.
-            return SmsMessages.notConfirmedAdvice
+            if text == request.text { text = "" }
+        case .deliveredEarlier:
+            progress = .deliveredEarlier
+            if text == request.text { text = "" }
+        case .certainlyNotSent: progress = .certainlyNotSent
+        case .notConfirmed: progress = .notConfirmed
+        case .uncertain: progress = .uncertain
+        }
+        announced = false
+        awaiting = result.isFinal ? .result(request.identifier) : nil
+        return words
+    }
+
+    /// The words of the line the last send, or the opening, came to; nil when there is none.
+    var words: String? {
+        switch progress {
+        case .idle, .sending: nil
+        case .sent: SmsMessages.sentToAndroid
+        case .deliveredEarlier: SmsMessages.deliveredEarlier
+        case .certainlyNotSent: SmsMessages.notSent
+        case .notConfirmed: SmsMessages.notConfirmed
+        case .uncertain: SmsMessages.uncertain
+        case .cutOff: SmsMessages.cutOff
         }
     }
+
+    /// The awaited line has been shown (and, under VoiceOver, announced): it is
+    /// told, and the record of it can go. Returns what was awaited.
+    func presented() -> Awaiting? {
+        defer {
+            awaiting = nil
+            announced = false
+        }
+        guard let awaiting else { return nil }
+        if case .result(let identifier) = awaiting { retries.presented(identifier: identifier) }
+        return awaiting
+    }
+
+    /// VoiceOver finished announcing `words`, or did not: only the awaited line's own words count.
+    func announcementEnded(_ words: String, successfully: Bool) {
+        guard successfully, awaiting != nil, words == self.words else { return }
+        announced = true
+    }
+
+    /// VoiceOver focus reached the status line.
+    func statusLineFocused() {
+        if awaiting != nil { announced = true }
+    }
+
+    func requestStatusFocus() { statusFocusRequests += 1 }
 
     /// The text is the draft the last send was of.
     private var isAttemptedDraft: Bool {
         guard let attempt else { return false }
         return attempt.sender == sender && attempt.text == text
+    }
+
+    /// A new draft cannot be sent: sixteen sends wait for Android to confirm them.
+    var isWaiting: Bool {
+        !text.isEmpty && retries.refuses(sender: sender, text: text)
     }
 
     /// How many UTF-16 units the text may still have.
@@ -191,18 +283,39 @@ final class TextMessageState {
         case .paused: return TextMessageStatus(words: SmsMessages.paused, tone: .info)
         case .ready: break
         }
-        if unsupported { return TextMessageStatus(words: SmsMessages.unsupported, tone: .problem) }
         switch progress {
         case .sending:
             return nil
         case .sent where text.isEmpty:
             return TextMessageStatus(words: SmsMessages.sentToAndroid, tone: .good)
+        case .deliveredEarlier where text.isEmpty:
+            return TextMessageStatus(words: SmsMessages.deliveredEarlier, tone: .good)
+        case .certainlyNotSent where isAttemptedDraft:
+            return TextMessageStatus(words: SmsMessages.notSent, tone: .problem)
         case .notConfirmed where isAttemptedDraft:
-            return TextMessageStatus(words: SmsMessages.notConfirmedAdvice, tone: .problem)
+            return TextMessageStatus(words: SmsMessages.notConfirmed, tone: .problem)
+        case .uncertain where isAttemptedDraft:
+            return TextMessageStatus(words: SmsMessages.uncertain, tone: .problem)
+        case .cutOff where text.isEmpty:
+            return TextMessageStatus(words: SmsMessages.cutOff, tone: .problem)
         default:
             break
         }
-        return senderStatus ?? textStatus
+        return senderStatus ?? textProblem ?? waitingStatus ?? textStatus
+    }
+
+    /// Sixteen sends wait: this draft is not one of them, and waits for a restart.
+    private var waitingStatus: TextMessageStatus? {
+        isWaiting ? TextMessageStatus(words: SmsMessages.waiting, tone: .problem) : nil
+    }
+
+    /// What is wrong with the text itself: over the limit, or a character that cannot go.
+    private var textProblem: TextMessageStatus? {
+        if unitsLeft < 0 { return TextMessageStatus(words: SmsMessages.charactersOver(-unitsLeft), tone: .problem) }
+        if GuestSms.textRefusal(text) == .unsendableCharacter {
+            return TextMessageStatus(words: SmsMessages.unsendableCharacter, tone: .problem)
+        }
+        return nil
     }
 
     /// What is wrong with the sender. Nothing says it is missing until there
@@ -215,13 +328,8 @@ final class TextMessageState {
         }
     }
 
-    /// What is wrong with the text, and once it runs short how much room is
-    /// left.
+    /// Once the room runs short, how much is left.
     var textStatus: TextMessageStatus? {
-        if unitsLeft < 0 { return TextMessageStatus(words: SmsMessages.charactersOver(-unitsLeft), tone: .problem) }
-        if GuestSms.textRefusal(text) == .unsendableCharacter {
-            return TextMessageStatus(words: SmsMessages.unsendableCharacter, tone: .problem)
-        }
         if unitsLeft <= 100 && !text.isEmpty { return TextMessageStatus(words: SmsMessages.charactersLeft(unitsLeft), tone: .info) }
         return nil
     }
@@ -241,12 +349,18 @@ extension AppModel {
     }
 
     /// Send may be pressed: Android can take it, no send is under way, the
-    /// message passes the rules, and the guest's one adb channel is not
-    /// busy with a transfer.
+    /// message passes the rules, and sixteen sends do not already wait for
+    /// Android to confirm them.
     var canSendTextMessage: Bool {
         let state = session.textMessage
-        return textMessageAvailability == .ready && state.progress != .sending && !state.unsupported
-            && GuestSms.refusal(sender: state.sender, text: state.text) == nil && fileBrowser?.busy != true
+        return textMessageAvailability == .ready && state.progress != .sending
+            && GuestSms.refusal(sender: state.sender, text: state.text) == nil && !state.isWaiting
+    }
+
+    /// The notice of this instance: the driver's, or, with no guest, one that
+    /// lives in memory.
+    var textMessageNotice: TextMessageNotice {
+        driver?.textMessageNotice ?? previewTextMessageNotice
     }
 
     /// Settings' row: Settings closes, and the bar comes up over Android
@@ -261,43 +375,128 @@ extension AppModel {
         }
     }
 
+    /// Opens the bar. When a session ended before the result of a send was
+    /// shown, it opens with the cut-off line, and that line is presented
+    /// before Send takes a new draft.
     func openTextMessage() {
         guard offersTextMessage else { return }
+        let state = session.textMessage
+        let wasOpen = state.isOpen
         let remembered = smsSender.sender.flatMap { GuestSms.senderRefusal($0) == nil ? $0 : nil }
-        session.textMessage.open(sender: remembered ?? GuestSms.defaultSender)
+        let voiceOver = textMessageVoiceOver()
+        state.open(sender: remembered ?? GuestSms.defaultSender, cutOff: textMessageNotice.cutOffPending, voiceOver: voiceOver)
+        guard !wasOpen, state.awaiting == .cutOff else { return }
+        announceTextMessage(SmsMessages.cutOff)
+        if voiceOver { state.requestStatusFocus() }
+        presentTextMessageLine()
     }
 
     func closeTextMessage() {
-        session.textMessage.close()
+        let state = session.textMessage
+        if let unshown = state.close() { textMessageNotice.leaveForCutOff(unshown) }
+    }
+
+    /// The run ended or the guest restarts: what the session left becomes the
+    /// notice's cut-off line, and the session's text message state ends.
+    func endTextMessageSession() {
+        session.textMessage.end()
+        textMessageNotice.endSession()
     }
 
     func setTextMessageSender(_ typed: String) { session.textMessage.setSender(typed) }
     func setTextMessageText(_ typed: String) { session.textMessage.setText(typed) }
 
+    // MARK: What the person has been told
+
+    /// Says `words` and learns whether VoiceOver spoke them to the end.
+    private func announceTextMessage(_ words: String) {
+        let state = session.textMessage
+        textMessageAnnouncer(words) { [weak self, weak state] successful in
+            guard let self, let state, state === self.session.textMessage else { return }
+            state.announcementEnded(words, successfully: successful)
+            self.presentTextMessageLine()
+        }
+    }
+
+    /// The awaited line is told once it is on screen in the open bar while the
+    /// application is active and, with VoiceOver running, announced to its
+    /// end or focused. Then the identifier it was kept for is forgotten.
+    func presentTextMessageLine() {
+        let state = session.textMessage
+        guard state.awaiting != nil, state.isOpen, textMessageSceneActive else { return }
+        if textMessageVoiceOver(), !state.announced { return }
+        let notice = textMessageNotice
+        switch state.presented() {
+        case .result(let identifier)?: Task { await notice.resolve(identifier) }
+        case .cutOff?: Task { await notice.clearCutOff() }
+        case nil: break
+        }
+    }
+
+    /// The scene became active or inactive (the bar tells the model).
+    func textMessageSceneChanged(active: Bool) {
+        textMessageSceneActive = active
+        if active { presentTextMessageLine() }
+    }
+
+    /// VoiceOver focus reached the status line.
+    func textMessageLineFocused() {
+        session.textMessage.statusLineFocused()
+        presentTextMessageLine()
+    }
+
     /// Hands the typed message to Android. The send and its answer belong to
     /// the run: stopping the virtual machine ends it, and an answer that
-    /// comes after is dropped.
+    /// comes after is dropped. A first attempt is written to the notice
+    /// before anything is dispatched.
     func sendTextMessage() {
-        guard canSendTextMessage else { return }
+        guard textMessageAvailability == .ready else { return }
         let state = session.textMessage
+        guard state.progress != .sending else { return }
+        // A result nobody has been told yet is not superseded: this press sends
+        // nothing, says it again and takes VoiceOver to the line.
+        if state.awaiting != nil, let words = state.words {
+            state.requestStatusFocus()
+            announceTextMessage(words)
+            return
+        }
+        guard canSendTextMessage else { return }
         let sender = state.sender
         let text = state.text
-        smsSender.keep(GuestSms.sender(sender) ?? sender)
-        let identifier = state.retries.identifier(sender: sender, text: text)
+        let next = state.retries.next(sender: sender, text: text)
+        guard let request = GuestSmsRequest(sender: sender, text: text, identifier: next.identifier, attempt: next.attempt) else { return }
+        smsSender.keep(request.sender)
         state.begin()
+        let driver = driver
+        let notice = textMessageNotice
         state.sendTask = Task { @MainActor [weak self, weak state] in
-            let outcome: GuestSms.Outcome
-            if let driver = self?.driver {
-                outcome = await driver.sendSms(sender: sender, text: text, identifier: identifier)
+            guard !Task.isCancelled else { return }
+            if request.attempt == .first {
+                do {
+                    try await notice.add(request.identifier)
+                } catch {
+                    // Nothing was dispatched, and nothing will be: the message certainly did not go.
+                    self?.finishTextMessage(state, request: request, result: .certainlyNotSent)
+                    return
+                }
+                guard !Task.isCancelled else { return }
+            }
+            let outcome: GuestSmsChannel.Outcome
+            if let driver {
+                outcome = await driver.sendSms(request)
             } else {
                 // The preview has no guest: Android takes it after a moment.
                 try? await Task.sleep(for: .milliseconds(600))
-                outcome = .handedToAndroid(parts: 1)
+                outcome = .answered(Data("\(GuestSms.payloadVersion).handed-over.\(request.identifier).1".utf8))
             }
-            guard !Task.isCancelled, let state else { return }
-            if let words = state.finish(outcome: outcome, sender: sender, text: text, identifier: identifier) {
-                self?.textMessageAnnouncer(words)
-            }
+            guard !Task.isCancelled else { return }
+            self?.finishTextMessage(state, request: request, result: GuestSms.result(for: request, outcome: outcome))
         }
+    }
+
+    private func finishTextMessage(_ state: TextMessageState?, request: GuestSmsRequest, result: GuestSms.Result) {
+        guard let state, state === session.textMessage, let words = state.finish(result: result, request: request) else { return }
+        announceTextMessage(words)
+        presentTextMessageLine()
     }
 }

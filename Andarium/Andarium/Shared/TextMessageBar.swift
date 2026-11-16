@@ -8,6 +8,7 @@ import SwiftUI
 /// that waits for a code can be read while the code is typed.
 struct TextMessageBarOverlay: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
@@ -18,6 +19,8 @@ struct TextMessageBarOverlay: View {
             }
         }
         .animation(.snappy, value: model.session.textMessage.isOpen)
+        // A line counts as told only while the application is active.
+        .onChange(of: scenePhase, initial: true) { _, phase in model.textMessageSceneChanged(active: phase == .active) }
     }
 }
 
@@ -96,6 +99,7 @@ struct TextMessageBar: View {
     @Environment(AppModel.self) private var model
     @FocusState private var focus: TextMessageField?
     @AccessibilityFocusState private var titleFocused: Bool
+    @AccessibilityFocusState private var statusFocused: Bool
 
     var body: some View {
         let state = model.session.textMessage
@@ -104,6 +108,7 @@ struct TextMessageBar: View {
             TextMessageBarHeader(focus: $focus, titleFocused: $titleFocused)
             if let status = state.status(availability: model.textMessageAvailability) {
                 statusLine(status)
+                    .accessibilityFocused($statusFocused)
             }
             HStack(alignment: .bottom, spacing: 8) {
                 // The one-time code type lets iOS offer a code that has just
@@ -155,11 +160,29 @@ struct TextMessageBar: View {
         .onChange(of: sending) { was, now in
             if was && !now { focus = .text }
         }
+        // Android is paused for lack of space: the keyboard goes, so that the
+        // pause card does not cover the bar's title and Close.
+        .onChange(of: model.textMessageAvailability) { _, now in
+            if now == .paused { focus = nil }
+        }
+        // A request to take VoiceOver to the status line: a result that was not
+        // told yet, asked about again, or the cut-off line.
+        .onChange(of: state.statusFocusRequests) { statusFocused = true }
+        .onChange(of: statusFocused) { _, focused in
+            if focused { model.textMessageLineFocused() }
+        }
         .task {
-            // The message box takes the keys once the bar has come up.
             guard state.progress != .sending else { return }
             try? await Task.sleep(for: .milliseconds(300))
-            focus = .text
+            // The bar opened with the cut-off line while VoiceOver runs: it is
+            // read first, and the keyboard's focus move waits for the person.
+            if state.skipsKeyboardFocus {
+                statusFocused = true
+                return
+            }
+            // The message box takes the keys once the bar has come up, unless
+            // Android is paused and the pause card is over the bar.
+            if model.textMessageAvailability != .paused { focus = .text }
             // After the keyboard's focus, which VoiceOver would follow: it
             // starts on the title, then reads the line under it.
             try? await Task.sleep(for: .milliseconds(400))

@@ -11,11 +11,11 @@ extension AppModel {
         let state = session.textMessage
         state.open(sender: GuestSms.defaultSender)
         let code = "Your sign-in code is 482913."
-        func send(_ outcome: GuestSms.Outcome) {
+        func send(_ result: GuestSms.Result) {
             state.setText(code)
             state.begin()
-            let identifier = GuestSms.newIdentifier()
-            _ = state.finish(outcome: outcome, sender: state.sender, text: code, identifier: identifier)
+            let request = GuestSmsRequest(sender: state.sender, text: code, identifier: GuestSms.newIdentifier(), attempt: .first)!
+            _ = state.finish(result: result, request: request)
         }
         switch screen {
         case "sms-bar-typing":
@@ -31,11 +31,26 @@ extension AppModel {
                 state?.begin()
             }
         case "sms-bar-sent":
-            send(.handedToAndroid(parts: 1))
+            send(.sent(parts: 1))
+        case "sms-bar-delivered-earlier":
+            send(.deliveredEarlier(parts: 1))
+        case "sms-bar-not-sent":
+            send(.certainlyNotSent)
         case "sms-bar-not-confirmed":
             send(.notConfirmed)
-        case "sms-bar-unsupported":
-            send(.unsupported)
+        case "sms-bar-uncertain":
+            send(.uncertain)
+        case "sms-bar-cut-off":
+            // The bar opens over a session that ended before a send's result was shown.
+            state.close()
+            state.open(sender: GuestSms.defaultSender, cutOff: true)
+        case "sms-bar-waiting":
+            // Sixteen sends wait for Android to confirm them; a new draft is typed.
+            for number in 0..<GuestSms.Retries.capacity {
+                state.retries.settle(
+                    sender: GuestSms.defaultSender, text: "Held \(number)", identifier: GuestSms.newIdentifier(), result: .notConfirmed)
+            }
+            state.setText(code)
         case "sms-bar-bad-sender":
             state.setSender("Shop & Go")
             state.setText(code)

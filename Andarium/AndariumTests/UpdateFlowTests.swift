@@ -310,16 +310,20 @@ final class StubDriver: RuntimeDriver {
     /// What Android's storage reads as; a test sets it as a boot would.
     var storage: Bool? = true
     func storageReady() async -> Bool? { storage }
-    /// Each text message the model handed over, in order.
-    private(set) var smsSent: [(sender: String, text: String, identifier: String)] = []
-    /// How the stub answers a text message: a test sets it to hold the
-    /// answer back or to say it was not confirmed. Absent, Android took it.
-    var smsAnswer: (@MainActor (String, String, String) async -> GuestSms.Outcome)?
-    func sendSms(sender: String, text: String, identifier: String) async -> GuestSms.Outcome {
-        smsSent.append((sender, text, identifier))
-        if let smsAnswer { return await smsAnswer(sender, text, identifier) }
-        return .handedToAndroid(parts: 1)
+    /// Each text message request the model handed over, in order.
+    private(set) var smsSent: [GuestSmsRequest] = []
+    /// How the stub answers a text message: a test sets it to hold the answer
+    /// back or to say what the channel would. Absent, Android took it.
+    var smsAnswer: (@MainActor (GuestSmsRequest) async -> SmsReply)?
+    func sendSms(_ request: GuestSmsRequest) async -> GuestSmsChannel.Outcome {
+        smsSent.append(request)
+        if let smsAnswer { return await smsAnswer(request).outcome(for: request) }
+        return SmsReply.handedOver(1).outcome(for: request)
     }
+    /// The notice's files, which a test reads and fails, and the notice over them.
+    var noticeFiles = RecordingNoticeFiles()
+    lazy var textMessageNotice = TextMessageNotice(
+        directory: URL(fileURLWithPath: "/instance"), files: noticeFiles)
     func startAdbOverNetwork() throws {
         if let startError { throw startError }
         listening = true
@@ -562,5 +566,32 @@ struct UpdateFlowTests {
         model.start(.normal)
         #expect(model.phase == .failed)
         #expect(driver.begun.count == 1)
+    }
+}
+
+/// What the guest's service answers to a text message request, as a test says
+/// it: the channel's outcome for the request it was asked.
+enum SmsReply: Sendable {
+    case handedOver(Int), handedOverEarlier(Int)
+    case notHandedOver(String), uncertain(String), unsettled
+    case refusedVersion
+    case notSent, notTaken, noAnswer
+    /// Bytes as they come, whatever they are.
+    case bytes(String)
+
+    func outcome(for request: GuestSmsRequest) -> GuestSmsChannel.Outcome {
+        let id = request.identifier
+        switch self {
+        case .handedOver(let parts): return .answered(Data("2.handed-over.\(id).\(parts)".utf8))
+        case .handedOverEarlier(let parts): return .answered(Data("2.handed-over-earlier.\(id).\(parts)".utf8))
+        case .notHandedOver(let reason): return .answered(Data("2.not-handed-over.\(id).\(reason)".utf8))
+        case .uncertain(let reason): return .answered(Data("2.uncertain.\(id).\(reason)".utf8))
+        case .unsettled: return .answered(Data("2.unsettled.\(id).store".utf8))
+        case .refusedVersion: return .answered(Data("2.refused-version".utf8))
+        case .notSent: return .notSent
+        case .notTaken: return .notTaken
+        case .noAnswer: return .noAnswer
+        case .bytes(let text): return .answered(Data(text.utf8))
+        }
     }
 }

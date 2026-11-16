@@ -483,8 +483,19 @@ final class AppModel {
     /// The sender of the last text message, kept until the virtual machine
     /// is erased.
     @ObservationIgnored var smsSender = GuestSms.SenderMemory()
-    /// Says what a text message came to aloud, for VoiceOver; a test collects it.
-    @ObservationIgnored var textMessageAnnouncer: @MainActor (String) -> Void = { VoiceOver.announce($0) }
+    /// Says what a text message came to aloud, for VoiceOver, and tells whether
+    /// the announcement was spoken to its end; a test collects the words and
+    /// reports the end itself.
+    @ObservationIgnored var textMessageAnnouncer: @MainActor (String, @escaping @MainActor @Sendable (Bool) -> Void) -> Void = {
+        VoiceOver.announce($0, finished: $1)
+    }
+    /// VoiceOver runs. A line counts as told only when VoiceOver has said it.
+    @ObservationIgnored var textMessageVoiceOver: @MainActor () -> Bool = { UIAccessibility.isVoiceOverRunning }
+    /// The scene is active: a line counts as told only while it is (the bar reports it).
+    @ObservationIgnored var textMessageSceneActive = true
+    /// The notice of a model with no guest (the preview): it lives in memory.
+    @ObservationIgnored let previewTextMessageNotice = TextMessageNotice(
+        directory: URL(fileURLWithPath: "/"), files: MemoryNoticeFiles())
     /// Waits for Settings to go before the bar comes up over Android; a test
     /// paces it by hand.
     @ObservationIgnored var textMessageSleep: @MainActor (Duration) async -> Void = { duration in
@@ -904,6 +915,7 @@ final class AppModel {
         guard let driver, guest != nil else {
             lifecycle.erase()
             smsSender.forget()
+            textMessageNotice.reset()
             plan = .firstStart
             forgetSnapshots()
             return
@@ -918,6 +930,7 @@ final class AppModel {
             try await driver.erase(progress: progress)
             self.lifecycle.erase()
             self.smsSender.forget()
+            self.textMessageNotice.reset()
             self.forgetSnapshots()
             self.resizePreset = nil
             self.sheet = nil
@@ -1730,7 +1743,7 @@ final class AppModel {
         abandonOperation()
         fileBrowser?.reset()
         endAdbOverNetwork()
-        session.textMessage.end()
+        endTextMessageSession()
         spacePause = nil
         graphicsNotice = GraphicsNotice()
         graphicsReclaim.reset()
@@ -1773,7 +1786,7 @@ final class AppModel {
         abandonOperation()
         fileBrowser?.reset()
         endAdbOverNetwork()
-        session.textMessage.end()
+        endTextMessageSession()
         spacePause = nil
         graphicsNotice = GraphicsNotice()
         graphicsReclaim.reset()
