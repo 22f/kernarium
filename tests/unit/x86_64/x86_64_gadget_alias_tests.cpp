@@ -776,29 +776,50 @@ void test_cross_page_stores_leave_the_block()
 
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
+	/* A row's name as the first argument runs that row alone. */
+	const char *only = argc > 1 ? argv[1] : nullptr;
+	const auto selected = [&](const char *name) {
+		return only == nullptr || std::strcmp(only, name) == 0;
+	};
 	const auto start = FrameAccounting::diagnostics();
-	test_store();
-	std::puts("store ok");
-	test_running_block();
-	std::puts("running ok");
-	test_running_push();
-	std::puts("push ok");
-	test_flush_serial();
-	std::puts("serial ok");
-	test_links_follow_alias_stores();
-	std::puts("links ok");
-	test_a_removed_holder_is_registered_again_before_a_link_runs();
-	std::puts("removed ok");
-	test_registration_failure();
-	std::puts("transient ok");
-	test_helper_stores_leave_the_block();
-	std::puts("helper stores ok");
-	test_helper_stores_are_seen_by_the_next_instruction();
-	std::puts("helper store value ok");
-	test_cross_page_stores_leave_the_block();
-	std::puts("cross-page stores ok");
+	if (selected("store")) {
+		test_store();
+		std::puts("store ok");
+	}
+	if (selected("running")) {
+		test_running_block();
+		std::puts("running ok");
+	}
+	if (selected("push")) {
+		test_running_push();
+		std::puts("push ok");
+	}
+	if (selected("serial")) {
+		test_flush_serial();
+		std::puts("serial ok");
+	}
+	if (selected("links")) {
+		test_links_follow_alias_stores();
+		std::puts("links ok");
+	}
+	if (selected("removed")) {
+		test_a_removed_holder_is_registered_again_before_a_link_runs();
+		std::puts("removed ok");
+	}
+	if (selected("transient")) {
+		test_registration_failure();
+		std::puts("transient ok");
+	}
+	if (selected("helpers")) {
+		test_helper_stores_leave_the_block();
+		std::puts("helper stores ok");
+		test_helper_stores_are_seen_by_the_next_instruction();
+		std::puts("helper store value ok");
+		test_cross_page_stores_leave_the_block();
+		std::puts("cross-page stores ok");
+	}
 	const auto now = FrameAccounting::diagnostics();
 	require(now.holder_leaks == start.holder_leaks, "a holder leaked");
 	require(now.unquiesced_holder_removals == start.unquiesced_holder_removals);
