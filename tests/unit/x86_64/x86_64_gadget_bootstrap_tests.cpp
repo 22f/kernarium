@@ -3803,6 +3803,186 @@ void execute_addressing_shapes()
 		"the address-generation zero slot is not zero");
 }
 
+/* Four pages high enough that their page numbers have bits above the
+ * software TLB's index, which an index must leave out. The middle two are a
+ * pair that an index folding those bits in would put in one entry. */
+constexpr std::uint64_t tlb_test_base = std::uint64_t{0x1ffffffe} << 12U;
+
+/* Every gadget looks a page up where the miss handler fills it, so a block
+ * of accesses to one page asks the address space for that page once: baked
+ * and segment-override loads and stores, a vector move and an
+ * element-masked one, each of which indexes the table itself. */
+void each_translation_finds_the_entry_its_miss_filled()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t code = tlb_test_base;
+	const std::uint64_t source = tlb_test_base + 4096U;
+	const std::uint64_t destination = tlb_test_base + 3U * 4096U;
+	TestMemory memory{tlb_test_base};
+	memory.load(code, {
+		0x48, 0x8b, 0x03,                   // mov rax,[rbx]
+		0x48, 0x8b, 0x4b, 0x08,             // mov rcx,[rbx+8]
+		0x64, 0x48, 0x8b, 0x53, 0x10,       // mov rdx,fs:[rbx+16]
+		0x64, 0x48, 0x8b, 0x7b, 0x18,       // mov rdi,fs:[rbx+24]
+		0xf3, 0x0f, 0x6f, 0x43, 0x20,       // movdqu xmm0,[rbx+32]
+		0xc4, 0xe2, 0x71, 0x8c, 0x53, 0x30, // vpmaskmovd xmm2,xmm1,[rbx+48]
+		0xc4, 0xe2, 0x71, 0x8c, 0x5b, 0x40, // vpmaskmovd xmm3,xmm1,[rbx+64]
+		0x48, 0x89, 0x06,                   // mov [rsi],rax
+		0x48, 0x89, 0x4e, 0x08,             // mov [rsi+8],rcx
+		0x64, 0x48, 0x89, 0x56, 0x10,       // mov fs:[rsi+16],rdx
+		0x64, 0x48, 0x89, 0x7e, 0x18,       // mov fs:[rsi+24],rdi
+		0xf3, 0x0f, 0x7f, 0x46, 0x20,       // movdqu [rsi+32],xmm0
+		0xc4, 0xe2, 0x71, 0x8e, 0x56, 0x30, // vpmaskmovd [rsi+48],xmm1,xmm2
+		0xc4, 0xe2, 0x71, 0x8e, 0x5e, 0x40, // vpmaskmovd [rsi+64],xmm1,xmm3
+		0x0f, 0x05,                         // syscall
+	});
+	for (unsigned index = 0; index < 80U; ++index)
+		memory.load(source + index,
+			{static_cast<std::uint8_t>(index * 7U + 3U)});
+	const auto built = require_built(gadgets::build(memory, code),
+		"the one-page access sequence did not build");
+	gadgets::Executor executor;
+	executor.prepare(memory);
+	CpuState cpu{};
+	cpu.rip = code;
+	cpu.gpr(Register::rbx) = source;
+	cpu.gpr(Register::rsi) = destination;
+	std::fill(cpu.vectors[1].begin(), cpu.vectors[1].begin() + 16,
+		std::byte{0x80});
+	memory.reset_atomic_pointers();
+	const auto result = gadgets::execute(built.program, cpu, memory,
+		executor, 64);
+	require(result.event == uml::cpu::EngineEvent::system_call &&
+			result.retired_instructions == 15,
+		"the one-page access sequence did not reach SYSCALL");
+	bool copied = true;
+	for (unsigned index = 0; index < 80U; ++index)
+		copied = copied && memory.byte(destination + index) ==
+			memory.byte(source + index);
+	require(copied, "the one-page access sequence lost bytes");
+	require(memory.atomic_pointers() == 2,
+		"a gadget did not find the translation its page's miss filled");
+}
+
+/* An access is keyed by the page of its last byte and looked up at the
+ * entry of its first byte's, and an entry holds only its own page, so an
+ * access across a page edge matches nothing and its miss takes the
+ * crossing path. Entries for both pages that point somewhere else entirely
+ * are passed over, and the address space is never asked to map the range in
+ * one piece, which it need not be able to. An element-masked access selects
+ * only its element across the edge: the others are on one page, where those
+ * entries rightly answer. */
+void a_page_crossing_access_matches_no_translation()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t edge = tlb_test_base + 2U * 4096U;
+	struct Case final {
+		const char *name;
+		std::vector<std::uint8_t> code;
+		int offset;
+		unsigned size;
+		bool vector;
+		bool store;
+		bool add;
+		bool masked;
+	};
+	const Case cases[] = {
+		{"a baked load", {0x48, 0x8b, 0x43, 0xfc}, -4, 8, false, false,
+			false, false},
+		{"a segment-override load", {0x64, 0x48, 0x8b, 0x43, 0xfc}, -4, 8,
+			false, false, false, false},
+		{"a vector load", {0xf3, 0x0f, 0x6f, 0x43, 0xf8}, -8, 16, true,
+			false, false, false},
+		{"an element-masked load", {0xc4, 0xe2, 0x71, 0x8c, 0x43, 0xfa},
+			-6, 16, true, false, false, true},
+		{"a memory-destination add", {0x48, 0x01, 0x43, 0xfc}, -4, 8,
+			false, true, true, false},
+		{"a baked store", {0x48, 0x89, 0x43, 0xfc}, -4, 8, false, true,
+			false, false},
+		{"a segment-override store", {0x64, 0x48, 0x89, 0x43, 0xfc}, -4, 8,
+			false, true, false, false},
+		{"a vector store", {0xf3, 0x0f, 0x7f, 0x43, 0xf8}, -8, 16, true,
+			true, false, false},
+		{"an element-masked store", {0xc4, 0xe2, 0x71, 0x8e, 0x43, 0xfa},
+			-6, 16, true, true, false, true},
+	};
+	for (const auto &test : cases) {
+		const std::string what = std::string{test.name} + " across a page";
+		TestMemory memory{tlb_test_base};
+		auto code = test.code;
+		code.insert(code.end(), {0x0f, 0x05}); // syscall
+		memory.fill(tlb_test_base, std::as_bytes(std::span{code}));
+		const auto address = edge + static_cast<std::uint64_t>(
+			static_cast<std::int64_t>(test.offset));
+		for (unsigned index = 0; index < 16U; ++index)
+			memory.load(address + index,
+				{static_cast<std::uint8_t>(0x31U + index)});
+		const auto built = require_built(
+			gadgets::build(memory, tlb_test_base), what + " did not build");
+		gadgets::Executor executor;
+		executor.prepare(memory);
+		std::vector<std::byte> elsewhere(3U * 4096U, std::byte{0xee});
+		const auto delta = reinterpret_cast<std::uintptr_t>(
+			elsewhere.data()) - (edge - 4096U);
+		for (const auto page : {edge - 4096U, edge})
+			executor.tlb_entries()[native_tlb_index(page)] = {
+				.read_page = page,
+				.read_data_minus_address = delta,
+				.write_page = page,
+				.write_data_minus_address = delta,
+			};
+		CpuState cpu{};
+		cpu.rip = tlb_test_base;
+		cpu.gpr(Register::rbx) = edge;
+		constexpr std::uint64_t value = 0x1122334455667788ULL;
+		cpu.gpr(Register::rax) = value;
+		/* The mask selects dword 1, the one across the edge. */
+		const auto selected = [&test](unsigned index) {
+			return !test.masked || index / 4U == 1U;
+		};
+		for (unsigned index = 0; index < 16U; ++index) {
+			cpu.vectors[0][index] = static_cast<std::byte>(0xc0U + index);
+			cpu.vectors[1][index] = selected(index) ? std::byte{0x80} :
+				std::byte{};
+		}
+		const auto before = memory.qword(address);
+		memory.reset_atomic_pointers();
+		const auto result = gadgets::execute(built.program, cpu, memory,
+			executor, 4);
+		require(result.event == uml::cpu::EngineEvent::system_call &&
+				result.retired_instructions == 2,
+			what + " did not reach SYSCALL");
+		std::array<std::uint8_t, 16> expected{};
+		std::array<std::uint8_t, 16> actual{};
+		for (unsigned index = 0; index < test.size; ++index) {
+			if (test.store)
+				expected[index] = static_cast<std::uint8_t>(
+					selected(index) ? 0xc0U + index : 0x31U + index);
+			else if (selected(index))
+				expected[index] = static_cast<std::uint8_t>(0x31U + index);
+			actual[index] = test.store || !test.vector ?
+				memory.byte(address + index) :
+				static_cast<std::uint8_t>(cpu.vectors[0][index]);
+		}
+		if (test.store && !test.vector)
+			std::memcpy(expected.data(), &value, sizeof(value));
+		if (test.add) {
+			const auto sum = before + value;
+			std::memcpy(expected.data(), &sum, sizeof(sum));
+		}
+		if (!test.store && !test.vector)
+			std::memcpy(actual.data(), &cpu.gpr(Register::rax),
+				sizeof(value));
+		require(expected == actual,
+			what + " used another page's translation");
+		require(std::all_of(elsewhere.begin(), elsewhere.end(),
+				[](std::byte byte) { return byte == std::byte{0xee}; }),
+			what + " wrote through another page's translation");
+		require(memory.atomic_pointers() == 0,
+			what + " asked for one mapping of both pages");
+	}
+}
+
 /* PMOVMSKB collapses one sign bit per byte into a bit mask. The corpus carries
  * only one or two cases per width, which a lane-ordering mistake can survive,
  * so walk a single set bit through every position instead.
@@ -10988,6 +11168,8 @@ int main(int argc, char **argv)
 	lazy_shift_flags_match_the_definition();
 	execute_segment_memory();
 	execute_addressing_shapes();
+	each_translation_finds_the_entry_its_miss_filled();
+	a_page_crossing_access_matches_no_translation();
 	execute_byte_sign_masks();
 	execute_call_and_return();
 	decode_compat32_defaults();
