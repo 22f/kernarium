@@ -199,7 +199,7 @@ int range_count;
 // printed: a value that points into one is named by it, whatever address the
 // mapping has in this run. A mapping of a file by the file and the offset in
 // it, a named anonymous one by its name and the offset in the mapping, an
-// unnamed one by the offset in its page.
+// unnamed one by its size and protection and the offset in it.
 char maps_text[1 << 17];
 long maps_size;
 
@@ -259,6 +259,7 @@ bool print_mapped(const char *label, uint64_t value) {
         while (*at == ' ') {
             ++at;
         }
+        const char *protection = at;
         while (*at != ' ' && *at != 0) {  // permissions
             ++at;
         }
@@ -288,7 +289,10 @@ bool print_mapped(const char *label, uint64_t value) {
             continue;
         }
         if (name == end) {
-            dprintf(1, " %s=anon+%#llx", label, static_cast<unsigned long long>(value & 0xfff));
+            // An unnamed mapping: which one (its size and protection) and
+            // where in it, not where the run put it.
+            dprintf(1, " %s=anon[%#llx,%.3s]+%#llx", label, static_cast<unsigned long long>(high - low),
+                    protection, static_cast<unsigned long long>(value - low));
         } else if (*name == '/') {
             const char *base = name;
             for (const char *c = name; c < end; ++c) {

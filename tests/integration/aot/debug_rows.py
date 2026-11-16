@@ -14,7 +14,8 @@ The program runs with address-space randomization off (the guest kernel's
 layout), but the image's userspace still places libraries and stacks at
 random: a register value that points into a mapping is therefore named by it
 (the file and the offset in it, the mapping's name and the offset in it, or
-the offset in its page) before the runs are compared, and such a name that
+an unnamed mapping's size and protection and the offset in it) before the
+runs are compared, and such a name that
 differs between two runs of the engine alone fails the row instead of being
 masked. Only values that name nothing can be masked, and only a few.
 """
@@ -58,32 +59,34 @@ def split_blocks(text: str) -> list[str]:
 
 
 MAP_LINE = re.compile(
-    r"^[ \t]+([0-9a-f]{8})'?([0-9a-f]{8})-([0-9a-f]{8})'?([0-9a-f]{8}) \S+[ \t]+([0-9a-f]+)[ \t]+[0-9a-f]+"
+    r"^[ \t]+([0-9a-f]{8})'?([0-9a-f]{8})-([0-9a-f]{8})'?([0-9a-f]{8}) (\S+)[ \t]+([0-9a-f]+)[ \t]+[0-9a-f]+"
     r"(?:[ \t]+(\S.*?))?(?: \(BuildId: \w+\))?[ \t]*$", re.MULTILINE)
 
 
-def parse_maps(text: str) -> list[tuple[int, int, int, str]]:
-    """The tombstone's memory map: (low, high, file offset, name)."""
+def parse_maps(text: str) -> list[tuple[int, int, int, str, str]]:
+    """The tombstone's memory map: (low, high, file offset, name, protection)."""
     return [(int(m.group(1) + m.group(2), 16), int(m.group(3) + m.group(4), 16) + 1,
-             int(m.group(5), 16), m.group(6) or "") for m in MAP_LINE.finditer(text)]
+             int(m.group(6), 16), m.group(7) or "", m.group(5)) for m in MAP_LINE.finditer(text)]
 
 
-def name_value(value: int, maps: list[tuple[int, int, int, str]]) -> str | None:
+def name_value(value: int, maps: list[tuple[int, int, int, str, str]]) -> str | None:
     """Where a value points, if into a mapping, as the run does not choose it:
-    a file's name and the offset in the file, an anonymous mapping's name and
-    the offset in it, or the offset in the page of an unnamed one."""
-    for low, high, offset, name in maps:
+    a file's name and the offset in the file, a named anonymous mapping's name
+    and the offset in it, or an unnamed mapping's size and protection and the
+    offset in it. Where the mapping lies is the run's choice and is not part
+    of the name; which mapping it is, and where in it, are the guest's."""
+    for low, high, offset, name, protection in maps:
         if low <= value < high:
             if name.startswith("/"):
                 return f"@{name.rsplit('/', 1)[1]}+{offset + value - low:#x}"
             if name:
                 # A thread's stack is named by its thread id.
                 return f"@{re.sub(r':[0-9]+]$', ':*]', name)}+{value - low:#x}"
-            return f"@anon+{value & 0xfff:#x}"
+            return f"@anon[{high - low:#x},{protection}]+{value - low:#x}"
     return None
 
 
-def name_registers(line: str, maps: list[tuple[int, int, int, str]]) -> str:
+def name_registers(line: str, maps: list[tuple[int, int, int, str, str]]) -> str:
     def replace(found: re.Match) -> str:
         return name_value(int(found.group(0), 16), maps) or found.group(0)
     return re.sub(r"\b[0-9a-f]{16}\b", replace, line)

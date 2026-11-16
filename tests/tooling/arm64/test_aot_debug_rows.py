@@ -26,7 +26,8 @@ def quoted(address: int) -> str:
 
 def tombstone(address: int = 0x7ff1b1f19000, frame: str = "__memmove_aarch64_mops+16", x13: int = 1,
               pid: int = 2038, extra_threads: str = "", load: int = 0x7ff1ae500000,
-              pointer: int = 0x2854d, stack_name: str = "[anon:stack_and_tls:2040]") -> str:
+              pointer: int = 0x2854d, stack_name: str = "[anon:stack_and_tls:2040]",
+              unnamed: int = 0x1234, unnamed_size: int = 0x100000) -> str:
     """A tombstone of a crash in libc (loaded at `load`): x4 points `pointer`
     bytes into libc's file, x5 into its .bss, x6 into an unnamed mapping, and
     x7 into a thread stack."""
@@ -40,7 +41,7 @@ pid: {pid}, ppid: 2036, tid: {pid}, name: toybox  >>> /system/bin/toybox <<<
 uid: 2000
 signal 11 (SIGSEGV), code 2 (SEGV_ACCERR), fault addr {address:#018x} (read)
     x0  b4007ff19a825220  x1  {address:016x}  x2  0000000000000028  x3  b4007ff19a825238
-    x4  {load + pointer:016x}  x5  {load + 0xb0000 + 0x2070:016x}  x6  {load + 0x200000 + 0x1234:016x}  x7  {load + 0x300000 + 0xf8c00:016x}
+    x4  {load + pointer:016x}  x5  {load + 0xb0000 + 0x2070:016x}  x6  {load + 0x200000 + unnamed:016x}  x7  {load + 0x300000 + 0xf8c00:016x}
     x12 0000000000000001  x13 {x13:016x}  x14 0000000000000001  x15 0000000000001863
     lr  {load + 0x25d0:016x}  sp  00007ffff7299dd0  pc  {base:016x}  pst 0000000020000000
 
@@ -65,7 +66,7 @@ memory map (6 entries):
                                VmFlags: rd ex mr mw me
     {quoted(load + 0xb0000)}-{quoted(load + 0xb3000 - 1)} rw-         0      3000  [anon:.bss]
                                VmFlags: rd wr mr mw me ac
-    {quoted(load + 0x200000)}-{quoted(load + 0x300000 - 1)} rw-         0    100000
+    {quoted(load + 0x200000)}-{quoted(load + 0x200000 + unnamed_size - 1)} rw-         0    {unnamed_size:x}
                                VmFlags: rd wr mr mw me ac
     {quoted(load + 0x300000)}-{quoted(load + 0x400000 - 1)} rw-         0    100000  {stack_name}
                                VmFlags: rd wr mr mw me ac
@@ -171,6 +172,20 @@ done mode=sibling
 """
 
 
+class GuestProgramTest(unittest.TestCase):
+    """The program prints a register that points into a mapping the way the
+    tombstone's digest names it: the guest runs only in a guest, so the
+    naming is read from its source."""
+
+    SOURCE = (pathlib.Path(__file__).resolve().parents[2] / "integration" / "aot" / "aot_guest_debug.cpp")
+
+    def test_an_unnamed_mapping_keeps_its_size_protection_and_offset(self):
+        text = self.SOURCE.read_text()
+        self.assertIn("=anon[%#llx,%.3s]+%#llx", text)
+        self.assertNotIn("=anon+%#llx", text)
+        self.assertNotIn("value & 0xfff", text)
+
+
 class RecordTest(unittest.TestCase):
     def test_good_records(self):
         rows.verify_record("ptrace", PTRACE.splitlines())
@@ -218,7 +233,9 @@ class CompareTest(unittest.TestCase):
         text = "\n".join(rows.digest_tombstone(tombstone()))
         self.assertIn("@libc.so+0x2854d", text)
         self.assertIn("@[anon:.bss]+0x2070", text)
-        self.assertIn("@anon+0x234", text)
+        # An unnamed mapping is named by its size and protection, and the
+        # offset in the whole mapping is kept.
+        self.assertIn("@anon[0x100000,rw-]+0x1234", text)
         self.assertIn("@[anon:stack_and_tls:*]+0xf8c00", text)
         self.assertIn("pc  @libc.so+0x70d50", text)
 
@@ -237,6 +254,32 @@ class CompareTest(unittest.TestCase):
         with self.assertRaises(rows.DebugFailure) as caught:
             rows.compare("crash-memcpy", off, on)
         self.assertIn("with it", str(caught.exception))
+
+    def test_a_pointer_moved_inside_an_unnamed_mapping_fails(self):
+        off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n))
+               for n, load in enumerate((0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000))]
+        # The same page offset, a page further in: the old naming kept only
+        # the offset in the page and called these the same pointer.
+        for moved in (0x1234 + 0x1000, 0x1234 + 0x10000):
+            on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, unnamed=moved, pid=3000))
+            with self.assertRaises(rows.DebugFailure) as caught:
+                rows.compare("crash-memcpy", off, on)
+            self.assertIn("with it", str(caught.exception))
+            self.assertIn("x6", str(caught.exception))
+
+    def test_a_pointer_into_another_unnamed_mapping_fails(self):
+        off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n))
+               for n, load in enumerate((0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000))]
+        on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, unnamed_size=0x80000, pid=3000))
+        with self.assertRaises(rows.DebugFailure):
+            rows.compare("crash-memcpy", off, on)
+
+    def test_an_unnamed_mapping_at_another_address_is_the_same_pointer(self):
+        off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n))
+               for n, load in enumerate((0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000))]
+        on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000))
+        compared, _ = rows.compare("crash-memcpy", off, on)
+        self.assertGreater(compared, 10)
 
     def test_a_named_location_that_varies_in_the_engine_is_judged_by_the_engines_values(self):
         off = [rows.digest_tombstone(tombstone(pointer=pointer, pid=2038 + n))
