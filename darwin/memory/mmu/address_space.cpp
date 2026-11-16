@@ -145,6 +145,21 @@ struct PageMapping final {
 	return mapping.guest_code && (mapping.protection & PROT_EXEC) != 0;
 }
 
+/* The stamp of a record, as the bridge reports it. */
+[[nodiscard]] bool load_stamp(const void *handle,
+	darwin_uml_static_code_page_stamp &stamp) noexcept
+{
+	MappedBacking::RecordStamp record;
+	if (!MappedBacking::load_code_page_stamp(handle, record))
+		return false;
+	stamp.identity = record.identity;
+	stamp.version = record.version;
+	stamp.epoch = record.epoch;
+	stamp.flags = record.never_share ?
+		DARWIN_UML_STATIC_STAMP_NEVER_SHARE : 0;
+	return true;
+}
+
 /* Raised once for the process, before the first x86 translation exists. x86
  * code sees every store at once, the kernel's included, so a kernel write into
  * a guest-code page must publish a code change itself. arm64 and AArch32 code
@@ -1037,9 +1052,10 @@ public:
 			return DARWIN_UML_STATIC_PERMISSION;
 		auto *code_page = mapping->backing->code_page_handle(mapping->offset);
 		if (code_page == nullptr ||
-		    !MappedBacking::load_code_page_stamp(
-			    code_page, stamp->identity, stamp->version))
+		    !load_stamp(code_page, *stamp))
 			return DARWIN_UML_STATIC_HOST_ERROR;
+		if (mapping->immutable)
+			stamp->flags |= DARWIN_UML_STATIC_STAMP_IMMUTABLE;
 		*handle = code_page;
 		return DARWIN_UML_STATIC_TRANSLATED;
 	}
@@ -2370,8 +2386,7 @@ extern "C" int darwin_uml_static_vm_code_page_stamp(
 	if (stamp == nullptr)
 		return -1;
 	*stamp = {};
-	return uml::memory::MappedBacking::load_code_page_stamp(
-		handle, stamp->identity, stamp->version) ? 0 : -1;
+	return uml::memory::load_stamp(handle, *stamp) ? 0 : -1;
 }
 
 extern "C" void darwin_uml_static_vm_invalidate_code_page(void *handle)

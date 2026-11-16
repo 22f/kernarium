@@ -38,9 +38,27 @@ struct darwin_uml_static_sequences {
 	uint64_t execution_interrupt;
 };
 
+/* Flags of a code-page stamp. */
+enum {
+	/* The mapping the stamp was asked through carries the kernel's immutable
+	 * fact. Only darwin_uml_static_vm_code_page() knows it: a stamp read by
+	 * handle leaves it clear, because a handle names the physical page, not
+	 * one of its mappings. */
+	DARWIN_UML_STATIC_STAMP_IMMUTABLE = 1,
+	/* The page's record cannot count its executable mappings exactly any
+	 * more, so no verdict about its bytes may be kept. */
+	DARWIN_UML_STATIC_STAMP_NEVER_SHARE = 2,
+};
+
+/* What one physical page says about itself. `identity` is never reused.
+ * `version` moves at every publication and at every departure of a mapping.
+ * `epoch` moves at a publication and when the last executable mapping of the
+ * page departs, and nowhere else. */
 struct darwin_uml_static_code_page_stamp {
 	uint64_t identity;
 	uint64_t version;
+	uint64_t epoch;
+	uint64_t flags;
 };
 
 int darwin_uml_static_vm_map(void *address, int fd,

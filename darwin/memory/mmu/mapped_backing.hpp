@@ -46,10 +46,29 @@ public:
 	 * takes one.
 	 */
 	[[nodiscard]] void *code_page_handle(std::uint64_t offset) noexcept;
-	[[nodiscard]] static bool load_code_page_stamp(const void *handle,
-		std::uint64_t &identity, std::uint64_t &version) noexcept;
+
+	/* What a record says about its page, read field by field (the fields are
+	 * separate atomics, so a reader that needs them to agree reads twice).
+	 * `identity` is never reused. `version` moves at every publication and at
+	 * every departure of a mapping, which keeps its meaning for the engines
+	 * that retire translations by it. `epoch` moves at a publication and when
+	 * the last executable mapping of the page departs, and nowhere else; it
+	 * is what a verdict of the page's bytes is keyed by. `never_share` is
+	 * set for good once the record cannot count exactly, and forbids every
+	 * verdict. */
+	struct RecordStamp final {
+		std::uint64_t identity{};
+		std::uint64_t version{};
+		std::uint64_t epoch{};
+		bool never_share{};
+	};
+	[[nodiscard]] static bool load_code_page_stamp(
+		const void *handle, RecordStamp &stamp) noexcept;
+	/* A publication: the page's bytes were written through a path no
+	 * translated store saw. Moves the version and the epoch. */
 	static void invalidate_code_page(void *handle) noexcept;
-	/* Moves the stamp of the backing page at `offset` if a translator has
+	/* A departure: a mapping of the page at `offset` went away or lost
+	 * execute. Moves the version of the page's record if a translator has
 	 * ever asked for it. A page nothing stamped holds no translation whose
 	 * stamp could be stale, so it is not given a record here. */
 	void retire_code_page(std::uint64_t offset) noexcept;

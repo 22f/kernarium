@@ -592,6 +592,70 @@ void test_mappings_of_one_frame_that_disagree_share_its_record()
 	require(darwin_uml_static_vm_destroy(generation) == 0);
 }
 
+/* A page's stamp carries the fact of the mapping it was asked through, not
+ * of the frame. A stamp read by handle names the frame and so never carries
+ * the fact; the epoch moves at a publication and with it the version. */
+void test_a_stamp_carries_the_epoch_and_the_mapping_fact()
+{
+	constexpr unsigned long generation = 511;
+	constexpr unsigned long base = 0x1a0'0000;
+	ScratchBacking backing{backing_name, 4 * page};
+	map(generation, base, backing, 0, 1, rwx, 3);
+	map(generation, base + page, backing, 0, 1, rwx, 1);
+	map(generation, base + 2 * page, backing, page, 1, rx, 3);
+	require(darwin_uml_static_vm_activate(generation) == 0);
+
+	std::array<void *, 3> handles{};
+	std::array<darwin_uml_static_code_page_stamp, 3> stamps{};
+	for (std::size_t index = 0; index < handles.size(); ++index)
+		require(darwin_uml_static_vm_code_page(generation,
+			base + index * page, &handles[index], &stamps[index]) ==
+			DARWIN_UML_STATIC_TRANSLATED);
+	require((stamps[0].flags & DARWIN_UML_STATIC_STAMP_IMMUTABLE) != 0);
+	require((stamps[1].flags & DARWIN_UML_STATIC_STAMP_IMMUTABLE) == 0);
+	require((stamps[2].flags & DARWIN_UML_STATIC_STAMP_IMMUTABLE) != 0);
+	for (const auto &stamp : stamps)
+		require((stamp.flags & DARWIN_UML_STATIC_STAMP_NEVER_SHARE) == 0);
+	require(handles[0] == handles[1] && handles[0] != handles[2]);
+	require(stamps[0].epoch == stamps[1].epoch);
+
+	/* By handle: the frame's own fields, and not the mapping's fact. */
+	darwin_uml_static_code_page_stamp by_handle{};
+	require(darwin_uml_static_vm_code_page_stamp(handles[0], &by_handle) == 0);
+	require(by_handle.identity == stamps[0].identity &&
+		by_handle.version == stamps[0].version &&
+		by_handle.epoch == stamps[0].epoch && by_handle.flags == 0);
+
+	/* A publication through the handle moves the version and the epoch of
+	 * that frame only. */
+	darwin_uml_static_vm_invalidate_code_page(handles[0]);
+	require(darwin_uml_static_vm_code_page_stamp(handles[1], &by_handle) == 0);
+	require(by_handle.version == stamps[0].version + 1 &&
+		by_handle.epoch == stamps[0].epoch + 1);
+	require(darwin_uml_static_vm_code_page_stamp(handles[2], &by_handle) == 0);
+	require(by_handle.version == stamps[2].version &&
+		by_handle.epoch == stamps[2].epoch);
+
+	/* So does a copy into the page that publishes (a ptrace or
+	 * /proc/pid/mem store, here as the bridge spells it). */
+	const std::uint32_t word = 0xd503'201fU;
+	require(darwin_uml_static_vm_copy_from_buffer(base, &word, sizeof word) ==
+		0);
+	require(darwin_uml_static_vm_code_page_stamp(handles[0], &by_handle) == 0);
+	require(by_handle.version == stamps[0].version + 2 &&
+		by_handle.epoch == stamps[0].epoch + 2);
+
+	/* Flipping the fact on a mapping changes what a full query says. */
+	map(generation, base + page, backing, 0, 1, rwx, 3);
+	darwin_uml_static_code_page_stamp flipped{};
+	void *again = nullptr;
+	require(darwin_uml_static_vm_code_page(generation, base + page, &again,
+		&flipped) == DARWIN_UML_STATIC_TRANSLATED);
+	require(again == handles[0] &&
+		(flipped.flags & DARWIN_UML_STATIC_STAMP_IMMUTABLE) != 0);
+	require(darwin_uml_static_vm_destroy(generation) == 0);
+}
+
 /* A kernel write into a guest-code page, the bytes a 4 KiB uaccess copies
  * back from the kernel's alias, lands either way. It publishes no code change
  * until code whose fetch is coherent with every store (x86) is about to run:
@@ -671,6 +735,7 @@ int main()
 	test_a_published_page_moves_its_stamp();
 	test_the_immutable_fact_replaces_a_mapping_without_a_code_change();
 	test_mappings_of_one_frame_that_disagree_share_its_record();
+	test_a_stamp_carries_the_epoch_and_the_mapping_fact();
 	test_a_kernel_write_publishes_once_x86_code_may_run();
 	std::puts("Static MMU code change tests passed");
 	return 0;

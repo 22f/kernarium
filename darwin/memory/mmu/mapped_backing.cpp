@@ -20,6 +20,16 @@ namespace {
 constexpr std::uint64_t page_size = DARWIN_UML_GUEST_PAGE_SIZE;
 std::atomic_uint64_t next_code_page_identity{1};
 
+/* The `fresh` word of a record: bits 0-23 count the executable guest-code
+ * mappings that name the page, bits 24-62 are the epoch, and bit 63 says the
+ * record can no longer be trusted to share. The epoch is the high field, so
+ * one more step past its largest value carries into bit 63 and sets it:
+ * exhausting the epoch fails closed. */
+constexpr std::uint64_t fresh_epoch_step = std::uint64_t{1} << 24;
+constexpr std::uint64_t fresh_epoch_mask =
+	((std::uint64_t{1} << 39) - 1) << 24;
+constexpr std::uint64_t fresh_never_share = std::uint64_t{1} << 63;
+
 } // namespace
 
 struct MappedBacking::CodePage final {
@@ -31,6 +41,7 @@ struct MappedBacking::CodePage final {
 
 	const std::uint64_t identity;
 	std::atomic_uint64_t version{1};
+	std::atomic_uint64_t fresh{};
 };
 
 std::shared_ptr<MappedBacking> MappedBacking::create(
@@ -136,26 +147,36 @@ void *MappedBacking::install_code_page(std::uint64_t page) noexcept
 	}
 }
 
-bool MappedBacking::load_code_page_stamp(const void *handle,
-	std::uint64_t &identity, std::uint64_t &version) noexcept
+bool MappedBacking::load_code_page_stamp(
+	const void *handle, RecordStamp &stamp) noexcept
 {
 	const auto *page = static_cast<const CodePage *>(handle);
 	if (page == nullptr)
 		return false;
-	identity = page->identity;
-	version = page->version.load(std::memory_order_acquire);
+	stamp.identity = page->identity;
+	stamp.version = page->version.load(std::memory_order_acquire);
+	const auto fresh = page->fresh.load(std::memory_order_acquire);
+	stamp.epoch = (fresh & fresh_epoch_mask) >> 24;
+	stamp.never_share = (fresh & fresh_never_share) != 0;
 	return true;
 }
 
 void MappedBacking::invalidate_code_page(void *handle) noexcept
 {
 	auto *page = static_cast<CodePage *>(handle);
-	if (page != nullptr)
-		page->version.fetch_add(1, std::memory_order_release);
+	if (page == nullptr)
+		return;
+	page->version.fetch_add(1, std::memory_order_release);
+	/* A step past the largest epoch carries into the never-share bit. */
+	page->fresh.fetch_add(fresh_epoch_step, std::memory_order_release);
 }
 
 void MappedBacking::retire_code_page(std::uint64_t offset) noexcept
 {
+	const auto depart = [](CodePage *page) noexcept {
+		if (page != nullptr)
+			page->version.fetch_add(1, std::memory_order_release);
+	};
 	const auto page = offset / page_size;
 	if (code_index_ && page < code_index_pages_) {
 		/* Every record of an indexed page is in the index. */
@@ -163,7 +184,7 @@ void MappedBacking::retire_code_page(std::uint64_t offset) noexcept
 			std::memory_order_acquire);
 		if (leaf == nullptr)
 			return;
-		invalidate_code_page((*leaf)[page % code_index_leaf_pages].load(
+		depart((*leaf)[page % code_index_leaf_pages].load(
 			std::memory_order_acquire));
 		return;
 	}
@@ -171,7 +192,7 @@ void MappedBacking::retire_code_page(std::uint64_t offset) noexcept
 		const std::lock_guard lock{code_pages_mutex_};
 		const auto found = code_pages_.find(page);
 		if (found != code_pages_.end())
-			invalidate_code_page(found->second.get());
+			depart(found->second.get());
 	} catch (...) {
 	}
 }

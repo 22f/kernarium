@@ -18,12 +18,31 @@ struct MemoryFault final {
 	MemoryAccess access{MemoryAccess::read};
 };
 
+/* A stable name for the bytes of a code page: the same page at the same
+ * version. The translation caches rely on it, and it is part of the layout of
+ * what they keep, so it stays two words. */
 struct CodePageStamp final {
 	std::uint64_t identity{};
 	std::uint64_t version{};
 
 	friend bool operator==(const CodePageStamp &, const CodePageStamp &) =
 		default;
+};
+
+/* What a code page says about itself, for a consumer that keeps verdicts
+ * about the page's bytes across address spaces. `epoch` moves at a
+ * publication and when the last executable mapping of the page departs, and
+ * nowhere else. `shareable` is true when the mapping the stamp was taken
+ * through carries the kernel's immutable fact and the page's record counts its
+ * executable mappings exactly. A verdict is kept only for a shareable page,
+ * under (identity, epoch). */
+struct ExtendedCodePageStamp final {
+	CodePageStamp stamp{};
+	std::uint64_t epoch{};
+	bool shareable{};
+
+	friend bool operator==(const ExtendedCodePageStamp &,
+			       const ExtendedCodePageStamp &) = default;
 };
 
 class GuestAddressSpace {
@@ -67,6 +86,12 @@ public:
 	 */
 	[[nodiscard]] virtual bool code_page_stamp(
 		std::uint64_t, void *, CodePageStamp &) noexcept
+	{
+		return false;
+	}
+	/* The same page's stamp with its epoch and whether it may be shared. */
+	[[nodiscard]] virtual bool extended_code_page_stamp(
+		std::uint64_t, void *, ExtendedCodePageStamp &) noexcept
 	{
 		return false;
 	}
