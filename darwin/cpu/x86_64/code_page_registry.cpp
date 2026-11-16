@@ -301,27 +301,47 @@ CodePageRegistry::Settlement CodePageRegistry::wait_for_participants(
 		return result;
 	/* The deadline passed with a participant still inside the engine. Every
 	 * one not yet seen leaving is stuck; remember each, say so once, and let
-	 * the caller translate without caching. */
-	result.settled = false;
+	 * the caller translate without caching. Another waiter may have recorded
+	 * the same participant at the same epoch meanwhile, or the participant
+	 * may have left, so each is checked again under the exclusive lock. */
 	for (; next < waiting.size(); ++next) {
 		const auto &awaited = waiting[next];
-		if (!still_inside(awaited))
-			continue;
-		result.stuck.push_back({awaited.serial, awaited.epoch});
+		bool stuck = false;
+		bool recorded = false;
 		{
 			const std::lock_guard lock{participants_mutex_};
-			try {
-				expiries_.push_back({awaited.serial, awaited.epoch});
-			} catch (...) {
-				/* The next registration waits for it again. */
+			const auto member = std::find_if(participants_.begin(),
+				participants_.end(), [&](const Member &candidate) {
+					return candidate.participant == awaited.participant &&
+						candidate.serial == awaited.serial;
+				});
+			stuck = member != participants_.end() &&
+				member->participant->engine_epoch.load(
+					std::memory_order_acquire) == awaited.epoch;
+			if (stuck && std::none_of(expiries_.begin(), expiries_.end(),
+				    [&](const StuckMember &known) {
+					    return known.serial == awaited.serial &&
+						    known.epoch == awaited.epoch;
+				    })) {
+				try {
+					expiries_.push_back({awaited.serial, awaited.epoch});
+					recorded = true;
+				} catch (...) {
+					/* The next registration waits for it again. */
+				}
 			}
 		}
-		std::fprintf(stderr, "Darwin x86 code pages: a vCPU stayed inside "
-			"the engine for %lld ms (epoch %llu); code on pages it may "
-			"write is not cached until it leaves\n",
-			static_cast<long long>((policy_.slice * policy_.slices).count()),
-			static_cast<unsigned long long>(awaited.epoch));
+		if (!stuck)
+			continue;
+		result.stuck.push_back({awaited.serial, awaited.epoch});
+		if (recorded)
+			std::fprintf(stderr, "Darwin x86 code pages: a vCPU stayed inside "
+				"the engine for %lld ms (epoch %llu); code on pages it may "
+				"write is not cached until it leaves\n",
+				static_cast<long long>((policy_.slice * policy_.slices).count()),
+				static_cast<unsigned long long>(awaited.epoch));
 	}
+	result.settled = result.stuck.empty();
 	return result;
 }
 

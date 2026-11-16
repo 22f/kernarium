@@ -466,6 +466,35 @@ void test_a_stuck_participant_is_waited_out_once()
 	registry.leave(stuck);
 }
 
+/* Two registrations that wait out the same participant at once record it
+ * once. */
+void test_concurrent_waiters_record_a_stuck_participant_once()
+{
+	using namespace std::chrono_literals;
+	CodePageRegistry registry{{.slice = 20ms, .slices = 3}};
+	const NoLateLeave no_late_leave{registry};
+	CodePageRegistry::Participant stuck;
+	registry.join(stuck);
+	stuck.engine_epoch.store(1, std::memory_order_release);
+	std::atomic<unsigned> ready{0};
+	const auto wait = [&](std::uint64_t number) {
+		ready.fetch_add(1);
+		while (ready.load() != 2)
+			std::this_thread::yield();
+		const auto result = registry.add(page_at(number), nullptr);
+		require(!result.settled && result.stuck.size() == 1,
+			"a stuck participant did not leave the page unsettled");
+	};
+	std::thread first{wait, 40};
+	std::thread second{wait, 41};
+	first.join();
+	second.join();
+	require(registry.expiry_records() == 1,
+		"two waiters recorded one participant at one epoch twice");
+	stuck.engine_epoch.store(2, std::memory_order_release);
+	registry.leave(stuck);
+}
+
 /* A participant that leaves the registry takes its record with it. */
 void test_leave_drops_the_record_of_a_stuck_participant()
 {
@@ -543,6 +572,7 @@ int main()
 	test_waiter_ignores_a_new_participant_at_a_departed_address(true);
 	test_a_second_registration_waits_for_the_first();
 	test_a_stuck_participant_is_waited_out_once();
+	test_concurrent_waiters_record_a_stuck_participant_once();
 	test_leave_drops_the_record_of_a_stuck_participant();
 	return 0;
 }
