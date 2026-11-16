@@ -393,9 +393,10 @@ ends at a store-exclusive, a CLREX, an exception and a store to the reserved
 granule; a store of the guest's own to another granule leaves it standing, as on
 hardware (`arm64-exclusive-progress`, `arm64-exclusive-events`,
 `arm64-jit-exclusive_completion`, `arm64-jit-reservation_alias`,
-`guest-exclusive-progress-gadgets`/`-jit`). A fused AArch32 sequence still clears
-the monitor on its mismatch exit and continues at the branch target, which
-starves a loop whose mismatch path reaches a store-exclusive without a new load.
+`guest-exclusive-progress-gadgets`/`-jit`). A fused AArch32 sequence that leaves
+before its store, through a taken branch or a store-exclusive whose condition
+fails, still clears the monitor and continues, which starves a loop that reaches
+a store-exclusive from there without a new load.
 
 Both engines complete WFE and WFI at once and treat SEV and SEVL as no-ops, so
 no wait depends on an event. Completing WFI deliberately deviates from arm64
