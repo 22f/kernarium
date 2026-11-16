@@ -88,6 +88,7 @@ function(uml_add_macos_embedded_kernel_app
     endif()
 
     add_executable("${TARGET_NAME}"
+        background_edge_control.hpp
         launcher.hpp
         main.cpp
         "${MAIN_SOURCE}")

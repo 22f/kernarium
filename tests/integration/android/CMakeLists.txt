@@ -309,12 +309,16 @@ add_dependencies(integration-test-binaries uml_audio_hold)
 # mode records, and expects the recording to end by itself with the clip saved, the
 # application still in front and the camera to open again, and the video mode's
 # viewfinder with no recording to be live again after the return (the release
-# carries the last topics of route p0030). It boots Android with the macOS launcher, so it is
-# opt-in: name the release under test.
+# carries the last topics of route p0030). Its video-leave mode plays the application's
+# leaving the foreground through the launcher's test-only edge pipe while the video mode
+# records: the launcher ends the camera's running video, waits for the guest to stop its
+# video streams and then holds the guest's GPU requests for a few seconds, and the
+# recording must have ended before the hold landed. It boots Android with the macOS
+# launcher, so it is opt-in: name the release under test.
 set(UML_ANDROID_CAMERA_RELEASE "" CACHE PATH
     "Installed Android release directory that the android-camera tests boot")
 if(UML_ANDROID_CAMERA_RELEASE AND TARGET uml-darwin-android17)
-    foreach(mode live blocked restart video-lost)
+    foreach(mode live blocked restart video-lost video-leave)
         if(mode STREQUAL "live")
             set(camera_test_name android-camera)
         else()

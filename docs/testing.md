@@ -1218,6 +1218,21 @@ the camera service's log must hold no leaked stream, the line it prints at the
 close of a device whose requests the HAL ended without a request error. The
 release must carry the HAL topic that handles the host's end of a camera's
 video and the camera application topic that ends the recording.
+`android-camera-video-leave` (`--mode video-leave`) plays the application's
+leaving the foreground to the launcher through its edge pipe
+(`UML_BACKGROUND_EDGE_CONTROL`, test-only, read with the synthetic camera only)
+while the video mode records, `--leave-trials` times (ten by default), with the
+platform's notice first or twenty milliseconds after: the launcher ends the
+camera's running video, waits for the guest to stop its video streams (the same
+sequence as the applications', `holdAfterVideoEnds`) and holds the guest's GPU
+requests for three seconds through the launcher's own request gate. Every trial
+expects the guest to have stopped its streams within the bound, the HAL's report
+of the loss and the recorder's stop to come before the hold landed (the guest's
+clock set against the launcher's by the shortest of seven round trips), the loss
+to be the HAL's first failed buffer, the camera device not to have given up on the
+guest's reading of the interrupted record, and the clip's audio not to run on
+past its video by more than a second. The runner keeps the guest's log of each
+trial in `--output-dir`.
 `camera-background-video` (unit) is the ordering of the application's departure
 (video running: end, wait, hold; none: hold at once; a wait that runs out: hold
 and one log line; the wait inside the bound) with a fake camera device and a

@@ -326,7 +326,7 @@ DEFAULT_LAYOUTS = {
     "tablet": "bf-small-flash-manual",
     "laptop": "front",
 }
-MODES = ("live", "blocked", "none", "restart", "video-lost")
+MODES = ("live", "blocked", "none", "restart", "video-lost", "video-leave")
 # The video-lost mode: the synthetic camera reads its test-only control pipe, and the runner tells it that the application
 # left the foreground (the host ends the video of a camera that has a video stream open; docs/testing.md). The recording
 # ends by itself and the clip, with encoded video samples, is saved, the application stays the resumed activity, and the
@@ -338,6 +338,26 @@ MODES = ("live", "blocked", "none", "restart", "video-lost")
 # camera was away) and the frame rate of a recording, and its audio holds what its time stamps span and ends with its video.
 # None of it looks at the pictures: the recording does not go on over the camera's reopening is what the row shows.
 CONTROL_VARIABLE = "UML_SYNTHETIC_CAMERA_CONTROL"
+# The video-leave mode: the launcher plays the application's leaving the foreground to the guest through a second pipe
+# (EDGE_VARIABLE, darwin/app/macos/background_edge_control.hpp): the camera's running video ends, the launcher waits until
+# the guest has stopped its video streams, and then it holds the guest's GPU requests (the request gate the application
+# closes as it enters the background) for LEAVE_AWAY_SECONDS. A guest that had not acted on the lost video when the hold
+# landed stalls its camera pipeline until the requests are released: the recording stops only then, and its sound goes on
+# in silence for as long as the hold lasts. The row makes LEAVE_TRIALS recordings and leaves each, with the platform's
+# notice of the departure (`interrupt background`) first or LEAVE_NOTICE_GAPS later, and expects of every one: the launcher
+# waited for the streams and they were stopped, the camera HAL's report of the loss and the recorder's stop came before the
+# hold landed, the loss was the HAL's first failed buffer, and the clip's audio ends with its video.
+EDGE_VARIABLE = "UML_BACKGROUND_EDGE_CONTROL"
+LEAVE_TRIALS = 10
+LEAVE_AWAY_SECONDS = 3.0
+LEAVE_NOTICE_GAPS = (0.0, 0.02)
+LEAVE_AUDIO_TAIL_MAXIMUM_SECONDS = 1.0
+# How far the guest's clock, read against the host's, may be out at least (a busy host's round trips are longer: the
+# shortest of seven, halved, is what a trial allows when it is more).
+LEAVE_CLOCK_MARGIN_SECONDS = 0.15
+# The camera device's line when the guest did not read the interrupted record of a lost video within its bound.
+RECORD_BOUND_LINE = "the guest did not read the interrupted record of the lost video"
+LEAVE_EDGE_SECONDS = 20
 LOST_HOLD_SECONDS = 4
 LOST_MINIMUM_SECONDS = 2.0
 LOST_END_SECONDS = 2.0
@@ -434,13 +454,15 @@ class Plan:
     features: frozenset[str]
     media_variant: str
     switch_rounds: int = SWITCH_ROUNDS
+    leave_trials: int = LEAVE_TRIALS
 
     @property
     def still_maximum_pixels(self) -> int:
         return STILL_MAXIMUM_PIXELS[self.layout.tier or "small"]
 
 
-def make_plan(layout_name: str, profile: str, mode: str, switch_rounds: int = SWITCH_ROUNDS) -> Plan:
+def make_plan(layout_name: str, profile: str, mode: str, switch_rounds: int = SWITCH_ROUNDS,
+              leave_trials: int = LEAVE_TRIALS) -> Plan:
     """The expectations of one run; a layout that does not describe the profile's cameras is refused,
     because the features would then promise cameras the guest lacks."""
     layouts = camera_layouts.by_name()
@@ -452,17 +474,19 @@ def make_plan(layout_name: str, profile: str, mode: str, switch_rounds: int = SW
         raise ValueError(f"{mode!r} is not a mode")
     if switch_rounds < 1:
         raise ValueError("a run makes at least one photo to video switch")
+    if leave_trials < 1:
+        raise ValueError("a run makes at least one leaving the foreground")
     layout = layouts[layout_name]
     if mode == "none":
         if layout.cameras != "none":
             raise ValueError("the layout of a guest without a camera device is none")
-        return Plan(layout, profile, mode, (), frozenset(), layout.media_variant, switch_rounds)
+        return Plan(layout, profile, mode, (), frozenset(), layout.media_variant, switch_rounds, leave_trials)
     cameras, ids = PROFILE_CAMERAS[profile]
     if layout.cameras != cameras:
         raise ValueError(
             f"the {profile} profile presents {cameras} cameras and the layout {layout_name} describes "
             f"{layout.cameras}")
-    return Plan(layout, profile, mode, ids, frozenset(layout.features), layout.media_variant, switch_rounds)
+    return Plan(layout, profile, mode, ids, frozenset(layout.features), layout.media_variant, switch_rounds, leave_trials)
 
 
 # ---- Readers of what the guest prints. The tooling test feeds them text in the same layout.
@@ -1248,7 +1272,8 @@ class SessionCapture:
 class Guest:
     def __init__(self, adb: str, serial: str, process: subprocess.Popen, log: pathlib.Path,
                  private: pathlib.Path, hold_directory: pathlib.Path | None = None,
-                 control: pathlib.Path | None = None, hardware_input: bool = False) -> None:
+                 control: pathlib.Path | None = None, hardware_input: bool = False,
+                 edge: pathlib.Path | None = None) -> None:
         self.adb = adb
         self.serial = serial
         self.process = process
@@ -1258,12 +1283,16 @@ class Guest:
         self.hold_directory = hold_directory
         # The time (a time.monotonic() value) by which every command must have finished, while a step holds one (`bounded`).
         self.limit: float | None = None
-        # The synthetic camera's control pipe (the video-lost mode); None without one.
+        # The synthetic camera's control pipe (the video-lost and video-leave modes); None without one.
         self.control = control
+        # The launcher's pipe that plays the application's leaving the foreground to it (the video-leave mode).
+        self.edge = edge
         # Whether the launcher gave the guest the side keys (--hardware-input): the device that reports the lens cover.
         self.hardware_input = hardware_input
         # The continuous capture of the guest's main and events logs, once the runner has started it.
         self.capture: SessionCapture | None = None
+        # Where the runner keeps what a failed check is read from, when it was given a directory for it (--output-dir).
+        self.output_directory: pathlib.Path | None = None
 
     def camera_control(self, line: str) -> None:
         """Writes one line to the synthetic camera's control pipe: `interrupt background`, `interrupt`, `resume`."""
@@ -1272,6 +1301,19 @@ class Guest:
         wait_for("the synthetic camera's control pipe", COMMAND_SECONDS,
                  lambda: None if self.control.exists() else f"{self.control} does not exist", self)
         descriptor = os.open(self.control, os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            os.write(descriptor, f"{line}\n".encode())
+        finally:
+            os.close(descriptor)
+
+    def edge_control(self, line: str) -> None:
+        """Writes one line to the launcher's edge pipe: `leave` (the camera's video ends and the guest's GPU requests are
+        held, as the application's leaving the foreground does it) or `return` (the requests are released)."""
+        if self.edge is None:
+            raise Failure("no edge pipe: the run was not started in the video-leave mode")
+        wait_for("the launcher's edge pipe", COMMAND_SECONDS,
+                 lambda: None if self.edge.exists() else f"{self.edge} does not exist", self)
+        descriptor = os.open(self.edge, os.O_WRONLY | os.O_NONBLOCK)
         try:
             os.write(descriptor, f"{line}\n".encode())
         finally:
@@ -2514,6 +2556,217 @@ def guest_time(guest: Guest) -> float:
     return float(guest.shell("date +%s.%N").strip())
 
 
+# ---- The video-leave mode.
+
+# The launcher's own lines about the leaving (background_edge_control.hpp); the time is the host's clock, in seconds since the epoch.
+EDGE_LEFT = re.compile(r"edge control: (\d+\.\d+) the application leaves the foreground")
+EDGE_HELD = re.compile(r"edge control: (\d+\.\d+) GPU requests held \((-?\d+)\) after (\d+) ms: video streams (\d+), "
+                       r"stopped (yes|no), answered (yes|no)")
+# What the guest's log says of the loss, by tag and message: the camera HAL's report of it, an ordinary failed buffer (the
+# loss must come first), the recorder's stop, the video encoder's, and the clip's finalization.
+LEAVE_LOG_TAGS = ("V4l2FrameSource:W EmulatedSensorHost:W Camera3-Device:E CameraActivity:E CameraViewModel:D Recorder:D "
+                  "VideoEncoder:D AudioEncoder:D")
+LEAVE_EVENTS = (
+    ("hal_end", "V4l2FrameSource", "the host ended the camera"),
+    ("hal_frame_failed", "EmulatedSensorHost", "failed: none of its"),
+    ("rec_stopping", "Recorder", "RECORDING --> STOPPING"),
+    ("venc_stopped", "VideoEncoder", "STOPPING --> CONFIGURED"),
+    ("finalize", "Recorder", "VideoRecordEvent$Finalize"),
+)
+
+
+@dataclass
+class Edge:
+    """What the launcher said of one leaving: the host's time of the leaving and of the hold, how long the launcher waited
+    for the guest, the video streams it ended, whether the guest stopped them and whether the camera device answered."""
+    left: float
+    held: float
+    result: int
+    waited_ms: int
+    streams: int
+    stopped: bool
+    answered: bool
+
+
+def parse_edge(log: str, since: int = 0) -> Edge | None:
+    """The first leaving in the launcher's `log` after offset `since` whose hold has landed, or None."""
+    text = log[since:]
+    left = EDGE_LEFT.search(text)
+    if not left:
+        return None
+    held = EDGE_HELD.search(text, left.end())
+    if not held:
+        return None
+    return Edge(float(left[1]), float(held[1]), int(held[2]), int(held[3]), int(held[4]), held[5] == "yes", held[6] == "yes")
+
+
+def leave_events(log: str, since: float) -> dict[str, float]:
+    """The guest time of the first line of each LEAVE_EVENTS at or after `since`, from a `logcat -v epoch`."""
+    found: dict[str, float] = {}
+    for when, tag, message in parse_application_events(log, since):
+        for key, want_tag, want in LEAVE_EVENTS:
+            if key not in found and tag == want_tag and want in message:
+                found[key] = when
+    return found
+
+
+@dataclass
+class LeaveTrial:
+    number: int
+    notice_gap: float          # the platform's notice came this long after the leaving (0: first)
+    edge: Edge
+    lost_at: float             # the host's time of the first line written to a pipe
+    skew: float                # the guest's clock minus the host's
+    clock_error: float         # how far out that is at most
+    events: dict[str, float]   # the guest's time of each LEAVE_EVENTS
+    clip_seconds: float
+    video_end: float
+    audio_end: float
+    record_bound_hit: bool = False   # the launcher said that the guest did not read the interrupted record in time
+
+
+def leave_failures(trial: LeaveTrial) -> list[str]:
+    """Why a leaving does not pass, in words: empty for one that does."""
+    reasons = []
+    edge, events = trial.edge, trial.events
+    margin = max(LEAVE_CLOCK_MARGIN_SECONDS, trial.clock_error)
+    held = edge.held + trial.skew + margin
+    if not edge.answered:
+        reasons.append("the camera device did not answer the end of the video")
+    elif edge.streams < 1:
+        reasons.append("the launcher found no video stream to end although a recording ran")
+    elif not edge.stopped:
+        reasons.append(f"the guest did not stop its {edge.streams} video stream(s) before the hold ({edge.waited_ms} ms)")
+    for key, what in (("hal_end", "the camera HAL's report of the loss"), ("rec_stopping", "the recorder's stop")):
+        if key not in events:
+            reasons.append(f"{what} is not in the guest's log")
+        elif events[key] > held:
+            reasons.append(f"{what} came {events[key] - held + margin:.2f} s after the hold landed")
+    if "hal_end" in events and events.get("hal_frame_failed", events["hal_end"]) < events["hal_end"]:
+        reasons.append("the first failed buffer of the camera HAL was an ordinary failure, not the loss")
+    if trial.record_bound_hit:
+        reasons.append("the guest did not read the interrupted record of the lost video within the device's bound")
+    tail = trial.audio_end - trial.video_end
+    if tail > LEAVE_AUDIO_TAIL_MAXIMUM_SECONDS:
+        reasons.append(f"the clip's audio ends {tail:.2f} s after its video (above {LEAVE_AUDIO_TAIL_MAXIMUM_SECONDS:g} s): the "
+                       "recording went on in silence")
+    return reasons
+
+
+def clock_offset(guest: Guest) -> tuple[float, float]:
+    """The guest's clock minus the host's, from the one of seven `date` calls with the shortest round trip, and that
+    round trip (half of it is how far out the offset is at most)."""
+    best: tuple[float, float] | None = None
+    for _ in range(7):
+        before = time.time()
+        guest_now = guest_time(guest)
+        after = time.time()
+        if best is None or after - before < best[1]:
+            best = (guest_now - (before + after) / 2, after - before)
+    assert best is not None
+    return best
+
+
+def leave_trial(guest: Guest, plan: Plan, number: int, notice_gap: float) -> LeaveTrial:
+    """One recording that ends as the application leaves: the launcher ends its video and holds the guest's GPU requests
+    for LEAVE_AWAY_SECONDS, the person returns, and the clip is read."""
+    before, _ = guest.videos()
+    mark = len(guest.launcher_log())
+    since = guest_time(guest) - 1.0
+    start_recording(guest, plan, restart_application=True)
+    time.sleep(LOST_HOLD_SECONDS)
+    skew, round_trip = clock_offset(guest)
+    lost_at = time.time()
+    if notice_gap == 0.0:
+        guest.camera_control("interrupt background")
+        guest.edge_control("leave")
+    else:
+        guest.edge_control("leave")
+        time.sleep(notice_gap)
+        guest.camera_control("interrupt background")
+    found: list[Edge] = []
+
+    def held() -> str | None:
+        edge = parse_edge(guest.launcher_log(), mark)
+        if edge is None:
+            return "the launcher has not said that it held the GPU requests"
+        found.append(edge)
+        return None
+
+    wait_for("the hold of the guest's GPU requests", LEAVE_EDGE_SECONDS, held, guest)
+    edge = found[0]
+    # The person is away LEAVE_AWAY_SECONDS from the hold, then back: the requests are released and the camera is the guest's again.
+    time.sleep(max(0.0, edge.held + LEAVE_AWAY_SECONDS - time.time()))
+    guest.edge_control("return")
+    guest.camera_control("resume")
+    row = new_movie(guest, before, LOST_WAIT_SECONDS, settle=0)
+    movie = finished_movie(guest, row.get("_data", ""), LOST_WAIT_SECONDS)
+    time.sleep(2)
+    log = guest.shell(f"logcat -d -v epoch -b all {LEAVE_LOG_TAGS} '*:S' 2>&1 || true")
+    events = leave_events(log, since)
+    keep_leave_log(guest, number)
+    bound_hit = RECORD_BOUND_LINE in guest.launcher_log()[mark:]
+    time.sleep(3)
+    return LeaveTrial(number, notice_gap, edge, lost_at, skew, round_trip / 2, events, movie.seconds, movie.video_end,
+                      movie.audio_end, bound_hit)
+
+
+def keep_leave_log(guest: Guest, number: int) -> None:
+    """The guest's whole log up to now, in the run's output directory when it has one: what to read when a trial fails."""
+    directory = guest.output_directory
+    if directory is None:
+        return
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"leave-{number}.log").write_text(guest.shell("logcat -d -v epoch -b all 2>&1 || true"), errors="replace")
+
+
+def describe_leave(trial: LeaveTrial) -> str:
+    """One line for a trial: the times from the loss, in milliseconds, of what the guest and the launcher did."""
+    base = trial.lost_at + trial.skew
+
+    def rel(key: str) -> str:
+        return f"{(trial.events[key] - base) * 1000:+.0f}" if key in trial.events else "-"
+    edge = trial.edge
+    return (f"leave {trial.number} (notice {trial.notice_gap * 1000:+.0f} ms): the launcher waited {edge.waited_ms} ms for "
+            f"{edge.streams} stream(s) ({'stopped' if edge.stopped else 'NOT stopped'}); ms from the loss: HAL report "
+            f"{rel('hal_end')}, first ordinary failure {rel('hal_frame_failed')}, Recorder STOPPING {rel('rec_stopping')}, "
+            f"VideoEncoder stopped {rel('venc_stopped')}, Finalize {rel('finalize')}, GPU held "
+            f"{(edge.held + trial.skew - base) * 1000:+.0f}, released {(edge.held + trial.skew - base + LEAVE_AWAY_SECONDS) * 1000:+.0f}; "
+            f"clip {trial.clip_seconds:.2f} s, video ends {trial.video_end:.2f} s, audio ends {trial.audio_end:.2f} s "
+            f"({trial.audio_end - trial.video_end:+.2f} s)")
+
+
+def check_video_leave(guest: Guest, plan: Plan) -> None:
+    """The application leaves the foreground while the guest records, and the guest's GPU requests are held, `leave_trials`
+    times: in every one the recording ends when the application leaves (the camera HAL reports the loss and the recorder
+    stops before the hold lands, which the launcher waited for) and no sound goes on in silence behind a stalled picture."""
+    time.sleep(1)
+    failed = []
+    for number in range(1, plan.leave_trials + 1):
+        try:
+            trial = leave_trial(guest, plan, number, LEAVE_NOTICE_GAPS[(number - 1) % len(LEAVE_NOTICE_GAPS)])
+        except Failure as problem:
+            # A leaving that left the guest with no clip (the recording went on stalled) fails its own trial, not the ones after
+            # it: the guest is given its GPU requests and its camera back, and the next trial starts the application again.
+            print(f"  leave {number}: the trial itself failed: {str(problem)[:300]} -- FAILS", flush=True)
+            failed.append((number, [f"the trial itself failed: {str(problem)[:200]}"]))
+            for give_back in (lambda: guest.edge_control("return"), lambda: guest.camera_control("resume")):
+                try:
+                    give_back()
+                except Failure:
+                    pass
+            time.sleep(10)
+            continue
+        reasons = leave_failures(trial)
+        print(f"  {describe_leave(trial)}{'' if not reasons else ' -- FAILS: ' + '; '.join(reasons)}", flush=True)
+        if reasons:
+            failed.append((number, reasons))
+    if failed:
+        raise Failure(f"{len(failed)} of {plan.leave_trials} leavings did not end the recording at the leave: "
+                      + " | ".join(f"leave {number}: {'; '.join(reasons)}" for number, reasons in failed))
+    print(f"  all {plan.leave_trials} leavings ended the recording before the GPU was held")
+
+
 APP_LOG_LINE = re.compile(r"^\s*(\d+\.\d+)\s+\d+\s+\d+\s+[VDIWEF]\s+(\S+?)\s*:\s(.*)$")
 
 
@@ -2961,6 +3214,9 @@ def run_checks(guest: Guest, plan: Plan) -> None:
     if plan.mode == "video-lost":
         check_video_lost(guest, plan)
         return
+    if plan.mode == "video-leave":
+        check_video_leave(guest, plan)
+        return
     if plan.mode == "none":
         if guest.provider_pids():
             raise Failure(f"a layout without cameras runs the camera provider: {guest.provider_pids()}")
@@ -3023,7 +3279,8 @@ def check_cameraserver_restart(guest: Guest, plan: Plan) -> None:
 
 # ---- Starting and stopping the guest.
 
-CAMERA_SOURCES = {"live": "synthetic", "video-lost": "synthetic", "blocked": "blocked", "none": "none"}
+CAMERA_SOURCES = {"live": "synthetic", "video-lost": "synthetic", "video-leave": "synthetic", "blocked": "blocked",
+                  "none": "none"}
 
 
 AUTO_LAYOUT = "auto"
@@ -3115,16 +3372,20 @@ def start_guest(options: argparse.Namespace, plan: Plan, adb: str, private: path
         hold_directory.mkdir()
         environment["DYLD_INSERT_LIBRARIES"] = str(options.audio_hold_library.resolve())
         environment["UML_AUDIO_HOLD_DIRECTORY"] = str(hold_directory)
-    control = None
-    if plan.mode == "video-lost":
+    control = edge = None
+    if plan.mode in ("video-lost", "video-leave"):
         # The pipe is made by the camera device of the launcher, under this name.
         control = private / "camera-control"
         environment[CONTROL_VARIABLE] = str(control)
+    if plan.mode == "video-leave":
+        # The launcher makes this one too, and plays the application's leaving the foreground through it.
+        edge = private / "edge-control"
+        environment[EDGE_VARIABLE] = str(edge)
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
                                start_new_session=True, env=environment)
     stream.close()
     serial = f"127.0.0.1:{options.adb_port}"
-    guest = Guest(adb, serial, process, log, private, hold_directory, control, hardware_input=hardware_input)
+    guest = Guest(adb, serial, process, log, private, hold_directory, control, hardware_input=hardware_input, edge=edge)
     boot_android.wait_for_adb(adb, serial, process, options.boot_timeout)
     if not boot_android.wait_for_boot_completed(adb, serial, process, options.boot_timeout):
         raise Failure("Android did not reach sys.boot_completed")
@@ -3202,6 +3463,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--audio-hold-library", type=pathlib.Path,
                         help="the test library (uml_audio_hold) that holds the thread of the Virtio sound device; "
                         "without it the audio stall step does not run")
+    parser.add_argument("--leave-trials", type=positive_integer, default=LEAVE_TRIALS,
+                        help=f"how many recordings the video-leave mode leaves (default {LEAVE_TRIALS})")
     parser.add_argument("--cpus", type=int, default=4)
     parser.add_argument("--memory", default="4G")
     parser.add_argument("--boot-timeout", type=int, default=900,
@@ -3298,7 +3561,7 @@ def main() -> int:
             return 2
     try:
         plan = make_plan(layout, options.camera_profile, "live" if options.mode == "restart" else options.mode,
-                         options.switch_rounds)
+                         options.switch_rounds, options.leave_trials)
     except ValueError as problem:
         print(f"{problem}", file=sys.stderr)
         return 2
@@ -3311,6 +3574,7 @@ def main() -> int:
             options.calibration_dir = private / "calibration"
             options.calibration_dir.mkdir()
         guest = start_guest(options, plan, adb, private)
+        guest.output_directory = options.output_dir
         if guest.hardware_input:
             # The sensor privacy checks judge the whole session: capture its logs from before the camera opens.
             output = options.output_dir or private

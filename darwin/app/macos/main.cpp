@@ -2,6 +2,7 @@
 #include "audio/in_process_service.hpp"
 #include "audio/microphone_switch.hpp"
 #include "audio/protocol.hpp"
+#include "background_edge_control.hpp"
 #include "battery/in_process_service.hpp"
 #include "battery/protocol.hpp"
 #include "camera/camera_diagnostics.hpp"
@@ -1902,6 +1903,16 @@ private:
 		options.onRotateAndCrop = uml::camera::printRotateAndCrop;
 		options.onFlash = uml::camera::printFlash;
 		options.onCheckpoint = uml::camera::printCheckpoint;
+		/* A test that plays the application's leaving the foreground to the
+		 * synthetic camera's run (BackgroundEdgeControl). */
+		const char *const edge_pipe =
+			prepared_.camera == CameraSource::synthetic && gpu_service_ ?
+				std::getenv(uml::app::BackgroundEdgeControl::variable) :
+				nullptr;
+		if (edge_pipe != nullptr && *edge_pipe != '\0')
+			options.background =
+				std::make_shared<uml::camera::BackgroundVideo>();
+		const auto background = options.background;
 		uml::camera::CameraSourceHandle source;
 		if (!make_camera_source(source))
 			return false;
@@ -1933,14 +1944,19 @@ private:
 				{uml::input::virtio::protocol::switchCameraLensCover,
 				 uml::camera::lensCoverAdvertised(options.mode, layout)});
 		}
-		return start_virtio_device(
-			kernel, services_.camera, uml::camera::cameraDeviceId,
-			[&] {
-				return uml::camera::makeInProcessCameraService(
-					std::move(source), std::move(options),
-					gpu_service_ ? shared_memory_regions_ : nullptr);
-			},
-			"--camera", "Virtio camera");
+		if (!start_virtio_device(
+			    kernel, services_.camera, uml::camera::cameraDeviceId,
+			    [&] {
+				    return uml::camera::makeInProcessCameraService(
+					    std::move(source), std::move(options),
+					    gpu_service_ ? shared_memory_regions_ : nullptr);
+			    },
+			    "--camera", "Virtio camera"))
+			return false;
+		if (background)
+			edge_control_ = std::make_unique<uml::app::BackgroundEdgeControl>(
+				edge_pipe, background, *gpu_service_);
+		return true;
 	}
 
 	static const char *camera_state_name(
@@ -2017,6 +2033,9 @@ private:
 	 * ends between them. */
 	std::unique_ptr<GuestWaker> waker_;
 	BootServices services_;
+	/* After the camera and the GPU service it works on, so it ends before
+	 * them. */
+	std::unique_ptr<uml::app::BackgroundEdgeControl> edge_control_;
 	/* What the camera has learned about the host's lenses; it outlives the
 	 * boots, so a restarted guest keeps it. */
 	std::shared_ptr<uml::camera::CalibrationStore> camera_calibration_;
