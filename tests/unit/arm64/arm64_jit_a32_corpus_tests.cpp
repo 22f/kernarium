@@ -21,7 +21,11 @@
  * had committed a fault (kFaultPlans), and checks that a plain loss is retried
  * and that a loss with another register or TPIDRURO wrong, a store that
  * reports success and did not write, and a store the pack has fail with
- * another register wrong each fail on that attempt.
+ * another register wrong each fail on that attempt. A recognized retry loop
+ * (retry_loop_length) that retires whole passes more than the pack is retried
+ * the same way; one instruction, a pass of another loop's length, an excess in
+ * a case that is no retry loop each fail on that attempt, and a whole pass on
+ * every attempt fails when the attempts are used up.
  *
  * The corpus also holds every lowered form out of the slow helper from a
  * clean state: each event-free case runs twice (the first run warms the
@@ -255,9 +259,9 @@ struct Attempt final {
                                 machine.read_data());
 }
 
-/* Runs one attempt at a case. `fault`, for --inject, makes it end as if the
- * JIT had committed it. */
-Attempt check(Machine &machine, const Case &test,
+/* Runs one attempt at a case of `record`. `fault`, for --inject, makes it end
+ * as if the JIT had committed it. */
+Attempt check(Machine &machine, std::string_view record, const Case &test,
               const FaultPlan *fault = nullptr) {
   const bool thumb = test.flags & kFlagThumb;
   const bool padded = machine.load(test);
@@ -287,6 +291,8 @@ Attempt check(Machine &machine, const Case &test,
   const bool at_thumb = key::key_is_thumb(cpu.pc);
   unsigned event = 0;
   std::size_t retired = result.retired_instructions;
+  if (fault != nullptr)
+    retired += fault->excess;
   switch (result.reason) {
   case ExitReason::system_call: {
     // pc is past the svc: a stub's svc is a finished program.
@@ -354,10 +360,11 @@ Attempt check(Machine &machine, const Case &test,
   if (retired != test.retired) {
     std::snprintf(text, sizeof text, "retired %zu (engine %zu), expected %u", retired,
                   result.retired_instructions, test.retired);
-    /* A loop that retries its store-exclusive absorbs a lost reservation: the
-     * registers and data end as the pack has them, after more instructions. */
-    if (!is_store_exclusive(test) || (test.flags & kFlagStraight) != 0 ||
-        retired < test.retired)
+    /* A recognized retry loop absorbs a lost reservation by going round again:
+     * its excess is whole passes, and the registers and data end as the pack
+     * has them. */
+    if (retired < test.retired ||
+        !retry_excess_accepted(record, test, retired - test.retired))
       return text;
     retired_excess = text;
   }
@@ -389,7 +396,9 @@ Attempt check(Machine &machine, const Case &test,
                   static_cast<unsigned long long>(cpu.registers[first_register]),
                   test.final.r[first_register]);
     Attempt attempt{text};
-    attempt.reservation_lost = lost_reservation(machine, test, cpu);
+    /* A register that differs beside a loop's excess is no lost reservation. */
+    attempt.reservation_lost =
+        retired_excess.empty() && lost_reservation(machine, test, cpu);
     return attempt;
   }
   if (const auto difference =
@@ -653,28 +662,34 @@ int main(int argc, char **argv) {
      * attempt, unretried. */
     bool good = true;
     for (const auto &plan : kFaultPlans) {
-      std::size_t run = 0, failed = 0, retried = 0, lost = 0;
+      std::size_t run = 0, failed = 0, retried = 0, lost = 0, taken = 0;
       for (const auto &record : pack.records)
         for (const auto &test : record.cases) {
           if ((record.profiles & kProfileBit) == 0 ||
               !plan_selects(plan, record, test) || !jit_accepts(test, profile))
             continue;
           ++run;
-          auto attempt = check(machine, test, &plan);
+          auto attempt = check(machine, record.name, test, &plan);
           unsigned attempts = 1;
           lost += attempt.reservation_lost ? 1 : 0;
           while (attempt.reservation_lost && attempts < attempts_limit) {
-            attempt = check(machine, test);
+            attempt = check(machine, record.name, test,
+                            plan.persistent ? &plan : nullptr);
             ++attempts;
           }
+          taken += attempts;
           if (!attempt.problem.empty())
             ++failed;
           else if (attempts > 1)
             ++retried;
         }
+      /* A fault made on every attempt is retried to the bound, then fails. */
       const bool as_planned =
-          run != 0 && (plan.retried ? failed == 0 && retried == run && lost == run
-                                    : failed == run && retried == 0 && lost == 0);
+          run != 0 &&
+          (plan.persistent ? failed == run && retried == 0 &&
+                                 taken == run * attempts_limit
+           : plan.retried  ? failed == 0 && retried == run && lost == run
+                           : failed == run && retried == 0 && lost == 0);
       std::printf("  inject %-20s %-22s run %3zu  failed %3zu  retried %3zu  %s\n",
                   plan.name, plan.record, run, failed, retried,
                   as_planned ? "as planned" : "NOT AS PLANNED");
@@ -707,10 +722,10 @@ int main(int argc, char **argv) {
             std::fprintf(stderr, " %04x", half);
           std::fprintf(stderr, "\n");
         }
-        auto attempt = check(machine, test);
+        auto attempt = check(machine, record.name, test);
         unsigned attempts = 1;
         while (attempt.reservation_lost && attempts < attempts_limit) {
-          attempt = check(machine, test);
+          attempt = check(machine, record.name, test);
           ++attempts;
         }
         if (attempt.problem.empty()) {

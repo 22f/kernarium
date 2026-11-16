@@ -35,7 +35,12 @@
  * engine had committed a fault (corpus::kFaultPlans), and checks that a plain
  * loss is retried and that a loss with another register or TPIDRURO wrong, a
  * store that reports success and did not write, and a store the pack has fail
- * with another register wrong each fail on that attempt.
+ * with another register wrong each fail on that attempt. A recognized retry
+ * loop (corpus::retry_loop_length) that retires whole passes more than the
+ * pack is retried the same way; one instruction, a pass of another loop's
+ * length, an excess in a case that is no retry loop each fail on that
+ * attempt, and a whole pass on every attempt fails when the attempts are used
+ * up.
  *
  *   uml_arm64_gadget_a32_corpus_tests PACK [--record NAME[,NAME...]]
  *       [--case TEXT] [--limit N] [--forms FILE] [--passes N] [--interrupt]
@@ -489,7 +494,8 @@ struct Attempt final {
 
 /* One run of a case. `fault`, for --inject, makes this run end as if the
  * engine had committed it. */
-[[nodiscard]] Attempt run_case(Machine &machine, const corpus::Case &test,
+[[nodiscard]] Attempt run_case(Machine &machine, std::string_view record,
+			       const corpus::Case &test,
 			       const std::vector<std::uint8_t> &initial_data,
 			       const std::vector<std::uint8_t> &expected_data,
 			       const corpus::FaultPlan *fault = nullptr)
@@ -574,9 +580,11 @@ struct Attempt final {
 			   result.reason == ExitReason::breakpoint) {
 			expected += 1;
 		}
-		if (outcome.retired != expected && !(padded && outcome.retired == expected + 1)) {
-			note("retired %zu vs %zu", test.retired, outcome.retired);
-			retired_excess = outcome.retired > expected;
+		const std::size_t retired = outcome.retired + (fault != nullptr ? fault->excess : 0);
+		if (retired != expected && !(padded && retired == expected + 1)) {
+			note("retired %zu vs %zu", test.retired, retired);
+			retired_excess = retired > expected &&
+				corpus::retry_excess_accepted(record, test, retired - expected);
 		}
 		for (unsigned index = 0; index < corpus::kRegisters; ++index) {
 			const auto value = static_cast<std::uint32_t>(cpu.registers[index]);
@@ -634,10 +642,10 @@ struct Attempt final {
 		notes == value_notes + data_notes && !actual.empty() &&
 		corpus::lost_exclusive_attempt(test, cpu.registers.data(),
 					       initial_data, expected_data, actual);
-	/* A loop that retries its store-exclusive absorbs a loss: the registers
-	 * and data end as the pack has them, after more instructions. */
-	if (is_store_exclusive(test) && (test.flags & corpus::kFlagStraight) == 0 &&
-	    retired_excess && notes == 1 && !actual.empty())
+	/* A recognized retry loop absorbs a loss by going round again: the
+	 * registers and data end as the pack has them, after whole passes more
+	 * instructions. */
+	if (retired_excess && notes == 1 && !actual.empty())
 		attempt.reservation_lost = true;
 	return attempt;
 }
@@ -655,11 +663,12 @@ void check_case(Machine &machine, const corpus::Record &record,
 	++totals.run;
 	totals.forms.insert(test.form);
 
-	auto attempt = run_case(machine, test, initial_data, expected_data, fault);
+	auto attempt = run_case(machine, record.name, test, initial_data, expected_data, fault);
 	unsigned attempts = 1;
 	totals.lost += attempt.reservation_lost ? 1 : 0;
 	while (attempt.reservation_lost && attempts < kExclusiveAttempts) {
-		attempt = run_case(machine, test, initial_data, expected_data);
+		attempt = run_case(machine, record.name, test, initial_data, expected_data,
+				   fault != nullptr && fault->persistent ? fault : nullptr);
 		totals.lost += attempt.reservation_lost ? 1 : 0;
 		++attempts;
 	}
@@ -697,11 +706,15 @@ void check_case(Machine &machine, const corpus::Record &record,
 				    corpus::plan_selects(plan, record, test))
 					check_case(machine, record, test, quiet, totals, &plan);
 		const bool as_planned = totals.run != 0 && totals.skipped == 0 &&
-			/* The attempt after the injected loss may itself be a real one. */
-			(plan.retried ? totals.failed == 0 && totals.retried == totals.run &&
-						totals.lost >= totals.run
-				      : totals.failed == totals.run && totals.retried == 0 &&
-						totals.lost == 0);
+			/* A fault made on every attempt is retried to the bound, then
+			 * fails. The attempt after an injected loss may itself be a
+			 * real one. */
+			(plan.persistent ? totals.failed == totals.run && totals.retried == 0 &&
+						   totals.lost == totals.run * kExclusiveAttempts
+			 : plan.retried ? totals.failed == 0 && totals.retried == totals.run &&
+						  totals.lost >= totals.run
+					: totals.failed == totals.run && totals.retried == 0 &&
+						  totals.lost == 0);
 		std::printf("  inject %-20s %-22s run %3zu  failed %3zu  retried %3zu  %s\n",
 			    plan.name, plan.record, totals.run, totals.failed, totals.retried,
 			    as_planned ? "as planned" : "NOT AS PLANNED");
