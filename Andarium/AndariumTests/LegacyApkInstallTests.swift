@@ -738,6 +738,45 @@ struct LegacyApkInstallAlertTests {
         #expect(driver.installAttempts == [false])
     }
 
+    /// The model can answer for the person: the overlay's Cancel serves while the alert is not up,
+    /// and the guest ending takes the question away. The alert goes with the question, whatever it
+    /// is doing at that moment, after it was offered again behind another alert too
+    /// (`presentUntilShown`). A negative delay answers as the other alert goes.
+    @Test(arguments: [-1, 0, 150, 600])
+    func theQuestionGoesWithTheModelsAnswerWhateverTheAlertIsDoing(afterMilliseconds: Int) async throws {
+        let (model, driver) = running()
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = AndariumHostingController(
+            rootView: RootView(entry: AppEntry(overrides: LaunchOverrides())).environment(model), model: model)
+        lease.window.rootViewController = controller
+        let target = LegacyTarget(appLevel: 7, requiredLevel: 24)
+        driver.installAttempt = { bypass, _ in
+            if !bypass {
+                try await Task.sleep(for: .milliseconds(600))
+                throw LegacyApkRefused(target: target)
+            }
+        }
+        let url = try patternedApk(bytes: 3 << 20)
+        defer { try? FileManager.default.removeItem(at: url) }
+        model.installPicked(url)
+        model.alert = AppAlert(title: "Display rotation unavailable", message: "Rotate the device.")
+        try #require(await eventually { alert(over: controller)?.title == "Display rotation unavailable" })
+        try #require(await eventually { model.legacyInstallQuestion != nil })
+        try await Task.sleep(for: .milliseconds(500))
+        model.alert = nil
+        if afterMilliseconds >= 0 {
+            try #require(await eventually { alert(over: controller)?.title == LegacyInstallWords.title }, "the question never presented")
+            try await Task.sleep(for: .milliseconds(afterMilliseconds))
+        }
+        model.answerLegacyInstall(installAnyway: false)
+        // Whatever the alert had reached, it goes, and stays gone while the loop that offered it ends.
+        try #require(await eventually { alert(over: controller) == nil && model.busy == nil }, "the alert stays up after the answer")
+        try await Task.sleep(for: .seconds(2))
+        #expect(alert(over: controller) == nil, "the alert came back after the answer")
+        #expect(driver.installAttempts == [false])
+    }
+
     @Test func theNumbersAreLeftOutWhenTheAnswerNamesNone() {
         let plain = LegacyInstallWords.message(for: LegacyTarget())
         #expect(!plain.contains("API level"))
