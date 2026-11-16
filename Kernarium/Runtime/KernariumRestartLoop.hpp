@@ -315,6 +315,16 @@ private:
             return 0;
         if (!machine.startBoot(restarts))
             return -UML_EMULATOR_RUNTIME_ERROR;
+        /* The application may have asked for the hold while the boot was
+         * built, after the look above: a restarted guest is not run behind a
+         * hold either. A stop ends this wait as it ends a stop right after
+         * startBoot: the loop returns, and the machine drops the boot it
+         * built. The first boot is run as asked: a hold that comes while it is
+         * built is applied to the GPU it has (the runtime's registration).
+         * What remains is a hold that lands as or after the guest runs, which
+         * is the ordinary held state of a running guest. */
+        if (restarts != 0 && !detail::waitForRelease(machine, timing))
+            return 0;
         guard.boot_started(machine.now());
         /* A stop that came between two boots was dropped by the handle: the
          * library does not inherit a request made while idle. */

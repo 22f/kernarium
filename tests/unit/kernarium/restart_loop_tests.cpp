@@ -433,6 +433,60 @@ void theFirstBootIsNeverHeld()
             "the first boot waited for a hold");
 }
 
+/* A hold that arrives while the next boot is built: the loop's guard found none before it, and the guest must not be run
+ * behind the hold either. What remains by design is the hold that lands after the guest runs. */
+void aHoldThatArrivesWhileTheNextBootIsBuiltKeepsTheGuestFromRunningUntilItEnds()
+{
+    FakeMachine machine;
+    machine.script = {restarts(), powersOff()};
+    machine.onCall = [](FakeMachine& self, const std::string& call) {
+        if (call == "start 1")
+            self.held.store(true);
+        if (self.count("wait-held") == 3U)
+            self.held.store(false);
+    };
+    require(kernarium::restart::run(machine, quickly) == 0,
+            "a released hold did not let the guest run");
+    require((machine.calls() == Calls {"start 0", "enter", "end", "stop-services",
+                "reset-link", "began 1", "start 1", "wait-held", "wait-held",
+                "wait-held", "enter", "end"}),
+            "the hold that arrived while the boot was built did not keep the guest from running");
+    require(contains(machine.said(), "the restarted guest may boot"),
+            "the end of the hold was not logged");
+}
+
+void aStopEndsTheWaitForAHoldThatArrivedWhileTheNextBootWasBuilt()
+{
+    FakeMachine machine;
+    machine.script = {restarts(), powersOff()};
+    machine.onCall = [](FakeMachine& self, const std::string& call) {
+        if (call == "start 1")
+            self.held.store(true);
+        if (self.count("wait-held") == 2U)
+            self.stop.store(true);
+    };
+    require(kernarium::restart::run(machine, quickly) == 0,
+            "a stop during the hold did not end the launch");
+    require(machine.count("enter") == 1U,
+            "a stop during the hold still ran the restarted guest");
+}
+
+/* The first boot is run as it is asked for: a hold that arrives while it is built is applied to the GPU the guest has
+ * (the runtime's registration), and the guest runs, as it does when the hold was there before. */
+void aHoldThatArrivesWhileTheFirstBootIsBuiltDoesNotKeepItBack()
+{
+    FakeMachine machine;
+    machine.script = {powersOff()};
+    machine.onCall = [](FakeMachine& self, const std::string& call) {
+        if (call == "start 0")
+            self.held.store(true);
+    };
+    require(kernarium::restart::run(machine, quickly) == 0,
+            "a hold kept the first boot back");
+    require(machine.count("wait-held") == 0U && machine.count("enter") == 1U,
+            "the first boot waited for a hold that arrived while it was built");
+}
+
 void aStopEndsTheWaitForTheHold()
 {
     FakeMachine machine;
@@ -796,6 +850,12 @@ const uml::testing::NamedTest tests[] {
     {"the-next-boot-waits-while-held", theNextBootWaitsWhileTheApplicationHoldsIt},
     {"the-first-boot-is-never-held", theFirstBootIsNeverHeld},
     {"a-stop-ends-the-wait-for-the-hold", aStopEndsTheWaitForTheHold},
+    {"a-hold-that-arrives-while-the-next-boot-is-built-keeps-the-guest-from-running",
+        aHoldThatArrivesWhileTheNextBootIsBuiltKeepsTheGuestFromRunningUntilItEnds},
+    {"a-stop-ends-the-wait-for-a-hold-that-arrived-while-the-next-boot-was-built",
+        aStopEndsTheWaitForAHoldThatArrivedWhileTheNextBootWasBuilt},
+    {"a-hold-that-arrives-while-the-first-boot-is-built-does-not-keep-it-back",
+        aHoldThatArrivesWhileTheFirstBootIsBuiltDoesNotKeepItBack},
     {"five-early-restarts-end-the-loop",
         fiveEarlyRestartsInARowEndTheLoopWithItsOwnResult},
     {"a-fifteen-second-boot-resets-the-count",

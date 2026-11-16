@@ -943,11 +943,12 @@ runs the same loop inside its one `run` call
 that arrives as the guest restarts wins, the next boot waits while the guest is
 paused or from the moment the application asks for its GPU requests to be held
 (`set_gpu_hold`, before the hold's camera wait, whether or not the gate has
-closed yet) until it gives them back, and a restart is reported twice so the
-application can re-apply what belongs to a kernel. After Android powers off
-cleanly the runtime releases the guest through `uml_emulator_release_guest` and
-returns success only once another run can start. An application that can be
-backgrounded holds the guest's GPU requests (`set_gpu_hold`) before it quiesces
+closed yet) until it gives them back (and again once the boot is built, so a hold
+that arrives meanwhile also keeps the guest from running), and a restart is
+reported twice so the application can re-apply what belongs to a kernel. After
+Android powers off cleanly the runtime releases the guest through
+`uml_emulator_release_guest` and returns success only once another run can
+start. An application that can be backgrounded holds the guest's GPU requests (`set_gpu_hold`) before it quiesces
 and releases them before it resumes. On an Android guest the hold is preceded by
 the camera's end of the guest's running video: the camera device ends it as the
 platform's notice of the departure would and the hold waits (two seconds at most,

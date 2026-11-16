@@ -1243,7 +1243,8 @@ with clocks that start at the edge: the camera's wait within what a deadline
 leaves after the drain, the edge's bound meeting the hold that waits (the gate
 closes at the bound's time and the main path is back inside the edge, a drain
 waited for once), and a guest that restarts while the hold waits for the camera,
-which boots after the release and not behind the closed gate.
+or whose boot is being built when the hold arrives, which runs after the release
+and not behind the closed gate.
 `camera-background-video` (unit) is the ordering of the application's departure
 (video running: end, wait, hold; none: hold at once; a wait that runs out: hold
 and one log line; the wait inside the bound; a hold that lands first ends a

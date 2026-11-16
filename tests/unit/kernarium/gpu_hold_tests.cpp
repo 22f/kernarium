@@ -249,7 +249,13 @@ void aMainPathThatCameLateWaitsForTheCameraOnlyWhatTheEdgeLeaves()
 
 class RestartingGuest final : public kernarium::restart::Machine {
 public:
-    RestartingGuest()
+    /* When the application's hold arrives: while the old guest runs (its camera is still to answer), or while the
+     * restarted guest's boot is being built. `gateClosesBeforeAdmission` is for the second: the hold's close has landed
+     * by the time the loop would run the guest. */
+    enum class When { whileTheOldGuestRuns, whileTheNextBootIsBuilt };
+
+    explicit RestartingGuest(When when = When::whileTheOldGuestRuns, bool gateClosesBeforeAdmission = false)
+        : when_(when), gateClosesBeforeAdmission_(gateClosesBeforeAdmission)
     {
         runtime.gpu.beforeClosing = [this] {
             const auto until = Clock::now() + 5s;
@@ -271,16 +277,27 @@ public:
     void letTheGateClose()
     {
         letTheGateClose_.store(true);
-        hold_.join();
+        if (hold_.joinable()) hold_.join();
     }
 
     bool startBoot(unsigned number) override
     {
+        if (when_ == When::whileTheNextBootIsBuilt && number == 1) {
+            /* The application leaves the foreground while the restarted guest's services are being made: the old
+             * guest's wait is over and the loop's guard has looked already. */
+            askForTheHold();
+            const auto until = Clock::now() + 5s;
+            while (!runtime.lifecycle.gpuHoldRequested() && Clock::now() < until) std::this_thread::sleep_for(1ms);
+            require(runtime.lifecycle.gpuHoldRequested(), "the hold is asked for while the boot is built");
+            if (gateClosesBeforeAdmission_) letTheGateClose();
+        }
         started.store(number + 1);
         return true;
     }
     int enter() override
     {
+        entered.fetch_add(1);
+        if (started.load() == 1 && when_ == When::whileTheNextBootIsBuilt) return 0;
         if (started.load() == 1) {
             video.attach([] {});
             askForTheHold();
@@ -293,6 +310,7 @@ public:
             return 0;
         }
         /* The restarted guest's first GPU request. */
+        enteredWhilePending = runtime.lifecycle.gpuHoldRequested();
         enteredWithGateHeld = runtime.gpu.requestsHeld();
         enteredAdmitted = bool(runtime.gpu.gate.enter());
         return 0;
@@ -322,11 +340,15 @@ public:
     Runtime runtime {halfTiming};
     BackgroundVideo video;
     std::atomic<unsigned> started {};
+    std::atomic<unsigned> entered {};
     std::atomic<unsigned> waits {};
     bool enteredWithGateHeld {};
+    bool enteredWhilePending {};
     bool enteredAdmitted {};
 
 private:
+    const When when_;
+    const bool gateClosesBeforeAdmission_;
     std::thread hold_;
     std::atomic<bool> letTheGateClose_ {};
 };
@@ -355,6 +377,47 @@ void aGuestThatRestartsWhileTheHoldWaitsForTheCameraBootsAfterTheRelease()
     require(!guest.enteredWithGateHeld && guest.enteredAdmitted, "and its GPU requests are answered");
 }
 
+/* The review's interleaving: the old guest ended and the loop's guard found no hold; the application leaves while the next
+ * boot is built, and the loop is about to run the guest. It must not: a guest that boots behind a closed gate (or one that
+ * is closing) runs without 3D for the whole boot. `gateClosesBeforeAdmission` is the hold whose close has landed; without
+ * it the close still waits for the guest's requests, and only the request for the hold is there. */
+void aHoldThatArrivesWhileTheNextBootIsBuiltKeepsTheRestartedGuestOutUntilTheRelease(bool gateClosesBeforeAdmission)
+{
+    RestartingGuest guest {RestartingGuest::When::whileTheNextBootIsBuilt, gateClosesBeforeAdmission};
+    int result = -1;
+    std::thread loop([&] {
+        result = kernarium::restart::run(guest, {.consolePoll = 1ms, .consoleBound = 20ms, .heldPoll = 1ms});
+    });
+    const auto until = Clock::now() + 5s;
+    while ((guest.started.load() < 2 || (guest.waits.load() < 3 && guest.entered.load() < 2)) && Clock::now() < until)
+        std::this_thread::sleep_for(1ms);
+    require(guest.started.load() == 2, "the restarted guest's boot was built");
+    require(guest.entered.load() == 1 && guest.waits.load() >= 3,
+            "the loop waits for the hold that arrived while the boot was built, and has not run the restarted guest");
+    require(guest.runtime.gpu.requestsHeld() == gateClosesBeforeAdmission, "the gate is as the hold has left it");
+    guest.letTheGateClose();
+    require(guest.runtime.gpu.requestsHeld(), "the hold's close lands");
+    std::this_thread::sleep_for(30ms);
+    require(guest.entered.load() == 1, "and the restarted guest is still not run behind it");
+    /* The application returns. */
+    (void)guest.runtime.gate.set(kernarium::gpu_hold::released, &guest.video, saysNothing);
+    loop.join();
+    require(result == 0, "the launch ends");
+    require(guest.entered.load() == 2, "the restarted guest runs once the requests are given back");
+    require(!guest.enteredWhilePending && !guest.enteredWithGateHeld && guest.enteredAdmitted,
+            "with no hold pending, and its GPU requests answered");
+}
+
+void aHoldThatArrivesWhileTheNextBootIsBuiltAndHasClosedTheGate()
+{
+    aHoldThatArrivesWhileTheNextBootIsBuiltKeepsTheRestartedGuestOutUntilTheRelease(true);
+}
+
+void aHoldThatArrivesWhileTheNextBootIsBuiltAndHasNotClosedTheGateYet()
+{
+    aHoldThatArrivesWhileTheNextBootIsBuiltKeepsTheRestartedGuestOutUntilTheRelease(false);
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -369,6 +432,8 @@ int main(int argc, char** argv)
     ROW(theBoundHoldsByItsTimeAndTheMainPathEndsInsideTheEdge);
     ROW(aMainPathThatCameLateWaitsForTheCameraOnlyWhatTheEdgeLeaves);
     ROW(aGuestThatRestartsWhileTheHoldWaitsForTheCameraBootsAfterTheRelease);
+    ROW(aHoldThatArrivesWhileTheNextBootIsBuiltAndHasClosedTheGate);
+    ROW(aHoldThatArrivesWhileTheNextBootIsBuiltAndHasNotClosedTheGateYet);
 #undef ROW
     return 0;
 }
