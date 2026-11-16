@@ -11,24 +11,14 @@
         "place": "sessionSettings"
       },
       {
-        "id": "camera-lenses",
-        "title": "Camera lenses",
-        "text": "The virtual machine’s camera app now has a button for each of this device’s back lenses, such as ultra wide, main and telephoto. Pinch to zoom is off; choose a lens instead.",
-        "symbol": "camera.aperture",
-        "requirement": {
-          "camera": true
-        }
-      },
-      {
         "id": "fixes-and-improvements",
         "title": "Fixes and improvements",
         "points": [
           "Fixed the camera preview freezing after you take a photo",
           "Fixed the camera preview lagging behind in video mode",
           "A camera recording now ends and is saved when you leave Andarium",
-          "Fixed the first half second of a video recording having no sound",
-          "Fixed 3D graphics failing to start in apps that run PC programs",
-          "Improved how sound and the microphone come back after you leave Andarium and return"
+          "Fixed the start of a video recording having no sound",
+          "Fixed 3D graphics failing to start in apps that run PC programs"
         ],
         "symbol": "wrench.and.screwdriver.fill"
       }

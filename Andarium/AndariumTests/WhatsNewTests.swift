@@ -67,8 +67,8 @@ struct WhatsNewTests {
 
     // MARK: The bundled notes
 
-    /// Build 12 as written; a device with no camera is not told its lenses.
-    private static let buildTwelveIDs = ["old-app-compatibility", "camera-lenses", "fixes-and-improvements"]
+    /// Build 12 as written.
+    private static let buildTwelveIDs = ["old-app-compatibility", "fixes-and-improvements"]
 
     /// Build 11 as written, and as an iPhone with haptics and a camera and an
     /// iPad with a camera are told it.
@@ -91,14 +91,13 @@ struct WhatsNewTests {
         let twelve = try #require(releases.first?.entries)
         #expect(twelve.map(\.id) == Self.buildTwelveIDs)
         #expect(twelve.first?.title == "Old app compatibility")
-        // The old-app switch is found in Settings; the lenses are for a device with a camera.
+        // The old-app switch is found in Settings.
         #expect(twelve.first?.place == .sessionSettings && twelve.first?.requirement == nil)
-        #expect(twelve[1].place == nil && twelve[1].requirement == WhatsNewRequirement(camera: true))
-        // The fixes are six points under a title, with no sentence of their own.
+        // The fixes are five points under a title, with no sentence of their own.
         let twelveFixes = try #require(twelve.last)
         #expect(
             twelveFixes.title == "Fixes and improvements" && twelveFixes.text == nil
-                && twelveFixes.points.count == 6)
+                && twelveFixes.points.count == 5)
         #expect(twelveFixes.place == nil && twelveFixes.requirement == nil)
         // Build 11's notes are kept as they were.
         let eleven = try #require(releases.dropFirst().first?.entries)
@@ -157,7 +156,7 @@ struct WhatsNewTests {
             }
         }
         // A requirement the code does not know fails to decode, so the notes
-        // would not be here; these six entries are the ones that have any.
+        // would not be here; these five entries are the ones that have any.
         let requirements = WhatsNewCatalog.load().flatMap(\.entries).compactMap { entry in
             entry.requirement.map { (entry.id, $0) }
         }
@@ -165,7 +164,6 @@ struct WhatsNewTests {
             "more-memory": WhatsNewRequirement(memoryAboveMiB: 4096),
             "ipad-rotation": WhatsNewRequirement(device: .pad),
             "camera": WhatsNewRequirement(camera: true),
-            "camera-lenses": WhatsNewRequirement(camera: true),
             "haptics": WhatsNewRequirement(device: .haptics),
             "send-feedback": WhatsNewRequirement(feature: .sendFeedback),
         ])
@@ -174,7 +172,7 @@ struct WhatsNewTests {
     @Test func theRibbonNamesTheBundledEntriesAndCountsTheRest() throws {
         let releases = WhatsNewCatalog.load()
         let twelveTitles = try #require(releases.first).entries.map(\.title)
-        #expect(twelveTitles == ["Old app compatibility", "Camera lenses", "Fixes and improvements"])
+        #expect(twelveTitles == ["Old app compatibility", "Fixes and improvements"])
         let titles = try #require(releases.first { $0.build == 11 }).entries.map(\.title)
         #expect(titles == [
             "Snapshots", "Resolution", "Rotation on iPad", "Keyboard, mouse and controllers", "Location", "Camera",
@@ -187,7 +185,7 @@ struct WhatsNewTests {
             WhatsNewRibbon.summary(titles, naming: 2, language: "en")
                 == "Snapshots\(separator)Resolution\(separator)8 more")
         #expect(WhatsNewRibbon.summary(titles, naming: 0) == "10 new features")
-        #expect(WhatsNewRibbon.summary(twelveTitles, naming: 0) == "3 new features")
+        #expect(WhatsNewRibbon.summary(twelveTitles, naming: 0) == "2 new features")
     }
 
     /// A language that breaks between any two characters gets plain spaces: a
@@ -201,9 +199,9 @@ struct WhatsNewTests {
         #expect(WhatsNewRibbon.summary(["A", "B", "C"], naming: 1, language: "ja") == "A \u{00B7} 2 more")
     }
 
-    /// The ribbon lists what the device is told, in the order written: twelve
+    /// The ribbon lists what the device is told, in the order written: eleven
     /// entries each (an update from build 9 carries builds 12 and 11), but not
-    /// the same twelve.
+    /// the same eleven.
     @Test func theRibbonNamesWhatAnIPhoneAndAnIPadAreTold() {
         func ribbon(on host: HostDevice, naming named: Int) -> String {
             withDefaultsReturning { defaults in
@@ -214,15 +212,15 @@ struct WhatsNewTests {
             }
         }
         let separator = "\u{00A0}\u{00B7} "
-        let twelve = ["Old app compatibility", "Camera lenses", "Fixes and improvements"]
-        #expect(ribbon(on: host(maximumMiB: 4096), naming: 6) == (twelve + [
+        let twelve = ["Old app compatibility", "Fixes and improvements"]
+        #expect(ribbon(on: host(maximumMiB: 4096), naming: 5) == (twelve + [
             "Snapshots", "Resolution", "Keyboard, mouse and controllers", "6 more",
         ]).joined(separator: separator))
-        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 6) == (twelve + [
+        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 5) == (twelve + [
             "Snapshots", "Resolution", "Rotation on iPad", "6 more",
         ]).joined(separator: separator))
-        #expect(ribbon(on: host(maximumMiB: 4096), naming: 0) == "12 new features")
-        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 0) == "12 new features")
+        #expect(ribbon(on: host(maximumMiB: 4096), naming: 0) == "11 new features")
+        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 0) == "11 new features")
     }
 
     @Test func eachKindOfDeviceIsToldItsOwnEntries() {
@@ -238,15 +236,14 @@ struct WhatsNewTests {
             }
         }
         let withoutDeviceEntries = Self.buildElevenIDs.filter { $0 != "ipad-rotation" && $0 != "haptics" }
-        let withoutACamera = { (ids: [String]) in ids.filter { $0 != "camera" && $0 != "camera-lenses" } }
+        let withoutACamera = { (ids: [String]) in ids.filter { $0 != "camera" } }
         #expect(told(by: host(maximumMiB: 4096)) == Self.buildTwelveIDs + Self.buildElevenIDsOnAnIPhone)
         #expect(
             told(by: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false))
                 == Self.buildTwelveIDs + Self.buildElevenIDsOnAnIPad)
         #expect(told(by: host(maximumMiB: 4096, hasHaptics: false)) == Self.buildTwelveIDs + withoutDeviceEntries)
         // A device with no camera (a Mac running the iPad app has none) is not
-        // told about the Camera row or the camera app's lenses, which would not
-        // be there.
+        // told about the Camera row, which would not be there.
         #expect(
             told(by: host(maximumMiB: 4096, hasCamera: false))
                 == withoutACamera(Self.buildTwelveIDs + Self.buildElevenIDsOnAnIPhone))
@@ -267,13 +264,13 @@ struct WhatsNewTests {
             let withoutFeedback = Self.buildElevenIDs.filter { $0 != "send-feedback" }
             let toldWithoutFeedback = Self.buildElevenIDsOnAnIPhone.filter { $0 != "send-feedback" }
             #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildTwelveIDs + toldWithoutFeedback)
-            #expect(model.whatsNew.pending.map(\.entries.count) == [3, 8])
+            #expect(model.whatsNew.pending.map(\.entries.count) == [2, 8])
             // Info: the device's entries as written (Rotation on iPad, here on an
             // iPhone), but not the feature the build lacks.
             #expect(model.whatsNew.releases.first?.entries.map(\.id) == Self.buildTwelveIDs)
             #expect(model.whatsNew.releases.dropFirst().first?.entries.map(\.id) == withoutFeedback)
             #expect(model.whatsNew.releases.map(\.build) == [12, 11, 9])
-            #expect(WhatsNewRibbon.summary(model.whatsNew.pendingEntries.map(\.title), naming: 0) == "11 new features")
+            #expect(WhatsNewRibbon.summary(model.whatsNew.pendingEntries.map(\.title), naming: 0) == "10 new features")
         }
     }
 
@@ -408,7 +405,7 @@ struct WhatsNewTests {
             #expect(model.whatsNew.pendingEntries.map(\.id)
                 == Self.buildTwelveIDs + Self.buildElevenIDsOnAnIPhone + ["file-browser", "stability-fixes"])
             // Info lists the notes as written.
-            #expect(model.whatsNew.releases.map(\.entries.count) == [3, 10, 3])
+            #expect(model.whatsNew.releases.map(\.entries.count) == [2, 10, 3])
         }
     }
 
