@@ -21,13 +21,13 @@ namespace are written beside the sources, in android/soong.
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  .gitignore                                    |   2 +
- Android.bp                                    | 269 ++++++++++++++++++
+ Android.bp                                    | 267 ++++++++++++++++++
  android/soong/AndroidManifest.xml             |  98 +++++++
  android/soong/config/device/config.h          |  18 ++
  android/soong/config/host/config.h            |  18 ++
  android/soong/espeak-data.sh                  |  68 +++++
  .../com/reecedunn/espeak/BuildConfig.java     |  13 +
- 7 files changed, 486 insertions(+)
+ 7 files changed, 484 insertions(+)
  create mode 100644 Android.bp
  create mode 100644 android/soong/AndroidManifest.xml
  create mode 100644 android/soong/config/device/config.h
@@ -50,10 +50,10 @@ index 71b9c8079166f33e65a5075d1fd12062a7f5a65d..0c6f19040808d52de4ed236914cdaf36
  install-sh
 diff --git a/Android.bp b/Android.bp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ee791aa5a5b00d34d6932298d3b0efef15a7f06c
+index 0000000000000000000000000000000000000000..c310a24f85be25e8cc1c8d3ba194efff1c634c38
 --- /dev/null
 +++ b/Android.bp
-@@ -0,0 +1,269 @@
+@@ -0,0 +1,267 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
 +// eSpeak NG, built from source by the Android image build. The Gradle and CMake
@@ -137,8 +137,6 @@ index 0000000000000000000000000000000000000000..ee791aa5a5b00d34d6932298d3b0efef
 +cc_defaults {
 +    name: "espeak_ng_host",
 +    defaults: ["espeak_ng_flags"],
-+    host_supported: true,
-+    device_supported: false,
 +    local_include_dirs: ["android/soong/config/host"],
 +}
 +
