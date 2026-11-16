@@ -22,6 +22,9 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "scripts"))
+import patch_series  # noqa: E402  (its isolated environment commits as the caller, as a replay does)
+
 specification = importlib.util.spec_from_file_location(
     "accessibility_identity", ROOT / "dependencies/andarium-accessibility/identity.py")
 identity = importlib.util.module_from_spec(specification)
@@ -86,9 +89,9 @@ class IdentityTests(unittest.TestCase):
         for name in identity.SOURCES:
             repository = sources / name
             repository.mkdir(parents=True)
-            for command in (["init", "-q"], ["config", "user.name", "t"], ["config", "user.email", "t@example.invalid"],
-                            ["commit", "-q", "--allow-empty", "-m", name]):
-                subprocess.run(["git", "-C", str(repository), *command], check=True, capture_output=True)
+            for command in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", name]):
+                subprocess.run(["git", "-C", str(repository), *command], check=True, capture_output=True,
+                               env=patch_series.isolated_environment())
         apks = self.root / "apks"
         apks.mkdir()
         for name, package in identity.APKS.items():

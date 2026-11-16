@@ -181,8 +181,11 @@ public final class SmsServiceTest {
                 "a second one survives");
         same("\u6100\u6200", new String("\uFFFEab".getBytes(StandardCharsets.UTF_16BE), StandardCharsets.UTF_16),
                 "a leading U+FFFE swaps every byte after it");
-        same("a\uFFFDb", new String("a\uFFFEb".getBytes(StandardCharsets.UTF_16BE), StandardCharsets.UTF_16),
-                "U+FFFE elsewhere is malformed");
+        // JDK 11's decoder replaces it with U+FFFD; JDK 17 and later pass it through. Either way it is
+        // never swapped or dropped, which is all the sender and text rules rely on (they refuse it anyway).
+        final String elsewhere = new String("a\uFFFEb".getBytes(StandardCharsets.UTF_16BE), StandardCharsets.UTF_16);
+        check(elsewhere.equals("a\uFFFDb") || elsewhere.equals("a\uFFFEb"),
+                "U+FFFE elsewhere is replaced or kept, got <" + elsewhere + ">");
         same("a\uFEFFb", new String("a\uFEFFb".getBytes(StandardCharsets.UTF_16BE), StandardCharsets.UTF_16),
                 "U+FEFF elsewhere is kept");
     }
