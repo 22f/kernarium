@@ -38,7 +38,8 @@
  *              whose registration settled, until another holder is added to
  *              the frame, its writers become unknown, the flush serial moves
  *              or the mapping changes (`memo-unknown` runs the row of the
- *              unknown writers alone).
+ *              unknown writers alone); bytes written through another address
+ *              run after a registration the memo answered (`memo-written`).
  */
 #include "address_space_types.hpp"
 #include "allocation_fault.hpp"
@@ -625,6 +626,44 @@ void test_a_revalidation_uses_the_memo()
 		"a validation asked the address space for a registration the executor had");
 	require(after.registration_memo_hits == before.registration_memo_hits + 1,
 		"a validation did not use the executor's memo");
+	require(after.unheld_runnable == 0);
+}
+
+/* A store through another address, published to a holder whose registration
+ * the memo answered: the block is built again from the new bytes, runs them,
+ * and asks the address space nothing. */
+void test_newly_written_bytes_run_after_a_memo_hit()
+{
+	const Clean clean;
+	namespace testing = uml::memory::testing;
+	constexpr std::uint64_t executable = 0x1a00'0000;
+	constexpr std::uint64_t alias = 0x2a00'0000;
+	/* Not in the memo's slot of the executable page. */
+	constexpr std::uint64_t writer = 0x3a00'1000;
+	ScratchBacking frame{"uml-x86-alias-memo-n-XXXXXX", page};
+	ScratchBacking code{"uml-x86-alias-memo-m-XXXXXX", page};
+	load_return(frame, 1);
+	load_writer(code);
+	Space space{9123};
+	space.map(writer, code, 0, rx, 1);
+	space.map(executable, frame, 0, rx, 1);
+	space.map(alias, frame, 0, rw, 0);
+	const auto backing = testing::mapped_backing(frame.descriptor());
+	require(backing != nullptr);
+	require(space.run(executable).rax == 1);
+	require(held_at(holders_of(backing, 0), space.generation(), executable));
+
+	/* The new immediate, through the alias: it reaches the holder. */
+	require(space.run(writer, 2, alias + 1).event == EngineEvent::system_call);
+	const auto before = space.diagnostics();
+	require(space.run(executable).rax == 2,
+		"bytes written through another address did not run after a memo hit");
+	const auto after = space.diagnostics();
+	require(after.translations == before.translations + 1,
+		"the block was not translated again from the new bytes");
+	require(after.holder_registrations == before.holder_registrations &&
+			after.registration_memo_hits == before.registration_memo_hits + 1,
+		"the translation from the new bytes was not a memo hit");
 	require(after.unheld_runnable == 0);
 }
 
@@ -1270,6 +1309,10 @@ int main(int argc, char **argv)
 		std::puts("registration memo ok");
 		test_a_revalidation_uses_the_memo();
 		std::puts("revalidation memo ok");
+	}
+	if (selected("memo") || selected("memo-written")) {
+		test_newly_written_bytes_run_after_a_memo_hit();
+		std::puts("memo and written bytes ok");
 	}
 	if (selected("memo") || selected("memo-unknown")) {
 		test_the_unknown_writer_state_ends_the_memo();
