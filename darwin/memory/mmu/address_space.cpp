@@ -6,6 +6,7 @@
 #include "address_layout.hpp"
 #include "address_space_types.hpp"
 #include "allocation_fault.hpp"
+#include "../count_audit.hpp"
 #include "bridge_call.hpp"
 #include "domain_registry_testing.hpp"
 #include "execution_gate.hpp"
@@ -1472,10 +1473,24 @@ public:
 		};
 	}
 
-#if UML_MEMORY_ALLOCATION_TESTING
-	/* The records of this space's backings whose count of executable
-	 * mappings differs from the executable words of its generations. */
-	[[nodiscard]] std::size_t audit_executable_counts() noexcept
+#if UML_MEMORY_ALLOCATION_TESTING || UML_MEMORY_COUNT_AUDIT
+	/* What a recount found: the records compared and the ones whose count of
+	 * executable mappings differs from the executable words of the space's
+	 * generations. */
+	struct CountTally final {
+		std::size_t records{};
+		std::size_t mismatches{};
+	};
+
+	/* Recounts the executable guest-code words of every generation of this
+	 * space per physical-page record and compares each record's count (a
+	 * record that can no longer count is not compared). With `exact` every
+	 * generation is held at once, so no change can fall between two of them,
+	 * and the recount is a fact; a generation that cannot be held without
+	 * waiting ends the audit with false. Without it the generations are held
+	 * one at a time, for a caller that has stopped changing mappings. */
+	[[nodiscard]] bool tally_executable_counts(CountTally &tally,
+		bool exact) noexcept
 	{
 		try {
 			std::vector<std::shared_ptr<GenerationState>> generations;
@@ -1486,9 +1501,22 @@ public:
 					generations.push_back(state);
 				}
 			}
+			std::vector<std::shared_lock<WordSharedMutex>> held;
+			if (exact) {
+				held.reserve(generations.size());
+				for (const auto &state : generations) {
+					std::shared_lock lock{state->mappings_mutex,
+						std::try_to_lock};
+					if (!lock.owns_lock())
+						return false;
+					held.push_back(std::move(lock));
+				}
+			}
 			std::unordered_map<const void *, std::uint64_t> recount;
 			for (const auto &state : generations) {
-				std::shared_lock lock{state->mappings_mutex};
+				std::shared_lock<WordSharedMutex> lock;
+				if (!exact)
+					lock = std::shared_lock{state->mappings_mutex};
 				(void)state->fill_index.scan(0,
 					std::numeric_limits<std::uint64_t>::max(),
 					[&](std::uint64_t page, std::uintptr_t word) {
@@ -1517,7 +1545,7 @@ public:
 						backings.push_back(std::move(backing));
 				}
 			}
-			std::size_t mismatches = recount.contains(nullptr) ? 1 : 0;
+			tally.mismatches += recount.contains(nullptr) ? 1 : 0;
 			std::unordered_map<const void *, bool> seen;
 			for (const auto &backing : backings) {
 				backing->for_each_code_page(
@@ -1529,17 +1557,19 @@ public:
 							record, stamp);
 						if (stamp.never_share)
 							return;
+						++tally.records;
 						const auto found = recount.find(record);
 						const auto expected =
 							found == recount.end() ? 0 : found->second;
 						if (MappedBacking::executable_mappings(record) !=
 						    expected)
-							++mismatches;
+							++tally.mismatches;
 					});
 			}
-			return mismatches;
+			return true;
 		} catch (...) {
-			return ~std::size_t{0};
+			tally.mismatches = ~std::size_t{0};
+			return true;
 		}
 	}
 #endif
@@ -2183,16 +2213,21 @@ public:
 		std::shared_lock lock{mutex_};
 		return spaces_.size();
 	}
+#endif
 
-	[[nodiscard]] std::size_t audit_executable_counts() const noexcept
+#if UML_MEMORY_ALLOCATION_TESTING || UML_MEMORY_COUNT_AUDIT
+	/* The recount of every space; false when `exact` and a space could not be
+	 * held whole. */
+	[[nodiscard]] bool tally_executable_counts(
+		AddressSpace::CountTally &tally, bool exact) const noexcept
 	{
-		std::size_t mismatches = 0;
 		std::shared_lock lock{mutex_};
 		for (const auto &[domain, space] : spaces_) {
 			(void)domain;
-			mismatches += space->audit_executable_counts();
+			if (!space->tally_executable_counts(tally, exact))
+				return false;
 		}
-		return mismatches;
+		return true;
 	}
 #endif
 
@@ -2308,10 +2343,54 @@ void set_software_address_space_acquired_hook(
 std::size_t audit_executable_counts() noexcept
 {
 	auto *registry = existing_address_space_registry();
-	return registry != nullptr ? registry->audit_executable_counts() : 0;
+	AddressSpace::CountTally tally;
+	if (registry != nullptr)
+		(void)registry->tally_executable_counts(tally, false);
+	return tally.mismatches;
 }
 
 } // namespace testing
+#endif
+
+#if UML_MEMORY_COUNT_AUDIT
+namespace {
+std::atomic<std::uint64_t> &anomaly_total() noexcept
+{
+	static std::atomic<std::uint64_t> total{};
+	return total;
+}
+} // namespace
+
+CountAuditResult audit_executable_counts() noexcept
+{
+	CountAuditResult result;
+	auto *registry = existing_address_space_registry();
+	if (registry == nullptr) {
+		result.exact = true;
+		return result;
+	}
+	AddressSpace::CountTally tally;
+	result.exact = registry->tally_executable_counts(tally, true);
+	if (result.exact) {
+		result.records = tally.records;
+		result.mismatches = tally.mismatches;
+	}
+	return result;
+}
+
+std::uint64_t count_anomalies() noexcept
+{
+#if UML_MEMORY_ALLOCATION_TESTING
+	return testing::count_anomalies();
+#else
+	return anomaly_total().load(std::memory_order_relaxed);
+#endif
+}
+
+void note_count_anomaly() noexcept
+{
+	anomaly_total().fetch_add(1, std::memory_order_relaxed);
+}
 #endif
 
 void set_domain_retire_observer(DomainRetireObserver observer) noexcept

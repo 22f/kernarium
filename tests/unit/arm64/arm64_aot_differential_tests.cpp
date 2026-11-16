@@ -18,6 +18,7 @@
 #include "cpu/arm64/fp_environment.hpp"
 #include "cpu/arm64/gadgets/executor.hpp"
 #include "cpu/host_capabilities.hpp"
+#include "memory/count_audit.hpp"
 #include "platform/apple/host_features.hpp"
 
 #include <algorithm>
@@ -1560,6 +1561,10 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 		require(same(want, b.result, c));
 		require(b.stats.enters > 0 && answered_by_the_table(b.stats) &&
 			b.stats.poisoned == 0);
+		/* The memory layer's count of this frame's executable mappings is
+		 * what the two guests' words say, as a guest run audits it. */
+		const auto audit = ::uml::memory::audit_executable_counts();
+		require(audit.exact && audit.records >= 1 && audit.mismatches == 0);
 		/* The first guest, asked again, finds its pages compared. */
 		std::fprintf(stderr, "hits %llu; ",
 			static_cast<unsigned long long>(b.stats.shared_hits));
@@ -5086,5 +5091,8 @@ int main(int argc, char **argv)
 			first.index), other, load_functions(cfg.functions,
 			second.index));
 	}
+	/* Nothing in the whole run counted a departure that had nothing to count
+	 * out. */
+	require(::uml::memory::count_anomalies() == 0);
 	return 0;
 }

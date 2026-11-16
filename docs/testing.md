@@ -826,9 +826,13 @@ blocker in every one of them.
   how many pages stayed cached). Each mode prints the same
   sums with the component on and off; in a diagnostics build the fork mode
   must find verdicts to reuse (`shared_hits`) and the copy, which the kernel
-  does not declare immutable, must be refused (`mutable` pages) and never hashed. Execution evidence exists
-  only in a diagnostics build, where the libraries the run names must have
-  been entered. A product build has residency evidence: the framework's text
+  does not declare immutable, must be refused (`mutable` pages) and never
+  hashed. Execution evidence exists only in a diagnostics build, where the
+  libraries the run names must have been entered, and where the memory layer
+  recounts the executable mappings of every physical-page record against the
+  executable words of every address space (every two seconds, holding them
+  all at once, and at exit): one mismatch or accounting anomaly fails the run,
+  and so does a run that never audited. A product build has residency evidence: the framework's text
   became resident in the emulator process (`vmmap`, macOS) and was not with
   the component off. Reading the text raises residency too, so that proves
   the framework was touched and not that rewritten instructions ran. Speed is

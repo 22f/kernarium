@@ -137,11 +137,16 @@ def good_probe() -> str:
     return "\n".join(lines) + "\n"
 
 
+GOOD_AUDIT = ("count_audit runs 5 skipped 1 records 40 mismatches 0 "
+              "last_mismatches 0 anomalies 0\n")
+
+
 def good_scenario() -> dict:
     text = workload_text(good_workloads())
     return {"workloads": {"off": text, "on": text},
             "probe": {"off": [good_probe()], "on": [good_probe()]},
-            "report": {"on": "binds 3 enters 9 steps 2 poisoned 0 refills 0\n",
+            "report": {"on": "binds 3 enters 9 steps 2 poisoned 0 refills 0\n" +
+                       GOOD_AUDIT,
                        "off": None},
             "vmmap": {"off": vmmap_text("16K"), "on": vmmap_text("19.3M")}}
 
@@ -335,11 +340,33 @@ class RunnerTest(unittest.TestCase):
     def test_diagnostics_report_is_judged(self):
         self.passes(good_scenario(), "--diagnostics")
         scenario = good_scenario()
-        scenario["report"]["on"] = "binds 3 enters 0 steps 0 poisoned 0\n"
+        scenario["report"]["on"] = "binds 3 enters 0 steps 0 poisoned 0\n" + GOOD_AUDIT
         self.fails(scenario, "never entered rewritten code", "--diagnostics")
         scenario = good_scenario()
         scenario["report"]["off"] = "binds 3 enters 4 steps 0 poisoned 0\n"
         self.fails(scenario, "ran with the component off", "--diagnostics")
+
+    def test_the_count_audit_is_judged(self):
+        """The run recounts the executable-mapping counts and fails on a
+        mismatch, on an anomaly, or when nothing was recounted."""
+        for report, expected in (
+                ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n",
+                 "no count audit"),
+                ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
+                 "count_audit runs 1 skipped 0 records 40 mismatches 0 "
+                 "last_mismatches 0 anomalies 0\n", "needs at least two"),
+                ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
+                 "count_audit runs 6 skipped 0 records 40 mismatches 2 "
+                 "last_mismatches 0 anomalies 0\n", "2 records whose"),
+                ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
+                 "count_audit runs 6 skipped 0 records 40 mismatches 0 "
+                 "last_mismatches 0 anomalies 3\n", "3 accounting anomalies"),
+                ("binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
+                 "count_audit runs 6 skipped 0 records 0 mismatches 0 "
+                 "last_mismatches 0 anomalies 0\n", "compared no record")):
+            scenario = good_scenario()
+            scenario["report"]["on"] = report
+            self.fails(scenario, expected, "--diagnostics")
 
     def test_the_stack_the_runtime_left_is_judged(self):
         scenario = good_scenario()

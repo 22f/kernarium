@@ -262,12 +262,15 @@ void MappedBacking::executable_mapping_removed(void *handle) noexcept
 	}
 }
 
-#if UML_MEMORY_ALLOCATION_TESTING
+#if UML_MEMORY_ALLOCATION_TESTING || UML_MEMORY_COUNT_AUDIT
 std::uint64_t MappedBacking::executable_mappings(const void *handle) noexcept
 {
 	return static_cast<const CodePage *>(handle)->fresh.load(
 		std::memory_order_acquire) & fresh_count_mask;
 }
+#endif
+
+#if UML_MEMORY_ALLOCATION_TESTING
 
 void MappedBacking::preset_for_testing(void *handle, std::uint64_t count,
 	std::uint64_t epoch) noexcept

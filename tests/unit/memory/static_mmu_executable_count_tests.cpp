@@ -11,6 +11,7 @@
 #include "uml_darwin_guest.h"
 #include "uml_darwin_static_mmu.h"
 #include "allocation_fault.hpp"
+#include "memory/count_audit.hpp"
 #include "domain_registry_testing.hpp"
 #include "mapped_backing.hpp"
 #include "require.hpp"
@@ -559,6 +560,47 @@ void test_never_share_survives_publications_and_the_exhausted_epoch()
 	audit();
 }
 
+/* The audit a diagnostics build runs on a real guest (count_audit.hpp): it
+ * recounts the executable words of every generation, holding all of them at
+ * once, and says whether it could. A wrong count is a mismatch it reports,
+ * and a departure that found nothing to count out is an anomaly it counts,
+ * with no test-only machinery behind it. */
+void test_the_audit_of_a_guest_run_sees_a_wrong_count()
+{
+	constexpr unsigned long first = 716, second = 717;
+	constexpr unsigned long base = 0x2e00'0000;
+	ScratchBacking backing{backing_name, 4 * page};
+	Pin pin18{1018, backing};
+	must_map(first, base, backing, 0, 2, rwx, 3);
+	must_map(second, base, backing, 0, 2, rx, 3);
+	auto *record = record_of(first, base);
+	const auto before = uml::memory::audit_executable_counts();
+	require(before.exact && before.mismatches == 0 && before.records >= 2);
+	require(uml::memory::count_anomalies() == expected_anomalies);
+
+	/* A count that is too high, then one that is too low: one record each. */
+	MappedBacking::preset_for_testing(record, 5, 0);
+	auto audit_now = uml::memory::audit_executable_counts();
+	require(audit_now.exact && audit_now.mismatches == 1);
+	MappedBacking::preset_for_testing(record, 1, 0);
+	audit_now = uml::memory::audit_executable_counts();
+	require(audit_now.exact && audit_now.mismatches == 1);
+	MappedBacking::preset_for_testing(record, 2, 0);
+	audit_now = uml::memory::audit_executable_counts();
+	require(audit_now.exact && audit_now.mismatches == 0);
+
+	/* A departure at zero is contained by the count and counted as an
+	 * anomaly: each of the two address spaces leaves it once. */
+	MappedBacking::preset_for_testing(record, 0, 4);
+	unmap(first, base, 2);
+	unmap(second, base, 2);
+	expected_anomalies += 2;
+	require(uml::memory::count_anomalies() == expected_anomalies);
+	destroy(first);
+	destroy(second);
+	audit();
+}
+
 /* Several address spaces, one frame, mapped and unmapped from several
  * threads at once: nothing is lost and nothing is counted twice. */
 void test_threads_mapping_one_frame_keep_the_count_exact()
@@ -651,6 +693,7 @@ int main()
 	test_protect_that_cannot_make_a_record_changes_nothing();
 	test_the_edges_of_the_word();
 	test_never_share_survives_publications_and_the_exhausted_epoch();
+	test_the_audit_of_a_guest_run_sees_a_wrong_count();
 	test_threads_mapping_one_frame_keep_the_count_exact();
 	test_threads_that_come_and_go_return_the_count_to_zero();
 	std::puts("Static MMU executable count tests passed");

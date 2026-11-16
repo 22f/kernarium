@@ -363,7 +363,7 @@ def read_report(path: pathlib.Path) -> dict[str, int]:
         prefix = ""
         if head == "library" and rest:
             prefix, rest = f"library.{rest[0]}.", rest[1:]
-        elif head in ("find", "cross_miss", "refused"):
+        elif head in ("find", "cross_miss", "refused", "count_audit"):
             prefix = head + "."
         elif head in ("binds", "max_retired", "stack_free"):
             rest = fields
@@ -373,6 +373,36 @@ def read_report(path: pathlib.Path) -> dict[str, int]:
             if number.isdigit():
                 values[prefix + key] = int(number)
     return values
+
+
+def judge_count_audit(report: dict[str, int]) -> str:
+    """The audit of the memory layer's executable-mapping counts that a
+    diagnostics build runs every two seconds while the guest runs and once at
+    exit: each record counts exactly the executable guest-code words that name
+    it, and no departure found nothing to count out. An audit that held every
+    address space at once saw a fact, so one mismatch or anomaly fails the run;
+    a report with no audit (a build that cannot recount) fails it too, since a
+    run that never looked is not a run that found nothing. Returns the line to
+    print."""
+    runs = report.get("count_audit.runs")
+    if runs is None:
+        raise Failure("the report has no count audit: the run did not recount "
+                      "the executable-mapping counts")
+    if runs < 2:
+        raise Failure(f"the count audit ran {runs} times; it needs at least two "
+                      "(one while the guest ran, one after its work was done)")
+    mismatches = report.get("count_audit.mismatches", 0)
+    anomalies = report.get("count_audit.anomalies", 0)
+    if mismatches or anomalies:
+        raise Failure(f"the count audit found {mismatches} records whose "
+                      f"executable-mapping count differs from the recount and "
+                      f"{anomalies} accounting anomalies")
+    if report.get("count_audit.records", 0) == 0:
+        raise Failure("the count audit compared no record")
+    return (f"count audit: {runs} audits "
+            f"({report.get('count_audit.skipped', 0)} skipped for a busy address "
+            f"space), {report.get('count_audit.records', 0)} records, "
+            "0 mismatches, 0 anomalies")
 
 
 def library_names(manifest: pathlib.Path) -> list[str]:
@@ -622,6 +652,7 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
         print("report: enters {enters}, steps {steps}, poisoned {poisoned}, "
               "refills {refills}".format(**{k: on.report.get(k, 0) for k in (
                   "enters", "steps", "poisoned", "refills")}))
+        print(judge_count_audit(on.report))
         left = on.report.get("stack_free")
         if left is not None:
             print(f"stack: the least a thread had left where the runtime is deepest "

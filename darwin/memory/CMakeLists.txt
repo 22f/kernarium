@@ -51,8 +51,11 @@ uml_declare_architecture_target(uml_static_mmu memory)
 target_link_libraries(uml_static_mmu PRIVATE UML::BridgeAbi UML::MemoryContract)
 target_include_directories(uml_static_mmu PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/mmu)
+# A diagnostics build of the AOT runtime audits the executable-mapping counts
+# of a real guest run (darwin/memory/count_audit.hpp); no other build has it.
 target_compile_definitions(uml_static_mmu PRIVATE
-    UML_MEMORY_ALLOCATION_TESTING=0)
+    UML_MEMORY_ALLOCATION_TESTING=0
+    UML_MEMORY_COUNT_AUDIT=$<BOOL:${UML_AOT_DIAGNOSTICS}>)
 
 add_library(uml_static_guest_memory OBJECT static_guest_memory.cpp)
 uml_declare_architecture_target(uml_static_guest_memory memory)

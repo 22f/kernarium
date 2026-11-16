@@ -16,9 +16,11 @@
 
 #if UML_AOT_DIAGNOSTICS
 #include "cpu/arm64/aot/aot_diagnostics.hpp"
+#include "memory/count_audit.hpp"
 
 #include <chrono>
 #include <cstdio>
+#include <mutex>
 #include <pthread.h>
 #include <signal.h>
 #include <thread>
@@ -237,6 +239,12 @@ std::array<std::array<std::atomic<std::uint64_t>, 8>, 64> library_finds{};
 std::array<std::atomic<std::uint64_t>, 3> cross_miss_kinds{};
 std::array<std::atomic<std::uint64_t>, 64> library_cross_misses{};
 std::atomic<bool> reporter_started{false};
+/* The audit of the executable-mapping counts of the memory layer, run by the
+ * reporter thread: audits that held every address space at once, those that
+ * could not, the records the last one compared, and the records whose count
+ * differed from the recount in all of them and in the last. */
+std::atomic<std::uint64_t> audit_runs{0}, audit_skipped{0}, audit_records{0},
+	audit_mismatches{0}, audit_last_mismatches{0};
 /* The least stack any sampled thread had left at the points where the
  * runtime is deepest (entry, refill, page verification), and the stack size
  * of the thread that had it. */
@@ -364,9 +372,31 @@ void note_step(std::uint64_t key) noexcept
 	}
 }
 
+/* One audit of the memory layer's executable-mapping counts: every record
+ * holds exactly the executable guest-code words that name it, and no
+ * departure found nothing to count out. A mismatch of an audit that held every
+ * address space at once is a bug in the accounting, never a race, so the guest
+ * run that sees one fails (tests/integration/aot/run_aot_guest.py). */
+void run_count_audit() noexcept
+{
+	const auto audit = ::uml::memory::audit_executable_counts();
+	if (!audit.exact) {
+		counters::audit_skipped.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	counters::audit_runs.fetch_add(1, std::memory_order_relaxed);
+	counters::audit_records.store(audit.records, std::memory_order_relaxed);
+	counters::audit_last_mismatches.store(audit.mismatches,
+		std::memory_order_relaxed);
+	counters::audit_mismatches.fetch_add(audit.mismatches,
+		std::memory_order_relaxed);
+}
+
 /* Written from a thread of its own: it allocates and does file I/O. */
 void write_report() noexcept
 {
+	static std::mutex writing;
+	const std::lock_guard lock{writing};
 	const char *path = std::getenv("DARWIN_UML_AOT_REPORT");
 	if (path == nullptr)
 		return;
@@ -399,6 +429,12 @@ void write_report() noexcept
 		get(counters::mutable_pages));
 	std::fprintf(file, "stack_free %llu stack_size %llu\n",
 		get(counters::stack_min_free), get(counters::stack_size_at_min));
+	std::fprintf(file, "count_audit runs %llu skipped %llu records %llu "
+		"mismatches %llu last_mismatches %llu anomalies %llu\n",
+		get(counters::audit_runs), get(counters::audit_skipped),
+		get(counters::audit_records), get(counters::audit_mismatches),
+		get(counters::audit_last_mismatches),
+		static_cast<unsigned long long>(::uml::memory::count_anomalies()));
 	std::fprintf(file, "refused tbi %llu sp %llu exclusive %llu fp %llu "
 		"short %llu\n",
 		get(counters::refusals[0]), get(counters::refusals[1]),
@@ -452,11 +488,20 @@ void start_reporter() noexcept
 		return;
 	try {
 		std::thread([] {
-			for (;;) {
+			for (unsigned tick = 0;; ++tick) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(500));
+				/* The audit stops the address spaces' mapping changes for
+				 * the length of a scan, so it runs every few ticks. */
+				if (tick % 4 == 0)
+					run_count_audit();
 				write_report();
 			}
 		}).detach();
+		/* A last audit and report when the process ends by exit(). */
+		std::atexit([] {
+			run_count_audit();
+			write_report();
+		});
 	} catch (...) {
 	}
 }

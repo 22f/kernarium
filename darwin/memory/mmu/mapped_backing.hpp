@@ -97,12 +97,22 @@ public:
 	static void executable_mapping_added(void *handle) noexcept;
 	static void executable_mapping_removed(void *handle) noexcept;
 
-#if UML_MEMORY_ALLOCATION_TESTING
+#if UML_MEMORY_ALLOCATION_TESTING || UML_MEMORY_COUNT_AUDIT
 	/* The record's count of executable mappings, and a visit of every record
 	 * of this backing by the number of its page: what an audit recounts
 	 * against. */
 	[[nodiscard]] static std::uint64_t executable_mappings(
 		const void *handle) noexcept;
+	template <typename Visit>
+	void for_each_code_page(Visit &&visit)
+	{
+		const std::lock_guard lock{code_pages_mutex_};
+		for (const auto &[page, record] : code_pages_)
+			if (record)
+				visit(page, record.get());
+	}
+#endif
+#if UML_MEMORY_ALLOCATION_TESTING
 	/* Puts a record in a state no test can reach by mapping: a count and an
 	 * epoch as given (the never-share bit cleared). */
 	static void preset_for_testing(void *handle, std::uint64_t count,
@@ -114,14 +124,6 @@ public:
 		const void *handle) noexcept;
 	static void preset_word_for_testing(void *handle,
 		std::uint64_t word) noexcept;
-	template <typename Visit>
-	void for_each_code_page(Visit &&visit)
-	{
-		const std::lock_guard lock{code_pages_mutex_};
-		for (const auto &[page, record] : code_pages_)
-			if (record)
-				visit(page, record.get());
-	}
 #endif
 
 private:

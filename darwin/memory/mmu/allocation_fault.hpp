@@ -7,6 +7,7 @@
 #ifndef UML_MEMORY_ALLOCATION_TESTING
 #define UML_MEMORY_ALLOCATION_TESTING 0
 #endif
+#include "../count_audit.hpp"
 
 #if UML_MEMORY_ALLOCATION_TESTING
 namespace uml::memory::testing {
@@ -73,9 +74,15 @@ void backing_mapping_destroyed() noexcept;
 #else
 /* Production expands these probes away before semantic analysis. The
  * allocation-site enum and test functions therefore create no ordinary
- * product symbol, load, branch, or call even in an unoptimized build. */
+ * product symbol, load, branch, or call even in an unoptimized build. The
+ * diagnostics build of a guest run keeps the one that counts accounting bugs
+ * (count_audit.hpp reports it). */
 #define UML_MEMORY_ALLOCATION_CHECKPOINT(...) ((void)0)
+#if UML_MEMORY_COUNT_AUDIT
+#define UML_MEMORY_COUNT_ANOMALY() ::uml::memory::note_count_anomaly()
+#else
 #define UML_MEMORY_COUNT_ANOMALY() ((void)0)
+#endif
 #define UML_MEMORY_BACKING_MAPPING_CREATED() ((void)0)
 #define UML_MEMORY_BACKING_MAPPING_DESTROYED() ((void)0)
 #endif
