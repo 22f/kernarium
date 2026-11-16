@@ -1721,12 +1721,13 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 	}
 
 	/* The backing is replaced: the same address, the same offset and the
-	 * kernel's fact, from another backing object that holds other bytes (a
-	 * loop device whose file was swapped, so that a read of the same block
-	 * lands in a new page). It is another frame with another record, and
-	 * nothing filed for the old one answers it, for a guest that maps the
-	 * new backing from the start and for one that has the old one under it
-	 * and is given the new. */
+	 * kernel's fact, from another backing object that holds other bytes. This
+	 * models what a loop device whose file was swapped would do to the host (a
+	 * read of the same block lands in a new page, under the same mapping
+	 * facts): another frame with another record. No loop device and no kernel
+	 * is operated here. Nothing filed for the old frame answers the new one,
+	 * for a guest that maps the new backing from the start and for one that
+	 * has the old one under it and is given the new. */
 	{
 		aot::clear_shared_verdicts();
 		SharedFrame frame{image, generation++};

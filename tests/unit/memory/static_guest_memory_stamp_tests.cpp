@@ -112,6 +112,24 @@ void test_the_stamp_says_whether_the_page_may_be_shared()
 	require(darwin_uml_static_vm_destroy(generation) == 0);
 }
 
+/* How the host before the fact read the kernel's `guest_code`, as that host's
+ * source has it (darwin/memory/mmu/address_space.cpp at 872c64c7, in
+ * darwin_uml_static_vm_map and _map_generation: `guest_code != 0`). Nothing
+ * here runs that host or a kernel of that time or of this: the rule is a
+ * reading of the earlier source, kept as a function so that this host's
+ * decoding of every value is held against it. */
+constexpr bool earlier_host_reads_guest_code(int value)
+{
+	return value != 0;
+}
+
+/* The values a kernel before the fact passes (0 and 1) and the ones a kernel
+ * with it passes (also 3), and the others the ABI's bit set allows. */
+constexpr bool kernel_before_the_fact_passes(int value)
+{
+	return value == 0 || value == 1;
+}
+
 /* A kernel of another version of the bridge meets this host. The ABI's
  * `guest_code` is a bit set, and a host and a kernel of different versions
  * agree on every value either may pass. A kernel from before the fact passes
@@ -120,7 +138,9 @@ void test_the_stamp_says_whether_the_page_may_be_shared()
  * reads any nonzero value as guest code, agrees), and the fact is bit 1 with
  * bit 0 and nothing else. So the older kernel on this host is never told a
  * page is immutable, and the newer kernel on the earlier host loses nothing it
- * had: its pages are code, and the fact it adds is not read. */
+ * had: its pages are code, and the fact it adds is not read. This row is this
+ * host's decoding judged against the earlier host's rule as that source reads;
+ * a mixed pair of host and kernel is not run. */
 void test_kernels_of_other_versions_agree_with_this_host_on_every_value()
 {
 	constexpr unsigned long generation = 604;
@@ -135,12 +155,12 @@ void test_kernels_of_other_versions_agree_with_this_host_on_every_value()
 		ExtendedCodePageStamp stamp{};
 		const bool found = stamp_of(memory, base + code * page, stamp);
 		/* The earlier host's reading: any nonzero value is guest code. */
-		require(found == (code != 0));
+		require(found == earlier_host_reads_guest_code(code));
 		/* This host's fact: bit 1 with bit 0. Kernels that never set bit 1
 		 * (the values 0 and 1) never produce it. */
 		const bool immutable = found && stamp.immutable;
 		require(immutable == ((code & 3) == 3));
-		if (code <= 1)
+		if (kernel_before_the_fact_passes(code))
 			require(!immutable && !(found && stamp.shareable));
 		std::printf("guest_code %d: code %d immutable %d\n", code,
 			found ? 1 : 0, immutable ? 1 : 0);
