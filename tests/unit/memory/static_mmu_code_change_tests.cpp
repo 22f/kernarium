@@ -483,6 +483,115 @@ void test_a_published_page_moves_its_stamp()
 	require(darwin_uml_static_vm_destroy(generation) == 0);
 }
 
+/* The kernel's immutable fact travels in bit 1 of `guest_code` and means
+ * something only for guest code (bit 0). A caller that passes 0 or 1 never
+ * sets it, and 3 does. The fact belongs to the mapping: changing it replaces
+ * the mapping, which a translator sees as a mapping change, but it changes
+ * neither the bytes nor the right to execute them, so it publishes no code
+ * change and moves no stamp. A replay of the same fact changes nothing. */
+void test_the_immutable_fact_replaces_a_mapping_without_a_code_change()
+{
+	constexpr unsigned long generation = 509;
+	constexpr unsigned long base = 0x180'0000;
+	ScratchBacking backing{backing_name, 8 * page};
+	map(generation, base, backing, 0, 4, rwx, 1);
+	require(darwin_uml_static_vm_activate(generation) == 0);
+	Observer seen{generation};
+
+	void *handle = nullptr;
+	darwin_uml_static_code_page_stamp before{};
+	require(darwin_uml_static_vm_code_page(generation, base + page, &handle,
+		&before) == DARWIN_UML_STATIC_TRANSLATED);
+	const auto moved = [&] {
+		darwin_uml_static_code_page_stamp now{};
+		require(darwin_uml_static_vm_code_page_stamp(handle, &now) == 0);
+		return now.version != before.version || now.identity != before.identity;
+	};
+
+	/* The fact on for one page. */
+	map(generation, base + page, backing, page, 1, rwx, 3);
+	seen.consume();
+	require_code(seen, 0, 0);
+	require(!seen.mapping_untracked && seen.mapping.size() == 1 &&
+		seen.mapping[0].address == base + page &&
+		seen.mapping[0].length == page);
+	require(!moved());
+
+	/* Again: the same mapping, nothing to publish. */
+	map(generation, base + page, backing, page, 1, rwx, 3);
+	seen.consume();
+	require_code(seen, 0, 0);
+	require(seen.mapping.empty());
+
+	/* Bit 1 without bit 0 is guest code and never immutable; as it is the
+	 * same mapping as the unflagged one, it publishes nothing for the pages
+	 * that are not flagged. */
+	map(generation, base + 2 * page, backing, 2 * page, 1, rwx, 2);
+	seen.consume();
+	require_code(seen, 0, 0);
+	require(seen.mapping.empty());
+
+	/* A fact that goes off again replaces the mapping again, and so does
+	 * the protection round trip of a flagged page not at all. */
+	protect(base + page, 1, rx);
+	protect(base + page, 1, rwx);
+	map(generation, base + page, backing, page, 1, rwx, 1);
+	seen.consume();
+	require_code(seen, 0, 0);
+	require(!seen.mapping_untracked && !seen.mapping.empty());
+	require(!moved());
+
+	/* Not guest code, flagged or not: a page that is not code is not made
+	 * code by the fact. */
+	map(generation, base + 3 * page, backing, 3 * page, 1, rwx, 0);
+	seen.consume();
+	require_code(seen, base + 3 * page, 1);
+	void *plain = nullptr;
+	darwin_uml_static_code_page_stamp unused{};
+	require(darwin_uml_static_vm_code_page(generation, base + 3 * page,
+		&plain, &unused) != DARWIN_UML_STATIC_TRANSLATED);
+	require(darwin_uml_static_vm_destroy(generation) == 0);
+}
+
+/* Two mappings of one frame that disagree on the fact still name one
+ * physical-page record: the stamp and the code history are the frame's, the
+ * fact is the mapping's. */
+void test_mappings_of_one_frame_that_disagree_share_its_record()
+{
+	constexpr unsigned long generation = 510;
+	constexpr unsigned long base = 0x190'0000;
+	ScratchBacking backing{backing_name, 4 * page};
+	map(generation, base, backing, page, 1, rwx, 1);
+	map(generation, base + 4 * page, backing, page, 1, rwx, 3);
+	map(generation, base + 8 * page, backing, page, 1, rx, 3);
+	require(darwin_uml_static_vm_activate(generation) == 0);
+
+	std::array<void *, 3> handles{};
+	std::array<darwin_uml_static_code_page_stamp, 3> stamps{};
+	const std::array<unsigned long, 3> addresses{base, base + 4 * page,
+		base + 8 * page};
+	for (std::size_t index = 0; index < handles.size(); ++index)
+		require(darwin_uml_static_vm_code_page(generation, addresses[index],
+			&handles[index], &stamps[index]) == DARWIN_UML_STATIC_TRANSLATED);
+	for (std::size_t index = 1; index < handles.size(); ++index) {
+		require(handles[index] == handles[0]);
+		require(stamps[index].identity == stamps[0].identity &&
+			stamps[index].version == stamps[0].version);
+	}
+
+	/* One of them leaving does not take the frame's record from the others. */
+	unmap(generation, base + 4 * page, 1);
+	void *remaining = nullptr;
+	darwin_uml_static_code_page_stamp stamp{};
+	require(darwin_uml_static_vm_code_page(generation, base, &remaining,
+		&stamp) == DARWIN_UML_STATIC_TRANSLATED);
+	require(remaining == handles[0] && stamp.identity == stamps[0].identity);
+	require(darwin_uml_static_vm_code_page(generation, base + 8 * page,
+		&remaining, &stamp) == DARWIN_UML_STATIC_TRANSLATED);
+	require(remaining == handles[0] && stamp.identity == stamps[0].identity);
+	require(darwin_uml_static_vm_destroy(generation) == 0);
+}
+
 /* A kernel write into a guest-code page, the bytes a 4 KiB uaccess copies
  * back from the kernel's alias, lands either way. It publishes no code change
  * until code whose fetch is coherent with every store (x86) is about to run:
@@ -560,6 +669,8 @@ int main()
 	test_a_flush_publishes_the_whole_address_space();
 	test_discarding_a_stale_page_publishes_it();
 	test_a_published_page_moves_its_stamp();
+	test_the_immutable_fact_replaces_a_mapping_without_a_code_change();
+	test_mappings_of_one_frame_that_disagree_share_its_record();
 	test_a_kernel_write_publishes_once_x86_code_may_run();
 	std::puts("Static MMU code change tests passed");
 	return 0;

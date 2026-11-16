@@ -102,6 +102,9 @@ struct PageMapping final {
 	int protection;
 	bool guest_code;
 	bool guest_writable;
+	/* The kernel's immutable fact for this mapping (BackingSlots keeps it in
+	 * the slot's key, since a word has no bit for it). */
+	bool immutable;
 };
 
 [[nodiscard]] int protection_of(const FillIndex::Fields &fields) noexcept
@@ -125,7 +128,7 @@ struct PageMapping final {
 	return PageMapping{entry.backing,
 		fields.host - reinterpret_cast<std::uintptr_t>(entry.backing->base()),
 		entry.fd, protection_of(fields), fields.guest_code,
-		fields.guest_writable};
+		fields.guest_writable, entry.immutable};
 }
 
 /* What the generation maps at `page`. For a holder of its lock. */
@@ -309,7 +312,8 @@ private:
 	return left.backing == right.backing && left.offset == right.offset &&
 		left.fd == right.fd && left.protection == right.protection &&
 		left.guest_code == right.guest_code &&
-		left.guest_writable == right.guest_writable;
+		left.guest_writable == right.guest_writable &&
+		left.immutable == right.immutable;
 }
 
 [[nodiscard]] bool same_mapping(
@@ -378,7 +382,7 @@ void commit_planned_pages(GenerationState &state,
 		const auto old_slot = FillIndex::decode(old_word).slot;
 		if (page.final) {
 			state.backings.add(page.slot, page.address, *page.owner,
-				page.final->fd);
+				page.final->fd, page.final->immutable);
 			state.fill_index.store(page.address,
 				fill_word(*page.final, page.slot));
 			if (!had)
@@ -600,7 +604,7 @@ public:
 	int map(std::uint64_t generation, std::uint64_t address, int fd,
 		std::uint64_t offset,
 		std::uint64_t length, int protection, bool guest_code,
-		bool guest_writable)
+		bool guest_writable, bool guest_immutable)
 	{
 		if ((address | offset | length) % page_size != 0 || length == 0 ||
 		    !stays_in_generation(address, length))
@@ -623,7 +627,7 @@ public:
 			batch.operations.push_back({
 				true, address, length,
 				Mapping{std::move(backing), offset, fd, protection,
-					guest_code, guest_writable}});
+					guest_code, guest_writable, guest_immutable}});
 			return 0;
 		}
 		auto state = state_for(generation);
@@ -631,7 +635,7 @@ public:
 		std::lock_guard lock{state->mappings_mutex};
 		map_locked(*state, address, length,
 			Mapping{std::move(backing), offset, fd, protection,
-				guest_code, guest_writable});
+				guest_code, guest_writable, guest_immutable});
 		return 0;
 	}
 
@@ -1587,13 +1591,15 @@ private:
 						operation.mapping.fd,
 						operation.mapping.protection,
 						operation.mapping.guest_code,
-						operation.mapping.guest_writable}};
+						operation.mapping.guest_writable,
+						operation.mapping.guest_immutable}};
 					if (same_mapping(page.final, next))
 						continue;
 					if (!operation_slot)
 						operation_slot = state.backings.claim(
 							operation.mapping.backing,
-							operation.mapping.fd);
+							operation.mapping.fd,
+							operation.mapping.guest_immutable);
 					changed = true;
 					note_code_change(code, page.address,
 						page.original, next);
@@ -1632,11 +1638,12 @@ private:
 			const std::optional<PageMapping> next{PageMapping{
 				mapping.backing.get(), mapping.offset + position,
 				mapping.fd, mapping.protection, mapping.guest_code,
-				mapping.guest_writable}};
+				mapping.guest_writable, mapping.guest_immutable}};
 			if (same_mapping(previous, next))
 				continue;
 			if (!slot)
-				slot = state.backings.claim(mapping.backing, mapping.fd);
+				slot = state.backings.claim(mapping.backing, mapping.fd,
+					mapping.guest_immutable);
 			note_code_change(code, page_address, previous, next);
 			pages.push_back({page_address, previous, next,
 				&mapping.backing, *slot});
@@ -1670,7 +1677,9 @@ private:
 					mapping->protection != operation.mapping.protection ||
 					mapping->guest_code != operation.mapping.guest_code ||
 					mapping->guest_writable !=
-						operation.mapping.guest_writable;
+						operation.mapping.guest_writable ||
+					mapping->immutable !=
+						operation.mapping.guest_immutable;
 			};
 			if (state.fill_index.scan(operation.address,
 				    operation.address + operation.length, differs))
@@ -2131,6 +2140,15 @@ template<typename Function>
 		[] { uml::memory::reset_mapping_batch(); });
 }
 
+/* The `guest_code` argument of a map call is a small bit set: bit 0 for guest
+ * code and bit 1 for the kernel's fact that the page belongs to a file system
+ * that cannot change under the guest. The fact means something only with
+ * bit 0, and a caller that passes 0 or 1 never sets it. */
+[[nodiscard]] constexpr bool mapping_is_immutable(int guest_code) noexcept
+{
+	return (guest_code & 3) == 3;
+}
+
 template<typename Function>
 [[nodiscard]] std::uint64_t with_address_space_sequence(
 	Function &&function) noexcept
@@ -2166,7 +2184,8 @@ extern "C" int darwin_uml_static_vm_map(void *address, int fd,
 	return with_address_space([&](auto &space) {
 		return space.map(space.active_generation(),
 			reinterpret_cast<std::uintptr_t>(address), fd, offset, length,
-			protection, guest_code != 0, guest_writable != 0);
+			protection, guest_code != 0, guest_writable != 0,
+			mapping_is_immutable(guest_code));
 	});
 }
 
@@ -2178,7 +2197,8 @@ extern "C" int darwin_uml_static_vm_map_generation(
 	return with_address_space([&](auto &space) {
 		return space.map(generation,
 			reinterpret_cast<std::uintptr_t>(address), fd, offset,
-			length, protection, guest_code != 0, guest_writable != 0);
+			length, protection, guest_code != 0, guest_writable != 0,
+			mapping_is_immutable(guest_code));
 	});
 }
 
