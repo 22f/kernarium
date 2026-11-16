@@ -151,6 +151,24 @@ target_compile_definitions(uml_static_mmu_code_holder_tests PRIVATE
 uml_add_unit_test(NAME static-mmu-code-holder
     COMMAND uml_static_mmu_code_holder_tests LABELS tsan)
 
+# The counters reporter's start leaves the caller's signal mask as it found it
+# when an allocation fails, before and after the signals are blocked.
+add_executable(uml_code_holder_reporter_tests
+    code_holder_reporter_tests.cpp
+    $<TARGET_OBJECTS:uml_static_mmu_test_variant>)
+target_link_libraries(uml_code_holder_reporter_tests PRIVATE
+    UML::BridgeAbi
+    UML::MemorySharedBacking
+    uml_test_allocation_failure)
+target_include_directories(uml_code_holder_reporter_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/memory/mmu)
+target_compile_definitions(uml_code_holder_reporter_tests PRIVATE
+    UML_MEMORY_ALLOCATION_TESTING=1)
+uml_add_unit_test(NAME code-holder-reporter-path-failure
+    COMMAND uml_code_holder_reporter_tests 1)
+uml_add_unit_test(NAME code-holder-reporter-thread-failure
+    COMMAND uml_code_holder_reporter_tests 2)
+
 # The fill index's word layout and radix table, and the backing slots its
 # words name. The slot test builds real backings.
 add_executable(uml_fill_index_tests fill_index_tests.cpp)

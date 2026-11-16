@@ -10,6 +10,7 @@
 #include <pthread.h>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace uml::memory::code_holders {
 namespace {
@@ -45,25 +46,44 @@ void write_counters(const std::string &path)
 	std::fclose(out);
 }
 
+/* Gives the calling thread back the signal mask it had, on every way out of
+ * the start. */
+class MaskRestore final {
+public:
+	explicit MaskRestore(const sigset_t &previous) noexcept
+		: previous_{previous}
+	{
+	}
+	MaskRestore(const MaskRestore &) = delete;
+	MaskRestore &operator=(const MaskRestore &) = delete;
+	~MaskRestore() { pthread_sigmask(SIG_SETMASK, &previous_, nullptr); }
+
+private:
+	sigset_t previous_;
+};
+
 bool start_report() noexcept
 {
 	const char *path = std::getenv("DARWIN_UML_CODE_HOLDER_COUNTERS");
 	if (path == nullptr || *path == '\0')
 		return false;
 	try {
+		/* Everything that can throw but the thread itself comes before the
+		 * block. */
+		std::string file{path};
 		/* Host signals are the guest's interrupts and must never be
 		 * delivered to this thread; it inherits the blocked mask. */
 		sigset_t all;
 		sigset_t previous;
 		sigfillset(&all);
 		pthread_sigmask(SIG_BLOCK, &all, &previous);
-		std::thread{[file = std::string{path}] {
+		const MaskRestore restore{previous};
+		std::thread{[file = std::move(file)] {
 			for (;;) {
 				write_counters(file);
 				std::this_thread::sleep_for(std::chrono::seconds{1});
 			}
 		}}.detach();
-		pthread_sigmask(SIG_SETMASK, &previous, nullptr);
 		return true;
 	} catch (...) {
 		return false;
