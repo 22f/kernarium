@@ -65,6 +65,10 @@ struct AppEntry {
     /// "transfer" for a file transfer that holds the channel; absent, the
     /// system carries it and it is off.
     var talkBack: String?
+    /// What the preview does of its own once the mock guest has been read:
+    /// "change" turns the screen reader on from Settings' switch, "card" from
+    /// the card's Turn On, so a capture shows a change under way or failed.
+    var talkBackAct: String?
 
     static func fromArguments() -> AppEntry {
         let defaults = UserDefaults.standard
@@ -87,7 +91,8 @@ struct AppEntry {
             displayPoints: defaults.string(forKey: "displayPoints"),
             memoryLimitMiB: defaults.string(forKey: "memoryLimitMiB").flatMap { Int($0) },
             voiceOver: defaults.bool(forKey: "voiceOver"),
-            talkBack: defaults.string(forKey: "talkBack")
+            talkBack: defaults.string(forKey: "talkBack"),
+            talkBackAct: defaults.string(forKey: "talkBackAct")
         )
     }
 
@@ -187,6 +192,7 @@ struct AppEntry {
         case "fails": model.previewScreenReaderFault = .refusesChange
         case "slow": model.previewScreenReaderFault = .slow
         case "transfer": model.previewScreenReaderFault = .transfer
+        case "checking": model.previewScreenReaderFault = .pending
         default:
             break
         }
@@ -699,6 +705,16 @@ struct AppEntry {
     @MainActor
     func applyDeferred(to model: AppModel) async {
         try? await Task.sleep(for: .milliseconds(450))
+        if let talkBackAct {
+            for _ in 0..<40 where model.session.reader.state == nil {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            switch talkBackAct {
+            case "change": model.setScreenReader(true)
+            case "card": model.turnOnScreenReaderFromCard()
+            default: break
+            }
+        }
         switch screen {
         case "create", "create-low-space":
             model.sheet = .create

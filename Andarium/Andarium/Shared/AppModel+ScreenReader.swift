@@ -46,6 +46,7 @@ extension AppModel {
         if let driver {
             answer = await driver.readScreenReader()
         } else {
+            if previewScreenReaderFault == .pending { try? await Task.sleep(for: .seconds(600)) }
             answer = previewScreenReaderFault == .unreadable ? nil : previewScreenReader
         }
         guard session === current, offersScreenReader else { return }
@@ -145,7 +146,7 @@ extension AppModel {
         switch previewScreenReaderFault {
         case .slow: try await Task.sleep(for: .seconds(600))
         case .refusesChange: throw AdbFailure(.io(EIO), activity: .screenReader)
-        case .unreadable, .transfer, nil: break
+        case .unreadable, .transfer, .pending, nil: break
         }
         let after = ScreenReader.state(afterTurningOn: on, state)
         previewScreenReader = after

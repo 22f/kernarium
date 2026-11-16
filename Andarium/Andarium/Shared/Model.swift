@@ -649,7 +649,7 @@ final class AppModel {
         installedService: ScreenReader.services[0], enabledServices: [])
     /// How the preview's mock guest misbehaves, for the states a person sees
     /// of a read or a change that does not work.
-    enum PreviewScreenReaderFault { case unreadable, refusesChange, slow, transfer }
+    enum PreviewScreenReaderFault { case unreadable, refusesChange, slow, transfer, pending }
     @ObservationIgnored var previewScreenReaderFault: PreviewScreenReaderFault?
     /// How often the loop reads while VoiceOver runs; a test shortens it.
     @ObservationIgnored var screenReaderWatchInterval = Duration.seconds(3)
