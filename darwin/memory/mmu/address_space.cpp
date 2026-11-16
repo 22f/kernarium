@@ -2894,6 +2894,29 @@ extern "C" int darwin_uml_static_vm_frame_state(
 	});
 }
 
+extern "C" int darwin_uml_static_vm_execution_context_frame_fill(
+	void *context, const void *code_page, unsigned long address,
+	struct darwin_uml_static_frame_state *state)
+{
+	const auto *entered = static_cast<uml::memory::ExecutionContext *>(context);
+	if (entered == nullptr || !entered->state || state == nullptr)
+		return -1;
+	const auto page =
+		address & ~std::uint64_t{DARWIN_UML_GUEST_PAGE_SIZE - 1U};
+	/* A page that holds a translation has its record's handle; a page that
+	 * cannot (a data mapping of the frame) is resolved by its word. A frame
+	 * with no record yet is a fill too: the record appearing moves it. */
+	const auto fill = code_page != nullptr ?
+		uml::memory::FrameAccounting::fill_state(*entered->state, page,
+			code_page) :
+		uml::memory::FrameAccounting::fill_state(*entered->state, page);
+	if (fill.record == nullptr && fill.backing == nullptr)
+		return -1;
+	*state = {fill.backing, fill.offset, fill.record, fill.alias_changes,
+		fill.other_holder ? 1 : 0};
+	return 0;
+}
+
 extern "C" int darwin_uml_static_vm_frame_state_unchanged(
 	const struct darwin_uml_static_frame_state *state)
 {

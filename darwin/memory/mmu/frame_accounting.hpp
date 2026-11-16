@@ -220,6 +220,11 @@ public:
 	};
 	[[nodiscard]] static FillState fill_state(const GenerationState &state,
 		std::uint64_t page) noexcept;
+	/* The same from the page's record handle, which the caller's own cache
+	 * holds: no lookup, no lock. The record then cannot appear later, and
+	 * only its change count tells the fill to start over. */
+	[[nodiscard]] static FillState fill_state(const GenerationState &state,
+		std::uint64_t page, const void *code_page) noexcept;
 	/* Whether the frame still has the record and alias count `was` read. For
 	 * a caller holding the generation's execution gate, with no lock. */
 	[[nodiscard]] static bool fill_unchanged(const FillState &was) noexcept;

@@ -211,6 +211,24 @@ Known deviations from x86 that remain:
   ([`docs/architecture.md`](../../../../docs/architecture.md#x86-64-frame-accounting)).
   A translator that registers a frame retires the write translations of the
   writer locations the registration names.
+- A translation is built and validated only from a frame its generation holds:
+  the executor registers the frame at the page's location before it reads a
+  byte, and runs nothing from a page whose registration did not settle (an
+  unsettled or failed one gives a transient program, one instruction when no
+  holder stands, rebuilt at the next dispatch; a refused one, a page that is
+  not executable, gives none). Every body records the generation's flush
+  serial with its page stamps, so a flush of the generation makes a body
+  compare its source and register again though no stamp moved.
+- A write fill is tagged when its frame has a holder at another location,
+  whether or not the page it fills is executable, and a store through that
+  entry publishes at every holder: the holders in this generation cool their
+  blocks, those in another generation are published in theirs. A store that
+  writes, through such an alias, into the block that is running leaves the
+  block after the store, as a store at the block's own address does. The
+  ordinary and baked stores and PUSH and CALL do; a store that crosses a page,
+  a vector or bulk store, ENTER and an extended-state store publish but do not
+  stop the running block, so the running block can run old bytes of its own
+  through an alias until its next exit.
 - Every store to a page that holds cached code owes a publication of its own,
   and the program performs it before its next store: another vCPU may
   revalidate the page between two stores, so a program that patches a page

@@ -107,7 +107,7 @@ extern "C" unsigned __int128 uml_x86_64_gadget_cross_page_load(
 extern "C" std::uint32_t uml_x86_64_gadget_cross_page_store(
 	NativeExecutionContext *context, std::uint64_t address,
 	std::uint64_t value, std::uint32_t size) noexcept;
-extern "C" void uml_x86_64_gadget_publish_code_write(
+extern "C" std::uint32_t uml_x86_64_gadget_publish_code_write(
 	NativeExecutionContext *context, std::uint64_t address,
 	std::uint32_t size) noexcept;
 extern "C" void uml_x86_64_gadget_invalidate_code(

@@ -143,6 +143,30 @@ enum class ProgramSourceComparison {
 	fault,
 };
 
+/* Calls visit(page) once for each page of the guest range `program` was read
+ * from, in order. */
+template <typename Visit>
+void for_each_program_page(const Program &program, Visit &&visit)
+{
+	auto address = program.address();
+	auto remaining = program.byte_count();
+	auto previous_page = ~std::uint64_t{};
+	while (remaining != 0) {
+		const auto page = address &
+			~std::uint64_t{DARWIN_UML_GUEST_PAGE_SIZE - 1U};
+		if (page != previous_page) {
+			visit(page);
+			previous_page = page;
+		}
+		const auto count = std::min<std::size_t>(remaining,
+			DARWIN_UML_GUEST_PAGE_SIZE -
+				(address & (DARWIN_UML_GUEST_PAGE_SIZE - 1U)));
+		remaining -= count;
+		address = advance_instruction_pointer(
+			program.execution_mode(), address, count);
+	}
+}
+
 /* A page stamp certifies only the bytes read after it was taken: a store that
  * lands later moves the stamp, and one that landed earlier is already visible
  * in the bytes. Every caller therefore takes the stamp before the source it
@@ -152,6 +176,9 @@ enum class ProgramSourceComparison {
 	void *execution_context) noexcept
 {
 	ProgramCodeStamps result;
+	/* Before the page stamps: a walk of the generation moves the serial, and
+	 * a stamp recorded under another serial never stamp-hits. */
+	result.flush_serial = memory.flush_serial(execution_context);
 	auto address = program.address();
 	auto remaining = program.byte_count();
 	auto previous_page = ~std::uint64_t{};
@@ -321,6 +348,60 @@ struct CodePageRegistries final {
 	}
 };
 
+/* What registering the frame of a page returned. */
+enum class FrameRegistration : std::uint8_t {
+	/* The holder stands and nothing is owed. */
+	settled,
+	/* The holder stands, but a participant that could still land a store
+	 * through a write translation retired for it is stuck inside the engine
+	 * (or the memory cannot say the debt was cleared). */
+	unsettled,
+	/* Nothing was registered. */
+	failed,
+	/* The page is not translatable at this location, or the generation is
+	 * gone. */
+	refused,
+};
+
+/* Registers the frame the page at `page` maps as held by this generation, and
+ * retires and waits out the write translations the registration owes
+ * (frame_accounting.hpp), all before the caller reads a byte of the page. */
+[[nodiscard]] FrameRegistration hold_frame(
+	::uml::memory::GuestAddressSpace &memory, void *execution_context,
+	CodePageRegistries *registries, std::uint64_t page,
+	ProgramCacheDiagnostics &diagnostics) noexcept
+{
+	++diagnostics.holder_registrations;
+	std::array<::uml::memory::FrameDebt, 16> debts{};
+	const auto hold = memory.hold_code_frame(
+		page, execution_context, debts.data(), debts.size());
+	switch (hold.result) {
+	case ::uml::memory::FrameHoldResult::settled:
+		return FrameRegistration::settled;
+	case ::uml::memory::FrameHoldResult::refused:
+		return FrameRegistration::refused;
+	case ::uml::memory::FrameHoldResult::failed:
+		return FrameRegistration::failed;
+	case ::uml::memory::FrameHoldResult::owed:
+		break;
+	}
+	const auto *self =
+		registries != nullptr ? &registries->participant : nullptr;
+	bool complete = true;
+	for (std::size_t index = 0; index < std::min(hold.owed, debts.size());
+	     ++index) {
+		/* A generation no executor holds a registry for has no write
+		 * translation to retire. */
+		if (const auto registry = CodePageRegistry::find(debts[index].generation);
+		    registry && !registry->retire_and_wait(debts[index].page, self).settled)
+			complete = false;
+	}
+	if (!complete)
+		return FrameRegistration::unsettled;
+	memory.clear_code_debt(page, execution_context, hold);
+	return FrameRegistration::settled;
+}
+
 /* Holds a translation's possible pages in the registry while their bytes are
  * read, so any store another executor has already translated for them lands
  * first. A cached program is at most maximum_cached_source_bytes long, so a
@@ -329,7 +410,9 @@ struct CodePageRegistries final {
  * pages the program turns out to cover. */
 class CodePageHold final {
 public:
-	CodePageHold(CodePageRegistries *registries, std::uint64_t address,
+	CodePageHold(CodePageRegistries *registries,
+		::uml::memory::GuestAddressSpace &memory, void *execution_context,
+		ProgramCacheDiagnostics &diagnostics, std::uint64_t address,
 		ExecutionMode mode) noexcept
 	{
 		pages_[count_++] = address &
@@ -341,13 +424,22 @@ public:
 			~std::uint64_t{DARWIN_UML_GUEST_PAGE_SIZE - 1U};
 		if (last != pages_[0])
 			pages_[count_++] = last;
-		if (registries == nullptr || !registries->current)
-			return;
-		registry_ = registries->current.get();
-		for (std::size_t index = 0; index < count_; ++index)
-			if (!registry_->add(pages_[index], &registries->participant)
-				    .settled)
+		if (registries != nullptr && registries->current) {
+			registry_ = registries->current.get();
+			for (std::size_t index = 0; index < count_; ++index)
+				if (!registry_->add(pages_[index], &registries->participant)
+					    .settled)
+					settled_ = false;
+		}
+		/* The frame of each page, registered whether or not the cache can
+		 * hold the translation, so that a store through any alias of it
+		 * reaches this generation. */
+		for (std::size_t index = 0; index < count_; ++index) {
+			frames_[index] = hold_frame(memory, execution_context, registries,
+				pages_[index], diagnostics);
+			if (frames_[index] == FrameRegistration::unsettled)
 				settled_ = false;
+		}
 	}
 	~CodePageHold()
 	{
@@ -370,8 +462,22 @@ public:
 	 * once and never cached. */
 	[[nodiscard]] bool settled() const noexcept { return settled_; }
 
+	/* The registration of the frame of page `index` of pages(). */
+	[[nodiscard]] FrameRegistration frame(std::size_t index) const noexcept
+	{
+		return frames_[index];
+	}
+	/* Whether the page was registered without being held: refused or failed,
+	 * so a program that covers it has no holder there. */
+	[[nodiscard]] bool unheld(std::size_t index) const noexcept
+	{
+		return frames_[index] == FrameRegistration::refused ||
+			frames_[index] == FrameRegistration::failed;
+	}
+
 private:
 	std::array<std::uint64_t, 2> pages_{};
+	std::array<FrameRegistration, 2> frames_{};
 	std::size_t count_{};
 	CodePageRegistry *registry_{};
 	bool settled_{true};
@@ -385,6 +491,7 @@ private:
 struct HeldCodeStamps final {
 	std::array<::uml::memory::CodePageStamp, 2> stamps{};
 	std::array<bool, 2> present{};
+	std::uint64_t flush_serial{};
 };
 
 [[nodiscard]] HeldCodeStamps capture_held_code_stamps(
@@ -392,6 +499,8 @@ struct HeldCodeStamps final {
 	std::span<const std::uint64_t> pages, void *execution_context) noexcept
 {
 	HeldCodeStamps result;
+	/* Before the page stamps, as in capture_program_code_stamps. */
+	result.flush_serial = memory.flush_serial(execution_context);
 	for (std::size_t index = 0; index < pages.size(); ++index)
 		result.present[index] = memory.code_page_stamp(
 			pages[index], execution_context, result.stamps[index]);
@@ -415,6 +524,7 @@ struct HeldCodeStamps final {
 	const HeldCodeStamps &held) noexcept
 {
 	ProgramCodeStamps result;
+	result.flush_serial = held.flush_serial;
 	auto address = program.address();
 	auto remaining = program.byte_count();
 	auto previous_page = ~std::uint64_t{};
@@ -2051,6 +2161,34 @@ private:
 			++diagnostics.validation_hits;
 			return Validation::valid;
 		}
+		if (recorded.complete && current_stamps.complete &&
+		    recorded.flush_serial != current_stamps.flush_serial &&
+		    recorded.count == current_stamps.count &&
+		    recorded.pages == current_stamps.pages)
+			++diagnostics.flush_serial_misses;
+
+		/* The body may run only where its pages are registered holders of
+		 * their frames: register them now, before a byte of the source is
+		 * read, so a store through any alias either lands before the
+		 * comparison or publishes here. A registration that is unsettled or
+		 * failed leaves the body undecided; one that is refused means the
+		 * body cannot run at this location. */
+		FrameRegistration registered = FrameRegistration::settled;
+		for_each_program_page(program, [&](std::uint64_t page) {
+			const auto result = hold_frame(
+				memory, execution_context, registries_, page, diagnostics);
+			/* settled < unsettled < failed < refused */
+			if (result > registered)
+				registered = result;
+		});
+		if (registered == FrameRegistration::refused) {
+			++diagnostics.walked_refusals;
+			return Validation::stale;
+		}
+		if (registered != FrameRegistration::settled) {
+			++diagnostics.validation_registration_races;
+			return Validation::race;
+		}
 
 		switch (compare_program_source(memory, program,
 			program.source())) {
@@ -2497,8 +2635,8 @@ ProgramSelection Executor::select_program(
 		};
 	}
 	const CodePageHold hold{
-		storage_->cache_ready ? &storage_->registries : nullptr, address,
-		mode};
+		storage_->cache_ready ? &storage_->registries : nullptr, memory,
+		storage_->execution_context, storage_->diagnostics, address, mode};
 	/* The address space counts the stores that land on these pages from
 	 * here until the program is stored, so that a build a store landed
 	 * across is not kept for others to adopt. After the hold, so that every
@@ -2515,8 +2653,12 @@ ProgramSelection Executor::select_program(
 	 * ahead of the read or moves the stamp this reads. */
 	const auto held_stamps = capture_held_code_stamps(
 		memory, hold.pages(), storage_->execution_context);
-	auto built = build(memory, address, mode, maximum_instructions, links,
-		storage_->checked);
+	/* A first page without a holder runs one instruction at a time: no byte
+	 * a program fetches then lies after a store it performs, which is what
+	 * a holder would have guaranteed. */
+	const bool first_unheld = hold.unheld(0);
+	auto built = build(memory, address, mode,
+		first_unheld ? 1U : maximum_instructions, links, storage_->checked);
 	if (built.status != BuildStatus::built) {
 		storage_->programs.cancel_selection();
 		return {
@@ -2537,6 +2679,37 @@ ProgramSelection Executor::select_program(
 			.cache_hit = false,
 		};
 	};
+	/* A page the program covers that was registered without being held (the
+	 * second page of a block that crosses into it) makes the program
+	 * transient and one instruction long, like the first page's. */
+	bool covers_unheld = first_unheld;
+	bool covers_refused = hold.frame(0) == FrameRegistration::refused;
+	for_each_program_page(built.program, [&](std::uint64_t page) {
+		for (std::size_t index = 0; index < hold.pages().size(); ++index)
+			if (hold.pages()[index] == page && hold.unheld(index)) {
+				covers_unheld = true;
+				covers_refused = covers_refused ||
+					hold.frame(index) == FrameRegistration::refused;
+			}
+	});
+	if (covers_unheld) {
+		++storage_->diagnostics.unregistered_transients;
+		if (covers_refused)
+			++storage_->diagnostics.walked_refusals;
+		if (!first_unheld) {
+			built = build(memory, address, mode, 1U, links, storage_->checked);
+			if (built.status != BuildStatus::built) {
+				storage_->programs.cancel_selection();
+				return {
+					.status = built.status,
+					.program = nullptr,
+					.fault_address = built.fault_address,
+					.cache_hit = false,
+				};
+			}
+		}
+		return use_transient();
+	}
 	if (!storage_->cache_ready || !pinned || !hold.settled() ||
 		built.program.byte_count() == 0 ||
 		built.program.byte_count() > maximum_cached_source_bytes)

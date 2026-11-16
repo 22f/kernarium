@@ -219,6 +219,17 @@ CodePageRegistry::Settlement CodePageRegistry::add(
 	return settlement;
 }
 
+CodePageRegistry::Settlement CodePageRegistry::retire_and_wait(
+	std::uint64_t page, const Participant *self) noexcept
+{
+	page &= ~std::uint64_t{0xfff};
+	/* Order the registration that owes this against the retirement: a fill
+	 * that read the frame before it sees the retired entry or is waited for. */
+	std::atomic_thread_fence(std::memory_order_seq_cst);
+	retire_write_translations(page);
+	return wait_for_participants(self);
+}
+
 CodePageRegistry::Settlement CodePageRegistry::wait_for_participants(
 	const Participant *self) noexcept
 {

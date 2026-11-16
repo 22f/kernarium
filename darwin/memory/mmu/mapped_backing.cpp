@@ -319,6 +319,12 @@ MappedBacking::FrameRecord *MappedBacking::find_frame_record(
 		std::memory_order_acquire);
 }
 
+const MappedBacking::FrameRecord *MappedBacking::record_of(
+	const void *handle) noexcept
+{
+	return static_cast<const CodePage *>(handle);
+}
+
 std::uint64_t MappedBacking::record_identity(const FrameRecord &record) noexcept
 {
 	return static_cast<const CodePage &>(record).identity;

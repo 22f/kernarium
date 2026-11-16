@@ -739,21 +739,17 @@ void FrameAccounting::clear_debt(GenerationState &state, std::uint64_t page,
 		record->debt_cleared = debt_sequence;
 }
 
-FrameAccounting::FillState FrameAccounting::fill_state(
-	const GenerationState &state, std::uint64_t page) noexcept
+namespace {
+
+/* What the fill reads of a record: the change count first, then the holder
+ * summary, so a holder added in between moves the count past the one read. */
+FrameAccounting::FillState fill_state_of(const GenerationState &state,
+	std::uint64_t page, const MappedBacking::FrameRecord &record,
+	FrameAccounting::FillState result) noexcept
 {
-	FillState result{nullptr, 0, false, nullptr, 0};
-	const auto frame = frame_of_word(state, page, state.fill_index.lookup(page));
-	if (frame.backing == nullptr)
-		return result;
-	result.backing = frame.backing;
-	result.offset = frame.offset;
-	auto *record = frame.backing->find_frame_record(frame.offset);
-	if (record == nullptr)
-		return result;
-	result.record = record;
-	result.alias_changes = record->alias_changes.load(std::memory_order_acquire);
-	const auto summary = record->summary.load(std::memory_order_acquire);
+	result.record = &record;
+	result.alias_changes = record.alias_changes.load(std::memory_order_acquire);
+	const auto summary = record.summary.load(std::memory_order_acquire);
 	switch (kind_of(summary)) {
 	case Kind::none:
 		break;
@@ -768,15 +764,45 @@ FrameAccounting::FillState FrameAccounting::fill_state(
 	return result;
 }
 
+} // namespace
+
+FrameAccounting::FillState FrameAccounting::fill_state(
+	const GenerationState &state, std::uint64_t page) noexcept
+{
+	FillState result{nullptr, 0, false, nullptr, 0};
+	const auto frame = frame_of_word(state, page, state.fill_index.lookup(page));
+	if (frame.backing == nullptr)
+		return result;
+	result.backing = frame.backing;
+	result.offset = frame.offset;
+	auto *record = frame.backing->find_frame_record(frame.offset);
+	if (record == nullptr)
+		return result;
+	return fill_state_of(state, page, *record, result);
+}
+
+FrameAccounting::FillState FrameAccounting::fill_state(
+	const GenerationState &state, std::uint64_t page,
+	const void *code_page) noexcept
+{
+	FillState result{nullptr, 0, false, nullptr, 0};
+	if (code_page == nullptr)
+		return result;
+	return fill_state_of(state, page, *MappedBacking::record_of(code_page),
+		result);
+}
+
 bool FrameAccounting::fill_unchanged(const FillState &was) noexcept
 {
+	if (was.record != nullptr)
+		/* Records are never destroyed or replaced. */
+		return static_cast<const MappedBacking::FrameRecord *>(was.record)
+			->alias_changes.load(std::memory_order_acquire) ==
+			was.alias_changes;
 	if (was.backing == nullptr)
 		return true;
-	const auto *record = was.backing->find_frame_record(was.offset);
-	if (record != was.record)
-		return false;
-	return record == nullptr || record->alias_changes.load(
-		std::memory_order_acquire) == was.alias_changes;
+	/* A record that has appeared counts as moved. */
+	return was.backing->find_frame_record(was.offset) == nullptr;
 }
 
 namespace {

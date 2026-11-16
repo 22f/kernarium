@@ -225,7 +225,14 @@ struct darwin_uml_static_frame_state {
 int darwin_uml_static_vm_frame_state(
 	void *context, unsigned long generation, unsigned long address,
 	struct darwin_uml_static_frame_state *state);
-/* 1 while the two words the state read have not moved. */
+/* The same for a caller with an entered execution context, which holds no
+ * lock: through the page's code-page handle when it has one, by the page's
+ * word when it has none (a data mapping of the frame). 0, or -1 when it cannot
+ * say. */
+int darwin_uml_static_vm_execution_context_frame_fill(
+	void *context, const void *code_page, unsigned long address,
+	struct darwin_uml_static_frame_state *state);
+/* 1 while the words the state read have not moved. */
 int darwin_uml_static_vm_frame_state_unchanged(
 	const struct darwin_uml_static_frame_state *state);
 

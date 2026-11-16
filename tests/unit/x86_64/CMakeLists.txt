@@ -95,6 +95,21 @@ uml_add_unit_test(
     COMMAND uml_x86_64_gadget_shared_tests bound
     LABELS cpu;x86-64;tsan)
 
+# The gadget engine over a frame that more than one address maps, on the real
+# static MMU: a store through another address reaches the translation, the
+# write entry's tag follows the frame's holders, and a flush or a failed
+# registration leaves nothing runnable unregistered.
+uml_add_x86_64_test_binary(uml_x86_64_gadget_alias_tests
+    x86_64_gadget_alias_tests.cpp GADGETS
+    LIBRARIES UML::MemoryTestComponent)
+target_include_directories(uml_x86_64_gadget_alias_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/memory
+    ${PROJECT_SOURCE_DIR}/darwin/memory/mmu)
+uml_add_unit_test(
+    NAME x86-64-gadget-alias
+    COMMAND uml_x86_64_gadget_alias_tests
+    LABELS cpu;x86-64)
+
 # The cache's handling of destroyed address-space generations alone, cheap
 # enough for the sanitizer trees.
 uml_add_unit_test(

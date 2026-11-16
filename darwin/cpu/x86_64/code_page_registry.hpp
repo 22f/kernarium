@@ -146,6 +146,13 @@ public:
 	[[nodiscard]] Settlement add(
 		std::uint64_t page, const Participant *self) noexcept;
 	void remove(std::uint64_t page) noexcept;
+	/* The debt of a frame registration (frame_accounting.hpp): retires every
+	 * participant's write translation for `page`, an address of this
+	 * generation that another translator of its frame may write through, and
+	 * waits for the participants inside the engine to leave once. The same
+	 * wait and escalation as `add`, for a page this registry does not count. */
+	[[nodiscard]] Settlement retire_and_wait(
+		std::uint64_t page, const Participant *self) noexcept;
 
 	/* Whether the participant a registration waited out as `serial` at
 	 * `epoch` has since left the engine or the registry. */

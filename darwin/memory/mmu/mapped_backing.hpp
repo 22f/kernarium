@@ -168,6 +168,8 @@ public:
 	 * record index exists has frames with writers (prepare_writers), so the
 	 * index is all that is looked in. */
 	[[nodiscard]] FrameRecord *find_frame_record(std::uint64_t offset) noexcept;
+	/* The record a code-page handle (code_page_handle) names. */
+	[[nodiscard]] static const FrameRecord *record_of(const void *handle) noexcept;
 	/* The record's stamp identity, unique and never reused. */
 	[[nodiscard]] static std::uint64_t record_identity(
 		const FrameRecord &record) noexcept;
