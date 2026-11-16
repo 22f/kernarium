@@ -392,6 +392,15 @@ void commit_planned_pages(GenerationState &state,
 		const auto old_word = state.fill_index.lookup(page.address);
 		const bool had = old_word != 0;
 		const auto old_slot = FillIndex::decode(old_word).slot;
+#if DARWIN_UML_X86_64_GUEST
+		/* A page of the overflow table that maps another backing lets go of
+		 * the old one when its entry is overwritten; the accounting below
+		 * still takes the old frame's location out of it. */
+		std::shared_ptr<MappedBacking> retained;
+		if (had && page.final && old_slot == BackingSlots::overflow &&
+		    page.slot == BackingSlots::overflow)
+			retained = state.backings.owner(old_slot, page.address);
+#endif
 		if (page.final) {
 			state.backings.add(page.slot, page.address, *page.owner,
 				page.final->fd);

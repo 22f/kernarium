@@ -405,6 +405,40 @@ void test_every_allocation_failure_rolls_back_the_reservation()
 	baseline.clean("M8");
 }
 
+/* M1 (overflow): the only page of a backing in the generation's overflow table
+ * is replaced by a page of another backing. The table lets go of the old
+ * backing at that replacement, and its writer location must still be taken
+ * out of the old backing's frame. */
+void test_overflow_replacement_keeps_the_old_backing_for_the_removal()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0x600'0000;
+	constexpr unsigned slots = uml::memory::BackingSlots::slot_count;
+	std::vector<std::unique_ptr<ScratchBacking>> backings;
+	for (unsigned index = 0; index <= slots + 1; ++index)
+		backings.push_back(std::make_unique<ScratchBacking>(
+			"uml-frame-accounting-overflow-XXXXXX", page));
+	Domain domain{71'004};
+	domain.run([&] {
+		/* One page of each backing: the last of them lies in the overflow
+		 * table. */
+		for (unsigned index = 0; index <= slots; ++index)
+			require(map(660, base + index * page, *backings[index], 0, 1,
+				rw, 0) == 0);
+		audit("overflow mapped", slots + 1);
+		require(writes(*backings[slots], 0, 660, base + slots * page));
+		/* The page of the overflow table now maps another backing. */
+		require(map(660, base + slots * page, *backings[slots + 1], 0, 1,
+			rw, 0) == 0);
+		audit("overflow replaced", slots + 1);
+		require(writers_of(*backings[slots], 0) == 0 &&
+			writes(*backings[slots + 1], 0, 660, base + slots * page),
+			"the replaced page kept a location in the old backing");
+	});
+	domain.retire();
+	baseline.clean("M1 overflow");
+}
+
 } // namespace
 
 int main()
@@ -414,6 +448,7 @@ int main()
 	test_flush_and_destroy_walk_differently();
 	test_reservation_is_idempotent_and_abandoned_plans_roll_back();
 	test_every_allocation_failure_rolls_back_the_reservation();
+	test_overflow_replacement_keeps_the_old_backing_for_the_removal();
 	uml::memory::set_domain_provider(nullptr);
 	std::puts("frame accounting tests passed");
 	return EXIT_SUCCESS;
