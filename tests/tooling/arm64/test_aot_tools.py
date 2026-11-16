@@ -145,9 +145,11 @@ class FakeElf:
 
 
 def library_of(words: list[int], functions: list[tuple[int, int]],
-               memory_call: str = "inline") -> "rewrite.Library":
+               memory_call: str = "inline", base: int = 0x1000
+               ) -> "rewrite.Library":
     layout = rewrite.read_layout(rewrite.LAYOUT_HEADER)
-    return rewrite.Library(0, "/test/lib.so", FakeElf(words, functions),
+    return rewrite.Library(0, "/test/lib.so",
+                           FakeElf(words, functions, base),
                            a64decode.Decoder(), layout,
                            memory_call=memory_call)
 
@@ -322,6 +324,28 @@ class MemoryCallTests(unittest.TestCase):
         # (untag at the site) and five in the routine
         self.assertEqual(library.stats.census["mem.routine"],
                          (5 + 7) * 4)
+
+
+class ExitAddressWidthTests(unittest.TestCase):
+    """An exit forms its guest address in 32 bits: a library whose text
+    reaches 4 GiB is refused at build time instead of leaving at a wrapped
+    PC."""
+
+    SVC = 0xd4000001
+
+    def test_an_exit_address_beyond_4_gib_is_refused(self) -> None:
+        # The text starts at 0xfffff000: its second page, at 0x100000000,
+        # holds an instruction the engine has to step.
+        words = [NOP] * 1024 + [self.SVC, RET]
+        library = library_of(words, [(4096, 4104)], base=0xfffff000)
+        with self.assertRaises(A.AsmError) as raised:
+            unit_words(library)
+        self.assertIn("4 GiB", str(raised.exception))
+
+    def test_the_last_page_below_4_gib_builds(self) -> None:
+        words = [NOP] * 1020 + [self.SVC, RET]
+        library = library_of(words, [(4080, 4088)], base=0xfffff000)
+        self.assertGreater(len(unit_words(library)), 0)
 
 
 class SimdRegisterFieldTests(unittest.TestCase):

@@ -709,8 +709,15 @@ class Library:
         return False
 
     def _exit_to(self, offset: int, routine: str) -> None:
-        """T0 = the guest offset, then the named exit routine."""
+        """T0 = the guest offset, then the named exit routine. The offset is
+        formed in 32 bits: an exit address beyond that would leave at a
+        wrapped PC, so a build that has one is refused."""
         asm = self.asm
+        if not 0 <= offset < 1 << 32:
+            raise A.AsmError(
+                f"an exit to {offset:#x} does not fit the 32 bits an exit "
+                "address is formed in (a library's text must lie below "
+                "4 GiB)")
         asm.word(A.movz(T0, offset & 0xffff))
         if offset >> 16:
             asm.word(A.movk(T0, (offset >> 16) & 0xffff, 1))
