@@ -19,6 +19,10 @@ and may still have the pages in the GPU's address space, so the pages are
 released behind a fence rather than at destroy time. Hosts without pinned
 memory keep the previous storage paths.
 
+A blob larger than the pages behind it is refused with -EINVAL
+when the context takes the buffer, and the device answers invalid
+parameter instead of mapping the buffer.
+
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 ---
  src/vrend/vrend_decode.c   |   6 +-

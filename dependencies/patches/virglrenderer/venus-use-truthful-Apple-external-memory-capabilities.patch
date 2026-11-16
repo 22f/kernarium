@@ -3,6 +3,9 @@ From: Yi Xie <imxieyi@users.noreply.github.com>
 Date: Sun, 23 Aug 2026 07:04:14 +0900
 Subject: [PATCH] venus: use truthful Apple external-memory capabilities
 
+A blob larger than the shared file behind it is refused when the
+renderer exports it, and the proxy answers the guest with EINVAL,
+so no mapping can reach past the end of the file.
 ---
  src/meson.build                 |   4 +-
  src/venus/vkr_buffer.c          |   1 -
