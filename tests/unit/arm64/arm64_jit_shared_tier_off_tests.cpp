@@ -14,10 +14,12 @@ using namespace uml::emulator::tests;
 /*
  * A budget too small for a shared translation tier leaves none: executors that
  * run the same guest code at the same time each compile it and keep their own
- * validation words, and the tier is never looked in, published to, locked or
- * swept. The tier's counters are the structural proof, since every lookup,
- * refusal and insertion moves one. The tier's own behaviour is in
- * arm64-jit-cache_validation, whose budget funds one.
+ * validation words, and the tier is never looked in, published to, registered
+ * with, locked or swept. Every one of those goes through
+ * SharedTranslationCache::instance(), so the structural proof is that the
+ * process tier is never constructed, observed without constructing it. The
+ * tier's own behaviour is in arm64-jit-cache_validation, whose budget funds
+ * one.
  */
 
 namespace {
@@ -91,38 +93,39 @@ void executors_alive_together_share_nothing()
 	JitMapping mapping{generation, base, backing, 1};
 	StaticGuestMemory memory;
 
-	auto &shared = arm64::SharedTranslationCache::instance();
-	const auto before = shared.statistics();
-	/* Two live executors are what publication needs when there is a tier. */
-	JitExecutor first;
-	JitExecutor second;
-	for (auto *executor : {&first, &second}) {
-		for (unsigned pass = 0; pass < 2; ++pass) {
-			arm64::CpuState cpu{};
-			run_to_system_call(*executor, memory, cpu);
-			require(cpu.registers[0] == 7 && cpu.registers[1] == 9);
-			require(cpu.registers[8] == 33 && cpu.registers[9] == 22);
+	/* Nothing before this point reached the tier: budgets, leases and the
+	 * guard test read geometry only. */
+	require(!arm64::SharedTranslationCache::instance_exists());
+	std::uint64_t installed = 0;
+	{
+		/* Two live executors are what publication needs when there is a
+		 * tier. */
+		JitExecutor first;
+		JitExecutor second;
+		for (auto *executor : {&first, &second}) {
+			for (unsigned pass = 0; pass < 2; ++pass) {
+				arm64::CpuState cpu{};
+				run_to_system_call(*executor, memory, cpu);
+				require(cpu.registers[0] == 7 && cpu.registers[1] == 9);
+				require(cpu.registers[8] == 33 && cpu.registers[9] == 22);
+			}
+			const auto diagnostics = executor->cache_validation_diagnostics();
+			require(diagnostics.translations > 0);
+			require(diagnostics.private_validation_word_installs ==
+				diagnostics.translations);
+			require(diagnostics.shared_validation_word_installs == 0);
+			installed += diagnostics.translations;
 		}
-		const auto diagnostics = executor->cache_validation_diagnostics();
-		require(diagnostics.translations > 0);
-		require(diagnostics.private_validation_word_installs ==
-			diagnostics.translations);
-		require(diagnostics.shared_validation_word_installs == 0);
+		/* Registration, lookups and publications of the compiles above would
+		 * each have constructed it. */
+		require(!arm64::SharedTranslationCache::instance_exists());
 	}
-
-	/* Every lookup, match, refusal and insertion moves a counter. */
-	const auto after = shared.statistics();
-	require(after == before);
-	require(after.matches == 0 && after.misses == 0 &&
-		after.insertions == 0 && after.rejected == 0 &&
-		after.entries == 0);
-	require(shared.allocated_shards() == 0);
+	/* The destructors unregister only from a tier that exists. */
+	require(!arm64::SharedTranslationCache::instance_exists());
 	std::fprintf(stderr,
 		"JIT without a shared tier: %llu blocks installed privately by two "
-		"executors, no lookup or publication\n",
-		static_cast<unsigned long long>(
-			first.cache_validation_diagnostics().translations +
-			second.cache_validation_diagnostics().translations));
+		"executors, the process tier never constructed\n",
+		static_cast<unsigned long long>(installed));
 }
 
 } // namespace
