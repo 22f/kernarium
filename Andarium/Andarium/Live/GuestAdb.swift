@@ -286,7 +286,7 @@ nonisolated struct AdbGuestOperations: Sendable {
     /// Delivers a text message as if from the network (`GuestSms`).
     func sendSms(sender: String, text: String, identifier: String) async -> GuestSms.Outcome {
         guard let command = GuestSms.command(sender: sender, text: text, identifier: identifier),
-              let result = try? await shell(command, limit: .seconds(30)) else { return .failed }
+              let result = try? await shell(command, limit: .seconds(30)) else { return .notConfirmed }
         return GuestSms.outcome(result)
     }
 

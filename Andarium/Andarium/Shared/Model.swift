@@ -1038,11 +1038,11 @@ final class AppModel {
         let identifier = smsRetries.identifier(sender: sender, text: text)
         let outcome = await driver.sendSms(sender: sender, text: text, identifier: identifier)
         // Only a send that was not confirmed may have reached Android: sent again, it keeps its identifier.
-        smsRetries.settle(sender: sender, text: text, identifier: identifier, confirmed: outcome != .failed)
+        smsRetries.settle(sender: sender, text: text, identifier: identifier, confirmed: outcome != .notConfirmed)
         return switch outcome {
         case .handedToAndroid(let parts): .delivered(SmsMessages.delivered(parts: parts))
         case .unsupported: .refused(SmsMessages.unsupported)
-        case .failed: .refused(SmsMessages.failed)
+        case .notConfirmed: .refused(SmsMessages.failed)
         }
     }
 

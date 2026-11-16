@@ -76,11 +76,63 @@ struct GuestSmsTests {
         }
     }
 
-    @Test func outcomesComeFromWhatContentPrinted() {
-        #expect(GuestSms.outcome(ShellResult(stdout: Data("Result: Bundle[{parts=2}]\n".utf8), exitCode: 0)) == .handedToAndroid(parts: 2))
-        #expect(GuestSms.outcome(ShellResult(stderr: Data("Error while accessing provider:android.kernarium.sms\njava.lang.IllegalArgumentException: Unknown authority android.kernarium.sms\n".utf8), exitCode: 0)) == .unsupported)
-        #expect(GuestSms.outcome(ShellResult(stderr: Data("java.lang.SecurityException: no\n".utf8), exitCode: 0)) == .failed)
-        #expect(GuestSms.outcome(ShellResult(exitCode: 1)) == .failed)
+    private static func shell(_ stdout: String = "", stderr: String = "", exit: Int? = 0) -> ShellResult {
+        ShellResult(stdout: Data(stdout.utf8), stderr: Data(stderr.utf8), exitCode: exit)
+    }
+
+    @Test func aCompleteResultOnStdoutIsHandedToAndroid() {
+        #expect(GuestSms.outcome(Self.shell("Result: Bundle[{parts=2}]\n")) == .handedToAndroid(parts: 2))
+        #expect(GuestSms.outcome(Self.shell("Result: Bundle[{parts=1}]\r\n")) == .handedToAndroid(parts: 1))
+        #expect(GuestSms.outcome(Self.shell("Result: Bundle[{parts=1}]")) == .handedToAndroid(parts: 1))
+        #expect(GuestSms.outcome(Self.shell("Result: Bundle[{parts=\(GuestSms.maximumParts)}]\n"))
+            == .handedToAndroid(parts: GuestSms.maximumParts))
+        // A newline of stderr alone is not an error.
+        #expect(GuestSms.outcome(Self.shell("Result: Bundle[{parts=3}]\n", stderr: "\n")) == .handedToAndroid(parts: 3))
+    }
+
+    /// Whatever is short of that is not confirmed: the message may have arrived, or not.
+    @Test func anythingElseIsNotConfirmed() {
+        let result = "Result: Bundle[{parts=2}]\n"
+        let cases: [(String, ShellResult)] = [
+            ("no output", Self.shell()),
+            ("no exit status", Self.shell(result, exit: nil)),
+            ("a failing exit", Self.shell(result, exit: 1)),
+            ("success beside an error", Self.shell(result, stderr: "java.lang.SecurityException: no\n")),
+            ("the result on stderr", Self.shell(stderr: result)),
+            ("a line before", Self.shell("Starting\n" + result)),
+            ("a line after", Self.shell(result + "Done\n")),
+            ("two results", Self.shell(result + result)),
+            ("a space before", Self.shell(" " + result)),
+            ("a truncated result", Self.shell("Result: Bundle[{parts=2")),
+            ("another key", Self.shell("Result: Bundle[{parts=2, x=1}]\n")),
+            ("another key alone", Self.shell("Result: Bundle[{count=2}]\n")),
+            ("no parts", Self.shell("Result: Bundle[{}]\n")),
+            ("no part count", Self.shell("Result: Bundle[{parts=}]\n")),
+            ("zero parts", Self.shell("Result: Bundle[{parts=0}]\n")),
+            ("a sign", Self.shell("Result: Bundle[{parts=+2}]\n")),
+            ("a negative count", Self.shell("Result: Bundle[{parts=-1}]\n")),
+            ("more parts than a text takes", Self.shell("Result: Bundle[{parts=\(GuestSms.maximumParts + 1)}]\n")),
+            ("a count that overflows", Self.shell("Result: Bundle[{parts=99999999999999999999}]\n")),
+            ("full-width digits", Self.shell("Result: Bundle[{parts=\u{FF12}}]\n")),
+            ("a null result", Self.shell("Result: null\n")),
+            ("an error on stdout", Self.shell("Error while accessing provider:android.kernarium.sms\n")),
+            ("a security exception", Self.shell(stderr: "java.lang.SecurityException: only the adb shell may deliver a message\n")),
+            ("an illegal argument", Self.shell(stderr: "java.lang.IllegalArgumentException: not an identifier\n")),
+            ("not UTF-8", ShellResult(stdout: Data([0xff, 0xfe]), exitCode: 0)),
+            ("a failing exit alone", Self.shell(exit: 1)),
+        ]
+        for (name, result) in cases {
+            #expect(GuestSms.outcome(result) == .notConfirmed, Comment(rawValue: name))
+        }
+    }
+
+    @Test func noServiceIsKnownFromWhatContentSaysOfTheAuthority() {
+        let missing = "Error while accessing provider:android.kernarium.sms\njava.lang.IllegalArgumentException: Unknown authority android.kernarium.sms\n"
+        #expect(GuestSms.outcome(Self.shell(stderr: missing)) == .unsupported)
+        #expect(GuestSms.outcome(Self.shell(stderr: "Could not find provider: android.kernarium.sms\n")) == .unsupported)
+        // A result beside it, or a failing exit, says something else happened.
+        #expect(GuestSms.outcome(Self.shell("Result: Bundle[{parts=2}]\n", stderr: missing)) == .notConfirmed)
+        #expect(GuestSms.outcome(Self.shell("Starting\n", stderr: missing)) == .notConfirmed)
     }
 
     @Test func identifiersAreRandomHex() {

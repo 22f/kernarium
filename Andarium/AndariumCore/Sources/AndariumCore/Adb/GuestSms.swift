@@ -119,19 +119,35 @@ public enum GuestSms {
         case handedToAndroid(parts: Int)
         /// The system image has no SMS service.
         case unsupported
-        case failed
+        /// Anything else: the message may or may not have reached Android.
+        case notConfirmed
     }
 
-    /// What the command did. `content` prints the provider's result bundle,
-    /// and reports a failure on stderr whatever its exit status.
+    /// What the command did. The service's answer is its result bundle on
+    /// stdout, alone, after a command that exited 0 and wrote nothing to
+    /// stderr, and its part count is one a text can take. `content` reports a
+    /// failure on stderr whatever its exit status, and a stream can end
+    /// part way, so anything short of that whole is not confirmed.
     public static func outcome(_ result: ShellResult) -> Outcome {
-        let output = String(decoding: result.stdout, as: UTF8.self) + String(decoding: result.stderr, as: UTF8.self)
-        if let match = output.firstMatch(of: /Result: Bundle\[\{parts=([0-9]+)\}\]/), let parts = Int(match.1) {
+        let output = String(decoding: result.stdout, as: UTF8.self)
+        let errors = String(decoding: result.stderr, as: UTF8.self)
+        let silent = errors.allSatisfy(\.isWhitespace)
+        if silent, result.exitCode == 0, let parts = resultParts(output), (1...maximumParts).contains(parts) {
             return .handedToAndroid(parts: parts)
         }
-        if output.contains("Could not find provider") || output.contains("Unknown authority") {
+        if output.allSatisfy(\.isWhitespace), errors.contains("Could not find provider") || errors.contains("Unknown authority") {
             return .unsupported
         }
-        return .failed
+        return .notConfirmed
+    }
+
+    /// The part count of stdout when stdout is exactly the result bundle
+    /// `content call` prints, and nil for any other text.
+    private static func resultParts(_ output: String) -> Int? {
+        var line = Substring(output)
+        // "\r\n" is one Character in Swift.
+        if let last = line.last, last == "\n" || last == "\r\n" { line = line.dropLast() }
+        guard let match = line.wholeMatch(of: /Result: Bundle\[\{parts=([0-9]+)\}\]/) else { return nil }
+        return Int(match.1)
     }
 }
