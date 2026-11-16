@@ -36,7 +36,6 @@ struct BusyOverlay: View {
         // happening when it appears, for a task (a copy of a large file) that can take minutes.
         .accessibilityAddTraits(.isModal)
         .onAppear { AccessibilityNotification.Announcement(state.title).post() }
-        .onAppear { VoiceOver.screenChanged(state.title) }
         .onChange(of: state.result != nil) { _, ended in
             // How it ended, in place of what it was doing.
             if ended { VoiceOver.screenChanged("\(state.title). \(state.detail)") }

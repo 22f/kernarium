@@ -50,7 +50,7 @@ struct EndView: View {
             .buttonStyle(.glass)
             .padding(.top, 14)
             .onChange(of: copied) { _, now in
-                if now { VoiceOver.announce("Report copied") }
+                if now { VoiceOver.announce(String(localized: "Report copied")) }
             }
 
             Spacer(minLength: 24)

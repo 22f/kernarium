@@ -47,7 +47,12 @@ struct LowSpaceOverlay: View {
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
         .accessibilityIdentifier("space-pause")
-        .onAppear { VoiceOver.screenChanged("\(pause.title). \(pause.detail)") }
+        .onAppear { VoiceOver.screenChanged(Self.spoken(pause)) }
+    }
+
+    /// What VoiceOver says as the screen appears: the words the screen shows.
+    static func spoken(_ pause: SpacePause) -> String {
+        "\(SpacePauseWords.title(pause)). \(SpacePauseWords.detail(pause))"
     }
 
     @ViewBuilder

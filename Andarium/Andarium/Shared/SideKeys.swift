@@ -284,7 +284,7 @@ struct ClosedKeys: View {
         .contentShape(Rectangle())
         .accessibilityElement()
         .accessibilityLabel("Side keys")
-        .accessibilityHint("Opens Power, volume, Back, Home and Settings. Actions move the keys.")
+        .accessibilityHint("Opens Power, volume, Back, Home and Settings")
         .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("side-keys")
     }

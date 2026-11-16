@@ -191,7 +191,7 @@ struct BootView: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .contentTransition(.numericText())
-                    .accessibilityLabel(Self.spokenElapsed(frozen ? model.frozenElapsed : Int(timeline.date.timeIntervalSince(startedAt))))
+                    .accessibilityLabel(Self.spokenElapsed(seconds))
             }
         }
         // What is starting and how long it has taken, read as one.
@@ -466,9 +466,9 @@ struct BootView: View {
 
     private static func spokenState(_ state: StepState) -> String {
         switch state {
-        case .done: "Done"
-        case .active: "In progress"
-        case .pending: "Waiting"
+        case .done: String(localized: "Done")
+        case .active: String(localized: "In progress")
+        case .pending: String(localized: "Waiting")
         }
     }
 
@@ -607,7 +607,7 @@ struct ProgressBar: View {
     let value: Double
     var height: CGFloat = 8
     /// What VoiceOver calls the bar: what is in progress.
-    var label = "Progress"
+    var label = String(localized: "Progress")
 
     var body: some View {
         GeometryReader { geo in

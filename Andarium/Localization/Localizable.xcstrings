@@ -1372,6 +1372,28 @@
         }
       }
     },
+    "Accessibility" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アクセシビリティ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "辅助功能"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "輔助使用"
+          }
+        }
+      }
+    },
     "Acknowledgements" : {
       "comment" : "Credits and licenses of the projects the app carries.",
       "localizations" : {
@@ -2021,6 +2043,28 @@
         }
       }
     },
+    "Android is running. The side keys on the screen edge have Back, Home and Settings." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidが動作中です。画面の端にあるサイドキーに、戻る、ホーム、設定があります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android正在运行。屏幕边缘的侧边按键有“返回”、“主屏幕”和“设置”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android正在執行。螢幕邊緣的側邊按鍵有「返回」、「主畫面」和「設定」。"
+          }
+        }
+      }
+    },
     "Android is still paused." : {
       "localizations" : {
         "ja" : {
@@ -2131,6 +2175,28 @@
         }
       }
     },
+    "Android screen" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidの画面"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android屏幕"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android畫面"
+          }
+        }
+      }
+    },
     "Android version" : {
       "localizations" : {
         "ja" : {
@@ -2216,6 +2282,204 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Android、LineageOS、Linux及此處的其他名稱和標誌均屬其各自擁有者所有。它們用於識別Andarium內建的軟體，並不代表任何背書。"
+          }
+        }
+      }
+    },
+    "Android’s accessibility settings" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのユーザー補助設定"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的无障碍设置"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的無障礙設定"
+          }
+        }
+      }
+    },
+    "Android’s screen reader can: it speaks in its own voice, and your touches on Android’s screen go to it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのスクリーンリーダーなら読み上げられます。独自の音声で話し、Androidの画面へのタッチを受け取ります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的屏幕阅读器可以：它会用自己的声音朗读，你在Android屏幕上的触摸也会交给它。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的螢幕閱讀器可以：它會用自己的聲音朗讀，你在Android畫面上的觸碰也會交給它。"
+          }
+        }
+      }
+    },
+    "Android’s screen reader didn’t turn off." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのスクリーンリーダーをオフにできませんでした。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的屏幕阅读器未能关闭。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的螢幕閱讀器無法關閉。"
+          }
+        }
+      }
+    },
+    "Android’s screen reader didn’t turn on." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのスクリーンリーダーをオンにできませんでした。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的屏幕阅读器未能开启。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的螢幕閱讀器無法開啟。"
+          }
+        }
+      }
+    },
+    "Android’s screen reader is off." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのスクリーンリーダーはオフです。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的屏幕阅读器已关闭。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的螢幕閱讀器已關閉。"
+          }
+        }
+      }
+    },
+    "Android’s screen reader is on." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのスクリーンリーダーがオンになりました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的屏幕阅读器已开启。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的螢幕閱讀器已開啟。"
+          }
+        }
+      }
+    },
+    "Android’s screen reader off" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのスクリーンリーダー、オフ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的屏幕阅读器已关闭"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的螢幕閱讀器已關閉"
+          }
+        }
+      }
+    },
+    "Android’s screen reader on" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのスクリーンリーダー、オン"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的屏幕阅读器已开启"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的螢幕閱讀器已開啟"
+          }
+        }
+      }
+    },
+    "Android’s screen reader speaks what you touch. While it is on, VoiceOver can’t read Android’s screen, and your touches go to it. To come back to VoiceOver, touch the side keys." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのスクリーンリーダーは、タッチしたものを読み上げます。オンの間は、VoiceOverでAndroidの画面を読み上げられず、タッチはスクリーンリーダーに届きます。VoiceOverに戻るには、サイドキーに触れてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的屏幕阅读器会朗读你触摸的内容。开启后，旁白无法读取Android的屏幕，你的触摸会交给它。要回到旁白，请触摸侧边按键。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的螢幕閱讀器會朗讀你觸碰的內容。開啟後，旁白無法讀取Android的畫面，你的觸碰會交給它。若要回到旁白，請觸碰側邊按鍵。"
           }
         }
       }
@@ -2441,6 +2705,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "至少%@"
+          }
+        }
+      }
+    },
+    "Available when the file transfer ends" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ファイルの転送が終わると使用できます"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文件传输结束后可用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "檔案傳輸結束後可使用"
           }
         }
       }
@@ -2848,6 +3134,50 @@
         }
       }
     },
+    "Checking Android’s screen reader…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのスクリーンリーダーを確認中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在检查Android的屏幕阅读器…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在檢查Android的螢幕閱讀器…"
+          }
+        }
+      }
+    },
+    "Checking…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "確認中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在检查…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在檢查…"
+          }
+        }
+      }
+    },
     "Chooses the highlighted item" : {
       "localizations" : {
         "ja" : {
@@ -3108,6 +3438,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "版權"
+          }
+        }
+      }
+    },
+    "Couldn’t check" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "確認できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法检查"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法檢查"
+          }
+        }
+      }
+    },
+    "Couldn’t check Android’s screen reader" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのスクリーンリーダーを確認できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法检查Android的屏幕阅读器"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法檢查Android的螢幕閱讀器"
           }
         }
       }
@@ -3660,6 +4034,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "診斷"
+          }
+        }
+      }
+    },
+    "Didn’t turn off" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オフにできませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未能关闭"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法關閉"
+          }
+        }
+      }
+    },
+    "Didn’t turn on" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オンにできませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未能开启"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法開啟"
           }
         }
       }
@@ -4688,6 +5106,28 @@
         }
       }
     },
+    "In progress" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "進行中"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "进行中"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "進行中"
+          }
+        }
+      }
+    },
     "Include in backups" : {
       "comment" : "Switch: include the virtual machine's data in iCloud and computer backups.",
       "localizations" : {
@@ -5603,6 +6043,94 @@
         }
       }
     },
+    "Move down" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下へ移動"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下移"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下移"
+          }
+        }
+      }
+    },
+    "Move to the left edge" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "左端に移動"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移到左边缘"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移到左邊緣"
+          }
+        }
+      }
+    },
+    "Move to the right edge" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "右端に移動"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移到右边缘"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移到右邊緣"
+          }
+        }
+      }
+    },
+    "Move up" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上へ移動"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上移"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上移"
+          }
+        }
+      }
+    },
     "Name" : {
       "localizations" : {
         "ja" : {
@@ -5845,6 +6373,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "尚無讀數"
+          }
+        }
+      }
+    },
+    "No screen reader for Android in this system image" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このシステムイメージにはAndroid用のスクリーンリーダーがありません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此系统镜像中没有供Android使用的屏幕阅读器"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此系統映像檔中沒有供Android使用的螢幕閱讀器"
           }
         }
       }
@@ -6092,7 +6642,51 @@
         }
       }
     },
+    "Not in this system image" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このシステムイメージにはありません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此系统镜像中没有"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此系統映像檔中沒有"
+          }
+        }
+      }
+    },
     "Not now" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "今はしない"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "以后"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "稍後再說"
+          }
+        }
+      }
+    },
+    "Not Now" : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -6761,6 +7355,28 @@
         }
       }
     },
+    "Recovery is running. The side keys’ volume keys move, and Power chooses." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "リカバリモードが動作中です。サイドキーの音量キーで移動し、電源キーで選択します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复模式正在运行。侧边按键的音量键用于移动，电源键用于选择。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "復原模式正在執行。側邊按鍵的音量鍵用於移動，電源鍵用於選擇。"
+          }
+        }
+      }
+    },
     "Remove %@" : {
       "localizations" : {
         "ja" : {
@@ -6891,6 +7507,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "將以此快照取代虛擬機器目前的資料。"
+          }
+        }
+      }
+    },
+    "Report copied" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "レポートをコピーしました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已拷贝报告"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已拷貝報告"
           }
         }
       }
@@ -8626,6 +9264,28 @@
         }
       }
     },
+    "TalkBack" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TalkBack"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TalkBack"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TalkBack"
+          }
+        }
+      }
+    },
     "Tap for Back, Home and Settings. Hold Power for the power menu. Drag to move." : {
       "localizations" : {
         "ja" : {
@@ -9243,6 +9903,28 @@
         }
       }
     },
+    "The virtual machine couldn’t change Android’s screen reader." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンがAndroidのスクリーンリーダーを変更できませんでした。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机无法更改Android的屏幕阅读器。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器無法變更Android的螢幕閱讀器。"
+          }
+        }
+      }
+    },
     "The virtual machine couldn’t copy the file." : {
       "localizations" : {
         "ja" : {
@@ -9554,6 +10236,28 @@
         }
       }
     },
+    "The virtual machine isn’t ready to change Android’s screen reader. Try again in a moment." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンはまだAndroidのスクリーンリーダーを変更する準備ができていません。しばらくしてからもう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机尚未准备好更改Android的屏幕阅读器。请稍后重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器尚未準備好變更Android的螢幕閱讀器。請稍後再試一次。"
+          }
+        }
+      }
+    },
     "The virtual machine isn’t ready to install apps. Try again in a moment." : {
       "localizations" : {
         "ja" : {
@@ -9616,6 +10320,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "虛擬機器尚未準備好打開其檔案。請稍後再試一次。"
+          }
+        }
+      }
+    },
+    "The virtual machine isn’t ready yet. Try again in a moment." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンはまだ準備ができていません。しばらくしてからもう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机尚未准备好。请稍后重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器尚未準備好。請稍後再試一次。"
           }
         }
       }
@@ -9716,6 +10442,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "虛擬機器拒絕安裝此應用程式。"
+          }
+        }
+      }
+    },
+    "The virtual machine stopped responding while changing Android’s screen reader." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのスクリーンリーダーの変更中に、仮想マシンが応答しなくなりました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机在更改Android的屏幕阅读器时停止了响应。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器在變更Android的螢幕閱讀器時停止回應。"
           }
         }
       }
@@ -9942,6 +10690,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "虛擬機器的資料可能來自回復前，也可能來自快照。"
+          }
+        }
+      }
+    },
+    "The virtual machine’s debugging service restarted before Android’s screen reader changed. Try again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンのデバッグサービスがAndroidのスクリーンリーダーの変更完了前に再起動しました。もう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机的调试服务在Android的屏幕阅读器更改完成前重启了。请重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器的偵錯服務在Android的螢幕閱讀器變更完成前重新啟動。請再試一次。"
           }
         }
       }
@@ -10641,6 +11411,50 @@
         }
       }
     },
+    "This system image has no screen reader for Android." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このシステムイメージには、Android用のスクリーンリーダーがありません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此系统镜像中没有供Android使用的屏幕阅读器。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此系統映像檔中沒有供Android使用的螢幕閱讀器。"
+          }
+        }
+      }
+    },
+    "To come back to VoiceOver, touch the side keys." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VoiceOverに戻るには、サイドキーに触れてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要回到旁白，请触摸侧边按键。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "若要回到旁白，請觸碰側邊按鍵。"
+          }
+        }
+      }
+    },
     "To install an app, open Settings here and choose Install APK." : {
       "comment" : "Second line of the side keys' tip, shown where Settings has Install APK.",
       "localizations" : {
@@ -10683,6 +11497,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "若要重新啟動，請在App切換器中關閉Andarium後重新打開。"
+          }
+        }
+      }
+    },
+    "Touches go to Android." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "タッチはそのままAndroidに届きます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "触摸会直接交给Android。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "觸碰會直接交給Android。"
           }
         }
       }
@@ -10824,6 +11660,50 @@
         }
       }
     },
+    "Turn On" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オンにする"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "开启"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "開啟"
+          }
+        }
+      }
+    },
+    "Turn on Android’s screen reader in Settings, under the side keys." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "サイドキーの“設定”で、Androidのスクリーンリーダーをオンにしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在侧边按键的“设置”中开启Android的屏幕阅读器。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "請在側邊按鍵的「設定」中開啟Android的螢幕閱讀器。"
+          }
+        }
+      }
+    },
     "Turn on for “%@”?" : {
       "comment" : "The title of the alert that asks before Old app compatibility is turned on for an app; the app's own name is quoted (Japanese and Traditional Chinese use their own corner quotes).",
       "localizations" : {
@@ -10847,6 +11727,28 @@
         }
       }
     },
+    "Turn on TalkBack?" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TalkBackをオンにしますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要开启TalkBack吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要開啟TalkBack嗎？"
+          }
+        }
+      }
+    },
     "Turn on USB debugging in the virtual machine’s Developer options to use ADB over network." : {
       "localizations" : {
         "ja" : {
@@ -10865,6 +11767,94 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "若要透過網路使用ADB，請在虛擬機器的「開發人員選項」中開啟USB偵錯。"
+          }
+        }
+      }
+    },
+    "Turning off Android’s screen reader…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのスクリーンリーダーをオフにしています…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在关闭Android的屏幕阅读器…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在關閉Android的螢幕閱讀器…"
+          }
+        }
+      }
+    },
+    "Turning off…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オフにしています…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在关闭…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在關閉…"
+          }
+        }
+      }
+    },
+    "Turning on Android’s screen reader…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのスクリーンリーダーをオンにしています…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在开启Android的屏幕阅读器…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在開啟Android的螢幕閱讀器…"
+          }
+        }
+      }
+    },
+    "Turning on…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オンにしています…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在开启…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在開啟…"
           }
         }
       }
@@ -11114,6 +12104,28 @@
         }
       }
     },
+    "VoiceOver can’t read Android’s screen." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VoiceOverはAndroidの画面を読み上げられません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "旁白无法读取Android的屏幕。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "旁白無法讀取Android的畫面。"
+          }
+        }
+      }
+    },
     "Volume down" : {
       "localizations" : {
         "ja" : {
@@ -11199,6 +12211,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "請等待檔案傳輸完成，然後再安裝應用程式。"
+          }
+        }
+      }
+    },
+    "Waiting" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "待機中"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "等待中"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "等待中"
           }
         }
       }
