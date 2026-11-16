@@ -350,7 +350,15 @@ lowest camera ID; the external cameras are one side), snapped to 0.5, 1, 2,
 2.5, 3, 4 or 5 when within 20 %. Pinch to zoom (the front camera's too),
 the zoom slider and the Zoom action of the hardware keys are off, the volume
 keys keep their other actions (the shutter by default), and a tap on the
-active button does nothing. A product overlay in
+active button does nothing. When CameraX closes the camera with a recoverable
+error and opens it again (the HAL's report that the host ended the camera's
+video, ERROR_DEVICE), the application ends the recording in progress and saves
+its clip, and stays open; a start still waiting for its sound is cancelled.
+While a recording that is ending is not finalized, the pause and resume
+button and the mute of that recording are skipped (the microphone setting
+applies to the next recording), and the button pressed with no recording
+does nothing. A CameraX recording in another camera application goes on across
+the camera's loss and reopening, and its clip holds the gap. A product overlay in
 `overlay/overlay/packages/apps/Aperture` sets the switch and ignores camera
 ID 2, which only a host that publishes the wide lens twice has. The build
 installs it as a static runtime overlay of the application; the application
@@ -402,12 +410,15 @@ open on it), the camera's video buffers fail under a black, interrupted record
 for as long as the guest keeps the stream, and the HAL decides by the session's
 streams (`camera_session.hpp`). A session with a stream whose consumer is a
 video encoder is over: the request that met the loss fails with every output
-buffer returned as an error, the HAL reports `ERROR_DEVICE` once, the requests
-it still holds drain as `ERROR_REQUEST` without the frame source, and the opened
-session answers every later request, flush and configuration with the internal
-error; a close succeeds. Any other session is told nothing: the HAL closes the
-camera's video streams between requests, which ends the host's loss, and opens
-them again with the next request. The rules have limits: the camera service
+buffer returned as an error and an `ERROR_REQUEST` (the camera service returns a
+request's buffers only for a request it was told failed), the HAL reports
+`ERROR_DEVICE` once besides, the requests it still holds drain as
+`ERROR_REQUEST` without the frame source, and the opened session answers every
+later request, flush and configuration with the internal error (a flush first
+ends what the session holds as failed requests); a close succeeds. Any other
+session is told nothing: the HAL closes the camera's video streams between
+requests, which ends the host's loss, and opens them again with the next
+request. The rules have limits: the camera service
 refuses further work on a device in its error state, so a client that reaches the
 HAL after `ERROR_DEVICE` talks to the provider directly, and there a configuration
 is refused by the HAL, which reaches the client as an illegal-argument answer and

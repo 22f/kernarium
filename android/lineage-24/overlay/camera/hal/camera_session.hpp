@@ -7,7 +7,9 @@
 //
 //  - a session with a stream whose consumer is a video encoder (the stream's usage
 //    carries GRALLOC_USAGE_HW_VIDEO_ENCODER) is over: the HAL fails the request that
-//    met the loss and tells the framework ERROR_DEVICE, once;
+//    met the loss as a request (ERROR_REQUEST: the framework returns the buffers of
+//    a request only when it was told that the request failed) and tells the
+//    framework ERROR_DEVICE besides, once;
 //  - any other session (a preview, a scanner, a video call) is told nothing: the HAL
 //    closes the camera's own video streams, which ends the host's loss, fails the
 //    requests of the gap as it does for any interruption, and opens the streams again
@@ -53,7 +55,8 @@ struct StreamUse {
 }
 
 enum class LossResponse {
-    // The session is over: ERROR_DEVICE, once.
+    // The session is over: ERROR_REQUEST for the request that met the loss, and
+    // ERROR_DEVICE besides, once.
     device_error,
     // The session goes on: the HAL closes its video streams and opens them again.
     reopen_streams,
@@ -111,9 +114,10 @@ public:
 
     [[nodiscard]] bool lost() const noexcept { return lost_.load(std::memory_order_acquire); }
 
-    // Whether this call is the one that tells the framework ERROR_DEVICE: true for the
-    // first call after the session was latched, false for every other. A request of a
-    // session that is over, other than that one, fails as ERROR_REQUEST.
+    // Whether this call is the one that tells the framework ERROR_DEVICE besides its
+    // request error: true for the first call after the session was latched, false for
+    // every other. Every request of a session that is over fails as ERROR_REQUEST, the
+    // one that claims the device error too.
     [[nodiscard]] bool claim_device_error() noexcept
     {
         return lost() && !told_.exchange(true, std::memory_order_acq_rel);

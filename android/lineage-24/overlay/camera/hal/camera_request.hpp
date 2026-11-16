@@ -5,11 +5,11 @@
 // framework learns of the end by the camera HAL's notify contract: a request
 // whose outputs all failed is an ERROR_REQUEST (a failed capture, after which the
 // application may shoot again), while ERROR_BUFFER belongs to a request that lost
-// only some of its outputs. A camera the host has ended is neither: when the
-// session has a video encoder stream the request fails as a whole and the
-// framework is told ERROR_DEVICE, once per session (camera_session.hpp); any other
-// session is told nothing of it. The tests hold the rules where no Android library
-// is needed.
+// only some of its outputs. A camera the host has ended fails the request as a
+// whole: when the session has a video encoder stream the framework is told
+// ERROR_REQUEST for it and, once per session, ERROR_DEVICE besides
+// (camera_session.hpp); any other session is told nothing of it. The tests hold
+// the rules where no Android library is needed.
 #pragma once
 
 #include <algorithm>
