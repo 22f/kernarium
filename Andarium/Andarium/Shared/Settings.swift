@@ -34,13 +34,14 @@ struct SessionSettingsSheet: View {
                 List {
                     if offersInstall { apps }
                     if normalSession, model.capabilities.guestFiles, model.fileBrowser != nil { files }
-                    if normalSession, model.capabilities.textMessages { TextMessageSection() }
                     if model.capabilities.statistics { stats(session) }
                     if model.host.supportsPointer { pointer }
                     #if !APP_STORE
                     if let probe = model.inputProbe { inputProbe(probe) }
                     #endif
-                    if normalSession, model.capabilities.adbOverNetwork { developer(session) }
+                    if normalSession, model.capabilities.adbOverNetwork || model.capabilities.textMessages {
+                        developer(session)
+                    }
                     if normalSession, model.capabilities.bugReport { diagnostics }
                     if normalSession, model.capabilities.screenReader { accessibility(session) }
                 }
@@ -293,36 +294,61 @@ struct SessionSettingsSheet: View {
 
     private func developer(_ session: SessionState) -> some View {
         Section {
-            Toggle(isOn: Binding(get: { session.adb }, set: { model.setAdbOverNetwork($0) })) {
-                HStack(spacing: 12) {
-                    IconTile(symbol: "terminal.fill", color: session.adb ? .accentColor : .gray)
-                    Text("ADB over network")
+            if model.capabilities.adbOverNetwork {
+                Toggle(isOn: Binding(get: { session.adb }, set: { model.setAdbOverNetwork($0) })) {
+                    HStack(spacing: 12) {
+                        IconTile(symbol: "terminal.fill", color: session.adb ? .accentColor : .gray)
+                        Text("ADB over network")
+                    }
+                }
+                .disabled(!session.adb && !model.adbOverNetworkAvailable)
+                if session.adb {
+                    if let address = session.adbAddress {
+                        connectCommand("adb connect \(address):\(AdbNetworkBridge.defaultPort)")
+                    } else {
+                        Text(AdbNetworkMessages.noAddress)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 4)
+                    }
                 }
             }
-            .disabled(!session.adb && !model.adbOverNetworkAvailable)
-            if session.adb {
-                if let address = session.adbAddress {
-                    connectCommand("adb connect \(address):\(AdbNetworkBridge.defaultPort)")
-                } else {
-                    Text(AdbNetworkMessages.noAddress)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 4)
-                }
-            }
+            if model.offersTextMessage { textMessageRow }
         } header: {
             Text("Developer")
         } footer: {
-            if let problem = session.adbProblem {
-                Text(problem).foregroundStyle(.red)
-            } else if session.adb {
-                Text("The virtual machine asks to allow the computer the first time it connects. ADB turns off when the virtual machine stops or USB debugging is turned off.")
-            } else if !model.adbOverNetworkAvailable {
-                Text("Turn on USB debugging in the virtual machine\u{2019}s Developer options to use ADB over network.")
-            } else {
-                Text("Lets a computer on the same network connect to the virtual machine with adb.")
+            if model.capabilities.adbOverNetwork {
+                if let problem = session.adbProblem {
+                    Text(problem).foregroundStyle(.red)
+                } else if session.adb {
+                    Text("The virtual machine asks to allow the computer the first time it connects. ADB turns off when the virtual machine stops or USB debugging is turned off.")
+                } else if !model.adbOverNetworkAvailable {
+                    Text("Turn on USB debugging in the virtual machine\u{2019}s Developer options to use ADB over network.")
+                } else {
+                    Text("Lets a computer on the same network connect to the virtual machine with adb.")
+                }
             }
         }
+        .id("developer")
+    }
+
+    /// The entrance to the text message bar: Settings closes, as Install APK
+    /// does, and the bar comes up over Android.
+    private var textMessageRow: some View {
+        Button {
+            dismiss()
+            model.presentTextMessage()
+        } label: {
+            HStack(spacing: 12) {
+                IconTile(symbol: "message.fill")
+                Text(SmsMessages.row)
+                    .foregroundStyle(Color.accentColor)
+                Spacer(minLength: 0)
+            }
+        }
+        // The guest's one adb channel is busy with the transfer.
+        .disabled(model.fileBrowser?.busy == true)
+        .accessibilityIdentifier("settings-text-message")
     }
 
     /// The command to type on the computer, with a button that copies it.
@@ -455,72 +481,6 @@ struct SessionSettingsSheet: View {
             .monospacedDigit()
             .foregroundStyle(.secondary)
             .contentTransition(.numericText())
-    }
-}
-
-/// A text message for the guest, which Android receives as if a SIM card had:
-/// its SMS application stores and shows it, and applications that read SMS
-/// get it. The sender is kept for the next message; the text is cleared once
-/// it is delivered.
-struct TextMessageSection: View {
-    @Environment(AppModel.self) private var model
-    @AppStorage(GuestSms.SenderMemory.key) private var sender = ""
-    @State private var text = ""
-    @State private var sending = false
-    @State private var result: SmsSendResult?
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        Section {
-            TextField(SmsMessages.senderPlaceholder, text: $sender)
-                .textContentType(.telephoneNumber)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .accessibilityLabel(SmsMessages.from)
-            TextField(SmsMessages.message, text: $text, axis: .vertical)
-                .lineLimit(3...8)
-                .focused($focused)
-                .accessibilityLabel(SmsMessages.message)
-            HStack {
-                Text(verbatim: "\(text.utf16.count)/\(GuestSms.maximumUnits)")
-                    .font(.footnote)
-                    .monospacedDigit()
-                    .foregroundStyle(text.utf16.count > GuestSms.maximumUnits ? Color.red : Color(.secondaryLabel))
-                Spacer()
-                if sending {
-                    ProgressView()
-                } else {
-                    Button(SmsMessages.send, systemImage: "paperplane.fill", action: send)
-                        .disabled(GuestSms.refusal(sender: sender, text: text) != nil
-                            || model.fileBrowser?.busy == true)
-                }
-            }
-        } header: {
-            Text(SmsMessages.name)
-        } footer: {
-            switch result {
-            case .delivered(let words)?: Text(words)
-            case .refused(let words)?: Text(words).foregroundStyle(.red)
-            case nil: Text(SmsMessages.senderHint)
-            }
-        }
-        // Typing a new message clears the last result; the send's own
-        // clearing of the text leaves it.
-        .onChange(of: text) { _, new in if !new.isEmpty { result = nil } }
-        .onChange(of: sender) { if result != nil { result = nil } }
-    }
-
-    private func send() {
-        sending = true
-        focused = false
-        Task {
-            let outcome = await model.sendSms(sender: sender, text: text)
-            if case .delivered = outcome { text = "" }
-            withAnimation(.snappy) {
-                result = outcome
-                sending = false
-            }
-        }
     }
 }
 

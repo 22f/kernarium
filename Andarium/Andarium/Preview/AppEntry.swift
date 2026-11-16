@@ -112,6 +112,7 @@ struct AppEntry {
     private static let settingsScrolls: [String: String] = [
         "settings-stats": "stats",
         "settings-feedback": "diagnostics",
+        "settings-text-message": "developer",
     ]
 
     /// The page of Info a screen opens on.
@@ -139,7 +140,7 @@ struct AppEntry {
             Tips.showAllTipsForTesting()
         } else if screen.hasPrefix("session") || screen.hasPrefix("settings") || screen.hasPrefix("files")
             || screen.hasPrefix("recovery") || screen.hasPrefix("boot")
-            || screen.hasPrefix("space-pause") || Self.operationScreens.contains(screen) {
+            || screen.hasPrefix("space-pause") || screen.hasPrefix("sms-") || Self.operationScreens.contains(screen) {
             Tips.hideAllTipsForTesting()
         }
         try? Tips.configure([.displayFrequency(.immediate)])
@@ -376,8 +377,13 @@ struct AppEntry {
             if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
             if screen == "session-camera-notice" { model.previewCameraNotice() }
             if screen == "session-camera-off-notice" { model.previewCameraNotice(.blockedInUse) }
+        case "sms-bar", "sms-bar-typing", "sms-bar-near-limit", "sms-bar-sending", "sms-bar-sent",
+             "sms-bar-not-confirmed", "sms-bar-unsupported", "sms-bar-bad-sender", "sms-bar-long-sender",
+             "sms-bar-no-sender", "sms-bar-too-long", "sms-bar-unsendable":
+            model.phase = .running(.normal)
+            model.previewTextMessage(screen)
         case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
-             "settings-feedback", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
+             "settings-feedback", "settings-text-message", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
              "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container",
              "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split",
              "install-part-too-large", "install-legacy-hint", "install-legacy-hint-data",

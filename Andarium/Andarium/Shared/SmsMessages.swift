@@ -3,13 +3,6 @@
 import AndariumCore
 import Foundation
 
-/// How sending a text message to the guest ended, in the words shown under
-/// the message box.
-enum SmsSendResult: Equatable {
-    case delivered(String)
-    case refused(String)
-}
-
 /// The words of sending a text message to the virtual machine: Settings' row,
 /// the fields, what is wrong with them, and how a send ended. "Text message"
 /// is Android's own name for it, and the person's. Each string goes through
@@ -71,7 +64,9 @@ nonisolated enum SmsMessages {
     static func refusal(_ refusal: GuestSms.Refusal, text: String) -> String {
         switch refusal {
         case .noSender: senderEmpty
-        case .badSender: senderHint
+        case .senderCharacters: senderCharacters
+        case .senderLongName: senderLongName
+        case .senderLongNumber: senderLongNumber
         case .noText: message
         case .tooLong: charactersOver(text.utf16.count - GuestSms.maximumUnits)
         case .unsendableCharacter: unsendableCharacter

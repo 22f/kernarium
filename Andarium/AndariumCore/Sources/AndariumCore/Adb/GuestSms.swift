@@ -22,33 +22,78 @@ public enum GuestSms {
     /// The authority of the guest's service.
     public static let authority = "android.kernarium.sms"
 
+    /// The sender a message carries when the person has kept none.
+    public static let defaultSender = "Andarium"
+
     public enum Refusal: Equatable, Sendable {
-        case noSender, badSender, noText, tooLong
+        /// The sender is empty.
+        case noSender
+        /// The sender is neither a number nor a name: it has a character that is not a digit, a plain letter
+        /// A to Z or a space.
+        case senderCharacters
+        /// A name of letters, digits and spaces that is longer than a name can be.
+        case senderLongName
+        /// A number with more digits than a number can have.
+        case senderLongNumber
+        case noText, tooLong
         /// The text holds U+FFFE, which Android's decoder cannot return: it
         /// swaps the bytes after it or replaces it (see the service's
         /// DeliverPdu), so the text would not arrive as typed.
         case unsendableCharacter
     }
 
-    /// The sender as the guest takes it: a phone number of at most 20 digits,
-    /// international with a leading +, with the spaces, dashes and brackets
-    /// people type left out; or a name of at most 11 letters, digits and
-    /// spaces, as a network sends a service's. nil for anything else.
+    /// The sender with what a pasted number brings along that the rules refuse
+    /// made plain: direction marks dropped, no-break spaces and hyphens made
+    /// ordinary, a full-width plus and full-width digits made ASCII.
+    public static func cleaned(_ typed: String) -> String {
+        var out = String.UnicodeScalarView()
+        for scalar in typed.unicodeScalars {
+            switch scalar.value {
+            case 0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069: continue
+            case 0x00A0, 0x2007, 0x202F: out.append(" ")
+            case 0x2010...0x2013, 0x2212: out.append("-")
+            case 0xFF0B: out.append("+")
+            case 0xFF10...0xFF19: out.append(Unicode.Scalar(scalar.value - 0xFF10 + 0x30) ?? scalar)
+            default: out.append(scalar)
+            }
+        }
+        return String(out)
+    }
+
+    /// The sender as the guest takes it, once it is cleaned: a phone number of
+    /// at most 20 digits, international with a leading +, with the spaces,
+    /// dashes and brackets people type left out; or a name of at most 11
+    /// letters, digits and spaces, as a network sends a service's. nil for
+    /// anything else.
     public static func sender(_ typed: String) -> String? {
-        let trimmed = typed.trimmingCharacters(in: .whitespaces)
+        let trimmed = cleaned(typed).trimmingCharacters(in: .whitespaces)
         let digits = trimmed.filter { !" -().".contains($0) }
         if digits.wholeMatch(of: /\+?[0-9]{1,20}/) != nil { return digits }
         if trimmed.wholeMatch(of: /[A-Za-z0-9 ]{1,11}/) != nil { return trimmed }
         return nil
     }
 
-    public static func refusal(sender typed: String, text: String) -> Refusal? {
-        if typed.trimmingCharacters(in: .whitespaces).isEmpty { return .noSender }
-        if sender(typed) == nil { return .badSender }
+    /// Why the sender is refused, or nil when it is not.
+    public static func senderRefusal(_ typed: String) -> Refusal? {
+        let trimmed = cleaned(typed).trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return .noSender }
+        if sender(typed) != nil { return nil }
+        if trimmed.filter({ !" -().".contains($0) }).wholeMatch(of: /\+?[0-9]+/) != nil { return .senderLongNumber }
+        if trimmed.wholeMatch(of: /[A-Za-z0-9 ]+/) != nil { return .senderLongName }
+        return .senderCharacters
+    }
+
+    /// Why the text is refused, or nil when it is not.
+    public static func textRefusal(_ text: String) -> Refusal? {
         if text.isEmpty { return .noText }
         if text.utf16.count > maximumUnits { return .tooLong }
         if text.unicodeScalars.contains("\u{FFFE}") { return .unsendableCharacter }
         return nil
+    }
+
+    /// Why the message is refused, the sender first, or nil when it is not.
+    public static func refusal(sender typed: String, text: String) -> Refusal? {
+        senderRefusal(typed) ?? textRefusal(text)
     }
 
     /// The sender the person last sent a message from, kept across launches

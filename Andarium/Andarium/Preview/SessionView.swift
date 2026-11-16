@@ -26,6 +26,8 @@ struct SessionView: View {
         @Bindable var model = model
         let guestModel = model.guest ?? Guest.fresh(on: model.host)
         content(guestModel: guestModel)
+        // The text message bar, over the guest and above the keyboard.
+        .overlay(alignment: .bottom) { TextMessageBarOverlay() }
         .statusBarHidden(true)
         // The system honours the bottom edge's deferral only while the home
         // indicator is visible: with it hidden, one swipe goes Home.
@@ -84,6 +86,8 @@ struct SessionView: View {
             ZStack {
                 Color.black.ignoresSafeArea()
                 guest
+                    // The keyboard of the text message bar leaves the guest still.
+                    .ignoresSafeArea(.keyboard)
                     .clipped()
                     .guestScreenAccessibility(talkBackOn: model.screenReaderOffer.isOn)
                     // As on the device, a touch on the guest closes the keys and

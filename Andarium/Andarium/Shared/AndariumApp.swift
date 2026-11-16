@@ -117,6 +117,9 @@ struct RootView: View {
             // The guest's display lives under the screens of the boot and the
             // run, so it is one view from the first frame to the last.
             GuestLayer()
+                // The keyboard of the text message bar goes over Android; it
+                // does not move it.
+                .ignoresSafeArea(.keyboard)
             Group {
                 switch model.phase {
                 case .home:

@@ -76,6 +76,9 @@ final class SessionState {
     var screenReader: ScreenReaderState?
     /// TalkBack is being turned on or off.
     var screenReaderChanging = false
+    /// The text message being written in the bar over Android, and how the
+    /// last send went. It lasts for this run.
+    let textMessage = TextMessageState()
 
     /// The address the preview shows, from the range reserved for examples.
     static let previewAddress = "198.51.100.23"
@@ -472,11 +475,16 @@ final class AppModel {
     #endif
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
     private var restoringUpdate = false
-    /// The identifiers of the text messages whose send was not confirmed.
-    private var smsRetries = GuestSms.Retries()
     /// The sender of the last text message, kept until the virtual machine
     /// is erased.
     @ObservationIgnored var smsSender = GuestSms.SenderMemory()
+    /// Says what a text message came to aloud, for VoiceOver; a test collects it.
+    @ObservationIgnored var textMessageAnnouncer: @MainActor (String) -> Void = { VoiceOver.announce($0) }
+    /// Waits for Settings to go before the bar comes up over Android; a test
+    /// paces it by hand.
+    @ObservationIgnored var textMessageSleep: @MainActor (Duration) async -> Void = { duration in
+        try? await Task.sleep(for: duration)
+    }
     /// The guest is paused because the device is nearly out of space; the
     /// screen over the session asks what to do.
     var spacePause: SpacePause?
@@ -536,11 +544,13 @@ final class AppModel {
     /// The share sheet of a bug report is up over the session.
     var shareSheetUp = false
     /// The guest has the hardware keys unless something is over it that needs
-    /// them (Settings, a sheet, an alert, the share sheet): the sheet takes
-    /// the keys, and the guest takes them back when it goes. The pointer lock
+    /// them (Settings, the text message bar, a sheet, an alert, the share
+    /// sheet): the sheet takes the keys, and the guest takes them back when
+    /// it goes. The pointer lock
     /// goes with them.
     var guestHasKeys: Bool {
-        !sessionSettingsOpen && sheet == nil && alert == nil && legacyInstallQuestion == nil && !shareSheetUp
+        !sessionSettingsOpen && !session.textMessage.isOpen && sheet == nil && alert == nil
+            && legacyInstallQuestion == nil && !shareSheetUp
     }
     /// An Android application captured the pointer and the guest should have
     /// the pointer lock; the scene's root asks iOS for it.
@@ -1031,26 +1041,6 @@ final class AppModel {
     /// The preview has no guest to ask and says yes unless a screen says no.
     var adbOverNetworkAvailable: Bool {
         driver == nil ? session.usbDebugging != false : session.usbDebugging == true
-    }
-
-    /// Delivers a text message to the guest as if from the network, and
-    /// returns what to say of it under the message box; the preview, with no
-    /// guest, says it was delivered.
-    func sendSms(sender: String, text: String) async -> SmsSendResult {
-        if let refusal = GuestSms.refusal(sender: sender, text: text) {
-            return .refused(SmsMessages.refusal(refusal, text: text))
-        }
-        guard case .running(.normal) = phase else { return .refused(SmsMessages.notRunning) }
-        guard let driver else { return .delivered(SmsMessages.sentToAndroid) }
-        let identifier = smsRetries.identifier(sender: sender, text: text)
-        let outcome = await driver.sendSms(sender: sender, text: text, identifier: identifier)
-        // Only a send that was not confirmed may have reached Android: sent again, it keeps its identifier.
-        smsRetries.settle(sender: sender, text: text, identifier: identifier, confirmed: outcome != .notConfirmed)
-        return switch outcome {
-        case .handedToAndroid: .delivered(SmsMessages.sentToAndroid)
-        case .unsupported: .refused(SmsMessages.unsupported)
-        case .notConfirmed: .refused(SmsMessages.notConfirmedAdvice)
-        }
     }
 
     /// The file browser may list and move files: Android has its storage up.
@@ -1817,6 +1807,7 @@ final class AppModel {
         abandonOperation()
         fileBrowser?.reset()
         endAdbOverNetwork()
+        session.textMessage.end()
         spacePause = nil
         graphicsNotice = GraphicsNotice()
         graphicsReclaim.reset()
@@ -1859,6 +1850,7 @@ final class AppModel {
         abandonOperation()
         fileBrowser?.reset()
         endAdbOverNetwork()
+        session.textMessage.end()
         spacePause = nil
         graphicsNotice = GraphicsNotice()
         graphicsReclaim.reset()

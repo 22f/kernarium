@@ -48,9 +48,54 @@ struct GuestSmsTests {
         #expect(GuestSms.sender(String(repeating: "1", count: GuestSms.maximumNumberDigits + 1)) == nil)
     }
 
+    /// What a number pasted from a web page or a message brings along is made plain before it is judged.
+    @Test func aPastedSenderIsCleanedBeforeItIsJudged() {
+        // Direction marks around it, no-break spaces and typographic hyphens inside it.
+        #expect(GuestSms.sender("\u{200E}+98\u{00A0}912\u{2011}123\u{2013}4567\u{200F}") == "+989121234567")
+        #expect(GuestSms.sender("\u{202A}+1 (555) 010\u{2212}0100\u{202C}") == "+15550100100")
+        // Every hyphen and dash of U+2010 to U+2013 and the minus sign is a hyphen.
+        #expect(GuestSms.cleaned("1\u{2010}2\u{2011}3\u{2012}4\u{2013}5\u{2212}6") == "1-2-3-4-5-6")
+        // Full-width digits and plus.
+        #expect(GuestSms.sender("\u{FF0B}\u{FF18}\u{FF16}\u{FF11}\u{FF12}\u{FF13}\u{FF14}") == "+861234")
+        #expect(GuestSms.sender("\u{FF11}\u{FF12}\u{FF13}") == "123")
+        // A name keeps its plain letters and its single spaces; the marks around it go.
+        #expect(GuestSms.sender("\u{200F}My\u{00A0}Bank\u{200E}") == "My Bank")
+        // What no rule makes plain stays refused.
+        #expect(GuestSms.sender("Ba\u{200B}nk") == nil)
+        #expect(GuestSms.sender("Bank\u{200D}") == nil)
+        #expect(GuestSms.sender("\u{FF22}ank") == nil)
+        #expect(GuestSms.sender("Ban\u{0301}k") == nil)
+        #expect(GuestSms.sender("\u{0661}\u{0662}\u{0663}") == nil)
+        // The refusal judges the cleaned sender, and says what is wrong with it.
+        #expect(GuestSms.refusal(sender: "\u{200E}\u{00A0}", text: "hi") == .noSender)
+        #expect(GuestSms.refusal(sender: "\u{200E}+98\u{00A0}912\u{2011}123\u{2013}4567", text: "hi") == nil)
+    }
+
+    @Test func aSenderIsRefusedForTheRightReason() {
+        #expect(GuestSms.senderRefusal("") == .noSender)
+        #expect(GuestSms.senderRefusal("   ") == .noSender)
+        #expect(GuestSms.senderRefusal("Shop & Go") == .senderCharacters)
+        #expect(GuestSms.senderRefusal("B\u{00E4}nk") == .senderCharacters)
+        #expect(GuestSms.senderRefusal("+") == .senderCharacters)
+        #expect(GuestSms.senderRefusal("12+34") == .senderCharacters)
+        #expect(GuestSms.senderRefusal("Twelve Chars") == .senderLongName)
+        #expect(GuestSms.senderRefusal("123456789012 name") == .senderLongName)
+        #expect(GuestSms.senderRefusal(String(repeating: "1", count: 21)) == .senderLongNumber)
+        #expect(GuestSms.senderRefusal("+" + String(repeating: "1", count: 21)) == .senderLongNumber)
+        #expect(GuestSms.senderRefusal("1234 5678 9012 3456 7890 1") == .senderLongNumber)
+        #expect(GuestSms.senderRefusal("Bank") == nil)
+        #expect(GuestSms.senderRefusal("+1 (555) 010-0100") == nil)
+        #expect(GuestSms.textRefusal("") == .noText)
+        #expect(GuestSms.textRefusal("hi") == nil)
+        // The sender is judged before the text.
+        #expect(GuestSms.refusal(sender: "", text: "") == .noSender)
+        #expect(GuestSms.defaultSender == "Andarium")
+        #expect(GuestSms.senderRefusal(GuestSms.defaultSender) == nil)
+    }
+
     @Test func refusalsNameWhatIsWrong() {
         #expect(GuestSms.refusal(sender: " ", text: "hi") == .noSender)
-        #expect(GuestSms.refusal(sender: "a@b", text: "hi") == .badSender)
+        #expect(GuestSms.refusal(sender: "a@b", text: "hi") == .senderCharacters)
         #expect(GuestSms.refusal(sender: "Bank", text: "") == .noText)
         #expect(GuestSms.refusal(sender: "Bank", text: String(repeating: "x", count: 671)) == .tooLong)
         // An emoji is two UTF-16 units, as the guest counts them.
