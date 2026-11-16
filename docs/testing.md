@@ -752,7 +752,8 @@ blocker in every one of them.
   a shootdown by another thread while rewritten code loops. The runs use the
   product's code layout; `UML_AOT_COUNT_RETIRED=ON` rewrites the libraries to
   count each instruction an entry runs, which checks the budget's bound
-  exactly.
+  exactly (`arm64-aot-tools` builds that layout on the generated library in
+  every run, so it cannot stop assembling unnoticed).
   A generated library holds the forms of the ordered, atomic, memory copy and
   set, and Advanced SIMD structure classes. Each form runs from random
   states; compare-and-swap runs with every outcome and permission; loops that

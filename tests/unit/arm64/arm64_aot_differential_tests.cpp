@@ -2587,13 +2587,13 @@ void atomics_are_shared_between_aot_and_engine(const LibraryImage &image)
 	Copy second_copy{generation, bias_b, changed};
 	Arena arena{generation, arena_base(bias_a)};
 	StaticGuestMemory memory_a, memory_b;
-	GadgetExecutor executor_a, executor_b;
 	const auto cell = arena_base(bias_a) + 0x100;
 	for (std::size_t i = 0; i < arena.total(); ++i)
 		arena.set_kind(i, 2);
 	aot::set_enabled(true);
 	/* The changed copy is the engine's alone. */
 	{
+		GadgetExecutor executor_a, executor_b;
 		aot::reset_stats();
 		SplitMix fill{3};
 		arena.fill(fill);
@@ -2609,6 +2609,11 @@ void atomics_are_shared_between_aot_and_engine(const LibraryImage &image)
 		require(aot::stats().enters > 0);
 	}
 	for (const auto &pair : pairs) {
+		/* Fresh executors: what an executor learned about an address (the
+		 * short entries it stops taking) is not a pair's to inherit; in the
+		 * exact-count layout an entry retires less than it was charged and
+		 * the tail entry of every budget is short. */
+		GadgetExecutor executor_a, executor_b;
 		SplitMix fill{11};
 		arena.fill(fill);
 		const auto initial = cell_value(arena, 0x100);
