@@ -684,7 +684,7 @@ class Arm:
             raise Failure(f"pushing the debug program exited "
                           f"{pushed.returncode}:\n{pushed.stdout}")
         for mode in debug_rows.MODES:
-            for _ in range(1 if self.aot else debug_rows.OFF_RUNS):
+            for _ in range(1 if self.aot else debug_rows.off_runs(mode)):
                 try:
                     record = debug_rows.run_mode(
                         lambda text, seconds=60: device.shell(text, timeout=seconds),
@@ -770,10 +770,10 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
         print(f"probe: {checked} registers compared, identical")
     if options.debug_program:
         for mode in debug_rows.MODES:
-            if len(off.debug.get(mode, [])) != debug_rows.OFF_RUNS or len(on.debug.get(mode, [])) != 1:
+            if len(off.debug.get(mode, [])) != debug_rows.off_runs(mode) or len(on.debug.get(mode, [])) != 1:
                 raise Failure(f"debug row {mode} ran {len(off.debug.get(mode, []))} times "
                               f"without the component and {len(on.debug.get(mode, []))} with it, "
-                              f"not {debug_rows.OFF_RUNS} and 1")
+                              f"not {debug_rows.off_runs(mode)} and 1")
             try:
                 compared, masked = debug_rows.compare(mode, off.debug[mode], on.debug[mode][0])
             except debug_rows.DebugFailure as problem:

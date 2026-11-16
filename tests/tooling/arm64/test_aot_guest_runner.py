@@ -11,6 +11,7 @@ pair of arms and fail every incomplete or failed one.
 
 __import__("sys").dont_write_bytecode = True
 
+import collections
 import hashlib
 import io
 import json
@@ -579,6 +580,52 @@ def study_options(**changes) -> types.SimpleNamespace:
                   study_eviction=True, diagnostics=False, manifest=None, expect_entered=[])
     values.update(changes)
     return types.SimpleNamespace(**values)
+
+
+class DebugBaselineTest(unittest.TestCase):
+    """The debug rows run each mode several times without the component, and a
+    field is masked when two of those runs differ. A register that counts how
+    far a sibling thread got when the process crashed varies in crash-sibling
+    from run to run, in a spread that depends on the host's load (measured on
+    one guest: 19 values in 40 runs, and in another session one value in
+    half of its runs), so three baseline runs sometimes all show one value
+    and a run with the component then differs from them by chance. That mode
+    has more baseline runs."""
+
+    CRASH_SIBLING_RUNS = 8
+
+    def test_crash_sibling_runs_more_baselines_than_the_other_modes(self):
+        calls: collections.Counter = collections.Counter()
+
+        def run_mode(shell, mode):
+            calls[mode] += 1
+            return ["= a"]
+        arm = types.SimpleNamespace(
+            options=types.SimpleNamespace(debug_program=pathlib.Path("libaotdebug.so")),
+            aot=False, label="off", debug={})
+        device = unittest.mock.Mock()
+        device.run.return_value = types.SimpleNamespace(returncode=0, stdout="")
+        with unittest.mock.patch.object(runner.debug_rows, "run_mode", side_effect=run_mode):
+            runner.Arm.run_debug_rows(arm, device, "serial")
+        for mode in runner.debug_rows.MODES:
+            self.assertEqual(calls[mode],
+                             self.CRASH_SIBLING_RUNS if mode == "crash-sibling" else 3, mode)
+
+    def test_the_judging_wants_the_same_numbers(self):
+        def records(sibling_runs: int):
+            return {mode: [["= a"]] * (sibling_runs if mode == "crash-sibling" else 3)
+                    for mode in runner.debug_rows.MODES}
+        options = study_options(debug_program=pathlib.Path("libaotdebug.so"), share_program=None,
+                                study_eviction=False)
+        on = types.SimpleNamespace(label="on", workloads={}, probe=[], report={}, resident=1 << 20,
+                                   share={}, share_counts={}, share_rounds={},
+                                   debug={mode: [["= a"]] for mode in runner.debug_rows.MODES})
+        short = types.SimpleNamespace(label="off", workloads={}, probe=[], report={}, resident=0,
+                                      share={}, share_counts={}, share_rounds={}, debug=records(3))
+        with self.assertRaises(runner.Failure) as caught:
+            runner.check(short, on, options)
+        self.assertIn(f"crash-sibling ran 3 times without the component", str(caught.exception))
+        self.assertIn(f"not {self.CRASH_SIBLING_RUNS} and 1", str(caught.exception))
 
 
 class StudyEvictionTest(unittest.TestCase):

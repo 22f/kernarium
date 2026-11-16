@@ -31,6 +31,18 @@ PROGRAM = "/data/local/tmp/libaotdebug.so"
 # Runs of each mode without the component: a field is masked when any two differ,
 # so the more runs, the fewer fields that differ by chance in two runs only.
 OFF_RUNS = 3
+# crash-sibling prints a register that counts how far a sibling thread got when
+# the process crashed. Its spread depends on the host's load: 19 values in 40
+# runs on one guest, and in another session one value in half of its runs.
+# With three baselines the chance that all show one value and a run with the
+# component then differs is about 7 in 100 at that concentration; with eight
+# it is about 2 in 1000 (the sum over values of p^n (1 - p)), and with the
+# wider spread it is negligible either way. Each run takes seconds.
+OFF_RUNS_BY_MODE = {"crash-sibling": 8}
+
+
+def off_runs(mode: str) -> int:
+    return OFF_RUNS_BY_MODE.get(mode, OFF_RUNS)
 # The program prints this once address-space randomization is off for it.
 RANDOMIZATION_OFF = "randomization: off"
 # The most fields of one mode the engine's own runs may differ in once the
