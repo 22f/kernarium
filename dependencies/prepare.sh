@@ -21,6 +21,7 @@ VALIDATE_MANIFEST_ONLY=0
 RESOLVE_REPOSITORY=
 RESOLVE_REF=
 ARCHIVE_MANIFEST=
+PIN_ARCHIVES=
 TAG_REPOSITORY=
 TAG_REF=
 TAG_OBJECT=
@@ -54,6 +55,12 @@ Options:
                   Validate every source and patch-series identity only
   --archive-manifest PATH
                   Fetch SHA-256-pinned HTTPS archives into CACHE/archives
+  --pin-archives PATH
+                  With --product andarium-accessibility: build the phone
+                  release of each application online (JAVA_HOME and
+                  ANDROID_HOME name the pinned toolchain) and write the
+                  archive list it resolves to PATH, for review before it
+                  replaces dependencies/andarium-accessibility/archives.tsv
   --resolve-ref REPOSITORY REF
                   Print the object ID of one exact HTTPS branch/tag ref,
                   peeling annotated tags; use it to pin a source manifest
@@ -108,6 +115,11 @@ while [ "$#" -gt 0 ]; do
 		ARCHIVE_MANIFEST=$2
 		shift 2
 		;;
+	--pin-archives)
+		[ "$#" -ge 2 ] || fail "--pin-archives requires a path"
+		PIN_ARCHIVES=$2
+		shift 2
+		;;
 	--resolve-ref)
 		[ "$#" -ge 3 ] || fail "--resolve-ref requires a repository and exact ref"
 		RESOLVE_REPOSITORY=$2
@@ -143,6 +155,37 @@ sha256_file()
 		sha256sum "$1" | awk '{print $1}'
 	fi
 }
+
+if [ -n "$PIN_ARCHIVES" ]; then
+	[ "$PRODUCT" = andarium-accessibility ] ||
+		fail "--pin-archives is for the andarium-accessibility product"
+	[ -z "$ARCHIVE_MANIFEST" ] && [ -z "$RESOLVE_REPOSITORY" ] && [ -z "$TAG_REPOSITORY" ] &&
+		[ "$VERIFY_ONLY" -eq 0 ] && [ "$VALIDATE_MANIFEST_ONLY" -eq 0 ] && [ "$FETCH" -eq 1 ] ||
+		fail "--pin-archives cannot be combined with other preparation modes"
+	[ -n "${JAVA_HOME:-}" ] && [ -n "${ANDROID_HOME:-}" ] ||
+		fail "--pin-archives requires JAVA_HOME and ANDROID_HOME, the pinned toolchain"
+	LIST="$ROOT_DIR/dependencies/andarium-accessibility/archives.tsv"
+	PINNER="$ROOT_DIR/dependencies/andarium-accessibility/pin-archives.py"
+	# The sources the builds export must be the prepared, verified ones.
+	"$0" --product andarium-accessibility --verify --root "$DEPENDENCY_ROOT" --cache "$CACHE_ROOT" >/dev/null ||
+		fail "the andarium-accessibility sources are not prepared; run dependencies/prepare.sh --product andarium-accessibility"
+	# The two Gradle distributions come through the digest-checked archive
+	# path: a list of just those rows, whose digests the tracked list pins.
+	DISTRIBUTIONS=$(mktemp "${TMPDIR:-/tmp}/uml-pin-distributions.XXXXXX")
+	trap 'rm -f -- "$DISTRIBUTIONS"' EXIT HUP INT TERM
+	{
+		printf 'name\turl\tsha256\n'
+		awk -F '\t' '$1 ~ /-bin\.zip$/ { print }' "$LIST"
+	} >"$DISTRIBUTIONS"
+	"$0" --archive-manifest "$DISTRIBUTIONS" --cache "$CACHE_ROOT" >/dev/null ||
+		fail "the Gradle distributions could not be fetched and verified"
+	# The pinner is this shell's own child, which is what lets it reach the network.
+	UML_PREPARE_NETWORK_PARENT=$$ python3 -B "$PINNER" pin \
+		--sources "$DEPENDENCY_ROOT" --cache "$CACHE_ROOT" --archives "$LIST" \
+		--work "$ROOT_DIR/.build/dependency-build/andarium-accessibility-pin" \
+		--java-home "$JAVA_HOME" --android-home "$ANDROID_HOME" --output "$PIN_ARCHIVES"
+	exit $?
+fi
 
 if [ -n "$ARCHIVE_MANIFEST" ]; then
 	[ -z "$RESOLVE_REPOSITORY" ] && [ -z "$TAG_REPOSITORY" ] ||

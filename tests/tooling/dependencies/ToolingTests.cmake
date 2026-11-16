@@ -132,3 +132,12 @@ if(UML_KOSMICKRISP_SPIRV_BUILD_HOST)
         LABELS dependency gpu
         TIMEOUT 3600)
 endif()
+
+# pin-archives.py reaches the network only as the child of prepare.sh
+# --pin-archives, and compares and parses without it.
+uml_add_tooling_test(
+    NAME dependency-andarium-accessibility-pin-archives
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/dependencies/test_pin_archives.py
+    LABELS dependency;andarium
+    TIMEOUT 60)
