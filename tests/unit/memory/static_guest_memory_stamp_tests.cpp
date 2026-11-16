@@ -5,12 +5,15 @@
  * that still counts exactly. The stamp the translation caches keep stays
  * the two words it was. */
 #include "memory/static_guest_memory.hpp"
+#include "cpu/arm64/aot/shared_verdicts.hpp"
+#include "mapped_backing.hpp"
 #include "require.hpp"
 #include "scratch_backing.hpp"
 
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <string_view>
 #include <sys/mman.h>
 
@@ -108,11 +111,81 @@ void test_the_stamp_says_whether_the_page_may_be_shared()
 	require(darwin_uml_static_vm_destroy(generation) == 0);
 }
 
+/* A verdict filed for a page is answered to the next address space until the
+ * page's epoch moves; a record that ran out of count or of epoch is marked
+ * never-share for good and answers none, whatever the epoch field says
+ * after later publications. Through the table's own entry point and the
+ * stamps the memory layer reports, the sequence that clears the mark in an
+ * unconditional epoch step: the count overflows with the epoch at its
+ * largest, every mapping goes, the frame is mapped again and a change is
+ * published. */
+void test_an_exhausted_record_answers_no_old_verdict()
+{
+	namespace aot = uml::cpu::arm64::aot;
+	constexpr unsigned long first = 801, second = 802;
+	constexpr unsigned long base = 0x1100'0000;
+	constexpr int rx = PROT_READ | PROT_EXEC;
+	ScratchBacking backing{backing_name, 2 * page};
+	/* A mapping that is not code keeps the frame's record while the
+	 * address spaces unmap it. */
+	map(803, 0x1000, backing, 0, PROT_READ, 0);
+	map(first, base, backing, 0, rx, 3);
+	map(second, base, backing, 0, rx, 3);
+	require(darwin_uml_static_vm_activate(first) == 0);
+	StaticGuestMemory one, two;
+	one.set_generation(first);
+	two.set_generation(second);
+	auto table = std::make_unique<aot::VerdictTable>();
+	std::size_t hashed = 0;
+	const auto ask = [&](StaticGuestMemory &memory) {
+		return aot::verify_through_table(*table,
+			[&](std::uint64_t at, aot::PageStamp &stamp) noexcept {
+				ExtendedCodePageStamp seen;
+				if (!memory.extended_code_page_stamp(at, nullptr, seen))
+					return false;
+				stamp = {seen.stamp.identity, seen.epoch, seen.shareable};
+				return true;
+			},
+			[&]() noexcept {
+				++hashed;
+				return aot::SharedOutcome::match;
+			},
+			base, aot::VerdictTable::where(1, 0));
+	};
+	require(ask(one) == aot::SharedOutcome::match && hashed == 1);
+	require(ask(two) == aot::SharedOutcome::shared_hit && hashed == 1);
+
+	void *record = nullptr;
+	darwin_uml_static_code_page_stamp raw{};
+	require(darwin_uml_static_vm_code_page(first, base, &record, &raw) ==
+		DARWIN_UML_STATIC_TRANSLATED);
+	uml::memory::MappedBacking::preset_for_testing(record,
+		(std::uint64_t{1} << 24) - 1, (std::uint64_t{1} << 39) - 1);
+	uml::memory::MappedBacking::executable_mapping_added(record);
+	require(darwin_uml_static_vm_unmap_generation(first,
+		reinterpret_cast<void *>(base), page) == 0);
+	require(darwin_uml_static_vm_unmap_generation(second,
+		reinterpret_cast<void *>(base), page) == 0);
+	map(second, base, backing, 0, rx, 3);
+	darwin_uml_static_vm_invalidate_code_page(record);
+	two.set_generation(second);
+	ExtendedCodePageStamp after{};
+	require(stamp_of(two, base, after));
+	require(!after.shareable && after.immutable);
+	/* The old verdict stays unanswered, and so does whatever is filed. */
+	require(ask(two) == aot::SharedOutcome::match && hashed == 2);
+	require(ask(two) == aot::SharedOutcome::match && hashed == 3);
+	require(darwin_uml_static_vm_destroy(first) == 0);
+	require(darwin_uml_static_vm_destroy(second) == 0);
+	require(darwin_uml_static_vm_destroy(803) == 0);
+}
+
 } // namespace
 
 int main()
 {
 	test_the_stamp_says_whether_the_page_may_be_shared();
+	test_an_exhausted_record_answers_no_old_verdict();
 	std::puts("Static guest memory stamp tests passed");
 	return 0;
 }

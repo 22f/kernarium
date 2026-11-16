@@ -66,7 +66,9 @@ public:
 	[[nodiscard]] static bool load_code_page_stamp(
 		const void *handle, RecordStamp &stamp) noexcept;
 	/* A publication: the page's bytes were written through a path no
-	 * translated store saw. Moves the version and the epoch. */
+	 * translated store saw. Moves the version and the epoch, except that a
+	 * record marked never-share keeps its epoch (and the mark): running out
+	 * of epoch is itself a mark, and nothing may carry out of the word. */
 	static void invalidate_code_page(void *handle) noexcept;
 	/* A departure: a mapping of the page at `offset` went away or lost
 	 * execute. Moves the version of the page's record if it has one. A page
@@ -105,6 +107,13 @@ public:
 	 * epoch as given (the never-share bit cleared). */
 	static void preset_for_testing(void *handle, std::uint64_t count,
 		std::uint64_t epoch) noexcept;
+	/* The record's whole word, count, epoch and never-share bit, as it is
+	 * stored: to reach the edges of the epoch field, which 2^39 steps would
+	 * take to reach. */
+	[[nodiscard]] static std::uint64_t word_for_testing(
+		const void *handle) noexcept;
+	static void preset_word_for_testing(void *handle,
+		std::uint64_t word) noexcept;
 	template <typename Visit>
 	void for_each_code_page(Visit &&visit)
 	{

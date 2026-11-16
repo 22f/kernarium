@@ -172,8 +172,18 @@ void MappedBacking::invalidate_code_page(void *handle) noexcept
 	if (page == nullptr)
 		return;
 	page->version.fetch_add(1, std::memory_order_release);
-	/* A step past the largest epoch carries into the never-share bit. */
-	page->fresh.fetch_add(fresh_epoch_step, std::memory_order_release);
+	/* A step past the largest epoch carries into the never-share bit, which
+	 * is for good: the step is made only while the bit is clear, so that no
+	 * publication after the mark can carry out of the word and clear it. */
+	auto fresh = page->fresh.load(std::memory_order_relaxed);
+	for (;;) {
+		if ((fresh & fresh_never_share) != 0)
+			return;
+		if (page->fresh.compare_exchange_weak(fresh,
+			    fresh + fresh_epoch_step, std::memory_order_release,
+			    std::memory_order_relaxed))
+			return;
+	}
 }
 
 void MappedBacking::retire_code_page(std::uint64_t offset) noexcept
@@ -264,6 +274,19 @@ void MappedBacking::preset_for_testing(void *handle, std::uint64_t count,
 {
 	static_cast<CodePage *>(handle)->fresh.store(
 		(count & fresh_count_mask) | ((epoch << 24) & fresh_epoch_mask),
+		std::memory_order_release);
+}
+
+std::uint64_t MappedBacking::word_for_testing(const void *handle) noexcept
+{
+	return static_cast<const CodePage *>(handle)->fresh.load(
+		std::memory_order_acquire);
+}
+
+void MappedBacking::preset_word_for_testing(void *handle,
+	std::uint64_t word) noexcept
+{
+	static_cast<CodePage *>(handle)->fresh.store(word,
 		std::memory_order_release);
 }
 #endif

@@ -498,6 +498,67 @@ void test_the_edges_of_the_word()
 	destroy(generation);
 }
 
+/* "Never share" is for good. A record that cannot count exactly any more
+ * (its count overflowed, or its epoch ran out) answers no verdict, so
+ * nothing may clear the bit again: a publication moves the legacy version of
+ * the page and nothing else, and the mapping counts stay out of it. 2^39
+ * publications are out of reach of a test, so the rows set the whole word at
+ * the edge: the epoch at its largest with the bit set, which an unconditional
+ * step carries out of the word and clears. */
+void test_never_share_survives_publications_and_the_exhausted_epoch()
+{
+	constexpr unsigned long generation = 715;
+	constexpr unsigned long base = 0x2d00'0000;
+	constexpr std::uint64_t never_share = std::uint64_t{1} << 63;
+	constexpr std::uint64_t count_mask = (std::uint64_t{1} << 24) - 1;
+	constexpr std::uint64_t epoch_mask =
+		((std::uint64_t{1} << 39) - 1) << 24;
+	ScratchBacking backing{backing_name, 4 * page};
+	Pin pin17{1017, backing};
+	must_map(generation, base, backing, 0, 1, rwx, 1);
+	auto *record = record_of(generation, base);
+
+	/* After the count overflowed: publications leave the bit and the epoch. */
+	MappedBacking::preset_for_testing(record, count_mask, 7);
+	must_map(generation, base + page, backing, 0, 1, rwx, 1);
+	require((stamp_of(record).flags & DARWIN_UML_STATIC_STAMP_NEVER_SHARE) != 0);
+	const auto marked = MappedBacking::word_for_testing(record);
+	auto version = stamp_of(record).version;
+	for (int step = 0; step < 3; ++step) {
+		darwin_uml_static_vm_invalidate_code_page(record);
+		require(MappedBacking::word_for_testing(record) == marked);
+		require(stamp_of(record).version == ++version);
+	}
+	unmap(generation, base + page, 1);
+	require(MappedBacking::word_for_testing(record) == marked);
+
+	/* After the epoch ran out: bit set, epoch at its largest. */
+	const auto exhausted = never_share | epoch_mask | count_mask;
+	MappedBacking::preset_word_for_testing(record, exhausted);
+	for (int step = 0; step < 3; ++step) {
+		darwin_uml_static_vm_invalidate_code_page(record);
+		require(MappedBacking::word_for_testing(record) == exhausted);
+		require((stamp_of(record).flags &
+			DARWIN_UML_STATIC_STAMP_NEVER_SHARE) != 0);
+	}
+	must_map(generation, base + page, backing, 0, 1, rwx, 1);
+	unmap(generation, base + page, 1);
+	require(MappedBacking::word_for_testing(record) == exhausted);
+
+	/* Running out of epoch is itself the mark: one publication at the
+	 * largest epoch sets the bit, and the next ones leave it. */
+	MappedBacking::preset_word_for_testing(record, epoch_mask);
+	darwin_uml_static_vm_invalidate_code_page(record);
+	require(MappedBacking::word_for_testing(record) == never_share);
+	darwin_uml_static_vm_invalidate_code_page(record);
+	require(MappedBacking::word_for_testing(record) == never_share);
+	MappedBacking::preset_word_for_testing(record, 1);
+	unmap(generation, base, 1);
+	require(MappedBacking::word_for_testing(record) == (std::uint64_t{1} << 24));
+	destroy(generation);
+	audit();
+}
+
 /* Several address spaces, one frame, mapped and unmapped from several
  * threads at once: nothing is lost and nothing is counted twice. */
 void test_threads_mapping_one_frame_keep_the_count_exact()
@@ -589,6 +650,7 @@ int main()
 	test_an_allocation_failure_changes_no_count();
 	test_protect_that_cannot_make_a_record_changes_nothing();
 	test_the_edges_of_the_word();
+	test_never_share_survives_publications_and_the_exhausted_epoch();
 	test_threads_mapping_one_frame_keep_the_count_exact();
 	test_threads_that_come_and_go_return_the_count_to_zero();
 	std::puts("Static MMU executable count tests passed");
