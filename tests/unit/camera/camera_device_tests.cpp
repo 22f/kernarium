@@ -2109,7 +2109,9 @@ void testTheDepartureWaitsForALossTheNoticeBegan()
     }
 }
 
-/* What the guest's end of the run, or the device's, does to a call that waits: it returns, with nothing left to wait for. */
+/* What the guest's end of the run, or the device's, does to a call that waits: it returns, with nothing left to wait for.
+ * It shows the wait returning and nothing about the guest that restarts: that the restarted guest does not boot behind the
+ * hold that was waiting is kernarium-gpu-hold's. */
 void testTheDepartureEndsWithTheGuestOrTheDevice()
 {
     {

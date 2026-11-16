@@ -396,6 +396,9 @@ void aStopBeforeTheFirstRunKeepsTheGuestFromRunning()
             "a stop before the first run still ran the guest");
 }
 
+/* The loop's side only: the machine's `held` is the test's own switch. What makes the real machine held (a hold asked for
+ * with the gate still open) is the Lifecycle's, in aHoldAskedForHoldsTheNextBootBeforeTheGateCloses, and the restart that
+ * meets a hold that waits for the guest's camera is kernarium-gpu-hold. */
 void theNextBootWaitsWhileTheApplicationHoldsIt()
 {
     FakeMachine machine;
@@ -687,6 +690,33 @@ void aStoppedAndQuiescedLifecycleHoldsTheNextBoot()
     require(!lifecycle.held(), "an unregistered GPU still held the boot");
 }
 
+void aHoldAskedForHoldsTheNextBootBeforeTheGateCloses()
+{
+    Lifecycle lifecycle;
+    std::atomic_bool gate {};
+    lifecycle.setGpuHeld([&] { return gate.load(); });
+    require(!lifecycle.gpuHoldRequested(), "a fresh lifecycle had a hold asked for");
+
+    // The application has asked, and the gate is still open: it waits for the
+    // guest's camera first, and a guest that boots meanwhile would find the gate
+    // closed behind it.
+    lifecycle.setGpuHoldRequested(true);
+    require(lifecycle.gpuHoldRequested(), "the hold asked for was not kept");
+    require(lifecycle.held(), "a hold asked for with the gate open did not hold the boot");
+    require(!lifecycle.quiesced(), "a hold asked for is not a quiesced guest");
+
+    // It holds with no GPU service registered, between two boots.
+    lifecycle.setGpuHeld({});
+    require(lifecycle.held(), "a hold asked for was forgotten when the GPU service went away");
+
+    // The requests given back release the boot, whatever the gate does.
+    lifecycle.setGpuHoldRequested(false);
+    require(!lifecycle.held(), "a hold given back still held the boot");
+    gate.store(true);
+    lifecycle.setGpuHeld([&] { return gate.load(); });
+    require(lifecycle.held(), "a closed gate stopped holding the boot");
+}
+
 /* Calls `nudge` until `done`, so that a wake-up sent before the waiter began
  * to wait is sent again. */
 template<typename Nudge, typename Done>
@@ -793,6 +823,8 @@ const uml::testing::NamedTest tests[] {
         noBootedEventIsSentWhenTheGuestEndsFirst},
     {"the-lifecycle-holds-the-next-boot",
         aStoppedAndQuiescedLifecycleHoldsTheNextBoot},
+    {"a-hold-asked-for-holds-the-next-boot-before-the-gate-closes",
+        aHoldAskedForHoldsTheNextBootBeforeTheGateCloses},
     {"a-waiting-boot-wakes-when-the-hold-ends", aWaitingBootWakesWhenTheHoldEnds},
     {"a-stop-wakes-a-waiting-boot",
         aStopWakesAWaitingBootAndIsNotInheritedByTheNextRun},

@@ -941,7 +941,9 @@ is part of the loop: every restart reads the misc partition again (see the
 runs the same loop inside its one `run` call
 (`Kernarium/Runtime/KernariumRestartLoop.hpp`, `kernarium-restart-loop`): a stop
 that arrives as the guest restarts wins, the next boot waits while the guest is
-paused or the GPU request gate is held, and a restart is reported twice so the
+paused or from the moment the application asks for its GPU requests to be held
+(`set_gpu_hold`, before the hold's camera wait, whether or not the gate has
+closed yet) until it gives them back, and a restart is reported twice so the
 application can re-apply what belongs to a kernel. After Android powers off
 cleanly the runtime releases the guest through `uml_emulator_release_guest` and
 returns success only once another run can start. An application that can be

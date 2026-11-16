@@ -363,7 +363,8 @@ the edge at the latest. A kept-running job's bound (`gpuHoldBound`, 1.5 s) takes
 the hold without the camera's wait, so on that path the gate is held 2.5 s after
 the edge at the latest, and a bound that fires while the other path waits for the
 camera holds at once and ends that wait. Guest page-cache trimming stays off in
-the foreground, and quiescing trims once by itself.
+the foreground, and quiescing trims once by itself. A guest that restarts while a
+hold is pending boots after the requests are given back.
 
 On a device the quiesce ends by hibernating the guest's RAM, so that a paused
 Kernarium no longer carries the guest's wired memory

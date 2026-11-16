@@ -7,6 +7,7 @@
 #endif
 #include "KernariumConsoleInput.hpp"
 #include "KernariumConsoleOutput.hpp"
+#include "KernariumGpuHold.hpp"
 #include "KernariumGuestTimeZone.hpp"
 #include "KernariumHostFeatures.hpp"
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
@@ -215,12 +216,10 @@ void* inputStatusContext;
  * same mutex, so the order the application hears them is the order they
  * happened in. */
 uml::input::virtio::RegistrationSummary inputRegistrations;
-/* The GPU hold the application last asked for, and the GPU service it applies
- * to while a guest runs. A hold asked for before the guest's GPU exists takes
- * effect when it does. */
+/* The GPU service of the guest that runs, which the application's GPU hold
+ * applies to. */
 std::mutex activeGpuMutex;
 uml::gpu::InProcessGpuService* activeGpu;
-bool gpuHoldRequested;
 /* Longest a hold waits for a GPU request already running. The application
  * holds inside didEnterBackground, which iOS gives about five seconds. */
 constexpr std::chrono::milliseconds gpuHoldBudget {1000};
@@ -234,6 +233,13 @@ kernarium::console::InputRegistry& consoleInputs =
  * run loop reads between boots: a stop, a quiesce, the GPU hold. Process
  * lifetime, like the callers that reach it. */
 kernarium::restart::Lifecycle& lifecycle = *new kernarium::restart::Lifecycle;
+/* The GPU hold the application last asked for (the lifecycle knows whether it
+ * is asked for), applied to the guest's GPU service while a guest runs. A hold
+ * asked for before the guest's GPU exists takes effect when it does. */
+kernarium::gpu_hold::Gate<uml::gpu::InProcessGpuService>& gpuGate =
+    *new kernarium::gpu_hold::Gate<uml::gpu::InProcessGpuService>(
+        activeGpuMutex, activeGpu, lifecycle,
+        kernarium::gpu_hold::Timing {gpuHoldBudget});
 /* The one receiver of restart events, and the page-cache trimming the
  * application last asked for. The restarted guest's console is asked for the
  * latter to see whether it answers, so the question can never undo what the
@@ -967,7 +973,7 @@ public:
          * guest it was placed for and still holds the next one: the run loop
          * reads it to keep a restarted guest from booting behind it. */
         lifecycle.setGpuHeld([&gpu] { return gpu.requestsHeld(); });
-        if (gpuHoldRequested)
+        if (lifecycle.gpuHoldRequested())
             (void)gpu.holdRequests(gpuHoldBudget);
     }
 
@@ -2936,67 +2942,22 @@ int runtimeSetNetworkNotice(int notice)
     }
 }
 
-/* Holds the guest's GPU requests: 1 when it is held, 0 when a request that was
- * running outlasted the budget, -1 when no guest runs (the hold then waits for
- * the next one). */
-int holdGpuRequests()
-{
-    std::lock_guard lock(activeGpuMutex);
-    gpuHoldRequested = true;
-    if (activeGpu == nullptr)
-        return -1;
-    return activeGpu->holdRequests(gpuHoldBudget) ? 1 : 0;
-}
-
 int runtimeSetGpuHold(int held)
 {
-    if (held == 2) {
-        /* The hold at once, with no wait for the guest's camera: the
-         * application's own bound takes it when the edge is already late.
-         * A hold that waits for the camera meanwhile is of no use once this
-         * has landed, and ends. */
-        const int result = holdGpuRequests();
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
-        cameraBackgroundVideo()->abandon();
-#endif
-        return result;
-    }
-    if (held != 0) {
-#if KERNARIUM_RUNTIME_ANDROID_GUEST
-        /* A camera video that runs as the application leaves the foreground
-         * ends first, and the guest has stopped it before the hold lands: a
-         * guest that has not acted on the lost video when its GPU requests
-         * stop stalls its camera pipeline until the application is back, and
-         * a recording that runs stops only then. The wait is the one bound
-         * the edge allots it (`backgroundVideoBound`), taken out of the
-         * application's edge budget, and no video running means no wait. The
-         * hold is recorded first, as a hold asked for before the wait would
-         * be, so a guest that restarts meanwhile boots behind it. */
-        {
-            std::lock_guard lock(activeGpuMutex);
-            gpuHoldRequested = true;
-        }
-        return uml::camera::holdAfterVideoEnds(
-                   *cameraBackgroundVideo(), holdGpuRequests,
-                   uml::camera::backgroundVideoBound,
-                   [](const std::string& line) {
-                       std::fprintf(stderr,
-                                    "Kernarium: %s; the GPU is held as it is\n",
-                                    line.c_str());
-                   })
-            .held;
+    /* A camera video that runs as the application leaves the foreground ends
+     * first, and the guest has stopped it before the hold lands: a guest that
+     * has not acted on the lost video when its GPU requests stop stalls its
+     * camera pipeline until the application is back, and a recording that
+     * runs stops only then. The sequence is in KernariumGpuHold.hpp. */
+    return gpuGate.set(
+        held, cameraBackgroundVideo().get(), [](const std::string& line) {
+            std::fprintf(stderr, "Kernarium: %s; the GPU is held as it is\n",
+                         line.c_str());
+        });
 #else
-        return holdGpuRequests();
+    return gpuGate.set(held, nullptr, [](const std::string&) {});
 #endif
-    }
-    std::lock_guard lock(activeGpuMutex);
-    gpuHoldRequested = false;
-    if (activeGpu == nullptr)
-        return -1;
-    activeGpu->releaseRequests();
-    /* A restarted guest waits for this. */
-    lifecycle.changed();
-    return 1;
 }
 
 int runtimeGuestDisplayActive()
