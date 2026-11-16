@@ -20,14 +20,17 @@ CLEAN = b"_uml_aot_enter _ZN3uml3cpu5arm643aot5enterE" + bytes(16)
 SYMBOL = b"__ZN3uml3cpu5arm643aot11diagnostics5resetEv" + bytes(16)
 STRING = b"DARWIN_UML_AOT_REPORT\0" + bytes(16)
 # The memory layer's compilation with the executable-mapping count audit
-# (darwin/memory/count_audit.hpp): its three entry points, and the string it
-# keeps once the symbols are stripped. The production memory layer holds
-# neither, and the checker reads the audit as a diagnostics build whatever
-# else the product linked.
+# (darwin/memory/count_audit.hpp): its three entry points, the record reader
+# its recount uses, and the string it keeps once the symbols are stripped. The
+# production memory layer holds none of them, and the checker reads the audit
+# as a diagnostics build whatever else the product linked. The names are what
+# `nm` reports for the audited objects, which test_audit_symbols_refused.py
+# reads from the build itself.
 AUDIT_SYMBOLS = (
-    b"__ZN3uml6memory22audit_executable_countsEv",
-    b"__ZN3uml6memory14count_anomaliesEv",
+    b"__ZN3uml6memory23audit_executable_countsEv",
+    b"__ZN3uml6memory15count_anomaliesEv",
     b"__ZN3uml6memory18note_count_anomalyEv",
+    b"__ZN3uml6memory13MappedBacking19executable_mappingsEPKv",
 )
 AUDIT_STRING = b"UML_MEMORY_COUNT_AUDIT_BUILD\0" + bytes(16)
 # The memory layer's own names the audit does not own.
@@ -118,7 +121,7 @@ def main() -> int:
 
     if failures:
         raise SystemExit("\n".join(failures))
-    print("the AOT packaging check accepted 3 and rejected 11 products")
+    print("the AOT packaging check accepted 3 and rejected 12 products")
     return 0
 
 

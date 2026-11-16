@@ -35,12 +35,16 @@ MAGICS = (
 # The AOT diagnostics namespace in a mangled name (the gadget engine has a
 # namespace of the same last name, so the match includes `aot`), and the
 # variable only the diagnostics compilation reads. The memory layer's count
-# audit (darwin/memory/count_audit.hpp) is named by its three entry points in
-# namespace uml::memory, and by the string the audited compilation keeps.
+# audit (darwin/memory/count_audit.hpp) is named by its three entry points and
+# the record reader the recount uses, all in namespace uml::memory, and by the
+# string the audited compilation keeps. The lengths are the Itanium name
+# lengths, so tests/tooling/cmake/test_audit_symbols_refused.py checks them
+# against the names `nm` reports for the audited objects.
 AUDIT_MARKERS = (
-    b"6memory22audit_executable_counts",
-    b"6memory14count_anomalies",
+    b"6memory23audit_executable_counts",
+    b"6memory15count_anomalies",
     b"6memory18note_count_anomaly",
+    b"13MappedBacking19executable_mappings",
     b"UML_MEMORY_COUNT_AUDIT_BUILD",
 )
 MARKERS = (b"3aot11diagnostics", b"DARWIN_UML_AOT_REPORT") + AUDIT_MARKERS

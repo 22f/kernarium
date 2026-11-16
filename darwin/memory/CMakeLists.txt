@@ -136,6 +136,12 @@ if(TARGET uml_native_mmu)
 endif()
 
 if(UML_BUILD_UNIT_TESTS)
+    # The audited compilation of the static MMU, built to be read and linked
+    # by nothing: the packaging rows (tests/tooling/cmake) need an audited
+    # object to refuse, and the unit tree has no AOT image, so the
+    # diagnostics composition's own copy does not exist where the gate runs.
+    _uml_add_static_mmu(uml_static_mmu_audit_probe 1)
+
     # Fault injection and white-box ownership queries recompile the exact
     # production implementation manifests under a test-only policy. Ordinary
     # products contain neither the probe atomics nor their conditional calls.

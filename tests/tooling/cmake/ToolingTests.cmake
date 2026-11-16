@@ -74,6 +74,17 @@ if(TARGET uml_static_mmu)
         LABELS audit;package
         TIMEOUT 60)
 endif()
+if(TARGET uml_static_mmu_audit_probe)
+    uml_add_tooling_test(
+        NAME memory-audit-symbols-are-refused
+        COMMAND ${Python3_EXECUTABLE} -B
+            ${PROJECT_SOURCE_DIR}/tests/tooling/cmake/test_audit_symbols_refused.py
+            --checker ${PROJECT_SOURCE_DIR}/scripts/check-no-aot-diagnostics.py
+            --audited $<TARGET_PROPERTY:uml_static_mmu_audit_probe,BINARY_DIR>/CMakeFiles/uml_static_mmu_audit_probe.dir
+            --production $<TARGET_PROPERTY:uml_static_mmu,BINARY_DIR>/CMakeFiles/uml_static_mmu.dir
+        LABELS audit;package
+        TIMEOUT 60)
+endif()
 if(TARGET uml_static_mmu_audited)
     uml_add_tooling_test(
         NAME memory-audit-compilation-fails-packaging
