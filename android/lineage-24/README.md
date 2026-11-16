@@ -499,10 +499,13 @@ and expects the same cameras).
 ### Text messages
 
 The guest receives text messages from the host and sends none. `KernariumSms`
-(`overlay/sms/`) runs as the system user and serves one provider call, to the
-adb shell's uid and root's; an application's call is refused. A message is a
-sender (a number or a short name), a text of limited length and an identifier
-the host chooses for it. `Message.java` and
+(`overlay/sms/`) is a persistent system application in an SELinux domain of its
+own that listens on vsock port 5560 and takes a request only from host CID 2.
+It has no other entry point, so neither an adb shell, adb over the network
+included, nor an application can deliver a message. `HostFrame.java` and
+`Andarium/AndariumCore/Sources/AndariumCore/GuestSmsChannel.swift` own the
+frame. A message is a sender (a number or a short name), a text of limited
+length and an identifier the host chooses for it. `Message.java` and
 `Andarium/AndariumCore/Sources/AndariumCore/Adb/GuestSms.swift` own what is
 accepted and refused, each limit stated once.
 
@@ -511,12 +514,16 @@ the text needs more than one part: an `SMS_DELIVER` broadcast to the SMS role
 holder, then `SMS_RECEIVED` to the applications that may receive SMS, so
 Messaging stores and notifies and applications holding `RECEIVE_SMS` get it.
 With no SMS role holder and no Messaging installed, the message is stored in
-the inbox. The broadcasts are sent, not awaited, so the answer says only that
-Android took the message. A message whose identifier was handed over before is
-answered with the first call's result and not handed over again, so a host that
-did not see the answer can send it again; the service remembers a bounded
-number of identifiers, in its process, and one it has forgotten (after the
-service restarts, or many messages later) is handed over again.
+the inbox, and with no SMS provider either it goes only to the `SMS_RECEIVED`
+receivers. The broadcasts are sent, not awaited, so a handed-over answer says
+only that Android took the message. Each message carries an identifier the host
+chooses, and the host marks a repeated send of a message whose answer it did not
+get as a retry. The service records the message in its device-protected storage
+before handing it over, answers a retry from that record without handing
+anything over, and closes an identifier that a retry finds unrecorded, so no
+message is handed over twice. When the record cannot say whether a message was
+handed over, the answer is uncertain, and that identifier is never handed over
+afterwards.
 
 The product carries Messaging and TelephonyProvider and declares
 `android.hardware.telephony.messaging` and `config_sms_capable` (the SMS role

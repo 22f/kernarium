@@ -837,6 +837,12 @@ storage layout (`android17-launcher-arguments`,
 where the Android CLI is built, runs the executable's own argument checks)
 ([storage](../android/lineage-24/README.md#static-disk-and-boot-contract),
 [block device](../darwin/device/block/README.md)).
+The target-files verifier also reads the compiled policy for the text message
+service ([README](../android/lineage-24/README.md#text-messages)): which types may
+create, bind or listen on vsock, who may reach the service's sockets and data, the
+services it finds, who may set adbd's listen address, and which seapp line selects
+its domain; the fixtures of `lineage24-target-files-fixtures` and
+`lineage24-builder-lane` each hold a policy that one of those checks must refuse.
 `lineage24-camera-app-contract` checks that the camera application's overlay,
 its patch series and the target-files verifier's constants name the same
 settings and values; what the application then does is the image's to show.
@@ -995,10 +1001,14 @@ packages, install times and processes, and `android17-oldapp-switch-command`
 lock file (on real files), writes and exit statuses on a plain JVM; the Android
 calls need a built image.
 `android17-sms-service` (tooling; skipped without a JDK) runs the text message
-service's encoder, argument parser and identifier memory on a plain JVM: it reads
-the PDUs back with a parser of its own and the JDK's `UTF-16` decoder, the one
-Android applies to a UCS-2 message, which drops a leading byte order mark; the
-broadcasts and the inbox need a built image.
+service on a plain JVM: the PDUs it builds, read back with a parser of its own
+and the JDK's `UTF-16` decoder, the one Android applies to a UCS-2 message, which
+drops a leading byte order mark; the request's parser and the answers against the
+golden file the host's tests read too; the delivery record at each point where a
+request can end (a forced end, a failing file operation, a second process on its
+lock); and the host channel's server, frame and admission over stand-ins for the
+platform's socket classes. The broadcasts, the inbox and the socket calls need a
+built image.
 `android-vulkan-smoke` (integration) registers when `UML_ANDROID_VULKAN_SMOKE_RELEASE`
 names a release and runs the image's `kernarium_vk_ahb_import` in a guest: hardware
 buffers imported and read back, and the guest memory file descriptors
@@ -1117,6 +1127,22 @@ Android sees (devices, keys, axes), what comes back (rumble, lights, the
 drivers' feature requests), hot plug, the relay's recovery, and reports the
 guest's cost per report and the relay's memory. `android17-gamepad-runner`
 (tooling) runs its wire, controllers and parsers without a guest.
+`android-sms-channel` and `android-sms-record` (integration) register when
+`UML_ANDROID_SMS_RELEASE` names the release and `UML_ANDROID_SMS_PROBE_APK` and
+`UML_ANDROID_SMS_VSOCKPROBE_DEX` the output of
+[`sms/build-apk.sh`](../tests/integration/android/sms/README.md): the runner plays
+the host application over a launcher forward to the service's port and sends the
+contract's frames. It checks that a request from the host is handed over and
+answered, that a delivery asked from adb (the provider, a forward to the port, a
+reverse forward) is refused, the service's domain and denials, every vsock listener
+of the guest, and that neither the shell nor an application can create a vsock
+socket; the record mode checks that no message is handed over twice across a
+crash, a reboot and fifty kills. `--mode proof` (a userdebug build) writes a
+pending record and traces the order of the record's writes; the variants without
+Messaging or without an SMS provider, the adbd topic and the kernel configuration
+are options of the runner (`--list-rows` names each row and what it needs).
+`android17-sms-runner` (tooling) runs its wire, record file, parsers and
+judgements without a guest.
 `android-oldapp` (integration) registers when `UML_ANDROID_OLDAPP_RELEASE`
 names a release built with the old-application layer
 ([README](../android/lineage-24/README.md#old-applications)): a probe application
