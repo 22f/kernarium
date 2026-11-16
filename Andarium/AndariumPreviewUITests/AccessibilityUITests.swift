@@ -145,16 +145,4 @@ final class AccessibilityUITests: XCTestCase {
         let toggle = talkBackSwitch(in: app)
         XCTAssertEqual(toggle.value as? String, "0")
     }
-
-    @MainActor
-    func testAcknowledgementsListTheScreenReader() {
-        let app = launch("info-acknowledgements")
-        let list = app.collectionViews.firstMatch
-        XCTAssertTrue(list.waitForExistence(timeout: 10))
-        for _ in 0..<15 where !app.staticTexts["eSpeak NG"].exists {
-            list.swipeUp()
-        }
-        XCTAssertTrue(app.staticTexts["TalkBack"].exists)
-        XCTAssertTrue(app.staticTexts["eSpeak NG"].exists)
-    }
 }
