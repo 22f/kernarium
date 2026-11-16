@@ -384,7 +384,10 @@ struct SideKeysTouchTests {
         let found = elements(in: view)
         let scroll = test.descendants(of: view).compactMap { $0 as? UIScrollView }.first
         return ShownTip(
-            card: UIAccessibility.convertToScreenCoordinates(view.bounds, in: view),
+            // The card is what the popover keeps clear of its arrow, which an iPad
+            // app on a Mac draws inside the presented view (its safe area).
+            card: UIAccessibility.convertToScreenCoordinates(
+                ProcessInfo.processInfo.isiOSAppOnMac ? view.bounds.inset(by: view.safeAreaInsets) : view.bounds, in: view),
             text: found.filter { !$0.button && !$0.label.hasPrefix("Vertical scroll bar") }.map { ($0.label, $0.frame) },
             close: found.first { $0.button }?.frame,
             scrollContent: scroll?.contentSize.height ?? 0, preferred: popover.preferredContentSize)
@@ -498,7 +501,10 @@ struct SideKeysTouchTests {
         let plain = try await measure(.large, maxHeight: 4000)
         let larger = try await measure(.extraExtraExtraLarge, maxHeight: 4000)
         #expect(plain.height > 100 && !plain.scrolls, "the card at the ordinary size is \(plain)")
-        #expect(larger.height > plain.height, "larger text makes a taller card: \(plain) \(larger)")
+        // An iPad app on a Mac draws text at one size whatever the content size category.
+        if !ProcessInfo.processInfo.isiOSAppOnMac {
+            #expect(larger.height > plain.height, "larger text makes a taller card: \(plain) \(larger)")
+        }
         #expect(!larger.scrolls, "with room the card does not scroll: \(larger)")
         let capped = try await measure(.large, maxHeight: plain.height / 2)
         #expect(

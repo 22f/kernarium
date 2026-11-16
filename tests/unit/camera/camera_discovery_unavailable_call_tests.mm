@@ -2,9 +2,10 @@
 // A platform call a host lacks, in camera discovery (an iPad app on a Mac or on a Vision Pro meets one: the rotation
 // coordinator's angles are unavailable there). An object that does not take the call is not sent it, and one that does
 // states its angles in the order asked (where an iPhone or an iPad takes it nothing changes). A discovery that raises
-// an Objective-C exception anyway presents no cameras, says so on one line, and the process lives, where a C++ handler
-// would not have seen the exception and the process would have ended. The platform's raise is stood in by a replacement
-// of the discovery session's device list for the length of the call; no camera is opened.
+// an Objective-C exception anyway presents no cameras and says so on one line, where `catch (const std::exception&)`
+// would not have caught it: a start with a catch-all would have failed and a caller with none would have been ended.
+// The platform's raise is stood in by a replacement of the discovery session's device list for the length of the
+// call; no camera is opened.
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 
