@@ -4,39 +4,69 @@ Date: Mon, 16 Nov 2026 19:10:27 +0900
 Subject: [PATCH] Build with Soong
 
 The Android image build compiles TalkBack from this tree with Soong, as
-it does the other applications it ships. This first part holds the
-license, the proguard annotations and the utils module, with the BuildConfig
-the Gradle build would generate for a release build. The ndk-build
-makefiles of the braille libraries carry a .find-ignore, so that the
-platform makefile search leaves them alone.
+it does the other applications it ships. Each module's Android.bp lists
+the sources of the Gradle module's phone variant (src/main and
+src/phone), links the resources with transitive R classes as the Gradle
+build leaves them, and takes the library versions the platform carries.
+
+This part holds the license, the proguard annotations, the utils module
+with the BuildConfig the Gradle build would generate for a release
+build, the braille modules and the material preference modules. The
+translation and key tables the Gradle build zips into res/raw become
+genrules, and liblouis and BRLTTY with its braille drivers build as
+native libraries against the NDK API level of the app's minSdk. The
+ndk-build makefiles of the braille libraries carry a .find-ignore, so
+that the platform makefile search leaves them alone.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- Android.bp                                    | 21 +++++++++
- braille/brltty/src/phone/jni/.find-ignore     |  0
- braille/translate/src/phone/jni/.find-ignore  |  0
- proguard/Android.bp                           |  9 ++++
- utils/Android.bp                              | 45 +++++++++++++++++++
- .../accessibility/utils/BuildConfig.java      | 14 ++++++
- 6 files changed, 89 insertions(+)
+ Android.bp                                    |  97 +++++
+ braille/brailledisplay/Android.bp             |  24 ++
+ braille/brailledisplayanalytics/Android.bp    |  15 +
+ braille/brailleime/Android.bp                 |  22 +
+ braille/brailleimeanalytics/Android.bp        |  17 +
+ braille/brltty/Android.bp                     | 389 ++++++++++++++++++
+ braille/brltty/src/phone/jni/.find-ignore     |   0
+ braille/common/Android.bp                     |  24 ++
+ braille/interfaces/Android.bp                 |  15 +
+ braille/translate/Android.bp                  |  74 ++++
+ braille/translate/src/phone/jni/.find-ignore  |   0
+ material/flags/Android.bp                     |  15 +
+ material/preference/Android.bp                |  17 +
+ proguard/Android.bp                           |   9 +
+ utils/Android.bp                              |  18 +
+ .../accessibility/utils/BuildConfig.java      |  14 +
+ 16 files changed, 750 insertions(+)
  create mode 100644 Android.bp
+ create mode 100644 braille/brailledisplay/Android.bp
+ create mode 100644 braille/brailledisplayanalytics/Android.bp
+ create mode 100644 braille/brailleime/Android.bp
+ create mode 100644 braille/brailleimeanalytics/Android.bp
+ create mode 100644 braille/brltty/Android.bp
  create mode 100644 braille/brltty/src/phone/jni/.find-ignore
+ create mode 100644 braille/common/Android.bp
+ create mode 100644 braille/interfaces/Android.bp
+ create mode 100644 braille/translate/Android.bp
  create mode 100644 braille/translate/src/phone/jni/.find-ignore
+ create mode 100644 material/flags/Android.bp
+ create mode 100644 material/preference/Android.bp
  create mode 100644 proguard/Android.bp
  create mode 100644 utils/Android.bp
  create mode 100644 utils/src/soong/java/com/google/android/accessibility/utils/BuildConfig.java
 
 diff --git a/Android.bp b/Android.bp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b27e87fb578a2db7785ac939996e978b35b7f464
+index 0000000000000000000000000000000000000000..ac1f5c1e4aaf034f009b0397e4b76283b7e76b6d
 --- /dev/null
 +++ b/Android.bp
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,97 @@
 +// SPDX-License-Identifier: Apache-2.0
++
 +//
 +// TalkBack, built from source by the Android image build. The Gradle files
 +// beside these modules are not used by it; each module's Android.bp lists the
-+// sources its Gradle module compiles.
++// sources its Gradle module compiles (the phone variant: src/main and
++// src/phone).
 +
 +package {
 +    default_applicable_licenses: ["external_talkback_license"],
@@ -53,60 +83,52 @@ index 0000000000000000000000000000000000000000..b27e87fb578a2db7785ac939996e978b
 +        "LICENSE",
 +    ],
 +}
-diff --git a/braille/brltty/src/phone/jni/.find-ignore b/braille/brltty/src/phone/jni/.find-ignore
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/braille/translate/src/phone/jni/.find-ignore b/braille/translate/src/phone/jni/.find-ignore
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/proguard/Android.bp b/proguard/Android.bp
-new file mode 100644
-index 0000000000000000000000000000000000000000..a1826f1053bd52530c04fd8949c8676256df5aa9
---- /dev/null
-+++ b/proguard/Android.bp
-@@ -0,0 +1,9 @@
-+// SPDX-License-Identifier: Apache-2.0
 +
-+// The annotations that mark code kept for reflection and native callers.
-+java_library {
-+    name: "TalkBack-proguard",
-+    srcs: ["src/main/java/**/*.java"],
-+    sdk_version: "core_current",
-+    java_version: "17",
-+}
-diff --git a/utils/Android.bp b/utils/Android.bp
-new file mode 100644
-index 0000000000000000000000000000000000000000..b7a820f6c40d469b7ad006199fd9c66c08cf9151
---- /dev/null
-+++ b/utils/Android.bp
-@@ -0,0 +1,45 @@
-+// SPDX-License-Identifier: Apache-2.0
-+
-+// The utils module: accessibility helpers that the phone build of every other
-+// TalkBack module uses. Resources are linked with the transitive R classes the
-+// Gradle build generates (nonTransitiveRClass=false).
-+android_library {
-+    name: "TalkBack-utils",
-+    srcs: [
-+        "src/main/java/**/*.java",
-+        "src/main/java/**/*.kt",
-+        // BuildConfig, as the Gradle build generates it for a release build.
-+        "src/soong/java/**/*.java",
++// liblouis and BRLTTY, which the braille libraries build from the sources
++// they carry.
++license {
++    name: "external_talkback_liblouis_license",
++    visibility: [":__subpackages__"],
++    license_kinds: [
++        "SPDX-license-identifier-LGPL-2.1-or-later",
 +    ],
-+    resource_dirs: ["src/main/res"],
-+    manifest: "src/main/AndroidManifest.xml",
-+    use_resource_processor: false,
++}
++
++license {
++    name: "external_talkback_brltty_license",
++    visibility: [":__subpackages__"],
++    license_kinds: [
++        "SPDX-license-identifier-LGPL-2.1-or-later",
++    ],
++}
++
++// The BRLTTY wrapper is GPL-2.0-or-later.
++license {
++    name: "external_talkback_brltty_wrapper_license",
++    visibility: [":__subpackages__"],
++    license_kinds: [
++        "SPDX-license-identifier-GPL-2.0-or-later",
++    ],
++}
++
++// What every Android library of the phone build shares: the platform's own
++// copies of the libraries the Gradle build declares in shared.gradle, at the
++// versions the tree carries. R classes are transitive, as the Gradle build
++// leaves them (nonTransitiveRClass=false).
++java_defaults {
++    name: "TalkBack-defaults",
 +    sdk_version: "36",
 +    java_version: "17",
 +    kotlin_lang_version: "1.9",
++    use_resource_processor: false,
 +    plugins: ["auto_value_plugin"],
 +    libs: [
 +        "auto_value_annotations",
 +        "checker-qual",
 +        "error_prone_annotations",
++        "jsr305",
 +    ],
 +    static_libs: [
-+        "TalkBack-proguard",
 +        "androidx.annotation_annotation",
 +        "androidx.appcompat_appcompat",
 +        "androidx.collection_collection",
@@ -124,6 +146,733 @@ index 0000000000000000000000000000000000000000..b7a820f6c40d469b7ad006199fd9c66c
 +        "kotlin-stdlib",
 +        "libprotobuf-java-lite",
 +    ],
++}
++
++// The JNI libraries of the app: built against the NDK API level of its
++// minSdk, with the code they ship (liblouis, BRLTTY) carrying its own
++// warnings.
++cc_defaults {
++    name: "TalkBack-native-defaults",
++    sdk_version: "26",
++    stl: "none",
++    cflags: ["-Wno-error"],
++}
+diff --git a/braille/brailledisplay/Android.bp b/braille/brailledisplay/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..7fec22affc5ee39c1c4335be7d6c294717bdedcc
+--- /dev/null
++++ b/braille/brailledisplay/Android.bp
+@@ -0,0 +1,24 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The braille display support.
++android_library {
++    name: "TalkBack-braille-display",
++    defaults: ["TalkBack-defaults"],
++    srcs: [
++        "src/main/java/**/*.java",
++        "src/phone/java/**/*.java",
++    ],
++    resource_dirs: [
++        "src/phone/res",
++    ],
++    manifest: "src/phone/AndroidManifest.xml",
++    static_libs: [
++        "TalkBack-proguard",
++        "TalkBack-utils",
++        "TalkBack-braille-brltty",
++        "TalkBack-braille-display-analytics",
++        "TalkBack-braille-interfaces",
++        "TalkBack-braille-translate",
++        "TalkBack-braille-common",
++    ],
++}
+diff --git a/braille/brailledisplayanalytics/Android.bp b/braille/brailledisplayanalytics/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..65acb680f50a9fe4bf537160d3380094ab078233
+--- /dev/null
++++ b/braille/brailledisplayanalytics/Android.bp
+@@ -0,0 +1,15 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The braille display's analytics hooks.
++android_library {
++    name: "TalkBack-braille-display-analytics",
++    defaults: ["TalkBack-defaults"],
++    srcs: [
++        "src/main/java/**/*.java",
++        "src/phone/java/**/*.java",
++    ],
++    manifest: "src/main/AndroidManifest.xml",
++    static_libs: [
++        "TalkBack-braille-common",
++    ],
++}
+diff --git a/braille/brailleime/Android.bp b/braille/brailleime/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..3ee550283d4d43fb66b8b740a070541b88d9dd36
+--- /dev/null
++++ b/braille/brailleime/Android.bp
+@@ -0,0 +1,22 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The braille keyboard.
++android_library {
++    name: "TalkBack-brailleime",
++    defaults: ["TalkBack-defaults"],
++    srcs: [
++        "src/main/java/**/*.java",
++        "src/phone/java/**/*.java",
++    ],
++    resource_dirs: [
++        "src/phone/res",
++    ],
++    manifest: "src/phone/AndroidManifest.xml",
++    static_libs: [
++        "TalkBack-utils",
++        "TalkBack-braille-common",
++        "TalkBack-braille-interfaces",
++        "TalkBack-brailleime-analytics",
++        "TalkBack-braille-translate",
++    ],
++}
+diff --git a/braille/brailleimeanalytics/Android.bp b/braille/brailleimeanalytics/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..5637fc519662ffe493b8b5ec892f571da4831717
+--- /dev/null
++++ b/braille/brailleimeanalytics/Android.bp
+@@ -0,0 +1,17 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The IME's analytics hooks.
++android_library {
++    name: "TalkBack-brailleime-analytics",
++    defaults: ["TalkBack-defaults"],
++    srcs: [
++        "src/main/java/**/*.java",
++        "src/phone/java/**/*.java",
++    ],
++    manifest: "src/main/AndroidManifest.xml",
++    static_libs: [
++        "TalkBack-utils",
++        "TalkBack-braille-common",
++        "TalkBack-braille-interfaces",
++    ],
++}
+diff --git a/braille/brltty/Android.bp b/braille/brltty/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..dfa8b74775bf47d1984f491dbd42d7e09a6d62be
+--- /dev/null
++++ b/braille/brltty/Android.bp
+@@ -0,0 +1,389 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The BRLTTY braille display drivers and their Java side: the key tables as a raw
++// resource (the Gradle build zips them into res/raw), libbrltty with the drivers the
++// build selects, and the JNI wrapper.
++android_library {
++    name: "TalkBack-braille-brltty",
++    defaults: ["TalkBack-defaults"],
++    srcs: [
++        "src/main/java/**/*.java",
++        "src/phone/java/**/*.java",
++    ],
++    resource_dirs: [
++        "src/phone/res",
++    ],
++    resource_zips: [
++        ":TalkBack-braille-brltty-key-tables-res",
++    ],
++    manifest: "src/phone/AndroidManifest.xml",
++    static_libs: [
++        "TalkBack-braille-interfaces",
++        "TalkBack-braille-translate",
++        "TalkBack-braille-common",
++        "TalkBack-proguard",
++        "TalkBack-utils",
++    ],
++}
++
++// res/raw/keytables.zip: the key tables.
++genrule {
++    name: "TalkBack-braille-brltty-key-tables-res",
++    srcs: ["src/phone/tables/**/*"],
++    out: ["keytables.res.zip"],
++    tools: ["soong_zip"],
++    cmd: "mkdir -p $(genDir)/res/raw && " +
++        "$(location soong_zip) -o $(genDir)/res/raw/keytables.zip " +
++        "-C external/talkback/braille/brltty/src/phone/tables -D external/talkback/braille/brltty/src/phone/tables && " +
++        "$(location soong_zip) -o $(out) -C $(genDir)/res -D $(genDir)/res",
++}
++
++cc_defaults {
++    name: "talkback_brltty_defaults",
++    defaults: ["TalkBack-native-defaults"],
++    licenses: ["external_talkback_brltty_license"],
++    c_std: "c99",
++    local_include_dirs: [
++        "src/phone/jni/brlttywrapper/third_party/brltty",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Headers",
++        "src/phone/jni/brlttywrapper",
++    ],
++    cflags: ["-DHAVE_CONFIG_H"],
++}
++
++cc_library_static {
++    name: "talkback_brltty_driver_vo",
++    defaults: ["talkback_brltty_defaults"],
++    srcs: ["src/phone/jni/brlttywrapper/third_party/brltty/Drivers/Braille/Voyager/braille.c"],
++    cflags: [
++        "-DDRIVER_NAME=Voyager",
++        "-DDRIVER_CODE=vo",
++        "-DDRIVER_COMMENT=\"\"",
++        "-DDRIVER_VERSION=\"0.3 (June 2009)\"",
++        "-DDRIVER_DEVELOPERS=\"Stéphane Doyon <s.doyon@videotron.ca>\"",
++    ],
++}
++
++cc_library_static {
++    name: "talkback_brltty_driver_fs",
++    defaults: ["talkback_brltty_defaults"],
++    srcs: ["src/phone/jni/brlttywrapper/third_party/brltty/Drivers/Braille/FreedomScientific/braille.c"],
++    cflags: [
++        "-DDRIVER_NAME=FreedomScientific",
++        "-DDRIVER_CODE=fs",
++        "-DDRIVER_COMMENT=\"\"",
++        "-DDRIVER_VERSION=\"\"",
++        "-DDRIVER_DEVELOPERS=\"Dave Mielke <dave@mielke.cc>\"",
++    ],
++}
++
++cc_library_static {
++    name: "talkback_brltty_driver_hw",
++    defaults: ["talkback_brltty_defaults"],
++    srcs: ["src/phone/jni/brlttywrapper/third_party/brltty/Drivers/Braille/HumanWare/braille.c"],
++    cflags: [
++        "-DDRIVER_NAME=HumanWare",
++        "-DDRIVER_CODE=hw",
++        "-DDRIVER_COMMENT=\"\"",
++        "-DDRIVER_VERSION=\"\"",
++        "-DDRIVER_DEVELOPERS=\"Dave Mielke <dave@mielke.cc>\"",
++    ],
++}
++
++cc_library_static {
++    name: "talkback_brltty_driver_bm",
++    defaults: ["talkback_brltty_defaults"],
++    srcs: ["src/phone/jni/brlttywrapper/third_party/brltty/Drivers/Braille/Baum/braille.c"],
++    cflags: [
++        "-DDRIVER_NAME=Baum",
++        "-DDRIVER_CODE=bm",
++        "-DDRIVER_COMMENT=\"\"",
++        "-DDRIVER_VERSION=\"\"",
++        "-DDRIVER_DEVELOPERS=\"Dave Mielke <dave@mielke.cc>\"",
++    ],
++}
++
++cc_library_static {
++    name: "talkback_brltty_driver_mm",
++    defaults: ["talkback_brltty_defaults"],
++    srcs: ["src/phone/jni/brlttywrapper/third_party/brltty/Drivers/Braille/BrailleMemo/braille.c"],
++    cflags: [
++        "-DDRIVER_NAME=BrailleMemo",
++        "-DDRIVER_CODE=mm",
++        "-DDRIVER_COMMENT=\"\"",
++        "-DDRIVER_VERSION=\"\"",
++        "-DDRIVER_DEVELOPERS=\"Dave Mielke <dave@mielke.cc>\"",
++    ],
++}
++
++cc_library_static {
++    name: "talkback_brltty_driver_pm",
++    defaults: ["talkback_brltty_defaults"],
++    srcs: ["src/phone/jni/brlttywrapper/third_party/brltty/Drivers/Braille/Papenmeier/braille.c"],
++    cflags: [
++        "-DDRIVER_NAME=Papenmeier",
++        "-DDRIVER_CODE=pm",
++        "-DDRIVER_COMMENT=\"\"",
++        "-DDRIVER_VERSION=\"\"",
++        "-DDRIVER_DEVELOPERS=\"August Hörandl <august.hoerandl@gmx.at>, Heimo Schön <heimo.schoen@gmx.at>\"",
++    ],
++}
++
++cc_library_static {
++    name: "talkback_brltty_driver_hm",
++    defaults: ["talkback_brltty_defaults"],
++    srcs: ["src/phone/jni/brlttywrapper/third_party/brltty/Drivers/Braille/HIMS/braille.c"],
++    cflags: [
++        "-DDRIVER_NAME=HIMS",
++        "-DDRIVER_CODE=hm",
++        "-DDRIVER_COMMENT=\"\"",
++        "-DDRIVER_VERSION=\"\"",
++        "-DDRIVER_DEVELOPERS=\"Dave Mielke <dave@mielke.cc>\"",
++    ],
++}
++
++cc_library_static {
++    name: "talkback_brltty_driver_al",
++    defaults: ["talkback_brltty_defaults"],
++    srcs: ["src/phone/jni/brlttywrapper/third_party/brltty/Drivers/Braille/Alva/braille.c"],
++    cflags: [
++        "-DDRIVER_NAME=Alva",
++        "-DDRIVER_CODE=al",
++        "-DDRIVER_COMMENT=\"\"",
++        "-DDRIVER_VERSION=\"2.2\"",
++        "-DDRIVER_DEVELOPERS=\"Nicolas Pitre <nico@fluxnic.net>\"",
++    ],
++}
++
++cc_library_static {
++    name: "talkback_brltty_driver_sk",
++    defaults: ["talkback_brltty_defaults"],
++    srcs: ["src/phone/jni/brlttywrapper/third_party/brltty/Drivers/Braille/Seika/braille.c"],
++    cflags: [
++        "-DDRIVER_NAME=Seika",
++        "-DDRIVER_CODE=sk",
++        "-DDRIVER_COMMENT=\"\"",
++        "-DDRIVER_VERSION=\"\"",
++        "-DDRIVER_DEVELOPERS=\"Dave Mielke <dave@mielke.cc>\"",
++    ],
++}
++
++cc_library_static {
++    name: "talkback_brltty_driver_ht",
++    defaults: ["talkback_brltty_defaults"],
++    srcs: ["src/phone/jni/brlttywrapper/third_party/brltty/Drivers/Braille/HandyTech/braille.c"],
++    cflags: [
++        "-DDRIVER_NAME=HandyTech",
++        "-DDRIVER_CODE=ht",
++        "-DDRIVER_COMMENT=\"\"",
++        "-DDRIVER_VERSION=\"0.6\"",
++        "-DDRIVER_DEVELOPERS=\"Andreas Gross <andi.gross@gmx.de>, Dave Mielke <dave@mielke.cc>, Mario Lang <mlang@delysid.org>\"",
++    ],
++}
++
++cc_library_static {
++    name: "talkback_brltty_driver_hid",
++    defaults: ["talkback_brltty_defaults"],
++    srcs: ["src/phone/jni/brlttywrapper/third_party/brltty/Drivers/Braille/HID/braille.c"],
++    cflags: [
++        "-DDRIVER_NAME=HID",
++        "-DDRIVER_CODE=hid",
++        "-DDRIVER_COMMENT=\"\"",
++        "-DDRIVER_VERSION=\"\"",
++        "-DDRIVER_DEVELOPERS=\"\"",
++    ],
++}
++
++cc_library_static {
++    name: "talkback_libbrltty",
++    defaults: ["talkback_brltty_defaults"],
++    srcs: [
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/addresses.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/dynld_none.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/log_history.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/system_java.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/log.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/file.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/device.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/parse.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/timing.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/variables.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/thread.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/report.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/brl.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/brl_base.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/brl_driver.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/brl_utils.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/io_misc.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/io_log.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/gio.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/gio_null.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/gio_serial.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/gio_usb.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/gio_hid.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/gio_bluetooth.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/bluetooth.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/bluetooth_names.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/hid.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/hid_items.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/usb.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/usb_devices.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/usb_hid.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/usb_serial.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/usb_ftdi.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/usb_belkin.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/usb_cp2101.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/usb_cp2110.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/usb_cdc_acm.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/usb_ch341.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/usb_adapters.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmdline.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/pgmprivs_none.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/service_none.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/spk_input.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/scr_frozen.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/pgmpath_none.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/pid.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/pipe.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/scr_help.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/params_none.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/api_control.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/core.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/brlapi_server.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/blink.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/clipboard.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/config.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/ctb_translate.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/update.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/spk_driver.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/scr.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/brlapi_keyranges.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/atb_translate.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/pref_tables.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/alert.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/auth.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_brlapi.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/ctb_compile.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/activity.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/status.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/bell.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/leds.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/tune.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/notes_pcm.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/message.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/routing.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/ses.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/spk.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_miscellaneous.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/scr_driver.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_learn.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_speech.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_clipboard.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_preferences.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_toggle.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_touch.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_keycodes.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_input.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_navigation.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_override.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_custom.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/brl_input.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/scr_special.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/revision.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/scr_utils.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/scr_base.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/tune_builder.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/hostcmd.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/hostcmd_none.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/ctb_external.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/ctb_native.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cldr.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/bell_none.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/leds_none.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/pcm_none.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/pcm.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/notes.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/spk_thread.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_utils.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/scr_main.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/learn.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/menu_prefs.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/ktb_keyboard.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/kbd.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/atb_compile.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/menu.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/scr_menu.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/rgx.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/profile.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/kbd_none.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/rgx_none.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/spk_base.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/scr_real.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/utf8.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/messages.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/program.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/prefs.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/charset.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/charset_none.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/lock.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/drivers.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/driver.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/ttb_translate.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/ttb_compile.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/ttb_native.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/unicode.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/queue.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/serial.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/serial_none.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/ktb_translate.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/ktb_compile.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/ktb_list.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/ktb_cmds.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/async_io.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/async_alarm.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/async_event.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/async_handle.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/async_wait.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/async_task.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/async_data.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/async_signal.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/datafile.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/dataarea.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/cmd_queue.c",
++        "src/phone/jni/brlttywrapper/third_party/brltty/Programs/hidkeys.c",
++    ],
++    whole_static_libs: [
++        "talkback_brltty_driver_vo",
++        "talkback_brltty_driver_fs",
++        "talkback_brltty_driver_hw",
++        "talkback_brltty_driver_bm",
++        "talkback_brltty_driver_mm",
++        "talkback_brltty_driver_pm",
++        "talkback_brltty_driver_hm",
++        "talkback_brltty_driver_al",
++        "talkback_brltty_driver_sk",
++        "talkback_brltty_driver_ht",
++        "talkback_brltty_driver_hid",
++    ],
++}
++
++cc_library_shared {
++    name: "talkback_brlttywrap",
++    stem: "libbrlttywrap",
++    defaults: ["TalkBack-native-defaults"],
++    licenses: ["external_talkback_brltty_wrapper_license"],
++    srcs: [
++        "src/phone/jni/brlttywrapper/BrlttyWrapper.c",
++        "src/phone/jni/brlttywrapper/libbrltty.c",
++        "src/phone/jni/brlttywrapper/bluetooth_android.c",
++        "src/phone/jni/brlttywrapper/hid_android.c",
++        "src/phone/jni/brlttywrapper/usb_android.c",
++    ],
++    local_include_dirs: ["src/phone/jni/brlttywrapper/third_party/brltty/Headers"],
++    include_dirs: ["external/talkback/braille/common/src/phone/jni"],
++    ldflags: ["-Wl,--allow-multiple-definition"],
++    whole_static_libs: ["talkback_libbrltty"],
++    shared_libs: ["liblog"],
++}
+diff --git a/braille/brltty/src/phone/jni/.find-ignore b/braille/brltty/src/phone/jni/.find-ignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/braille/common/Android.bp b/braille/common/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..c49c0eae3fb951656ac770b14f9cf63c67d5c34d
+--- /dev/null
++++ b/braille/common/Android.bp
+@@ -0,0 +1,24 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The braille code the IME and the display share.
++android_library {
++    name: "TalkBack-braille-common",
++    defaults: ["TalkBack-defaults"],
++    srcs: [
++        "src/main/java/**/*.java",
++        "src/phone/java/**/*.java",
++    ],
++    resource_dirs: [
++        "src/phone/res",
++    ],
++    asset_dirs: [
++        "src/phone/assets",
++    ],
++    manifest: "src/phone/AndroidManifest.xml",
++    static_libs: [
++        "TalkBack-braille-interfaces",
++        "TalkBack-braille-translate",
++        "TalkBack-proguard",
++        "TalkBack-utils",
++    ],
++}
+diff --git a/braille/interfaces/Android.bp b/braille/interfaces/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..889d8500acfe61fa9d9623dde167feba164b9994
+--- /dev/null
++++ b/braille/interfaces/Android.bp
+@@ -0,0 +1,15 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The interfaces the braille modules share.
++android_library {
++    name: "TalkBack-braille-interfaces",
++    defaults: ["TalkBack-defaults"],
++    srcs: [
++        "src/main/java/**/*.java",
++        "src/phone/java/**/*.java",
++    ],
++    manifest: "src/main/AndroidManifest.xml",
++    static_libs: [
++        "TalkBack-utils",
++    ],
++}
+diff --git a/braille/translate/Android.bp b/braille/translate/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..892bd3e584db73db4040cbcefea461d8daad643a
+--- /dev/null
++++ b/braille/translate/Android.bp
+@@ -0,0 +1,74 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The braille translation module: the Java side, the translation tables as a raw
++// resource (the Gradle build zips them into res/raw), liblouis and the JNI wrapper.
++android_library {
++    name: "TalkBack-braille-translate",
++    defaults: ["TalkBack-defaults"],
++    srcs: [
++        "src/main/java/**/*.java",
++        "src/phone/java/**/*.java",
++    ],
++    resource_zips: [
++        ":TalkBack-braille-translation-tables-res",
++    ],
++    manifest: "src/phone/AndroidManifest.xml",
++    static_libs: [
++        "TalkBack-braille-interfaces",
++        "TalkBack-proguard",
++        "TalkBack-utils",
++    ],
++}
++
++// res/raw/translationtables.zip: the tables below liblouis/tables.
++genrule {
++    name: "TalkBack-braille-translation-tables-res",
++    srcs: ["src/phone/tables/**/*"],
++    out: ["translationtables.res.zip"],
++    tools: ["soong_zip"],
++    cmd: "mkdir -p $(genDir)/res/raw && " +
++        "$(location soong_zip) -o $(genDir)/res/raw/translationtables.zip -P liblouis/tables " +
++        "-C external/talkback/braille/translate/src/phone/tables -D external/talkback/braille/translate/src/phone/tables && " +
++        "$(location soong_zip) -o $(out) -C $(genDir)/res -D $(genDir)/res",
++}
++
++cc_library_static {
++    name: "talkback_liblouis",
++    defaults: ["TalkBack-native-defaults"],
++    licenses: ["external_talkback_liblouis_license"],
++    srcs: [
++        "src/phone/jni/third_party/liblouis/liblouis/commonTranslationFunctions.c",
++        "src/phone/jni/third_party/liblouis/liblouis/compileTranslationTable.c",
++        "src/phone/jni/third_party/liblouis/liblouis/logging.c",
++        "src/phone/jni/third_party/liblouis/liblouis/lou_backTranslateString.c",
++        "src/phone/jni/third_party/liblouis/liblouis/lou_translateString.c",
++        "src/phone/jni/third_party/liblouis/liblouis/maketable.c",
++        "src/phone/jni/third_party/liblouis/liblouis/metadata.c",
++        "src/phone/jni/third_party/liblouis/liblouis/pattern.c",
++        "src/phone/jni/third_party/liblouis/liblouis/utils.c",
++    ],
++    local_include_dirs: [
++        "src/phone/jni/third_party/liblouis",
++        "src/phone/jni/third_party/liblouis/liblouis",
++    ],
++    cflags: ["-DTABLESDIR=\"__non_existent_path__\""],
++}
++
++cc_library_shared {
++    name: "talkback_louiswrap",
++    stem: "liblouiswrap",
++    defaults: ["TalkBack-native-defaults"],
++    licenses: ["external_talkback_license"],
++    stl: "c++_static",
++    srcs: ["src/phone/jni/liblouiswrapper/louis_translation.cc"],
++    local_include_dirs: [
++        "src/phone/jni",
++        "src/phone/jni/third_party/liblouis",
++    ],
++    include_dirs: ["external/talkback/braille/common/src/phone/jni"],
++    whole_static_libs: ["talkback_liblouis"],
++    shared_libs: [
++        "libandroid",
++        "liblog",
++    ],
++}
+diff --git a/braille/translate/src/phone/jni/.find-ignore b/braille/translate/src/phone/jni/.find-ignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/material/flags/Android.bp b/material/flags/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..57ffac080eea5566a9ca41858d718e62748d115e
+--- /dev/null
++++ b/material/flags/Android.bp
+@@ -0,0 +1,15 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The flags of the material preference library.
++android_library {
++    name: "TalkBack-material-flags",
++    defaults: ["TalkBack-defaults"],
++    srcs: [
++        "src/main/java/**/*.java",
++        "src/phone/java/**/*.java",
++    ],
++    manifest: "src/main/AndroidManifest.xml",
++    static_libs: [
++        "TalkBack-proguard",
++    ],
++}
+diff --git a/material/preference/Android.bp b/material/preference/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..1eefd982cb26d20f556cff1b4d2252f244cdccff
+--- /dev/null
++++ b/material/preference/Android.bp
+@@ -0,0 +1,17 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The phone preference widgets. The Compose widgets of the watch build are not part
++// of the phone build.
++android_library {
++    name: "TalkBack-material-preference",
++    defaults: ["TalkBack-defaults"],
++    srcs: [
++        "src/main/java/**/*.java",
++        "src/phone/java/**/*.java",
++    ],
++    manifest: "src/main/AndroidManifest.xml",
++    static_libs: [
++        "TalkBack-proguard",
++        "TalkBack-utils",
++    ],
++}
+diff --git a/proguard/Android.bp b/proguard/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..a1826f1053bd52530c04fd8949c8676256df5aa9
+--- /dev/null
++++ b/proguard/Android.bp
+@@ -0,0 +1,9 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The annotations that mark code kept for reflection and native callers.
++java_library {
++    name: "TalkBack-proguard",
++    srcs: ["src/main/java/**/*.java"],
++    sdk_version: "core_current",
++    java_version: "17",
++}
+diff --git a/utils/Android.bp b/utils/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..287916ca696933289d798e10c6fe523c49b809bb
+--- /dev/null
++++ b/utils/Android.bp
+@@ -0,0 +1,18 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The utils module: accessibility helpers that the phone build of every other
++// TalkBack module uses. Resources are linked with the transitive R classes the
++// Gradle build generates (nonTransitiveRClass=false).
++android_library {
++    name: "TalkBack-utils",
++    defaults: ["TalkBack-defaults"],
++    srcs: [
++        "src/main/java/**/*.java",
++        "src/main/java/**/*.kt",
++        // BuildConfig, as the Gradle build generates it for a release build.
++        "src/soong/java/**/*.java",
++    ],
++    resource_dirs: ["src/main/res"],
++    manifest: "src/main/AndroidManifest.xml",
++    static_libs: ["TalkBack-proguard"],
 +}
 diff --git a/utils/src/soong/java/com/google/android/accessibility/utils/BuildConfig.java b/utils/src/soong/java/com/google/android/accessibility/utils/BuildConfig.java
 new file mode 100644
