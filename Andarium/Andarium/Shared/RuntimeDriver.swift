@@ -203,6 +203,9 @@ protocol RuntimeDriver: AnyObject, OldAppsSource {
     /// Whether Android has mounted its internal storage (`InternalStorage`);
     /// nil when it cannot be read now. Android's boot ends before it does.
     func storageReady() async -> Bool?
+    /// Delivers a text message to the guest as if from the network
+    /// (`GuestSms`); the sender and text are ones `GuestSms` accepts.
+    func sendSms(sender: String, text: String) async -> GuestSms.Outcome
     /// Opens the listener of ADB over the network on the device's network
     /// addresses. Throws when it cannot (`AdbError.io(EADDRINUSE)` for a
     /// port in use).

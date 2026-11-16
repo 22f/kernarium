@@ -72,7 +72,8 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   are 4 KiB aligned. ABI support does not lower the minimum installable target
   SDK; test an older APK with `adb install --bypass-low-target-sdk-block`.
 - **Applications.** Settings, Trebuchet, Files, Package Installer, the LineageOS
-  WebView, LatinIME, ThemePicker and a curated set (camera, gallery, music, calendar,
+  WebView, LatinIME, ThemePicker, Messaging for the host's
+  [text messages](#text-messages) and a curated set (camera, gallery, music, calendar,
   calculator, PDF viewer, backup). There is no browser, app store, install
   restriction, Google or microG. Applications that need absent hardware or
   LineageOS cloud services are excluded by name in the product makefile, and the
@@ -91,7 +92,8 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   entry, the Bluetooth developer option, the media output switcher, and the
   hearing, Bluetooth pairing, telephony, biometric and USB pages) and hides the
   Wi-Fi hotspot, wireless display and System update pages.
-- **Hardware not advertised.** Telephony, NFC, UWB, Thread,
+- **Hardware not advertised.** Telephony (apart from receiving text
+  messages), NFC, UWB, Thread,
   biometric, secure element, USB, Bluetooth and Trusty; the vibrator only on a
   device with haptics ([Haptics](#haptics)) and the cameras only as the host
   has them ([Camera](#camera)). The host's position is declared on
@@ -472,6 +474,22 @@ candidate's smoke test is
 `tests/integration/android/run_android_camera.py` (`android-camera`; its
 restart mode, `android-camera-restart`, boots again over a lens's colour data
 and expects the same cameras).
+
+### Text messages
+
+The guest receives text messages from the host and sends none. `KernariumSms`
+(`overlay/sms/`) runs as the system user and serves one provider call,
+`content call --uri content://android.kernarium.sms --method deliver`, to the
+adb shell's uid alone. It encodes the message as 3GPP SMS-DELIVER PDUs (UCS-2,
+up to ten concatenated parts) and broadcasts `SMS_DELIVER` to the SMS role
+holder and `SMS_RECEIVED` as the radio stack does, so Messaging stores and
+notifies and applications holding `RECEIVE_SMS` get it. The product carries
+Messaging and TelephonyProvider and declares
+`android.hardware.telephony.messaging` and `config_sms_capable` (the SMS role
+needs both), but not `android.hardware.telephony`: there is no radio, SIM or
+SMS sending. `Message.java` and
+`Andarium/AndariumCore/Sources/AndariumCore/Adb/GuestSms.swift` own the
+argument's format and limits.
 
 ### Networking
 

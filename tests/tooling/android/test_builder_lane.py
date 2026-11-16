@@ -3016,7 +3016,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 archive.writestr("SYSTEM/etc/gps_debug.conf", "# SUPL_HOST=supl.example\n# NTP_SERVER=ntp.example\n\n")
                 advertised_features = ["android.hardware.touchscreen",
                                        "android.hardware.sensor.accelerometer",
-                                       "android.hardware.sensor.gyroscope"]
+                                       "android.hardware.sensor.gyroscope",
+                                       "android.hardware.telephony.messaging"]
                 advertised_features.extend(
                     feature for feature in (
                         "android.hardware.touchscreen.multitouch",
@@ -8062,6 +8063,9 @@ def verify_package_assertions(android_root: Path) -> None:
         "com.google.cf.wpa_supplicant",
         "KernariumWifiOverlay",
         "KernariumPinnerOverlay",
+        "KernariumSms",
+        "messaging",
+        "TelephonyProvider",
         "SecureElement",
         "EasterEgg",
         "kernarium_net_setup",

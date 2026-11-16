@@ -283,6 +283,13 @@ nonisolated struct AdbGuestOperations: Sendable {
         return InternalStorage.parse(result)
     }
 
+    /// Delivers a text message as if from the network (`GuestSms`).
+    func sendSms(sender: String, text: String) async -> GuestSms.Outcome {
+        guard let command = GuestSms.command(sender: sender, text: text),
+              let result = try? await shell(command, limit: .seconds(30)) else { return .failed }
+        return GuestSms.outcome(result)
+    }
+
     /// Runs a command in the guest's shell and returns what it printed.
     func shell(_ command: String, limit: Duration = .seconds(60)) async throws -> ShellResult {
         guard let identity else { throw AdbFailure(.keyRejected, activity: .bugReport) }

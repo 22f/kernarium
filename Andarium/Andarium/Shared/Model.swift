@@ -1018,6 +1018,20 @@ final class AppModel {
     /// The guest's USB debugging setting does not matter, since the browser
     /// uses the application's own channel. The preview has no guest to ask
     /// and says yes unless a screen says no.
+    /// Delivers a text message to the guest as if from the network, and
+    /// returns what to say of it under the message box. The preview, with no
+    /// guest, says it was delivered.
+    func sendSms(sender: String, text: String) async -> SmsSendResult {
+        if let refusal = GuestSms.refusal(sender: sender, text: text) { return .refused(SmsMessages.refusal(refusal)) }
+        guard case .running(.normal) = phase else { return .refused(SmsMessages.notRunning) }
+        guard let driver else { return .delivered(SmsMessages.delivered(parts: 1)) }
+        return switch await driver.sendSms(sender: sender, text: text) {
+        case .delivered(let parts): .delivered(SmsMessages.delivered(parts: parts))
+        case .unsupported: .refused(SmsMessages.unsupported)
+        case .failed: .refused(SmsMessages.failed)
+        }
+    }
+
     var filesAvailable: Bool {
         driver == nil ? session.storageReady != false : session.storageReady == true
     }

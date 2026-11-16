@@ -207,6 +207,7 @@ final class StubDriver: RuntimeDriver {
     /// What Android's storage reads as; a test sets it as a boot would.
     var storage: Bool? = true
     func storageReady() async -> Bool? { storage }
+    func sendSms(sender: String, text: String) async -> GuestSms.Outcome { .delivered(parts: 1) }
     func startAdbOverNetwork() throws {
         if let startError { throw startError }
         listening = true

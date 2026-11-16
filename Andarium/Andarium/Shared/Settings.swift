@@ -34,6 +34,7 @@ struct SessionSettingsSheet: View {
                 List {
                     if offersInstall { apps }
                     if normalSession, model.capabilities.guestFiles, model.fileBrowser != nil { files }
+                    if normalSession, model.capabilities.textMessages { TextMessageSection() }
                     if model.capabilities.statistics { stats(session) }
                     if model.host.supportsPointer { pointer }
                     #if !APP_STORE
@@ -409,6 +410,72 @@ struct SessionSettingsSheet: View {
             .monospacedDigit()
             .foregroundStyle(.secondary)
             .contentTransition(.numericText())
+    }
+}
+
+/// A text message for the guest, which Android receives as if a SIM card had:
+/// its SMS application stores and shows it, and applications that read SMS
+/// get it. The sender is kept for the next message; the text is cleared once
+/// it is delivered.
+struct TextMessageSection: View {
+    @Environment(AppModel.self) private var model
+    @AppStorage("smsSender") private var sender = ""
+    @State private var text = ""
+    @State private var sending = false
+    @State private var result: SmsSendResult?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Section {
+            TextField("From: number or name", text: $sender)
+                .textContentType(.telephoneNumber)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .accessibilityLabel("Sender")
+            TextField("Message", text: $text, axis: .vertical)
+                .lineLimit(3...8)
+                .focused($focused)
+                .accessibilityLabel("Message")
+            HStack {
+                Text("\(text.utf16.count)/\(GuestSms.maximumUnits)")
+                    .font(.footnote)
+                    .monospacedDigit()
+                    .foregroundStyle(text.utf16.count > GuestSms.maximumUnits ? Color.red : Color(.secondaryLabel))
+                Spacer()
+                if sending {
+                    ProgressView()
+                } else {
+                    Button("Send", systemImage: "paperplane.fill", action: send)
+                        .disabled(GuestSms.refusal(sender: sender, text: text) != nil
+                            || model.fileBrowser?.busy == true)
+                }
+            }
+        } header: {
+            Text("Text message")
+        } footer: {
+            switch result {
+            case .delivered(let words)?: Text(words)
+            case .refused(let words)?: Text(words).foregroundStyle(.red)
+            case nil: Text("Android receives it as a text message from this sender, as if from its SIM card.")
+            }
+        }
+        // Typing a new message clears the last result; the send's own
+        // clearing of the text leaves it.
+        .onChange(of: text) { _, new in if !new.isEmpty { result = nil } }
+        .onChange(of: sender) { if result != nil { result = nil } }
+    }
+
+    private func send() {
+        sending = true
+        focused = false
+        Task {
+            let outcome = await model.sendSms(sender: sender, text: text)
+            if case .delivered = outcome { text = "" }
+            withAnimation(.snappy) {
+                result = outcome
+                sending = false
+            }
+        }
     }
 }
 

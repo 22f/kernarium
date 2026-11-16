@@ -477,6 +477,12 @@ fi
 	fail "the Wi-Fi overlay that turns MAC randomization off is absent"
 [[ "$PRODUCT_PACKAGES" == *" KernariumPinnerOverlay "* ]] ||
 	fail "the overlay that releases the home app's memory pin is absent"
+[[ "$PRODUCT_PACKAGES" == *" KernariumSms "* ]] ||
+	fail "the service that delivers the host's text messages is absent"
+[[ "$PRODUCT_PACKAGES" == *" messaging "* ]] ||
+	fail "the SMS application that shows the host's text messages is absent"
+[[ "$PRODUCT_PACKAGES" == *" TelephonyProvider "* ]] ||
+	fail "the provider that stores text messages is absent"
 [[ "$PRODUCT_PACKAGES" == *" SecureElement "* ]] ||
 	fail "the OMAPI service that SEService clients bind on demand is absent"
 for package in \
@@ -512,7 +518,6 @@ for package in \
 	QuickSearchBox \
 	TeleService \
 	Telecom \
-	TelephonyProvider \
 	com.android.compos \
 	com.android.hardware.authsecret \
 	com.android.hardware.graphics.composer.ranchu \
@@ -547,7 +552,6 @@ for package in \
 	CuttlefishWifiOverlay \
 	gsi_tool \
 	gsid \
-	messaging \
 	pmg_daemon \
 	snapshotctl \
 	snapuserd \

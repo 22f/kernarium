@@ -977,6 +977,10 @@ requires reopening Andarium.
   prints, at most about twice a second, the Core Motion sample behind the
   guest's field with iOS's own attitude and heading; App Store builds compile it
   out.
+- **Text messages.** Settings' Text message section sends a sender and a text
+  over the adb channel, and Android receives it as an SMS from that sender
+  (`GuestSms`); the system image must include the
+  [SMS service](../android/lineage-24/README.md#text-messages).
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and
   every screen use; it leaves out the purgeable space iOS Settings counts, so
