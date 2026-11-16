@@ -3112,6 +3112,10 @@ class VideoLostTests(unittest.TestCase):
             self.pulls: dict[str, int] = {}
             # Presses that found no recording, after the Finalize had reset the state.
             self.ignored_idle = 0
+            # How the movies of the clips are built: the clip of the recording that the second key starts, the short clip a loss
+            # leaves (movie() options).
+            self.second_options: dict = {}
+            self.short_options: dict = {}
 
         def note(self, offset: float, tag: str, message: str, level: str = "D") -> None:
             self.app_log += f"{self.now + offset:.3f}  2179  2179 {level} {tag}: {message}\n"
@@ -3181,7 +3185,8 @@ class VideoLostTests(unittest.TestCase):
         def add_clip(self, name: str, seconds: float, unfinished_pulls: int = 0) -> str:
             self.window_clips += 1
             path = f"/sdcard/window{self.window_clips}-{name}.mp4"
-            self.files[path] = movie(seconds, audio=sound(seconds))
+            options = {"second": self.second_options, "short": self.short_options}.get(name, {})
+            self.files[path] = movie(seconds, audio=sound(seconds), **options)
             self.unfinished[path] = unfinished_pulls
             identity = str(100 + self.window_clips)
             self.rows[identity] = {"_id": identity, "_data": path, "_display_name": f"window{self.window_clips}-{name}.mp4"}
@@ -3391,25 +3396,36 @@ class VideoLostTests(unittest.TestCase):
         self.assertEqual(guest.commands[index - 1], "<control interrupt background>", "nothing between the loss and the presses")
         self.assertTrue(any("uiautomator dump" in command for command in guest.commands[:index]))
         self.assertIn("the pause and resume button was pressed 3 times at once after the loss: 3 presses landed while the "
-                      "recording ended and were ignored, 0 after its Finalize line but before the state was reset, 0 found no "
-                      "recording (the application's log)", text)
+                      "recording ended and were ignored, 0 more were ignored after its Finalize line but before the state was "
+                      "reset, 0 found no recording (the application's log)", text)
 
     def test_the_presses_are_counted_inside_the_window_and_after_it(self) -> None:
         guest = self.Guest(self.plan())
         guest.ignored_inside, guest.ignored_after = 2, 1
-        self.assertIn("2 presses landed while the recording ended and were ignored, 1 after its Finalize line", self.run_check(guest))
+        self.assertIn("2 presses landed while the recording ended and were ignored, 1 more were ignored after its Finalize line",
+                      self.run_check(guest))
 
-    def test_presses_that_all_came_after_the_finalize_show_nothing_and_fail(self) -> None:
+    def test_presses_ignored_after_the_finalize_line_count_as_ignored(self) -> None:
+        # The ending mark outlives the Finalize line (the application broadcasts the clip and resets its state after it): a
+        # press that came then and was ignored is the guard at work, not a row that showed nothing.
         guest = self.Guest(self.plan())
         guest.ignored_inside, guest.ignored_after = 0, 3
-        with self.assertRaisesRegex(runner.Failure, "no press of the pause and resume button landed while the stopped recording "
-                                                    "was not finalized yet"):
-            self.run_check(guest)
+        text = self.run_check(guest)
+        self.assertIn("0 presses landed while the recording ended and were ignored, 3 more were ignored after its Finalize line "
+                      "but before the state was reset, 0 found no recording", text)
+        self.assertIn("the recording ended by itself: lost.mp4", text)
 
     def test_an_application_that_ignores_nothing_fails(self) -> None:
         guest = self.Guest(self.plan())
         guest.ignored_inside = 0
-        with self.assertRaisesRegex(runner.Failure, "no press of the pause and resume button landed"):
+        with self.assertRaisesRegex(runner.Failure, "no press of the pause and resume button was ignored for the stopped recording"):
+            self.run_check(guest)
+
+    def test_presses_that_only_found_no_recording_show_nothing_and_fail(self) -> None:
+        # Every press came after the state was reset: the log line of a press that found no recording is no ignored press.
+        guest = self.Guest(self.plan())
+        guest.ignored_inside, guest.ignored_idle = 0, 3
+        with self.assertRaisesRegex(runner.Failure, "no press of the pause and resume button was ignored for the stopped recording"):
             self.run_check(guest)
 
     def test_an_application_that_crashes_on_the_press_fails_with_the_exception(self) -> None:
@@ -3492,8 +3508,68 @@ class VideoLostTests(unittest.TestCase):
         # start a recording stops it: one clip as long as the wait.
         guest = self.Guest(self.plan())
         guest.window_modes = ["survives"]
-        with self.assertRaisesRegex(runner.Failure, r"window1-survivor\.mp4 lasts 7\.50 s \(above 4\.5 s\).*went on over the camera's reopening"):
+        with self.assertRaisesRegex(runner.Failure, r"window1-survivor\.mp4 lasts 7\.50 s \(above 4\.5 s: the 3\.0 s between the keys.*went on over the camera's reopening"):
             self.run_check(guest)
+
+    def slow_stop_key(self, guest, delay: float) -> str:
+        """The check on a virtual clock whose third key of every attempt (the one that stops the recording) takes `delay`
+        seconds to be delivered, as it can on a guest under load."""
+        clock = self.Clock()
+        original = guest.shell
+        key = f"input keyevent {runner.CAMERA_KEYCODE}"
+
+        def shell(command: str, timeout: float = 0) -> str:
+            if command == key and guest.control_lines.count("resume") >= 3 and guest.window_keys % 3 == 2:
+                clock.sleep(delay)
+            return original(command, timeout)
+
+        guest.shell = shell
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(runner.time, "monotonic", clock.monotonic), \
+                mock.patch.object(runner.time, "sleep", clock.sleep):
+            runner.check_video_lost(guest, guest.plan)
+        return out.getvalue()
+
+    def test_the_bound_of_the_clip_follows_the_time_between_the_keys(self) -> None:
+        # The stop key reaches the recording 2.5 s late: the recording ran 5.4 s between the keys (3 s hold, 2.5 s of delivery),
+        # more than the nominal hold and its margin, and it is still the clip of a correct application.
+        guest = self.Guest(self.plan())
+        guest.second_seconds = 5.4
+        text = self.slow_stop_key(guest, 2.5)
+        self.assertIn("start window 1 of 5: the start was cancelled; clips: window1-second.mp4 5.40 s", text)
+        # The same clip after keys that were delivered at once is longer than a recording of the hold can be.
+        slow = self.Guest(self.plan())
+        slow.second_seconds = 5.4
+        with self.assertRaisesRegex(runner.Failure, r"window1-second\.mp4 lasts 5\.40 s \(above 4\.5 s: the 3\.0 s between the keys"):
+            self.run_check(slow)
+
+    def test_a_survivor_is_still_longer_than_the_slow_keys_allow(self) -> None:
+        # With the stop key 2.5 s late the bound is 7.0 s: a recording that went on over the loss lasts as long as the wait.
+        guest = self.Guest(self.plan())
+        guest.window_modes = ["survives"]
+        guest.survivor_seconds = 8.5
+        with self.assertRaisesRegex(runner.Failure, r"window1-survivor\.mp4 lasts 8\.50 s \(above 7\.0 s: the 5\.5 s between the keys"):
+            self.slow_stop_key(guest, 2.5)
+
+    def test_the_recording_after_the_cancelled_start_must_hold_encoded_video(self) -> None:
+        # A container of the right length with no video samples, or with the samples declared and no bytes behind them, is not
+        # the recording that the key started.
+        for options, pattern in (({"samples": False}, r"window1-second\.mp4 has a video track but no encoded video samples"),
+                                 ({"payload": 40}, r"window1-second\.mp4 declares 102 video samples but its media data holds 40 bytes"),
+                                 ({"video": False}, r"window1-second\.mp4 \(start window attempt 1\) has no video track")):
+            guest = self.Guest(self.plan())
+            guest.second_options = options
+            with self.subTest(options=options), self.assertRaisesRegex(runner.Failure, pattern):
+                self.run_check(guest)
+
+    def test_the_short_clip_a_loss_leaves_is_not_the_recording_that_follows_the_cancelled_start(self) -> None:
+        # The loss stopped a recording that had started: its short clip may hold nothing, the clip of the next recording is judged.
+        guest = self.Guest(self.plan())
+        guest.window_modes = ["stopped", "cancel"]
+        guest.short_clip_seconds = 0.4
+        guest.short_options = {"samples": False}
+        text = self.run_check(guest)
+        self.assertIn("start window 1 of 5: the recording had started and the loss stopped it; clips: window1-short.mp4 0.40 s", text)
 
     def test_losses_that_all_came_after_the_recording_was_created_prove_nothing_and_fail(self) -> None:
         guest = self.Guest(self.plan())
@@ -3532,8 +3608,8 @@ class VideoLostTests(unittest.TestCase):
     def test_presses_that_found_no_recording_are_counted(self) -> None:
         guest = self.Guest(self.plan())
         guest.ignored_idle = 2
-        self.assertIn("3 presses landed while the recording ended and were ignored, 0 after its Finalize line but before the "
-                      "state was reset, 2 found no recording (the application's log)", self.run_check(guest))
+        self.assertIn("3 presses landed while the recording ended and were ignored, 0 more were ignored after its Finalize line "
+                      "but before the state was reset, 2 found no recording (the application's log)", self.run_check(guest))
 
     def test_a_recording_after_the_loss_that_is_too_short_fails(self) -> None:
         guest = self.Guest(self.plan())
