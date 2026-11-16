@@ -23,6 +23,7 @@
 #include <mutex>
 #include <pthread.h>
 #include <signal.h>
+#include <string>
 #include <thread>
 #endif
 
@@ -458,7 +459,10 @@ void run_count_audit() noexcept
 	}
 }
 
-/* Written from a thread of its own: it allocates and does file I/O. */
+/* Written from a thread of its own: it allocates and does file I/O. The
+ * file is made beside the report and renamed over it, so that a reader (the
+ * runner reads it a few times a second, around each row) sees the whole of
+ * one report and never the front of a new one. */
 void write_report() noexcept
 {
 	static std::mutex writing;
@@ -466,7 +470,8 @@ void write_report() noexcept
 	const char *path = std::getenv("DARWIN_UML_AOT_REPORT");
 	if (path == nullptr)
 		return;
-	std::FILE *file = std::fopen(path, "w");
+	const std::string part = std::string{path} + ".part";
+	std::FILE *file = std::fopen(part.c_str(), "w");
 	if (file == nullptr)
 		return;
 	auto get = [](const std::atomic<std::uint64_t> &value) {
@@ -560,7 +565,8 @@ void write_report() noexcept
 				key & ((1ULL << 40) - 1), count);
 		}
 	}
-	std::fclose(file);
+	if (std::fclose(file) != 0 || std::rename(part.c_str(), path) != 0)
+		(void)std::remove(part.c_str());
 }
 
 void start_reporter() noexcept
