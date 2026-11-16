@@ -253,8 +253,26 @@ std::vector<WriterLocation> holders_of(
 
 /* A store through W reaches the translation at X, and the tag of W's write
  * entry follows the frame's holders. */
+/* A row leaves the counters that must stay 0 where it found them: no state
+ * was destroyed with its locations still in the accounting, no holder
+ * outlived its state, and no removal found its location missing. */
+struct Clean final {
+	FrameAccounting::Diagnostics start{FrameAccounting::diagnostics()};
+
+	~Clean()
+	{
+		const auto now = FrameAccounting::diagnostics();
+		require(now.nonempty_state_destructions ==
+			start.nonempty_state_destructions,
+			"a state was destroyed without its walk");
+		require(now.holder_leaks == start.holder_leaks, "a holder leaked");
+		require(now.errors == start.errors, "an accounting error was counted");
+	}
+};
+
 void test_store()
 {
+	const Clean clean;
 	constexpr std::uint64_t executable = 0x1000'0000;
 	constexpr std::uint64_t alias = 0x2000'0000;
 	constexpr std::uint64_t unheld = 0x2000'4000;
@@ -304,6 +322,7 @@ void test_store()
  * runs them: the guest sees the new immediate, not the old. */
 void test_running_block()
 {
+	const Clean clean;
 	constexpr std::uint64_t executable = 0x1100'0000;
 	constexpr std::uint64_t alias = 0x2100'0000;
 	ScratchBacking frame{"uml-x86-alias-running-XXXXXX", page};
@@ -323,6 +342,7 @@ void test_running_block()
  * over the block that runs it. */
 void test_running_push()
 {
+	const Clean clean;
 	constexpr std::uint64_t executable = 0x1400'0000;
 	constexpr std::uint64_t alias = 0x2400'0000;
 	ScratchBacking frame{"uml-x86-alias-push-XXXXXX", page};
@@ -357,6 +377,7 @@ void test_running_push()
  * address space on the same frame keeps its stamp hit. */
 void test_flush_serial()
 {
+	const Clean clean;
 	constexpr std::uint64_t executable = 0x1200'0000;
 	ScratchBacking frame{"uml-x86-alias-serial-XXXXXX", page};
 	load_return(frame, 7);
@@ -414,6 +435,7 @@ void test_flush_serial()
  * one, and registers on the next dispatch. */
 void test_registration_failure()
 {
+	const Clean clean;
 	namespace testing = uml::memory::testing;
 	constexpr std::uint64_t executable = 0x1300'0000;
 	ScratchBacking frame{"uml-x86-alias-failure-XXXXXX", page};

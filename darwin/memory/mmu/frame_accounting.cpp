@@ -573,10 +573,15 @@ StateAccounting::StateAccounting(
 
 StateAccounting::~StateAccounting()
 {
-	/* A state is destroyed after its walk, which gave its id back. One whose
-	 * walk did not run and that reserved locations may still have them naming
-	 * the id: it is counted and the id retired for good. One that never
-	 * reserved gives its id back. */
+	/* A state is destroyed after its walk, which gave its id back: it leaves
+	 * its address space only through destroy and retire, each of which walks
+	 * it, and the state's holders are out of every frame's list before the
+	 * id is, so no publisher under a stripe lock can still reach it. One
+	 * whose walk did not run and that reserved locations may still have them
+	 * naming the id (an address space dropped without being retired, at the
+	 * end of the process): it is counted and the id retired for good, and
+	 * every test row fails on a count. One that never reserved gives its id
+	 * back. */
 	if (walked)
 		return;
 	const bool reserved = used.load(std::memory_order_relaxed);

@@ -268,8 +268,26 @@ void load_writer(ScratchBacking &backing)
 	return false;
 }
 
+/* A row leaves the counters that must stay 0 where it found them: no state
+ * was destroyed with its locations still in the accounting, no holder
+ * outlived its state, and no removal found its location missing. */
+struct Clean final {
+	FrameAccounting::Diagnostics start{FrameAccounting::diagnostics()};
+
+	~Clean()
+	{
+		const auto now = FrameAccounting::diagnostics();
+		require(now.nonempty_state_destructions ==
+			start.nonempty_state_destructions,
+			"a state was destroyed without its walk");
+		require(now.holder_leaks == start.holder_leaks, "a holder leaked");
+		require(now.errors == start.errors, "an accounting error was counted");
+	}
+};
+
 void test_store()
 {
+	const Clean clean;
 	constexpr std::uint64_t executable = 0x1000'0000;
 	constexpr std::uint64_t alias = 0x2000'0000;
 	constexpr std::uint64_t writer = 0x3000'0000;
@@ -295,6 +313,7 @@ void test_store()
 
 void test_running_block()
 {
+	const Clean clean;
 	constexpr std::uint64_t executable = 0x1100'0000;
 	constexpr std::uint64_t alias = 0x2100'0000;
 	ScratchBacking frame{"uml-x86-jit-running-XXXXXX", page};
@@ -310,6 +329,7 @@ void test_running_block()
 
 void test_decoder_range()
 {
+	const Clean clean;
 	constexpr std::uint64_t executable = 0x1200'0000;
 	ScratchBacking frame{"uml-x86-jit-range-XXXXXX", page};
 	load_return(frame, 3);
@@ -341,6 +361,7 @@ void test_decoder_range()
  * code. */
 void test_without_a_registry()
 {
+	const Clean clean;
 	constexpr std::uint64_t executable = 0x1500'0000;
 	constexpr std::uint64_t alias = 0x2500'0000;
 	constexpr std::uint64_t writer = 0x3500'0000;
@@ -379,6 +400,7 @@ void fail_every_holder_list(uml::memory::testing::AllocationSite site) noexcept
 
 void test_registration_failure()
 {
+	const Clean clean;
 	namespace testing = uml::memory::testing;
 	constexpr std::uint64_t executable = 0x1300'0000;
 	ScratchBacking frame{"uml-x86-jit-failure-XXXXXX", page};
