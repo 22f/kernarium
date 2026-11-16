@@ -159,6 +159,9 @@ uml_add_arm64_unit_test(cross_generation_code_change)
 # IC IVAU faults at an address nothing maps, as hardware does, so the kernel
 # maps the page and the instruction reaches the frame it means.
 uml_add_arm64_unit_test(code_synchronize_fault)
+# A change published again and again, and to more generations than a frame's
+# holder word names, reaches every process that runs the page.
+uml_add_arm64_unit_test(cross_generation_publication)
 uml_add_arm64_unit_test(simd_ordinary_memory_gadget)
 uml_add_arm64_unit_test(simd_structure_gadget)
 uml_add_arm64_unit_test(simd_baseline_inventory WITHOUT_HARNESS

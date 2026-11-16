@@ -91,15 +91,15 @@ struct Map final {
 	Map &operator=(const Map &) = delete;
 };
 
-/* Runs `cpu` in `generation` on `engine` until the guest leaves for a reason
- * other than its budget. */
+/* Runs `cpu` in `generation` on `engine`, over `memory`, until the guest
+ * leaves for a reason other than its budget. */
 inline ::uml::cpu::ExecutionResult run(::uml::cpu::CpuEngine &engine,
-	unsigned long generation, arm64::CpuState &cpu)
+	::uml::memory::StaticGuestMemory &memory, unsigned long generation,
+	arm64::CpuState &cpu)
 {
 	require(darwin_uml_static_vm_activate(generation) == 0);
 	::uml::cpu::ExecutionResult result{};
 	for (int attempt = 0; attempt < 64; ++attempt) {
-		::uml::memory::StaticGuestMemory memory;
 		memory.prepare(generation,
 			darwin_uml_static_vm_sequences(generation)
 				.mapping_changes);
@@ -118,13 +118,17 @@ inline ::uml::cpu::ExecutionResult run(::uml::cpu::CpuEngine &engine,
 	return result;
 }
 
-/* Runs the function at `pc` in `generation`: what it put in x0. */
-[[nodiscard]] inline std::uint64_t call(::uml::cpu::CpuEngine &engine,
-	unsigned long generation, std::uint64_t pc)
+/* The same over memory of its own for each call. */
+inline ::uml::cpu::ExecutionResult run(::uml::cpu::CpuEngine &engine,
+	unsigned long generation, arm64::CpuState &cpu)
 {
-	arm64::CpuState cpu{};
-	cpu.pc = pc;
-	const auto result = run(engine, generation, cpu);
+	auto memory = std::make_unique<::uml::memory::StaticGuestMemory>();
+	return run(engine, *memory, generation, cpu);
+}
+
+[[nodiscard]] inline std::uint64_t result_of(
+	const ::uml::cpu::ExecutionResult &result, const arm64::CpuState &cpu)
+{
 	if (result.reason != ::uml::cpu::ExitReason::system_call)
 		std::printf("  exit reason %d at pc %#llx\n",
 			static_cast<int>(result.reason),
@@ -132,6 +136,40 @@ inline ::uml::cpu::ExecutionResult run(::uml::cpu::CpuEngine &engine,
 	require(result.reason == ::uml::cpu::ExitReason::system_call);
 	return cpu.registers[0];
 }
+
+/* Runs the function at `pc` in `generation`: what it put in x0. */
+[[nodiscard]] inline std::uint64_t call(::uml::cpu::CpuEngine &engine,
+	unsigned long generation, std::uint64_t pc)
+{
+	arm64::CpuState cpu{};
+	cpu.pc = pc;
+	const auto result = run(engine, generation, cpu);
+	return result_of(result, cpu);
+}
+
+/* A vCPU: an engine and the memory it runs over, which keeps its TLB from one
+ * call to the next, as a carrier thread's does. */
+struct Vcpu final {
+	explicit Vcpu(::uml::cpu::EngineKind kind)
+		: engine{::uml::cpu::make_cpu_engine(kind)},
+		  memory{std::make_unique<::uml::memory::StaticGuestMemory>()}
+	{
+		require(engine != nullptr);
+	}
+
+	/* Runs the function at `pc` in `generation` on this vCPU. */
+	[[nodiscard]] std::uint64_t call(unsigned long generation,
+		std::uint64_t pc)
+	{
+		arm64::CpuState cpu{};
+		cpu.pc = pc;
+		const auto result = run(*engine, *memory, generation, cpu);
+		return result_of(result, cpu);
+	}
+
+	std::unique_ptr<::uml::cpu::CpuEngine> engine;
+	std::unique_ptr<::uml::memory::StaticGuestMemory> memory;
+};
 
 /* The writer's guest program: store `word` at `target` in its own view and
  * synchronize it. */
