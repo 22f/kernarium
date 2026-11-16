@@ -14,6 +14,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <fcntl.h>
 #include <new>
 #include <optional>
@@ -44,6 +45,28 @@ namespace {
     if (descriptor < 0)
         return -1;
     (void)::shm_unlink(name);
+    if (::ftruncate(descriptor, static_cast<off_t>(bytes)) != 0) {
+        const int saved = errno;
+        ::close(descriptor);
+        errno = saved;
+        return -1;
+    }
+    return descriptor;
+}
+
+/* An unlinked regular file of exactly `bytes` bytes, as the renderer exports
+ * for a blob where shared memory is denied (iOS), or -1. Shared memory is
+ * rounded up to the host page and a file is not. */
+[[nodiscard]] int exactFile(std::uint64_t bytes) noexcept
+{
+    const char* directory = std::getenv("TMPDIR");
+    char path[1024];
+    std::snprintf(path, sizeof(path), "%s/umlgpu-XXXXXX",
+        directory != nullptr && *directory != '\0' ? directory : "/tmp");
+    const int descriptor = ::mkstemp(path);
+    if (descriptor < 0)
+        return -1;
+    (void)::unlink(path);
     if (::ftruncate(descriptor, static_cast<off_t>(bytes)) != 0) {
         const int saved = errno;
         ::close(descriptor);
@@ -274,7 +297,7 @@ public:
         if (exportedFileBytes)
             bytes = *exportedFileBytes;
         descriptorType = VirglRenderer::sharedMemoryBlobDescriptor;
-        descriptor = sizedFile(bytes);
+        descriptor = exportedFileExact ? exactFile(bytes) : sizedFile(bytes);
         if (descriptor < 0)
             return errno;
         lastExportedDescriptor = descriptor;
@@ -620,6 +643,9 @@ public:
     std::unordered_map<std::uint32_t, std::uint64_t> blobBytes;
     // When set, the size of the file every export hands out.
     std::optional<std::uint64_t> exportedFileBytes;
+    // When set, the exported file is a regular file of exactly that size and
+    // not shared memory, which is a whole number of host pages.
+    bool exportedFileExact {};
     int lastExportedDescriptor {-1};
     void* attachedBackingAddress {};
     std::uint32_t attachedBackingResource {};
@@ -1607,6 +1633,60 @@ void blobMapRefusesAFileShorterThanItsCharge()
     require(::fstat(action.descriptor.get(), &status) == 0 &&
             static_cast<std::uint64_t>(status.st_size) >= action.length,
         "the queued descriptor is shorter than the queued length");
+}
+
+/* The aperture is charged the blob's size rounded up to the host page, and
+ * the guest is given and the host maps the whole charge. A file that covers
+ * the bytes the guest asked for and ends before the charge (a file made to
+ * the size asked, where shared memory is denied) cannot back the mapping, so
+ * it is refused by the charge and not by the request. */
+void blobMapRefusesAFileThatCoversOnlyTheRequestedBytes()
+{
+    FakeGpuDependencies dependencies;
+    dependencies.exportedFileExact = true;
+    VirtioGpuDevice device {dependencies, noGuestReads, noGuestMappings};
+    const auto context = createContext(0x931, protocol::venusCapsetId);
+    requireOk(device, requestBytes(context));
+
+    constexpr auto page = protocol::hostVisibleSharedMemoryAlignment;
+    auto create = newRequest<protocol::GpuResourceCreateBlob>(
+        GpuCommand::resourceCreateBlob);
+    create.header.contextId = context.header.contextId;
+    create.resourceId = 0x932;
+    create.memory = protocol::blobMemoryHost3d;
+    create.flags = protocol::blobFlagMappable;
+    create.size = page + 3616U;
+    requireOk(device, requestBytes(create));
+
+    auto map = newRequest<protocol::GpuResourceMapBlob>(
+        GpuCommand::resourceMapBlob);
+    map.resourceId = create.resourceId;
+    map.offset = 0;
+
+    // A file of the bytes asked for, which is not the whole charge.
+    dependencies.exportedFileBytes = create.size;
+    requireResponse(device, requestBytes(map),
+        protocol::GpuResponse::errorInvalidParameter);
+    require(!device.takeSharedMemoryAction().has_value(),
+        "a mapping longer than the file was queued");
+    require(dependencies.lastExportedDescriptor >= 0 &&
+            ::fcntl(dependencies.lastExportedDescriptor, F_GETFD) == -1 &&
+            errno == EBADF,
+        "the refused export's descriptor was kept");
+
+    // A file one byte short of the charge.
+    dependencies.exportedFileBytes = 2U * page - 1U;
+    requireResponse(device, requestBytes(map),
+        protocol::GpuResponse::errorInvalidParameter);
+    require(!device.takeSharedMemoryAction().has_value(),
+        "a mapping one byte past the file was queued");
+
+    // The charge itself.
+    dependencies.exportedFileBytes = 2U * page;
+    requireResponse(device, requestBytes(map),
+        protocol::GpuResponse::okMapInfo);
+    const auto action = completeAction(device);
+    require(action.length == 2U * page && action.regionOffset == 0);
 }
 
 void edidReportsDisplayPixelsAndEffectiveDensity()
@@ -3839,6 +3919,7 @@ int main()
     blobCommandsAllocateBeforeCommitAndRetry();
     refusedBlobIsAnsweredAsOutOfMemory();
     blobMapRefusesAFileShorterThanItsCharge();
+    blobMapRefusesAFileThatCoversOnlyTheRequestedBytes();
     rendererExecutionFailuresPreserveDeviceState();
     softwareScanoutProgressesWhileRendererFenceIsPending();
     deferredFencesUseHostTimelineAndMergedRetirement();

@@ -15,12 +15,17 @@
 //  - a refused blob leaves nothing mapped and no pages held, so a guest
 //    cannot grow the host's address space or residency by asking again; and
 //  - a GL blob larger than the shared pages behind a persistent coherent
-//    buffer is refused, and the buffer can then be taken at its own size.
+//    buffer is refused, and the buffer can then be taken at its own size; and
+//  - the shared pages are whole host pages, so a blob of memory that is not a
+//    whole number of pages may ask for the bytes it allocated and for the
+//    pages it was rounded up to, and is refused one byte past them.
 //
 // The Venus cases run in a child each, because a renderer without the bound
 // ends the process that holds it and the backing is chosen once per process.
 // The GL case is the test gpu-blob-size-bounds-gl: it needs the host's pinned
-// memory path, and a renderer without it reports the test skipped.
+// memory path, and a renderer without it reports the test skipped. A case that
+// is skipped makes its test report skipped, whatever the others did, unless
+// one failed.
 
 #include "gpu_test_support.hpp"
 #include "host_gl_test_support.hpp"
@@ -43,7 +48,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
-#include <iterator>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -62,6 +66,9 @@ namespace venus = uml::gpu::testing::venus;
 // The host page is the unit the render server maps and the device exports in.
 constexpr std::uint64_t pageBytes = 16384;
 constexpr std::uint64_t oversizedBytes = 4 * pageBytes;
+// Memory that is not a whole number of host pages: the renderer backs it with
+// two.
+constexpr std::uint64_t unalignedBytes = pageBytes + 3616;
 constexpr std::uint32_t cmdFreeMemory = 22;
 constexpr std::uint32_t cmdExecuteCommandStreams = 180;
 
@@ -279,6 +286,46 @@ void useRefusedVenusBlob(bool unlinked)
     renderer.destroyContext(VenusGuest::ctxId);
 }
 
+// Memory that is not a whole number of host pages is backed by whole pages.
+// A blob may ask for the bytes the guest allocated and for the pages they
+// were rounded up to, and not for one byte more. A memory backs one resource
+// at a time, so each attempt has a memory of its own.
+void boundVenusBlobByItsPages(bool unlinked)
+{
+    setBacking(unlinked);
+    VirglRenderer renderer;
+    VenusGuest guest {renderer};
+
+    std::uint64_t memId = 0x2200;
+    std::uint32_t resId = 500;
+    const auto attempt = [&](std::uint64_t blobBytes) {
+        ++memId;
+        guest.allocate(memId, unalignedBytes, guest.hostTypeIndex);
+        guest.sync();
+        return guest.createBlob(++resId, memId, blobBytes);
+    };
+
+    require(attempt(unalignedBytes) == 0,
+        "a blob of the memory's own size was refused");
+    const std::uint64_t paddedBytes = exportedBytes(renderer, resId);
+    require(paddedBytes > unalignedBytes && paddedBytes % pageBytes == 0,
+        "the file behind a blob is not the memory rounded up to host pages");
+    renderer.unrefResource(resId);
+
+    require(attempt(paddedBytes) == 0,
+        "a blob of the pages behind its memory was refused");
+    renderer.unrefResource(resId);
+
+    require(attempt(paddedBytes + 1) != 0,
+        "a blob one byte past the pages behind its memory was accepted");
+    require(guest.createBlob(++resId, memId, unalignedBytes) == 0,
+        "the memory could not be exported at its own size after a refusal");
+    require(exportedBytes(renderer, resId) >= unalignedBytes,
+        "the file behind a blob is shorter than the blob");
+    renderer.unrefResource(resId);
+    renderer.destroyContext(VenusGuest::ctxId);
+}
+
 // Refusals leave nothing mapped: a guest that asks for oversized blobs of
 // memory it writes and releases gains no address space and no pages.
 void refuseOversizedVenusBlobsWithoutRetention()
@@ -335,10 +382,11 @@ void refuseOversizedVenusBlobsWithoutRetention()
     renderer.destroyContext(VenusGuest::ctxId);
 }
 
-// PIPE_RESOURCE_CREATE of a 16 KiB buffer with persistent, coherent storage
-// that the blob id names.
-[[nodiscard]] int createCoherentBuffer(
-    VirglRenderer& renderer, std::uint32_t contextId, std::uint32_t blobId)
+// PIPE_RESOURCE_CREATE of a buffer of `bytes` bytes with persistent, coherent
+// storage that the blob id names.
+[[nodiscard]] int createCoherentBuffer(VirglRenderer& renderer,
+    std::uint32_t contextId, std::uint32_t blobId,
+    std::uint64_t bytes = pageBytes)
 {
     constexpr std::uint32_t commandPipeResourceCreate = 48;
     constexpr std::uint32_t pipeBuffer = 0;
@@ -348,7 +396,7 @@ void refuseOversizedVenusBlobsWithoutRetention()
     const std::vector<std::uint32_t> words {
         (11U << 16U) | commandPipeResourceCreate, pipeBuffer,
         virglFormatR8Unorm, virglBindVertexBuffer,
-        static_cast<std::uint32_t>(pageBytes), 1, 1, 1, 0, 0,
+        static_cast<std::uint32_t>(bytes), 1, 1, 1, 0, 0,
         mapPersistentCoherent, blobId,
     };
     return renderer.submit(contextId,
@@ -422,6 +470,40 @@ void refuseOversizedGlBlob()
     require(exportedBytes(*renderer, resourceId) >= pageBytes,
         "the pages behind a blob are shorter than the blob");
     renderer->unrefResource(resourceId);
+
+    // A buffer that is not a whole number of host pages is backed by whole
+    // pages: a blob may ask for its bytes and for the pages it was rounded up
+    // to, and not for one byte more. A blob takes its buffer, so each attempt
+    // has a buffer of its own.
+    std::uint32_t paddedBlobId = 20;
+    std::uint32_t paddedResource = 30;
+    const auto attempt = [&](std::uint64_t blobBytes) {
+        ++paddedBlobId;
+        require(createCoherentBuffer(
+                    *renderer, contextId, paddedBlobId, unalignedBytes) == 0,
+            "the unaligned persistent buffer could not be created");
+        return createGlBlob(
+            *renderer, contextId, ++paddedResource, paddedBlobId, blobBytes);
+    };
+    require(attempt(unalignedBytes) == 0,
+        "a blob of the buffer's own size was refused");
+    const std::uint64_t paddedBytes = exportedBytes(*renderer, paddedResource);
+    require(paddedBytes > unalignedBytes && paddedBytes % pageBytes == 0,
+        "the pages behind a buffer are not the buffer rounded up to host pages");
+    renderer->unrefResource(paddedResource);
+
+    require(attempt(paddedBytes) == 0,
+        "a blob of the pages behind its buffer was refused");
+    renderer->unrefResource(paddedResource);
+
+    require(attempt(paddedBytes + 1) != 0,
+        "a blob one byte past the pages behind its buffer was accepted");
+    require(createGlBlob(*renderer, contextId, paddedResource, paddedBlobId,
+                unalignedBytes) == 0,
+        "the buffer could not be taken at its own size after a refusal");
+    require(exportedBytes(*renderer, paddedResource) >= unalignedBytes,
+        "the pages behind a blob are shorter than the blob");
+    renderer->unrefResource(paddedResource);
 }
 
 [[noreturn]] void runMode(std::string_view mode)
@@ -435,6 +517,10 @@ void refuseOversizedGlBlob()
             useRefusedVenusBlob(true);
         else if (mode == "venus-posix-shm-use")
             useRefusedVenusBlob(false);
+        else if (mode == "venus-unlinked-padding")
+            boundVenusBlobByItsPages(true);
+        else if (mode == "venus-posix-shm-padding")
+            boundVenusBlobByItsPages(false);
         else if (mode == "venus-retention")
             refuseOversizedVenusBlobsWithoutRetention();
         else if (mode == "gl-coherent-buffer")
@@ -477,16 +563,27 @@ int main(int argc, char** argv)
 {
     if (argc == 2)
         runMode(argv[1]);
-    int skipped = 0;
+    std::vector<const char*> skipped;
     int failed = 0;
     constexpr const char* modes[] = {
         "venus-unlinked-reexport", "venus-posix-shm-reexport",
-        "venus-unlinked-use", "venus-posix-shm-use", "venus-retention"};
+        "venus-unlinked-use", "venus-posix-shm-use",
+        "venus-unlinked-padding", "venus-posix-shm-padding",
+        "venus-retention"};
     for (const char* mode : modes) {
         const int result = runChild(argv[0], mode);
-        skipped += result == 77 ? 1 : 0;
+        if (result == 77)
+            skipped.push_back(mode);
         failed += result == 1 ? 1 : 0;
     }
+    // A failure wins; a case that did not run must not read as a pass.
     require(failed == 0, "a case failed");
-    return skipped == static_cast<int>(std::size(modes)) ? 77 : 0;
+    if (!skipped.empty()) {
+        std::fputs("skipped, the renderer is unavailable here:", stderr);
+        for (const char* mode : skipped)
+            std::fprintf(stderr, " %s", mode);
+        std::fputc('\n', stderr);
+        return 77;
+    }
+    return 0;
 }
