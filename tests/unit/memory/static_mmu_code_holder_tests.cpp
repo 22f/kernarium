@@ -386,7 +386,10 @@ void hold_the_publisher(memory_testing::AllocationSite site) noexcept
 	}
 }
 
-void two_publishers(bool late_holder, unsigned long base)
+/* The second publisher is a guest synchronization by another process, or a
+ * kernel write through the reader's own read-write view of the frame, the
+ * reader being the target of the kernel call. */
+void two_publishers(bool late_holder, bool kernel_on_reader, unsigned long base)
 {
 	ScratchBacking backing{backing_name, page};
 	backing.put32(0, old_word);
@@ -396,6 +399,8 @@ void two_publishers(bool late_holder, unsigned long base)
 	map_code(late, backing);
 	map_writer(first, backing);
 	map_writer(second, backing);
+	if (kernel_on_reader)
+		map_writer(reader, backing);
 	(void)fetch(reader);
 	const auto changes_before = code_changes(reader);
 	const auto before = holders::counters();
@@ -418,20 +423,34 @@ void two_publishers(bool late_holder, unsigned long base)
 		}
 		std::this_thread::yield();
 	}
-	if (late_holder)
+	std::uint64_t late_before = 0;
+	if (late_holder) {
 		(void)fetch(late);
+		late_before = code_changes(late);
+	}
 	backing.put32(0, third_word);
-	synchronize(second);
+	if (kernel_on_reader) {
+		require(darwin_uml_static_vm_invalidate_code_generation(reader,
+			writer_address, 4) == 0);
+	} else {
+		synchronize(second);
+	}
 	const bool heard = code_changes(reader) > changes_before;
+	const bool late_heard =
+		!late_holder || code_changes(late) > late_before;
 	publisher_released.store(true, std::memory_order_release);
 	first_writer.join();
 	memory_testing::set_allocation_observer(nullptr);
 
-	require(heard, late_holder ?
+	require(heard, kernel_on_reader ?
+		"a kernel write through the reader's own view missed the reader "
+		"the first publisher had consumed" : late_holder ?
 		"a publication that took a late holder missed the reader the "
 		"first publisher had consumed" :
 		"a publication that found the word empty missed the reader the "
 		"first publisher had consumed");
+	require(late_heard,
+		"a publication that took a late holder missed that holder");
 	require(since(before).overlap_widenings == 1,
 		"the overlap did not widen exactly one publication");
 	for (const auto generation : {reader, late, first, second})
@@ -440,8 +459,10 @@ void two_publishers(bool late_holder, unsigned long base)
 
 void test_a_publication_that_overlaps_an_unfinished_one_reaches_its_holders()
 {
-	two_publishers(false, 1061);
-	two_publishers(true, 1071);
+	two_publishers(false, false, 1061);
+	two_publishers(true, false, 1071);
+	two_publishers(false, true, 1081);
+	two_publishers(true, true, 1091);
 }
 
 /* A kernel write for `target`, which maps the frame read-write only or not at

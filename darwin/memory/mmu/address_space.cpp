@@ -1208,6 +1208,15 @@ public:
 				publish_first = std::min(publish_first, page);
 				publish_end = page + page_size;
 			}
+			/* A list that goes to every generation, because an unfinished
+			 * publisher has consumed holders (take_holders) or for any other
+			 * reason, leaves the target out of it: the target is published
+			 * here, whole, whatever its pages map, as the holder an
+			 * unfinished publisher took may be the target itself. */
+			if (others.every()) {
+				publish_first = first;
+				publish_end = rounded_end;
+			}
 		}
 		if (publish_first < publish_end)
 			::uml::memory::publish_code_change(*state, publish_first,
