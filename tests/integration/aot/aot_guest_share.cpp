@@ -653,11 +653,24 @@ void evict_mode() {
 // library, which the framework must verify from its bytes again each time. The
 // counts are comments the runner reads; on a kernel that spares shared file
 // pages (the stock one) nothing is evicted and the runner fails the row.
+//
+// AOT_SHARE_ROUND=n makes one invocation of it round n only (the first one
+// also runs the children that precede the first eviction), so that the runner
+// can read the framework's counters around every round. The page cache and the
+// framework's table outlive the process, so the rounds follow one another as
+// they do inside one.
 void reclaim_mode() {
     constexpr int kMadvPageout = 21;
     constexpr int kRounds = 3;
+    const char *only = getenv("AOT_SHARE_ROUND");
+    const int first_round = only == nullptr ? 0 : only[0] - '0';
+    const int end_round = only == nullptr ? kRounds : first_round + 1;
+    if (only != nullptr && (only[0] < '0' || only[0] >= '0' + kRounds || only[1] != 0)) {
+        fail("AOT_SHARE_ROUND is not a round of the reclaim mode");
+        return;
+    }
     const Zlib z = system_zlib();
-    if (!children_in_turn("before", 0, 3, z, Prep::None)) {
+    if (first_round == 0 && !children_in_turn("before", 0, 3, z, Prep::None)) {
         return;
     }
     const LibzMap m = map_libz();
@@ -665,7 +678,7 @@ void reclaim_mode() {
         fail("map libz.so");
         return;
     }
-    for (int round = 0; round < kRounds; ++round) {
+    for (int round = first_round; round < end_round; ++round) {
         touch_readbacks(m);
         long total = 0;
         const long before = cached_pages(kSystemZ, &total);

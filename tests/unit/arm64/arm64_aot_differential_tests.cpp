@@ -1561,6 +1561,8 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 		require(same(want, b.result, c));
 		require(b.stats.enters > 0 && answered_by_the_table(b.stats) &&
 			b.stats.poisoned == 0);
+		/* Nothing was filed under another epoch: no hash is blamed on one. */
+		require(a.stats.epoch_rehashes == 0 && b.stats.epoch_rehashes == 0);
 		/* The memory layer's count of this frame's executable mappings is
 		 * what the two guests' words say, as a guest run audits it. */
 		const auto audit = ::uml::memory::audit_executable_counts();
@@ -1670,6 +1672,12 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 		const auto d = run_shared(*second, c);
 		require(same(want_changed, d.result, c));
 		require(d.stats.verifications >= 1 && d.stats.poisoned >= 1);
+		/* The verdict filed for the old bytes names this frame, this page
+		 * and the epoch before the publication: the page is hashed again
+		 * because the epoch moved, and the counter says so (a build that
+		 * shares nothing files nothing and has none to blame). */
+		require(AOT_TEST_SHARED_VERDICTS != 0 ?
+			d.stats.epoch_rehashes >= 1 : d.stats.epoch_rehashes == 0);
 	}
 
 	/* The last executable mapping of the page goes, the frame is reused for
@@ -1694,6 +1702,10 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 		const auto d = run_shared(*second, c);
 		require(same(want_changed, d.result, c));
 		require(d.stats.verifications >= 1 && d.stats.poisoned >= 1);
+		/* The frame came back for other bytes under a later epoch: the
+		 * counter is how a guest run sees that a frame was given back. */
+		require(AOT_TEST_SHARED_VERDICTS != 0 ?
+			d.stats.epoch_rehashes >= 1 : d.stats.epoch_rehashes == 0);
 	}
 
 	/* The backing is replaced: the same address, the same offset and the
@@ -1720,6 +1732,9 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 		require(same(want_changed, d.result, c));
 		require(d.stats.shared_hits == 0 && d.stats.verifications >= 1 &&
 			d.stats.poisoned >= 1);
+		/* Another frame is another identity: nothing was filed under an
+		 * older epoch of it, and no hash is blamed on one. */
+		require(d.stats.epoch_rehashes == 0);
 		unmap_page(*second);
 		map_page(*second, replacement);
 		const auto e = run_shared(*second, c);

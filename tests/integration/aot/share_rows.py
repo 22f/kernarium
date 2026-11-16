@@ -36,6 +36,11 @@ STUDY_MODES = ("reclaim",)
 RECLAIM_ROUNDS = 3
 RECLAIM_MIN_CACHED = 16
 RECLAIM_MIN_HASHED = 4
+# Pages the framework must have hashed again because the epoch of their
+# frame moved, in each round after the first (the page cache gives frames
+# back to the pages that held them, which a verdict of the frame would
+# answer for were its epoch not to move).
+RECLAIM_MIN_EPOCH_REHASHES = 1
 MODE_SECONDS = 300
 # The children of a mode, one after another or together, and the sums they print.
 CHILD = re.compile(r"^(\S+(?: \S+)*) child (\d+) sum=0x[0-9a-f]+$")
@@ -48,9 +53,22 @@ class ShareFailure(RuntimeError):
     pass
 
 
-def command(mode: str) -> str:
-    return (f"cd /data/local/tmp && AOT_SHARE_MODE={mode} LD_PRELOAD={PROGRAM} "
+# The reclaim mode runs as one invocation per round, so that the framework's
+# counters can be read around each: the children of a round, in the first the
+# ones that precede its eviction as well.
+RECLAIM_ROUND_CHILDREN = (6, 3, 3)
+
+
+def command(mode: str, round_: int | None = None) -> str:
+    # The names of the rounds are digits: a round is one of RECLAIM_ROUNDS.
+    choice = "" if round_ is None else f"AOT_SHARE_ROUND={round_} "
+    return (f"cd /data/local/tmp && AOT_SHARE_MODE={mode} {choice}LD_PRELOAD={PROGRAM} "
             f"/system/bin/toybox true; echo rc=$?")
+
+
+def invocations(mode: str) -> tuple[int | None, ...]:
+    """The invocations a mode makes: one, or one per round."""
+    return tuple(range(RECLAIM_ROUNDS)) if mode == "reclaim" else (None,)
 
 
 EXPECTED_CHILDREN = {"fork": 16, "copy": 16, "cow": 10, "cow-parent": 7, "mprotect": 6,
@@ -67,9 +85,10 @@ def modes(study: bool) -> tuple[str, ...]:
     return MODES + STUDY_MODES if study else MODES
 
 
-def run_mode(shell: Callable[..., str], mode: str) -> list[str]:
-    """One run of a mode; returns its record, checked for what it must show."""
-    output = shell(command(mode), MODE_SECONDS)
+def run_mode(shell: Callable[..., str], mode: str, round_: int | None = None) -> list[str]:
+    """One run of a mode (or of one of its rounds); returns its record,
+    checked for what it must show."""
+    output = shell(command(mode, round_), MODE_SECONDS)
     lines = output.splitlines()
     status = [line for line in lines if line.startswith("rc=")]
     if not status or status[-1] != "rc=0":
@@ -81,9 +100,10 @@ def run_mode(shell: Callable[..., str], mode: str) -> list[str]:
     if f"done mode={mode}" not in record:
         raise ShareFailure(f"{mode}: no closing record:\n{output}")
     children = [line for line in record if CHILD.match(line)]
-    if len(children) != EXPECTED_CHILDREN[mode]:
+    expected = EXPECTED_CHILDREN[mode] if round_ is None else RECLAIM_ROUND_CHILDREN[round_]
+    if len(children) != expected:
         raise ShareFailure(f"{mode}: {len(children)} children reported, "
-                           f"not {EXPECTED_CHILDREN[mode]}:\n{output}")
+                           f"not {expected}:\n{output}")
     return record
 
 
@@ -114,12 +134,14 @@ RECLAIM = re.compile(r"^# reclaim: libz\.so (\d+) pages cached before the evicti
 
 
 def check_counts(mode: str, delta: dict[str, int], fork_shared: int | None,
-                 record: list[str] | None = None) -> str:
+                 record: list[str] | None = None,
+                 per_round: list[dict[str, int]] | None = None) -> str:
     """The framework's counters of libz.so around a mode in a diagnostics
     build: pages verified by their hash, verifications a verdict of another
     address space answered, and pages refused for lack of the kernel's
     immutable fact. Returns a line to print, or raises. `fork_shared` is
-    `shared` of the fork mode; `record` is the mode's record."""
+    `shared` of the fork mode; `record` is the mode's record; `per_round`
+    is the counters around each invocation of a mode that has rounds."""
     shared = delta.get("shared", 0)
     hashed = delta.get("verified", 0)
     refused = delta.get("mutable", 0)
@@ -162,19 +184,23 @@ def check_counts(mode: str, delta: dict[str, int], fork_shared: int | None,
     elif mode == "evict":
         text += evict_check(record or [], hashed, shared, refused)
     elif mode == "reclaim":
-        text += reclaim_check(record or [], hashed, shared, refused)
+        text += reclaim_check(record or [], hashed, shared, refused, per_round)
     return text
 
 
-def reclaim_check(record: list[str], hashed: int, shared: int, refused: int) -> str:
+def reclaim_check(record: list[str], hashed: int, shared: int, refused: int,
+                  per_round: list[dict[str, int]] | None = None) -> str:
     """The reclaim mode: in each round the study kernel must have evicted most
     of libz.so's pages from every address space (the row fails on a guest that
     spares them) and reading them back must have taken faults; the children
     that run it again must have had pages verified by hash (never a verdict
     taken for a frame the page cache gave up, in the round that gives a frame
     back to the page it held two rounds before as much as in the first) and
-    the later ones must share what the first left. Returns what to add to the
-    line."""
+    the later ones must share what the first left. Whether a frame was given
+    back is not assumed of the guest's allocator: the framework counts the
+    pages it hashed because the epoch of their frame had moved (a verdict of
+    the same frame for the same page under an older epoch), and each round
+    after the first must have had one. Returns what to add to the line."""
     rounds = [m for m in map(RECLAIM.match, record) if m]
     if len(rounds) != RECLAIM_ROUNDS:
         raise ShareFailure(f"the reclaim record has {len(rounds)} rounds, not {RECLAIM_ROUNDS}")
@@ -203,7 +229,19 @@ def reclaim_check(record: list[str], hashed: int, shared: int, refused: int) -> 
                            "answered for the page read back")
     if shared < 2:
         raise ShareFailure("the children after the eviction shared no verdict")
-    return f"; libz.so lost {lost} pages in {RECLAIM_ROUNDS} rounds"
+    if per_round is None or len(per_round) != RECLAIM_ROUNDS or \
+            any("rehash" not in counted for counted in per_round):
+        raise ShareFailure("the reclaim row needs the framework's re-hash count of each round "
+                           f"({RECLAIM_ROUNDS} rounds, from a diagnostics build)")
+    forced = [counted["rehash"] for counted in per_round]
+    for number, count in enumerate(forced[1:], 2):
+        if count < RECLAIM_MIN_EPOCH_REHASHES:
+            raise ShareFailure(f"round {number}: no page was hashed again because the epoch of its "
+                               "frame had moved (re-hashes per round: "
+                               f"{', '.join(map(str, forced))}): the page cache gave no frame back to "
+                               "the page it held, so the row cannot observe the reuse")
+    return (f"; libz.so lost {lost} pages in {RECLAIM_ROUNDS} rounds, hashed again because the epoch "
+            f"moved {', '.join(map(str, forced))} (per round)")
 
 
 def evict_check(record: list[str], hashed: int, shared: int, refused: int) -> str:

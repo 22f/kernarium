@@ -218,7 +218,7 @@ std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
 	refill_failures{0}, cross_hits{0}, cross_misses{0}, max_retired{0},
 	verify_nanos{0}, step_nanos{0}, steps_run{0}, code_bumps{0},
 	history_queries{0}, mops_slow{0}, mops_fault{0}, mops_illegal{0},
-	shared_hits{0}, mutable_pages{0};
+	shared_hits{0}, mutable_pages{0}, epoch_rehashes{0};
 std::array<std::atomic<std::uint64_t>, 5> refusals{};
 /* The guest addresses AOT code stepped at most: library << 40 | offset. */
 constexpr std::size_t step_slots = 32768;
@@ -232,6 +232,9 @@ std::array<std::atomic<std::uint64_t>, 64> library_verifications{};
 std::array<std::atomic<std::uint64_t>, 64> library_shared_hits{};
 /* Page verifications refused for lack of the kernel's immutable fact. */
 std::array<std::atomic<std::uint64_t>, 64> library_mutable_pages{};
+/* Page verifications that the epoch of a frame's record forced (see
+ * Stats::epoch_rehashes). */
+std::array<std::atomic<std::uint64_t>, 64> library_epoch_rehashes{};
 /* What find() answered: an entry, or why not (FindResult), in all and per
  * library where the answer names one; and what a cross-library lookup that
  * found no entry looked at (CrossMiss). */
@@ -491,13 +494,14 @@ void write_report() noexcept
 	std::fprintf(file,
 		"max_retired %llu verify_nanos %llu step_nanos %llu steps_run %llu "
 		"code_bumps %llu history_queries %llu mops_slow %llu mops_fault %llu "
-		"mops_illegal %llu shared_hits %llu mutable_pages %llu\n",
+		"mops_illegal %llu shared_hits %llu mutable_pages %llu "
+		"epoch_rehashes %llu\n",
 		get(counters::max_retired), get(counters::verify_nanos),
 		get(counters::step_nanos), get(counters::steps_run),
 		get(counters::code_bumps), get(counters::history_queries),
 		get(counters::mops_slow), get(counters::mops_fault),
 		get(counters::mops_illegal), get(counters::shared_hits),
-		get(counters::mutable_pages));
+		get(counters::mutable_pages), get(counters::epoch_rehashes));
 	std::fprintf(file, "stack_free %llu stack_size %llu stack_kind %llu "
 		"stack_task_bytes %llu stack_engine_free %llu stack_growth %llu\n",
 		get(counters::stack_min_free), get(counters::stack_size_at_min),
@@ -544,13 +548,14 @@ void write_report() noexcept
 		const auto hashed = get(counters::library_verifications[library]);
 		const auto shared = get(counters::library_shared_hits[library]);
 		const auto refused = get(counters::library_mutable_pages[library]);
+		const auto forced = get(counters::library_epoch_rehashes[library]);
 		if (enters == 0 && finds == 0 && cross == 0 && hashed == 0 &&
-		    shared == 0 && refused == 0)
+		    shared == 0 && refused == 0 && forced == 0)
 			continue;
 		std::fprintf(file, "library %zu enters %llu steps %llu cross_misses "
-			"%llu verified %llu shared %llu mutable %llu", library, enters,
-			get(counters::library_steps[library]), cross, hashed, shared,
-			refused);
+			"%llu verified %llu shared %llu mutable %llu rehash %llu",
+			library, enters, get(counters::library_steps[library]), cross,
+			hashed, shared, refused, forced);
 		for (std::size_t kind = 0;
 		     kind < counters::library_finds[library].size(); ++kind)
 			std::fprintf(file, " %s %llu", find_result_name(kind),
@@ -835,6 +840,7 @@ Stats stats() noexcept
 		result.finds[i] = get(counters::find_results[i]);
 	result.shared_hits = get(counters::shared_hits);
 	result.mutable_pages = get(counters::mutable_pages);
+	result.epoch_rehashes = get(counters::epoch_rehashes);
 	result.stack_min_free = get(counters::stack_min_free);
 	result.stack_size_at_min = get(counters::stack_size_at_min);
 	result.stack_kind_at_min = get(counters::stack_kind_at_min);
@@ -856,7 +862,8 @@ void reset_stats() noexcept
 		     &counters::steps_run, &counters::code_bumps,
 		     &counters::history_queries, &counters::mops_slow,
 		     &counters::mops_fault, &counters::mops_illegal,
-		     &counters::shared_hits, &counters::mutable_pages})
+		     &counters::shared_hits, &counters::mutable_pages,
+		     &counters::epoch_rehashes})
 		counter->store(0, std::memory_order_relaxed);
 	for (auto *counter : {&counters::stack_min_free, &counters::stack_engine_free})
 		counter->store(~std::uint64_t{0}, std::memory_order_relaxed);
@@ -976,7 +983,14 @@ Binder::Verdict Binder::verify_page(
 		},
 		[&]() noexcept { return mapping_sequence() != sequence_at_start; },
 		address, VerdictTable::where(instance.library,
-			static_cast<std::uint32_t>(index)));
+			static_cast<std::uint32_t>(index))
+#if UML_AOT_DIAGNOSTICS
+		, [&]() noexcept {
+			UML_AOT_COUNT(epoch_rehashes, 1);
+			UML_AOT_COUNT_LIBRARY(library_epoch_rehashes, instance.library);
+		}
+#endif
+		);
 	switch (outcome) {
 	case SharedOutcome::unreadable:
 		return Verdict::unreadable;

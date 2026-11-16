@@ -489,6 +489,8 @@ class Arm:
         self.debug: dict[str, list[list[str]]] = {}
         self.share: dict[str, list[str]] = {}
         self.share_counts: dict[str, dict[str, int]] = {}
+        # The counters around each invocation of a mode that has rounds.
+        self.share_rounds: dict[str, list[dict[str, int]]] = {}
         self.report: dict[str, int] = {}
         self.resident: int | None = None
 
@@ -623,21 +625,29 @@ class Arm:
             time.sleep(REPORT_SECONDS)
             return read_report(report)
 
+        fields = (("shared", "shared"), ("verified", "verified"), ("mutable", "mutable"),
+                  ("rehash", "rehash"))
         for mode in share_rows.modes(self.options.study_eviction):
-            before = counters() if counting else {}
-            try:
-                record = share_rows.run_mode(
-                    lambda text, seconds=60: device.shell(text, timeout=seconds),
-                    mode)
-            except (share_rows.ShareFailure, subprocess.TimeoutExpired) as problem:
-                raise Failure(f"{self.label}: share row {mode}: {problem}")
+            record: list[str] = []
+            around: list[dict[str, int]] = []
+            for invocation in share_rows.invocations(mode):
+                before = counters() if counting else {}
+                try:
+                    record += share_rows.run_mode(
+                        lambda text, seconds=60: device.shell(text, timeout=seconds),
+                        mode, invocation)
+                except (share_rows.ShareFailure, subprocess.TimeoutExpired) as problem:
+                    raise Failure(f"{self.label}: share row {mode}: {problem}")
+                if counting:
+                    after = counters()
+                    around.append({
+                        key: after.get(f"library.{libz}.{field}", 0) - before.get(f"library.{libz}.{field}", 0)
+                        for key, field in fields})
             self.share[mode] = record
             if counting:
-                after = counters()
-                self.share_counts[mode] = {
-                    key: after.get(f"library.{libz}.{field}", 0) - before.get(f"library.{libz}.{field}", 0)
-                    for key, field in (("shared", "shared"), ("verified", "verified"),
-                                       ("mutable", "mutable"))}
+                self.share_rounds[mode] = around
+                self.share_counts[mode] = {key: sum(counted[key] for counted in around)
+                                           for key, _ in fields}
 
 
 def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
@@ -693,7 +703,7 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
                     print("  " + note)
                 if on.share_counts:
                     print(share_rows.check_counts(mode, on.share_counts[mode], fork_shared,
-                                                  on.share[mode]))
+                                                  on.share[mode], on.share_rounds.get(mode)))
             except share_rows.ShareFailure as problem:
                 raise Failure(f"share row {problem}")
             if mode == "fork" and on.share_counts:

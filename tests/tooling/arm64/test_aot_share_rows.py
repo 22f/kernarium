@@ -171,6 +171,15 @@ def reclaim_round(before: int = 33, after: int = 8, faults: int = 3) -> str:
 
 
 RECLAIM = [reclaim_round(), reclaim_round(after=9), reclaim_round(after=8, faults=2)]
+# What the framework counted around each round: pages hashed again because
+# the epoch of their frame moved.
+GOOD_ROUNDS = [{"rehash": 2}, {"rehash": 14}, {"rehash": 9}]
+
+
+def reclaim_counts(delta: dict[str, int], record: list[str] = RECLAIM,
+                   per_round: list[dict[str, int]] | None = None) -> str:
+    return rows.check_counts("reclaim", delta, 176, record,
+                             GOOD_ROUNDS if per_round is None else per_round)
 
 
 class ReclaimTest(unittest.TestCase):
@@ -181,14 +190,15 @@ class ReclaimTest(unittest.TestCase):
         self.assertEqual(rows.modes(True), rows.MODES + ("reclaim",))
 
     def test_evicted_pages_are_hashed_again_and_then_shared(self):
-        text = rows.check_counts("reclaim", {"shared": 8, "verified": 90}, 176, RECLAIM)
+        text = reclaim_counts({"shared": 8, "verified": 90})
         self.assertIn("libz.so lost 74 pages in 3 rounds", text)
+        self.assertIn("hashed again because the epoch moved 2, 14, 9", text)
 
     def test_a_guest_that_spares_the_pages_fails(self):
         for after in (33, 20):
             record = [reclaim_round(), reclaim_round(after=after), reclaim_round()]
             with self.assertRaises(rows.ShareFailure):
-                rows.check_counts("reclaim", {"shared": 8, "verified": 90}, 176, record)
+                reclaim_counts({"shared": 8, "verified": 90}, record)
 
     def test_an_engine_that_answers_for_a_frame_given_back_fails(self):
         # The pages a round gives back to the frames of two rounds before are
@@ -197,32 +207,75 @@ class ReclaimTest(unittest.TestCase):
         for delta in ({"shared": 100, "verified": 0}, {"shared": 100, "verified": 15},
                       {"shared": 100, "verified": 36}):
             with self.assertRaises(rows.ShareFailure):
-                rows.check_counts("reclaim", delta, 176, RECLAIM)
+                reclaim_counts(delta)
 
     def test_a_round_without_a_fault_to_read_back_fails(self):
         record = [reclaim_round(), reclaim_round(faults=0), reclaim_round()]
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("reclaim", {"shared": 8, "verified": 90}, 176, record)
+            reclaim_counts({"shared": 8, "verified": 90}, record)
 
     def test_a_library_the_guest_had_not_cached_cannot_observe_eviction(self):
         record = [reclaim_round(before=4, after=0, faults=1)] + RECLAIM[1:]
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("reclaim", {"shared": 8, "verified": 90}, 176, record)
+            reclaim_counts({"shared": 8, "verified": 90}, record)
 
     def test_nothing_shared_after_the_first_verification_fails(self):
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("reclaim", {"shared": 0, "verified": 90}, 176, RECLAIM)
+            reclaim_counts({"shared": 0, "verified": 90})
 
     def test_a_refused_page_or_a_missing_round_fails(self):
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("reclaim", {"shared": 8, "verified": 90, "mutable": 1}, 176, RECLAIM)
+            reclaim_counts({"shared": 8, "verified": 90, "mutable": 1})
         for record in ([], RECLAIM[:2]):
             with self.assertRaises(rows.ShareFailure):
-                rows.check_counts("reclaim", {"shared": 8, "verified": 90}, 176, record)
+                reclaim_counts({"shared": 8, "verified": 90}, record)
 
     def test_a_record_of_twelve_children_is_the_expected_shape(self):
         out = record("reclaim", 12, tail="\n" + "\n".join(RECLAIM))
         self.assertEqual(len(rows.run_mode(shell_of(out), "reclaim")), 16)
+
+    def test_a_later_round_whose_frames_the_page_cache_did_not_give_back_fails(self):
+        # The row observes the reuse itself: a round after the first in which
+        # the framework hashed no page because an epoch had moved did not
+        # exercise the epoch, whatever the allocator did.
+        for bad in ([{"rehash": 2}, {"rehash": 0}, {"rehash": 9}],
+                    [{"rehash": 2}, {"rehash": 14}, {"rehash": 0}],
+                    [{"rehash": 0}, {"rehash": 0}, {"rehash": 0}]):
+            with self.assertRaises(rows.ShareFailure) as caught:
+                reclaim_counts({"shared": 8, "verified": 90}, per_round=bad)
+            self.assertIn("cannot observe the reuse", str(caught.exception))
+        # The first round has no earlier epoch of a frame to be given back to.
+        reclaim_counts({"shared": 8, "verified": 90},
+                       per_round=[{"rehash": 0}, {"rehash": 1}, {"rehash": 1}])
+
+    def test_a_run_without_the_count_of_each_round_fails(self):
+        for missing in (None, [], GOOD_ROUNDS[:2], [{"shared": 1}] * 3):
+            with self.assertRaises(rows.ShareFailure):
+                rows.check_counts("reclaim", {"shared": 8, "verified": 90}, 176, RECLAIM, missing)
+
+
+class RoundsTest(unittest.TestCase):
+    """The reclaim mode runs once per round, so its counters can be read around each."""
+
+    def test_only_the_reclaim_mode_has_rounds(self):
+        self.assertEqual(rows.invocations("reclaim"), (0, 1, 2))
+        for mode in rows.MODES:
+            self.assertEqual(rows.invocations(mode), (None,))
+
+    def test_a_round_names_itself_to_the_program(self):
+        self.assertIn("AOT_SHARE_ROUND=1 ", rows.command("reclaim", 1))
+        self.assertNotIn("AOT_SHARE_ROUND", rows.command("reclaim"))
+        self.assertNotIn("AOT_SHARE_ROUND", rows.command("fork"))
+
+    def test_a_round_reports_its_own_children(self):
+        # The first round also runs the children that precede the eviction.
+        for number, children in enumerate((6, 3, 3)):
+            lines = rows.run_mode(shell_of(record("reclaim", children, tail="\n" + RECLAIM[0])),
+                                  "reclaim", number)
+            self.assertEqual(len(lines), children + 2)
+        for number, children in ((0, 3), (1, 6), (2, 12)):
+            with self.assertRaises(rows.ShareFailure):
+                rows.run_mode(shell_of(record("reclaim", children)), "reclaim", number)
 
 
 if __name__ == "__main__":

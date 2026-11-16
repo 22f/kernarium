@@ -843,11 +843,16 @@ blocker in every one of them.
   change to `madvise(MADV_PAGEOUT)` and `mincore`; no artifact of it is
   accepted or published). It evicts the library's pages from every address
   space that maps them, three rounds over (a frame freed in one round can
-  come back to the page it held before), asserts from `mincore` that most of
-  them left in each round and that reading them back took faults, and
-  requires the children which run the library afterwards to have at least
-  half as many pages verified by hash again, and then to share those
-  verdicts. On a stock kernel the row fails, as designed.
+  come back to the page it held before), each round in an invocation of its
+  own so that the framework's counts can be read around it, asserts from
+  `mincore` that most of the pages left in each round and that reading them
+  back took faults, and requires the children which run the library
+  afterwards to have at least half as many pages verified by hash again, and
+  then to share those verdicts. The page cache's choice of frames is not
+  assumed: the framework counts the pages it hashed because the epoch of
+  their frame had moved (the table held that frame's verdict for the same
+  page under an older epoch), and every round after the first must have at
+  least one. On a stock kernel the row fails, as designed.
   Execution evidence exists only in a diagnostics build, where the libraries
   the run names must have been entered, and where the memory layer recounts
   the executable mappings of every physical-page record against the

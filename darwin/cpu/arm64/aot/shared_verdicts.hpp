@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <thread>
+#include <type_traits>
 
 namespace uml::cpu::arm64::aot {
 
@@ -94,6 +95,30 @@ public:
 			filed == at;
 	}
 
+	/* Whether the slot of this page frame holds a verdict for the same page
+	 * of the same library under another epoch: the one contains() would
+	 * have answered had the epoch not moved. A diagnostics build asks it
+	 * when it hashes a page the table did not answer, to count the
+	 * verifications that the epoch forced (a frame the page cache gave back,
+	 * a publication); nothing else reads it. */
+	[[nodiscard]] bool filed_under_another_epoch(
+		const PageStamp &stamp, std::uint64_t at) const noexcept
+	{
+		if (!stamp.immutable || stamp.identity == 0)
+			return false;
+		const auto &slot = slots_[slot_of(stamp.identity)];
+		const auto first = slot.seq.load(std::memory_order_acquire);
+		if ((first & 1U) != 0)
+			return false;
+		const auto identity = slot.identity.load(std::memory_order_relaxed);
+		const auto epoch = slot.epoch.load(std::memory_order_relaxed);
+		const auto filed = slot.where.load(std::memory_order_relaxed);
+		std::atomic_thread_fence(std::memory_order_acquire);
+		return slot.seq.load(std::memory_order_relaxed) == first &&
+			identity == stamp.identity && epoch != stamp.epoch &&
+			filed == at;
+	}
+
 	/* Forgets every verdict. Writers own a slot as insert() does; a slot
 	 * another thread is writing is waited for. */
 	void clear() noexcept
@@ -149,7 +174,10 @@ enum class SharedOutcome : std::uint8_t {
  *  hash_page()           fetches the page and compares its SHA-256 with the
  *                        stored one: returns match, mismatch or unreadable;
  *  moved()               whether the verifying address space's mapping-change
- *                        sequence moved since the call began.
+ *                        sequence moved since the call began;
+ *  epoch_forced()        optional, called when the page is hashed because
+ *                        the table holds this frame's verdict for the page
+ *                        under another epoch.
  *
  * The whole stamp is read before the fetch and, after a match, once more: a
  * verdict is filed only when it is unchanged and immutable, so a page that
@@ -160,15 +188,28 @@ enum class SharedOutcome : std::uint8_t {
  * mapping changes out while it verifies; the sequence makes the call check
  * what it relies on: a verification during which the space's mappings moved
  * says neither match nor mismatch and files nothing. */
-template <class Stamp, class Hash, class Moved>
+/* The observer of a verification the epoch forced: a diagnostics build
+ * passes one that counts, and every other build this one, which makes the
+ * question below compile away. */
+struct NoEpochObserver final {
+	void operator()() const noexcept {}
+};
+
+template <class Stamp, class Hash, class Moved,
+	class EpochForced = NoEpochObserver>
 [[nodiscard]] SharedOutcome verify_through_table(VerdictTable &table,
 	Stamp &&stamp, Hash &&hash_page, Moved &&moved, std::uint64_t address,
-	std::uint64_t at) noexcept
+	std::uint64_t at, EpochForced &&epoch_forced = EpochForced{}) noexcept
 {
 	PageStamp before;
 	const bool stamped = stamp(address, before);
 	if (stamped && before.immutable && table.contains(before, at))
 		return SharedOutcome::shared_hit;
+	if constexpr (!std::is_same_v<std::remove_cvref_t<EpochForced>,
+			      NoEpochObserver>) {
+		if (stamped && table.filed_under_another_epoch(before, at))
+			epoch_forced();
+	}
 	const SharedOutcome result = hash_page();
 	if (moved())
 		return SharedOutcome::unreadable;

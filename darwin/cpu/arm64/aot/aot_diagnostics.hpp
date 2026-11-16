@@ -63,6 +63,11 @@ struct Stats final {
 	/* Page verifications refused because the page's mapping lacks the
 	 * kernel's immutable fact (each retry after a backoff counts again). */
 	std::uint64_t mutable_pages{};
+	/* Verifications that hashed a page because its frame's epoch moved: the
+	 * table held a verdict of the same frame for the same library page
+	 * under an older epoch. A frame given back to the page it held, or one
+	 * whose code was published, shows here. */
+	std::uint64_t epoch_rehashes{};
 	/* The stack the runtime measured (see the report's stack_ fields): the
 	 * least left at a sample site (all ones: none sampled), the size of the
 	 * stack that was on, its kind (0 task, 1 host, 2 signal), the task stack

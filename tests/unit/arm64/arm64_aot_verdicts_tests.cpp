@@ -177,6 +177,8 @@ struct StubMemory final {
 	/* The verifying space's mapping-change sequence moved since the
 	 * verification began. */
 	bool moved{false};
+	/* Verifications the epoch forced, as a diagnostics build counts them. */
+	std::uint64_t epoch_forced{0};
 
 	SharedOutcome verify(VerdictTable &table, std::uint64_t at)
 	{
@@ -192,7 +194,7 @@ struct StubMemory final {
 				return content;
 			},
 			[&] { return moved; },
-			0x7000'0000, at);
+			0x7000'0000, at, [&] { ++epoch_forced; });
 	}
 };
 
@@ -289,6 +291,45 @@ void deciding_rows()
 	memory.stamp = {931, 1, true};
 	memory.moved = false;
 	require(memory.verify(table, where_a) == SharedOutcome::match);
+	/* A page hashed because the epoch of its frame moved is told apart from
+	 * every other hash: the table holds the same frame's verdict for the
+	 * same page under another epoch. The first sight, a page of another
+	 * frame, another page of the frame, a mapping without the fact and a
+	 * page that was never stamped are not it. */
+	memory.stamp = {940, 1, true};
+	memory.moved = false;
+	const auto forced_before = memory.epoch_forced;
+	require(memory.verify(table, where_a) == SharedOutcome::match);
+	require(memory.verify(table, where_a) == SharedOutcome::shared_hit);
+	require(memory.epoch_forced == forced_before);
+	memory.stamp.epoch = 2;
+	require(memory.verify(table, where_a) == SharedOutcome::match);
+	require(memory.epoch_forced == forced_before + 1);
+	require(memory.verify(table, where_a) == SharedOutcome::shared_hit);
+	require(memory.epoch_forced == forced_before + 1);
+	memory.stamp = {941, 1, true};
+	require(memory.verify(table, where_a) == SharedOutcome::match);
+	memory.stamp = {942, 1, true};
+	require(memory.verify(table, where_a) == SharedOutcome::match);
+	memory.stamp.epoch = 2;
+	require(memory.verify(table, where_b) == SharedOutcome::match);
+	memory.stamp = {943, 1, true};
+	require(memory.verify(table, where_a) == SharedOutcome::match);
+	memory.stamp = {943, 2, false};
+	require(memory.verify(table, where_a) == SharedOutcome::match);
+	memory.stamped = false;
+	require(memory.verify(table, where_a) == SharedOutcome::match);
+	memory.stamped = true;
+	require(memory.epoch_forced == forced_before + 1);
+	require(!table.filed_under_another_epoch({0, 2, true}, where_a));
+	/* A caller that passes no observer compiles the question away. */
+	require(aot::verify_through_table(table,
+		[](std::uint64_t, PageStamp &out) {
+			out = {944, 1, true};
+			return true;
+		},
+		[] { return SharedOutcome::match; }, [] { return false; },
+		0x7000'0000, where_a) == SharedOutcome::match);
 	/* Clearing at hand-back: nothing hits afterwards. */
 	memory.stamp = {920, 1, true};
 	require(memory.verify(table, where_a) == SharedOutcome::match);
