@@ -831,6 +831,54 @@ void test_a_batch_cannot_commit_into_a_generation_being_destroyed()
 	audit();
 }
 
+
+/* A whole-space flush and destroy count every executable mapping out,
+ * whatever the number of pages: the sizes around one leaf of the fill index
+ * (512 words) and past several of them. The mappings of a second generation
+ * to half of the pages keep their counts through it. */
+void test_a_large_space_counts_every_mapping_out()
+{
+	constexpr unsigned long base = 0x3200'0000;
+	unsigned long round = 0;
+	for (const unsigned long pages : {511ul, 512ul, 513ul, 1024ul}) {
+		const unsigned long generation = 740 + round;
+		const unsigned long other = 760 + round;
+		ScratchBacking backing{backing_name, pages * page};
+		Pin pin{1040 + round, backing};
+		must_map(generation, base, backing, 0, pages, rwx, 1);
+		must_map(other, base, backing, 0, pages / 2, rwx, 1);
+		std::vector<void *> records(pages);
+		std::vector<std::uint64_t> epochs(pages);
+		for (unsigned long index = 0; index < pages; ++index) {
+			records[index] = record_of(generation, base + index * page);
+			epochs[index] = stamp_of(records[index]).epoch;
+			require(count_of(records[index]) == (index < pages / 2 ? 2u : 1u));
+		}
+		audit();
+		/* The flush departs this generation's mappings and no others. */
+		require(darwin_uml_static_vm_flush_generation(generation) == 0);
+		for (unsigned long index = 0; index < pages; ++index) {
+			require(count_of(records[index]) == (index < pages / 2 ? 1u : 0u));
+			require(stamp_of(records[index]).epoch ==
+				epochs[index] + (index < pages / 2 ? 0u : 1u));
+		}
+		audit();
+		/* Destroy of a generation that was not flushed counts the same. */
+		must_map(generation, base, backing, 0, pages, rwx, 1);
+		destroy(generation);
+		for (unsigned long index = 0; index < pages; ++index)
+			require(count_of(records[index]) == (index < pages / 2 ? 1u : 0u));
+		audit();
+		destroy(other);
+		for (unsigned long index = 0; index < pages; ++index) {
+			require(count_of(records[index]) == 0);
+			require(stamp_of(records[index]).epoch > epochs[index]);
+		}
+		audit();
+		++round;
+	}
+}
+
 } // namespace
 
 int main()
@@ -853,6 +901,7 @@ int main()
 	test_threads_that_come_and_go_return_the_count_to_zero();
 	test_an_exact_audit_is_exact_while_generations_come_and_go();
 	test_a_batch_cannot_commit_into_a_generation_being_destroyed();
+	test_a_large_space_counts_every_mapping_out();
 	std::puts("Static MMU executable count tests passed");
 	return 0;
 }
