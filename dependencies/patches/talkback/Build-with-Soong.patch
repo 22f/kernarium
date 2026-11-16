@@ -1,0 +1,147 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 19:10:27 +0900
+Subject: [PATCH] Build with Soong
+
+The Android image build compiles TalkBack from this tree with Soong, as
+it does the other applications it ships. This first part holds the
+license, the proguard annotations and the utils module, with the BuildConfig
+the Gradle build would generate for a release build. The ndk-build
+makefiles of the braille libraries carry a .find-ignore, so that the
+platform makefile search leaves them alone.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ Android.bp                                    | 21 +++++++++
+ braille/brltty/src/phone/jni/.find-ignore     |  0
+ braille/translate/src/phone/jni/.find-ignore  |  0
+ proguard/Android.bp                           |  9 ++++
+ utils/Android.bp                              | 45 +++++++++++++++++++
+ .../accessibility/utils/BuildConfig.java      | 14 ++++++
+ 6 files changed, 89 insertions(+)
+ create mode 100644 Android.bp
+ create mode 100644 braille/brltty/src/phone/jni/.find-ignore
+ create mode 100644 braille/translate/src/phone/jni/.find-ignore
+ create mode 100644 proguard/Android.bp
+ create mode 100644 utils/Android.bp
+ create mode 100644 utils/src/soong/java/com/google/android/accessibility/utils/BuildConfig.java
+
+diff --git a/Android.bp b/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..b27e87fb578a2db7785ac939996e978b35b7f464
+--- /dev/null
++++ b/Android.bp
+@@ -0,0 +1,21 @@
++// SPDX-License-Identifier: Apache-2.0
++//
++// TalkBack, built from source by the Android image build. The Gradle files
++// beside these modules are not used by it; each module's Android.bp lists the
++// sources its Gradle module compiles.
++
++package {
++    default_applicable_licenses: ["external_talkback_license"],
++    default_visibility: ["//external/talkback:__subpackages__"],
++}
++
++license {
++    name: "external_talkback_license",
++    visibility: [":__subpackages__"],
++    license_kinds: [
++        "SPDX-license-identifier-Apache-2.0",
++    ],
++    license_text: [
++        "LICENSE",
++    ],
++}
+diff --git a/braille/brltty/src/phone/jni/.find-ignore b/braille/brltty/src/phone/jni/.find-ignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/braille/translate/src/phone/jni/.find-ignore b/braille/translate/src/phone/jni/.find-ignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/proguard/Android.bp b/proguard/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..a1826f1053bd52530c04fd8949c8676256df5aa9
+--- /dev/null
++++ b/proguard/Android.bp
+@@ -0,0 +1,9 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The annotations that mark code kept for reflection and native callers.
++java_library {
++    name: "TalkBack-proguard",
++    srcs: ["src/main/java/**/*.java"],
++    sdk_version: "core_current",
++    java_version: "17",
++}
+diff --git a/utils/Android.bp b/utils/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..b7a820f6c40d469b7ad006199fd9c66c08cf9151
+--- /dev/null
++++ b/utils/Android.bp
+@@ -0,0 +1,45 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The utils module: accessibility helpers that the phone build of every other
++// TalkBack module uses. Resources are linked with the transitive R classes the
++// Gradle build generates (nonTransitiveRClass=false).
++android_library {
++    name: "TalkBack-utils",
++    srcs: [
++        "src/main/java/**/*.java",
++        "src/main/java/**/*.kt",
++        // BuildConfig, as the Gradle build generates it for a release build.
++        "src/soong/java/**/*.java",
++    ],
++    resource_dirs: ["src/main/res"],
++    manifest: "src/main/AndroidManifest.xml",
++    use_resource_processor: false,
++    sdk_version: "36",
++    java_version: "17",
++    kotlin_lang_version: "1.9",
++    plugins: ["auto_value_plugin"],
++    libs: [
++        "auto_value_annotations",
++        "checker-qual",
++        "error_prone_annotations",
++    ],
++    static_libs: [
++        "TalkBack-proguard",
++        "androidx.annotation_annotation",
++        "androidx.appcompat_appcompat",
++        "androidx.collection_collection",
++        "androidx.core_core",
++        "androidx.fragment_fragment",
++        "androidx.lifecycle_lifecycle-runtime",
++        "androidx.lifecycle_lifecycle-service",
++        "androidx.localbroadcastmanager_localbroadcastmanager",
++        "androidx.preference_preference",
++        "androidx.recyclerview_recyclerview",
++        "androidx.savedstate_savedstate",
++        "com.google.android.material_material",
++        "gson",
++        "guava",
++        "kotlin-stdlib",
++        "libprotobuf-java-lite",
++    ],
++}
+diff --git a/utils/src/soong/java/com/google/android/accessibility/utils/BuildConfig.java b/utils/src/soong/java/com/google/android/accessibility/utils/BuildConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf385c55e31a2e063db53195c82c7c74d7bb750e
+--- /dev/null
++++ b/utils/src/soong/java/com/google/android/accessibility/utils/BuildConfig.java
+@@ -0,0 +1,14 @@
++// SPDX-License-Identifier: Apache-2.0
++package com.google.android.accessibility.utils;
++
++/** The fields the Gradle build generates for this module's release build. */
++public final class BuildConfig {
++  public static final boolean DEBUG = false;
++  public static final String LIBRARY_PACKAGE_NAME = "com.google.android.accessibility.utils";
++  public static final String BUILD_TYPE = "release";
++  public static final String APPLICATION_ID = "com.android.talkback";
++  public static final String TALKBACK_APPLICATION_ID = "com.android.talkback";
++  public static final String IS_SYSTEM_PRELOAD = "False";
++
++  private BuildConfig() {}
++}
