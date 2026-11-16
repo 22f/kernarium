@@ -417,7 +417,9 @@ class Library:
         known to match its stored hash: T0 is clobbered, flags are not."""
         page = (target - self.table_base) // PAGE
         if page >= 1 << 24:
-            raise A.AsmError("a library's text must be below 64 GiB")
+            raise A.AsmError(
+                "a library's text page index must fit 24 bits (64 GiB); a "
+                "unit is limited much earlier, by the +-128 MiB reach of b")
         asm = self.asm
         before = len(asm._w)
         asm.word(A.ldr_x(T0, 31, SLOT_PSTATE))

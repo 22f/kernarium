@@ -257,8 +257,21 @@ def ldrb_zero_ext(rt: int, rn: int, imm: int) -> int:
 
 # ---- control flow words, targets patched by the assembler ----------------
 
+def _branch_reach(delta_words: int) -> int:
+    """The 26-bit word displacement of b and bl, or the error that names the
+    limit a unit's size actually has: the exit, refill and cross-library
+    routines sit at the unit's ends, so every site reaches them by one b."""
+    if not -(1 << 25) <= delta_words < (1 << 25):
+        raise AsmError(
+            f"a branch of {4 * delta_words} bytes is beyond the +-128 MiB "
+            "reach of b and bl, which limits a unit to about that size; a "
+            "larger unit needs a copy of its routines per 128 MiB or a "
+            "veneer (adrp, add, br)")
+    return delta_words & ((1 << 26) - 1)
+
+
 def b_word(delta_words: int) -> int:
-    return (0b000101 << 26) | _s(delta_words, 26)
+    return (0b000101 << 26) | _branch_reach(delta_words)
 
 
 def bcond_word(cond: int, delta_words: int) -> int:

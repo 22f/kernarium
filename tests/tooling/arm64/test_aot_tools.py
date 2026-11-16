@@ -200,8 +200,11 @@ class AssemblerFarBranchTests(unittest.TestCase):
 
     def test_an_unconditional_branch_out_of_reach_is_refused(self) -> None:
         # +-128 MiB: a unit larger than that cannot be assembled, and says so.
-        with self.assertRaises(A.AsmError):
+        with self.assertRaises(A.AsmError) as raised:
             A.b_word(1 << 25)
+        self.assertIn("128 MiB", str(raised.exception))
+        A.b_word((1 << 25) - 1)
+        A.b_word(-(1 << 25))
 
 
 class SimdRegisterFieldTests(unittest.TestCase):
