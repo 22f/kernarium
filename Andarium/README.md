@@ -588,8 +588,8 @@ control out.
   `StartPlan` is what Home shows of them before Start. An update clones
   `data.img` first (the update's copy, until the updated Android has booted),
   and Erase virtual machine deletes everything the guest has stored, its snapshots,
-  the adb key, its installation identity and the sender it last sent a text message
-  from included.
+  the adb key, its installation identity and the sender of the last text message
+  sent to it included.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
   user turns on Include in backups. Its snapshots are never backed up.
 - **Snapshots.** A snapshot is an APFS clone of `data.img` with a copy of
@@ -1005,8 +1005,10 @@ requires reopening Andarium.
   channel is busy with a transfer or Android is paused for lack of space.
   The words say only what is known, that Android took the message or did not
   confirm it, and VoiceOver hears them. A message that was not confirmed is
-  sent again with the same identifier, so the service hands it over once
-  (`GuestSms.Retries`). The sender and text rules, the limits and the command
+  sent again with the same identifier, and the service does not hand an
+  identifier over twice while it remembers it (`GuestSms.Retries`); both sides
+  remember a bounded number, for the run or until the service restarts, so an
+  old retry may be handed over again. The sender and text rules, the limits and the command
   are `GuestSms`'s; the system image must include the
   [SMS service](../android/lineage-24/README.md#text-messages).
 - **Free space.** Free space is the space a write can use (`HostStorage`,

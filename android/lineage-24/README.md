@@ -499,30 +499,24 @@ and expects the same cameras).
 ### Text messages
 
 The guest receives text messages from the host and sends none. `KernariumSms`
-(`overlay/sms/`) runs as the system user and serves one provider call,
-`content call --uri content://android.kernarium.sms --method deliver`, to the
-adb shell's uid and root's; an application's call is refused. The argument is
-`base64(sender).base64(text).identifier`: the sender and text as UTF-8, the
-identifier 32 lower-case hex digits that the host chooses for each message.
-`Message.java` and
-`Andarium/AndariumCore/Sources/AndariumCore/Adb/GuestSms.swift` own the
-argument's format and limits, each stating a limit once.
+(`overlay/sms/`) runs as the system user and serves one provider call, to the
+adb shell's uid and root's; an application's call is refused. A message is a
+sender (a number or a short name), a text of limited length and an identifier
+the host chooses for it. `Message.java` and
+`Andarium/AndariumCore/Sources/AndariumCore/Adb/GuestSms.swift` own what is
+accepted and refused, each limit stated once.
 
-The service encodes the message as 3GPP SMS-DELIVER PDUs (UCS-2, concatenated
-when the text needs more than one part) and broadcasts `SMS_DELIVER` to the
-SMS role holder, then `SMS_RECEIVED` to the applications that may receive SMS,
-so Messaging stores and notifies and applications holding `RECEIVE_SMS` get
-it; with no SMS application the message is stored in the inbox. The broadcasts
-are sent, not awaited, so the reply, `Result: Bundle[{parts=N}]`, says only that
+The service hands Android the message as SMS-DELIVER PDUs, concatenated when
+the text needs more than one part: an `SMS_DELIVER` broadcast to the SMS role
+holder, then `SMS_RECEIVED` to the applications that may receive SMS, so
+Messaging stores and notifies and applications holding `RECEIVE_SMS` get it.
+With no SMS role holder and no Messaging installed, the message is stored in
+the inbox. The broadcasts are sent, not awaited, so the answer says only that
 Android took the message. A message whose identifier was handed over before is
-answered with the first call's result and handed over once, so a host that did
-not see the answer can send it again; the service keeps a bounded number of
-identifiers in its process, and a restart of the service forgets them.
-
-Android decodes each part as UTF-16 with a byte order mark. A part whose text
-starts with U+FEFF gets one more, which that decoder takes as the mark, so the
-character arrives; U+FFFE is the mark's reverse and cannot arrive as sent, so
-both sides refuse a text that holds it.
+answered with the first call's result and not handed over again, so a host that
+did not see the answer can send it again; the service remembers a bounded
+number of identifiers, in its process, and one it has forgotten (after the
+service restarts, or many messages later) is handed over again.
 
 The product carries Messaging and TelephonyProvider and declares
 `android.hardware.telephony.messaging` and `config_sms_capable` (the SMS role
