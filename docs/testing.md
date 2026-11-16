@@ -771,7 +771,8 @@ blocker in every one of them.
   `arm64-aarch32-corpus` also proves the store-exclusive ranges the retry
   compares and what it refuses. The corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
   case that differs only by a spurious store-exclusive failure (its own bytes
-  unwritten, the case's other stores in the data), and the `-interrupted`
+  unwritten, the case's other stores in the data; in the `exclusive-retry`
+  loops, a retry that retires more instructions), and the `-interrupted`
   tests provoke that failure on purpose. Only the gadget one runs the spill
   suite, whose cases store between the pair: the JIT does not lose a
   reservation there. The `-injected` tests make an attempt end as a lost

@@ -82,7 +82,9 @@ The oracle's store-exclusive always succeeds when its load-exclusive ran
 first, and a case is one attempt. An engine whose exclusives are the host's can
 fail one without cause, as the architecture allows, so a lane runs a failing
 store-exclusive case again, up to 16 attempts in all, when the only difference
-is a status of 1 where the pack has 0 and the store that did not happen.
+is a status of 1 where the pack has 0 and the store that did not happen, or,
+in a loop that retries its store-exclusive, more instructions retired than the
+pack has with everything else as the pack has it.
 
 What the oracle's answers rest on:
 

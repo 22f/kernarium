@@ -350,10 +350,16 @@ Attempt check(Machine &machine, const Case &test,
                   result.retired_instructions);
     return text;
   }
+  std::string retired_excess;
   if (retired != test.retired) {
     std::snprintf(text, sizeof text, "retired %zu (engine %zu), expected %u", retired,
                   result.retired_instructions, test.retired);
-    return text;
+    /* A loop that retries its store-exclusive absorbs a lost reservation: the
+     * registers and data end as the pack has them, after more instructions. */
+    if (!is_store_exclusive(test) || (test.flags & kFlagStraight) != 0 ||
+        retired < test.retired)
+      return text;
+    retired_excess = text;
   }
   if (event == kSigIll || event == kSigTrap) {
     if (pc != test.fault_address) {
@@ -390,6 +396,11 @@ Attempt check(Machine &machine, const Case &test,
           state_difference(cpu, test, machine.read_data(),
                            data_after(test, machine.initial_data())))
     return fail(difference->c_str());
+  if (!retired_excess.empty()) {
+    Attempt attempt{retired_excess};
+    attempt.reservation_lost = true;
+    return attempt;
+  }
   return {};
 }
 

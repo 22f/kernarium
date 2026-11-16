@@ -526,6 +526,7 @@ struct Attempt final {
 	Attempt attempt;
 	auto &diffs = attempt.diffs;
 	std::size_t notes = 0, value_notes = 0, data_notes = 0;
+	bool retired_excess = false;
 	std::vector<std::uint8_t> actual;
 	const auto note = [&](const char *format, auto... values) {
 		char text[200];
@@ -573,8 +574,10 @@ struct Attempt final {
 			   result.reason == ExitReason::breakpoint) {
 			expected += 1;
 		}
-		if (outcome.retired != expected && !(padded && outcome.retired == expected + 1))
+		if (outcome.retired != expected && !(padded && outcome.retired == expected + 1)) {
 			note("retired %zu vs %zu", test.retired, outcome.retired);
+			retired_excess = outcome.retired > expected;
+		}
 		for (unsigned index = 0; index < corpus::kRegisters; ++index) {
 			const auto value = static_cast<std::uint32_t>(cpu.registers[index]);
 			/* A register's slot stays zero-extended: the shared A64
@@ -631,6 +634,11 @@ struct Attempt final {
 		notes == value_notes + data_notes && !actual.empty() &&
 		corpus::lost_exclusive_attempt(test, cpu.registers.data(),
 					       initial_data, expected_data, actual);
+	/* A loop that retries its store-exclusive absorbs a loss: the registers
+	 * and data end as the pack has them, after more instructions. */
+	if (is_store_exclusive(test) && (test.flags & corpus::kFlagStraight) == 0 &&
+	    retired_excess && notes == 1 && !actual.empty())
+		attempt.reservation_lost = true;
 	return attempt;
 }
 
