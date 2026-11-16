@@ -11,17 +11,20 @@ build leaves them, and takes the library versions the platform carries.
 
 This part holds the license, the proguard annotations, the utils module
 with the BuildConfig the Gradle build would generate for a release
-build, the braille modules and the material preference modules. The
-translation and key tables the Gradle build zips into res/raw become
-genrules, and liblouis and BRLTTY with its braille drivers build as
-native libraries against the NDK API level of the app's minSdk, with the
-platform's JNI headers. The ndk-build makefiles of the braille libraries
-carry a .find-ignore, so that the platform makefile search leaves them
-alone.
+build, the braille modules, the material preference modules, the
+service and settings module with its BuildConfig and app_id string, and
+the app with the manifest that names its package and application class.
+The two provider authorities of the service's manifest, which the Gradle
+build fills in from the application ID, are written out. The translation
+and key tables the Gradle build zips into res/raw become genrules, and
+liblouis and BRLTTY with its braille drivers build as native libraries
+against the NDK API level of the app's minSdk, with the platform's JNI
+headers. The ndk-build makefiles of the braille libraries carry a
+.find-ignore, so that the platform makefile search leaves them alone.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- Android.bp                                    |  98 +++++
+ Android.bp                                    | 123 ++++++
  braille/brailledisplay/Android.bp             |  24 ++
  braille/brailledisplayanalytics/Android.bp    |  15 +
  braille/brailleime/Android.bp                 |  22 +
@@ -35,9 +38,14 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  material/flags/Android.bp                     |  15 +
  material/preference/Android.bp                |  17 +
  proguard/Android.bp                           |   9 +
+ src/soong/AndroidManifest.xml                 |  27 ++
+ talkback/Android.bp                           |  40 ++
+ talkback/src/main/AndroidManifest.xml         |   4 +-
+ .../accessibility/talkback/BuildConfig.java   |  13 +
+ talkback/src/soong/res/values/app_id.xml      |   6 +
  utils/Android.bp                              |  18 +
  .../accessibility/utils/BuildConfig.java      |  14 +
- 16 files changed, 756 insertions(+)
+ 21 files changed, 869 insertions(+), 2 deletions(-)
  create mode 100644 Android.bp
  create mode 100644 braille/brailledisplay/Android.bp
  create mode 100644 braille/brailledisplayanalytics/Android.bp
@@ -52,15 +60,19 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  create mode 100644 material/flags/Android.bp
  create mode 100644 material/preference/Android.bp
  create mode 100644 proguard/Android.bp
+ create mode 100644 src/soong/AndroidManifest.xml
+ create mode 100644 talkback/Android.bp
+ create mode 100644 talkback/src/soong/java/com/google/android/accessibility/talkback/BuildConfig.java
+ create mode 100644 talkback/src/soong/res/values/app_id.xml
  create mode 100644 utils/Android.bp
  create mode 100644 utils/src/soong/java/com/google/android/accessibility/utils/BuildConfig.java
 
 diff --git a/Android.bp b/Android.bp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5ddfcef3a8f3a7a5f314765f6894e564d7e1e57e
+index 0000000000000000000000000000000000000000..ac18f6620a120736fede279b957f17f0f5122d85
 --- /dev/null
 +++ b/Android.bp
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,123 @@
 +// SPDX-License-Identifier: Apache-2.0
 +
 +//
@@ -158,6 +170,31 @@ index 0000000000000000000000000000000000000000..5ddfcef3a8f3a7a5f314765f6894e564
 +    stl: "none",
 +    header_libs: ["jni_headers"],
 +    cflags: ["-Wno-error"],
++}
++
++// The app, as the Gradle build's root project builds its phone flavor: the
++// service and settings (TalkBack-talkback) with the two JNI libraries, and the
++// manifest that names the application class and the package. The app does not
++// shrink its code (the Gradle build sets no minification), and the release
++// signing step signs it, so it carries the default certificate.
++android_app {
++    name: "TalkBack",
++    defaults: ["TalkBack-defaults"],
++    manifest: "src/soong/AndroidManifest.xml",
++    min_sdk_version: "26",
++    target_sdk_version: "30",
++    product_specific: true,
++    optimize: {
++        enabled: false,
++    },
++    static_libs: [
++        "TalkBack-talkback",
++    ],
++    jni_libs: [
++        "talkback_louiswrap",
++        "talkback_brlttywrap",
++    ],
++    use_embedded_native_libs: true,
 +}
 diff --git a/braille/brailledisplay/Android.bp b/braille/brailledisplay/Android.bp
 new file mode 100644
@@ -857,6 +894,136 @@ index 0000000000000000000000000000000000000000..a1826f1053bd52530c04fd8949c86762
 +    sdk_version: "core_current",
 +    java_version: "17",
 +}
+diff --git a/src/soong/AndroidManifest.xml b/src/soong/AndroidManifest.xml
+new file mode 100644
+index 0000000000000000000000000000000000000000..79ebc45680d56e36bddb097905aeead71ac287e3
+--- /dev/null
++++ b/src/soong/AndroidManifest.xml
+@@ -0,0 +1,27 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- SPDX-License-Identifier: Apache-2.0 -->
++<!-- The app's manifest for the Soong build: src/main/AndroidManifest.xml with the
++     package and version the Gradle build sets (namespace, applicationId,
++     versionName). The SDK levels come from the module's properties. -->
++<manifest xmlns:android="http://schemas.android.com/apk/res/android"
++    package="com.android.talkback"
++    android:versionCode="1"
++    android:versionName="TfPu_release_16_2">
++
++  <!-- The <queries> element allows us to ask the package manager about the
++  installation status of external components we are interested in. -->
++  <queries>
++    <intent>
++      <action android:name="android.intent.action.TTS_SERVICE" />
++    </intent>
++    <intent>
++      <action android:name="android.speech.RecognitionService" />
++    </intent>
++  </queries>
++
++  <application
++     android:name="com.google.android.accessibility.talkback.TalkBackApplication"
++     android:enableOnBackInvokedCallback="true"
++     />
++
++</manifest>
+diff --git a/talkback/Android.bp b/talkback/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d83e9e472fd06564145227069bbf20e54775cb9
+--- /dev/null
++++ b/talkback/Android.bp
+@@ -0,0 +1,40 @@
++// SPDX-License-Identifier: Apache-2.0
++
++// The TalkBack service and its settings: the phone flavor of the Gradle :talkback
++// module (src/main and src/phone; src/wear belongs to the watch build). The values
++// the Gradle build generates are written beside the sources: BuildConfig and the
++// app_id string (src/soong).
++android_library {
++    name: "TalkBack-talkback",
++    defaults: ["TalkBack-defaults"],
++    srcs: [
++        "src/main/java/**/*.java",
++        "src/main/java/**/*.kt",
++        "src/phone/java/**/*.java",
++        "src/phone/java/**/*.kt",
++        "src/soong/java/**/*.java",
++    ],
++    resource_dirs: [
++        "src/main/res",
++        "src/soong/res",
++    ],
++    manifest: "src/main/AndroidManifest.xml",
++    // Annotations of the Kotlin and JetBrains packages the sources import.
++    libs: ["kotlin-annotations"],
++    static_libs: [
++        "TalkBack-proguard",
++        "TalkBack-utils",
++        "TalkBack-brailleime",
++        "TalkBack-braille-interfaces",
++        "TalkBack-braille-display",
++        "TalkBack-material-flags",
++        "TalkBack-material-preference",
++        "androidx-constraintlayout_constraintlayout",
++        "androidx.activity_activity",
++        "androidx.coordinatorlayout_coordinatorlayout",
++        "androidx.lifecycle_lifecycle-runtime-ktx",
++        "androidx.viewpager2_viewpager2",
++        "kotlinx-coroutines-android",
++        "volley",
++    ],
++}
+diff --git a/talkback/src/main/AndroidManifest.xml b/talkback/src/main/AndroidManifest.xml
+index c873e354c26a1b7f472dd77a975a6960562ff85f..9a6c827f60f7f1a2c508e145fc554a6fe6b88785 100644
+--- a/talkback/src/main/AndroidManifest.xml
++++ b/talkback/src/main/AndroidManifest.xml
+@@ -233,13 +233,13 @@
+         <!-- Content provider for custom label data -->
+         <provider
+             android:name="com.google.android.accessibility.talkback.labeling.LabelProvider"
+-            android:authorities="${applicationId}.providers.LabelProvider"
++            android:authorities="com.android.talkback.providers.LabelProvider"
+             android:exported="true"
+             android:directBootAware="true" />
+ 
+         <provider
+             android:name="androidx.core.content.FileProvider"
+-            android:authorities="${applicationId}.providers.FileProvider"
++            android:authorities="com.android.talkback.providers.FileProvider"
+             android:exported="false"
+             android:grantUriPermissions="true">
+             <meta-data
+diff --git a/talkback/src/soong/java/com/google/android/accessibility/talkback/BuildConfig.java b/talkback/src/soong/java/com/google/android/accessibility/talkback/BuildConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d59d7ebf36a3ba33fa5e10f3d2567e1fd73ae7f8
+--- /dev/null
++++ b/talkback/src/soong/java/com/google/android/accessibility/talkback/BuildConfig.java
+@@ -0,0 +1,13 @@
++// SPDX-License-Identifier: Apache-2.0
++package com.google.android.accessibility.talkback;
++
++/** The fields the Gradle build generates for this module's release build. */
++public final class BuildConfig {
++  public static final boolean DEBUG = false;
++  public static final String LIBRARY_PACKAGE_NAME = "com.google.android.accessibility.talkback";
++  public static final String BUILD_TYPE = "release";
++  public static final String APPLICATION_ID = "com.android.talkback";
++  public static final String GEMINI_API_KEY = "";
++
++  private BuildConfig() {}
++}
+diff --git a/talkback/src/soong/res/values/app_id.xml b/talkback/src/soong/res/values/app_id.xml
+new file mode 100644
+index 0000000000000000000000000000000000000000..a93d706ca46d547eb7cad7f9daef86528281794c
+--- /dev/null
++++ b/talkback/src/soong/res/values/app_id.xml
+@@ -0,0 +1,6 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- SPDX-License-Identifier: Apache-2.0 -->
++<!-- The string the Gradle build generates from the application ID (resValue app_id). -->
++<resources>
++    <string name="app_id" translatable="false">com.android.talkback</string>
++</resources>
 diff --git a/utils/Android.bp b/utils/Android.bp
 new file mode 100644
 index 0000000000000000000000000000000000000000..287916ca696933289d798e10c6fe523c49b809bb
