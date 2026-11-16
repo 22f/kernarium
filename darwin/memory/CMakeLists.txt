@@ -132,6 +132,19 @@ if(UML_BUILD_UNIT_TESTS)
     target_compile_definitions(uml_static_mmu_test_variant PUBLIC
         UML_MEMORY_ALLOCATION_TESTING=1)
 
+    # The fetch path with an observer that holds a reader between its read of
+    # a frame and its return, for the row that publishes in that window.
+    add_library(uml_static_guest_memory_test_variant OBJECT
+        static_guest_memory.cpp)
+    uml_declare_architecture_target(uml_static_guest_memory_test_variant memory)
+    target_link_libraries(uml_static_guest_memory_test_variant PRIVATE
+        UML::BridgeAbi
+        UML::MemoryContract)
+    target_include_directories(uml_static_guest_memory_test_variant PRIVATE
+        ${PROJECT_SOURCE_DIR}/darwin)
+    target_compile_definitions(uml_static_guest_memory_test_variant PUBLIC
+        UML_STATIC_GUEST_MEMORY_TESTING=1)
+
     if(TARGET uml_native_mmu)
         add_library(uml_native_mmu_test_variant OBJECT
             ${_uml_native_mmu_sources})
