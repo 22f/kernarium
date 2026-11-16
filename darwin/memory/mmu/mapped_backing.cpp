@@ -20,6 +20,7 @@ namespace {
 
 constexpr std::uint64_t page_size = DARWIN_UML_GUEST_PAGE_SIZE;
 std::atomic_uint64_t next_code_page_identity{1};
+std::atomic_bool sharing_latched{false};
 
 /* The `fresh` word of a record: bits 0-23 count the executable guest-code
  * mappings that name the page, bits 24-62 are the epoch, and bit 63 says the
@@ -261,6 +262,25 @@ void MappedBacking::executable_mapping_removed(void *handle) noexcept
 			return;
 	}
 }
+
+void latch_sharing_off() noexcept
+{
+	sharing_latched.store(true, std::memory_order_relaxed);
+}
+
+bool sharing_latched_off() noexcept
+{
+	return sharing_latched.load(std::memory_order_relaxed);
+}
+
+#if UML_MEMORY_ALLOCATION_TESTING
+namespace testing {
+void clear_sharing_latch() noexcept
+{
+	sharing_latched.store(false, std::memory_order_relaxed);
+}
+} // namespace testing
+#endif
 
 #if UML_MEMORY_ALLOCATION_TESTING || UML_MEMORY_COUNT_AUDIT
 std::uint64_t MappedBacking::executable_mappings(const void *handle) noexcept

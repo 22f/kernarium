@@ -6,6 +6,7 @@
  * the two words it was. */
 #include "memory/static_guest_memory.hpp"
 #include "cpu/arm64/aot/shared_verdicts.hpp"
+#include "allocation_fault.hpp"
 #include "mapped_backing.hpp"
 #include "require.hpp"
 #include "scratch_backing.hpp"
@@ -180,12 +181,48 @@ void test_an_exhausted_record_answers_no_old_verdict()
 	require(darwin_uml_static_vm_destroy(803) == 0);
 }
 
+/* Once the accounting has been seen to fail anywhere, no stamp says
+ * shareable, whichever frame it names; the kernel's fact is still the
+ * mapping's. */
+void test_an_accounting_anomaly_leaves_nothing_shareable()
+{
+	namespace testing = uml::memory::testing;
+	constexpr unsigned long generation = 804;
+	constexpr unsigned long base = 0x1200'0000;
+	constexpr int rx = PROT_READ | PROT_EXEC;
+	ScratchBacking good{backing_name, 2 * page}, bad{backing_name, 2 * page};
+	map(805, 0x1000, good, 0, PROT_READ, 0);
+	map(806, 0x1000, bad, 0, PROT_READ, 0);
+	map(generation, base, good, 0, rx, 3);
+	map(generation, base + page, bad, 0, rx, 3);
+	require(darwin_uml_static_vm_activate(generation) == 0);
+	StaticGuestMemory memory;
+	memory.set_generation(generation);
+	ExtendedCodePageStamp stamp{};
+	require(stamp_of(memory, base, stamp) && stamp.shareable && stamp.immutable);
+	void *record = nullptr;
+	darwin_uml_static_code_page_stamp raw{};
+	require(darwin_uml_static_vm_code_page(generation, base + page, &record,
+		&raw) == DARWIN_UML_STATIC_TRANSLATED);
+	uml::memory::MappedBacking::preset_for_testing(record, 0, 1);
+	require(darwin_uml_static_vm_unmap_generation(generation,
+		reinterpret_cast<void *>(base + page), page) == 0);
+	require(uml::memory::sharing_latched_off());
+	require(stamp_of(memory, base, stamp) && !stamp.shareable && stamp.immutable);
+	testing::clear_sharing_latch();
+	require(stamp_of(memory, base, stamp) && stamp.shareable);
+	require(darwin_uml_static_vm_destroy(generation) == 0);
+	require(darwin_uml_static_vm_destroy(805) == 0);
+	require(darwin_uml_static_vm_destroy(806) == 0);
+}
+
 } // namespace
 
 int main()
 {
 	test_the_stamp_says_whether_the_page_may_be_shared();
 	test_an_exhausted_record_answers_no_old_verdict();
+	test_an_accounting_anomaly_leaves_nothing_shareable();
 	std::puts("Static guest memory stamp tests passed");
 	return 0;
 }

@@ -9,6 +9,19 @@
 #endif
 #include "../count_audit.hpp"
 
+namespace uml::memory {
+
+/* The executable-mapping accounting found a bug: a departure with nothing to
+ * count out, or a count that names no record. Counts are not exact any more,
+ * and a verdict kept on their strength may be wrong, so from then on the
+ * process shares none: every stamp the memory layer reports says
+ * never-share. The latch is one relaxed flag, set in every build and never
+ * cleared (but by a test). */
+void latch_sharing_off() noexcept;
+[[nodiscard]] bool sharing_latched_off() noexcept;
+
+} // namespace uml::memory
+
 #if UML_MEMORY_ALLOCATION_TESTING
 namespace uml::memory::testing {
 
@@ -56,6 +69,8 @@ void set_allocation_observer(AllocationObserver observer) noexcept;
  * count clamps at zero and the epoch moves) and a test must see it. */
 void count_anomaly() noexcept;
 [[nodiscard]] std::size_t count_anomalies() noexcept;
+/* Lets a test that provoked an anomaly on purpose share again. */
+void clear_sharing_latch() noexcept;
 
 void backing_mapping_created() noexcept;
 void backing_mapping_destroyed() noexcept;
@@ -66,7 +81,10 @@ void backing_mapping_destroyed() noexcept;
 #define UML_MEMORY_ALLOCATION_CHECKPOINT(site) \
 	::uml::memory::testing::allocation_checkpoint(site)
 #define UML_MEMORY_COUNT_ANOMALY() \
-	::uml::memory::testing::count_anomaly()
+	do { \
+		::uml::memory::testing::count_anomaly(); \
+		::uml::memory::latch_sharing_off(); \
+	} while (0)
 #define UML_MEMORY_BACKING_MAPPING_CREATED() \
 	::uml::memory::testing::backing_mapping_created()
 #define UML_MEMORY_BACKING_MAPPING_DESTROYED() \
@@ -75,13 +93,18 @@ void backing_mapping_destroyed() noexcept;
 /* Production expands these probes away before semantic analysis. The
  * allocation-site enum and test functions therefore create no ordinary
  * product symbol, load, branch, or call even in an unoptimized build. The
- * diagnostics build of a guest run keeps the one that counts accounting bugs
- * (count_audit.hpp reports it). */
+ * one that sees an accounting bug latches sharing off in every build, and the
+ * diagnostics build of a guest run counts it as well (count_audit.hpp reports
+ * it). */
 #define UML_MEMORY_ALLOCATION_CHECKPOINT(...) ((void)0)
 #if UML_MEMORY_COUNT_AUDIT
-#define UML_MEMORY_COUNT_ANOMALY() ::uml::memory::note_count_anomaly()
+#define UML_MEMORY_COUNT_ANOMALY() \
+	do { \
+		::uml::memory::note_count_anomaly(); \
+		::uml::memory::latch_sharing_off(); \
+	} while (0)
 #else
-#define UML_MEMORY_COUNT_ANOMALY() ((void)0)
+#define UML_MEMORY_COUNT_ANOMALY() ::uml::memory::latch_sharing_off()
 #endif
 #define UML_MEMORY_BACKING_MAPPING_CREATED() ((void)0)
 #define UML_MEMORY_BACKING_MAPPING_DESTROYED() ((void)0)

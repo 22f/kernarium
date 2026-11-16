@@ -496,7 +496,43 @@ void test_the_edges_of_the_word()
 	require(count_of(wrong) == 0 && stamp_of(wrong).epoch == 6);
 	require(testing::count_anomalies() == expected_anomalies + 1);
 	++expected_anomalies;
+	/* It also stopped all sharing, which the next row looks at. */
+	testing::clear_sharing_latch();
 	destroy(generation);
+}
+
+/* An accounting anomaly latches sharing off for the whole process, in every
+ * build: the counts are not exact any more, so no record answers a verdict,
+ * whichever frame it names. */
+void test_an_accounting_anomaly_stops_all_sharing()
+{
+	constexpr unsigned long generation = 718;
+	constexpr unsigned long base = 0x2f00'0000;
+	ScratchBacking one{backing_name, 2 * page}, other{backing_name, 2 * page};
+	Pin pin19{1019, one}, pin20{1020, other};
+	must_map(generation, base, one, 0, 1, rwx, 3);
+	must_map(generation, base + page, other, 0, 1, rwx, 3);
+	auto *spoiled = record_of(generation, base);
+	auto *innocent = record_of(generation, base + page);
+	require((stamp_of(spoiled).flags & DARWIN_UML_STATIC_STAMP_NEVER_SHARE) == 0);
+	require((stamp_of(innocent).flags & DARWIN_UML_STATIC_STAMP_NEVER_SHARE) == 0);
+	require(!uml::memory::sharing_latched_off());
+	MappedBacking::preset_for_testing(spoiled, 0, 2);
+	unmap(generation, base, 1);
+	++expected_anomalies;
+	require(uml::memory::sharing_latched_off());
+	require((stamp_of(spoiled).flags & DARWIN_UML_STATIC_STAMP_NEVER_SHARE) != 0);
+	require((stamp_of(innocent).flags & DARWIN_UML_STATIC_STAMP_NEVER_SHARE) != 0);
+	/* A page mapped afterwards is just as refused. */
+	ScratchBacking later{backing_name, 2 * page};
+	Pin pin21{1021, later};
+	must_map(generation, base + 2 * page, later, 0, 1, rwx, 3);
+	require((stamp_of(record_of(generation, base + 2 * page)).flags &
+		DARWIN_UML_STATIC_STAMP_NEVER_SHARE) != 0);
+	testing::clear_sharing_latch();
+	require((stamp_of(innocent).flags & DARWIN_UML_STATIC_STAMP_NEVER_SHARE) == 0);
+	destroy(generation);
+	audit();
 }
 
 /* "Never share" is for good. A record that cannot count exactly any more
@@ -596,6 +632,7 @@ void test_the_audit_of_a_guest_run_sees_a_wrong_count()
 	unmap(second, base, 2);
 	expected_anomalies += 2;
 	require(uml::memory::count_anomalies() == expected_anomalies);
+	testing::clear_sharing_latch();
 	destroy(first);
 	destroy(second);
 	audit();
@@ -694,6 +731,7 @@ int main()
 	test_the_edges_of_the_word();
 	test_never_share_survives_publications_and_the_exhausted_epoch();
 	test_the_audit_of_a_guest_run_sees_a_wrong_count();
+	test_an_accounting_anomaly_stops_all_sharing();
 	test_threads_mapping_one_frame_keep_the_count_exact();
 	test_threads_that_come_and_go_return_the_count_to_zero();
 	std::puts("Static MMU executable count tests passed");

@@ -156,7 +156,9 @@ struct PageMapping final {
 	stamp.identity = record.identity;
 	stamp.version = record.version;
 	stamp.epoch = record.epoch;
-	stamp.flags = record.never_share ?
+	/* A record that can no longer count exactly shares no verdict, and nor
+	 * does any record once the accounting has been seen to fail. */
+	stamp.flags = record.never_share || sharing_latched_off() ?
 		DARWIN_UML_STATIC_STAMP_NEVER_SHARE : 0;
 	return true;
 }
