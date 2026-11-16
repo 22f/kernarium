@@ -25,6 +25,51 @@ private enum TextMessageField: Hashable {
     case sender, text
 }
 
+/// The bar's top edge: who the message is from, and Close. It is one view so
+/// that the edge can change without the fields under it changing.
+private struct TextMessageBarHeader: View {
+    @Environment(AppModel.self) private var model
+    var focus: FocusState<TextMessageField?>.Binding
+
+    var body: some View {
+        let state = model.session.textMessage
+        let sending = state.progress == .sending
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Text(SmsMessages.fromLabel)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                // No content type: iOS would offer the person's own number.
+                TextField(SmsMessages.senderPlaceholder, text: Binding(
+                    get: { state.sender }, set: { model.setTextMessageSender($0) }))
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .submitLabel(.next)
+                    .onSubmit { focus.wrappedValue = .text }
+                    .focused(focus, equals: .sender)
+                    .accessibilityLabel(SmsMessages.from)
+                    .accessibilityHint(SmsMessages.senderHint)
+                    .accessibilityIdentifier("text-message-sender")
+                    .frame(maxWidth: 200)
+            }
+            .font(.subheadline)
+            .disabled(sending)
+            .padding(.horizontal, 14)
+            .frame(height: 36)
+            .background(Color(.tertiarySystemFill), in: Capsule())
+            Spacer(minLength: 0)
+            Button(SmsMessages.close, systemImage: "xmark") { model.closeTextMessage() }
+                .disabled(sending)
+                .labelStyle(.iconOnly)
+                .font(.subheadline.weight(.semibold))
+                .frame(width: 36, height: 36)
+                .background(Color(.tertiarySystemFill), in: Circle())
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("text-message-close")
+        }
+    }
+}
+
 /// The sender, the message and Send, with what is wrong or how the last send
 /// went between them. What is typed and the send are the run's
 /// (`TextMessageState`), so the bar holds nothing of its own but the focus.
@@ -36,39 +81,7 @@ struct TextMessageBar: View {
         let state = model.session.textMessage
         let sending = state.progress == .sending
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                HStack(spacing: 6) {
-                    Text(SmsMessages.fromLabel)
-                        .foregroundStyle(.secondary)
-                        .accessibilityHidden(true)
-                    // No content type: iOS would offer the person's own number.
-                    TextField(SmsMessages.senderPlaceholder, text: Binding(
-                        get: { state.sender }, set: { model.setTextMessageSender($0) }))
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .submitLabel(.next)
-                        .onSubmit { focus = .text }
-                        .focused($focus, equals: .sender)
-                        .accessibilityLabel(SmsMessages.from)
-                        .accessibilityHint(SmsMessages.senderHint)
-                        .accessibilityIdentifier("text-message-sender")
-                        .frame(maxWidth: 200)
-                }
-                .font(.subheadline)
-                .disabled(sending)
-                .padding(.horizontal, 14)
-                .frame(height: 36)
-                .background(Color(.tertiarySystemFill), in: Capsule())
-                Spacer(minLength: 0)
-                Button(SmsMessages.close, systemImage: "xmark") { model.closeTextMessage() }
-                    .disabled(sending)
-                    .labelStyle(.iconOnly)
-                    .font(.subheadline.weight(.semibold))
-                    .frame(width: 36, height: 36)
-                    .background(Color(.tertiarySystemFill), in: Circle())
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("text-message-close")
-            }
+            TextMessageBarHeader(focus: $focus)
             if let status = state.status(availability: model.textMessageAvailability) {
                 statusLine(status)
             }
