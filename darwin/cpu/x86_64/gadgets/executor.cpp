@@ -310,10 +310,13 @@ struct CodePageRegistries final {
 
 	[[nodiscard]] CodePageRegistry &of(std::uint64_t generation)
 	{
-		auto [entry, inserted] = held.try_emplace(generation);
-		if (inserted)
-			entry->second = CodePageRegistry::acquire(generation);
-		return *entry->second;
+		if (const auto found = held.find(generation); found != held.end())
+			return *found->second;
+		/* Acquiring can throw, and nothing is entered before it returns: an
+		 * entry that stayed empty would be found, and dereferenced, by the
+		 * next ask for the generation. */
+		auto registry = CodePageRegistry::acquire(generation);
+		return *held.emplace(generation, std::move(registry)).first->second;
 	}
 
 	void bind(std::uint64_t generation)

@@ -26,9 +26,12 @@
  *   helpers    a store that a helper makes and publishes -- x87, extended
  *              state, string, ENTER, the segment model's, across a page --
  *              leaves the running block as the ordinary store does.
+ *   registry   a registry that could not be made is made again by the next
+ *              prepare of its generation.
  */
 #include "address_space_types.hpp"
 #include "allocation_fault.hpp"
+#include "cpu/x86_64/code_page_registry.hpp"
 #include "cpu/x86_64/cpu_state.hpp"
 #include "cpu/x86_64/gadgets/executor.hpp"
 #include "cpu/x86_64/gadgets/program.hpp"
@@ -41,6 +44,7 @@
 #include "uml_darwin_static_mmu.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -48,9 +52,24 @@
 #include <cstring>
 #include <initializer_list>
 #include <memory>
+#include <new>
 #include <sys/mman.h>
 #include <utility>
 #include <vector>
+
+/* The next allocation of exactly this many bytes fails: the registry's page
+ * counts are the only array of this size an executor makes. */
+std::atomic<std::size_t> failing_array_size{0};
+constexpr std::size_t registry_page_counts = std::size_t{1} << 18;
+
+void *operator new[](std::size_t size)
+{
+	auto armed = failing_array_size.load(std::memory_order_relaxed);
+	if (armed != 0 && size == armed &&
+	    failing_array_size.compare_exchange_strong(armed, 0))
+		throw std::bad_alloc{};
+	return ::operator new(size);
+}
 
 namespace {
 
@@ -135,6 +154,26 @@ public:
 	{
 		require(darwin_uml_static_vm_unmap_generation(generation_,
 			reinterpret_cast<void *>(address), page) == 0);
+	}
+
+	/* Prepares the executor for another generation's address space, as a
+	 * vCPU that moves between processes does. */
+	void prepare_as(unsigned long generation)
+	{
+		require(darwin_uml_static_vm_execution_context_begin(context_, 0) == 0);
+		const auto sequences =
+			darwin_uml_static_vm_execution_context_sequences(context_);
+		executor_.prepare(memory_, generation, sequences.mapping_changes,
+			sequences.code_changes, context_, cache_sequences,
+			cache_code_changes, cache_mapping_changes);
+		require(darwin_uml_static_vm_execution_context_end(context_) == 0);
+	}
+
+	/* The registry the executor participates in, null when it could not
+	 * make one. */
+	[[nodiscard]] CodePageRegistry *registry() const noexcept
+	{
+		return executor_.code_page_registry();
 	}
 
 	/* One dispatch from `cpu`: the block at its RIP, run to its exit. */
@@ -774,6 +813,25 @@ void test_cross_page_stores_leave_the_block()
 	}
 }
 
+/* A registry that could not be made is made again: the executor prepared for
+ * a generation whose registry failed, then for another, and again for the
+ * first, finds nothing left from the failure. */
+void test_a_failed_registry_is_made_again()
+{
+	const Clean clean;
+	Space space{9450};
+	failing_array_size.store(registry_page_counts);
+	space.prepare_as(9451);
+	require(failing_array_size.load() == 0,
+		"the registry's allocation was not the one that failed");
+	require(space.registry() == nullptr);
+	space.prepare_as(9452);
+	require(space.registry() != nullptr);
+	space.prepare_as(9451);
+	require(space.registry() != nullptr,
+		"the registry of a generation that failed once was not made again");
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -819,6 +877,10 @@ int main(int argc, char **argv)
 		std::puts("helper store value ok");
 		test_cross_page_stores_leave_the_block();
 		std::puts("cross-page stores ok");
+	}
+	if (selected("registry")) {
+		test_a_failed_registry_is_made_again();
+		std::puts("failed registry ok");
 	}
 	const auto now = FrameAccounting::diagnostics();
 	require(now.holder_leaks == start.holder_leaks, "a holder leaked");
