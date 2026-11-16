@@ -525,8 +525,11 @@ void rollback_block_retires_nothing() {
 }
 
 /* A compare-retry whose load is the last three words of a page and whose
- * store is on the next mapped page still fuses. */
-void compare_retry_across_a_page_boundary_fuses() {
+ * store is on the next mapped page is not fused: a span reads the words of
+ * the load's page alone, so every executor reads the same words for the same
+ * code. The load is a one-instruction semantic block, and the loop completes
+ * through the semantic store-exclusive its reservation arms. */
+void compare_retry_across_a_page_boundary_declines() {
   constexpr auto page = DARWIN_UML_GUEST_PAGE_SIZE;
   constexpr unsigned long generation = 10'124U;
   constexpr std::uint64_t base = 0x145'0000U;
@@ -551,7 +554,15 @@ void compare_retry_across_a_page_boundary_fuses() {
   std::size_t executed = 0;
   require(executor.run_block(cpu, memory, generation, executed) ==
           ::uml::cpu::EngineEvent::continued);
-  require(executed >= 5U && (executed - 5U) % 5U == 0U);
+  /* The declined load retires alone and leaves its reservation armed. */
+  require(executed == 1U && cpu.pc == start + 4U &&
+          cpu.exclusive_size == 8U);
+  auto event = ::uml::cpu::EngineEvent::continued;
+  for (unsigned attempt = 0;
+       attempt < 10U && event == ::uml::cpu::EngineEvent::continued;
+       ++attempt)
+    event = executor.run_block(cpu, memory, generation, executed);
+  require(event == ::uml::cpu::EngineEvent::system_call);
   require(cpu.exclusive_size == 0U && cpu.registers[5] == 0U);
   require(backing.get64(2U * page) == 43U);
   executor.end_execution();
@@ -1225,7 +1236,7 @@ int main() {
   mismatch_path_store_exclusive_makes_progress();
   mismatch_rolls_back_to_a_semantic_load();
   rollback_block_retires_nothing();
-  compare_retry_across_a_page_boundary_fuses();
+  compare_retry_across_a_page_boundary_declines();
   same_backing_alias_case(true);
   same_backing_alias_case(false);
   same_backing_alias_case(true, true);

@@ -295,6 +295,7 @@
             publication_gate
             reservation_alias
             exclusive_completion
+            exclusive_run_fetch
             shared_tier_off)
         set(_jit_test_objects ${UML_ARM64_RUNTIME_TEST_OBJECTS})
         if(JIT_TEST STREQUAL "cache_validation" OR
