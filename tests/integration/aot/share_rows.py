@@ -28,8 +28,12 @@ MODES = ("fork", "copy", "cow", "cow-parent", "mprotect", "mprotect-write", "pre
 # The mode that needs a kernel which pages out file pages whoever maps them
 # (the study's, never shipped); the runner adds it only on request.
 STUDY_MODES = ("reclaim",)
-# What a study eviction must show: pages the guest held before it, the share of
-# them it lost, and the pages the children afterwards must have hashed again.
+# What a study eviction must show, in each of its rounds: pages the guest held
+# before it, the share of them it lost, and over the rounds the pages the
+# children afterwards must have hashed again (a quarter of the pages lost, and
+# four a round at the least; an engine that answers for a frame it gave back
+# hashes a tenth of that).
+RECLAIM_ROUNDS = 3
 RECLAIM_MIN_CACHED = 16
 RECLAIM_MIN_HASHED = 4
 MODE_SECONDS = 300
@@ -50,12 +54,12 @@ def command(mode: str) -> str:
 
 
 EXPECTED_CHILDREN = {"fork": 16, "copy": 16, "cow": 10, "cow-parent": 7, "mprotect": 6,
-                     "mprotect-write": 6, "pressure": 15, "evict": 6, "reclaim": 6}
+                     "mprotect-write": 6, "pressure": 15, "evict": 6, "reclaim": 12}
 # Children that write a text page of their own copy, in the modes that make them,
 # and the children that run the library's unchanged pages.
 COW_WRITERS = {"cow": 3, "cow-parent": 7, "mprotect-write": 3}
 UNCHANGED_CHILDREN = {"cow": 7, "cow-parent": 0, "mprotect": 6, "mprotect-write": 3, "pressure": 15, "evict": 6,
-                      "reclaim": 6}
+                      "reclaim": 12}
 
 
 def modes(study: bool) -> tuple[str, ...]:
@@ -163,34 +167,43 @@ def check_counts(mode: str, delta: dict[str, int], fork_shared: int | None,
 
 
 def reclaim_check(record: list[str], hashed: int, shared: int, refused: int) -> str:
-    """The reclaim mode: the study kernel must have evicted most of libz.so's
-    pages from every address space (the row fails on a guest that spares them),
-    the children that run it again must have had pages verified by hash, never
-    taken a verdict of a frame the page cache gave up, and the first of them
-    must have left verdicts the others share. Returns what to add to the line."""
-    found = next((m for m in map(RECLAIM.match, record) if m), None)
-    if found is None:
-        raise ShareFailure("the reclaim record lacks its libz.so counts")
-    before, after, readbacks = (int(found.group(i)) for i in (1, 2, 3))
-    if before < RECLAIM_MIN_CACHED:
-        raise ShareFailure(f"libz.so had {before} pages cached, fewer than {RECLAIM_MIN_CACHED}: "
-                           "the row cannot observe an eviction")
-    if (before - after) * 2 < before:
-        raise ShareFailure(f"the guest evicted {before - after} of {before} pages of libz.so: it is "
-                           "not the study's privileged one (a stock kernel spares mapped file pages and "
-                           "reports every page of a read-only file resident)")
+    """The reclaim mode: in each round the study kernel must have evicted most
+    of libz.so's pages from every address space (the row fails on a guest that
+    spares them) and reading them back must have taken faults; the children
+    that run it again must have had pages verified by hash (never a verdict
+    taken for a frame the page cache gave up, in the round that gives a frame
+    back to the page it held two rounds before as much as in the first) and
+    the later ones must share what the first left. Returns what to add to the
+    line."""
+    rounds = [m for m in map(RECLAIM.match, record) if m]
+    if len(rounds) != RECLAIM_ROUNDS:
+        raise ShareFailure(f"the reclaim record has {len(rounds)} rounds, not {RECLAIM_ROUNDS}")
+    lost = 0
+    for number, found in enumerate(rounds, 1):
+        before, after, readbacks = (int(found.group(i)) for i in (1, 2, 3))
+        if before < RECLAIM_MIN_CACHED:
+            raise ShareFailure(f"round {number}: libz.so had {before} pages cached, fewer than "
+                               f"{RECLAIM_MIN_CACHED}: the row cannot observe an eviction")
+        if (before - after) * 2 < before:
+            raise ShareFailure(f"round {number}: the guest evicted {before - after} of {before} pages "
+                               "of libz.so: it is not the study's privileged one (a stock kernel "
+                               "spares mapped file pages and reports every page of a read-only "
+                               "file resident)")
+        if readbacks < 1:
+            raise ShareFailure(f"round {number}: {before - after} pages of libz.so were evicted and "
+                               "reading them back took no fault: the pages never left the page cache")
+        lost += before - after
     if refused:
         raise ShareFailure("a page of the read-only library was refused")
-    if readbacks < 1:
-        raise ShareFailure(f"{before - after} pages of libz.so were evicted and reading them "
-                           "back took no fault: the pages never left the page cache")
-    if hashed < RECLAIM_MIN_HASHED:
-        raise ShareFailure(f"{before - after} pages of libz.so were evicted and the children that "
-                           f"ran it again hashed only {hashed} pages: a verdict of a frame the page "
-                           "cache gave up answered for the page read back")
+    due = max(RECLAIM_MIN_HASHED * RECLAIM_ROUNDS, lost // 4)
+    if hashed < due:
+        raise ShareFailure(f"{lost} pages of libz.so were evicted in {RECLAIM_ROUNDS} rounds and the "
+                           f"children that ran it again hashed only {hashed} pages (at least "
+                           f"{due} are due): a verdict of a frame the page cache gave up "
+                           "answered for the page read back")
     if shared < 2:
         raise ShareFailure("the children after the eviction shared no verdict")
-    return f"; libz.so lost {before - after} of {before} pages, read back in {readbacks} faults"
+    return f"; libz.so lost {lost} pages in {RECLAIM_ROUNDS} rounds"
 
 
 def evict_check(record: list[str], hashed: int, shared: int, refused: int) -> str:

@@ -45,8 +45,8 @@
  *             a kernel whose madvise(MADV_PAGEOUT) pages out file pages
  *             whoever maps them and whoever owns the file, and whose mincore
  *             tells the truth about them (a stock kernel does neither).
- *             libz.so's pages are evicted from every address space and
- *             children run it again.
+ *             libz.so's pages are evicted from every address space three
+ *             times over, with children running it again after each.
  *
  * Every line it prints is a function of the guest's architectural behaviour
  * alone: the runner (run_aot_guest.py) requires the same lines with the
@@ -644,15 +644,18 @@ void evict_mode() {
     children_in_turn("after", 3, 3, z, Prep::None);
 }
 
-// The study kernel's eviction: map libz.so, touch every page so that this
-// address space has them, and page them out. The kernel unmaps each folio from
-// every address space that maps it and drops it from the page cache, which
-// frees the frame; the second round of children runs the library again, and
-// the framework must verify what it reads back from its bytes. The counts are
-// comments the runner reads; on a kernel that spares shared file pages (the
-// stock one) nothing is evicted and the runner fails the row.
+// The study kernel's eviction, three times over: map libz.so, touch every page
+// so that this address space has them, and page them out. The kernel unmaps
+// each folio from every address space that maps it and drops it from the page
+// cache, which frees the frame; touching the pages reads them back into frames
+// the allocator hands out again (a frame freed in one round is a frame the
+// next round may give to the same page), and the children that follow run the
+// library, which the framework must verify from its bytes again each time. The
+// counts are comments the runner reads; on a kernel that spares shared file
+// pages (the stock one) nothing is evicted and the runner fails the row.
 void reclaim_mode() {
     constexpr int kMadvPageout = 21;
+    constexpr int kRounds = 3;
     const Zlib z = system_zlib();
     if (!children_in_turn("before", 0, 3, z, Prep::None)) {
         return;
@@ -662,18 +665,26 @@ void reclaim_mode() {
         fail("map libz.so");
         return;
     }
-    touch_readbacks(m);
-    long total = 0;
-    const long before = cached_pages(kSystemZ, &total);
-    if (madvise(m.map, static_cast<size_t>(m.size), kMadvPageout) != 0) {
-        fail("madvise(MADV_PAGEOUT)");
+    for (int round = 0; round < kRounds; ++round) {
+        touch_readbacks(m);
+        long total = 0;
+        const long before = cached_pages(kSystemZ, &total);
+        if (madvise(m.map, static_cast<size_t>(m.size), kMadvPageout) != 0) {
+            fail("madvise(MADV_PAGEOUT)");
+        }
+        const long after = cached_pages(kSystemZ, &total);
+        const long readbacks = touch_readbacks(m);
+        dprintf(1, "# reclaim: libz.so %ld pages cached before the eviction, %ld after; %ld faults read them back\n",
+                before, after, readbacks);
+        char label[16];
+        label[0] = 'a';
+        label[1] = static_cast<char>('0' + round);
+        label[2] = 0;
+        if (!children_in_turn(label, 3 + round * 3, 3, z, Prep::None)) {
+            break;
+        }
     }
-    const long after = cached_pages(kSystemZ, &total);
-    const long readbacks = touch_readbacks(m);
     munmap(m.map, static_cast<size_t>(m.size));
-    dprintf(1, "# reclaim: libz.so %ld pages cached before the eviction, %ld after; %ld faults read them back\n", before,
-            after, readbacks);
-    children_in_turn("after", 3, 3, z, Prep::None);
 }
 
 __attribute__((constructor)) void run() {

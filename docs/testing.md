@@ -838,10 +838,12 @@ blocker in every one of them.
   every caller as the owner of every file for the page cache (a study-only
   change to `madvise(MADV_PAGEOUT)` and `mincore`; no artifact of it is
   accepted or published). It evicts the library's pages from every address
-  space that maps them, asserts from `mincore` that most of them left and that
-  reading them back took faults, and requires the children which run the
-  library afterwards to have pages verified by hash again and then to share
-  those verdicts. On a stock kernel the row fails, as designed.
+  space that maps them, three rounds over (the allocator gives a frame freed
+  in one round back to the page it held two rounds before), asserts from
+  `mincore` that most of them left in each round and that reading them back
+  took faults, and requires the children which run the library afterwards to
+  have pages verified by hash again, and then to share those verdicts. On a
+  stock kernel the row fails, as designed.
   Execution evidence exists only in a diagnostics build, where the libraries
   the run names must have been entered, and where the memory layer recounts
   the executable mappings of every physical-page record against the

@@ -166,7 +166,11 @@ class EvictTest(unittest.TestCase):
             rows.check_counts("evict", {"shared": 30, "mutable": 1}, 176, EVICT)
 
 
-RECLAIM = ["# reclaim: libz.so 33 pages cached before the eviction, 2 after; 3 faults read them back"]
+def reclaim_round(before: int = 33, after: int = 8, faults: int = 3) -> str:
+    return f"# reclaim: libz.so {before} pages cached before the eviction, {after} after; {faults} faults read them back"
+
+
+RECLAIM = [reclaim_round(), reclaim_round(after=9), reclaim_round(after=8, faults=2)]
 
 
 class ReclaimTest(unittest.TestCase):
@@ -177,43 +181,48 @@ class ReclaimTest(unittest.TestCase):
         self.assertEqual(rows.modes(True), rows.MODES + ("reclaim",))
 
     def test_evicted_pages_are_hashed_again_and_then_shared(self):
-        text = rows.check_counts("reclaim", {"shared": 8, "verified": 11}, 176, RECLAIM)
-        self.assertIn("libz.so lost 31 of 33 pages, read back in 3 faults", text)
+        text = rows.check_counts("reclaim", {"shared": 8, "verified": 30}, 176, RECLAIM)
+        self.assertIn("libz.so lost 74 pages in 3 rounds", text)
 
     def test_a_guest_that_spares_the_pages_fails(self):
         for after in (33, 20):
-            record = [f"# reclaim: libz.so 33 pages cached before the eviction, {after} after; 1 faults read them back"]
+            record = [reclaim_round(), reclaim_round(after=after), reclaim_round()]
             with self.assertRaises(rows.ShareFailure):
-                rows.check_counts("reclaim", {"shared": 8, "verified": 11}, 176, record)
+                rows.check_counts("reclaim", {"shared": 8, "verified": 30}, 176, record)
 
-    def test_an_engine_that_answers_for_an_evicted_frame_fails(self):
-        for delta in ({"shared": 19, "verified": 0}, {"shared": 19, "verified": 3}):
+    def test_an_engine_that_answers_for_a_frame_given_back_fails(self):
+        # The pages a round gives back to the frames of two rounds before are
+        # answered by the verdicts of those frames: the first round hashes, the
+        # others do not.
+        for delta in ({"shared": 100, "verified": 0}, {"shared": 100, "verified": 10},
+                      {"shared": 100, "verified": 17}):
             with self.assertRaises(rows.ShareFailure):
                 rows.check_counts("reclaim", delta, 176, RECLAIM)
 
-    def test_a_library_the_guest_had_not_cached_cannot_observe_eviction(self):
-        record = ["# reclaim: libz.so 4 pages cached before the eviction, 0 after; 1 faults read them back"]
+    def test_a_round_without_a_fault_to_read_back_fails(self):
+        record = [reclaim_round(), reclaim_round(faults=0), reclaim_round()]
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("reclaim", {"shared": 8, "verified": 11}, 176, record)
+            rows.check_counts("reclaim", {"shared": 8, "verified": 30}, 176, record)
+
+    def test_a_library_the_guest_had_not_cached_cannot_observe_eviction(self):
+        record = [reclaim_round(before=4, after=0, faults=1)] + RECLAIM[1:]
+        with self.assertRaises(rows.ShareFailure):
+            rows.check_counts("reclaim", {"shared": 8, "verified": 30}, 176, record)
 
     def test_nothing_shared_after_the_first_verification_fails(self):
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("reclaim", {"shared": 0, "verified": 11}, 176, RECLAIM)
+            rows.check_counts("reclaim", {"shared": 0, "verified": 30}, 176, RECLAIM)
 
-    def test_evicted_pages_that_take_no_fault_to_read_back_fail(self):
-        record = ["# reclaim: libz.so 33 pages cached before the eviction, 2 after; 0 faults read them back"]
+    def test_a_refused_page_or_a_missing_round_fails(self):
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("reclaim", {"shared": 8, "verified": 11}, 176, record)
+            rows.check_counts("reclaim", {"shared": 8, "verified": 30, "mutable": 1}, 176, RECLAIM)
+        for record in ([], RECLAIM[:2]):
+            with self.assertRaises(rows.ShareFailure):
+                rows.check_counts("reclaim", {"shared": 8, "verified": 30}, 176, record)
 
-    def test_a_refused_page_or_a_missing_record_fails(self):
-        with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("reclaim", {"shared": 8, "verified": 11, "mutable": 1}, 176, RECLAIM)
-        with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("reclaim", {"shared": 8, "verified": 11}, 176, [])
-
-    def test_a_record_of_six_children_is_the_expected_shape(self):
-        out = record("reclaim", 6, tail="\n" + RECLAIM[0])
-        self.assertEqual(len(rows.run_mode(shell_of(out), "reclaim")), 8)
+    def test_a_record_of_twelve_children_is_the_expected_shape(self):
+        out = record("reclaim", 12, tail="\n" + "\n".join(RECLAIM))
+        self.assertEqual(len(rows.run_mode(shell_of(out), "reclaim")), 16)
 
 
 if __name__ == "__main__":
