@@ -13,7 +13,8 @@ nonisolated protocol GuestGPUGate: Sendable {
     /// `hold()` for a caller whose deadline leaves `left` seconds: the camera
     /// wait takes what is left of them after the second the gate itself may
     /// wait for a request that is running, and never more than it does in
-    /// `hold()`, so the gate is closed and drained inside the deadline.
+    /// `hold()`. The deadline limits the camera's wait and not that second,
+    /// which the gate always has.
     func hold(within left: TimeInterval)
     /// Closes the gate at once, without that wait: the hold the bound takes
     /// when the edge is already late. It also ends a wait that is pending in

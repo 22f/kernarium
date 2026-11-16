@@ -359,10 +359,11 @@ handler's four-second budget (the hold's own wait for a running request, and
 for an Android guest a camera video that runs, which the hold ends and waits for
 the guest to stop, two seconds at most, are taken out of it); the quiesce carries
 on under the `guest-sync` background task. The hold is given the edge's deadline,
-and its camera wait takes what that leaves after the drain, two seconds at most:
-the main path of a kept-running job, which waits up to 1.5 s for the screen to go
-off first, waits for the camera for 1.5 s at most and has the gate drained by the
-deadline. A kept-running job's bound (`gpuHoldBound`, 1.5 s) takes the hold
+and its camera wait takes what that leaves after the drain's second, two seconds
+at most (the drain always has its second): the main path of a kept-running job,
+which waits up to 1.5 s for the screen to go off first, waits for the camera for
+1.5 s at most, so the gate is drained at the deadline at the latest, less the
+wake-up of its timers. A kept-running job's bound (`gpuHoldBound`, 1.5 s) takes the hold
 without the camera's wait, so on that path the gate is closed 1.5 s after the edge
 and drained 2.5 s after it at the latest, and a bound that fires while the main
 path waits for the camera holds at once and ends that wait. A guest that restarts

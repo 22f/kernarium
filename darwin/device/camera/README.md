@@ -252,7 +252,9 @@ application's statements (the sensor orientation, the rotation that
   the hold's own budget and the application's `backgroundVideoBound` caps, then
   hold whatever the wait found, and say once on a wait that ran out); the hold's
   own budget and this bound together stay inside the application's edge budget
-  (three seconds from the edge to the held gate at the latest with no deadline).
+  (three seconds from the edge to the held gate at the latest with no deadline;
+  a deadline that leaves less than the hold's own budget leaves the wait nothing,
+  and the hold keeps its budget).
   A caller that holds without the wait, as the application's bound does when the
   edge is late, ends a wait that is pending with `abandon()`: the call returns
   at once with `abandoned` set and says nothing, since the held gate makes the

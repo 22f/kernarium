@@ -35,8 +35,10 @@ struct Timing final {
 
 /* How long a hold of `held` waits for the guest's camera video: the camera's
  * own bound, or, for a caller whose deadline leaves `held` milliseconds, what
- * is left of them after the gate's own wait for a running request, which also
- * has to end inside them. None when nothing is left. */
+ * is left of them after the second the gate's own wait for a running request
+ * may take. None when nothing is left. The deadline limits this wait and not
+ * that one: a hold always has its drain's second, so a deadline that leaves
+ * less than a second is passed by the drain. */
 [[nodiscard]] constexpr std::chrono::nanoseconds cameraWait(
     int held, const Timing& timing) noexcept
 {

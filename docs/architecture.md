@@ -956,9 +956,10 @@ inside the edge's budget, never added to it) until the guest has stopped its
 video streams, so a recording that runs ends before the guest's GPU requests
 stop (`uml::camera::BackgroundVideo`, the camera device's README). A caller
 that has a deadline passes what it leaves (`set_gpu_hold` of 3 or more, the
-milliseconds): the wait then takes what is left after the hold's own wait of one
-second for a request that is running, so the gate is closed and drained inside the
-deadline. The hold of a caller with none (Andarium, at the edge) is held three
+milliseconds): the camera wait then takes what is left after the hold's own wait
+of one second for a request that is running, and nothing when less is left. The
+deadline bounds the camera wait and not that second, which the drain always has.
+The hold of a caller with none (Andarium, at the edge) is held three
 seconds after the edge at the latest, the wait and then the drain; the main path
 of a kept-running job, which waits for the screen to go off first, gets what its
 four-second edge leaves. The bound that holds that job's GPU 1.5 s after the edge

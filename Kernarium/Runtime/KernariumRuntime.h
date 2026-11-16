@@ -428,7 +428,8 @@ typedef int (*kernarium_runtime_send_console_input_function)(
  * stop; with no video running it waits for nothing. A hold of 3 or more is a
  * hold of 1 from a caller that has a deadline: the value is the milliseconds
  * the deadline leaves, and the wait takes what is left of them after the one
- * second the hold may spend on a request that is running, two seconds at most.
+ * second the hold may spend on a request that is running, two seconds at most;
+ * the deadline does not shorten that second.
  * A hold of 2 takes the hold at once, with no such wait (the application's own
  * bound, when the edge is already late), and ends a wait of a hold that is
  * pending. A hold asked for keeps a guest that restarts from booting until the

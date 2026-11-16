@@ -322,7 +322,9 @@ nonisolated struct RuntimeGPUGate: GuestGPUGate {
     }
 
     func hold(within left: TimeInterval) {
-        // A value of 3 or more is the milliseconds the caller's deadline leaves.
+        // A value of 3 or more is the milliseconds the caller's deadline leaves:
+        // the runtime's camera wait takes what is left after the drain's second,
+        // which the deadline does not shorten.
         let milliseconds = Int32(clamping: Int((left * 1000).rounded(.down)))
         let result = kernarium_runtime_loader_set_gpu_hold(max(3, milliseconds))
         print(
