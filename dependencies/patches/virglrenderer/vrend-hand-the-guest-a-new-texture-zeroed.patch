@@ -72,7 +72,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  1 file changed, 205 insertions(+)
 
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index eeefd299f3ef4ad8ab0fd5ca8af0336ef81bf79c..03fba507c3e5a40a4d871105ff08d9ca2d81bc0f 100644
+index daef37018d3e4092a8ce14698c43150acd391d37..4362b457638ec5b7d8744a65e69828fe7d89a4bf 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -9470,6 +9470,202 @@ vrend_resource_create(const struct vrend_renderer_resource_create_args *args)

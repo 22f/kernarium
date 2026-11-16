@@ -112,7 +112,7 @@ index 0f5e0e951f2e242b1c614ee994a20f5f8360a551..b98aaf7a98bd46580f61c6a863e02811
  #endif
  
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index bae72b710aa0ecc6df0b06cd8cb15144042d5ae2..840d48284bc32db89a2e90564caf14cceecaaae7 100644
+index 5d756fc0e84f604bda6ab044d13bcc72eea0ab06..061892d99fae54dd1ec01e1d46b625c3e2749fa1 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -31,6 +31,7 @@
@@ -367,7 +367,7 @@ index bae72b710aa0ecc6df0b06cd8cb15144042d5ae2..840d48284bc32db89a2e90564caf14cc
  {
     if (ctx->ctx_switch_pending == false)
 diff --git a/src/vrend/vrend_renderer.h b/src/vrend/vrend_renderer.h
-index b3b7ee7501169b405c1add95d915d8a644d6ae6d..133569a3b0c733d625226afc6f803c89a5a4daa5 100644
+index dc17fef860c4ac21f693d705785ad7c58e206ad3..b10bb514297b1b86fc4fc471649837e759794e15 100644
 --- a/src/vrend/vrend_renderer.h
 +++ b/src/vrend/vrend_renderer.h
 @@ -254,6 +254,15 @@ struct vrend_if_cbs {

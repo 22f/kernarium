@@ -135,7 +135,7 @@ index 4f87d5accabf1929a5b174d4a5f95419aa699e61..64f318d741670840cddc388cb88d2577
        close_res_fd = true;
     }
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index d37273d63b85e55c0615f1ea787faee596053fa6..a2ea2d4a84a9ec5990c44b1564e37a61e427dbea 100644
+index ec9cabedb541a490be7d8c9e8a19de13de2b8e86..2da1139dee334b41aa07acbe08a35ad0be094398 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -3120,6 +3120,18 @@ static void vrend_hw_set_zsurf_texture(struct vrend_context *ctx)
@@ -596,7 +596,7 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..a2ea2d4a84a9ec5990c44b1564e37a61
     if (vrend_state.use_egl_fence) {
        fence->eglsyncobj = virgl_egl_fence_create(egl);
 diff --git a/src/vrend/vrend_renderer.h b/src/vrend/vrend_renderer.h
-index 7c6034957c31b903c90ab18625e2d42c30deced0..726ffc2e0ad49a57f458c1d79972fdabebe59781 100644
+index 059849b47138ea699983b2c6e37320e5b25f91e9..15aaf56d386b91e1ea6faf38a9128d3007237d55 100644
 --- a/src/vrend/vrend_renderer.h
 +++ b/src/vrend/vrend_renderer.h
 @@ -132,6 +132,14 @@ struct vrend_resource {
