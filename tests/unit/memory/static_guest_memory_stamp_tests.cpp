@@ -112,6 +112,42 @@ void test_the_stamp_says_whether_the_page_may_be_shared()
 	require(darwin_uml_static_vm_destroy(generation) == 0);
 }
 
+/* A kernel of another version of the bridge meets this host. The ABI's
+ * `guest_code` is a bit set, and a host and a kernel of different versions
+ * agree on every value either may pass. A kernel from before the fact passes
+ * only 0 and 1 and a kernel with it also 3: what is guest code is what the
+ * value says, whatever bit 1 and the bits above it say (an earlier host, which
+ * reads any nonzero value as guest code, agrees), and the fact is bit 1 with
+ * bit 0 and nothing else. So the older kernel on this host is never told a
+ * page is immutable, and the newer kernel on the earlier host loses nothing it
+ * had: its pages are code, and the fact it adds is not read. */
+void test_kernels_of_other_versions_agree_with_this_host_on_every_value()
+{
+	constexpr unsigned long generation = 604;
+	constexpr unsigned long base = 0x1400'0000;
+	ScratchBacking backing{backing_name, 8 * page};
+	for (int code = 0; code < 8; ++code)
+		map(generation, base + code * page, backing, code * page, rwx, code);
+	require(darwin_uml_static_vm_activate(generation) == 0);
+	StaticGuestMemory memory;
+	memory.set_generation(generation);
+	for (int code = 0; code < 8; ++code) {
+		ExtendedCodePageStamp stamp{};
+		const bool found = stamp_of(memory, base + code * page, stamp);
+		/* The earlier host's reading: any nonzero value is guest code. */
+		require(found == (code != 0));
+		/* This host's fact: bit 1 with bit 0. Kernels that never set bit 1
+		 * (the values 0 and 1) never produce it. */
+		const bool immutable = found && stamp.immutable;
+		require(immutable == ((code & 3) == 3));
+		if (code <= 1)
+			require(!immutable && !(found && stamp.shareable));
+		std::printf("guest_code %d: code %d immutable %d\n", code,
+			found ? 1 : 0, immutable ? 1 : 0);
+	}
+	require(darwin_uml_static_vm_destroy(generation) == 0);
+}
+
 /* A verdict filed for a page is answered to the next address space until the
  * page's epoch moves; a record that ran out of count or of epoch is marked
  * never-share for good and answers none, whatever the epoch field says
@@ -151,6 +187,7 @@ void test_an_exhausted_record_answers_no_old_verdict()
 				++hashed;
 				return aot::SharedOutcome::match;
 			},
+			[]() noexcept { return false; },
 			base, aot::VerdictTable::where(1, 0));
 	};
 	require(ask(one) == aot::SharedOutcome::match && hashed == 1);
@@ -221,6 +258,7 @@ void test_an_accounting_anomaly_leaves_nothing_shareable()
 int main()
 {
 	test_the_stamp_says_whether_the_page_may_be_shared();
+	test_kernels_of_other_versions_agree_with_this_host_on_every_value();
 	test_an_exhausted_record_answers_no_old_verdict();
 	test_an_accounting_anomaly_leaves_nothing_shareable();
 	std::puts("Static guest memory stamp tests passed");

@@ -1695,6 +1695,37 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 		require(same(want_changed, d.result, c));
 		require(d.stats.verifications >= 1 && d.stats.poisoned >= 1);
 	}
+
+	/* The backing is replaced: the same address, the same offset and the
+	 * kernel's fact, from another backing object that holds other bytes (a
+	 * loop device whose file was swapped, so that a read of the same block
+	 * lands in a new page). It is another frame with another record, and
+	 * nothing filed for the old one answers it, for a guest that maps the
+	 * new backing from the start and for one that has the old one under it
+	 * and is given the new. */
+	{
+		aot::clear_shared_verdicts();
+		SharedFrame frame{image, generation++};
+		SharedFrame replacement{changed, generation++};
+		auto first = guest(frame, true);
+		auto second = guest(frame, true);
+		const auto a = run_shared(*first, c);
+		const auto b = run_shared(*second, c);
+		require(same(want, a.result, c) && same(want, b.result, c));
+		require(a.stats.enters > 0 && b.stats.enters > 0 &&
+			(AOT_TEST_SHARED_VERDICTS != 0 ? b.stats.shared_hits >= 1 :
+			 b.stats.shared_hits == 0));
+		auto third = guest(replacement, true);
+		const auto d = run_shared(*third, c);
+		require(same(want_changed, d.result, c));
+		require(d.stats.shared_hits == 0 && d.stats.verifications >= 1 &&
+			d.stats.poisoned >= 1);
+		unmap_page(*second);
+		map_page(*second, replacement);
+		const auto e = run_shared(*second, c);
+		require(same(want_changed, e.result, c));
+		require(e.stats.verifications >= 1 && e.stats.poisoned >= 1);
+	}
 	std::fprintf(stderr, "ok\n");
 }
 
@@ -1741,10 +1772,13 @@ void inline_hit_path_is_taken(const LibraryImage &image,
 
 /* Every access that leaves the page of the last one refills, and the
  * refill callback leaves every register and flag the thunk saves scrambled:
- * the results must still be the engine's. */
+ * the results must still be the engine's. A release library's functions
+ * touch memory in nearly every case, so its cases refill more than once on
+ * average; the generated fixture's functions often touch none, and only a
+ * share of its cases refill. */
 [[gnu::noinline]]
 void refill_keeps_state(const LibraryImage &image,
-	const std::vector<Function> &functions)
+	const std::vector<Function> &functions, bool fixture_library)
 {
 	SplitMix rng{29};
 	const auto bias = Fixture::bias;
@@ -1779,7 +1813,7 @@ void refill_keeps_state(const LibraryImage &image,
 		static_cast<unsigned long long>(st.refill_failures),
 		static_cast<unsigned long long>(st.steps));
 	require(compared > 20);
-	require(st.refills > compared);
+	require(st.refills > (fixture_library ? compared / 16 : compared));
 }
 
 /* A library whose last code page is not mapped yet: the code on the pages
@@ -4560,7 +4594,8 @@ void a_stop_takes_effect_within_one_run_block(
  * flight and one lap of the loop, having started rewritten code at most once
  * after the publication, in a state on the engine's own path, and once the
  * word is back the loop goes on, in rewritten code, to the end the engine
- * alone reaches from the same state. Returns whether the vCPU ran a block
+ * alone reaches from the same state. The vCPU must have entered rewritten
+ * code before the publication began. Returns whether the vCPU ran a block
  * while the publication was in progress. */
 [[gnu::noinline]]
 bool breakpoint_on_a_running_loop(const LibraryImage &image,
@@ -4579,6 +4614,7 @@ bool breakpoint_on_a_running_loop(const LibraryImage &image,
 	aot::set_enabled(true);
 	std::atomic<std::size_t> blocks{0}, blocks_before_call{0},
 		blocks_at_publish{0}, enters_at_publish{0};
+	std::atomic<std::uint64_t> enters_before_call{0};
 	std::atomic_bool published{false};
 	std::atomic<int> published_rc{-1};
 	std::thread patcher{[&] {
@@ -4588,6 +4624,7 @@ bool breakpoint_on_a_running_loop(const LibraryImage &image,
 			if (std::chrono::steady_clock::now() >= deadline)
 				return;
 		got.env.backing.put32(spot, brk);
+		enters_before_call.store(aot::stats().enters);
 		blocks_before_call.store(blocks.load(std::memory_order_acquire));
 		published_rc.store(darwin_uml_static_vm_invalidate_code_generation(
 			got.env.generation, bias + spot, 4));
@@ -4612,6 +4649,9 @@ bool breakpoint_on_a_running_loop(const LibraryImage &image,
 	require(published_rc.load() == 0);
 	require(last == EngineEvent::breakpoint);
 	require(cpu.pc == bias + spot);
+	/* A publication that finds the vCPU still outside rewritten code proves
+	 * nothing about entering it. */
+	require(enters_before_call.load() > 0);
 	const auto after = blocks.load() - blocks_at_publish.load();
 	const auto entered_after =
 		aot::stats().enters - enters_at_publish.load();
@@ -4727,8 +4767,14 @@ void a_breakpoint_published_through_the_bridge_stops_rewritten_code(
 		aot::set_enabled(false);
 	}
 
-	/* The loop runs on this vCPU while another thread publishes. */
+	/* The loop runs on this vCPU while another thread publishes. Overlap is
+	 * a matter of scheduling, so the schedule is a bounded one and it must
+	 * observe the overlap at least once: the publication points go on past
+	 * the first sweep (up to 96 runs in all) until the vCPU was seen running
+	 * a block while the publication was in progress, and a schedule that
+	 * never sees it fails. */
 	std::size_t raced = 0, attempts = 0;
+	constexpr std::size_t max_attempts = 96;
 	for (const std::size_t publish_at : {std::size_t{3}, std::size_t{8},
 	     std::size_t{16}, std::size_t{5}, std::size_t{12}, std::size_t{2}}) {
 		for (int again = 0; again < 4 && raced < 3; ++again) {
@@ -4737,8 +4783,15 @@ void a_breakpoint_published_through_the_bridge_stops_rewritten_code(
 				publish_at, publish_at + 24) ? 1 : 0;
 		}
 	}
+	for (std::size_t publish_at = 2; raced == 0 && attempts < max_attempts;
+	     publish_at = publish_at % 29 + 2) {
+		++attempts;
+		raced += breakpoint_on_a_running_loop(image, ++generation,
+			publish_at, publish_at + 24) ? 1 : 0;
+	}
 	std::fprintf(stderr, "breakpoint on a running loop: %zu runs, %zu with the "
 		"vCPU running during the publication\n", attempts, raced);
+	require(raced >= 1);
 }
 
 /* The kernel declares a page immutable (`guest_code` 3) or it does not (1).
@@ -5098,7 +5151,8 @@ int main(int argc, char **argv)
 			other_bytes_fall_back(image, sample);
 			changed_text_falls_back(image, functions);
 			verdicts_are_shared_between_address_spaces(image, functions);
-			refill_keeps_state(image, sample);
+			refill_keeps_state(image, sample,
+				file.guest.ends_with("/libaotfixture.so"));
 			partially_mapped_library(image, functions);
 			two_vcpus(image, sample);
 		}
