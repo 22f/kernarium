@@ -7,11 +7,19 @@ import Testing
 struct CapabilitiesTests {
     @Test func theDeviceOffersWhatTheRuntimeDoes() {
         let device = Capabilities.device
-        #expect(device.bugReport && device.apkInstall && device.adbOverNetwork && device.guestFiles && device.textMessages)
+        #expect(device.bugReport && device.apkInstall && device.adbOverNetwork && device.guestFiles)
         // The statistics are the runtime's own readings.
         #expect(device.statistics)
         // TalkBack goes through the same adb channel.
         #expect(device.screenReader)
+    }
+
+    /// Held until an accepted release image carries the service: the device
+    /// offers no text message, and the preview, which has no device to ship
+    /// to, shows it.
+    @Test func textMessagesAreHeldBackOnTheDevice() {
+        #expect(!Capabilities.device.textMessages)
+        #expect(Capabilities.preview.textMessages)
     }
 
     @Test func installApkIsOfferedInANormalSessionOfARuntimeThatInstalls() {

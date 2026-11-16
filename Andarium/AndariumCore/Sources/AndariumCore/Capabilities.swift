@@ -52,16 +52,19 @@ public struct Capabilities: Equatable, Sendable {
     )
 
     /// The device application: the session offers an app install, ADB over
-    /// the network, a bug report, the guest's files, text messages and
-    /// TalkBack, all through the runtime's adb channel, and the statistics
-    /// from the runtime's own readings.
+    /// the network, a bug report, the guest's files and TalkBack, all through
+    /// the runtime's adb channel, and the statistics from the runtime's own
+    /// readings. Text messages are held back until an accepted release image
+    /// carries the service that takes them, so the application offers none;
+    /// a development launch turns them on for tests and proof images
+    /// (`TextMessagesLaunch`).
     public static let device = Capabilities(
         adbOverNetwork: true,
         apkInstall: true,
         bugReport: true,
         statistics: true,
         guestFiles: true,
-        textMessages: true,
+        textMessages: false,
         screenReader: true
     )
 }

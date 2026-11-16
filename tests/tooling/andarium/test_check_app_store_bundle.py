@@ -89,6 +89,7 @@ DEBUG_SUPPORT = (
     ("old apps preview", "int _s8Andarium15ScriptedOldAppsC10listOldAppsAA0cD7ListingOyYaF(void) { return 1; }\n"),
     ("old apps preview", "int _s8Andarium8AppModelC15scriptedOldAppsAA0D4AppsSource_pSgvg(void) { return 1; }\n"),
     ("old apps preview", "int _s8Andarium18OldAppsProbeLaunchO6script2inAC6ScriptOSgSDyS2SG_tFZ(void) { return 1; }\n"),
+    ("text messages launch", "int _s8Andarium18TextMessagesLaunchO9requested2inSbSDyS2SG_tFZ(void) { return 1; }\n"),
     # The Simulator preview's hooks into the Send feedback sheet.
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV20previewOpensAtLaunchSbvg(void) { return 1; }\n"),
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV14previewPrepareyyAA0aD5ModelCYaYbcvg(void) { return 1; }\n"),

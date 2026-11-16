@@ -1343,6 +1343,9 @@ nothing.
 session a scripted list of two made-up old apps in place of the image's command:
 `apps` lists them (one on and open), `refuse` also refuses every change, `none` is
 an image without the command.
+`ANDARIUM_TEXT_MESSAGES=1` turns on the Text message entrance that the device
+application holds back until an accepted release image carries the service
+(`Capabilities.device`); tests and proof images use it.
 `ANDARIUM_GUEST_INSTANCE=<name>` runs an isolated guest under
 `Library/TestGuests/<name>`, for tests that need a fresh guest while the
 ordinary guest or its pending update must be preserved. A file `free-space-mib`
