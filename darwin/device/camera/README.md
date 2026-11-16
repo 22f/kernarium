@@ -248,14 +248,16 @@ application's statements (the sensor orientation, the rotation that
   acted on), or until the deadline, which covers the device's answer as well.
   With no video running nothing is waited for; with no device attached nothing is
   ended. `holdAfterVideoEnds` is the application's sequence (end, wait at most
-  `backgroundVideoBound`, then hold whatever the wait found, and say once on a
-  wait that ran out); the hold's own budget and this bound together stay inside
-  the application's edge budget (three seconds from the edge to the held gate at
-  the latest). A caller that holds without the wait, as the application's bound
-  does when the edge is late, ends a wait that is pending with `abandon()`: the
-  call returns at once with `abandoned` set and says nothing, since the held gate
-  makes the wait of no use. The calls serialize under their deadlines: a call still
-  queued behind another at its own returns unanswered.
+  `bound`, which a caller with a deadline sets to what the deadline leaves after
+  the hold's own budget and the application's `backgroundVideoBound` caps, then
+  hold whatever the wait found, and say once on a wait that ran out); the hold's
+  own budget and this bound together stay inside the application's edge budget
+  (three seconds from the edge to the held gate at the latest with no deadline).
+  A caller that holds without the wait, as the application's bound does when the
+  edge is late, ends a wait that is pending with `abandon()`: the call returns
+  at once with `abandoned` set and says nothing, since the held gate makes the
+  wait of no use. The calls serialize under their deadlines: a call still queued
+  behind another at its own returns unanswered.
 - **Video mode.** The device tells its owner (`onVideoMode`) whether the guest
   is in video mode: a live camera's video runs, uninterrupted, and the guest
   asks for the picture stabilized, which Android's record template does and its

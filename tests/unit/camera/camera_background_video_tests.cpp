@@ -301,14 +301,27 @@ void aBoundThatRunsOutHoldsAndSaysSoOnce()
     require((silent.events == std::vector<std::string> {"end", "ended", "hold"}) && silent.log.size() == 1, "an unanswered request too: one line");
 }
 
-/* The wait is the edge's own bound: one call, one deadline, and the hold follows the wait without a second one. */
+/* The wait is within the edge's own budget, whose clock starts at the edge, not at the call: a display wait of 150 ms comes
+ * first, the bound is what a 400 ms edge budget leaves after it and after the 100 ms the hold may spend on a running
+ * request, and the hold follows the wait without a second one. A guest whose video never stops holds it to the bound. */
 void theWaitIsWithinTheBoundAndNeverAddedToIt()
 {
-    const auto run = runTheEdge({1, false, true}, -1ms, 300ms);
-    require(run.deadlines.size() == 1, "the video is asked once");
-    require(run.deadlines[0] <= run.began + 300ms + 50ms, "with a deadline that is the bound from the start of the edge");
-    require(std::chrono::duration_cast<std::chrono::milliseconds>(run.held - run.began) < 420ms,
-            "so the hold lands at the bound at the latest");
+    constexpr auto budget = 400ms;
+    constexpr auto drain = 100ms;
+    const auto edge = Clock::now();
+    std::this_thread::sleep_for(150ms);
+    BackgroundVideo control;
+    FakeDevice device(control, 0ms, 1, 0ms);
+    const auto bound = budget - since(edge) - drain;
+    Clock::time_point held;
+    std::vector<std::string> log;
+    const auto result = uml::camera::holdAfterVideoEnds(
+        control, [&] { held = Clock::now(); return 7; }, bound, [&](const std::string& line) { log.push_back(line); });
+    require(result.video.answered && !result.video.stopped && result.video.streams == 1, "the stream never stopped");
+    require(log.size() == 1, "and it is said once");
+    const auto after = std::chrono::duration_cast<std::chrono::milliseconds>(held - edge);
+    require(after >= budget - drain - 30ms, "the hold waited for the video to the end of the bound");
+    require(after <= budget - drain + 60ms, "and landed there at the latest, so the drain ends inside the budget");
 }
 
 /* A call that is queued behind another keeps its own deadline: the one before it may be waiting for a device that does not
@@ -332,23 +345,28 @@ void aCallQueuedBehindAnotherEndsAtItsOwnDeadline()
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
-    withNoDeviceTheCallEndsAndWaitsForNothing();
-    theCallReturnsWhenTheGuestHasStoppedItsStreams();
-    aGuestWithNoRunningVideoIsNotWaitedFor();
-    aGuestThatDoesNotStopHoldsTheCallForTheDeadlineOnly();
-    theAnswerAndTheStopShareTheDeadline();
-    aDeviceThatDoesNotAnswerIsSaid();
-    aDeviceThatGoesAwayEndsTheWait();
-    callsSerialize();
-    anAbandonedWaitReturnsAtOnce();
-    anAbandonWithNoCallInProgressChangesNothing();
-    aHoldThatLandsFirstEndsThePendingWaitHarmlessly();
-    aRunningVideoIsEndedAndWaitedForBeforeTheHold();
-    noVideoMeansTheHoldAtOnce();
-    aBoundThatRunsOutHoldsAndSaysSoOnce();
-    theWaitIsWithinTheBoundAndNeverAddedToIt();
-    aCallQueuedBehindAnotherEndsAtItsOwnDeadline();
+    /* A row's name on the command line runs that row alone. */
+    const char* const only = argc > 1 ? argv[1] : nullptr;
+#define ROW(name) \
+    if (only == nullptr || std::string(only) == #name) name()
+    ROW(withNoDeviceTheCallEndsAndWaitsForNothing);
+    ROW(theCallReturnsWhenTheGuestHasStoppedItsStreams);
+    ROW(aGuestWithNoRunningVideoIsNotWaitedFor);
+    ROW(aGuestThatDoesNotStopHoldsTheCallForTheDeadlineOnly);
+    ROW(theAnswerAndTheStopShareTheDeadline);
+    ROW(aDeviceThatDoesNotAnswerIsSaid);
+    ROW(aDeviceThatGoesAwayEndsTheWait);
+    ROW(callsSerialize);
+    ROW(anAbandonedWaitReturnsAtOnce);
+    ROW(anAbandonWithNoCallInProgressChangesNothing);
+    ROW(aHoldThatLandsFirstEndsThePendingWaitHarmlessly);
+    ROW(aRunningVideoIsEndedAndWaitedForBeforeTheHold);
+    ROW(noVideoMeansTheHoldAtOnce);
+    ROW(aBoundThatRunsOutHoldsAndSaysSoOnce);
+    ROW(theWaitIsWithinTheBoundAndNeverAddedToIt);
+    ROW(aCallQueuedBehindAnotherEndsAtItsOwnDeadline);
+#undef ROW
     return 0;
 }

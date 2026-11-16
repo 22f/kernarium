@@ -18,6 +18,35 @@ struct GuestGPUHoldTests {
     }
 
     @Test
+    func aHoldWithADeadlineTellsTheGateWhatItLeaves() {
+        let log = CallLog()
+        let gate = BudgetGate(log)
+        let hold = GuestGPUHold(gate: gate, timer: ManualHoldTimer().timer)
+
+        #expect(hold.hold(before: DispatchTime.now() + .milliseconds(2500)))
+        #expect(log.entries == ["hold within"])
+        let left = gate.left
+        #expect(left.count == 1)
+        #expect((2.3...2.5).contains(left.first ?? 0))
+
+        #expect(hold.release())
+        // A deadline that has passed is told as what is left of it: nothing.
+        #expect(hold.hold(before: DispatchTime.now() - .milliseconds(100)))
+        #expect((gate.left.last ?? 1) <= 0)
+    }
+
+    @Test
+    func aHoldWithNoDeadlineWaitsForTheCameraAsItAlwaysDid() {
+        let log = CallLog()
+        let gate = BudgetGate(log)
+        let hold = GuestGPUHold(gate: gate, timer: ManualHoldTimer().timer)
+
+        #expect(hold.hold())
+        #expect(log.entries == ["hold"])
+        #expect(gate.left.isEmpty)
+    }
+
+    @Test
     func aHoldTakenIsTakenOnceAndReleasedOnce() {
         let rig = Rig()
 

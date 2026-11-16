@@ -10,6 +10,11 @@ nonisolated protocol GuestGPUGate: Sendable {
     /// waits (two seconds at most) until the guest has stopped it, so a
     /// recording that runs ends before the guest's GPU requests stop.
     func hold()
+    /// `hold()` for a caller whose deadline leaves `left` seconds: the camera
+    /// wait takes what is left of them after the second the gate itself may
+    /// wait for a request that is running, and never more than it does in
+    /// `hold()`, so the gate is closed and drained inside the deadline.
+    func hold(within left: TimeInterval)
     /// Closes the gate at once, without that wait: the hold the bound takes
     /// when the edge is already late. It also ends a wait that is pending in
     /// `hold()`, which the held gate makes of no use.
@@ -18,6 +23,7 @@ nonisolated protocol GuestGPUGate: Sendable {
 }
 
 nonisolated extension GuestGPUGate {
+    func hold(within left: TimeInterval) { hold() }
     func holdNow() { hold() }
 }
 
@@ -73,9 +79,12 @@ nonisolated final class GuestGPUHold: @unchecked Sendable {
     ///
     /// The gate may wait for requests already inside the device, and for the
     /// guest's camera, so a caller that arrives while another is holding waits
-    /// for it. The bound does not: it holds at once.
+    /// for it. The bound does not: it holds at once. `deadline` is the one the
+    /// caller must be back inside (the edge's): the camera's wait is limited
+    /// to what it leaves when the gate is asked, after any wait for another
+    /// hold.
     @discardableResult
-    func hold() -> Bool {
+    func hold(before deadline: DispatchTime? = nil) -> Bool {
         serial.lock()
         defer { serial.unlock() }
         lock.lock()
@@ -88,7 +97,15 @@ nonisolated final class GuestGPUHold: @unchecked Sendable {
         lock.unlock()
         // The bound stays armed while the gate waits for the camera, and
         // lands the hold if it fires then. It is withdrawn once this hold has.
-        gate.hold()
+        if let deadline {
+            let left = Double(
+                Int64(clamping: deadline.uptimeNanoseconds) -
+                    Int64(clamping: DispatchTime.now().uptimeNanoseconds)
+            ) / 1_000_000_000
+            gate.hold(within: left)
+        } else {
+            gate.hold()
+        }
         lock.withLock {
             gateHolds = true
             withdrawLocked()

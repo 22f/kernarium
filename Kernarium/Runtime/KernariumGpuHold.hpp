@@ -4,6 +4,7 @@
 #include "KernariumRestartLoop.hpp"
 #include "camera/background_video.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <mutex>
 #include <type_traits>
@@ -19,7 +20,8 @@ namespace kernarium::gpu_hold {
  * hand in their own, so the sequence runs as the runtime runs it.
  */
 
-/* The values of `held`. */
+/* The values of `held`. A value of 3 or more is the hold of a caller that has a
+ * deadline: the milliseconds its deadline leaves. */
 inline constexpr int released = 0;
 inline constexpr int withCamera = 1;
 inline constexpr int atOnce = 2;
@@ -30,6 +32,20 @@ struct Timing final {
     /* The longest a hold waits for the guest to stop its camera video. */
     std::chrono::nanoseconds camera {uml::camera::backgroundVideoBound};
 };
+
+/* How long a hold of `held` waits for the guest's camera video: the camera's
+ * own bound, or, for a caller whose deadline leaves `held` milliseconds, what
+ * is left of them after the gate's own wait for a running request, which also
+ * has to end inside them. None when nothing is left. */
+[[nodiscard]] constexpr std::chrono::nanoseconds cameraWait(
+    int held, const Timing& timing) noexcept
+{
+    if (held < 3)
+        return timing.camera;
+    const auto left = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::milliseconds(held) - timing.drain);
+    return std::clamp(left, std::chrono::nanoseconds::zero(), timing.camera);
+}
 
 /* The hold on the guest's GPU service. `Gpu` is the in-process GPU service
  * (`holdRequests`, `releaseRequests`); `mutex` guards `gpu`, which is null when
@@ -48,13 +64,18 @@ public:
 
     /* Holds the guest's GPU requests: 1 when it is held, 0 when a request that
      * was running outlasted the drain, -1 when no guest runs (the hold then
-     * waits for the next one). */
+     * waits for the next one). A gate that is held already was closed by a
+     * hold that waited for its requests under this mutex, which this call
+     * waited for: it does not wait for them again, so two holds that meet
+     * cost the drain once. */
     int close()
     {
         std::lock_guard lock(mutex_);
         lifecycle_.setGpuHoldRequested(true);
         if (gpu_ == nullptr)
             return -1;
+        if (gpu_->requestsHeld())
+            return 1;
         return gpu_->holdRequests(timing_.drain) ? 1 : 0;
     }
 
@@ -96,10 +117,11 @@ public:
         if constexpr (std::is_null_pointer_v<Video>) {
             return close();
         } else {
-            if (video == nullptr)
+            const auto wait = cameraWait(held, timing_);
+            if (video == nullptr || wait <= std::chrono::nanoseconds::zero())
                 return close();
             return uml::camera::holdAfterVideoEnds(
-                       *video, [this] { return close(); }, timing_.camera,
+                       *video, [this] { return close(); }, wait,
                        std::forward<Log>(log))
                 .held;
         }

@@ -358,13 +358,16 @@ them when it returns to the foreground. The hold and the quiesce share the
 handler's four-second budget (the hold's own wait for a running request, and
 for an Android guest a camera video that runs, which the hold ends and waits for
 the guest to stop, two seconds at most, are taken out of it); the quiesce carries
-on under the `guest-sync` background task. The gate is held three seconds after
-the edge at the latest. A kept-running job's bound (`gpuHoldBound`, 1.5 s) takes
-the hold without the camera's wait, so on that path the gate is held 2.5 s after
-the edge at the latest, and a bound that fires while the other path waits for the
-camera holds at once and ends that wait. Guest page-cache trimming stays off in
-the foreground, and quiescing trims once by itself. A guest that restarts while a
-hold is pending boots after the requests are given back.
+on under the `guest-sync` background task. The hold is given the edge's deadline,
+and its camera wait takes what that leaves after the drain, two seconds at most:
+the main path of a kept-running job, which waits up to 1.5 s for the screen to go
+off first, waits for the camera for 1.5 s at most and has the gate drained by the
+deadline. A kept-running job's bound (`gpuHoldBound`, 1.5 s) takes the hold
+without the camera's wait, so on that path the gate is closed 1.5 s after the edge
+and drained 2.5 s after it at the latest, and a bound that fires while the main
+path waits for the camera holds at once and ends that wait. A guest that restarts
+while a hold is pending boots after the requests are given back. Guest page-cache
+trimming stays off in the foreground, and quiescing trims once by itself.
 
 On a device the quiesce ends by hibernating the guest's RAM, so that a paused
 Kernarium no longer carries the guest's wired memory

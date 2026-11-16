@@ -321,6 +321,15 @@ nonisolated struct RuntimeGPUGate: GuestGPUGate {
         print("Kernarium: guest GPU requests held on background (\(result))")
     }
 
+    func hold(within left: TimeInterval) {
+        // A value of 3 or more is the milliseconds the caller's deadline leaves.
+        let milliseconds = Int32(clamping: Int((left * 1000).rounded(.down)))
+        let result = kernarium_runtime_loader_set_gpu_hold(max(3, milliseconds))
+        print(
+            "Kernarium: guest GPU requests held on background, \(milliseconds) ms left (\(result))"
+        )
+    }
+
     func holdNow() {
         let result = kernarium_runtime_loader_set_gpu_hold(2)
         print("Kernarium: guest GPU requests held at once (\(result))")

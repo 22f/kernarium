@@ -425,7 +425,10 @@ typedef int (*kernarium_runtime_send_console_input_function)(
  * seconds, and releases when it returns. A hold of 1 on an Android guest first
  * ends the guest's running camera video and waits, two seconds at most, until
  * the guest has stopped it, so a recording that runs ends before the requests
- * stop; with no video running it waits for nothing.
+ * stop; with no video running it waits for nothing. A hold of 3 or more is a
+ * hold of 1 from a caller that has a deadline: the value is the milliseconds
+ * the deadline leaves, and the wait takes what is left of them after the one
+ * second the hold may spend on a request that is running, two seconds at most.
  * A hold of 2 takes the hold at once, with no such wait (the application's own
  * bound, when the edge is already late), and ends a wait of a hold that is
  * pending. A hold asked for keeps a guest that restarts from booting until the

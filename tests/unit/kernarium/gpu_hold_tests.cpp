@@ -2,9 +2,13 @@
 /*
  * The application's hold of the guest's GPU requests (kernarium_runtime_set_gpu_hold) as the runtime runs it
  * (KernariumGpuHold.hpp), over the real request gate, the real camera control (`BackgroundVideo`) and the real run loop's
- * Lifecycle: that a guest that restarts while a hold is pending does not boot behind the gate.
+ * Lifecycle: how long a hold waits for the guest's camera when its caller's deadline leaves little, what happens when the
+ * edge's own bound and the hold that waits for the camera meet, and that a guest that restarts while a hold is pending
+ * does not boot behind the gate.
  *
- * The times are the application's, halved: a drain of 0.5 s for a request that runs and a camera bound of 1 s.
+ * The times are the application's, halved, with the edge's own: a drain of 0.5 s for a request that runs, a camera bound
+ * of 1 s, an edge budget of 2 s, and the bound that holds a kept-running job's GPU 0.75 s after the edge. Every row's
+ * clock starts at the edge, not at the call of the hold.
  */
 #include "KernariumGpuHold.hpp"
 #include "KernariumRestartLoop.hpp"
@@ -30,7 +34,14 @@ using uml::camera::BackgroundVideo;
 using uml::testing::require;
 using Clock = BackgroundVideo::Clock;
 
+constexpr std::chrono::milliseconds edgeBudget {2000};
+constexpr std::chrono::milliseconds boundAfterTheEdge {750};
 constexpr Timing halfTiming {500ms, 1000ms};
+
+std::chrono::milliseconds since(Clock::time_point began)
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - began);
+}
 
 /* The in-process GPU service as the gate uses it, over the real request gate. `beforeClosing` lets a row decide when the
  * call that closes the gate gets to do it. */
@@ -69,7 +80,152 @@ struct Runtime final {
     Gate<FakeGpu> gate;
 };
 
+/* The guest's camera layer for a recording that never stops: it answers the request to end the video, and leaves the
+ * streams running. */
+class StubbornCamera final {
+public:
+    explicit StubbornCamera(BackgroundVideo& control) : control_(control)
+    {
+        control_.attach([this] { requested_.store(true); });
+        thread_ = std::thread([this] {
+            std::uint64_t request = 0;
+            while (!quit_.load()) {
+                if (requested_.exchange(false) && control_.take(request)) control_.ended(request, 1);
+                std::this_thread::sleep_for(1ms);
+            }
+        });
+    }
+    ~StubbornCamera()
+    {
+        quit_.store(true);
+        thread_.join();
+        control_.detach();
+    }
+
+private:
+    BackgroundVideo& control_;
+    std::atomic<bool> requested_ {};
+    std::atomic<bool> quit_ {};
+    std::thread thread_;
+};
+
+/* A camera control that answers at once, and records what it was asked. */
+struct RecordingVideo final {
+    BackgroundVideo::Outcome end(Clock::time_point deadline)
+    {
+        deadlines.push_back(deadline);
+        return {1, true, true};
+    }
+    void abandon() { ++abandons; }
+    std::vector<Clock::time_point> deadlines;
+    int abandons {};
+};
+
 const auto saysNothing = [](const std::string&) {};
+
+void sleepUntil(Clock::time_point when) { std::this_thread::sleep_until(when); }
+
+/* ---- What the camera's wait is. */
+
+void aDeadlineLeavesTheCameraWhatIsLeftAfterTheDrain()
+{
+    const Timing timing {1000ms, 2000ms};
+    const auto wait = [&](int held) { return std::chrono::duration_cast<std::chrono::milliseconds>(kernarium::gpu_hold::cameraWait(held, timing)); };
+    require(wait(1) == 2000ms, "a hold with no deadline waits for the camera's own bound");
+    require(wait(3) == 0ms && wait(1000) == 0ms, "a deadline that leaves no more than the drain leaves the camera nothing");
+    require(wait(1100) == 100ms, "and one that leaves a little more, a little");
+    require(wait(2500) == 1500ms, "2.5 s left: the drain's second, and 1.5 s for the camera");
+    require(wait(3000) == 2000ms && wait(4000) == 2000ms, "and never more than the camera's bound");
+}
+
+void aHoldWithADeadlineWaitsForTheCameraOnlyWithinIt()
+{
+    Runtime runtime {Timing {1000ms, 2000ms}};
+    RecordingVideo video;
+    auto began = Clock::now();
+    (void)runtime.gate.set(2500, &video, saysNothing);
+    require(video.deadlines.size() == 1, "the video was asked once");
+    auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(video.deadlines[0] - began);
+    require(wait >= 1500ms && wait < 1700ms, "within what the deadline leaves after the drain: 1.5 s, not the camera's 2 s");
+    require(runtime.gpu.requestsHeld(), "and the gate was held");
+
+    RecordingVideo bounded;
+    began = Clock::now();
+    (void)runtime.gate.set(1, &bounded, saysNothing);
+    wait = std::chrono::duration_cast<std::chrono::milliseconds>(bounded.deadlines.at(0) - began);
+    require(wait >= 2000ms && wait < 2200ms, "a hold with no deadline waits for the camera's own bound");
+
+    RecordingVideo late;
+    (void)runtime.gate.set(900, &late, saysNothing);
+    require(late.deadlines.empty() && late.abandons == 0, "a deadline with nothing left after the drain does not wait for the camera");
+    require(runtime.gpu.requestsHeld() && runtime.lifecycle.gpuHoldRequested(), "and holds");
+
+    RecordingVideo bound;
+    (void)runtime.gate.set(kernarium::gpu_hold::atOnce, &bound, saysNothing);
+    require(bound.deadlines.empty() && bound.abandons == 1, "the bound's hold waits for nothing and ends a wait that is pending");
+}
+
+/* ---- The edge's own bound and the hold that waits for the camera. A job whose display stays on, a video that never
+ * stops and one GPU request that never ends: the clock starts at the edge. */
+
+struct EdgeRun final {
+    std::chrono::milliseconds closed {};
+    std::chrono::milliseconds returned {};
+};
+
+/* `timerAt` and `mainAt`: when, after the edge, the bound's hold and the main path's hold begin (the main path has waited
+ * for the display, a time at most the bound's). A negative time leaves the call out. */
+EdgeRun theEdge(std::chrono::milliseconds timerAt, std::chrono::milliseconds mainAt)
+{
+    Runtime runtime {halfTiming};
+    BackgroundVideo video;
+    StubbornCamera camera {video};
+    auto stuck = runtime.gpu.gate.enter();
+    require(bool(stuck), "a request is running");
+
+    const auto edge = Clock::now();
+    std::thread bound;
+    if (timerAt >= 0ms) {
+        bound = std::thread([&] {
+            sleepUntil(edge + timerAt);
+            (void)runtime.gate.set(kernarium::gpu_hold::atOnce, &video, saysNothing);
+        });
+    }
+    EdgeRun run;
+    if (mainAt >= 0ms) {
+        sleepUntil(edge + mainAt);
+        const auto left = edgeBudget - since(edge);
+        (void)runtime.gate.set(static_cast<int>(left.count()), &video, saysNothing);
+        run.returned = since(edge);
+    }
+    if (bound.joinable()) bound.join();
+    run.closed = runtime.gpu.closedAfter(edge);
+    require(runtime.gpu.requestsHeld() && runtime.lifecycle.gpuHoldRequested(), "the gate is held and the hold is asked for");
+    return run;
+}
+
+void theBoundHoldsByItsTimeAndTheMainPathEndsInsideTheEdge()
+{
+    /* The bound fires first, and the main path meets its hold already in progress. */
+    const auto timerFirst = theEdge(boundAfterTheEdge, boundAfterTheEdge + 20ms);
+    require(timerFirst.closed <= boundAfterTheEdge + 150ms, "the bound closes the gate at its time, not after another camera wait");
+    require(timerFirst.returned < edgeBudget, "and the main path is back inside the edge's deadline");
+    require(timerFirst.returned <= boundAfterTheEdge + halfTiming.drain + 200ms, "as soon as the bound's drain ends: a drain that is waited for once");
+    /* The main path takes its hold first: the bound's lands while it waits for the camera, and ends that wait. */
+    const auto mainFirst = theEdge(boundAfterTheEdge, boundAfterTheEdge - 20ms);
+    require(mainFirst.closed <= boundAfterTheEdge + 150ms, "the bound closes the gate at its time while the main path waits");
+    require(mainFirst.returned < edgeBudget, "and the main path, whose wait it ended, is back inside the edge's deadline");
+    require(mainFirst.returned <= boundAfterTheEdge + halfTiming.drain + 200ms, "as soon as the bound's drain ends, not when its own wait would have");
+}
+
+void aMainPathThatCameLateWaitsForTheCameraOnlyWhatTheEdgeLeaves()
+{
+    /* No bound fires (it was withdrawn, or its thread has not run): the main path alone, after a display wait of the
+     * bound's length. What the edge leaves after the drain is 1.25 s - 0.5 s = 0.75 s, not the camera's second. */
+    const auto run = theEdge(-1ms, boundAfterTheEdge);
+    require(run.closed >= boundAfterTheEdge + 600ms, "the main path waited for the camera");
+    require(run.closed <= edgeBudget - 500ms + 150ms, "but only until the edge budget less the drain, so the drain ends inside the edge");
+}
 
 /* ---- A guest that restarts while the hold waits for the camera does not boot behind the gate. */
 
@@ -189,6 +345,10 @@ int main(int argc, char** argv)
     const char* const only = argc > 1 ? argv[1] : nullptr;
 #define ROW(name) \
     if (only == nullptr || std::string(only) == #name) name()
+    ROW(aDeadlineLeavesTheCameraWhatIsLeftAfterTheDrain);
+    ROW(aHoldWithADeadlineWaitsForTheCameraOnlyWithinIt);
+    ROW(theBoundHoldsByItsTimeAndTheMainPathEndsInsideTheEdge);
+    ROW(aMainPathThatCameLateWaitsForTheCameraOnlyWhatTheEdgeLeaves);
     ROW(aGuestThatRestartsWhileTheHoldWaitsForTheCameraBootsAfterTheRelease);
 #undef ROW
     return 0;
