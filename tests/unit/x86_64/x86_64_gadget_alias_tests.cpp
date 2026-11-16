@@ -36,7 +36,9 @@
  *              prepare of its generation.
  *   memo       an executor does not ask the address space again for a page
  *              whose registration settled, until another holder is added to
- *              the frame, the flush serial moves or the mapping changes.
+ *              the frame, its writers become unknown, the flush serial moves
+ *              or the mapping changes (`memo-unknown` runs the row of the
+ *              unknown writers alone).
  */
 #include "address_space_types.hpp"
 #include "allocation_fault.hpp"
@@ -316,6 +318,9 @@ std::vector<WriterLocation> holders_of(
 			return true;
 	return false;
 }
+
+/* The accounting errors the rows made on purpose. */
+std::uint64_t forced_accounting_errors{};
 
 /* A row leaves the counters that must stay 0 where it found them: no state
  * was destroyed with its locations still in the accounting, no holder
@@ -621,6 +626,81 @@ void test_a_revalidation_uses_the_memo()
 	require(after.registration_memo_hits == before.registration_memo_hits + 1,
 		"a validation did not use the executor's memo");
 	require(after.unheld_runnable == 0);
+}
+
+/* When a frame's writers become unknown the registration of the frame is the
+ * global one, and an executor's memo of an earlier registration must not stand
+ * in for it: the next block asks, is answered globally, and so is the one
+ * after it. The unknown state is forced the way the accounting reports it, by
+ * the removal of a writer location the frame never had. */
+void test_the_unknown_writer_state_ends_the_memo()
+{
+	namespace testing = uml::memory::testing;
+	const auto start = FrameAccounting::diagnostics();
+	constexpr std::uint64_t x = 0x1b00'0000;
+	constexpr std::uint64_t alias = 0x2b00'0000;
+	ScratchBacking frame{"uml-x86-alias-memo-u-XXXXXX", page};
+	for (std::uint8_t block = 0; block < 5; ++block)
+		put(frame, block * 0x100,
+			{0xb8, static_cast<std::uint8_t>(20 + block), 0x00, 0x00, 0x00,
+				0x0f, 0x05});
+	{
+		Space space{9124};
+		space.map(x, frame, 0, rx, 1);
+		/* The alias makes the frame writable: its writers are known. */
+		space.map(alias, frame, 0, rw, 0);
+		const auto backing = testing::mapped_backing(frame.descriptor());
+		require(backing != nullptr);
+		const auto registered = [&](const gadgets::ProgramCacheDiagnostics &before,
+					    const gadgets::ProgramCacheDiagnostics &after,
+					    std::uint64_t asked, std::uint64_t answered) {
+			return after.holder_registrations ==
+					before.holder_registrations + asked &&
+				after.registration_memo_hits ==
+					before.registration_memo_hits + answered;
+		};
+
+		auto before = space.diagnostics();
+		require(space.run(x).rax == 20);
+		auto after = space.diagnostics();
+		require(registered(before, after, 1, 0));
+		before = after;
+		require(space.run(x + 0x100).rax == 21);
+		after = space.diagnostics();
+		require(registered(before, after, 0, 1),
+			"the memo did not answer before the writers became unknown");
+
+		const auto errors = FrameAccounting::diagnostics().errors;
+		FrameAccounting::remove_writer(*backing, 0, {777'777, x});
+		require(FrameAccounting::diagnostics().errors == errors + 1,
+			"a removal of a writer the frame never had was not an error");
+
+		auto globals = FrameAccounting::diagnostics().global_holds;
+		before = after;
+		require(space.run(x + 0x200).rax == 22);
+		after = space.diagnostics();
+		require(registered(before, after, 1, 0),
+			"the memo answered for a frame whose writers became unknown");
+		require(FrameAccounting::diagnostics().global_holds == globals + 1,
+			"a frame whose writers are unknown was not answered globally");
+		/* The global answer is no registration to remember. */
+		globals = FrameAccounting::diagnostics().global_holds;
+		before = after;
+		require(space.run(x + 0x300).rax == 23);
+		after = space.diagnostics();
+		require(registered(before, after, 1, 0),
+			"a global answer was remembered");
+		require(FrameAccounting::diagnostics().global_holds == globals + 1,
+			"a second registration of the unknown frame was not global");
+		require(after.unheld_runnable == 0);
+	}
+	const auto now = FrameAccounting::diagnostics();
+	require(now.nonempty_state_destructions == start.nonempty_state_destructions,
+		"a state was destroyed without its walk");
+	require(now.holder_leaks == start.holder_leaks, "a holder leaked");
+	/* The one error this row made. */
+	require(now.errors == start.errors + 1, "another accounting error was counted");
+	forced_accounting_errors += 1;
 }
 
 /* E7: units that link to each other stay safe when the frame of one of them
@@ -1191,12 +1271,17 @@ int main(int argc, char **argv)
 		test_a_revalidation_uses_the_memo();
 		std::puts("revalidation memo ok");
 	}
+	if (selected("memo") || selected("memo-unknown")) {
+		test_the_unknown_writer_state_ends_the_memo();
+		std::puts("memo and unknown writers ok");
+	}
 	const auto now = FrameAccounting::diagnostics();
 	require(now.holder_leaks == start.holder_leaks, "a holder leaked");
 	require(now.unquiesced_holder_removals == start.unquiesced_holder_removals);
 	require(now.unmarked_holder_removals == start.unmarked_holder_removals);
 	require(now.walked_refusals == start.walked_refusals);
-	require(now.errors == start.errors, "an accounting error was counted");
+	require(now.errors == start.errors + forced_accounting_errors,
+		"an accounting error was counted");
 	std::puts("x86-64 gadget alias tests passed");
 	return EXIT_SUCCESS;
 }

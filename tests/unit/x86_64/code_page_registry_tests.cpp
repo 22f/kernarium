@@ -977,6 +977,35 @@ void test_only_a_settled_registration_is_remembered()
 	stuck.participant.engine_epoch.store(2, std::memory_order_release);
 }
 
+/* A frame whose writers cannot be named is answered globally, and a registration
+ * of it asks for the same retirement again, so a memo never stands in for the
+ * answer: it names no frame. A frame whose writers can be named does. */
+void test_a_global_answer_is_not_remembered()
+{
+	using uml::cpu::x86_64::FrameRegistration;
+	using uml::cpu::x86_64::RegistrationMemo;
+	ScriptedMemory memory;
+	memory.always_unchanged = true;
+	memory.unnameable = true;
+	const auto global = uml::cpu::x86_64::register_frame(
+		memory, nullptr, nullptr, page_at(76));
+	require(global.status == FrameRegistration::settled,
+		"a global answer did not settle");
+	require(global.record == nullptr,
+		"a global answer named the frame it retired every writer for");
+	RegistrationMemo memo;
+	memo.remember(page_at(76), 5, global);
+	require(!memo.holds(memory, page_at(76), 5),
+		"a global answer was remembered");
+	memory.unnameable = false;
+	const auto named = uml::cpu::x86_64::register_frame(
+		memory, nullptr, nullptr, page_at(76));
+	require(named.record == &memory.record_token);
+	memo.remember(page_at(76), 5, named);
+	require(memo.holds(memory, page_at(76), 5),
+		"an answer that named the frame's writers was not remembered");
+}
+
 int main()
 {
 	test_a_memo_answers_for_a_page_that_is_still_held();
@@ -984,6 +1013,7 @@ int main()
 	test_a_memo_is_dropped_at_a_mapping_change();
 	test_a_memo_is_dropped_at_a_serial_move();
 	test_only_a_settled_registration_is_remembered();
+	test_a_global_answer_is_not_remembered();
 	test_gadget_and_jit_participants_of_one_generation_are_both_retired();
 	test_a_repeat_registration_waits_for_the_pending_one();
 	test_membership_is_counted();

@@ -28,7 +28,10 @@ namespace uml::cpu::x86_64 {
  *   - the frame's change count is the one the registration left
  *     (`GuestAddressSpace::frame_hold_unchanged`).
  * Only a registration that settled is remembered: an unsettled one still owes
- * its debt, and a failed or refused one holds nothing.
+ * its debt, and a failed or refused one holds nothing. A registration the
+ * address space answered globally (the frame's writers are not known or too
+ * many to name) names no frame, and the frame's change count moves when its
+ * writers become unknown, so no entry stands in for that answer.
  *
  * One executor's table, touched by its own thread only. */
 class RegistrationMemo final {

@@ -181,6 +181,20 @@ constexpr std::uint64_t execution_gate_closed = std::uint64_t{1} << 63;
 		execution_gate_closed;
 }
 
+/* Makes the frame's writers unknown, under its stripe lock. A registration
+ * of such a frame can name no writer and owes every write translation, which
+ * the memo of an executor that registered the frame earlier cannot say, so
+ * the frame's change count moves in the section that makes the change. The
+ * record is looked for again: one made after the caller looked is the one a
+ * registration holds. */
+void make_unknown(MappedBacking &backing, std::uint64_t offset,
+	std::uint64_t *word) noexcept
+{
+	*word = kind_word(Kind::unknown);
+	if (auto *record = backing.find_frame_record(offset); record != nullptr)
+		record->alias_changes.fetch_add(1, std::memory_order_release);
+}
+
 /* Adds `location` to the frame's writers, under the frame's stripe lock.
  * `record` is the frame's record, found before the lock was taken; null if it
  * has none. When the list needs a record or more room than `spare` brings,
@@ -239,7 +253,7 @@ constexpr std::uint64_t execution_gate_closed = std::uint64_t{1} << 63;
 		if (record == nullptr) {
 			/* Several writers without their list: an error. */
 			accounting_errors.fetch_add(1, std::memory_order_relaxed);
-			*word = kind_word(Kind::unknown);
+			make_unknown(backing, offset, word);
 			return true;
 		}
 		auto &list = record->writers;
@@ -358,7 +372,7 @@ void FrameAccounting::remove_writer(MappedBacking &backing,
 	}
 	const auto fail = [&] {
 		accounting_errors.fetch_add(1, std::memory_order_relaxed);
-		*word = kind_word(Kind::unknown);
+		make_unknown(backing, offset, word);
 	};
 	switch (kind_of(*word)) {
 	case Kind::none:

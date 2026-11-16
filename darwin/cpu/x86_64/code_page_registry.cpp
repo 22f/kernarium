@@ -558,8 +558,13 @@ FrameRegistrationOutcome register_frame_uncounted(
 	}
 	memory.clear_code_debt(page, execution_context, hold);
 	outcome.status = FrameRegistration::settled;
-	outcome.record = hold.record;
-	outcome.alias_changes = hold.alias_changes;
+	/* A global answer names no frame to remember: the frame's writers are not
+	 * known or too many to name, and a registration of it asks for the same
+	 * retirement again. */
+	if (hold.result != ::uml::memory::FrameHoldResult::global) {
+		outcome.record = hold.record;
+		outcome.alias_changes = hold.alias_changes;
+	}
 	return outcome;
 }
 

@@ -223,8 +223,9 @@ Known deviations from x86 that remain:
   The executor remembers the last settled registration of a page and skips
   the address-space call while the generation's mappings are unchanged, its
   flush serial is the one it was taken at, and the frame's change count has
-  not moved; an unsettled, failed or refused registration is never
-  remembered ([`../registration_memo.hpp`](../registration_memo.hpp)).
+  not moved. A holder added to the frame, and its writers becoming unknown,
+  move the count; an unsettled, failed, refused or global registration is
+  never remembered ([`../registration_memo.hpp`](../registration_memo.hpp)).
 - A write fill is tagged when its frame has a holder at another location,
   whether or not the page it fills is executable, and a store through that
   entry publishes at every holder: the holders in this generation cool their
