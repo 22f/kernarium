@@ -683,7 +683,9 @@ channel: route `p0007` records the setting in `persist.sys.usb.config` and
 restarts adbd instead of stopping it, and route `p0011` refuses every key but the
 host's, with no prompt, while USB and wireless debugging are both off. `adb root`
 is refused at once on a `user` build whatever the authorization policy, with
-AOSP's answer for a production build (route `p0011`). SELinux stays enforcing in
+AOSP's answer for a production build (route `p0011`). Route `p0011` also makes adbd
+refuse an `adb reverse` whose device side is a vsock socket, the socket family of the
+host-to-guest channels, or a descriptor adbd already holds. SELinux stays enforcing in
 both variants. `tests/integration/android/run_android_adb_debugging.py`
 qualifies this contract.
 

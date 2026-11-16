@@ -560,7 +560,7 @@ ELSEWHERE = (
     ("R1-R24, U1-U5", "the JVM rows of tests/tooling/android (android17-sms-service)"),
     ("U6", "the target-files verifier and its fixtures (lineage24-target-files-fixtures)"),
     ("B1", "the unsigned image build of the change, on each variant built"),
-    ("H12", "a read of the pinned adb source, made when the adbd topic is written"),
+    ("H12", "the commit message of the adbd topic (route p0011) names the function and the listen forms; G2e tries each"),
 )
 
 

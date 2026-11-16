@@ -1013,8 +1013,8 @@ drops a leading byte order mark; the request's parser and the answers against th
 golden file the host's tests read too; the delivery record at each point where a
 request can end (a forced end, a failing file operation, a second process on its
 lock); and the host channel's server, frame and admission over stand-ins for the
-platform's socket classes. The broadcasts, the inbox and the socket calls need a
-built image.
+platform's socket classes. `Delivery` and `HostChannel` (the broadcasts, the inbox
+and the socket calls) need a built image.
 `android-vulkan-smoke` (integration) registers when `UML_ANDROID_VULKAN_SMOKE_RELEASE`
 names a release and runs the image's `kernarium_vk_ahb_import` in a guest: hardware
 buffers imported and read back, and the guest memory file descriptors
@@ -1139,8 +1139,8 @@ guest's cost per report and the relay's memory. `android17-gamepad-runner`
 [`sms/build-apk.sh`](../tests/integration/android/sms/README.md): the runner plays
 the host application over a launcher forward to the service's port and sends the
 contract's frames. It checks that a request from the host is handed over and
-answered, that a delivery asked from adb (the provider, a forward to the port, a
-reverse forward) is refused, the service's domain and denials, every vsock listener
+answered, that a delivery asked from adb (a forward to the port) is refused, that
+adbd refuses an `adb reverse` onto a vsock port, the service's domain and denials, every vsock listener
 of the guest, and that neither the shell nor an application can create a vsock
 socket; the record mode checks that no message is handed over twice across a
 crash, a reboot and fifty kills. `--mode proof` (a userdebug build) writes a
