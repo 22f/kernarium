@@ -26,6 +26,9 @@
  *   helpers    a store that a helper makes and publishes -- x87, extended
  *              state, string, ENTER, the segment model's, across a page --
  *              leaves the running block as the ordinary store does.
+ *   enter,     a later store of an instruction that already reached the
+ *   stos       running block (ENTER's next push, the next element of a
+ *              repeated STOS) publishes for itself.
  *   registry   a registry that could not be made is made again by the next
  *              prepare of its generation.
  */
@@ -813,6 +816,112 @@ void test_cross_page_stores_leave_the_block()
 	}
 }
 
+/* A later store of an instruction that has already reached the running block
+ * publishes for itself. ENTER with nesting level 2 pushes three times through
+ * W: the first push, into the page of the block that runs it, reaches the
+ * block; the second, into the page below, which another frame backs, writes
+ * the bytes of a block of that frame cached at another address (X2). The
+ * instruction leaves, and X2 runs what the push wrote. */
+void test_enter_pushes_publish_each()
+{
+	const Clean clean;
+	constexpr std::uint64_t running = 0x1900'0000;
+	constexpr std::uint64_t cached = 0x1a00'0000;
+	constexpr std::uint64_t stack = 0x2900'0000;
+	constexpr std::uint64_t data = 0x2a00'0000;
+	ScratchBacking first{"uml-x86-alias-enter-1-XXXXXX", page};
+	ScratchBacking second{"uml-x86-alias-enter-2-XXXXXX", page};
+	ScratchBacking value{"uml-x86-alias-enter-v-XXXXXX", page};
+	std::vector<std::byte> bytes(page, std::byte{0x90});
+	/* enter 0, 2 */
+	for (const auto [at, byte] : {std::pair{0, 0xc8}, {1, 0x00}, {2, 0x00},
+		{3, 0x02}})
+		bytes[at] = static_cast<std::byte>(byte);
+	first.put(0, bytes);
+	/* The block X2 runs: mov al, 1 ; syscall, at the page's last eight
+	 * bytes. */
+	std::vector<std::byte> tail(page, std::byte{0x90});
+	std::size_t at = 0xff8;
+	for (const auto byte : {0xb0, 0x01, 0x0f, 0x05})
+		tail[at++] = static_cast<std::byte>(byte);
+	second.put(0, tail);
+	/* What the second push writes: mov al, 2 ; syscall. */
+	std::vector<std::byte> pushed(page, std::byte{0x90});
+	at = 0;
+	for (const auto byte : {0xb0, 0x02, 0x0f, 0x05})
+		pushed[at++] = static_cast<std::byte>(byte);
+	value.put(0, pushed);
+	Space space{9430};
+	space.map(running, first, 0, rx, 1);
+	space.map(cached, second, 0, rx, 1);
+	/* The stack grows down from the top of the first frame's page, through
+	 * W, into the second frame's. */
+	space.map(stack, second, 0, rw, 0);
+	space.map(stack + page, first, 0, rw, 0);
+	space.map(data, value, 0, rw, 0);
+	const auto backing = uml::memory::testing::mapped_backing(second.descriptor());
+	require(backing != nullptr);
+	/* X2 is translated and cached before the instruction runs. */
+	for (unsigned round = 0; round < 2; ++round)
+		require((space.run_to_system_call(cached + 0xff8).rax & 0xff) == 1);
+	CpuState cpu{};
+	cpu.rip = running;
+	cpu.gpr(Register::rsp) = stack + page + 8;
+	/* ENTER's nesting level loads the word below RBP. */
+	cpu.gpr(Register::rbp) = data + 8;
+	const auto entered = space.step(cpu);
+	require(entered.event == EngineEvent::continued && entered.retired == 1,
+		"the instruction that stored over the running block did not leave it");
+	require((space.run_to_system_call(cached + 0xff8).rax & 0xff) == 2,
+		"a later push of ENTER did not reach a block cached at another address");
+	require(space.diagnostics().unheld_runnable == 0);
+}
+
+/* The same for the elements of a repeated STOS: the first sixteen bytes land
+ * in the frame of the block that runs it, the next four in the first bytes of
+ * the frame after W's page, whose block is cached at another address. */
+void test_repeated_stores_publish_each()
+{
+	const Clean clean;
+	constexpr std::uint64_t running = 0x1b00'0000;
+	constexpr std::uint64_t cached = 0x1c00'0000;
+	constexpr std::uint64_t stack = 0x2b00'0000;
+	ScratchBacking first{"uml-x86-alias-stos-1-XXXXXX", page};
+	ScratchBacking second{"uml-x86-alias-stos-2-XXXXXX", page};
+	std::vector<std::byte> bytes(page, std::byte{0x90});
+	/* rep stosb, at the end of the page */
+	bytes[0xff0] = std::byte{0xf3};
+	bytes[0xff1] = std::byte{0xaa};
+	first.put(0, bytes);
+	/* mov al, 1 ; syscall ; syscall. The four bytes written over it make
+	 * `mov al, 0xb0 ; mov al, 0xb0`, and the syscall after them runs. */
+	std::vector<std::byte> head(page, std::byte{0x90});
+	std::size_t at = 0;
+	for (const auto byte : {0xb0, 0x01, 0x0f, 0x05, 0x0f, 0x05})
+		head[at++] = static_cast<std::byte>(byte);
+	second.put(0, head);
+	Space space{9431};
+	space.map(running, first, 0, rx, 1);
+	space.map(cached, second, 0, rx, 1);
+	space.map(stack, first, 0, rw, 0);
+	space.map(stack + page, second, 0, rw, 0);
+	for (unsigned round = 0; round < 2; ++round)
+		require((space.run_to_system_call(cached).rax & 0xff) == 1);
+	CpuState cpu{};
+	cpu.rip = running + 0xff0;
+	cpu.gpr(Register::rdi) = stack + 0xff0;
+	cpu.gpr(Register::rcx) = 20;
+	cpu.gpr(Register::rax) = 0xb0;
+	const auto stored = space.step(cpu);
+	require(stored.event == EngineEvent::continued,
+		"the repeated store did not leave the block it wrote");
+	require(cpu.gpr(Register::rcx) == 0, "the repeated store did not finish");
+	require((space.run_to_system_call(cached).rax & 0xff) == 0xb0,
+		"a later element of a repeated store did not reach a block cached at "
+		"another address");
+	require(space.diagnostics().unheld_runnable == 0);
+}
+
 /* A registry that could not be made is made again: the executor prepared for
  * a generation whose registry failed, then for another, and again for the
  * first, finds nothing left from the failure. */
@@ -877,6 +986,14 @@ int main(int argc, char **argv)
 		std::puts("helper store value ok");
 		test_cross_page_stores_leave_the_block();
 		std::puts("cross-page stores ok");
+	}
+	if (selected("enter")) {
+		test_enter_pushes_publish_each();
+		std::puts("enter pushes ok");
+	}
+	if (selected("stos")) {
+		test_repeated_stores_publish_each();
+		std::puts("repeated stores ok");
 	}
 	if (selected("registry")) {
 		test_a_failed_registry_is_made_again();

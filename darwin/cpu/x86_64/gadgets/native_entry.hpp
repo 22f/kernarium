@@ -29,11 +29,14 @@ struct NativeExecutionContext final {
 	/* This run holds the lock that serializes locked operands no exclusive
 	 * access can cover; the fault tail releases it. */
 	std::uint8_t split_lock{};
-	/* A store of this run wrote, through another address of its frame, into
-	 * the block that is running. It stays set for the rest of the run, so the
-	 * instruction that finishes after a helper published the store leaves
-	 * the block as the store's own epilogue does. It sits in the padding
-	 * after `split_lock`; no offset the assembly names moves. */
+	/* A helper published a store of this run that wrote, through another
+	 * address of its frame, into the block that is running, and its epilogue
+	 * has not yet answered for it: the range is `write_reached_address` and
+	 * `write_reached_size`. The epilogue of that store takes the reach (it
+	 * leaves the block as the store's own epilogue does, and does not publish
+	 * again), and a later store of the same instruction owes its own
+	 * publication. It sits in the padding after `split_lock`; no offset the
+	 * assembly names moves. */
 	std::uint8_t write_reached{};
 	std::size_t instruction_limit{};
 	IndirectLink *indirect_miss{};
@@ -63,6 +66,9 @@ struct NativeExecutionContext final {
 	/* A segment-fault exit's #NP, #SS or #GP and its error code. */
 	std::uint8_t segment_vector{};
 	std::uint32_t segment_error{};
+	/* The range of the store `write_reached` stands for. */
+	std::uint64_t write_reached_address{};
+	std::uint64_t write_reached_size{};
 };
 
 static_assert(offsetof(NativeExecutionContext, tlb_entries) ==

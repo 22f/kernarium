@@ -151,8 +151,11 @@ bool publish_code_write(NativeExecutionContext &context,
 		}
 		completed += count;
 	}
-	if (overlaps)
+	if (overlaps) {
 		context.write_reached = 1;
+		context.write_reached_address = address;
+		context.write_reached_size = size;
+	}
 	return overlaps;
 }
 
@@ -297,19 +300,33 @@ extern "C" std::uint32_t uml_x86_64_gadget_publish_code_write(
 	/* A helper that stored and published itself -- a bulk store, a store
 	 * across a page, the segment model's -- found the store in the block
 	 * that is running and left that to the instruction's epilogue, which is
-	 * this call: the publication is not owed twice, the exit is. */
-	if (context->write_reached != 0)
-		return 1;
-	if (((address ^ (address + size - 1U)) & page_mask) != 0)
-		return publish_code_write(*context, address, size) ? 1U : 0U;
+	 * this call: the publication is not owed twice, the exit is. The reach
+	 * is taken here, once, by the store it stands for; a later store of the
+	 * instruction (ENTER's next push, the next element of a repeated string
+	 * store) publishes for itself. A reach that no store of this range
+	 * answered for, because its epilogue never ran, is still owed as an
+	 * exit. */
+	bool owed = false;
+	if (context->write_reached != 0) {
+		const auto begin = context->write_reached_address;
+		const auto end = begin + context->write_reached_size;
+		context->write_reached = 0;
+		if (address < end && address + size > begin)
+			return 1;
+		owed = true;
+	}
+	if (((address ^ (address + size - 1U)) & page_mask) != 0) {
+		const bool reached = publish_code_write(*context, address, size);
+		/* This call is the epilogue: it answered for the store itself. */
+		context->write_reached = 0;
+		return reached || owed ? 1U : 0U;
+	}
 	invalidate_cached_code(*context, address, size);
 	bool overlaps = false;
 	if (context->write_code != write_code_published &&
 	    !publish_frame_holders(*context, address, size, overlaps))
 		publish_code_page(*context, address);
-	if (overlaps)
-		context->write_reached = 1;
-	return overlaps ? 1U : 0U;
+	return overlaps || owed ? 1U : 0U;
 }
 
 extern "C" std::uint64_t uml_x86_64_gadget_random_value() noexcept
