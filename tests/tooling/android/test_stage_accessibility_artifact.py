@@ -211,6 +211,44 @@ class StageTests(unittest.TestCase):
         (artifact / "artifact.json").write_text(json.dumps(description))
         self.refused(artifact, f"holds a value of the machine that built it: classes.dex: {identity.FORBIDDEN_ROOTS[1]}")
 
+    def target_files(self, artifact: Path, signed: bool = True, **replace: bytes) -> Path:
+        """A target-files tree carrying the artifact's APKs, re-signed as the release does."""
+        target = self.root / "target-files"
+        for name, package in identity.APKS.items():
+            directory = target / "PRODUCT/app" / Path(name).stem
+            directory.mkdir(parents=True)
+            if name in replace:
+                make_apk(directory / name, package, replace[name])
+                continue
+            with zipfile.ZipFile(artifact / name) as built, zipfile.ZipFile(directory / name, "w") as copy:
+                for info in built.infolist():
+                    copy.writestr(info, built.read(info.filename))
+                if signed:
+                    copy.writestr("META-INF/RELEASE.RSA", b"another signature")
+        return target
+
+    def test_the_apks_of_the_target_files_are_the_artifacts_whatever_signs_them(self) -> None:
+        artifact = self.accepted()
+        target = self.target_files(artifact)
+        result = self.stager(artifact, "--check", "--target-files", str(target))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_another_apk_in_the_target_files_is_refused(self) -> None:
+        artifact = self.accepted()
+        target = self.target_files(artifact, **{"TalkBack.apk": b"other classes"})
+        self.refused(artifact, "the target files' TalkBack.apk is not the accessibility artifact's",
+                     "--check", "--target-files", str(target))
+
+    def test_an_apk_missing_from_the_target_files_is_refused(self) -> None:
+        artifact = self.accepted()
+        target = self.target_files(artifact)
+        (target / "PRODUCT/app/eSpeakNG/eSpeakNG.apk").unlink()
+        self.refused(artifact, "the target files carry no eSpeakNG.apk", "--check", "--target-files", str(target))
+
+    def test_target_files_without_check_are_refused(self) -> None:
+        artifact = self.accepted()
+        self.refused(artifact, "--target-files goes with --check", "--accept", "--target-files", str(self.root))
+
     def test_a_description_without_its_sources_is_refused(self) -> None:
         artifact = make_artifact(self.root, self.tree, sources={"talkback": {}})
         self.refused(artifact, "artifact.json records no source espeak-ng")

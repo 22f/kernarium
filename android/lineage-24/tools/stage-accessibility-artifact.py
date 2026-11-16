@@ -14,6 +14,10 @@ APK and what they were built from. The tool accepts an artifact only when
   - artifact.json is the one android/lineage-24/metadata/accepted-
     accessibility.env names.
 
+--target-files DIR also checks that the APKs a build carries (PRODUCT/app of
+a target-files tree, signed or not) are the artifact's: the same package and
+the same entries, whatever signature the build added.
+
 --accept writes that descriptor from an artifact that passes the first two.
 Staging writes vendor/kernarium/accessibility: the two APKs and the Android.bp
 of the filegroups that overlay/accessibility/Android.bp imports. A file whose
@@ -21,7 +25,7 @@ bytes did not change keeps its time, so an unchanged artifact rebuilds
 nothing. Anything else the directory held is removed.
 
     stage-accessibility-artifact.py --artifact DIR --aosp-source DIR
-    stage-accessibility-artifact.py --artifact DIR --check
+    stage-accessibility-artifact.py --artifact DIR --check [--target-files DIR]
     stage-accessibility-artifact.py --artifact DIR --accept
 """
 
@@ -134,6 +138,19 @@ def accepted(identity, root: Path, description: dict, digest: str) -> None:
         fail(f"{identity.DESCRIPTOR} differs from this artifact at {', '.join(names)}")
 
 
+def linked(identity, description: dict, target_files: Path) -> None:
+    """Refuses unless the target files carry the artifact's APKs."""
+    for name, entry in sorted(description["apks"].items()):
+        path = target_files / "PRODUCT/app" / Path(name).stem / name
+        if not path.is_file() or path.is_symlink():
+            fail(f"the target files carry no {name} at PRODUCT/app/{Path(name).stem}")
+        problem = identity.package_problem(path, entry["package"])
+        if problem:
+            fail(f"the target files' {name} {problem}")
+        if identity.entries_sha256(path) != entry["entries_sha256"]:
+            fail(f"the target files' {name} is not the accessibility artifact's: its entries differ")
+
+
 def blueprint() -> bytes:
     groups = "".join(
         f'\nfilegroup {{\n    name: "{group}",\n    srcs: ["{name}"],\n}}\n' for name, group in sorted(GROUPS.items())
@@ -177,11 +194,15 @@ def main() -> int:
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[3],
                         help="the source tree whose tracked inputs the artifact must match")
     parser.add_argument("--check", action="store_true", help="check the artifact and stage nothing")
+    parser.add_argument("--target-files", type=Path,
+                        help="with --check: a target-files tree whose APKs must be the artifact's")
     parser.add_argument("--accept", action="store_true",
                         help="record a checked artifact in the tracked descriptor")
     args = parser.parse_args()
     if [args.check, args.accept, args.aosp_source is not None].count(True) != 1:
         fail("give one of --aosp-source, --check or --accept")
+    if args.target_files is not None and not args.check:
+        fail("--target-files goes with --check")
     identity = load_identity(args.repo_root.resolve())
     description, digest = checked(identity, args.repo_root.resolve(), args.artifact)
     if args.accept:
@@ -190,6 +211,8 @@ def main() -> int:
         print(f"accepted the accessibility artifact in {identity.DESCRIPTOR}")
         return 0
     accepted(identity, args.repo_root.resolve(), description, digest)
+    if args.target_files is not None:
+        linked(identity, description, args.target_files.resolve())
     if args.check:
         print(f"accessibility artifact checks: {', '.join(sorted(description['apks']))}")
         return 0
