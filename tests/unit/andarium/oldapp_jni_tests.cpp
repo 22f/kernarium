@@ -35,10 +35,13 @@
 #include "jni_abi.hpp"
 #include "jni_shim.hpp"
 #include "require.hpp"
+#include "wait_until.hpp"
+#include "watchdog.hpp"
 
 using namespace oldapp;
 using namespace oldapp::jni;
 using uml::testing::require;
+using uml::testing::waitUntil;
 
 namespace {
 
@@ -126,6 +129,84 @@ struct World {
 };
 World world;
 
+// The fake runtime's lock. Several cases run the layer on more than one thread at once (a hook starts a thread, a thread waits
+// for the layer's mutex while the owner holds it), and the layer calls the runtime from each of them, so the state above is
+// guarded by this one leaf mutex. It is held only while fake-runtime code reads or writes that state, never across a test hook,
+// a wait for another thread or a call into the layer, and the only lock taken under it is the flip model's, briefly and never
+// waited on. So it cannot deadlock a case, and it hides no ordering a case is about: the layer's own mutex and the order of the
+// layer's calls are untouched. A helper that guards itself may be called from one that holds the lock already (t_world_depth
+// counts the thread's holds). A test body reads `world` without the lock only where no other thread touches it: before a thread
+// starts, after it has been joined, or while the others wait on the body.
+std::mutex g_world_mutex;
+thread_local int t_world_depth = 0;
+class WorldGuard {
+public:
+    WorldGuard() {
+        if (t_world_depth++ == 0) g_world_mutex.lock();
+    }
+    ~WorldGuard() {
+        if (--t_world_depth == 0) g_world_mutex.unlock();
+    }
+    WorldGuard(const WorldGuard&) = delete;
+    WorldGuard& operator=(const WorldGuard&) = delete;
+};
+// For its scope the thread holds none of the lock, whatever depth it was at: a test hook, or a wait for another thread, runs
+// inside it. The lock is taken again, at the same depth, when the scope ends.
+class WorldUnlocked {
+public:
+    WorldUnlocked() : depth_(t_world_depth) {
+        if (depth_ != 0) {
+            t_world_depth = 0;
+            g_world_mutex.unlock();
+        }
+    }
+    ~WorldUnlocked() {
+        if (depth_ != 0) {
+            g_world_mutex.lock();
+            t_world_depth = depth_;
+        }
+    }
+    WorldUnlocked(const WorldUnlocked&) = delete;
+    WorldUnlocked& operator=(const WorldUnlocked&) = delete;
+
+private:
+    int depth_;
+};
+
+// A test hook: what a case has the fake run at a chosen point, so that another thread (or the case) acts meanwhile. The slot is
+// guarded like the rest of the fake's state; the fake copies or takes the hook out under the lock and runs it with the lock
+// released (WorldUnlocked), so that whatever the hook does, on this thread or on one it starts, meets no lock of the fake.
+template <class... Args>
+class Hook {
+public:
+    Hook& operator=(std::nullptr_t) {
+        WorldGuard guard;
+        fn_ = nullptr;
+        return *this;
+    }
+    template <class F>
+    Hook& operator=(F&& f) {
+        WorldGuard guard;
+        fn_ = std::forward<F>(f);
+        return *this;
+    }
+    // A copy of the hook; it stays in the slot (a hook that clears itself, or that stays for the rest of a case).
+    std::function<void(Args...)> peek() const {
+        WorldGuard guard;
+        return fn_;
+    }
+    // The hook, out of its slot: it runs once, in the call that finds it.
+    std::function<void(Args...)> take() {
+        WorldGuard guard;
+        std::function<void(Args...)> hook = std::move(fn_);
+        fn_ = nullptr;
+        return hook;
+    }
+
+private:
+    std::function<void(Args...)> fn_;
+};
+
 thread_local int t_ended_depth = 0;  // how deep this thread is in the ended lock (a wrapper is never entered under it)
 thread_local int t_regions = 0;      // the critical regions this thread has open (CheckJNI's rule: nothing else runs inside one)
 thread_local int t_flips = 0;        // the thread's flip count: raised only by a get that raises_the_flip_count (the nesting the flip rule sees)
@@ -134,6 +215,7 @@ thread_local int t_app_regions = 0;  // the ones the application holds: the coun
 // CheckJNI's rules: nothing but the critical pair runs inside a critical region (a thread's own), and almost nothing with
 // an exception pending.
 void jni_allowed(const char* what) {
+    WorldGuard guard;
     require(t_regions == 0, what);
     require(!world.exception_pending, what);
 }
@@ -164,7 +246,7 @@ bool g_flip_running = false;      // a flip is pending or running
 int g_open_regions = 0;           // threads with a region open
 int g_gets_that_waited = 0;       // critical gets that found the flip pending and waited for it
 std::atomic<int> g_flip_timeouts{0};
-std::function<void()> g_before_first_critical;  // runs on the first thread that makes a critical get, before the get waits
+Hook<> g_before_first_critical;  // runs on the first thread that makes a critical get, before the get waits
 void flip_enter_region() {
     std::unique_lock<std::mutex> l(g_flip_mutex);
     if (g_flip_running) {
@@ -194,18 +276,21 @@ void flip_end() {
 }
 
 bool live(jobject ref) {
+    WorldGuard guard;
     Ref* r = static_cast<Ref*>(ref);
     if (world.revoked.count(r) != 0) return false;
     return world.locals.count(r) != 0 || world.globals.count(r) != 0 || world.weaks.count(r) != 0 ||
            world.class_globals.count(r) != 0;
 }
 Ref* new_local(Obj* object) {
+    WorldGuard guard;
     Ref* ref = new Ref{object, false};
     world.locals.insert(ref);
     if (!world.frames.empty()) world.frames.back().push_back(ref);
     return ref;
 }
 Obj* object_of(jobject ref) {
+    WorldGuard guard;
     require(live(ref), "the runtime is handed a live reference, never a shadow");
     return static_cast<Ref*>(ref)->object;
 }
@@ -213,6 +298,7 @@ Obj* object_of(jobject ref) {
 // stops being valid at that point, as the end of a block by Java code that runs during the call would make it. A wrapper
 // that hands the runtime the block's own reference then fails the liveness requirement; one that made its own does not.
 void revoke_if_asked() {
+    WorldGuard guard;
     if (!world.revoke_next) return;
     world.revoke_next = false;
     for (Ref* ref : world.globals) {
@@ -221,6 +307,7 @@ void revoke_if_asked() {
 }
 
 jobject byte_array(const std::vector<uint8_t>& bytes) {
+    WorldGuard guard;
     Obj* object = new Obj{bytes, true};
     return new_local(object);
 }
@@ -236,6 +323,7 @@ bool g_without_own_check = false;  // the next install gives the platform no is_
 
 bool fake_is_app(const void*) {
     require(t_ended_depth == 0, "a wrapper was entered while the ended lock is held");
+    WorldGuard guard;
     ++world.app_checks;
     return g_app_caller;
 }
@@ -254,8 +342,14 @@ void* fake_thread_state(size_t size) {
     }
     return t_block;
 }
-void fake_log(const char* message, long a, long b) { world.logs.push_back({message, a, b}); }
-uint32_t fake_now() { return world.clock_ms; }
+void fake_log(const char* message, long a, long b) {
+    WorldGuard guard;
+    world.logs.push_back({message, a, b});
+}
+uint32_t fake_now() {
+    WorldGuard guard;
+    return world.clock_ms;
+}
 bool g_baseline_fails = false;
 void* fake_alloc_baseline(size_t bytes) { return g_baseline_fails ? nullptr : std::malloc(bytes); }
 void fake_free_baseline(void* baseline) { std::free(baseline); }
@@ -266,6 +360,7 @@ bool fake_make_read_only(void*, size_t) { return g_read_only_ok; }
 
 // The kinds of a method's parameters from its signature, for an ID the layer never saw being looked up.
 bool fake_describe(Env*, void* const*, void* id, bool, jobject, char* kinds, unsigned capacity, unsigned* count) {
+    WorldGuard guard;
     ++world.describe_calls;
     const auto found = world.methods.find(id);
     if (world.describe_fails || found == world.methods.end()) return false;
@@ -322,10 +417,12 @@ const Platform kPlatform{fake_is_app, fake_thread_state, fake_log, fake_make_wri
                          fake_is_own, fake_mutex_lock, fake_mutex_unlock, fake_now_ns, fake_yield};
 
 jsize f_GetArrayLength(Env*, jarray a) {
+    WorldGuard guard;
     not_under_mutex("GetArrayLength is not on the list of calls under the mutex");
     return static_cast<jsize>(object_of(a)->bytes.size());
 }
 jobject f_NewByteArray(Env*, jsize n) {
+    WorldGuard guard;
     not_under_mutex("NewByteArray (an allocation in the Java heap can wait for the collector) under the mutex");
     ++world.new_array_calls;
     if (world.new_array_fails) {
@@ -334,8 +431,9 @@ jobject f_NewByteArray(Env*, jsize n) {
     }
     return byte_array(std::vector<uint8_t>(static_cast<size_t>(n), 0));
 }
-std::function<void()> g_after_set;  // runs inside a SetByteArrayRegion, after it copied
+Hook<> g_after_set;  // runs inside a SetByteArrayRegion, after it copied
 void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* buf) {
+    WorldGuard guard;
     on_the_list("SetByteArrayRegion");
     revoke_if_asked();
     jni_allowed("SetByteArrayRegion where JNI is not allowed (a critical region, or an exception pending)");
@@ -347,14 +445,14 @@ void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* b
         return;
     }
     std::memcpy(bytes.data() + start, buf, size_t(len));
-    if (g_after_set) {
-        auto hook = g_after_set;
-        g_after_set = nullptr;
+    if (auto hook = g_after_set.take()) {
+        WorldUnlocked unlocked;
         hook();
     }
 }
-std::function<void()> g_after_get;  // runs inside a GetByteArrayRegion, after it copied: another thread acts meanwhile
+Hook<> g_after_get;  // runs inside a GetByteArrayRegion, after it copied: another thread acts meanwhile
 void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
+    WorldGuard guard;
     on_the_list("GetByteArrayRegion");
     revoke_if_asked();
     jni_allowed("GetByteArrayRegion where JNI is not allowed (a critical region, or an exception pending)");
@@ -365,13 +463,13 @@ void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
         return;
     }
     std::memcpy(buf, bytes.data() + start, size_t(len));
-    if (g_after_get) {
-        auto hook = g_after_get;
-        g_after_get = nullptr;
+    if (auto hook = g_after_get.take()) {
+        WorldUnlocked unlocked;
         hook();
     }
 }
 jbyte* f_GetByteArrayElements(Env*, jarray a, jboolean* is_copy) {
+    WorldGuard guard;
     not_under_mutex("GetByteArrayElements under the mutex");
     revoke_if_asked();
     jni_allowed("GetByteArrayElements where JNI is not allowed");
@@ -379,6 +477,7 @@ jbyte* f_GetByteArrayElements(Env*, jarray a, jboolean* is_copy) {
     return reinterpret_cast<jbyte*>(object_of(a)->bytes.data());
 }
 void f_ReleaseByteArrayElements(Env*, jarray a, jbyte* p, jint) {
+    WorldGuard guard;
     on_the_list("ReleaseByteArrayElements");
     revoke_if_asked();
     (void)object_of(a);
@@ -389,13 +488,11 @@ void f_ReleaseByteArrayElements(Env*, jarray a, jbyte* p, jint) {
 // flip count decides whether a get waits, and the layer cannot know it. A get that raises the thread's count from zero waits
 // for a pending flip; the hook runs just before that wait.
 void begin_region(const Obj* object) {
+    WorldGuard guard;
     if (raises_the_flip_count(object)) {
         if (t_flips == 0) {
-            if (g_before_first_critical) {
-                auto hook = g_before_first_critical;
-                g_before_first_critical = nullptr;
-                hook();
-            }
+            WorldUnlocked unlocked;  // the hook, and the wait for a pending flip, run without the fake's lock
+            if (auto hook = g_before_first_critical.take()) hook();
             flip_enter_region();
         }
         ++t_flips;
@@ -404,6 +501,7 @@ void begin_region(const Obj* object) {
     ++world.critical;
 }
 void end_region(const Obj* object) {
+    WorldGuard guard;
     require(world.critical > 0 && t_regions > 0, "a critical region was open");
     --world.critical;
     --t_regions;
@@ -413,6 +511,7 @@ void end_region(const Obj* object) {
     }
 }
 void* f_GetPrimitiveArrayCritical(Env*, jarray a, jboolean* is_copy) {
+    WorldGuard guard;
     on_the_list("GetPrimitiveArrayCritical");
     ++world.critical_gets;
     not_under_mutex("a critical get under the mutex");
@@ -422,21 +521,22 @@ void* f_GetPrimitiveArrayCritical(Env*, jarray a, jboolean* is_copy) {
     if (is_copy) *is_copy = 0;
     return object->bytes.data();
 }
-std::function<void()> g_in_release_critical;  // runs inside a ReleasePrimitiveArrayCritical, after it closed the region
+Hook<> g_in_release_critical;  // runs inside a ReleasePrimitiveArrayCritical, after it closed the region
 void f_ReleasePrimitiveArrayCritical(Env*, jarray a, void* p, jint) {
+    WorldGuard guard;
     revoke_if_asked();
     Obj* object = object_of(a);
     ++world.release_calls;
     world.released.push_back(p);
     end_region(object);
-    if (g_in_release_critical) {
-        auto hook = g_in_release_critical;
-        g_in_release_critical = nullptr;
+    if (auto hook = g_in_release_critical.take()) {
+        WorldUnlocked unlocked;
         hook();
     }
 }
 // A string's critical: a compressed string's is a copy (no flip count), an uncompressed movable string's raises the count.
 const jchar* f_GetStringCritical(Env*, jstring s, jboolean* is_copy) {
+    WorldGuard guard;
     on_the_list("GetStringCritical");
     not_under_mutex("GetStringCritical under the mutex");
     Obj* object = object_of(s);
@@ -446,6 +546,7 @@ const jchar* f_GetStringCritical(Env*, jstring s, jboolean* is_copy) {
 }
 void f_ReleaseStringCritical(Env*, jstring s, const jchar*) { end_region(object_of(s)); }
 void f_DeleteLocalRef(Env*, jobject o) {
+    WorldGuard guard;
     on_the_list("DeleteLocalRef");
     Ref* ref = static_cast<Ref*>(o);
     require(world.locals.erase(ref) == 1, "a local reference is deleted once, and only while it is live");
@@ -455,6 +556,7 @@ void f_DeleteLocalRef(Env*, jobject o) {
     delete ref;
 }
 jobject f_NewGlobalRef(Env*, jobject o) {
+    WorldGuard guard;
     on_the_list("NewGlobalRef");
     jni_allowed("NewGlobalRef where JNI is not allowed");
     require(live(o), "NewGlobalRef is handed a live reference, never a shadow");
@@ -464,6 +566,7 @@ jobject f_NewGlobalRef(Env*, jobject o) {
     return ref;
 }
 jobject f_NewWeakGlobalRef(Env*, jobject o) {
+    WorldGuard guard;
     on_the_list("NewWeakGlobalRef");
     jni_allowed("NewWeakGlobalRef where JNI is not allowed");
     ++world.weak_new_calls;
@@ -473,6 +576,7 @@ jobject f_NewWeakGlobalRef(Env*, jobject o) {
     return ref;
 }
 void f_DeleteWeakGlobalRef(Env*, jobject o) {
+    WorldGuard guard;
     on_the_list("DeleteWeakGlobalRef");
     require(t_regions == 0, "DeleteWeakGlobalRef inside a critical region");
     Ref* ref = static_cast<Ref*>(o);
@@ -480,16 +584,19 @@ void f_DeleteWeakGlobalRef(Env*, jobject o) {
     delete ref;
 }
 void f_ExceptionClear(Env*) {
+    WorldGuard guard;
     on_the_list("ExceptionClear");
     world.exception_pending = false;
 }
 jobject f_ExceptionOccurred(Env*) {
+    WorldGuard guard;
     not_under_mutex("ExceptionOccurred is not on the list of calls under the mutex");
     if (!world.exception_pending) return nullptr;
     if (world.pending_object == nullptr) world.pending_object = new Obj{};
     return new_local(world.pending_object);
 }
 jint f_Throw(Env*, jobject throwable) {
+    WorldGuard guard;
     not_under_mutex("Throw under the mutex");
     require(!world.exception_pending, "Throw with an exception pending");
     Obj* object = object_of(throwable);
@@ -499,9 +606,13 @@ jint f_Throw(Env*, jobject throwable) {
 }
 // A collection: a weak reference to an object nothing holds is cleared. Held: a strong reference, or Java.
 // The weak references the ended blocks hold (the layer's sentinel, once a block has ended, is one more).
-size_t block_weaks() { return world.weaks.size() - (counters().blocks_ended != 0 ? 1 : 0); }
+size_t block_weaks() {
+    WorldGuard guard;
+    return world.weaks.size() - (counters().blocks_ended != 0 ? 1 : 0);
+}
 bool g_collect_ignores_locals = false;  // a row that models a collector that clears a weak reference under a local one
 void collect() {
+    WorldGuard guard;
     std::set<Obj*> reachable;
     if (!g_collect_ignores_locals) {
         for (Ref* r : world.locals) reachable.insert(r->object);
@@ -511,22 +622,25 @@ void collect() {
         if (r->object != nullptr && !r->object->held && reachable.count(r->object) == 0) r->object = nullptr;
     }
 }
-std::function<void(Obj*)> g_on_global_deleted;  // runs inside DeleteGlobalRef, before the reference goes
-std::function<void()> g_on_find_class;           // runs inside FindClass: Java code that enters the layer again
+Hook<Obj*> g_on_global_deleted;  // runs inside DeleteGlobalRef, before the reference goes
+Hook<> g_on_find_class;          // runs inside FindClass: Java code that enters the layer again
 bool g_ids_at_install = true;                    // the install gives the layer its environment, which resolves the ids
 void f_DeleteGlobalRef(Env*, jobject o) {
+    WorldGuard guard;
     on_the_list("DeleteGlobalRef");
     require(t_regions == 0, "DeleteGlobalRef inside a critical region");  // allowed with an exception pending
     Ref* ref = static_cast<Ref*>(o);
-    if (g_on_global_deleted) {
-        auto hook = g_on_global_deleted;
-        hook(ref->object);
+    if (auto hook = g_on_global_deleted.peek()) {
+        Obj* object = ref->object;
+        WorldUnlocked unlocked;
+        hook(object);
     }
     require(world.globals.erase(ref) == 1, "a global reference is deleted once, and only while it is live");
     world.revoked.erase(ref);
     delete ref;
 }
 jobject f_NewLocalRef(Env*, jobject o) {
+    WorldGuard guard;
     on_the_list("NewLocalRef");
     jni_allowed("NewLocalRef where JNI is not allowed");
     require(live(o), "NewLocalRef is handed a live reference, never a shadow");
@@ -534,6 +648,7 @@ jobject f_NewLocalRef(Env*, jobject o) {
     return new_local(object_of(o));
 }
 jboolean f_IsSameObject(Env*, jobject a, jobject b) {
+    WorldGuard guard;
     on_the_list("IsSameObject");
     revoke_if_asked();
     require(t_regions == 0, "IsSameObject inside a critical region");
@@ -543,16 +658,19 @@ jboolean f_IsSameObject(Env*, jobject a, jobject b) {
     return x == y;
 }
 jobject f_GetObjectClass(Env*, jobject o) {
+    WorldGuard guard;
     not_under_mutex("GetObjectClass under the mutex");
     (void)object_of(o);
     return new_local(new Obj{});
 }
 jboolean f_IsInstanceOf(Env*, jobject o, jclass) {
+    WorldGuard guard;
     not_under_mutex("IsInstanceOf under the mutex");
     (void)object_of(o);
     return 1;
 }
 jint f_MonitorEnter(Env*, jobject o) {
+    WorldGuard guard;
     not_under_mutex("MonitorEnter (it can wait for another thread) under the mutex");
     revoke_if_asked();
     (void)object_of(o);
@@ -560,6 +678,7 @@ jint f_MonitorEnter(Env*, jobject o) {
     return 0;
 }
 jint f_MonitorExit(Env*, jobject o) {
+    WorldGuard guard;
     not_under_mutex("MonitorExit under the mutex");
     revoke_if_asked();
     require(o != nullptr, "MonitorExit is handed an object");
@@ -572,11 +691,13 @@ jint f_MonitorExit(Env*, jobject o) {
     return 0;
 }
 jint f_PushLocalFrame(Env*, jint) {
+    WorldGuard guard;
     not_under_mutex("PushLocalFrame under the mutex");
     world.frames.emplace_back();
     return 0;
 }
 jobject f_PopLocalFrame(Env*, jobject result) {
+    WorldGuard guard;
     not_under_mutex("PopLocalFrame under the mutex");
     require(!world.frames.empty(), "a frame was pushed");
     Obj* keep = result == nullptr ? nullptr : object_of(result);
@@ -589,21 +710,23 @@ jobject f_PopLocalFrame(Env*, jobject result) {
 int g_register_fail_at = -1;                            // the call (counted from 0) that fails
 std::vector<std::vector<NativeMethod>> g_registered;    // what each call of the runtime's RegisterNatives received
 jint f_RegisterNatives(Env*, jclass, const NativeMethod* methods, jint count) {
+    WorldGuard guard;
     not_under_mutex("RegisterNatives under the mutex");
     require(count > 0 && methods != nullptr, "the runtime is handed methods");
     g_registered.emplace_back(methods, methods + count);
     return int(g_registered.size()) - 1 == g_register_fail_at ? JNI_ERR : JNI_OK;
 }
 jboolean f_ExceptionCheck(Env*) {
+    WorldGuard guard;
     on_the_list("ExceptionCheck");
     return world.exception_pending;
 }
 jobject f_FindClass(Env*, const char*) {
+    WorldGuard guard;
     jni_allowed("FindClass where JNI is not allowed");
     require(t_ended_depth == 0, "FindClass runs Java: not under the ended lock");
-    if (g_on_find_class) {
-        auto hook = g_on_find_class;
-        g_on_find_class = nullptr;
+    if (auto hook = g_on_find_class.take()) {
+        WorldUnlocked unlocked;
         hook();
     }
     if (world.find_fails) {
@@ -615,6 +738,7 @@ jobject f_FindClass(Env*, const char*) {
     return new_local(object);
 }
 jmethodID f_GetMethodID(Env*, jclass, const char* name, const char* sig) {
+    WorldGuard guard;
     jni_allowed("GetMethodID where JNI is not allowed");
     require(t_ended_depth == 0, "a method lookup can run Java: not under the ended lock");
     void* id = new int(0);
@@ -622,18 +746,21 @@ jmethodID f_GetMethodID(Env*, jclass, const char* name, const char* sig) {
     return id;
 }
 jfieldID f_GetFieldID(Env*, jclass, const char*, const char* sig) {
+    WorldGuard guard;
     not_under_mutex("GetFieldID under the mutex");
     void* id = new int(0);
     world.fields[id] = sig;
     return id;
 }
 jobject f_GetObjectField(Env*, jobject o, jfieldID f) {
+    WorldGuard guard;
     not_under_mutex("GetObjectField under the mutex");
     (void)object_of(o);
     require(world.fields.count(f) == 1, "a known field");
     return world.next_result;
 }
 jobject f_GetStaticObjectField(Env*, jclass, jfieldID f) {
+    WorldGuard guard;
     not_under_mutex("GetStaticObjectField under the mutex");
     require(world.fields.count(f) == 1, "a known field");
     return world.next_result;
@@ -689,6 +816,7 @@ std::vector<jvalue> decode_array(const std::string& sig, const jvalue* in) {
 
 // What the runtime saw: references must be real (a live reference of the fake), never a shadow.
 void record(const std::string& call, void* method, const std::vector<jvalue>& args) {
+    WorldGuard guard;
     not_under_mutex("a call into Java under the mutex");
     const Method& m = world.methods.at(method);
     world.last_call = call;
@@ -717,6 +845,7 @@ void record(const std::string& call, void* method, const std::vector<jvalue>& ar
     if (world.throw_after_call) world.exception_pending = true;
 }
 jobject result_of(void* method) {
+    WorldGuard guard;
     const Method& m = world.methods.at(method);
     char kind = m.sig[m.sig.find(')') + 1];
     if (kind == 'V' || kind == 'I') return nullptr;
@@ -724,10 +853,12 @@ jobject result_of(void* method) {
 }
 
 jobject f_CallStaticObjectMethodV(Env*, jclass, jmethodID m, va_list ap) {
+    WorldGuard guard;
     record("static-object-V", m, decode_va(world.methods.at(m).sig, ap));
     return result_of(m);
 }
 jobject f_CallStaticObjectMethodA(Env*, jclass, jmethodID m, const jvalue* a) {
+    WorldGuard guard;
     if (world.methods.at(m).name == "getRuntime") {  // the layer's own call
         not_under_mutex("Runtime.getRuntime (Java code) under the mutex");
         jni_allowed("Runtime.getRuntime where JNI is not allowed");
@@ -737,24 +868,29 @@ jobject f_CallStaticObjectMethodA(Env*, jclass, jmethodID m, const jvalue* a) {
     return result_of(m);
 }
 jobject f_CallStaticObjectMethod(Env*, jclass, jmethodID, ...) {
+    WorldGuard guard;
     require(false, "the variadic entry of the original is not used by the wrappers");
     return nullptr;
 }
-std::function<void()> g_in_call;  // runs at the start of a static int call: another thread acts while it is under way
+Hook<> g_in_call;  // runs at the start of a static int call: another thread acts while it is under way
 jint f_CallStaticIntMethodV(Env*, jclass, jmethodID m, va_list ap) {
+    WorldGuard guard;
     revoke_if_asked();
-    if (g_in_call) {
-        auto hook = g_in_call;
+    if (auto hook = g_in_call.peek()) {
+        WorldUnlocked unlocked;
         hook();
     }
     record("static-int-V", m, decode_va(world.methods.at(m).sig, ap));
     return 7;
 }
 jint f_CallStaticIntMethodA(Env*, jclass, jmethodID m, const jvalue* a) {
+    WorldGuard guard;
     if (world.methods.at(m).name != "identityHashCode") revoke_if_asked();
-    if (world.methods.at(m).name != "identityHashCode" && g_in_call) {
-        auto hook = g_in_call;
-        hook();
+    if (world.methods.at(m).name != "identityHashCode") {
+        if (auto hook = g_in_call.peek()) {
+            WorldUnlocked unlocked;
+            hook();
+        }
     }
     if (world.methods.at(m).name == "identityHashCode") {  // the layer's own call
         not_under_mutex("System.identityHashCode (Java code) under the mutex");
@@ -773,6 +909,7 @@ jint f_CallStaticIntMethodA(Env*, jclass, jmethodID m, const jvalue* a) {
     return 7;
 }
 void f_CallVoidMethodA(Env*, jobject o, jmethodID m, const jvalue*) {
+    WorldGuard guard;
     require(world.methods.at(m).name == "gc", "the layer calls Runtime.gc and no other instance method of its own");
     not_under_mutex("Runtime.gc (a collection) under the mutex");
     jni_allowed("Runtime.gc where JNI is not allowed");
@@ -781,17 +918,21 @@ void f_CallVoidMethodA(Env*, jobject o, jmethodID m, const jvalue*) {
     collect();
 }
 void f_CallStaticVoidMethodV(Env*, jclass, jmethodID m, va_list ap) {
+    WorldGuard guard;
     record("static-void-V", m, decode_va(world.methods.at(m).sig, ap));
 }
 void f_CallStaticVoidMethodA(Env*, jclass, jmethodID m, const jvalue* a) {
+    WorldGuard guard;
     record("static-void-A", m, decode_array(world.methods.at(m).sig, a));
 }
 jobject f_NewObjectA(Env*, jclass, jmethodID m, const jvalue* a) {
+    WorldGuard guard;
     record("new-A", m, decode_array(world.methods.at(m).sig, a));
     return new_local(new Obj{});
 }
 // What Java reads and writes through the receiver of an instance call.
 void touch_receiver(jobject o) {
+    WorldGuard guard;
     revoke_if_asked();
     Obj* object = object_of(o);
     world.seen_receiver.clear();
@@ -801,45 +942,54 @@ void touch_receiver(jobject o) {
     }
 }
 jobject f_CallObjectMethodA(Env*, jobject o, jmethodID m, const jvalue* a) {
+    WorldGuard guard;
     touch_receiver(o);
     record("object-A", m, decode_array(world.methods.at(m).sig, a));
     return result_of(m);
 }
 jobject f_CallObjectMethodV(Env*, jobject o, jmethodID m, va_list ap) {
+    WorldGuard guard;
     touch_receiver(o);
     record("object-V", m, decode_va(world.methods.at(m).sig, ap));
     return result_of(m);
 }
 jobject f_CallNonvirtualObjectMethodA(Env*, jobject o, jclass, jmethodID m, const jvalue* a) {
+    WorldGuard guard;
     touch_receiver(o);
     record("nonvirtual-A", m, decode_array(world.methods.at(m).sig, a));
     return result_of(m);
 }
 jobject f_CallNonvirtualObjectMethodV(Env*, jobject o, jclass, jmethodID m, va_list ap) {
+    WorldGuard guard;
     touch_receiver(o);
     record("nonvirtual-V", m, decode_va(world.methods.at(m).sig, ap));
     return result_of(m);
 }
 jobject f_NewObjectV(Env*, jclass, jmethodID m, va_list ap) {
+    WorldGuard guard;
     record("new-V", m, decode_va(world.methods.at(m).sig, ap));
     return new_local(new Obj{});
 }
 void f_SetObjectField(Env*, jobject o, jfieldID, jobject value) {
+    WorldGuard guard;
     not_under_mutex("SetObjectField under the mutex");
     (void)object_of(o);
     if (value != nullptr) (void)object_of(value);
 }
 void f_SetObjectArrayElement(Env*, jobject, jsize, jobject value) {
+    WorldGuard guard;
     not_under_mutex("SetObjectArrayElement under the mutex");
     if (value != nullptr) (void)object_of(value);
 }
 jobject f_NewObjectArray(Env*, jsize, jclass, jobject initial) {
+    WorldGuard guard;
     not_under_mutex("NewObjectArray (an allocation) under the mutex");
     if (initial != nullptr) (void)object_of(initial);
     return new_local(new Obj{});
 }
 
 void trap(...) {
+    WorldGuard guard;
     ++world.traps;
     require(false, "an original function the test did not provide was called");
 }
@@ -3378,6 +3528,17 @@ struct Other {
     Other& operator=(const Other&) = delete;
 };
 
+// A hand-off between the threads of a case: waits for the counter another thread of the case advances (`turn`, `stage`) to
+// reach `value`. A hand-off that never comes fails the case within the limit, with a line that names the case, the waiter and the
+// counter's value; the unbounded wait this replaces ended only when the test's own timeout killed the binary.
+constexpr std::chrono::seconds kHandOffLimit{30};
+void wait_for_counter(const char* the_case, const char* counter_name, const std::atomic<int>& counter, int value,
+                      const char* waiter) {
+    if (waitUntil([&] { return counter.load() == value; }, kHandOffLimit, std::chrono::microseconds(100))) return;
+    uml::testing::fail(std::string(the_case) + ": " + waiter + " waited " + std::to_string(kHandOffLimit.count()) + " s for " +
+                       counter_name + " " + std::to_string(value) + ", and it is " + std::to_string(counter.load()));
+}
+
 // A kept reference used on a second thread while the owner's native method returns: the call of the second thread is
 // handed a local reference of its own, never the global reference that the end deletes. The block stays where it was (it
 // ended), and the second thread, with no native frame, holds nothing afterwards.
@@ -3389,14 +3550,16 @@ void check_a_kept_reference_on_a_second_thread_survives_the_owners_end() {
     g_in_call = [&] {
         g_in_call = nullptr;
         stage = 1;
-        while (stage != 2) std::this_thread::yield();
+        wait_for_counter("check_a_kept_reference_on_a_second_thread_survives_the_owners_end", "stage", stage, 2,
+                         "the second thread's call (the owner's end is under way)");
     };
     jint result = 0;
     std::thread second([&] {
         result = call_static_int_v(other.f, f.consume, kept.shadow);
         stage = 3;
     });
-    while (stage != 1) std::this_thread::yield();
+    wait_for_counter("check_a_kept_reference_on_a_second_thread_survives_the_owners_end", "stage", stage, 1,
+                     "the owner (the second thread's call is under way)");
     end_ref(f, kept.shadow);  // the owner's native method returns while the call is under way
     stage = 2;
     second.join();
@@ -4008,29 +4171,33 @@ void check_live_blocks_of_many_threads_count_against_the_cap() {
     std::vector<std::unique_ptr<Other>> others;
     std::vector<std::vector<jobject>> shadows(kThreads);
     for (int t = 0; t < kThreads; ++t) others.emplace_back(new Other(f));
+    // One thread at a time, in turns (each counts the blocks it made and ended in order, and `kept` is shared). The turn is one
+    // counter that every phase moves forward, and no value belongs to two phases: worker t makes its blocks at turn t; the
+    // value kThreads is the main thread's (all have made theirs and hold them), and no worker waits for it; the main thread
+    // then sets kEnds, and worker t ends its blocks at turn kEnds + t.
+    constexpr int kChecks = kThreads;
+    constexpr int kEnds = kThreads + 1;
+    constexpr const char* kCase = "check_live_blocks_of_many_threads_count_against_the_cap";
     std::atomic<int> turn{0};
-    const auto wait_for = [&](int value) {
-        while (turn != value) std::this_thread::yield();
-    };
     std::vector<std::thread> threads;
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([&, t] {
-            wait_for(t);  // one thread at a time: the fake runtime is not thread-safe
+            wait_for_counter(kCase, "turn", turn, t, "a thread making its blocks");
             for (int i = 0; i < 512; ++i) {
                 Made made = make_held(others[size_t(t)]->f, std::vector<uint8_t>());
                 if (is_shadow_block(made.shadow)) shadows[size_t(t)].push_back(made.shadow);
                 kept.push_back(made.object);
             }
             ++turn;
-            wait_for(kThreads + t);
+            wait_for_counter(kCase, "turn", turn, kEnds + t, "a thread ending its blocks");
             for (jobject shadow : shadows[size_t(t)]) end_ref(others[size_t(t)]->f, shadow);
             ++turn;
         });
     }
-    wait_for(kThreads);  // all have made theirs and hold them
+    wait_for_counter(kCase, "turn", turn, kChecks, "the main thread (all threads hold their blocks)");
     require(counters().shadows_live + counters().shadows_ended <= 16384, "live and ended blocks together stay under the cap");
     require(counters().shadows_declined > 0, "the results past it stayed real references");
-    turn = kThreads;
+    turn = kEnds;
     for (auto& thread : threads) thread.join();
     require(counters().shadows_ended <= 16384 && counters().shadows_live == 0, "and so do the ended ones after every end");
     require(block_weaks() <= 16384, "the weak references the layer holds are bounded by the cap");
@@ -4947,6 +5114,9 @@ void check_no_shadows_when_disabled() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // The whole binary runs in a few seconds; a thread of a case that never returns (a join, a lock) fails here, with a line,
+    // long before the test's own timeout.
+    uml::testing::Watchdog watchdog("the old-application JNI test", std::chrono::minutes(5));
     require(argc == 2, "usage: oldapp_jni_tests <jni-slots.tsv>");
     check_slot_constants(argv[1]);
     check_shadow_layout_and_use();
