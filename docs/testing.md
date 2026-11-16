@@ -820,8 +820,9 @@ blocker in every one of them.
   libz and libc, and a tracer's registers, breakpoints and steps. The program
   runs under the `ADDR_NO_RANDOMIZE` personality, and a register that points
   into a mapping is compared by the file or mapping and the offset in it (an
-  unnamed mapping by its size and protection), because the image's userspace
-  still places libraries and stacks at random;
+  unnamed mapping by its size, its protection and its place among the unnamed
+  mappings of that shape, lowest address first), because the image's
+  userspace still places libraries and stacks at random;
   only a field that names nothing (a process id, a random value) may differ
   between two runs of one engine, and few of them. The image is a user build,
   so `debuggerd -b` and `kill -3` of a system process (which need root) are

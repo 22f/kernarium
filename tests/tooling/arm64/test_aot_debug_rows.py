@@ -27,11 +27,18 @@ def quoted(address: int) -> str:
 def tombstone(address: int = 0x7ff1b1f19000, frame: str = "__memmove_aarch64_mops+16", x13: int = 1,
               pid: int = 2038, extra_threads: str = "", load: int = 0x7ff1ae500000,
               pointer: int = 0x2854d, stack_name: str = "[anon:stack_and_tls:2040]",
-              unnamed: int = 0x1234, unnamed_size: int = 0x100000) -> str:
+              unnamed: int = 0x1234, unnamed_size: int = 0x100000, second_unnamed: bool = False,
+              unnamed_target: int = 0) -> str:
     """A tombstone of a crash in libc (loaded at `load`): x4 points `pointer`
     bytes into libc's file, x5 into its .bss, x6 into an unnamed mapping, and
-    x7 into a thread stack."""
+    x7 into a thread stack. With `second_unnamed` a second unnamed mapping of
+    the same size and protection lies above the stack, and `unnamed_target`
+    says which of the two x6 points into."""
     base = load + 0x70d50
+    unnamed_base = load + (0x500000 if unnamed_target else 0x200000)
+    extra_map = (f"""    {quoted(load + 0x500000)}-{quoted(load + 0x500000 + unnamed_size - 1)} rw-         0    {unnamed_size:x}
+                               VmFlags: rd wr mr mw me ac
+""" if second_unnamed else "")
     return f"""*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***
 Build fingerprint: 'Android/test:17/ID/1:user/release-keys'
 Timestamp: 2026-11-16 05:48:50.054109184+0000
@@ -41,7 +48,7 @@ pid: {pid}, ppid: 2036, tid: {pid}, name: toybox  >>> /system/bin/toybox <<<
 uid: 2000
 signal 11 (SIGSEGV), code 2 (SEGV_ACCERR), fault addr {address:#018x} (read)
     x0  b4007ff19a825220  x1  {address:016x}  x2  0000000000000028  x3  b4007ff19a825238
-    x4  {load + pointer:016x}  x5  {load + 0xb0000 + 0x2070:016x}  x6  {load + 0x200000 + unnamed:016x}  x7  {load + 0x300000 + 0xf8c00:016x}
+    x4  {load + pointer:016x}  x5  {load + 0xb0000 + 0x2070:016x}  x6  {unnamed_base + unnamed:016x}  x7  {load + 0x300000 + 0xf8c00:016x}
     x12 0000000000000001  x13 {x13:016x}  x14 0000000000000001  x15 0000000000001863
     lr  {load + 0x25d0:016x}  sp  00007ffff7299dd0  pc  {base:016x}  pst 0000000020000000
 
@@ -70,7 +77,7 @@ memory map (6 entries):
                                VmFlags: rd wr mr mw me ac
     {quoted(load + 0x300000)}-{quoted(load + 0x400000 - 1)} rw-         0    100000  {stack_name}
                                VmFlags: rd wr mr mw me ac
-{extra_threads}"""
+{extra_map}{extra_threads}"""
 
 
 def sibling_block(offset: int = 360, name: str = "crc32_z") -> str:
@@ -179,9 +186,9 @@ class GuestProgramTest(unittest.TestCase):
 
     SOURCE = (pathlib.Path(__file__).resolve().parents[2] / "integration" / "aot" / "aot_guest_debug.cpp")
 
-    def test_an_unnamed_mapping_keeps_its_size_protection_and_offset(self):
+    def test_an_unnamed_mapping_keeps_its_shape_its_place_among_that_shape_and_its_offset(self):
         text = self.SOURCE.read_text()
-        self.assertIn("=anon[%#llx,%.3s]+%#llx", text)
+        self.assertIn("=anon[%#llx,%.3s]#%u+%#llx", text)
         self.assertNotIn("=anon+%#llx", text)
         self.assertNotIn("value & 0xfff", text)
 
@@ -235,7 +242,7 @@ class CompareTest(unittest.TestCase):
         self.assertIn("@[anon:.bss]+0x2070", text)
         # An unnamed mapping is named by its size and protection, and the
         # offset in the whole mapping is kept.
-        self.assertIn("@anon[0x100000,rw-]+0x1234", text)
+        self.assertIn("@anon[0x100000,rw-]#0+0x1234", text)
         self.assertIn("@[anon:stack_and_tls:*]+0xf8c00", text)
         self.assertIn("pc  @libc.so+0x70d50", text)
 
@@ -273,6 +280,31 @@ class CompareTest(unittest.TestCase):
         on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, unnamed_size=0x80000, pid=3000))
         with self.assertRaises(rows.DebugFailure):
             rows.compare("crash-memcpy", off, on)
+
+    def test_a_pointer_moved_to_another_mapping_of_the_same_shape_fails(self):
+        """Two unnamed mappings of one size and protection are two places: x6
+        moved from one to the other, at the same offset, is a moved pointer."""
+        off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n, second_unnamed=True))
+               for n, load in enumerate((0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000))]
+        on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000, second_unnamed=True,
+                                             unnamed_target=1))
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", off, on)
+        self.assertIn("with it", str(caught.exception))
+        self.assertIn("x6", str(caught.exception))
+        # The same pointer in the same one is the same pointer, at any load address.
+        same = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000, second_unnamed=True))
+        compared, _ = rows.compare("crash-memcpy", off, same)
+        self.assertGreater(compared, 10)
+
+    def test_same_shaped_unnamed_mappings_are_numbered_in_address_order(self):
+        names = lambda target: next(line for line in rows.digest_tombstone(
+            tombstone(second_unnamed=True, unnamed_target=target)) if " x6 " in line)
+        self.assertIn("#0+0x1234", names(0))
+        self.assertIn("#1+0x1234", names(1))
+        # A mapping that is alone of its shape is the first of it.
+        alone = next(line for line in rows.digest_tombstone(tombstone()) if " x6 " in line)
+        self.assertIn("#0+0x1234", alone)
 
     def test_an_unnamed_mapping_at_another_address_is_the_same_pointer(self):
         off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n))

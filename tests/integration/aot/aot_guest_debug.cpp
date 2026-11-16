@@ -250,6 +250,14 @@ uint64_t parse_hex(const char *&at) {
 }
 
 bool print_mapped(const char *label, uint64_t value) {
+    // The unnamed mappings seen so far, by size and protection: a mapping is
+    // named by its place among those of its shape, lowest address first.
+    struct Shape {
+        uint64_t size;
+        char protection[3];
+        unsigned seen;
+    } shapes[128];
+    int shape_count = 0;
     const char *at = maps_text;
     while (*at != 0) {
         const char *line = at;
@@ -285,14 +293,31 @@ bool print_mapped(const char *label, uint64_t value) {
             ++at;
         }
         (void)line;
+        unsigned ordinal = 0;
+        if (name == end) {
+            int shape = 0;
+            while (shape < shape_count &&
+                   !(shapes[shape].size == high - low && shapes[shape].protection[0] == protection[0] &&
+                     shapes[shape].protection[1] == protection[1] &&
+                     shapes[shape].protection[2] == protection[2])) {
+                ++shape;
+            }
+            if (shape == shape_count && shape_count < 128) {
+                shapes[shape_count++] = {high - low, {protection[0], protection[1], protection[2]}, 0};
+            }
+            if (shape < shape_count) {
+                ordinal = shapes[shape].seen++;
+            }
+        }
         if (value < low || value >= high) {
             continue;
         }
         if (name == end) {
-            // An unnamed mapping: which one (its size and protection) and
-            // where in it, not where the run put it.
-            dprintf(1, " %s=anon[%#llx,%.3s]+%#llx", label, static_cast<unsigned long long>(high - low),
-                    protection, static_cast<unsigned long long>(value - low));
+            // An unnamed mapping: which one (its size and protection, and
+            // its place among those of that shape) and where in it, not
+            // where the run put it.
+            dprintf(1, " %s=anon[%#llx,%.3s]#%u+%#llx", label, static_cast<unsigned long long>(high - low),
+                    protection, ordinal, static_cast<unsigned long long>(value - low));
         } else if (*name == '/') {
             const char *base = name;
             for (const char *c = name; c < end; ++c) {

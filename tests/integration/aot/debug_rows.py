@@ -14,8 +14,8 @@ The program runs with address-space randomization off (the guest kernel's
 layout), but the image's userspace still places libraries and stacks at
 random: a register value that points into a mapping is therefore named by it
 (the file and the offset in it, the mapping's name and the offset in it, or
-an unnamed mapping's size and protection and the offset in it) before the
-runs are compared, and such a name that
+an unnamed mapping's size, protection and place among the mappings of that
+shape, and the offset in it) before the runs are compared, and such a name that
 differs between two runs of the engine alone fails the row instead of being
 masked. Only values that name nothing can be masked, and only a few.
 """
@@ -72,17 +72,24 @@ def parse_maps(text: str) -> list[tuple[int, int, int, str, str]]:
 def name_value(value: int, maps: list[tuple[int, int, int, str, str]]) -> str | None:
     """Where a value points, if into a mapping, as the run does not choose it:
     a file's name and the offset in the file, a named anonymous mapping's name
-    and the offset in it, or an unnamed mapping's size and protection and the
-    offset in it. Where the mapping lies is the run's choice and is not part
-    of the name; which mapping it is, and where in it, are the guest's."""
+    and the offset in it, or an unnamed mapping's size and protection, its
+    place among the unnamed mappings of that size and protection (counted
+    from the lowest address; `maps` is in address order), and the offset in
+    it. Where the mapping lies is the run's choice and is not part of the
+    name; which mapping it is, and where in it, are the guest's."""
+    shapes: dict[tuple[int, str], int] = {}
     for low, high, offset, name, protection in maps:
+        ordinal = 0
+        if not name:
+            ordinal = shapes.get((high - low, protection), 0)
+            shapes[(high - low, protection)] = ordinal + 1
         if low <= value < high:
             if name.startswith("/"):
                 return f"@{name.rsplit('/', 1)[1]}+{offset + value - low:#x}"
             if name:
                 # A thread's stack is named by its thread id.
                 return f"@{re.sub(r':[0-9]+]$', ':*]', name)}+{value - low:#x}"
-            return f"@anon[{high - low:#x},{protection}]+{value - low:#x}"
+            return f"@anon[{high - low:#x},{protection}]#{ordinal}+{value - low:#x}"
     return None
 
 
