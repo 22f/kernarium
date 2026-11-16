@@ -12,8 +12,10 @@ user:
 
 - the vDSO probe uses no C library.  It checks the auxiliary vector, the ELF
   object behind AT_SYSINFO_EHDR, /proc/self/maps, both hash tables, the
-  unwind tables, the agreement of each entry with its system call, and a fork
-  and an exec;
+  unwind tables, the agreement of each entry with its system call, a fork and
+  an exec, and what a task can do to its own vDSO.  Android's configuration
+  seals the system mappings, so it runs with --seal=sealed: the mapping must
+  carry the sealed flag and refuse a move, an unmap, a cover and an mprotect;
 - the library probe links against the guest's own libc.so, so it runs bionic's
   clock_gettime, gettimeofday and time.  It checks their values and, by tracing
   a child, that the system call each makes is made from the [vdso] mapping,
@@ -136,7 +138,8 @@ def main() -> int:
     private = pathlib.Path(tempfile.mkdtemp(prefix="uml-avd-"))
     guest: "base.Guest | None" = None
     try:
-        probes = [("vdso_probe", build_freestanding(clang, lld, private), ""),
+        # Android's configuration seals the system mappings: the probe requires it.
+        probes = [("vdso_probe", build_freestanding(clang, lld, private), "--seal=sealed"),
                   ("vdso_libc_probe", build_bionic(clang, lld, private), "")]
         guest = base.start_guest(options, str(adb), private)
         failures = 0

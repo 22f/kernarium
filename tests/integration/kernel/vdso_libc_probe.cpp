@@ -204,6 +204,9 @@ void check_values()
 	       seconds >= realtime.seconds - 2 && seconds <= realtime.seconds + 2,
 	       "time(), gettimeofday and CLOCK_REALTIME agree", seconds, realtime.seconds);
 	report(clock_gettime(12, &ignored) == -1, "an invalid clock fails with -1 as the library's contract says");
+	// This pins the plain-system-call contract: the call faults in the kernel and returns -1. An entry
+	// with a counter fast path would store through the pointer in user mode and kill the probe with
+	// SIGSEGV instead of failing this check, so such a change revisits it.
 	report(clock_gettime(1, reinterpret_cast<void *>(1)) == -1, "a bad pointer fails with -1");
 }
 

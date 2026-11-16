@@ -12,8 +12,11 @@
 // - an ELF shared object is at that address: one read-only, executable
 //   segment, a dynamic section with both hash tables and a version
 //   definition, a Linux note, and no relocation, so that the image works
-//   wherever it is mapped;
-// - /proc/self/maps shows it once, as r-xp [vdso], beside the [sigpage];
+//   wherever it is mapped; its section headers lie inside the mapped page
+//   and its SHT_DYNSYM header counts the symbols the hash tables chain
+//   through (a C library may read them rather than the hash tables);
+// - /proc/self/maps shows it once, as r-xp [vdso], in addition to the
+//   [sigpage], and the caller says whether the mapping is sealed (see below);
 // - __kernel_clock_gettime, __kernel_gettimeofday and __kernel_clock_getres
 //   under LINUX_2.6.39 resolve through the SysV hash and through the GNU
 //   hash to the same addresses, and the signal-return entry and a wrong
@@ -24,7 +27,21 @@
 //   clock the vDSO's time lies between two reads by the call, an invalid
 //   clock and a bad pointer fail as the call fails, and the resolution is the
 //   call's;
-// - a fork and an exec (twice) keep the vDSO.
+// - a fork and an exec (twice) keep the vDSO;
+// - a task that moves, unmaps or covers its vDSO, or has it refuse that,
+//   still execs a program with a working one, and mremap can neither grow
+//   nor duplicate it;
+// - a write to a task's own vDSO (its mprotect and store, or a tracer's
+//   PTRACE_POKEDATA) is that task's copy and shows in no other task and in
+//   no later exec.
+//
+// The caller states whether the kernel seals its system mappings
+// (CONFIG_MSEAL_SYSTEM_MAPPINGS, which Android's configuration sets and the
+// mainline guest configuration does not): --seal=sealed requires VmFlags sl
+// and a refused mremap, munmap, MAP_FIXED and mprotect; --seal=open requires
+// the move to succeed. The argument is required, so that a kernel that seals
+// where it must not, or fails to seal where it must, fails instead of
+// passing as either.
 //
 // The probe prints one line per case and exits with the number of failures.
 // It needs no libc: build it in a guest with
@@ -32,7 +49,8 @@
 //       -fno-stack-protector -fno-exceptions -fno-rtti vdso_probe.cpp
 // or with the host's clang and ld.lld for aarch64-linux-gnu.
 //
-// With --exec-stage=N it is the program that an exec of itself starts.
+// With --exec-stage=N it is the program that an exec of itself starts (it is
+// given the same --seal).
 
 #include <stdarg.h>
 #include <stddef.h>
@@ -113,6 +131,9 @@ constexpr long nr_clock_gettime = 113;
 constexpr long nr_clock_getres = 114;
 constexpr long nr_gettimeofday = 169;
 constexpr long nr_getpid = 172;
+constexpr long nr_kill = 129;
+constexpr long nr_ptrace = 117;
+constexpr long nr_madvise = 233;
 constexpr long nr_clone = 220;
 constexpr long nr_execve = 221;
 constexpr long nr_mmap = 222;
@@ -252,7 +273,15 @@ void say(const char *format, ...)
 int failures;
 // A forked or exec'd copy reports only what fails.
 bool quiet;
-constexpr int sealed_status = 40;
+
+// What the caller said about the [vdso] mapping (--seal=...).
+enum class Seal { unstated, sealed, open };
+Seal seal_expected;
+
+bool expect_sealed()
+{
+	return seal_expected == Seal::sealed;
+}
 
 #define CHECK(condition, ...)                                     \
 	do {                                                      \
@@ -300,6 +329,19 @@ struct Phdr {
 	uint64_t align;
 };
 
+struct Shdr {
+	uint32_t name;
+	uint32_t type;
+	uint64_t flags;
+	uint64_t addr;
+	uint64_t offset;
+	uint64_t size;
+	uint32_t link;
+	uint32_t info;
+	uint64_t addralign;
+	uint64_t entsize;
+};
+
 struct Dyn {
 	int64_t tag;
 	uint64_t value;
@@ -341,6 +383,7 @@ constexpr uint32_t pt_interp = 3;
 constexpr uint32_t pt_note = 4;
 constexpr uint32_t pt_gnu_eh_frame = 0x6474e550;
 constexpr uint32_t pf_x = 1, pf_w = 2, pf_r = 4;
+constexpr uint32_t sht_dynsym = 11;
 
 constexpr int64_t dt_null = 0, dt_needed = 1, dt_hash = 4, dt_strtab = 5,
 		  dt_symtab = 6, dt_rela = 7, dt_strsz = 10, dt_syment = 11,
@@ -747,7 +790,6 @@ void check_neighbours()
 	const char *end = maps_text + size;
 	Mapping mapping;
 	int sigpages = 0;
-	int overlaps = 0;
 	int vvars = 0;
 
 	while (next_mapping(cursor, end, mapping)) {
@@ -755,12 +797,10 @@ void check_neighbours()
 			sigpages++;
 		if (string_equal(mapping.name, "[vvar]") || string_equal(mapping.name, "[vvar_vclock]"))
 			vvars++;
-		if (!string_equal(mapping.name, "[vdso]") && mapping.start < image.base + image.length &&
-		    image.base < mapping.end)
-			overlaps++;
 	}
-	CHECK(sigpages == 1, "the [sigpage] is still mapped once (%d)", sigpages);
-	CHECK(overlaps == 0, "nothing else overlaps the [vdso] (%d)", overlaps);
+	// That no other mapping overlaps the [vdso] is not asked: /proc/self/maps
+	// lists each page once, so a row for it could not fail.
+	CHECK(sigpages == 1, "the [sigpage] is still mapped once, in addition to the [vdso] (%d)", sigpages);
 	CHECK(vvars == 0, "there is no data page: every entry is a system call (%d)", vvars);
 }
 
@@ -773,6 +813,9 @@ bool check_header()
 	image.header = header;
 	CHECK(memcmp(header->ident, expected, sizeof(expected)) == 0,
 	      "ELF magic, 64-bit, little endian, version 1");
+	// The padding of the identification is zero: a write another task made
+	// to its copy of the page (below) shows here if it reached the shared one.
+	CHECK(*at<unsigned long>(image.base + 8) == 0, "the identification padding is zero");
 	CHECK(header->type == 3 && header->machine == 183 && header->version == 1,
 	      "a shared object for AArch64 (type %d, machine %d)", header->type, header->machine);
 	CHECK(header->ehsize == sizeof(Ehdr) && header->phentsize == sizeof(Phdr) && header->phnum >= 3 &&
@@ -890,6 +933,44 @@ bool check_dynamic()
 	return true;
 }
 
+// The section headers are not what a loader maps the image by, and a native
+// kernel's vDSO has them inside its page all the same. Bionic's libc is
+// believed to find the vDSO's entries by counting its symbols from the
+// SHT_DYNSYM section header and not from the hash tables: that is the
+// reading of bionic's vDSO code by the review of this change (medium
+// confidence; no bionic source or build was at hand to confirm it, and the
+// Android run of this probe is where a libc's own lookup is exercised). The
+// two checks are cheap and hold for any libc: the headers are in the mapped
+// page, and the SHT_DYNSYM header is the symbol table the dynamic section
+// names, with as many symbols as the hash chains cover.
+void check_sections()
+{
+	const Ehdr *header = image.header;
+	unsigned long table = image.base + header->shoff;
+	bool whole = header->shoff != 0 && header->shentsize == sizeof(Shdr) && header->shnum >= 2 &&
+		     inside(table, static_cast<unsigned long>(header->shnum) * sizeof(Shdr));
+
+	CHECK(whole, "the section headers are inside the mapped page (%d of them at +%lu)", header->shnum,
+	      static_cast<unsigned long>(header->shoff));
+	if (!whole)
+		return;
+	const Shdr *dynsym = nullptr;
+	int dynsyms = 0;
+	for (int i = 0; i < header->shnum; i++) {
+		const auto *section = at<Shdr>(table + static_cast<unsigned long>(i) * sizeof(Shdr));
+		if (section->type == sht_dynsym) {
+			dynsym = section;
+			dynsyms++;
+		}
+	}
+	bool symbols = dynsyms == 1 && dynsym->entsize == sizeof(Sym) && dynsym->size % sizeof(Sym) == 0 &&
+		       inside(image.base + dynsym->offset, dynsym->size) &&
+		       in_memory(dynsym->addr) == reinterpret_cast<unsigned long>(image.symbols) &&
+		       dynsym->size / sizeof(Sym) == image.sysv_hash[1];
+	CHECK(symbols, "its SHT_DYNSYM header is the symbol table of the dynamic section, with the hash tables' %u symbols",
+	      image.sysv_hash[1]);
+}
+
 unsigned long resolved[3];
 
 void check_symbols()
@@ -946,6 +1027,187 @@ unsigned long read_uleb(unsigned long &cursor)
 	return value;
 }
 
+// What an entry's unwind description comes to for an unwinder: the CFA and
+// where the return address is, at every instruction of the entry. The call
+// frame programs of the CIE and the FDE are run rather than matched byte for
+// byte, so an instruction that moves the CFA, saves x30 elsewhere or ends the
+// stack there (DW_CFA_undefined) fails. The other registers' rules are read
+// past and not judged, and an instruction this reader does not know fails the
+// program instead of being skipped.
+struct FrameRow {
+	bool cfa_in_register;		// false: the CFA is an expression
+	unsigned long cfa_register;
+	unsigned long cfa_offset;
+	bool return_in_x30;		// no rule, or the same value: the live x30
+};
+
+struct FrameProgram {
+	unsigned long code_alignment;
+	unsigned long range;		// bytes of the entry the rows must hold for
+	unsigned long location;		// where the row in force starts, from the entry
+	FrameRow row;
+	FrameRow initial;
+	FrameRow saved[4];
+	int saved_count;
+	bool known;			// every instruction was one this reader knows
+	bool plain;			// every row so far is the stack pointer and x30
+	unsigned long first_bad;	// where the first row that is not begins
+};
+
+constexpr unsigned long stack_pointer_column = 31;
+constexpr unsigned long return_column_x30 = 30;
+
+bool row_is_plain(const FrameRow &row)
+{
+	return row.cfa_in_register && row.cfa_register == stack_pointer_column && row.cfa_offset == 0 &&
+	       row.return_in_x30;
+}
+
+// The row in force from the program's location up to `until` is judged when
+// the program moves on, or ends, and only for the part inside the range.
+void judge_row(FrameProgram &program, unsigned long until)
+{
+	if (program.location >= program.range || program.location >= until || !program.plain)
+		return;
+	if (!row_is_plain(program.row)) {
+		program.plain = false;
+		program.first_bad = program.location;
+	}
+}
+
+void advance_row(FrameProgram &program, unsigned long delta)
+{
+	unsigned long next = program.location + delta * program.code_alignment;
+
+	if (next < program.location)
+		program.known = false;
+	judge_row(program, next);
+	program.location = next;
+}
+
+unsigned long read_unsigned(unsigned long &cursor, unsigned bytes)
+{
+	unsigned long value = 0;
+
+	for (unsigned n = 0; n < bytes; n++)
+		value |= static_cast<unsigned long>(*at<unsigned char>(cursor++)) << (8 * n);
+	return value;
+}
+
+void run_frame_program(FrameProgram &program, unsigned long cursor, unsigned long end)
+{
+	while (cursor < end && program.known) {
+		unsigned char op = *at<unsigned char>(cursor++);
+		unsigned long operand = op & 0x3f;
+
+		if ((op & 0xc0) == 0x40) {			// DW_CFA_advance_loc
+			advance_row(program, operand);
+		} else if ((op & 0xc0) == 0x80) {		// DW_CFA_offset: reg, uleb
+			read_uleb(cursor);
+			if (operand == return_column_x30)
+				program.row.return_in_x30 = false;
+		} else if ((op & 0xc0) == 0xc0) {		// DW_CFA_restore: back to the CIE's rule
+			if (operand == return_column_x30)
+				program.row.return_in_x30 = program.initial.return_in_x30;
+		} else {
+			unsigned long reg;
+			unsigned long block;
+
+			// Signed operands are skipped as unsigned ones: only the
+			// continuation bits frame a LEB128.
+			switch (op) {
+			case 0x00:				// DW_CFA_nop
+				break;
+			case 0x02:				// DW_CFA_advance_loc1
+				advance_row(program, read_unsigned(cursor, 1));
+				break;
+			case 0x03:				// DW_CFA_advance_loc2
+				advance_row(program, read_unsigned(cursor, 2));
+				break;
+			case 0x04:				// DW_CFA_advance_loc4
+				advance_row(program, read_unsigned(cursor, 4));
+				break;
+			case 0x05:				// DW_CFA_offset_extended: reg, uleb
+			case 0x11:				// DW_CFA_offset_extended_sf: reg, sleb
+			case 0x14:				// DW_CFA_val_offset: reg, uleb
+			case 0x15:				// DW_CFA_val_offset_sf: reg, sleb
+				reg = read_uleb(cursor);
+				read_uleb(cursor);
+				if (reg == return_column_x30)
+					program.row.return_in_x30 = false;
+				break;
+			case 0x06:				// DW_CFA_restore_extended
+				reg = read_uleb(cursor);
+				if (reg == return_column_x30)
+					program.row.return_in_x30 = program.initial.return_in_x30;
+				break;
+			case 0x07:				// DW_CFA_undefined
+				reg = read_uleb(cursor);
+				if (reg == return_column_x30)
+					program.row.return_in_x30 = false;
+				break;
+			case 0x08:				// DW_CFA_same_value
+				reg = read_uleb(cursor);
+				if (reg == return_column_x30)
+					program.row.return_in_x30 = true;
+				break;
+			case 0x09:				// DW_CFA_register: reg, reg
+				reg = read_uleb(cursor);
+				read_uleb(cursor);
+				if (reg == return_column_x30)
+					program.row.return_in_x30 = false;
+				break;
+			case 0x0a:				// DW_CFA_remember_state
+				if (program.saved_count == 4)
+					program.known = false;
+				else
+					program.saved[program.saved_count++] = program.row;
+				break;
+			case 0x0b:				// DW_CFA_restore_state
+				if (program.saved_count == 0)
+					program.known = false;
+				else
+					program.row = program.saved[--program.saved_count];
+				break;
+			case 0x0c:				// DW_CFA_def_cfa: reg, offset
+				program.row.cfa_in_register = true;
+				program.row.cfa_register = read_uleb(cursor);
+				program.row.cfa_offset = read_uleb(cursor);
+				break;
+			case 0x0d:				// DW_CFA_def_cfa_register
+				program.row.cfa_register = read_uleb(cursor);
+				break;
+			case 0x0e:				// DW_CFA_def_cfa_offset
+				program.row.cfa_offset = read_uleb(cursor);
+				break;
+			case 0x0f:				// DW_CFA_def_cfa_expression: block
+				block = read_uleb(cursor);
+				cursor += block;
+				program.row.cfa_in_register = false;
+				break;
+			case 0x10:				// DW_CFA_expression: reg, block
+			case 0x16:				// DW_CFA_val_expression: reg, block
+				reg = read_uleb(cursor);
+				block = read_uleb(cursor);
+				cursor += block;
+				if (reg == return_column_x30)
+					program.row.return_in_x30 = false;
+				break;
+			case 0x2d:				// DW_CFA_AARCH64_negate_ra_state
+				break;
+			case 0x2e:				// DW_CFA_GNU_args_size
+				read_uleb(cursor);
+				break;
+			default:				// def_cfa_sf and the rest: not known to this reader
+				program.known = false;
+				break;
+			}
+		}
+	}
+	if (cursor != end)
+		program.known = false;
+}
+
 void check_unwind()
 {
 	const Phdr *segment = nullptr;
@@ -971,30 +1233,41 @@ void check_unwind()
 	if (count < 3 || !inside(table + 12, count * 8UL) || !inside(frames, 16))
 		return;
 
-	// The common information entry that starts the frames: CFA is the stack
-	// pointer, and the return address is in x30.
+	// The common information entry that starts the frames: the return
+	// address is in x30, and its program leaves the CFA at the stack pointer.
 	unsigned long cie = frames;
 	uint32_t cie_length = *at<uint32_t>(cie);
 	uint32_t cie_id = *at<uint32_t>(cie + 4);
+	unsigned long cie_end = cie + 4 + cie_length;
 	unsigned long p = cie + 8;
 	unsigned char cie_version = *at<unsigned char>(p++);
 	const char *augmentation = at<char>(p);
 	p += length(augmentation) + 1;
-	read_uleb(p);			// code alignment
-	read_uleb(p);			// data alignment (signed, one byte here)
+	unsigned long code_alignment = read_uleb(p);
+	read_uleb(p);			// data alignment (signed): only the other registers' offsets use it
 	unsigned long return_column = cie_version == 1 ? *at<unsigned char>(p++) : read_uleb(p);
 	bool zr = string_equal(augmentation, "zR");
 	unsigned long augmentation_size = zr ? read_uleb(p) : 0;
 	unsigned char pointer_format = zr ? *at<unsigned char>(p) : 0;
 	p += augmentation_size;
-	const unsigned char *initial = at<unsigned char>(p);
-	CHECK(cie_length != 0 && cie_length != 0xffffffffU && cie_id == 0 && cie_version == 1 && zr &&
-	      return_column == 30 && pointer_format == 0x1b,
+	bool cie_whole = cie_length != 0 && cie_length != 0xffffffffU && inside(cie, 4UL + cie_length) &&
+			 p <= cie_end;
+	CHECK(cie_whole && cie_id == 0 && cie_version == 1 && zr && return_column == 30 &&
+	      pointer_format == 0x1b && code_alignment != 0,
 	      "the frames start with a CIE: return address in x30, pc-relative pointers");
-	// DW_CFA_def_cfa r31 (sp) +0
-	CHECK(initial[0] == 0x0c && initial[1] == 31 && initial[2] == 0,
-	      "the CIE sets the CFA to the stack pointer, which the entries never move");
+	if (!cie_whole || code_alignment == 0)
+		return;
+	FrameProgram initial = {};
+	initial.code_alignment = code_alignment;
+	initial.known = true;
+	initial.plain = true;
+	initial.row.return_in_x30 = true;
+	run_frame_program(initial, p, cie_end);
+	CHECK(initial.known && initial.location == 0 && row_is_plain(initial.row),
+	      "the CIE's program sets the CFA to the stack pointer, which the entries never move, "
+	      "and leaves the return address in x30");
 
+	unsigned long found[3] = {};
 	for (int i = 0; i < 3; i++) {
 		bool covered = false;
 		bool sorted = true;
@@ -1015,12 +1288,45 @@ void check_unwind()
 			// The FDE's own CIE pointer leads back to the CIE.
 			bool to_cie = fde + 4 - fde_pointer == cie;
 			if (to_cie && pc_begin == static_cast<long>(resolved[i]) && pc_range == 12 &&
-			    start == pc_begin)
+			    start == pc_begin) {
 				covered = true;
+				found[i] = fde;
+			}
 			if (!sorted)
 				break;
 		}
 		CHECK(covered && sorted, "an unwind frame covers entry %d exactly, and the table is sorted", i);
+	}
+
+	// What each entry's frame comes to over its whole 12 bytes.
+	for (int i = 0; i < 3; i++) {
+		unsigned long fde = found[i];
+		if (!fde)
+			continue;
+		unsigned long end = fde + 4 + *at<uint32_t>(fde);
+		unsigned long q = fde + 16;
+		if (!inside(fde, 4UL + *at<uint32_t>(fde)) || end < q + 1) {
+			CHECK(false, "the frame of entry %d is inside the mapping", i);
+			continue;
+		}
+		unsigned long augmentation_data = read_uleb(q);	// none for zR, but its length is there
+		q += augmentation_data;
+		FrameProgram frame = {};
+		frame.code_alignment = code_alignment;
+		frame.range = 12;
+		frame.row = initial.row;
+		frame.initial = initial.row;
+		frame.known = true;
+		frame.plain = true;
+		if (q > end)
+			frame.known = false;
+		else
+			run_frame_program(frame, q, end);
+		judge_row(frame, frame.range);
+		CHECK(frame.known, "the frame program of entry %d uses only instructions this probe reads", i);
+		CHECK(frame.plain,
+		      "entry %d unwinds from each of its 12 bytes: the CFA is the stack pointer, the return "
+		      "address stays in x30 (first row that is not, at +%lu)", i, frame.first_bad);
 	}
 }
 
@@ -1240,8 +1546,10 @@ void check_fork()
 }
 
 // Whether /proc/self/smaps marks the [vdso] mapping sealed (VmFlags "sl"), as
-// a kernel built with CONFIG_MSEAL_SYSTEM_MAPPINGS does, as Android's is.
-bool vdso_is_sealed()
+// a kernel built with CONFIG_MSEAL_SYSTEM_MAPPINGS does, as Android's is: 1
+// if it does, 0 if the mapping's VmFlags do not say so, -1 if there is no
+// VmFlags line for the [vdso] to read.
+int vdso_seal_state()
 {
 	size_t size = read_file("/proc/self/smaps", maps_text, maps_capacity - 1);
 	const char *cursor = maps_text;
@@ -1261,19 +1569,34 @@ bool vdso_is_sealed()
 		else if (inside_vdso && length > 8 && cursor[0] == 'V' && cursor[1] == 'm' && cursor[2] == 'F') {
 			for (const char *p = cursor + 8; p + 1 < line_end; p++)
 				if (p[-1] == ' ' && p[0] == 's' && p[1] == 'l' && (p + 2 >= line_end || p[2] == ' '))
-					return true;
-			return false;
+					return 1;
+			return 0;
 		}
 		cursor = line_end + 1;
 	}
-	return false;
+	return -1;
+}
+
+// The mapping is sealed or not, as the caller said.
+void check_seal()
+{
+	int state = vdso_seal_state();
+
+	CHECK(state >= 0 && (state == 1) == expect_sealed(),
+	      "the [vdso] mapping is %s, as the caller states (VmFlags sl: %d)",
+	      expect_sealed() ? "sealed" : "not sealed", state);
 }
 
 // The vDSO moved with mremap (as a checkpoint-and-restore tool or a sandbox
 // moves it) is where the process put it: the maps name it there and its entry
-// works from the new address. A kernel that seals its system mappings refuses
-// the move and marks the mapping sealed, so that is the other right answer.
-// The child does it, to keep this process's vDSO.
+// works from the new address. Where the caller says the mapping is sealed, the
+// move is refused with EPERM and the vDSO stays where it was and works. The
+// child does it, to keep this process's vDSO.
+//
+// The kernel's mremap callback also updates mm->context.vdso to the new
+// address. Nothing in this port reads that field but ARCH_DLINFO, at exec, on
+// a fresh mm, so no row can observe the update: this row tests the mapping and
+// the entry at the new address, not the update.
 void check_mremap()
 {
 	long child = syscall6(nr_clone, 17, 0, 0, 0, 0);
@@ -1290,16 +1613,26 @@ void check_mremap()
 		Mapping mapping;
 		int named = 0;
 
-		if (moved == -error_perm)
-			code = vdso_is_sealed() ? sealed_status : 5;
-		else if (moved != target)
+		if (expect_sealed()) {
+			if (moved != -error_perm)
+				code = 6;
+			else if (vdso_seal_state() != 1)
+				code = 5;
+			else if (!read_maps_and_find(image.base, mapping, named) || !string_equal(mapping.name, "[vdso]") ||
+				 named != 1)
+				code = 7;
+			else {
+				Timespec now = {};
+				code = vdso_clock_gettime(1, &now) == 0 && now.seconds >= 0 ? 0 : 4;
+			}
+		} else if (moved != target) {
 			code = 1;
-		else if (!read_maps_and_find(static_cast<unsigned long>(target), mapping, named) ||
-			 !string_equal(mapping.name, "[vdso]") || named != 1)
+		} else if (!read_maps_and_find(static_cast<unsigned long>(target), mapping, named) ||
+			   !string_equal(mapping.name, "[vdso]") || named != 1) {
 			code = 2;
-		else if (read_maps_and_find(image.base, mapping, named) && string_equal(mapping.name, "[vdso]"))
+		} else if (read_maps_and_find(image.base, mapping, named) && string_equal(mapping.name, "[vdso]")) {
 			code = 3;
-		else {
+		} else {
 			auto entry = reinterpret_cast<ClockGettime>(resolved[0] - image.base + static_cast<unsigned long>(target));
 			Timespec now = {};
 			code = entry(1, &now) == 0 && now.seconds >= 0 ? 0 : 4;
@@ -1308,9 +1641,38 @@ void check_mremap()
 	}
 	int status = -1;
 	long waited = syscall6(nr_wait4, child, reinterpret_cast<long>(&status), 0, 0);
-	int code = (status >> 8) & 0xff;
-	CHECK(child > 0 && waited == child && (status & 0x7f) == 0 && (code == 0 || code == sealed_status),
-	      "mremap of the vDSO moves it and the entry works there, or the sealed mapping refuses (status 0x%x)", status);
+	CHECK(child > 0 && waited == child && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 0,
+	      expect_sealed() ? "mremap of the sealed vDSO is refused with EPERM and the vDSO stays and works (status 0x%x)"
+			      : "mremap of the vDSO moves it and the entry works there (status 0x%x)", status);
+}
+
+// Replace this process with the probe at `stage`: a new address space, with a
+// vDSO of its own, which gets the same --seal. `fallback` is the exit status
+// if the exec fails.
+[[noreturn]] void exec_self(int stage, int fallback)
+{
+	char stage_option[] = "--exec-stage=0";
+	char sealed_option[] = "--seal=sealed";
+	char open_option[] = "--seal=open";
+	char *arguments[] = { argument_vector[0], stage_option, expect_sealed() ? sealed_option : open_option,
+			      nullptr };
+
+	stage_option[13] = static_cast<char>('0' + stage);
+	syscall6(nr_execve, reinterpret_cast<long>("/proc/self/exe"), reinterpret_cast<long>(arguments),
+		 reinterpret_cast<long>(environment));
+	say("exec failed\n");
+	syscall6(nr_exit_group, fallback);
+	for (;;)
+		;
+}
+
+// Wait for `child`: its wait status, or -1 if another process came back.
+int wait_child(long child)
+{
+	int status = -1;
+	long waited = syscall6(nr_wait4, child, reinterpret_cast<long>(&status), 0, 0);
+
+	return waited == child ? status : -1;
 }
 
 // Exec the probe again, `stage` times over: each image is a new address
@@ -1319,19 +1681,185 @@ void check_exec(int stage)
 {
 	long child = syscall6(nr_clone, 17, 0, 0, 0, 0);
 
-	if (child == 0) {
-		char option[] = "--exec-stage=0";
-		char *arguments[] = { argument_vector[0], option, nullptr };
-		option[13] = static_cast<char>('0' + stage);
-		syscall6(nr_execve, reinterpret_cast<long>("/proc/self/exe"), reinterpret_cast<long>(arguments),
-			 reinterpret_cast<long>(environment));
-		say("exec failed\n");
-		syscall6(nr_exit_group, 98);
-	}
-	int status = -1;
-	long waited = syscall6(nr_wait4, child, reinterpret_cast<long>(&status), 0, 0);
-	CHECK(child > 0 && waited == child && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 0,
+	if (child == 0)
+		exec_self(stage, 98);
+	int status = wait_child(child);
+	CHECK(child > 0 && status == 0,
 	      "the program after an exec (stage %d) has a vDSO of its own that works (status 0x%x)", stage, status);
+}
+
+// How many mappings of this task are named [vdso].
+int count_vdso()
+{
+	Mapping mapping;
+	int named = 0;
+
+	read_maps_and_find(0, mapping, named);
+	return named;
+}
+
+// A task that moved, unmapped or covered its vDSO still execs a program with
+// a working one: the exec makes a new address space and maps a vDSO into it,
+// whatever became of the old one. Where the mapping is sealed each change is
+// refused instead, and the exec follows the refusal. A child tries each, so
+// this task keeps its own. The exit status says where a child stopped: 50
+// the move, 52 the unmap, 54 the cover, 51/53/55 the exec itself.
+void check_exec_after_change()
+{
+	const bool sealed = expect_sealed();
+	const long base = static_cast<long>(image.base);
+	const long size = static_cast<long>(image.length);
+	long child = syscall6(nr_clone, 17, 0, 0, 0, 0);
+
+	if (child == 0) {
+		quiet = true;
+		long target = syscall6(nr_mmap, 0, size, 0 /* PROT_NONE */, 0x22 /* MAP_PRIVATE|MAP_ANONYMOUS */, -1, 0);
+		long moved = syscall6(nr_mremap, base, size, size, 3 /* MREMAP_MAYMOVE|MREMAP_FIXED */, target);
+		if (sealed ? moved != -error_perm : moved != target)
+			syscall6(nr_exit_group, 50);
+		exec_self(0, 51);
+	}
+	int status = wait_child(child);
+	CHECK(status == 0, "exec after mremap of the vDSO gives a working vDSO (status 0x%x)", status);
+
+	child = syscall6(nr_clone, 17, 0, 0, 0, 0);
+	if (child == 0) {
+		quiet = true;
+		long result = syscall6(nr_munmap, base, size);
+		if (sealed ? result != -error_perm : (result != 0 || count_vdso() != 0))
+			syscall6(nr_exit_group, 52);
+		exec_self(0, 53);
+	}
+	status = wait_child(child);
+	CHECK(status == 0, "exec after munmap of the vDSO gives a working vDSO (status 0x%x)", status);
+
+	child = syscall6(nr_clone, 17, 0, 0, 0, 0);
+	if (child == 0) {
+		quiet = true;
+		long result = syscall6(nr_mmap, base, size, 3 /* PROT_READ|PROT_WRITE */,
+				       0x32 /* MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED */, -1, 0);
+		if (sealed ? result != -error_perm : (result != base || count_vdso() != 0))
+			syscall6(nr_exit_group, 54);
+		if (!sealed)
+			*reinterpret_cast<volatile unsigned char *>(image.base) = 1;
+		exec_self(0, 55);
+	}
+	status = wait_child(child);
+	CHECK(status == 0, "exec after MAP_FIXED over the vDSO gives a working vDSO (status 0x%x)", status);
+}
+
+// A special mapping cannot be grown, or duplicated while the old one stays
+// (MREMAP_DONTUNMAP), and a DONTNEED refault leaves it working. What madvise
+// itself returns differs with the sealing, so only the entry afterwards counts.
+void check_refused_growth()
+{
+	long child = syscall6(nr_clone, 17, 0, 0, 0, 0);
+
+	if (child == 0) {
+		quiet = true;
+		long grow = syscall6(nr_mremap, static_cast<long>(image.base), static_cast<long>(image.length),
+				     static_cast<long>(2 * image.length), 1 /* MREMAP_MAYMOVE */, 0);
+		long copy = syscall6(nr_mremap, static_cast<long>(image.base), static_cast<long>(image.length),
+				     static_cast<long>(image.length), 1 | 4 /* MREMAP_MAYMOVE|MREMAP_DONTUNMAP */, 0);
+		if (grow >= 0 || copy >= 0)
+			syscall6(nr_exit_group, 56);
+		if (count_vdso() != 1)
+			syscall6(nr_exit_group, 57);
+		syscall6(nr_madvise, static_cast<long>(image.base), static_cast<long>(image.length),
+			 4 /* MADV_DONTNEED */);
+		Timespec now = {};
+		syscall6(nr_exit_group, vdso_clock_gettime(1, &now) == 0 && now.seconds >= 0 ? 0 : 58);
+	}
+	int status = wait_child(child);
+	CHECK(status == 0,
+	      "mremap can neither grow nor duplicate the vDSO, and it works after MADV_DONTNEED (status 0x%x)", status);
+}
+
+// Flush the instruction cache over one address a task has written.
+void flush_code(unsigned long address)
+{
+	asm volatile("dc cvau, %0\n\tdsb ish\n\tic ivau, %0\n\tdsb ish\n\tisb" ::"r"(address) : "memory");
+}
+
+// What a task writes to its own vDSO page, through mprotect and a store, stays
+// in its copy: its header and an entry's code change there, in no other task
+// and in no program an exec starts. Where the mapping is sealed the mprotect is
+// refused and there is nothing to write.
+void check_private_copy()
+{
+	const bool sealed = expect_sealed();
+	const uint32_t original = *at<uint32_t>(resolved[0]);
+	long child = syscall6(nr_clone, 17, 0, 0, 0, 0);
+
+	if (child == 0) {
+		quiet = true;
+		long result = syscall6(nr_mprotect, static_cast<long>(image.base), static_cast<long>(image.length),
+				       7 /* PROT_READ|PROT_WRITE|PROT_EXEC */);
+		if (sealed)
+			syscall6(nr_exit_group, result == -error_perm ? 0 : 60);
+		if (result != 0)
+			syscall6(nr_exit_group, 61);
+		*reinterpret_cast<volatile unsigned char *>(image.base + 8) = 0x5a;
+		// mov x8, #172 (getpid): the entry now returns the process's ID.
+		*reinterpret_cast<volatile uint32_t *>(resolved[0]) = 0xd2801588;
+		flush_code(resolved[0]);
+		Timespec now = {};
+		long got = vdso_clock_gettime(1, &now);
+		syscall6(nr_exit_group, got == syscall6(nr_getpid) ? 0 : 62);
+	}
+	int status = wait_child(child);
+	bool header_kept = *at<unsigned char>(image.base + 8) == 0;
+	bool code_kept = *at<uint32_t>(resolved[0]) == original;
+	CHECK(status == 0 && header_kept && code_kept,
+	      "a child's write to its vDSO stays in its copy (status 0x%x, header %d, code %d)", status,
+	      header_kept ? 1 : 0, code_kept ? 1 : 0);
+
+	Timespec before = {}, mine = {}, after = {};
+	syscall6(nr_clock_gettime, 1, reinterpret_cast<long>(&before));
+	long own = vdso_clock_gettime(1, &mine);
+	syscall6(nr_clock_gettime, 1, reinterpret_cast<long>(&after));
+	CHECK(own == 0 && later_or_equal(before, mine) && later_or_equal(mine, after),
+	      "this task's entry still reads the clock after the child's write (%ld)", own);
+
+	child = syscall6(nr_clone, 17, 0, 0, 0, 0);
+	if (child == 0) {
+		quiet = true;
+		exec_self(0, 63);
+	}
+	status = wait_child(child);
+	CHECK(status == 0, "an exec after the child's write has the original vDSO (status 0x%x)", status);
+}
+
+// A tracer's PTRACE_POKEDATA into a tracee's vDSO page changes the tracee's
+// copy only: the tracer reads its own page unchanged.
+void check_tracer_write()
+{
+	long child = syscall6(nr_clone, 17, 0, 0, 0, 0);
+
+	if (child == 0) {
+		quiet = true;
+		if (syscall6(nr_ptrace, 0 /* PTRACE_TRACEME */, 0, 0, 0) != 0)
+			syscall6(nr_exit_group, 70);
+		syscall6(nr_kill, syscall6(nr_getpid), 19 /* SIGSTOP */);
+		unsigned char seen = *at<unsigned char>(image.base + 9);
+		syscall6(nr_exit_group, seen == 0x77 ? 0 : 71);
+	}
+	int status = wait_child(child);
+	bool stopped = (status & 0xff) == 0x7f;
+	long poked = stopped ? syscall6(nr_ptrace, 5 /* PTRACE_POKEDATA */, child, static_cast<long>(image.base + 8),
+					0x7700L)
+			     : -1;
+	unsigned long peeked = 0;
+	long peek = stopped ? syscall6(nr_ptrace, 2 /* PTRACE_PEEKDATA */, child, static_cast<long>(image.base + 8),
+				       reinterpret_cast<long>(&peeked))
+			    : -1;
+	if (stopped)
+		syscall6(nr_ptrace, 7 /* PTRACE_CONT */, child, 0, 0);
+	status = stopped ? wait_child(child) : status;
+	bool kept = *at<unsigned long>(image.base + 8) == 0;
+	CHECK(stopped && poked == 0 && peek == 0 && peeked == 0x7700 && status == 0 && kept,
+	      "PTRACE_POKEDATA into a tracee's vDSO changes the tracee's copy only (status 0x%x, own copy kept %d)",
+	      status, kept ? 1 : 0);
 }
 
 // Whether the vDSO is there; the cases that need it run only when it is.
@@ -1340,12 +1868,15 @@ bool check_vdso(bool whole)
 	check_auxiliary();
 	if (!locate_image())
 		return false;
+	check_seal();
 	if (whole)
 		check_neighbours();
 	if (!check_header() || !check_dynamic())
 		return false;
-	if (whole)
+	if (whole) {
+		check_sections();
 		check_note();
+	}
 	check_symbols();
 	if (whole)
 		check_unwind();
@@ -1383,6 +1914,10 @@ int run(int exec_stage, bool staged)
 	}
 	check_fork();
 	check_mremap();
+	check_exec_after_change();
+	check_refused_growth();
+	check_private_copy();
+	check_tracer_write();
 	check_exec(2);
 	return failures;
 }
@@ -1396,8 +1931,18 @@ extern "C" [[noreturn]] void probe_start(long *stack)
 	environment = argument_vector + argument_count + 1;
 
 	int stage = -1;
-	if (argument_count >= 2 && starts_with(argument_vector[1], "--exec-stage="))
-		stage = argument_vector[1][13] - '0';
+	for (long i = 1; i < argument_count; i++) {
+		if (starts_with(argument_vector[i], "--exec-stage="))
+			stage = argument_vector[i][13] - '0';
+		else if (string_equal(argument_vector[i], "--seal=sealed"))
+			seal_expected = Seal::sealed;
+		else if (string_equal(argument_vector[i], "--seal=open"))
+			seal_expected = Seal::open;
+	}
+	if (seal_expected == Seal::unstated) {
+		say("usage: vdso_probe --seal=sealed|open (whether the kernel seals its system mappings)\n");
+		syscall6(nr_exit_group, 64);
+	}
 	quiet = stage >= 0;
 	int status = run(stage < 0 ? 0 : stage, stage >= 0);
 	syscall6(nr_exit_group, status > 255 ? 255 : status);
