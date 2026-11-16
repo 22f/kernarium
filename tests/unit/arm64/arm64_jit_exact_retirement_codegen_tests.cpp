@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 using uml::emulator::tests::require;
 
@@ -259,7 +260,123 @@ void compare_retry_region_uses_native_exclusives() {
   }));
 }
 
-void tracked_compare_retry_region_uses_the_semantic_path() {
+/* Whether `word` is the host's load-exclusive or store-exclusive on x21, the
+ * translated address the run keeps. */
+[[nodiscard]] bool native_load_exclusive(std::uint32_t word) {
+  return (word & 0x3fe0'0000U) == 0x0840'0000U && ((word >> 5) & 31U) == 21U;
+}
+[[nodiscard]] bool native_store_exclusive(std::uint32_t word) {
+  return (word & 0x3fe0'0000U) == 0x0800'0000U && ((word >> 5) & 31U) == 21U;
+}
+/* A word that touches no memory: data processing (immediate or register) or
+ * a conditional branch, the only words a run's interval may hold. */
+[[nodiscard]] bool register_only_or_branch(std::uint32_t word) {
+  const auto group = (word >> 25) & 15U;
+  const bool data_processing = group == 8U || group == 9U || group == 5U ||
+                               group == 13U;
+  const bool branch = (word & 0xff00'0010U) == 0x5400'0000U ||
+                      (word & 0x7e00'0000U) == 0x3400'0000U ||
+                      (word & 0x7e00'0000U) == 0x3600'0000U;
+  return data_processing || branch;
+}
+
+/* The fused run in `compiled`: exactly one host load-exclusive and one
+ * store-exclusive, and between them nothing but register work and branches
+ * (to the rollback), whatever the variant. Returns the store's position. */
+[[nodiscard]] std::size_t
+require_fused_interval(const jit_test::CompiledCode &compiled) {
+  const auto code = hot(compiled);
+  require(std::ranges::count_if(code, native_load_exclusive) == 1);
+  require(std::ranges::count_if(code, native_store_exclusive) == 1);
+  const auto load = static_cast<std::size_t>(
+      std::ranges::find_if(code, native_load_exclusive) - code.begin());
+  const auto store = static_cast<std::size_t>(
+      std::ranges::find_if(code, native_store_exclusive) - code.begin());
+  require(load < store);
+  for (std::size_t index = load + 1; index < store; ++index)
+    require(register_only_or_branch(code[index]));
+  return store;
+}
+
+[[nodiscard]] std::ptrdiff_t sign_extend_19(std::uint32_t word) {
+  auto value = static_cast<std::int32_t>((word >> 5) & 0x7ffffU);
+  if ((value & 0x40000) != 0)
+    value -= 0x80000;
+  return value;
+}
+
+/* After the store, the tracked variant records the store's range only if the
+ * host store succeeded: a cbnz on the store's status register guards the
+ * record's first word (a store of x21 through the chain's range table), and
+ * nothing of the record comes before the store. */
+void require_record_after_a_successful_store(
+    const jit_test::CompiledCode &compiled, std::size_t store, bool tracked) {
+  const auto code = hot(compiled);
+  const auto status = (code[store] >> 16) & 31U;
+  require(status != 31U);
+  constexpr std::uint32_t record_address = 0xf900'0000U | (3U << 5) | 21U;
+  const auto is_record = [](std::uint32_t word) {
+    return (word & 0xffc0'03ffU) == record_address;
+  };
+  require(std::none_of(code.begin(), code.begin() + store + 1, is_record));
+  const auto after = std::ranges::find_if(code.begin() + store + 1, code.end(),
+                                          is_record);
+  if (!tracked) {
+    require(after == code.end());
+    return;
+  }
+  require(after != code.end());
+  const auto cbnz = code[store + 1];
+  require((cbnz & 0xff00'001fU) == (0x3500'0000U | status));
+  const auto skipped =
+      static_cast<std::ptrdiff_t>(sign_extend_19(cbnz));
+  require(static_cast<std::ptrdiff_t>(after - code.begin()) <
+          static_cast<std::ptrdiff_t>(store + 1) + skipped);
+}
+
+void fused_runs_have_one_interval_in_both_variants() {
+  struct Shape {
+    std::vector<std::uint32_t> guest;
+    std::uint64_t pc;
+  };
+  const std::array<Shape, 4> shapes{{
+      {{0xc85f'7c23U, // ldxr x3, [x1]
+        0xc805'7c23U, // stxr w5, x3, [x1]
+        0x35ff'ffe5U},
+       0x5b08'0000U},
+      {{0xc85f'7c23U, // ldxr x3, [x1]
+        0x9100'0463U, // add x3, x3, #1
+        0xc805'7c23U, // stxr w5, x3, [x1]
+        0x35ff'ff85U},
+       0x5b09'0000U},
+      {{0xc85f'7c23U, // ldxr x3, [x1]
+        0xeb04'007fU, // cmp x3, x4
+        0x5400'0061U, // b.ne pc + 12
+        0xc805'7c22U, // stxr w5, x2, [x1]
+        0x35ff'ff85U},
+       0x5b0a'0000U},
+      /* The status is the zero register: it gets a scratch of its own. */
+      {{0xc85f'7c23U, // ldxr x3, [x1]
+        0x9100'0463U, // add x3, x3, #1
+        0xc81f'7c23U, // stxr wzr, x3, [x1]
+        0x35ff'ff9fU},
+       0x5b0b'0000U},
+  }};
+  for (const auto &shape : shapes) {
+    for (const bool tracked : {false, true}) {
+      const auto compiled = tracked
+          ? jit_test::compile_tracked_block(shape.pc, shape.guest)
+          : jit_test::compile_block(shape.pc, shape.guest);
+      require(compiled.guest_instructions == shape.guest.size());
+      const auto store = require_fused_interval(compiled);
+      require_record_after_a_successful_store(compiled, store, tracked);
+      require(compiled.direct_memory_write_mask ==
+              (std::uint64_t{1} << (shape.guest.size() - 2U)));
+    }
+  }
+}
+
+void tracked_compare_retry_region_uses_native_exclusives() {
   constexpr std::array guest{
       0xc85f'7c23U, // ldxr x3, [x1]
       0xeb04'007fU, // cmp x3, x4
@@ -269,13 +386,9 @@ void tracked_compare_retry_region_uses_the_semantic_path() {
   };
   const auto compiled =
       jit_test::compile_tracked_block(0x5b06'0000U, guest);
-  require(!compiled.words.empty());
-  require(compiled.guest_instructions != 0);
-  require(compiled.guest_instructions <= guest.size());
-  require(compiled.direct_memory_write_mask == 0);
-  require(std::ranges::none_of(hot(compiled), [](std::uint32_t word) {
-    return (word & ~((31U << 16) | 31U)) == 0xc800'7ea0U;
-  }));
+  require(compiled.guest_instructions == guest.size());
+  require(compiled.direct_memory_write_mask == (std::uint64_t{1} << 3U));
+  (void)require_fused_interval(compiled);
 }
 
 void compare_retry_with_shared_result_and_status_is_not_fused() {
@@ -305,7 +418,8 @@ int main() {
   exclusive_counter_loop_retains_one_translated_address();
   profiled_exclusive_integer_shapes_remain_native();
   compare_retry_region_uses_native_exclusives();
-  tracked_compare_retry_region_uses_the_semantic_path();
+  tracked_compare_retry_region_uses_native_exclusives();
+  fused_runs_have_one_interval_in_both_variants();
   compare_retry_with_shared_result_and_status_is_not_fused();
   return 0;
 }
