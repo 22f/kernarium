@@ -572,6 +572,55 @@ void test_links_follow_alias_stores()
 	require(space.to_system_call(w, 9, alias + 0x400) == 2);
 }
 
+/* E7, the case the explicit cooling of the writer's own units catches: one
+ * dispatch, with no hand-over between, stores through W into a unit it has
+ * already compiled and linked to, and branches into it again. The unit P
+ * stores CL through W over the immediate of X's `mov eax, imm32`, then jumps
+ * to X, which counts and jumps back once:
+ *
+ *	P:	88 0a			mov %cl, (%rdx)
+ *		e9 rel32		jmp X
+ *	X:	b8 00 00 00 00		mov $0, %eax	(immediate patched)
+ *		ff c1			inc %ecx
+ *		83 f9 02		cmp $2, %ecx
+ *		0f 8c rel32		jl P
+ *		0f 05			syscall
+ *
+ * The second round stores 1, and the second run of X must see it. The
+ * ring record the store makes is applied at the next hand-over, which this
+ * dispatch does not reach. */
+void test_a_store_then_a_branch_into_a_linked_unit_in_one_dispatch()
+{
+	const Clean clean;
+	constexpr std::uint64_t p = 0x3c00'0000;
+	constexpr std::uint64_t x = 0x1c00'0000;
+	constexpr std::uint64_t alias = 0x2c00'0000;
+	ScratchBacking frame_p{"uml-x86-jit-loop-p-XXXXXX", page};
+	ScratchBacking frame_x{"uml-x86-jit-loop-x-XXXXXX", page};
+	const auto rel32 = [](std::uint64_t from, std::uint64_t to) {
+		const auto delta = static_cast<std::int32_t>(to - from);
+		return std::array<std::uint8_t, 4>{
+			static_cast<std::uint8_t>(delta), static_cast<std::uint8_t>(delta >> 8),
+			static_cast<std::uint8_t>(delta >> 16), static_cast<std::uint8_t>(delta >> 24)};
+	};
+	const auto to_x = rel32(p + 7, x);
+	put(frame_p, 0, {0x88, 0x0a, 0xe9, to_x[0], to_x[1], to_x[2], to_x[3]});
+	const auto to_p = rel32(x + 16, p);
+	put(frame_x, 0, {0xb8, 0x00, 0x00, 0x00, 0x00, 0xff, 0xc1, 0x83, 0xf9, 0x02,
+		0x0f, 0x8c, to_p[0], to_p[1], to_p[2], to_p[3], 0x0f, 0x05});
+	Space space{9213};
+	space.map(p, frame_p, 0, rx, 1);
+	space.map(x, frame_x, 0, rx, 1);
+	space.map(alias, frame_x, 0, rw, 0);
+	auto cpu = Space::cpu_at(p, 0, alias + 1);
+	const auto result = space.run(cpu);
+	require(result.execution.reason == uml::cpu::ExitReason::system_call,
+		"the loop did not reach its system call in one dispatch");
+	require(cpu.gpr(x86_64::Register::rax) == 1,
+		"a branch into a linked unit ran the code a store through W had "
+		"replaced in the same dispatch");
+}
+
 /* E4j: a participant of another generation stays inside the engine while
  * this space compiles a frame it writes: the space drops the frame's code at
  * each hand-over until the participant has left, and then once more. */
@@ -852,6 +901,8 @@ int main()
 	std::puts("retire all ok");
 	test_links_follow_alias_stores();
 	std::puts("links ok");
+	test_a_store_then_a_branch_into_a_linked_unit_in_one_dispatch();
+	std::puts("one dispatch ok");
 	test_a_stuck_writer_of_another_generation_drops_the_code();
 	std::puts("stuck ok");
 	test_registration_failure();
