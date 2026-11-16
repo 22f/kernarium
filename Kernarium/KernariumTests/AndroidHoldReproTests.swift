@@ -69,6 +69,11 @@ struct AndroidHoldReproTests {
                 runtime.hold()
             }
 
+            func holdNow() {
+                log.record("hold")
+                runtime.holdNow()
+            }
+
             func release() {
                 log.record("release")
                 runtime.release()

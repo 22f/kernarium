@@ -250,7 +250,11 @@ application's statements (the sensor orientation, the rotation that
   ended. `holdAfterVideoEnds` is the application's sequence (end, wait at most
   `backgroundVideoBound`, then hold whatever the wait found, and say once on a
   wait that ran out); the hold's own budget and this bound together stay inside
-  the application's edge budget.
+  the application's edge budget (three seconds from the edge to the held gate at
+  the latest). A caller that holds without the wait, as the application's bound
+  does when the edge is late, ends a wait that is pending with `abandon()`: the
+  call returns at once with `abandoned` set and says nothing, since the held gate
+  makes the wait of no use.
 - **Video mode.** The device tells its owner (`onVideoMode`) whether the guest
   is in video mode: a live camera's video runs, uninterrupted, and the guest
   asks for the picture stabilized, which Android's record template does and its

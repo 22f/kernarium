@@ -321,6 +321,11 @@ nonisolated struct RuntimeGPUGate: GuestGPUGate {
         print("Kernarium: guest GPU requests held on background (\(result))")
     }
 
+    func holdNow() {
+        let result = kernarium_runtime_loader_set_gpu_hold(2)
+        print("Kernarium: guest GPU requests held at once (\(result))")
+    }
+
     func release() {
         let result = kernarium_runtime_loader_set_gpu_hold(0)
         print("Kernarium: guest GPU requests released (\(result))")

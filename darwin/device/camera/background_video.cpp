@@ -11,14 +11,27 @@ BackgroundVideo::Outcome BackgroundVideo::end(Clock::time_point deadline)
     std::unique_lock lock(mutex_);
     if (!attached_) return {};
     const auto request = ++asked_;
+    const auto abandonedAtStart = abandoned_;
     requested_.store(true, std::memory_order_release);
     wake_();
-    changed_.wait_until(lock, deadline, [&] { return answered_ >= request || !attached_; });
+    const auto cut = [&] { return abandoned_ != abandonedAtStart; };
+    changed_.wait_until(lock, deadline, [&] { return answered_ >= request || !attached_ || cut(); });
     if (!attached_) return {};
+    if (cut()) return {0, false, answered_ >= request, true};
     if (answered_ < request) return {0, false, false};
     const auto streams = streams_;
-    changed_.wait_until(lock, deadline, [&] { return remaining_ == 0 || !attached_; });
+    changed_.wait_until(lock, deadline, [&] { return remaining_ == 0 || !attached_ || cut(); });
+    if (cut() && remaining_ != 0 && attached_) return {streams, false, true, true};
     return {streams, remaining_ == 0 || !attached_, true};
+}
+
+void BackgroundVideo::abandon()
+{
+    {
+        std::lock_guard lock(mutex_);
+        ++abandoned_;
+    }
+    changed_.notify_all();
 }
 
 void BackgroundVideo::attach(std::function<void()> wake)

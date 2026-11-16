@@ -39,11 +39,21 @@ public:
         /* The device took the request: false when it did not within the deadline (the video may be ended late, and `streams`
          * is not known). */
         bool answered {true};
+        /* The wait was cut short by `abandon`: the application's GPU requests were held meanwhile (by a caller that had
+         * no time to wait), so the guest cannot act on the lost video any more. `stopped` is then not known. */
+        bool abandoned {};
     };
 
     /* Ends the guest's running video and waits until the guest has stopped its streams, or until `deadline`: one deadline
      * for the device's answer and the wait together, so the call never takes longer than it. Calls serialize. */
     [[nodiscard]] Outcome end(Clock::time_point deadline);
+
+    /* Ends the wait of a call of `end` that is in progress, as the application's other way to hold the GPU does when it lands
+     * first (the hold that the edge's bound takes when the edge is already late): the guest cannot act on the video once its
+     * GPU requests are held, so waiting for it is of no use. The call returns at once with `abandoned` set. With no call in
+     * progress it does nothing: a call that comes later waits as any does (each call counts the abandons from its own
+     * start). Any thread. */
+    void abandon();
 
     /* The device's side. */
 
@@ -69,6 +79,7 @@ private:
     bool attached_ {};
     std::atomic<bool> requested_ {};
     std::uint64_t asked_ {};
+    std::uint64_t abandoned_ {};
     std::uint64_t answered_ {};
     std::uint32_t streams_ {};
     std::uint32_t remaining_ {};
@@ -80,7 +91,8 @@ inline constexpr std::chrono::milliseconds backgroundVideoBound {2000};
 
 /* What the application does when it leaves the foreground, before it holds the guest's GPU requests: `video.end` ends the
  * guest's running camera video and waits for the guest to stop it, within `bound`, and then `hold` runs, whatever the wait
- * found. A wait that ran out is told once to `log` (the message, without a prefix). `Video` is a `BackgroundVideo`. */
+ * found. A wait that ran out is told once to `log` (the message, without a prefix); one that was abandoned is not, and the
+ * hold that follows it holds what is held already. `Video` is a `BackgroundVideo`. */
 template <class Hold> struct HeldAfterVideo {
     BackgroundVideo::Outcome video;
     std::invoke_result_t<Hold&> held;
@@ -90,7 +102,9 @@ template <class Video, class Hold, class Log>
 [[nodiscard]] HeldAfterVideo<Hold> holdAfterVideoEnds(Video& video, Hold&& hold, std::chrono::nanoseconds bound, Log&& log)
 {
     const auto outcome = video.end(BackgroundVideo::Clock::now() + bound);
-    if (!outcome.answered)
+    if (outcome.abandoned) {
+        // Another caller held the GPU first: nothing to tell.
+    } else if (!outcome.answered)
         log("the camera did not answer the end of the guest's video within " +
             std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(bound).count()) + " ms");
     else if (!outcome.stopped)

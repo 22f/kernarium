@@ -422,10 +422,15 @@ typedef int (*kernarium_runtime_send_console_input_function)(
  * its virtqueue, through any suspend of the guest, and runs in order after the
  * release. Work already in the renderer carries on. The application holds
  * before it enters the background, where the host GPU is revoked within
- * seconds, and releases when it returns. Returns 1 when the setting is in
- * effect and no request was still running after one second, 0 when one was
- * (the hold is in effect regardless), and -1 when no guest is running: the
- * setting is kept and applies to the guest's GPU once it starts. */
+ * seconds, and releases when it returns. A hold of 1 on an Android guest first
+ * ends the guest's running camera video and waits, two seconds at most, until
+ * the guest has stopped it, so a recording that runs ends before the requests
+ * stop; with no video running it waits for nothing. A hold of 2 takes the hold
+ * at once, with no such wait (the application's own bound, when the edge is
+ * already late), and ends a wait of a hold of 1 that is pending. Returns 1 when
+ * the setting is in effect and no request was still running after one second,
+ * 0 when one was (the hold is in effect regardless), and -1 when no guest is
+ * running: the setting is kept and applies to the guest's GPU once it starts. */
 typedef int (*kernarium_runtime_set_gpu_hold_function)(int held);
 /* Whether the guest's display is on: 1 while it has its primary scanout, 0
  * while it has none, as an Android screen that is off has not, and -1 when no

@@ -165,6 +165,68 @@ void callsSerialize()
     require(stopped.load() == 3, "every call came back");
 }
 
+/* A hold that lands while a call waits ends the wait: the guest cannot act on the video once its GPU requests are held. */
+void anAbandonedWaitReturnsAtOnce()
+{
+    BackgroundVideo control;
+    FakeDevice device(control, 10ms, 1, 0ms);
+    BackgroundVideo::Outcome outcome;
+    const auto began = Clock::now();
+    std::thread caller([&] { outcome = control.end(Clock::now() + 8s); });
+    while (!device.answered()) std::this_thread::sleep_for(1ms);
+    std::this_thread::sleep_for(50ms);
+    control.abandon();
+    caller.join();
+    require(outcome.abandoned && !outcome.stopped && outcome.answered && outcome.streams == 1, "the wait was cut short");
+    require(since(began) < 2s, "at once, not at the deadline");
+}
+
+/* An abandon with no call in progress does nothing, and a call that comes later waits as any does. */
+void anAbandonWithNoCallInProgressChangesNothing()
+{
+    BackgroundVideo control;
+    FakeDevice device(control, 5ms, 1, 40ms);
+    control.abandon();
+    const auto outcome = control.end(Clock::now() + 5s);
+    require(!outcome.abandoned && outcome.answered && outcome.stopped && outcome.streams == 1, "the next call waits for the stop");
+}
+
+/* The edge's main path waits for the guest to stop its video, the bound's hold lands first (the edge is already late), and the
+ * wait ends: the main path's own hold then holds what is held, and nothing is told. */
+void aHoldThatLandsFirstEndsThePendingWaitHarmlessly()
+{
+    BackgroundVideo control;
+    FakeDevice device(control, 5ms, 2, 0ms);
+    std::mutex mutex;
+    std::vector<std::string> events;
+    const auto note = [&](const char* what) {
+        std::lock_guard lock(mutex);
+        events.emplace_back(what);
+    };
+    std::vector<std::string> log;
+    std::atomic<bool> held {};
+    const auto began = Clock::now();
+    BackgroundVideo::Outcome outcome;
+    std::thread mainPath([&] {
+        const auto result = uml::camera::holdAfterVideoEnds(
+            control, [&] { note("hold"); return held.load() ? 1 : 0; }, 8s, [&](const std::string& line) { log.push_back(line); });
+        outcome = result.video;
+    });
+    while (!device.answered()) std::this_thread::sleep_for(1ms);
+    std::this_thread::sleep_for(50ms);
+    {
+        // The other path: the hold at the bound lands at once, and the pending wait is told.
+        note("late hold");
+        held.store(true);
+        control.abandon();
+    }
+    mainPath.join();
+    require((events == std::vector<std::string> {"late hold", "hold"}), "the late hold first, the main path's hold after it");
+    require(outcome.abandoned && outcome.streams == 2, "the main path's wait was abandoned");
+    require(log.empty(), "and says nothing");
+    require(since(began) < 3s, "without waiting for the bound");
+}
+
 /* The ordering of the edge, with a fake video and a fake hold. */
 struct FakeVideo {
     std::vector<std::string>* events {};
@@ -261,6 +323,9 @@ int main()
     aDeviceThatDoesNotAnswerIsSaid();
     aDeviceThatGoesAwayEndsTheWait();
     callsSerialize();
+    anAbandonedWaitReturnsAtOnce();
+    anAbandonWithNoCallInProgressChangesNothing();
+    aHoldThatLandsFirstEndsThePendingWaitHarmlessly();
     aRunningVideoIsEndedAndWaitedForBeforeTheHold();
     noVideoMeansTheHoldAtOnce();
     aBoundThatRunsOutHoldsAndSaysSoOnce();

@@ -2950,6 +2950,17 @@ int holdGpuRequests()
 
 int runtimeSetGpuHold(int held)
 {
+    if (held == 2) {
+        /* The hold at once, with no wait for the guest's camera: the
+         * application's own bound takes it when the edge is already late.
+         * A hold that waits for the camera meanwhile is of no use once this
+         * has landed, and ends. */
+        const int result = holdGpuRequests();
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        cameraBackgroundVideo()->abandon();
+#endif
+        return result;
+    }
     if (held != 0) {
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
         /* A camera video that runs as the application leaves the foreground
