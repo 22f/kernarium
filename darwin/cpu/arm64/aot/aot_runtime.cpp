@@ -808,8 +808,8 @@ bool Binder::changed_since(void *context, std::uint64_t sequence,
 }
 
 Binder::Verdict Binder::verify_page(
-	::uml::memory::StaticGuestMemory &memory, Instance &instance,
-	std::uint64_t index) noexcept
+	::uml::memory::StaticGuestMemory &memory, void *context,
+	Instance &instance, std::uint64_t index) noexcept
 {
 	const auto library = directory().library(instance.library);
 	const auto address =
@@ -829,6 +829,16 @@ Binder::Verdict Binder::verify_page(
 			return Verdict::mutable_page;
 		}
 	}
+	/* The bytes fetched below are the frame the stamps name only while the
+	 * address space's mappings stand still, which the execution gate this
+	 * runs inside keeps true; the sequence is read to check it, not to rely
+	 * on it. */
+	const auto mapping_sequence = [context]() noexcept -> std::uint64_t {
+		return context == nullptr ? 0 :
+			darwin_uml_static_vm_execution_context_sequences(context)
+				.mapping_changes;
+	};
+	const auto sequence_at_start = mapping_sequence();
 	const auto outcome = verify_through_table(g_verdicts,
 		[&](std::uint64_t at, PageStamp &stamp) noexcept {
 #if !UML_AOT_SHARED_VERDICTS
@@ -863,6 +873,7 @@ Binder::Verdict Binder::verify_page(
 				page_hash_size) == 0 ? SharedOutcome::match :
 				SharedOutcome::mismatch;
 		},
+		[&]() noexcept { return mapping_sequence() != sequence_at_start; },
 		address, VerdictTable::where(instance.library,
 			static_cast<std::uint32_t>(index)));
 	switch (outcome) {
@@ -1063,7 +1074,8 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 #if UML_AOT_DIAGNOSTICS
 		const auto began = std::chrono::steady_clock::now();
 #endif
-		const auto verdict = verify_page(memory, instance, page_index);
+		const auto verdict = verify_page(memory, context, instance,
+			page_index);
 #if UML_AOT_DIAGNOSTICS
 		counters::verify_nanos.fetch_add(static_cast<std::uint64_t>(
 			std::chrono::duration_cast<std::chrono::nanoseconds>(

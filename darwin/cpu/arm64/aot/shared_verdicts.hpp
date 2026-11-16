@@ -147,15 +147,22 @@ enum class SharedOutcome : std::uint8_t {
  *                        unmapped), which is the execute contract: such a
  *                        page is never answered from the table;
  *  hash_page()           fetches the page and compares its SHA-256 with the
- *                        stored one: returns match, mismatch or unreadable.
+ *                        stored one: returns match, mismatch or unreadable;
+ *  moved()               whether the verifying address space's mapping-change
+ *                        sequence moved since the call began.
  *
  * The whole stamp is read before the fetch and, after a match, once more: a
  * verdict is filed only when it is unchanged and immutable, so a page that
  * was replaced, published or unmapped while it was being hashed is not
- * filed. */
-template <class Stamp, class Hash>
+ * filed. The stamps alone could not tell the frame being replaced and put
+ * back in the verifying space, and the bytes fetched through the address are
+ * the stamped frame's only because the execution gate keeps that space's
+ * mapping changes out while it verifies; the sequence makes the call check
+ * what it relies on: a verification during which the space's mappings moved
+ * says neither match nor mismatch and files nothing. */
+template <class Stamp, class Hash, class Moved>
 [[nodiscard]] SharedOutcome verify_through_table(VerdictTable &table,
-	Stamp &&stamp, Hash &&hash_page, std::uint64_t address,
+	Stamp &&stamp, Hash &&hash_page, Moved &&moved, std::uint64_t address,
 	std::uint64_t at) noexcept
 {
 	PageStamp before;
@@ -163,6 +170,8 @@ template <class Stamp, class Hash>
 	if (stamped && before.immutable && table.contains(before, at))
 		return SharedOutcome::shared_hit;
 	const SharedOutcome result = hash_page();
+	if (moved())
+		return SharedOutcome::unreadable;
 	if (result == SharedOutcome::match && stamped && before.immutable) {
 		PageStamp after;
 		if (stamp(address, after) && after == before)

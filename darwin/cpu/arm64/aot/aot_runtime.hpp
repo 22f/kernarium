@@ -200,8 +200,8 @@ private:
 	/* Hash text page `index` of the instance and compare it with the stored
 	 * hash. */
 	[[nodiscard]] Verdict verify_page(
-		::uml::memory::StaticGuestMemory &memory, Instance &instance,
-		std::uint64_t index) noexcept;
+		::uml::memory::StaticGuestMemory &memory, void *context,
+		Instance &instance, std::uint64_t index) noexcept;
 	/* Whether a code change after `sequence` touches [low, high). */
 	[[nodiscard]] static bool changed_since(void *context,
 		std::uint64_t sequence, std::uint64_t low, std::uint64_t high,

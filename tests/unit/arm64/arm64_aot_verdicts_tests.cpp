@@ -174,6 +174,9 @@ struct StubMemory final {
 	std::function<void()> on_fetch;
 	std::uint64_t fetches{0};
 	SharedOutcome content{SharedOutcome::match};
+	/* The verifying space's mapping-change sequence moved since the
+	 * verification began. */
+	bool moved{false};
 
 	SharedOutcome verify(VerdictTable &table, std::uint64_t at)
 	{
@@ -188,6 +191,7 @@ struct StubMemory final {
 					on_fetch();
 				return content;
 			},
+			[&] { return moved; },
 			0x7000'0000, at);
 	}
 };
@@ -262,6 +266,29 @@ void deciding_rows()
 		require(memory.verify(table, where_b) == SharedOutcome::match);
 		require(memory.fetches == fetched + 2);
 	}
+	/* The verifying space's mapping changes while the page is fetched (which
+	 * the execution gate forbids; Rule S does not rely on it alone): what was
+	 * fetched may not be the frame the stamps name, so the verification
+	 * answers neither a match nor a mismatch and files nothing, however
+	 * equal the stamps are before and after. */
+	memory.stamp = {930, 1, true};
+	memory.on_fetch = [&] { memory.moved = true; };
+	const auto fetched = memory.fetches;
+	require(memory.verify(table, where_a) == SharedOutcome::unreadable);
+	memory.content = SharedOutcome::mismatch;
+	require(memory.verify(table, where_a) == SharedOutcome::unreadable);
+	memory.content = SharedOutcome::unreadable;
+	require(memory.verify(table, where_a) == SharedOutcome::unreadable);
+	memory.content = SharedOutcome::match;
+	memory.on_fetch = nullptr;
+	memory.moved = false;
+	require(memory.verify(table, where_a) == SharedOutcome::match);
+	require(memory.fetches == fetched + 4);
+	require(memory.verify(table, where_a) == SharedOutcome::shared_hit);
+	/* A sequence that moved before the verification began is not a move. */
+	memory.stamp = {931, 1, true};
+	memory.moved = false;
+	require(memory.verify(table, where_a) == SharedOutcome::match);
 	/* Clearing at hand-back: nothing hits afterwards. */
 	memory.stamp = {920, 1, true};
 	require(memory.verify(table, where_a) == SharedOutcome::match);
