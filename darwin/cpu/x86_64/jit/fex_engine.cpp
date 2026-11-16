@@ -571,10 +571,13 @@ struct Space final {
 
 	/* The page's own part of the question: a translator of this address
 	 * space holds code at this location. Its frame's holders elsewhere are
-	 * the rest (a fill reads them with the fill's own settling). */
+	 * the rest (a fill reads them with the fill's own settling). A space with
+	 * no registry cannot be retired from a holder's registration, so every
+	 * store it makes publishes, a non-executable page's included: a write
+	 * entry filled before a holder existed would outlive it. */
 	[[nodiscard]] bool publishes_by_page(GuestAddressSpace &memory, std::uint64_t address) const
 	{
-		return memory.is_executable(address) && (!registry || registry->holds(address));
+		return !registry || (memory.is_executable(address) && registry->holds(address));
 	}
 };
 

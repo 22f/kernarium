@@ -708,6 +708,42 @@ void test_without_a_registry()
 	require(space.engine().diagnostics().registration_failures == 1);
 }
 
+/* The writer's side of E5: a space that could not make its registry is not
+ * named by a registration that retires write translations, so it cannot be
+ * retired from a holder's registration. Every store it makes publishes, the
+ * stores to a non-executable page included: W's store, made before any
+ * holder of the frame exists, must still reach the code that X, another
+ * generation, compiles afterwards. */
+void test_a_writer_without_a_registry()
+{
+	const Clean clean;
+	constexpr std::uint64_t executable = 0x1c00'0000;
+	constexpr std::uint64_t alias = 0x2c00'0000;
+	constexpr std::uint64_t writer = 0x3c00'0000;
+	constexpr std::size_t page_counts = std::size_t{1} << 18;
+	ScratchBacking frame{"uml-x86-jit-bare-writer-XXXXXX", page};
+	ScratchBacking code{"uml-x86-jit-bare-writer-code-XXXXXX", page};
+	load_return(frame, 1);
+	load_writer(code);
+	Space w{9217};
+	Space x{9218};
+	w.map(writer, code, 0, rx, 1);
+	w.map(alias, frame, 0, rw, 0);
+	x.map(executable, frame, 0, rx, 1);
+	failing_array_size.store(page_counts);
+	/* W's first store, before any holder of the frame exists. */
+	(void)w.to_system_call(writer, 1, alias + 1);
+	require(failing_array_size.load() == 0 &&
+		uml::cpu::x86_64::CodePageRegistry::find(w.generation()) == nullptr,
+		"the registry of the writer was made");
+	require(x.to_system_call(executable) == 1);
+	/* W stores again, through whatever its first store left. */
+	(void)w.to_system_call(writer, 2, alias + 1);
+	require(x.to_system_call(executable) == 2,
+		"a store of a space with no registry did not reach code compiled "
+		"after its first store");
+}
+
 /* Fails every registration that reaches the holder list, as memory that
  * stays exhausted would. */
 void fail_every_holder_list(uml::memory::testing::AllocationSite site) noexcept
@@ -884,8 +920,14 @@ void test_helper_stores_reach_the_next_instruction()
 		"the instruction after a helper-shaped store ran its old bytes");
 }
 
-int main()
+int main(int argc, char **argv)
 {
+	/* A row's name as the first argument runs that row alone: "writer". */
+	if (argc > 1 && std::strcmp(argv[1], "writer") == 0) {
+		test_a_writer_without_a_registry();
+		std::puts("writer without a registry ok");
+		return EXIT_SUCCESS;
+	}
 	const auto start = FrameAccounting::diagnostics();
 	test_store();
 	std::puts("store ok");
@@ -909,6 +951,8 @@ int main()
 	std::puts("failure ok");
 	test_without_a_registry();
 	std::puts("no registry ok");
+	test_a_writer_without_a_registry();
+	std::puts("writer without a registry ok");
 	test_helper_stores_reach_the_next_instruction();
 	std::puts("helper stores ok");
 	const auto now = FrameAccounting::diagnostics();
