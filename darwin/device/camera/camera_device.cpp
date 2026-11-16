@@ -60,6 +60,9 @@ constexpr std::uint64_t captureTimeoutNanoseconds = 10'000'000'000;
 constexpr std::uint64_t abandonedCaptureNanoseconds = 30'000'000'000;
 /* How long a session that failed to open waits before it is tried again. */
 constexpr std::uint64_t sessionRetryNanoseconds = 1'000'000'000;
+/* A lost camera's first failed video buffer waits this long for the guest to have read the camera's interrupted record
+ * (`lossRecordDelivered`); the buffers fail after it whether the guest has read it or not. */
+constexpr std::uint64_t lossRecordReadNanoseconds = 100'000'000;
 /* The guest is still acting on a camera's lost video this long after the loss: the application that leaves the foreground
  * then waits for the guest to stop the streams of that video (`BackgroundVideo`). A loss older than this was not acted on,
  * and a later departure does not wait for it. */
@@ -220,6 +223,14 @@ public:
         bool lost {};
         /* When the video was lost, on the device's clock. */
         std::uint64_t lostAt {};
+        /* The camera's interrupted record goes to the guest ahead of the first failed video buffer of the loss (the guest's
+         * camera layer reads the camera's records, and reports the loss only when the record that came with the failed
+         * buffer says it): its sequence (none until it is made), when it was made, the meta buffers (stream and resource)
+         * that carried it, and whether the guest has queued one of them again, which is how the device knows it was read. */
+        std::uint64_t lossRecord {};
+        std::uint64_t lossRecordAt {};
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> lossRecordCarriers;
+        bool lossRecordRead {};
         /* The guest has been told the camera is interrupted (or gone) and not
          * yet that it is back; it is told once each way. */
         bool told {};
@@ -933,7 +944,46 @@ public:
             const auto age = entry.timestamp != 0 && time > entry.timestamp ? time - entry.timestamp : 0;
             complete(id, held, age, ok ? 0 : VIRTIO_VIDEO_DEQUEUE_FLAG_ERR, ok ? std::uint32_t(bytes.size()) : 0,
                      entry.meta.sequence);
+            if (auto* runtime = runtimeOf(stream.camera); runtime && runtime->lossRecord != 0 && entry.meta.sequence == runtime->lossRecord)
+                runtime->lossRecordCarriers.emplace_back(id, held.resource);
         }
+    }
+
+    /* Whether a started meta stream of the camera is there to carry its records. */
+    [[nodiscard]] bool hasStartedMeta(const Runtime& runtime) const
+    {
+        return std::any_of(streams.begin(), streams.end(), [&](const auto& entry) {
+            return entry.second.camera == runtime.description.index && entry.second.kind == VIRTIO_VIDEO_CAMERA_STREAM_META &&
+                entry.second.started;
+        });
+    }
+
+    /* Whether the buffers of a lost camera's video may fail now. The camera's interrupted record goes to the guest first,
+     * and they fail once the guest has queued again the meta buffer that carried it (it has read it) or
+     * `lossRecordReadNanoseconds` have passed, so that the first failure the guest meets is the loss: a buffer that fails
+     * before the guest has read the record is taken for an ordinary failure, and the loss is found only a request later.
+     * A camera with no meta stream running has no reader to wait for. */
+    [[nodiscard]] bool lossRecordDelivered(Runtime& runtime)
+    {
+        if (runtime.lossRecordRead) return true;
+        if (runtime.lossRecord == 0) {
+            if (!hasStartedMeta(runtime)) {
+                runtime.lossRecordRead = true;
+                return true;
+            }
+            const auto sequence = ++runtime.sequence;
+            CameraExposure record;
+            record.activeCamera = std::uint32_t(runtime.description.platformIndex);
+            runtime.lossRecord = sequence;
+            runtime.lossRecordAt = now();
+            pushMeta(runtime, metaOf(runtime, sequence, record, blackMetaFlags(runtime)), now());
+            return false;
+        }
+        if (now() - runtime.lossRecordAt < lossRecordReadNanoseconds) return false;
+        runtime.lossRecordRead = true;
+        std::fprintf(stderr, "camera %u: the guest did not read the interrupted record of the lost video in %llu ms\n",
+                     unsigned(runtime.description.index), static_cast<unsigned long long>(lossRecordReadNanoseconds / 1'000'000));
+        return true;
     }
 
     // ------------------------------------------------------------------------
@@ -1076,6 +1126,7 @@ public:
             return;
         }
         if (stream.queued.empty()) return;
+        if (runtime->lost && !lossRecordDelivered(*runtime)) return;
         const auto held = stream.queued.front();
         stream.queued.pop_front();
         auto& resource = stream.resources.at(held.resource);
@@ -1760,6 +1811,9 @@ public:
                 if (ends) {
                     runtime.lost = ended = true;
                     runtime.lostAt = now();
+                    runtime.lossRecord = 0;
+                    runtime.lossRecordCarriers.clear();
+                    runtime.lossRecordRead = false;
                     std::fprintf(stderr, "camera %u: the video ended: the application left the foreground\n",
                                  unsigned(runtime.description.index));
                 }
@@ -2301,6 +2355,11 @@ public:
                 break;
             case VIRTIO_VIDEO_CAMERA_STREAM_STILL: queueStill(stream, runtime, held); break;
             default:
+                // The guest queues a meta buffer that carried the loss's record again: it has read the record.
+                if (runtime.lost && !runtime.lossRecordRead &&
+                    std::find(runtime.lossRecordCarriers.begin(), runtime.lossRecordCarriers.end(),
+                              std::pair<std::uint32_t, std::uint32_t> {id, q.resource_id}) != runtime.lossRecordCarriers.end())
+                    runtime.lossRecordRead = true;
                 stream.queued.push_back(held);
                 stream.started = true;
                 serveMeta(id, stream);
@@ -2370,6 +2429,9 @@ public:
             runtime.resuming = false;
             runtime.failed = false;
             runtime.lost = false;
+            runtime.lossRecord = 0;
+            runtime.lossRecordCarriers.clear();
+            runtime.lossRecordRead = false;
             runtime.told = false;
             runtime.toldUnavailable = false;
             runtime.videoRetry = 0;

@@ -231,6 +231,11 @@ application's statements (the sensor orientation, the rotation that
   session whose frames are dark and interrupted and whose stills fail until the
   application is back, not a loss for each reopening. A blocked session hears of
   none. The report line names the camera and says the video ended.
+  The interrupted record goes to the guest first: the device queues it on the
+  meta stream when the loss begins, and the video buffers fail only once the guest
+  has queued the meta buffer that carried it again (100 ms at most, then the
+  buffers fail and one line says so), so the first failure a guest meets is the
+  loss and not an ordinary failed buffer.
 - **The application's departure.** The application holds the guest's GPU requests
   as it enters the background, and a guest whose camera layer has not acted on
   the lost video by then stalls in its next GPU request until the application is

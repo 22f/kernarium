@@ -1221,7 +1221,8 @@ video and the camera application topic that ends the recording.
 `camera-background-video` (unit) is the ordering of the application's departure
 (video running: end, wait, hold; none: hold at once; a wait that runs out: hold
 and one log line; the wait inside the bound) with a fake camera device and a
-fake GPU gate, and `camera-device` drives the device's side of it.
+fake GPU gate, and `camera-device` drives the device's side of it and the
+interrupted record that goes to the guest before a lost video's failed buffers.
 `android17-camera-runner` (tooling) runs its
 parsers and the expectations of every layout without a guest,
 `android17-camera-layouts` (tooling) the layout set, its fallback order and the
