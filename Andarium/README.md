@@ -588,8 +588,9 @@ control out.
   `StartPlan` is what Home shows of them before Start. An update clones
   `data.img` first (the update's copy, until the updated Android has booted),
   and Erase virtual machine deletes everything the guest has stored, its snapshots,
-  the adb key, its installation identity and the sender of the last text message
-  sent to it included.
+  the adb key, its installation identity, the sender of the last text message
+  sent to it and the notice of a text message whose outcome was not yet shown
+  included.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
   user turns on Include in backups. Its snapshots are never backed up.
 - **Snapshots.** A snapshot is an APFS clone of `data.img` with a copy of
@@ -1003,15 +1004,20 @@ requires reopening Andarium.
   a message box, which alone asks iOS for a one-time code, and Send. While a
   message is being sent the fields refuse edits and keep the keyboard. The
   session owns the bar (`TextMessageState`): a send that is under way ends
-  with the run, and its late answer is dropped. Send waits while the adb
-  channel is busy with a transfer or Android is paused for lack of space.
-  The words say only what is known, that Android took the message or did not
-  confirm it, and VoiceOver hears them. A message that was not confirmed is
-  sent again with the same identifier, and the service does not hand an
-  identifier over twice while it remembers it (`GuestSms.Retries`); both sides
-  remember a bounded number, for the run or until the service restarts, so an
-  old retry may be handed over again. The sender and text rules, the limits and the command
-  are `GuestSms`'s; the system image must include the
+  with the run, and its late answer is dropped. Send waits while Android is
+  paused for lack of space, and the keyboard goes while it is, so the pause
+  card does not cover the bar's title. The words say only what is known: that
+  Android took the message, already had it, did not receive it, did not confirm
+  it, or cannot tell, and VoiceOver hears them. Sending again, within the run, a
+  message that Android did not confirm asks about the first send instead of
+  handing it over again (`GuestSms.Retries`); "not sent" is said only of a first
+  send. When a message may have arrived, the bar says so, also the next time it
+  opens after a session that ended before a send's result was shown, and sending
+  it again is then a new message (`TextMessageNotice`). Sixteen messages waiting
+  for Android to confirm them refuse a new draft until Android restarts. Each
+  message goes to the guest over vsock port 5560 (`GuestSmsChannel`), not over
+  adb. The sender and text rules and the limits are `GuestSms`'s; the system
+  image must include the
   [SMS service](../android/lineage-24/README.md#text-messages).
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and

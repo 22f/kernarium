@@ -449,6 +449,12 @@ system's rating prompt is never asked for). `HomeMenuTests` (Home's toolbar
 menu) exist with any of Send feedback, Review and Buy me tokens, and
 `HomePlainInfoTests` (the plain Info button) only with none
 ([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
+`GuestSmsTests`, `GuestSmsChannelTests` and `TextMessageNoticeTests` (`AndariumCoreTests`)
+read the golden bytes of the text message channel and its payload, which the guest
+service's tests read too, and run the exchange over socket pairs and a scripted
+system (deadline, cancellation); the hosted `TextMessageTests` play the bar over a
+fake driver: every state, the durable notice at each point where a session can end,
+and what VoiceOver has been told.
 `AndariumCoreTests` holds the tip sheet's states and the rating rule, counter
 and record as pure logic, and the state of the no-Google-apps notice (the panel
 on a first start and on the retry of a first Android boot that did not finish,
