@@ -548,7 +548,8 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   every address space that maps the page, under the page's identity and
   epoch, only when the kernel reports the page immutable in the mapping
   being verified (bit 1 of the map call's `guest_code`) and the page's record
-  counts its executable mappings exactly. The epoch moves at every
+  counts its executable mappings (a record that ran out of count or of epoch
+  answers none, for good). The epoch moves at every
   publication of a change to the page's code and when its last executable
   mapping departs, so a verdict is answered only while the page has stayed
   executable in some address space since it was filed. A mapping that cannot
