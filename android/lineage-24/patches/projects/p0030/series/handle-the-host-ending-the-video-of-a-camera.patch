@@ -19,13 +19,19 @@ A session with a stream whose usage carries the video encoder bit
   host's wire contract states).
 - The sensor latches the loss in the health of the opened session, fails
   the request as a whole with every output buffer returned as an error,
-  and notifies ERROR_DEVICE for it, once per session.
+  and tells the framework ERROR_REQUEST for it, and ERROR_DEVICE besides,
+  once per session. The framework returns the buffers of a request only
+  when it was told that the request failed: a request that ERROR_DEVICE
+  alone named would keep its buffers, and the references to their
+  streams, until the camera service ends, and the application could not
+  open the camera again.
 - Each request the session still holds drains in order as ERROR_REQUEST
   with error buffers, and the frame source is not asked again.
 - processCaptureRequest, flush and configureStreams answer INTERNAL_ERROR
-  from then on, a close succeeds, and a session opened afterwards is a
-  new one. The state belongs to the opened session, not to a frame
-  source or a sensor that a reconfiguration replaces.
+  from then on (a flush ends what the session holds as failed requests
+  first), a close succeeds, and a session opened afterwards is a new
+  one. The state belongs to the opened session, not to a frame source or
+  a sensor that a reconfiguration replaces.
 
 Any other session is told nothing:
 
@@ -40,15 +46,15 @@ A failed buffer without that record keeps its old meaning.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- .../EmulatedCameraDeviceSessionHWLImpl.cpp    | 49 ++++++++++++-
+ .../EmulatedCameraDeviceSessionHWLImpl.cpp    | 49 +++++++++++-
  .../hwl/EmulatedCameraDeviceSessionHWLImpl.h  |  5 ++
  devices/EmulatedCamera/hwl/EmulatedSensor.cpp |  5 ++
  devices/EmulatedCamera/hwl/EmulatedSensor.h   | 10 +++
- .../EmulatedCamera/hwl/EmulatedSensorHost.cpp | 68 ++++++++++++++-----
- devices/EmulatedCamera/hwl/IFrameSource.h     | 17 +++++
- .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 53 +++++++++++++++
+ .../EmulatedCamera/hwl/EmulatedSensorHost.cpp | 78 +++++++++++++++----
+ devices/EmulatedCamera/hwl/IFrameSource.h     | 17 ++++
+ .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 53 +++++++++++++
  devices/EmulatedCamera/hwl/V4l2FrameSource.h  | 15 ++++
- 8 files changed, 204 insertions(+), 18 deletions(-)
+ 8 files changed, 214 insertions(+), 18 deletions(-)
 
 diff --git a/devices/EmulatedCamera/hwl/EmulatedCameraDeviceSessionHWLImpl.cpp b/devices/EmulatedCamera/hwl/EmulatedCameraDeviceSessionHWLImpl.cpp
 index 337677a5ad2544e1220f538a062609ffd7613c8a..bbc7c6449c1fbc1c8bf3b4854f2ee4728ca88538 100644
@@ -239,18 +245,23 @@ index b7f8e622257551764d1b850a42176f3b75a71f30..0c82bc55efc071c8b4b347d93699d3f4
  
    bool WaitForVSyncLocked(nsecs_t reltime);
 diff --git a/devices/EmulatedCamera/hwl/EmulatedSensorHost.cpp b/devices/EmulatedCamera/hwl/EmulatedSensorHost.cpp
-index d2105c09f0f31cfa7a0c73f1c423c0756df17431..42fb38f920c4f2b093ec654f35e88edebf0b5151 100644
+index d2105c09f0f31cfa7a0c73f1c423c0756df17431..b2b464dcf1871ed233559de105d2854c1fc45945 100644
 --- a/devices/EmulatedCamera/hwl/EmulatedSensorHost.cpp
 +++ b/devices/EmulatedCamera/hwl/EmulatedSensorHost.cpp
-@@ -55,6 +55,41 @@ void EmulatedSensor::CaptureFromHost(
+@@ -55,6 +55,52 @@ void EmulatedSensor::CaptureFromHost(
      exposure_time = settings.begin()->second.exposure_time;
    }
  
 +  // Returns the request as failed, as a whole: every output buffer goes back with an error
 +  // status, whatever it did before (one output may have completed when another met the loss),
 +  // the buffers are marked so that none of them sends a buffer error of its own, and the
-+  // framework is told by one error for the request, with no shutter and no results.
-+  auto fail_request = [&](ErrorCode code) {
++  // framework is told by one error for the request, with no shutter and no results. The request
++  // that also tells the framework that the device is gone (the first of a lost session) is
++  // reported as a failed request all the same, after the device error: the framework returns the
++  // buffers of a request only when it was told that the request failed, so a request that only
++  // the device error named would keep its buffers, and the references to their streams, until
++  // the camera service itself ends, and the application's own reopening would fail.
++  auto fail_request = [&](bool device_error) {
 +    for (auto& buffer : *buffers) {
 +      if (!buffer->is_input) {
 +        buffer->stream_buffer.status = BufferStatus::kError;
@@ -260,9 +271,16 @@ index d2105c09f0f31cfa7a0c73f1c423c0756df17431..42fb38f920c4f2b093ec654f35e88ede
 +    next_capture_time_ = getSystemTimeWithSource(timestamp_source);
 +    next_readout_time_ = next_capture_time_ + exposure_time;
 +    if (callback.notify != nullptr) {
-+      NotifyMessage msg = ErrorMessage{
-+          .frame_number = frame_number, .error_stream_id = -1, .error_code = code};
-+      callback.notify(pipeline_id, msg);
++      if (device_error) {
++        NotifyMessage device = ErrorMessage{.frame_number = frame_number,
++                                            .error_stream_id = -1,
++                                            .error_code = ErrorCode::kErrorDevice};
++        callback.notify(pipeline_id, device);
++      }
++      NotifyMessage request = ErrorMessage{.frame_number = frame_number,
++                                           .error_stream_id = -1,
++                                           .error_code = ErrorCode::kErrorRequest};
++      callback.notify(pipeline_id, request);
 +    }
 +    if (result != nullptr) {
 +      result->result_metadata.reset();
@@ -276,15 +294,14 @@ index d2105c09f0f31cfa7a0c73f1c423c0756df17431..42fb38f920c4f2b093ec654f35e88ede
 +  // source. The one that tells the framework that the device is gone is the first of them.
 +  if (session_health_->lost()) {
 +    ALOGW("%s: frame %u failed: the session's device is gone", __FUNCTION__, frame_number);
-+    fail_request(session_health_->claim_device_error() ? ErrorCode::kErrorDevice
-+                                                       : ErrorCode::kErrorRequest);
++    fail_request(session_health_->claim_device_error());
 +    return;
 +  }
 +
    // The request processor hands every buffer over marked as failed, and the
    // stock sensor flips the mark as it produces the buffer. Here the source's
    // BeginRequest marks only the buffers it could not queue, so the others start
-@@ -134,24 +169,23 @@ void EmulatedSensor::CaptureFromHost(
+@@ -134,24 +180,22 @@ void EmulatedSensor::CaptureFromHost(
        ++failed;
      }
    }
@@ -306,8 +323,8 @@ index d2105c09f0f31cfa7a0c73f1c423c0756df17431..42fb38f920c4f2b093ec654f35e88ede
 -      result->result_metadata.reset();
 +  // A camera whose video the host ended in a session with an encoder stream fails the request
 +  // whatever else was produced, and the session is over: the loss is latched at the session's
-+  // scope, and the framework is told that the device is gone (ERROR_DEVICE), once, not that one
-+  // request failed.
++  // scope, and the framework is told that the device is gone (ERROR_DEVICE), once, besides the
++  // failed request.
 +  if (frame_source_->DeviceLost()) {
 +    session_health_->latch_lost();
 +  }
@@ -320,13 +337,12 @@ index d2105c09f0f31cfa7a0c73f1c423c0756df17431..42fb38f920c4f2b093ec654f35e88ede
 +            __FUNCTION__, frame_number, outputs);
      }
 -    buffers->clear();
-+    fail_request(device_lost && session_health_->claim_device_error() ? ErrorCode::kErrorDevice
-+                                                                      : ErrorCode::kErrorRequest);
++    fail_request(device_lost && session_health_->claim_device_error());
      return;
    }
  
 diff --git a/devices/EmulatedCamera/hwl/IFrameSource.h b/devices/EmulatedCamera/hwl/IFrameSource.h
-index cea72f2711ef850a568d7fc8830a4414dc430326..59b557c2453bc9f2d06b8bb3679a4e1de7118461 100644
+index cea72f2711ef850a568d7fc8830a4414dc430326..9627a5c5d186c88327be7bf600c5cb4d6d8dbd97 100644
 --- a/devices/EmulatedCamera/hwl/IFrameSource.h
 +++ b/devices/EmulatedCamera/hwl/IFrameSource.h
 @@ -22,9 +22,11 @@
@@ -353,9 +369,9 @@ index cea72f2711ef850a568d7fc8830a4414dc430326..59b557c2453bc9f2d06b8bb3679a4e1d
 +  }
 +
 +  // Whether the source has seen the host end the camera's video in a session that has an encoder
-+  // stream. The sensor then fails the request as a whole, latches the loss in the session's health
-+  // and tells the framework ERROR_DEVICE, once per session; every later request of the session
-+  // fails as ERROR_REQUEST.
++  // stream. The sensor then fails the request as a whole (ERROR_REQUEST), latches the loss in the
++  // session's health and tells the framework ERROR_DEVICE besides, once per session; every later
++  // request of the session fails as ERROR_REQUEST alone.
 +  virtual bool DeviceLost() const {
 +    return false;
 +  }

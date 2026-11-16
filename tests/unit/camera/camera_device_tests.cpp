@@ -2892,6 +2892,78 @@ void stillStream(Rig& rig, std::uint32_t stream, std::uint32_t camera, std::uint
     }
 }
 
+// The guest's camera layer answers the application's departure by closing the video stream that was lost and opening
+// another, while the application is still away. The platform session that opens for it is held, interrupted, until the
+// application is back: one close for the departure and one opening, dark frames that say why meanwhile, a still that fails
+// with an error, live frames on the same session after the return, and the same again for a second departure. An
+// interruption that is not the application's departure keeps its session and ends no video.
+void testASessionOpenedWhileTheApplicationIsAwayIsHeldUntilItIsBack()
+{
+    Rig rig;
+    std::uint32_t video = 1;
+    videoStream(rig, video, 0, 640, 480, 6);
+    stillStream(rig, 10, 0, 1008, 756, 4);
+    rig.queue(video, 1);
+    rig.pumpSteps(0, 1);
+    unsigned sessions = 1;
+    require(rig.camera->sessionsOpened() == sessions && rig.camera->sessionsOpen() == 1, "one session runs");
+
+    for (std::uint32_t round = 1; round <= 2; ++round) {
+        // The application leaves: the running video is lost and its session closes.
+        rig.camera->interrupt(CameraEventKind::interruptedInBackground);
+        rig.step();
+        require(rig.camera->sessionsOpen() == 0 && rig.camera->sessionsOpened() == sessions, "one close for the departure");
+        const auto lost = rig.queue(video, round == 1 ? 2 : 5);
+        require(rig.waitFor([&] { return rig.done(lost); }) && rig.result(lost).base.flags == endedFlags, "the video is lost");
+
+        // The guest closes the lost stream and opens another, with the application still away.
+        rig.destroy(video);
+        ++video;
+        videoStream(rig, video, 0, 640, 480, 6);
+        const auto first = rig.queue(video, 1), second = rig.queue(video, 2);
+        rig.step();
+        require(rig.waitFor([&] { return rig.done(first) && rig.done(second); }), "the new stream is answered");
+        require(rig.result(first).base.flags == (blackFlag | interruptedFlag) && rig.result(second).base.flags == (blackFlag | interruptedFlag),
+                "with dark frames that say the camera is interrupted, not that the video ended");
+        ++sessions;
+        require(rig.camera->sessionsOpened() == sessions && rig.camera->sessionsOpen() == 1, "one opening, held while the application is away");
+        require(rig.states.back() == CameraState::interrupted, "the guest is told the camera is interrupted");
+
+        // A still taken meanwhile fails, and takes nothing from the session.
+        const auto away = rig.queue(10, 2 * round - 1, 70 + round);
+        require(rig.waitFor([&] { return rig.done(away); }) && rig.result(away).base.flags == endedFlags, "a still while away fails");
+        require(rig.camera->sessionsOpened() == sessions && rig.camera->sessionsOpen() == 1, "and the session is the one held");
+
+        // The application is back: the same session delivers live frames and takes stills.
+        rig.camera->resume();
+        rig.step();
+        const auto bridge = rig.queue(video, 3);
+        require(rig.waitFor([&] { return rig.done(bridge); }) && rig.result(bridge).base.flags == (blackFlag | resumingFlag),
+                "the stream is bridged until the platform delivers");
+        const auto live = rig.queue(video, 4);
+        rig.camera->pump(0, 1);
+        rig.step();
+        require(rig.done(live) && rig.result(live).base.flags == 0 && rig.states.back() == CameraState::streaming, "then it is live");
+        require(rig.camera->sessionsOpened() == sessions && rig.camera->sessionsOpen() == 1, "on the one session");
+        const auto again = rig.queue(10, 2 * round, 80 + round);
+        rig.camera->pump(0, 0);
+        rig.step();
+        require(rig.waitFor([&] { return rig.done(again); }) && rig.result(again).base.flags == 0, "and a still is taken");
+    }
+
+    // A call, or any other interruption that is not the application's departure, keeps the session and ends no video.
+    rig.camera->interrupt(CameraEventKind::interrupted);
+    rig.step();
+    const auto gap = rig.queue(video, 5);
+    require(rig.waitFor([&] { return rig.done(gap); }) && rig.result(gap).base.flags == (blackFlag | interruptedFlag), "a dark gap, not an end");
+    require(rig.camera->sessionsOpened() == sessions && rig.camera->sessionsOpen() == 1, "the session stays");
+    rig.camera->resume();
+    rig.step();
+    const auto bridge = rig.queue(video, 6);
+    require(rig.waitFor([&] { return rig.done(bridge); }) && rig.result(bridge).base.flags == (blackFlag | resumingFlag), "and the video comes back");
+    require(rig.camera->sessionsOpened() == sessions, "on the same session");
+}
+
 // A change of a running video that the platform refuses leaves the capture it was to replace running (the platform's
 // rollback keeps it): the camera still holds it, so a second camera is not admitted under a use of one, and the stream's
 // end stops it.
@@ -3894,6 +3966,7 @@ int main()
     testTheApplicationLeavingTheForegroundEndsTheVideoOfACamera();
     testTheLossDoesNotDependOnTheStabilization();
     testOnlyTheBackgroundEndsAVideoAndOnlyOfACameraWithAVideoStream();
+    testASessionOpenedWhileTheApplicationIsAwayIsHeldUntilItIsBack();
     testAccessDenied();
     testStillsAndCalibration();
     testControlsOnStreams();
