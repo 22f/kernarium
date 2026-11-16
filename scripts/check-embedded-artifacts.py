@@ -369,6 +369,31 @@ def check_accessibility(repo, report, release_id, label):
     )
 
 
+NEW_INPUT = "is an input now and was not when the release was built"
+
+
+def input_findings(recorded, paths, current):
+    """(path, what, recorded object ID or None) for each input path that
+    differs from what a release recorded. `current` maps the list's paths to
+    their object IDs here, None for a path the commit lacks. A path the list
+    gained since the release is NEW_INPUT: pending until a release carries it."""
+    findings = []
+    for path in sorted(set(recorded) | set(paths)):
+        if path not in recorded:
+            findings.append((path, NEW_INPUT, None))
+        elif path not in current:
+            findings.append((path, "is no longer an input of the list", None))
+        elif current[path] is None:
+            findings.append((path, f"was removed (recorded {short(recorded[path])})", None))
+        elif current[path] != recorded[path]:
+            findings.append((
+                path,
+                f"changed (recorded {short(recorded[path])}, now {short(current[path])})",
+                recorded[path],
+            ))
+    return findings
+
+
 def check_android(repo, report, staged_root, app):
     try:
         descriptor = descriptor_of(repo, ANDROID_DESCRIPTOR)
@@ -410,20 +435,7 @@ def check_android(repo, report, staged_root, app):
         report.error(f"the accepted descriptor's input trees are malformed: {error}")
         return
     current = object_ids_at(repo, paths)
-    findings = []
-    for path in sorted(set(recorded) | set(paths)):
-        if path not in recorded:
-            findings.append((path, "is an input now and was not when the release was built", None))
-        elif path not in current:
-            findings.append((path, "is no longer an input of the list", None))
-        elif current[path] is None:
-            findings.append((path, f"was removed (recorded {short(recorded[path])})", None))
-        elif current[path] != recorded[path]:
-            findings.append((
-                path,
-                f"changed (recorded {short(recorded[path])}, now {short(current[path])})",
-                recorded[path],
-            ))
+    findings = input_findings(recorded, paths, current)
     if not findings:
         report.note(f"{label}: its {len(recorded)} input paths are the ones on this commit")
         return
