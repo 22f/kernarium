@@ -229,9 +229,15 @@ extension AppModel {
     /// Turn On on the card; the card goes when the screen reader is on, and
     /// stays, with the reason, when it did not turn on. When nothing can be
     /// asked of Android just now it says why in Settings' words, and reads
-    /// again.
+    /// again; while the change runs a press says "Turning on…".
     func turnOnScreenReaderFromCard() {
         let reader = session.reader
+        // The button stays enabled while the change runs, and a press says what
+        // it shows: the change is under way, and no second one starts.
+        if reader.changing != nil {
+            announce(ScreenReaderWords.turningOn)
+            return
+        }
         let reason: String?
         if screenReaderChannelBusy {
             reason = ScreenReaderWords.waitsForTransfer

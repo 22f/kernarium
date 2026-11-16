@@ -792,7 +792,15 @@ struct TalkBackSwitchTests {
         // The read answered: the note goes, and the next press turns it on.
         try await settle { model.session.reader.state != nil }
         #expect(model.session.reader.cardFailure == nil)
+        driver.screenReaderChangeDelay = .milliseconds(300)
+        said.lines.removeAll()
         model.turnOnScreenReaderFromCard()
+        try await settle { model.session.reader.changing == true && driver.screenReaderChanges.count == 1 }
+        // A press while the change runs says "Turning on…" and starts no second change.
+        model.turnOnScreenReaderFromCard()
+        model.turnOnScreenReaderFromCard()
+        #expect(said.lines == [ScreenReaderWords.turningOn, ScreenReaderWords.turningOn])
+        #expect(driver.screenReaderChanges == [.init(on: true, service: talkBack)])
         try await settle { model.session.reader.isOn }
         #expect(driver.screenReaderChanges == [.init(on: true, service: talkBack)])
     }

@@ -84,8 +84,8 @@ struct ScreenReaderCard: View {
 
     /// Turn On, Try Again after a failure, and "Turning on…" while the change
     /// runs. The button is not disabled for that: a disabled button dims its
-    /// label out of reach of the contrast, and a press while it runs does
-    /// nothing (`AppModel.setScreenReader`).
+    /// label out of reach of the contrast, and a press while it runs says
+    /// "Turning on…" and starts nothing (`AppModel.turnOnScreenReaderFromCard`).
     @ViewBuilder
     private func turnOn(_ reader: ScreenReaderSession) -> some View {
         let button = Button {
@@ -94,7 +94,10 @@ struct ScreenReaderCard: View {
             if reader.changing == true {
                 HStack(spacing: 8) {
                     ProgressView()
+                    // One line, shrunk where a language runs long (Japanese).
                     Text(ScreenReaderWords.turningOn)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                 }
             } else {
                 Text(reader.cardFailure != nil ? ScreenReaderWords.tryAgain : ScreenReaderWords.turnOn)

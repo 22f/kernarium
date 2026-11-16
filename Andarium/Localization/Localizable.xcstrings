@@ -2517,13 +2517,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android的屏幕阅读器会朗读你在Android屏幕上触摸的内容。开启后，旁白在这里不再朗读，你的触摸会交给屏幕阅读器。"
+            "value" : "Android的屏幕阅读器会朗读你在Android屏幕上触摸的内容。开启后，旁白不再朗读Android屏幕，你的触摸会交给屏幕阅读器。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android的螢幕閱讀器會朗讀你在Android畫面上觸碰的內容。開啟後，旁白在這裡不再朗讀，你的觸碰會交給螢幕閱讀器。"
+            "value" : "Android的螢幕閱讀器會朗讀你在Android畫面上觸碰的內容。開啟後，旁白不再朗讀Android畫面，你的觸碰會交給螢幕閱讀器。"
           }
         }
       }
