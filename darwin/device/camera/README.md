@@ -254,7 +254,8 @@ application's statements (the sensor orientation, the rotation that
   the latest). A caller that holds without the wait, as the application's bound
   does when the edge is late, ends a wait that is pending with `abandon()`: the
   call returns at once with `abandoned` set and says nothing, since the held gate
-  makes the wait of no use.
+  makes the wait of no use. The calls serialize under their deadlines: a call still
+  queued behind another at its own returns unanswered.
 - **Video mode.** The device tells its owner (`onVideoMode`) whether the guest
   is in video mode: a live camera's video runs, uninterrupted, and the guest
   asks for the picture stabilized, which Android's record template does and its
