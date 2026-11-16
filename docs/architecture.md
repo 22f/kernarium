@@ -270,10 +270,11 @@ host's table of the kernel's direct ranges (32 of them, split on a partial unmap
 and counted when full) resolves its buffer to; a buffer the table does not
 resolve, or resolves to a descriptor with no backing alive, is counted and makes
 every generation read every translation again.
-When the emulator's run ends it appends the run's counts (unresolved kernel
-writes, dropped direct ranges, global holds, registrations and their failures,
-refusals and lost stamp hits) to the file `UML_X86_ACCOUNTING_LOG` names; the
-unresolved writes and global holds stay near zero in an ordinary guest.
+When a run of the emulator ends it appends the process's counts so far, which
+nothing resets (unresolved kernel writes, dropped direct ranges, global holds,
+registrations and their failures, refusals and lost stamp hits), to the file
+`UML_X86_ACCOUNTING_LOG` names; the unresolved writes and global holds stay
+near zero in an ordinary guest.
 
 Every change of a frame's locations happens under that frame's stripe lock, and
 nothing under it allocates, makes a record or takes another lock: the index

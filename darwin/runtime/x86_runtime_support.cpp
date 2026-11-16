@@ -140,8 +140,7 @@ void report_x86_run_counters() noexcept
 		static_cast<unsigned long long>(accounting.unresolved_kernel_writes),
 		static_cast<unsigned long long>(accounting.direct_range_drops),
 		static_cast<unsigned long long>(accounting.global_holds),
-		static_cast<unsigned long long>(accounting.registration_failures +
-			registrations.failures),
+		static_cast<unsigned long long>(registrations.failures),
 		static_cast<unsigned long long>(registrations.registrations),
 		static_cast<unsigned long long>(registrations.flush_serial_misses),
 		static_cast<unsigned long long>(registrations.refusals),
