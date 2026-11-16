@@ -27,10 +27,10 @@ The target is `uml_arm64_jit`.
 
 The JIT compiles a block the first time an address space runs it, and no
 translation serves another process: the private cache is keyed by the address
-space, the shared tier opens only while two executors live and is keyed by
-guest PC, and the guest's ASLR moves every image anyway. Each exec'd process
-therefore compiles its whole startup path again, several times what it costs
-the gadget engine, and the LTP runner scales its case bounds for it
+space, the shared tier is keyed by guest PC, and the guest's ASLR moves every
+image anyway. Each exec'd process therefore compiles its whole startup path
+again, several times what it costs the gadget engine, and the LTP runner
+scales its case bounds for it
 ([testing](../../../../docs/testing.md#ltp)). An Android guest never stops
 translating: its processes' working sets together outgrow the cache at any
 budget a device can afford, so the arena is emptied every few seconds and the
@@ -39,6 +39,21 @@ gadgets, while a long single-process computation runs faster in CPU time. The
 JIT's products are macOS and development builds, so the cold path is not
 optimized
 ([history](../../../../docs/optimization-history.md#jit-cold-code-per-process)).
+
+## Cache budget
+
+The cache's whole-process budget is divided by the budget and the executor
+count alone, the same on every platform. Each executor's private cache takes
+min(256 MiB, budget / executors); the shared translation tier takes what is
+left when that is at least 768 MiB and two or more executors run, and does
+not exist otherwise (what is left below that is not allocated). Without a
+tier no executor looks in it, publishes to it, locks it or sweeps it, and each
+keeps its own validation words; with one, it serves only while two executors
+live. A tier under the floor costs more in lookups, publications and reclaim
+sweeps than the compilations it saves. An iOS device's budget (160 to 304 MiB
+at 1 to 8 vCPUs) is all private; half of a 4 GiB guest's memory funds a tier
+of about 1 GiB at 4 vCPUs and none at 8
+([`jit_cache_geometry.hpp`](jit_cache_geometry.hpp)).
 
 ## Top-byte ignore
 
