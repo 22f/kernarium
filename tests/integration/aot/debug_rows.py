@@ -272,8 +272,9 @@ def compare(mode: str, off_runs: list[list[str]], with_it: list[str]) -> tuple[i
     """The records of the runs without the component and of the run with it;
     returns (fields compared, fields masked). A field is masked when two of
     the runs without the component differ in it and it names nothing (a
-    process id, a random value); a named location that differs, or more than
-    MAX_MASKED masked fields, fail the row."""
+    process id, a random value); a pc, sp or nzcv that differs, a named location
+    that differs and that the run with the component shows differently from
+    every run without it, or more than MAX_MASKED masked fields, fail the row."""
     if len({len(run) for run in off_runs + [with_it]}) != 1:
         raise DebugFailure(f"{mode}: the runs have "
                            f"{[len(run) for run in off_runs + [with_it]]} lines")
@@ -287,8 +288,17 @@ def compare(mode: str, off_runs: list[list[str]], with_it: list[str]) -> tuple[i
             for fields in zip(*columns):
                 values = set(fields[:-1])
                 if len(values) > 1:
-                    if fields[0].startswith(STRICT_FIELDS) or any(SYMBOLIC.fullmatch(v) for v in values):
-                        raise DebugFailure(f"{mode} line {number}: the engine's own runs differ in {sorted(values)}")
+                    if fields[0].startswith(STRICT_FIELDS):
+                        raise DebugFailure(f"{mode} line {number}: the engine's own runs differ in "
+                                           f"{sorted(values)}:\n" + "\n".join(rows))
+                    if any(SYMBOLIC.fullmatch(v) for v in values) and fields[-1] not in values:
+                        # A value that names a place and still varies between the
+                        # engine's own runs (a register left over from a race in the
+                        # guest) is judged by what the engine itself showed: the run
+                        # with the component may show any of those values, no other.
+                        raise DebugFailure(f"{mode} line {number}: the engine's own runs differ in "
+                                           f"{sorted(values)} and the run with the component shows "
+                                           f"{fields[-1]!r}:\n" + "\n".join(rows))
                     masked += 1
                     continue
                 compared += 1

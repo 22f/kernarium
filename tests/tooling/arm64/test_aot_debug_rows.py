@@ -238,12 +238,18 @@ class CompareTest(unittest.TestCase):
             rows.compare("crash-memcpy", off, on)
         self.assertIn("with it", str(caught.exception))
 
-    def test_a_named_location_that_differs_between_the_engines_runs_is_not_masked(self):
+    def test_a_named_location_that_varies_in_the_engine_is_judged_by_the_engines_values(self):
         off = [rows.digest_tombstone(tombstone(pointer=pointer, pid=2038 + n))
                for n, pointer in enumerate((0x2854d, 0x28555, 0x2854d))]
+        # the run with the component shows a place the engine showed: no verdict on that field
+        compared, masked = rows.compare("crash-memcpy", off, rows.digest_tombstone(tombstone(pid=3000)))
+        self.assertGreater(compared, 10)
+        self.assertGreater(masked, 0)
+        # a place the engine never showed fails, naming the engine's own values
         with self.assertRaises(rows.DebugFailure) as caught:
-            rows.compare("crash-memcpy", off, rows.digest_tombstone(tombstone(pid=3000)))
+            rows.compare("crash-memcpy", off, rows.digest_tombstone(tombstone(pointer=0x28600, pid=3000)))
         self.assertIn("the engine's own runs differ", str(caught.exception))
+        self.assertIn("run with the component shows", str(caught.exception))
 
     def test_only_a_few_fields_may_be_masked(self):
         runs = [[f"  regs crc32 " + " ".join(f"x{n:02d}=0x{n + 100 * value:x}" for n in range(rows.MAX_MASKED + 4))]
