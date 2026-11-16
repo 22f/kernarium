@@ -40,6 +40,19 @@ entry-table slot in a marker word). The call saves the guest's x30 in the
 frame's last slot. The two calls are measurement variants of the same
 contract; the differential and the guest runs hold each of them.
 
+`UML_AOT_HOT_LIST` (`--hot-list`, with a call) keeps the inline probe in the
+functions a profile calls hot and gives every other function the call.
+`hot_list.py` makes the list from the guest sampler's profile files
+(`darwin/cpu/arm64/gadgets/guest_sampler.hpp`): it matches each sampled block
+by its instruction words against the executable segment of every covered
+library, shares a block found in several places among them, and takes the
+functions in order of samples (ties by library digest, then address) until
+they hold `--coverage` of the samples. The list names each function by library
+SHA-256 and range, and its header records the digest of the profile it came
+from; the blob manifest records the list's digest (`hot_list_sha256`) and each
+library's `hot_functions`. A library the list does not name is all cold. The
+list is a build input, so a given profile and image make one blob.
+
 Entry points: `ctest -R '^arm64-aot-tools$'` for the encoders, decoder and
 assembler, and `ctest -R '^arm64-aot-differential$'` (a configuration with
 `UML_AOT_DIAGNOSTICS=ON`) for the rewritten libraries against the gadget

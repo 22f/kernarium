@@ -64,6 +64,8 @@ set(UML_AOT_MEMORY_CALL "inline" CACHE STRING
     "How rewritten loads and stores reach their TLB probe: inline (the product), probe (a call returns the compare) or probe-miss (a call also takes the miss exit); the other two are experiments")
 set_property(CACHE UML_AOT_MEMORY_CALL PROPERTY STRINGS
     inline probe probe-miss)
+set(UML_AOT_HOT_LIST "" CACHE FILEPATH
+    "With a call UML_AOT_MEMORY_CALL, the hot list (tools/aot/hot_list.py) naming the functions that keep the inline probe")
 option(UML_AOT_COUNT_RETIRED
     "With UML_AOT_DIAGNOSTICS, rewrite the libraries to count each instruction an entry runs (the blob then differs from the product's)" OFF)
 set(UML_AOT OFF)

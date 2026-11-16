@@ -9,6 +9,7 @@ checked against the engine by the arm64-aot-differential differential test.
 
 __import__("sys").dont_write_bytecode = True
 
+import collections
 import hashlib
 import pathlib
 import struct
@@ -23,6 +24,7 @@ import a64decode  # noqa: E402
 import asm as A  # noqa: E402
 import elf64  # noqa: E402
 import fixture  # noqa: E402
+import hot_list  # noqa: E402
 import rewrite  # noqa: E402
 
 ENCODERS = [
@@ -145,13 +147,13 @@ class FakeElf:
 
 
 def library_of(words: list[int], functions: list[tuple[int, int]],
-               memory_call: str = "inline", base: int = 0x1000
-               ) -> "rewrite.Library":
+               memory_call: str = "inline", base: int = 0x1000,
+               hot_starts: "frozenset | None" = None) -> "rewrite.Library":
     layout = rewrite.read_layout(rewrite.LAYOUT_HEADER)
     return rewrite.Library(0, "/test/lib.so",
                            FakeElf(words, functions, base),
                            a64decode.Decoder(), layout,
-                           memory_call=memory_call)
+                           memory_call=memory_call, hot_starts=hot_starts)
 
 
 def unit_words(library: "rewrite.Library") -> list[int]:
@@ -324,6 +326,106 @@ class MemoryCallTests(unittest.TestCase):
         # (untag at the site) and five in the routine
         self.assertEqual(library.stats.census["mem.routine"],
                          (5 + 7) * 4)
+
+
+class HotListTests(unittest.TestCase):
+    """With a call for cold code, the functions of a hot list keep the inline
+    probe; the profile is turned into a hot list by tools/aot/hot_list.py."""
+
+    LDR = 0xf9400020      # ldr x0, [x1]
+    RET = RET
+    BASE = 0x1000
+
+    def census(self, words, functions, mode, hot):
+        library = library_of(words, functions, mode, self.BASE, hot)
+        unit = unit_words(library)
+        self.assertEqual(sum(library.stats.census.values()), 4 * len(unit))
+        self.assertEqual(library.stats.census["other"], 0)
+        return library, library.stats.census
+
+    def test_a_hot_function_is_inline_and_a_cold_one_calls(self) -> None:
+        one = [self.LDR, self.RET]
+        _, inline = self.census(one, [(0, 8)], "inline", None)
+        _, called = self.census(one, [(0, 8)], "probe-miss", None)
+        library, mixed = self.census(one + one, [(0, 8), (8, 16)],
+                                     "probe-miss",
+                                     frozenset({self.BASE}))
+        self.assertEqual(library.hot_functions, 1)
+        self.assertEqual(mixed["mem.probe"], inline["mem.probe"])
+        self.assertEqual(mixed["stub.mm"], inline["stub.mm"])
+        self.assertEqual(mixed["mem.call"], called["mem.call"])
+        self.assertEqual(mixed["mem.routine"], called["mem.routine"])
+        self.assertGreater(mixed["mem.call"], 0)
+        self.assertGreater(mixed["mem.probe"], 0)
+
+    def test_a_probe_call_keeps_its_stub_for_cold_code_only(self) -> None:
+        one = [self.LDR, self.RET]
+        _, called = self.census(one, [(0, 8)], "probe", None)
+        _, inline = self.census(one, [(0, 8)], "inline", None)
+        _, mixed = self.census(one + one, [(0, 8), (8, 16)], "probe",
+                               frozenset({self.BASE + 8}))
+        self.assertEqual(mixed["stub.mm"],
+                         inline["stub.mm"] + called["stub.mm"])
+        self.assertEqual(mixed["mem.probe"], inline["mem.probe"])
+
+    def test_no_hot_list_and_an_empty_one_differ(self) -> None:
+        words = [self.LDR, self.RET]
+        a, with_none = self.census(words, [(0, 8)], "probe-miss", None)
+        b, with_empty = self.census(words, [(0, 8)], "probe-miss",
+                                    frozenset())
+        self.assertEqual(with_none, with_empty)
+        self.assertEqual(b.hot_functions, 0)
+        self.assertEqual(with_empty["mem.probe"], 0)
+
+    def test_an_inline_build_ignores_the_list(self) -> None:
+        words = [self.LDR, self.RET]
+        _, plain = self.census(words, [(0, 8)], "inline", None)
+        _, listed = self.census(words, [(0, 8)], "inline", frozenset())
+        self.assertEqual(plain, listed)
+
+    def test_the_file_is_read_with_its_digest(self) -> None:
+        import tempfile
+        text = (f"# {rewrite.HOT_LIST_FORMAT}\n# profile-sha256 00\n"
+                "aa\t0x10\t0x20\t5.00\t/x\naa\t0x40\t0x50\t1.00\t/x\n"
+                "bb\t0x10\t0x20\t2.00\t/y\n")
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "hot.txt"
+            path.write_text(text)
+            hot, digest = rewrite.read_hot_list(path)
+            self.assertEqual(hot, {"aa": frozenset({0x10, 0x40}),
+                                   "bb": frozenset({0x10})})
+            self.assertEqual(digest, hashlib.sha256(text.encode()).hexdigest())
+            path.write_text("aa\t0x10\t0x20\n")
+            with self.assertRaises(ValueError):
+                rewrite.read_hot_list(path)
+
+    def test_the_smallest_set_holding_the_coverage_is_chosen(self) -> None:
+        rows = [(5.0, "a", 0x20, 0x30, "/x"), (90.0, "b", 0x10, 0x20, "/y"),
+                (5.0, "a", 0x10, 0x20, "/x")]
+        chosen, held, total = hot_list.choose(rows, 0.9)
+        self.assertEqual(chosen, [rows[1]])
+        self.assertEqual((held, total), (90.0, 100.0))
+        # equal weights fall by digest, then address, however they arrive
+        chosen, held, _ = hot_list.choose(rows, 0.95)
+        self.assertEqual(chosen, [rows[2], rows[1]])
+        chosen, _, _ = hot_list.choose(list(reversed(rows)), 0.95)
+        self.assertEqual(chosen, [rows[2], rows[1]])
+        chosen, held, _ = hot_list.choose(rows, 1.0)
+        self.assertEqual(len(chosen), 3)
+
+    def test_samples_are_shared_among_the_places_a_block_is_found(self) -> None:
+        words = [0x11, 0x22, 0x33, 0x44, 0x11, 0x22, 0x55, 0x66]
+        text = struct.pack("<8I", *words)
+        library = {"text": text, "vaddr": 0x1000,
+                   "ranges": [(0x1000, 0x1010), (0x1010, 0x1020)],
+                   "starts": [0x1000, 0x1010],
+                   "weight": collections.Counter()}
+        blocks = collections.Counter({(0x33, 0x44): 6, (0x11, 0x22): 10,
+                                      (0x55, 0x66): 3, (0x77, 0x88): 9})
+        hot_list.attribute(blocks, [library])
+        # (0x11, 0x22) is at 0x1000 and 0x1010: five samples each
+        self.assertEqual(dict(library["weight"]),
+                         {0x1000: 11.0, 0x1010: 8.0})
 
 
 class ExitAddressWidthTests(unittest.TestCase):

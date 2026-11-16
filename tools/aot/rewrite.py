@@ -267,10 +267,18 @@ class Library:
     def __init__(self, index: int, name: str, elf: elf64.Elf,
                  decoder: a64decode.Decoder, layout: dict[str, int],
                  count_retired: bool = False,
-                 memory_call: str = "inline") -> None:
+                 memory_call: str = "inline",
+                 hot_starts: frozenset | None = None) -> None:
         if memory_call not in MEMORY_CALLS:
             raise ValueError(f"unknown memory_call {memory_call!r}")
         self.count_retired = count_retired
+        # The shape the library's cold code uses; a function in hot_starts
+        # keeps the inline probe, and with no hot list every function uses
+        # the library's shape. memory_call is the shape of the function
+        # being emitted.
+        self.cold_call = memory_call
+        self.hot_starts = hot_starts
+        self.hot_functions = 0
         self.memory_call = memory_call
         self.mem_routines: set[tuple[str, int, int]] = set()
         self.index = index
@@ -527,6 +535,10 @@ class Library:
     def _emit_function(self, function: elf64.Function) -> None:
         asm = self.asm
         self.fn_start = function.start
+        self.memory_call = self.cold_call
+        if self.hot_starts is not None and function.start in self.hot_starts:
+            self.memory_call = "inline"
+            self.hot_functions += 1
         self.fn_mm = []
         self.fn_xu = set()
         self.fn_xb = set()
@@ -1770,7 +1782,7 @@ def emit_memory_routines(asm: A.Assembler, library: "Library") -> None:
     of this library calls exist."""
     for kind, total, chunk in sorted(library.mem_routines):
         entry = 0 if kind == "LOAD" else 16
-        probe = library.memory_call == "probe"
+        probe = library.cold_call == "probe"
         name = f"MEMP_{kind}_{total}" if probe else \
             f"MEMC_{kind}_{total}_{chunk}"
         asm.label(name)
@@ -2017,6 +2029,28 @@ def emit_mops_thunks(asm: A.Assembler, library: "Library") -> None:
 
 # ---- the blob ----------------------------------------------------------------
 
+# The hot list (tools/aot/hot_list.py): the functions whose memory probes stay
+# inline when --memory-call asks for a call.
+HOT_LIST_FORMAT = "aot-hot-list 1"
+
+
+def read_hot_list(path: pathlib.Path) -> tuple[dict[str, frozenset], str]:
+    """(library file SHA-256 -> starts of its hot functions), and the
+    SHA-256 of the hot list file."""
+    data = path.read_bytes()
+    lines = data.decode().splitlines()
+    if not lines or lines[0] != f"# {HOT_LIST_FORMAT}":
+        raise ValueError(f"{path}: not a hot list ({HOT_LIST_FORMAT})")
+    hot: dict[str, set[int]] = collections.defaultdict(set)
+    for line in lines:
+        if line.startswith("#") or not line:
+            continue
+        fields = line.split("\t")
+        hot[fields[0]].add(int(fields[1], 0))
+    return ({sha: frozenset(starts) for sha, starts in hot.items()},
+            hashlib.sha256(data).hexdigest())
+
+
 def resolve_library(root: pathlib.Path, mounts: dict[str, pathlib.Path],
                     path: str) -> pathlib.Path:
     """A guest path to its file: the longest mount prefix, else the root."""
@@ -2032,12 +2066,14 @@ def resolve_library(root: pathlib.Path, mounts: dict[str, pathlib.Path],
 
 def build_unit(job: tuple) -> dict:
     """One library to its self-contained unit (runs in a worker process)."""
-    index, name, file_path, count_retired, memory_call = job
+    index, name, file_path, count_retired, memory_call, hot = job
     decoder = a64decode.Decoder(a64decode.DEFAULT_TABLE)
     layout = read_layout(LAYOUT_HEADER)
     data = pathlib.Path(file_path).read_bytes()
-    library = Library(index, name, elf64.Elf(data), decoder, layout,
-                      count_retired, memory_call)
+    elf = elf64.Elf(data)
+    hot_starts = None if hot is None else hot.get(elf.sha256, frozenset())
+    library = Library(index, name, elf, decoder, layout, count_retired,
+                      memory_call, hot_starts)
     segment = library.segment
     digests = []
     pages = []
@@ -2050,7 +2086,8 @@ def build_unit(job: tuple) -> dict:
     unit = library.build(digests, b"".join(pages))
     unit.update({
         "index": index,
-        "memory_call": library.memory_call,
+        "memory_call": library.cold_call,
+        "hot_functions": library.hot_functions,
         "path": name,
         "sha256": library.elf.sha256,
         "build_id": library.elf.build_id,
@@ -2164,6 +2201,7 @@ def build_blob(units: list[dict], layout: dict[str, int],
             "unit_bytes": len(unit["unit"]),
             "table_bytes": 4 * unit["table_words"],
             "functions": unit["stats"]["functions"],
+            "hot_functions": unit["hot_functions"],
             "instructions": unit["stats"]["instructions"],
             "inlined": unit["stats"]["inlined"],
             "steps": unit["stats"]["steps"],
@@ -2206,6 +2244,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="how a plain load or store reaches its probe: "
                         "inline (the product), or a call to a routine of "
                         "the unit (an experiment, see tools/aot/README.md)")
+    parser.add_argument("--hot-list", type=pathlib.Path,
+                        help="the functions that keep the inline probe when "
+                        "--memory-call is a call (tools/aot/hot_list.py); a "
+                        "library the list does not name is all cold")
     parser.add_argument("--jobs", type=int, default=0,
                         help="worker processes (default: about half the CPUs)")
     arguments = parser.parse_args(argv)
@@ -2215,11 +2257,18 @@ def main(argv: list[str] | None = None) -> int:
         mounts[guest.rstrip("/")] = pathlib.Path(directory)
     count = arguments.count_retired
     call = arguments.memory_call
+    hot = None
+    hot_digest = None
+    if arguments.hot_list is not None:
+        if call == "inline":
+            parser.error("--hot-list needs --memory-call probe or probe-miss")
+        hot, hot_digest = read_hot_list(arguments.hot_list)
     jobs = [(index, path, str(resolve_library(arguments.root, mounts, path)),
-             count, call) for index, path in enumerate(arguments.library)]
+             count, call, hot)
+            for index, path in enumerate(arguments.library)]
     for item in arguments.generated:
         guest, _, host = item.partition("=")
-        jobs.append((len(jobs), guest, host, count, call))
+        jobs.append((len(jobs), guest, host, count, call, hot))
     workers = arguments.jobs or max(1, (os.cpu_count() or 2) // 2)
     order = sorted(jobs, key=lambda job: -pathlib.Path(job[2]).stat().st_size)
     if workers == 1 or len(jobs) == 1:
@@ -2229,6 +2278,8 @@ def main(argv: list[str] | None = None) -> int:
             units = list(pool.imap_unordered(build_unit, order))
     layout = read_layout(LAYOUT_HEADER)
     blob, manifest = build_blob(units, layout, arguments.release_id, count)
+    if hot_digest is not None:
+        manifest["hot_list_sha256"] = hot_digest
     arguments.out.mkdir(parents=True, exist_ok=True)
     # The notice of each library as the image states it: generated output
     # beside the framework, never tracked.
