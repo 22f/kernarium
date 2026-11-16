@@ -68,6 +68,9 @@ struct Platform {
     // region), kept for the life of the process. The layer never clears it. A fresh anonymous mapping is the memory wanted: it
     // is resident only where block starts have been recorded. Null, or a null result: nothing is intercepted.
     void* (*map_record)(size_t bytes);
+    // Stops the process (abort): called, after a line in the log, for a call whose parameters the layer cannot learn, which it
+    // will not hand to the runtime unconverted. Null: the layer traps.
+    void (*abort_process)();
 };
 
 // The block record covers a shadow region below 2^28 bytes (a block's length fits 28 bits of its word): one 32-bit word for

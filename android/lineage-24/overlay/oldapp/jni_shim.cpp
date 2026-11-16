@@ -12,9 +12,7 @@ namespace {
 using namespace jni;
 
 constexpr int kMaxParams = 255;      // the JVM's limit on parameter slots
-constexpr int kInlineParams = 12;    // kinds kept in the registry entry; the rest go to a pool
-constexpr uint32_t kKindPoolBytes = 32768;
-constexpr uint32_t kMethodSlots = 8192;
+constexpr uint32_t kMethodBuckets = 8192;  // the heads of the method registry's chains (the registry itself has no limit)
 constexpr uint32_t kFieldSlots = 2048;
 constexpr unsigned kProbeLimit = 32;
 constexpr unsigned kMaxBlocks = 512;  // Dalvik's limit on local references; a thread has no more live references
@@ -128,13 +126,14 @@ static_assert(kRecordWindow % 16 == 0 && kBlockHead % 16 == 0, "block references
 static_assert(kBlockHead + offsetof(DalvikArray, data) + kBlockTail + Arena::kChunkHeaderBytes >= kRecordWindow,
               "a block's chunk is at least a record window, so a window holds at most one block's start");
 
+// What the layer knows of a method: the kinds of its parameters (Z B C S I J F D, or L for every reference), `nparams` bytes
+// that follow the struct in the same allocation. A node is published whole, by the store of its bucket's head, and is never
+// changed or freed, so a reader needs no lock. Nothing bounds the number of methods or of parameters (the JVM's 255 slots).
 struct MethodInfo {
+    MethodInfo* next;  // the next node of the chain
     void* id;
     uint8_t nparams;
-    uint8_t usable;  // false: the kinds are not known (pool exhausted, or the method could not be described)
     uint8_t returns_bytes;
-    char kinds[kInlineParams];
-    const char* more;  // kinds from kInlineParams on
 };
 
 // A frame of the thread's local references: the entries below `height` belong to outer frames.
@@ -225,9 +224,7 @@ struct Globals {
     uint32_t records_lock;     // the table's own lock (a leaf: nothing is called and no other lock is taken under it)
     uint32_t records_full_logged;  // the first pointer that found the table full has been logged
     uint8_t scratch[kPullPiece];  // the bytes of the array that a pull or a merge reads; under the mutex (see "scratch")
-    uint32_t kind_pool_used;
-    char kind_pool[kKindPoolBytes];
-    MethodInfo methods[kMethodSlots];
+    MethodInfo* method_bucket[kMethodBuckets];  // the heads of the registry's chains; a head is stored with release, under `lock`
     void* byte_fields[kFieldSlots];
     Counters counters;
 };
@@ -1904,9 +1901,7 @@ unsigned hash_of(const void* id, unsigned modulus) {
                                  modulus);
 }
 
-char kind_at(const MethodInfo& info, unsigned index) {
-    return index < kInlineParams ? info.kinds[index] : info.more[index - kInlineParams];
-}
+char kind_at(const MethodInfo& info, unsigned index) { return reinterpret_cast<const char*>(&info + 1)[index]; }
 
 // The parameter kinds of a method signature into `kinds` (kMaxParams + 1 entries); false when it is malformed.
 bool parse_signature(const char* sig, char* kinds, unsigned* count, bool* returns_bytes) {
@@ -1963,47 +1958,44 @@ bool parse_signature(const char* sig, char* kinds, unsigned* count, bool* return
     return true;
 }
 
-// Stores an entry for `id`; false when the registry or the pool is full.
-bool store_method(void* id, const char* kinds, unsigned count, bool returns_bytes, bool usable = true) {
+const MethodInfo* find_method(const void* id);
+
+// Makes `id` known with its parameter kinds. False only when the node cannot be allocated; nothing else can refuse it, and a
+// method that is known already is left as it was.
+bool store_method(void* id, const char* kinds, unsigned count, bool returns_bytes) {
+    if (find_method(id) != nullptr) {
+        return true;
+    }
+    MethodInfo* node = static_cast<MethodInfo*>(g.platform.alloc_baseline(sizeof(MethodInfo) + count));
+    if (node == nullptr) {
+        return false;
+    }
+    node->next = nullptr;
+    node->id = id;
+    node->nparams = static_cast<uint8_t>(count);
+    node->returns_bytes = returns_bytes;
+    char* stored = reinterpret_cast<char*>(node + 1);
+    for (unsigned i = 0; i < count; ++i) {
+        stored[i] = kinds[i];
+    }
+    MethodInfo** head = &g.method_bucket[hash_of(id, kMethodBuckets)];
+    bool added = true;
     lock_registry();
-    MethodInfo parsed = {};
-    parsed.nparams = static_cast<uint8_t>(count);
-    parsed.returns_bytes = returns_bytes;
-    parsed.usable = usable;
-    for (unsigned i = 0; i < count && i < kInlineParams; ++i) {
-        parsed.kinds[i] = kinds[i];
-    }
-    if (count > kInlineParams) {
-        const unsigned extra = count - kInlineParams;
-        if (g.kind_pool_used + extra > kKindPoolBytes) {
-            parsed.usable = 0;  // the kinds are not kept: the call is forwarded unchanged
-        } else {
-            char* pool = g.kind_pool + g.kind_pool_used;
-            for (unsigned i = 0; i < extra; ++i) {
-                pool[i] = kinds[kInlineParams + i];
-            }
-            g.kind_pool_used += extra;
-            parsed.more = pool;
-        }
-    }
-    bool stored = false;
-    unsigned index = hash_of(id, kMethodSlots);
-    for (unsigned probe = 0; probe < kProbeLimit; ++probe, index = (index + 1) % kMethodSlots) {
-        MethodInfo& entry = g.methods[index];
-        if (entry.id == id) {
-            stored = true;  // already known
+    for (const MethodInfo* known = *head; known != nullptr; known = known->next) {
+        if (known->id == id) {
+            added = false;  // another thread stored it meanwhile
             break;
         }
-        if (entry.id == nullptr) {
-            entry = parsed;
-            entry.id = nullptr;
-            __atomic_store_n(&entry.id, id, __ATOMIC_RELEASE);
-            stored = true;
-            break;
-        }
+    }
+    if (added) {
+        node->next = *head;
+        __atomic_store_n(head, node, __ATOMIC_RELEASE);
     }
     unlock_registry();
-    return stored;
+    if (!added) {
+        g.platform.free_baseline(node);
+    }
+    return true;
 }
 
 void register_method(void* id, const char* sig) {
@@ -2014,7 +2006,7 @@ void register_method(void* id, const char* sig) {
     unsigned count = 0;
     bool returns_bytes = false;
     if (parse_signature(sig, kinds, &count, &returns_bytes)) {
-        store_method(id, kinds, count, returns_bytes);
+        store_method(id, kinds, count, returns_bytes);  // where it cannot be stored the first call learns it again
     }
 }
 
@@ -2022,51 +2014,68 @@ const MethodInfo* find_method(const void* id) {
     if (id == nullptr) {
         return nullptr;
     }
-    unsigned index = hash_of(id, kMethodSlots);
-    for (unsigned probe = 0; probe < kProbeLimit; ++probe, index = (index + 1) % kMethodSlots) {
-        const MethodInfo& entry = g.methods[index];
-        void* seen = __atomic_load_n(&entry.id, __ATOMIC_ACQUIRE);
-        if (seen == id) {
-            return &entry;
-        }
-        if (seen == nullptr) {
-            return nullptr;
+    for (const MethodInfo* node = __atomic_load_n(&g.method_bucket[hash_of(id, kMethodBuckets)], __ATOMIC_ACQUIRE); node != nullptr;
+         node = node->next) {
+        if (node->id == id) {
+            return node;
         }
     }
     return nullptr;
 }
 
-// A method ID the layer did not see being looked up (FromReflectedMethod, or one the registry dropped):
-// asks the platform, once, what its parameters are. `object_or_class` is the receiver (an instance call) or
-// the class (a static call or a constructor).
+// A method ID the layer did not see being looked up (FromReflectedMethod, or one whose node could not be allocated then):
+// asks the platform what its parameters are. `object_or_class` is the receiver (an instance call) or the class (a static call
+// or a constructor). Null when they cannot be had now (nothing is remembered about that: the next call asks again). A call made
+// with an exception pending, which ART does not refuse, is learned with the exception taken out for the time and put back.
 const MethodInfo* learn_method(Env* env, void* id, bool is_static, jobject object_or_class) {
-    if (id == nullptr || object_or_class == nullptr || g.platform.describe_method == nullptr ||
-        original<jboolean (*)(Env*)>(slot::ExceptionCheck)(env) != 0) {
-        return nullptr;  // an exception is pending: no JNI function may be called
+    if (id == nullptr || object_or_class == nullptr || g.platform.describe_method == nullptr) {
+        return nullptr;
     }
+    jobject pending = nullptr;
+    if (original<jboolean (*)(Env*)>(slot::ExceptionCheck)(env) != 0) {
+        pending = original<jobject (*)(Env*)>(slot::ExceptionOccurred)(env);
+        if (pending == nullptr) {
+            return nullptr;
+        }
+        original<void (*)(Env*)>(slot::ExceptionClear)(env);
+    }
+    const MethodInfo* learned = nullptr;
     jobject hint = object_or_class;
     jobject owned = nullptr;
     if (!is_static) {
         owned = original<jobject (*)(Env*, jobject)>(slot::GetObjectClass)(env, object_or_class);
         hint = owned;
-        if (hint == nullptr) {
-            return nullptr;
+    }
+    if (hint != nullptr) {
+        char kinds[kMaxParams + 1];
+        unsigned count = 0;
+        if (g.platform.describe_method(env, g.orig, id, is_static, hint, kinds, kMaxParams, &count) &&
+            store_method(id, kinds, count, false)) {
+            learned = find_method(id);
         }
     }
-    char kinds[kMaxParams + 1];
-    unsigned count = 0;
-    const bool described = g.platform.describe_method(env, g.orig, id, is_static, hint, kinds, kMaxParams, &count);
     if (owned != nullptr) {
         original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, owned);
     }
-    if (!described) {
-        store_method(id, kinds, 0, false, false);  // remember that it cannot be described: no new attempt
-        return nullptr;
+    if (pending != nullptr) {
+        original<jint (*)(Env*, jobject)>(slot::Throw)(env, pending);
+        original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, pending);
     }
-    if (!store_method(id, kinds, count, false)) {
-        return nullptr;
+    return learned;
+}
+
+// A call whose parameters the layer cannot learn (no method ID, an ID it cannot describe, nothing to describe it from, memory
+// for its node gone): it cannot say which of the call's values are references, and a block's address that reached the runtime
+// would be taken for one. So the call does not reach the runtime: the process stops, with one line in the log.
+[[noreturn]] void stop_for_unknown_parameters(const void* method) {
+    if (g.platform.log != nullptr) {
+        g.platform.log("a call's parameters cannot be learned and a block's address must not reach the runtime: the process stops; method:",
+                       static_cast<long>(reinterpret_cast<intptr_t>(method)), 0);
     }
-    return find_method(id);
+    if (g.platform.abort_process != nullptr) {
+        g.platform.abort_process();
+    }
+    __builtin_trap();
 }
 
 void register_byte_field(void* id, const char* sig) {
@@ -2208,8 +2217,11 @@ R run_va(Env* e, jobject l0, jobject l1, jmethodID m, va_list ap, bool app) {
         }
         if (info == nullptr) {
             info = learn_method(e, m, K == Kind::kStatic, receiver);
+            if (info == nullptr) {
+                stop_for_unknown_parameters(m);
+            }
         }
-        const unsigned params = info != nullptr && info->usable ? info->nparams : 0;
+        const unsigned params = info->nparams;
         Access* items = static_cast<Access*>(__builtin_alloca((params + 1) * sizeof(Access)));
         HoldSet argument_set(e, items, params, &receiver_set);
         if (params > 0) {
@@ -2246,8 +2258,11 @@ R run_array(Env* e, jobject l0, jobject l1, jmethodID m, const jvalue* args, boo
         }
         if (info == nullptr) {
             info = learn_method(e, m, K == Kind::kStatic, receiver);
+            if (info == nullptr) {
+                stop_for_unknown_parameters(m);
+            }
         }
-        const unsigned params = info != nullptr && info->usable ? info->nparams : 0;
+        const unsigned params = info->nparams;
         Access* items = static_cast<Access*>(__builtin_alloca((params + 1) * sizeof(Access)));
         HoldSet argument_set(e, items, params, &receiver_set);
         if (params > 0) {
@@ -3208,7 +3223,18 @@ void* thunk_leave(void* sp) {
     return record.lr;
 }
 
-void reset_for_test() { __builtin_memset(&g, 0, sizeof(g)); }
+void reset_for_test() {
+    if (g.platform.free_baseline != nullptr) {
+        for (MethodInfo* head : g.method_bucket) {
+            while (head != nullptr) {
+                MethodInfo* next = head->next;
+                g.platform.free_baseline(head);
+                head = next;
+            }
+        }
+    }
+    __builtin_memset(&g, 0, sizeof(g));
+}
 
 bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_region, size_t shadow_size, Env* env) {
     if (g.installed) {

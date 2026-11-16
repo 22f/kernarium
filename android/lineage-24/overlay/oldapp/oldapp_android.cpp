@@ -37,6 +37,7 @@ void* oldapp_malloc(size_t) __asm__("malloc");
 void* oldapp_calloc(size_t, size_t) __asm__("calloc");
 void* oldapp_realloc(void*, size_t) __asm__("realloc");
 void oldapp_free(void*) __asm__("free");
+void oldapp_abort() __asm__("abort");
 size_t oldapp_usable_size(void*) __asm__("malloc_usable_size");
 int* oldapp_errno() __asm__("__errno");
 int oldapp_open(const char*, int, ...) __asm__("open");
@@ -117,6 +118,9 @@ void yield_thread() { oldapp_sched_yield(); }
 // The baselines of the byte[] blocks live in libc's heap: they need no low address.
 void* alloc_baseline(size_t bytes) { return oldapp_malloc(bytes); }
 void free_baseline(void* baseline) { oldapp_free(baseline); }
+
+// The platform's stop (jni_shim.hpp, Platform::abort_process): the process aborts, with the line the layer logged before it.
+void abort_process() { oldapp_abort(); }
 
 // The memory of the shadow blocks' record (jni_shim.cpp): a mapping of its own, fresh and so zero-filled, that the layer never
 // clears. It is resident by page only where block starts have been recorded, and a page stays resident after its blocks go.
@@ -1044,7 +1048,7 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
     const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method, now_ms,
                             alloc_baseline, free_baseline, region != nullptr ? thunk_address : nullptr,
                             region != nullptr ? thunk_count() : 0, is_own_library, ended_lock, ended_unlock, now_ns,
-                            yield_thread, map_record};
+                            yield_thread, map_record, abort_process};
     refresh_modules(true);  // every library the application loaded before this one
     void** table = const_cast<void**>(env->functions);
     const bool jni_ok = install_jni_wrappers(table, platform, region != nullptr ? region + kArenaBytes : nullptr,

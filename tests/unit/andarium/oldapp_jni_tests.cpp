@@ -15,6 +15,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <csetjmp>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -323,6 +324,7 @@ bool g_no_thread_state = false;                  // the platform has no thread s
 bool g_own_default = true;
 bool (*g_own_predicate)(const void*) = nullptr;
 bool g_without_own_check = false;  // the next install gives the platform no is_own_library (not reset by reset_world)
+bool g_without_describe = false;   // the next install gives the platform no describe_method (not reset by reset_world)
 
 bool fake_is_app(const void*) {
     require(t_ended_depth == 0, "a wrapper was entered while the ended lock is held");
@@ -352,6 +354,17 @@ void fake_log(const char* message, long a, long b) {
 uint32_t fake_now() {
     WorldGuard guard;
     return world.clock_ms;
+}
+// Platform::abort_process: the layer stops the process for a call whose parameters it cannot learn. A row that expects it comes
+// back here (the_process_stops); anywhere else it fails the row.
+std::jmp_buf g_stop_jump;
+bool g_stop_expected = false;
+int g_stops = 0;
+void fake_abort() {
+    require(g_stop_expected, "the layer stops the process only where a row expects it");
+    g_stop_expected = false;
+    ++g_stops;
+    std::longjmp(g_stop_jump, 1);
 }
 bool g_baseline_fails = false;
 void* fake_alloc_baseline(size_t bytes) { return g_baseline_fails ? nullptr : std::malloc(bytes); }
@@ -445,7 +458,7 @@ void* fake_map_record(size_t bytes) {
 }
 const Platform kPlatform{fake_is_app, fake_thread_state, fake_log, fake_make_writable, fake_make_read_only,
                          fake_describe, fake_now, fake_alloc_baseline, fake_free_baseline, fake_thunk_address, 1024,
-                         fake_is_own, fake_mutex_lock, fake_mutex_unlock, fake_now_ns, fake_yield, fake_map_record};
+                         fake_is_own, fake_mutex_lock, fake_mutex_unlock, fake_now_ns, fake_yield, fake_map_record, fake_abort};
 
 jsize f_GetArrayLength(Env*, jarray a) {
     WorldGuard guard;
@@ -1141,6 +1154,8 @@ void reset_world() {
     g_in_pop = nullptr;
     g_before_lock = nullptr;
     g_null_receiver_ok = false;
+    g_stop_expected = false;
+    g_stops = 0;
     g_ref_type_asked_with_a_reference = 0;
     g_before_first_critical = nullptr;
     g_in_release_critical = nullptr;
@@ -1191,6 +1206,9 @@ Table* install(bool shadows = true, unsigned thunks = 1024) {
     platform.thunk_capacity = thunks;
     if (g_without_own_check) {
         platform.is_own_library = nullptr;
+    }
+    if (g_without_describe) {
+        platform.describe_method = nullptr;
     }
     g_record_expected_bytes = shadow_record_bytes(g_region_size);
     require(install_jni_wrappers(table->slots, platform, shadows ? g_region : nullptr, shadows ? g_region_size : 0,
@@ -1614,14 +1632,6 @@ void check_unknown_and_long_signatures() {
     args[1].l = made.shadow;
     fn<void (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kVoid, kArray))(f.env, f.cls, unknown, args);
     require(world.describe_calls == 1 && world.last_array_args[0] == made.object, "the answer is kept (array form)");
-
-    void* hopeless = new int(0);
-    world.methods[hopeless] = Method{"(I)V", "hopeless"};
-    world.describe_fails = true;
-    call_static_void_v(f, hopeless, 3);
-    call_static_void_v(f, hopeless, 4);
-    require(world.describe_calls == 2, "an ID that cannot be described is not asked about again");
-    world.describe_fails = false;
 
     // Twenty ints and a byte[] (more than sixteen parameters), the shadow last.
     call_static_void_v(f, f.many, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, made.shadow);
@@ -4837,11 +4847,11 @@ void check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_l
 // installation (the platform's memory is zero-filled); and no shadow is made where the record cannot be had, the region's base is
 // not 16-byte aligned or the region is larger than the record can describe.
 void check_shadows_need_a_record_the_region_can_be_described_by() {
-    const auto installs_nothing = [&](void* region, size_t size, const char* what) {
+    const auto installs_nothing = [&](void* region, size_t size, const char* what, const Platform& platform = kPlatform) {
         reset_world();
         Table* table = new Table;
         g_record_expected_bytes = shadow_record_bytes(size);
-        require(install_jni_wrappers(table->slots, kPlatform, region, size, &table->env), what);
+        require(install_jni_wrappers(table->slots, platform, region, size, &table->env), what);
         require(table->slots[slot::GetArrayLength] == reinterpret_cast<void*>(&f_GetArrayLength) &&
                     table->slots[slot::GetByteArrayRegion] == reinterpret_cast<void*>(&f_GetByteArrayRegion),
                 what);
@@ -4850,6 +4860,9 @@ void check_shadows_need_a_record_the_region_can_be_described_by() {
     g_record_fails = true;
     installs_nothing(g_shadow_region, sizeof(g_shadow_region), "the platform cannot give the record: nothing is intercepted");
     g_record_fails = false;
+    Platform without_record = kPlatform;
+    without_record.map_record = nullptr;
+    installs_nothing(g_shadow_region, sizeof(g_shadow_region), "a platform with no map_record: nothing is intercepted", without_record);
     installs_nothing(g_shadow_region + 8, sizeof(g_shadow_region) - 16, "a region whose base is not 16-byte aligned: nothing is intercepted");
     installs_nothing(g_shadow_region, kMaxShadowBytes + 16, "a region the record cannot describe: nothing is intercepted");
     // The record is asked for by the size of the region, and what the platform gives is not written at the installation.
@@ -5114,6 +5127,155 @@ void check_a_call_with_the_address_of_a_block_that_is_gone_is_handed_null() {
         form.issue(f, kit, x.shadow);
         require(runtime_was_handed(form) == nullptr, (std::string(form.name) + ": (b) the runtime was handed null").c_str());
     }
+}
+
+// ---- a call never reaches the runtime unconverted: the parameters of a method are known, or the process stops
+//
+// Which of a call's values are references is known from the method: its signature at the lookup, else the platform's reflection
+// at the first call. Nothing bounds the number of methods or of their parameters, and a failure to learn is not remembered. Where
+// the parameters cannot be had at the moment of a call, the layer cannot tell a block's address from an integer, and the runtime
+// would take it for a reference: the call does not reach it, and the process stops after one line in the log.
+
+// Runs `call`, which must not return: the layer stops the process (Platform::abort_process) and the fake's stop comes back here.
+template <class F>
+bool the_process_stops(F&& call) {
+    const int before = g_stops;
+    g_stop_expected = true;
+    if (setjmp(g_stop_jump) == 0) {
+        call();
+        g_stop_expected = false;
+        return false;
+    }
+    return g_stops == before + 1;
+}
+size_t stop_lines() {
+    WorldGuard guard;
+    size_t n = 0;
+    for (const auto& line : world.logs) n += line.message.find("cannot be learned") != std::string::npos ? 1 : 0;
+    return n;
+}
+
+jmethodID unseen_method(const char* signature) {
+    WorldGuard guard;
+    void* id = new int(0);  // an ID the layer never saw being looked up (FromReflectedMethod makes such)
+    world.methods[id] = Method{signature, "unseen"};
+    return static_cast<jmethodID>(id);
+}
+
+// More methods than the registry had slots (and than any probe could place), and more parameters than its pool held: every one is
+// known from its lookup, and a shadow passed to it is converted. (Fails on a registry of fixed size: the call is forwarded
+// unchanged and the fake runtime is handed the block.)
+void check_every_method_the_application_looks_up_is_known() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, sample(16));  // a shadow may be in the application's hands from here on
+    auto get_static = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetStaticMethodID);
+    std::vector<jmethodID> ids;
+    for (int i = 0; i < 20000; ++i) ids.push_back(get_static(f.env, f.cls, "m", "(I[B)I"));
+    for (size_t i = 0; i < ids.size(); i += (i < 100 || i + 100 >= ids.size()) ? 1 : 197) {
+        forget_the_last_call();
+        require(call_static_int_v(f, ids[i], 3, made.shadow) == 7 && world.last_array_args.size() == 1 &&
+                    world.last_array_args[0] == made.object,
+                "a method looked up among twenty thousand: its shadow is converted");
+    }
+    const std::string wide_signature = "(" + std::string(254, 'I') + "[B)V";
+    std::vector<jmethodID> wide;
+    for (int i = 0; i < 300; ++i) wide.push_back(get_static(f.env, f.cls, "w", wide_signature.c_str()));
+    jvalue args[255] = {};
+    args[254].l = made.shadow;
+    for (jmethodID m : wide) {
+        forget_the_last_call();
+        fn<void (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kVoid, kArray))(f.env, f.cls, m, args);
+        require(world.last_array_args.size() == 1 && world.last_array_args[0] == made.object,
+                "a method of 255 parameters among three hundred such: its shadow is converted");
+    }
+    require(world.describe_calls == 0 && g_stops == 0, "every method was known from its lookup: none was asked about, none stopped");
+}
+
+// An ID the layer must describe at its call, and that the platform cannot describe, is not remembered as undescribable: the call
+// does not reach the runtime, the process is stopped (one line each time), and the next call asks the platform again and goes
+// through once it can. (Fails on a layer that remembers the failure: no second question, and the call is forwarded unchanged.)
+void check_a_method_that_cannot_be_described_stops_the_call_and_is_asked_about_again() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, sample(16));
+    jmethodID unseen = unseen_method("(I[B)I");
+    world.describe_fails = true;
+    forget_the_last_call();
+    require(the_process_stops([&] { (void)call_static_int_v(f, unseen, 5, made.shadow); }), "the call in the V form stops the process");
+    require(world.last_call.empty() && world.describe_calls == 1 && stop_lines() == 1, "it did not reach the runtime; one question, one line");
+    jvalue args[2] = {};
+    args[0].i = 5;
+    args[1].l = made.shadow;
+    require(the_process_stops([&] {
+                (void)fn<jint (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kInt, kArray))(f.env, f.cls, unseen, args);
+            }),
+            "and in the A form");
+    require(world.last_call.empty() && world.describe_calls == 2 && stop_lines() == 2, "the failure was not remembered: it was asked about again");
+    world.describe_fails = false;
+    require(call_static_int_v(f, unseen, 5, made.shadow) == 7 && world.last_array_args.size() == 1 && world.last_array_args[0] == made.object &&
+                world.describe_calls == 3,
+            "once the platform can say, the call goes through converted");
+    require(call_static_int_v(f, unseen, 6, made.shadow) == 7 && world.describe_calls == 3, "and the answer is kept");
+}
+
+// Every other way the parameters can be unobtainable at a call stops it too, and none lets the runtime see the block's address:
+// nothing to describe from (a platform without reflection), no method ID, no receiver to describe an instance method by, and no
+// memory for the method's node (the lookup then stored nothing, and the first call learns it again once memory is back).
+void check_the_other_causes_of_unknown_parameters_stop_the_call() {
+    {
+        g_without_describe = true;
+        Fixture f = make();
+        g_without_describe = false;
+        Made made = make_shadow_of(f, sample(16));
+        jmethodID unseen = unseen_method("([B)I");
+        forget_the_last_call();
+        require(the_process_stops([&] { (void)call_static_int_v(f, unseen, made.shadow); }) && world.last_call.empty() && stop_lines() == 1,
+                "a platform that cannot describe: the call stops");
+        require(the_process_stops([&] { (void)call_static_int_v(f, nullptr, made.shadow); }) && world.last_call.empty() && stop_lines() == 2,
+                "no method ID: the call stops");
+    }
+    {
+        Fixture f = make();
+        const CallKit kit = make_call_kit(f);
+        Made made = make_shadow_of(f, sample(16));
+        jmethodID unseen = unseen_method("([B)Ljava/lang/Object;");
+        forget_the_last_call();
+        require(the_process_stops([&] { (void)call_object_v(f, nullptr, unseen, made.shadow); }) && world.last_call.empty() && world.describe_calls == 0,
+                "an instance call without a receiver to describe the method by: the call stops");
+        (void)kit;
+    }
+    {
+        Fixture f = make();
+        Made made = make_shadow_of(f, sample(16));
+        auto get_static = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetStaticMethodID);
+        g_baseline_fails = true;  // no memory for the node of a method
+        jmethodID late = get_static(f.env, f.cls, "late", "(I[B)I");
+        forget_the_last_call();
+        require(the_process_stops([&] { (void)call_static_int_v(f, late, 1, made.shadow); }) && world.last_call.empty() && world.describe_calls == 1,
+                "a lookup that stored nothing, learned again at the call that still has no memory: the call stops");
+        g_baseline_fails = false;
+        require(call_static_int_v(f, late, 1, made.shadow) == 7 && world.last_array_args.size() == 1 && world.last_array_args[0] == made.object &&
+                    world.describe_calls == 2,
+                "with memory back the call learns the method and is converted");
+    }
+}
+
+// A call made with an exception pending (ART does not refuse it) is no cause: the parameters of an ID the layer has to describe
+// are had with the exception taken out for the time, and the same exception is pending again after the call.
+void check_an_unseen_method_is_learned_with_an_exception_pending() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, sample(16));
+    jmethodID unseen = unseen_method("(I[B)I");
+    {
+        WorldGuard guard;
+        world.exception_pending = true;
+        world.pending_object = new Obj{};
+    }
+    Obj* const pending = world.pending_object;
+    forget_the_last_call();
+    require(call_static_int_v(f, unseen, 5, made.shadow) == 7 && world.last_array_args.size() == 1 && world.last_array_args[0] == made.object,
+            "the call went through converted");
+    require(world.describe_calls == 1 && g_stops == 0, "the method was described once");
+    require(world.exception_pending && world.pending_object == pending, "and the same exception is pending after it");
 }
 
 // The ids of the layer's own calls are resolved at the installation, before the first block can be made.
@@ -6318,6 +6480,10 @@ int main(int argc, char** argv) {
     check_a_collected_block_is_an_ended_block_of_its_length_until_a_sweep_reclaims_it();
     check_a_call_during_a_revival_is_handed_the_array_by_a_reference_of_the_runtime();
     check_a_call_with_the_address_of_a_block_that_is_gone_is_handed_null();
+    check_every_method_the_application_looks_up_is_known();
+    check_a_method_that_cannot_be_described_stops_the_call_and_is_asked_about_again();
+    check_the_other_causes_of_unknown_parameters_stop_the_call();
+    check_an_unseen_method_is_learned_with_an_exception_pending();
     check_after_a_merge_and_a_new_cut_a_place_is_a_block_only_where_one_starts();
     check_a_block_made_at_a_stale_address_during_PopLocalFrame_is_left_alone();
     check_a_block_made_at_a_collected_address_before_the_mutex_is_taken_is_acted_on_whole();

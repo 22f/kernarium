@@ -667,8 +667,14 @@ patches ART's one JNI function table in place and gives the application:
   form (`Call*`, `CallStatic*`, `CallNonvirtual*`, `NewObject*`, the variadic, `V` and
   `A` entries) gives it the array for a reference that is a block, and null for any
   other address of the region (a block that was reclaimed, or one that is being built
-  or revived), whatever blocks exist at that moment (a method whose parameters the layer
-  could not learn is forwarded unchanged). The layer reads the
+  or revived), whatever blocks exist at that moment. For that the layer knows the
+  parameters of every method a call names: from the signature at the lookup
+  (`GetMethodID`, `GetStaticMethodID`), else by reflection at the first call (an ID from
+  `FromReflectedMethod`; an exception pending then is taken out for the time and put
+  back). The registry has no limit, and a failure to learn is not remembered. Where the
+  parameters cannot be had at a call (no reflection, no method ID, no memory for the
+  method's record), the call does not reach the runtime: the process stops after one
+  line in the log. The layer reads the
   length from its own record, never from the length word, which the application
   can overwrite. The block and its array behave as one memory at the points
   where the application meets Java: before and after a call that is passed the
