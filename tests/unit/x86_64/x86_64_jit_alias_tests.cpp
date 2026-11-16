@@ -371,6 +371,47 @@ void test_decoder_range()
 		"the old frame was registered again");
 }
 
+/* E12: an instruction that spans the end of a page is decoded from two
+ * frames, and the unit registers both before the decoder reads a byte of
+ * them: a store through an alias of the second frame reaches the compiled
+ * unit. The instruction is `mov eax, imm32` with its last two immediate bytes
+ * on the second page. */
+void test_decoder_across_two_pages()
+{
+	const Clean clean;
+	constexpr std::uint64_t executable = 0x1800'0000;
+	constexpr std::uint64_t alias = 0x2800'0000;
+	constexpr std::uint64_t writer = 0x3800'0000;
+	ScratchBacking first{"uml-x86-jit-span-first-XXXXXX", page};
+	ScratchBacking second{"uml-x86-jit-span-second-XXXXXX", page};
+	ScratchBacking code{"uml-x86-jit-span-code-XXXXXX", page};
+	/* 0xffd: mov eax, imm32 (b8 01 00 | 00 00) ; syscall */
+	put(first, 0xffd, {0xb8, 0x01, 0x00});
+	put(second, 0, {0x00, 0x00, 0x0f, 0x05});
+	load_writer(code);
+	Space space{9210};
+	space.map(writer, code, 0, rx, 1);
+	space.map(executable, first, 0, rx, 1);
+	space.map(executable + page, second, 0, rx, 1);
+	space.map(alias, second, 0, rw, 0);
+	const auto first_backing =
+		uml::memory::testing::mapped_backing(first.descriptor());
+	const auto second_backing =
+		uml::memory::testing::mapped_backing(second.descriptor());
+	require(first_backing != nullptr && second_backing != nullptr);
+	require(space.to_system_call(executable + 0xffd) == 1);
+	require(held_at(first_backing, space.generation(), executable),
+		"the first page of a spanning instruction was decoded unregistered");
+	require(held_at(second_backing, space.generation(), executable + page),
+		"the second page of a spanning instruction was decoded unregistered");
+	/* The byte at the start of the second page becomes the immediate's
+	 * third byte. */
+	(void)space.to_system_call(writer, 2, alias);
+	require(space.to_system_call(executable + 0xffd) == 0x2'0001,
+		"a store through the second frame's alias did not reach the unit");
+	require(space.engine().diagnostics().registration_failures == 0);
+}
+
 /* E7: a store through W into a unit that other units link to reaches the
  * link: the units W -> A -> B run within one dispatch chain, and B's frame
  * is rewritten through W by the first of them. */
@@ -664,6 +705,8 @@ int main()
 	std::puts("running ok");
 	test_decoder_range();
 	std::puts("decoder ok");
+	test_decoder_across_two_pages();
+	std::puts("decoder spanning ok");
 	test_links_follow_alias_stores();
 	std::puts("links ok");
 	test_a_stuck_writer_of_another_generation_drops_the_code();

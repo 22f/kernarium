@@ -1078,6 +1078,53 @@ void test_kernel_write_frames()
 	baseline.clean("K1 K2");
 }
 
+/* R1: a frame is translated at X and written at W (one generation each); the
+ * kernel's table holds the frame's alias in a range, a later host page of that
+ * range is unmapped, and the kernel then copies through what is still mapped
+ * into the word W holds present. The unmap must leave the rest of the range
+ * in the table, so the write is published at the frame: X's stamp moves and
+ * nothing is counted unresolved. */
+void test_kernel_write_after_a_partial_unmap()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0xa00'0000;
+	ScratchBacking backing{"uml-frame-partial-XXXXXX", 16 * page};
+	Domain domain{73'009};
+	darwin_uml_static_vm_require_coherent_kernel_code_writes();
+	void *alias = mmap(nullptr, 16 * page, PROT_READ | PROT_WRITE, MAP_SHARED,
+		backing.descriptor(), 0);
+	require(alias != MAP_FAILED);
+	domain.run([&] {
+		FrameAccounting::note_direct_map(alias, 16 * page, backing.descriptor(), 0);
+		require(map(831, base, backing, 2, 1, rx) == 0);
+		require(map(832, base + page, backing, 2, 1, rw, 0) == 0);
+		require(hold_frame(831, base).result != DARWIN_UML_STATIC_FRAME_FAILED);
+		require(darwin_uml_static_vm_activate(832) == 0);
+		/* W's word is present: the process wrote through it. */
+		require(darwin_uml_static_vm_copy_kernel_write(base + page + 0x10,
+			static_cast<unsigned char *>(alias) + 2 * page + 0x10, 4) == 0);
+
+		/* The table loses the upper half; the lower half stays mapped. */
+		FrameAccounting::note_direct_unmap(
+			static_cast<unsigned char *>(alias) + 8 * page, 8 * page);
+		auto *bytes = static_cast<unsigned char *>(alias) + 2 * page + 0x80;
+		std::memset(bytes, 0xcc, 4);
+		const auto stamp = stamp_of(831, base);
+		const auto counted =
+			FrameAccounting::diagnostics().unresolved_kernel_writes;
+		require(darwin_uml_static_vm_copy_kernel_write(
+			base + page + 0x80, bytes, 4) == 0);
+		require(stamp_of(831, base) > stamp,
+			"the kernel's write did not reach the translation of the frame");
+		require(FrameAccounting::diagnostics().unresolved_kernel_writes ==
+			counted, "the unmap of a later page lost the range");
+	});
+	FrameAccounting::note_direct_unmap(alias, 8 * page);
+	domain.retire();
+	munmap(alias, 16 * page);
+	baseline.clean("R1");
+}
+
 /* M16: two vCPUs of one generation register frames at once. Registrations
  * hold the generation's mapping lock shared, so everything they write in the
  * state is atomic or under a stripe lock: the thread sanitizer says whether it
@@ -1124,6 +1171,7 @@ int main()
 	test_publication();
 	test_direct_table();
 	test_kernel_write_frames();
+	test_kernel_write_after_a_partial_unmap();
 	test_unknown_frame();
 	test_a_debt_larger_than_the_buffer();
 	test_concurrent_registrations_of_one_state();

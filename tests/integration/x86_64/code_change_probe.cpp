@@ -1126,7 +1126,11 @@ void case_alias_unmap_remap()
 }
 
 /* The kernel stores: read(2) into W after X ran. With `untouched_w` the
- * process never touched W before the read. */
+ * process never touched W before the read. Both rows fail, on both engines,
+ * when the kernel's write is not published at the frame its alias names. They
+ * do not tell that publication from the fallback a write takes when the host
+ * does not resolve the alias, which publishes everywhere; the memory layer's
+ * kernel-write rows count those writes. */
 void case_alias_kernel_write(bool untouched_w)
 {
 	const char *name = untouched_w ? "alias-kernel-write-untouched-w" : "alias-kernel-write";
