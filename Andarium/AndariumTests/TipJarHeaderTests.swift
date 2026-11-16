@@ -293,16 +293,22 @@ struct TipJarHeaderTests {
             controller.view.setNeedsLayout()
             controller.view.layoutIfNeeded()
             let elements = ToolbarProbe.elements(in: lease.window, above: 5000, includeUnlabelled: true)
-            name = elements.first { $0.traits.contains(.header) }?.object.accessibilityFrame ?? .null
+            // The developer's name, which is one element; the window can hold headers of its own.
+            name = elements.first { $0.traits.contains(.header) && $0.label.hasPrefix("example") }?.object.accessibilityFrame ?? .null
             return !name.isNull && elements.filter { $0.traits.contains(.link) }.count == Self.sites.count
         }
         try #require(drawn, "the header was not drawn; is ApplicationAccessibilityEnabled on?")
         try await Task.sleep(for: .milliseconds(300))
         let view = controller.view!
         let line = try #require(view.window).screen.coordinateSpace.convert(name, to: view)
-        let picture = UIGraphicsImageRenderer(bounds: view.bounds).image { _ in
+        // 8-bit sRGB, which `inkRuns` reads a byte to a component: an iPad app on a Mac is given 16-bit
+        // floating-point pixels by default.
+        let format = UIGraphicsImageRendererFormat()
+        format.preferredRange = .standard
+        let picture = UIGraphicsImageRenderer(bounds: view.bounds, format: format).image { _ in
             view.drawHierarchy(in: view.bounds, afterScreenUpdates: true)
         }
+        try #require(picture.cgImage?.bitsPerComponent == 8, "the picture is not 8 bits to a component")
         // The marks are the ink right of the name.
         let area = CGRect(x: line.maxX, y: line.minY - 12, width: view.bounds.width - line.maxX, height: line.height + 24)
         let marks = Self.inkRuns(in: picture, area: area, columns: true)

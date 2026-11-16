@@ -651,7 +651,8 @@ struct LegacyApkInstallAlertTests {
         #expect(model.busy == nil && model.alert == nil)
     }
 
-    @Test func installAnywayAndCancelEachAnswerFromTheAlertItself() async throws {
+    @Test(.disabled(if: ProcessInfo.processInfo.isiOSAppOnMac, "an iPad app on a Mac takes no accessibility activation of an alert's buttons"))
+    func installAnywayAndCancelEachAnswerFromTheAlertItself() async throws {
         for installAnyway in [false, true] {
             let (model, driver) = running()
             let lease = try await HostWindow.take()
@@ -703,7 +704,8 @@ struct LegacyApkInstallAlertTests {
 
     /// An alert of the screens (a failure, a notice) can be up when the answer arrives. The
     /// question presents once it is gone, and the overlay's Cancel serves meanwhile.
-    @Test func theQuestionPresentsOnceAnotherAlertIsGone() async throws {
+    @Test(.disabled(if: ProcessInfo.processInfo.isiOSAppOnMac, "an iPad app on a Mac takes no accessibility activation of an alert's buttons"))
+    func theQuestionPresentsOnceAnotherAlertIsGone() async throws {
         let (model, driver) = running()
         let lease = try await HostWindow.take()
         defer { lease.give() }
