@@ -804,47 +804,43 @@ blocker in every one of them.
 - `aot-guest-workloads` (integration, opt-in like the other Android guest
   tests: it exists where `UML_AOT_IMAGE` and the Android launcher target do)
   boots the release twice, without and with `DARWIN_UML_AOT=1`, runs the
-  covered library families' workloads, three times each, and the guest probe
-  (faults inside rewritten libz code, text patched at run time), and requires
-  every command to succeed with identical output. The debug program
-  (`aot_guest_debug.cpp`, rows in `debug_rows.py`) adds what a debugger and
-  the crash reporter see: the tombstone of a SIGSEGV in libc's memcpy reached
-  through libz (the first access of its sequence crosses into an unmapped
-  page), of an abort, and of an abort while another thread runs libz; a
-  tracer's attach, registers, breakpoint, single steps from libz into libc and
-  back, changed register and pc, and detach; and a breakpoint written into
-  libz by a tracer that never stops the thread running it, at the function's
-  entry and at the pc where that thread was found. Each mode runs three times
-  without the component and once with it, under the kernel's
-  `ADDR_NO_RANDOMIZE` personality; the image's userspace still places
-  libraries and stacks at random, so a register that points into a mapping
-  is compared by the file or mapping and the offset in it, and a field that
-  differs between two of the runs without the component and names nothing (a
-  process id, a random value) is masked, within a small bound. Everything
-  else, frame for frame, must be equal. The image is a user build,
+  covered library families' workloads three times each, the guest probe
+  (faults inside rewritten libz code, text patched at run time), the debug
+  rows and the share rows, and requires every command to succeed with
+  identical output; `run_aot_guest.py` lists what each part judges.
+  The debug rows (`aot_guest_debug.cpp`, `debug_rows.py`) compare what a
+  debugger and the crash reporter see: tombstones of crashes in rewritten
+  libz and libc, and a tracer's registers, breakpoints and steps. The program
+  runs under the `ADDR_NO_RANDOMIZE` personality, and a register that points
+  into a mapping is compared by the file or mapping and the offset in it,
+  because the image's userspace still places libraries and stacks at random;
+  only a field that names nothing (a process id, a random value) may differ
+  between two runs of one engine, and few of them. The image is a user build,
   so `debuggerd -b` and `kill -3` of a system process (which need root) are
-  not run. The share program (`aot_guest_share.cpp`, rows in
-  `share_rows.py`) runs libz in many processes: the read-only file system's
-  library, a byte-identical copy on the writable data file system, a text
-  page copied by a write and one patched in a single child, a changed page
-  protection, and rounds in which a child takes more memory than is free, so
-  that the kernel may reclaim and reuse the library's frames (the guest is not
-  rooted: no `drop_caches`, no compaction, and a page another process maps
-  stays through `fadvise`, so a frame's free cannot be forced; the row prints
-  how many pages stayed cached). Each mode prints the same
-  sums with the component on and off; in a diagnostics build the fork mode
-  must find verdicts to reuse (`shared_hits`) and the copy, which the kernel
-  does not declare immutable, must be refused (`mutable` pages) and never
-  hashed. Execution evidence exists only in a diagnostics build, where the
-  libraries the run names must have been entered, and where the memory layer
-  recounts the executable mappings of every physical-page record against the
+  not run.
+  The share rows (`aot_guest_share.cpp`, `share_rows.py`) run libz in many
+  processes: the read-only file system's library, a copy on the writable one,
+  a page copied by a write (in the children, or in their parent before they
+  are made), a protection that changed with and without a store, and memory
+  pressure. In a diagnostics build each mode states what the framework's
+  counts must show: verdicts reused for the file system's pages, a copied or
+  writable-file-system page refused and never shared, a page nothing wrote
+  never refused. The kernel's page cache cannot be made to give up a covered
+  library's frames in an unrooted guest (the system's processes map them,
+  and `fadvise` dropped none of any covered library's pages), so the
+  `evict` row asserts that a file nothing maps loses its pages, reports what
+  the library lost, and requires what it lost to be verified again; the
+  frame's last departure and reuse are the memory layer's unit rows.
+  Execution evidence exists only in a diagnostics build, where the libraries
+  the run names must have been entered, and where the memory layer recounts
+  the executable mappings of every physical-page record against the
   executable words of every address space (every two seconds, holding them
-  all at once, and at exit): one mismatch or accounting anomaly fails the run,
-  and so does a run that never audited. A product build has residency evidence: the framework's text
-  became resident in the emulator process (`vmmap`, macOS) and was not with
-  the component off. Reading the text raises residency too, so that proves
-  the framework was touched and not that rewritten instructions ran. Speed is
-  printed, not judged.
+  all at once, and at exit): a mismatch or an accounting anomaly fails the
+  run, and so does a run that never audited. A product build has residency
+  evidence: the framework's text became resident in the emulator process
+  (`vmmap`, macOS) and was not with the component off. Reading the text
+  raises residency too, so that proves the framework was touched and not that
+  rewritten instructions ran. Speed is printed, not judged.
 - `arm64-instruction-corpus` runs the generated A64 corpus through both
   engines; the special records (native SME, absent features, the SM = 0 family,
   top-byte ignore, indirect-branch targets, native floating-point traps) have

@@ -17,16 +17,28 @@
  *   copy      a byte-identical copy of libz.so on the writable data file
  *             system, which binds by content like the original but is not
  *             immutable, so every child verifies its pages.
- *   cow       the system libz.so after a write of the same bytes copied one
- *             of its text pages, then a child that patches the copy and
- *             others that do not; and after it an untouched child.
+ *   cow       children that write a text page of the system libz.so (a
+ *             write of the same bytes copies the page), one that patches it,
+ *             and after them children that do not: the copied page is
+ *             anonymous in its own address space only.
+ *   cow-parent  this process copies the page first, and its children inherit
+ *             the copy (an anonymous page under a private mapping of a
+ *             read-only file system): that page is refused, the library's
+ *             others are shared.
  *   mprotect  children that change the protection of a text page to writable
- *             and back, and one that then writes it.
+ *             and back with no store: the page stays the file system's.
+ *   mprotect-write  children that make the page writable, write it and make
+ *             it executable again: the page is copied, so it is refused.
  *   pressure  rounds of children, each followed by a child that takes more
  *             memory than is free, so that the kernel reclaims file pages (the
  *             library's among them) and reuses their frames; the next round
  *             runs the library again. The guest is not rooted, so there is no
  *             drop_caches or compaction to do it exactly.
+ *   evict     the one way a frame is freed without pressure, after the last
+ *             mapping leaves: posix_fadvise(DONTNEED) on a file nothing maps
+ *             (a control, which must lose its pages) and on libz.so, whose
+ *             pages are mapped by the system's own processes. Whatever it
+ *             evicts is run again by children, which must verify it afresh.
  *
  * Every line it prints is a function of the guest's architectural behaviour
  * alone: the runner (run_aot_guest.py) requires the same lines with the
@@ -83,6 +95,8 @@ int deflateInit_(ZStream *, int, const char *, int);
 int deflate(ZStream *, int);
 int deflateEnd(ZStream *);
 long lseek(int, long, int);
+int posix_fadvise(int, long, long, int);
+int fsync(int);
 }
 
 namespace {
@@ -381,8 +395,21 @@ void cow_mode() {
 void protect_mode() {
     const Zlib z = system_zlib();
     children_in_turn("protect", 0, 3, z, Prep::Protect);
-    children_in_turn("protect-write", 3, 3, z, Prep::ProtectAndWrite);
-    children_in_turn("plain", 6, 3, z, Prep::None);
+    children_in_turn("plain", 3, 3, z, Prep::None);
+}
+
+void protect_write_mode() {
+    const Zlib z = system_zlib();
+    children_in_turn("protect-write", 0, 3, z, Prep::ProtectAndWrite);
+    children_in_turn("plain", 3, 3, z, Prep::None);
+}
+
+// The copy of the page is made here, and the children inherit it.
+void cow_parent_mode() {
+    const Zlib z = system_zlib();
+    prepare(Prep::CopyPage, z);
+    children_in_turn("inherited", 0, 3, z, Prep::None);
+    children_together("together", 3, 4, z);
 }
 
 // How many of the file's pages the page cache holds, and how many it has.
@@ -501,6 +528,56 @@ void pressure_mode() {
     children_in_turn("last", 12, 3, z, Prep::None);
 }
 
+// Pages the page cache holds of a file after the kernel is asked to drop
+// them. Returns the count before in `before`.
+long evict(const char *path, long &before) {
+    long total = 0;
+    before = cached_pages(path, &total);
+    const int fd = open(path, 0);
+    if (fd >= 0) {
+        posix_fadvise(fd, 0, 0, 4);  // POSIX_FADV_DONTNEED
+        close(fd);
+    }
+    return cached_pages(path, &total);
+}
+
+// The control proves the pair (fadvise, mincore) evicts a file nothing maps;
+// libz.so is then given the same, and the pages it loses (if any: the
+// system's own processes map every page of a covered library, and the kernel
+// does not drop a mapped page) are run again by children, which print the
+// same sums whatever happened. The counts are comments the runner reads.
+void evict_mode() {
+    constexpr const char *control = "/data/local/tmp/libz_evict_control.bin";
+    const int fd = open(control, kOpenWriteCreateTruncate, 0644);
+    static uint8_t block[kPage];
+    for (int i = 0; i < 256 && fd >= 0; ++i) {
+        block[0] = static_cast<uint8_t>(i);
+        if (write(fd, block, sizeof(block)) != static_cast<long>(sizeof(block))) {
+            break;
+        }
+    }
+    if (fd >= 0) {
+        fsync(fd);
+        close(fd);
+    }
+    long control_before = 0;
+    const long control_after = evict(control, control_before);
+    unlink(control);
+    dprintf(1, "# control: %ld of 256 pages cached before, %ld after\n", control_before, control_after);
+    if (control_before < 128 || control_after != 0) {
+        fail("the control file was not evicted: eviction is not observable here");
+        return;
+    }
+    const Zlib z = system_zlib();
+    if (!children_in_turn("before", 0, 3, z, Prep::None)) {
+        return;
+    }
+    long libz_before = 0;
+    const long libz_after = evict(kSystemZ, libz_before);
+    dprintf(1, "# libz.so: %ld pages cached before the eviction, %ld after\n", libz_before, libz_after);
+    children_in_turn("after", 3, 3, z, Prep::None);
+}
+
 __attribute__((constructor)) void run() {
     const char *mode = getenv("AOT_SHARE_MODE");
     if (mode == nullptr) {
@@ -514,10 +591,16 @@ __attribute__((constructor)) void run() {
         copy_mode();
     } else if (strcmp(mode, "cow") == 0) {
         cow_mode();
+    } else if (strcmp(mode, "cow-parent") == 0) {
+        cow_parent_mode();
     } else if (strcmp(mode, "mprotect") == 0) {
         protect_mode();
+    } else if (strcmp(mode, "mprotect-write") == 0) {
+        protect_write_mode();
     } else if (strcmp(mode, "pressure") == 0) {
         pressure_mode();
+    } else if (strcmp(mode, "evict") == 0) {
+        evict_mode();
     } else {
         dprintf(1, "FAIL unknown mode\n");
     }

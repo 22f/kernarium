@@ -98,9 +98,73 @@ class CountsTest(unittest.TestCase):
         with self.assertRaises(rows.ShareFailure):
             rows.check_counts("copy", {"shared": 0, "mutable": 20}, None)
 
-    def test_the_other_modes_only_report(self):
-        for mode in ("cow", "mprotect", "pressure"):
-            self.assertIn(mode, rows.check_counts(mode, {}, 100))
+    def test_the_fork_mode_refuses_nothing(self):
+        with self.assertRaises(rows.ShareFailure):
+            rows.check_counts("fork", {"shared": 176, "mutable": 1}, None)
+
+    def test_a_copied_page_is_refused_in_every_child_that_ran_it(self):
+        # The modes that copy a page: the children that ran the copy are
+        # refused it, and the library's other pages share.
+        for mode, writers in rows.COW_WRITERS.items():
+            good = {"shared": 100, "verified": 2, "mutable": writers}
+            rows.check_counts(mode, good, 176)
+            with self.subTest(mode=mode, what="refused too few times"):
+                with self.assertRaises(rows.ShareFailure):
+                    rows.check_counts(mode, dict(good, mutable=writers - 1), 176)
+            with self.subTest(mode=mode, what="a copied page shared"):
+                with self.assertRaises(rows.ShareFailure):
+                    rows.check_counts(mode, dict(good, mutable=0), 176)
+            with self.subTest(mode=mode, what="nothing shared"):
+                with self.assertRaises(rows.ShareFailure):
+                    rows.check_counts(mode, dict(good, shared=0), 176)
+
+    def test_a_protection_without_a_store_refuses_nothing(self):
+        rows.check_counts("mprotect", {"shared": 40, "mutable": 0}, 176)
+        with self.assertRaises(rows.ShareFailure):
+            rows.check_counts("mprotect", {"shared": 40, "mutable": 1}, 176)
+        with self.assertRaises(rows.ShareFailure):
+            rows.check_counts("mprotect", {"shared": 2, "mutable": 0}, 176)
+
+    def test_pressure_still_shares(self):
+        rows.check_counts("pressure", {"shared": 200, "verified": 20}, 176)
+        for bad in ({"shared": 3}, {"shared": 200, "mutable": 1}, {}):
+            with self.assertRaises(rows.ShareFailure):
+                rows.check_counts("pressure", bad, 176)
+
+
+EVICT = ["# control: 256 of 256 pages cached before, 0 after",
+         "# libz.so: 33 pages cached before the eviction, 33 after"]
+
+
+class EvictTest(unittest.TestCase):
+    def test_nothing_evicted_and_everything_shared(self):
+        text = rows.check_counts("evict", {"shared": 30, "verified": 2}, 176, EVICT)
+        self.assertIn("libz.so lost 0 of 33", text)
+
+    def test_pages_that_were_evicted_are_hashed_again(self):
+        record = [EVICT[0], "# libz.so: 33 pages cached before the eviction, 9 after"]
+        rows.check_counts("evict", {"shared": 30, "verified": 5}, 176, record)
+        with self.assertRaises(rows.ShareFailure):
+            rows.check_counts("evict", {"shared": 30, "verified": 0}, 176, record)
+
+    def test_a_control_that_kept_its_pages_cannot_observe_eviction(self):
+        for control in ("# control: 256 of 256 pages cached before, 3 after",
+                        "# control: 20 of 256 pages cached before, 0 after"):
+            with self.assertRaises(rows.ShareFailure):
+                rows.check_counts("evict", {"shared": 30}, 176, [control, EVICT[1]])
+
+    def test_a_record_without_its_counts_fails(self):
+        for record in ([], EVICT[:1], EVICT[1:]):
+            with self.assertRaises(rows.ShareFailure):
+                rows.check_counts("evict", {"shared": 30}, 176, record)
+
+    def test_nothing_shared_when_nothing_was_evicted_fails(self):
+        with self.assertRaises(rows.ShareFailure):
+            rows.check_counts("evict", {"shared": 1, "verified": 30}, 176, EVICT)
+
+    def test_a_refused_page_of_the_read_only_library_fails(self):
+        with self.assertRaises(rows.ShareFailure):
+            rows.check_counts("evict", {"shared": 30, "mutable": 1}, 176, EVICT)
 
 
 if __name__ == "__main__":

@@ -689,7 +689,8 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
                 for note in share_rows.informational(on.share[mode]):
                     print("  " + note)
                 if on.share_counts:
-                    print(share_rows.check_counts(mode, on.share_counts[mode], fork_shared))
+                    print(share_rows.check_counts(mode, on.share_counts[mode], fork_shared,
+                                                  on.share[mode]))
             except share_rows.ShareFailure as problem:
                 raise Failure(f"share row {problem}")
             if mode == "fork" and on.share_counts:
