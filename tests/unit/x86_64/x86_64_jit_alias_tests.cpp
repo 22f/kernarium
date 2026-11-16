@@ -34,6 +34,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -332,7 +333,9 @@ void test_decoder_range()
 	const Clean clean;
 	constexpr std::uint64_t executable = 0x1200'0000;
 	ScratchBacking frame{"uml-x86-jit-range-XXXXXX", page};
+	ScratchBacking other{"uml-x86-jit-range-other-XXXXXX", page};
 	load_return(frame, 3);
+	load_return(other, 4);
 	Space space{9203};
 	space.map(executable, frame, 0, rx, 1);
 	const auto backing = uml::memory::testing::mapped_backing(frame.descriptor());
@@ -344,16 +347,101 @@ void test_decoder_range()
 	require(space.to_system_call(executable) == 3);
 	require(space.engine().diagnostics().frame_registrations == first,
 		"an unchanged page registered its frame again");
-	/* The page goes and comes back: its holder is removed, and the next
-	 * compile registers it before it reads a byte. */
+	/* The page goes and comes back as another frame: its holder is removed,
+	 * and the next compile asks for the page again and registers the new
+	 * frame before it reads a byte of it. A decoder range that survived the
+	 * unmap would run the old bytes. */
 	space.unmap(executable);
 	require(!held_at(backing, space.generation(), executable),
 		"the unmap left the page's holder");
-	space.map(executable, frame, 0, rx, 1);
-	require(space.to_system_call(executable) == 3);
+	space.map(executable, other, 0, rx, 1);
+	const auto replacement =
+		uml::memory::testing::mapped_backing(other.descriptor());
+	require(replacement != nullptr);
+	require(!held_at(replacement, space.generation(), executable),
+		"a mapping registered a frame nobody compiled");
+	require(space.to_system_call(executable) == 4,
+		"a decoder range survived the page being replaced");
 	require(space.engine().diagnostics().frame_registrations == first + 1,
 		"a page mapped back was compiled without registering its frame");
-	require(held_at(backing, space.generation(), executable));
+	require(held_at(replacement, space.generation(), executable),
+		"the replacement frame was compiled without a holder");
+	require(!held_at(backing, space.generation(), executable),
+		"the old frame was registered again");
+}
+
+/* E7: a store through W into a unit that other units link to reaches the
+ * link: the units W -> A -> B run within one dispatch chain, and B's frame
+ * is rewritten through W by the first of them. */
+void test_links_follow_alias_stores()
+{
+	const Clean clean;
+	constexpr std::uint64_t a = 0x1600'0000;
+	constexpr std::uint64_t b = a + 0x1000;
+	constexpr std::uint64_t w = a + 0x2000;
+	constexpr std::uint64_t alias = 0x2600'0000;
+	ScratchBacking frame_a{"uml-x86-jit-link-a-XXXXXX", page};
+	ScratchBacking frame_b{"uml-x86-jit-link-b-XXXXXX", page};
+	ScratchBacking frame_w{"uml-x86-jit-link-w-XXXXXX", page};
+	/* jmp B */
+	put(frame_a, 0, {0xe9, 0xfb, 0x0f, 0x00, 0x00});
+	load_return(frame_b, 1);
+	/* mov [rdx], bl ; jmp A */
+	put(frame_w, 0, {0x88, 0x1a, 0xe9, 0xf9, 0xdf, 0xff, 0xff});
+	Space space{9206};
+	space.map(w, frame_w, 0, rx, 1);
+	space.map(a, frame_a, 0, rx, 1);
+	space.map(b, frame_b, 0, rx, 1);
+	space.map(alias, frame_b, 0, rw, 0);
+	for (unsigned round = 0; round < 4; ++round)
+		require(space.to_system_call(w, 1, alias + 1) == 1);
+	require(space.to_system_call(w, 2, alias + 1) == 2,
+		"a store through W did not reach a unit another unit links to");
+	/* Past B's code: the units keep running as they did. (FEXCore asks for a
+	 * page again after any range invalidation, so the registrations do not
+	 * say whether a unit was compiled again; the gadget row counts those.) */
+	require(space.to_system_call(w, 9, alias + 0x400) == 2);
+}
+
+/* E4j: a participant of another generation stays inside the engine while
+ * this space compiles a frame it writes: the space drops the frame's code at
+ * each hand-over until the participant has left, and then once more. */
+void test_a_stuck_writer_of_another_generation_drops_the_code()
+{
+	using namespace std::chrono_literals;
+	const Clean clean;
+	constexpr std::uint64_t executable = 0x1700'0000;
+	constexpr std::uint64_t alias = 0x2700'0000;
+	constexpr unsigned long writer_generation = 9402;
+	ScratchBacking frame{"uml-x86-jit-stuck-XXXXXX", page};
+	load_return(frame, 1);
+	/* Another address space writes the frame through its own mapping, and a
+	 * vCPU of it stays inside the engine. */
+	Space other{writer_generation};
+	other.map(alias, frame, 0, rw, 0);
+	const auto registry = uml::cpu::x86_64::CodePageRegistry::acquire(
+		writer_generation, {.slice = 10ms, .slices = 2});
+	uml::cpu::x86_64::CodePageRegistry::Participant stuck;
+	registry->join(stuck);
+	stuck.engine_epoch.store(1, std::memory_order_release);
+
+	Space space{9401};
+	space.map(executable, frame, 0, rx, 1);
+	require(space.to_system_call(executable) == 1);
+	const auto compiled = space.engine().diagnostics().escalation_invalidations;
+	require(space.to_system_call(executable) == 1);
+	require(space.engine().diagnostics().escalation_invalidations == compiled + 1,
+		"a hand-over did not drop the code that depends on a stuck participant");
+	/* The participant leaves the engine: the next hand-over drops the code
+	 * once more, and the record with it. */
+	stuck.engine_epoch.store(2, std::memory_order_release);
+	require(space.to_system_call(executable) == 1);
+	require(space.engine().diagnostics().escalation_invalidations == compiled + 2,
+		"the hand-over after the participant left did not drop the code once");
+	require(space.to_system_call(executable) == 1);
+	require(space.engine().diagnostics().escalation_invalidations == compiled + 2,
+		"the record of a participant that left was kept");
+	registry->leave(stuck);
 }
 
 /* E5: a space whose registry could not be made still registers the frames it
@@ -466,6 +554,10 @@ int main()
 	std::puts("running ok");
 	test_decoder_range();
 	std::puts("decoder ok");
+	test_links_follow_alias_stores();
+	std::puts("links ok");
+	test_a_stuck_writer_of_another_generation_drops_the_code();
+	std::puts("stuck ok");
 	test_registration_failure();
 	std::puts("failure ok");
 	test_without_a_registry();

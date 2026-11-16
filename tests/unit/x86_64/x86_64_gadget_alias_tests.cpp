@@ -127,6 +127,12 @@ public:
 			"a mapping was refused");
 	}
 
+	void unmap(std::uint64_t address)
+	{
+		require(darwin_uml_static_vm_unmap_generation(generation_,
+			reinterpret_cast<void *>(address), page) == 0);
+	}
+
 	/* One dispatch from `cpu`: the block at its RIP, run to its exit. */
 	[[nodiscard]] Run step(CpuState &cpu)
 	{
@@ -251,8 +257,6 @@ std::vector<WriterLocation> holders_of(
 	return false;
 }
 
-/* A store through W reaches the translation at X, and the tag of W's write
- * entry follows the frame's holders. */
 /* A row leaves the counters that must stay 0 where it found them: no state
  * was destroyed with its locations still in the accounting, no holder
  * outlived its state, and no removal found its location missing. */
@@ -270,6 +274,8 @@ struct Clean final {
 	}
 };
 
+/* A store through W reaches the translation at X, and the tag of W's write
+ * entry follows the frame's holders. */
 void test_store()
 {
 	const Clean clean;
@@ -433,6 +439,95 @@ void test_flush_serial()
 
 /* A registration that fails runs the instruction as a transient program of
  * one, and registers on the next dispatch. */
+/* E7: units that link to each other stay safe when the frame of one of them
+ * is written through W. W stores into B's frame and then jumps to A, which
+ * jumps to B, all within one dispatch: B was cached and linked from A before
+ * the store, and runs the new bytes. A store that touches none of B's code
+ * leaves the cached units and their links alone. */
+void test_links_follow_alias_stores()
+{
+	const Clean clean;
+	constexpr std::uint64_t a = 0x1600'0000;
+	constexpr std::uint64_t b = a + 0x1000;
+	constexpr std::uint64_t w = a + 0x2000;
+	constexpr std::uint64_t alias = 0x2600'0000;
+	ScratchBacking frame_a{"uml-x86-alias-link-a-XXXXXX", page};
+	ScratchBacking frame_b{"uml-x86-alias-link-b-XXXXXX", page};
+	ScratchBacking frame_w{"uml-x86-alias-link-w-XXXXXX", page};
+	/* jmp B */
+	put(frame_a, 0, {0xe9, 0xfb, 0x0f, 0x00, 0x00});
+	load_return(frame_b, 1);
+	/* mov [rdx], bl ; jmp A */
+	put(frame_w, 0, {0x88, 0x1a, 0xe9, 0xf9, 0xdf, 0xff, 0xff});
+	Space space{9106};
+	space.map(w, frame_w, 0, rx, 1);
+	space.map(a, frame_a, 0, rx, 1);
+	space.map(b, frame_b, 0, rx, 1);
+	space.map(alias, frame_b, 0, rw, 0);
+	for (unsigned round = 0; round < 4; ++round)
+		require(space.run_to_system_call(w, 1, alias + 1).rax == 1);
+	require(space.run_to_system_call(w, 2, alias + 1).rax == 2,
+		"a store through W did not reach a unit another unit links to");
+	/* Past B's code: the cached units and their links are kept. */
+	const auto built = space.diagnostics().translations;
+	require(space.run_to_system_call(w, 9, alias + 0x400).rax == 2);
+	require(space.diagnostics().translations == built,
+		"a store that touched no code translated the units again");
+	require(space.diagnostics().unheld_runnable == 0);
+}
+
+/* E10: after a holder is removed at a page, no link reaches a body that
+ * covers it before the body is validated again and registers its frame, and
+ * a store through W then reaches the body. */
+void test_a_removed_holder_is_registered_again_before_a_link_runs()
+{
+	const Clean clean;
+	namespace testing = uml::memory::testing;
+	constexpr std::uint64_t a = 0x1700'0000;
+	constexpr std::uint64_t b = a + 0x1000;
+	constexpr std::uint64_t w = a + 0x2000;
+	constexpr std::uint64_t alias = 0x2700'0000;
+	ScratchBacking frame_a{"uml-x86-alias-gone-a-XXXXXX", page};
+	ScratchBacking frame_b{"uml-x86-alias-gone-b-XXXXXX", page};
+	ScratchBacking frame_w{"uml-x86-alias-gone-w-XXXXXX", page};
+	put(frame_a, 0, {0xe9, 0xfb, 0x0f, 0x00, 0x00});
+	load_return(frame_b, 1);
+	put(frame_w, 0, {0x88, 0x1a, 0xe9, 0xf9, 0xdf, 0xff, 0xff});
+	Space space{9107};
+	space.map(w, frame_w, 0, rx, 1);
+	space.map(a, frame_a, 0, rx, 1);
+	space.map(b, frame_b, 0, rx, 1);
+	space.map(alias, frame_b, 0, rw, 0);
+	const auto backing = testing::mapped_backing(frame_b.descriptor());
+	require(backing != nullptr);
+	for (unsigned round = 0; round < 4; ++round)
+		require(space.run_to_system_call(a).rax == 1);
+	require(held_at(holders_of(backing, 0), space.generation(), b));
+
+	/* The page goes and comes back: its holder is out of the frame until
+	 * the body that covers it registers again. */
+	space.unmap(b);
+	require(!held_at(holders_of(backing, 0), space.generation(), b),
+		"an unmap left the page's holder");
+	space.map(b, frame_b, 0, rx, 1);
+	require(!held_at(holders_of(backing, 0), space.generation(), b),
+		"a mapping registered a holder nobody asked for");
+	const auto before = space.diagnostics();
+	require(space.run_to_system_call(a).rax == 1);
+	const auto after = space.diagnostics();
+	require(after.validation_attempts > before.validation_attempts,
+		"a link reached a body whose page had been removed without validating it");
+	require(after.holder_registrations > before.holder_registrations,
+		"the body ran before its frame was registered again");
+	require(held_at(holders_of(backing, 0), space.generation(), b));
+	require(after.unheld_runnable == 0);
+
+	/* And a store through W now reaches it. */
+	require(space.run_to_system_call(w, 2, alias + 1).rax == 2,
+		"a store through W did not reach a body registered again");
+	require(space.diagnostics().unheld_runnable == 0);
+}
+
 void test_registration_failure()
 {
 	const Clean clean;
@@ -476,6 +571,10 @@ int main()
 	std::puts("push ok");
 	test_flush_serial();
 	std::puts("serial ok");
+	test_links_follow_alias_stores();
+	std::puts("links ok");
+	test_a_removed_holder_is_registered_again_before_a_link_runs();
+	std::puts("removed ok");
 	test_registration_failure();
 	std::puts("transient ok");
 	const auto now = FrameAccounting::diagnostics();
