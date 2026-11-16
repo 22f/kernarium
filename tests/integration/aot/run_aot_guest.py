@@ -453,9 +453,9 @@ def missing_audit_fields(report: dict[str, int]) -> list[str]:
 
 def judge_count_audit(report: dict[str, int]) -> str:
     """The audit of the memory layer's executable-mapping counts that a
-    diagnostics build runs every two seconds while the guest runs and once at
-    exit: each record counts exactly the executable guest-code words that name
-    it, and no departure found nothing to count out. An audit that held every
+    diagnostics build runs every two seconds while the guest runs: each
+    record counts exactly the executable guest-code words that name it, and no
+    departure found nothing to count out. An audit that held every
     address space at once saw a fact, so one mismatch or anomaly fails the run;
     a report with no audit (a build that cannot recount) fails it too, since a
     run that never looked is not a run that found nothing. Returns the line to

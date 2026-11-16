@@ -497,7 +497,10 @@ void run_count_audit() noexcept
  * one report and never the front of a new one. */
 void write_report() noexcept
 {
-	static std::mutex writing;
+	/* Never destroyed: the reporter's thread goes on writing until the
+	 * process is gone, and a process that leaves through exit() runs the
+	 * static destructors while it does. */
+	static std::mutex &writing = *new std::mutex;
 	const std::lock_guard lock{writing};
 	const char *path = std::getenv("DARWIN_UML_AOT_REPORT");
 	if (path == nullptr)
@@ -623,11 +626,6 @@ void start_reporter() noexcept
 				write_report();
 			}
 		}).detach();
-		/* A last audit and report when the process ends by exit(). */
-		std::atexit([] {
-			run_count_audit();
-			write_report();
-		});
 	} catch (...) {
 	}
 }

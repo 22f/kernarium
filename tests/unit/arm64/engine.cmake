@@ -489,6 +489,11 @@ get_property(_uml_static_mmu GLOBAL PROPERTY UML_STATIC_MMU_TARGET)
         uml_add_arm64_unit_test(aot_differential WITHOUT_HARNESS
             OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS}
                 $<TARGET_OBJECTS:uml_arm64_gadget_engine>)
+        # The diagnostics runtime's reporter thread, and a process that ends
+        # through exit() while it runs.
+        uml_add_arm64_unit_test(aot_reporter WITHOUT_HARNESS
+            OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS}
+                $<TARGET_OBJECTS:uml_arm64_gadget_engine>)
         get_property(_uml_aot_libraries GLOBAL PROPERTY UML_AOT_LIBRARY_FILES)
         get_property(_uml_aot_stack_bytes GLOBAL PROPERTY UML_AOT_KERNEL_STACK_BYTES)
         get_property(_uml_aot_functions GLOBAL PROPERTY UML_AOT_FUNCTIONS)
