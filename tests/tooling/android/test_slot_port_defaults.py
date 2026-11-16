@@ -31,6 +31,7 @@ RUNNERS = {
     "run_android_keymouse": (TESTS / "integration/android/run_android_keymouse.py", 5582),
     "run_android_wifi_network": (TESTS / "integration/android/run_android_wifi_network.py", 5584),
     "run_android_orientation": (TESTS / "integration/android/run_android_orientation.py", 5586),
+    "run_android_vulkan_smoke": (TESTS / "integration/android/run_android_vulkan_smoke.py", 5587),
     "android_launch_suite": (TESTS / "perf/android_launch_suite.py", 5601),
 }
 SLOT = "21300"

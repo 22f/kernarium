@@ -405,6 +405,12 @@ static_assert(UML_GADGET_LINK_HEADER_PC ==
 	return reinterpret_cast<const std::uintptr_t *>(&link.stream);
 }
 
+/* A target and the link a hit on it follows. The default value, a zero
+ * target with no link, is not a followable entry: a translated site that
+ * matched it would load through the null link. The space that owns a site
+ * stores every cell's vacant target and its leave-to-dispatcher link before
+ * translated code reads it, and a test that builds a cell by hand does the
+ * same. */
 struct IndirectLinkEntry final {
 	std::uint64_t guest_pc{};
 	const BlockLink *link{};
