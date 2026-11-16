@@ -378,7 +378,7 @@ inside one 16-byte block is single-copy atomic, one that crosses a block faults,
 and without host LSE2 every such access faults.
 
 **Exclusive monitor.** A load/store-exclusive loop makes progress whatever the
-TLB holds, and nothing an A64 engine does between the pair without an exception
+TLB holds, and nothing an engine does between an A64 pair without an exception
 fails the store. An exclusive load fills the write TLB entry and records the host
 address and loaded values in the `CpuState` exclusive fields
 (`engine/exclusive.inc`, reused by the AArch32 exclusives), and a store-exclusive
