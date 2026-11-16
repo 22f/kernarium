@@ -1026,12 +1026,8 @@ final class AppModel {
         driver == nil ? session.usbDebugging != false : session.usbDebugging == true
     }
 
-    /// The file browser may list and move files: Android has its storage up.
-    /// The guest's USB debugging setting does not matter, since the browser
-    /// uses the application's own channel. The preview has no guest to ask
-    /// and says yes unless a screen says no.
     /// Delivers a text message to the guest as if from the network, and
-    /// returns what to say of it under the message box. The preview, with no
+    /// returns what to say of it under the message box; the preview, with no
     /// guest, says it was delivered.
     func sendSms(sender: String, text: String) async -> SmsSendResult {
         if let refusal = GuestSms.refusal(sender: sender, text: text) { return .refused(SmsMessages.refusal(refusal)) }
@@ -1044,6 +1040,10 @@ final class AppModel {
         }
     }
 
+    /// The file browser may list and move files: Android has its storage up.
+    /// The guest's USB debugging setting does not matter, since the browser
+    /// uses the application's own channel. The preview has no guest to ask
+    /// and says yes unless a screen says no.
     var filesAvailable: Bool {
         driver == nil ? session.storageReady != false : session.storageReady == true
     }
