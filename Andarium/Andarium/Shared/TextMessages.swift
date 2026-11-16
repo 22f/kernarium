@@ -63,12 +63,16 @@ final class TextMessageState {
     private(set) var ended = false
     @ObservationIgnored var sendTask: Task<Void, Never>?
 
+    /// A field writes its text back as it is when it is laid out or focused:
+    /// only a change is typing.
     func setSender(_ typed: String) {
+        guard typed != sender else { return }
         sender = typed
         edited()
     }
 
     func setText(_ typed: String) {
+        guard typed != text else { return }
         text = typed
         edited()
     }

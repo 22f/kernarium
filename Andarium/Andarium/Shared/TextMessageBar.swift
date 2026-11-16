@@ -129,6 +129,11 @@ struct TextMessageBar: View {
         .padding(.bottom, 6)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(SmsMessages.name)
+        // The message box was disabled for the send, which put the keyboard
+        // away: it comes back when Android has answered.
+        .onChange(of: sending) { was, now in
+            if was && !now { focus = .text }
+        }
         .task {
             // The message box takes the keys once the bar has come up.
             guard state.progress != .sending else { return }
