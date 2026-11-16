@@ -166,15 +166,27 @@ final class StubDriver: RuntimeDriver {
     }
 
     /// Android's screen reader as the stub plays it: what the guest holds
-    /// (every service it has on), nil while it cannot be asked, how long each
-    /// reply takes, and the calls the model made. The system carries TalkBack,
-    /// off.
+    /// (every service it has on, and `accessibility_enabled`), nil while it
+    /// cannot be asked, how long each reply takes, and the calls the model
+    /// made. The system carries TalkBack, off.
     var screenReaderState: ScreenReaderState? = ScreenReaderState(
         installedService: ScreenReader.services[0], enabledServices: [])
     var screenReaderError: Error?
     /// Each read's delay in turn; a read past the list answers at once.
     var screenReaderReadDelays: [Duration] = []
+    /// How long a change, and the opening of Android's settings, wait to reach
+    /// Android, as a connection that is being established does: a task that
+    /// is cancelled meanwhile ends there (`CancellationError`) and Android is
+    /// left as it was. Where `screenReaderRepliesAfterCancel` is set the wait
+    /// goes on, and the operation reaches Android and answers late.
     var screenReaderChangeDelay = Duration.zero
+    var screenReaderRepliesAfterCancel = false
+    /// The change writes the list and then fails, leaving `accessibility_enabled`
+    /// as it was: a write that stopped half way.
+    var screenReaderChangeFailsAfterListWrite = false
+    /// What opening Android's settings does besides counting: wait, then fail.
+    var accessibilitySettingsDelay = Duration.zero
+    var accessibilitySettingsError: Error?
     struct ScreenReaderCall: Equatable {
         var on: Bool
         var service: String
@@ -182,6 +194,15 @@ final class StubDriver: RuntimeDriver {
     private(set) var screenReaderReads = 0
     private(set) var screenReaderChanges: [ScreenReaderCall] = []
     private(set) var accessibilitySettingsOpened = 0
+    private(set) var accessibilitySettingsCalls = 0
+    /// How many operations were cancelled while they waited to reach Android,
+    /// and how many errors the stub delivered (to a session that may be over).
+    private(set) var screenReaderCancelled = 0
+    private(set) var screenReaderErrorsThrown = 0
+    private(set) var accessibilitySettingsErrorsThrown = 0
+    /// What the change's command reports instead of what it wrote: a guest
+    /// whose report disagrees with the request.
+    var screenReaderChangeReport: ScreenReaderState?
     func readScreenReader() async -> ScreenReaderState? {
         let index = screenReaderReads
         screenReaderReads += 1
@@ -191,18 +212,61 @@ final class StubDriver: RuntimeDriver {
         if index < screenReaderReadDelays.count { try? await Task.sleep(for: screenReaderReadDelays[index]) }
         return answer
     }
+    /// Waits as the connection to Android would; false when the task was
+    /// cancelled meanwhile and the operation never reached it.
+    private func reachAndroid(after delay: Duration) async -> Bool {
+        guard delay > .zero else { return true }
+        if screenReaderRepliesAfterCancel {
+            await Task.detached { try? await Task.sleep(for: delay) }.value
+            return true
+        }
+        do {
+            try await Task.sleep(for: delay)
+            return true
+        } catch {
+            screenReaderCancelled += 1
+            return false
+        }
+    }
     func changeScreenReader(_ on: Bool, service: String) async throws -> ScreenReaderState {
         screenReaderChanges.append(ScreenReaderCall(on: on, service: service))
-        if screenReaderChangeDelay > .zero { try? await Task.sleep(for: screenReaderChangeDelay) }
-        if let screenReaderError { throw screenReaderError }
+        guard await reachAndroid(after: screenReaderChangeDelay) else { throw CancellationError() }
+        if let screenReaderError, !screenReaderChangeFailsAfterListWrite {
+            screenReaderErrorsThrown += 1
+            throw screenReaderError
+        }
+        if let screenReaderChangeReport {
+            screenReaderState = screenReaderChangeReport
+            return screenReaderChangeReport
+        }
         // The change edits what the guest holds now, as the command does, so
-        // a service turned on meanwhile stays on.
+        // a service turned on meanwhile stays on; it writes the service it
+        // was given, which is the guest's only if the guest still has that
+        // variant.
         guard let current = screenReaderState else { throw AdbFailure(.io(EIO), activity: .screenReader) }
-        let after = ScreenReader.state(afterTurningOn: on, current)
+        var enabled = current.enabledServices.filter { !ScreenReader.services.contains($0) }
+        if on { enabled.append(service) }
+        if screenReaderChangeFailsAfterListWrite {
+            screenReaderState = ScreenReaderState(
+                installedService: current.installedService, enabledServices: enabled,
+                accessibilitySetting: current.accessibilitySetting ?? !current.enabledServices.isEmpty)
+            screenReaderErrorsThrown += 1
+            throw screenReaderError ?? AdbFailure(.io(EIO), activity: .screenReader)
+        }
+        let after = ScreenReaderState(
+            installedService: current.installedService, enabledServices: enabled, accessibilitySetting: !enabled.isEmpty)
         screenReaderState = after
         return after
     }
-    func openAccessibilitySettings() async throws { accessibilitySettingsOpened += 1 }
+    func openAccessibilitySettings() async throws {
+        accessibilitySettingsCalls += 1
+        guard await reachAndroid(after: accessibilitySettingsDelay) else { throw CancellationError() }
+        if let accessibilitySettingsError {
+            accessibilitySettingsErrorsThrown += 1
+            throw accessibilitySettingsError
+        }
+        accessibilitySettingsOpened += 1
+    }
 
     /// What the resume of a guest paused for space answers, and what Shut
     /// down does; a test sets them as the runtime would behave.

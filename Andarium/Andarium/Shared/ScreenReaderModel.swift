@@ -105,6 +105,14 @@ final class ScreenReaderSession {
     var settingsOpen = 0
     /// The loop that reads while VoiceOver runs.
     @ObservationIgnored var watcher: Task<Void, Never>?
+    /// The session is over: nothing begins in it, and what was under way was
+    /// cancelled.
+    @ObservationIgnored private(set) var ended = false
+    /// The tasks that work on Android for this session: a change, a read that
+    /// Turn On asked for, the opening of Android's Settings. Each stays until
+    /// it finishes, or until the session ends and cancels it.
+    @ObservationIgnored private var operations: [Int: Task<Void, Never>] = [:]
+    @ObservationIgnored private var operationCount = 0
 
     /// Android has shown the screen reader on in this session.
     @ObservationIgnored private var hasBeenOn = false
@@ -114,10 +122,36 @@ final class ScreenReaderSession {
 
     var isOn: Bool { state?.isOn == true }
 
-    /// Stops the loop that reads; the session is over.
+    /// Stops the loop that reads.
     func stop() {
         watcher?.cancel()
         watcher = nil
+    }
+
+    /// How many operations are outstanding.
+    var outstandingOperations: Int { operations.count }
+
+    /// Starts work for this session, which keeps it until it finishes. Nothing
+    /// starts once the session ended; `body` checks, before it asks anything of
+    /// Android, that the session is still the model's.
+    func run(_ body: @escaping @MainActor () async -> Void) {
+        guard !ended else { return }
+        operationCount += 1
+        let key = operationCount
+        operations[key] = Task { [weak self] in
+            await body()
+            self?.operations[key] = nil
+        }
+    }
+
+    /// The session is over: the loop and every operation are cancelled, so
+    /// that nothing queued reaches the run that follows.
+    func end() {
+        ended = true
+        stop()
+        let outstanding = operations.values
+        operations = [:]
+        for task in outstanding { task.cancel() }
     }
 
     // MARK: Reads
@@ -141,7 +175,9 @@ final class ScreenReaderSession {
             // What the card said about not being able to ask is answered.
             if failure == nil { cardFailure = nil }
         }
-        if let failure, let answer, answer.isOn == failure.turningOn { self.failure = nil }
+        // The state a change asked for, with the list and `accessibility_enabled`
+        // agreeing: a write that left them apart is not confirmed by the list.
+        if let failure, let answer, answer.isOn == failure.turningOn, answer.isConsistent { self.failure = nil }
         return true
     }
 

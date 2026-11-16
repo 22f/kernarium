@@ -561,10 +561,14 @@ VoiceOver a card asks before the screen reader is turned on, at a first start
 too, starts with its title, and names the edge the side keys are on, as the
 Settings footer does after the keys are moved. The Simulator has no VoiceOver,
 so these tests drive the interface and read no speech. The hosted
-`TalkBackSwitchTests` run the model against a driver that can delay and fail:
-overlapping reads and changes, a change that outlives its session, the card, the
-display's direct touch, and what VoiceOver is told (once per event, with the way
-back).
+`TalkBackSwitchTests` run the model against a driver that can delay and fail
+(and fail after a partial write): overlapping reads and changes, an operation
+that the session's end cancels, or that answers after it, the card, the
+display's direct touch, the loop that reads, and what VoiceOver is told (once
+per event, with the way back); a wait in them fails where what it waited for did
+not happen. `ScreenReaderAdapterTests` run the adapter over a shell that answers
+as told, and `ScreenReaderShellTests` in `andarium-core` run the commands in a
+real shell with fake `am`, `pm` and `settings` tools that keep a store per user.
 
 The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
 `andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.

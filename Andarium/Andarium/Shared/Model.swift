@@ -239,10 +239,10 @@ final class AppModel {
     var sessionPreset = SessionPreset()
     var session = SessionState() {
         // The new session shows no figures: the next reading is published
-        // whatever it draws. The old one's reader stops reading.
+        // whatever it draws. The old one's reader ends, and with it the work it began.
         didSet {
             statisticsGate.reset()
-            if oldValue !== session { oldValue.reader.stop() }
+            if oldValue !== session { oldValue.reader.end() }
         }
     }
     /// The release notes: Info's history and the ribbon above Start after an

@@ -59,10 +59,15 @@ struct TalkBackSwitchTests {
         ScreenReaderState(installedService: installed ?? talkBack, enabledServices: services)
     }
 
-    /// Waits, within a bound, until `done` holds.
-    private func settle(_ done: () -> Bool) async throws {
+    /// Waits, within a bound, until `done` holds, and records a failure where
+    /// it does not: a wait is the assertion of what it waited for.
+    private func settle(sourceLocation: SourceLocation = #_sourceLocation, _ done: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
-        while !done(), ContinuousClock.now < deadline {
+        while !done() {
+            guard ContinuousClock.now < deadline else {
+                Issue.record("What the test waited for did not happen within 5 seconds.", sourceLocation: sourceLocation)
+                return
+            }
             try await Task.sleep(for: .milliseconds(10))
         }
     }
@@ -186,6 +191,23 @@ struct TalkBackSwitchTests {
         #expect(model.session.reader.isOn)
     }
 
+    /// The same in the other direction: a read that left while it was on and
+    /// answered after it was turned off.
+    @Test func aReadThatAnsweredAfterTurningItOffNeverOverwritesIt() async throws {
+        let (model, driver) = started(guestState: reading([talkBack]))
+        _ = await read(model)
+        #expect(model.screenReaderRow == .on)
+        driver.screenReaderReadDelays = [.zero, .milliseconds(400)]
+        let late = Task { await model.refreshScreenReader() }
+        try await settle { driver.screenReaderReads == 2 }
+        model.setScreenReader(false)
+        try await settle { model.session.reader.changing == nil && !model.session.reader.isOn }
+        await late.value
+        #expect(model.screenReaderRow == .off)
+        #expect(!model.session.reader.isOn)
+        #expect(driver.screenReaderState?.enabledServices == [])
+    }
+
     /// A read that began while a change ran saw Android half way: it never
     /// applies, whatever it answers.
     @Test func aReadThatBeganDuringAChangeNeverApplies() {
@@ -233,52 +255,306 @@ struct TalkBackSwitchTests {
         #expect(model.screenReaderRow == .on)
     }
 
-    // MARK: A session's own
+    // MARK: Changes that end half way
 
-    @Test func aChangeThatEndsAfterTheRunLeavesTheNextSessionAlone() async throws {
+    private func guestOn(setting: Bool = true) -> ScreenReaderState {
+        ScreenReaderState(installedService: talkBack, enabledServices: [talkBack], accessibilitySetting: setting)
+    }
+
+    /// The list was written and `accessibility_enabled` was not: Android shows
+    /// the screen reader off while it holds the list that was asked for, and
+    /// what a later read finds there is not the change that was asked for.
+    @Test func aChangeThatWroteTheListThenFailedStaysUnconfirmedWhenItReadsAgain() async throws {
+        let (model, driver) = started(guestState: guestOn())
+        _ = await read(model)
+        #expect(model.screenReaderRow == .on)
+        driver.screenReaderChangeFailsAfterListWrite = true
+        model.setScreenReader(false)
+        // The read after the failure finds the list empty and the switch on.
+        try await settle { model.session.reader.failure != nil && model.session.reader.state?.enabledServices == [] }
+        #expect(driver.screenReaderState == ScreenReaderState(
+            installedService: talkBack, enabledServices: [], accessibilitySetting: true))
+        guard case .failed(let on, _) = model.screenReaderRow else {
+            Issue.record("The row is \(model.screenReaderRow), not a failure.")
+            return
+        }
+        #expect(!on)
+        #expect(model.screenReaderRow.offersTryAgain)
+    }
+
+    /// The change's own report that the list and the switch disagree is not a
+    /// change that happened, whichever way it went.
+    @Test func aReportWhoseListAndSwitchDisagreeIsNotAChange() async throws {
+        let (model, driver) = started(guestState: guestOn())
+        let said = listen(to: model)
+        _ = await read(model)
+        driver.screenReaderChangeReport = ScreenReaderState(
+            installedService: talkBack, enabledServices: [], accessibilitySetting: true)
+        model.setScreenReader(false)
+        try await settle { model.session.reader.failure != nil }
+        #expect(model.screenReaderRow == .failed(turningOn: false, reason: ScreenReaderWords.notReady))
+        #expect(said.lines == [ScreenReaderWords.changeFailure(turningOn: false, reason: ScreenReaderWords.notReady)])
+        #expect(model.session.reader.changing == nil)
+    }
+
+    /// A list that names the screen reader while Android's switch is off is not
+    /// "on": Android does not run it.
+    @Test func aListThatNamesItWhileAccessibilityIsOffIsOff() async throws {
+        let (model, _) = started(guestState: guestOn(setting: false))
+        #expect(await read(model) == .off)
+        #expect(!model.session.reader.isOn)
+        #expect(!(GuestLayer.accessibility(of: model)?.directTouch ?? false))
+    }
+
+    /// The service a change writes is the one it was given: a guest whose
+    /// system now has the other TalkBack does not show the screen reader on.
+    @Test func aServiceTheGuestNoLongerHasIsNotTheScreenReaderOn() async throws {
         let (model, driver) = started()
         _ = await read(model)
-        driver.screenReaderChangeDelay = .milliseconds(300)
+        driver.screenReaderState = ScreenReaderState(installedService: ScreenReader.services[1], enabledServices: [])
+        model.setScreenReader(true)
+        try await settle { model.session.reader.failure != nil }
+        #expect(driver.screenReaderChanges == [.init(on: true, service: talkBack)])
+        #expect(driver.screenReaderState?.enabledServices == [talkBack])
+        #expect(model.screenReaderRow == .failed(turningOn: true, reason: ScreenReaderWords.notReady))
+    }
+
+    // MARK: A session's own
+
+    /// How a run ends: the guest powers off, or Android restarts in place.
+    /// Either way the session is replaced.
+    enum RunsEnd: CaseIterable, Sendable {
+        case poweredOff, restarted
+    }
+
+    private func end(_ model: AppModel, _ how: RunsEnd) {
+        switch how {
+        case .poweredOff: model.powerOff()
+        case .restarted: model.restart()
+        }
+    }
+
+    /// Nothing of the session that ended is in the one that follows: no state,
+    /// card, failure or alert, nothing begun, and nothing said to VoiceOver.
+    private func expectNothingCarriedOver(_ model: AppModel, _ said: Said, sourceLocation: SourceLocation = #_sourceLocation) {
+        let reader = model.session.reader
+        #expect(reader.state == nil, sourceLocation: sourceLocation)
+        #expect(reader.changing == nil && reader.failure == nil, sourceLocation: sourceLocation)
+        #expect(reader.card == nil && reader.cardFailure == nil, sourceLocation: sourceLocation)
+        #expect(!reader.toldOn && reader.outstandingOperations == 0, sourceLocation: sourceLocation)
+        #expect(model.alert == nil, sourceLocation: sourceLocation)
+        #expect(said.lines.isEmpty, "\(said.lines)", sourceLocation: sourceLocation)
+    }
+
+    /// The session's operations are its own: they end with it, and nothing
+    /// begins in a session that ended.
+    @Test func aSessionThatEndedCancelsItsOperationsAndStartsNone() async throws {
+        final class Flags { var cancelled = false; var started = false }
+        let flags = Flags()
+        let reader = ScreenReaderSession()
+        reader.run {
+            do { try await Task.sleep(for: .seconds(30)) } catch { flags.cancelled = true }
+        }
+        #expect(reader.outstandingOperations == 1)
+        reader.end()
+        #expect(reader.outstandingOperations == 0 && reader.ended)
+        try await settle { flags.cancelled }
+        reader.run { flags.started = true }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!flags.started && reader.outstandingOperations == 0)
+    }
+
+    @Test func anOperationThatFinishedIsNoLongerKept() async throws {
+        let reader = ScreenReaderSession()
+        reader.run {}
+        try await settle { reader.outstandingOperations == 0 }
+        #expect(!reader.ended)
+    }
+
+    /// The window the review found: the session ends between the person's
+    /// action and the task that carries it out, which has not begun.
+    @Test(arguments: RunsEnd.allCases)
+    func aChangeNotYetBegunNeverReachesAndroid(_ how: RunsEnd) async throws {
+        let (model, driver) = started()
+        let said = listen(to: model)
+        _ = await read(model)
+        let old = model.session
+        model.setScreenReader(true)
+        #expect(old.reader.outstandingOperations == 1)
+        #expect(driver.screenReaderChanges.isEmpty)
+        end(model, how)
+        #expect(old.reader.outstandingOperations == 0)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(driver.screenReaderChanges.isEmpty, "the change reached Android after its run ended")
+        #expect(driver.screenReaderState == ScreenReaderState(installedService: talkBack, enabledServices: []))
+        expectNothingCarriedOver(model, said)
+    }
+
+    @Test(arguments: RunsEnd.allCases)
+    func openingSettingsNotYetBegunNeverReachesAndroid(_ how: RunsEnd) async throws {
+        let (model, driver) = started()
+        let said = listen(to: model)
+        let old = model.session
+        model.openAccessibilitySettings()
+        #expect(old.reader.outstandingOperations == 1)
+        end(model, how)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(driver.accessibilitySettingsCalls == 0, "Settings opened on Android after its run ended")
+        expectNothingCarriedOver(model, said)
+    }
+
+    /// A change that waits for Android's connection when its run ends is
+    /// cancelled there: nothing is written, and nothing is said of it.
+    @Test(arguments: RunsEnd.allCases)
+    func aChangeWaitingForAndroidIsCancelledWithItsRun(_ how: RunsEnd) async throws {
+        let (model, driver) = started()
+        let said = listen(to: model)
+        _ = await read(model)
+        driver.screenReaderChangeDelay = .seconds(30)
         let old = model.session
         model.setScreenReader(true)
         try await settle { driver.screenReaderChanges.count == 1 }
-        model.powerOff()
-        #expect(model.session !== old)
-        try await Task.sleep(for: .milliseconds(500))
-        #expect(model.session.reader.state == nil)
-        #expect(model.session.reader.changing == nil)
-        #expect(!old.reader.isOn)
-        #expect(model.alert == nil)
+        #expect(old.reader.outstandingOperations == 1)
+        end(model, how)
+        try await settle { driver.screenReaderCancelled == 1 }
+        #expect(driver.screenReaderState == ScreenReaderState(installedService: talkBack, enabledServices: []))
+        expectNothingCarriedOver(model, said)
     }
 
-    @Test func aFailedChangeAfterTheRunSaysNothingToTheNextSession() async throws {
+    @Test(arguments: RunsEnd.allCases)
+    func openingSettingsWaitingForAndroidIsCancelledWithItsRun(_ how: RunsEnd) async throws {
         let (model, driver) = started()
+        let said = listen(to: model)
+        driver.accessibilitySettingsDelay = .seconds(30)
+        model.openAccessibilitySettings()
+        try await settle { driver.accessibilitySettingsCalls == 1 }
+        end(model, how)
+        try await settle { driver.screenReaderCancelled == 1 }
+        #expect(driver.accessibilitySettingsOpened == 0)
+        expectNothingCarriedOver(model, said)
+    }
+
+    /// A change that reaches Android and answers after its run ended, as a
+    /// connection that does not stop would: the guest has changed, and the
+    /// next session is told nothing.
+    @Test(arguments: RunsEnd.allCases)
+    func aChangeThatAnswersAfterItsRunLeavesTheNextSessionAlone(_ how: RunsEnd) async throws {
+        let (model, driver) = started()
+        let said = listen(to: model)
         _ = await read(model)
+        driver.screenReaderRepliesAfterCancel = true
+        driver.screenReaderChangeDelay = .milliseconds(200)
+        model.setScreenReader(true)
+        try await settle { driver.screenReaderChanges.count == 1 }
+        end(model, how)
+        try await settle { driver.screenReaderState?.enabledServices == [talkBack] }
+        try await Task.sleep(for: .milliseconds(100))
+        expectNothingCarriedOver(model, said)
+    }
+
+    @Test(arguments: RunsEnd.allCases)
+    func aFailedChangeAfterTheRunSaysNothingToTheNextSession(_ how: RunsEnd) async throws {
+        let (model, driver) = started()
+        let said = listen(to: model)
+        _ = await read(model)
+        driver.screenReaderRepliesAfterCancel = true
         driver.screenReaderChangeDelay = .milliseconds(200)
         driver.screenReaderError = AdbFailure(.io(EIO), activity: .screenReader)
         model.setScreenReader(true)
         try await settle { driver.screenReaderChanges.count == 1 }
-        model.powerOff()
-        try await Task.sleep(for: .milliseconds(400))
-        #expect(model.session.reader.failure == nil)
-        #expect(model.alert == nil)
+        end(model, how)
+        try await settle { driver.screenReaderErrorsThrown == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        expectNothingCarriedOver(model, said)
+    }
+
+    @Test(arguments: RunsEnd.allCases)
+    func aLateErrorOpeningSettingsIsNotTheNextSessions(_ how: RunsEnd) async throws {
+        let (model, driver) = started()
+        let said = listen(to: model)
+        driver.screenReaderRepliesAfterCancel = true
+        driver.accessibilitySettingsDelay = .milliseconds(200)
+        driver.accessibilitySettingsError = AdbFailure(message: "The guest refused.")
+        model.openAccessibilitySettings()
+        try await settle { driver.accessibilitySettingsCalls == 1 }
+        end(model, how)
+        try await settle { driver.accessibilitySettingsErrorsThrown == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        expectNothingCarriedOver(model, said)
+    }
+
+    /// The same error in the session that asked is shown, so the row above is
+    /// not an alert that never comes.
+    @Test func anErrorOpeningSettingsInItsOwnSessionIsShown() async throws {
+        let (model, driver) = started()
+        driver.accessibilitySettingsError = AdbFailure(message: "The guest refused.")
+        model.openAccessibilitySettings()
+        try await settle { model.alert != nil }
+        #expect(model.alert?.title == ScreenReaderWords.androidSettings)
+        #expect(model.alert?.message == "The guest refused.")
+        #expect(driver.accessibilitySettingsOpened == 0)
+    }
+
+    @Test(arguments: RunsEnd.allCases)
+    func aReadThatAnswersAfterItsRunLeavesTheNextSessionAlone(_ how: RunsEnd) async throws {
+        let (model, driver) = started(voiceOver: true, guestState: reading([talkBack]), interval: .seconds(60))
+        let said = listen(to: model)
+        try await settle { model.session.reader.isOn }
+        said.lines.removeAll()
+        said.queued.removeAll()
+        driver.screenReaderReadDelays = Array(repeating: .zero, count: driver.screenReaderReads) + [.milliseconds(300)]
+        let reads = driver.screenReaderReads
+        let late = Task { await model.refreshScreenReader() }
+        try await settle { driver.screenReaderReads == reads + 1 }
+        end(model, how)
+        await late.value
+        expectNothingCarriedOver(model, said)
     }
 
     @Test func theLoopThatReadsEndsWithTheSession() async throws {
         let (model, driver) = started(voiceOver: true, interval: .milliseconds(20))
         try await settle { driver.screenReaderReads >= 3 }
         let old = model.session
+        #expect(old.reader.watcher != nil)
         model.powerOff()
-        #expect(old.reader.watcher == nil)
+        #expect(old.reader.watcher == nil && old.reader.ended)
         let reads = driver.screenReaderReads
         try await Task.sleep(for: .milliseconds(200))
         #expect(driver.screenReaderReads <= reads + 1)
+    }
+
+    /// Reads begin with VoiceOver, stop when it stops, begin again when it
+    /// does, and stop with the run: the count of reads shows each.
+    @Test func theLoopStartsStopsAndStartsAgain() async throws {
+        let (model, driver) = started(voiceOver: true, interval: .milliseconds(20))
+        try await settle { driver.screenReaderReads >= 3 }
+        #expect(model.session.reader.watcher != nil)
+        var running = true
+        model.voiceOverRunning = { running }
+        running = false
+        model.voiceOverStatusChanged()
+        #expect(model.session.reader.watcher == nil)
+        let stopped = driver.screenReaderReads
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(driver.screenReaderReads <= stopped + 1, "reads went on after VoiceOver stopped")
+        running = true
+        model.voiceOverStatusChanged()
+        let restarted = driver.screenReaderReads
+        try await settle { driver.screenReaderReads >= restarted + 3 }
+        #expect(model.session.reader.watcher != nil)
+        let old = model.session
+        model.powerOff()
+        #expect(old.reader.watcher == nil)
+        let ended = driver.screenReaderReads
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(driver.screenReaderReads <= ended + 1, "reads went on after the run ended")
     }
 
     // MARK: Reading only when it is needed
 
     @Test func withoutVoiceOverNothingReadsUntilSettingsOpens() async throws {
         let (model, driver) = started(voiceOver: false, interval: .milliseconds(20))
+        #expect(model.offersScreenReader && model.session.reader.watcher == nil)
         try await Task.sleep(for: .milliseconds(150))
         #expect(driver.screenReaderReads == 0)
         let watcher = Task { await model.watchSettings() }
@@ -440,7 +716,9 @@ struct TalkBackSwitchTests {
         // And back on: the loop reads again and the card follows.
         running = true
         model.voiceOverStatusChanged()
+        #expect(model.session.reader.watcher != nil)
         try await settle { model.session.reader.card == .ask }
+        #expect(model.session.reader.card == .ask)
     }
 
     // MARK: The way back

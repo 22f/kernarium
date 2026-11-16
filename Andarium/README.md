@@ -1126,9 +1126,19 @@ is on. `AndariumCore/Adb` speaks the protocol.
   editing `enabled_accessibility_services` and `accessibility_enabled` in one
   adb shell command that reads the list it writes, so every other service the
   virtual machine has on stays on (`ScreenReader`, `Capabilities.screenReader`).
-  Each command acts on the foreground user (`--user`); another user's own setting
-  stays as it is. A read that gets no answer is shown as "couldn't check", never
-  as a state. The switch follows what Android reports while Settings is open
+  Each command acts on the foreground user (`--user`), checks that lookup and
+  the live list (split without pathname expansion; a list that is not a list of
+  services is refused before anything is written), and fails when any write or
+  the delete fails; another user's own setting stays as it is. Its reply, like a
+  read's, is exactly the report `ScreenReader.parse` defines, ending with its
+  terminator, and the screen reader is on only where the list names it and
+  `accessibility_enabled` is on: any other reply is "couldn't check", never a
+  state, and a change that left the two apart is not a change. Opening Android's
+  Accessibility page needs a shell result with status 0. A change, a read it
+  asks for and the opening of that page are the session's operations: the
+  session's end (a power off, Android's own restart) cancels them, they ask
+  nothing of Android once it has ended, and nothing they report reaches the next
+  session. The switch follows what Android reports while Settings is open
   and, while VoiceOver runs, every few seconds. While VoiceOver runs and the
   screen reader is off, a card over Android says that VoiceOver cannot read
   Android's screen, that the screen reader can and how to come back (touch the

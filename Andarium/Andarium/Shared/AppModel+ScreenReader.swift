@@ -62,6 +62,15 @@ extension AppModel {
         if reader.apply(read: answer, ticket) { evaluateScreenReaderCard() }
     }
 
+    /// A read for `current`, begun as the session's own operation: it does not
+    /// reach a session that came after.
+    private func refreshScreenReaderSoon(in current: SessionState) {
+        current.reader.run { [weak self] in
+            guard let self, session === current, !Task.isCancelled else { return }
+            await refreshScreenReader()
+        }
+    }
+
     /// Reads again while VoiceOver runs, so the display follows a change made
     /// in Android within a few seconds. One loop per session; it ends with
     /// VoiceOver, with the session or with the run.
@@ -112,25 +121,32 @@ extension AppModel {
         let current = session
         let reader = current.reader
         guard let state = reader.state, state.isInstalled else {
-            Task { await refreshScreenReader() }
+            refreshScreenReaderSoon(in: current)
             return
         }
         guard state.isOn != on, reader.beginChange(turningOn: on) else { return }
         let service = state.installedService ?? ScreenReader.services[0]
-        Task { [weak self] in
-            guard let self else { return }
+        let driver = driver
+        let standIn = screenReaderStandIn
+        // The operation belongs to this session: it asks nothing of Android
+        // once the session ended, and the session's end cancels it where it
+        // waits for Android.
+        reader.run { [weak self] in
+            guard let self, session === current, !Task.isCancelled else { return }
             do {
                 let after: ScreenReaderState
                 if let driver {
                     after = try await driver.changeScreenReader(on, service: service)
-                } else if let screenReaderStandIn {
-                    after = try await screenReaderStandIn.change(on, from: state)
+                } else if let standIn {
+                    after = try await standIn.change(on, from: state)
                 } else {
                     throw AdbFailure(.io(EIO), activity: .screenReader)
                 }
-                guard session === current else { return }
-                guard after.isOn == on else {
-                    // The command ended well and Android shows another state.
+                guard session === current, !Task.isCancelled else { return }
+                // Android shows what was asked, its list and its switch in
+                // agreement; the command ended well otherwise too, and a
+                // half-made change is not one.
+                guard after.isOn == on, after.isConsistent else {
                     reader.finishChange(after)
                     failScreenReader(reader, turningOn: on, reason: ScreenReaderWords.notReady)
                     return
@@ -145,7 +161,7 @@ extension AppModel {
                 }
                 evaluateScreenReaderCard()
             } catch {
-                guard session === current else { return }
+                guard session === current, !Task.isCancelled, !(error is CancellationError) else { return }
                 failScreenReader(reader, turningOn: on, reason: error.localizedDescription)
                 await refreshScreenReader()
             }
@@ -157,14 +173,18 @@ extension AppModel {
         announce(ScreenReaderWords.changeFailure(turningOn: on, reason: reason))
     }
 
-    /// Opens Android's Accessibility page; Settings closes for it.
+    /// Opens Android's Accessibility page; Settings closes for it. A failure
+    /// that arrives after the session ended is not the next session's.
     func openAccessibilitySettings() {
         guard offersScreenReader, spacePause == nil, let driver else { return }
-        Task { [weak self] in
+        let current = session
+        current.reader.run { [weak self] in
+            guard let self, session === current, !Task.isCancelled else { return }
             do {
                 try await driver.openAccessibilitySettings()
             } catch {
-                self?.alert = AppAlert(title: ScreenReaderWords.androidSettings, message: error.localizedDescription)
+                guard session === current, !Task.isCancelled, !(error is CancellationError) else { return }
+                alert = AppAlert(title: ScreenReaderWords.androidSettings, message: error.localizedDescription)
             }
         }
     }
@@ -226,7 +246,7 @@ extension AppModel {
         }
         reader.cardFailure = reason
         announce(ScreenReaderWords.changeFailure(turningOn: true, reason: reason))
-        if reader.state == nil { Task { await refreshScreenReader() } }
+        if reader.state == nil { refreshScreenReaderSoon(in: session) }
     }
 
     /// What VoiceOver is told of its own accord (`announcer` is a test's).
