@@ -777,6 +777,11 @@ blocker in every one of them.
   the generation bridge keeps the page from being entered and stops at the
   instruction in the engine's state, also when it is published while a vCPU
   runs the loop, and rewritten code is entered again once the word is back.
+  Random cases start with cumulative FPSR flags set and, one in eight, with
+  the floating-point state not loaded yet; a change published in the dispatch
+  window comes from the vCPU's own thread and from a second one; and the
+  engine adapter's choice between the plain and the rewritten-code loop is
+  made once, when its executor is made.
   `arm64-aot-tools` checks the generator's encoders, classifier, byte census
   and fixture layout, including which forms are left to the engine.
 - `arm64-aot-runtime-product` checks that the product compilation of the AOT

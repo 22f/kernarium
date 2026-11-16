@@ -484,7 +484,20 @@ struct Case final {
 	std::uint64_t seed;
 	std::uint64_t pc_offset;
 	bool faulting;
+	/* The saved vector registers of a case whose floating-point state is
+	 * not loaded yet; cpu.deferred_vectors points into it. */
+	std::shared_ptr<std::array<std::byte, sizeof(arm64::CpuState::vectors)>>
+		deferred;
 };
+
+/* The vector registers the guest has: the loaded ones, or the image a
+ * deferred load will bring in (arm64::CpuState::defer_fp_load). */
+[[nodiscard]] const void *vector_image(const arm64::CpuState &cpu) noexcept
+{
+	return cpu.fp_loaded || cpu.deferred_vectors == nullptr ?
+		static_cast<const void *>(cpu.vectors.data()) :
+		static_cast<const void *>(cpu.deferred_vectors);
+}
 
 /* What a guest can observe of a vCPU at an instruction boundary: the
  * registers, the flags, the floating-point control and status words, the
@@ -521,10 +534,7 @@ struct Snapshot final {
 	s.tls = cpu.tls;
 	for (std::size_t i = 0; i < 31; ++i)
 		s.x[i] = cpu.registers[i];
-	s.vectors = hash_of(cpu.fp_loaded || cpu.deferred_vectors == nullptr ?
-		static_cast<const void *>(cpu.vectors.data()) :
-		static_cast<const void *>(cpu.deferred_vectors),
-		sizeof(cpu.vectors));
+	s.vectors = hash_of(vector_image(cpu), sizeof(cpu.vectors));
 	s.memory = memory;
 	return s;
 }
@@ -595,7 +605,7 @@ struct BlockLog final {
 			static_cast<std::uint32_t>(executor.fault_access()),
 			executor.fault_alignment(),
 			executor.floating_point_syndrome(), {}, cpu.sp, cpu.nzcv,
-			hash_of(cpu.vectors.data(), sizeof(cpu.vectors)),
+			hash_of(vector_image(cpu), sizeof(cpu.vectors)),
 			hash_bytes(arena.snapshot())};
 		for (std::size_t i = 0; i < fault.registers.size(); ++i)
 			fault.registers[i] = cpu.registers[i];
@@ -613,6 +623,11 @@ struct BlockLog final {
 		arena.set_kind(page, 2);
 	}
 	arm64::restore_native_fp_environment(cpu);
+	/* Whether a run loaded a deferred floating-point state depends on the
+	 * path (rewritten code loads it at every entry, the engine only when an
+	 * instruction needs it); the guest's state is the same, and the results
+	 * are compared with it loaded. */
+	cpu.access_fp_state();
 	r.cpu = cpu;
 	r.memory = arena.snapshot();
 	return r;
@@ -879,6 +894,31 @@ void describe(const char *what, const Case &c)
 	return c;
 }
 
+/* The floating-point state a random case starts with, drawn from its seed so
+ * that a failure report reproduces it: cumulative exception flags and QC
+ * from before the function, which a native floating-point instruction must
+ * leave set and add to, and in one case in eight a state not loaded yet, as
+ * the runtime hands it over after a context load (the register file holds
+ * stale words and the guest's are in the saved image). The directed rows set
+ * their own and do not call it. */
+void randomize_fp_state(Case &c)
+{
+	SplitMix rng{c.seed ^ 0x6670'7374'6174'65ULL};
+	c.cpu.fpsr = rng.below(4) == 0 ?
+		static_cast<std::uint32_t>(rng.next()) & arm64::fpsr_writable_mask :
+		0U;
+	if (rng.below(8) != 0)
+		return;
+	c.deferred = std::make_shared<
+		std::array<std::byte, sizeof(c.cpu.vectors)>>();
+	std::memcpy(c.deferred->data(), c.cpu.vectors.data(), c.deferred->size());
+	const auto fpcr = c.cpu.fpcr, fpsr = c.cpu.fpsr;
+	c.cpu.defer_fp_load(c.deferred->data(), fpcr, fpsr, ~0U);
+	std::memset(c.cpu.vectors.data(), 0x5a, sizeof(c.cpu.vectors));
+	c.cpu.fpcr = 0;
+	c.cpu.fpsr = 0;
+}
+
 [[nodiscard]] Case make_case_from_seed(std::uint64_t seed,
 	std::uint64_t bias, std::uint64_t pc_offset, bool faulting, bool tbi,
 	std::uint64_t arena_base)
@@ -1019,7 +1059,7 @@ void describe(const char *what, const Case &c)
 
 struct Totals final {
 	std::size_t cases{}, compared{}, skipped{}, faulted{}, fault_events{},
-		finished{}, nondeterministic{}, slow{};
+		finished{}, nondeterministic{}, slow{}, deferred{}, flagged{};
 };
 
 struct Config final {
@@ -1087,8 +1127,11 @@ Totals differential(const Config &config, const LibraryImage &image,
 	const auto one = [&](std::uint64_t pc, const char *kind) {
 		const bool faulting = rng.below(3) == 0;
 		const bool tbi = rng.below(4) != 0;
-		const auto c = make_case(rng, bias, pc, faulting, tbi,
+		auto c = make_case(rng, bias, pc, faulting, tbi,
 			arena_base(bias));
+		randomize_fp_state(c);
+		t.deferred += c.deferred ? 1 : 0;
+		t.flagged += c.deferred || c.cpu.fpsr != 0 ? 1 : 0;
 		if (std::getenv("AOT_TRACE") != nullptr) {
 			describe("reference", c);
 			std::fflush(stderr);
@@ -1911,6 +1954,10 @@ struct WindowChange final {
 	std::uint64_t offset;
 	std::uint32_t word;
 	bool fired;
+	/* Publish from another thread (which the window waits for) rather than
+	 * from the vCPU's own, by the generation form of the bridge. */
+	bool other_thread;
+	int rc;
 };
 
 void publish_in_the_window(void *context)
@@ -1919,6 +1966,16 @@ void publish_in_the_window(void *context)
 	if (change.fired)
 		return;
 	change.fired = true;
+	if (change.other_thread) {
+		std::thread other{[&change] {
+			change.env->backing.put32(change.offset, change.word);
+			change.rc = darwin_uml_static_vm_invalidate_code_generation(
+				change.env->generation,
+				change.env->bias + change.offset, 4);
+		}};
+		other.join();
+		return;
+	}
 	change.env->backing.put32(change.offset, change.word);
 	change.env->memory.invalidate_code(change.env->bias + change.offset);
 }
@@ -1930,7 +1987,7 @@ void publish_in_the_window(void *context)
  * new sequence, which finds it changed; rewritten code must not run it. */
 [[gnu::noinline]]
 void code_change_in_the_dispatch_window(const LibraryImage &image,
-	const std::vector<Function> &functions)
+	const std::vector<Function> &functions, bool other_thread)
 {
 	/* The fixture's `isb; mov x0, #1` form (tools/aot/fixture.py). */
 	const Function *found = nullptr;
@@ -1944,7 +2001,8 @@ void code_change_in_the_dispatch_window(const LibraryImage &image,
 	const auto form = *found;
 	const std::uint32_t patched = 0xd2800f00U; /* mov x0, #0x78 */
 	const auto bias = Fixture::bias;
-	Fixture ref{4371, image}, got{4372, image};
+	Fixture ref{4371UL + (other_thread ? 2 : 0), image},
+		got{4372UL + (other_thread ? 2 : 0), image};
 	SplitMix rng{71};
 	auto c = make_case(rng, bias, form.start, false, true, arena_base(bias));
 	enterable(c);
@@ -1963,16 +2021,20 @@ void code_change_in_the_dispatch_window(const LibraryImage &image,
 	require(warm.cpu.registers[0] == 1);
 	const auto entered = aot::stats().enters;
 	require(entered > 0);
-	WindowChange change{&got.env, form.start + 4, patched, false};
+	WindowChange change{&got.env, form.start + 4, patched, false,
+		other_thread, 0};
 	aot::set_run_hook(publish_in_the_window, &change);
 	const auto have = drive(got.env, got.arena, c, aot_max_blocks);
 	aot::set_run_hook(nullptr, nullptr);
 	aot::set_enabled(false);
 	require(change.fired);
+	require(!other_thread || change.rc == 0);
 	require(same(want, have, c));
 	const auto st = aot::stats();
-	std::fprintf(stderr, "code change in the dispatch window: %llu entries "
-		"before, %llu after\n", static_cast<unsigned long long>(entered),
+	std::fprintf(stderr, "code change in the dispatch window (%s): %llu "
+		"entries before, %llu after\n",
+		other_thread ? "from a second thread" : "from the vCPU's own",
+		static_cast<unsigned long long>(entered),
 		static_cast<unsigned long long>(st.enters));
 	/* Entered once, at the ISB; the changed page is no library page. */
 	require(st.enters == entered + 1);
@@ -3886,8 +3948,9 @@ TraceTotals exits_lie_on_the_stepped_trace(
 		++t.tried;
 		const bool faulting = rng.below(3) == 0;
 		const bool tbi = rng.below(4) != 0;
-		const auto c = make_case(rng, bias, start, faulting, tbi,
+		auto c = make_case(rng, bias, start, faulting, tbi,
 			arena_base(bias));
+		randomize_fp_state(c);
 		aot::set_enabled(false);
 		const auto want = drive(ref, ref_arena, c, max_blocks);
 		if (!want.done()) {
@@ -4390,6 +4453,61 @@ void a_breakpoint_published_through_the_bridge_stops_rewritten_code(
 		"vCPU running during the publication\n", attempts, raced);
 }
 
+/* The engine adapter chooses between the plain block loop and the one with
+ * rewritten code when its executor is made, once, and neither loop tests it
+ * again. So an engine made while rewritten code is off never enters it, even
+ * once it is switched on, and one made while it is on keeps entering it
+ * after it is switched off; the diagnostics switch decides only for
+ * executors made later (and for the harness's own dispatch). */
+[[gnu::noinline]]
+void the_dispatch_choice_is_made_when_the_executor_is_made(
+	const LibraryImage &image)
+{
+	const auto bias = Fixture::bias;
+	auto c = loop_case(77, bias, 0x1000, arena_base(bias));
+	c.cpu.registers[3] = 20000;
+	unsigned long generation = 7500;
+	const auto entries = [&](uml::cpu::CpuEngine &engine) {
+		Fixture f{++generation, image};
+		prepare_arena(f.arena, c);
+		auto cpu = c.cpu;
+		uml::cpu::ExecutionRequest request{
+			.cpu = cpu,
+			.memory = f.env.memory,
+			.translated_memory = &f.env.memory,
+			.generation = generation,
+			.instruction_budget = std::size_t{1} << 40,
+		};
+		aot::reset_stats();
+		const auto result = engine.run(request);
+		require(result.reason == uml::cpu::ExitReason::system_call);
+		require(cpu.registers[0] == 20000);
+		return aot::stats().enters;
+	};
+	aot::set_enabled(false);
+	GadgetExecutor made_off;
+	require(!made_off.aot_selected());
+	auto off = arm64::detail::make_gadget_engine({});
+	aot::set_enabled(true);
+	GadgetExecutor made_on;
+	require(made_on.aot_selected());
+	auto on = arm64::detail::make_gadget_engine({});
+	const auto off_while_on = entries(*off);
+	const auto on_while_on = entries(*on);
+	aot::set_enabled(false);
+	const auto off_while_off = entries(*off);
+	const auto on_while_off = entries(*on);
+	aot::set_enabled(std::nullopt);
+	std::fprintf(stderr, "dispatch choice: made off %llu entries while on, "
+		"%llu while off; made on %llu while on, %llu while off\n",
+		static_cast<unsigned long long>(off_while_on),
+		static_cast<unsigned long long>(off_while_off),
+		static_cast<unsigned long long>(on_while_on),
+		static_cast<unsigned long long>(on_while_off));
+	require(off_while_on == 0 && off_while_off == 0);
+	require(on_while_on > 0 && on_while_off > 0);
+}
+
 } // namespace
 
 /* A host fault inside rewritten code is a bug; say where before dying. */
@@ -4445,8 +4563,9 @@ int main(int argc, char **argv)
 		const auto image = load_library(
 			libraries[cfg.library < 0 ? 0 : cfg.library].host);
 		g_sites_image = &image;
-		const auto c = make_case_from_seed(seed, bias, pc, faulting != 0,
+		auto c = make_case_from_seed(seed, bias, pc, faulting != 0,
 			tbi != 0, arena_base(bias));
+		randomize_fp_state(c);
 		(void)diagnose(c, image, bias);
 		return 0;
 	}
@@ -4486,12 +4605,14 @@ int main(int argc, char **argv)
 		const auto st = aot::stats();
 		std::fprintf(stderr,
 			"differential: %zu cases, %zu compared, %zu unbounded "
-			"(%zu not repeatable, %zu too slow), %zu finished, %zu faulting, %zu faults; enters %llu steps %llu "
+			"(%zu not repeatable, %zu too slow), %zu finished, %zu faulting, "
+			"%zu faults; %zu started with FP flags or an unloaded FP state, "
+			"%zu of them unloaded; enters %llu steps %llu "
 			"binds %llu verifications %llu retired %llu refills %llu "
 			"refusals sp %llu fp %llu poisoned %llu unreadable %llu\n",
 			t.cases, t.compared, t.skipped, t.nondeterministic, t.slow,
-			t.finished, t.faulted,
-			t.fault_events, static_cast<unsigned long long>(st.enters),
+			t.finished, t.faulted, t.fault_events, t.flagged, t.deferred,
+			static_cast<unsigned long long>(st.enters),
 			static_cast<unsigned long long>(st.steps),
 			static_cast<unsigned long long>(st.binds),
 			static_cast<unsigned long long>(st.verifications),
@@ -4547,7 +4668,8 @@ int main(int argc, char **argv)
 			require(ps.enters > p.compared / 2);
 			require(ps.poisoned == 0);
 			loop_through_another_range(image, functions);
-			code_change_in_the_dispatch_window(image, functions);
+			code_change_in_the_dispatch_window(image, functions, false);
+			code_change_in_the_dispatch_window(image, functions, true);
 			edges_into_a_page_that_differs(image);
 			edges_into_a_page_that_matches(image);
 			next_page_changes_after_its_neighbour_was_compared(image);
@@ -4570,6 +4692,7 @@ int main(int argc, char **argv)
 			a_stop_takes_effect_within_one_run_block(image);
 			a_breakpoint_published_through_the_bridge_stops_rewritten_code(
 				image);
+			the_dispatch_choice_is_made_when_the_executor_is_made(image);
 		}
 		/* The scenarios are about the mechanism, not about the code:
 		 * they run on one library, whatever order the build lists. */
