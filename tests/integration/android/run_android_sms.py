@@ -1379,15 +1379,21 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path) ->
                                start_new_session=True, env=environment)
     stream.close()
     serial = f"127.0.0.1:{options.adb_port}"
-    guest = Guest(adb, serial, process, log, vsock_forward_port(log, process, SMS_PORT), private)
-    boot_android.wait_for_adb(adb, serial, process, options.boot_timeout)
-    if not boot_android.wait_for_boot_completed(adb, serial, process, options.boot_timeout):
-        raise Failure("Android did not reach sys.boot_completed")
-    boot_android.android_instance.booted(instance, identity)
-    if not options.instance:
-        boot_android.provision_guest(adb, serial)
-    print(f"booted; settling for {SETTLE_SECONDS} s")
-    time.sleep(SETTLE_SECONDS)
+    # main's cleanup owns the emulator only once this returns, so a failure from here on stops it here.
+    try:
+        guest = Guest(adb, serial, process, log, vsock_forward_port(log, process, SMS_PORT), private)
+        boot_android.wait_for_adb(adb, serial, process, options.boot_timeout)
+        if not boot_android.wait_for_boot_completed(adb, serial, process, options.boot_timeout):
+            raise Failure("Android did not reach sys.boot_completed")
+        boot_android.android_instance.booted(instance, identity)
+        if not options.instance:
+            boot_android.provision_guest(adb, serial)
+        print(f"booted; settling for {SETTLE_SECONDS} s")
+        time.sleep(SETTLE_SECONDS)
+    except BaseException:
+        boot_android.disconnect_adb(adb, serial)
+        boot_android.stop_guest(process)
+        raise
     return guest
 
 

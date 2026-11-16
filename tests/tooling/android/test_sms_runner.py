@@ -27,6 +27,8 @@ import sys
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 TESTS = Path(__file__).resolve().parents[2]
 SCRIPT = TESTS / "integration/android/run_android_sms.py"
@@ -533,6 +535,85 @@ class AdbServerTests(unittest.TestCase):
         self.assertEqual(ask("dev:1", 5556), "FAIL")
         self.assertEqual(ask("dev:1", 6000, 1), "TIMEOUT")
         self.assertEqual(ask("other", 5555), "FAIL")
+
+
+class StartFailureTests(unittest.TestCase):
+    """start_guest owns the emulator it spawned until it returns: whatever fails after the spawn stops it."""
+
+    MARKER = "sms-start-failure-test"
+
+    def start_and_fail(self, forward: object = 12345, **patched: object) -> list[subprocess.Popen]:
+        """Runs start_guest with the launcher's steps replaced; returns the spawned children left running."""
+        boot = runner.boot_android
+        children: list[subprocess.Popen] = []
+        real_popen = subprocess.Popen
+
+        def spawn(command, *args, **kwargs):
+            process = real_popen(command, *args, **kwargs)
+            if self.MARKER in " ".join(map(str, command)):
+                children.append(process)
+            return process
+
+        options = SimpleNamespace(instance=None, release=None, emulator=None, adb_port=5599, cpus=2,
+                                  memory="2G", boot_timeout=5)
+        steps = {
+            "wait_for_adb": mock.DEFAULT,
+            "wait_for_boot_completed": True,
+            "provision_guest": mock.DEFAULT,
+        }
+        steps.update(patched)
+        with tempfile.TemporaryDirectory(prefix="uml-sms-t-") as private, contextlib.ExitStack() as stack:
+            directory = Path(private)
+            stack.enter_context(mock.patch.object(boot, "parse_arguments", return_value=SimpleNamespace(
+                emulator="fake", release="fake")))
+            stack.enter_context(mock.patch.object(boot, "resolve_executable", return_value=sys.executable))
+            stack.enter_context(mock.patch.object(boot, "release_path", return_value=directory))
+            stack.enter_context(mock.patch.object(boot.android_instance, "read_release", return_value=object()))
+            stack.enter_context(mock.patch.object(boot, "plan_start", return_value=object()))
+            stack.enter_context(mock.patch.object(boot.android_instance, "apply"))
+            stack.enter_context(mock.patch.object(boot.android_instance, "booted"))
+            stack.enter_context(mock.patch.object(boot, "data_capacity", return_value=1))
+            stack.enter_context(mock.patch.object(boot, "disconnect_adb"))
+            stack.enter_context(mock.patch.object(boot, "emulator_command", return_value=[
+                sys.executable, "-c", f"import time; time.sleep(120)  # {self.MARKER}"]))
+            if isinstance(forward, BaseException):
+                stack.enter_context(mock.patch.object(runner, "vsock_forward_port", side_effect=forward))
+            else:
+                stack.enter_context(mock.patch.object(runner, "vsock_forward_port", return_value=forward))
+            for name, effect in steps.items():
+                if isinstance(effect, BaseException):
+                    stack.enter_context(mock.patch.object(boot, name, side_effect=effect))
+                elif effect is mock.DEFAULT:
+                    stack.enter_context(mock.patch.object(boot, name))
+                else:
+                    stack.enter_context(mock.patch.object(boot, name, return_value=effect))
+            stack.enter_context(mock.patch.object(runner.subprocess, "Popen", side_effect=spawn))
+            try:
+                runner.start_guest(options, "adb", directory)
+            except (runner.Failure, runner.boot_android.LauncherError):
+                pass
+            else:
+                self.fail("start_guest returned although the step failed")
+            finally:
+                alive = [child for child in children if child.poll() is None]
+                for child in alive:
+                    child.kill()
+                for child in children:
+                    child.wait(timeout=10)
+        return alive
+
+    def test_a_failure_after_the_spawn_leaves_no_emulator(self) -> None:
+        boot = runner.boot_android
+        cases = {
+            "the forward is never announced": {"forward": runner.Failure("injected: no forward")},
+            "adb never answers": {"wait_for_adb": boot.LauncherError("injected: waiting for adb")},
+            "Android never boots": {"wait_for_boot_completed": False},
+            "provisioning fails": {"provision_guest": boot.LauncherError("injected: provisioning")},
+        }
+        for name, patched in cases.items():
+            with self.subTest(name):
+                alive = self.start_and_fail(**patched)
+                self.assertEqual([], alive, "the emulator it spawned was left running")
 
 
 class ProbeSourceTests(unittest.TestCase):
