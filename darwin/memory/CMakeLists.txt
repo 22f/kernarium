@@ -45,6 +45,10 @@ set(_uml_static_mmu_sources
     mmu/address_space.cpp
     mmu/execution_gate.cpp
     mmu/mapped_backing.cpp)
+# The x86-64 guest's frame accounting; no other product compiles it.
+if(UML_BUILD_X86_64_GUEST)
+    list(APPEND _uml_static_mmu_sources mmu/frame_accounting.cpp)
+endif()
 
 add_library(uml_static_mmu OBJECT ${_uml_static_mmu_sources})
 uml_declare_architecture_target(uml_static_mmu memory)

@@ -9,6 +9,7 @@
 #include "bridge_call.hpp"
 #include "domain_registry_testing.hpp"
 #include "execution_gate.hpp"
+#include "frame_accounting.hpp"
 
 #include <algorithm>
 #include <array>
@@ -141,6 +142,18 @@ struct PageMapping final {
 {
 	return mapping.guest_code && (mapping.protection & PROT_EXEC) != 0;
 }
+
+#if DARWIN_UML_X86_64_GUEST
+/* The frame a page mapping names, for the writer accounting. */
+[[nodiscard]] FrameRef frame_of(
+	const std::optional<PageMapping> &mapping) noexcept
+{
+	if (!mapping)
+		return {};
+	return {mapping->backing, mapping->offset,
+		(mapping->protection & PROT_WRITE) != 0};
+}
+#endif
 
 /* Raised once for the process, before the first x86 translation exists. x86
  * code sees every store at once, the kernel's included, so a kernel write into
@@ -360,6 +373,9 @@ void reserve_planned_pages(GenerationState &state,
 			throw std::bad_alloc{};
 		if (page.slot == BackingSlots::overflow)
 			state.backings.reserve_overflow(page.address);
+#if DARWIN_UML_X86_64_GUEST
+		FrameAccounting::reserve(state, page.address, frame_of(page.final));
+#endif
 	}
 }
 
@@ -388,6 +404,10 @@ void commit_planned_pages(GenerationState &state,
 			if (had)
 				--state.mapped_pages;
 		}
+#if DARWIN_UML_X86_64_GUEST
+		FrameAccounting::apply(state, page.address,
+			frame_of(page.original), frame_of(page.final));
+#endif
 		/* A page that stays in the overflow table was just given its new
 		 * entry; dropping the old one would drop that. */
 		if (had && !(page.final && old_slot == BackingSlots::overflow &&
@@ -402,11 +422,17 @@ void commit_planned_pages(GenerationState &state,
 		trimmed = FillIndex::leaf_of(page.address);
 		state.fill_index.trim(page.address);
 	}
+#if DARWIN_UML_X86_64_GUEST
+	FrameAccounting::commit(state);
+#endif
 }
 
 /* Empties a generation of its pages. */
 void clear_mappings(GenerationState &state) noexcept
 {
+#if DARWIN_UML_X86_64_GUEST
+	FrameAccounting::walk(state);
+#endif
 	state.fill_index.clear();
 	state.backings.clear();
 	state.mapped_pages = 0;
@@ -417,7 +443,13 @@ void clear_mappings(GenerationState &state) noexcept
 class SlotSettler final {
 public:
 	explicit SlotSettler(GenerationState &state) noexcept : state_{state} {}
-	~SlotSettler() { state_.backings.settle(); }
+	~SlotSettler()
+	{
+		state_.backings.settle();
+#if DARWIN_UML_X86_64_GUEST
+		FrameAccounting::settle(state_);
+#endif
+	}
 	SlotSettler(const SlotSettler &) = delete;
 	SlotSettler &operator=(const SlotSettler &) = delete;
 
@@ -649,6 +681,9 @@ public:
 		auto state = state_for(generation);
 		ExecutionQuiesce quiesce{state, generation};
 		std::lock_guard lock{state->mappings_mutex};
+#if DARWIN_UML_X86_64_GUEST
+		WriterSettler writers{*state};
+#endif
 		bool changed = false;
 		CodeSpan code;
 		(void)state->fill_index.scan(address, address + length,
@@ -657,6 +692,12 @@ public:
 				if (protection_of(fields) == protection)
 					return false;
 				changed = true;
+#if DARWIN_UML_X86_64_GUEST
+				if ((protection & PROT_WRITE) != 0 && !fields.write)
+					if (const auto mapping = decode_page(*state, page, word))
+						FrameAccounting::reserve(*state, page,
+							{mapping->backing, mapping->offset, true});
+#endif
 				/* The backing and the bytes stay; only losing execute
 				 * leaves a translation wrong. */
 				if (fields.guest_code && fields.exec &&
@@ -681,9 +722,17 @@ public:
 				fields.write = (protection & PROT_WRITE) != 0;
 				fields.exec = (protection & PROT_EXEC) != 0;
 				state->fill_index.store(page, FillIndex::encode(fields));
+#if DARWIN_UML_X86_64_GUEST
+				if (FillIndex::decode(word).write &&
+				    (protection & PROT_WRITE) == 0)
+					FrameAccounting::release_word(*state, page, word);
+#endif
 				return false;
 			});
 		pending.commit();
+#if DARWIN_UML_X86_64_GUEST
+		FrameAccounting::commit(*state);
+#endif
 		return 0;
 	}
 
@@ -799,6 +848,9 @@ public:
 			PendingMappingChanges pending{*state, changes};
 			clear_mappings(*state);
 			pending.commit();
+#if DARWIN_UML_X86_64_GUEST
+			FrameAccounting::finish(*state);
+#endif
 		}
 		state->retired.store(true, std::memory_order_release);
 		{
@@ -828,14 +880,29 @@ public:
 		wait_for_active_accesses(this);
 		lifetime_->retired.store(true, std::memory_order_release);
 		lifetime_retirement_epoch().fetch_add(1, std::memory_order_acq_rel);
+#if DARWIN_UML_X86_64_GUEST
+		decltype(states_) gone;
+#endif
 		{
 			std::lock_guard lock{states_mutex_};
 			for (auto &[generation, state] : states_) {
 				(void)generation;
 				state->retired.store(true, std::memory_order_release);
 			}
+#if DARWIN_UML_X86_64_GUEST
+			gone = std::move(states_);
+#endif
 			states_.clear();
 		}
+#if DARWIN_UML_X86_64_GUEST
+		/* After states_mutex_ is released: the walk takes each state's
+		 * mapping lock and the frames' stripe locks. */
+		for (auto &[generation, state] : gone) {
+			(void)generation;
+			std::lock_guard lock{state->mappings_mutex};
+			FrameAccounting::retire(*state);
+		}
+#endif
 		generation_retirement_sequence().fetch_add(
 			1, std::memory_order_release);
 		auto &active = active_thread_generation();
@@ -1707,6 +1774,9 @@ private:
 		PendingMappingChanges pending{state, changes};
 		state.fill_index.erase_range(address, end,
 			[&state](std::uint64_t page, std::uintptr_t word) noexcept {
+#if DARWIN_UML_X86_64_GUEST
+				FrameAccounting::release_word(state, page, word);
+#endif
 				state.backings.remove(FillIndex::decode(word).slot, page);
 				--state.mapped_pages;
 			});
@@ -1745,6 +1815,121 @@ private:
 	std::shared_ptr<AddressSpaceLifetime> lifetime_{
 		std::make_shared<AddressSpaceLifetime>()};
 	std::atomic_bool retired_{};
+
+#if UML_MEMORY_ALLOCATION_TESTING && DARWIN_UML_X86_64_GUEST
+public:
+	/* The test hooks of the frame accounting (frame_accounting.hpp). */
+	[[nodiscard]] std::shared_ptr<GenerationState> state_for_testing(
+		std::uint64_t generation)
+	{
+		std::shared_lock lock{states_mutex_};
+		const auto found = states_.find(generation);
+		return found == states_.end() ? nullptr : found->second;
+	}
+
+	[[nodiscard]] std::shared_ptr<MappedBacking> backing_for_testing(int fd)
+	{
+		struct stat status {};
+		if (fstat(fd, &status) != 0)
+			return {};
+		std::shared_lock lock{backing_mutex_};
+		if (auto found = descriptor_backings_.find(fd);
+		    found != descriptor_backings_.end())
+			return found->second.lock();
+		return {};
+	}
+
+	[[nodiscard]] testing::FrameWriterAudit audit_frame_writers_for_testing()
+	{
+		using Site = testing::FrameWriterSite;
+		testing::FrameWriterAudit audit;
+		std::vector<std::shared_ptr<GenerationState>> states;
+		std::vector<std::shared_ptr<MappedBacking>> backings;
+		{
+			std::shared_lock lock{states_mutex_};
+			for (const auto &[generation, state] : states_) {
+				(void)generation;
+				states.push_back(state);
+			}
+		}
+		{
+			std::shared_lock lock{backing_mutex_};
+			const auto add = [&](const std::weak_ptr<MappedBacking> &weak) {
+				if (auto backing = weak.lock();
+				    backing && std::find(backings.begin(), backings.end(),
+					    backing) == backings.end())
+					backings.push_back(std::move(backing));
+			};
+			for (const auto &[key, weak] : backings_) {
+				(void)key;
+				add(weak);
+			}
+			for (const auto &[fd, weak] : descriptor_backings_) {
+				(void)fd;
+				add(weak);
+			}
+		}
+		std::vector<Site> recount;
+		for (const auto &state : states) {
+			std::shared_lock lock{state->mappings_mutex};
+			(void)state->fill_index.scan(0, ~std::uint64_t{0},
+				[&](std::uint64_t page, std::uintptr_t word) {
+					const auto fields = FillIndex::decode(word);
+					if (!fields.write || !FrameAccounting::tracks(page))
+						return false;
+					const auto entry = state->backings.entry(fields.slot, page);
+					if (entry.backing == nullptr)
+						return false;
+					const auto offset = fields.host -
+						reinterpret_cast<std::uintptr_t>(entry.backing->base());
+					recount.push_back({entry.backing, offset / page_size,
+						state->accounting.alias, page});
+					return false;
+				});
+		}
+		std::vector<Site> held;
+		for (const auto &backing : backings) {
+			std::vector<std::uint64_t> frames;
+			backing->for_each_writer_word(
+				[&](std::uint64_t offset, std::uint64_t) {
+					frames.push_back(offset);
+				});
+			for (const auto offset : frames) {
+				std::vector<WriterLocation> locations;
+				if (!FrameAccounting::locations_for_testing(
+					    *backing, offset, locations))
+					++audit.unknown_frames;
+				for (const auto &location : locations)
+					held.push_back({backing.get(), offset / page_size,
+						location.alias, location.page});
+			}
+		}
+		std::sort(recount.begin(), recount.end());
+		std::sort(held.begin(), held.end());
+		audit.state_locations = recount.size();
+		audit.frame_locations = held.size();
+		audit.equal = recount == held && audit.unknown_frames == 0;
+		return audit;
+	}
+
+	[[nodiscard]] std::vector<std::pair<std::uint64_t, std::uint64_t>>
+	frame_writers_for_testing(int fd, std::uint64_t offset)
+	{
+		std::vector<std::pair<std::uint64_t, std::uint64_t>> writers;
+		const auto backing = backing_for_testing(fd);
+		if (!backing)
+			return writers;
+		std::vector<WriterLocation> locations;
+		(void)FrameAccounting::locations_for_testing(
+			*backing, offset, locations);
+		std::shared_lock lock{states_mutex_};
+		for (const auto &location : locations)
+			for (const auto &[generation, state] : states_)
+				if (state->accounting.alias == location.alias)
+					writers.emplace_back(generation, location.page);
+		return writers;
+	}
+#endif
 };
 
 /* Holds space for one operation. It either owns a reference or borrows the
@@ -2476,3 +2661,41 @@ extern "C" void darwin_uml_static_vm_invalidate_code(unsigned long address)
 		return 0;
 	});
 }
+
+#if UML_MEMORY_ALLOCATION_TESTING && DARWIN_UML_X86_64_GUEST
+namespace uml::memory::testing {
+
+FrameWriterAudit audit_frame_writers() noexcept
+{
+	try {
+		if (const auto access = address_space(); access)
+			return access->audit_frame_writers_for_testing();
+	} catch (...) {
+	}
+	return {};
+}
+
+std::shared_ptr<GenerationState> generation_state(std::uint64_t generation)
+{
+	if (const auto access = address_space(); access)
+		return access->state_for_testing(generation);
+	return {};
+}
+
+std::shared_ptr<MappedBacking> mapped_backing(int fd)
+{
+	if (const auto access = address_space(); access)
+		return access->backing_for_testing(fd);
+	return {};
+}
+
+std::vector<std::pair<std::uint64_t, std::uint64_t>> frame_writers(
+	int fd, std::uint64_t offset)
+{
+	if (const auto access = address_space(); access)
+		return access->frame_writers_for_testing(fd, offset);
+	return {};
+}
+
+} // namespace uml::memory::testing
+#endif

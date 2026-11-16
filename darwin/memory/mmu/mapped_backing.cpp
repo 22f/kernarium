@@ -13,6 +13,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <utility>
+#include <vector>
 
 namespace uml::memory {
 namespace {
@@ -31,6 +32,11 @@ struct MappedBacking::CodePage final {
 
 	const std::uint64_t identity;
 	std::atomic_uint64_t version{1};
+#if DARWIN_UML_X86_64_GUEST
+	/* The writer locations of a frame with several (frame_accounting.hpp),
+	 * guarded by the frame's stripe lock. */
+	std::vector<WriterLocation> writers;
+#endif
 };
 
 std::shared_ptr<MappedBacking> MappedBacking::create(
@@ -177,3 +183,66 @@ void MappedBacking::retire_code_page(std::uint64_t offset) noexcept
 }
 
 } // namespace uml::memory
+
+#if DARWIN_UML_X86_64_GUEST
+namespace uml::memory {
+
+bool MappedBacking::prepare_writers(
+	std::uint64_t offset, bool record) noexcept
+{
+	const auto frame = offset / frame_bytes;
+	const auto leaf = frame / writer_leaf_frames;
+	try {
+		if (record && code_page_handle(offset) == nullptr)
+			return false;
+		const std::lock_guard lock{code_pages_mutex_};
+		auto *index = writer_index_.load(std::memory_order_relaxed);
+		if (index == nullptr) {
+			const auto leaves =
+				(size_ / frame_bytes + 1U + writer_leaf_frames - 1U) /
+				writer_leaf_frames;
+			auto storage = std::unique_ptr<std::atomic<WriterLeaf *>[]>{
+				new (std::nothrow) std::atomic<WriterLeaf *>[leaves]{}};
+			if (!storage)
+				return false;
+			writer_index_leaves_ = leaves;
+			index = storage.get();
+			writer_index_storage_ = std::move(storage);
+			writer_index_.store(index, std::memory_order_release);
+		}
+		if (leaf >= writer_index_leaves_)
+			return false;
+		if (index[leaf].load(std::memory_order_relaxed) == nullptr) {
+			auto owned = std::make_unique<WriterLeaf>();
+			owned->fill(0);
+			auto *words = owned.get();
+			writer_leaves_.push_back(std::move(owned));
+			index[leaf].store(words, std::memory_order_release);
+		}
+		return true;
+	} catch (...) {
+		return false;
+	}
+}
+
+std::uint64_t *MappedBacking::writer_word(std::uint64_t offset) noexcept
+{
+	const auto frame = offset / frame_bytes;
+	const auto leaf = frame / writer_leaf_frames;
+	/* The index is published before any leaf and a leaf before any word. */
+	auto *index = writer_index_.load(std::memory_order_acquire);
+	if (index == nullptr || leaf >= writer_index_leaves_)
+		return nullptr;
+	auto *words = index[leaf].load(std::memory_order_acquire);
+	return words == nullptr ? nullptr : &(*words)[frame % writer_leaf_frames];
+}
+
+std::vector<WriterLocation> *MappedBacking::writer_list(
+	std::uint64_t offset) noexcept
+{
+	auto *record = static_cast<CodePage *>(code_page_handle(offset));
+	return record == nullptr ? nullptr : &record->writers;
+}
+
+} // namespace uml::memory
+#endif

@@ -118,6 +118,23 @@ target_compile_definitions(uml_static_retire_tests PRIVATE
 uml_add_unit_test(NAME memory-static-retire COMMAND uml_static_retire_tests
     LABELS tsan)
 
+# The x86-64 guest's writer accounting at the four mapping primitives.
+if(UML_BUILD_X86_64_GUEST)
+    add_executable(uml_frame_accounting_tests
+        frame_accounting_tests.cpp
+        $<TARGET_OBJECTS:uml_static_mmu_test_variant>)
+    target_link_libraries(uml_frame_accounting_tests PRIVATE
+        UML::BridgeAbi
+        UML::MemorySharedBacking)
+    target_include_directories(uml_frame_accounting_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/darwin/memory
+        ${PROJECT_SOURCE_DIR}/darwin/memory/mmu)
+    target_compile_definitions(uml_frame_accounting_tests PRIVATE
+        UML_MEMORY_ALLOCATION_TESTING=1)
+    uml_add_unit_test(NAME memory-frame-accounting
+        COMMAND uml_frame_accounting_tests LABELS tsan)
+endif()
+
 # What a mapping change publishes as a code change.
 add_executable(uml_static_mmu_code_change_tests
     static_mmu_code_change_tests.cpp

@@ -48,6 +48,16 @@ bool provide_test_domain(std::uint64_t &domain) noexcept
 	return statistics.size_in_use;
 }
 
+/* The x86-64 guest accounts the writers of each frame in the default zone,
+ * in proportion to the frames and aliases written, which this test maps by
+ * the hundred to a few frames; what it measures is the domain's own indexes,
+ * so its pages are read only there. */
+#if DARWIN_UML_X86_64_GUEST
+constexpr int test_protection = PROT_READ;
+#else
+constexpr int test_protection = PROT_READ | PROT_WRITE;
+#endif
+
 /* Single-page maps in batches, as a guest's page faults and mmaps make them:
  * the fill index and the history grow with the pages. */
 void map_pages(unsigned long generation, unsigned long base, int descriptor,
@@ -62,7 +72,7 @@ void map_pages(unsigned long generation, unsigned long base, int descriptor,
 			require(darwin_uml_static_vm_map_generation(generation,
 					reinterpret_cast<void *>(base + index * page),
 					descriptor, (index % backing_pages) * page, page,
-					PROT_READ | PROT_WRITE, 0, 1) == 0,
+					test_protection, 0, 1) == 0,
 				"a page was not mapped");
 		require(darwin_uml_static_vm_batch_end() == 0,
 			"a batch did not end");

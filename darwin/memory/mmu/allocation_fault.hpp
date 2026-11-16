@@ -30,6 +30,7 @@ enum class AllocationSite : std::uint8_t {
 	native_owner_record,
 	native_owner_registry,
 	native_slot,
+	writers,
 	count,
 };
 

@@ -207,6 +207,13 @@ Known deviations from x86 that remain:
   long as that participant stays inside, and the gadget engine builds the
   translation of an unsettled page again at every dispatch instead of
   caching it.
+- The memory layer keeps, for each 4 KiB frame of a backing, the exact set of
+  {generation, page} locations whose mapping is writable
+  ([`frame_accounting.hpp`](../../../memory/mmu/frame_accounting.hpp)). A
+  location exists for as long as its writable mapping: the four mapping
+  primitives add it before the mapping is installed, take it back after the
+  mapping is gone, and a change that fails or is abandoned takes back only
+  what it added. Only the x86-64 guest compiles it.
 - Every store to a page that holds cached code owes a publication of its own,
   and the program performs it before its next store: another vCPU may
   revalidate the page between two stores, so a program that patches a page

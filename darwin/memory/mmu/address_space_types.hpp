@@ -4,6 +4,7 @@
 #include "backing_slots.hpp"
 #include "../domain_heap.hpp"
 #include "fill_index.hpp"
+#include "frame_accounting.hpp"
 #include "mapped_backing.hpp"
 #include "uml_darwin_static_mmu.h"
 #include "word_shared_mutex.hpp"
@@ -86,6 +87,11 @@ struct GenerationState final {
 		std::uint64_t length{};
 	};
 	std::array<CodeChangeRecord, 1024> code_history{};
+#if DARWIN_UML_X86_64_GUEST
+	/* The generation's writer locations (frame_accounting.hpp), guarded by
+	 * the mapping lock. */
+	StateAccounting accounting;
+#endif
 };
 
 /* The bridge's own type, so the history is written straight into a caller's
