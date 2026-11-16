@@ -10,12 +10,6 @@
 #include <thread>
 #include <unordered_map>
 
-/* Whether leave() checks that its caller is outside the engine. The unit-test
- * build turns it on; a product has no use for the load. */
-#ifndef UML_CODE_PAGE_REGISTRY_CHECKS
-#define UML_CODE_PAGE_REGISTRY_CHECKS 0
-#endif
-
 namespace uml::cpu::x86_64 {
 namespace {
 
@@ -122,16 +116,13 @@ void CodePageRegistry::join(Participant &participant,
 
 void CodePageRegistry::leave(Participant &participant) noexcept
 {
-#if UML_CODE_PAGE_REGISTRY_CHECKS
 	/* A departure must follow the participant's last leave of the engine,
 	 * in its own thread or after it: a waiter treats a departed member as
 	 * having left the engine, and every store the member translated must
-	 * have landed by then. */
-	if ((participant.engine_epoch.load(std::memory_order_acquire) & 1U) != 0) {
-		std::fputs("CodePageRegistry::leave inside the engine\n", stderr);
-		std::abort();
-	}
-#endif
+	 * have landed by then. A counter, not an assertion, says whether any
+	 * caller breaks that: it must stay 0. */
+	if ((participant.engine_epoch.load(std::memory_order_acquire) & 1U) != 0)
+		leaves_inside_engine_.fetch_add(1, std::memory_order_relaxed);
 	const std::lock_guard lock{participants_mutex_};
 	const auto found = std::find_if(participants_.begin(),
 		participants_.end(), [&](const Member &member) {

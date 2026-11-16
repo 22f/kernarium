@@ -320,6 +320,13 @@ void test_stuck_participant(unsigned long generation)
 			break;
 	}
 	registry->leave(stuck);
+	expect(registry->leaves_inside_engine() == 0, name,
+		"a participant left the registry inside the engine");
+	/* The program's page and the function's page both compiled beside the
+	 * stuck participant; each is dropped at the three hand-overs that found
+	 * the record, the last of which dropped it. */
+	expect(engine.diagnostics().escalation_invalidations == 6, name,
+		"the hand-overs did not drop each stuck page once");
 	expect(finished, name, "the program did not reach its system call");
 	expect(cpu.gpr(x86_64::Register::rax) == 2, name,
 		"the call after the late store ran the old code");
@@ -330,10 +337,12 @@ void test_stuck_participant(unsigned long generation)
 		"the hand-over after the vCPU left did not drop the code");
 	expect(fetches[5] == fetches[4], name,
 		"the code was not cached once the vCPU had left");
-	std::printf("%s %.*s: eax=%llu fetches=%u,%u,%u,%u,%u\n",
+	std::printf("%s %.*s: eax=%llu fetches=%u,%u,%u,%u,%u invalidations=%llu\n",
 		failures == 0 ? "ok" : "FAIL", static_cast<int>(name.size()), name.data(),
 		static_cast<unsigned long long>(cpu.gpr(x86_64::Register::rax)),
-		fetches[1], fetches[2], fetches[3], fetches[4], fetches[5]);
+		fetches[1], fetches[2], fetches[3], fetches[4], fetches[5],
+		static_cast<unsigned long long>(
+			engine.diagnostics().escalation_invalidations));
 }
 
 } // namespace

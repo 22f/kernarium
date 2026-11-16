@@ -32,6 +32,9 @@ struct ProgramCacheDiagnostics final {
 	std::uint64_t validation_mismatches{};
 	std::uint64_t validation_faults{};
 	std::uint64_t validation_sequence_races{};
+	/* A translation became runnable from a registration that was not
+	 * settled. Must stay 0: an unsettled page's translation is transient. */
+	std::uint64_t unheld_runnable{};
 	/* Sweeps of an address space's link records and indirect sites, and
 	 * the records and sites they released. */
 	std::uint64_t link_sweeps{};

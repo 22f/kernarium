@@ -2552,6 +2552,8 @@ ProgramSelection Executor::select_program(
 			pinned->pins(), storage_->diagnostics);
 		if (stored == nullptr)
 			return use_transient();
+		if (!hold.settled())
+			++storage_->diagnostics.unheld_runnable;
 		return {
 			.status = BuildStatus::built,
 			.program = stored,

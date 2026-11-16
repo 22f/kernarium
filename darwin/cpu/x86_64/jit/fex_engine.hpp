@@ -116,6 +116,15 @@ public:
 	 * hand-over. Costs one load when nothing is stuck. */
 	void settle_stuck_participants(unsigned long generation, ExecutionMode mode) noexcept;
 
+	/* What the engine has done that a check reads, like the gadget cache's
+	 * diagnostics: always compiled in, moving on cold paths only. */
+	struct Diagnostics final {
+		/* Pages dropped at a hand-over because a participant a registration
+		 * waited out had not left the engine since. */
+		std::uint64_t escalation_invalidations{};
+	};
+	[[nodiscard]] Diagnostics diagnostics() const noexcept;
+
 	/* Retires the software-TLB entries the mapping changes cover and the
 	 * translations the code changes cover, and makes the space's context on
 	 * first use, ordering stores as the next run will. */

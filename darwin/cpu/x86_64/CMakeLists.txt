@@ -21,13 +21,6 @@ target_link_libraries(uml_x86_64_target
 set_source_files_properties(fp_model.cpp PROPERTIES COMPILE_OPTIONS -fno-lto)
 target_include_directories(uml_x86_64_target PUBLIC
     ${PROJECT_SOURCE_DIR}/darwin)
-# The unit builds check that no participant leaves the registry from inside
-# the engine; a product does not.
-if(UML_BUILD_UNIT_TESTS)
-    target_compile_definitions(uml_x86_64_target PRIVATE
-        UML_CODE_PAGE_REGISTRY_CHECKS=1)
-endif()
-
 add_subdirectory(gadgets)
 if(UML_BUILD_X86_64_JIT)
     add_subdirectory(jit)

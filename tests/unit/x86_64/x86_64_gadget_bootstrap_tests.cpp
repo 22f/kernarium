@@ -2805,7 +2805,11 @@ void stuck_participant_keeps_translations_out_of_the_cache()
 		fourth.program != nullptr && fourth.cache_hit &&
 		memory.fetches() == 0,
 		"the build after the vCPU left was not cached");
+	require(executor.cache_diagnostics().unheld_runnable == 0,
+		"a translation became runnable from an unsettled registration");
 	registry->leave(stuck);
+	require(registry->leaves_inside_engine() == 0,
+		"a participant left the registry inside the engine");
 }
 
 void overlapping_executable_store_stops_immediately()

@@ -305,6 +305,8 @@ struct Space final {
 	/* The engine's count of spaces with records, so a hand-over with none
 	 * costs one load. */
 	std::size_t *stuck_spaces{};
+	/* The engine's count of pages invalidated for a stuck participant. */
+	std::uint64_t *escalation_invalidations{};
 	/* The locked operand across a granule whose copy the bounce buffer
 	 * holds while this thread holds the split-operand lock. */
 	std::uint64_t split_address{};
@@ -473,8 +475,11 @@ struct Space final {
 			return;
 		}
 		for (auto record = stuck.begin(); record != stuck.end();) {
-			for (const auto page : record->pages)
+			for (const auto page : record->pages) {
 				invalidate_code(page, guest_page_size);
+				if (escalation_invalidations != nullptr)
+					++*escalation_invalidations;
+			}
 			if (record->registry->left_or_moved(record->serial, record->epoch))
 				record = stuck.erase(record);
 			else
@@ -584,6 +589,7 @@ struct FexEngine::Impl final {
 	/* The spaces with participants stuck inside the engine to settle. After
 	 * the spaces' own storage is released, so declared before them. */
 	std::size_t stuck_spaces{};
+	FexEngine::Diagnostics diagnostics;
 	std::vector<std::unique_ptr<Space>> spaces;
 	std::uint64_t clock{};
 	/* Valid during run(). */
@@ -1542,6 +1548,7 @@ Space *FexEngine::Impl::create(unsigned long generation, ExecutionMode mode, boo
 	space->last_use = ++clock;
 	space->engine = this;
 	space->stuck_spaces = &stuck_spaces;
+	space->escalation_invalidations = &diagnostics.escalation_invalidations;
 	if (!space->callret.reserve())
 		return nullptr;
 	space->flush_tlb();
@@ -1635,6 +1642,11 @@ bool FexEngine::consumed_sequences(unsigned long generation, ExecutionMode mode,
 	mapping_sequence = space->mapping_sequence;
 	code_sequence = space->code_sequence;
 	return true;
+}
+
+FexEngine::Diagnostics FexEngine::diagnostics() const noexcept
+{
+	return impl_ ? impl_->diagnostics : Diagnostics{};
 }
 
 void FexEngine::settle_stuck_participants(unsigned long generation, ExecutionMode mode) noexcept

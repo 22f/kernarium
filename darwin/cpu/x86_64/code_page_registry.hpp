@@ -119,7 +119,8 @@ public:
 	/* Takes `participant` out of the registry. A waiter that is waiting for
 	 * it stops waiting, and the participant may be destroyed once this
 	 * returns. The caller is outside the engine: every store the participant
-	 * translated has landed. A test build checks that. */
+	 * translated has landed. A caller that is not is counted
+	 * (`leaves_inside_engine`). */
 	void leave(Participant &participant) noexcept;
 
 	[[nodiscard]] bool holds(std::uint64_t address) const noexcept
@@ -153,6 +154,11 @@ public:
 	/* The stuck participants a registration returns at once for, for
 	 * diagnostics. */
 	[[nodiscard]] std::size_t expiry_records() const noexcept;
+	/* Departures that found the participant inside the engine; must stay 0. */
+	[[nodiscard]] std::uint64_t leaves_inside_engine() const noexcept
+	{
+		return leaves_inside_engine_.load(std::memory_order_relaxed);
+	}
 
 private:
 	static constexpr unsigned bit_count_log2 = 18;
@@ -217,6 +223,7 @@ private:
 	/* The serial of the next join; 64 bits, so never reused. Guarded by
 	 * participants_mutex_ like the list. */
 	std::uint64_t next_serial_{1};
+	std::atomic_uint64_t leaves_inside_engine_{0};
 	/* The participants a registration waited out, at the epoch each did not
 	 * leave. A later registration does not wait for such a participant
 	 * again while its epoch is unchanged. Guarded by participants_mutex_;

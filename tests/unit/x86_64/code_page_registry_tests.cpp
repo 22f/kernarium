@@ -4,8 +4,6 @@
 #include "require.hpp"
 
 #include <malloc/malloc.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
@@ -189,6 +187,18 @@ void test_concurrent_holders_stay_exact()
 	require(registry.holds(pinned), "the pinned page was released");
 }
 
+/* The registry counts a participant that leaves it while inside the engine;
+ * a row that does not do that on purpose requires the count to stay 0. */
+struct NoLateLeave final {
+	const CodePageRegistry &registry;
+
+	~NoLateLeave()
+	{
+		require(registry.leaves_inside_engine() == 0,
+			"a participant left the registry inside the engine");
+	}
+};
+
 /* A member the waiter is waiting for, and the retirer that orders the test
  * with the waiter's snapshot: the waiter retires the page's write
  * translations immediately before it snapshots the members, in its own
@@ -230,6 +240,7 @@ constexpr auto prompt = std::chrono::milliseconds{100};
 void test_waiter_does_not_read_a_member_that_was_freed()
 {
 	CodePageRegistry registry;
+	const NoLateLeave no_late_leave{registry};
 	SnapshotSignal signal;
 	CodePageRegistry::Participant first;
 	CodePageRegistry::Participant self;
@@ -270,6 +281,7 @@ void test_waiter_does_not_read_a_member_that_was_freed()
 void test_waiter_ignores_a_new_participant_at_a_departed_address(bool join)
 {
 	CodePageRegistry registry;
+	const NoLateLeave no_late_leave{registry};
 	SnapshotSignal signal;
 	CodePageRegistry::Participant first;
 	CodePageRegistry::Participant self;
@@ -335,27 +347,24 @@ void test_find_shares_the_registry_without_making_one()
 		"a released registry was found");
 }
 
-/* A participant is out of the engine when it leaves the registry. The unit
- * builds enforce it by ending the process; the child proves that. */
-void test_leave_inside_the_engine_is_refused()
+/* A participant is out of the engine when it leaves the registry. A caller
+ * that is not is counted, and the registry stays usable: the member is gone
+ * and nothing waits for it. */
+void test_leave_inside_the_engine_is_counted()
 {
-	const auto child = fork();
-	require(child >= 0, "fork failed");
-	if (child == 0) {
-		alarm(10);
-		/* The refusal says why on stderr. */
-		(void)freopen("/dev/null", "w", stderr);
-		CodePageRegistry registry;
-		CodePageRegistry::Participant participant;
-		registry.join(participant);
-		participant.engine_epoch.store(1, std::memory_order_release);
-		registry.leave(participant);
-		_exit(0);
-	}
-	int status = 0;
-	require(waitpid(child, &status, 0) == child, "waitpid failed");
-	require(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
-		"leaving the registry inside the engine was accepted");
+	CodePageRegistry registry;
+	CodePageRegistry::Participant participant;
+	registry.join(participant);
+	participant.engine_epoch.store(1, std::memory_order_release);
+	require(registry.leaves_inside_engine() == 0,
+		"a participant that has not left was counted");
+	registry.leave(participant);
+	require(registry.leaves_inside_engine() == 1,
+		"leaving the registry inside the engine was not counted");
+	const auto began = Clock::now();
+	(void)registry.add(page_at(40), nullptr);
+	require(Clock::now() - began < prompt,
+		"a wait waited for a participant that had left the registry");
 }
 
 /* A second translator of a page whose gain is still being settled waits
@@ -366,6 +375,7 @@ void test_leave_inside_the_engine_is_refused()
 void test_a_second_registration_waits_for_the_first()
 {
 	CodePageRegistry registry;
+	const NoLateLeave no_late_leave{registry};
 	SnapshotSignal signal;
 	CodePageRegistry::Participant inside;
 	CodePageRegistry::Participant first;
@@ -409,6 +419,7 @@ void test_a_stuck_participant_is_waited_out_once()
 {
 	using namespace std::chrono_literals;
 	CodePageRegistry registry{{.slice = 20ms, .slices = 3}};
+	const NoLateLeave no_late_leave{registry};
 	CodePageRegistry::Participant stuck;
 	registry.join(stuck);
 	stuck.engine_epoch.store(1, std::memory_order_release);
@@ -460,6 +471,7 @@ void test_leave_drops_the_record_of_a_stuck_participant()
 {
 	using namespace std::chrono_literals;
 	CodePageRegistry registry{{.slice = 10ms, .slices = 2}};
+	const NoLateLeave no_late_leave{registry};
 	CodePageRegistry::Participant stuck;
 	registry.join(stuck);
 	stuck.engine_epoch.store(1, std::memory_order_release);
@@ -525,7 +537,7 @@ int main()
 	test_concurrent_holders_stay_exact();
 	test_acquired_registries_are_released();
 	test_find_shares_the_registry_without_making_one();
-	test_leave_inside_the_engine_is_refused();
+	test_leave_inside_the_engine_is_counted();
 	test_waiter_does_not_read_a_member_that_was_freed();
 	test_waiter_ignores_a_new_participant_at_a_departed_address(false);
 	test_waiter_ignores_a_new_participant_at_a_departed_address(true);
