@@ -20,6 +20,10 @@
  *                once, and a second publication finds it empty.
  *   no leaf      a backing that cannot make a leaf of its table registers
  *                nothing, and a publication on it goes to every generation.
+ *   kernel write the kernel writes a frame through another process's view
+ *                (darwin_uml_vm_invalidate_code): a process whose table has no
+ *                entry for the page publishes to every generation, and one
+ *                that maps it without execute still tells the holders.
  *   overlap      a publisher has taken a frame's word and not yet published;
  *                a second synchronization of the frame meets an empty word
  *                (or a word of its own) and must still reach the first one's
@@ -141,7 +145,8 @@ holders::Counters since(const holders::Counters &before)
 		now.generations_published - before.generations_published,
 		now.leaves - before.leaves,
 		now.unknown_backings - before.unknown_backings,
-		now.overlap_widenings - before.overlap_widenings};
+		now.overlap_widenings - before.overlap_widenings,
+		now.absent_kernel_pages - before.absent_kernel_pages};
 }
 
 void test_the_word_fills_two_slots_then_reads_every_generation()
@@ -439,6 +444,45 @@ void test_a_publication_that_overlaps_an_unfinished_one_reaches_its_holders()
 	two_publishers(true, 1071);
 }
 
+/* A kernel write for `target`, which maps the frame read-write only or not at
+ * all: the reader that translated the frame must still hear of it. */
+void kernel_write(bool target_maps_frame, unsigned long base)
+{
+	ScratchBacking backing{backing_name, page};
+	backing.put32(0, old_word);
+	const unsigned long reader = base, target = base + 1;
+	map_code(reader, backing);
+	require(darwin_uml_static_vm_activate(target) == 0);
+	if (target_maps_frame)
+		map(target, writer_address, backing, PROT_READ | PROT_WRITE, 0);
+	(void)fetch(reader);
+	const auto changes_before = code_changes(reader);
+	const auto before = holders::counters();
+
+	backing.put32(0, new_word);
+	require(darwin_uml_static_vm_invalidate_code_generation(
+		target, writer_address, 4) == 0);
+	require(code_changes(reader) > changes_before, target_maps_frame ?
+		"a kernel write through a view without execute missed the holder" :
+		"a kernel write for a process with no entry for the page missed "
+		"the holder");
+	const auto delta = since(before);
+	require(delta.absent_kernel_pages == (target_maps_frame ? 0U : 1U),
+		"the absent pages were not counted as the write names them");
+	require(delta.all_publications == (target_maps_frame ? 0U : 1U),
+		target_maps_frame ? "a write through a mapped page went to every "
+		"generation" : "a write for an absent page did not go to every "
+		"generation");
+	destroy(reader);
+	destroy(target);
+}
+
+void test_a_kernel_write_reaches_the_holders_whatever_the_target_maps()
+{
+	kernel_write(false, 1081);
+	kernel_write(true, 1091);
+}
+
 } // namespace
 
 int main()
@@ -451,6 +495,7 @@ int main()
 	test_a_frame_held_by_its_writer_alone_is_published_without_an_exchange();
 	test_a_backing_without_a_leaf_publishes_to_every_generation();
 	test_a_publication_that_overlaps_an_unfinished_one_reaches_its_holders();
+	test_a_kernel_write_reaches_the_holders_whatever_the_target_maps();
 	std::puts("static-mmu-code-holder: ok");
 	return 0;
 }

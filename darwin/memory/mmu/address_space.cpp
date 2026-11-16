@@ -1157,9 +1157,13 @@ public:
 	 * process's memory -- so no translated store saw it. Move each code
 	 * page's stamp and publish the range in that process's generation, as a
 	 * guest code synchronization would, and in every other generation that
-	 * translated one of the frames. A page mapped without execute
-	 * permission holds no translation, which keeps the data transfers of
-	 * process_vm_writev() from publishing anything. */
+	 * translated one of the frames: whatever the page's permissions in the
+	 * process written, since another process's view of the frame may be the
+	 * executable one. A page the process has no entry for yet (a software
+	 * table the kernel fills at faults) names no frame, so every generation
+	 * hears of the change. Data transfers publish nothing unless some
+	 * generation translated the frame, or the page is one the process never
+	 * touched. */
 	int invalidate_code(std::uint64_t generation, std::uint64_t address,
 			    std::uint64_t length)
 	{
@@ -1189,14 +1193,19 @@ public:
 			for (auto page = first; page < rounded_end;
 			     page += page_size) {
 				const auto mapping = find_page(*state, page);
-				if (mapping) {
-					if (!mapping->guest_code)
+				if (!mapping) {
+					others.add_every();
+					code_holders::count(&code_holders::detail::
+						CounterStore::absent_kernel_pages);
+				} else {
+					if (mapping->guest_code)
+						MappedBacking::invalidate_code_page(
+							mapping->backing->code_page_handle(
+								mapping->offset));
+					const bool own = take_holders(*mapping, target,
+						others, holder_takes_in_flight_);
+					if (!mapping->guest_code && !own)
 						continue;
-					MappedBacking::invalidate_code_page(
-						mapping->backing->code_page_handle(
-							mapping->offset));
-					take_holders(*mapping, target, others,
-						holder_takes_in_flight_);
 				}
 				publish_first = std::min(publish_first, page);
 				publish_end = page + page_size;
@@ -1800,7 +1809,9 @@ private:
 	 * generations it held, but `generation`'s own, to `others`. A word that
 	 * is empty or names only the writer's generation is left alone: the common
 	 * frame, held by its writer alone, costs one load and no exchange. For a
-	 * holder of the writer's mapping lock; nothing here waits.
+	 * holder of the writer's mapping lock; nothing here waits. Answers
+	 * whether `generation` holds the frame itself: its backing's holders are
+	 * unknown, or the word read every generation or named it.
 	 *
 	 * An empty word says only that nobody has registered since a publisher
 	 * emptied it: that publisher may not have published yet. So whoever
@@ -1810,18 +1821,20 @@ private:
 	 * consumed are among them. The word is read before the counter, and its
 	 * emptying is ordered after the count, so a word read empty by a later
 	 * publisher comes with the count of the one that emptied it. */
-	static void take_holders(const PageMapping &mapping,
+	static bool take_holders(const PageMapping &mapping,
 		std::uint64_t generation, code_holders::HolderList &others,
 		std::atomic<std::uint64_t> &in_flight) noexcept
 	{
 		const auto *backing = mapping.backing;
 		if (backing->holders_unknown()) {
 			others.add_every();
-			return;
+			return true;
 		}
+		bool own = false;
 		if (auto *word = backing->find_holder_word(mapping.offset)) {
 			const auto slot = code_holders::slot_of(generation);
 			auto held = word->load(std::memory_order_acquire);
+			own = code_holders::holds(held, slot);
 			if (held != code_holders::none &&
 			    !code_holders::holds_only(held, slot)) {
 				others.begin_take(in_flight);
@@ -1829,6 +1842,7 @@ private:
 					&code_holders::detail::CounterStore::exchanges);
 				held = word->exchange(code_holders::none,
 					std::memory_order_acq_rel);
+				own = code_holders::holds(held, slot);
 				others.add(held, slot);
 			}
 		}
@@ -1838,6 +1852,7 @@ private:
 			code_holders::count(
 				&code_holders::detail::CounterStore::overlap_widenings);
 		}
+		return own;
 	}
 
 	/* A whole-space code change in each generation `holders` names, or in

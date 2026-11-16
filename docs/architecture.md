@@ -519,7 +519,10 @@ word and publishes a whole-space code change in every generation it named. A
 publication consumes the word, so a reader registers again at its next fetch;
 a publisher that has emptied a word stays counted until its publication
 finishes, and one that meets such a count publishes to every generation, so an
-empty word never hides a reader another publisher has yet to tell. The words
+empty word never hides a reader another publisher has yet to tell. The kernel
+path takes the word of every page the target maps, whatever its permission,
+and publishes to every generation for a page the target has not mapped yet (its
+software page table fills at faults, so the frame is unknown). The words
 live in 4 KiB leaves made on a frame's first registration (a leaf per 512
 frames). A backing whose leaf cannot be made, or a word that names
 more generations than it holds, publishes to every live generation instead.
