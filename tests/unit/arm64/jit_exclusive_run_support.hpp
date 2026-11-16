@@ -87,9 +87,9 @@ logical_immediate(bool wide, unsigned opc, unsigned rd, unsigned rn,
   return (wide ? 0x8000'0000U : 0U) | (opc << 29U) | 0x1200'0000U |
          (n << 22U) | (immr << 16U) | (imms << 10U) | (rn << 5U) | rd;
 }
-/* tst Wn, #0xcfffffff: ANDS WZR with a run of 30 ones rotated by 30. */
+/* tst Wn, #0xcfffffff: ANDS WZR with a run of 30 ones rotated right by 2. */
 [[nodiscard]] constexpr std::uint32_t tst_w_cfffffff(unsigned rn) noexcept {
-  return logical_immediate(false, 3, 31, rn, 0, 30, 29);
+  return logical_immediate(false, 3, 31, rn, 0, 2, 29);
 }
 
 [[nodiscard]] constexpr std::uint32_t
@@ -142,7 +142,7 @@ constexpr int out = 12; // words past the load: after every shape's retry
 
 /* ldxr w16,[x19]; mov w17,#0x5c000000; cbnz w16,slow;
  * stlxr w16,w17,[x19]; cbnz w16,retry */
-constexpr Shape j1{"J1",
+constexpr Shape shape_j1{"J1",
                    {load_exclusive(2, false, 16, 19),
                     movz(false, 17, 0x5c00, 1),
                     compare_branch(false, true, 16, out - 2),
@@ -151,7 +151,7 @@ constexpr Shape j1{"J1",
                    5, 3, 2, 19};
 /* ldaxr w16,[x19]; mov w17,#0x5c000000; cmp w16,w17; b.ne slow;
  * stxr w16,wzr,[x19]; cbnz w16,retry */
-constexpr Shape j2{"J2",
+constexpr Shape shape_j2{"J2",
                    {load_exclusive(2, true, 16, 19),
                     movz(false, 17, 0x5c00, 1), cmp(false, 16, 17),
                     branch_condition(ne, out - 3),
@@ -160,13 +160,13 @@ constexpr Shape j2{"J2",
                    6, 4, 2, 19};
 /* ldaxr w17,[x16]; cmp w17,w2; b.ne out; stlxr w17,w0,[x16];
  * cbnz w17,retry */
-constexpr Shape c1_w{"C1 (W)",
+constexpr Shape shape_c1_w{"C1 (W)",
                      {load_exclusive(2, true, 17, 16), cmp(false, 17, 2),
                       branch_condition(ne, out - 2),
                       store_exclusive(2, true, 17, 0, 16),
                       compare_branch(false, true, 17, -4), 0, 0},
                      5, 3, 2, 16};
-constexpr Shape c1_x{"C1 (X)",
+constexpr Shape shape_c1_x{"C1 (X)",
                      {load_exclusive(3, true, 17, 16), cmp(true, 17, 2),
                       branch_condition(ne, out - 2),
                       store_exclusive(3, true, 17, 0, 16),
@@ -174,7 +174,7 @@ constexpr Shape c1_x{"C1 (X)",
                      5, 3, 3, 16};
 /* ldaxr w10,[x8]; eor w11,w10,w9; tst w10,#0xcfffffff; b.ne 2f;
  * stxr w10,w11,[x8]; cbnz w10,1b */
-constexpr Shape l1{"L1",
+constexpr Shape shape_l1{"L1",
                    {load_exclusive(2, true, 10, 8),
                     logical_register(false, 2, false, 11, 10, 9),
                     tst_w_cfffffff(10), branch_condition(ne, out - 3),
@@ -183,7 +183,7 @@ constexpr Shape l1{"L1",
                    6, 4, 2, 8};
 /* ldxr w10,[x8]; eor w11,w10,w9; tst w11,#0xcfffffff; b.ne 2f;
  * stlxr w10,w11,[x8]; cbnz w10,1b */
-constexpr Shape u1{"U1",
+constexpr Shape shape_u1{"U1",
                    {load_exclusive(2, false, 10, 8),
                     logical_register(false, 2, false, 11, 10, 9),
                     tst_w_cfffffff(11), branch_condition(ne, out - 3),
@@ -191,7 +191,7 @@ constexpr Shape u1{"U1",
                     compare_branch(false, true, 10, -5), 0},
                    6, 4, 2, 8};
 
-constexpr std::array<const Shape *, 6> hot_shapes{&j1, &j2, &c1_w, &c1_x, &l1,
-                                                  &u1};
+constexpr std::array<const Shape *, 6> hot_shapes{
+    &shape_j1, &shape_j2, &shape_c1_w, &shape_c1_x, &shape_l1, &shape_u1};
 
 } // namespace uml::emulator::tests::a64

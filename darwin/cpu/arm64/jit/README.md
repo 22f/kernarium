@@ -69,6 +69,23 @@ see the untagged address, as the semantic path reports it. Exclusives, atomics
 and ordered accesses strip before they translate and record the host address,
 so the monitor guards the location and not the pointer.
 
+## Exclusive runs
+
+A block that starts at a load-exclusive runs it with its store-exclusive on the
+host's own monitor when the words between are at most four register-only
+instructions (move wide, add and subtract, logical, in immediate and register
+forms) and conditional branches that leave the run, and the executor's fetch
+reaches the store (`jit_exclusive_run.hpp` judges the words, one decoder for
+the fetch and for the compiler). Each guest register the run touches has a
+scratch host copy, taken before the load and written back after the store, so
+the host interval holds nothing but the run's own words. A branch that leaves
+discards the attempt: the load-exclusive re-executes on the software
+reservation and the guest takes the branch from there, so no exit clears the
+monitor and continues. The tracked-store variant fuses the same runs and
+records the store's range only after a host store that succeeded. A run the
+decoder or the pool of seven scratch registers cannot take is a block of one
+semantic instruction. `jit_compiler_exclusive_run.cpp` states what fuses.
+
 ## Streaming mode
 
 The JIT follows the streaming-mode rules that the

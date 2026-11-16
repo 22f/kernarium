@@ -221,47 +221,6 @@ void identical_words_give_identical_spans() {
   require(fetch_span(origin, ordinary).count == 3U);
 }
 
-/* What the code does with each hot sequence: one run_block from the load. */
-void each_hot_shape_declines_to_one_semantic_instruction() {
-  /* Admission is unchanged by the look-ahead: the sequences that were
-   * semantic stay so, each as a one-instruction block whose software
-   * reservation is armed. Until a later step fuses them. */
-  constexpr unsigned long first_generation = 10'300U;
-  unsigned long generation = first_generation;
-  for (const auto *shape : hot_shapes) {
-    const auto base = std::uint64_t{0x150'0000U} + 4U * page * (generation - first_generation);
-    const auto data = base + page;
-    JitBacking backing{2};
-    for (std::size_t index = 0; index < shape->length; ++index)
-      backing.put32(index * 4U, shape->words[index]);
-    for (std::size_t index = shape->length; index < 16U; ++index)
-      backing.put32(index * 4U, system_call);
-    if (shape == &j2)
-      backing.put64(page, 0x5c00'0000U);
-    else if (shape == &c1_w || shape == &c1_x)
-      backing.put64(page, 5U);
-    else if (shape == &u1)
-      backing.put64(page, 5U);
-    JitMapping mapping{generation, base, backing, 2};
-    arm64::JitExecutor executor;
-    uml::memory::StaticGuestMemory memory;
-    arm64::CpuState cpu{};
-    cpu.pc = base;
-    cpu.registers[shape->base] = data;
-    cpu.registers[2] = 5U; // C1's expected value
-    cpu.registers[0] = 9U; // C1's new value
-    cpu.registers[9] = shape == &u1 ? 5U : 7U;
-    require(executor.begin_execution(generation, cpu.pc));
-    std::size_t executed = 0;
-    require(executor.run_block(cpu, memory, generation, executed) ==
-            ::uml::cpu::EngineEvent::continued);
-    require(executed == 1U && cpu.pc == base + 4U);
-    require(cpu.exclusive_size == (std::size_t{1} << shape->size));
-    executor.end_execution();
-    ++generation;
-  }
-}
-
 } // namespace
 
 int main() {
@@ -274,6 +233,5 @@ int main() {
   the_span_stops_at_the_page_of_the_load();
   a_fetch_that_fails_leaves_the_ordinary_span();
   identical_words_give_identical_spans();
-  each_hot_shape_declines_to_one_semantic_instruction();
   return 0;
 }

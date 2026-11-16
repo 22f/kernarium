@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <span>
 #include <vector>
 
@@ -391,7 +392,7 @@ void tracked_compare_retry_region_uses_native_exclusives() {
   (void)require_fused_interval(compiled);
 }
 
-void compare_retry_with_shared_result_and_status_is_not_fused() {
+void compare_retry_with_shared_result_and_status_is_fused() {
   constexpr std::array guest{
       0x885f'fc9bU, // ldxr w27, [x4]
       0x6b02'037fU, // cmp w27, w2
@@ -399,12 +400,58 @@ void compare_retry_with_shared_result_and_status_is_not_fused() {
       0x881b'fc83U, // stxr w27, w3, [x4]
       0xb5ff'ff9bU, // cbnz x27, pc - 16
   };
-  const auto compiled = jit_test::compile_block(0x5b07'0000U, guest);
-  require(!compiled.words.empty());
-  require(compiled.guest_instructions != 0);
-  require(std::ranges::none_of(hot(compiled), [](std::uint32_t word) {
-    return (word & 0x3fa0'fc00U) == 0x08a0'7c00U;
-  }));
+  /* The status is the load's destination: the host store writes it, and the
+   * guest's register takes the status after the compare has read the load. */
+  for (const bool tracked : {false, true}) {
+    const auto compiled = tracked
+        ? jit_test::compile_tracked_block(0x5b0c'0000U, guest)
+        : jit_test::compile_block(0x5b0c'0000U, guest);
+    require(compiled.guest_instructions == guest.size());
+    const auto store = require_fused_interval(compiled);
+    require_record_after_a_successful_store(compiled, store, tracked);
+  }
+}
+
+/* What a run may not be: a register read before the run writes it, the base
+ * written, the status the data or the base, SP or a reserved encoding named,
+ * a side exit into the run, more than four words between the pair, or more
+ * registers than the pool. Each declines to one semantic instruction. */
+void runs_that_cannot_be_fused_decline() {
+  constexpr std::uint32_t load = 0xc85f'7c23U;  // ldxr x3, [x1]
+  constexpr std::uint32_t store = 0xc805'7c23U; // stxr w5, x3, [x1]
+  constexpr std::uint32_t retry = 0x35ff'ff85U;
+  const auto declines = [&](std::initializer_list<std::uint32_t> words,
+                            std::uint64_t pc) {
+    const std::vector<std::uint32_t> guest{words};
+    for (const bool tracked : {false, true}) {
+      const auto compiled = tracked
+          ? jit_test::compile_tracked_block(pc, guest)
+          : jit_test::compile_block(pc, guest);
+      require(compiled.guest_instructions == 1U);
+      require(std::ranges::none_of(hot(compiled), native_store_exclusive));
+    }
+  };
+  declines({load, 0x9100'0442U /* add x2, x2, #1: live-in written */, store,
+            retry}, 0x5b10'0000U);
+  declines({load, 0x9100'0421U /* add x1, x1, #1: the base */, store, retry},
+           0x5b11'0000U);
+  declines({load, 0x9100'03e3U /* add x3, sp, #0 */, store, retry},
+           0x5b12'0000U);
+  declines({load, 0x9100'0463U, 0xc803'7c23U /* stxr w3, x3, [x1] */, retry},
+           0x5b13'0000U);
+  declines({load, 0x9100'0463U, 0xc801'7c23U /* stxr w1, x3, [x1] */, retry},
+           0x5b14'0000U);
+  declines({load, 0x5400'006eU /* b.al */, store, retry}, 0x5b15'0000U);
+  declines({load, 0x5400'0041U /* b.ne to the store: pc + 8 */, 0xd280'0027U,
+            store, retry}, 0x5b16'0000U);
+  declines({load, 0x9100'0463U, 0x9100'0463U, 0x9100'0463U, 0x9100'0463U,
+            0x9100'0463U, store, retry}, 0x5b17'0000U);
+  declines({load, 0x9341'0063U /* a bitfield: not a run word */, store,
+            retry}, 0x5b18'0000U);
+  declines({load, 0x1200'7c20U /* and w0, w1, #imms=31: reserved */, store,
+            retry}, 0x5b19'0000U);
+  declines({load, 0x0bc4'0060U /* add w0, w3, w4, shift type 3: reserved */,
+            store, retry}, 0x5b1a'0000U);
 }
 
 } // namespace
@@ -420,6 +467,7 @@ int main() {
   compare_retry_region_uses_native_exclusives();
   tracked_compare_retry_region_uses_native_exclusives();
   fused_runs_have_one_interval_in_both_variants();
-  compare_retry_with_shared_result_and_status_is_not_fused();
+  compare_retry_with_shared_result_and_status_is_fused();
+  runs_that_cannot_be_fused_decline();
   return 0;
 }

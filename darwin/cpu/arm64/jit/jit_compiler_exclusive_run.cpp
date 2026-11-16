@@ -3,6 +3,7 @@
 #include "jit_compiler.hpp"
 #include "jit_exclusive_run.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <optional>
@@ -244,56 +245,45 @@ analyze_exclusive_run(std::span<const std::uint32_t> instructions,
   const std::size_t needed = run.touched + (zero_status ? 1U : 0U);
   if (needed > shadow_pool.size())
     return std::nullopt;
+  /* The base takes the first shadow, then the live-ins in order of first
+   * touch, then the rest in that order, and a zero-register status the last. */
+  std::size_t next = 0;
+  const auto assign = [&](unsigned guest) {
+    run.host[guest] = shadow_pool[next++];
+  };
+  if (run.base != 31U)
+    assign(run.base);
   for (std::size_t index = 0; index < run.touched; ++index)
-    run.host[run.order[index]] = shadow_pool[index];
+    if (run.live_in[run.order[index]] && run.order[index] != run.base)
+      assign(run.order[index]);
+  for (std::size_t index = 0; index < run.touched; ++index)
+    if (!run.live_in[run.order[index]])
+      assign(run.order[index]);
   if (zero_status)
-    run.zero_status_host = shadow_pool[run.touched];
+    run.zero_status_host = shadow_pool[next];
   return run;
 }
 
-/* The store index of a run that today's compiler fuses: a load-exclusive, at
- * most one add, subtract or logical middle and the store-exclusive, or the
- * compare-retry with its mismatch exit. Zero if the words are none. */
+/* The index of the store-exclusive that ends the run at the front of
+ * `instructions`: the first word that is one, with only middles and side
+ * exits before it and no more than four of them. Zero if there is none. */
 [[nodiscard]] std::size_t
-recognize_current_exclusive_run(
-    std::span<const std::uint32_t> instructions) {
+find_exclusive_run_store(std::span<const std::uint32_t> instructions) {
   if (instructions.size() < 2U ||
       exclusive_run_word_kind(instructions[0]) !=
           ExclusiveRunWord::load_exclusive)
     return 0;
-  if (exclusive_run_word_kind(instructions[1]) ==
-      ExclusiveRunWord::store_exclusive)
-    return 1U;
-  if (instructions.size() < 3U)
-    return 0;
-  const auto middle = instructions[1];
-  if (exclusive_run_word_kind(middle) != ExclusiveRunWord::middle)
-    return 0;
-  const auto kind = run_operands(middle).kind;
-  if (kind != RunClass::add_sub_immediate &&
-      kind != RunClass::add_sub_shifted && kind != RunClass::logical_shifted)
-    return 0;
-  if (exclusive_run_word_kind(instructions[2]) ==
-      ExclusiveRunWord::store_exclusive)
-    return 2U;
-
-  /* cmp Rt, Rm; b.ne beyond the store; store; cbnz Ws, load. */
-  if (instructions.size() < 5U || (middle & 0x7fe0'fc1fU) != 0x6b00'001fU ||
-      (instructions[2] & 0xff00'001fU) != 0x5400'0001U)
-    return 0;
-  const unsigned size = instructions[0] >> 30U;
-  const unsigned load_destination = instructions[0] & 31U;
-  const unsigned status = (instructions[3] >> 16U) & 31U;
-  const auto mismatch_offset =
-      detail::sign_extend((instructions[2] >> 5U) & 0x7ffffU, 19) * 4;
-  const auto retry = instructions[4];
-  const auto retry_offset = detail::sign_extend((retry >> 5U) & 0x7ffffU, 19) * 4;
-  if (load_destination == 31U || status == load_destination ||
-      ((middle >> 5U) & 31U) != load_destination ||
-      (middle >> 31U) != (size == 3U ? 1U : 0U) || mismatch_offset < 12 ||
-      (retry & 0xff00'001fU) != (0x3500'0000U | status) || retry_offset != -16)
-    return 0;
-  return 3U;
+  const auto limit = std::min(instructions.size(),
+                              maximum_exclusive_run_middles + 2U);
+  for (std::size_t index = 1; index < limit; ++index) {
+    const auto kind = exclusive_run_word_kind(instructions[index]);
+    if (kind == ExclusiveRunWord::store_exclusive)
+      return index;
+    if (kind != ExclusiveRunWord::middle &&
+        kind != ExclusiveRunWord::side_exit)
+      return 0;
+  }
+  return 0;
 }
 
 /* The word with its register fields replaced by the run's host registers. */
@@ -338,8 +328,7 @@ shadow_encoding(std::uint32_t word, const RunOperands &operands,
     std::span<const std::uint32_t> instructions, std::uint64_t pc) {
   if (count_ != 0U || !no_gprs_bound() || instructions.size() < 2U)
     return 0;
-  const auto store_index =
-      recognize_current_exclusive_run(instructions);
+  const auto store_index = find_exclusive_run_store(instructions);
   if (store_index == 0U)
     return 0;
   const auto planned = analyze_exclusive_run(instructions, store_index, pc);

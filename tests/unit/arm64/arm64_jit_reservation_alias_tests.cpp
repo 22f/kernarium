@@ -9,6 +9,7 @@
 #include "cpu/arm64/jit/jit_test_api.hpp"
 #include "platform/apple/host_features.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <barrier>
@@ -220,10 +221,12 @@ void compare_lookahead_preserves_fetch_faults(bool matches) {
 /*
  * Four vCPUs raise one counter with a compare-and-swap loop. The loop at the
  * page's start is the fused sequence the JIT lowers to the host's own
- * monitor. With `mixed_semantic`, vCPU 0 runs a copy that begins one NOP
- * earlier and retries to it: a load-exclusive that does not begin a block is
- * left to the checked semantic helpers and their software reservation, so
- * the two kinds of vCPU meet on one location.
+ * monitor. With `mixed_semantic`, vCPU 0 runs a copy with a `csel` between
+ * its load and its store, which no fused run admits: its load-exclusive and
+ * store-exclusive take the checked semantic helpers and their software
+ * reservation, so the two kinds of vCPU meet on one location. Each fused
+ * worker must retire a whole pass in one block at least once, and the
+ * semantic one never does.
  */
 void concurrent_compare_retry_case(bool mixed_semantic) {
   constexpr auto page = DARWIN_UML_GUEST_PAGE_SIZE;
@@ -233,7 +236,7 @@ void concurrent_compare_retry_case(bool mixed_semantic) {
   constexpr std::uint64_t semantic_entry = base + 0x100U;
   constexpr std::size_t workers = 4;
   constexpr unsigned iterations = 1000;
-  constexpr std::uint32_t nop = 0xd503'201fU;
+  constexpr std::uint32_t csel_eq = 0x9a86'00c6U; // csel x6, x6, x6, eq
   JitBacking backing{2};
   backing.put32(0, load_exclusive);
   backing.put32(4, 0xeb04'007fU); // cmp x3, x4
@@ -241,12 +244,12 @@ void concurrent_compare_retry_case(bool mixed_semantic) {
   backing.put32(12, 0xc805'7c22U); // stxr w5, x2, [x1]
   backing.put32(16, 0x35ff'ff85U); // cbnz w5, start
   backing.put32(20, system_call);
-  backing.put32(0x100, nop);
-  backing.put32(0x104, load_exclusive);
-  backing.put32(0x108, 0xeb04'007fU); // cmp x3, x4
-  backing.put32(0x10c, 0x5400'0061U); // b.ne end
+  backing.put32(0x100, load_exclusive);
+  backing.put32(0x104, 0xeb04'007fU); // cmp x3, x4
+  backing.put32(0x108, 0x5400'0081U); // b.ne end
+  backing.put32(0x10c, csel_eq);
   backing.put32(0x110, 0xc805'7c22U); // stxr w5, x2, [x1]
-  backing.put32(0x114, 0x35ff'ff65U); // cbnz w5, the NOP
+  backing.put32(0x114, 0x35ff'ff65U); // cbnz w5, the load
   backing.put32(0x118, system_call);
   backing.put64(page, 0);
   JitMapping mapping{generation, base, backing, 2};
@@ -256,6 +259,7 @@ void concurrent_compare_retry_case(bool mixed_semantic) {
       std::make_unique<std::array<uml::memory::StaticGuestMemory, workers>>();
   auto cpus = std::make_unique<
       std::array<uml::cpu::arm64::CpuState, workers>>();
+  std::array<std::size_t, workers> widest{};
   std::barrier start{workers};
   std::vector<std::thread> threads;
   for (std::size_t index = 0; index < workers; ++index) {
@@ -284,6 +288,7 @@ void concurrent_compare_retry_case(bool mixed_semantic) {
           std::size_t executed = 0;
           event = executor.run_block(cpu, (*memories)[index],
                                      generation, executed);
+          widest[index] = std::max(widest[index], executed);
           retired += executed;
         }
         require(event == ::uml::cpu::EngineEvent::system_call);
@@ -300,7 +305,8 @@ void concurrent_compare_retry_case(bool mixed_semantic) {
           require(cpu.registers[5] == 1 || cpu.registers[5] == 7);
           require(cpu.registers[3] > expected);
           require((cpu.nzcv & 0x4000'0000U) == 0);
-          require(retired >= pass - 1 && (retired - (pass - 1)) % pass == 0);
+          // Load, compare, the taken branch and the call: four words.
+          require(retired >= 4U && (retired - 4U) % pass == 0);
           expected = cpu.registers[3];
         }
       }
@@ -310,6 +316,14 @@ void concurrent_compare_retry_case(bool mixed_semantic) {
   for (auto &thread : threads)
     thread.join();
   require(backing.get64(page) == workers * iterations);
+  /* Fused workers retired a whole pass (five words) in one block; the
+   * semantic worker never retired more than its last three. */
+  for (std::size_t index = 0; index < workers; ++index) {
+    if (mixed_semantic && index == 0)
+      require(widest[index] <= 3U);
+    else
+      require(widest[index] >= 5U);
+  }
 }
 
 /*
