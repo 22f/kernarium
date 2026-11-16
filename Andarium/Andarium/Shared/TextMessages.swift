@@ -364,11 +364,15 @@ extension AppModel {
 
     /// Send may be pressed: Android can take it, no send is under way, the
     /// message passes the rules, and sixteen sends do not already wait for
-    /// Android to confirm them.
+    /// Android to confirm them. While a result waits to be told, its line
+    /// stays and says nothing of a refused draft, so Send stays enabled and a
+    /// press only says the result again (`sendTextMessage`); the refusal and
+    /// the dimmed Send return together once the result was told.
     var canSendTextMessage: Bool {
         let state = session.textMessage
-        return textMessageAvailability == .ready && state.progress != .sending
-            && GuestSms.refusal(sender: state.sender, text: state.text) == nil && !state.isWaiting
+        guard textMessageAvailability == .ready, state.progress != .sending else { return false }
+        if state.awaiting != nil, state.words != nil { return true }
+        return GuestSms.refusal(sender: state.sender, text: state.text) == nil && !state.isWaiting
     }
 
     /// The notice of this instance: the driver's, or, with no guest, one that

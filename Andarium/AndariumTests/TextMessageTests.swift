@@ -1172,6 +1172,99 @@ struct TextMessageTests {
         #expect(await eventually { rig.state.progress == .sent })
     }
 
+    /// The accessibility element labelled `label` in a drawn tree, as UIKit walks them.
+    private func element(labelled label: String, in root: UIView) -> NSObject? {
+        var seen = Set<ObjectIdentifier>()
+        func walk(_ node: NSObject, depth: Int) -> NSObject? {
+            guard depth < 64, seen.insert(ObjectIdentifier(node)).inserted else { return nil }
+            if node.accessibilityLabel == label { return node }
+            var children = (node.accessibilityElements ?? []).compactMap { $0 as? NSObject }
+            if let view = node as? UIView { children += view.subviews }
+            for child in children { if let found = walk(child, depth: depth + 1) { return found } }
+            return nil
+        }
+        return walk(root, depth: 0)
+    }
+
+    /// With a result untold on the line, a refused draft leaves Send enabled, since the line does not say
+    /// what is wrong with the draft; its press only says the result again. Once the result was told, the
+    /// refusal line and the dimmed Send come back together. The presses go through the drawn button.
+    @Test func aRefusedDraftAfterAnUntoldResultLeavesSendEnabledUntilTheResultIsTold() async throws {
+        let rig = try rig(voiceOver: true)
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        #expect(await send(rig, "one", .uncertain("unknown")))
+        rig.said.finishLast(false)
+        await settle()
+        #expect(state.awaiting != nil)
+        let refused: [(sender: String, text: String)] = [
+            (GuestSms.defaultSender, String(repeating: "a", count: GuestSms.maximumUnits + 12)),
+            (GuestSms.defaultSender, "Code \u{FFFE} 482913"),
+            ("Shop & Go", "two"),
+            (GuestSms.defaultSender, "three"),
+        ]
+        for (index, draft) in refused.enumerated() {
+            if index == refused.count - 1 {
+                // Sixteen sends wait for Android to confirm them: this draft is not one of them.
+                for number in 0..<GuestSms.Retries.capacity {
+                    state.retries.settle(
+                        sender: GuestSms.defaultSender, text: "Held \(number)", identifier: GuestSms.newIdentifier(),
+                        result: .notConfirmed)
+                }
+            }
+            model.setTextMessageSender(draft.sender)
+            model.setTextMessageText(draft.text)
+            let said = rig.said.lines.count
+            try await withHostedBar(model) { view in
+                try await Task.sleep(for: .milliseconds(800))
+                let button = try #require(element(labelled: SmsMessages.send, in: view), "no Send under \(draft.text.prefix(12))")
+                #expect(!button.accessibilityTraits.contains(.notEnabled), "Send is dimmed with the result on the line")
+                #expect(button.accessibilityActivate(), "the press did nothing")
+            }
+            await settle()
+            #expect(rig.driver.smsSent.count == 1, "a refused draft was sent")
+            #expect(rig.said.lines.count == said + 1 && rig.said.lines.last == SmsMessages.uncertain, "\(rig.said.lines)")
+            #expect(state.awaiting != nil && state.status(availability: .ready)?.words == SmsMessages.uncertain)
+        }
+        // Told: the draft's own refusal is on the line and Send is dimmed with it.
+        model.textMessageLineFocused()
+        #expect(await eventually { state.awaiting == nil })
+        let told = try await draw(TextMessageBar().environment(model))
+        #expect(told.labels.contains(SmsMessages.waiting), "the refusal is not on the line: \(told.labels)")
+        let dimmed = try #require(told.traits.first { $0.label == SmsMessages.send })
+        #expect(dimmed.traits.contains(.notEnabled), "Send is enabled beside a refusal")
+    }
+
+    /// The same for the cut-off line: a refused draft leaves Send enabled while the line waits to be told,
+    /// and a press through the drawn button says it again and sends nothing.
+    @Test func aRefusedDraftAfterAnAwaitedCutOffLineLeavesSendEnabledUntilItIsTold() async throws {
+        let files = RecordingNoticeFiles()
+        files.put(Data((header + "cut-off\n").utf8), at: Self.noticeURL)
+        let rig = try rig(voiceOver: true, files: files)
+        defer { rig.cleanUp() }
+        let (model, state) = (rig.model, rig.state)
+        model.openTextMessage()
+        #expect(state.awaiting != nil && state.progress == .cutOff)
+        rig.said.finishLast(false)
+        await settle()
+        model.setTextMessageText(String(repeating: "a", count: GuestSms.maximumUnits + 12))
+        try await withHostedBar(model) { view in
+            try await Task.sleep(for: .milliseconds(800))
+            let button = try #require(element(labelled: SmsMessages.send, in: view))
+            #expect(!button.accessibilityTraits.contains(.notEnabled), "Send is dimmed with the cut-off line waiting")
+            #expect(button.accessibilityActivate(), "the press did nothing")
+        }
+        await settle()
+        #expect(rig.driver.smsSent.isEmpty && rig.said.lines == [SmsMessages.cutOff, SmsMessages.cutOff], "\(rig.said.lines)")
+        model.textMessageLineFocused()
+        #expect(await eventually { state.awaiting == nil })
+        let told = try await draw(TextMessageBar().environment(model))
+        #expect(told.labels.contains(SmsMessages.charactersOver(12)), "the refusal is not on the line: \(told.labels)")
+        let dimmed = try #require(told.traits.first { $0.label == SmsMessages.send })
+        #expect(dimmed.traits.contains(.notEnabled), "Send is enabled beside a refusal")
+    }
+
     /// Hosts the bar in a window and gives `body` the view; the window goes after.
     private func withHostedBar(_ model: AppModel, _ body: (UIView) async throws -> Void) async throws {
         let lease = try await HostWindow.take()
