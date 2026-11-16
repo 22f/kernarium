@@ -320,6 +320,19 @@ a cold site; the cached sites of the gadget engine, which hold the same exit
 to the guest, are the unit tests' work (`arm64-pc-alignment-contract` and
 `arm64-gadget-indirect-links`).
 
+## Compare-retry exclusive cases
+
+A compare-and-swap loop (`LDXR; CMP; B.NE alt; STXR; CBNZ`) whose mismatch
+target holds a store-exclusive of its own leaves the monitor armed on the
+branch, so that store succeeds without a new load; single-stepping and the
+gadget engine complete it in one pass. An engine that clears the reservation on
+the mismatch and continues fails that store on every pass, and the loop ends
+only at the runner's instruction budget.
+[`exclusive-mismatch-corpus.py`](../../../../tools/arm64-tests/exclusive-mismatch-corpus.py)
+authors the `arm64-exclusive-mismatch` record (the X and W forms, with and
+without acquire/release, taking the mismatch and the match), and
+`arm64-instruction-corpus-exclusive-mismatch` re-derives it.
+
 ## 16 KiB retirement
 
 The guest has 4 KiB pages only, but the producer export ran both page

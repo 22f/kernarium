@@ -1622,6 +1622,8 @@ def metadata(corpus: Corpus, pack: bytes) -> dict[str, bytes]:
            if "tbi_memory" in corpus.meta else {}),
         **({"control_target": corpus.meta["control_target"]}
            if "control_target" in corpus.meta else {}),
+        **({"exclusive_mismatch": corpus.meta["exclusive_mismatch"]}
+           if "exclusive_mismatch" in corpus.meta else {}),
         **({"retired_16k": corpus.meta["retired_16k"]}
            if "retired_16k" in corpus.meta else {}),
         **({"invalid_encoding": corpus.meta["invalid_encoding"]}
@@ -1824,6 +1826,13 @@ def check(options: argparse.Namespace) -> int:
             (REPOSITORY / target["script"]).read_bytes()) != target["sha256"]:
         stale.append(target["script"] + " (not the indirect-branch target "
                      "records' script)")
+    # And the compare-retry exclusive records.
+    mismatch = corpus.meta.get("exclusive_mismatch")
+    if mismatch is not None and sha256(
+            (REPOSITORY / mismatch["script"]).read_bytes()) != \
+            mismatch["sha256"]:
+        stale.append(mismatch["script"] + " (not the compare-retry "
+                     "exclusive records' script)")
     if stale:
         fail("stale corpus files: " + ", ".join(stale))
     # Every inventory entry has a case, or an illegal-instruction case.

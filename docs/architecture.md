@@ -378,18 +378,25 @@ inside one 16-byte block is single-copy atomic, one that crosses a block faults,
 and without host LSE2 every such access faults.
 
 **Exclusive monitor.** A load/store-exclusive loop makes progress whatever the
-TLB holds, and nothing an engine does between the pair without an exception
+TLB holds, and nothing an engine does between an A64 pair without an exception
 fails the store. An exclusive load fills the write TLB entry and records the host
 address and loaded values in the `CpuState` exclusive fields
 (`engine/exclusive.inc`, reused by the AArch32 exclusives), and a store-exclusive
 that still misses completes in software with one host compare-and-swap of the
 recorded values. The JIT's semantic path keeps a software reservation (versions
 of 16-byte host granules), so a store to the reserved granule, including the
-kernel's futex and SWP emulation, fails the store-exclusive. The monitor ends at
-a store-exclusive, a CLREX, an exception and a store to the reserved granule; a
-store of the guest's own to another granule leaves it standing, as on hardware
-(`arm64-exclusive-progress`, `arm64-exclusive-events`,
-`arm64-jit-exclusive_completion`, `guest-exclusive-progress-gadgets`/`-jit`).
+kernel's futex and SWP emulation, fails the store-exclusive. The JIT runs an A64
+pair it fuses on the host's own monitor, and a compare-retry sequence's mismatch
+exit rolls back to the guest state at the load-exclusive, which then executes on
+the software reservation; no exit clears the monitor and continues. The monitor
+ends at a store-exclusive, a CLREX, an exception and a store to the reserved
+granule; a store of the guest's own to another granule leaves it standing, as on
+hardware (`arm64-exclusive-progress`, `arm64-exclusive-events`,
+`arm64-jit-exclusive_completion`, `arm64-jit-reservation_alias`,
+`guest-exclusive-progress-gadgets`/`-jit`). A fused AArch32 sequence that leaves
+before its store, through a taken branch or a store-exclusive whose condition
+fails, still clears the monitor and continues, which starves a loop that reaches
+a store-exclusive from there without a new load.
 
 Both engines complete WFE and WFI at once and treat SEV and SEVL as no-ops, so
 no wait depends on an event. Completing WFI deliberately deviates from arm64
