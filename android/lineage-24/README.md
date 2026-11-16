@@ -75,11 +75,13 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   WebView, LatinIME, ThemePicker, Messaging for the host's
   [text messages](#text-messages), TalkBack and eSpeak NG
   ([Accessibility](#accessibility)) and a curated set (camera, gallery, music, calendar,
-  calculator, PDF viewer, backup). There is no browser, app store, install
-  restriction, Google or microG. Applications that need absent hardware or
+  calculator, PDF viewer, backup). There is no browser, app store or install
+  restriction, and no Google apps, services or closed-source Google code;
+  open-source components built from source are allowed and are the ones listed
+  here. Applications that need absent hardware or
   LineageOS cloud services are excluded by name in the product makefile, and the
   build and the verifier assert that list.
-- **Signature spoofing.** The image ships no Google or microG software, and
+- **Signature spoofing.** The image ships no microG, and
   no guest interface names Google's services; Andarium names them only to say
   that they are left out on purpose ([No Google
   apps](../../Andarium/README.md#runtime)). LineageOS's restricted
@@ -155,18 +157,21 @@ first page while it has room, then on the later pages in order (route `p0010`).
 
 ### Accessibility
 
-The image carries TalkBack, Android's screen reader, and eSpeak NG, its only
-speech engine, as the prebuilt applications `TalkBack` and `eSpeakNG`
-(`overlay/accessibility/Android.bp`, in `/product/app`), off until Andarium's
-Settings or Android's own turns TalkBack on. They are the accessibility
-artifact: the release APKs, unsigned, and `artifact.json`, which
-`dependencies/build-andarium-accessibility.sh` builds offline on the Mac from
-pinned sources ([`../../dependencies/README.md`](../../dependencies/README.md)).
-`build-aosp.sh` requires it (`--accessibility-artifact`), and
-`tools/stage-accessibility-artifact.py` checks it against its description and
-stages it as `vendor/kernarium/accessibility`, outside the synchronized device
-tree; the build and the release signing sign the APKs as any application of
-the image. The target-files verifier requires both.
+The image carries TalkBack, Android's screen reader, and eSpeak NG, a speech
+engine, as the prebuilt applications `TalkBack` and `eSpeakNG`
+(`overlay/accessibility/Android.bp`, in `/product/app`); the image turns
+nothing on by itself, and Andarium turns TalkBack on only at the person's
+request. Both are open source, built from source into the accessibility
+artifact: the release APKs, unsigned, and `artifact.json`
+(`dependencies/build-andarium-accessibility.sh`;
+[`../../dependencies/README.md`](../../dependencies/README.md)). The artifact
+the release carries is the one `metadata/accepted-accessibility.env` names:
+`build-aosp.sh` (`--accessibility-artifact`) and `publish-release.py` refuse
+one that `tools/stage-accessibility-artifact.py` does not accept as built from
+this tree's pins, patch series, archive list, builder and toolchain, and the
+signed system carries exactly its APKs. The stager stages it as
+`vendor/kernarium/accessibility`, outside the synchronized device tree, and
+the target-files verifier requires both applications.
 
 ### Motion sensors
 

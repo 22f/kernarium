@@ -147,6 +147,16 @@ class StageTests(unittest.TestCase):
                          ["Android.bp", "TalkBack.apk", "artifact.json", "eSpeakNG.apk"])
         self.assertEqual((destination / "TalkBack.apk").read_bytes(), (artifact / "TalkBack.apk").read_bytes())
 
+    def test_the_image_turns_no_accessibility_service_on_by_itself(self) -> None:
+        # The README says the image enables nothing: no default of the overlay
+        # or of a patch to the source writes either setting.
+        for directory in (ROOT / "android/lineage-24/overlay", ROOT / "android/lineage-24/patches"):
+            for path in directory.rglob("*"):
+                if path.is_file() and path.suffix not in (".png", ".jar", ".apk"):
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                    for setting in ("enabled_accessibility_services", "accessibility_enabled"):
+                        self.assertNotIn(setting, text, f"{path} sets {setting}")
+
     def test_the_filegroups_are_those_the_overlay_imports(self) -> None:
         artifact = self.accepted()
         self.assertEqual(self.stager(artifact, "--aosp-source", str(self.aosp)).returncode, 0)
