@@ -280,6 +280,11 @@ one fixed guest-physical region of `protocol::hostVisibleSharedMemoryRegionSize`
 That constant and the kernel's `UML_VHOST_USER_SHMEM_SIZE` are one value, so
 changing it is a change to the kernel as well as to the host.
 
+A blob is refused when it is larger than the shared memory behind it, by the
+renderer where it is created and by the device when it maps one
+(`gpu-blob-size-bounds`, `gpu-device-command-atomicity`), so a guest never maps
+bytes past the end of the file that backs them.
+
 The aperture, not host memory, bounds host-visible memory: the host-visible
 memory type gets its own heap sized to it. A mapping near the aperture's size
 can fail at `vkMapMemory` with `VK_ERROR_OUT_OF_DEVICE_MEMORY` until the guest's
