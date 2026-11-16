@@ -901,6 +901,20 @@ final class LiveRuntime: RuntimeDriver {
         await operations.sendSms(sender: sender, text: text)
     }
 
+    // MARK: TalkBack
+
+    func readScreenReader() async -> ScreenReaderState? {
+        await operations.screenReader()
+    }
+
+    func setScreenReader(_ on: Bool, in state: ScreenReaderState) async throws -> ScreenReaderState {
+        try await operations.setScreenReader(on, in: state)
+    }
+
+    func openAccessibilitySettings() async throws {
+        try await operations.openAccessibilitySettings()
+    }
+
     // MARK: ADB over network
 
     /// The listener on the network addresses, whose every connection is

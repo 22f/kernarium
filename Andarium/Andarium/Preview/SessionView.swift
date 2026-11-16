@@ -68,6 +68,7 @@ struct SessionView: View {
                     guest
                         .frame(width: plan.guest.width, height: plan.guest.height)
                         .clipped()
+                        .guestScreenAccessibility(talkBackOn: model.screenReaderOffer.isOn)
                         // As on the device, a touch on the guest closes the keys
                         // and still reaches the guest.
                         .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in model.session.closeSideKeys() })
@@ -84,6 +85,7 @@ struct SessionView: View {
                 Color.black.ignoresSafeArea()
                 guest
                     .clipped()
+                    .guestScreenAccessibility(talkBackOn: model.screenReaderOffer.isOn)
                     // As on the device, a touch on the guest closes the keys and
                     // still reaches the guest.
                     .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in model.session.closeSideKeys() })
@@ -243,5 +245,17 @@ struct SessionView: View {
         if preset.settings {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { settings = true }
         }
+    }
+}
+
+private extension View {
+    /// The mock guest reads as the device's display does: Android's screen as
+    /// one element, a direct-touch area while TalkBack is on.
+    func guestScreenAccessibility(talkBackOn: Bool) -> some View {
+        accessibilityElement(children: .ignore)
+            .accessibilityLabel(ScreenReaderWords.displayLabel)
+            .accessibilityHint(talkBackOn ? ScreenReaderWords.displayHintDirect : ScreenReaderWords.displayHint)
+            .accessibilityAddTraits(talkBackOn ? .allowsDirectInteraction : [])
+            .accessibilityIdentifier("guest-display")
     }
 }

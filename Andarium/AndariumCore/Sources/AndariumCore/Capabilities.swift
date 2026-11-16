@@ -21,10 +21,13 @@ public struct Capabilities: Equatable, Sendable {
     /// A text message can be sent to the guest as if from the network
     /// (`GuestSms`).
     public var textMessages: Bool
+    /// The session's Settings can turn TalkBack, Android's screen reader, on
+    /// and off.
+    public var screenReader: Bool
 
     public init(
         adbOverNetwork: Bool, apkInstall: Bool, bugReport: Bool, statistics: Bool, guestFiles: Bool,
-        textMessages: Bool
+        textMessages: Bool, screenReader: Bool
     ) {
         self.adbOverNetwork = adbOverNetwork
         self.apkInstall = apkInstall
@@ -32,6 +35,7 @@ public struct Capabilities: Equatable, Sendable {
         self.statistics = statistics
         self.guestFiles = guestFiles
         self.textMessages = textMessages
+        self.screenReader = screenReader
     }
 
     /// Whether a session started in `mode` can offer Install APK: Settings has
@@ -44,19 +48,20 @@ public struct Capabilities: Equatable, Sendable {
     /// Everything the mock runtime pretends to do.
     public static let preview = Capabilities(
         adbOverNetwork: true, apkInstall: true, bugReport: true, statistics: true, guestFiles: true,
-        textMessages: true
+        textMessages: true, screenReader: true
     )
 
     /// The device application: the session offers an app install, ADB over
-    /// the network, a bug report, the guest's files and text messages, all
-    /// through the runtime's adb channel, and the statistics from the
-    /// runtime's own readings.
+    /// the network, a bug report, the guest's files, text messages and
+    /// TalkBack, all through the runtime's adb channel, and the statistics
+    /// from the runtime's own readings.
     public static let device = Capabilities(
         adbOverNetwork: true,
         apkInstall: true,
         bugReport: true,
         statistics: true,
         guestFiles: true,
-        textMessages: true
+        textMessages: true,
+        screenReader: true
     )
 }

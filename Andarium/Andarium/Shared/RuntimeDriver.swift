@@ -206,6 +206,13 @@ protocol RuntimeDriver: AnyObject, OldAppsSource {
     /// Delivers a text message to the guest as if from the network
     /// (`GuestSms`); the sender and text are ones `GuestSms` accepts.
     func sendSms(sender: String, text: String) async -> GuestSms.Outcome
+    /// TalkBack in the guest; nil when the guest cannot be asked now.
+    func readScreenReader() async -> ScreenReaderState?
+    /// Turns TalkBack on or off in the guest whose state is `state`, keeping
+    /// every other accessibility service; returns the state after.
+    func setScreenReader(_ on: Bool, in state: ScreenReaderState) async throws -> ScreenReaderState
+    /// Opens Android's Accessibility page on the guest's screen.
+    func openAccessibilitySettings() async throws
     /// Opens the listener of ADB over the network on the device's network
     /// addresses. Throws when it cannot (`AdbError.io(EADDRINUSE)` for a
     /// port in use).

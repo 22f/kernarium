@@ -51,6 +51,7 @@ struct GuestLayer: View {
     private var display: GuestDisplayView {
         var display = GuestDisplayView(
             scale: model.resolution,
+            accessibility: accessibility,
             // A touch beside the side keys reaches the guest, and
             // puts the keys away.
             touchDidBegin: { model.session.closeSideKeys() },
@@ -70,6 +71,19 @@ struct GuestLayer: View {
         }
         #endif
         return display
+    }
+
+    /// Android's screen for VoiceOver while the session shows it; the boot
+    /// screen covers it before. Touches go straight through while TalkBack
+    /// is on, which then speaks instead of VoiceOver.
+    private var accessibility: GuestDisplayAccessibility? {
+        guard case .running = model.phase else { return nil }
+        let talkBack = model.screenReaderOffer.isOn
+        return GuestDisplayAccessibility(
+            label: ScreenReaderWords.displayLabel,
+            hint: talkBack ? ScreenReaderWords.displayHintDirect
+                : (model.offersScreenReader ? ScreenReaderWords.displayHint : nil),
+            directTouch: talkBack)
     }
 
     private var showsGuest: Bool { model.phase.showsGuestDisplay }

@@ -56,6 +56,12 @@ struct AppEntry {
     /// default resolution follows ("2867" is an iPad mini 6's); absent, no
     /// limit, as on a Mac.
     var memoryLimitMiB: Int?
+    /// The model takes VoiceOver as running, which the Simulator never has,
+    /// so a first start plays TalkBack turning on by itself.
+    var voiceOver: Bool
+    /// The mock guest's TalkBack: "on", or "missing" for a system without
+    /// it; absent, the system carries it and it is off.
+    var talkBack: String?
 
     static func fromArguments() -> AppEntry {
         let defaults = UserDefaults.standard
@@ -76,7 +82,9 @@ struct AppEntry {
             displayScale: defaults.string(forKey: "displayScale"),
             displayNative: defaults.string(forKey: "displayNative"),
             displayPoints: defaults.string(forKey: "displayPoints"),
-            memoryLimitMiB: defaults.string(forKey: "memoryLimitMiB").flatMap { Int($0) }
+            memoryLimitMiB: defaults.string(forKey: "memoryLimitMiB").flatMap { Int($0) },
+            voiceOver: defaults.bool(forKey: "voiceOver"),
+            talkBack: defaults.string(forKey: "talkBack")
         )
     }
 
@@ -164,6 +172,15 @@ struct AppEntry {
         // screen states another access (and `-systemCamera` reads the
         // Simulator's own).
         model.cameraAccess = .notDetermined
+        if voiceOver { model.voiceOverRunning = { true } }
+        switch talkBack {
+        case "on":
+            model.previewScreenReader.enabledServices = [ScreenReader.services[0]]
+        case "missing":
+            model.previewScreenReader = ScreenReaderState(installedService: nil, enabledServices: [])
+        default:
+            break
+        }
 
         func boot(_ kind: BootKind, stage: Int, seconds: Int) {
             model.frozenBootStage = freeze ? (bootStage ?? stage) : nil

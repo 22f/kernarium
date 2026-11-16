@@ -28,6 +28,7 @@ struct LowSpaceOverlay: View {
                         .accessibilityHidden(true)
                     Text(SpacePauseWords.title(pause).keepingTogether)
                         .font(.title3.weight(.bold))
+                        .accessibilityAddTraits(.isHeader)
                 }
                 Text(SpacePauseWords.detail(pause).keepingTogether)
                     .font(.subheadline)
@@ -44,7 +45,9 @@ struct LowSpaceOverlay: View {
         }
         .transition(.opacity)
         .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
         .accessibilityIdentifier("space-pause")
+        .onAppear { VoiceOver.screenChanged("\(pause.title). \(pause.detail)") }
     }
 
     @ViewBuilder

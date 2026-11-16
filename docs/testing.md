@@ -551,6 +551,12 @@ Android (the test allows ten minutes to create the machine and 25 for the
 boot). Its other test, in a build with Send feedback, reaches the Send feedback
 line from a probe session's Settings.
 
+`AndariumPreviewUITests` drives `AndariumPreview` in the Simulator
+(`xcodebuild test -scheme AndariumPreview`): every screen passes the
+accessibility audit for element descriptions and traits, and TalkBack's switch
+in the session's Settings and a first start under VoiceOver work as a person
+reaches them.
+
 The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
 `andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.
 `FoldSessionHostingTests` puts the real scene root in a window of each pose's
