@@ -246,8 +246,6 @@ struct AppEntry {
         }
         announceWhatsNew(
             on: model, hasGuest: guest != nil, vCPUs: guest?.cores ?? host.processorCount)
-        // Only the person's own launch keeps what the notice has shown, as it does the release notes' record.
-        model.noGoogleNotice = NoGoogleNotice(defaults: announcesWhatsNew ? defaults : nil)
         model.alert = problem.map { AppAlert(title: String(localized: "Andarium is incomplete"), message: $0) }
         #if APP_REVIEW
         // Last: the ribbon and the alert above are part of what Home shows.

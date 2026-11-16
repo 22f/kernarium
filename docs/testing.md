@@ -452,11 +452,11 @@ menu) exist with any of Send feedback, Review and Buy me tokens, and
 `AndariumCoreTests` holds the tip sheet's states and the rating rule, counter
 and record as pure logic, and the state of the no-Google-apps notice (the panel
 on a first start and on the retry of a first Android boot that did not finish,
-and nothing else; the Send feedback line until opened or closed).
+and nothing else).
 `NoGoogleNoticeScreenTests` host the real boot screen and Send feedback sheet
 for it (the panel reached on those starts and gone with the boot, the starts
-that show none, the line opening and closing in place, the words in each
-language), and `NoGoogleNoticeUITests` boot a real first start and reach the
+that show none, the line opening and closing in place and coming back with each
+sheet, the words in each language), and `NoGoogleNoticeUITests` boot a real first start and reach the
 line (see the UI-test target below).
 The Mail composer, the picker and the guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view

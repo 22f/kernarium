@@ -12,7 +12,7 @@ import UIKit
 /// first start or the retry of one that did not finish, which the end of the
 /// boot takes away; the starts that never show it, whatever the installation
 /// has seen; and, where Send feedback is compiled in, the line at the top of
-/// its mail, which opens in place, closes, and is not there on the next sheet.
+/// its mail, which opens in place, closes, and is there again on the next sheet.
 /// A stub stands for the runtime, and the boot ends as the runtime ends it
 /// (`finishBoot`).
 ///
@@ -37,23 +37,9 @@ struct NoGoogleNoticeScreenTests {
         let model: AppModel
         let driver: StubDriver
         let clock: Clock
-        let defaults: UserDefaults
-        let name: String
-
-        /// Removes the defaults database the notice kept its values in.
-        func clean() {
-            defaults.removePersistentDomain(forName: name)
-            try? FileManager.default.removeItem(atPath: (name as NSString).deletingLastPathComponent)
-        }
     }
 
-    /// A model whose notice keeps its values in a database of the test's own.
     private func rig(phase: Phase) -> Fixture {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("andarium-nogoogle-hosted-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let name = directory.appendingPathComponent("defaults").path
-        let defaults = UserDefaults(suiteName: name)!
         let system = SystemInfo(
             version: "17", release: "r2", kernel: "Linux 6.18", architecture: "arm64, 4 KiB pages", appVersion: "1.0 (9)")
         let model = AppModel(
@@ -62,7 +48,6 @@ struct NoGoogleNoticeScreenTests {
         model.driver = driver
         let clock = Clock()
         model.clock = { clock.now }
-        model.noGoogleNotice = NoGoogleNotice(defaults: defaults)
         model.phase = phase
         #if FEEDBACK_MAIL
         var services = SendFeedbackServices()
@@ -72,7 +57,7 @@ struct NoGoogleNoticeScreenTests {
         services.captureScreen = { _ in nil }
         model.feedbackServices = services
         #endif
-        return Fixture(model: model, driver: driver, clock: clock, defaults: defaults, name: name)
+        return Fixture(model: model, driver: driver, clock: clock)
     }
 
     // MARK: Finding what is on screen
@@ -128,7 +113,6 @@ struct NoGoogleNoticeScreenTests {
 
     @Test func aFirstStartShowsThePanelAndTheEndOfTheBootTakesItAway() async throws {
         let fixture = rig(phase: .booting(.firstStart))
-        defer { fixture.clean() }
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let controller = root(fixture, lease: lease)
@@ -155,10 +139,8 @@ struct NoGoogleNoticeScreenTests {
     }
 
     @Test func aFirstStartAfterEraseShowsItAgain() async throws {
-        // An installation that has used the line, started normally and is erased: its next start is a first start.
+        // An installation started normally and then erased: its next start is a first start.
         let fixture = rig(phase: .booting(.normal))
-        defer { fixture.clean() }
-        NoGoogleNotice(defaults: fixture.defaults).keepFeedbackAnswered()
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let controller = root(fixture, lease: lease)
@@ -178,7 +160,6 @@ struct NoGoogleNoticeScreenTests {
     @Test(arguments: [true, false])
     func aNormalStartShowsThePanelOnlyWhileTheFirstBootIsUnfinished(pending: Bool) async throws {
         let fixture = rig(phase: .home)
-        defer { fixture.clean() }
         fixture.driver.firstBootIsPending = pending
         fixture.model.start(.normal)
         #expect(fixture.model.phase == .booting(.normal))
@@ -203,7 +184,6 @@ struct NoGoogleNoticeScreenTests {
     ])
     func everyOtherStartShowsNone(kind: BootKind, status: String) async throws {
         let fixture = rig(phase: .booting(kind))
-        defer { fixture.clean() }
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let controller = root(fixture, lease: lease)
@@ -213,13 +193,10 @@ struct NoGoogleNoticeScreenTests {
         }
         try await Task.sleep(for: .milliseconds(800))
         #expect(labelled(Self.title, in: controller.view) == nil, "\(kind) shows the panel")
-        // Nothing was kept on the way: the defaults hold no value of the notice.
-        #expect(fixture.defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("andarium.noGoogleNotice") }.isEmpty)
     }
 
     @Test func thePanelStaysWhenTheSlowStartNoticeComesAbove() async throws {
         let fixture = rig(phase: .booting(.firstStart))
-        defer { fixture.clean() }
         fixture.model.slowStart.begin(at: fixture.clock.now)
         let lease = try await HostWindow.take()
         defer { lease.give() }
@@ -291,36 +268,34 @@ struct NoGoogleNoticeScreenTests {
 
     #if FEEDBACK_MAIL
 
-    @Test func theLineIsOpenedAndClosedOnTheModelAndTheNextSheetHasNone() {
+    /// The contract: every sheet opens with the line, closed, whatever was done on an earlier one.
+    @Test func everySheetOpensWithTheLineClosedWhateverWasDoneOnTheLastOne() {
         let fixture = rig(phase: .home)
-        defer { fixture.clean() }
         let first = SendFeedbackModel(app: fixture.model)
         defer { first.close() }
         #expect(first.showsNoGoogleLine && !first.noGoogleAnswerOpen)
-        // A sheet that is opened and left alone leaves the line for the next.
+        // Closing the line takes it from this sheet alone.
+        first.closeNoGoogleLine()
+        #expect(!first.showsNoGoogleLine)
         let second = SendFeedbackModel(app: fixture.model)
         defer { second.close() }
-        #expect(second.showsNoGoogleLine)
-        first.openNoGoogleAnswer()
-        #expect(first.noGoogleAnswerOpen && first.showsNoGoogleLine, "the answer closed itself on this sheet")
+        #expect(second.showsNoGoogleLine && !second.noGoogleAnswerOpen, "the line did not come back after it was closed")
+        // Opening its answer suppresses nothing later.
+        second.openNoGoogleAnswer()
+        #expect(second.noGoogleAnswerOpen && second.showsNoGoogleLine)
         let third = SendFeedbackModel(app: fixture.model)
         defer { third.close() }
-        #expect(!third.showsNoGoogleLine)
-        // Closing it is the same: another installation's defaults show it, this one's never again.
-        let other = rig(phase: .home)
-        defer { other.clean() }
-        let before = SendFeedbackModel(app: other.model)
-        defer { before.close() }
-        before.closeNoGoogleLine()
-        #expect(!before.showsNoGoogleLine)
-        let after = SendFeedbackModel(app: other.model)
-        defer { after.close() }
-        #expect(!after.showsNoGoogleLine)
+        #expect(third.showsNoGoogleLine && !third.noGoogleAnswerOpen, "the line did not come back after its answer was opened")
+        // Opened and then closed on one sheet is closed on that one alone.
+        second.closeNoGoogleLine()
+        #expect(!second.showsNoGoogleLine)
+        let fourth = SendFeedbackModel(app: fixture.model)
+        defer { fourth.close() }
+        #expect(fourth.showsNoGoogleLine && !fourth.noGoogleAnswerOpen, "the line did not come back after it was opened and closed")
     }
 
     @Test func theLineAtTheTopOfTheMailOpensInPlaceAndCloses() async throws {
         let fixture = rig(phase: .home)
-        defer { fixture.clean() }
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let controller = root(fixture, lease: lease)
@@ -344,8 +319,6 @@ struct NoGoogleNoticeScreenTests {
         let answer = await eventually { sheetView().flatMap { labelled("Missing Google apps?", in: $0)?.accessibilityLabel?.contains(Self.reason) } == true }
         #expect(answer, "the answer did not open")
         #expect(sheetView().flatMap { button("Send feedback", in: $0) } != nil, "the sheet lost its Send")
-        // Opening kept the line for no later sheet.
-        #expect(!NoGoogleNotice(defaults: fixture.defaults).showsInFeedback)
         // Close: the line goes from this sheet.
         let dismiss = try #require(
             sheetView().flatMap { button("Dismiss Google apps note", in: $0) }, "the line has no close button")
@@ -355,6 +328,13 @@ struct NoGoogleNoticeScreenTests {
         #expect(dismiss.accessibilityActivate())
         let gone = await eventually { sheetView().flatMap { labelled("Missing Google apps?", in: $0) } == nil }
         #expect(gone, "the line stayed after it was closed")
+        // The next presentation of the sheet has the line again, closed.
+        fixture.model.feedbackSheetOpen = false
+        #expect(await eventually { controller.presentedViewController == nil }, "the sheet did not close")
+        fixture.model.feedbackSheetOpen = true
+        let back = await eventually { sheetView().flatMap { button("Missing Google apps?", in: $0) } != nil }
+        #expect(back, "the line did not come back when the sheet opened again")
+        #expect(sheetView().flatMap { labelled(Self.reason, in: $0) } == nil, "the line came back open")
         fixture.model.feedbackSheetOpen = false
     }
 
