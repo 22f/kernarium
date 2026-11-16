@@ -45,6 +45,25 @@ struct TextMessageNoticeTests {
         #expect(full.count == 593)
     }
 
+    /// The session ended, and its send task was cancelled first: the add that was already on its way holds
+    /// nothing, so no identifier of a session that is gone joins the next session's memory or file.
+    @Test func anAddThatArrivesAfterItsTaskWasCancelledHoldsNothing() async throws {
+        let files = RecordingFiles()
+        let notice = notice(files)
+        let task = Task {
+            while !Task.isCancelled { await Task.yield() }
+            try await notice.add(Self.x)
+        }
+        task.cancel()
+        notice.endSession()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(notice.currentEntries.isEmpty)
+        #expect(text(files) == "(none)")
+        // A task that was not cancelled still adds.
+        try await notice.add(Self.y)
+        #expect(notice.currentEntries == [Self.y])
+    }
+
     @Test func aFileThatIsNotExactlyTheFormatCountsAsALeftover() {
         let good = [header, header + "cut-off\n", header + Self.x + "\n", header + "cut-off\n" + Self.x + "\n" + Self.y + "\n"]
         for body in good {

@@ -163,10 +163,13 @@ public final class TextMessageNotice: @unchecked Sendable {
     // MARK: Changes
 
     /// Adds `identifier` and writes the file whole, flushed. The send waits for
-    /// this before it dispatches anything. When it fails the identifier is
-    /// not held, and nothing may be dispatched for it.
+    /// this before it dispatches anything. When it fails, or the task was
+    /// cancelled, the identifier is not held, and nothing may be dispatched for it.
     public func add(_ identifier: String) async throws {
         try lock.withLock {
+            // The session cancels its send tasks before `endSession`: an add that arrives after that is
+            // a send of a session that is gone, and must not join the next one's memory.
+            if Task.isCancelled { throw CancellationError() }
             if entries.contains(identifier) { return }
             guard entries.count < Self.capacity else { throw Failure.full }
             entries.append(identifier)
