@@ -16,18 +16,29 @@ raw resources the Gradle build makes. The Gradle files are not used.
 The pinned libsonic tree is placed in sonic/ beside these sources before
 the build; it is not part of this series. The BuildConfig the Gradle
 build generates and the manifest with the package it sets as the
-namespace are written beside the sources, in android/soong.
+namespace are written beside the sources, in android/soong. The manifest
+leaves out the uses-library of the Wear OS shared library, which the
+platform does not have and the app does not require.
+
+The compat <stdio.h> includes the system one outside its include
+guard: glibc's <wchar.h> before 2.28 includes <stdio.h> for the FILE
+types only and expects it to be included again, which the guard of the
+shim turned into the only inclusion (the host libraries are built
+against a glibc 2.17 sysroot). The speechPlayer sources are built with
+-Wnon-virtual-dtor as a warning, which the platform's C++ flags make an
+error, and the data tool carries its C++ library.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  .gitignore                                    |   2 +
- Android.bp                                    | 267 ++++++++++++++++++
- android/soong/AndroidManifest.xml             |  98 +++++++
+ Android.bp                                    | 272 ++++++++++++++++++
+ android/soong/AndroidManifest.xml             |  96 +++++++
  android/soong/config/device/config.h          |  18 ++
  android/soong/config/host/config.h            |  18 ++
  android/soong/espeak-data.sh                  |  68 +++++
  .../com/reecedunn/espeak/BuildConfig.java     |  13 +
- 7 files changed, 484 insertions(+)
+ src/include/compat/stdio.h                    |  15 +-
+ 8 files changed, 496 insertions(+), 6 deletions(-)
  create mode 100644 Android.bp
  create mode 100644 android/soong/AndroidManifest.xml
  create mode 100644 android/soong/config/device/config.h
@@ -50,10 +61,10 @@ index 71b9c8079166f33e65a5075d1fd12062a7f5a65d..0c6f19040808d52de4ed236914cdaf36
  install-sh
 diff --git a/Android.bp b/Android.bp
 new file mode 100644
-index 0000000000000000000000000000000000000000..c310a24f85be25e8cc1c8d3ba194efff1c634c38
+index 0000000000000000000000000000000000000000..c19d7b3b64026ff250431aaaf522ddd5e3e4eaa4
 --- /dev/null
 +++ b/Android.bp
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,272 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
 +// eSpeak NG, built from source by the Android image build. The Gradle and CMake
@@ -134,9 +145,11 @@ index 0000000000000000000000000000000000000000..c310a24f85be25e8cc1c8d3ba194efff
 +    local_include_dirs: ["android/soong/config/device"],
 +}
 +
++// The tool runs as a genrule tool: it carries its C++ library.
 +cc_defaults {
 +    name: "espeak_ng_host",
 +    defaults: ["espeak_ng_flags"],
++    stl: "libc++_static",
 +    local_include_dirs: ["android/soong/config/host"],
 +}
 +
@@ -153,6 +166,8 @@ index 0000000000000000000000000000000000000000..c310a24f85be25e8cc1c8d3ba194efff
 +    export_include_dirs: ["src/ucd-tools/src/include"],
 +}
 +
++// The platform makes -Wnon-virtual-dtor an error for C++; speechPlayer's WaveGenerator is an
++// interface without a virtual destructor, and its one implementation has one.
 +cc_defaults {
 +    name: "espeak_ng_speechplayer_sources",
 +    srcs: [
@@ -160,6 +175,7 @@ index 0000000000000000000000000000000000000000..c310a24f85be25e8cc1c8d3ba194efff
 +        "src/speechPlayer/src/speechPlayer.cpp",
 +        "src/speechPlayer/src/speechWaveGenerator.cpp",
 +    ],
++    cflags: ["-Wno-error=non-virtual-dtor"],
 +    export_include_dirs: ["src/speechPlayer/include"],
 +}
 +
@@ -296,7 +312,7 @@ index 0000000000000000000000000000000000000000..c310a24f85be25e8cc1c8d3ba194efff
 +        "soong_zip",
 +    ],
 +    tool_files: ["android/soong/espeak-data.sh"],
-+    cmd: "bash $(location android/soong/espeak-data.sh) $(location espeak_ng_tool) $(location soong_zip) " +
++    cmd: "/bin/bash $(location android/soong/espeak-data.sh) $(location espeak_ng_tool) $(location soong_zip) " +
 +        "external/espeak-ng $(genDir) $(out)",
 +}
 +
@@ -323,13 +339,14 @@ index 0000000000000000000000000000000000000000..c310a24f85be25e8cc1c8d3ba194efff
 +}
 diff --git a/android/soong/AndroidManifest.xml b/android/soong/AndroidManifest.xml
 new file mode 100644
-index 0000000000000000000000000000000000000000..025974ce421801e4840c51befab0fdcc2a5fe56c
+index 0000000000000000000000000000000000000000..55e6352c03abc0fd8490fcd509b18d14bec28828
 --- /dev/null
 +++ b/android/soong/AndroidManifest.xml
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,96 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<!-- SPDX-License-Identifier: Apache-2.0 -->
-+<!-- android/AndroidManifest.xml with the package the Gradle build sets as the namespace. -->
++<!-- android/AndroidManifest.xml with the package the Gradle build sets as the namespace,
++     and without the uses-library of the Wear OS shared library (optional; the platform does not have it). -->
 +<manifest xmlns:android="http://schemas.android.com/apk/res/android"
 +    package="com.reecedunn.espeak"
 +    android:versionCode="23"
@@ -347,9 +364,6 @@ index 0000000000000000000000000000000000000000..025974ce421801e4840c51befab0fdcc
 +        android:icon="@mipmap/icon"
 +        android:theme="@style/AppTheme"
 +        android:label="@string/app_name" >
-+        <uses-library
-+            android:name="com.google.android.wearable"
-+            android:required="false" />
 +        <meta-data
 +            android:name="com.google.android.wearable.standalone"
 +            android:value="true" />
@@ -566,3 +580,38 @@ index 0000000000000000000000000000000000000000..366d6dd10479f5e6789b5982af11ca63
 +
 +  private BuildConfig() {}
 +}
+diff --git a/src/include/compat/stdio.h b/src/include/compat/stdio.h
+index 6b55337fbd94289ce47e8a6db848b6016511ec0b..4583fb8082eb4e50116712510b4f7cdd9e457332 100644
+--- a/src/include/compat/stdio.h
++++ b/src/include/compat/stdio.h
+@@ -16,21 +16,24 @@
+  * along with this program; if not, see: <http://www.gnu.org/licenses/>.
+  */
+ 
++#ifndef _MSC_VER
++#pragma GCC system_header // Silence "warning: #include_next is a GCC extension"
++// Outside the include guard: glibc's <wchar.h> (before 2.28) includes <stdio.h> with __need_FILE
++// and __need___FILE set, to get the FILE types only, and expects the next inclusion to declare the
++// rest. A guard around this include would turn that inclusion into the only one.
++#include_next <stdio.h>
++#endif
++
+ #ifndef STDIO_H_COMPAT_SHIM
+ #define STDIO_H_COMPAT_SHIM
+ 
+ #ifdef _MSC_VER
++
+ #if _MSC_VER >= 1900 // Visual C++ 14 (Visual Studio 2015) and above...
+ #include <../ucrt/stdio.h>
+ #else
+ #include <../include/stdio.h>
+ #endif
+-#else
+-#pragma GCC system_header // Silence "warning: #include_next is a GCC extension"
+-#include_next <stdio.h>
+-#endif
+-
+-#ifdef _MSC_VER
+ 
+ #ifndef snprintf
+ #define snprintf _snprintf
