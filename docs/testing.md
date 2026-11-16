@@ -418,11 +418,15 @@ TIP_LITE=com.example.andarium.tip.lite TIP_PRO=com.example.andarium.tip.pro
 TIP_MAX=com.example.andarium.tip.max TIP_ULTRA=com.example.andarium.tip.ultra
 SHEET_DEVELOPER_NAME=example SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle
 ICP_NUMBER=示例ICP备00000000号-0A`;
-the scheme without the filter also runs `AndariumUITests`). The scheme's Test
-action pins English, so the tests that read the application's words do not
-depend on the language of the device; `LocalizationTests` names a lost pin and
-looks each language up by name, and the language a `-testLanguage` run asks
-for fails only the tests that read the English words. `SnapshotFileApiTests`
+the scheme without the filter also runs `AndariumUITests`). A row that asserts
+what an iPad app on a Mac does not do (accessibility activation of an alert's
+buttons, text that scales with the content size category, a menu's items as
+UIKit elements) is disabled there with its reason and shows as skipped. The
+scheme's Test action pins English, so the tests that read the application's
+words do not depend on the language of the device; `LocalizationTests` names a
+lost pin and looks each language up by name, and the language a `-testLanguage`
+run asks for fails only the tests that read the English words.
+`SnapshotFileApiTests`
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
@@ -477,11 +481,11 @@ bundle check refuses a build that does).
 `DeviceOrientationTests` checks UIKit's orientation numbers against the
 application's readings, the mapping to Android's rotation, the observer's begin
 and end of the device's notifications, the path from a turn to the record a
-fake guest reads on a device without sensors, and that the Simulator and a Mac,
-which have none, hold no connection for them. The Simulator cannot turn an
-iPhone's `UIDevice` under a portrait-only interface (XCUIDevice reaches the
-interface only), so the device is injected there; the real turns are checked on
-an iPhone.
+fake guest reads on a device without sensors, and that a device without them
+holds no connection for them (the Simulator has none; a Mac answers as Core
+Motion does). The Simulator cannot turn an iPhone's `UIDevice` under a
+portrait-only interface (XCUIDevice reaches the interface only), so the device
+is injected there; the real turns are checked on an iPhone.
 
 `SlowStartScreenTests` check the boot screen's slow-start notice by a clock
 the test moves, so no test waits three minutes: when the notice comes (also for
@@ -769,14 +773,17 @@ blocker in every one of them.
   `arm64-a32-corpus` and `arm64-aarch32-semantics*` check the AArch32 decoder,
   generated tables, corpus and semantic library without an engine;
   `arm64-aarch32-corpus` also proves the store-exclusive ranges the retry
-  compares and what it refuses. The corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
+  compares and what it refuses, and which retirement excess it takes. The corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
   case that differs only by a spurious store-exclusive failure (its own bytes
-  unwritten, the case's other stores in the data), and the `-interrupted`
+  unwritten, the case's other stores in the data; in a recognized
+  `exclusive-retry` loop, whole extra iterations), and the `-interrupted`
   tests provoke that failure on purpose. Only the gadget one runs the spill
   suite, whose cases store between the pair: the JIT does not lose a
   reservation there. The `-injected` tests make an attempt end as a lost
   reservation with another register or a thread register wrong, and as other
-  faults, and require that only a plain loss is retried.
+  faults, and require that only a plain loss is retried; a retry loop's excess
+  that is not whole iterations fails, and one made on every attempt fails when
+  the attempts are used up.
 - `guest-aarch32-engine-gadgets` and `-jit` boot the freestanding engine probe
   in `tests/integration/aarch32/engine_probe/` and count every `SIGILL`.
 

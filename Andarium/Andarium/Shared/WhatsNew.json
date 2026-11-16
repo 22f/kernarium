@@ -1,5 +1,30 @@
 [
   {
+    "build": 12,
+    "version": "1.0 (12)",
+    "entries": [
+      {
+        "id": "old-app-compatibility",
+        "title": "Old app compatibility",
+        "text": "If an app built for an Android version before 4.0 crashes, turn on Old app compatibility for it. Android then runs that app more like older versions did.",
+        "symbol": "clock.arrow.2.circlepath",
+        "place": "sessionSettings"
+      },
+      {
+        "id": "fixes-and-improvements",
+        "title": "Fixes and improvements",
+        "points": [
+          "Fixed the camera preview freezing after you take a photo",
+          "Fixed the camera preview lagging behind in video mode",
+          "A camera recording now ends and is saved when you leave Andarium",
+          "Fixed the start of a video recording having no sound",
+          "Fixed 3D graphics failing to start in apps that run PC programs"
+        ],
+        "symbol": "wrench.and.screwdriver.fill"
+      }
+    ]
+  },
+  {
     "build": 11,
     "version": "1.0 (11)",
     "entries": [

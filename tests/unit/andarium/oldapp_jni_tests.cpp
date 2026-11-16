@@ -15,6 +15,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <csetjmp>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -24,13 +25,20 @@
 #include <sstream>
 #include <string>
 #include <mutex>
+#include <random>
 #include <thread>
 #include <vector>
 
 #include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
+
+#if defined(__APPLE__) && defined(__aarch64__)
+#include <mach/arm/thread_status.h>
+#include <sys/ucontext.h>
+#endif
 
 #include "jni_abi.hpp"
 #include "jni_shim.hpp"
@@ -126,6 +134,8 @@ struct World {
     std::set<Ref*> revoked;     // globals that stopped being valid (what a re-entrant end of a block would make them)
     bool revoke_next = false;   // the next array function revokes the globals of every array first
     int set_fails = 0;          // the next SetByteArrayRegion calls are refused (an exception, nothing written)
+    int receiver_calls = 0;     // instance and nonvirtual calls that reached the runtime
+    Obj* last_receiver = nullptr;  // the object behind the receiver of the latest of them (null: the receiver was null)
 };
 World world;
 
@@ -320,6 +330,7 @@ bool g_no_thread_state = false;                  // the platform has no thread s
 bool g_own_default = true;
 bool (*g_own_predicate)(const void*) = nullptr;
 bool g_without_own_check = false;  // the next install gives the platform no is_own_library (not reset by reset_world)
+bool g_without_describe = false;   // the next install gives the platform no describe_method (not reset by reset_world)
 
 bool fake_is_app(const void*) {
     require(t_ended_depth == 0, "a wrapper was entered while the ended lock is held");
@@ -350,16 +361,31 @@ uint32_t fake_now() {
     WorldGuard guard;
     return world.clock_ms;
 }
+// Platform::abort_process: the layer stops the process for a call whose parameters it cannot learn. A row that expects it comes
+// back here (the_process_stops); anywhere else it fails the row.
+std::jmp_buf g_stop_jump;
+bool g_stop_expected = false;
+int g_stops = 0;
+void fake_abort() {
+    require(g_stop_expected, "the layer stops the process only where a row expects it");
+    g_stop_expected = false;
+    ++g_stops;
+    std::longjmp(g_stop_jump, 1);
+}
 bool g_baseline_fails = false;
 void* fake_alloc_baseline(size_t bytes) { return g_baseline_fails ? nullptr : std::malloc(bytes); }
-void fake_free_baseline(void* baseline) { std::free(baseline); }
+Hook<> g_in_free_baseline;  // runs inside the free of a baseline, the last step before a reclaimed block's memory goes back to the arena
+void fake_free_baseline(void* baseline) {
+    if (auto hook = g_in_free_baseline.take()) hook();
+    std::free(baseline);
+}
 bool g_writable_ok = true;
 bool g_read_only_ok = true;
 bool fake_make_writable(void*, size_t) { return g_writable_ok; }
 bool fake_make_read_only(void*, size_t) { return g_read_only_ok; }
 
 // The kinds of a method's parameters from its signature, for an ID the layer never saw being looked up.
-bool fake_describe(Env*, void* const*, void* id, bool, jobject, char* kinds, unsigned capacity, unsigned* count) {
+bool fake_describe(Env*, void* const*, void* id, bool, char* kinds, unsigned capacity, unsigned* count) {
     WorldGuard guard;
     ++world.describe_calls;
     const auto found = world.methods.find(id);
@@ -395,8 +421,16 @@ unsigned g_thunk_capacity = 1024;
 // makes JNI calls under it, and they go to the runtime's own functions).
 std::mutex g_ended_mutex;
 int g_ended_locks = 0;
+// A pause before a thread's next take of the ended lock: the thread sets t_pause_at_lock, and the hook runs on it, with no lock of the
+// fake or of the layer held, just before the lock is taken (another thread acts meanwhile).
+thread_local bool t_pause_at_lock = false;
+Hook<> g_before_lock;
 void fake_mutex_lock() {
     require(t_ended_depth == 0, "the ended lock is taken twice by one thread");
+    if (t_pause_at_lock) {
+        t_pause_at_lock = false;
+        if (auto hook = g_before_lock.take()) hook();
+    }
     g_ended_mutex.lock();
     ++t_ended_depth;
     ++g_ended_locks;
@@ -412,9 +446,29 @@ uint64_t fake_now_ns() {
                                      .count());
 }
 void fake_yield() { std::this_thread::yield(); }
+// The memory of the block record: a buffer the cases share, zero-filled again at each installation by this test code (the layer
+// never clears the record; production maps a fresh anonymous mapping). g_record_memory is replaced by a probe or a case that
+// needs its own, and g_record_fails makes the platform unable to give it.
+alignas(64) uint32_t g_record_storage[(8u << 20) / 64];
+uint32_t* g_record_memory = g_record_storage;
+size_t g_record_memory_bytes = sizeof(g_record_storage);
+bool g_record_fails = false;
+bool g_record_reset = true;
+size_t g_record_expected_bytes = 0;  // what the installation must ask for: shadow_record_bytes of its region
+void* fake_map_record(size_t bytes) {
+    if (g_record_fails) {
+        return nullptr;
+    }
+    require(bytes == g_record_expected_bytes && bytes <= g_record_memory_bytes,
+            "the layer asks for the record of its region, and the buffer covers it");
+    if (g_record_reset) {
+        std::memset(g_record_memory, 0, bytes);
+    }
+    return g_record_memory;
+}
 const Platform kPlatform{fake_is_app, fake_thread_state, fake_log, fake_make_writable, fake_make_read_only,
                          fake_describe, fake_now, fake_alloc_baseline, fake_free_baseline, fake_thunk_address, 1024,
-                         fake_is_own, fake_mutex_lock, fake_mutex_unlock, fake_now_ns, fake_yield};
+                         fake_is_own, fake_mutex_lock, fake_mutex_unlock, fake_now_ns, fake_yield, fake_map_record, fake_abort};
 
 jsize f_GetArrayLength(Env*, jarray a) {
     WorldGuard guard;
@@ -451,6 +505,7 @@ void f_SetByteArrayRegion(Env*, jarray a, jsize start, jsize len, const jbyte* b
     }
 }
 Hook<> g_after_get;  // runs inside a GetByteArrayRegion, after it copied: another thread acts meanwhile
+std::atomic<const void*> g_last_get_buffer{nullptr};  // where the latest GetByteArrayRegion that was not refused copied to
 void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
     WorldGuard guard;
     on_the_list("GetByteArrayRegion");
@@ -463,6 +518,7 @@ void f_GetByteArrayRegion(Env*, jarray a, jsize start, jsize len, jbyte* buf) {
         return;
     }
     std::memcpy(buf, bytes.data() + start, size_t(len));
+    g_last_get_buffer.store(buf, std::memory_order_release);
     if (auto hook = g_after_get.take()) {
         WorldUnlocked unlocked;
         hook();
@@ -690,16 +746,27 @@ jint f_MonitorExit(Env*, jobject o) {
     }
     return 0;
 }
+std::atomic<int> g_ref_type_asked_with_a_reference{0};  // GetObjectRefType calls that reached the runtime with a reference
+jint f_GetObjectRefType(Env*, jobject o) {
+    WorldGuard guard;
+    if (o != nullptr) ++g_ref_type_asked_with_a_reference;
+    return 0;  // JNIInvalidRefType: the fake knows no reference of the kinds a row asks about
+}
 jint f_PushLocalFrame(Env*, jint) {
     WorldGuard guard;
     not_under_mutex("PushLocalFrame under the mutex");
     world.frames.emplace_back();
     return 0;
 }
+Hook<> g_in_pop;  // runs inside a PopLocalFrame of the runtime, before it pops: another thread acts meanwhile
 jobject f_PopLocalFrame(Env*, jobject result) {
     WorldGuard guard;
     not_under_mutex("PopLocalFrame under the mutex");
     require(!world.frames.empty(), "a frame was pushed");
+    if (auto hook = g_in_pop.take()) {
+        WorldUnlocked unlocked;
+        hook();
+    }
     Obj* keep = result == nullptr ? nullptr : object_of(result);
     for (Ref* r : world.frames.back()) {
         if (world.locals.erase(r) == 1) delete r;
@@ -931,10 +998,17 @@ jobject f_NewObjectA(Env*, jclass, jmethodID m, const jvalue* a) {
     return new_local(new Obj{});
 }
 // What Java reads and writes through the receiver of an instance call.
+bool g_null_receiver_ok = false;  // a row that has the layer replace a receiver by null: the fake notes it and goes on
 void touch_receiver(jobject o) {
     WorldGuard guard;
     revoke_if_asked();
+    ++world.receiver_calls;
+    if (o == nullptr && g_null_receiver_ok) {
+        world.last_receiver = nullptr;
+        return;
+    }
     Obj* object = object_of(o);
+    world.last_receiver = object;
     world.seen_receiver.clear();
     if (object->is_array) {
         world.seen_receiver = object->bytes;
@@ -1024,6 +1098,7 @@ struct Table {
         slots[slot::IsInstanceOf] = reinterpret_cast<void*>(&f_IsInstanceOf);
         slots[slot::MonitorEnter] = reinterpret_cast<void*>(&f_MonitorEnter);
         slots[slot::MonitorExit] = reinterpret_cast<void*>(&f_MonitorExit);
+        slots[slot::GetObjectRefType] = reinterpret_cast<void*>(&f_GetObjectRefType);
         slots[slot::PushLocalFrame] = reinterpret_cast<void*>(&f_PushLocalFrame);
         slots[slot::PopLocalFrame] = reinterpret_cast<void*>(&f_PopLocalFrame);
         slots[slot::RegisterNatives] = reinterpret_cast<void*>(&f_RegisterNatives);
@@ -1066,6 +1141,7 @@ F fn(const Table& table, int slot) {
 }
 
 void reset_world() {
+    g_in_free_baseline = nullptr;
     reset_for_test();
     for (Ref* r : world.locals) delete r;
     for (Ref* r : world.globals) delete r;
@@ -1086,6 +1162,12 @@ void reset_world() {
     g_in_call = nullptr;
     g_after_get = nullptr;
     g_after_set = nullptr;
+    g_in_pop = nullptr;
+    g_before_lock = nullptr;
+    g_null_receiver_ok = false;
+    g_stop_expected = false;
+    g_stops = 0;
+    g_ref_type_asked_with_a_reference = 0;
     g_before_first_critical = nullptr;
     g_in_release_critical = nullptr;
     g_collect_ignores_locals = false;
@@ -1136,6 +1218,10 @@ Table* install(bool shadows = true, unsigned thunks = 1024) {
     if (g_without_own_check) {
         platform.is_own_library = nullptr;
     }
+    if (g_without_describe) {
+        platform.describe_method = nullptr;
+    }
+    g_record_expected_bytes = shadow_record_bytes(g_region_size);
     require(install_jni_wrappers(table->slots, platform, shadows ? g_region : nullptr, shadows ? g_region_size : 0,
                                  g_ids_at_install ? &table->env : nullptr),
             "the wrappers install");
@@ -1557,14 +1643,6 @@ void check_unknown_and_long_signatures() {
     args[1].l = made.shadow;
     fn<void (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kVoid, kArray))(f.env, f.cls, unknown, args);
     require(world.describe_calls == 1 && world.last_array_args[0] == made.object, "the answer is kept (array form)");
-
-    void* hopeless = new int(0);
-    world.methods[hopeless] = Method{"(I)V", "hopeless"};
-    world.describe_fails = true;
-    call_static_void_v(f, hopeless, 3);
-    call_static_void_v(f, hopeless, 4);
-    require(world.describe_calls == 2, "an ID that cannot be described is not asked about again");
-    world.describe_fails = false;
 
     // Twenty ints and a byte[] (more than sixteen parameters), the shadow last.
     call_static_void_v(f, f.many, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, made.shadow);
@@ -3806,6 +3884,64 @@ void check_an_elements_pointer_of_the_runtime_released_through_a_block_reaches_t
     require(block_weaks() == 1 && world.globals.size() == 1, "its own release gives the strong reference up");
 }
 
+// A pointer the runtime handed out before the process had a block is still the runtime's when a block made later for the same array
+// releases it: the layer records the runtime's pointers from the first one on, not from the first block. (Fails on a layer that
+// records them only once a block has been made: the release is taken for the application's buffer and never reaches the runtime.)
+void check_a_runtime_elements_pointer_got_before_the_first_block_is_released_by_the_runtime() {
+    for (const jint mode : {jint(0), jint(kReleaseCommit), jint(kReleaseAbort)}) {
+        Fixture f = make();
+        jobject array = byte_array(sample(64));
+        Obj* object = object_of(array);
+        object->held = true;
+        require(counters().shadows_created == 0, "no block has been made yet");
+        jbyte* theirs = get_elements(f, array);  // the runtime's pointer, before any block
+        Made made = obtain_again(f, object);      // the first block, of the same array
+        require(is_shadow_block(made.shadow) && counters().shadows_created == 1, "the first block");
+        const size_t before = world.released.size();
+        release_elements(f, made.shadow, theirs, mode);
+        require(world.released.size() == before + 1 && world.released.back() == theirs,
+                "the runtime's own Release ran with its own pointer, whatever the mode");
+        if (mode == kReleaseCommit) {  // the pointer stays valid after a commit: the record stays, and the final release finds it
+            release_elements(f, made.shadow, theirs, 0);
+            require(world.released.size() == before + 2, "the release that ends a committed pointer reached the runtime too");
+        }
+        release_elements(f, made.shadow, theirs, 0);
+        require(world.released.size() == before + (mode == kReleaseCommit ? 2 : 1), "and the record is gone after the last release");
+    }
+}
+
+// The same for a critical pointer, which another thread holds when the first block is made: its region closes at the release through
+// the block's reference, and the layer's count of that thread's regions goes down with it.
+void check_a_runtime_critical_pointer_got_before_the_first_block_closes_its_region_at_the_release() {
+    constexpr const char* kCase = "check_a_runtime_critical_pointer_got_before_the_first_block_closes_its_region_at_the_release";
+    Fixture f = make();
+    Other holder(f);
+    jobject array = byte_array(sample(64));
+    Obj* object = object_of(array);
+    object->held = true;
+    jobject global = fn<jobject (*)(Env*, jobject)>(*f.table, slot::NewGlobalRef)(f.env, array);
+    require(counters().shadows_created == 0, "no block has been made yet");
+    std::atomic<int> stage{0};
+    std::atomic<jobject> shadow{nullptr};
+    int released_by_runtime = 0;
+    std::thread thread([&] {
+        void* pointer = get_critical(holder.f, global);  // the runtime's region opens on this thread, before any block
+        stage = 1;
+        wait_for_counter(kCase, "stage", stage, 2, "the thread that holds the pointer (the first block is being made)");
+        const int before = world.release_calls;
+        release_critical(holder.f, shadow.load(), pointer, 0);
+        released_by_runtime = world.release_calls - before;
+        stage = 3;
+    });
+    wait_for_counter(kCase, "stage", stage, 1, "the first thread (the other holds a critical pointer)");
+    Made made = obtain_again(f, object);
+    require(is_shadow_block(made.shadow) && counters().shadows_created == 1, "the first block, of the same array");
+    shadow = made.shadow;
+    stage = 2;
+    thread.join();
+    require(released_by_runtime == 1 && world.critical == 0, "the runtime's own Release ran and its critical region closed");
+}
+
 // JNI_COMMIT keeps the record (the pointer stays valid); mode 0 removes it, and then the address is nobody's again; a
 // release through the real reference removes it too.
 void check_the_record_of_a_runtime_pointer_ends_with_its_release() {
@@ -3831,6 +3967,44 @@ void check_the_record_of_a_runtime_pointer_ends_with_its_release() {
     release_elements(f, made.shadow, one, 0);
     release_elements(f, made.shadow, two, 0);
     require(world.released.size() == start + 5, "each release reached the runtime");
+}
+
+// Two threads get and release the runtime's pointers at the same time: the count of the records, which the unlocked fast path
+// reads, is changed by each Get and Release under the table's lock, so that every access to it must be atomic. (The row's
+// weight is under ThreadSanitizer, which reports a plain write against the unlocked read; in a plain build it checks that the
+// pointers of both threads come back to the runtime and that nothing is left recorded.)
+void check_two_threads_getting_and_releasing_pointers_race_on_no_count() {
+    constexpr const char* kCase = "check_two_threads_getting_and_releasing_pointers_race_on_no_count";
+    Fixture f = make();
+    Other a(f);
+    Other b(f);
+    Made made = make_held(f, sample(100));
+    jobject real_a = fn<jobject (*)(Env*, jobject)>(*f.table, slot::NewGlobalRef)(a.f.env, made.shadow);
+    jobject real_b = fn<jobject (*)(Env*, jobject)>(*f.table, slot::NewGlobalRef)(b.f.env, byte_array(sample(90)));
+    const size_t start = world.released.size();
+    std::atomic<int> ready{0};
+    std::atomic<int> go{0};
+    constexpr int kRounds = 4000;
+    const auto work = [&](Fixture& local, jobject real) {
+        ++ready;
+        wait_for_counter(kCase, "go", go, 1, "a worker (the other worker is starting)");
+        for (int n = 0; n < kRounds; ++n) {
+            jbyte* pointer = get_elements(local, real);
+            release_elements(local, real, pointer, 0);
+        }
+    };
+    std::thread one([&] { work(a.f, real_a); });
+    std::thread two([&] { work(b.f, real_b); });
+    wait_for_counter(kCase, "ready", ready, 2, "the case (the workers start)");
+    go = 1;
+    one.join();
+    two.join();
+    require(world.released.size() == start + 2u * kRounds, "every release of both threads reached the runtime");
+    const size_t after = world.released.size();
+    jbyte* last = get_elements(f, real_a);
+    release_elements(f, made.shadow, last, 0);
+    release_elements(f, made.shadow, last, 0);
+    require(world.released.size() == after + 1, "and nothing stayed recorded: a second release is the application's own");
 }
 
 // ---- DeleteLocalRef only reaches the innermost frame
@@ -4143,6 +4317,1404 @@ void check_a_release_of_a_pointer_inside_a_block_is_harmless() {
     require(std::memcmp(raw_of(made), before.data(), 4096) == 0, "and the block is as it was");
 }
 
+// A block that only a weak reference holds (ended, no pin) has no array to reach while no reference can be made, as with an
+// exception pending: its reference converts to nothing, as for a null array (README: no elements, no copy). A region read then
+// copies nothing: the block's bytes are not the array's once Java has gone on with it, and nothing holds the block, so a sweep
+// may free it while it is read. The row has Java change the array after the block ended and, in its second case, lets the
+// array be collected (the layer cannot tell with an exception pending). Fails on a layer that copies the block's bytes.
+void check_a_block_nothing_holds_gives_no_bytes_while_no_reference_can_be_made() {
+    for (int collected = 0; collected < 2; ++collected) {
+        Fixture f = make();
+        const std::vector<uint8_t> payload = sample(100);
+        Made kept = make_held(f, payload);
+        end_ref(f, kept.shadow);
+        require(is_ended_block(kept.shadow) && block_weaks() == 1 && world.globals.empty(),
+                "an ended block that only a weak reference holds");
+        for (uint8_t& byte : kept.object->bytes) byte = uint8_t(~byte);  // Java went on with the array
+        if (collected != 0) {
+            kept.object->held = false;
+            collect();
+        }
+        world.exception_pending = true;
+        world.get_calls = 0;
+        world.set_calls = 0;
+        jbyte buffer[100];
+        std::memset(buffer, 0x77, sizeof(buffer));
+        fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, kept.shadow, 0, 100, buffer);
+        bool untouched = true;
+        for (jbyte byte : buffer) untouched = untouched && byte == jbyte(0x77);
+        require(untouched, "a region read of a block nothing holds copies nothing");
+        require(get_elements(f, kept.shadow) == nullptr, "and gives no elements");
+        const jbyte patch[3] = {1, 2, 3};
+        fn<SetRegion>(*f.table, slot::SetByteArrayRegion)(f.env, kept.shadow, 0, 3, patch);
+        require(world.get_calls == 0 && world.set_calls == 0, "and a region write reaches nothing: the layer called the runtime for none of them");
+        world.exception_pending = false;
+        require(kept.object->bytes[0] == uint8_t(~payload[0]) && std::memcmp(raw_of(kept), payload.data(), 100) == 0,
+                "neither the array nor the block changed");
+        require(is_ended_block(kept.shadow), "the block is as it was");
+    }
+}
+
+// ---- the block record: an address is a block only where the layer's record says a block starts exactly there
+
+constexpr uint32_t kLiveMagic = 0xb10c11feu, kEndedMagic = 0xe4ded10cu;  // the layer's marker words of a header (never read by the layer)
+constexpr size_t kHeadBytes = sizeof(void*) == 8 ? 96 : 64;              // a block's header, in front of its Dalvik object
+
+// Writes what a header holds (a block magic, then a length: at +0 and at +8 of the header, so that either layout is forged)
+// into `contents`, at the place where the header of the block whose reference is `forged` lies, when `contents` are the bytes
+// of the block whose reference is `container`.
+void forge_header(std::vector<uint8_t>& contents, const void* container, const void* forged, uint32_t magic, uint32_t length) {
+    const ptrdiff_t at = (static_cast<const uint8_t*>(forged) - kHeadBytes) - (static_cast<const uint8_t*>(container) + 16);
+    require(at >= 0 && size_t(at) + 16 <= contents.size(), "the forged header lies in the contents of the block");
+    for (const size_t layout : {size_t(0), size_t(8)}) {
+        std::memcpy(contents.data() + at + layout, &magic, sizeof(magic));
+        std::memcpy(contents.data() + at + layout + 4, &length, sizeof(length));
+    }
+}
+
+// Every use of the reference `stale`, which is no block, finds none: it is no block of either kind, its length is 0, the runtime
+// is handed null for it, nothing is read from it or written to it, and no pointer of it is released. `other` is a block that is
+// live, and stays so.
+void require_no_block_at(Fixture& f, jobject stale, const Made& other, const char* what) {
+    const std::string at = std::string(what) + ": ";
+    require(!is_shadow_block(stale) && !is_ended_block(stale), (at + "it is no block of either kind").c_str());
+    require(length_of(f, stale) == 0, (at + "its length is 0").c_str());
+    require(fn<jint (*)(Env*, jobject)>(*f.table, slot::GetObjectRefType)(f.env, stale) != kRefTypeLocal,
+            (at + "it is no local reference of the layer's").c_str());
+    require(call_static_int_v(f, f.consume, stale) == 7 && world.last_array_args.size() == 1 && world.last_array_args[0] == nullptr,
+            (at + "a call is handed null").c_str());
+    world.get_calls = 0;
+    world.set_calls = 0;
+    world.release_calls = 0;
+    jbyte buffer[8];
+    std::memset(buffer, 0x77, sizeof(buffer));
+    fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, stale, 0, 8, buffer);
+    require(buffer[0] == 0x77 && buffer[7] == 0x77, (at + "a region read copies nothing").c_str());
+    const jbyte patch[4] = {1, 2, 3, 4};
+    fn<SetRegion>(*f.table, slot::SetByteArrayRegion)(f.env, stale, 0, 4, patch);
+    require(get_elements(f, stale) == nullptr && get_critical(f, stale) == nullptr, (at + "it gives no elements").c_str());
+    release_elements(f, stale, static_cast<const uint8_t*>(stale) + 16, 0);
+    release_elements(f, stale, static_cast<const uint8_t*>(stale) + 16, kReleaseAbort);
+    require(world.get_calls == 0 && world.set_calls == 0 && world.release_calls == 0,
+            (at + "no region, no write and no release reached the runtime").c_str());
+    require(fn<jboolean (*)(Env*, jobject, jobject)>(*f.table, slot::IsSameObject)(f.env, stale, nullptr) == 1,
+            (at + "and it is the null reference").c_str());
+    const uint32_t live = counters().shadows_live, ended = counters().shadows_ended;
+    end_ref(f, stale);  // DeleteLocalRef of it ends nothing
+    require(counters().shadows_live == live && counters().shadows_ended == ended && is_shadow_block(other.shadow),
+            (at + "DeleteLocalRef of it ends nothing").c_str());
+    auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+    auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+    push(f.env, 16);
+    require(pop(f.env, stale) == nullptr && counters().shadows_live == live && counters().shadows_ended == ended &&
+                is_shadow_block(other.shadow),
+            (at + "PopLocalFrame returns null for it and keeps nothing").c_str());
+}
+
+// A reference whose block was reclaimed, and whose memory another block's contents now cover, is no block: the layer's own
+// record of where a block starts says so, not the bytes found in the arena. Two 100-byte blocks end, their arrays are collected and
+// the next block made reclaims them; the block
+// of a 600-byte array takes both chunks, and its contents hold what a header holds (a block magic and a length) at the place of
+// the second block's header. The old reference must read as no block, whichever magic the contents hold, and every use of it must
+// find none. (Fails on a layer that decides by the bytes: the old reference reads as a block of length 1234.)
+void check_a_collected_reference_covered_by_another_blocks_contents_is_no_block() {
+    for (const uint32_t magic : {kLiveMagic, kEndedMagic}) {
+        Fixture f = make();
+        Made left = make_shadow_of(f, std::vector<uint8_t>(100, 0));
+        Made old = make_shadow_of(f, std::vector<uint8_t>(100, 0));
+        std::vector<uint8_t> payload(600, 0x5a);
+        forge_header(payload, left.shadow, old.shadow, magic, 1234);
+        end_ref(f, left.shadow);
+        end_ref(f, old.shadow);
+        collect();
+        Made replacement = make_shadow_of(f, payload);
+        require(replacement.shadow == left.shadow, "the larger block takes the memory of the two reclaimed ones");
+        require(is_shadow_block(replacement.shadow) && length_of(f, replacement.shadow) == 600, "the block that is there is whole");
+        require_no_block_at(f, old.shadow, replacement, "the reclaimed block's reference, over forged contents");
+        require(replacement.object->bytes == payload && std::memcmp(raw_of(replacement), payload.data(), 600) == 0,
+                "the block that covers it is unchanged by all of them");
+        require(counters().shadows_live == 1 && length_of(f, replacement.shadow) == 600, "and still live and whole");
+    }
+}
+
+// The same inside a live block: a reference into the contents of a live block, 16-byte aligned and so a possible block start,
+// at a place where the contents hold a header, is no block either. The pin of the block that holds it is not given back by a
+// release of a pointer there.
+void check_a_forged_header_inside_a_live_blocks_contents_is_no_block() {
+    for (const uint32_t magic : {kLiveMagic, kEndedMagic}) {
+        Fixture f = make();
+        std::vector<uint8_t> payload(2000, 0x5a);
+        Made host = make_held(f, std::vector<uint8_t>(payload));
+        const uint8_t* forged = static_cast<const uint8_t*>(host.shadow) + 16 + 160 + kHeadBytes;  // a place inside the contents
+        forge_header(payload, host.shadow, forged, magic, 777);
+        fn<SetRegion>(*f.table, slot::SetByteArrayRegion)(f.env, host.shadow, 0, 2000, reinterpret_cast<const jbyte*>(payload.data()));
+        require(std::memcmp(raw_of(host), payload.data(), 2000) == 0 && is_shadow_block(host.shadow), "the host block holds the forged header");
+        require(forged + 16 + 16 <= raw_of(host) + 2000, "and the forged reference's own data lies in the contents as well");
+        jbyte* pointer = get_elements(f, host.shadow);  // the host is pinned
+        require(pointer == reinterpret_cast<jbyte*>(raw_of(host)), "the host's pin");
+        require_no_block_at(f, const_cast<uint8_t*>(forged), host, "the interior reference, over a forged header");
+        // A release of a pointer there, through a reference that is not the host's, reaches nothing and unpins nothing.
+        jobject real = byte_array(sample(4));
+        world.release_calls = 0;
+        release_elements(f, real, forged + 16, 0);
+        require(world.release_calls == 0 && is_shadow_block(host.shadow), "a release of the interior pointer reaches nothing");
+        end_ref(f, host.shadow);
+        require(is_ended_block(host.shadow) && world.globals.size() == 1, "the host's pin is still there: the ended block keeps its strong reference");
+        release_elements(f, host.shadow, pointer, 0);
+        require(world.globals.empty() && is_ended_block(host.shadow), "and its own release gives it back");
+    }
+}
+
+// Contents that look like headers everywhere: each aligned 16 bytes hold a block magic and a length (a length no block of these rows
+// has), at +0 and +8 of the unit, so that a layer that read a header from the bytes of the region would find a block at every
+// 16-byte place of them.
+constexpr uint32_t kForgedLength = 0x12345;
+std::vector<uint8_t> forged_contents(size_t n, uint32_t magic) {
+    std::vector<uint8_t> bytes(n, 0);
+    for (size_t at = 0; at + 16 <= n; at += 16) {
+        for (const size_t layout : {size_t(0), size_t(8)}) {
+            std::memcpy(bytes.data() + at + layout, &magic, sizeof(magic));
+            std::memcpy(bytes.data() + at + layout + 4, &kForgedLength, sizeof(kForgedLength));
+        }
+    }
+    return bytes;
+}
+
+// Every 16-byte place in [from, to) is checked against `starts` (the blocks that exist, live, by their reference and length): a block
+// where one starts, with its length, and none anywhere else, whatever the bytes there say.
+void require_record_matches(Fixture& f, const uint8_t* from, const uint8_t* to, const std::map<const void*, size_t>& starts,
+                            const char* what) {
+    for (const uint8_t* at = from; at < to; at += 16) {
+        const auto found = starts.find(at);
+        const bool live = is_shadow_block(at);
+        const jsize length = length_of(f, const_cast<uint8_t*>(at));
+        if (found != starts.end()) {
+            require(live && !is_ended_block(at) && length == jsize(found->second), what);
+        } else {
+            require(!live && !is_ended_block(at) && length == 0, what);
+        }
+    }
+}
+
+// Blocks that are reclaimed, and whose chunks the arena merges and cuts again at other boundaries, leave their addresses to
+// whatever is made there: chunk headers, links, the headers and the contents of other blocks. The contents here are made of
+// forged headers. After each new block, every 16-byte place of the span where the old blocks lay is a block exactly where a new
+// block starts, with that block's own length (the first of them starts at an old block's address, with another length when the
+// size differs), and none anywhere else. The first new block is up to six 16-byte steps shorter or longer than an old one, so
+// that the later boundaries fall at every 16-byte step against the old ones, and the row asserts, as a count it requires, the
+// case the record's slot compare is for: a new block that starts in the same 64-byte window as an old block's start, at another
+// 16-byte slot of it (the old reference is no block, the new one is). (Fails on a layer that decides by the bytes, and on one that
+// compares the window and not the slot.)
+void check_after_a_merge_and_a_new_cut_a_place_is_a_block_only_where_one_starts() {
+    size_t same_window_other_slot = 0;
+    for (const uint32_t magic : {kLiveMagic, kEndedMagic}) {
+        for (int delta = -6; delta <= 6; ++delta) {  // the first new block is 16 * delta bytes longer than an old one
+            Fixture f = make();
+            Made old[4] = {};
+            for (Made& block : old) block = make_shadow_of(f, forged_contents(100, magic));
+            const uint8_t* const from = static_cast<const uint8_t*>(old[0].shadow) - 16;  // the first place of the region a block can start at, or later
+            require(from >= g_region + kHeadBytes, "the span starts inside the region the layer owns");
+            const uint8_t* const to = static_cast<const uint8_t*>(old[3].shadow) + 16 + 100 + 64;
+            for (Made& block : old) end_ref(f, block.shadow);
+            collect();
+            std::map<const void*, size_t> starts;
+            std::vector<Made> fresh;
+            const uint8_t* const region_start = g_region + kHeadBytes;
+            const auto window_of = [&](const void* reference) { return size_t(static_cast<const uint8_t*>(reference) - region_start) >> 6; };
+            const auto slot_of = [&](const void* reference) { return (size_t(static_cast<const uint8_t*>(reference) - region_start) >> 4) & 3u; };
+            for (const size_t size : {size_t(int(100) + 16 * delta), size_t(100), size_t(300), size_t(37), size_t(250)}) {
+                fresh.push_back(make_shadow_of(f, forged_contents(size, magic)));
+                const Made& block = fresh.back();
+                starts[block.shadow] = size;
+                require(fresh.size() != 1 || block.shadow == old[0].shadow, "the first new block starts where the first old one did");
+                require(is_shadow_block(block.shadow), "the new block is a block");
+                require_record_matches(f, from, to, starts, "a place is a block only where a new block starts");
+                for (const Made& earlier : old) {
+                    if (window_of(earlier.shadow) == window_of(block.shadow) && slot_of(earlier.shadow) != slot_of(block.shadow)) {
+                        ++same_window_other_slot;
+                        require(length_of(f, block.shadow) == jsize(size) && !is_shadow_block(earlier.shadow) &&
+                                    !is_ended_block(earlier.shadow) && length_of(f, earlier.shadow) == 0,
+                                "an old start in the window of a new block, at another slot of it, is no block, and the new block is");
+                    }
+                }
+            }
+            require(length_of(f, old[0].shadow) == jsize(int(100) + 16 * delta), "the old reference that a new block starts at is that block, with its own length");
+            for (const Made& block : fresh) {
+                require(std::memcmp(raw_of(block), forged_contents(starts[block.shadow], magic).data(), starts[block.shadow]) == 0,
+                        "and no new block was changed by what was asked of the old addresses");
+            }
+        }
+    }
+    require(same_window_other_slot > 0, "the row met a new block in an old start's window at another slot");
+}
+
+// PopLocalFrame keeps a block the thread holds, and nothing else. The reference of a block that ended, with the pop under way on its
+// thread, is collected, and a block is made at its address by another thread (which reclaims it): the pop keeps nothing and takes no reference of
+// the new block, which that thread's single end still ends. The same for a live block of another thread, the stale reference
+// being that thread's own. The control: the thread's own block comes out of its frame and is its entry again.
+void check_a_block_made_at_a_stale_address_during_PopLocalFrame_is_left_alone() {
+    constexpr const char* kCase = "check_a_block_made_at_a_stale_address_during_PopLocalFrame_is_left_alone";
+    {
+        Fixture f = make();
+        auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+        auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+        push(f.env, 16);
+        Made mine = make_shadow_of(f, sample(100));
+        jobject out = pop(f.env, mine.shadow);
+        require(out == mine.shadow && is_shadow_block(out) && counters().shadows_live == 1, "the control: the thread's own block comes out of the frame");
+        end_ref(f, out);
+        require(is_ended_block(out), "as one entry, which one DeleteLocalRef ends");
+    }
+    for (int variant = 0; variant < 2; ++variant) {
+        Fixture f = make();
+        Other other(f);
+        auto push = fn<jint (*)(Env*, jint)>(*f.table, slot::PushLocalFrame);
+        auto pop = fn<jobject (*)(Env*, jobject)>(*f.table, slot::PopLocalFrame);
+        Made stale{};
+        if (variant == 0) {  // the reference of a block that ended; its array will be collected under the pop
+            stale = make_shadow_of(f, sample(100));
+            end_ref(f, stale.shadow);
+            require(is_ended_block(stale.shadow), "a block that ended and waits for its collection");
+        }
+        std::atomic<int> stage{0};
+        Made theirs{};
+        std::thread second([&] {
+            if (variant == 1) {  // the second thread's live block is what the first pops
+                theirs = make_shadow_of(other.f, sample(100));
+                stage = 1;
+            } else {
+                wait_for_counter(kCase, "stage", stage, 1, "the second thread (the pop is under way)");
+                collect();
+                theirs = make_shadow_of(other.f, sample(100));  // the reclaimed block's address
+                stage = 2;
+            }
+            wait_for_counter(kCase, "stage", stage, 3, "the second thread (the pop has returned)");
+            end_ref(other.f, theirs.shadow);
+            stage = 4;
+        });
+        if (variant == 1) {
+            wait_for_counter(kCase, "stage", stage, 1, "the first thread (the second thread makes its block)");
+            stale = theirs;
+        } else {
+            g_in_pop = [&] {
+                stage = 1;
+                wait_for_counter(kCase, "stage", stage, 2, "the pop (the second thread makes its block)");
+            };
+        }
+        push(f.env, 16);
+        jobject out = pop(f.env, stale.shadow);
+        stage = 3;
+        wait_for_counter(kCase, "stage", stage, 4, "the first thread (the second thread ends its block)");
+        second.join();
+        require(theirs.shadow == stale.shadow, "the second thread's block is at the address popped");
+        require(out == stale.shadow, "the reference comes back as it was");
+        require(is_ended_block(theirs.shadow) && counters().shadows_live == 0,
+                "the second thread's one end ended its block: the pop took no reference of it, and moved nothing");
+        require(counters().blocks_ended == (variant == 0 ? 2u : 1u), "each block ended once");
+    }
+}
+
+// A wrapper that took the reference of a block that ended, finds the block gone, or another block, when it takes the mutex:
+// the answer under the mutex decides. Another thread collects the block and makes (a) a block at the same address, which the
+// region read then reads within its own length; or (b) a larger block from an earlier address, whose contents hold a header
+// where the old one lay, which the read finds no block in and copies nothing.
+void check_a_block_made_at_a_collected_address_before_the_mutex_is_taken_is_acted_on_whole() {
+    constexpr const char* kCase = "check_a_block_made_at_a_collected_address_before_the_mutex_is_taken_is_acted_on_whole";
+    for (int variant = 0; variant < 2; ++variant) {
+        Fixture f = make();
+        Other other(f);
+        Made left{};
+        if (variant == 1) left = make_shadow_of(f, std::vector<uint8_t>(100, 0x11));
+        Made stale = make_shadow_of(f, std::vector<uint8_t>(100, 0x11));
+        if (variant == 1) end_ref(f, left.shadow);
+        end_ref(f, stale.shadow);
+        require(is_ended_block(stale.shadow), "a block that ended and waits for its collection");
+        std::vector<uint8_t> replacement_bytes = variant == 0 ? std::vector<uint8_t>(64, 0x22) : std::vector<uint8_t>(600, 0x5a);
+        if (variant == 1) forge_header(replacement_bytes, left.shadow, stale.shadow, kLiveMagic, 1234);
+        std::atomic<int> stage{0};
+        Made replacement{};
+        std::thread second([&] {
+            wait_for_counter(kCase, "stage", stage, 1, "the second thread (the first is about to take the mutex)");
+            collect();
+            replacement = make_shadow_of(other.f, replacement_bytes);
+            stage = 2;
+        });
+        g_before_lock = [&] {
+            stage = 1;
+            wait_for_counter(kCase, "stage", stage, 2, "the first thread (the second makes its block)");
+        };
+        t_pause_at_lock = true;
+        jbyte buffer[40];
+        std::memset(buffer, 0x77, sizeof(buffer));
+        fn<GetRegion>(*f.table, slot::GetByteArrayRegion)(f.env, stale.shadow, 0, 40, buffer);
+        t_pause_at_lock = false;
+        second.join();
+        require(variant == 1 ? replacement.shadow == left.shadow : replacement.shadow == stale.shadow,
+                "the second thread's block has the memory it was meant to cover");
+        bool copied_new = true, untouched = true;
+        for (jbyte byte : buffer) {
+            copied_new = copied_new && byte == jbyte(0x22);
+            untouched = untouched && byte == jbyte(0x77);
+        }
+        if (variant == 0) {
+            require(copied_new && !world.exception_pending, "(a) the read acted on the block that is there, within its own length");
+        } else {
+            require(untouched && !world.exception_pending, "(b) the read found no block and copied nothing");
+        }
+        require(is_shadow_block(replacement.shadow) && length_of(f, replacement.shadow) == jsize(replacement_bytes.size()) &&
+                    std::memcmp(raw_of(replacement), replacement_bytes.data(), replacement_bytes.size()) == 0,
+                "the block that is there is whole and unchanged");
+    }
+}
+
+// The record follows every transition. A run of 12000 steps (a fixed seed) of makes of 0 to 8192 bytes (their contents forged
+// headers), ends, collections and revivals; after each, the answers are the model's: at each block, its state and length; at
+// every 16-byte place inside every block the step touched and at samples of the span, no block; at each address of a block that
+// was freed, none (or the block made there since). The marker word of each header agrees with the state the model has.
+void check_the_record_follows_makes_ends_collections_and_revivals() {
+    constexpr int kSteps = 12000;
+    struct Block {
+        Made made;
+        size_t length;
+        bool held;
+        bool ended;
+    };
+    Fixture f = make();
+    std::mt19937 rng(0x5eed0001u);
+    std::vector<Block> blocks;                  // the blocks that exist as far as the model knows
+    std::vector<const uint8_t*> stale;          // addresses of blocks that were freed (the newest last)
+    std::set<const uint8_t*> ever;              // every address a block started at
+    const auto pick = [&](size_t n) { return size_t(rng() % n); };
+    const auto ref_of = [](const Block& block) { return static_cast<const uint8_t*>(block.made.shadow); };
+    const auto marker = [&](const Block& block) {
+        uint32_t magic;
+        std::memcpy(&magic, ref_of(block) - kHeadBytes + 8, sizeof(magic));
+        return magic;
+    };
+    const auto live_count = [&] { size_t n = 0; for (const Block& b : blocks) n += b.ended ? 0 : 1; return n; };
+    const auto held_count = [&] { size_t n = 0; for (const Block& b : blocks) n += b.held ? 1 : 0; return n; };
+    const uint8_t* low = nullptr;
+    const uint8_t* high = nullptr;
+    for (int step = 0; step < kSteps; ++step) {
+        const uint8_t* touched_ref = nullptr;  // the block the step made, ended or revived, by value (the vector moves)
+        size_t touched_length = 0;
+        const unsigned action = unsigned(rng() % 100);
+        if (action < 45 || blocks.empty()) {  // make
+            const size_t size = rng() % 4 == 0 ? pick(8193) : pick(300);
+            const bool held = held_count() < 40 && rng() % 3 == 0;
+            const uint32_t magic = rng() % 2 != 0 ? kLiveMagic : kEndedMagic;
+            Made made = make_shadow_of(f, forged_contents(size, magic));
+            require(is_shadow_block(made.shadow), "the new block is live");
+            made.object->held = held;
+            // Whatever the layer freed on the way is gone: a droppable ended block that is no longer ended.
+            const uint8_t* const at = static_cast<const uint8_t*>(made.shadow);
+            for (size_t i = 0; i < blocks.size();) {
+                if (blocks[i].ended && !blocks[i].held && (ref_of(blocks[i]) == at || !is_ended_block(ref_of(blocks[i])))) {
+                    stale.push_back(ref_of(blocks[i]));
+                    blocks.erase(blocks.begin() + std::ptrdiff_t(i));
+                } else {
+                    ++i;
+                }
+            }
+            stale.erase(std::remove(stale.begin(), stale.end(), at), stale.end());
+            blocks.push_back(Block{made, size, held, false});
+            ever.insert(at);
+            touched_ref = at;
+            touched_length = size;
+            if (low == nullptr || at < low) low = at;
+            if (high == nullptr || at > high) high = at;
+        } else if (action < 75 || live_count() > 40) {  // end a live block
+            const size_t start = pick(blocks.size());
+            for (size_t k = 0; k < blocks.size(); ++k) {
+                Block& block = blocks[(start + k) % blocks.size()];
+                if (!block.ended) {
+                    end_ref(f, block.made.shadow);
+                    block.ended = true;
+                    touched_ref = ref_of(block);
+                    touched_length = block.length;
+                    break;
+                }
+            }
+        } else if (action < 88) {  // a collection
+            collect();
+        } else {  // revive an ended block whose array is held
+            const size_t start = pick(blocks.size());
+            for (size_t k = 0; k < blocks.size(); ++k) {
+                Block& block = blocks[(start + k) % blocks.size()];
+                if (block.ended && block.held) {
+                    Made again = obtain_again(f, block.made.object);
+                    require(again.shadow == block.made.shadow, "an ended block is the block again");
+                    block.ended = false;
+                    touched_ref = ref_of(block);
+                    touched_length = block.length;
+                    break;
+                }
+            }
+        }
+        // The model's blocks: state, length and marker; a droppable ended block may have been freed by a sweep.
+        size_t live = 0, ended = 0;
+        for (size_t i = 0; i < blocks.size();) {
+            Block& block = blocks[i];
+            const uint8_t* ref = ref_of(block);
+            if (block.ended && !block.held && !is_ended_block(ref)) {
+                require(!is_shadow_block(ref) && length_of(f, block.made.shadow) == 0, "a freed block is no block, with no length");
+                stale.push_back(ref);
+                blocks.erase(blocks.begin() + std::ptrdiff_t(i));
+                continue;
+            }
+            if (block.ended) {
+                require(is_ended_block(ref) && !is_shadow_block(ref) && length_of(f, block.made.shadow) == jsize(block.length),
+                        "an ended block: ended, with its length");
+                require(marker(block) == kEndedMagic, "and its marker says ended");
+                ++ended;
+            } else {
+                require(is_shadow_block(ref) && !is_ended_block(ref) && length_of(f, block.made.shadow) == jsize(block.length),
+                        "a live block: live, with its length");
+                require(marker(block) == kLiveMagic, "and its marker says live");
+                ++live;
+            }
+            ++i;
+        }
+        require(counters().shadows_live == live && counters().shadows_ended == ended, "the counters count the model's blocks");
+        // Every place inside a block the step touched, and inside one other, is no block; the freed addresses are none.
+        const auto interior_is_none = [&](const uint8_t* ref, size_t length) {
+            for (const uint8_t* at = ref - kHeadBytes - 16; at < ref + 16 + length + 32; at += 16) {
+                if (at == ref) continue;
+                require(!is_shadow_block(at) && !is_ended_block(at), "no place inside a block is a block");
+            }
+        };
+        if (touched_ref != nullptr) interior_is_none(touched_ref, touched_length);
+        if (!blocks.empty()) {
+            const Block& other = blocks[pick(blocks.size())];
+            interior_is_none(ref_of(other), other.length);
+        }
+        for (size_t i = stale.size() > 32 ? stale.size() - 32 : 0; i < stale.size(); ++i) {
+            require(!is_shadow_block(stale[i]) && !is_ended_block(stale[i]) && length_of(f, const_cast<uint8_t*>(stale[i])) == 0,
+                    "the address of a freed block is no block");
+        }
+        if (low != nullptr) {
+            const uint8_t* const limit = std::min<const uint8_t*>(high + 1024, g_region + g_region_size - 64);  // inside the region the layer owns
+            for (int sample_index = 0; sample_index < 8; ++sample_index) {
+                const uint8_t* at = low + 16 * pick(size_t(limit - low) / 16);
+                bool is_start = false;
+                for (const Block& block : blocks) is_start = is_start || ref_of(block) == at;
+                if (!is_start) {
+                    require(!is_shadow_block(at) && !is_ended_block(at) && length_of(f, const_cast<uint8_t*>(at)) == 0,
+                            "a place that no block starts at is no block");
+                }
+            }
+        }
+    }
+    require(ever.size() > 50, "the run used many addresses");
+}
+
+// Readers that use stale and interior references while blocks are made, ended and collected at the same places read no block, or a
+// length that a block published at exactly that address had. Two readers hammer GetArrayLength, GetObjectRefType and the
+// state queries on a fixed set of addresses (the starts of 24 reclaimed blocks, places inside the blocks made after, and a place that
+// is not 16-byte aligned) while the maker churns blocks of mixed sizes whose contents are forged headers; the maker logs the length of
+// each block it makes at an address, and the readers' observations are checked against the log after both have been joined. The
+// row cannot pass without the readers having answered: before the churn each reader must have looked at the block that stays live and
+// at the places inside it, and every 50 steps the maker makes a block and holds it live until each reader has acknowledged a live
+// answer of exactly its length, then ends it and holds it ended until each has acknowledged an ended answer of that length; it goes
+// on only then, so each answer is checked against the one state that holds at that moment. (Under ThreadSanitizer this is the proof
+// that no reader reads a byte of the region.)
+void check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_length() {
+    constexpr const char* kCase = "check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_length";
+    constexpr int kSteps = 4000;
+    constexpr int kReaders = 2;
+    Fixture f = make();
+    std::mt19937 rng(0x5eed0002u);
+    std::mutex log_mutex;
+    std::map<const void*, std::set<size_t>> published;  // address -> the lengths of the blocks made there
+    const auto make_logged = [&](size_t size) {
+        Made made = make_shadow_of(f, forged_contents(size, rng() % 2 != 0 ? kLiveMagic : kEndedMagic));
+        std::lock_guard<std::mutex> lock(log_mutex);
+        if (is_shadow_block(made.shadow)) published[made.shadow].insert(size);
+        return made;
+    };
+    std::vector<const void*> watched;
+    // A block that stays live through the churn, read all the while: the readers must see it whole every time, and no block
+    // at the places inside it (a layer that answered "no block" for everything would pass the rest of the row).
+    constexpr size_t kAnchorBytes = 120;
+    Made anchor = make_logged(kAnchorBytes);
+    require(is_shadow_block(anchor.shadow) && length_of(f, anchor.shadow) == jsize(kAnchorBytes), "the anchor is a live block");
+    const uint8_t* const anchor_start = static_cast<const uint8_t*>(anchor.shadow);
+    const std::set<const void*> anchor_inside = {anchor_start + 16, anchor_start + 48, anchor_start + 64};
+    watched.push_back(anchor.shadow);
+    watched.insert(watched.end(), anchor_inside.begin(), anchor_inside.end());
+    {
+        std::vector<Made> first;
+        for (int i = 0; i < 24; ++i) {
+            first.push_back(make_logged(16 + rng() % 400));
+            watched.push_back(first.back().shadow);
+        }
+        for (const Made& block : first) {
+            for (const size_t offset : {size_t(1), size_t(16), size_t(48), size_t(160), size_t(256)}) {
+                watched.push_back(static_cast<const uint8_t*>(block.shadow) + offset);  // inside the block; the first is not aligned
+            }
+        }
+        for (const Made& block : first) end_ref(f, block.shadow);
+        collect();
+    }
+    struct Seen {
+        const void* address;
+        bool live, ended;
+        jsize length;
+        jint type;
+    };
+    std::vector<Seen> seen[kReaders];
+    std::atomic<size_t> anchor_seen[kReaders] = {};
+    std::atomic<size_t> inside_seen[kReaders] = {};
+    // The maker's hold: held_phase is 2n - 1 while the n-th block is held live and 2n while it is held ended; the maker changes it
+    // only after both readers wrote that phase to their acknowledgment, and a reader acknowledges after it checked its answers.
+    std::atomic<uint32_t> held_phase{0};
+    std::atomic<const void*> held_address{nullptr};
+    std::atomic<jsize> held_length{0};
+    std::atomic<uint32_t> acknowledged[kReaders] = {};
+    std::atomic<int> started{0};
+    std::atomic<bool> stop{false};
+    std::vector<std::unique_ptr<Other>> readers;
+    for (int i = 0; i < kReaders; ++i) readers.emplace_back(new Other(f));
+    std::vector<std::thread> threads;
+    for (int i = 0; i < kReaders; ++i) {
+        threads.emplace_back([&, i] {
+            Other& reader = *readers[size_t(i)];
+            ++started;
+            size_t rounds = 0;
+            while (!stop.load(std::memory_order_acquire)) {
+                const uint32_t phase = held_phase.load(std::memory_order_acquire);
+                if (phase != 0 && acknowledged[i].load(std::memory_order_relaxed) != phase) {
+                    const void* const address = held_address.load(std::memory_order_relaxed);
+                    const jsize length = held_length.load(std::memory_order_relaxed);
+                    const bool is_live = is_shadow_block(address);
+                    const bool is_ended = is_ended_block(address);
+                    const jsize got = length_of(reader.f, const_cast<void*>(address));
+                    if ((phase & 1u) != 0) {
+                        require(is_live && !is_ended && got == length &&
+                                    fn<jint (*)(Env*, jobject)>(*reader.f.table, slot::GetObjectRefType)(
+                                        reader.f.env, const_cast<void*>(address)) == kRefTypeLocal,
+                                "a block held live is a live block of its length");
+                    } else {
+                        require(!is_live && is_ended && got == length, "a block held ended is an ended block of its length");
+                    }
+                    acknowledged[i].store(phase, std::memory_order_release);
+                }
+                for (const void* address : watched) {
+                    Seen now{address, is_shadow_block(address), is_ended_block(address), length_of(reader.f, const_cast<void*>(address)),
+                             fn<jint (*)(Env*, jobject)>(*reader.f.table, slot::GetObjectRefType)(reader.f.env, const_cast<void*>(address))};
+                    if (address == anchor.shadow) {
+                        require(now.live && !now.ended && now.length == jsize(kAnchorBytes) && now.type == kRefTypeLocal,
+                                "the block that stays live is a live block of its length, whatever the churn does");
+                        ++anchor_seen[i];
+                        continue;
+                    }
+                    if (anchor_inside.count(address) != 0) {
+                        require(!now.live && !now.ended && now.length == 0 && now.type != kRefTypeLocal,
+                                "a place inside the live block is no block");
+                        ++inside_seen[i];
+                        continue;
+                    }
+                    if ((now.live || now.ended || now.length != 0 || now.type == kRefTypeLocal) && seen[i].size() < 400000) {
+                        seen[i].push_back(now);
+                    }
+                }
+                if ((++rounds & 7u) == 0) std::this_thread::yield();
+            }
+        });
+    }
+    wait_for_counter(kCase, "started", started, kReaders, "the maker (the readers start)");
+    const auto wait_for_readers = [&](const char* what, const std::function<bool(int)>& done) {
+        for (int i = 0; i < kReaders; ++i) {
+            if (!waitUntil([&] { return done(i); }, kHandOffLimit, std::chrono::microseconds(100))) {
+                uml::testing::fail(std::string(kCase) + ": the maker waited " + std::to_string(kHandOffLimit.count()) + " s for reader " +
+                                   std::to_string(i) + " to " + what);
+            }
+        }
+    };
+    wait_for_readers("look at the block that stays live and at the places inside it",
+                     [&](int i) { return anchor_seen[i].load() > 0 && inside_seen[i].load() > 0; });
+    uint32_t held_count = 0;
+    for (int step = 0; step < kSteps; ++step) {
+        if (step % 50 == 0) {
+            Made held = make_logged(1 + rng() % 300);
+            require(is_shadow_block(held.shadow), "the block to hold is made");
+            held_address.store(held.shadow, std::memory_order_relaxed);
+            held_length.store(length_of(f, held.shadow), std::memory_order_relaxed);
+            const uint32_t live_phase = 2 * ++held_count - 1;
+            held_phase.store(live_phase, std::memory_order_release);
+            wait_for_readers("acknowledge the live block", [&](int i) { return acknowledged[i].load() == live_phase; });
+            end_ref(f, held.shadow);
+            held_phase.store(live_phase + 1, std::memory_order_release);
+            wait_for_readers("acknowledge the ended block", [&](int i) { return acknowledged[i].load() == live_phase + 1; });
+        }
+        const size_t size = rng() % 3 == 0 ? rng() % 4096 : rng() % 200;
+        Made made = make_logged(size);
+        end_ref(f, made.shadow);
+        if (step % 2 == 1) collect();
+        if (step % 64 == 0) std::this_thread::yield();
+    }
+    stop.store(true, std::memory_order_release);
+    for (std::thread& thread : threads) thread.join();
+    require(g_ref_type_asked_with_a_reference == 0,
+            "GetObjectRefType of an address of the region that no block started at reached the runtime as the null reference: it was not looked up a second time");
+    for (int i = 0; i < kReaders; ++i) {
+        require(acknowledged[i].load() == 2 * held_count, "each reader acknowledged every block held live and every one held ended");
+    }
+    require(is_shadow_block(anchor.shadow) && length_of(f, anchor.shadow) == jsize(kAnchorBytes), "and it is live and whole after the churn");
+    for (int i = 0; i < kReaders; ++i) {
+        for (const Seen& now : seen[i]) {
+            const auto found = published.find(now.address);
+            const bool started_there = found != published.end();
+            require(now.length != jsize(kForgedLength), "a length read is never a forged header's");
+            require(now.length == 0 || (started_there && found->second.count(size_t(now.length)) != 0),
+                    "a length read is 0, or the length of a block made at exactly that address");
+            require(!(now.live || now.ended || now.type == kRefTypeLocal) || started_there,
+                    "an address is a block (of either kind, or a local reference) only where a block started");
+        }
+    }
+}
+
+// ---- GetObjectRefType looks at the record once, and a block made at that moment is not what the reference was
+
+// The answer for an address of the region that no block starts at is the null reference to the runtime, however a block comes to
+// stand there before the call returns. A layer that looked the address up a second time (a conversion of the reference) would
+// hand the runtime the new block's array, and nothing a fake runtime can pause on lies between the two loads of the record. So
+// the row pauses the load itself: the record is the platform's memory, supplied by the fake map_record, and its first page is
+// protected; the first acquire load of that page faults, the handler answers the load with the zero word that was there, and
+// holds the thread while another thread publishes a block at exactly the queried address, then lets the load's thread go on.
+// It exists in the test target only, on an arm64 macOS host (the handler reads the AArch64 instruction and the Mach thread
+// state), and not under a sanitizer (whose runtime makes the load). The handler accepts only a 32-bit LDAR or LDAPR and stops
+// the process with a message at any other fault; the hold is bounded; and the page, the handlers and the record are restored
+// on every way out of the row.
+#if defined(__APPLE__) && defined(__aarch64__) && !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__)
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
+#define UML_OLDAPP_NO_LOAD_PAUSE 1
+#endif
+#endif
+#else
+#define UML_OLDAPP_NO_LOAD_PAUSE 1
+#endif
+
+#ifndef UML_OLDAPP_NO_LOAD_PAUSE
+struct LoadPause {
+    void* page = nullptr;
+    size_t size = 0;
+    std::atomic<int> phase{0};  // 1: the load was caught and the page is open again; 2: the other thread has published
+    std::atomic<unsigned> faults{0};
+};
+LoadPause g_load_pause;
+[[noreturn]] void load_pause_stops(const char* message, int code) {
+    const ssize_t written = write(2, message, strlen(message));
+    (void)written;
+    _Exit(code);
+}
+uint64_t monotonic_ns() {
+    timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return uint64_t(now.tv_sec) * 1000000000u + uint64_t(now.tv_nsec);
+}
+void load_pause_handler(int, siginfo_t* info, void* context) {
+    const uintptr_t at = reinterpret_cast<uintptr_t>(info->si_addr);
+    const uintptr_t start = reinterpret_cast<uintptr_t>(g_load_pause.page);
+    if (at < start || at >= start + g_load_pause.size) {
+        load_pause_stops("oldapp_jni_tests: a fault outside the protected page of the record\n", 91);
+    }
+    auto& state = static_cast<ucontext_t*>(context)->uc_mcontext->__ss;
+    const uintptr_t pc = arm_thread_state64_get_pc(state);
+    const uint32_t instruction = *reinterpret_cast<const uint32_t*>(pc);
+    // LDAR Wt, [Xn] and LDAPR Wt, [Xn]: what an acquire load of a 32-bit word compiles to, with or without the RCpc extension.
+    const uint32_t shape = instruction & 0xfffffc00u;
+    const uint32_t target = instruction & 31u;
+    if ((shape != 0x88dffc00u && shape != 0xb8bfc000u) || target >= 29u) {
+        char message[] = "oldapp_jni_tests: the faulting instruction is not an acquire load of a word: 00000000\n";
+        for (unsigned i = 0; i < 8; ++i) message[sizeof(message) - 10 + i] = "0123456789abcdef"[(instruction >> (28 - 4 * i)) & 15u];
+        load_pause_stops(message, 92);
+    }
+    state.__x[target] = 0;  // the word that was there before the other thread publishes
+    arm_thread_state64_set_pc_fptr(state, reinterpret_cast<void (*)()>(pc + 4));
+    if (mprotect(g_load_pause.page, g_load_pause.size, PROT_READ | PROT_WRITE) != 0) {
+        load_pause_stops("oldapp_jni_tests: the record's page cannot be opened again\n", 93);
+    }
+    ++g_load_pause.faults;
+    g_load_pause.phase.store(1, std::memory_order_release);
+    const uint64_t deadline = monotonic_ns() + 10u * 1000000000u;
+    while (g_load_pause.phase.load(std::memory_order_acquire) != 2) {
+        if (monotonic_ns() > deadline) {
+            load_pause_stops("oldapp_jni_tests: the other thread did not publish within 10 s\n", 94);
+        }
+    }
+}
+// The record's memory for one row, and everything the row changes, put back by the destructor.
+class ProtectedRecord {
+public:
+    explicit ProtectedRecord(size_t bytes) : bytes_(bytes) {
+        mapping_ = mmap(nullptr, bytes_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        require(mapping_ != MAP_FAILED, "the record's memory is mapped");
+        g_record_memory = static_cast<uint32_t*>(mapping_);
+        g_record_memory_bytes = bytes_;
+    }
+    ProtectedRecord(const ProtectedRecord&) = delete;
+    ProtectedRecord& operator=(const ProtectedRecord&) = delete;
+    ~ProtectedRecord() {
+        disarm();
+        g_record_memory = g_record_storage;
+        g_record_memory_bytes = sizeof(g_record_storage);
+        munmap(mapping_, bytes_);
+    }
+    // The first page of the record is protected, and the handler is in place.
+    void arm() {
+        g_load_pause.page = mapping_;
+        g_load_pause.size = size_t(getpagesize());
+        g_load_pause.phase = 0;
+        g_load_pause.faults = 0;
+        struct sigaction action;
+        std::memset(&action, 0, sizeof(action));
+        action.sa_sigaction = load_pause_handler;
+        action.sa_flags = SA_SIGINFO;
+        sigemptyset(&action.sa_mask);
+        require(sigaction(SIGBUS, &action, &old_bus_) == 0 && sigaction(SIGSEGV, &action, &old_segv_) == 0, "the fault handlers");
+        armed_ = true;
+        require(mprotect(mapping_, g_load_pause.size, PROT_NONE) == 0, "the first page of the record is protected");
+    }
+    void disarm() {
+        if (!armed_) return;
+        armed_ = false;
+        mprotect(mapping_, g_load_pause.size, PROT_READ | PROT_WRITE);
+        sigaction(SIGBUS, &old_bus_, nullptr);
+        sigaction(SIGSEGV, &old_segv_, nullptr);
+        g_load_pause.page = nullptr;
+    }
+
+private:
+    void* mapping_ = nullptr;
+    size_t bytes_;
+    bool armed_ = false;
+    struct sigaction old_bus_;
+    struct sigaction old_segv_;
+};
+#endif
+
+void check_get_object_ref_type_looks_at_the_record_once() {
+    constexpr const char* kCase = "check_get_object_ref_type_looks_at_the_record_once";
+#ifdef UML_OLDAPP_NO_LOAD_PAUSE
+    std::printf("%s: skipped: it intercepts an AArch64 acquire load in the signal context, so it needs an arm64 macOS host and no sanitizer\n",
+                kCase);
+#else
+    ProtectedRecord record(shadow_record_bytes(sizeof(g_shadow_region)));
+    Fixture f = make();
+    Other writer(f);
+    void* const candidate = g_region + kHeadBytes + 16;
+    require(!is_shadow_block(candidate), "the address starts empty");
+    Made published{};
+    std::thread maker([&] {
+        wait_for_counter(kCase, "the pause", g_load_pause.phase, 1, "the writer (the query's load is caught)");
+        published = make_shadow_of(writer.f, sample(100));
+        require(published.shadow == candidate, "the writer publishes a block at exactly the queried address");
+        g_load_pause.phase.store(2, std::memory_order_release);
+    });
+    record.arm();
+    const jint type = fn<jint (*)(Env*, jobject)>(*f.table, slot::GetObjectRefType)(f.env, candidate);
+    maker.join();
+    record.disarm();
+    require(g_load_pause.faults.load() == 1 && g_load_pause.phase.load() == 2, "the one load of the record was caught and let go on");
+    require(is_shadow_block(candidate) && length_of(f, candidate) == 100, "the block was published before the query went on");
+    require(type == 0, "the answer follows the one load: no block (invalid)");
+    require(g_ref_type_asked_with_a_reference == 0, "and the runtime was handed the null reference, not the block that appeared");
+#endif
+}
+
+// The block record has its own memory, which the platform gives and the layer never clears; a region it cannot cover gets no
+// shadows. The layer asks for the record of its region and for nothing else; it writes nothing to the memory it is given at the
+// installation (the platform's memory is zero-filled); and no shadow is made where the record cannot be had, the region's base is
+// not 16-byte aligned or the region is larger than the record can describe.
+void check_shadows_need_a_record_the_region_can_be_described_by() {
+    const auto installs_nothing = [&](void* region, size_t size, const char* what, const Platform& platform = kPlatform) {
+        reset_world();
+        Table* table = new Table;
+        g_record_expected_bytes = shadow_record_bytes(size);
+        require(install_jni_wrappers(table->slots, platform, region, size, &table->env), what);
+        require(table->slots[slot::GetArrayLength] == reinterpret_cast<void*>(&f_GetArrayLength) &&
+                    table->slots[slot::GetByteArrayRegion] == reinterpret_cast<void*>(&f_GetByteArrayRegion),
+                what);
+        require(!is_shadow_block(region) && counters().shadows_created == 0, what);
+    };
+    g_record_fails = true;
+    installs_nothing(g_shadow_region, sizeof(g_shadow_region), "the platform cannot give the record: nothing is intercepted");
+    g_record_fails = false;
+    Platform without_record = kPlatform;
+    without_record.map_record = nullptr;
+    installs_nothing(g_shadow_region, sizeof(g_shadow_region), "a platform with no map_record: nothing is intercepted", without_record);
+    installs_nothing(g_shadow_region + 8, sizeof(g_shadow_region) - 16, "a region whose base is not 16-byte aligned: nothing is intercepted");
+    installs_nothing(g_shadow_region, kMaxShadowBytes + 16, "a region the record cannot describe: nothing is intercepted");
+    // The record is asked for by the size of the region, and what the platform gives is not written at the installation.
+    g_record_reset = false;
+    std::memset(g_record_storage, 0x5a, shadow_record_bytes(sizeof(g_shadow_region)));
+    {
+        reset_world();
+        Table* table = new Table;
+        g_record_expected_bytes = shadow_record_bytes(sizeof(g_shadow_region));
+        require(install_jni_wrappers(table->slots, kPlatform, g_shadow_region, sizeof(g_shadow_region), &table->env), "installs");
+        require(table->slots[slot::GetArrayLength] != reinterpret_cast<void*>(&f_GetArrayLength), "and intercepts");
+        bool untouched = true;
+        for (size_t i = 0; i < shadow_record_bytes(sizeof(g_shadow_region)) / sizeof(uint32_t); ++i) untouched = untouched && g_record_storage[i] == 0x5a5a5a5au;
+        require(untouched, "the installation wrote nothing to the memory of the record");
+    }
+    g_record_reset = true;
+}
+
+// Only the layer's reclaim removes a block from the record. A block whose array the collector has cleared is still an ended block
+// of its length (GetArrayLength says it; the wrappers find no array behind it and act as for null); the next sweep, a creation
+// after the collection, reclaims it, and its reference is then no block, or the block that is made at exactly that address.
+void check_a_collected_block_is_an_ended_block_of_its_length_until_a_sweep_reclaims_it() {
+    Fixture f = make();
+    Made left = make_shadow_of(f, sample(100));  // live: it keeps the freed memory from starting before the block
+    Made gone = make_shadow_of(f, sample(100));
+    end_ref(f, gone.shadow);
+    collect();
+    require(is_ended_block(gone.shadow) && !is_shadow_block(gone.shadow) && length_of(f, gone.shadow) == 100 &&
+                counters().shadows_ended == 1 && counters().blocks_collected == 0,
+            "collected and not reclaimed: still an ended block, of its length");
+    require(get_elements(f, gone.shadow) == nullptr, "and the wrappers find no array behind it");
+    require(call_static_int_v(f, f.consume, gone.shadow) == 7 && world.last_array_args.size() == 1 && world.last_array_args[0] == nullptr,
+            "a call is handed null");
+    Made next = make_shadow_of(f, sample(300));  // a creation after the collection sweeps it
+    require(counters().blocks_collected == 1 && counters().shadows_ended == 0, "the sweep reclaimed it");
+    require(next.shadow == gone.shadow && !is_ended_block(gone.shadow) && is_shadow_block(gone.shadow) && length_of(f, gone.shadow) == 300,
+            "its address is now the block made there, with that block's length");
+    require(is_shadow_block(left.shadow) && length_of(f, left.shadow) == 100, "the other block is as it was");
+}
+
+// The record is cleared before the memory of a reclaimed block goes back to the arena: by the time the block's baseline is freed (the
+// last step before the release) the reclaimed block's reference is already no block, of either kind, with no length, while the block
+// beside it is as it was. (Fails on a layer that clears the record after the release: another block could be made at the address
+// and published, and the clear would then take that block out of the record.)
+void check_the_record_is_cleared_before_the_memory_goes_back_to_the_arena() {
+    Fixture f = make();
+    Made left = make_shadow_of(f, sample(100));  // live beside it
+    Made gone = make_shadow_of(f, sample(100));
+    end_ref(f, gone.shadow);
+    collect();
+    int frees = 0;
+    g_in_free_baseline = [&] {
+        ++frees;
+        require(!is_shadow_block(gone.shadow) && !is_ended_block(gone.shadow) && length_of(f, gone.shadow) == 0,
+                "the reclaimed block's reference is no block by the time its baseline is freed");
+        require(is_shadow_block(left.shadow) && length_of(f, left.shadow) == 100, "the block beside it is as it was");
+    };
+    Made next = make_shadow_of(f, sample(300));  // a creation after the collection sweeps the ended block
+    require(frees == 1 && counters().blocks_collected == 1, "the sweep reclaimed it, and the hook ran once");
+    require(is_shadow_block(next.shadow), "and the creation went on");
+}
+
+// ---- every call form converts once a shadow may have reached the application: the current counts decide nothing
+//
+// A call hands the runtime what the layer made of each reference in it: the array for a block, null for any other address of the
+// region. The numbers of live and ended blocks say nothing about that: both are zero while a block is revived (counted live after
+// its contents are synchronized) or built, and after the last block was reclaimed or never published, while an application
+// keeps the address of a block it once had.
+
+// The methods the rows below call. Each form hands the runtime one reference that the row chooses, as the byte[] argument of a
+// method or as the receiver of one, so what the fake runtime receives says what the layer made of it.
+struct CallKit {
+    jmethodID take;   // ([B)Ljava/lang/Object;  (instance)
+    jmethodID touch;  // ()Ljava/lang/Object;    (instance)
+    jobject plain;    // a real object: the receiver of the argument forms
+};
+CallKit make_call_kit(Fixture& f) {
+    auto get_method = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetMethodID);
+    return CallKit{get_method(f.env, f.cls, "take", "([B)Ljava/lang/Object;"), get_method(f.env, f.cls, "touch", "()Ljava/lang/Object;"),
+                   string_object()};
+}
+
+jobject call_nonvirtual_object_v(Fixture& f, jobject receiver, jmethodID m, ...) {
+    va_list ap;
+    va_start(ap, m);
+    jobject r = fn<jobject (*)(Env*, jobject, jclass, jmethodID, va_list)>(*f.table, nonvirtual_slot(kObject, kVa))(f.env, receiver, f.cls, m, ap);
+    va_end(ap);
+    return r;
+}
+jobject construct_v(Fixture& f, jmethodID m, ...) {
+    va_list ap;
+    va_start(ap, m);
+    jobject r = fn<jobject (*)(Env*, jclass, jmethodID, va_list)>(*f.table, slot::NewObjectV)(f.env, f.cls, m, ap);
+    va_end(ap);
+    return r;
+}
+
+struct CallForm {
+    const char* name;
+    bool receiver;  // the reference is the receiver of the call; otherwise it is the byte[] argument
+    void (*issue)(Fixture&, const CallKit&, jobject);
+};
+using ObjectA = jobject (*)(Env*, jobject, jmethodID, const jvalue*);
+using NonvirtualA = jobject (*)(Env*, jobject, jclass, jmethodID, const jvalue*);
+const CallForm kCallForms[] = {
+    {"CallStaticIntMethodV", false, [](Fixture& f, const CallKit&, jobject o) { (void)call_static_int_v(f, f.consume, o); }},
+    {"CallStaticIntMethodA", false,
+     [](Fixture& f, const CallKit&, jobject o) {
+         jvalue a[1] = {};
+         a[0].l = o;
+         (void)fn<jint (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kInt, kArray))(f.env, f.cls, f.consume, a);
+     }},
+    {"CallStaticIntMethod", false,
+     [](Fixture& f, const CallKit&, jobject o) {
+         (void)fn<jint (*)(Env*, jclass, jmethodID, ...)>(*f.table, static_call_slot(kInt, kVarargs))(f.env, f.cls, f.consume, o);
+     }},
+    {"CallStaticVoidMethodV", false, [](Fixture& f, const CallKit&, jobject o) { call_static_void_v(f, f.consume_void, jint(1), o); }},
+    {"CallStaticVoidMethodA", false,
+     [](Fixture& f, const CallKit&, jobject o) {
+         jvalue a[2] = {};
+         a[0].z = 1;
+         a[1].l = o;
+         fn<void (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kVoid, kArray))(f.env, f.cls, f.consume_void, a);
+     }},
+    {"CallStaticVoidMethod", false,
+     [](Fixture& f, const CallKit&, jobject o) {
+         fn<void (*)(Env*, jclass, jmethodID, ...)>(*f.table, static_call_slot(kVoid, kVarargs))(f.env, f.cls, f.consume_void, jint(1), o);
+     }},
+    {"CallObjectMethodV", false, [](Fixture& f, const CallKit& k, jobject o) { (void)call_object_v(f, k.plain, k.take, o); }},
+    {"CallObjectMethodA", false,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         jvalue a[1] = {};
+         a[0].l = o;
+         (void)fn<ObjectA>(*f.table, call_slot(kObject, kArray))(f.env, k.plain, k.take, a);
+     }},
+    {"CallObjectMethod", false,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         (void)fn<jobject (*)(Env*, jobject, jmethodID, ...)>(*f.table, call_slot(kObject, kVarargs))(f.env, k.plain, k.take, o);
+     }},
+    {"CallNonvirtualObjectMethodV", false, [](Fixture& f, const CallKit& k, jobject o) { (void)call_nonvirtual_object_v(f, k.plain, k.take, o); }},
+    {"CallNonvirtualObjectMethodA", false,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         jvalue a[1] = {};
+         a[0].l = o;
+         (void)fn<NonvirtualA>(*f.table, nonvirtual_slot(kObject, kArray))(f.env, k.plain, f.cls, k.take, a);
+     }},
+    {"CallNonvirtualObjectMethod", false,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         (void)fn<jobject (*)(Env*, jobject, jclass, jmethodID, ...)>(*f.table, nonvirtual_slot(kObject, kVarargs))(f.env, k.plain, f.cls, k.take, o);
+     }},
+    {"NewObjectV", false, [](Fixture& f, const CallKit&, jobject o) { (void)construct_v(f, f.construct, o); }},
+    {"NewObjectA", false,
+     [](Fixture& f, const CallKit&, jobject o) {
+         jvalue a[1] = {};
+         a[0].l = o;
+         (void)fn<jobject (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, slot::NewObjectA)(f.env, f.cls, f.construct, a);
+     }},
+    {"NewObject", false,
+     [](Fixture& f, const CallKit&, jobject o) {
+         (void)fn<jobject (*)(Env*, jclass, jmethodID, ...)>(*f.table, slot::NewObject)(f.env, f.cls, f.construct, o);
+     }},
+    {"CallObjectMethodV (receiver)", true, [](Fixture& f, const CallKit& k, jobject o) { (void)call_object_v(f, o, k.touch); }},
+    {"CallObjectMethodA (receiver)", true,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         const jvalue none[1] = {};
+         (void)fn<ObjectA>(*f.table, call_slot(kObject, kArray))(f.env, o, k.touch, none);
+     }},
+    {"CallObjectMethod (receiver)", true,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         (void)fn<jobject (*)(Env*, jobject, jmethodID, ...)>(*f.table, call_slot(kObject, kVarargs))(f.env, o, k.touch);
+     }},
+    {"CallNonvirtualObjectMethodV (receiver)", true, [](Fixture& f, const CallKit& k, jobject o) { (void)call_nonvirtual_object_v(f, o, k.touch); }},
+    {"CallNonvirtualObjectMethodA (receiver)", true,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         const jvalue none[1] = {};
+         (void)fn<NonvirtualA>(*f.table, nonvirtual_slot(kObject, kArray))(f.env, o, f.cls, k.touch, none);
+     }},
+    {"CallNonvirtualObjectMethod (receiver)", true,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         (void)fn<jobject (*)(Env*, jobject, jclass, jmethodID, ...)>(*f.table, nonvirtual_slot(kObject, kVarargs))(f.env, o, f.cls, k.touch);
+     }},
+};
+
+Obj g_not_reached;  // what the fake notes before a call: it is never handed out, so a call that did not reach the runtime shows
+void forget_the_last_call() {
+    WorldGuard guard;
+    world.last_call.clear();
+    world.last_array_args.assign(1, &g_not_reached);
+    world.receiver_calls = 0;
+    world.last_receiver = &g_not_reached;
+}
+// The object behind the reference the runtime was handed by the call since forget_the_last_call, or null when it was handed null.
+Obj* runtime_was_handed(const CallForm& form) {
+    WorldGuard guard;
+    const std::string at = std::string(form.name) + ": ";
+    if (form.receiver) {
+        require(world.receiver_calls == 1 && world.last_receiver != &g_not_reached, (at + "the call reached the runtime once").c_str());
+        return world.last_receiver;
+    }
+    require(!world.last_call.empty() && world.last_array_args.size() == 1 && world.last_array_args[0] != &g_not_reached,
+            (at + "the call reached the runtime with its one reference").c_str());
+    return world.last_array_args[0];
+}
+
+// A block is revived while another thread calls with its old pointer: the array is obtained again, the block is live in the record
+// and neither counted live nor ended (the live count follows the synchronization), and the pointer is a kept reference of a
+// reachable array, so every call form must give the runtime a reference of its own to the array. (Fails on a layer that skips the
+// conversion while the counts are zero: the runtime is handed the address of the block.)
+void check_a_call_during_a_revival_is_handed_the_array_by_a_reference_of_the_runtime() {
+    constexpr const char* kCase = "check_a_call_during_a_revival_is_handed_the_array_by_a_reference_of_the_runtime";
+    for (const CallForm& form : kCallForms) {
+        Fixture f = make();
+        const CallKit kit = make_call_kit(f);
+        Other caller_env(f);
+        Made x = make_held(f, std::vector<uint8_t>(100, 0x11));
+        end_ref(f, x.shadow);
+        require(is_ended_block(x.shadow) && counters().shadows_ended == 1, "the block ended, and its array is reachable");
+        std::atomic<bool> tried_the_lock{false}, finished{false};
+        std::thread caller;
+        int pauses = 0;
+        forget_the_last_call();
+        g_before_lock = [&] { tried_the_lock = true; };
+        g_after_get = [&] {  // the revival copies the array into the block, under the mutex
+            ++pauses;
+            require(counters().shadows_live == 0 && counters().shadows_ended == 0 && counters().blocks_revived == 0,
+                    "the revival has left the ended count and not yet joined the live count");
+            require(is_shadow_block(x.shadow) && length_of(f, x.shadow) == 100, "and the record says the block is live and whole");
+            caller = std::thread([&] {
+                t_pause_at_lock = true;
+                form.issue(caller_env.f, kit, x.shadow);
+                t_pause_at_lock = false;
+                finished = true;
+            });
+            // A conversion waits for the mutex the revival holds; a call that skips it reaches the runtime at once.
+            require(waitUntil([&] { return tried_the_lock.load() || finished.load(); }, kHandOffLimit),
+                    (std::string(kCase) + ": the call neither waited for the mutex nor finished").c_str());
+        };
+        Made again = obtain_again(f, x.object);
+        require(pauses == 1 && caller.joinable(), "the revival paused once, and the call was made meanwhile");
+        caller.join();
+        require(again.shadow == x.shadow && counters().shadows_live == 1 && counters().blocks_revived == 1, "the array has its block back");
+        require(runtime_was_handed(form) == x.object, (std::string(form.name) + ": the runtime was handed the array").c_str());
+    }
+}
+
+// The address of a block that is gone is no block, whichever numbers are zero: after a failed creation reclaimed the last block, and
+// while a block is being built at that very address (nothing is published, nothing is counted), every call form gives the runtime
+// null for it, and no address of the region. (Fails on a layer that skips the conversion while the counts are zero.)
+void check_a_call_with_the_address_of_a_block_that_is_gone_is_handed_null() {
+    for (const CallForm& form : kCallForms) {
+        Fixture f = make();
+        const CallKit kit = make_call_kit(f);
+        Other reader(f);
+        Made x = make_shadow_of(f, std::vector<uint8_t>(100, 0x11));
+        end_ref(f, x.shadow);
+        collect();
+        g_null_receiver_ok = true;
+        // (a) a replacement is being built at x's address: its contents are copied in, nothing is published or counted
+        int pauses = 0;
+        g_after_get = [&] {
+            ++pauses;
+            require(counters().shadows_live == 0 && counters().shadows_ended == 0, "no block is counted while the replacement is built");
+            require(!is_shadow_block(x.shadow) && !is_ended_block(x.shadow) && length_of(f, x.shadow) == 0, "and none is published yet");
+            require(static_cast<const uint8_t*>(g_last_get_buffer.load()) - 16 == x.shadow, "the replacement is being built at x's address");
+            std::thread([&] {
+                forget_the_last_call();
+                form.issue(reader.f, kit, x.shadow);
+                require(runtime_was_handed(form) == nullptr, (std::string(form.name) + ": (a) the runtime was handed null").c_str());
+            }).join();
+        };
+        Made y = make_shadow_of(f, std::vector<uint8_t>(100, 0x66));
+        require(pauses == 1 && y.shadow == x.shadow, "the replacement took x's address");
+        // (b) the replacement ended and was collected; the next creation fails after it has reclaimed it: nothing is left
+        end_ref(f, y.shadow);
+        collect();
+        g_baseline_fails = true;
+        Made declined = make_shadow_of(f, std::vector<uint8_t>(100, 0x77));
+        g_baseline_fails = false;
+        require(!is_shadow_block(declined.shadow) && counters().shadows_live == 0 && counters().shadows_ended == 0 &&
+                    counters().blocks_collected == 2,
+                "every block was reclaimed, and the failed creation published none");
+        require(!is_shadow_block(x.shadow) && !is_ended_block(x.shadow) && length_of(f, x.shadow) == 0, "x's address is no block");
+        forget_the_last_call();
+        form.issue(f, kit, x.shadow);
+        require(runtime_was_handed(form) == nullptr, (std::string(form.name) + ": (b) the runtime was handed null").c_str());
+    }
+}
+
+// A setup that is refused leaves no query bounds behind: the queries range-test an address before they read the record, and a
+// refused attempt after an attempt that was refused later (the table could not be written, the record was already mapped) must not
+// leave the range of the first for an address to match with no record to read. A fresh refusal and the retry sequence both answer
+// "no block" for an address inside the region. (Fails with a null dereference on a layer that keeps the bounds.)
+void check_a_refused_install_leaves_no_query_bounds() {
+    const void* const inside = g_shadow_region + kHeadBytes + 16;
+    const auto require_no_block = [&](const char* what) {
+        require(!is_shadow_block(inside) && !is_ended_block(inside), what);
+    };
+    {  // a fresh install whose record cannot be had
+        reset_world();
+        Table* table = new Table;
+        g_record_expected_bytes = shadow_record_bytes(sizeof(g_shadow_region));
+        g_record_fails = true;
+        require(install_jni_wrappers(table->slots, kPlatform, g_shadow_region, sizeof(g_shadow_region), &table->env), "the refused install returns");
+        g_record_fails = false;
+        require_no_block("a fresh install without a record: an address of the region is no block");
+    }
+    {  // the table cannot be written, and the retry cannot have its record
+        reset_world();
+        Table* table = new Table;
+        g_record_expected_bytes = shadow_record_bytes(sizeof(g_shadow_region));
+        g_writable_ok = false;
+        require(!install_jni_wrappers(table->slots, kPlatform, g_shadow_region, sizeof(g_shadow_region), &table->env),
+                "the first attempt is refused: the table cannot be written");
+        require_no_block("after the first refusal: an address of the region is no block");
+        g_writable_ok = true;
+        g_record_fails = true;
+        require(install_jni_wrappers(table->slots, kPlatform, g_shadow_region, sizeof(g_shadow_region), &table->env),
+                "the retry returns, with shadows off");
+        g_record_fails = false;
+        require(table->slots[slot::GetArrayLength] == reinterpret_cast<void*>(&f_GetArrayLength), "and leaves the table as it was");
+        require_no_block("after the retry without a record: an address of the region is no block");
+    }
+    {  // a retry that works after a refusal makes blocks
+        reset_world();
+        Table* table = new Table;
+        g_record_expected_bytes = shadow_record_bytes(sizeof(g_shadow_region));
+        g_writable_ok = false;
+        require(!install_jni_wrappers(table->slots, kPlatform, g_shadow_region, sizeof(g_shadow_region), &table->env), "refused");
+        g_writable_ok = true;
+        require(install_jni_wrappers(table->slots, kPlatform, g_shadow_region, sizeof(g_shadow_region), &table->env), "and then accepted");
+        require(table->slots[slot::GetArrayLength] != reinterpret_cast<void*>(&f_GetArrayLength), "wrapped");
+    }
+    g_record_fails = false;
+    g_writable_ok = true;
+}
+
+// ---- a call never reaches the runtime unconverted: the parameters of a method are known, or the process stops
+//
+// Which of a call's values are references is known from the method: its signature at the lookup, else the platform's reflection
+// at the first call. Nothing bounds the number of methods or of their parameters, and a failure to learn is not remembered. Where
+// the parameters cannot be had at the moment of a call, the layer cannot tell a block's address from an integer, and the runtime
+// would take it for a reference: the application's call does not reach it, and the process stops after one line in the log (a
+// platform caller's call is forwarded, receiver converted, arguments as they are).
+
+// Runs `call`, which must not return: the layer stops the process (Platform::abort_process) and the fake's stop comes back here.
+template <class F>
+bool the_process_stops(F&& call) {
+    const int before = g_stops;
+    g_stop_expected = true;
+    if (setjmp(g_stop_jump) == 0) {
+        call();
+        g_stop_expected = false;
+        return false;
+    }
+    return g_stops == before + 1;
+}
+size_t stop_lines() {
+    WorldGuard guard;
+    size_t n = 0;
+    for (const auto& line : world.logs) n += line.message.find("cannot be learned") != std::string::npos ? 1 : 0;
+    return n;
+}
+
+jmethodID unseen_method(const char* signature) {
+    WorldGuard guard;
+    void* id = new int(0);  // an ID the layer never saw being looked up (FromReflectedMethod makes such)
+    world.methods[id] = Method{signature, "unseen"};
+    return static_cast<jmethodID>(id);
+}
+
+// More methods than the registry had slots (and than any probe could place), and more parameters than its pool held: every one is
+// known from its lookup, and a shadow passed to it is converted. (Fails on a registry of fixed size: the call is forwarded
+// unchanged and the fake runtime is handed the block.)
+void check_every_method_the_application_looks_up_is_known() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, sample(16));  // a shadow may be in the application's hands from here on
+    auto get_static = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetStaticMethodID);
+    std::vector<jmethodID> ids;
+    for (int i = 0; i < 20000; ++i) ids.push_back(get_static(f.env, f.cls, "m", "(I[B)I"));
+    for (size_t i = 0; i < ids.size(); i += (i < 100 || i + 100 >= ids.size()) ? 1 : 197) {
+        forget_the_last_call();
+        require(call_static_int_v(f, ids[i], 3, made.shadow) == 7 && world.last_array_args.size() == 1 &&
+                    world.last_array_args[0] == made.object,
+                "a method looked up among twenty thousand: its shadow is converted");
+    }
+    const std::string wide_signature = "(" + std::string(254, 'I') + "[B)V";
+    std::vector<jmethodID> wide;
+    for (int i = 0; i < 300; ++i) wide.push_back(get_static(f.env, f.cls, "w", wide_signature.c_str()));
+    jvalue args[255] = {};
+    args[254].l = made.shadow;
+    for (jmethodID m : wide) {
+        forget_the_last_call();
+        fn<void (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kVoid, kArray))(f.env, f.cls, m, args);
+        require(world.last_array_args.size() == 1 && world.last_array_args[0] == made.object,
+                "a method of 255 parameters among three hundred such: its shadow is converted");
+    }
+    require(world.describe_calls == 0 && g_stops == 0, "every method was known from its lookup: none was asked about, none stopped");
+}
+
+// An ID the layer must describe at its call, and that the platform cannot describe, is not remembered as undescribable: the call
+// does not reach the runtime, the process is stopped (one line each time), and the next call asks the platform again and goes
+// through once it can. (Fails on a layer that remembers the failure: no second question, and the call is forwarded unchanged.)
+void check_a_method_that_cannot_be_described_stops_the_call_and_is_asked_about_again() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, sample(16));
+    jmethodID unseen = unseen_method("(I[B)I");
+    world.describe_fails = true;
+    forget_the_last_call();
+    require(the_process_stops([&] { (void)call_static_int_v(f, unseen, 5, made.shadow); }), "the call in the V form stops the process");
+    require(world.last_call.empty() && world.describe_calls == 1 && stop_lines() == 1, "it did not reach the runtime; one question, one line");
+    jvalue args[2] = {};
+    args[0].i = 5;
+    args[1].l = made.shadow;
+    require(the_process_stops([&] {
+                (void)fn<jint (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kInt, kArray))(f.env, f.cls, unseen, args);
+            }),
+            "and in the A form");
+    require(world.last_call.empty() && world.describe_calls == 2 && stop_lines() == 2, "the failure was not remembered: it was asked about again");
+    world.describe_fails = false;
+    require(call_static_int_v(f, unseen, 5, made.shadow) == 7 && world.last_array_args.size() == 1 && world.last_array_args[0] == made.object &&
+                world.describe_calls == 3,
+            "once the platform can say, the call goes through converted");
+    require(call_static_int_v(f, unseen, 6, made.shadow) == 7 && world.describe_calls == 3, "and the answer is kept");
+}
+
+// Every other way the parameters can be unobtainable at a call stops it too, and none lets the runtime see the block's address:
+// nothing to describe from (a platform without reflection), no method ID (the runtime aborts on that itself), and no memory for the
+// method's node (the lookup then stored nothing, and the first call learns it again once memory is back). A method is described
+// from its ID alone, so a null receiver or class is no cause: an instance call without a receiver is forwarded for the runtime to
+// refuse (it aborts on a null receiver), and a static call with a null class runs (see the row for it).
+void check_the_other_causes_of_unknown_parameters_stop_the_call() {
+    {
+        g_without_describe = true;
+        Fixture f = make();
+        g_without_describe = false;
+        Made made = make_shadow_of(f, sample(16));
+        jmethodID unseen = unseen_method("([B)I");
+        forget_the_last_call();
+        require(the_process_stops([&] { (void)call_static_int_v(f, unseen, made.shadow); }) && world.last_call.empty() && stop_lines() == 1,
+                "a platform that cannot describe: the call stops");
+        require(the_process_stops([&] { (void)call_static_int_v(f, nullptr, made.shadow); }) && world.last_call.empty() && stop_lines() == 2,
+                "no method ID: the call stops");
+    }
+    {
+        Fixture f = make();
+        const CallKit kit = make_call_kit(f);
+        Made made = make_shadow_of(f, sample(16));
+        jmethodID unseen = unseen_method("([B)Ljava/lang/Object;");
+        forget_the_last_call();
+        g_null_receiver_ok = true;  // the fake notes a null receiver and goes on; the real runtime aborts on it
+        (void)call_object_v(f, nullptr, unseen, made.shadow);
+        g_null_receiver_ok = false;
+        require(g_stops == 0 && world.describe_calls == 1 && !world.last_call.empty() && world.last_array_args.size() == 1 &&
+                    world.last_array_args[0] == made.object,
+                "an instance call without a receiver is learned from the ID and forwarded converted: no stop of the layer's");
+        (void)kit;
+    }
+    {
+        Fixture f = make();
+        Made made = make_shadow_of(f, sample(16));
+        auto get_static = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetStaticMethodID);
+        g_baseline_fails = true;  // no memory for the node of a method
+        jmethodID late = get_static(f.env, f.cls, "late", "(I[B)I");
+        forget_the_last_call();
+        require(the_process_stops([&] { (void)call_static_int_v(f, late, 1, made.shadow); }) && world.last_call.empty() && world.describe_calls == 1,
+                "a lookup that stored nothing, learned again at the call that still has no memory: the call stops");
+        g_baseline_fails = false;
+        require(call_static_int_v(f, late, 1, made.shadow) == 7 && world.last_array_args.size() == 1 && world.last_array_args[0] == made.object &&
+                    world.describe_calls == 2,
+                "with memory back the call learns the method and is converted");
+    }
+}
+
+// The runtime ignores the class argument of a CallStatic* (only the method ID is checked), so a static call with a null class runs,
+// and so it does here whether or not the ID was seen at a lookup: an ID the layer must describe is described from the ID alone.
+// (Fails on a layer that describes a method by a receiver or class: the call stops the process, and nothing reaches the runtime.)
+void check_a_static_call_with_a_null_class_runs_converted() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, sample(16));
+    auto variadic = fn<jint (*)(Env*, jclass, jmethodID, ...)>(*f.table, static_call_slot(kInt, kVarargs));
+    auto array = fn<jint (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kInt, kArray));
+    auto va_form = [&](jclass cls, jmethodID m, ...) {
+        va_list ap;
+        va_start(ap, m);
+        const jint r = fn<jint (*)(Env*, jclass, jmethodID, va_list)>(*f.table, static_call_slot(kInt, kVa))(f.env, cls, m, ap);
+        va_end(ap);
+        return r;
+    };
+    const auto converted = [&](const char* form) {
+        require(world.last_array_args.size() == 1 && world.last_array_args[0] == made.object && g_stops == 0, form);
+        forget_the_last_call();
+    };
+    forget_the_last_call();
+    jmethodID unseen_variadic = unseen_method("(I[B)I");
+    require(variadic(f.env, nullptr, unseen_variadic, 5, made.shadow) == 7, "the variadic form runs");
+    converted("a static call with a null class, variadic, an unseen ID: the block is converted");
+    jmethodID unseen_v = unseen_method("(I[B)I");
+    require(va_form(nullptr, unseen_v, 5, made.shadow) == 7, "the V form runs");
+    converted("and in the V form");
+    jmethodID unseen_a = unseen_method("(I[B)I");
+    jvalue args[2] = {};
+    args[0].i = 5;
+    args[1].l = made.shadow;
+    require(array(f.env, nullptr, unseen_a, args) == 7, "the A form runs");
+    converted("and in the A form");
+    require(world.describe_calls == 3, "each unseen ID was described once, from the ID alone");
+    require(variadic(f.env, nullptr, unseen_variadic, 6, made.shadow) == 7 && world.describe_calls == 3, "and the answer is kept");
+    converted("a second call with the same ID");
+    jmethodID looked_up = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetStaticMethodID)(f.env, f.cls, "m", "(I[B)I");
+    require(variadic(f.env, nullptr, looked_up, 7, made.shadow) == 7 && world.describe_calls == 3, "an ID that was looked up runs with a null class as well");
+    converted("and its block is converted");
+}
+
+// The stop is for the application's calls. A platform caller whose call's parameters cannot be had (a framework thread that meets a
+// failing reflection at its first call of a method ID cached before the layer) is forwarded: its receiver is converted, its
+// arguments are as it passed them, and nothing is remembered. It can hold a block's address only through an application's type
+// error, which fails on stock too. The same state still stops an application's call.
+// (Fails on a layer that stops for every caller: the process stops and nothing reaches the runtime.)
+void check_a_platform_call_whose_parameters_cannot_be_had_is_forwarded() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, sample(16));
+    jmethodID unseen_static = unseen_method("(J)I");
+    jmethodID unseen_instance = unseen_method("(J)Ljava/lang/Object;");
+    const jlong value = static_cast<jlong>(reinterpret_cast<intptr_t>(made.shadow));  // an integer that is a block's address
+    world.describe_fails = true;
+    g_app_caller = false;
+    const auto forwarded = [&](const char* what, bool with_receiver) {
+        require(g_stops == 0 && !world.last_call.empty() && world.last_args.size() == 1 && world.last_args[0].j == value, what);
+        require(!with_receiver || world.last_receiver == made.object, "and its receiver, a block, was converted");
+        forget_the_last_call();
+    };
+    forget_the_last_call();
+    require(call_static_int_v(f, unseen_static, value) == 7, "a static call by a platform caller runs");
+    forwarded("the V form: forwarded with its argument as it was passed", false);
+    jvalue args[1] = {};
+    args[0].j = value;
+    require(fn<jint (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kInt, kArray))(f.env, f.cls, unseen_static, args) == 7,
+            "the A form runs");
+    forwarded("the A form: forwarded with its argument as it was passed", false);
+    (void)call_object_v(f, made.shadow, unseen_instance, value);
+    forwarded("an instance call, V form: forwarded with its argument as it was passed", true);
+    (void)fn<jobject (*)(Env*, jobject, jmethodID, const jvalue*)>(*f.table, call_slot(kObject, kArray))(f.env, made.shadow, unseen_instance, args);
+    forwarded("an instance call, A form: forwarded with its argument as it was passed", true);
+    require(world.describe_calls == 4 && stop_lines() == 0, "every call asked again, none stopped, none logged a stop");
+    g_app_caller = true;
+    forget_the_last_call();
+    require(the_process_stops([&] { (void)call_static_int_v(f, unseen_static, value); }) && world.last_call.empty() && stop_lines() == 1,
+            "the same state, from the application: the call stops");
+    world.describe_fails = false;
+}
+
+// A call made with an exception pending (ART does not refuse it) is no cause: the parameters of an ID the layer has to describe
+// are had with the exception taken out for the time, and the same exception is pending again after the call.
+void check_an_unseen_method_is_learned_with_an_exception_pending() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, sample(16));
+    jmethodID unseen = unseen_method("(I[B)I");
+    {
+        WorldGuard guard;
+        world.exception_pending = true;
+        world.pending_object = new Obj{};
+    }
+    Obj* const pending = world.pending_object;
+    forget_the_last_call();
+    require(call_static_int_v(f, unseen, 5, made.shadow) == 7 && world.last_array_args.size() == 1 && world.last_array_args[0] == made.object,
+            "the call went through converted");
+    require(world.describe_calls == 1 && g_stops == 0, "the method was described once");
+    require(world.exception_pending && world.pending_object == pending, "and the same exception is pending after it");
+}
+
 // The ids of the layer's own calls are resolved at the installation, before the first block can be made.
 void check_the_ids_are_resolved_before_the_first_block() {
     Fixture f = make();
@@ -4201,6 +5773,129 @@ void check_live_blocks_of_many_threads_count_against_the_cap() {
     for (auto& thread : threads) thread.join();
     require(counters().shadows_ended <= 16384 && counters().shadows_live == 0, "and so do the ended ones after every end");
     require(block_weaks() <= 16384, "the weak references the layer holds are bounded by the cap");
+}
+
+// A block is published whole. A thread that reads a block's address without the mutex (is_shadow_block, is_ended_block, and the
+// length of a reference, which the wrapper answers from the layer's record) and finds the block live finds the block that was made
+// there, with its fields, Dalvik words, contents and tail, never what the address held before; and a block that is still being
+// made is no block yet.
+// Two parts. The proof of the order is deterministic: the maker pauses inside the fake's GetByteArrayRegion, which the layer
+// calls for the contents after the header's fields and before the publication, the reader looks at the block under
+// construction while it is paused, and finds no block (neither live nor ended, length 0). A layer that publishes the record of the
+// block before it has built it fails that look every time. The stress part is the stale reader: one thread makes a block, waits
+// until the other has looked at it whole, ends it and has the runtime collect its array, so that the next block is made at the
+// address of the one before; the other thread reads that address all the while, in the stage the first publishes: while a block
+// is being made, a live block at the address can only be the one being made. (Fails by its checks when make_shadow publishes the
+// record before the header's other fields and the contents.)
+void check_a_header_is_published_whole_to_readers_without_the_mutex() {
+    constexpr const char* kCase = "check_a_header_is_published_whole_to_readers_without_the_mutex";
+    constexpr int kGenerations = 1500;
+    // Both sizes take the same chunk of the arena, so that the freed block's address is the next block's. They are long: the layer
+    // copies the contents again for the baseline after it has built the block, and a layer that published the block before that
+    // copy is seen by the stale reader almost every time it makes a block.
+    constexpr size_t kShort = 32769, kLong = 32770;
+    const auto size_of = [](int generation) -> size_t { return generation % 2 != 0 ? kShort : kLong; };
+    const auto fill_of = [](int generation) -> uint8_t { return generation % 2 != 0 ? 0xA1 : 0x5E; };
+    Fixture f = make();
+    Other reader(f);
+    const auto length_of_block = [&](const void* block) {
+        return fn<jsize (*)(Env*, jarray)>(*f.table, slot::GetArrayLength)(reader.f.env, const_cast<void*>(block));
+    };
+    std::atomic<int> stage{0};  // 2g - 1: block g is being made; 2g: it is made and the reader is to look at it; then the maker ends it
+    std::atomic<int> acked{0};  // the last block the reader looked at whole
+    std::atomic<const void*> first{nullptr};    // the address of the first block: the reader's stale reference
+    std::atomic<const void*> current{nullptr};  // the block of the latest generation made
+    std::atomic<bool> stop{false};
+    // The pause inside the construction of generation g: the maker names the block under construction and waits for the reader.
+    std::atomic<int> paused{0};                      // the generation whose block is under construction and waits for the look
+    std::atomic<int> looked{0};                      // the generation the reader has looked at while it was paused
+    std::atomic<const void*> candidate{nullptr};     // the block under construction
+    std::atomic<bool> candidate_live{false}, candidate_ended{false};
+    std::atomic<jsize> candidate_length{-1};
+    std::thread looker([&] {
+        // The block as it was made for the generation: the length word, the contents and the zeroes behind them.
+        const auto whole = [&](const void* block, int generation) {
+            const uint8_t* raw = static_cast<const uint8_t*>(block);
+            uint32_t length_word;
+            std::memcpy(&length_word, raw + 8, sizeof(length_word));
+            require(length_word == size_of(generation), "a live block's length word is its own");
+            for (size_t i = 0; i < size_of(generation); ++i) {
+                require(raw[16 + i] == fill_of(generation), "a live block's contents are its own");
+            }
+            for (size_t i = 0; i < 16; ++i) require(raw[16 + size_of(generation) + i] == 0, "a live block's tail is zeroes");
+        };
+        int done = 0;
+        unsigned looks = 0;
+        while (!stop.load(std::memory_order_acquire)) {
+            const int pause = paused.load(std::memory_order_acquire);
+            if (pause > looked.load(std::memory_order_relaxed)) {
+                // The maker is inside the construction of a block and waits: look at it, without the mutex.
+                const void* block = candidate.load(std::memory_order_acquire);
+                candidate_live.store(is_shadow_block(block), std::memory_order_relaxed);
+                candidate_ended.store(is_ended_block(block), std::memory_order_relaxed);
+                candidate_length.store(length_of_block(block), std::memory_order_relaxed);
+                looked.store(pause, std::memory_order_release);
+                continue;
+            }
+            const int at = stage.load(std::memory_order_acquire);
+            const void* address = first.load(std::memory_order_acquire);
+            if (address == nullptr) {
+                std::this_thread::yield();
+                continue;
+            }
+            const bool live = is_shadow_block(address);
+            (void)is_ended_block(address);
+            const jint type = fn<jint (*)(Env*, jobject)>(*f.table, slot::GetObjectRefType)(reader.f.env, const_cast<void*>(address));
+            require(type == 0 || type == kRefTypeLocal, "the kind of a reference to the address is a block's (local) or the null reference's (invalid)");
+            const jsize length = length_of_block(address);
+            require(length == 0 || length == jsize(kShort) || length == jsize(kLong),
+                    "a length read without the mutex is the length of a block that was or is at the address, never a link");
+            if (at % 2 != 0 && live) {
+                // Block g is being made and the one before it has ended: the live block is g, and nothing of it is old.
+                const int generation = (at + 1) / 2;
+                require(length == jsize(size_of(generation)), "a live block's length is its own");
+                whole(address, generation);
+            } else if (at != 0 && at % 2 == 0 && at / 2 > done) {
+                const int generation = at / 2;
+                const void* block = current.load(std::memory_order_acquire);
+                require(is_shadow_block(block) && length_of_block(block) == jsize(size_of(generation)), "the block made is live");
+                whole(block, generation);
+                done = generation;
+                acked.store(generation, std::memory_order_release);
+            }
+            if ((++looks & 15u) == 0) std::this_thread::yield();
+        }
+    });
+    int reused = 0;
+    for (int generation = 1; generation <= kGenerations; ++generation) {
+        stage.store(2 * generation - 1, std::memory_order_release);
+        g_after_get = [&, generation] {  // the layer has copied the contents into the block under construction and has not published it
+            const uint8_t* contents = static_cast<const uint8_t*>(g_last_get_buffer.load(std::memory_order_acquire));
+            candidate.store(contents - 16, std::memory_order_release);  // the object starts 16 bytes before its contents
+            paused.store(generation, std::memory_order_release);
+            wait_for_counter(kCase, "looked", looked, generation, "the maker (paused inside the construction of a block; the reader looks at it)");
+            require(!candidate_live.load() && !candidate_ended.load() && candidate_length.load() == 0,
+                    "a block that is still being made is no block yet: neither live nor ended, and no length");
+        };
+        Made made = make_shadow_of(f, std::vector<uint8_t>(size_of(generation), fill_of(generation)));
+        require(made.shadow == candidate.load(std::memory_order_acquire), "the block that was paused is the block that was made");
+        require(is_shadow_block(made.shadow), "a block");
+        if (generation == 1) {
+            first.store(made.shadow, std::memory_order_release);
+        } else if (made.shadow == first.load(std::memory_order_acquire)) {
+            ++reused;
+        }
+        current.store(made.shadow, std::memory_order_release);
+        stage.store(2 * generation, std::memory_order_release);
+        wait_for_counter(kCase, "acked", acked, generation, "the maker (the reader looks at each block)");
+        end_ref(f, made.shadow);
+        collect();  // nothing holds the array: the next creation frees the ended block
+    }
+    stop.store(true, std::memory_order_release);
+    looker.join();
+    require(reused >= kGenerations * 9 / 10, "the freed block's address was the next block's: the reader's reference was stale");
+    require(g_ref_type_asked_with_a_reference == 0,
+            "GetObjectRefType of an address that no block started at went to the runtime as the null reference: it was not looked up again");
 }
 
 
@@ -5206,7 +6901,10 @@ int main(int argc, char** argv) {
     check_an_end_is_serialized_with_a_second_threads_access();
     check_a_critical_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime();
     check_an_elements_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime();
+    check_a_runtime_elements_pointer_got_before_the_first_block_is_released_by_the_runtime();
+    check_a_runtime_critical_pointer_got_before_the_first_block_closes_its_region_at_the_release();
     check_the_record_of_a_runtime_pointer_ends_with_its_release();
+    check_two_threads_getting_and_releasing_pointers_race_on_no_count();
     check_a_nested_native_method_cannot_delete_its_callers_reference();
     check_monitor_exit_with_an_exception_pending();
     check_a_pull_does_not_overwrite_a_raw_write_to_another_byte();
@@ -5216,8 +6914,30 @@ int main(int argc, char** argv) {
     check_a_collection_the_step_sweep_saw_is_swept_in_full();
     check_a_kept_reference_gives_a_critical_pointer();
     check_a_release_of_a_pointer_inside_a_block_is_harmless();
+    check_a_block_nothing_holds_gives_no_bytes_while_no_reference_can_be_made();
+    check_a_collected_reference_covered_by_another_blocks_contents_is_no_block();
+    check_a_forged_header_inside_a_live_blocks_contents_is_no_block();
+    check_shadows_need_a_record_the_region_can_be_described_by();
+    check_a_refused_install_leaves_no_query_bounds();
+    check_a_collected_block_is_an_ended_block_of_its_length_until_a_sweep_reclaims_it();
+    check_the_record_is_cleared_before_the_memory_goes_back_to_the_arena();
+    check_a_call_during_a_revival_is_handed_the_array_by_a_reference_of_the_runtime();
+    check_a_call_with_the_address_of_a_block_that_is_gone_is_handed_null();
+    check_every_method_the_application_looks_up_is_known();
+    check_a_method_that_cannot_be_described_stops_the_call_and_is_asked_about_again();
+    check_the_other_causes_of_unknown_parameters_stop_the_call();
+    check_a_static_call_with_a_null_class_runs_converted();
+    check_a_platform_call_whose_parameters_cannot_be_had_is_forwarded();
+    check_an_unseen_method_is_learned_with_an_exception_pending();
+    check_after_a_merge_and_a_new_cut_a_place_is_a_block_only_where_one_starts();
+    check_a_block_made_at_a_stale_address_during_PopLocalFrame_is_left_alone();
+    check_a_block_made_at_a_collected_address_before_the_mutex_is_taken_is_acted_on_whole();
+    check_the_record_follows_makes_ends_collections_and_revivals();
+    check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_length();
+    check_get_object_ref_type_looks_at_the_record_once();
     check_the_ids_are_resolved_before_the_first_block();
     check_live_blocks_of_many_threads_count_against_the_cap();
+    check_a_header_is_published_whole_to_readers_without_the_mutex();
     check_a_block_critical_get_does_not_hold_the_mutex_while_it_waits_for_the_collector();
     check_a_block_critical_release_does_not_hold_the_mutex_while_it_waits_for_the_collector();
     check_the_mutex_is_free_while_the_first_critical_get_is_in_the_runtime();

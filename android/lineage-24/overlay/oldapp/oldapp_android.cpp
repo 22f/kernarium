@@ -37,6 +37,7 @@ void* oldapp_malloc(size_t) __asm__("malloc");
 void* oldapp_calloc(size_t, size_t) __asm__("calloc");
 void* oldapp_realloc(void*, size_t) __asm__("realloc");
 void oldapp_free(void*) __asm__("free");
+void oldapp_abort() __asm__("abort");
 size_t oldapp_usable_size(void*) __asm__("malloc_usable_size");
 int* oldapp_errno() __asm__("__errno");
 int oldapp_open(const char*, int, ...) __asm__("open");
@@ -76,6 +77,7 @@ using namespace oldapp;
 
 constexpr size_t kArenaBytes = 64u << 20;
 constexpr size_t kShadowBytes = 32u << 20;
+static_assert(kShadowBytes <= kMaxShadowBytes, "the shadow region is within what the layer's block record covers");
 constexpr uintptr_t kLowLimit = 0x7ff00000u;
 constexpr unsigned kMaxModules = 512;
 constexpr unsigned kMaxSlots = 160;
@@ -116,6 +118,19 @@ void yield_thread() { oldapp_sched_yield(); }
 // The baselines of the byte[] blocks live in libc's heap: they need no low address.
 void* alloc_baseline(size_t bytes) { return oldapp_malloc(bytes); }
 void free_baseline(void* baseline) { oldapp_free(baseline); }
+
+// The platform's stop (jni_shim.hpp, Platform::abort_process): the process aborts, with the line the layer logged before it.
+void abort_process() { oldapp_abort(); }
+
+// The memory of the shadow blocks' record (jni_shim.cpp): a mapping of its own, fresh and so zero-filled, that the layer never
+// clears. It is resident by page only where block starts have been recorded, and a page stays resident after its blocks go.
+// It needs no low address: only the layer's own code reads it.
+void* map_record(size_t bytes) {
+    constexpr int kProtReadWrite = 3;
+    constexpr int kMapPrivateAnonymous = 0x02 | 0x20;
+    void* mapped = oldapp_mmap(nullptr, bytes, kProtReadWrite, kMapPrivateAnonymous, -1, 0);
+    return mapped == reinterpret_cast<void*>(-1) ? nullptr : mapped;
+}
 
 // The first allocation the arena could not serve: one log line, for the sessions of real games.
 uint32_t g_fallback_logged = 0;
@@ -911,8 +926,8 @@ char kind_of_class_name(const char* name) {
 
 // Executable.getParameterTypes() of the method's reflected object, and the name of each class: every function is
 // taken from the table as it was before the layer, and the locals of the lookup are gone when it returns.
-bool describe_method(jni::Env* env, void* const* original, void* id, bool is_static, jni::jobject hint, char* kinds,
-                     unsigned capacity, unsigned* count) {
+bool describe_method(jni::Env* env, void* const* original, void* id, bool is_static, char* kinds, unsigned capacity,
+                     unsigned* count) {
     using namespace jni;
     auto push_frame = reinterpret_cast<jint (*)(Env*, jint)>(original[slot::PushLocalFrame]);
     auto pop_frame = reinterpret_cast<jobject (*)(Env*, jobject)>(original[slot::PopLocalFrame]);
@@ -933,10 +948,15 @@ bool describe_method(jni::Env* env, void* const* original, void* id, bool is_sta
         auto element = reinterpret_cast<jobject (*)(Env*, jobject, jsize)>(original[slot::GetObjectArrayElement]);
         auto utf_chars = reinterpret_cast<const char* (*)(Env*, jobject, jboolean*)>(original[slot::GetStringUTFChars]);
         auto release_chars = reinterpret_cast<void (*)(Env*, jobject, const char*)>(original[slot::ReleaseStringUTFChars]);
-        jobject reflected = to_reflected(env, hint, id, is_static ? 1 : 0);
+        // The runtime's ToReflectedMethod decodes the method ID and ignores its class and static-flag arguments, so a method is
+        // described from its ID alone: any class does for the call, and one is needed because CheckJNI refuses a null one.
         jobject executable = find_class(env, "java/lang/reflect/Executable");
         jobject class_class = find_class(env, "java/lang/Class");
-        if (reflected == nullptr || executable == nullptr || class_class == nullptr || exception_check(env)) {
+        if (executable == nullptr || class_class == nullptr || exception_check(env)) {
+            break;
+        }
+        jobject reflected = to_reflected(env, executable, id, is_static ? 1 : 0);
+        if (reflected == nullptr || exception_check(env)) {
             break;
         }
         jmethodID get_types = get_method(env, executable, "getParameterTypes", "()[Ljava/lang/Class;");
@@ -1033,7 +1053,7 @@ extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void* vm_pointe
     const Platform platform{is_app_caller, thread_state, log_line, make_writable, make_read_only, describe_method, now_ms,
                             alloc_baseline, free_baseline, region != nullptr ? thunk_address : nullptr,
                             region != nullptr ? thunk_count() : 0, is_own_library, ended_lock, ended_unlock, now_ns,
-                            yield_thread};
+                            yield_thread, map_record, abort_process};
     refresh_modules(true);  // every library the application loaded before this one
     void** table = const_cast<void**>(env->functions);
     const bool jni_ok = install_jni_wrappers(table, platform, region != nullptr ? region + kArenaBytes : nullptr,

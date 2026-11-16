@@ -42,6 +42,22 @@ void check_alignment_and_basics() {
     require(arena.block_count() == 8, "eight blocks");
 }
 
+// The old-application layer's block record relies on the least chunk of a block (its header, Dalvik words, tail and this header):
+// kChunkHeaderBytes is the bytes a chunk adds to its payload, and a chunk is the request plus them rounded up to 16.
+void check_chunk_header_bytes() {
+    Arena arena = fresh();
+    for (size_t size : {size_t{0}, size_t{1}, size_t{8}, size_t{9}, size_t{24}, size_t{100}, size_t{200}, size_t{1000}}) {
+        void* first = arena.allocate(size);
+        void* second = arena.allocate(size);
+        require(first != nullptr && second != nullptr, "two small requests succeed");
+        size_t chunk = (size + Arena::kChunkHeaderBytes + 15) & ~size_t{15};
+        if (chunk < 16) chunk = 16;
+        require(arena.usable_size(first) + Arena::kChunkHeaderBytes == chunk, "a chunk is its payload plus kChunkHeaderBytes");
+        require(static_cast<uint8_t*>(second) - static_cast<uint8_t*>(first) == static_cast<ptrdiff_t>(chunk),
+                "and the next payload lies one chunk further");
+    }
+}
+
 void check_coalescing() {
     Arena arena = fresh(64 * 1024);
     void* a = arena.allocate(1000);
@@ -177,6 +193,7 @@ void check_random_run() {
 
 int main() {
     check_alignment_and_basics();
+    check_chunk_header_bytes();
     check_coalescing();
     check_exhaustion();
     check_foreign_pointers();

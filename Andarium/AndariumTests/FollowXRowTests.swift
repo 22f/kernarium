@@ -181,7 +181,8 @@ struct FollowXRowTests {
         #expect(FollowXLogo.inlineImage(height: 0, scale: 3) == nil)
     }
 
-    @Test func theLogoGrowsWithTheTextSize() async throws {
+    @Test(.disabled(if: ProcessInfo.processInfo.isiOSAppOnMac, "an iPad app on a Mac draws text at one size whatever the content size category"))
+    func theLogoGrowsWithTheTextSize() async throws {
         let lease = try await HostWindow.take()
         defer { lease.give() }
         func titleWidth(_ size: DynamicTypeSize) async throws -> CGFloat {

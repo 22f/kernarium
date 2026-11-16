@@ -638,7 +638,7 @@ def write_notes(app: Path, entries: list[dict] | None, strings: dict[str, str],
     and the compiled table of their translations in each language, which both tracks share."""
     if entries is not None:
         (app / track).write_text(
-            json.dumps([{"build": 11, "version": "1.0 (11)", "entries": entries}] if entries else []),
+            json.dumps([{"build": 12, "version": "1.0 (12)", "entries": entries}] if entries else []),
             encoding="utf-8")
     for language in languages:
         lproj = app / f"{language}.lproj"
@@ -2404,7 +2404,7 @@ def main() -> int:
         # it does not name, they are Send feedback text in a product that has none.
         beta_source = root / "beta-source" / BETA_NOTES
         beta_source.parent.mkdir()
-        beta_source.write_text(json.dumps([{"build": 11, "version": "1.0 (11)", "entries": hidden}]),
+        beta_source.write_text(json.dumps([{"build": 12, "version": "1.0 (12)", "entries": hidden}]),
                                encoding="utf-8")
         carried = make_app(root, "notes-beta-strings", clean, app_info())
         write_notes(carried, [], NOTES_STRINGS, track=APP_STORE_NOTES)

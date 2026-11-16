@@ -127,6 +127,51 @@ void check_program_walk()
 		"half an A32 word is reported");
 }
 
+/* The retirement a lane takes for a lost reservation in a loop that retries its
+ * store-exclusive: whole passes of a recognized loop more than the pack, and
+ * nothing else. */
+void check_retry_classification()
+{
+	constexpr std::string_view record = "exclusive-retry-qemu";
+	const auto loop = [](const char *name, std::uint16_t retired, std::uint8_t event = 0) {
+		Case test;
+		test.name = name;
+		test.retired = retired;
+		test.event = event;
+		return test;
+	};
+	const auto accepts = [&](const Case &test, std::size_t excess) {
+		return retry_excess_accepted(record, test, excess);
+	};
+	/* A six-instruction pass: one pass, two and sixteen are accepted, and one
+	 * instruction, the five or seven of the other loops, and nothing are not. */
+	const Case six = loop("STREX_A1/side_exit_match.a", 7);
+	require(retry_loop_length(record, six) == 6, "a pass of the A32 loop is six instructions");
+	require(accepts(six, 6) && accepts(six, 12) && accepts(six, 96), "whole passes of a six-long loop");
+	require(!accepts(six, 1) && !accepts(six, 5) && !accepts(six, 7) && !accepts(six, 13) && !accepts(six, 0),
+		"an excess that is not whole passes of a six-long loop is accepted");
+	/* The CBNZ loop is five long and the IT and ITE loops seven. */
+	const Case cbnz = loop("STREX_T1/side_exit_cbnz.t", 6);
+	require(retry_loop_length(record, cbnz) == 5 && accepts(cbnz, 5) && accepts(cbnz, 10),
+		"whole passes of the CBNZ loop");
+	require(!accepts(cbnz, 6) && !accepts(cbnz, 12) && !accepts(cbnz, 1) && !accepts(cbnz, 7),
+		"an excess that is not whole passes of the CBNZ loop is accepted");
+	for (const char *name : {"STREX_T1/it_eq.t", "STREX_T1/it_ite.t"}) {
+		const Case it = loop(name, 8);
+		require(retry_loop_length(record, it) == 7 && accepts(it, 7) && accepts(it, 14),
+			"whole passes of an IT loop");
+		require(!accepts(it, 6) && !accepts(it, 12) && !accepts(it, 1) && !accepts(it, 8),
+			"an excess that is not whole passes of an IT loop is accepted");
+	}
+	/* Nothing outside the record's loops: another record, a case that raised
+	 * an event, and one whose count is not a pass and the tail. */
+	require(!retry_excess_accepted("exclusive-qemu", six, 6) && !retry_excess_accepted("exclusive-retry", six, 6),
+		"an excess in another record is accepted");
+	require(!accepts(loop("STREX_A1/side_exit_match.a", 7, kSigSegv), 6), "an excess after an event is accepted");
+	require(!accepts(loop("STREX_A1/side_exit_match.a", 9), 6) && !accepts(loop("STREX_A1/side_exit_match.a", 3), 6),
+		"a case that is not a pass and a tail is a retry loop");
+}
+
 struct Totals final {
 	std::size_t records = 0, cases = 0, events = 0;
 	std::map<std::string, std::size_t> per_oracle;
@@ -235,6 +280,8 @@ void check_case(const Record &record, const Case &test, const Profile &profile, 
 		std::fprintf(stderr, "%s: %s\n", context.c_str(), what);
 		std::abort();
 	};
+	if (record.name == "exclusive-retry-qemu" && retry_loop_length(record.name, test) == 0)
+		fail("a case of the exclusive-retry record is not a recognized retry loop");
 	bool truncated = false;
 	const auto program = decode_program(context, test, profile, truncated);
 	const auto named = forms_by_name().find(test.form);
@@ -362,6 +409,7 @@ int main(int argc, char **argv)
 	require(path != nullptr, "usage: PACK [--record NAME]");
 
 	check_program_walk();
+	check_retry_classification();
 	const Pack pack = read_pack(read_file(path));
 	const Profile profile;
 	Totals totals;
