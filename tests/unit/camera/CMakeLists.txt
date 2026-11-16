@@ -34,6 +34,18 @@ target_link_libraries(uml_camera_apple_discovery_tests PRIVATE UML::AppleCamera 
 uml_add_unit_test(NAME camera-apple-discovery COMMAND uml_camera_apple_discovery_tests
     LABELS "device;camera")
 
+# A platform call a host lacks, in camera discovery (an iPad app on a Mac or on a Vision Pro meets one): an
+# object that does not take it is not sent it, and a discovery that raises anyway presents no cameras with one
+# log line and a live process. The raise is stood in by a replaced method of the discovery session; no camera
+# is opened.
+add_executable(uml_camera_discovery_unavailable_call_tests camera_discovery_unavailable_call_tests.mm)
+target_link_libraries(uml_camera_discovery_unavailable_call_tests PRIVATE UML::AppleCamera
+    "-framework Foundation" "-framework AVFoundation")
+target_include_directories(uml_camera_discovery_unavailable_call_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/platform/apple)
+uml_add_unit_test(NAME camera-discovery-unavailable-call COMMAND uml_camera_discovery_unavailable_call_tests
+    LABELS "device;camera")
+
 # What a still reports of its exposure, from a literal photo-metadata dictionary
 # (no camera is opened).
 add_executable(uml_camera_still_exposure_tests camera_still_exposure_tests.cpp)
