@@ -91,6 +91,8 @@ VM_SECONDS = 60
 SWEEP_PORT_SECONDS = 2
 SWEEP_SECONDS = 1800
 SWEEP_WIDTH = 16
+# The shared adb server's port: the sweep speaks its protocol to ask adbd for a connection.
+ADB_SERVER_PORT = 5037
 
 # ---- The wire: frames, requests and answers (HostFrame, Message and Answer of the service).
 
@@ -665,16 +667,13 @@ def raw_stream(port: int, data: bytes, seconds: float) -> tuple[bytes, bool, flo
         return received, False, time.monotonic() - started
 
 
-def adb_server_port() -> int:
-    return int(os.environ.get("ANDROID_ADB_SERVER_PORT", "5037"))
-
-
-def open_vsock_through_adbd(serial: str, port: int, seconds: float = SWEEP_PORT_SECONDS) -> str:
+def open_vsock_through_adbd(serial: str, port: int, seconds: float = SWEEP_PORT_SECONDS,
+                            server_port: int = ADB_SERVER_PORT) -> str:
     """Asks adbd, through the adb server's own protocol, to connect to ``vsock:3:<port>``: ``OKAY`` once adbd has
     connected, ``FAIL`` when it is refused, ``TIMEOUT`` when neither comes."""
     deadline = time.monotonic() + seconds
     try:
-        with socket.create_connection(("127.0.0.1", adb_server_port()), timeout=seconds) as connection:
+        with socket.create_connection(("127.0.0.1", server_port), timeout=seconds) as connection:
             for service, last in ((f"host:transport:{serial}", False), (f"vsock:3:{port}", True)):
                 connection.sendall(smart_request(service))
                 reply = recv_exactly(connection, 4, deadline)

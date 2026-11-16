@@ -17,7 +17,6 @@ __import__("sys").dont_write_bytecode = True
 import contextlib
 import importlib.util
 import io
-import os
 from pathlib import Path
 import re
 import shutil
@@ -525,13 +524,15 @@ class AdbServerTests(unittest.TestCase):
     def test_okay_fail_and_silence(self) -> None:
         port = self.serve({"host:transport:dev:1": b"OKAY", "vsock:3:5555": b"OKAY", "vsock:3:6000": b"HANG",
                            "vsock:3:7000": b"FAIL0007refused"})
-        os.environ["ANDROID_ADB_SERVER_PORT"] = str(port)
-        self.addCleanup(os.environ.pop, "ANDROID_ADB_SERVER_PORT")
-        self.assertEqual(runner.open_vsock_through_adbd("dev:1", 5555), "OKAY")
-        self.assertEqual(runner.open_vsock_through_adbd("dev:1", 7000), "FAIL")
-        self.assertEqual(runner.open_vsock_through_adbd("dev:1", 5556), "FAIL")
-        self.assertEqual(runner.open_vsock_through_adbd("dev:1", 6000, seconds=1), "TIMEOUT")
-        self.assertEqual(runner.open_vsock_through_adbd("other", 5555), "FAIL")
+
+        def ask(serial: str, vsock_port: int, seconds: float = 2) -> str:
+            return runner.open_vsock_through_adbd(serial, vsock_port, seconds, port)
+
+        self.assertEqual(ask("dev:1", 5555), "OKAY")
+        self.assertEqual(ask("dev:1", 7000), "FAIL")
+        self.assertEqual(ask("dev:1", 5556), "FAIL")
+        self.assertEqual(ask("dev:1", 6000, 1), "TIMEOUT")
+        self.assertEqual(ask("other", 5555), "FAIL")
 
 
 class ProbeSourceTests(unittest.TestCase):
