@@ -19,7 +19,9 @@
 #include <cstdint>
 #include <memory>
 #include <new>
+#include <span>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -557,6 +559,193 @@ void test_acquired_registries_are_released()
 
 } // namespace
 
+/* A memory that answers a frame hold from a script and records what the
+ * registration did with the answer. */
+class ScriptedMemory final : public uml::memory::GuestAddressSpace {
+public:
+	using FrameDebt = uml::memory::FrameDebt;
+	using FrameHold = uml::memory::FrameHold;
+	using FrameHoldResult = uml::memory::FrameHoldResult;
+
+	/* The locations the frame's writers have: a hold that asks for fewer
+	 * says so, and one with room names them. A frame with `unnameable` is
+	 * too large for any buffer. */
+	std::vector<FrameDebt> writers;
+	bool unnameable{};
+	/* The writers double each time a hold finds the buffer too small. */
+	bool growing{};
+	std::vector<std::pair<std::size_t, bool>> asks;
+	unsigned cleared{};
+
+	[[nodiscard]] bool read(std::uint64_t, std::span<std::byte>) override
+	{
+		return false;
+	}
+	[[nodiscard]] bool write(
+		std::uint64_t, std::span<const std::byte>) override
+	{
+		return false;
+	}
+	[[nodiscard]] FrameHold hold_code_frame(std::uint64_t, void *,
+		FrameDebt *debts, std::size_t capacity, bool global_ok) noexcept override
+	{
+		asks.emplace_back(capacity, global_ok);
+		FrameHold hold;
+		hold.record_identity = 7;
+		hold.debt_sequence = 3;
+		const auto count = unnameable ? std::size_t{1} << 62 : writers.size();
+		if (count > capacity) {
+			hold.result = global_ok ? FrameHoldResult::global :
+				FrameHoldResult::crowded;
+			hold.owed = count;
+			if (growing && !global_ok)
+				writers.resize(writers.size() * 2);
+			return hold;
+		}
+		for (std::size_t index = 0; index < count; ++index)
+			debts[index] = writers[index];
+		hold.result = FrameHoldResult::owed;
+		hold.owed = count;
+		return hold;
+	}
+	void clear_code_debt(std::uint64_t, void *, const FrameHold &) noexcept override
+	{
+		++cleared;
+	}
+};
+
+/* One generation's registry with a participant whose write translations are
+ * laid out like the gadget engine's, and one that retires its own. */
+struct Generation final {
+	std::shared_ptr<CodePageRegistry> registry;
+	std::unique_ptr<NativeTlbEntry[]> translations;
+	CodePageRegistry::Participant participant;
+	CodePageRegistry::Participant own;
+	std::vector<std::uint64_t> retired;
+
+	Generation(std::uint64_t number,
+		const CodePageRegistry::WaitPolicy &policy = {})
+		: registry{CodePageRegistry::acquire(number, policy)},
+		  translations{std::make_unique<NativeTlbEntry[]>(native_tlb_entry_count)}
+	{
+		participant.write_translations = translations.get();
+		registry->join(participant);
+		registry->join(own, [](void *context, std::uint64_t page) noexcept {
+			static_cast<Generation *>(context)->retired.push_back(page);
+		}, this);
+	}
+	~Generation()
+	{
+		registry->leave(own);
+		registry->leave(participant);
+	}
+	Generation(const Generation &) = delete;
+	Generation &operator=(const Generation &) = delete;
+};
+
+/* A frame with more writers than the first buffer holds is registered with a
+ * buffer of the size it reported, and every writer's write translation is
+ * retired: never a registration that fails for good. */
+void test_a_debt_larger_than_the_buffer_is_asked_for_again()
+{
+	constexpr std::uint64_t first = 9100;
+	std::vector<std::unique_ptr<Generation>> generations;
+	ScriptedMemory memory;
+	for (std::uint64_t index = 0; index < 17; ++index) {
+		generations.push_back(std::make_unique<Generation>(first + index));
+		memory.writers.push_back({first + index, page_at(index)});
+		generations.back()->translations[native_tlb_index(page_at(index))]
+			.write_page = page_at(index);
+	}
+	const auto result = uml::cpu::x86_64::register_frame(
+		memory, nullptr, nullptr, page_at(40));
+	require(result.status == uml::cpu::x86_64::FrameRegistration::settled,
+		"a frame with 17 writers was not registered");
+	require(memory.asks.size() == 2 && memory.asks[0].first == 16 &&
+			memory.asks[1].first >= 17 && !memory.asks[0].second &&
+			!memory.asks[1].second,
+		"the registration did not ask again with room for the debt");
+	for (std::uint64_t index = 0; index < 17; ++index) {
+		require(generations[index]->translations[native_tlb_index(page_at(index))]
+				.write_page == 1,
+			"a writer's write translation was not retired");
+		require(generations[index]->retired.size() == 1 &&
+				generations[index]->retired[0] == page_at(index),
+			"a writer's own translation was not retired for its page");
+	}
+	require(memory.cleared == 1, "the settled debt was not cleared");
+}
+
+/* A debt the registration cannot make room for, or keeps being too small
+ * for, takes the global fallback: every write translation of every
+ * participant of every generation is retired and every participant waited
+ * for. */
+void test_a_debt_without_room_retires_every_write_translation()
+{
+	constexpr std::uint64_t first = 9200;
+	for (const bool unnameable : {true, false}) {
+		std::vector<std::unique_ptr<Generation>> generations;
+		ScriptedMemory memory;
+		memory.unnameable = unnameable;
+		for (std::uint64_t index = 0; index < 3; ++index) {
+			generations.push_back(std::make_unique<Generation>(first + index));
+			/* An entry for a page the frame's writers do not name. */
+			generations.back()->translations[native_tlb_index(page_at(90 + index))]
+				.write_page = page_at(90 + index);
+			generations.back()->translations[native_tlb_entry_count - 1]
+				.write_page = 0x7777'0000;
+		}
+		if (!unnameable) {
+			/* The buffer never has room: the asks are bounded. */
+			memory.writers.resize(40);
+			memory.growing = true;
+		}
+		const auto result = uml::cpu::x86_64::register_frame(
+			memory, nullptr, nullptr, page_at(41));
+		require(result.status == uml::cpu::x86_64::FrameRegistration::settled,
+			"a registration with no room for its debt did not settle");
+		require(!memory.asks.empty() && memory.asks.back().second &&
+				memory.asks.back().first == 0,
+			"the fallback was not asked for");
+		for (const auto &generation : generations) {
+			require(generation->retired.size() == 1 &&
+					generation->retired[0] == CodePageRegistry::all_pages,
+				"the fallback did not retire a participant's translations");
+			for (std::size_t index = 0; index < native_tlb_entry_count; ++index)
+				require(generation->translations[index].write_page == 1,
+					"the fallback left a write translation");
+		}
+		require(memory.cleared == 1, "the settled fallback was not cleared");
+	}
+}
+
+/* The fallback waits for every participant: one that stays inside the engine
+ * leaves the registration unsettled, names its registry, and the debt is
+ * not cleared. */
+void test_the_fallback_names_a_participant_that_does_not_leave()
+{
+	using namespace std::chrono_literals;
+	ScriptedMemory memory;
+	memory.unnameable = true;
+	Generation stuck{9300, {.slice = 10ms, .slices = 2}};
+	Generation quiet{9301};
+	stuck.participant.engine_epoch.store(1, std::memory_order_release);
+	const auto result = uml::cpu::x86_64::register_frame(
+		memory, nullptr, nullptr, page_at(42));
+	require(result.status == uml::cpu::x86_64::FrameRegistration::unsettled,
+		"a stuck participant did not leave the fallback unsettled");
+	require(result.stuck.size() == 1 && result.stuck[0].registry == stuck.registry &&
+			result.stuck[0].settlement.stuck.size() == 1,
+		"the fallback did not name the stuck participant's registry");
+	require(memory.cleared == 0, "an unsettled fallback cleared the debt");
+	stuck.participant.engine_epoch.store(2, std::memory_order_release);
+	const auto again = uml::cpu::x86_64::register_frame(
+		memory, nullptr, nullptr, page_at(42));
+	require(again.status == uml::cpu::x86_64::FrameRegistration::settled &&
+			memory.cleared == 1,
+		"the fallback did not settle once the participant left");
+}
+
 int main()
 {
 	test_membership_is_counted();
@@ -574,5 +763,8 @@ int main()
 	test_a_stuck_participant_is_waited_out_once();
 	test_concurrent_waiters_record_a_stuck_participant_once();
 	test_leave_drops_the_record_of_a_stuck_participant();
+	test_a_debt_larger_than_the_buffer_is_asked_for_again();
+	test_a_debt_without_room_retires_every_write_translation();
+	test_the_fallback_names_a_participant_that_does_not_leave();
 	return 0;
 }

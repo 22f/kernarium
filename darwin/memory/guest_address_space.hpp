@@ -35,7 +35,18 @@ struct FrameDebt final {
 	std::uint64_t generation{};
 	std::uint64_t page{};
 };
-enum class FrameHoldResult : std::uint8_t { settled, owed, refused, failed };
+enum class FrameHoldResult : std::uint8_t {
+	settled,
+	owed,
+	refused,
+	failed,
+	/* Nothing changed: the debt is `owed` locations, more than the caller's
+	 * buffer holds. */
+	crowded,
+	/* The holder stands, and the debt is every write translation of every
+	 * participant. */
+	global,
+};
 struct FrameHold final {
 	FrameHoldResult result{FrameHoldResult::settled};
 	std::uint64_t record_identity{};
@@ -113,9 +124,12 @@ public:
 #if DARWIN_UML_X86_64_GUEST
 	/* Registers the page as a holder of its frame before the caller reads a
 	 * byte of it, and names the writer locations whose write translations
-	 * the caller must retire and wait out (`owed` entries of `debts`). */
+	 * the caller must retire and wait out (`owed` entries of `debts`). A debt
+	 * larger than `capacity` answers `crowded` with its size, or, when
+	 * `global_ok`, registers the holder and answers `global`. */
 	[[nodiscard]] virtual FrameHold hold_code_frame(
-		std::uint64_t, void *, FrameDebt *, std::size_t) noexcept
+		std::uint64_t, void *, FrameDebt *, std::size_t,
+		bool) noexcept
 	{
 		return {};
 	}

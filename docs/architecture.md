@@ -254,7 +254,10 @@ the frame. The memory layer (`memory/mmu/frame_accounting.hpp`) keeps, for each
   before reading a byte of it, each with a translatable word (guest code with
   execute) naming the frame. Registration also returns the writer locations
   whose write translations may predate it; the translator retires them and
-  waits for the participants inside the engine before it caches anything; and
+  waits for the participants inside the engine before it caches anything. A
+  debt larger than the translator's buffer is asked for again with room for it;
+  when the room cannot be had, or the frame's writers are not known, the
+  translator retires every write translation of every participant instead; and
 - one flush serial per generation, which every walk of the generation moves
   after removing its holders, so that a translation recorded before the walk
   never stamp-hits after it.

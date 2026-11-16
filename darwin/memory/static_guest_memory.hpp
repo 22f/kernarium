@@ -39,7 +39,8 @@ public:
 #if DARWIN_UML_X86_64_GUEST
 	[[nodiscard]] ::uml::memory::FrameHold hold_code_frame(
 		std::uint64_t address, void *execution_context,
-		::uml::memory::FrameDebt *debts, std::size_t capacity) noexcept override;
+		::uml::memory::FrameDebt *debts, std::size_t capacity,
+		bool global_ok) noexcept override;
 	void clear_code_debt(std::uint64_t address, void *execution_context,
 		const ::uml::memory::FrameHold &hold) noexcept override;
 	[[nodiscard]] bool frame_fill(std::uint64_t address,

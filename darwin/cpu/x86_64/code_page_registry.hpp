@@ -155,6 +155,17 @@ public:
 	[[nodiscard]] Settlement retire_and_wait(
 		std::uint64_t page, const Participant *self) noexcept;
 
+	/* The debt of a frame registration whose writers cannot be named one by
+	 * one (design 2.5): retires every write translation of every participant
+	 * and waits for them to leave once. */
+	[[nodiscard]] Settlement retire_all_and_wait(
+		const Participant *self) noexcept;
+	/* A retirer is called with this page to retire everything it holds. */
+	static constexpr std::uint64_t all_pages = ~std::uint64_t{0};
+	/* Every registry some executor holds. Throws std::bad_alloc. */
+	[[nodiscard]] static std::vector<std::shared_ptr<CodePageRegistry>>
+	registries();
+
 	/* Whether the participant a registration waited out as `serial` at
 	 * `epoch` has since left the engine or the registry. */
 	[[nodiscard]] bool left_or_moved(

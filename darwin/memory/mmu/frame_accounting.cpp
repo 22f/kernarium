@@ -590,7 +590,8 @@ std::uint64_t FrameAccounting::flush_serial(const GenerationState &state) noexce
 }
 
 FrameAccounting::HoldReport FrameAccounting::hold(GenerationState &state,
-	std::uint64_t page, DebtLocation *owed, std::size_t capacity) noexcept
+	std::uint64_t page, DebtLocation *owed, std::size_t capacity,
+	bool global_ok) noexcept
 {
 	HoldReport report{HoldResult::failed, 0, 0, 0};
 	const auto fail = [&]() -> HoldReport {
@@ -643,8 +644,9 @@ FrameAccounting::HoldReport FrameAccounting::hold(GenerationState &state,
 			auto *writer_word = backing.writer_word(offset);
 			const auto kind = writer_word == nullptr ? Kind::none :
 				kind_of(*writer_word);
-			if (kind == Kind::unknown)
-				return fail();
+			/* Writers that are not known cannot be named: the debt is every
+			 * write translation. */
+			bool global = kind == Kind::unknown;
 			auto &holders = record->holders;
 			const bool repeat = contains(holders, here);
 			/* The writers, with the debt each carries. */
@@ -671,8 +673,14 @@ FrameAccounting::HoldReport FrameAccounting::hold(GenerationState &state,
 				if (is_new || debt > record->debt_cleared)
 					++count;
 			});
-			if (count > capacity)
-				return fail();
+			if (count > capacity) {
+				if (!global_ok) {
+					report.result = HoldResult::crowded;
+					report.owed = count;
+					return report;
+				}
+				global = true;
+			}
 			if (!repeat && holders.size() == holders.capacity() &&
 			    spare.capacity() <= holders.size()) {
 				more = std::max<std::size_t>(4, holders.size() * 2U);
@@ -716,9 +724,9 @@ FrameAccounting::HoldReport FrameAccounting::hold(GenerationState &state,
 				}
 				report.record_identity = MappedBacking::record_identity(*record);
 				report.debt_sequence = record->debt_sequence;
-				report.owed = written;
-				report.result = written == 0 ? HoldResult::settled :
-					HoldResult::owed;
+				report.owed = global ? count : written;
+				report.result = global ? HoldResult::global :
+					written == 0 ? HoldResult::settled : HoldResult::owed;
 				return report;
 			}
 		}

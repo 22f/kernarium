@@ -6,6 +6,7 @@
 #if DARWIN_UML_X86_64_GUEST
 
 #include "mapped_backing.hpp"
+#include "uml_darwin_static_mmu.h"
 #include "writer_location.hpp"
 
 #include <atomic>
@@ -179,14 +180,20 @@ public:
 		owed,
 		/* The page is not translatable here, or the state is gone. */
 		refused,
-		/* Nothing changed: memory ran out, the frame's accounting is in
-		 * error, or the debt is more than the caller's buffer holds. */
+		/* Nothing changed: memory ran out, or the frame has no record
+		 * index. */
 		failed,
+		/* Nothing changed: the debt is `owed` locations, more than the
+		 * caller's buffer holds. The caller asks again with room for them. */
+		crowded,
+		/* The holder stands, and the debt is every write translation of every
+		 * participant: the frame's writers are not known (an accounting
+		 * error), or the caller took the fallback for a debt it had no room
+		 * for. `owed` is how many locations the debt names, if known. The
+		 * caller retires them all and waits for every participant. */
+		global,
 	};
-	struct DebtLocation final {
-		std::uint64_t generation;
-		std::uint64_t page;
-	};
+	using DebtLocation = darwin_uml_static_frame_location;
 	struct HoldReport final {
 		HoldResult result;
 		/* The frame record's identity and the debt sequence the owed
@@ -199,9 +206,11 @@ public:
 	 * byte of it. For a holder of the generation's mapping lock shared, who
 	 * keeps it for the whole call: the word is read once, and the record and
 	 * the room the list needs are made before the stripe lock, never under
-	 * it. */
+	 * it. A debt larger than `capacity` is reported as `crowded` unless
+	 * `global_ok`, which registers the holder and reports `global`. */
 	[[nodiscard]] static HoldReport hold(GenerationState &state,
-		std::uint64_t page, DebtLocation *owed, std::size_t capacity) noexcept;
+		std::uint64_t page, DebtLocation *owed, std::size_t capacity,
+		bool global_ok = false) noexcept;
 	/* A completed retirement covers the debt up to `debt_sequence` of the
 	 * record `record_identity`, if the page still maps that record. For a
 	 * holder of the mapping lock shared. */

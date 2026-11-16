@@ -363,6 +363,12 @@ struct Space final {
 	static void retire_write_translation(void *context, std::uint64_t page) noexcept
 	{
 		auto &space = *static_cast<Space *>(context);
+		if (page == CodePageRegistry::all_pages) {
+			for (std::size_t index = 0; index < tlb_entries; ++index)
+				std::atomic_ref<std::uint64_t>{space.tlb[index].WriteTag}
+					.store(0, std::memory_order_relaxed);
+			return;
+		}
 		std::atomic_ref<std::uint64_t>{space.tlb[(page >> 12U) & (tlb_entries - 1)].WriteTag}
 			.store(0, std::memory_order_relaxed);
 	}

@@ -114,6 +114,25 @@ Hold hold_frame(unsigned long generation, unsigned long address)
 	return held;
 }
 
+/* A hold with a buffer of `capacity` locations and, optionally, the fallback
+ * for a debt that does not fit. */
+struct BigHold final {
+	int result;
+	darwin_uml_static_frame_hold hold;
+	std::vector<darwin_uml_static_frame_location> owed;
+};
+
+BigHold hold_frame_with(unsigned long generation, unsigned long address,
+	std::size_t capacity, bool global_ok)
+{
+	BigHold held{};
+	held.owed.resize(capacity);
+	held.hold.global_ok = global_ok ? 1 : 0;
+	held.result = darwin_uml_static_vm_hold_code_frame(nullptr, generation,
+		address, held.owed.data(), capacity, &held.hold);
+	return held;
+}
+
 bool owes(const Hold &held, unsigned long generation, unsigned long address)
 {
 	for (std::size_t index = 0; index < held.hold.owed; ++index)
@@ -526,8 +545,10 @@ void test_publication()
 	baseline.clean("M3 M4 M5");
 }
 
-/* M7: a writer removal that finds no such location marks the frame unknown,
- * and a registration on it fails and changes nothing. */
+/* M7: a writer removal that finds no such location marks the frame unknown.
+ * The writers are then not known, so a registration on it registers the
+ * holder and answers that the debt is every write translation; it is not a
+ * failure, and nothing keeps the frame from being registered again. */
 void test_unknown_frame()
 {
 	const Baseline baseline;
@@ -543,10 +564,16 @@ void test_unknown_frame()
 		FrameAccounting::remove_writer(*kept, page, {777'777, base});
 		require(FrameAccounting::diagnostics().errors == errors + 1);
 		const auto failures = FrameAccounting::diagnostics().registration_failures;
-		require(hold_frame(731, base).result == DARWIN_UML_STATIC_FRAME_FAILED);
-		require(FrameAccounting::diagnostics().registration_failures ==
-			failures + 1);
-		require(holders_of(kept, 1).empty(), "a failed registration changed the frame");
+		const auto first = hold_frame(731, base);
+		require(first.result == DARWIN_UML_STATIC_FRAME_GLOBAL,
+			"a frame of unknown writers did not take the fallback");
+		require(FrameAccounting::diagnostics().registration_failures == failures,
+			"the fallback was counted as a failure");
+		require(holders_of(kept, 1).size() == 1, "the fallback did not register");
+		darwin_uml_static_vm_clear_code_debt(nullptr, 731, base,
+			first.hold.record_identity, first.hold.debt_sequence);
+		require(hold_frame(731, base).result == DARWIN_UML_STATIC_FRAME_GLOBAL,
+			"a frame of unknown writers settled");
 		/* The unknown frame is a test's doing: its error is the one counted
 		 * above. */
 		require(unmap(731, base, 1) == 0);
@@ -556,6 +583,69 @@ void test_unknown_frame()
 	require(now.holder_leaks == baseline.start.holder_leaks);
 	require(now.nonempty_state_destructions ==
 		baseline.start.nonempty_state_destructions);
+}
+
+/* M15: a frame with more writers than the caller's buffer holds is not
+ * failed. The first registration is told how many to make room for and
+ * changes nothing; the second, with room, names every one of them; with no
+ * room at all it may take the fallback, which registers the holder and
+ * settles with a single clearing. */
+void test_a_debt_larger_than_the_buffer()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0x700'0000;
+	constexpr unsigned long writers = 17;
+	ScratchBacking backing{"uml-frame-crowded-XXXXXX", 8 * page};
+	Domain domain{73'007};
+	domain.run([&] {
+		for (unsigned long frame : {1UL, 2UL}) {
+			for (unsigned long writer = 0; writer < writers; ++writer)
+				require(map(950 + writer, base + frame * 0x10000, backing,
+					frame, 1, rw, 0) == 0);
+			require(map(990, base + frame * page, backing, frame, 1, rx) == 0);
+		}
+		const auto kept = uml::memory::testing::mapped_backing(backing.descriptor());
+		require(kept != nullptr);
+
+		const auto failures = FrameAccounting::diagnostics().registration_failures;
+		const auto crowded = hold_frame_with(990, base + page, 16, false);
+		require(crowded.result == DARWIN_UML_STATIC_FRAME_CROWDED &&
+			crowded.hold.owed == writers,
+			"a debt larger than the buffer did not say how large it is");
+		require(holders_of(kept, 1).empty(), "a crowded hold registered");
+		require(FrameAccounting::diagnostics().registration_failures == failures,
+			"a crowded hold was counted as a failure");
+
+		const auto roomy = hold_frame_with(990, base + page, 32, false);
+		require(roomy.result == DARWIN_UML_STATIC_FRAME_OWED &&
+			roomy.hold.owed == writers, "a hold with room did not owe all");
+		for (unsigned long writer = 0; writer < writers; ++writer) {
+			bool found = false;
+			for (std::size_t index = 0; index < roomy.hold.owed; ++index)
+				found = found || (roomy.owed[index].generation == 950 + writer &&
+					roomy.owed[index].page == base + 0x10000);
+			require(found, "a writer's location was not named");
+		}
+		require(holders_of(kept, 1).size() == 1, "the hold did not register");
+		darwin_uml_static_vm_clear_code_debt(nullptr, 990, base + page,
+			roomy.hold.record_identity, roomy.hold.debt_sequence);
+		require(hold_frame_with(990, base + page, 0, false).result ==
+			DARWIN_UML_STATIC_FRAME_SETTLED, "a cleared debt was still owed");
+
+		/* No room at all: the fallback registers the holder and one clearing
+		 * settles it. */
+		const auto global = hold_frame_with(990, base + 2 * page, 0, true);
+		require(global.result == DARWIN_UML_STATIC_FRAME_GLOBAL &&
+			global.hold.owed == writers, "the fallback did not report its debt");
+		require(holders_of(kept, 2).size() == 1, "the fallback did not register");
+		darwin_uml_static_vm_clear_code_debt(nullptr, 990, base + 2 * page,
+			global.hold.record_identity, global.hold.debt_sequence);
+		require(hold_frame_with(990, base + 2 * page, 0, false).result ==
+			DARWIN_UML_STATIC_FRAME_SETTLED, "a cleared fallback was still owed");
+		require(FrameAccounting::diagnostics().registration_failures == failures);
+	});
+	domain.retire();
+	baseline.clean("M15");
 }
 
 /* M11 (serial): the flush serial moves at a walk and not at a stamp, and a
@@ -982,6 +1072,7 @@ int main()
 	test_direct_table();
 	test_kernel_write_frames();
 	test_unknown_frame();
+	test_a_debt_larger_than_the_buffer();
 	test_flush_serial();
 	test_registration_allocation_failures();
 	test_reservation_and_registration_race();

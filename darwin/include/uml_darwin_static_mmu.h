@@ -184,7 +184,12 @@ struct darwin_uml_static_frame_location {
 struct darwin_uml_static_frame_hold {
 	uint64_t record_identity;
 	uint64_t debt_sequence;
+	/* Out: how many locations the debt names (for CROWDED, how many the
+	 * caller must make room for). */
 	size_t owed;
+	/* In: take the global fallback for a debt larger than the buffer
+	 * instead of reporting CROWDED. */
+	int global_ok;
 };
 
 enum darwin_uml_static_frame_hold_result {
@@ -197,6 +202,12 @@ enum darwin_uml_static_frame_hold_result {
 	DARWIN_UML_STATIC_FRAME_REFUSED = 2,
 	/* Nothing changed; the caller must not cache what it translates. */
 	DARWIN_UML_STATIC_FRAME_FAILED = 3,
+	/* Nothing changed; the debt is `owed` locations, more than the buffer
+	 * holds. Ask again with room for them. */
+	DARWIN_UML_STATIC_FRAME_CROWDED = 4,
+	/* The holder stands, and the debt is every write translation of every
+	 * participant: retire them all and wait for every participant. */
+	DARWIN_UML_STATIC_FRAME_GLOBAL = 5,
 };
 
 /* Registers the page at `address` of `generation` as a holder of its frame,

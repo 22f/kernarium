@@ -1330,16 +1330,13 @@ public:
 	{
 		if (hold == nullptr || (capacity != 0 && owed == nullptr))
 			return DARWIN_UML_STATIC_FRAME_FAILED;
+		const bool global_ok = hold->global_ok != 0;
 		*hold = {};
-		constexpr std::size_t maximum_debt = 16;
-		std::array<FrameAccounting::DebtLocation, maximum_debt> debts{};
 		const auto page = address & ~(page_size - 1);
 		auto reference = frame_call_state(context, generation, page);
 		std::shared_lock lock{reference.state->mappings_mutex};
-		const auto report = FrameAccounting::hold(*reference.state, page,
-			debts.data(), std::min(capacity, maximum_debt));
-		for (std::size_t index = 0; index < report.owed; ++index)
-			owed[index] = {debts[index].generation, debts[index].page};
+		const auto report = FrameAccounting::hold(
+			*reference.state, page, owed, capacity, global_ok);
 		hold->record_identity = report.record_identity;
 		hold->debt_sequence = report.debt_sequence;
 		hold->owed = report.owed;
@@ -1350,6 +1347,10 @@ public:
 			return DARWIN_UML_STATIC_FRAME_OWED;
 		case FrameAccounting::HoldResult::refused:
 			return DARWIN_UML_STATIC_FRAME_REFUSED;
+		case FrameAccounting::HoldResult::crowded:
+			return DARWIN_UML_STATIC_FRAME_CROWDED;
+		case FrameAccounting::HoldResult::global:
+			return DARWIN_UML_STATIC_FRAME_GLOBAL;
 		case FrameAccounting::HoldResult::failed:
 			break;
 		}

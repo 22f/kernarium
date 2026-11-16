@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <vector>
 
 namespace uml::memory {
 
@@ -116,19 +117,37 @@ void StaticGuestMemory::invalidate_code(
 #if DARWIN_UML_X86_64_GUEST
 ::uml::memory::FrameHold StaticGuestMemory::hold_code_frame(
 	std::uint64_t address, void *execution_context,
-	::uml::memory::FrameDebt *debts, std::size_t capacity) noexcept
+	::uml::memory::FrameDebt *debts, std::size_t capacity,
+	bool global_ok) noexcept
 {
 	::uml::memory::FrameHold result{};
-	std::array<darwin_uml_static_frame_location, 16> owed{};
+	/* The bridge writes into locations of its own type. */
+	std::array<darwin_uml_static_frame_location, 16> small{};
+	std::vector<darwin_uml_static_frame_location> large;
+	darwin_uml_static_frame_location *owed = small.data();
+	if (capacity > small.size()) {
+		try {
+			large.resize(capacity);
+			owed = large.data();
+		} catch (...) {
+			/* No room for the locations: the debt is every write
+			 * translation, whatever its size. */
+			capacity = 0;
+			global_ok = true;
+		}
+	}
+	capacity = std::min(capacity, large.empty() ? small.size() : large.size());
 	darwin_uml_static_frame_hold hold{};
+	hold.global_ok = global_ok ? 1 : 0;
 	const auto status = darwin_uml_static_vm_hold_code_frame(
 		execution_context, generation_, static_cast<unsigned long>(address),
-		owed.data(), std::min(capacity, owed.size()), &hold);
+		owed, capacity, &hold);
 	result.record_identity = hold.record_identity;
 	result.debt_sequence = hold.debt_sequence;
-	result.owed = std::min({hold.owed, capacity, owed.size()});
-	for (std::size_t index = 0; index < result.owed; ++index)
-		debts[index] = {owed[index].generation, owed[index].page};
+	result.owed = hold.owed;
+	if (status == DARWIN_UML_STATIC_FRAME_OWED)
+		for (std::size_t index = 0; index < std::min(hold.owed, capacity); ++index)
+			debts[index] = {owed[index].generation, owed[index].page};
 	switch (status) {
 	case DARWIN_UML_STATIC_FRAME_SETTLED:
 		result.result = ::uml::memory::FrameHoldResult::settled;
@@ -138,6 +157,12 @@ void StaticGuestMemory::invalidate_code(
 		break;
 	case DARWIN_UML_STATIC_FRAME_REFUSED:
 		result.result = ::uml::memory::FrameHoldResult::refused;
+		break;
+	case DARWIN_UML_STATIC_FRAME_CROWDED:
+		result.result = ::uml::memory::FrameHoldResult::crowded;
+		break;
+	case DARWIN_UML_STATIC_FRAME_GLOBAL:
+		result.result = ::uml::memory::FrameHoldResult::global;
 		break;
 	default:
 		result.result = ::uml::memory::FrameHoldResult::failed;

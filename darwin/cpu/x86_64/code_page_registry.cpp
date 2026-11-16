@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <new>
 #include <shared_mutex>
 #include <thread>
 #include <unordered_map>
@@ -231,6 +232,40 @@ CodePageRegistry::Settlement CodePageRegistry::retire_and_wait(
 	return wait_for_participants(self);
 }
 
+CodePageRegistry::Settlement CodePageRegistry::retire_all_and_wait(
+	const Participant *self) noexcept
+{
+	std::atomic_thread_fence(std::memory_order_seq_cst);
+	{
+		const std::shared_lock lock{participants_mutex_};
+		for (const auto &member : participants_) {
+			if (member.participant->write_translations == nullptr)
+				continue;
+			for (std::size_t index = 0; index < native_tlb_entry_count; ++index)
+				std::atomic_ref<std::uint64_t>{
+					member.participant->write_translations[index].write_page}
+					.store(1, std::memory_order_relaxed);
+		}
+		for (const auto &retirer : retirers_)
+			retirer.retire(retirer.context, all_pages);
+	}
+	return wait_for_participants(self);
+}
+
+std::vector<std::shared_ptr<CodePageRegistry>> CodePageRegistry::registries()
+{
+	auto &shared = table();
+	std::vector<std::shared_ptr<CodePageRegistry>> found;
+	const std::lock_guard lock{shared.mutex};
+	found.reserve(shared.entries.size());
+	for (const auto &[generation, entry] : shared.entries) {
+		(void)generation;
+		if (auto registry = entry.lock())
+			found.push_back(std::move(registry));
+	}
+	return found;
+}
+
 CodePageRegistry::Settlement CodePageRegistry::wait_for_participants(
 	const Participant *self) noexcept
 {
@@ -417,9 +452,33 @@ FrameRegistrationOutcome register_frame(
 	const CodePageRegistry::Participant *self, std::uint64_t page) noexcept
 {
 	FrameRegistrationOutcome outcome;
-	std::array<::uml::memory::FrameDebt, 16> debts{};
-	const auto hold = memory.hold_code_frame(
-		page, execution_context, debts.data(), debts.size());
+	std::array<::uml::memory::FrameDebt, 16> small{};
+	std::vector<::uml::memory::FrameDebt> large;
+	::uml::memory::FrameDebt *debts = small.data();
+	std::size_t capacity = small.size();
+	bool global_ok = false;
+	::uml::memory::FrameHold hold;
+	/* A debt larger than the buffer is asked for again with room for it. The
+	 * writers may grow between the asks, so the asks are bounded; when the
+	 * room cannot be had, or keeps being too small, the registration takes
+	 * the global fallback, which needs none. */
+	for (unsigned attempt = 0;; ++attempt) {
+		hold = memory.hold_code_frame(
+			page, execution_context, debts, capacity, global_ok);
+		if (hold.result != ::uml::memory::FrameHoldResult::crowded)
+			break;
+		try {
+			if (attempt >= 4)
+				throw std::bad_alloc{};
+			large.resize(hold.owed + hold.owed / 4U + 8U);
+			debts = large.data();
+			capacity = large.size();
+		} catch (...) {
+			debts = small.data();
+			capacity = 0;
+			global_ok = true;
+		}
+	}
 	switch (hold.result) {
 	case ::uml::memory::FrameHoldResult::settled:
 		outcome.status = FrameRegistration::settled;
@@ -428,27 +487,52 @@ FrameRegistrationOutcome register_frame(
 		outcome.status = FrameRegistration::refused;
 		return outcome;
 	case ::uml::memory::FrameHoldResult::failed:
+	case ::uml::memory::FrameHoldResult::crowded:
 		outcome.status = FrameRegistration::failed;
 		return outcome;
 	case ::uml::memory::FrameHoldResult::owed:
+	case ::uml::memory::FrameHoldResult::global:
 		break;
 	}
 	bool complete = true;
-	for (std::size_t index = 0; index < std::min(hold.owed, debts.size());
-	     ++index) {
-		/* A generation no executor holds a registry for has no write
-		 * translation to retire. */
-		auto registry = CodePageRegistry::find(debts[index].generation);
-		if (!registry)
-			continue;
-		auto settlement = registry->retire_and_wait(debts[index].page, self);
-		if (settlement.settled)
-			continue;
+	const auto stuck_at = [&](std::shared_ptr<CodePageRegistry> registry,
+				 CodePageRegistry::Settlement settlement) {
 		complete = false;
 		try {
 			outcome.stuck.push_back({std::move(registry), std::move(settlement)});
 		} catch (...) {
 			outcome.stuck_lost = true;
+		}
+	};
+	if (hold.result == ::uml::memory::FrameHoldResult::global) {
+		/* Every participant of every generation: the writers are too many
+		 * to name or not known. */
+		std::vector<std::shared_ptr<CodePageRegistry>> all;
+		try {
+			all = CodePageRegistry::registries();
+		} catch (...) {
+			/* The holder stands and the debt stays owed. */
+			outcome.stuck_lost = true;
+			outcome.status = FrameRegistration::unsettled;
+			return outcome;
+		}
+		for (auto &registry : all) {
+			auto settlement = registry->retire_all_and_wait(self);
+			if (!settlement.settled)
+				stuck_at(registry, std::move(settlement));
+		}
+	} else {
+		for (std::size_t index = 0; index < std::min(hold.owed, capacity);
+		     ++index) {
+			/* A generation no executor holds a registry for has no write
+			 * translation to retire. */
+			auto registry = CodePageRegistry::find(debts[index].generation);
+			if (!registry)
+				continue;
+			auto settlement = registry->retire_and_wait(debts[index].page, self);
+			if (settlement.settled)
+				continue;
+			stuck_at(std::move(registry), std::move(settlement));
 		}
 	}
 	if (!complete) {
