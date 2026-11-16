@@ -760,9 +760,8 @@ patches ART's one JNI function table in place and gives the application:
   not at a block's start is not read as a header, copies nothing, and counts as
   the release of the block of the reference that comes with it. A pointer the
   runtime itself handed out for a real reference to the array (the layer records
-  those from `Get...Elements` and `Get...Critical` once the process has had a
-  block, under a lock of their own, until their release with mode 0 or
-  `JNI_ABORT`) goes to the runtime's
+  those from `Get...Elements` and `Get...Critical`, from the first one on, under a
+  lock of their own, until their release with mode 0 or `JNI_ABORT`) goes to the runtime's
   own Release when it comes with a block's reference, with the block's array,
   and closes its critical region; any other pointer that comes with a block's
   reference is the application's own buffer, and is copied into the block. At

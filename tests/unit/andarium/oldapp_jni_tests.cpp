@@ -3863,6 +3863,55 @@ void check_an_elements_pointer_of_the_runtime_released_through_a_block_reaches_t
     require(block_weaks() == 1 && world.globals.size() == 1, "its own release gives the strong reference up");
 }
 
+// A pointer the runtime handed out before the process had a block is still the runtime's when a block made later for the same array
+// releases it: the layer records the runtime's pointers from the first one on, not from the first block. (Fails on a layer that
+// records them only once a block has been made: the release is taken for the application's buffer and never reaches the runtime.)
+void check_a_runtime_elements_pointer_got_before_the_first_block_is_released_by_the_runtime() {
+    Fixture f = make();
+    jobject array = byte_array(sample(64));
+    Obj* object = object_of(array);
+    object->held = true;
+    require(counters().shadows_created == 0, "no block has been made yet");
+    jbyte* theirs = get_elements(f, array);  // the runtime's pointer, before any block
+    Made made = obtain_again(f, object);      // the first block, of the same array
+    require(is_shadow_block(made.shadow) && counters().shadows_created == 1, "the first block");
+    const size_t before = world.released.size();
+    release_elements(f, made.shadow, theirs, 0);
+    require(world.released.size() == before + 1 && world.released.back() == theirs, "the runtime's own Release ran with its own pointer");
+}
+
+// The same for a critical pointer, which another thread holds when the first block is made: its region closes at the release through
+// the block's reference, and the layer's count of that thread's regions goes down with it.
+void check_a_runtime_critical_pointer_got_before_the_first_block_closes_its_region_at_the_release() {
+    constexpr const char* kCase = "check_a_runtime_critical_pointer_got_before_the_first_block_closes_its_region_at_the_release";
+    Fixture f = make();
+    Other holder(f);
+    jobject array = byte_array(sample(64));
+    Obj* object = object_of(array);
+    object->held = true;
+    jobject global = fn<jobject (*)(Env*, jobject)>(*f.table, slot::NewGlobalRef)(f.env, array);
+    require(counters().shadows_created == 0, "no block has been made yet");
+    std::atomic<int> stage{0};
+    std::atomic<jobject> shadow{nullptr};
+    int released_by_runtime = 0;
+    std::thread thread([&] {
+        void* pointer = get_critical(holder.f, global);  // the runtime's region opens on this thread, before any block
+        stage = 1;
+        wait_for_counter(kCase, "stage", stage, 2, "the thread that holds the pointer (the first block is being made)");
+        const int before = world.release_calls;
+        release_critical(holder.f, shadow.load(), pointer, 0);
+        released_by_runtime = world.release_calls - before;
+        stage = 3;
+    });
+    wait_for_counter(kCase, "stage", stage, 1, "the first thread (the other holds a critical pointer)");
+    Made made = obtain_again(f, object);
+    require(is_shadow_block(made.shadow) && counters().shadows_created == 1, "the first block, of the same array");
+    shadow = made.shadow;
+    stage = 2;
+    thread.join();
+    require(released_by_runtime == 1 && world.critical == 0, "the runtime's own Release ran and its critical region closed");
+}
+
 // JNI_COMMIT keeps the record (the pointer stays valid); mode 0 removes it, and then the address is nobody's again; a
 // release through the real reference removes it too.
 void check_the_record_of_a_runtime_pointer_ends_with_its_release() {
@@ -6250,6 +6299,8 @@ int main(int argc, char** argv) {
     check_an_end_is_serialized_with_a_second_threads_access();
     check_a_critical_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime();
     check_an_elements_pointer_of_the_runtime_released_through_a_block_reaches_the_runtime();
+    check_a_runtime_elements_pointer_got_before_the_first_block_is_released_by_the_runtime();
+    check_a_runtime_critical_pointer_got_before_the_first_block_closes_its_region_at_the_release();
     check_the_record_of_a_runtime_pointer_ends_with_its_release();
     check_a_nested_native_method_cannot_delete_its_callers_reference();
     check_monitor_exit_with_an_exception_pending();

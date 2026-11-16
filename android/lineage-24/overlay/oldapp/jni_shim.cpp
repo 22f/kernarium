@@ -2687,8 +2687,8 @@ void erase_record(unsigned i) {
     --g.records_in_use;
 }
 void record_runtime_pointer(const void* pointer, uint32_t kind) {
-    if (pointer == nullptr || __atomic_load_n(&g.counters.shadows_created, __ATOMIC_RELAXED) == 0) {
-        return;  // no block has been made yet: no block's reference can release it
+    if (pointer == nullptr) {
+        return;
     }
     {
         TableLock lock;
