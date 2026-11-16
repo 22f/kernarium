@@ -488,7 +488,10 @@ void test_a_stuck_writer_of_another_generation_drops_the_code()
 
 /* E5: a space whose registry could not be made still registers the frames it
  * compiles from, so that a store through another mapping of one reaches its
- * code. */
+ * code. The space refuses to compile a page until a holder stands: the first
+ * registration is made to fail, and the dispatch reports a fetch fault with
+ * nothing retired and nothing run; only the next one, whose registration
+ * settles, compiles. */
 void test_without_a_registry()
 {
 	const Clean clean;
@@ -507,17 +510,26 @@ void test_without_a_registry()
 	const auto backing = uml::memory::testing::mapped_backing(frame.descriptor());
 	require(backing != nullptr);
 
+	namespace testing = uml::memory::testing;
 	failing_array_size.store(page_counts);
-	require(space.to_system_call(executable) == 1);
+	auto cpu = Space::cpu_at(executable);
+	testing::fail_allocation_at(testing::AllocationSite::holders, 1);
+	const auto refused = space.run(cpu);
+	testing::clear_allocation_failure();
 	require(failing_array_size.load() == 0 &&
 		uml::cpu::x86_64::CodePageRegistry::find(space.generation()) == nullptr,
 		"the registry of the space was made");
+	require(refused.execution.reason == uml::cpu::ExitReason::memory_fault &&
+		refused.execution.retired_instructions == 0 && cpu.rip == executable,
+		"a space with no registry compiled a page no holder stood for");
+	require(space.engine().diagnostics().registration_failures == 1);
+	require(space.to_system_call(executable) == 1);
 	require(held_at(backing, space.generation(), executable),
 		"a space without a registry compiled from a frame it had not registered");
 	(void)space.to_system_call(writer, 2, alias + 1);
 	require(space.to_system_call(executable) == 2,
 		"a store through another address did not reach a space with no registry");
-	require(space.engine().diagnostics().registration_failures == 0);
+	require(space.engine().diagnostics().registration_failures == 1);
 }
 
 /* Fails every registration that reaches the holder list, as memory that
