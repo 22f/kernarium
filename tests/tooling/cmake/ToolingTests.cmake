@@ -74,7 +74,22 @@ if(TARGET uml_static_mmu)
         LABELS audit;package
         TIMEOUT 60)
 endif()
+# The audited compilation is built as a probe wherever the unit tests are
+# (darwin/memory/CMakeLists.txt), so these rows run in the check-unit gate,
+# and a diagnostics composition adds the row for the compilation it links. A
+# row that expects the checker to refuse an input reads the checker's own
+# message: an absent or empty directory also makes it exit nonzero, and must
+# not pass for the audit having been found.
 if(TARGET uml_static_mmu_audit_probe)
+    uml_add_tooling_test(
+        NAME memory-audit-compilation-fails-packaging
+        COMMAND ${Python3_EXECUTABLE} -B
+            ${PROJECT_SOURCE_DIR}/scripts/check-no-aot-diagnostics.py
+            $<TARGET_PROPERTY:uml_static_mmu_audit_probe,BINARY_DIR>/CMakeFiles/uml_static_mmu_audit_probe.dir
+        LABELS audit;package
+        TIMEOUT 60)
+    set_tests_properties(memory-audit-compilation-fails-packaging
+        PROPERTIES PASS_REGULAR_EXPRESSION "the memory layer's count audit")
     uml_add_tooling_test(
         NAME memory-audit-symbols-are-refused
         COMMAND ${Python3_EXECUTABLE} -B
@@ -87,14 +102,14 @@ if(TARGET uml_static_mmu_audit_probe)
 endif()
 if(TARGET uml_static_mmu_audited)
     uml_add_tooling_test(
-        NAME memory-audit-compilation-fails-packaging
+        NAME memory-audited-target-fails-packaging
         COMMAND ${Python3_EXECUTABLE} -B
             ${PROJECT_SOURCE_DIR}/scripts/check-no-aot-diagnostics.py
             $<TARGET_PROPERTY:uml_static_mmu_audited,BINARY_DIR>/CMakeFiles/uml_static_mmu_audited.dir
         LABELS audit;package
         TIMEOUT 60)
-    set_tests_properties(memory-audit-compilation-fails-packaging
-        PROPERTIES WILL_FAIL TRUE)
+    set_tests_properties(memory-audited-target-fails-packaging
+        PROPERTIES PASS_REGULAR_EXPRESSION "the memory layer's count audit")
 endif()
 
 # The software renderer is the Simulator's alone. The Kernarium framework

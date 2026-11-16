@@ -793,8 +793,11 @@ blocker in every one of them.
   runtime holds none of the diagnostics or test switches, and
   `memory-product-carries-no-count-audit` that the product compilation of the
   static MMU holds none of the count audit a diagnostics build links in a
-  second compilation (`memory-audit-compilation-fails-packaging` shows the
-  packaging check refuses that one).
+  second compilation. The unit tree builds that compilation as a probe nothing
+  links, so the gate also runs `memory-audit-compilation-fails-packaging` (the
+  packaging check refuses it, by its own message) and
+  `memory-audit-symbols-are-refused` (it refuses every memory-layer name `nm`
+  reports for the audited objects and not for the product's).
 - `arm64-aot-guest-runner` drives the guest runner of the next test against
   scripted guests: a complete pair of arms passes, and every failed or
   incomplete one (an exit status, a missing or empty workload row, a probe
