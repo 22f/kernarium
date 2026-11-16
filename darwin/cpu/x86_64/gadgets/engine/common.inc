@@ -1078,9 +1078,7 @@ Lx86_segment_ready\@:
 	and x23, x23, #~(1 << 60)
 	.endif
 	and x9, x7, #0xfffffffffffff000
-	lsr x10, x7, #12
-	eor x10, x10, x10, lsr #15
-	and w10, w10, #0x7fff
+	ubfx x10, x7, #12, #UML_X86_64_TLB_INDEX_BITS
 	ldr x11, [_context, #UML_X86_64_CONTEXT_TLB]
 	add x11, x11, x10, lsl #5
 	.if \record_stack
@@ -1158,9 +1156,7 @@ Lx86_tlb_write_code_owed\@:
 .macro translate_plain access, entry_offset, size, fault
 	x86_marks_guest_memory
 	and x9, x7, #0xfffffffffffff000
-	lsr x10, x7, #12
-	eor x10, x10, x10, lsr #15
-	and w10, w10, #0x7fff
+	ubfx x10, x7, #12, #UML_X86_64_TLB_INDEX_BITS
 	ldr x11, [_context, #UML_X86_64_CONTEXT_TLB]
 	add x11, x11, x10, lsl #5
 	ldp x12, x13, [x11, #\entry_offset]

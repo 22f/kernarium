@@ -139,9 +139,7 @@ def translate(o, write, size, record_stack=False, miss='Lx86_baked_miss'):
     if write:
         o.emit('\tand x23, x23, #~(1 << 60)')
     o.emit('\tand x9, x7, #0xfffffffffffff000')
-    o.emit('\tlsr x10, x7, #12')
-    o.emit('\teor x10, x10, x10, lsr #15')
-    o.emit('\tand w10, w10, #0x7fff')
+    o.emit('\tubfx x10, x7, #12, #UML_X86_64_TLB_INDEX_BITS')
     o.emit('\tldr x11, [_context, #UML_X86_64_CONTEXT_TLB]')
     o.emit('\tadd x11, x11, x10, lsl #5')
     if record_stack:

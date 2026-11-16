@@ -137,10 +137,12 @@ tail and resolves the same address.
   registers, so a gadget may not hold a guest value in one across its own
   translation. This is also why vector result forwarding takes register forms
   only.
-- The software TLB is direct-mapped. `native_tlb_entry_count` in
-  `../software_tlb.hpp` is the one constant; the three assembly copies of the
-  index (`translate` and `translate_plain` in `engine/common.inc`, and the
-  baked entries in `engine/generate_baked.py`) must change with it.
+- The software TLB is direct-mapped and indexed by the low
+  `UML_X86_64_TLB_INDEX_BITS` bits of the page number
+  (`../layout/assembly_offsets.h`); `native_tlb_index` in
+  `../software_tlb.hpp` and the three assembly copies of the index
+  (`translate` and `translate_plain` in `engine/common.inc`, and the baked
+  entries in `engine/generate_baked.py`) all read that constant.
 
 ## Floating-point environment
 
