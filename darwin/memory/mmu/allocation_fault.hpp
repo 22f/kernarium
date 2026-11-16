@@ -60,6 +60,12 @@ void stripe_lock_left() noexcept;
 /* An allocator the frame accounting's metadata uses, or a test's replacement
  * of the global operator new, reports here; one made under a stripe lock is
  * counted. */
+/* A walk that ran while the address space's table of generations was locked,
+ * which a test reads (retire_walks_under_lock): the retire walk takes the
+ * state's mapping lock and the frames' stripe locks, so it must not nest in
+ * the table's. */
+void retire_walk_under_lock() noexcept;
+[[nodiscard]] std::size_t retire_walks_under_lock() noexcept;
 bool allocator_probe() noexcept;
 /* While set, every allocation the calling thread makes through a probed
  * allocator or a checkpoint is refused and counted: a test shows that a path
@@ -86,6 +92,13 @@ void backing_mapping_destroyed() noexcept;
 	} while (false)
 #define UML_MEMORY_FRAME_BYTES(delta) \
 	::uml::memory::testing::frame_bytes_changed(delta)
+#define UML_MEMORY_RETIRE_WALK_UNLOCKED(mutex) \
+	do { \
+		if ((mutex).try_lock_shared()) \
+			(mutex).unlock_shared(); \
+		else \
+			::uml::memory::testing::retire_walk_under_lock(); \
+	} while (false)
 #define UML_MEMORY_STRIPE_LOCK_ENTERED() \
 	::uml::memory::testing::stripe_lock_entered()
 #define UML_MEMORY_STRIPE_LOCK_LEFT() \
@@ -101,6 +114,7 @@ void backing_mapping_destroyed() noexcept;
 #define UML_MEMORY_ALLOCATION_CHECKPOINT(...) ((void)0)
 #define UML_MEMORY_ALLOCATOR_PROBE() ((void)0)
 #define UML_MEMORY_FRAME_BYTES(...) ((void)0)
+#define UML_MEMORY_RETIRE_WALK_UNLOCKED(mutex) ((void)0)
 #define UML_MEMORY_STRIPE_LOCK_ENTERED() ((void)0)
 #define UML_MEMORY_STRIPE_LOCK_LEFT() ((void)0)
 #define UML_MEMORY_BACKING_MAPPING_CREATED() ((void)0)

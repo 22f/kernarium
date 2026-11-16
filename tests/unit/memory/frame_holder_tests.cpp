@@ -245,7 +245,7 @@ struct Baseline final {
 		uml::memory::testing::allocations_under_stripe_lock()};
 
 	/* The counters that must stay 0 did, whatever the row did. */
-	void clean(const char *row) const
+	void clean(const char *row, std::uint64_t refusals = 0) const
 	{
 		const auto now = FrameAccounting::diagnostics();
 		if (now.errors != start.errors ||
@@ -253,7 +253,7 @@ struct Baseline final {
 		    now.holder_leaks != start.holder_leaks ||
 		    now.unquiesced_holder_removals != start.unquiesced_holder_removals ||
 		    now.unmarked_holder_removals != start.unmarked_holder_removals ||
-		    now.walked_refusals != start.walked_refusals ||
+		    now.walked_refusals != start.walked_refusals + refusals ||
 		    uml::memory::testing::allocations_under_stripe_lock() !=
 			    stripe_allocations) {
 			std::printf("%s: errors +%llu, nonempty destructions +%llu, "
@@ -272,7 +272,7 @@ struct Baseline final {
 					now.unmarked_holder_removals -
 					start.unmarked_holder_removals),
 				static_cast<unsigned long long>(
-					now.walked_refusals - start.walked_refusals),
+					now.walked_refusals - start.walked_refusals - refusals),
 				uml::memory::testing::allocations_under_stripe_lock() -
 					stripe_allocations);
 			require(false, "a counter that must stay 0 moved");
@@ -1125,6 +1125,64 @@ void test_kernel_write_after_a_partial_unmap()
 	baseline.clean("R1");
 }
 
+/* E9: an address space is retired. Its states are walked after the table of
+ * generations is unlocked, every holder is gone when the walk ends, a
+ * registration and a reservation on a walked state are refused (counted, for
+ * the first), and the state, dropped later, destructs with empty tables: no
+ * state destroyed with its walk missing, no holder that outlived its state,
+ * no removal the generation had not quiesced. */
+void test_a_retired_address_space()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0xb00'0000;
+	ScratchBacking backing{"uml-frame-retire-XXXXXX", 4 * page};
+	Domain domain{73'010};
+	std::shared_ptr<uml::memory::GenerationState> state;
+	std::shared_ptr<uml::memory::MappedBacking> kept;
+	domain.run([&] {
+		require(map(851, base, backing, 1, 1, rx) == 0);
+		require(hold_frame(851, base).result != DARWIN_UML_STATIC_FRAME_FAILED);
+		kept = uml::memory::testing::mapped_backing(backing.descriptor());
+		state = uml::memory::testing::generation_state(851);
+		require(state != nullptr && kept != nullptr);
+		std::vector<WriterLocation> holders;
+		FrameAccounting::holders_for_testing(*kept, page, holders);
+		require(holders.size() == 1, "the frame had no holder before the retire");
+	});
+	const auto locked = uml::memory::testing::retire_walks_under_lock();
+	domain.retire();
+	require(uml::memory::testing::retire_walks_under_lock() == locked,
+		"the retire walk ran with the table of generations locked");
+	require(state->accounting.walked, "the retire did not walk the state");
+	std::vector<WriterLocation> holders;
+	FrameAccounting::holders_for_testing(*kept, page, holders);
+	require(holders.empty(), "a retired address space left a holder");
+
+	std::array<darwin_uml_static_frame_location, 4> owed{};
+	const auto refusals = FrameAccounting::diagnostics().walked_refusals;
+	const auto report = FrameAccounting::hold(
+		*state, base, owed.data(), owed.size(), false);
+	require(report.result == FrameAccounting::HoldResult::refused,
+		"a walked state took a registration");
+	require(FrameAccounting::diagnostics().walked_refusals == refusals + 1,
+		"the refusal of a registration on a walked state was not counted");
+	bool refused = false;
+	try {
+		state->accounting.reservation.add(*state, *kept, 3 * page, base);
+	} catch (const std::bad_alloc &) {
+		refused = true;
+	}
+	require(refused, "a walked state took a reservation");
+	std::vector<WriterLocation> left;
+	require(FrameAccounting::locations_for_testing(*kept, 3 * page, left) &&
+		left.empty(), "a refused reservation left a location");
+	holders.clear();
+	FrameAccounting::holders_for_testing(*kept, page, holders);
+	require(holders.empty(), "a refused registration left a holder");
+	state.reset();
+	baseline.clean("E9", 1);
+}
+
 /* M16: two vCPUs of one generation register frames at once. Registrations
  * hold the generation's mapping lock shared, so everything they write in the
  * state is atomic or under a stripe lock: the thread sanitizer says whether it
@@ -1172,6 +1230,7 @@ int main()
 	test_direct_table();
 	test_kernel_write_frames();
 	test_kernel_write_after_a_partial_unmap();
+	test_a_retired_address_space();
 	test_unknown_frame();
 	test_a_debt_larger_than_the_buffer();
 	test_concurrent_registrations_of_one_state();

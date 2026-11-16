@@ -918,6 +918,7 @@ public:
 #if DARWIN_UML_X86_64_GUEST
 		/* After states_mutex_ is released: the walk takes each state's
 		 * mapping lock and the frames' stripe locks. */
+		UML_MEMORY_RETIRE_WALK_UNLOCKED(states_mutex_);
 		for (auto &[generation, state] : gone) {
 			(void)generation;
 			std::lock_guard lock{state->mappings_mutex};

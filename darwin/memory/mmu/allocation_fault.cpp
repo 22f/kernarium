@@ -21,6 +21,7 @@ std::atomic<std::ptrdiff_t> frame_bytes{};
 thread_local unsigned stripe_depth{};
 thread_local bool refusing{};
 std::atomic_size_t refusals{};
+std::atomic_size_t locked_walks{};
 std::array<std::atomic_size_t,
 	static_cast<std::size_t>(AllocationSite::count)> allocation_attempts{};
 
@@ -107,6 +108,16 @@ bool allocator_probe() noexcept
 	if (refusing)
 		refusals.fetch_add(1, std::memory_order_relaxed);
 	return refusing;
+}
+
+void retire_walk_under_lock() noexcept
+{
+	locked_walks.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::size_t retire_walks_under_lock() noexcept
+{
+	return locked_walks.load(std::memory_order_relaxed);
 }
 
 void refuse_allocations(const bool refuse) noexcept
