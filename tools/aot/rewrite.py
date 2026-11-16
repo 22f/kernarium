@@ -237,7 +237,7 @@ CENSUS = ("other", "insn", "spill", "branch", "pcrel", "step", "hint",
           "atomic", "mops.site", "mem.ea", "mem.probe", "mem.access",
           "mem.wb", "charge", "gate", "stub.mm", "stub.st", "stub.xu",
           "stub.ma", "stub.xb", "exits", "mops.thunk", "table", "src",
-          "stub.refill", "mem.call", "mem.routine")
+          "stub.refill", "mem.call", "mem.routine", "count")
 CENSUS_CODE = {name: code for code, name in enumerate(CENSUS)}
 CENSUS_OUTER = {"branch_imm": "branch", "condbranch": "branch",
                 "compbranch": "branch", "testbranch": "branch",
@@ -567,9 +567,11 @@ class Library:
                 self.stats.words["charge"] += 2
             asm.label(self.lab("E", offset))
             if self.count_retired:
+                before = len(asm._w)
                 asm.word(A.ldr_x(T2, 31, SLOT_COUNT))
                 asm.word(A.add_imm(T2, T2, 1))
                 asm.word(A.str_x(T2, 31, SLOT_COUNT))
+                self.tag("count", before)
                 self.stats.words["count"] += 3
             self.entry_labels.append(offset)
             self.stats.instructions += 1

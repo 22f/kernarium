@@ -12,6 +12,7 @@ __import__("sys").dont_write_bytecode = True
 import collections
 import hashlib
 import pathlib
+import re
 import struct
 import sys
 import unittest
@@ -650,6 +651,79 @@ class RunBoundTests(unittest.TestCase):
         # The lap itself crosses charge points that cover its 41 words.
         paid = sum(library.charge[offset] for offset in library.charge)
         self.assertGreaterEqual(paid, len(words))
+
+
+class CountingLayoutTests(unittest.TestCase):
+    """The counting layout (UML_AOT_COUNT_RETIRED) builds and counts.
+
+    The differential test's independent bound on an entry reads the exact
+    count only from this layout, which no preset builds. These rows keep the
+    layout assembling on a library, keep it different from the product's in
+    exactly the counter's words, and tie the test's bound to the rewriter's
+    run limit, so the bound cannot go stale unnoticed.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import tempfile
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.path = pathlib.Path(cls.directory.name) / "libaotfixture.so"
+        cls.path.write_bytes(fixture.build())
+        cls.layout = rewrite.read_layout(rewrite.LAYOUT_HEADER)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.directory.cleanup()
+
+    def unit(self, count: bool) -> dict:
+        return rewrite.build_unit(
+            (0, "/aot-test/libaotfixture.so", str(self.path), count,
+             "inline", None))
+
+    @staticmethod
+    def words(code: bytes) -> list[int]:
+        return list(struct.unpack(f"<{len(code) // 4}I", code))
+
+    def test_every_instruction_pays_three_words_to_count(self) -> None:
+        product = self.unit(False)
+        counting = self.unit(True)
+        instructions = counting["stats"]["instructions"]
+        self.assertGreater(instructions, 40)
+        self.assertEqual(product["stats"]["instructions"], instructions)
+        self.assertEqual(product["stats"]["words"].get("count", 0), 0)
+        self.assertEqual(counting["stats"]["words"]["count"], 3 * instructions)
+        # Every counter word has a census kind, so the unit builds at all.
+        self.assertEqual(product["stats"]["census"]["count"], 0)
+        self.assertEqual(counting["stats"]["census"]["count"],
+                         12 * instructions)
+        self.assertGreater(len(counting["unit"]), len(product["unit"]))
+        load = A.ldr_x(rewrite.T2, 31, rewrite.SLOT_COUNT)
+        self.assertNotIn(load, self.words(product["unit"]))
+        self.assertGreaterEqual(self.words(counting["unit"]).count(load),
+                                instructions)
+
+    def test_the_entry_zeroes_and_reports_the_count(self) -> None:
+        for count in (False, True):
+            blob, manifest = rewrite.build_blob(
+                [self.unit(count)], self.layout, "counting-row", count)
+            words = self.words(blob)
+            zero = A.str_x(31, 31, rewrite.SLOT_COUNT)
+            report = A.ldr_x(1, 31, rewrite.SLOT_COUNT)
+            budget = A.ldr_x(rewrite.TLB, 31, rewrite.SLOT_BUD0)
+            self.assertEqual(zero in words, count)
+            self.assertEqual(report in words, count)
+            self.assertEqual(budget in words, not count)
+
+    def test_the_tests_bound_is_the_rewriters_run_limit(self) -> None:
+        source = (pathlib.Path(__file__).resolve().parents[3] / "tests" /
+                  "unit" / "arm64" /
+                  "arm64_aot_differential_tests.cpp").read_text()
+        match = re.search(
+            r"entry_bound = 4096 \+ (\d+) \+ (\d+);", source)
+        self.assertIsNotNone(match)
+        self.assertEqual(int(match.group(1)), rewrite.RUN_LIMIT)
+        # The charge point's own word and the entry's last instruction.
+        self.assertGreaterEqual(int(match.group(2)), 2)
 
 
 class StackAlignmentTests(unittest.TestCase):
