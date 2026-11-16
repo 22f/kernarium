@@ -49,6 +49,18 @@ uml_add_tooling_test(
     LABELS audit;package
     TIMEOUT 120)
 
+# The AOT runtime's diagnostics build (counters, a report writer, test
+# switches) is never packaged. The packaging scripts run this check; the
+# fixtures show it finds the diagnostics namespace and the report name in an
+# object, an archive member, a stripped binary and a nested framework.
+uml_add_tooling_test(
+    NAME packaged-products-carry-no-aot-diagnostics
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/cmake/test_check_no_aot_diagnostics.py
+        --checker ${PROJECT_SOURCE_DIR}/scripts/check-no-aot-diagnostics.py
+    LABELS audit;package
+    TIMEOUT 60)
+
 # The software renderer is the Simulator's alone. The Kernarium framework
 # packaging runs this check on every device slice, and requires it in the
 # Simulator's GL provider; the fixtures show it finds either Gallium screen as a

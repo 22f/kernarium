@@ -602,8 +602,10 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
 - Diagnostics: the CMake option `UML_AOT_DIAGNOSTICS` (off) composes a second
   compilation of the runtime with counters, a report file written by a thread
   of its own, and the test switches. The product target holds none of it in
-  any configuration (`arm64-aot-runtime-product` checks the object), and in
-  no build does a vCPU thread do file I/O or allocate while it is inside
+  any configuration (`arm64-aot-runtime-product` checks the object;
+  `scripts/check-no-aot-diagnostics.py` fails the XCFramework and Kernarium
+  packaging on a binary that linked the diagnostics compilation), and in no
+  build does a vCPU thread do file I/O or allocate while it is inside
   rewritten code.
 
 Build and tests: `tools/aot/README.md`.

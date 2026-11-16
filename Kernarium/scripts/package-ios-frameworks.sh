@@ -578,6 +578,10 @@ fi
 "$PYTHON" -B "$ROOT_DIR/scripts/check-no-fexcore.py" "$STAGE" ||
 	fail "a packaged iOS framework carries FEXCore"
 
+# The AOT runtime's diagnostics build is for tests only.
+"$PYTHON" -B "$ROOT_DIR/scripts/check-no-aot-diagnostics.py" "$STAGE" ||
+	fail "a packaged iOS framework carries the AOT diagnostics build"
+
 # Publish with one atomic rename, so the XCFrameworks are never absent and a
 # concurrent run is never moved below another's tree: the first publish is an
 # exclusive rename, and a later one swaps the new tree in, which leaves the
