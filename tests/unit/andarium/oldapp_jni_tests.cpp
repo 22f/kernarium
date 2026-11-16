@@ -5657,6 +5657,44 @@ void check_a_static_call_with_a_null_class_runs_converted() {
     converted("and its block is converted");
 }
 
+// The stop is for the application's calls. A platform caller whose call's parameters cannot be had (a framework thread that meets a
+// failing reflection at its first call of a method ID cached before the layer) is forwarded: its receiver is converted, its
+// arguments are as it passed them, and nothing is remembered. It can hold a block's address only through an application's type
+// error, which fails on stock too. The same state still stops an application's call.
+// (Fails on a layer that stops for every caller: the process stops and nothing reaches the runtime.)
+void check_a_platform_call_whose_parameters_cannot_be_had_is_forwarded() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, sample(16));
+    jmethodID unseen_static = unseen_method("(J)I");
+    jmethodID unseen_instance = unseen_method("(J)Ljava/lang/Object;");
+    const jlong value = static_cast<jlong>(reinterpret_cast<intptr_t>(made.shadow));  // an integer that is a block's address
+    world.describe_fails = true;
+    g_app_caller = false;
+    const auto forwarded = [&](const char* what, bool with_receiver) {
+        require(g_stops == 0 && !world.last_call.empty() && world.last_args.size() == 1 && world.last_args[0].j == value, what);
+        require(!with_receiver || world.last_receiver == made.object, "and its receiver, a block, was converted");
+        forget_the_last_call();
+    };
+    forget_the_last_call();
+    require(call_static_int_v(f, unseen_static, value) == 7, "a static call by a platform caller runs");
+    forwarded("the V form: forwarded with its argument as it was passed", false);
+    jvalue args[1] = {};
+    args[0].j = value;
+    require(fn<jint (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kInt, kArray))(f.env, f.cls, unseen_static, args) == 7,
+            "the A form runs");
+    forwarded("the A form: forwarded with its argument as it was passed", false);
+    (void)call_object_v(f, made.shadow, unseen_instance, value);
+    forwarded("an instance call, V form: forwarded with its argument as it was passed", true);
+    (void)fn<jobject (*)(Env*, jobject, jmethodID, const jvalue*)>(*f.table, call_slot(kObject, kArray))(f.env, made.shadow, unseen_instance, args);
+    forwarded("an instance call, A form: forwarded with its argument as it was passed", true);
+    require(world.describe_calls == 4 && stop_lines() == 0, "every call asked again, none stopped, none logged a stop");
+    g_app_caller = true;
+    forget_the_last_call();
+    require(the_process_stops([&] { (void)call_static_int_v(f, unseen_static, value); }) && world.last_call.empty() && stop_lines() == 1,
+            "the same state, from the application: the call stops");
+    world.describe_fails = false;
+}
+
 // A call made with an exception pending (ART does not refuse it) is no cause: the parameters of an ID the layer has to describe
 // are had with the exception taken out for the time, and the same exception is pending again after the call.
 void check_an_unseen_method_is_learned_with_an_exception_pending() {
@@ -6888,6 +6926,7 @@ int main(int argc, char** argv) {
     check_a_method_that_cannot_be_described_stops_the_call_and_is_asked_about_again();
     check_the_other_causes_of_unknown_parameters_stop_the_call();
     check_a_static_call_with_a_null_class_runs_converted();
+    check_a_platform_call_whose_parameters_cannot_be_had_is_forwarded();
     check_an_unseen_method_is_learned_with_an_exception_pending();
     check_after_a_merge_and_a_new_cut_a_place_is_a_block_only_where_one_starts();
     check_a_block_made_at_a_stale_address_during_PopLocalFrame_is_left_alone();

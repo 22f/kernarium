@@ -2054,9 +2054,11 @@ const MethodInfo* learn_method(Env* env, void* id, bool is_static) {
     return learned;
 }
 
-// A call whose parameters the layer cannot learn (no method ID, an ID it cannot describe, no reflection to describe it with,
-// memory for its node gone): it cannot say which of the call's values are references, and a block's address that reached the
-// runtime would be taken for one. So the call does not reach the runtime: the process stops, with one line in the log.
+// An application's call whose parameters the layer cannot learn (no method ID, an ID it cannot describe, no reflection to
+// describe it with, memory for its node gone): it cannot say which of the call's values are references, and a block's address
+// that reached the runtime would be taken for one. So the call does not reach the runtime: the process stops, with one line in
+// the log. A platform caller's call is not stopped: it can hold a block's address only through an application's type error,
+// which fails on stock too.
 [[noreturn]] void stop_for_unknown_parameters(const void* method) {
     if (g.platform.log != nullptr) {
         g.platform.log("a call's parameters cannot be learned and a block's address must not reach the runtime: the process stops; method:",
@@ -2208,7 +2210,15 @@ R run_va(Env* e, jobject l0, jobject l1, jmethodID m, va_list ap, bool app) {
         if (info == nullptr) {
             info = learn_method(e, m, K == Kind::kStatic);
             if (info == nullptr) {
-                stop_for_unknown_parameters(m);
+                if (app) {
+                    stop_for_unknown_parameters(m);
+                }
+                // A platform caller: its arguments go as they are (the kinds cannot be had), its receiver converted.
+                HoldSet no_arguments(e, nullptr, 0, &receiver_set);
+                return complete<R>(e, nullptr, app, [&] {
+                    return call_synced<R>(e, receiver_set, no_arguments,
+                                          [&] { return call_original_v<R, K>(SlotV, e, receiver, l1, m, ap); });
+                });
             }
         }
         const unsigned params = info->nparams;
@@ -2249,7 +2259,15 @@ R run_array(Env* e, jobject l0, jobject l1, jmethodID m, const jvalue* args, boo
         if (info == nullptr) {
             info = learn_method(e, m, K == Kind::kStatic);
             if (info == nullptr) {
-                stop_for_unknown_parameters(m);
+                if (app) {
+                    stop_for_unknown_parameters(m);
+                }
+                // A platform caller: its arguments go as they are (the kinds cannot be had), its receiver converted.
+                HoldSet no_arguments(e, nullptr, 0, &receiver_set);
+                return complete<R>(e, nullptr, app, [&] {
+                    return call_synced<R>(e, receiver_set, no_arguments,
+                                          [&] { return call_original_a<R, K>(SlotA, e, receiver, l1, m, args); });
+                });
             }
         }
         const unsigned params = info->nparams;

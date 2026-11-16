@@ -675,8 +675,9 @@ patches ART's one JNI function table in place and gives the application:
   call with a null class, which the runtime runs, runs here too. The registry has no
   limit, and a failure to learn is not remembered. Where the
   parameters cannot be had at a call (no reflection, no method ID, no memory for the
-  method's record), the call does not reach the runtime: the process stops after one
-  line in the log. The layer reads the
+  method's record), the application's call does not reach the runtime: the process
+  stops after one line in the log. A platform caller's call goes on with its receiver
+  converted and its arguments as they are. The layer reads the
   length from its own record, never from the length word, which the application
   can overwrite. The block and its array behave as one memory at the points
   where the application meets Java: before and after a call that is passed the
