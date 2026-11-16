@@ -44,6 +44,7 @@
 #include <memory>
 #include <new>
 #include <sys/mman.h>
+#include <thread>
 #include <vector>
 
 /* The next allocation of exactly this many bytes fails: the registry's page
@@ -82,8 +83,11 @@ constexpr int rx = PROT_READ | PROT_EXEC;
  * execution context entered, the engine handed what changed, then the run. */
 class Space final {
 public:
-	explicit Space(unsigned long generation)
+	/* `owner` is false for a second vCPU of a generation another Space made
+	 * and will destroy. */
+	explicit Space(unsigned long generation, bool owner = true)
 		: generation_{generation},
+		  owner_{owner},
 		  context_{darwin_uml_static_vm_execution_context_create(generation)},
 		  engine_(uml::platform::apple::probed_host_capabilities(),
 			  jit::FexEngineOptions{.generation_live = &generation_live})
@@ -94,7 +98,8 @@ public:
 
 	~Space()
 	{
-		(void)darwin_uml_static_vm_destroy(generation_);
+		if (owner_)
+			(void)darwin_uml_static_vm_destroy(generation_);
 		darwin_uml_static_vm_execution_context_destroy(context_);
 	}
 
@@ -229,6 +234,7 @@ public:
 
 private:
 	unsigned long generation_;
+	bool owner_;
 	void *context_;
 	StaticGuestMemory memory_;
 	jit::FexEngine engine_;
@@ -410,6 +416,83 @@ void test_decoder_across_two_pages()
 	require(space.to_system_call(executable + 0xffd) == 0x2'0001,
 		"a store through the second frame's alias did not reach the unit");
 	require(space.engine().diagnostics().registration_failures == 0);
+}
+
+/* Holds each registering thread at the point it records a holder, until the
+ * other has reached it too, so that both are inside the registration (and so
+ * inside the engine) when either one retires the writers' translations. */
+std::atomic<unsigned> registering{0};
+thread_local bool hold_at_registration = false;
+
+void wait_for_the_other_registration(
+	uml::memory::testing::AllocationSite site) noexcept
+{
+	using namespace std::chrono_literals;
+	if (site != uml::memory::testing::AllocationSite::holders ||
+	    !hold_at_registration)
+		return;
+	hold_at_registration = false;
+	registering.fetch_add(1, std::memory_order_acq_rel);
+	const auto deadline = std::chrono::steady_clock::now() + 3s;
+	while (registering.load(std::memory_order_acquire) < 2 &&
+	       std::chrono::steady_clock::now() < deadline)
+		std::this_thread::yield();
+}
+
+/* NF-1: two vCPUs of one generation compile frames that each owe a writer's
+ * write translation, at the same moment. A registration waits for the
+ * participants inside the engine, so a vCPU that waits with its own epoch odd
+ * is waited for by the other, and both come back at the deadline with the
+ * page unsettled. Both must settle at once and neither record a stuck
+ * participant. */
+void test_two_spaces_registering_owed_frames()
+{
+	const Clean clean;
+	namespace testing = uml::memory::testing;
+	using namespace std::chrono_literals;
+	constexpr unsigned long generation = 9211;
+	constexpr std::uint64_t executable_a = 0x1900'0000;
+	constexpr std::uint64_t alias_a = 0x2900'0000;
+	constexpr std::uint64_t executable_b = 0x1a00'0000;
+	constexpr std::uint64_t alias_b = 0x2a00'0000;
+	ScratchBacking frame_a{"uml-x86-jit-twin-a-XXXXXX", page};
+	ScratchBacking frame_b{"uml-x86-jit-twin-b-XXXXXX", page};
+	load_return(frame_a, 1);
+	load_return(frame_b, 2);
+	Space first{generation};
+	Space second{generation, false};
+	first.map(executable_a, frame_a, 0, rx, 1);
+	first.map(alias_a, frame_a, 0, rw, 0);
+	first.map(executable_b, frame_b, 0, rx, 1);
+	first.map(alias_b, frame_b, 0, rw, 0);
+
+	registering.store(0);
+	testing::set_allocation_observer(&wait_for_the_other_registration);
+	std::uint64_t result_a = 0;
+	std::uint64_t result_b = 0;
+	const auto start = std::chrono::steady_clock::now();
+	std::thread thread_a{[&] {
+		hold_at_registration = true;
+		result_a = first.to_system_call(executable_a);
+	}};
+	std::thread thread_b{[&] {
+		hold_at_registration = true;
+		result_b = second.to_system_call(executable_b);
+	}};
+	thread_a.join();
+	thread_b.join();
+	const auto elapsed = std::chrono::steady_clock::now() - start;
+	testing::set_allocation_observer(nullptr);
+	require(registering.load() == 2, "the two registrations did not overlap");
+	require(result_a == 1 && result_b == 2);
+	require(elapsed < 600ms,
+		"two vCPUs registering owed frames waited for each other");
+	for (auto *space : {&first, &second}) {
+		const auto &diagnostics = space->engine().diagnostics();
+		require(diagnostics.escalation_invalidations == 0,
+			"a registration left a participant counted stuck");
+		require(diagnostics.registration_failures == 0);
+	}
 }
 
 /* E7: a store through W into a unit that other units link to reaches the
@@ -719,6 +802,8 @@ int main()
 	std::puts("decoder ok");
 	test_decoder_across_two_pages();
 	std::puts("decoder spanning ok");
+	test_two_spaces_registering_owed_frames();
+	std::puts("twin spaces ok");
 	test_links_follow_alias_stores();
 	std::puts("links ok");
 	test_a_stuck_writer_of_another_generation_drops_the_code();

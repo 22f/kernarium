@@ -638,6 +638,24 @@ namespace {
 
 bool Space::hold_code_page(std::uint64_t page) noexcept
 {
+	/* A compile runs between two guest instructions, with no store translated
+	 * and pending, so neither registration below need wait for this
+	 * participant to leave the engine: the epoch is even for both, because a
+	 * registration that owes a writer waits for every participant inside the
+	 * engine, and two vCPUs each waiting with an odd epoch would wait for
+	 * each other until the deadline. */
+	const bool inside = (participant.engine_epoch.load(std::memory_order_relaxed) & 1U) != 0;
+	if (inside)
+		participant.engine_epoch.fetch_add(1, std::memory_order_release);
+	const struct Reenter final {
+		Space &space;
+		bool inside;
+		~Reenter()
+		{
+			if (inside)
+				space.participant.engine_epoch.fetch_add(1, std::memory_order_seq_cst);
+		}
+	} reenter{*this, inside};
 	/* The frame is registered at every query, before the early returns
 	 * below: a space with no registry (its acquisition or join failed under
 	 * memory pressure) still compiles from the frame, and a store through
@@ -673,15 +691,7 @@ bool Space::hold_code_page(std::uint64_t page) noexcept
 			/* The count can never be returned: the page stays held,
 			 * which costs publications, not correctness. */
 		}
-		/* A compile runs between two guest instructions, with no store
-		 * translated and pending, so the registration need not wait for
-		 * this participant to leave the engine. */
-		const bool inside = (participant.engine_epoch.load(std::memory_order_relaxed) & 1U) != 0;
-		if (inside)
-			participant.engine_epoch.fetch_add(1, std::memory_order_release);
 		settlement = registry->add(page, &participant);
-		if (inside)
-			participant.engine_epoch.fetch_add(1, std::memory_order_seq_cst);
 	}
 	/* A participant stuck inside the engine may still land a store that
 	 * publishes nothing; the code compiled from this page is dropped at
