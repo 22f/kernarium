@@ -474,6 +474,9 @@ final class AppModel {
     private var restoringUpdate = false
     /// The identifiers of the text messages whose send was not confirmed.
     private var smsRetries = GuestSms.Retries()
+    /// The sender of the last text message, kept until the virtual machine
+    /// is erased.
+    @ObservationIgnored var smsSender = GuestSms.SenderMemory()
     /// The guest is paused because the device is nearly out of space; the
     /// screen over the session asks what to do.
     var spacePause: SpacePause?
@@ -880,6 +883,7 @@ final class AppModel {
     func erase() {
         guard let driver, guest != nil else {
             lifecycle.erase()
+            smsSender.forget()
             plan = .firstStart
             forgetSnapshots()
             return
@@ -893,6 +897,7 @@ final class AppModel {
             self.persistTask?.cancel()
             try await driver.erase(progress: progress)
             self.lifecycle.erase()
+            self.smsSender.forget()
             self.forgetSnapshots()
             self.resizePreset = nil
             self.sheet = nil

@@ -188,4 +188,21 @@ struct GuestSmsTests {
         retries.settle(sender: "Bank", text: composed, identifier: identifier, confirmed: false)
         #expect(retries.identifier(sender: "Bank", text: decomposed) != identifier)
     }
+
+    @Test func theSenderIsKeptUntilTheVirtualMachineIsErased() throws {
+        let suite = "GuestSmsTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let memory = GuestSms.SenderMemory(defaults: defaults)
+        #expect(memory.sender == nil)
+        memory.keep("My Bank")
+        // Another launch reads the same defaults.
+        #expect(GuestSms.SenderMemory(defaults: defaults).sender == "My Bank")
+        memory.keep("")
+        #expect(memory.sender == nil)
+        memory.keep("+15551234567")
+        memory.forget()
+        #expect(memory.sender == nil)
+        #expect(defaults.object(forKey: GuestSms.SenderMemory.key) == nil)
+    }
 }

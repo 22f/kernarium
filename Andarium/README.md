@@ -588,7 +588,8 @@ control out.
   `StartPlan` is what Home shows of them before Start. An update clones
   `data.img` first (the update's copy, until the updated Android has booted),
   and Erase virtual machine deletes everything the guest has stored, its snapshots,
-  the adb key and its installation identity included.
+  the adb key, its installation identity and the sender it last sent a text message
+  from included.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
   user turns on Include in backups. Its snapshots are never backed up.
 - **Snapshots.** A snapshot is an APFS clone of `data.img` with a copy of

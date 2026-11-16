@@ -47,6 +47,33 @@ public enum GuestSms {
         return nil
     }
 
+    /// The sender the person last sent a message from, kept across launches
+    /// and forgotten when the virtual machine is erased: it is a choice of
+    /// that virtual machine's.
+    public struct SenderMemory {
+        /// The stored value's key in the defaults database.
+        public static let key = "andarium.textMessageSender"
+
+        private let defaults: UserDefaults
+
+        public init(defaults: UserDefaults = .standard) {
+            self.defaults = defaults
+        }
+
+        /// The last sender kept; nil until one is, and after `forget`.
+        public var sender: String? {
+            defaults.string(forKey: Self.key).flatMap { $0.isEmpty ? nil : $0 }
+        }
+
+        public func keep(_ sender: String) {
+            defaults.set(sender, forKey: Self.key)
+        }
+
+        public func forget() {
+            defaults.removeObject(forKey: Self.key)
+        }
+    }
+
     /// An identifier for one message: 128 random bits in lower-case hex. The
     /// service hands a message over once for each identifier it is given.
     public static func newIdentifier() -> String {

@@ -464,7 +464,7 @@ struct SessionSettingsSheet: View {
 /// it is delivered.
 struct TextMessageSection: View {
     @Environment(AppModel.self) private var model
-    @AppStorage("smsSender") private var sender = ""
+    @AppStorage(GuestSms.SenderMemory.key) private var sender = ""
     @State private var text = ""
     @State private var sending = false
     @State private var result: SmsSendResult?
