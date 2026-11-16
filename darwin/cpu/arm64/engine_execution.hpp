@@ -138,15 +138,22 @@ template<typename Entry, bool PollCallback, typename Executor>
 	if (!executor.begin_execution(
 		    request.generation, Entry::guest_pc(request.cpu.pc)))
 		return {.reason = ExitReason::fatal};
+	/* An arm64 run registers its generation as a holder of every frame it
+	 * fetches code from, so that a code synchronization by another process
+	 * reaches it (memory/mmu/code_holders.hpp). The x86 engines share the
+	 * memory and never run through this loop, so they leave it off. */
+	memory.set_code_holder_registration(true);
 	struct ExecutionScope final {
 		Executor &executor;
+		::uml::memory::StaticGuestMemory &memory;
 
 		~ExecutionScope() noexcept
 		{
+			memory.set_code_holder_registration(false);
 			executor.end_execution();
 		}
 	};
-	[[maybe_unused]] const ExecutionScope execution_scope{executor};
+	[[maybe_unused]] const ExecutionScope execution_scope{executor, memory};
 	executor.set_single_step(request.single_step);
 	Entry::prepare(executor, request.cpu);
 	const auto interrupt_pending = [&]() noexcept {

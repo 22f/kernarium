@@ -2,6 +2,7 @@
 #pragma once
 
 #include "memory/guest_address_space.hpp"
+#include "memory/mmu/code_holders.hpp"
 #include "uml_darwin_guest.h"
 #include "uml_darwin_static_mmu.h"
 
@@ -14,6 +15,16 @@ namespace uml::memory {
 
 class StaticGuestMemory final : public ::uml::memory::GuestAddressSpace {
 public:
+	/* Whether an instruction fetch registers this memory's generation as a
+	 * holder of the frame it reads, before it reads it, so that another
+	 * process's code synchronization of the frame reaches the generation
+	 * (mmu/code_holders.hpp). The arm64 engines' entry loop turns it on for
+	 * the length of a run; the x86 engines never do, and nothing of theirs
+	 * changes. */
+	void set_code_holder_registration(bool enabled) noexcept
+	{
+		register_holders_ = enabled;
+	}
 	void set_generation(unsigned long generation) noexcept;
 	void prepare(unsigned long generation, std::uint64_t changes) noexcept;
 
@@ -60,6 +71,15 @@ private:
 		::uml::memory::MemoryAccess access) noexcept;
 	[[nodiscard]] std::byte *translate(
 		std::uint64_t address, ::uml::memory::MemoryAccess access);
+	/* The execute arm of translate() for a memory that registers: it keeps
+	 * the frame's holder word in the TLB entry's code-page slot, tagged so
+	 * that a code-page handle is never mistaken for it, and checks the word
+	 * at every fetch. The word, never a "registered" bit, is what is cached:
+	 * a publication empties it and the next fetch must register again. */
+	[[nodiscard]] std::byte *translate_execute(std::uint64_t address);
+	void register_holder(::uml::memory::code_holders::Word *word) noexcept;
+	void register_holder_slow(::uml::memory::code_holders::Word &word,
+		std::uint32_t slot, std::uint64_t held) noexcept;
 	[[nodiscard]] void *code_page_handle(
 		std::uint64_t address,
 		::uml::memory::CodePageStamp *stamp = nullptr) noexcept;
@@ -73,6 +93,7 @@ private:
 	std::array<TlbEntry, tlb_size> tlb_{};
 	::uml::memory::MemoryFault fault_{};
 	bool fault_recorded_{};
+	bool register_holders_{};
 };
 
 } // namespace uml::memory

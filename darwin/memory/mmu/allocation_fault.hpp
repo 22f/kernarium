@@ -19,6 +19,7 @@ enum class AllocationSite : std::uint8_t {
 	batch_index,
 	generation,
 	history,
+	holder_leaf,
 	reserve,
 	software_domain_registry,
 	native_after_mmap,

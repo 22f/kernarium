@@ -108,6 +108,17 @@ int darwin_uml_static_vm_translate(unsigned long generation,
 				   unsigned long address,
 				   enum darwin_uml_static_access access,
 				   void **host_address);
+/* darwin_uml_static_vm_translate() for an execute access that also names the
+ * holder word of the frame it translated: an 8-byte atomic, 8-byte aligned,
+ * in which a translator registers its generation before it reads the frame's
+ * bytes, so that a code synchronization by another process reaches it
+ * (memory/mmu/code_holders.hpp has the word's layout). It lives as long as the
+ * mapping does. `*holder` is null when the frame's backing cannot make one;
+ * every publication on such a backing then goes to every generation, and
+ * there is nothing to register. */
+int darwin_uml_static_vm_translate_execute(unsigned long generation,
+					   unsigned long address,
+					   void **host_address, void **holder);
 /* darwin_uml_static_vm_translate() through an execution context of the same
  * generation: while the context is entered, a guest address is resolved from
  * the generation it holds; otherwise, or for a null context, this is
