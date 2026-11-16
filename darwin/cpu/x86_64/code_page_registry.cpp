@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "code_page_registry.hpp"
+#include "memory/domain_heap.hpp"
 
 #include <algorithm>
 #include <array>
@@ -453,7 +454,13 @@ FrameRegistrationOutcome register_frame(
 {
 	FrameRegistrationOutcome outcome;
 	std::array<::uml::memory::FrameDebt, 16> small{};
-	std::vector<::uml::memory::FrameDebt> large;
+	/* The larger buffer is a temporary of this call, so it comes from the
+	 * thread's scratch arena, which this scope resets. */
+	const ::uml::memory::ScratchScope scratch;
+	std::vector<::uml::memory::FrameDebt,
+		::uml::memory::ScratchAllocator<::uml::memory::FrameDebt>>
+		large{::uml::memory::ScratchAllocator<::uml::memory::FrameDebt>{
+			scratch.arena()}};
 	::uml::memory::FrameDebt *debts = small.data();
 	std::size_t capacity = small.size();
 	bool global_ok = false;

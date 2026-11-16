@@ -14,7 +14,7 @@ add_library(uml_x86_64_target OBJECT
     split_operand_lock.cpp)
 uml_declare_architecture_target(uml_x86_64_target cpu shared)
 target_link_libraries(uml_x86_64_target
-    PUBLIC UML::ThirdPartySoftFloat
+    PUBLIC UML::ThirdPartySoftFloat UML::MemoryHeap
     PRIVATE UML::CpuContract)
 # The model is not translation-path code: it runs as the JIT's cold path always
 # compiled it, apart from the interprocedural optimization of the target.
