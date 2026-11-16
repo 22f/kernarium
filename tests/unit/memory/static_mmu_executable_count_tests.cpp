@@ -714,6 +714,57 @@ void test_threads_that_come_and_go_return_the_count_to_zero()
 	destroy(900);
 }
 
+/* An audit that says it held every generation is a fact while generations
+ * come and go: a generation made after the audit began cannot count a mapping
+ * in that the recount missed. One thread makes generations, maps the frames
+ * of one backing into each and destroys the older ones; another audits
+ * without pause, and every audit that was exact finds nothing. */
+void test_an_exact_audit_is_exact_while_generations_come_and_go()
+{
+	constexpr unsigned long rounds = 3000;
+	constexpr unsigned long window = 6;
+	constexpr unsigned long frames = 48;
+	constexpr unsigned long base = 0x2d00'0000;
+	ScratchBacking backing{backing_name, frames * page};
+	Pin pin19{1019, backing};
+	std::atomic<bool> finished{false};
+	std::atomic<unsigned long> exact_audits{};
+	std::atomic<unsigned long> wrong_audits{};
+	std::atomic<unsigned long> first_wrong{};
+	std::thread auditor{[&] {
+		while (!finished.load(std::memory_order_acquire)) {
+			const auto result = uml::memory::audit_executable_counts();
+			if (!result.exact)
+				continue;
+			exact_audits.fetch_add(1, std::memory_order_relaxed);
+			if (result.mismatches != 0) {
+				unsigned long none = 0;
+				first_wrong.compare_exchange_strong(none,
+					result.mismatches);
+				wrong_audits.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+	}};
+	/* At least `rounds` generations, and on until the audit has been exact
+	 * enough times to mean something (a busy mapper can starve it). */
+	unsigned long made = 0;
+	while (made < rounds || (exact_audits.load() < 16 && made < 20 * rounds)) {
+		must_map(50000 + made, base, backing, 0, frames, rx, 3);
+		if (made >= window)
+			destroy(50000 + made - window);
+		++made;
+	}
+	for (unsigned long round = made - window; round < made; ++round)
+		destroy(50000 + round);
+	finished.store(true, std::memory_order_release);
+	auditor.join();
+	std::printf("exact audits %lu, with a mismatch %lu (first: %lu records)\n",
+		exact_audits.load(), wrong_audits.load(), first_wrong.load());
+	require(exact_audits.load() >= 16);
+	require(wrong_audits.load() == 0);
+	audit();
+}
+
 } // namespace
 
 int main()
@@ -734,6 +785,7 @@ int main()
 	test_an_accounting_anomaly_stops_all_sharing();
 	test_threads_mapping_one_frame_keep_the_count_exact();
 	test_threads_that_come_and_go_return_the_count_to_zero();
+	test_an_exact_audit_is_exact_while_generations_come_and_go();
 	std::puts("Static MMU executable count tests passed");
 	return 0;
 }

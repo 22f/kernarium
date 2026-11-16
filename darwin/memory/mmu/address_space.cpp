@@ -1504,13 +1504,18 @@ public:
 	{
 		try {
 			std::vector<std::shared_ptr<GenerationState>> generations;
-			{
-				std::shared_lock lock{states_mutex_};
-				for (const auto &[generation, state] : states_) {
-					(void)generation;
-					generations.push_back(state);
-				}
+			/* An exact audit keeps the set of generations from changing:
+			 * one made after the list was taken could count a mapping in
+			 * that the recount never saw. It waits for no generation
+			 * below, so holding this cannot make anyone wait on it for
+			 * long. */
+			std::shared_lock states_lock{states_mutex_};
+			for (const auto &[generation, state] : states_) {
+				(void)generation;
+				generations.push_back(state);
 			}
+			if (!exact)
+				states_lock.unlock();
 			std::vector<std::shared_lock<WordSharedMutex>> held;
 			if (exact) {
 				held.reserve(generations.size());
