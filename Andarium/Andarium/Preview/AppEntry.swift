@@ -183,16 +183,18 @@ struct AppEntry {
         // Simulator's own).
         model.cameraAccess = .notDetermined
         if voiceOver { model.voiceOverRunning = { true } }
+        let mockReader = PreviewScreenReader()
+        model.screenReaderStandIn = mockReader
         switch talkBack {
         case "on":
-            model.previewScreenReader.enabledServices = [ScreenReader.services[0]]
+            mockReader.state.enabledServices = [ScreenReader.services[0]]
         case "missing":
-            model.previewScreenReader = ScreenReaderState(installedService: nil, enabledServices: [])
-        case "unreadable": model.previewScreenReaderFault = .unreadable
-        case "fails": model.previewScreenReaderFault = .refusesChange
-        case "slow": model.previewScreenReaderFault = .slow
-        case "transfer": model.previewScreenReaderFault = .transfer
-        case "checking": model.previewScreenReaderFault = .pending
+            mockReader.state = ScreenReaderState(installedService: nil, enabledServices: [])
+        case "unreadable": mockReader.fault = .unreadable
+        case "fails": mockReader.fault = .refusesChange
+        case "slow": mockReader.fault = .slow
+        case "transfer": mockReader.fault = .transfer
+        case "checking": mockReader.fault = .pending
         default:
             break
         }

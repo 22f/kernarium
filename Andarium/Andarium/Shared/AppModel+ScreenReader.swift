@@ -4,6 +4,16 @@ import AndariumCore
 import Foundation
 import UIKit
 
+/// A mock guest's screen reader, for the preview, which has no runtime behind
+/// its screens. The application has none.
+@MainActor
+protocol ScreenReaderStandIn: AnyObject {
+    /// The mock holds the adb channel, as a file transfer does.
+    var holdsChannel: Bool { get }
+    func read() async -> ScreenReaderState?
+    func change(_ on: Bool, from state: ScreenReaderState) async throws -> ScreenReaderState
+}
+
 /// Android's screen reader in the session (`ScreenReaderSession`). Every
 /// read and change binds to the session it began in and does nothing to a
 /// later one; a read that a change overtook is dropped; and nothing turns the
@@ -20,7 +30,7 @@ extension AppModel {
     /// A file transfer or another task holds the adb channel: a read or a
     /// change would only wait for it.
     var screenReaderChannelBusy: Bool {
-        busy != nil || fileBrowser?.running == true || previewScreenReaderFault == .transfer
+        busy != nil || fileBrowser?.running == true || screenReaderStandIn?.holdsChannel == true
     }
 
     /// What Settings shows under the switch.
@@ -46,8 +56,7 @@ extension AppModel {
         if let driver {
             answer = await driver.readScreenReader()
         } else {
-            if previewScreenReaderFault == .pending { try? await Task.sleep(for: .seconds(600)) }
-            answer = previewScreenReaderFault == .unreadable ? nil : previewScreenReader
+            answer = await screenReaderStandIn?.read()
         }
         guard session === current, offersScreenReader else { return }
         if reader.apply(read: answer, ticket) { evaluateScreenReaderCard() }
@@ -114,8 +123,10 @@ extension AppModel {
                 let after: ScreenReaderState
                 if let driver {
                     after = try await driver.changeScreenReader(on, service: service)
+                } else if let screenReaderStandIn {
+                    after = try await screenReaderStandIn.change(on, from: state)
                 } else {
-                    after = try await previewChange(on, from: state)
+                    throw AdbFailure(.io(EIO), activity: .screenReader)
                 }
                 guard session === current else { return }
                 guard after.isOn == on else {
@@ -138,19 +149,6 @@ extension AppModel {
     private func failScreenReader(_ reader: ScreenReaderSession, turningOn on: Bool, reason: String) {
         reader.failChange(turningOn: on, reason: reason)
         VoiceOver.announce(ScreenReaderWords.changeFailure(turningOn: on, reason: reason))
-    }
-
-    /// The preview's mock guest changes the way a guest does, or as
-    /// `previewScreenReaderFault` says.
-    private func previewChange(_ on: Bool, from state: ScreenReaderState) async throws -> ScreenReaderState {
-        switch previewScreenReaderFault {
-        case .slow: try await Task.sleep(for: .seconds(600))
-        case .refusesChange: throw AdbFailure(.io(EIO), activity: .screenReader)
-        case .unreadable, .transfer, .pending, nil: break
-        }
-        let after = ScreenReader.state(afterTurningOn: on, state)
-        previewScreenReader = after
-        return after
     }
 
     /// Opens Android's Accessibility page; Settings closes for it.

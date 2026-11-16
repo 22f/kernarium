@@ -642,15 +642,9 @@ final class AppModel {
     var adbWatchInterval = Duration.seconds(2)
     /// Whether VoiceOver is running; a test answers for it.
     @ObservationIgnored var voiceOverRunning: @MainActor () -> Bool = { UIAccessibility.isVoiceOverRunning }
-    /// Android's screen reader in the preview's mock guest, whose system
-    /// carries it, off until the switch turns it on. It outlives a run, as a
-    /// guest's setting does.
-    @ObservationIgnored var previewScreenReader = ScreenReaderState(
-        installedService: ScreenReader.services[0], enabledServices: [])
-    /// How the preview's mock guest misbehaves, for the states a person sees
-    /// of a read or a change that does not work.
-    enum PreviewScreenReaderFault { case unreadable, refusesChange, slow, transfer, pending }
-    @ObservationIgnored var previewScreenReaderFault: PreviewScreenReaderFault?
+    /// The preview's mock guest screen reader, where no runtime is behind the
+    /// screens; nil in the application.
+    @ObservationIgnored var screenReaderStandIn: (any ScreenReaderStandIn)?
     /// How often the loop reads while VoiceOver runs; a test shortens it.
     @ObservationIgnored var screenReaderWatchInterval = Duration.seconds(3)
     @ObservationIgnored var voiceOverObserver: NSObjectProtocol?
