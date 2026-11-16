@@ -107,6 +107,15 @@ public:
 		ExecutionMode mode, std::uint64_t &mapping_sequence,
 		std::uint64_t &code_sequence) const noexcept;
 
+	/* Before the hand-over of the address space's changes, whatever they
+	 * are: drops the code of `generation` and `mode` that was compiled
+	 * while a vCPU stayed inside the engine for longer than a registration
+	 * waits for it, until that vCPU has left. A store it translated before
+	 * may land after the compile read its bytes and publish nothing, so a
+	 * vCPU that has seen the store compiles that code again at each
+	 * hand-over. Costs one load when nothing is stuck. */
+	void settle_stuck_participants(unsigned long generation, ExecutionMode mode) noexcept;
+
 	/* Retires the software-TLB entries the mapping changes cover and the
 	 * translations the code changes cover, and makes the space's context on
 	 * first use, ordering stores as the next run will. */

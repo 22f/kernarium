@@ -345,7 +345,9 @@ public:
 			return;
 		registry_ = registries->current.get();
 		for (std::size_t index = 0; index < count_; ++index)
-			registry_->add(pages_[index], &registries->participant);
+			if (!registry_->add(pages_[index], &registries->participant)
+				    .settled)
+				settled_ = false;
 	}
 	~CodePageHold()
 	{
@@ -362,10 +364,17 @@ public:
 		return {pages_.data(), count_};
 	}
 
+	/* Whether every page's gain is settled: no participant that could still
+	 * land a store through a write translation retired for these pages is
+	 * stuck inside the engine. A translation read while it is not is used
+	 * once and never cached. */
+	[[nodiscard]] bool settled() const noexcept { return settled_; }
+
 private:
 	std::array<std::uint64_t, 2> pages_{};
 	std::size_t count_{};
 	CodePageRegistry *registry_{};
+	bool settled_{true};
 };
 
 /* The stamp of every page a block can span, read before the decoder reads a
@@ -2528,7 +2537,7 @@ ProgramSelection Executor::select_program(
 			.cache_hit = false,
 		};
 	};
-	if (!storage_->cache_ready || !pinned ||
+	if (!storage_->cache_ready || !pinned || !hold.settled() ||
 		built.program.byte_count() == 0 ||
 		built.program.byte_count() > maximum_cached_source_bytes)
 		return use_transient();

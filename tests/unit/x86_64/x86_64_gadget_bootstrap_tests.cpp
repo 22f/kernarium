@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "allocation_failure.hpp"
 #include "cpu/gadget_cache_budget.hpp"
+#include "cpu/x86_64/code_page_registry.hpp"
 #include "cpu/x86_64/cpu_state.hpp"
 #include "cpu/x86_64/cpuid.hpp"
 #include "cpu/x86_64/decoder.hpp"
@@ -2753,6 +2754,58 @@ void store_publishes_only_where_some_executor_caches_code()
 		"store after the other executor retired did not run");
 	require(memory.invalidations() == 1,
 		"store to a page that lost its cached code still published");
+}
+
+/* A vCPU of another process that stays inside the engine for longer than a
+ * registration waits may still land a store that publishes nothing, so the
+ * bytes a translation reads are not final. The translation runs once and is
+ * built again at the next dispatch; once the vCPU has left, the next build
+ * is cached.
+ */
+void stuck_participant_keeps_translations_out_of_the_cache()
+{
+	using namespace uml::cpu::x86_64;
+	using namespace std::chrono_literals;
+	constexpr std::uint64_t generation = 91;
+	TestMemory memory;
+	memory.load(0, {0xb8, 0x01, 0x00, 0x00, 0x00, 0x0f, 0x05});
+	/* The registry is made before the executor joins it, with a wait short
+	 * enough for a test. */
+	const auto registry = CodePageRegistry::acquire(
+		generation, {.slice = 10ms, .slices = 3});
+	CodePageRegistry::Participant stuck;
+	registry->join(stuck);
+	stuck.engine_epoch.store(1, std::memory_order_release);
+	gadgets::Executor executor;
+	executor.prepare(memory, generation, 1, 1);
+
+	const auto first = executor.select_program(
+		memory, 0, ExecutionMode::long64);
+	require(first.status == gadgets::BuildStatus::built &&
+		first.program != nullptr && !first.cache_hit,
+		"a translation built beside a stuck vCPU did not build");
+	memory.reset_fetches();
+	const auto second = executor.select_program(
+		memory, 0, ExecutionMode::long64);
+	require(second.status == gadgets::BuildStatus::built &&
+		second.program != nullptr && !second.cache_hit &&
+		memory.fetches() != 0,
+		"a translation built beside a stuck vCPU was cached");
+
+	stuck.engine_epoch.store(2, std::memory_order_release);
+	const auto third = executor.select_program(
+		memory, 0, ExecutionMode::long64);
+	require(third.status == gadgets::BuildStatus::built &&
+		third.program != nullptr && !third.cache_hit,
+		"the build after the vCPU left did not read the bytes again");
+	memory.reset_fetches();
+	const auto fourth = executor.select_program(
+		memory, 0, ExecutionMode::long64);
+	require(fourth.status == gadgets::BuildStatus::built &&
+		fourth.program != nullptr && fourth.cache_hit &&
+		memory.fetches() == 0,
+		"the build after the vCPU left was not cached");
+	registry->leave(stuck);
 }
 
 void overlapping_executable_store_stops_immediately()
@@ -10971,6 +11024,7 @@ int main(int argc, char **argv)
 	budget_limited_replay_faults_where_the_block_does();
 	executable_stores_publish_a_code_change_each();
 	store_publishes_only_where_some_executor_caches_code();
+	stuck_participant_keeps_translations_out_of_the_cache();
 	overlapping_executable_store_stops_immediately();
 	executable_store_links_only_to_unchanged_code();
 	distant_code_write_cools_its_linked_block();

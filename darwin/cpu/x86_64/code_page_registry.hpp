@@ -6,6 +6,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -61,6 +62,29 @@ public:
 		/* Odd while the participant is inside the engine. */
 		std::atomic<std::uint64_t> engine_epoch{0};
 	};
+	/* How long a registration waits for the participants inside the engine:
+	 * `slices` slices of `slice`. A participant still inside the engine
+	 * after that is stuck, for instance a thread the host stopped. */
+	struct WaitPolicy final {
+		std::chrono::milliseconds slice{200};
+		unsigned slices{5};
+	};
+	/* A stuck participant, as the join that made it a member and the odd
+	 * epoch it did not leave. */
+	struct StuckMember final {
+		std::uint64_t serial{};
+		std::uint64_t epoch{};
+	};
+	/* What a registration settled. A registration is settled when every
+	 * participant that could still land a store through a write translation
+	 * retired for the page has left the engine since: only then may the
+	 * caller cache a translation of the page. Otherwise the caller must not
+	 * cache one, and `stuck` names the participants it waited out; each
+	 * stays stuck until its epoch moves (`left_or_moved`). */
+	struct Settlement final {
+		bool settled{true};
+		std::vector<StuckMember> stuck;
+	};
 	/* Retires the write translation a participant whose software TLB has
 	 * another layout holds for `page`, if it holds one. Any thread may call
 	 * it, while the participant runs. */
@@ -71,6 +95,9 @@ public:
 	 * any executor holds it. */
 	[[nodiscard]] static std::shared_ptr<CodePageRegistry> acquire(
 		std::uint64_t generation);
+	/* The same, made with `policy` when no executor holds one yet. */
+	[[nodiscard]] static std::shared_ptr<CodePageRegistry> acquire(
+		std::uint64_t generation, const WaitPolicy &policy);
 	/* The registry of `generation` while some executor holds it, and null
 	 * otherwise; it never makes one. The caller's reference keeps the
 	 * registry alive, so a registry cannot go away under a caller that
@@ -79,6 +106,7 @@ public:
 		std::uint64_t generation);
 
 	CodePageRegistry();
+	explicit CodePageRegistry(const WaitPolicy &policy);
 	~CodePageRegistry();
 	CodePageRegistry(const CodePageRegistry &) = delete;
 	CodePageRegistry &operator=(const CodePageRegistry &) = delete;
@@ -108,9 +136,23 @@ public:
 	}
 
 	/* Called by the executor that is about to translate `page`, before it
-	 * reads the page's bytes. */
-	void add(std::uint64_t page, const Participant *self) noexcept;
+	 * reads the page's bytes. The call that gains the page, and any later
+	 * one while the gain is not settled, retires the participants' write
+	 * translations for it and waits for the participants inside the engine
+	 * to leave it once; a call settles the gain only by a wait that
+	 * completed. A caller that does not get a settled page translates it
+	 * once and caches nothing. */
+	[[nodiscard]] Settlement add(
+		std::uint64_t page, const Participant *self) noexcept;
 	void remove(std::uint64_t page) noexcept;
+
+	/* Whether the participant a registration waited out as `serial` at
+	 * `epoch` has since left the engine or the registry. */
+	[[nodiscard]] bool left_or_moved(
+		std::uint64_t serial, std::uint64_t epoch) const noexcept;
+	/* The stuck participants a registration returns at once for, for
+	 * diagnostics. */
+	[[nodiscard]] std::size_t expiry_records() const noexcept;
 
 private:
 	static constexpr unsigned bit_count_log2 = 18;
@@ -124,8 +166,10 @@ private:
 	}
 	[[nodiscard]] bool holds_exactly(
 		std::uint64_t address, std::size_t bit) const noexcept;
-	void wait_for_participants(const Participant *self) noexcept;
+	[[nodiscard]] Settlement wait_for_participants(
+		const Participant *self) noexcept;
 	void retire_write_translations(std::uint64_t page) noexcept;
+	void forget_departed_expiries() noexcept;
 
 	/* A participant is named by where it lives and by the join that made it
 	 * a member. A waiter may only touch the participant while it finds that
@@ -144,9 +188,19 @@ private:
 	 * at zero, so a cache that keeps replacing one translation does not keep
 	 * allocating one. */
 	static constexpr std::size_t stripe_count = 64;
+	/* The holders of a page, and whether the gain that made it held is
+	 * settled. Each gain takes the next number of its stripe; `settled` is
+	 * the highest gain a completed wait covered, so a wait that finishes
+	 * after the page was lost and gained again settles nothing. */
+	struct Page final {
+		std::uint32_t count{};
+		std::uint64_t gain{};
+		std::uint64_t settled{};
+	};
 	struct alignas(64) Stripe final {
 		mutable ::uml::memory::WordSharedMutex mutex;
-		std::unordered_map<std::uint64_t, std::uint32_t> pages;
+		std::unordered_map<std::uint64_t, Page> pages;
+		std::uint64_t gains{};
 	};
 	[[nodiscard]] Stripe &stripe_for(std::size_t bit) noexcept
 	{
@@ -158,11 +212,17 @@ private:
 	}
 
 	std::array<Stripe, stripe_count> stripes_;
-	::uml::memory::WordSharedMutex participants_mutex_;
+	mutable ::uml::memory::WordSharedMutex participants_mutex_;
 	std::vector<Member> participants_;
 	/* The serial of the next join; 64 bits, so never reused. Guarded by
 	 * participants_mutex_ like the list. */
 	std::uint64_t next_serial_{1};
+	/* The participants a registration waited out, at the epoch each did not
+	 * leave. A later registration does not wait for such a participant
+	 * again while its epoch is unchanged. Guarded by participants_mutex_;
+	 * dropped when the participant leaves the engine or the registry. */
+	std::vector<StuckMember> expiries_;
+	const WaitPolicy policy_;
 	std::unique_ptr<std::atomic<std::uint64_t>[]> bits_;
 	std::unique_ptr<std::uint8_t[]> counts_;
 	std::atomic<std::uint64_t> changes_{0};

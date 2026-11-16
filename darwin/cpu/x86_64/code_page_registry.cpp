@@ -32,11 +32,6 @@ Table &table()
 	return *instance;
 }
 
-/* A participant leaves the engine at the latest when its run exhausts the
- * instruction window, which is microseconds; the bound only guards against a
- * carrier thread stopped inside the engine by the host. */
-constexpr auto quiescence_bound = std::chrono::milliseconds{200};
-
 } // namespace
 
 std::shared_ptr<CodePageRegistry> CodePageRegistry::find(
@@ -51,20 +46,29 @@ std::shared_ptr<CodePageRegistry> CodePageRegistry::find(
 std::shared_ptr<CodePageRegistry> CodePageRegistry::acquire(
 	std::uint64_t generation)
 {
+	return acquire(generation, WaitPolicy{});
+}
+
+std::shared_ptr<CodePageRegistry> CodePageRegistry::acquire(
+	std::uint64_t generation, const WaitPolicy &policy)
+{
 	auto &shared = table();
 	const std::lock_guard lock{shared.mutex};
 	auto [entry, inserted] = shared.entries.try_emplace(generation);
 	if (!inserted)
 		if (auto existing = entry->second.lock())
 			return existing;
-	auto created = std::make_shared<CodePageRegistry>();
+	auto created = std::make_shared<CodePageRegistry>(policy);
 	created->generation_ = generation;
 	entry->second = created;
 	return created;
 }
 
-CodePageRegistry::CodePageRegistry()
-	: bits_{std::make_unique<std::atomic<std::uint64_t>[]>(bit_count / 64U)},
+CodePageRegistry::CodePageRegistry() : CodePageRegistry(WaitPolicy{}) {}
+
+CodePageRegistry::CodePageRegistry(const WaitPolicy &policy)
+	: policy_{policy},
+	  bits_{std::make_unique<std::atomic<std::uint64_t>[]>(bit_count / 64U)},
 	  counts_{std::make_unique<std::uint8_t[]>(bit_count)}
 {
 	for (std::size_t word = 0; word < bit_count / 64U; ++word)
@@ -140,6 +144,9 @@ void CodePageRegistry::leave(Participant &participant) noexcept
 	std::erase_if(retirers_, [&](const Retirer &retirer) {
 		return retirer.serial == serial;
 	});
+	std::erase_if(expiries_, [&](const StuckMember &stuck) {
+		return stuck.serial == serial;
+	});
 }
 
 void CodePageRegistry::retire_write_translations(std::uint64_t page) noexcept
@@ -165,18 +172,27 @@ bool CodePageRegistry::holds_exactly(
 	const auto &stripe = stripe_for(bit);
 	const std::shared_lock lock{stripe.mutex};
 	const auto found = stripe.pages.find(address & ~std::uint64_t{0xfff});
-	return found != stripe.pages.end() && found->second != 0;
+	return found != stripe.pages.end() && found->second.count != 0;
 }
 
-void CodePageRegistry::add(std::uint64_t page, const Participant *self) noexcept
+CodePageRegistry::Settlement CodePageRegistry::add(
+	std::uint64_t page, const Participant *self) noexcept
 {
 	page &= ~std::uint64_t{0xfff};
 	const auto bit = bit_index(page);
 	auto &stripe = stripe_for(bit);
 	std::unique_lock lock{stripe.mutex};
 	bool gained = false;
+	/* The gain this call settles, 0 when the page cannot be tracked. */
+	std::uint64_t gain = 0;
+	bool unsettled = false;
 	try {
-		gained = stripe.pages.try_emplace(page, 0).first->second++ == 0;
+		auto &entry = stripe.pages.try_emplace(page).first->second;
+		gained = entry.count++ == 0;
+		if (gained)
+			entry.gain = ++stripe.gains;
+		gain = entry.gain;
+		unsettled = entry.settled != entry.gain;
 	} catch (...) {
 		/* Without its count the page is held for as long as its bit is. */
 		inexact_.store(true, std::memory_order_relaxed);
@@ -186,9 +202,14 @@ void CodePageRegistry::add(std::uint64_t page, const Participant *self) noexcept
 	if (count != 0xff && count++ == 0)
 		bits_[bit >> 6U].fetch_or(std::uint64_t{1} << (bit & 63U),
 			std::memory_order_release);
-	if (!gained)
-		return;
-	changes_.fetch_add(1, std::memory_order_acq_rel);
+	/* A call that finds the gain settled has nothing to wait for. A call
+	 * that finds it unsettled is a second translator of the page: the first
+	 * may still be waiting, and the second must not read the page before the
+	 * stores in flight have landed either. */
+	if (!gained && !unsettled)
+		return {};
+	if (gained)
+		changes_.fetch_add(1, std::memory_order_acq_rel);
 	/* Order the count against the retirement below: a miss handler that read
 	 * the old count before this fence sees the new count after its own. */
 	std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -197,10 +218,18 @@ void CodePageRegistry::add(std::uint64_t page, const Participant *self) noexcept
 	 * through the entry just retired. Wait for each to leave once so that
 	 * store lands before the translation reads the page. */
 	lock.unlock();
-	wait_for_participants(self);
+	auto settlement = wait_for_participants(self);
+	if (settlement.settled && gain != 0) {
+		const std::lock_guard relock{stripe.mutex};
+		if (const auto found = stripe.pages.find(page);
+		    found != stripe.pages.end() && found->second.settled < gain)
+			found->second.settled = gain;
+	}
+	return settlement;
 }
 
-void CodePageRegistry::wait_for_participants(const Participant *self) noexcept
+CodePageRegistry::Settlement CodePageRegistry::wait_for_participants(
+	const Participant *self) noexcept
 {
 	/* A participant is read only while the lock is held and the pair named
 	 * here is still a member: `leave()` waits for nobody, and the owner
@@ -210,7 +239,9 @@ void CodePageRegistry::wait_for_participants(const Participant *self) noexcept
 		std::uint64_t serial;
 		std::uint64_t epoch;
 	};
+	Settlement result;
 	std::vector<Awaited> waiting;
+	bool stale_expiry = false;
 	{
 		const std::shared_lock lock{participants_mutex_};
 		for (const auto &member : participants_) {
@@ -218,33 +249,122 @@ void CodePageRegistry::wait_for_participants(const Participant *self) noexcept
 				continue;
 			const auto epoch = member.participant->engine_epoch.load(
 				std::memory_order_acquire);
-			if ((epoch & 1U) != 0)
+			if ((epoch & 1U) == 0)
+				continue;
+			const bool expired = std::any_of(expiries_.begin(),
+				expiries_.end(), [&](const StuckMember &stuck) {
+					return stuck.serial == member.serial &&
+						stuck.epoch == epoch;
+				});
+			if (expired) {
+				/* Waited out already, and it has not left since. */
+				result.stuck.push_back({member.serial, epoch});
+				result.settled = false;
+			} else {
 				waiting.push_back({member.participant, member.serial, epoch});
+			}
+		}
+		for (const auto &stuck : expiries_) {
+			const auto member = std::find_if(participants_.begin(),
+				participants_.end(), [&](const Member &candidate) {
+					return candidate.serial == stuck.serial;
+				});
+			if (member == participants_.end() ||
+			    member->participant->engine_epoch.load(
+				    std::memory_order_acquire) != stuck.epoch)
+				stale_expiry = true;
 		}
 	}
+	if (stale_expiry)
+		forget_departed_expiries();
 	if (waiting.empty())
-		return;
-	const auto deadline = std::chrono::steady_clock::now() + quiescence_bound;
-	for (const auto &awaited : waiting) {
-		for (;;) {
-			{
-				const std::shared_lock lock{participants_mutex_};
-				const auto member = std::find_if(participants_.begin(),
-					participants_.end(), [&](const Member &candidate) {
-						return candidate.participant == awaited.participant &&
-							candidate.serial == awaited.serial;
-					});
-				/* Gone: it left the engine before it left the registry. */
-				if (member == participants_.end() ||
-				    member->participant->engine_epoch.load(
-					    std::memory_order_acquire) != awaited.epoch)
-					break;
-			}
-			if (std::chrono::steady_clock::now() >= deadline)
-				return;
+		return result;
+	const auto deadline = std::chrono::steady_clock::now() +
+		policy_.slice * policy_.slices;
+	/* One pass over the participants, each polled while it is a member at
+	 * its recorded epoch. */
+	const auto still_inside = [this](const Awaited &awaited) noexcept {
+		const std::shared_lock lock{participants_mutex_};
+		const auto member = std::find_if(participants_.begin(),
+			participants_.end(), [&](const Member &candidate) {
+				return candidate.participant == awaited.participant &&
+					candidate.serial == awaited.serial;
+			});
+		/* Gone: it left the engine before it left the registry. */
+		return member != participants_.end() &&
+			member->participant->engine_epoch.load(
+				std::memory_order_acquire) == awaited.epoch;
+	};
+	std::size_t next = 0;
+	bool expired = false;
+	while (next < waiting.size() && !expired) {
+		if (!still_inside(waiting[next])) {
+			++next;
+		} else if (std::chrono::steady_clock::now() >= deadline) {
+			expired = true;
+		} else {
 			std::this_thread::yield();
 		}
 	}
+	if (!expired)
+		return result;
+	/* The deadline passed with a participant still inside the engine. Every
+	 * one not yet seen leaving is stuck; remember each, say so once, and let
+	 * the caller translate without caching. */
+	result.settled = false;
+	for (; next < waiting.size(); ++next) {
+		const auto &awaited = waiting[next];
+		if (!still_inside(awaited))
+			continue;
+		result.stuck.push_back({awaited.serial, awaited.epoch});
+		{
+			const std::lock_guard lock{participants_mutex_};
+			try {
+				expiries_.push_back({awaited.serial, awaited.epoch});
+			} catch (...) {
+				/* The next registration waits for it again. */
+			}
+		}
+		std::fprintf(stderr, "Darwin x86 code pages: a vCPU stayed inside "
+			"the engine for %lld ms (epoch %llu); code on pages it may "
+			"write is not cached until it leaves\n",
+			static_cast<long long>((policy_.slice * policy_.slices).count()),
+			static_cast<unsigned long long>(awaited.epoch));
+	}
+	return result;
+}
+
+bool CodePageRegistry::left_or_moved(
+	std::uint64_t serial, std::uint64_t epoch) const noexcept
+{
+	const std::shared_lock lock{participants_mutex_};
+	const auto member = std::find_if(participants_.begin(),
+		participants_.end(), [&](const Member &candidate) {
+			return candidate.serial == serial;
+		});
+	return member == participants_.end() ||
+		member->participant->engine_epoch.load(
+			std::memory_order_acquire) != epoch;
+}
+
+std::size_t CodePageRegistry::expiry_records() const noexcept
+{
+	const std::shared_lock lock{participants_mutex_};
+	return expiries_.size();
+}
+
+void CodePageRegistry::forget_departed_expiries() noexcept
+{
+	const std::lock_guard lock{participants_mutex_};
+	std::erase_if(expiries_, [&](const StuckMember &stuck) {
+		const auto member = std::find_if(participants_.begin(),
+			participants_.end(), [&](const Member &candidate) {
+				return candidate.serial == stuck.serial;
+			});
+		return member == participants_.end() ||
+			member->participant->engine_epoch.load(
+				std::memory_order_acquire) != stuck.epoch;
+	});
 }
 
 void CodePageRegistry::remove(std::uint64_t page) noexcept
@@ -255,8 +375,8 @@ void CodePageRegistry::remove(std::uint64_t page) noexcept
 	const std::lock_guard lock{stripe.mutex};
 	bool lost = false;
 	if (const auto found = stripe.pages.find(page);
-	    found != stripe.pages.end() && found->second != 0)
-		lost = --found->second == 0;
+	    found != stripe.pages.end() && found->second.count != 0)
+		lost = --found->second.count == 0;
 	auto &count = counts_[bit];
 	if (count != 0 && count != 0xff && --count == 0)
 		bits_[bit >> 6U].fetch_and(~(std::uint64_t{1} << (bit & 63U)),

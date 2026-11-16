@@ -48,6 +48,9 @@ void sync_engine(x86_64::jit::FexEngine &engine,
 	const darwin_uml_static_sequences &sequences,
 	bool orders_stores) noexcept
 {
+	/* First, before either early return below: it concerns code that no
+	 * address-space change describes. */
+	engine.settle_stuck_participants(generation, mode);
 	x86_64::jit::AddressSpaceChanges changes{};
 	changes.mapping_sequence = sequences.mapping_changes;
 	changes.code_sequence = sequences.code_changes;

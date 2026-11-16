@@ -202,6 +202,11 @@ Known deviations from x86 that remain:
   retires its own entry for a page. A page enters the set before any
   translation built from it is handed out, and every participating executor's
   write-side TLB entry for it is retired before the registration returns.
+  A registration waits at most one second for a participant that is still
+  inside the engine, and says so once; the page then stays unsettled for as
+  long as that participant stays inside, and the gadget engine builds the
+  translation of an unsettled page again at every dispatch instead of
+  caching it.
 - Every store to a page that holds cached code owes a publication of its own,
   and the program performs it before its next store: another vCPU may
   revalidate the page between two stores, so a program that patches a page

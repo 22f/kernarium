@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <mutex>
 #include <new>
 #include <optional>
@@ -287,6 +288,23 @@ struct Space final {
 	CodePageRegistry::Participant participant;
 	/* The pages this space counted in the registry. */
 	std::unordered_set<std::uint64_t> code_pages;
+	/* A participant the registry could not settle a page against, as the
+	 * join and the odd epoch it did not leave, with the pages of this space
+	 * that depend on it. The compile that registered such a page goes on,
+	 * and its code is cached; the space drops the pages' code at every
+	 * hand-over until the participant has moved (`settle_stuck`). */
+	struct StuckRecord final {
+		std::shared_ptr<CodePageRegistry> registry;
+		std::uint64_t serial{};
+		std::uint64_t epoch{};
+		std::vector<std::uint64_t> pages;
+	};
+	std::vector<StuckRecord> stuck;
+	/* A record could not be made: the next hand-over drops all code. */
+	bool stuck_lost{};
+	/* The engine's count of spaces with records, so a hand-over with none
+	 * costs one load. */
+	std::size_t *stuck_spaces{};
 	/* The locked operand across a granule whose copy the bounce buffer
 	 * holds while this thread holds the split-operand lock. */
 	std::uint64_t split_address{};
@@ -322,6 +340,7 @@ struct Space final {
 	Space &operator=(const Space &) = delete;
 	~Space()
 	{
+		drop_stuck();
 		release_code_pages();
 		/* After leave() no other thread retires an entry of the TLB. */
 		if (registry)
@@ -391,9 +410,78 @@ struct Space final {
 		const bool inside = (participant.engine_epoch.load(std::memory_order_relaxed) & 1U) != 0;
 		if (inside)
 			participant.engine_epoch.fetch_add(1, std::memory_order_release);
-		registry->add(page, &participant);
+		const auto settlement = registry->add(page, &participant);
 		if (inside)
 			participant.engine_epoch.fetch_add(1, std::memory_order_seq_cst);
+		/* A participant stuck inside the engine may still land a store that
+		 * publishes nothing; the code compiled from this page is dropped at
+		 * each hand-over until it has moved. */
+		if (!settlement.settled)
+			note_stuck(page, settlement);
+	}
+
+	[[nodiscard]] bool has_stuck() const noexcept
+	{
+		return !stuck.empty() || stuck_lost;
+	}
+
+	void drop_stuck() noexcept
+	{
+		if (has_stuck() && stuck_spaces != nullptr)
+			--*stuck_spaces;
+		stuck.clear();
+		stuck_lost = false;
+	}
+
+	/* Remembers that `page` depends on the participants `settlement` waited
+	 * out. Allocation failing here costs a full drop of this space's code at
+	 * the next hand-over, which is exact. */
+	void note_stuck(std::uint64_t page, const CodePageRegistry::Settlement &settlement) noexcept
+	{
+		const bool had = has_stuck();
+		try {
+			for (const auto &member : settlement.stuck) {
+				auto record = std::find_if(stuck.begin(), stuck.end(), [&](const StuckRecord &held) {
+					return held.registry == registry && held.serial == member.serial &&
+						held.epoch == member.epoch;
+				});
+				if (record == stuck.end()) {
+					stuck.push_back({registry, member.serial, member.epoch, {}});
+					record = std::prev(stuck.end());
+				}
+				if (std::find(record->pages.begin(), record->pages.end(), page) == record->pages.end())
+					record->pages.push_back(page);
+			}
+		} catch (...) {
+			stuck_lost = true;
+		}
+		if (!had && has_stuck() && stuck_spaces != nullptr)
+			++*stuck_spaces;
+	}
+
+	/* At a hand-over, before the run: drops the code that depends on a
+	 * participant that was stuck inside the engine when it was compiled.
+	 * The participant's stores may land after the compile read its bytes
+	 * and publish nothing; a vCPU that saw one reaches a hand-over, and the
+	 * code compiled after the drop reads the bytes after the store. The
+	 * record goes only once the participant has moved: the drop comes first,
+	 * so that nothing compiled before the store survives the move. */
+	void settle_stuck() noexcept
+	{
+		if (stuck_lost) {
+			clear_code();
+			return;
+		}
+		for (auto record = stuck.begin(); record != stuck.end();) {
+			for (const auto page : record->pages)
+				invalidate_code(page, guest_page_size);
+			if (record->registry->left_or_moved(record->serial, record->epoch))
+				record = stuck.erase(record);
+			else
+				++record;
+		}
+		if (stuck.empty() && stuck_spaces != nullptr)
+			--*stuck_spaces;
 	}
 
 	void release_code_pages() noexcept
@@ -446,6 +534,7 @@ struct Space final {
 	{
 		context->ClearCodeCache(thread, false);
 		release_code_pages();
+		drop_stuck();
 	}
 
 	/* Makes this space another address space's: its generation is gone, so
@@ -492,6 +581,9 @@ struct Space final {
 struct FexEngine::Impl final {
 	FEXCore::HostFeatures host_features;
 	FEXCore::SignalDelegator signal_delegator;
+	/* The spaces with participants stuck inside the engine to settle. After
+	 * the spaces' own storage is released, so declared before them. */
+	std::size_t stuck_spaces{};
 	std::vector<std::unique_ptr<Space>> spaces;
 	std::uint64_t clock{};
 	/* Valid during run(). */
@@ -1449,6 +1541,7 @@ Space *FexEngine::Impl::create(unsigned long generation, ExecutionMode mode, boo
 	 * used, so making the next one never evicts it. */
 	space->last_use = ++clock;
 	space->engine = this;
+	space->stuck_spaces = &stuck_spaces;
 	if (!space->callret.reserve())
 		return nullptr;
 	space->flush_tlb();
@@ -1542,6 +1635,15 @@ bool FexEngine::consumed_sequences(unsigned long generation, ExecutionMode mode,
 	mapping_sequence = space->mapping_sequence;
 	code_sequence = space->code_sequence;
 	return true;
+}
+
+void FexEngine::settle_stuck_participants(unsigned long generation, ExecutionMode mode) noexcept
+{
+	if (!impl_ || impl_->stuck_spaces == 0)
+		return;
+	for (auto &held : impl_->spaces)
+		if (held->generation == generation && held->mode == mode && held->has_stuck())
+			held->settle_stuck();
 }
 
 void FexEngine::apply_changes(unsigned long generation, ExecutionMode mode,

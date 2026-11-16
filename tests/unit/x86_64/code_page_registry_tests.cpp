@@ -44,12 +44,12 @@ void test_membership_is_counted()
 	const auto page = page_at(3);
 	require(!registry.holds(page), "an empty registry holds a page");
 	const auto before = registry.changes();
-	registry.add(page, nullptr);
+	(void)registry.add(page, nullptr);
 	require(registry.holds(page), "an added page is not held");
 	require(registry.changes() != before,
 		"a page that gained code did not change the registry");
 	const auto counted = registry.changes();
-	registry.add(page, nullptr);
+	(void)registry.add(page, nullptr);
 	require(registry.changes() == counted,
 		"a second holder of a page changed the registry");
 	registry.remove(page);
@@ -58,7 +58,7 @@ void test_membership_is_counted()
 	require(!registry.holds(page), "the last holder did not release the page");
 	registry.remove(page);
 	require(!registry.holds(page), "a stray removal underflowed the count");
-	registry.add(page, nullptr);
+	(void)registry.add(page, nullptr);
 	require(registry.holds(page), "a page cannot be held again");
 }
 
@@ -72,12 +72,12 @@ void test_membership_is_exact_behind_a_shared_bit()
 	const std::uint64_t code = std::uint64_t{0x400} << 12U;
 	/* (page ^ page >> 18) of both is 0x400. */
 	const std::uint64_t shadowed = std::uint64_t{0x40401} << 12U;
-	registry.add(code, nullptr);
+	(void)registry.add(code, nullptr);
 	require(registry.holds(code), "the code page is not held");
 	require(!registry.holds(shadowed),
 		"a data page sharing the code page's bit is held");
 	const auto before = registry.changes();
-	registry.add(shadowed, nullptr);
+	(void)registry.add(shadowed, nullptr);
 	require(registry.holds(shadowed), "the second page of a bit is not held");
 	require(registry.changes() != before,
 		"a page gained code behind a set bit without changing the registry");
@@ -100,7 +100,7 @@ void test_membership_retires_write_translations()
 	const auto page = page_at(9);
 	auto &entry = translations[native_tlb_index(page)];
 	entry.write_page = page;
-	registry.add(page, &participant);
+	(void)registry.add(page, &participant);
 	require(entry.write_page == 1,
 		"a page gained code under a live write translation");
 	entry.write_page = page;
@@ -109,7 +109,7 @@ void test_membership_retires_write_translations()
 		"a tagged write translation outlived the page's code");
 	registry.leave(participant);
 	entry.write_page = page;
-	registry.add(page, nullptr);
+	(void)registry.add(page, nullptr);
 	require(entry.write_page == page,
 		"a participant that left was still retired");
 }
@@ -130,10 +130,10 @@ void test_participant_retires_its_own_translations()
 		static_cast<OwnTlb *>(context)->retired.push_back(page);
 	}, &tlb);
 	const auto page = page_at(11);
-	registry.add(page, &participant);
+	(void)registry.add(page, &participant);
 	require(tlb.retired.size() == 1 && tlb.retired[0] == page,
 		"a page gained code without retiring the participant's entry");
-	registry.add(page, nullptr);
+	(void)registry.add(page, nullptr);
 	require(tlb.retired.size() == 1,
 		"a second holder retired the participant's entry again");
 	registry.remove(page);
@@ -141,7 +141,7 @@ void test_participant_retires_its_own_translations()
 	require(tlb.retired.size() == 2 && tlb.retired[1] == page,
 		"a page lost its code without retiring the participant's entry");
 	registry.leave(participant);
-	registry.add(page, nullptr);
+	(void)registry.add(page, nullptr);
 	require(tlb.retired.size() == 2,
 		"a participant that left was still retired");
 }
@@ -157,7 +157,7 @@ void test_concurrent_holders_stay_exact()
 	constexpr unsigned rounds = 20000;
 	CodePageRegistry registry;
 	const auto pinned = page_at(pages + 1);
-	registry.add(pinned, nullptr);
+	(void)registry.add(pinned, nullptr);
 
 	std::atomic<bool> start{false};
 	std::atomic<bool> lost{false};
@@ -171,7 +171,7 @@ void test_concurrent_holders_stay_exact()
 				random = random * 6364136223846793005ULL +
 					1442695040888963407ULL;
 				const auto page = page_at((random >> 33U) % pages);
-				registry.add(page, nullptr);
+				(void)registry.add(page, nullptr);
 				if (!registry.holds(page) || !registry.holds(pinned))
 					lost.store(true, std::memory_order_release);
 				registry.remove(page);
@@ -242,7 +242,7 @@ void test_waiter_does_not_read_a_member_that_was_freed()
 
 	Clock::time_point returned{};
 	std::thread waiter{[&] {
-		registry.add(page_at(21), &self);
+		(void)registry.add(page_at(21), &self);
 		returned = Clock::now();
 	}};
 	signal.settle();
@@ -286,7 +286,7 @@ void test_waiter_ignores_a_new_participant_at_a_departed_address(bool join)
 
 	Clock::time_point returned{};
 	std::thread waiter{[&] {
-		registry.add(page_at(22), &self);
+		(void)registry.add(page_at(22), &self);
 		returned = Clock::now();
 	}};
 	signal.settle();
@@ -327,7 +327,7 @@ void test_find_shares_the_registry_without_making_one()
 	held.reset();
 	require(CodePageRegistry::find(generation) == found,
 		"a registry a finder still holds was lost");
-	found->add(page_at(23), nullptr);
+	(void)found->add(page_at(23), nullptr);
 	require(found->holds(page_at(23)),
 		"a registry outlived by its acquirer is unusable");
 	found.reset();
@@ -356,6 +356,120 @@ void test_leave_inside_the_engine_is_refused()
 	require(waitpid(child, &status, 0) == child, "waitpid failed");
 	require(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
 		"leaving the registry inside the engine was accepted");
+}
+
+/* A second translator of a page whose gain is still being settled waits
+ * itself. On main it returned at once, because the page was already counted,
+ * while the first adder was still waiting, and read the page before the
+ * stores in flight had landed.
+ */
+void test_a_second_registration_waits_for_the_first()
+{
+	CodePageRegistry registry;
+	SnapshotSignal signal;
+	CodePageRegistry::Participant inside;
+	CodePageRegistry::Participant first;
+	CodePageRegistry::Participant second;
+	registry.join(inside, &SnapshotSignal::retire, &signal);
+	inside.engine_epoch.store(1, std::memory_order_release);
+	const auto page = page_at(24);
+
+	std::atomic<bool> second_returned{false};
+	CodePageRegistry::Settlement first_result;
+	CodePageRegistry::Settlement second_result;
+	std::thread first_adder{[&] { first_result = registry.add(page, &first); }};
+	signal.settle();
+	std::thread second_adder{[&] {
+		second_result = registry.add(page, &second);
+		second_returned.store(true, std::memory_order_release);
+	}};
+	std::this_thread::sleep_for(std::chrono::milliseconds{60});
+	require(!second_returned.load(std::memory_order_acquire),
+		"a second registration returned while the page was unsettled");
+	inside.engine_epoch.fetch_add(1, std::memory_order_release);
+	first_adder.join();
+	second_adder.join();
+	require(first_result.settled && second_result.settled,
+		"a wait that completed did not settle the page");
+	/* Settled: the next holder has nothing to wait for. */
+	inside.engine_epoch.store(3, std::memory_order_release);
+	const auto before = Clock::now();
+	const auto third = registry.add(page, nullptr);
+	require(third.settled && Clock::now() - before < std::chrono::milliseconds{30},
+		"a registration of a settled page waited");
+	inside.engine_epoch.store(4, std::memory_order_release);
+	registry.leave(inside);
+}
+
+/* A participant still inside the engine after the wait is stuck. The wait
+ * says so once, reports the page unsettled, and later waits do not wait for
+ * the same stuck participant again; the page settles by a wait that
+ * completes. */
+void test_a_stuck_participant_is_waited_out_once()
+{
+	using namespace std::chrono_literals;
+	CodePageRegistry registry{{.slice = 20ms, .slices = 3}};
+	CodePageRegistry::Participant stuck;
+	registry.join(stuck);
+	stuck.engine_epoch.store(1, std::memory_order_release);
+
+	auto began = Clock::now();
+	const auto first = registry.add(page_at(30), nullptr);
+	require(!first.settled && first.stuck.size() == 1 &&
+			first.stuck[0].epoch == 1,
+		"a stuck participant did not leave the page unsettled");
+	require(Clock::now() - began >= 60ms,
+		"the wait ended before its slices did");
+	require(registry.expiry_records() == 1,
+		"the stuck participant was not remembered");
+	const auto serial = first.stuck[0].serial;
+	require(!registry.left_or_moved(serial, 1),
+		"a participant still inside the engine has moved");
+
+	/* Another page, and the same one again, do not wait for it. */
+	began = Clock::now();
+	const auto other = registry.add(page_at(31), nullptr);
+	const auto again = registry.add(page_at(30), nullptr);
+	require(Clock::now() - began < 40ms,
+		"a later registration waited for a participant already waited out");
+	require(!other.settled && !again.settled &&
+			other.stuck.size() == 1 && again.stuck.size() == 1 &&
+			other.stuck[0].serial == serial,
+		"a later registration did not report the stuck participant");
+	require(registry.expiry_records() == 1,
+		"the same stuck participant was remembered twice");
+
+	/* It leaves the engine: the next registration completes and settles. */
+	stuck.engine_epoch.store(2, std::memory_order_release);
+	require(registry.left_or_moved(serial, 1),
+		"a participant that left the engine has not moved");
+	const auto settled = registry.add(page_at(30), nullptr);
+	require(settled.settled && settled.stuck.empty(),
+		"a registration after the participant left was not settled");
+	require(registry.expiry_records() == 0,
+		"the record of a participant that moved was kept");
+	began = Clock::now();
+	const auto last = registry.add(page_at(31), nullptr);
+	require(last.settled && Clock::now() - began < 40ms,
+		"the other page did not settle once the participant left");
+	registry.leave(stuck);
+}
+
+/* A participant that leaves the registry takes its record with it. */
+void test_leave_drops_the_record_of_a_stuck_participant()
+{
+	using namespace std::chrono_literals;
+	CodePageRegistry registry{{.slice = 10ms, .slices = 2}};
+	CodePageRegistry::Participant stuck;
+	registry.join(stuck);
+	stuck.engine_epoch.store(1, std::memory_order_release);
+	const auto result = registry.add(page_at(32), nullptr);
+	require(!result.settled && registry.expiry_records() == 1,
+		"the stuck participant was not remembered");
+	stuck.engine_epoch.store(2, std::memory_order_release);
+	registry.leave(stuck);
+	require(registry.expiry_records() == 0,
+		"a participant that left the registry kept its record");
 }
 
 /* The bytes the process's live allocations hold. A sanitizer replaces the
@@ -415,5 +529,8 @@ int main()
 	test_waiter_does_not_read_a_member_that_was_freed();
 	test_waiter_ignores_a_new_participant_at_a_departed_address(false);
 	test_waiter_ignores_a_new_participant_at_a_departed_address(true);
+	test_a_second_registration_waits_for_the_first();
+	test_a_stuck_participant_is_waited_out_once();
+	test_leave_drops_the_record_of_a_stuck_participant();
 	return 0;
 }
