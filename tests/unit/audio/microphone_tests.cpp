@@ -96,6 +96,8 @@ public:
             *mirror = false;
     }
 
+    void revive() noexcept override { ++revives; }
+
     void deliver(std::uint8_t value, std::size_t count)
     {
         require(running && ring != nullptr, "the microphone is not running");
@@ -126,6 +128,7 @@ public:
     std::uint8_t channels {};
     unsigned starts {};
     unsigned stops {};
+    unsigned revives {};
     bool startResult {true};
     bool running {};
     // Where the test can still read `running` after the source is gone.
@@ -442,6 +445,33 @@ void sourceTriesAgainAfterAStartThatFailed()
     require(fixture.input->starts == 2 && fixture.input->running);
     fixture.input->deliver(0x33, 960);
     require(fixture.source->read(pcm) == 960 && pcm[0] == 0x33);
+}
+
+/* A microphone that lost its engine while the guest records is asked to open
+ * it again with every pass over the source's events, and only then: not before
+ * the guest records, not once it is stopped, not while a start is failing
+ * (the source starts it again itself). */
+void sourceAsksARunningMicrophoneToReviveItself()
+{
+    Source fixture;
+    fixture.allow();
+    fixture.source->handleEvents();
+    require(fixture.input->revives == 0);
+    fixture.source->start();
+    require(fixture.input->running && fixture.input->revives == 0);
+    fixture.source->handleEvents();
+    fixture.source->handleEvents();
+    require(fixture.input->revives == 2 && fixture.input->starts == 1);
+    fixture.source->stop();
+    fixture.source->handleEvents();
+    require(fixture.input->revives == 2);
+
+    Source failing;
+    failing.allow();
+    failing.input->startResult = false;
+    failing.source->start();
+    failing.source->handleEvents();
+    require(failing.input->revives == 0 && failing.input->starts == 2);
 }
 
 /* A microphone that runs ahead of the guest adds no latency: the oldest
@@ -845,6 +875,7 @@ int main()
     sourceRecordsFromTheMicrophoneOnlyWhileTheGuestRecords();
     sourceFollowsTheSettingUnderARecordingGuest();
     sourceTriesAgainAfterAStartThatFailed();
+    sourceAsksARunningMicrophoneToReviveItself();
     standbyOpensTheMicrophoneBeforeTheGuestRecords();
     aBufferHeldAcrossTheStartIsNotTheRecordings();
     aBufferThatSpansTheBoundaryLosesItsLeadingFrames();

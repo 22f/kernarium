@@ -112,6 +112,8 @@ private:
             ring_.clear();
             capturing_ = input_->start(channels, ring_);
             openChannels_ = capturing_ ? channels : std::uint8_t {};
+        } else if (wanted && capturing_) {
+            input_->revive();
         }
     }
 

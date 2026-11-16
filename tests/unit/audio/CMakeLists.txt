@@ -14,6 +14,14 @@ target_include_directories(uml_audio_output_cycle_tests PRIVATE
 uml_add_unit_test(NAME audio-output-cycle COMMAND uml_audio_output_cycle_tests
     LABELS audio)
 
+# So is when the Apple output replaces its engine and how long it waits for a
+# route that is not there.
+add_executable(uml_audio_output_recovery_tests output_recovery_tests.cpp)
+target_include_directories(uml_audio_output_recovery_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/device/audio)
+uml_add_unit_test(NAME audio-output-recovery
+    COMMAND uml_audio_output_recovery_tests LABELS audio)
+
 # So is the audio session's category and options for the clients that need it.
 add_executable(uml_audio_session_category_tests session_category_tests.cpp)
 target_include_directories(uml_audio_session_category_tests PRIVATE

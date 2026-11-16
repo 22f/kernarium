@@ -26,6 +26,10 @@ public:
     /* Stops the microphone, so that the system's recording indicator goes
      * out. No delivery is running when it returns. */
     virtual void stop() noexcept = 0;
+    /* Called while the guest records: opens the microphone again if it was
+     * started and lost its engine without being stopped or interrupted. It is
+     * cheap when nothing is wrong, and limits its own retries. */
+    virtual void revive() noexcept {}
 };
 
 /* A capture source that records from the real microphone while the guest

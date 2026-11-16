@@ -27,10 +27,12 @@
 #import <objc/runtime.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -50,6 +52,9 @@ std::atomic<int> engineStarts {};
 std::atomic<int> engineStops {};
 std::atomic<int> sessionActivations {};
 std::atomic<int> sessionDeactivations {};
+// How many of the next activations the session refuses, as it does while the
+// system has not given the route back.
+std::atomic<int> activationsToFail {};
 // The last category the session was given, and whether the session refuses
 // the Bluetooth options (a category call that carries them fails).
 std::atomic<NSUInteger> categoryOptions {};
@@ -188,7 +193,16 @@ void installHooks()
     Method activate = class_getInstanceMethod(
         [AVAudioSession class], @selector(setActive:error:));
     method_setImplementation(activate, imp_implementationWithBlock(
-        ^BOOL(id, BOOL active, NSError* __autoreleasing*) {
+        ^BOOL(id, BOOL active, NSError* __autoreleasing* error) {
+          if (active && activationsToFail.load() > 0) {
+              --activationsToFail;
+              if (error != nullptr) {
+                  *error = [NSError errorWithDomain:NSOSStatusErrorDomain
+                                               code:-50
+                                           userInfo:nil];
+              }
+              return NO;
+          }
           if (active)
               ++sessionActivations;
           return YES;
@@ -872,6 +886,88 @@ void routeChangeRebuildsTheEngineOnTheSameSession()
         since(idle).text());
 }
 
+// A route change whose rebuild cannot take the session back (the system has
+// not given the route back yet) leaves the microphone wanted and without an
+// engine. The capture source asks it to revive while the guest records, and it
+// opens the engine again, at most once a second. An interruption leaves the
+// engine to the system's advice instead, and a stopped microphone opens
+// nothing.
+void aRebuildThatCannotTakeTheSessionIsTriedAgain()
+{
+    otherAudioPlaying = false;
+    Recording recording;
+    check(recording.start(), "the microphone starts before the route changes");
+    AVAudioEngine* const engine = startedEngine;
+    auto before = Counts::now();
+    activationsToFail = 1;
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:AVAudioEngineConfigurationChangeNotification
+                      object:engine];
+    auto seen = since(before);
+    check(seen.stops == 1 && seen.starts == 0 && seen.activations == 0,
+        "a rebuild that cannot take the session leaves no engine", seen.text());
+
+    before = Counts::now();
+    recording.input->revive();
+    check(since(before) == Counts {},
+        "it is not tried again within a second", since(before).text());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    recording.input->revive();
+    seen = since(before);
+    check(seen.starts == 1 && seen.activations == 1,
+        "it is tried again after a second and runs", seen.text());
+
+    before = Counts::now();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    recording.input->revive();
+    check(since(before) == Counts {},
+        "a microphone that runs is left alone", since(before).text());
+
+    // Interrupted: the system's advice decides, not a retry.
+    postInterruptionBegan();
+    before = Counts::now();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    recording.input->revive();
+    check(since(before) == Counts {},
+        "an interrupted microphone waits for the advice, not a retry",
+        since(before).text());
+    postInterruptionEnded(true);
+    check(since(before).starts == 1, "the advice opens it again",
+        since(before).text());
+
+    recording.stop();
+    before = Counts::now();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    recording.input->revive();
+    check(since(before) == Counts {}, "a stopped microphone opens nothing",
+        since(before).text());
+}
+
+// The system's advice to resume arrives while the route is not back yet, so
+// the reopen fails. The interruption is over all the same: the microphone
+// opens again, at most once a second, without waiting for another advice.
+void aRefusedReopenAfterTheAdviceIsTriedAgain()
+{
+    otherAudioPlaying = false;
+    Recording recording;
+    check(recording.start(), "the microphone starts before the interruption");
+    postInterruptionBegan();
+    auto before = Counts::now();
+    activationsToFail = 1;
+    postInterruptionEnded(true);
+    auto seen = since(before);
+    check(seen.starts == 0 && seen.activations == 0,
+        "a reopen the system refuses leaves no engine", seen.text());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    recording.input->revive();
+    seen = since(before);
+    check(seen.starts == 1 && seen.activations == 1,
+        "the microphone opens again once the system allows it", seen.text());
+    recording.stop();
+}
+
 // The notification iOS 27 deprecates is no longer observed.
 void deprecatedNotificationIsIgnored()
 {
@@ -911,6 +1007,8 @@ int main()
         sessionAllowsTheHeadsetMicrophone();
         refusedBluetoothOptionsFallBack();
         routeChangeRebuildsTheEngineOnTheSameSession();
+        aRebuildThatCannotTakeTheSessionIsTriedAgain();
+        aRefusedReopenAfterTheAdviceIsTriedAgain();
         sessionCategoryIsSetOnlyWhenItChanges();
         aSessionChangedBehindItsBackIsSetAgain();
         refusedBluetoothOptionsAreAskedAgainWhenTheMicrophoneIsBuiltAgain();
