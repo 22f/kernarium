@@ -249,6 +249,11 @@ std::atomic<bool> reporter_started{false};
  * differed from the recount in all of them and in the last. */
 std::atomic<std::uint64_t> audit_runs{0}, audit_skipped{0}, audit_records{0},
 	audit_mismatches{0}, audit_last_mismatches{0};
+/* The time the exact audits took, in all and the longest: one holds every
+ * address space's mapping changes (fork, exit, page faults that map) still
+ * for the length of its scan, so the timing of a diagnostics run is read
+ * with it. */
+std::atomic<std::uint64_t> audit_nanos_total{0}, audit_nanos_max{0};
 /* What the last audit that found a mismatch saw: its generations, the
  * executable words that named no record, and the first mismatches as the
  * record's count and the recount. */
@@ -437,12 +442,22 @@ void note_step(std::uint64_t key) noexcept
  * run that sees one fails (tests/integration/aot/run_aot_guest.py). */
 void run_count_audit() noexcept
 {
+	const auto started = std::chrono::steady_clock::now();
 	const auto audit = ::uml::memory::audit_executable_counts();
+	const auto nanos = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::nanoseconds>(
+			std::chrono::steady_clock::now() - started).count());
 	if (!audit.exact) {
 		counters::audit_skipped.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
 	counters::audit_runs.fetch_add(1, std::memory_order_relaxed);
+	counters::audit_nanos_total.fetch_add(nanos, std::memory_order_relaxed);
+	auto longest = counters::audit_nanos_max.load(std::memory_order_relaxed);
+	while (nanos > longest &&
+	       !counters::audit_nanos_max.compare_exchange_weak(longest, nanos,
+			       std::memory_order_relaxed)) {
+	}
 	counters::audit_records.store(audit.records, std::memory_order_relaxed);
 	counters::audit_last_mismatches.store(audit.mismatches,
 		std::memory_order_relaxed);
@@ -510,11 +525,13 @@ void write_report() noexcept
 		static_cast<unsigned long long>(kernel_stack_bytes),
 		get(counters::stack_engine_free), get(counters::stack_max_growth));
 	std::fprintf(file, "count_audit runs %llu skipped %llu records %llu "
-		"mismatches %llu last_mismatches %llu anomalies %llu\n",
+		"mismatches %llu last_mismatches %llu anomalies %llu "
+		"nanos_total %llu nanos_max %llu\n",
 		get(counters::audit_runs), get(counters::audit_skipped),
 		get(counters::audit_records), get(counters::audit_mismatches),
 		get(counters::audit_last_mismatches),
-		static_cast<unsigned long long>(::uml::memory::count_anomalies()));
+		static_cast<unsigned long long>(::uml::memory::count_anomalies()),
+		get(counters::audit_nanos_total), get(counters::audit_nanos_max));
 	std::fprintf(file, "count_audit_detail generations %llu unnamed %llu "
 		"c0 %llu e0 %llu c1 %llu e1 %llu c2 %llu e2 %llu c3 %llu e3 %llu\n",
 		get(counters::audit_detail_generations),

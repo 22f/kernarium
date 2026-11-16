@@ -463,10 +463,17 @@ def judge_count_audit(report: dict[str, int]) -> str:
                       + (f" (the last mismatching audit: {seen})" if seen else ""))
     if report.get("count_audit.records", 0) == 0:
         raise Failure("the count audit compared no record")
+    # An exact audit holds every address space's mapping changes still while
+    # it scans, so what a diagnostics run measured is read with its duration.
+    if "count_audit.nanos_total" not in report or "count_audit.nanos_max" not in report:
+        raise Failure("the report has no duration of the count audit: the timing of "
+                      "a diagnostics run cannot be read without it")
     return (f"count audit: {runs} audits "
             f"({report.get('count_audit.skipped', 0)} skipped for a busy address "
             f"space), {report.get('count_audit.records', 0)} records, "
-            "0 mismatches, 0 anomalies")
+            "0 mismatches, 0 anomalies; each exact audit holds every address "
+            f"space still while it scans: longest {report['count_audit.nanos_max'] / 1e6:.1f} ms, "
+            f"total {report['count_audit.nanos_total'] / 1e6:.1f} ms")
 
 
 def library_names(manifest: pathlib.Path) -> list[str]:

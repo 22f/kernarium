@@ -138,7 +138,7 @@ def good_probe() -> str:
 
 
 GOOD_AUDIT = ("count_audit runs 5 skipped 1 records 40 mismatches 0 "
-              "last_mismatches 0 anomalies 0\n")
+              "last_mismatches 0 anomalies 0 nanos_total 9000000 nanos_max 3200000\n")
 GOOD_STACK = ("stack_free 59200 stack_size 65536 stack_kind 0 "
               "stack_task_bytes 65536 stack_engine_free 62000 stack_growth 2800\n")
 
@@ -347,6 +347,17 @@ class RunnerTest(unittest.TestCase):
         scenario = good_scenario()
         scenario["report"]["off"] = "binds 3 enters 4 steps 0 poisoned 0\n"
         self.fails(scenario, "ran with the component off", "--diagnostics")
+
+    def test_the_duration_of_the_exact_audit_is_reported(self):
+        """The exact audit holds every address space still for the length of
+        its scan, so the timing of a diagnostics run is read with it."""
+        result = self.passes(good_scenario(), "--diagnostics")
+        self.assertIn("longest 3.2 ms", result.stdout)
+        self.assertIn("total 9.0 ms", result.stdout)
+        scenario = good_scenario()
+        scenario["report"]["on"] = scenario["report"]["on"].replace(
+            " nanos_total 9000000 nanos_max 3200000", "")
+        self.fails(scenario, "no duration of the count audit", "--diagnostics")
 
     def test_the_count_audit_is_judged(self):
         """The run recounts the executable-mapping counts and fails on a
