@@ -28,11 +28,11 @@ A host that ignores the bit stays correct.
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  arch/arm64/um/user-offsets.c                |  2 +
- arch/um/kernel/tlb.c                        | 63 +++++++++++++++++++--
+ arch/um/kernel/tlb.c                        | 64 +++++++++++++++++++--
  arch/um/os-Darwin/skas/mem.c                |  8 ++-
  arch/um/os-Darwin/uml_darwin_abi_identity.h |  2 +-
  arch/um/os-Darwin/uml_darwin_memory.h       |  6 ++
- 5 files changed, 73 insertions(+), 8 deletions(-)
+ 5 files changed, 74 insertions(+), 8 deletions(-)
 
 diff --git a/arch/arm64/um/user-offsets.c b/arch/arm64/um/user-offsets.c
 index fad1abac06375c29246c39c7e0d22b714a0a38ee..8d650259a53c4ac2976c7a0c9b5fac2330e8a304 100644
@@ -46,10 +46,10 @@ index fad1abac06375c29246c39c7e0d22b714a0a38ee..8d650259a53c4ac2976c7a0c9b5fac23
 +	DEFINE(UM_PROT_GUEST_IMMUTABLE, 32);
  }
 diff --git a/arch/um/kernel/tlb.c b/arch/um/kernel/tlb.c
-index 04cff8cc7fb270a9b3980c3324335b5cd8868104..0fcc345674ad9af9d72b34be65932677ef0a4ba7 100644
+index 04cff8cc7fb270a9b3980c3324335b5cd8868104..5f1b1082c5543918b4cfc681ae00e888f5a2e272 100644
 --- a/arch/um/kernel/tlb.c
 +++ b/arch/um/kernel/tlb.c
-@@ -3,6 +3,8 @@
+@@ -3,8 +3,11 @@
   * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
   */
  
@@ -57,8 +57,11 @@ index 04cff8cc7fb270a9b3980c3324335b5cd8868104..0fcc345674ad9af9d72b34be65932677
 +#include <linux/magic.h>
  #include <linux/mm.h>
  #include <linux/module.h>
++#include <linux/pagemap.h>
  #include <linux/sched/signal.h>
-@@ -104,19 +106,67 @@ static unsigned int darwin_vma_protection(struct mm_struct *mm,
+ #include <linux/string.h>
+ #include <linux/uaccess.h>
+@@ -104,19 +107,67 @@ static unsigned int darwin_vma_protection(struct mm_struct *mm,
  	return protection;
  }
  
@@ -129,7 +132,7 @@ index 04cff8cc7fb270a9b3980c3324335b5cd8868104..0fcc345674ad9af9d72b34be65932677
  	if (vma_protection & DARWIN_VMA_WRITABLE)
  		prot |= UM_PROT_GUEST_WRITABLE;
  	return prot;
-@@ -219,7 +269,7 @@ static int darwin_init_mm_pte_prot(pte_t pteval)
+@@ -219,7 +270,7 @@ static int darwin_init_mm_pte_prot(pte_t pteval)
  	prot = (r ? UM_PROT_READ : 0) |
  	       (w ? UM_PROT_WRITE : 0) |
  	       (x ? UM_PROT_EXEC : 0);
@@ -138,7 +141,7 @@ index 04cff8cc7fb270a9b3980c3324335b5cd8868104..0fcc345674ad9af9d72b34be65932677
  }
  
  static int darwin_map_init_mm_pte(struct vm_ops *ops,
-@@ -550,6 +600,7 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
+@@ -550,6 +601,7 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
  	do {
  #ifdef UML_HOST_DARWIN
  		pte_t pteval;
@@ -146,7 +149,7 @@ index 04cff8cc7fb270a9b3980c3324335b5cd8868104..0fcc345674ad9af9d72b34be65932677
  
  		/*
  		 * UML's original shadow-TLB walker was uniprocessor-only.  Clearing
-@@ -581,6 +632,7 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
+@@ -581,6 +633,7 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
  				return -EAGAIN;
  		}
  		pteval = ptep_get(pte);
@@ -154,7 +157,7 @@ index 04cff8cc7fb270a9b3980c3324335b5cd8868104..0fcc345674ad9af9d72b34be65932677
  		if (ops->mm == &init_mm)
  			spin_unlock(ptl);
  		else
-@@ -620,7 +672,8 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
+@@ -620,7 +673,8 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
  			       (x ? UM_PROT_EXEC : 0);
  #ifdef UML_HOST_DARWIN
  			prot = darwin_guest_protection(ops->mm, prot, x,
