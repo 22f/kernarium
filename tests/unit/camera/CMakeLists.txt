@@ -26,6 +26,15 @@ target_link_libraries(uml_camera_apple_discovery_tests PRIVATE UML::AppleCamera 
 uml_add_unit_test(NAME camera-apple-discovery COMMAND uml_camera_apple_discovery_tests
     LABELS "device;camera")
 
+# A discovery that raises an Objective-C exception (the platform's call unavailable on the host, as an iPad
+# app on a Mac meets): no cameras, one log line and a live process. The raise is stood in by a replaced
+# method of the discovery session; no camera is opened.
+add_executable(uml_camera_discovery_exception_tests camera_discovery_exception_tests.mm)
+target_link_libraries(uml_camera_discovery_exception_tests PRIVATE UML::AppleCamera
+    "-framework Foundation" "-framework AVFoundation")
+uml_add_unit_test(NAME camera-discovery-exception COMMAND uml_camera_discovery_exception_tests
+    LABELS "device;camera")
+
 # What a still reports of its exposure, from a literal photo-metadata dictionary
 # (no camera is opened).
 add_executable(uml_camera_still_exposure_tests camera_still_exposure_tests.cpp)

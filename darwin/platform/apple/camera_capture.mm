@@ -513,18 +513,21 @@ std::vector<Entry> discover()
         entry.discovered.deviceType = deviceTypeOf(type);
         // The platform states each camera's mounting, which is what the guest is told (presentedMountingOf); the
         // connections present the pictures in it (keepSensorOrientation). Its fixed angle for each interface
-        // orientation is noted for the record.
-        AVCaptureDeviceRotationCoordinator* rotation = [[AVCaptureDeviceRotationCoordinator alloc] initWithDevice:device previewLayer:nil];
-        const AVCaptureVideoOrientation orientations[4] = {AVCaptureVideoOrientationPortrait, AVCaptureVideoOrientationPortraitUpsideDown,
-                                                           AVCaptureVideoOrientationLandscapeRight, AVCaptureVideoOrientationLandscapeLeft};
-        double portraitAngle = 0;
-        for (int index = 0; index < 4; ++index) {
-            const double angle = [rotation videoRotationAngleRelativeToDeviceOrientation:orientations[index]];
-            if (index == 0) portraitAngle = angle;
-            entry.discovered.coordinatorAngles[std::size_t(index)] = angleNumber(angle);
+        // orientation is noted for the record. An iPad app on a Mac has no such angles (the call is unavailable on
+        // macOS and raises there): its cameras keep the mounting their sensor states, as a Mac's own do.
+        if (!NSProcessInfo.processInfo.isiOSAppOnMac) {
+            AVCaptureDeviceRotationCoordinator* rotation = [[AVCaptureDeviceRotationCoordinator alloc] initWithDevice:device previewLayer:nil];
+            const AVCaptureVideoOrientation orientations[4] = {AVCaptureVideoOrientationPortrait, AVCaptureVideoOrientationPortraitUpsideDown,
+                                                               AVCaptureVideoOrientationLandscapeRight, AVCaptureVideoOrientationLandscapeLeft};
+            double portraitAngle = 0;
+            for (int index = 0; index < 4; ++index) {
+                const double angle = [rotation videoRotationAngleRelativeToDeviceOrientation:orientations[index]];
+                if (index == 0) portraitAngle = angle;
+                entry.discovered.coordinatorAngles[std::size_t(index)] = angleNumber(angle);
+            }
+            entry.mounting = presentedMountingOf(info.position, portraitAngle);
+            info.sensorOrientation = entry.mounting.stated;
         }
-        entry.mounting = presentedMountingOf(info.position, portraitAngle);
-        info.sensorOrientation = entry.mounting.stated;
 #endif
         entry.discovered.stated = std::uint16_t(entry.mounting.stated);
         entry.discovered.turn = std::uint16_t(entry.mounting.connectionTurn);
@@ -2899,25 +2902,37 @@ private:
 
 class AppleCamera final : public Camera {
 public:
-    AppleCamera() : entries_(discover())
+    // Discovery calls the platform, which can raise where a host lacks what the build assumes (an iPad app on a Mac
+    // lacks the rotation coordinator's angles). A C++ handler does not see an Objective-C exception and it ends the
+    // process, so the exception stops here: the host presents no cameras, with one line saying why.
+    AppleCamera()
     {
+        @try {
+            entries_ = discover();
 #if TARGET_OS_IOS
-        // The sets AVFoundation lists, by position in cameras().
-        NSMutableArray<AVCaptureDeviceType>* types = [NSMutableArray array];
-        for (const auto& entry : entries_) [types addObject:entry.device.deviceType];
-        AVCaptureDeviceDiscoverySession* session =
-            [AVCaptureDeviceDiscoverySession discoverySessionWithDeviceTypes:types
-                                                                   mediaType:AVMediaTypeVideo
-                                                                    position:AVCaptureDevicePositionUnspecified];
-        for (NSSet<AVCaptureDevice*>* set in session.supportedMultiCamDeviceSets) {
-            std::vector<std::size_t> members;
-            for (AVCaptureDevice* device in set)
-                for (std::size_t index = 0; index < entries_.size(); ++index)
-                    if ([entries_[index].device.uniqueID isEqualToString:device.uniqueID]) members.push_back(index);
-            std::sort(members.begin(), members.end());
-            if (members.size() > 1) sets_.push_back(std::move(members));
-        }
+            // The sets AVFoundation lists, by position in cameras().
+            NSMutableArray<AVCaptureDeviceType>* types = [NSMutableArray array];
+            for (const auto& entry : entries_) [types addObject:entry.device.deviceType];
+            AVCaptureDeviceDiscoverySession* session =
+                [AVCaptureDeviceDiscoverySession discoverySessionWithDeviceTypes:types
+                                                                       mediaType:AVMediaTypeVideo
+                                                                        position:AVCaptureDevicePositionUnspecified];
+            for (NSSet<AVCaptureDevice*>* set in session.supportedMultiCamDeviceSets) {
+                std::vector<std::size_t> members;
+                for (AVCaptureDevice* device in set)
+                    for (std::size_t index = 0; index < entries_.size(); ++index)
+                        if ([entries_[index].device.uniqueID isEqualToString:device.uniqueID]) members.push_back(index);
+                std::sort(members.begin(), members.end());
+                if (members.size() > 1) sets_.push_back(std::move(members));
+            }
 #endif
+        } @catch (NSException* exception) {
+            entries_.clear();
+            sets_.clear();
+            std::fprintf(stderr, "Camera: discovery raised %s (%s): the host presents no cameras\n",
+                         exception.name != nil ? exception.name.UTF8String : "an exception",
+                         exception.reason != nil ? exception.reason.UTF8String : "no reason");
+        }
     }
 
     std::vector<CameraInfo> cameras() const override
