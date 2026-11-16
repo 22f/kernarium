@@ -5486,7 +5486,8 @@ void check_a_refused_install_leaves_no_query_bounds() {
 // Which of a call's values are references is known from the method: its signature at the lookup, else the platform's reflection
 // at the first call. Nothing bounds the number of methods or of their parameters, and a failure to learn is not remembered. Where
 // the parameters cannot be had at the moment of a call, the layer cannot tell a block's address from an integer, and the runtime
-// would take it for a reference: the call does not reach it, and the process stops after one line in the log.
+// would take it for a reference: the application's call does not reach it, and the process stops after one line in the log (a
+// platform caller's call is forwarded, receiver converted, arguments as they are).
 
 // Runs `call`, which must not return: the layer stops the process (Platform::abort_process) and the fake's stop comes back here.
 template <class F>
