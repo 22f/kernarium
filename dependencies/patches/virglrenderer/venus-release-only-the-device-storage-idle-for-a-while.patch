@@ -59,7 +59,7 @@ index a5815912cb918406ace6dd96c1a6242db51df57d..da6106e3dc0098750896116d68e72089
  uint64_t
  vkr_renderer_release_cached_memory(void);
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index f437ce508de167ff960cf1e94d48f758311e2d39..0630ff3ca27502045c43c144a0a9001df121ea12 100644
+index 26d1c85e3919bf64861fac9154aeb835c35c8240..2ead12a941345410cfd679d3aa335471e7daee31 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -13659,7 +13659,10 @@ static void vrend_reclaim_trim(void)

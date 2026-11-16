@@ -25,6 +25,7 @@
 #include <utility>
 #include <variant>
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace uml::gpu {
@@ -1825,6 +1826,21 @@ std::vector<std::uint8_t> VirtioGpuDevice::processInternal(
             descriptorType != VirglRenderer::sharedMemoryBlobDescriptor) {
             return response(
                 *header, protocol::GpuResponse::errorUnspecified);
+        }
+        /* The guest is given chargedSize bytes of this file, and the host maps
+         * the same range; an access past the file's end ends the host process.
+         * The renderer bounds a blob where it is created, and the transport
+         * checks the range again before it hands the guest a descriptor. This
+         * answers a request that the descriptor cannot back, whatever the
+         * renderer made of it, before anything is queued: the descriptor is
+         * closed here and the guest keeps its device. */
+        struct stat descriptorStatus {};
+        if (::fstat(descriptor, &descriptorStatus) != 0 ||
+            descriptorStatus.st_size < 0 ||
+            static_cast<std::uint64_t>(descriptorStatus.st_size) <
+                resource.chargedSize) {
+            return response(
+                *header, protocol::GpuResponse::errorInvalidParameter);
         }
         std::uint32_t mapInfo = 0;
         if (UML_GPU_RENDERER.resourceMapInfo(
