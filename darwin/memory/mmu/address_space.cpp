@@ -1201,7 +1201,7 @@ public:
 							mapping->backing->code_page_handle(
 								mapping->offset));
 					const bool own = take_holders(*mapping, target,
-						others, holder_takes_in_flight_);
+						others, holder_takes_in_flight_, true);
 					if (!mapping->guest_code && !own)
 						continue;
 				}
@@ -1796,7 +1796,7 @@ private:
 			MappedBacking::invalidate_code_page(
 				mapping->backing->code_page_handle(mapping->offset));
 		if (AddressLayout::is_guest(page))
-			take_holders(*mapping, generation, others, in_flight);
+			take_holders(*mapping, generation, others, in_flight, false);
 		return true;
 	}
 
@@ -1816,7 +1816,8 @@ private:
 	 * generations it held, but `generation`'s own, to `others`. A word that
 	 * is empty or names only the writer's generation is left alone: the common
 	 * frame, held by its writer alone, costs one load and no exchange. For a
-	 * holder of the writer's mapping lock; nothing here waits. Answers
+	 * holder of the writer's mapping lock; nothing here waits. `kernel` says
+	 * the take is a kernel write's, which the counters keep apart. Answers
 	 * whether `generation` holds the frame itself: its backing's holders are
 	 * unknown, or the word read every generation or named it.
 	 *
@@ -1830,7 +1831,7 @@ private:
 	 * publisher comes with the count of the one that emptied it. */
 	static bool take_holders(const PageMapping &mapping,
 		std::uint64_t generation, code_holders::HolderList &others,
-		std::atomic<std::uint64_t> &in_flight) noexcept
+		std::atomic<std::uint64_t> &in_flight, bool kernel) noexcept
 	{
 		const auto *backing = mapping.backing;
 		if (backing->holders_unknown()) {
@@ -1847,6 +1848,9 @@ private:
 				others.begin_take(in_flight);
 				code_holders::count(
 					&code_holders::detail::CounterStore::exchanges);
+				if (kernel)
+					code_holders::count(&code_holders::detail::
+						CounterStore::kernel_exchanges);
 				held = word->exchange(code_holders::none,
 					std::memory_order_acq_rel);
 				own = code_holders::holds(held, slot);

@@ -146,7 +146,8 @@ holders::Counters since(const holders::Counters &before)
 		now.leaves - before.leaves,
 		now.unknown_backings - before.unknown_backings,
 		now.overlap_widenings - before.overlap_widenings,
-		now.absent_kernel_pages - before.absent_kernel_pages};
+		now.absent_kernel_pages - before.absent_kernel_pages,
+		now.kernel_exchanges - before.kernel_exchanges};
 }
 
 void test_the_word_fills_two_slots_then_reads_every_generation()
@@ -318,6 +319,8 @@ void test_a_frame_held_by_its_writer_alone_is_published_without_an_exchange()
 	before = holders::counters();
 	synchronize(writer);
 	require(since(before).exchanges == 1 && since(before).publications == 1);
+	require(since(before).kernel_exchanges == 0,
+		"a guest synchronization's take was counted as the kernel's");
 	require(since(before).overlap_widenings == 0,
 		"a publication that overlapped nothing widened");
 	require(code_changes(reader) > reader_before);
@@ -490,6 +493,9 @@ void kernel_write(bool target_maps_frame, unsigned long base)
 	const auto delta = since(before);
 	require(delta.absent_kernel_pages == (target_maps_frame ? 0U : 1U),
 		"the absent pages were not counted as the write names them");
+	require(delta.kernel_exchanges == (target_maps_frame ? 1U : 0U) &&
+		delta.exchanges == delta.kernel_exchanges,
+		"the kernel path's take was not counted as the kernel's");
 	require(delta.all_publications == (target_maps_frame ? 0U : 1U),
 		target_maps_frame ? "a write through a mapped page went to every "
 		"generation" : "a write for an absent page did not go to every "

@@ -206,6 +206,9 @@ struct Counters final {
 	/* Pages a kernel write named that the target's software table had no
 	 * entry for, each of which widened its publication to every generation. */
 	std::uint64_t absent_kernel_pages{};
+	/* The exchanges (above) the kernel path made, which tell a kernel write's
+	 * take from a guest synchronization's. */
+	std::uint64_t kernel_exchanges{};
 };
 
 namespace detail {
@@ -221,6 +224,7 @@ struct CounterStore final {
 	std::atomic_uint64_t unknown_backings{};
 	std::atomic_uint64_t overlap_widenings{};
 	std::atomic_uint64_t absent_kernel_pages{};
+	std::atomic_uint64_t kernel_exchanges{};
 };
 
 [[nodiscard]] inline CounterStore &counter_store() noexcept
@@ -248,7 +252,8 @@ inline void count(std::atomic_uint64_t detail::CounterStore::*counter,
 		read(store.exchanges), read(store.publications),
 		read(store.all_publications), read(store.generations_published),
 		read(store.leaves), read(store.unknown_backings),
-		read(store.overlap_widenings), read(store.absent_kernel_pages)};
+		read(store.overlap_widenings), read(store.absent_kernel_pages),
+		read(store.kernel_exchanges)};
 }
 
 } // namespace uml::memory::code_holders
