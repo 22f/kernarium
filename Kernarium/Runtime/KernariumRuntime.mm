@@ -2958,7 +2958,13 @@ int runtimeSetGpuHold(int held)
          * stop stalls its camera pipeline until the application is back, and
          * a recording that runs stops only then. The wait is the one bound
          * the edge allots it (`backgroundVideoBound`), taken out of the
-         * application's edge budget, and no video running means no wait. */
+         * application's edge budget, and no video running means no wait. The
+         * hold is recorded first, as a hold asked for before the wait would
+         * be, so a guest that restarts meanwhile boots behind it. */
+        {
+            std::lock_guard lock(activeGpuMutex);
+            gpuHoldRequested = true;
+        }
         return uml::camera::holdAfterVideoEnds(
                    *cameraBackgroundVideo(), holdGpuRequests,
                    uml::camera::backgroundVideoBound,
