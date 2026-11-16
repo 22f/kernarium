@@ -357,9 +357,8 @@ its clip, and stays open; a start still waiting for its sound is cancelled.
 While a recording that is ending is not finalized, the pause and resume
 button and the mute of that recording are skipped (the microphone setting
 applies to the next recording), and the button pressed with no recording
-is logged, not thrown. That stop is the whole mechanism: Andarium does not turn
-the Android display off before it suspends the guest, and another camera
-application behaves as before. A product overlay in
+does nothing. A CameraX recording in another camera application goes on across
+the camera's loss and reopening, and its clip holds the gap. A product overlay in
 `overlay/overlay/packages/apps/Aperture` sets the switch and ignores camera
 ID 2, which only a host that publishes the wide lens twice has. The build
 installs it as a static runtime overlay of the application; the application

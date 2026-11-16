@@ -50,6 +50,12 @@ FINALIZE_CLEAR = "endingVideoRecording.compareAndSet(recordingId, 0L)"
 FINALIZE_RETIRE = "videoRecording.compareAndSet(started.get(), null)"
 FINALIZE_IDLE = "cameraState.value = CameraState.IDLE"
 FINALIZE_DROP = "videoRecording.value = null"
+FINALIZE_FLAG = "finalized.set(true)"
+# The start's own steps after startRecording() returns.
+START_STORE_STARTED = "started.set(recording)"
+START_STORE_HANDLE = "videoRecording.value = recording"
+START_CHECK = "if (finalized.get()) {"
+START_RETIRE = "videoRecording.compareAndSet(recording, null)"
 
 
 def fail(message: str) -> None:
@@ -159,22 +165,34 @@ def view_model_code(patches: str) -> list[str]:
 
 
 def finalize_order(patches: str) -> bool:
-    """The Finalize handler ends a recording's hold on the view model in this order: it retires the handle of its OWN recording
-    (compare-and-set against the handle it started, never a plain write that a later recording's handle could lose to), then
-    publishes idle, which lets the next recording start and store its handle, then clears the ending mark. In the hunk that adds
-    the clear the three come in that order, and no plain write of null is left."""
+    """How the view model's Finalize handler and the start that stored the handle hand a recording over, in the hunk that adds the
+    mark's clear (code only, without comments).
+
+    The Finalize handler flags that its event came, retires the handle of its OWN recording (compare-and-set against the handle its
+    start stored, never a plain write that a later recording's handle could lose to), publishes idle, which lets the next
+    recording start and store its handle, then clears the ending mark. Flag before retire: otherwise an event that comes between
+    the start's two steps below retires nothing and flags too late for the start to see it.
+
+    The start stores the handle it got in `started` and in the state flow, both BEFORE it looks at the flag, and retires the
+    handle after that look. Then, whichever of the two threads goes first, one of them retires the handle."""
     for hunk in file_diffs(patches).get(VIEW_MODEL_FILE, []):
         body = code_of(body_of(hunk))
         for index, (added, code) in enumerate(body):
             if added and FINALIZE_CLEAR in code:
                 texts = [text for _, text in body]
-                before = texts[:index]
+                before, after = texts[:index], texts[index + 1:]
                 try:
+                    flag = len(before) - 1 - before[::-1].index(FINALIZE_FLAG)
                     retire = len(before) - 1 - before[::-1].index(FINALIZE_RETIRE)
                     idle = len(before) - 1 - before[::-1].index(FINALIZE_IDLE)
+                    stored_started = after.index(START_STORE_STARTED)
+                    stored_handle = after.index(START_STORE_HANDLE)
+                    check = after.index(START_CHECK)
+                    late = after.index(START_RETIRE)
                 except ValueError:
                     return False
-                return retire < idle and FINALIZE_DROP not in texts
+                return (flag < retire < idle and FINALIZE_DROP not in texts
+                        and stored_started < check and stored_handle < check < late)
     return False
 
 
@@ -332,8 +350,11 @@ def fixtures(android_root: Path) -> None:
             def find(needle: str, prefix: str) -> int:
                 return next(number for number, line in enumerate(lines) if line.startswith(prefix) and needle in line)
 
-            retire, idle, clear = find(FINALIZE_RETIRE, "+"), find(FINALIZE_IDLE, " "), find(FINALIZE_CLEAR, "+")
-            if not retire < idle < clear:
+            flag, retire, idle, clear = (find(FINALIZE_FLAG, "+"), find(FINALIZE_RETIRE, "+"), find(FINALIZE_IDLE, " "),
+                                         find(FINALIZE_CLEAR, "+"))
+            stored_started, stored_handle = find(START_STORE_STARTED, "+"), find(START_STORE_HANDLE, "+")
+            look, late = find(START_CHECK, "+"), find(START_RETIRE, "+")
+            if not flag < retire < idle < clear < stored_started < stored_handle < look < late:
                 fail("the fixtures for the order of the Finalize handler found its lines out of order in the patch")
 
             def move(source: int, before: int) -> list[str]:
@@ -342,13 +363,20 @@ def fixtures(android_root: Path) -> None:
                 position = before - (1 if source < before else 0)
                 return rest[:position] + [lines[source]] + rest[position:]
 
-            swapped = list(lines)
-            swapped[retire], swapped[idle] = lines[idle], lines[retire]
+            def swap(first: int, second: int) -> list[str]:
+                swapped = list(lines)
+                swapped[first], swapped[second] = lines[second], lines[first]
+                return swapped
+
             for label, variant in (
-                ("a patch that publishes idle before it retires the handle", swapped),
+                ("a patch that publishes idle before it retires the handle", swap(retire, idle)),
                 ("a patch that clears the ending mark before the state goes idle", move(clear, idle)),
                 ("a patch that clears the ending mark before it retires the handle", move(clear, retire)),
                 ("a patch that writes a null handle after idle", lines[:idle + 1] + ["+" + " " * 24 + FINALIZE_DROP] + lines[idle + 1:]),
+                ("a patch that retires the handle before it flags the event", swap(flag, retire)),
+                ("a patch whose start stores its handle in the holder after it looks at the flag", move(stored_started, late + 1)),
+                ("a patch whose start stores its handle in the state flow after it looks at the flag", move(stored_handle, late + 1)),
+                ("a patch whose start retires the handle before it looks at the flag", swap(look, late)),
             ):
                 patch.write_text("\n".join(variant), encoding="utf-8")
                 expect_failure(lambda: check(copy), label)
