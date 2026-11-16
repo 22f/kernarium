@@ -1131,6 +1131,24 @@ struct TextMessageTests {
         #expect(drawn.labels.firstIndex(of: SmsMessages.close).map { $0 > title } == true)
     }
 
+    /// The line that says what is wrong has a symbol beside its words, as the good line has its check; VoiceOver
+    /// reads the words once, and the symbol is not an element.
+    @Test func aStatusLineIsReadOnceAndItsSymbolIsNotAnElement() async throws {
+        let rig = try rig()
+        defer { rig.cleanUp() }
+        rig.model.openTextMessage()
+        #expect(await send(rig, "one", .uncertain("unknown")))
+        let problem = try await draw(TextMessageBar().environment(rig.model))
+        #expect(problem.labels.filter { $0 == SmsMessages.uncertain }.count == 1, "\(problem.labels)")
+        #expect(!problem.labels.contains { $0.localizedCaseInsensitiveContains("warning") || $0.contains("exclamation") },
+                "the warning symbol is an element: \(problem.labels)")
+        rig.model.setTextMessageText("")
+        #expect(await send(rig, "two", .handedOver(1)))
+        let good = try await draw(TextMessageBar().environment(rig.model))
+        #expect(good.labels.filter { $0 == SmsMessages.sentToAndroid }.count == 1, "\(good.labels)")
+        #expect(!good.labels.contains { $0.localizedCaseInsensitiveContains("check") }, "the check is an element: \(good.labels)")
+    }
+
     /// Send is where it was while the message goes, disabled and labelled Sending: the
     /// element VoiceOver focus is on stays in the tree.
     @Test func sendStaysInPlaceDisabledAndSayingSendingWhileAMessageGoes() async throws {

@@ -28,6 +28,19 @@ private enum TextMessageField: Hashable {
     case sender, text
 }
 
+private extension Color {
+    /// The bar's second-rank text: a caption, a label, a count, a placeholder. The
+    /// system's secondary colour measures 2.9-3.5:1 on the bar's light backing;
+    /// this one is at least 4.5:1 on it and on the fields' fill, in both appearances.
+    static var barSecondary: Color { Color(.label).opacity(0.62) }
+
+    /// The check beside a good line: the system green in dark, which is 10:1 on the dark
+    /// backing, and a deeper green in light, where the system green is 2.2:1 on white.
+    static var barGood: Color {
+        Color(UIColor { $0.userInterfaceStyle == .dark ? .systemGreen : UIColor(red: 0, green: 0.5, blue: 0.2, alpha: 1) })
+    }
+}
+
 /// The bar's top edge: what the bar is (the Settings row's symbol, "Text
 /// message" and a line of who receives it) with Close beside it, and under
 /// that who the message is from. It is one view so that the edge can change
@@ -52,7 +65,7 @@ private struct TextMessageBarHeader: View {
                         .accessibilityFocused(titleFocused)
                     Text(SmsMessages.caption)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.barSecondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
                 }
@@ -63,16 +76,17 @@ private struct TextMessageBarHeader: View {
                     .font(.footnote.weight(.semibold))
                     .frame(width: 32, height: 32)
                     .background(Color(.tertiarySystemFill), in: Circle())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.barSecondary)
                     .accessibilityIdentifier("text-message-close")
             }
             HStack(spacing: 6) {
                 Text(SmsMessages.fromLabel)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.barSecondary)
                     .accessibilityHidden(true)
                 // No content type: iOS would offer the person's own number.
-                TextField(SmsMessages.senderPlaceholder, text: Binding(
-                    get: { state.shownSender }, set: { model.setTextMessageSender($0) }))
+                TextField("", text: Binding(
+                    get: { state.shownSender }, set: { model.setTextMessageSender($0) }),
+                    prompt: Text(SmsMessages.senderPlaceholder).foregroundStyle(Color.barSecondary))
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .submitLabel(.next)
@@ -113,8 +127,9 @@ struct TextMessageBar: View {
             HStack(alignment: .bottom, spacing: 8) {
                 // The one-time code type lets iOS offer a code that has just
                 // come to the person's phone.
-                TextField(SmsMessages.name, text: Binding(
+                TextField("", text: Binding(
                     get: { state.shownText }, set: { model.setTextMessageText($0) }),
+                    prompt: Text(SmsMessages.name).foregroundStyle(Color.barSecondary),
                     axis: .vertical)
                     .lineLimit(1...4)
                     .textContentType(.oneTimeCode)
@@ -150,6 +165,10 @@ struct TextMessageBar: View {
             }
         }
         .padding(12)
+        // Glass alone shows whatever Android draws behind it, and the words
+        // measured under 4.5:1 over some screens. The opaque backing the screen
+        // reader card has keeps every word readable over any screen.
+        .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 28))
         .glassEffect(.regular, in: .rect(cornerRadius: 28))
         .frame(maxWidth: 560)
         .padding(.horizontal, 10)
@@ -194,13 +213,23 @@ struct TextMessageBar: View {
 
     private func statusLine(_ status: TextMessageStatus) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            if status.tone == .good {
+            // What is wrong, and what went well, is a symbol beside the words:
+            // the words themselves stay in the primary colour and VoiceOver
+            // reads them once, not the symbol.
+            switch status.tone {
+            case .good:
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                    .foregroundStyle(Color.barGood)
                     .accessibilityHidden(true)
+            case .problem:
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .accessibilityHidden(true)
+            case .info:
+                EmptyView()
             }
             Text(status.words)
-                .foregroundStyle(status.tone == .problem ? Color.red : Color.secondary)
+                .foregroundStyle(status.tone == .info ? Color.barSecondary : Color.primary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .font(.footnote)

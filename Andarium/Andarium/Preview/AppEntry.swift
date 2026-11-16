@@ -399,6 +399,10 @@ struct AppEntry {
              "sms-bar-cut-off", "sms-bar-waiting", "sms-bar-bad-sender", "sms-bar-long-sender",
              "sms-bar-no-sender", "sms-bar-too-long", "sms-bar-unsendable", "sms-bar-paused":
             model.phase = .running(.normal)
+            // `-androidScreen light` puts the bar over a light Android screen (the launcher's search).
+            if UserDefaults.standard.string(forKey: "androidScreen") == "light" {
+                model.sessionPreset = SessionPreset(guestScreen: .search)
+            }
             model.previewTextMessage(screen)
         case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
              "settings-feedback", "settings-text-message", "settings-accessibility", "settings-accessibility-left", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
