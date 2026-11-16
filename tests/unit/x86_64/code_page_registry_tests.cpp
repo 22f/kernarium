@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <span>
 #include <thread>
@@ -575,7 +576,9 @@ public:
 	/* The writers double each time a hold finds the buffer too small. */
 	bool growing{};
 	std::vector<std::pair<std::size_t, bool>> asks;
-	unsigned cleared{};
+	std::atomic_uint cleared{};
+	/* Registrations of one frame may run on several threads. */
+	std::mutex mutex;
 
 	[[nodiscard]] bool read(std::uint64_t, std::span<std::byte>) override
 	{
@@ -589,6 +592,7 @@ public:
 	[[nodiscard]] FrameHold hold_code_frame(std::uint64_t, void *,
 		FrameDebt *debts, std::size_t capacity, bool global_ok) noexcept override
 	{
+		const std::lock_guard lock{mutex};
 		asks.emplace_back(capacity, global_ok);
 		FrameHold hold;
 		hold.record_identity = 7;
@@ -746,8 +750,52 @@ void test_the_fallback_names_a_participant_that_does_not_leave()
 		"the fallback did not settle once the participant left");
 }
 
+/* E3, for the frame's debt: a registration that repeats while another one
+ * of the same frame waits for a participant inside the engine waits for it
+ * as well, and neither returns settled before the writer's write translation
+ * is retired and the participant has left, so a store that was under way
+ * lands before the registration's caller reads the page. */
+void test_a_repeat_registration_waits_for_the_pending_one()
+{
+	using namespace std::chrono_literals;
+	ScriptedMemory memory;
+	Generation writer{9500, {.slice = 100ms, .slices = 40}};
+	memory.writers.push_back({9500, page_at(7)});
+	writer.translations[native_tlb_index(page_at(7))].write_page = page_at(7);
+	/* The writer is inside the engine, with a store that may still land. */
+	writer.participant.engine_epoch.store(1, std::memory_order_release);
+
+	std::atomic<unsigned> returned{0};
+	uml::cpu::x86_64::FrameRegistrationOutcome first;
+	uml::cpu::x86_64::FrameRegistrationOutcome second;
+	std::thread first_registration{[&] {
+		first = uml::cpu::x86_64::register_frame(
+			memory, nullptr, nullptr, page_at(50));
+		returned.fetch_add(1, std::memory_order_release);
+	}};
+	std::this_thread::sleep_for(60ms);
+	std::thread repeat{[&] {
+		second = uml::cpu::x86_64::register_frame(
+			memory, nullptr, nullptr, page_at(50));
+		returned.fetch_add(1, std::memory_order_release);
+	}};
+	std::this_thread::sleep_for(120ms);
+	require(returned.load(std::memory_order_acquire) == 0,
+		"a registration returned while the writer was inside the engine");
+	require(writer.translations[native_tlb_index(page_at(7))].write_page == 1,
+		"the writer's write translation was not retired before the wait");
+	writer.participant.engine_epoch.fetch_add(1, std::memory_order_release);
+	first_registration.join();
+	repeat.join();
+	require(first.status == uml::cpu::x86_64::FrameRegistration::settled &&
+			second.status == uml::cpu::x86_64::FrameRegistration::settled,
+		"a registration that waited the writer out did not settle");
+	require(memory.cleared == 2, "a settled registration did not clear its debt");
+}
+
 int main()
 {
+	test_a_repeat_registration_waits_for_the_pending_one();
 	test_membership_is_counted();
 	test_membership_is_exact_behind_a_shared_bit();
 	test_membership_retires_write_translations();
