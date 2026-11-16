@@ -769,6 +769,11 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
                 raise Failure(f"share row {problem}")
             if mode == "fork" and on.share_counts:
                 fork_shared = on.share_counts[mode].get("shared", 0)
+        if all(mode in on.share for mode in ("pressure", "evict")):
+            try:
+                print(share_rows.check_readbacks(on.share))
+            except share_rows.ShareFailure as problem:
+                raise Failure(f"share rows pressure and evict: {problem}")
     if not options.diagnostics:
         assert off.resident is not None and on.resident is not None
         if on.resident < MIN_RESIDENT_BYTES:

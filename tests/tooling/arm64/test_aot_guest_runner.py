@@ -502,17 +502,24 @@ class RunnerTest(unittest.TestCase):
                 runner.kernel_stack_bytes(config)
 
 
-def study_record(mode: str, before: int = 33, after: int = 8, faults: int = 3) -> list[str]:
+def study_record(mode: str, before: int = 33, after: int = 8, faults: int = 3,
+                 pressure: tuple[int, ...] = (1, 2, 0, 1), evicted: int = 1) -> list[str]:
     """What the share program prints for a mode, as a guest returned it."""
     count = share_rows.EXPECTED_CHILDREN[mode]
     lines = [f"sequential child {i} sum={0x1000 + i:#x}" for i in range(count)]
+    if mode == "pressure":
+        lines += [f"# round {n}: {faults} faults read libz.so's pages back; the pressure child exited 0"
+                  for n, faults in enumerate(pressure)]
+    if mode == "evict":
+        lines += ["# control: 256 of 256 pages cached before, 0 after",
+                  f"# libz.so: 0 faults read pages back before the eviction, {evicted} after"]
     if mode == "reclaim":
         lines += [f"# reclaim: libz.so {before} pages cached before the eviction, {after} after; "
                   f"{faults} faults read them back"] * share_rows.RECLAIM_ROUNDS
     return lines + [f"done mode={mode}"]
 
 
-def study_arm(label: str, **eviction) -> types.SimpleNamespace:
+def study_arm(label: str, **eviction) -> types.SimpleNamespace:  # noqa: C901
     return types.SimpleNamespace(
         label=label, workloads={}, probe=[], debug={}, report={}, resident=(1 << 20) if label == "on" else 0,
         share={mode: study_record(mode, **eviction) for mode in share_rows.modes(True)},
@@ -556,6 +563,17 @@ class StudyEvictionTest(unittest.TestCase):
 
     def test_a_guest_that_evicted_passes_the_records_without_counts(self):
         self.judged(study_arm("off"), study_arm("on"))
+
+    def test_the_stock_rows_must_have_seen_the_library_give_up_a_page(self):
+        """Across the pressure and evict rows at least one fault read a page of
+        libz.so back; otherwise neither row observed a frame given back."""
+        kept = dict(pressure=(0, 0, 0, 0), evicted=0)
+        with self.assertRaises(runner.Failure) as caught:
+            self.judged(study_arm("off"), study_arm("on", **kept))
+        self.assertIn("no fault", str(caught.exception))
+        # Either row is enough, and the arm without the component is not the one judged.
+        self.judged(study_arm("off", **kept), study_arm("on", pressure=(0, 0, 0, 0), evicted=1))
+        self.judged(study_arm("off", **kept), study_arm("on", pressure=(0, 1, 0, 0), evicted=0))
 
     def test_the_study_option_names_what_it_needs_before_a_guest_starts(self):
         parser = runner.build_parser()

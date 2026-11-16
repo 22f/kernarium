@@ -166,6 +166,40 @@ class EvictTest(unittest.TestCase):
             rows.check_counts("evict", {"shared": 30, "mutable": 1}, 176, EVICT)
 
 
+def pressure_round(number: int, faults: int) -> str:
+    return f"# round {number}: {faults} faults read libz.so's pages back; the pressure child exited 0"
+
+
+def stock_records(pressure: list[int], evicted: int) -> dict[str, list[str]]:
+    return {"pressure": [pressure_round(n, f) for n, f in enumerate(pressure)],
+            "evict": [EVICT[0], f"# libz.so: 0 faults read pages back before the eviction, {evicted} after"]}
+
+
+class StockReadbackTest(unittest.TestCase):
+    """The stock guest's rows count a read-only library's lost pages from the
+    faults that read them back (mincore cannot say): across the pressure and
+    evict rows at least one page of libz.so must have been given up, or the
+    two rows saw no frame go and no reuse of one."""
+
+    def test_a_fault_in_either_row_is_enough(self):
+        for pressure, evicted in (([0, 2, 0, 1], 0), ([0, 0, 0, 0], 1), ([1, 3, 2, 0], 2)):
+            text = rows.check_readbacks(stock_records(pressure, evicted))
+            self.assertIn(f"{sum(pressure) + evicted} faults", text)
+
+    def test_a_library_that_kept_every_page_in_both_rows_fails(self):
+        with self.assertRaises(rows.ShareFailure) as caught:
+            rows.check_readbacks(stock_records([0, 0, 0, 0], 0))
+        self.assertIn("no fault", str(caught.exception))
+
+    def test_a_row_without_its_counts_fails(self):
+        records = stock_records([1, 1, 1, 1], 1)
+        for broken in ({"pressure": [], "evict": records["evict"]},
+                       {"pressure": records["pressure"], "evict": []},
+                       {"evict": records["evict"]}, {"pressure": records["pressure"]}):
+            with self.assertRaises(rows.ShareFailure):
+                rows.check_readbacks(broken)
+
+
 def reclaim_round(before: int = 33, after: int = 8, faults: int = 3) -> str:
     return f"# reclaim: libz.so {before} pages cached before the eviction, {after} after; {faults} faults read them back"
 
