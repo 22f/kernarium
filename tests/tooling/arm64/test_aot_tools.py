@@ -9,6 +9,7 @@ checked against the engine by the arm64-aot-differential differential test.
 
 __import__("sys").dont_write_bytecode = True
 
+import hashlib
 import pathlib
 import struct
 import sys
@@ -564,11 +565,37 @@ class CensusTests(unittest.TestCase):
         second = unit_words(library)
         self.assertEqual(first, second)
 
-    def test_the_stored_source_is_counted_once(self) -> None:
+    def test_a_text_page_is_stored_as_its_sha256(self) -> None:
         library = library_of([self.ADD, RET], [(0, 8)])
-        digests = [1] * ((library.table_end - library.table_base) // 4096)
-        library.build(digests, bytes(4096))
-        self.assertEqual(library.stats.census["src"], 4096)
+        pages = (library.table_end - library.table_base) // 4096
+        self.assertEqual(pages, 1)
+        source = bytes(range(256)) * 16
+        unit = library.build([1] * pages, source)
+        self.assertEqual(library.stats.census["src"], 32)
+        stored = unit["unit"][unit["hashes_at"]:unit["hashes_at"] + 32]
+        self.assertEqual(stored, hashlib.sha256(source).digest())
+        self.assertEqual(len(unit["unit"]) - unit["hashes_at"], 32)
+
+    def test_every_page_has_its_own_hash_in_page_order(self) -> None:
+        source = b"".join(bytes([n]) * 4096 for n in range(5))
+        hashes = rewrite.page_hashes(source)
+        self.assertEqual(len(hashes), 5 * rewrite.PAGE_HASH_BYTES)
+        for n in range(5):
+            self.assertEqual(
+                hashes[32 * n:32 * n + 32],
+                hashlib.sha256(bytes([n]) * 4096).digest())
+
+    def test_one_bit_in_a_page_changes_its_hash(self) -> None:
+        page = bytearray(range(256)) * 16
+        before = rewrite.page_hashes(bytes(page))
+        for offset in (0, 1, 2047, 2048, 4094, 4095):
+            changed = bytearray(page)
+            changed[offset] ^= 0x10
+            self.assertNotEqual(rewrite.page_hashes(bytes(changed)), before)
+
+    def test_a_partial_page_of_source_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            rewrite.page_hashes(bytes(100))
 
 
 class WideningTests(unittest.TestCase):

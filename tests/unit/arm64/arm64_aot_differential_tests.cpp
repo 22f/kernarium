@@ -2517,35 +2517,20 @@ void a_shootdown_reaches_a_native_loop(const LibraryImage &image)
 	return crc;
 }
 
-/* `image` with the first word of the code at `start` changed (to
- * `mov x0, #120`) and the last word of its page chosen so that the page's
- * digest is the one the framework was built from: a page that is not the
- * stored one and that no digest tells from it. */
-[[nodiscard]] LibraryImage with_equal_digest(const LibraryImage &image,
-	std::uint64_t start)
+/* Set the word at `fixup` of `work` (one page) so that the page's CRC, which
+ * is linear in the page, is `wanted`: the word's effect on the CRC is a
+ * bijection of 32-bit values. */
+void cancel_crc_with_word(std::array<std::byte, page_bytes> &work,
+	std::uint32_t wanted, std::size_t fixup)
 {
-	LibraryImage other = image;
-	const auto page = start / page_bytes * page_bytes;
-	const auto fixup = page + page_bytes - 4;
-	require(start + 4 < fixup);
-	std::array<std::byte, page_bytes> original;
-	std::memcpy(original.data(), &image.bytes[page], page_bytes);
-	/* mov x0, #120 in place of the function's first word. */
-	const std::uint32_t mov = 0xd2800f00U;
-	std::memcpy(&other.bytes[start], &mov, 4);
-	/* The CRC is linear: find the word at the end of the page that cancels
-	 * the change (its effect is a bijection of 32-bit values). */
-	std::array<std::byte, page_bytes> work;
-	std::memcpy(work.data(), &other.bytes[page], page_bytes);
-	const auto wanted = crc_of(original.data());
 	std::array<std::uint32_t, 32> image_of_bit{};
 	const auto base_crc = crc_of(work.data());
 	for (unsigned bit = 0; bit < 32; ++bit) {
 		std::array<std::byte, page_bytes> flipped = work;
 		std::uint32_t value;
-		std::memcpy(&value, &flipped[page_bytes - 4], 4);
+		std::memcpy(&value, &flipped[fixup], 4);
 		value ^= 1U << bit;
-		std::memcpy(&flipped[page_bytes - 4], &value, 4);
+		std::memcpy(&flipped[fixup], &value, 4);
 		image_of_bit[bit] = crc_of(flipped.data()) ^ base_crc;
 	}
 	/* Solve: choose bits so that the xor of their images is base ^ wanted. */
@@ -2575,13 +2560,60 @@ void a_shootdown_reaches_a_native_loop(const LibraryImage &image)
 			chosen ^= combo[bit];
 		}
 	std::uint32_t value;
-	std::memcpy(&value, &work[page_bytes - 4], 4);
+	std::memcpy(&value, &work[fixup], 4);
 	value ^= chosen;
-	std::memcpy(&work[page_bytes - 4], &value, 4);
-	std::memcpy(&other.bytes[fixup], &value, 4);
+	std::memcpy(&work[fixup], &value, 4);
+}
+
+/* `image` with the first word of the code at `start` changed (to
+ * `mov x0, #120`) and the last word of its page chosen so that the page's
+ * digest is the one the framework was built from: a page that is not the
+ * stored one and that no digest tells from it. */
+[[nodiscard]] LibraryImage with_equal_digest(const LibraryImage &image,
+	std::uint64_t start)
+{
+	LibraryImage other = image;
+	const auto page = start / page_bytes * page_bytes;
+	const auto fixup = page + page_bytes - 4;
+	require(start + 4 < fixup);
+	std::array<std::byte, page_bytes> original;
+	std::memcpy(original.data(), &image.bytes[page], page_bytes);
+	/* mov x0, #120 in place of the function's first word. */
+	const std::uint32_t mov = 0xd2800f00U;
+	std::memcpy(&other.bytes[start], &mov, 4);
+	std::array<std::byte, page_bytes> work;
+	std::memcpy(work.data(), &other.bytes[page], page_bytes);
+	cancel_crc_with_word(work, crc_of(original.data()), page_bytes - 4);
+	std::memcpy(&other.bytes[fixup], &work[page_bytes - 4], 4);
 	require(digest_of(work.data()) == digest_of(original.data()));
 	require(std::memcmp(work.data(), original.data(), page_bytes) != 0);
 
+	return other;
+}
+
+/* `image` with bit `bit` of the byte at `byte` of the page at `page` flipped
+ * and a second word of the page, 32 bytes from the first within its 64,
+ * chosen so that the page's digest is the one the framework was built from:
+ * a page that differs from the stored one by that bit and the few of the
+ * word that cancels it, which no digest tells from it. Where the bit is
+ * neither in the first nor in the last 48 bytes, the page keeps its first and
+ * last 16 bytes. */
+[[nodiscard]] LibraryImage with_a_bit_changed_and_equal_digest(
+	const LibraryImage &image, std::uint64_t page, std::uint64_t byte,
+	unsigned bit)
+{
+	LibraryImage other = image;
+	std::array<std::byte, page_bytes> original;
+	std::memcpy(original.data(), &image.bytes[page], page_bytes);
+	std::array<std::byte, page_bytes> work = original;
+	work[byte] = static_cast<std::byte>(
+		std::to_integer<unsigned>(work[byte]) ^ (1U << bit));
+	const std::size_t fixup = (byte & ~std::uint64_t{3}) ^ 0x20U;
+	require(fixup + 4 <= page_bytes);
+	cancel_crc_with_word(work, crc_of(original.data()), fixup);
+	require(digest_of(work.data()) == digest_of(original.data()));
+	require(std::memcmp(work.data(), original.data(), page_bytes) != 0);
+	std::memcpy(&other.bytes[page], work.data(), page_bytes);
 	return other;
 }
 
@@ -2609,6 +2641,89 @@ void equal_digest_is_not_equal_code(const LibraryImage &image,
 		static_cast<unsigned long long>(st.poisoned));
 	require(st.poisoned == 1);
 	require(st.enters == 0);
+}
+
+/* One changed bit anywhere in a compared page, however far from its first
+ * and last bytes, is found by the hash of the page. The page's 64-bit digest
+ * is made to come out the one the framework was built from (a word 32 bytes
+ * from the bit cancels the bit's effect on it), so the digest finds the
+ * library and only the stored hash can tell the page from the stored one; the
+ * change is published and the history then drops what it held, so the binder
+ * hashes the page again. The instance is the engine's from then on and the
+ * guest's result is the engine's.
+ *
+ * The positions: the first and last byte, the byte before the middle, the
+ * middle, the bytes either side of every 512-byte boundary, both bits at the
+ * ends of a byte, and a seeded spread. */
+void a_changed_bit_anywhere_in_a_page_is_refused(const LibraryImage &image,
+	const std::vector<Function> &functions)
+{
+	const auto fn = functions[5];
+	const auto page = fn.start / page_bytes * page_bytes;
+	require(page + page_bytes <= image.bytes.size());
+	std::vector<std::pair<std::uint64_t, unsigned>> positions{
+		{0, 0}, {0, 7}, {page_bytes - 1, 0}, {page_bytes - 1, 7},
+		{page_bytes / 2 - 1, 3}, {page_bytes / 2, 3}, {page_bytes / 2, 0}};
+	for (std::uint64_t edge = 512; edge < page_bytes; edge += 512) {
+		positions.emplace_back(edge - 1, 7);
+		positions.emplace_back(edge, 0);
+	}
+	SplitMix pick{73};
+	for (int i = 0; i < 24; ++i)
+		positions.emplace_back(pick.below(page_bytes),
+			static_cast<unsigned>(pick.below(8)));
+	const auto bias = Fixture::bias;
+	SplitMix rng{31};
+	const auto c = make_case(rng, bias, fn.start, false, true,
+		arena_base(bias));
+	std::size_t refused = 0;
+	for (const auto &[byte, bit] : positions) {
+		const auto changed =
+			with_a_bit_changed_and_equal_digest(image, page, byte, bit);
+		/* Where the bit is in the middle, the first and the last 16 bytes
+		 * of the page are the stored ones. */
+		if (byte >= 48 && byte < page_bytes - 48) {
+			require(std::memcmp(&image.bytes[page], &changed.bytes[page],
+				16) == 0);
+			require(std::memcmp(&image.bytes[page + page_bytes - 16],
+				&changed.bytes[page + page_bytes - 16], 16) == 0);
+		}
+		Fixture ref{4601, changed}, got{4602, image};
+		aot::set_enabled(false);
+		const auto want = drive(ref.env, ref.arena, c, max_blocks);
+		aot::reset_stats();
+		aot::set_enabled(true);
+		const auto first = drive(got.env, got.arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		require(first.done());
+		const auto entered = aot::stats().enters;
+		require(entered > 0);
+		require(aot::stats().poisoned == 0);
+		/* The page becomes the other one, and its publication is
+		 * followed by more than the history holds. */
+		for (std::uint64_t word = page; word < page + page_bytes; word += 4) {
+			std::uint32_t was, now;
+			std::memcpy(&was, &image.bytes[word], 4);
+			std::memcpy(&now, &changed.bytes[word], 4);
+			if (was != now)
+				got.env.backing.put32(word, now);
+		}
+		got.env.memory.invalidate_code(got.env.bias + page);
+		for (std::size_t i = 0; i < 40; ++i)
+			got.env.memory.invalidate_code(
+				bias + 0x2000'0000ULL + (400 + i) * 0x10000);
+		aot::set_enabled(true);
+		const auto have = drive(got.env, got.arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		if (want.done())
+			require(same(want, have, c));
+		const auto st = aot::stats();
+		require(st.poisoned == 1);
+		require(st.enters == entered);
+		++refused;
+	}
+	std::fprintf(stderr, "changed bit refused: %zu positions\n", refused);
+	require(refused == positions.size());
 }
 
 /* A text page changes after it was compared, and more code changes are
@@ -3462,6 +3577,7 @@ int main(int argc, char **argv)
 			misaligned_cas_follows_the_profile(image);
 			more_instances_than_the_binder_holds(image);
 			code_change_history_overflows(image, functions);
+			a_changed_bit_anywhere_in_a_page_is_refused(image, functions);
 			a_shootdown_reaches_a_native_loop(image);
 			memory_copy_and_set_match_the_engine(image);
 			memory_copy_and_set_started_at_the_epilogue(image);

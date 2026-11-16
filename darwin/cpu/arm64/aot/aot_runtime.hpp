@@ -60,7 +60,7 @@ struct EnterResult final {
 
 /* One guest instruction the rewritten code can be entered at. `pages` is
  * the state of the text pages of the instance it is in: byte p is 1 once
- * text page p was compared with the stored source (rewritten code reads it
+ * text page p matched its stored hash (rewritten code reads it
  * where it leaves a page; the binder alone writes it, between entries). */
 struct Hit final {
 	const void *native{};
@@ -120,14 +120,14 @@ struct CrossTable final {
 };
 
 /* The libraries an address space has mapped, identified by the digest of
- * their code pages. Each text page is compared, byte for byte, with the page
- * of the stored source before any rewritten instruction of it runs (when
- * find() is asked for an entry in it, and when rewritten code leaves another
- * page for it: it tests the page's state byte), and again after the address
- * space's code-change history names it. An instance with a page whose bytes
- * differ is never entered again in that address space generation; a page
- * that cannot be read yet is tried again later. One binder belongs to one
- * executor thread. */
+ * their code pages. Each text page is hashed (SHA-256) and the hash compared
+ * with the one stored for the page before any rewritten instruction of it
+ * runs (when find() is asked for an entry in it, and when rewritten code
+ * leaves another page for it: it tests the page's state byte), and again
+ * after the address space's code-change history names it. An instance with a
+ * page whose hash differs is never entered again in that address space
+ * generation; a page that cannot be read yet is tried again later. One
+ * binder belongs to one executor thread. */
 class Binder final {
 public:
 	Binder() noexcept;
@@ -157,7 +157,7 @@ private:
 		std::uint64_t bias{};
 		bool poisoned{};
 		bool used{};
-		/* One byte per text page: 1 = compared with the stored source and
+		/* One byte per text page: 1 = matched its stored hash and
 		 * not named by a code change since; as of `state_changes`. */
 		std::vector<std::uint8_t> pages{};
 		std::uint64_t state_changes{};
@@ -186,7 +186,8 @@ private:
 	 * instance's last sequence are cleared. */
 	void sync(void *context, unsigned long generation,
 		std::uint64_t code_changes) noexcept;
-	/* Compare text page `index` of the instance with the stored source. */
+	/* Hash text page `index` of the instance and compare it with the stored
+	 * hash. */
 	[[nodiscard]] Verdict verify_page(
 		::uml::memory::StaticGuestMemory &memory, Instance &instance,
 		std::uint64_t index) noexcept;

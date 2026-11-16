@@ -3,6 +3,7 @@
 
 #include "cpu/arm64/detail/memory_copy_set.hpp"
 
+#include <CommonCrypto/CommonDigest.h>
 #include <arm_acle.h>
 
 #include "uml_darwin_static_mmu.h"
@@ -27,7 +28,10 @@ namespace uml::cpu::arm64::aot {
 namespace {
 
 constexpr std::uint64_t page_size = 4096;
-constexpr char blob_magic[8] = {'U', 'M', 'L', 'A', 'O', 'T', 'B', '1'};
+constexpr char blob_magic[8] = {'U', 'M', 'L', 'A', 'O', 'T', 'B', '2'};
+/* The stored hash of a text page: SHA-256 (tools/aot/rewrite.py:
+ * page_hashes). */
+constexpr std::size_t page_hash_size = CC_SHA256_DIGEST_LENGTH;
 
 /* The generator's layout (tools/aot/rewrite.py: build_blob). */
 constexpr std::size_t header_library_count = 16;
@@ -42,7 +46,7 @@ constexpr std::size_t record_table_offset = 168;
 constexpr std::size_t record_table_words = 172;
 constexpr std::size_t record_pages = 180;
 constexpr std::size_t record_unit_offset = 200;
-constexpr std::size_t record_source = 204;
+constexpr std::size_t record_page_hashes = 204;
 
 template<typename T>
 [[nodiscard]] T read(std::size_t offset) noexcept
@@ -59,8 +63,8 @@ struct Library final {
 	std::size_t table_words;
 	std::size_t pages;
 	std::size_t unit_offset;
-	/* The text pages the library was built from, to compare with. */
-	std::size_t source;
+	/* The SHA-256 of each text page the library was built from. */
+	std::size_t page_hashes;
 };
 
 struct Directory final {
@@ -80,7 +84,7 @@ struct Directory final {
 			read<std::uint32_t>(base + record_table_words),
 			read<std::uint32_t>(base + record_pages),
 			read<std::uint32_t>(base + record_unit_offset),
-			read<std::uint32_t>(base + record_source)};
+			read<std::uint32_t>(base + record_page_hashes)};
 	}
 };
 
@@ -454,9 +458,9 @@ Target lookup(const CrossTable *table, std::uint64_t address) noexcept
 		const std::uint64_t offset = address - entry.bias;
 		if ((offset & 3U) != 0)
 			break;
-		/* The target's text page must have been compared with the
-		 * stored source; a page not yet compared ends the entry at the
-		 * branch, and the host compares it before the next one. */
+		/* The target's text page must have matched its stored hash; a
+		 * page not yet verified ends the entry at the branch, and the
+		 * host verifies it before the next one. */
 		if (entry.pages[(offset - library.table_base) / page_size] == 0)
 			break;
 		const auto native = read<std::uint32_t>(library.table_offset +
@@ -655,8 +659,15 @@ Binder::Verdict Binder::verify_page(
 	if (!memory.fetch(address, page))
 		return Verdict::unreadable;
 	UML_AOT_COUNT(verifications, 1);
-	if (std::memcmp(page.data(), uml_aot_blob + library.source +
-	    index * page_size, page_size) != 0)
+	/* The stored page is a SHA-256 of the bytes the code was built from:
+	 * rewritten code runs for other bytes only on a collision of the hash.
+	 * CC_SHA256 is CommonCrypto's one-shot digest, part of libSystem on
+	 * macOS, iOS and the iOS Simulator, and runs on the SHA-2 instructions
+	 * of the host. */
+	std::array<std::uint8_t, page_hash_size> hash;
+	CC_SHA256(page.data(), static_cast<CC_LONG>(page_size), hash.data());
+	if (std::memcmp(hash.data(), uml_aot_blob + library.page_hashes +
+	    index * page_hash_size, page_hash_size) != 0)
 		return Verdict::mismatch;
 	instance.pages[index] = 1;
 	return Verdict::match;
@@ -826,7 +837,7 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 		slot = PageSlot{};
 		return {};
 	}
-	/* The page of `pc` must have been compared with the stored source. */
+	/* The page of `pc` must have matched its stored hash. */
 	const auto record = directory().library(instance.library);
 	const std::uint64_t page_index =
 		(pc - instance.bias - record.table_base) / page_size;

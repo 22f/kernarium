@@ -743,8 +743,10 @@ blocker in every one of them.
   without ahead-of-time code and requires the same guest state, memory,
   ending event and exception syndrome, and the same registers, flags, vector
   registers and memory at every fault. The unhappy paths are part of it:
-  single step, the preemption bound, two load biases, other or changed bytes,
-  pages that appear or change after their neighbours were compared, edges
+  single step, the preemption bound, two load biases, other or changed bytes
+  (including one changed bit anywhere in a page whose 64-bit digest is made
+  to match), pages that appear or change after their neighbours were
+  verified, edges
   into such pages, more code changes than the history keeps, more libraries
   than the binder holds, tagged pointers, page crossings, forced refills and
   a shootdown by another thread while rewritten code loops. The runs use the

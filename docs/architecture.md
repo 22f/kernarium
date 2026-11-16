@@ -521,15 +521,20 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   without the component.
 - Units: each library is a self-contained unit of the framework. Branches
   between libraries mapped in one address space stay in rewritten code when
-  the target page is compared (below); any other target leaves to the engine.
-- Binding: the framework stores the exact guest bytes it stands for. A mapped
-  text page authorizes native execution only after an exact comparison with
-  the stored page, made at the first entry into that page and again after the
-  address space's code-change history names it or no longer reaches back; a
-  digest of a page only finds which library it belongs to. Every edge that
-  leaves a compared page (a branch, a fall-through, an indirect branch, a
-  call between libraries) tests the state of the page it reaches, so
-  rewritten code never runs from a page that was not compared. A page the
+  the target page is verified (below); any other target leaves to the engine.
+- Binding: the framework stores the SHA-256 of every guest page it stands
+  for, whole and untruncated. A mapped text page authorizes native execution
+  only after its own SHA-256 equals the stored one, made at the first entry
+  into that page and again after the address space's code-change history
+  names it or no longer reaches back; a 64-bit digest of a page only finds
+  which library it belongs to. Rewritten code therefore runs for bytes other
+  than the ones it was built from only on a collision of SHA-256, and no
+  weaker digest, truncation or checksum takes its place. The hash is
+  CommonCrypto's `CC_SHA256`, part of libSystem on macOS, iOS and the iOS
+  Simulator, on the host's SHA-2 instructions. Every edge that leaves a
+  verified page (a branch, a fall-through, an indirect branch, a call between
+  libraries) tests the state of the page it reaches, so rewritten code never
+  runs from a page that was not verified. A page the
   guest has not mapped yet is not entered and is tried again later; a page
   that differs retires the library's instance for that address space, and the
   engine runs the code. Covered text must not be writable through another

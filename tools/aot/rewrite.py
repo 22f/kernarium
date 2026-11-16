@@ -4,8 +4,8 @@
 
 The blob is the whole content of the AOT framework's __TEXT,__text: the
 entry/exit routines, the rewritten code, the per-instruction ENTRY tables and
-the source pages and page digests that bind the code to the guest bytes it
-stands for. See
+the per-page SHA-256 hashes and page digests that bind the code to the guest
+bytes it stands for. See
 docs/architecture.md (ahead-of-time code) for the contract this implements.
 
 Every guest instruction is either inlined or becomes a STEP: AOT code leaves
@@ -20,6 +20,7 @@ __import__("sys").dont_write_bytecode = True
 import argparse
 import collections
 import dataclasses
+import hashlib
 import json
 import multiprocessing
 import os
@@ -46,8 +47,8 @@ SLOT_XTAB = 0xF0
 # Instructions started in this entry (a diagnostics build counts them).
 SLOT_COUNT = 0xF8
 # The state bytes of the library instance the code is running in: byte p is
-# 1 once text page p was compared with the stored source (the binder writes
-# them between entries; the code only reads them).
+# 1 once text page p matched its stored hash (the binder writes them
+# between entries; the code only reads them).
 SLOT_PSTATE = 0x100
 # CrossTable::Entry (aot_runtime.hpp): the offsets the cross-library thunk
 # reads from the entry the host answers with.
@@ -72,7 +73,7 @@ EXIT_BUDGET, EXIT_BRANCH, EXIT_STEP = 0, 1, 2
 ABSOLUTE = 0x100
 
 PAGE = 4096
-ENTRY_MAGIC = b"UMLAOTB1"
+ENTRY_MAGIC = b"UMLAOTB2"
 HEADER_SIZE = 256
 LIB_RECORD_SIZE = 256
 
@@ -134,6 +135,18 @@ def page_digest(page: bytes) -> int:
     high = crc32c_raw(page, 0x9e3779b9)
     digest = (high << 32) | low
     return digest or 1
+
+
+PAGE_HASH_BYTES = 32
+
+
+def page_hashes(source: bytes) -> bytes:
+    """The SHA-256 of each 4 KiB page of `source`, in page order (see
+    Binder::verify_page)."""
+    if len(source) % PAGE:
+        raise ValueError("the source is not a whole number of pages")
+    return b"".join(hashlib.sha256(source[offset:offset + PAGE]).digest()
+                    for offset in range(0, len(source), PAGE))
 
 
 # ---- classification policy ----------------------------------------------
@@ -385,7 +398,7 @@ class Library:
     def goto_label(self, target: int) -> str:
         if target in self.covered:
             # A target on another text page goes through that page's gate:
-            # the page must have been compared with the stored source.
+            # the page must have matched its stored hash.
             if target // PAGE != self.cur // PAGE:
                 self.fn_pg.add(target)
                 return self.pg_label(target)
@@ -401,7 +414,7 @@ class Library:
 
     def page_test(self, target: int) -> None:
         """Leave by the branch exit of `target` unless its text page is
-        known to equal the stored source: T0 is clobbered, flags are not."""
+        known to match its stored hash: T0 is clobbered, flags are not."""
         page = (target - self.table_base) // PAGE
         if page >= 1 << 24:
             raise A.AsmError("a library's text must be below 64 GiB")
@@ -437,10 +450,12 @@ class Library:
     def build(self, digests: list[int], source: bytes = b"") -> dict:
         """Emit the whole library as one self-contained unit.
 
-        `source` is the library's text pages as the guest must map them: the
-        binder compares each mapped page with it, byte for byte, before any
-        rewritten code of the page runs. `digests` (one per page) only find
-        the library in the blob's hash.
+        `source` is the library's text pages as the guest must map them. The
+        unit stores the SHA-256 of each page, not the page: the binder hashes
+        each mapped page and compares the hash with the stored one before any
+        rewritten code of the page runs, so the code runs for bytes other
+        than `source` only on a collision of SHA-256. `digests` (one per
+        page) only find the library in the blob's hash.
         """
         asm = self.asm = A.Assembler()
         self.xb_emitted = {}
@@ -464,7 +479,7 @@ class Library:
         self.tag("table", before)
         asm.label("SRC")
         before = len(asm._w)
-        asm.data(source)
+        asm.data(page_hashes(source))
         self.tag("src", before)
         unit = bytearray(asm.resolve())
         self.stats.census = {
@@ -480,7 +495,7 @@ class Library:
                 self.lab("G" if offset in self.charge else "E", offset))
         view.release()
         return {"unit": bytes(unit), "table_at": table_at,
-                "source_at": asm.label_address("SRC")}
+                "hashes_at": asm.label_address("SRC")}
 
     def _emit_function(self, function: elf64.Function) -> None:
         asm = self.asm
@@ -1637,7 +1652,7 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
         asm.word(A.movk(T2, (span >> 16) & 0xffff, 1))
         asm.word(A.add_reg(T2, T1, T2, sub=True))
     asm.tbz(T2, 63, "XLIB", nz=False)
-    # The target's text page must have been compared with the stored source.
+    # The target's text page must have matched its stored hash.
     asm.word(A.ldr_x(T2, 31, SLOT_PSTATE))
     asm.word(A.add_reg(T2, T2, T1, shift=1, amount=12))
     asm.word(A.ldrb_w(T2, T2, 0))
@@ -2010,7 +2025,7 @@ def build_blob(units: list[dict], layout: dict[str, int],
             unit["table_end"], base + unit["table_at"], unit["table_words"],
             0, len(unit["digests"]), unit["text_end"],
             unit["stats"]["instructions"], unit["stats"]["steps"], base,
-            base + unit["source_at"])
+            base + unit["hashes_at"])
     manifest = {
         "release_id": release_id,
         "blob_bytes": len(blob),

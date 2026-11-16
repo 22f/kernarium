@@ -14,7 +14,8 @@ framework is generated and never committed.
   `tests/unit/arm64/a64_instruction_decode_partitions.tsv`.
 - `asm.py` encodes the words the rewriter emits and resolves labels.
 - `rewrite.py` classifies each word of each function (inline or step), emits
-  the code, the per-instruction entry table, the page digests and the digest
+  the code, the per-instruction entry table, the SHA-256 of each text page
+  (what binds the code to the guest bytes), the page digests and the digest
   hash. Every instruction it does not inline is left to the engine, so it
   never refuses for correctness.
 
