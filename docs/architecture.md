@@ -238,6 +238,19 @@ one operation's temporaries. The GPU stack, Metal, system frameworks, devices an
 the process's own objects stay in the default zone, whose residue is what
 remains.
 
+The x86-64 guest's frame accounting (`memory/mmu/frame_accounting.hpp`) keeps,
+for each 4 KiB frame of a backing, the exact set of {generation, page}
+locations whose mapping is writable. A location exists for as long as its
+writable mapping: the four mapping primitives add it before the mapping is
+installed and take it back after the mapping is gone, and a change that fails or
+is abandoned takes back only what it added. Every change of a frame's locations
+happens under that frame's stripe lock, and nothing under it allocates, makes a
+record or takes another lock: the index leaf, the frame's record and the room a
+list needs are made before the lock, and a lookup under it only finds. The
+accounting's whole metadata (the writer index, the records and their lists, and
+the plan's entries in thread scratch) comes from the domain heap, so a
+guest's frames never grow the default zone. The x86-64 guest alone compiles it.
+
 ### Executable code
 
 Gadget streams, MMU backing, and shadow mappings are data. Only

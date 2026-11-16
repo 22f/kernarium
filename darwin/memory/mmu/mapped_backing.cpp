@@ -23,25 +23,44 @@ std::atomic_uint64_t next_code_page_identity{1};
 
 } // namespace
 
-struct MappedBacking::CodePage final {
+struct MappedBacking::CodePage final
+#if DARWIN_UML_X86_64_GUEST
+	/* The frame accounting's fields (frame_accounting.hpp). */
+	: MappedBacking::FrameRecord
+#endif
+{
+#if DARWIN_UML_X86_64_GUEST
+	explicit CodePage(DomainHeap *heap) noexcept
+		: MappedBacking::FrameRecord{heap},
+		  identity{next_code_page_identity.fetch_add(
+			1, std::memory_order_relaxed)}
+	{
+	}
+#else
 	CodePage() noexcept
 		: identity{next_code_page_identity.fetch_add(
 			1, std::memory_order_relaxed)}
 	{
 	}
+#endif
 
 	const std::uint64_t identity;
 	std::atomic_uint64_t version{1};
-#if DARWIN_UML_X86_64_GUEST
-	/* The writer locations of a frame with several (frame_accounting.hpp),
-	 * guarded by the frame's stripe lock. */
-	std::vector<WriterLocation> writers;
-#endif
 };
 
 std::shared_ptr<MappedBacking> MappedBacking::create(
 	int fd, const struct stat &status)
 {
+#if DARWIN_UML_X86_64_GUEST
+	/* A backing made outside an address space keeps its metadata in a heap
+	 * of its own. */
+	return create(fd, status, std::make_shared<DomainHeap>());
+}
+
+std::shared_ptr<MappedBacking> MappedBacking::create(
+	int fd, const struct stat &status, std::shared_ptr<DomainHeap> heap)
+{
+#endif
 	if (status.st_size <= 0 ||
 	    static_cast<std::uintmax_t>(status.st_size) > SIZE_MAX)
 		return {};
@@ -61,22 +80,47 @@ std::shared_ptr<MappedBacking> MappedBacking::create(
 	} guard;
 	UML_MEMORY_ALLOCATION_CHECKPOINT(
 		testing::AllocationSite::backing);
+#if DARWIN_UML_X86_64_GUEST
+	auto *backing = new MappedBacking{std::move(mapping), size, std::move(heap)};
+#else
 	auto *backing = new MappedBacking{std::move(mapping), size};
+#endif
 	guard.owned = false;
 	return std::shared_ptr<MappedBacking>{backing};
 }
 
+#if DARWIN_UML_X86_64_GUEST
+MappedBacking::MappedBacking(SharedBackingView mapping, std::size_t size,
+	std::shared_ptr<DomainHeap> heap) noexcept
+	: heap_(std::move(heap)), mapping_(std::move(mapping)), size_(size),
+	  code_pages_(0, std::hash<std::uint64_t>{}, std::equal_to<std::uint64_t>{},
+		Allocator<std::pair<const std::uint64_t, RecordOwner>>{heap_.get()}),
+	  code_index_leaves_(Allocator<LeafOwner>{heap_.get()}),
+	  writer_leaves_(FrameAllocator<HeapOwned<WriterLeaf>>{heap_.get()})
+#else
 MappedBacking::MappedBacking(
 	SharedBackingView mapping, std::size_t size) noexcept
 	: mapping_(std::move(mapping)), size_(size)
+#endif
 {
 	const auto pages = size_ / page_size + 1U;
 	const auto roots = (pages + code_index_leaf_pages - 1U) /
 		code_index_leaf_pages;
 	/* One pointer per leaf, eight kilobytes for a gibibyte of backing. A
 	 * backing that cannot afford it keeps the locked lookup. */
+#if DARWIN_UML_X86_64_GUEST
+	/* The frame accounting needs the index: it refuses (prepare_writers) a
+	 * backing without one, so that no lookup under a stripe lock takes the
+	 * records' mutex. */
+	try {
+		code_index_ = make_array_in_heap<std::atomic<CodeIndexLeaf *>>(
+			heap_.get(), roots);
+	} catch (...) {
+	}
+#else
 	code_index_.reset(new (std::nothrow)
 		std::atomic<CodeIndexLeaf *>[roots]{});
+#endif
 	if (code_index_)
 		code_index_pages_ = roots * code_index_leaf_pages;
 }
@@ -117,17 +161,26 @@ void *MappedBacking::code_page_handle(std::uint64_t offset) noexcept
 void *MappedBacking::install_code_page(std::uint64_t page) noexcept
 {
 	try {
+		UML_MEMORY_ALLOCATION_CHECKPOINT(testing::AllocationSite::records);
 		const std::lock_guard lock{code_pages_mutex_};
 		auto &slot = code_pages_[page];
 		if (!slot)
+#if DARWIN_UML_X86_64_GUEST
+			slot = make_in_heap<CodePage>(heap_.get(), heap_.get());
+#else
 			slot = std::make_unique<CodePage>();
+#endif
 		auto *handle = slot.get();
 		if (!code_index_ || page >= code_index_pages_)
 			return handle;
 		auto &root = code_index_[page / code_index_leaf_pages];
 		auto *leaf = root.load(std::memory_order_relaxed);
 		if (leaf == nullptr) {
+#if DARWIN_UML_X86_64_GUEST
+			auto owned = make_in_heap<CodeIndexLeaf>(heap_.get());
+#else
 			auto owned = std::make_unique<CodeIndexLeaf>();
+#endif
 			leaf = owned.get();
 			code_index_leaves_.push_back(std::move(owned));
 			root.store(leaf, std::memory_order_release);
@@ -192,6 +245,10 @@ bool MappedBacking::prepare_writers(
 {
 	const auto frame = offset / frame_bytes;
 	const auto leaf = frame / writer_leaf_frames;
+	/* A frame without a slot in the record index would be looked up under
+	 * the records' mutex, which a stripe lock must never wait for. */
+	if (!code_index_ || offset / page_size >= code_index_pages_)
+		return false;
 	try {
 		if (record && code_page_handle(offset) == nullptr)
 			return false;
@@ -201,10 +258,8 @@ bool MappedBacking::prepare_writers(
 			const auto leaves =
 				(size_ / frame_bytes + 1U + writer_leaf_frames - 1U) /
 				writer_leaf_frames;
-			auto storage = std::unique_ptr<std::atomic<WriterLeaf *>[]>{
-				new (std::nothrow) std::atomic<WriterLeaf *>[leaves]{}};
-			if (!storage)
-				return false;
+			auto storage = make_array_in_heap<std::atomic<WriterLeaf *>>(
+				heap_.get(), leaves);
 			writer_index_leaves_ = leaves;
 			index = storage.get();
 			writer_index_storage_ = std::move(storage);
@@ -213,7 +268,7 @@ bool MappedBacking::prepare_writers(
 		if (leaf >= writer_index_leaves_)
 			return false;
 		if (index[leaf].load(std::memory_order_relaxed) == nullptr) {
-			auto owned = std::make_unique<WriterLeaf>();
+			auto owned = make_in_heap<WriterLeaf>(heap_.get());
 			owned->fill(0);
 			auto *words = owned.get();
 			writer_leaves_.push_back(std::move(owned));
@@ -237,11 +292,25 @@ std::uint64_t *MappedBacking::writer_word(std::uint64_t offset) noexcept
 	return words == nullptr ? nullptr : &(*words)[frame % writer_leaf_frames];
 }
 
-std::vector<WriterLocation> *MappedBacking::writer_list(
+MappedBacking::FrameRecord *MappedBacking::frame_record(
 	std::uint64_t offset) noexcept
 {
-	auto *record = static_cast<CodePage *>(code_page_handle(offset));
-	return record == nullptr ? nullptr : &record->writers;
+	return static_cast<CodePage *>(code_page_handle(offset));
+}
+
+MappedBacking::FrameRecord *MappedBacking::find_frame_record(
+	std::uint64_t offset) noexcept
+{
+	const auto page = offset / page_size;
+	if (!code_index_ || page >= code_index_pages_)
+		return nullptr;
+	/* Every record of an indexed page is in the index. */
+	const auto *leaf = code_index_[page / code_index_leaf_pages].load(
+		std::memory_order_acquire);
+	if (leaf == nullptr)
+		return nullptr;
+	return (*leaf)[page % code_index_leaf_pages].load(
+		std::memory_order_acquire);
 }
 
 } // namespace uml::memory

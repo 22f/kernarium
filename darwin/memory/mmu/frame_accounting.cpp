@@ -5,6 +5,7 @@
 
 #include "address_space_types.hpp"
 #include "allocation_fault.hpp"
+#include "frame_heap.hpp"
 
 #include <algorithm>
 #include <array>
@@ -32,6 +33,30 @@ constexpr std::size_t stripe_count = 4096;
 	key ^= key >> 29U;
 	return stripes[key & (stripe_count - 1U)];
 }
+
+/* A frame's stripe lock, held exclusively. Nothing allocates, makes a record
+ * or takes another lock while it is held; the test variant counts every
+ * allocation made under it. */
+class StripeLock final {
+public:
+	explicit StripeLock(WordSharedMutex &mutex) noexcept : mutex_{mutex}
+	{
+		mutex_.lock();
+		UML_MEMORY_STRIPE_LOCK_ENTERED();
+	}
+	~StripeLock()
+	{
+		UML_MEMORY_STRIPE_LOCK_LEFT();
+		mutex_.unlock();
+	}
+	StripeLock(const StripeLock &) = delete;
+	StripeLock &operator=(const StripeLock &) = delete;
+
+private:
+	WordSharedMutex &mutex_;
+};
+
+using WriterList = std::vector<WriterLocation, FrameAllocator<WriterLocation>>;
 
 /* A frame's word: its kind in the top two bits, and for a single writer its
  * location, the alias id and the page number. "Several" keeps its locations
@@ -71,20 +96,51 @@ std::atomic_uint64_t nonempty_destructions{};
 std::atomic_uint64_t writer_additions{};
 std::atomic_uint64_t writer_removals{};
 std::atomic_uint64_t reservation_rollbacks{};
+std::atomic_uint64_t reservation_growths{};
 
 /* The alias ids: which state a location names. Process-wide and never
- * destroyed, because a location in a backing can outlive any one address
- * space. Id 0 is unused. */
+ * destroyed, because an id that a leak keeps reserved outlives the address
+ * space that leaked it. Id 0 is unused.
+ *
+ * The entries sit in stable chunks that a reader finds without a lock, so a
+ * publication under a stripe lock takes none. Allocating and freeing an id
+ * takes a mutex, which no stripe lock is held across. The chunks come from a
+ * heap of their own, not the default malloc zone. */
+constexpr std::uint32_t alias_chunk_entries = 1024;
+constexpr std::size_t alias_chunk_count =
+	(std::size_t{FrameAccounting::maximum_alias} + alias_chunk_entries) /
+	alias_chunk_entries;
+
+struct AliasEntry final {
+	std::atomic<GenerationState *> state{};
+	/* The next free id while this one is on the free list. */
+	std::uint32_t next_free{};
+};
+using AliasChunk = std::array<AliasEntry, alias_chunk_entries>;
+
 struct AliasTable final {
 	std::mutex mutex;
-	std::vector<GenerationState *> entries{1, nullptr};
-	std::vector<std::uint32_t> free_ids;
+	/* Chunks are published before any id in them is handed out. */
+	std::array<std::atomic<AliasChunk *>, alias_chunk_count> chunks{};
+	/* Guarded by `mutex`. */
+	std::uint32_t free_head{};
+	std::uint32_t next_new{1};
+	DomainHeap heap;
 };
 
-[[nodiscard]] AliasTable &alias_table()
+[[nodiscard]] AliasTable &alias_table() noexcept
 {
 	static auto *table = new AliasTable;
 	return *table;
+}
+
+[[nodiscard]] AliasEntry *alias_entry(std::uint32_t alias) noexcept
+{
+	if (alias == 0 || alias > FrameAccounting::maximum_alias)
+		return nullptr;
+	auto *chunk = alias_table().chunks[alias / alias_chunk_entries].load(
+		std::memory_order_acquire);
+	return chunk == nullptr ? nullptr : &(*chunk)[alias % alias_chunk_entries];
 }
 
 [[nodiscard]] std::uint32_t allocate_alias(GenerationState &state)
@@ -92,36 +148,53 @@ struct AliasTable final {
 	auto &table = alias_table();
 	const std::lock_guard lock{table.mutex};
 	UML_MEMORY_ALLOCATION_CHECKPOINT(testing::AllocationSite::writers);
-	/* Room to give an id back without allocating. */
-	table.free_ids.reserve(table.entries.size() + 1U);
-	if (!table.free_ids.empty()) {
-		const auto id = table.free_ids.back();
-		table.free_ids.pop_back();
-		table.entries[id] = &state;
-		return id;
+	std::uint32_t id = 0;
+	if (table.free_head != 0) {
+		id = table.free_head;
+		table.free_head = alias_entry(id)->next_free;
+	} else {
+		if (table.next_new > FrameAccounting::maximum_alias)
+			throw std::bad_alloc{};
+		id = table.next_new;
+		if (table.chunks[id / alias_chunk_entries].load(
+			    std::memory_order_relaxed) == nullptr) {
+			auto *chunk = static_cast<AliasChunk *>(frame_allocate(
+				&table.heap, sizeof(AliasChunk), alignof(AliasChunk)));
+			new (chunk) AliasChunk{};
+			table.chunks[id / alias_chunk_entries].store(
+				chunk, std::memory_order_release);
+		}
+		++table.next_new;
 	}
-	if (table.entries.size() > FrameAccounting::maximum_alias)
-		throw std::bad_alloc{};
-	table.entries.push_back(&state);
-	return static_cast<std::uint32_t>(table.entries.size() - 1U);
+	alias_entry(id)->state.store(&state, std::memory_order_release);
+	return id;
 }
 
-void release_alias(std::uint32_t alias) noexcept
+/* Gives the id back for reuse, or with `leaked` retires it for good: a
+ * location may still name it, and the entry then names no state. */
+void release_alias(std::uint32_t alias, bool leaked) noexcept
 {
 	auto &table = alias_table();
 	const std::lock_guard lock{table.mutex};
-	if (alias == 0 || alias >= table.entries.size())
+	auto *entry = alias_entry(alias);
+	if (entry == nullptr)
 		return;
-	table.entries[alias] = nullptr;
-	table.free_ids.push_back(alias);
+	entry->state.store(nullptr, std::memory_order_release);
+	if (leaked)
+		return;
+	entry->next_free = table.free_head;
+	table.free_head = alias;
 }
 
-/* Adds `location` to the frame's writers, under the frame's stripe lock. When
- * the list needs more room than `spare` brings, returns false with the room
- * wanted in `wanted`; the caller makes `spare` and tries again. */
-[[nodiscard]] bool try_add(MappedBacking &backing, std::uint64_t offset,
-	const WriterLocation &location, std::vector<WriterLocation> &spare,
-	std::size_t &wanted, bool &added) noexcept
+/* Adds `location` to the frame's writers, under the frame's stripe lock.
+ * `record` is the frame's record, found before the lock was taken; null if it
+ * has none. When the list needs a record or more room than `spare` brings,
+ * returns false with the room wanted in `wanted`; the caller makes the record
+ * and `spare` outside the lock and tries again. */
+[[nodiscard]] bool try_add(MappedBacking &backing,
+	MappedBacking::FrameRecord *record, std::uint64_t offset,
+	const WriterLocation &location, WriterList &spare, std::size_t &wanted,
+	bool &added) noexcept
 {
 	auto *word = backing.writer_word(offset);
 	if (word == nullptr) {
@@ -143,11 +216,11 @@ void release_alias(std::uint32_t alias) noexcept
 		const auto existing = location_of(*word);
 		if (existing == location)
 			return true;
-		auto *list = backing.writer_list(offset);
-		if (list == nullptr) {
+		if (record == nullptr) {
 			wanted = 2;
 			return false;
 		}
+		auto *list = &record->writers;
 		if (list->capacity() < 2) {
 			if (spare.capacity() < 2) {
 				wanted = 2;
@@ -165,13 +238,13 @@ void release_alias(std::uint32_t alias) noexcept
 		return true;
 	}
 	case Kind::several: {
-		auto *list = backing.writer_list(offset);
-		if (list == nullptr) {
-			/* Several writers without their list: an error. */
+		if (record == nullptr) {
+			/* Several writers without their record: an error. */
 			accounting_errors.fetch_add(1, std::memory_order_relaxed);
 			*word = kind_word(Kind::unknown);
 			return true;
 		}
+		auto *list = &record->writers;
 		if (std::find(list->begin(), list->end(), location) != list->end())
 			return true;
 		if (list->size() == list->capacity()) {
@@ -197,20 +270,22 @@ void release_alias(std::uint32_t alias) noexcept
 bool FrameAccounting::add_writer(MappedBacking &backing,
 	std::uint64_t offset, const WriterLocation &location)
 {
-	std::vector<WriterLocation> spare;
+	WriterList spare{FrameAllocator<WriterLocation>{backing.heap()}};
 	std::size_t wanted = 0;
 	for (;;) {
 		UML_MEMORY_ALLOCATION_CHECKPOINT(testing::AllocationSite::writers);
+		/* The leaf and the record are made here, before the lock. */
 		if ((wanted != 0 || backing.writer_word(offset) == nullptr) &&
 		    !backing.prepare_writers(offset, wanted != 0))
 			throw std::bad_alloc{};
 		if (wanted != 0 && spare.capacity() < wanted)
 			spare.reserve(wanted);
+		auto *record = backing.find_frame_record(offset);
 		std::size_t more = 0;
 		bool added = false;
 		{
-			const std::lock_guard lock{stripe_for(&backing, offset)};
-			if (try_add(backing, offset, location, spare, more, added))
+			const StripeLock lock{stripe_for(&backing, offset)};
+			if (try_add(backing, record, offset, location, spare, more, added))
 				return added;
 		}
 		wanted = more;
@@ -220,7 +295,11 @@ bool FrameAccounting::add_writer(MappedBacking &backing,
 void FrameAccounting::remove_writer(MappedBacking &backing,
 	std::uint64_t offset, const WriterLocation &location) noexcept
 {
-	const std::lock_guard lock{stripe_for(&backing, offset)};
+	/* Found without the lock, and the room a list gives up is freed after
+	 * it. */
+	auto *record = backing.find_frame_record(offset);
+	WriterList released{FrameAllocator<WriterLocation>{backing.heap()}};
+	const StripeLock lock{stripe_for(&backing, offset)};
 	auto *word = backing.writer_word(offset);
 	if (word == nullptr) {
 		accounting_errors.fetch_add(1, std::memory_order_relaxed);
@@ -245,8 +324,8 @@ void FrameAccounting::remove_writer(MappedBacking &backing,
 		}
 		return;
 	case Kind::several: {
-		auto *list = backing.writer_list(offset);
-		const auto found = list == nullptr ? std::vector<WriterLocation>::iterator{} :
+		auto *list = record == nullptr ? nullptr : &record->writers;
+		const auto found = list == nullptr ? WriterList::iterator{} :
 			std::find(list->begin(), list->end(), location);
 		if (list == nullptr || found == list->end()) {
 			fail();
@@ -257,8 +336,10 @@ void FrameAccounting::remove_writer(MappedBacking &backing,
 		if (list->size() == 1) {
 			*word = single_word(list->front());
 			list->clear();
+			list->swap(released);
 		} else if (list->empty()) {
 			*word = 0;
+			list->swap(released);
 		}
 		return;
 	}
@@ -326,7 +407,7 @@ void FrameAccounting::finish(GenerationState &state) noexcept
 {
 	state.accounting.walked = true;
 	if (state.accounting.alias != 0) {
-		release_alias(state.accounting.alias);
+		release_alias(state.accounting.alias, false);
 		state.accounting.alias = 0;
 	}
 }
@@ -343,7 +424,8 @@ FrameAccounting::Diagnostics FrameAccounting::diagnostics() noexcept
 		nonempty_destructions.load(std::memory_order_relaxed),
 		writer_additions.load(std::memory_order_relaxed),
 		writer_removals.load(std::memory_order_relaxed),
-		reservation_rollbacks.load(std::memory_order_relaxed)};
+		reservation_rollbacks.load(std::memory_order_relaxed),
+		reservation_growths.load(std::memory_order_relaxed)};
 }
 
 void FrameAccounting::note_nonempty_state_destruction() noexcept
@@ -360,33 +442,47 @@ StateAccounting::~StateAccounting()
 
 GenerationState *FrameAccounting::state_of(std::uint32_t alias) noexcept
 {
-	auto &table = alias_table();
-	const std::lock_guard lock{table.mutex};
-	return alias < table.entries.size() ? table.entries[alias] : nullptr;
+	const auto *entry = alias_entry(alias);
+	return entry == nullptr ? nullptr :
+		entry->state.load(std::memory_order_acquire);
 }
 
 #if UML_MEMORY_ALLOCATION_TESTING
 bool FrameAccounting::locations_for_testing(MappedBacking &backing,
 	std::uint64_t offset, std::vector<WriterLocation> &locations)
 {
-	const std::lock_guard lock{stripe_for(&backing, offset)};
-	const auto *word = backing.writer_word(offset);
-	if (word == nullptr)
-		return true;
-	switch (kind_of(*word)) {
-	case Kind::none:
-		return true;
-	case Kind::unknown:
-		return false;
-	case Kind::single:
-		locations.push_back(location_of(*word));
-		return true;
-	case Kind::several:
-		if (const auto *list = backing.writer_list(offset); list != nullptr)
-			locations.insert(locations.end(), list->begin(), list->end());
+	/* The room is made before the lock, as everywhere. */
+	std::size_t room = 2;
+	for (;;) {
+		locations.reserve(locations.size() + room);
+		const StripeLock lock{stripe_for(&backing, offset)};
+		const auto *word = backing.writer_word(offset);
+		if (word == nullptr)
+			return true;
+		switch (kind_of(*word)) {
+		case Kind::none:
+			return true;
+		case Kind::unknown:
+			return false;
+		case Kind::single:
+			locations.push_back(location_of(*word));
+			return true;
+		case Kind::several: {
+			const auto *record = backing.find_frame_record(offset);
+			if (record == nullptr)
+				return true;
+			if (locations.capacity() - locations.size() <
+			    record->writers.size()) {
+				room = record->writers.size();
+				continue;
+			}
+			locations.insert(locations.end(), record->writers.begin(),
+				record->writers.end());
+			return true;
+		}
+		}
 		return true;
 	}
-	return true;
 }
 #endif
 
@@ -407,19 +503,43 @@ void WriterReservation::add(GenerationState &state, MappedBacking &backing,
 	if (accounting.alias == 0)
 		accounting.alias = allocate_alias(state);
 	UML_MEMORY_ALLOCATION_CHECKPOINT(testing::AllocationSite::writers);
-	added_.reserve(added_.size() + 1U);
+	/* The room for the entry is had before the location is added, so that
+	 * recording it cannot fail. The entries live in the thread's scratch
+	 * arena, which the plan's scope keeps until commit or settle, and the
+	 * room doubles, so a plan of any size reserves it in a few steps. */
+	if (!scope_)
+		scope_.emplace();
+	if (size_ == capacity_) {
+		const auto room = std::max<std::size_t>(16, capacity_ * 2U);
+		auto *items = static_cast<Added *>(
+			scope_->arena().allocate(room * sizeof(Added), alignof(Added)));
+		if (size_ != 0)
+			std::memcpy(items, items_, size_ * sizeof(Added));
+		items_ = items;
+		capacity_ = room;
+		reservation_growths.fetch_add(1, std::memory_order_relaxed);
+	}
 	if (FrameAccounting::add_writer(backing, offset, {accounting.alias, page}))
-		added_.push_back({&backing, offset, page});
+		items_[size_++] = {&backing, offset, page};
 }
 
 void WriterReservation::settle(std::uint32_t alias) noexcept
 {
-	if (!added_.empty())
+	if (size_ != 0)
 		reservation_rollbacks.fetch_add(1, std::memory_order_relaxed);
-	for (auto added = added_.rbegin(); added != added_.rend(); ++added)
-		FrameAccounting::remove_writer(*added->backing, added->offset,
-			{alias, added->page});
-	added_.clear();
+	for (auto added = size_; added != 0; --added)
+		FrameAccounting::remove_writer(*items_[added - 1U].backing,
+			items_[added - 1U].offset, {alias, items_[added - 1U].page});
+	release();
+}
+
+void WriterReservation::release() noexcept
+{
+	items_ = nullptr;
+	size_ = 0;
+	capacity_ = 0;
+	/* The outermost scope's end hands the arena's extra chunks back. */
+	scope_.reset();
 }
 
 } // namespace uml::memory

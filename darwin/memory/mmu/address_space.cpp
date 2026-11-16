@@ -1498,7 +1498,11 @@ private:
 				}
 			}
 		}
+#if DARWIN_UML_X86_64_GUEST
+		auto backing = MappedBacking::create(fd, status, heap_);
+#else
 		auto backing = MappedBacking::create(fd, status);
+#endif
 		if (backing) {
 			if (stable_identity)
 				backings_.insert_or_assign(key, backing);

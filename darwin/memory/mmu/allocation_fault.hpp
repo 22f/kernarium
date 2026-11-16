@@ -31,6 +31,7 @@ enum class AllocationSite : std::uint8_t {
 	native_owner_registry,
 	native_slot,
 	writers,
+	records,
 	count,
 };
 
@@ -49,6 +50,17 @@ void reset_allocation_attempt_counts() noexcept;
 using AllocationObserver = void (*)(AllocationSite site) noexcept;
 void set_allocation_observer(AllocationObserver observer) noexcept;
 
+/* The frame accounting holds a frame's stripe lock between these two calls on
+ * the thread that holds it; a checkpoint reached in between is an allocation
+ * under a stripe lock, which is counted. */
+void stripe_lock_entered() noexcept;
+void stripe_lock_left() noexcept;
+/* An allocator the frame accounting's metadata uses, or a test's replacement
+ * of the global operator new, reports here; one made under a stripe lock is
+ * counted. */
+void allocator_probe() noexcept;
+[[nodiscard]] std::size_t allocations_under_stripe_lock() noexcept;
+
 void backing_mapping_created() noexcept;
 void backing_mapping_destroyed() noexcept;
 [[nodiscard]] std::size_t active_backing_mappings() noexcept;
@@ -57,6 +69,12 @@ void backing_mapping_destroyed() noexcept;
 
 #define UML_MEMORY_ALLOCATION_CHECKPOINT(site) \
 	::uml::memory::testing::allocation_checkpoint(site)
+#define UML_MEMORY_ALLOCATOR_PROBE() \
+	::uml::memory::testing::allocator_probe()
+#define UML_MEMORY_STRIPE_LOCK_ENTERED() \
+	::uml::memory::testing::stripe_lock_entered()
+#define UML_MEMORY_STRIPE_LOCK_LEFT() \
+	::uml::memory::testing::stripe_lock_left()
 #define UML_MEMORY_BACKING_MAPPING_CREATED() \
 	::uml::memory::testing::backing_mapping_created()
 #define UML_MEMORY_BACKING_MAPPING_DESTROYED() \
@@ -66,6 +84,9 @@ void backing_mapping_destroyed() noexcept;
  * allocation-site enum and test functions therefore create no ordinary
  * product symbol, load, branch, or call even in an unoptimized build. */
 #define UML_MEMORY_ALLOCATION_CHECKPOINT(...) ((void)0)
+#define UML_MEMORY_ALLOCATOR_PROBE() ((void)0)
+#define UML_MEMORY_STRIPE_LOCK_ENTERED() ((void)0)
+#define UML_MEMORY_STRIPE_LOCK_LEFT() ((void)0)
 #define UML_MEMORY_BACKING_MAPPING_CREATED() ((void)0)
 #define UML_MEMORY_BACKING_MAPPING_DESTROYED() ((void)0)
 #endif

@@ -16,6 +16,8 @@ std::atomic<AllocationSite> failure_site{};
 std::atomic_size_t failure_occurrence{};
 std::atomic_size_t backing_mappings{};
 std::atomic<AllocationObserver> allocation_observer{};
+std::atomic_size_t stripe_allocations{};
+thread_local unsigned stripe_depth{};
 std::array<std::atomic_size_t,
 	static_cast<std::size_t>(AllocationSite::count)> allocation_attempts{};
 
@@ -47,6 +49,7 @@ void set_allocation_observer(const AllocationObserver observer) noexcept
 
 void allocation_checkpoint(const AllocationSite site)
 {
+	allocator_probe();
 	if (const auto observer =
 		    allocation_observer.load(std::memory_order_acquire))
 		observer(site);
@@ -81,6 +84,27 @@ std::size_t allocation_attempt_count(const AllocationSite site) noexcept
 	const auto site_index = static_cast<std::size_t>(site);
 	return site_index < allocation_attempts.size() ?
 		allocation_attempts[site_index].load(std::memory_order_relaxed) : 0;
+}
+
+void stripe_lock_entered() noexcept
+{
+	++stripe_depth;
+}
+
+void stripe_lock_left() noexcept
+{
+	--stripe_depth;
+}
+
+void allocator_probe() noexcept
+{
+	if (stripe_depth != 0)
+		stripe_allocations.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::size_t allocations_under_stripe_lock() noexcept
+{
+	return stripe_allocations.load(std::memory_order_relaxed);
 }
 
 void backing_mapping_created() noexcept

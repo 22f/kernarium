@@ -88,8 +88,8 @@ lists the one record a handover changes. The x86 guest runners take
   and each such store publishes once it has landed. When a registration finds
   a participant stuck inside the engine for longer than its bound, the engine
   drops the code of the page at every hand-over until that participant has
-  left. A publishing store into the code of the unit running it stops that
-  unit before it stores. The engine
+  moved or left. A publishing store into the code of the unit running it
+  stops that unit before it stores. The engine
   learns of the address space's changes as two histories, mapping and code
   (see [`uml_darwin_static_mmu.h`](../../../include/uml_darwin_static_mmu.h)); a
   reader further behind than the history reaches drops every translation of the

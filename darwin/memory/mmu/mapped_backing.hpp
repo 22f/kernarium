@@ -3,11 +3,15 @@
 
 #include "../shared_backing.hpp"
 #include "writer_location.hpp"
+#if DARWIN_UML_X86_64_GUEST
+#include "frame_heap.hpp"
+#endif
 
 #include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -22,6 +26,12 @@ class MappedBacking final {
 public:
 	static std::shared_ptr<MappedBacking> create(int fd,
 		const struct stat &status);
+#if DARWIN_UML_X86_64_GUEST
+	/* The same, with the frame accounting's metadata for the backing in
+	 * `heap`, the heap of the address space that makes it. */
+	static std::shared_ptr<MappedBacking> create(int fd,
+		const struct stat &status, std::shared_ptr<DomainHeap> heap);
+#endif
 
 	MappedBacking(const MappedBacking &) = delete;
 	MappedBacking &operator=(const MappedBacking &) = delete;
@@ -63,16 +73,40 @@ private:
 	using CodeIndexLeaf =
 		std::array<std::atomic<CodePage *>, code_index_leaf_pages>;
 
+#if DARWIN_UML_X86_64_GUEST
+	/* The x86-64 guest keeps the records, their index and the writer index in
+	 * the owning address space's heap (frame_heap.hpp). */
+	template <typename T>
+	using Allocator = FrameAllocator<T>;
+	using RecordOwner = HeapOwned<CodePage>;
+	using LeafOwner = HeapOwned<CodeIndexLeaf>;
+	using RootOwner = HeapArray<std::atomic<CodeIndexLeaf *>>;
+	MappedBacking(SharedBackingView mapping, std::size_t size,
+		std::shared_ptr<DomainHeap> heap) noexcept;
+#else
+	template <typename T>
+	using Allocator = std::allocator<T>;
+	using RecordOwner = std::unique_ptr<CodePage>;
+	using LeafOwner = std::unique_ptr<CodeIndexLeaf>;
+	using RootOwner = std::unique_ptr<std::atomic<CodeIndexLeaf *>[]>;
 	MappedBacking(SharedBackingView mapping, std::size_t size) noexcept;
+#endif
 	[[nodiscard]] void *install_code_page(std::uint64_t page) noexcept;
 
+#if DARWIN_UML_X86_64_GUEST
+	/* Declared before everything it serves, so that it outlives it. */
+	std::shared_ptr<DomainHeap> heap_;
+#endif
 	SharedBackingView mapping_;
 	std::size_t size_;
 	/* Taken only to publish a page seen for the first time. */
 	std::mutex code_pages_mutex_;
-	std::unordered_map<std::uint64_t, std::unique_ptr<CodePage>> code_pages_;
-	std::vector<std::unique_ptr<CodeIndexLeaf>> code_index_leaves_;
-	std::unique_ptr<std::atomic<CodeIndexLeaf *>[]> code_index_;
+	std::unordered_map<std::uint64_t, RecordOwner, std::hash<std::uint64_t>,
+		std::equal_to<std::uint64_t>,
+		Allocator<std::pair<const std::uint64_t, RecordOwner>>>
+		code_pages_;
+	std::vector<LeafOwner, Allocator<LeafOwner>> code_index_leaves_;
+	RootOwner code_index_;
 	std::size_t code_index_pages_{};
 
 #if DARWIN_UML_X86_64_GUEST
@@ -89,9 +123,30 @@ public:
 		std::uint64_t offset, bool record) noexcept;
 	/* The frame's word, or null while its leaf does not exist. */
 	[[nodiscard]] std::uint64_t *writer_word(std::uint64_t offset) noexcept;
-	/* The frame's writer list: null while it has no record. */
-	[[nodiscard]] std::vector<WriterLocation> *writer_list(
-		std::uint64_t offset) noexcept;
+
+	/* What the frame accounting keeps per frame beside the stamp: the writer
+	 * locations of a frame with several. The list lives in the heap of the
+	 * address space that made the backing, as the generations' own indexes
+	 * do, and gives its room back when the writers are gone. Guarded by the
+	 * frame's stripe lock. */
+	struct FrameRecord {
+		explicit FrameRecord(DomainHeap *heap) noexcept
+			: writers{FrameAllocator<WriterLocation>{heap}}
+		{
+		}
+		std::vector<WriterLocation, FrameAllocator<WriterLocation>> writers;
+	};
+	/* The frame's record, made if it has none; null when memory ran out.
+	 * Allocates and takes the records' mutex: never call under a stripe
+	 * lock. */
+	[[nodiscard]] FrameRecord *frame_record(std::uint64_t offset) noexcept;
+	/* The frame's record if it has one: lock-free, allocating nothing and
+	 * making no record, so a stripe lock may be held. Only a backing whose
+	 * record index exists has frames with writers (prepare_writers), so the
+	 * index is all that is looked in. */
+	[[nodiscard]] FrameRecord *find_frame_record(std::uint64_t offset) noexcept;
+	/* The heap the frames' lists live in, or null for the process's. */
+	[[nodiscard]] DomainHeap *heap() const noexcept { return heap_.get(); }
 	/* Calls visit(frame_offset, word) for each frame whose word is not 0.
 	 * For a caller that excludes every change, a test. */
 	template <typename Visit>
@@ -118,10 +173,11 @@ private:
 
 	/* Made under code_pages_mutex_ when the first location is added, and
 	 * published through writer_index_ with the leaf count before it. */
-	std::unique_ptr<std::atomic<WriterLeaf *>[]> writer_index_storage_;
+	HeapArray<std::atomic<WriterLeaf *>> writer_index_storage_;
 	std::atomic<std::atomic<WriterLeaf *> *> writer_index_{nullptr};
 	std::size_t writer_index_leaves_{};
-	std::vector<std::unique_ptr<WriterLeaf>> writer_leaves_;
+	std::vector<HeapOwned<WriterLeaf>, FrameAllocator<HeapOwned<WriterLeaf>>>
+		writer_leaves_;
 #endif
 };
 

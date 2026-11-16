@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace uml::memory {
@@ -109,6 +110,9 @@ public:
 		std::uint64_t writer_removals;
 		/* Reservations taken back because their change did not complete. */
 		std::uint64_t rollbacks;
+		/* Times a reservation made room for more entries: a plan of N pages
+		 * takes O(log N), never N. */
+		std::uint64_t reservation_growths;
 	};
 	[[nodiscard]] static Diagnostics diagnostics() noexcept;
 	static void note_nonempty_state_destruction() noexcept;
@@ -134,7 +138,7 @@ public:
 	void add(GenerationState &state, MappedBacking &backing,
 		std::uint64_t offset, std::uint64_t page);
 	/* The change took effect: what was added stays. */
-	void commit() noexcept { added_.clear(); }
+	void commit() noexcept { release(); }
 	/* The change did not: removes what this reservation added. */
 	void settle(std::uint32_t alias) noexcept;
 
@@ -145,7 +149,15 @@ private:
 		std::uint64_t page;
 	};
 
-	std::vector<Added> added_;
+	void release() noexcept;
+
+	/* The plan's entries are temporaries of one operation on one thread, so
+	 * they live in that thread's scratch arena, which this scope keeps from
+	 * the first entry to the end of the plan. */
+	std::optional<ScratchScope> scope_;
+	Added *items_{};
+	std::size_t size_{};
+	std::size_t capacity_{};
 };
 
 /* Takes back the locations a primitive reserved if it did not commit them. */

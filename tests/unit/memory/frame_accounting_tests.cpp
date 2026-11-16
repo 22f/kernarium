@@ -16,6 +16,7 @@
 #include "address_space_types.hpp"
 #include "require.hpp"
 #include "scratch_backing.hpp"
+#include "stripe_allocation_probe.hpp"
 #include "uml_darwin_guest.h"
 #include "uml_darwin_static_mmu.h"
 
@@ -439,6 +440,78 @@ void test_overflow_replacement_keeps_the_old_backing_for_the_removal()
 	baseline.clean("M1 overflow");
 }
 
+/* M1 (lists) and M13 (stripe): one frame mapped at more pages than a list's
+ * first capacity holds, taken back down to none, and a second writer location
+ * made for a frame that has no record yet. The lists grow by their spare, the
+ * record is made before the lock, and nothing allocates while a stripe lock is
+ * held, through any allocator. */
+void test_writer_lists_grow_and_nothing_allocates_under_a_stripe_lock()
+{
+	const Baseline baseline;
+	const auto before = uml::memory::testing::allocations_under_stripe_lock();
+	constexpr unsigned long base = 0x700'0000;
+	constexpr unsigned long aliases = 40;
+	ScratchBacking backing{"uml-frame-accounting-lists-XXXXXX", 2 * page};
+	Domain domain{71'005};
+	domain.run([&] {
+		/* One location: a word, no record. The second makes the record and
+		 * the list; each growth of the list is made outside the lock. */
+		for (unsigned long alias = 0; alias < aliases; ++alias) {
+			require(map(670, base + alias * page, backing, 0, 1, rw, 0) == 0);
+			require(writers_of(backing, 0) == alias + 1,
+				"a writer location was lost while the list grew");
+		}
+		audit("lists grown", aliases);
+		for (unsigned long alias = 0; alias < aliases; alias += 2)
+			require(unmap(670, base + alias * page, 1) == 0);
+		audit("lists halved", aliases / 2);
+		require(writers_of(backing, 0) == aliases / 2);
+		/* Back down through one location to none. */
+		for (unsigned long alias = 1; alias < aliases; alias += 2) {
+			require(unmap(670, base + alias * page, 1) == 0);
+			require(writers_of(backing, 0) == (aliases - alias - 1) / 2);
+		}
+		audit("lists empty", 0);
+		/* A second frame, whose record does not exist: two aliases. */
+		require(map(670, base, backing, 1, 1, rw, 0) == 0);
+		require(map(670, base + page, backing, 1, 1, rw, 0) == 0);
+		audit("second frame", 2);
+		require(darwin_uml_static_vm_destroy(670) == 0);
+		audit("destroyed", 0);
+	});
+	domain.retire();
+	require(uml::memory::testing::allocations_under_stripe_lock() == before,
+		"an allocation was made under a stripe lock");
+	baseline.clean("M1 lists");
+}
+
+/* M8 (growth): a plan that adds a writer location for every one of 16384
+ * pages makes room for its entries a handful of times, not once per page,
+ * which took 165-184 ms under the mapping lock. */
+void test_a_large_plan_makes_room_geometrically()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0x1000'0000;
+	constexpr unsigned long pages = 16384;
+	ScratchBacking backing{"uml-frame-accounting-plan-XXXXXX", pages * page};
+	Domain domain{71'006};
+	std::uint64_t growths = 0;
+	domain.run([&] {
+		const auto start = FrameAccounting::diagnostics().reservation_growths;
+		require(map(680, base, backing, 0, pages, rw, 0) == 0);
+		growths = FrameAccounting::diagnostics().reservation_growths - start;
+		audit("large plan", pages);
+		require(darwin_uml_static_vm_destroy(680) == 0);
+		audit("large plan destroyed", 0);
+	});
+	domain.retire();
+	std::printf("plan of %lu pages: %llu reservation growths\n", pages,
+		static_cast<unsigned long long>(growths));
+	require(growths != 0 && growths <= 12,
+		"a plan made room for its entries more than geometrically");
+	baseline.clean("M8 growth");
+}
+
 } // namespace
 
 int main()
@@ -449,6 +522,8 @@ int main()
 	test_reservation_is_idempotent_and_abandoned_plans_roll_back();
 	test_every_allocation_failure_rolls_back_the_reservation();
 	test_overflow_replacement_keeps_the_old_backing_for_the_removal();
+	test_writer_lists_grow_and_nothing_allocates_under_a_stripe_lock();
+	test_a_large_plan_makes_room_geometrically();
 	uml::memory::set_domain_provider(nullptr);
 	std::puts("frame accounting tests passed");
 	return EXIT_SUCCESS;
