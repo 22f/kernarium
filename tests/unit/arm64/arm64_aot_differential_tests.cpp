@@ -165,8 +165,6 @@ const LibraryImage *g_sites_image = nullptr;
 /* Addresses in another library mapped in the same address space: some
  * registers (and the return address) of a case hold one. */
 std::vector<std::uint64_t> g_cross_targets;
-/* Whether the library under test is the fixture (tools/aot/fixture.py). */
-bool g_fixture_library = false;
 
 /* The register an instruction writes SP from, or -1: the 64-bit
  * add/sub (immediate and extended register) and logical (immediate) forms
@@ -861,15 +859,6 @@ void describe(const char *what, const Case &c)
 	c.cpu.tls = arena_base + rng.below(arena_pages) * page_bytes +
 		0x40 * rng.below(32);
 	c.cpu.registers[30] = bias + stub_offset;
-	/* The fixture's page-edge functions return through x15 and one branches
-	 * through x16 (tools/aot/fixture.py). A case may start after the
-	 * instruction that sets x15, so give both a valid target: the random
-	 * ones include addresses of all ones, which the engine's cached
-	 * indirect-branch gadget takes for an empty cell. */
-	if (g_fixture_library) {
-		c.cpu.registers[15] = bias + stub_offset;
-		c.cpu.registers[16] = bias + stub_offset;
-	}
 	if (!g_cross_targets.empty()) {
 		for (std::size_t i = 0; i < 29; ++i)
 			if (rng.below(6) == 0)
@@ -4824,7 +4813,6 @@ int main(int argc, char **argv)
 			continue;
 		const auto image = load_library(file.host);
 		g_sites_image = &image;
-		g_fixture_library = file.guest.ends_with("/libaotfixture.so");
 		const auto functions = load_functions(cfg.functions, file.index);
 		std::fprintf(stderr, "library %zu %s: %zu functions\n", file.index,
 			file.guest.c_str(), functions.size());
