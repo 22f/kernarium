@@ -815,9 +815,13 @@ blocker in every one of them.
   back, changed register and pc, and detach; and a breakpoint written into
   libz by a tracer that never stops the thread running it, at the function's
   entry and at the pc where that thread was found. Each mode runs three times
-  without the component and once with it; a field that differs between two of
-  the runs without it (an address under ASLR, a process id) is masked, and
-  everything else, frame for frame, must be equal. The image is a user build,
+  without the component and once with it, under the kernel's
+  `ADDR_NO_RANDOMIZE` personality; the image's userspace still places
+  libraries and stacks at random, so a register that points into a mapping
+  is compared by the file or mapping and the offset in it, and a field that
+  differs between two of the runs without the component and names nothing (a
+  process id, a random value) is masked, within a small bound. Everything
+  else, frame for frame, must be equal. The image is a user build,
   so `debuggerd -b` and `kill -3` of a system process (which need root) are
   not run. The share program (`aot_guest_share.cpp`, rows in
   `share_rows.py`) runs libz in many processes: the read-only file system's

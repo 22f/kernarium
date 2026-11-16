@@ -20,9 +20,17 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "integratio
 import debug_rows as rows  # noqa: E402
 
 
+def quoted(address: int) -> str:
+    return f"{address >> 32:016x}"[8:] + "'" + f"{address & 0xffffffff:08x}"
+
+
 def tombstone(address: int = 0x7ff1b1f19000, frame: str = "__memmove_aarch64_mops+16", x13: int = 1,
-              pid: int = 2038, extra_threads: str = "") -> str:
-    base = 0x7ff1b1c50000 + (address & 0xfffff)
+              pid: int = 2038, extra_threads: str = "", load: int = 0x7ff1ae500000,
+              pointer: int = 0x2854d, stack_name: str = "[anon:stack_and_tls:2040]") -> str:
+    """A tombstone of a crash in libc (loaded at `load`): x4 points `pointer`
+    bytes into libc's file, x5 into its .bss, x6 into an unnamed mapping, and
+    x7 into a thread stack."""
+    base = load + 0x70d50
     return f"""*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***
 Build fingerprint: 'Android/test:17/ID/1:user/release-keys'
 Timestamp: 2026-11-16 05:48:50.054109184+0000
@@ -32,8 +40,9 @@ pid: {pid}, ppid: 2036, tid: {pid}, name: toybox  >>> /system/bin/toybox <<<
 uid: 2000
 signal 11 (SIGSEGV), code 2 (SEGV_ACCERR), fault addr {address:#018x} (read)
     x0  b4007ff19a825220  x1  {address:016x}  x2  0000000000000028  x3  b4007ff19a825238
+    x4  {load + pointer:016x}  x5  {load + 0xb0000 + 0x2070:016x}  x6  {load + 0x200000 + 0x1234:016x}  x7  {load + 0x300000 + 0xf8c00:016x}
     x12 0000000000000001  x13 {x13:016x}  x14 0000000000000001  x15 0000000000001863
-    lr  00007ff1ae5f25d0  sp  00007ffff7299dd0  pc  {base:016x}  pst 0000000020000000
+    lr  {load + 0x25d0:016x}  sp  00007ffff7299dd0  pc  {base:016x}  pst 0000000020000000
 
 4 total frames
 backtrace:
@@ -49,8 +58,17 @@ memory near pc (/apex/com.android.runtime/lib64/bionic/libc.so):
     {base:016x} b90017e093407e68 93407e81aa0803e0  h~@..........~@.
     {base + 16:016x} 528000c2910003e3 d400000152801e08  .......R...R....
 
-memory map (3 entries):
-    0000000000400000-0000000000401000 r-x         0      1000  /system/bin/toybox
+memory map (6 entries):
+    {quoted(0x400000)}-{quoted(0x401000 - 1)} r-x         0      1000  /system/bin/toybox (BuildId: ef9a4dcc)
+                               VmFlags: rd ex mr mw me
+    {quoted(load)}-{quoted(load + 0xb0000 - 1)} r-x         0     b0000  /apex/com.android.runtime/lib64/bionic/libc.so (BuildId: f1804e2e)
+                               VmFlags: rd ex mr mw me
+    {quoted(load + 0xb0000)}-{quoted(load + 0xb3000 - 1)} rw-         0      3000  [anon:.bss]
+                               VmFlags: rd wr mr mw me ac
+    {quoted(load + 0x200000)}-{quoted(load + 0x300000 - 1)} rw-         0    100000
+                               VmFlags: rd wr mr mw me ac
+    {quoted(load + 0x300000)}-{quoted(load + 0x400000 - 1)} rw-         0    100000  {stack_name}
+                               VmFlags: rd wr mr mw me ac
 {extra_threads}"""
 
 
@@ -143,6 +161,8 @@ detached tracee status=0
 done mode=ptrace
 """
 
+MARKER = "randomization: off\n"
+
 SIBLING = """entry: breakpoint hit by the running thread: yes by_sibling=yes pc_at_breakpoint=yes in_libz=yes code=1  pc=libz.so+0x12190
 entry: the thread runs on after the restore: yes
 in loop: breakpoint hit by the running thread: yes by_sibling=yes pc_at_breakpoint=yes in_libz=yes code=1
@@ -193,6 +213,51 @@ class CompareTest(unittest.TestCase):
         with self.assertRaises(rows.DebugFailure) as caught:
             rows.compare("crash-memcpy", off, on)
         self.assertIn("with it", str(caught.exception))
+
+    def test_pointers_are_named_by_what_they_point_into(self):
+        text = "\n".join(rows.digest_tombstone(tombstone()))
+        self.assertIn("@libc.so+0x2854d", text)
+        self.assertIn("@[anon:.bss]+0x2070", text)
+        self.assertIn("@anon+0x234", text)
+        self.assertIn("@[anon:stack_and_tls:*]+0xf8c00", text)
+        self.assertIn("pc  @libc.so+0x70d50", text)
+
+    def test_a_library_loaded_elsewhere_is_the_same_run(self):
+        off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n, stack_name=f"[anon:stack_and_tls:{2040 + n}]"))
+               for n, load in enumerate((0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000))]
+        on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000, stack_name="[anon:stack_and_tls:3002]"))
+        compared, masked = rows.compare("crash-memcpy", off, on)
+        self.assertLessEqual(masked, 3)
+        self.assertGreater(compared, 10)
+
+    def test_a_pointer_that_moves_only_with_the_component_fails(self):
+        off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n))
+               for n, load in enumerate((0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000))]
+        on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pointer=0x28555, pid=3000))
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", off, on)
+        self.assertIn("with it", str(caught.exception))
+
+    def test_a_named_location_that_differs_between_the_engines_runs_is_not_masked(self):
+        off = [rows.digest_tombstone(tombstone(pointer=pointer, pid=2038 + n))
+               for n, pointer in enumerate((0x2854d, 0x28555, 0x2854d))]
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", off, rows.digest_tombstone(tombstone(pid=3000)))
+        self.assertIn("the engine's own runs differ", str(caught.exception))
+
+    def test_only_a_few_fields_may_be_masked(self):
+        runs = [[f"  regs crc32 " + " ".join(f"x{n:02d}=0x{n + 100 * value:x}" for n in range(rows.MAX_MASKED + 4))]
+                for value in (1, 2, 3)]
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("ptrace", runs, runs[0])
+        self.assertIn("process ids and random values", str(caught.exception))
+
+    def test_the_code_around_the_pc_is_compared_whatever_the_dump_starts_at(self):
+        one = rows.digest_tombstone(tombstone(load=0x7ff1ae500000))
+        two = rows.digest_tombstone(tombstone(load=0x7ff1a1a00000))
+        dump = lambda record: [line for line in record if line.startswith("=     +0x")]
+        self.assertEqual(dump(one), dump(two))
+        self.assertEqual(len(dump(one)), 2)
 
     def test_a_frame_that_moves(self):
         off = [rows.digest_tombstone(tombstone(pid=2038 + n)) for n in range(3)]
@@ -253,7 +318,7 @@ class RunTest(unittest.TestCase):
     def test_a_crash_is_judged_by_its_tombstone(self):
         log = "Fatal signal 11 (SIGSEGV), code 2 (SEGV_ACCERR), fault addr 0x7ff1b1f19000 in tid 2038 (toybox), pid 2038 (toybox)\npbtombstone x\n"
         shell = self.shell([
-            ("AOT_DEBUG_MODE=crash-memcpy", "warm sum=0x1\nrc=139\n"),
+            ("AOT_DEBUG_MODE=crash-memcpy", "randomization: off\nwarm sum=0x1\nrc=139\n"),
             ("logcat -b crash -d", log),
             ("pidof", ""),
             ("grep -l", "/data/tombstones/tombstone_03\n"),
@@ -274,14 +339,22 @@ class RunTest(unittest.TestCase):
             rows.run_mode(shell, "crash-memcpy")
 
     def test_a_mode_that_reports_a_failure_fails(self):
-        shell = self.shell([("AOT_DEBUG_MODE=sibling", SIBLING.replace("in_libz=yes code=1\n", "in_libz=NO code=1\n", 1) + "rc=0\n")])
+        shell = self.shell([("AOT_DEBUG_MODE=sibling", MARKER + SIBLING.replace("in_libz=yes code=1\n", "in_libz=NO code=1\n", 1) + "rc=0\n")])
         with self.assertRaises(rows.DebugFailure):
             rows.run_mode(shell, "sibling")
 
     def test_a_good_debug_record_is_returned_without_its_status(self):
-        shell = self.shell([("AOT_DEBUG_MODE=sibling", SIBLING + "rc=0\n")])
+        shell = self.shell([("AOT_DEBUG_MODE=sibling", MARKER + SIBLING + "rc=0\n")])
         record = rows.run_mode(shell, "sibling")
+        self.assertEqual(record[0], "randomization: off")
         self.assertEqual(record[-1], "done mode=sibling")
+
+    def test_a_run_whose_randomization_was_not_turned_off_is_no_run(self):
+        for output in (SIBLING + "rc=0\n", MARKER * 2 + SIBLING + "rc=0\n",
+                       MARKER + "FAIL randomization is still on after the program ran again\n" + SIBLING + "rc=0\n"):
+            with self.subTest(output=output[:60]):
+                with self.assertRaises(rows.DebugFailure):
+                    rows.run_mode(self.shell([("AOT_DEBUG_MODE=sibling", output)]), "sibling")
 
 
 if __name__ == "__main__":

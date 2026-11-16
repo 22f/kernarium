@@ -30,10 +30,18 @@
  *                  by a tracer that never stops it, and, in a second round,
  *                  a breakpoint at the pc where it was found.
  *
+ * It runs with address-space randomization off (personality
+ * ADDR_NO_RANDOMIZE, which needs no privilege and takes effect at exec: the
+ * constructor sets it and executes the process again once), so the registers
+ * and addresses of a crash are a function of the guest's behaviour alone and
+ * the runner compares them. It prints "randomization: off" once that holds
+ * and "FAIL" if the personality cannot be set.
+ *
  * Every line it prints is a function of the guest's architectural behaviour
  * alone: the runner (run_aot_guest.py) compares the same mode run with the
  * component on and off, after masking the values that differ between two runs
- * of the same engine (addresses under ASLR).
+ * of the same engine (process ids, times, the stack protector's random value
+ * and what depends on it).
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -74,6 +82,12 @@ char *strrchr(const char *, int);
 int strcmp(const char *, const char *);
 int memcmp(const void *, const void *, size_t);
 char *getenv(const char *);
+int setenv(const char *, const char *, int);
+int personality(unsigned long);
+int execv(const char *, char *const[]);
+int open(const char *, int, ...);
+long read(int, void *, size_t);
+int close(int);
 void abort(void) __attribute__((noreturn));
 void _exit(int) __attribute__((noreturn));
 int fork();
@@ -181,6 +195,118 @@ struct Range {
 Range ranges[3];
 int range_count;
 
+// The tracee's mappings (/proc/<pid>/maps), read before its registers are
+// printed: a value that points into one is named by it, whatever address the
+// mapping has in this run. A mapping of a file by the file and the offset in
+// it, a named anonymous one by its name and the offset in the mapping, an
+// unnamed one by the offset in its page.
+char maps_text[1 << 17];
+long maps_size;
+
+void load_maps(int pid) {
+    char path[32] = "/proc/";
+    int length = 6;
+    char digits[12];
+    int count = 0;
+    for (unsigned number = static_cast<unsigned>(pid); number != 0; number /= 10) {
+        digits[count++] = static_cast<char>('0' + number % 10);
+    }
+    while (count > 0) {
+        path[length++] = digits[--count];
+    }
+    const char tail[] = "/maps";
+    for (const char *c = tail; *c != 0; ++c) {
+        path[length++] = *c;
+    }
+    path[length] = 0;
+    maps_size = 0;
+    const int fd = open(path, 0);
+    if (fd < 0) {
+        return;
+    }
+    for (;;) {
+        const long got = read(fd, maps_text + maps_size, sizeof(maps_text) - 1 - maps_size);
+        if (got <= 0) {
+            break;
+        }
+        maps_size += got;
+    }
+    close(fd);
+    maps_text[maps_size] = 0;
+}
+
+uint64_t parse_hex(const char *&at) {
+    uint64_t value = 0;
+    for (;; ++at) {
+        const char c = *at;
+        if (c >= '0' && c <= '9') {
+            value = value * 16 + static_cast<uint64_t>(c - '0');
+        } else if (c >= 'a' && c <= 'f') {
+            value = value * 16 + static_cast<uint64_t>(c - 'a' + 10);
+        } else {
+            return value;
+        }
+    }
+}
+
+bool print_mapped(const char *label, uint64_t value) {
+    const char *at = maps_text;
+    while (*at != 0) {
+        const char *line = at;
+        const uint64_t low = parse_hex(at);
+        ++at;
+        const uint64_t high = parse_hex(at);
+        while (*at == ' ') {
+            ++at;
+        }
+        while (*at != ' ' && *at != 0) {  // permissions
+            ++at;
+        }
+        ++at;
+        const uint64_t file_offset = parse_hex(at);
+        for (int field = 0; field < 2 && *at != 0; ++field) {  // device, inode
+            while (*at == ' ') {
+                ++at;
+            }
+            while (*at != ' ' && *at != '\n' && *at != 0) {
+                ++at;
+            }
+        }
+        while (*at == ' ') {
+            ++at;
+        }
+        const char *name = at;
+        while (*at != '\n' && *at != 0) {
+            ++at;
+        }
+        const char *end = at;
+        if (*at == '\n') {
+            ++at;
+        }
+        (void)line;
+        if (value < low || value >= high) {
+            continue;
+        }
+        if (name == end) {
+            dprintf(1, " %s=anon+%#llx", label, static_cast<unsigned long long>(value & 0xfff));
+        } else if (*name == '/') {
+            const char *base = name;
+            for (const char *c = name; c < end; ++c) {
+                if (*c == '/') {
+                    base = c + 1;
+                }
+            }
+            dprintf(1, " %s=%.*s+%#llx", label, static_cast<int>(end - base), base,
+                    static_cast<unsigned long long>(file_offset + value - low));
+        } else {
+            dprintf(1, " %s=%.*s+%#llx", label, static_cast<int>(end - name), name,
+                    static_cast<unsigned long long>(value - low));
+        }
+        return true;
+    }
+    return false;
+}
+
 void print_value(const char *label, uint64_t value) {
     for (int i = 0; i < range_count; ++i) {
         if (value >= ranges[i].low && value < ranges[i].high) {
@@ -196,6 +322,9 @@ void print_value(const char *label, uint64_t value) {
         info.fbase != nullptr) {
         dprintf(1, " %s=%s+%#llx", label, base_name(info.fname),
                 static_cast<unsigned long long>(value - reinterpret_cast<uint64_t>(info.fbase)));
+        return;
+    }
+    if (value > 0x10000 && maps_size > 0 && print_mapped(label, value)) {
         return;
     }
     dprintf(1, " %s=%#llx", label, static_cast<unsigned long long>(value));
@@ -335,7 +464,10 @@ bool set_regs(int pid, Regs &regs) {
     return ptrace(kPtraceSetRegSet, pid, reinterpret_cast<void *>(kNtPrStatus), &vec) == 0;
 }
 
+int g_tracee;
+
 void print_regs(const char *tag, const Regs &regs) {
+    load_maps(g_tracee);
     dprintf(1, "  regs %s", tag);
     char label[8];
     for (int i = 0; i < 31; ++i) {
@@ -477,6 +609,7 @@ void ptrace_mode() {
     if (pid == 0) {
         tracee();
     }
+    g_tracee = pid;
     if (wait_stop(pid) != kSigStop) {
         fail("the tracee did not stop at its raise");
         return;
@@ -854,11 +987,74 @@ void crash_with_sibling() {
     abort();
 }
 
+// Run the program again with address-space randomization off. The
+// personality is inherited by exec and applies to the new image's layout.
+constexpr unsigned long kQuery = 0xffffffffUL;
+constexpr unsigned long kAddrNoRandomize = 0x0040000UL;
+
+bool randomization_off() {
+    const int current = personality(kQuery);
+    return current >= 0 && (static_cast<unsigned long>(current) & kAddrNoRandomize) != 0;
+}
+
+// Returns only if the process cannot be executed again.
+void execute_without_randomization() {
+    static char arguments[4096];
+    static char *vector[64];
+    const int fd = open("/proc/self/cmdline", 0);
+    if (fd < 0) {
+        return;
+    }
+    long used = 0;
+    for (;;) {
+        const long got = read(fd, arguments + used, sizeof(arguments) - 1 - used);
+        if (got <= 0) {
+            break;
+        }
+        used += got;
+    }
+    close(fd);
+    arguments[used] = 0;
+    size_t count = 0;
+    for (long at = 0; at < used && count < 63;) {
+        vector[count++] = arguments + at;
+        while (at < used && arguments[at] != 0) {
+            ++at;
+        }
+        ++at;
+    }
+    vector[count] = nullptr;
+    execv("/proc/self/exe", vector);
+}
+
+bool without_randomization() {
+    if (randomization_off()) {
+        return true;
+    }
+    if (getenv("AOT_DEBUG_REEXEC") != nullptr) {
+        dprintf(1, "FAIL randomization is still on after the program ran again\n");
+        return false;
+    }
+    const int current = personality(kQuery);
+    if (current < 0 || personality(static_cast<unsigned long>(current) | kAddrNoRandomize) < 0) {
+        dprintf(1, "FAIL the personality cannot be set\n");
+        return false;
+    }
+    setenv("AOT_DEBUG_REEXEC", "1", 1);
+    execute_without_randomization();
+    dprintf(1, "FAIL the program cannot be run again\n");
+    return false;
+}
+
 __attribute__((constructor)) void run() {
     const char *mode = getenv("AOT_DEBUG_MODE");
     if (mode == nullptr) {
         return;
     }
+    if (!without_randomization()) {
+        _exit(0);
+    }
+    dprintf(1, "randomization: off\n");
     if (strcmp(mode, "crash-memcpy") == 0) {
         fill_data();
         crash_memcpy();

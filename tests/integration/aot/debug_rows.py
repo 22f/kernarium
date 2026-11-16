@@ -6,9 +6,17 @@ debugs inside the rewritten libz.so and libc.so. Each mode runs twice without
 the component and once with it. A mode that crashes is judged by the
 tombstone the crash reporter wrote; a mode that debugs prints its record. The
 runs are then compared line by line: a line that names something the engine
-itself chooses differently from run to run (an address under ASLR, a process
-id, a time) is masked field by field where the two runs without the component
-differ, and every other line must be the same in all three runs.
+itself chooses differently from run to run (a process id, a time, a random
+value) is masked field by field where the runs without the component differ,
+and every other line must be the same in all of them.
+
+The program runs with address-space randomization off (the guest kernel's
+layout), but the image's userspace still places libraries and stacks at
+random: a register value that points into a mapping is therefore named by it
+(the file and the offset in it, the mapping's name and the offset in it, or
+the offset in its page) before the runs are compared, and such a name that
+differs between two runs of the engine alone fails the row instead of being
+masked. Only values that name nothing can be masked, and only a few.
 """
 
 from __future__ import annotations
@@ -22,6 +30,11 @@ PROGRAM = "/data/local/tmp/libaotdebug.so"
 # Runs of each mode without the component: a field is masked when any two differ,
 # so the more runs, the fewer fields that differ by chance in two runs only.
 OFF_RUNS = 3
+# The program prints this once address-space randomization is off for it.
+RANDOMIZATION_OFF = "randomization: off"
+# The most fields of one mode the engine's own runs may differ in once the
+# values that point into a mapping are named: process ids and random values.
+MAX_MASKED = 16
 MODES = ("crash-memcpy", "crash-cross", "crash-abort", "crash-sibling", "ptrace", "sibling")
 # The shell's exit status of a process that died of the signal.
 CRASH_STATUS = {"crash-memcpy": 139, "crash-cross": 139, "crash-abort": 134, "crash-sibling": 134}
@@ -44,18 +57,54 @@ def split_blocks(text: str) -> list[str]:
     return re.split(r"^--- --- ---.*$", text, flags=re.MULTILINE)
 
 
+MAP_LINE = re.compile(
+    r"^[ \t]+([0-9a-f]{8})'?([0-9a-f]{8})-([0-9a-f]{8})'?([0-9a-f]{8}) \S+[ \t]+([0-9a-f]+)[ \t]+[0-9a-f]+"
+    r"(?:[ \t]+(\S.*?))?(?: \(BuildId: \w+\))?[ \t]*$", re.MULTILINE)
+
+
+def parse_maps(text: str) -> list[tuple[int, int, int, str]]:
+    """The tombstone's memory map: (low, high, file offset, name)."""
+    return [(int(m.group(1) + m.group(2), 16), int(m.group(3) + m.group(4), 16) + 1,
+             int(m.group(5), 16), m.group(6) or "") for m in MAP_LINE.finditer(text)]
+
+
+def name_value(value: int, maps: list[tuple[int, int, int, str]]) -> str | None:
+    """Where a value points, if into a mapping, as the run does not choose it:
+    a file's name and the offset in the file, an anonymous mapping's name and
+    the offset in it, or the offset in the page of an unnamed one."""
+    for low, high, offset, name in maps:
+        if low <= value < high:
+            if name.startswith("/"):
+                return f"@{name.rsplit('/', 1)[1]}+{offset + value - low:#x}"
+            if name:
+                # A thread's stack is named by its thread id.
+                return f"@{re.sub(r':[0-9]+]$', ':*]', name)}+{value - low:#x}"
+            return f"@anon+{value & 0xfff:#x}"
+    return None
+
+
+def name_registers(line: str, maps: list[tuple[int, int, int, str]]) -> str:
+    def replace(found: re.Match) -> str:
+        return name_value(int(found.group(0), 16), maps) or found.group(0)
+    return re.sub(r"\b[0-9a-f]{16}\b", replace, line)
+
+
 def digest_tombstone(text: str) -> list[str]:
     """The lines of a tombstone that describe the crash, one per line, tagged
     by what may vary: `~` lines are compared field by field (registers,
-    addresses, process ids), `=` lines must be equal in every run."""
+    process ids), `=` lines must be equal in every run. A register that
+    points into a mapping is named by it (name_value)."""
     blocks = split_blocks(text)
+    maps = parse_maps(text)
     out: list[str] = []
     section = "head"
+    first_row = 0
     for line in blocks[0].splitlines():
         if line.startswith(("Timestamp:", "Process uptime:")):
             continue
         if line.startswith("memory near "):
             section = "keep" if line.startswith(("memory near pc", "memory near lr")) else "skip"
+            first_row = 0
             if section == "keep":
                 out.append("= " + re.sub(r"\(.*", "", line).strip())
             continue
@@ -73,9 +122,19 @@ def digest_tombstone(text: str) -> list[str]:
             # the page it lies is the guest's.
             out.append("= " + re.sub(r"fault addr 0x[0-9a-f]*([0-9a-f]{3}) ", r"fault addr page+0x\1 ", line))
             continue
-        varying = (line.startswith("pid:") or re.match(r"\s+(x\d+|lr|esr)\s", line)
-                   or (section == "keep" and re.match(r"\s+[0-9a-f]{16} ", line)))
-        out.append(("~ " if varying else "= ") + line)
+        if section == "keep":
+            row = re.match(r"(\s+)([0-9a-f]{16}) (.*)", line)
+            if row:
+                # The words of code at a place in the dump: where the dump
+                # starts is the run's address, not the guest's.
+                address = int(row.group(2), 16)
+                first_row = first_row or address
+                out.append(f"= {row.group(1)}+{address - first_row:#x} {row.group(3)}")
+                continue
+        if re.match(r"\s+(x\d+|lr|esr)\s", line):
+            out.append("~ " + name_registers(line, maps))
+            continue
+        out.append(("~ " if line.startswith("pid:") else "= ") + line)
     for block in blocks[1:]:
         for line in block.splitlines():
             match = re.match(r"pid: \d+, ppid: \d+, tid: \d+, name: (\S+)", line)
@@ -138,6 +197,9 @@ def run_mode(shell: Callable[..., str], mode: str) -> list[str]:
               if line.startswith("FAIL") or re.search(r"(=|: )NO\b", line) or "IS NOT" in line]
     if failed:
         raise DebugFailure(f"{mode} reported:\n" + "\n".join(failed) + f"\n--- output:\n{output}")
+    if lines.count(RANDOMIZATION_OFF) != 1:
+        raise DebugFailure(f"{mode}: the program did not run with address-space randomization off "
+                           f"(it prints {RANDOMIZATION_OFF!r} once when it does):\n{output}")
     if mode in CRASH_STATUS:
         record = digest_tombstone(fetch_tombstone(shell))
         verify_tombstone(mode, record)
@@ -194,9 +256,12 @@ def verify_record(mode: str, record: list[str]) -> None:
             raise DebugFailure(f"sibling: {len(rounds)} hit rounds and {len(goes_on)} continuations, not 2 and 2:\n{text}")
 
 
-# Fields of a register record that are symbolic (the position in a library or
-# the stack) and so never differ between two runs of one engine.
+# Fields of a register record that never differ between two runs of one
+# engine, whatever they hold.
 STRICT_FIELDS = ("pc=", "sp=", "nzcv=")
+# A value named by what it points into (a library, a buffer, a mapping and an
+# offset in it): never a value the run chooses, so never masked.
+SYMBOLIC = re.compile(r"(?:\w+=)?[@A-Za-z\[][^\s=]*\+(?:0x[0-9a-f]+|0)")
 
 
 def maskable(line: str) -> bool:
@@ -206,7 +271,9 @@ def maskable(line: str) -> bool:
 def compare(mode: str, off_runs: list[list[str]], with_it: list[str]) -> tuple[int, int]:
     """The records of the runs without the component and of the run with it;
     returns (fields compared, fields masked). A field is masked when two of
-    the runs without the component differ in it."""
+    the runs without the component differ in it and it names nothing (a
+    process id, a random value); a named location that differs, or more than
+    MAX_MASKED masked fields, fail the row."""
     if len({len(run) for run in off_runs + [with_it]}) != 1:
         raise DebugFailure(f"{mode}: the runs have "
                            f"{[len(run) for run in off_runs + [with_it]]} lines")
@@ -220,7 +287,7 @@ def compare(mode: str, off_runs: list[list[str]], with_it: list[str]) -> tuple[i
             for fields in zip(*columns):
                 values = set(fields[:-1])
                 if len(values) > 1:
-                    if fields[0].startswith(STRICT_FIELDS):
+                    if fields[0].startswith(STRICT_FIELDS) or any(SYMBOLIC.fullmatch(v) for v in values):
                         raise DebugFailure(f"{mode} line {number}: the engine's own runs differ in {sorted(values)}")
                     masked += 1
                     continue
@@ -234,4 +301,7 @@ def compare(mode: str, off_runs: list[list[str]], with_it: list[str]) -> tuple[i
                 raise DebugFailure(f"{mode} line {number}: the engine's own runs differ:\n" + "\n".join(engine))
             if engine[0] != third:
                 raise DebugFailure(f"{mode} line {number}: {engine[0]!r} without the component, {third!r} with it")
+    if masked > MAX_MASKED:
+        raise DebugFailure(f"{mode}: {masked} fields differ between the engine's own runs, more than the "
+                           f"{MAX_MASKED} that can be process ids and random values")
     return compared, masked
