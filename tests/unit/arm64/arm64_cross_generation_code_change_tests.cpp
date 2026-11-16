@@ -25,6 +25,12 @@
  *   kernel-write-data-alias
  *                The same, with A holding the frame read-write only: a
  *                process_vm_writev() into a writable view of a dual mapping.
+ *   kernel-write-own-alias
+ *                B maps the page RX and runs it, and RW at another address;
+ *                the kernel writes the frame through the RW view and calls
+ *                darwin_uml_vm_invalidate_code for B's generation at that
+ *                address: a ptrace or process_vm_writev() into a dual-view
+ *                JIT, or an AArch32 cacheflush() of its writable view.
  *   same-alias   Control: one process, the page RX at one address and RW at
  *                another; the store and the IC IVAU go to the RW alias.
  *   one-vcpu / two-vcpus: whether one engine object (one vCPU) runs both
@@ -44,7 +50,7 @@ using uml::testing::require;
 
 enum class Case {
 	cross_rw, cross_rwx, ptrace_third, kernel_lazy_target,
-	kernel_data_alias, same_alias
+	kernel_data_alias, kernel_own_alias, same_alias
 };
 
 [[nodiscard]] const char *name(Case c) noexcept
@@ -60,6 +66,8 @@ enum class Case {
 		return "kernel-write-lazy-target";
 	case Case::kernel_data_alias:
 		return "kernel-write-data-alias";
+	case Case::kernel_own_alias:
+		return "kernel-write-own-alias";
 	case Case::same_alias:
 		return "same-alias";
 	}
@@ -132,11 +140,13 @@ bool run_case(uml::cpu::EngineKind kind, Case c, bool two_engines,
 			a_view = std::make_unique<Map>(a, shared_base,
 				shared.descriptor(), PROT_READ | PROT_WRITE, false);
 			break;
+		case Case::kernel_own_alias:
 		case Case::same_alias:
 			b_alias = std::make_unique<Map>(b, alias_base,
 				shared.descriptor(), PROT_READ | PROT_WRITE, false);
-			b_writer = std::make_unique<Map>(b, writer_base,
-				writer.descriptor(), PROT_READ | PROT_EXEC, true);
+			if (c == Case::same_alias)
+				b_writer = std::make_unique<Map>(b, writer_base,
+					writer.descriptor(), PROT_READ | PROT_EXEC, true);
 			break;
 		}
 
@@ -174,6 +184,13 @@ bool run_case(uml::cpu::EngineKind kind, Case c, bool two_engines,
 				shared.put32(0, movz_x0(2));
 				require(darwin_uml_static_vm_invalidate_code_generation(
 					a, shared_base, 4) == 0);
+			});
+			break;
+		case Case::kernel_own_alias:
+			other_side([&](uml::cpu::CpuEngine &) {
+				shared.put32(0, movz_x0(2));
+				require(darwin_uml_static_vm_invalidate_code_generation(
+					b, alias_base, 4) == 0);
 			});
 			break;
 		case Case::same_alias:
@@ -233,7 +250,8 @@ int main(int argc, char **argv)
 			require(arm64::acquire_jit_cache_run_session());
 		for (const auto c : {Case::same_alias, Case::cross_rw,
 			     Case::cross_rwx, Case::ptrace_third,
-			     Case::kernel_lazy_target, Case::kernel_data_alias})
+			     Case::kernel_lazy_target, Case::kernel_data_alias,
+			     Case::kernel_own_alias})
 			for (const bool two : {false, true})
 				if (!run_case(kind, c, two, generation))
 					++stale;
