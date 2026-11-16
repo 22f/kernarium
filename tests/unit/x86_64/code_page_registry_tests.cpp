@@ -793,8 +793,44 @@ void test_a_repeat_registration_waits_for_the_pending_one()
 	require(memory.cleared == 2, "a settled registration did not clear its debt");
 }
 
+/* E8: tiering. A generation whose participants are a gadget engine's
+ * (write translations in a table) and a JIT's (a retirer of its own) has both
+ * retired for the writer a frame's debt names, and the registration returns
+ * only after both: a frame registered by either engine is safe against a
+ * store that the other's translation of it would have taken. */
+void test_gadget_and_jit_participants_of_one_generation_are_both_retired()
+{
+	ScriptedMemory memory;
+	Generation generation{9600};
+	memory.writers.push_back({9600, page_at(9)});
+	generation.translations[native_tlb_index(page_at(9))].write_page = page_at(9);
+	/* A second entry, for a page the debt does not name, stays. */
+	generation.translations[native_tlb_index(page_at(10))].write_page = page_at(10);
+	const auto result = uml::cpu::x86_64::register_frame(
+		memory, nullptr, nullptr, page_at(51));
+	require(result.status == uml::cpu::x86_64::FrameRegistration::settled,
+		"a frame owed to both kinds of participant did not settle");
+	require(generation.translations[native_tlb_index(page_at(9))].write_page == 1,
+		"the gadget participant's write translation was not retired");
+	require(generation.retired.size() == 1 && generation.retired[0] == page_at(9),
+		"the JIT participant was not told to retire the writer's page");
+	require(generation.translations[native_tlb_index(page_at(10))].write_page ==
+			page_at(10),
+		"an unrelated write translation was retired");
+	/* The fallback retires every page of both kinds. */
+	memory.unnameable = true;
+	const auto global = uml::cpu::x86_64::register_frame(
+		memory, nullptr, nullptr, page_at(52));
+	require(global.status == uml::cpu::x86_64::FrameRegistration::settled &&
+			generation.retired.size() == 2 &&
+			generation.retired[1] == CodePageRegistry::all_pages &&
+			generation.translations[native_tlb_index(page_at(10))].write_page == 1,
+		"the global retirement left a kind of participant behind");
+}
+
 int main()
 {
+	test_gadget_and_jit_participants_of_one_generation_are_both_retired();
 	test_a_repeat_registration_waits_for_the_pending_one();
 	test_membership_is_counted();
 	test_membership_is_exact_behind_a_shared_bit();
