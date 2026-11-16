@@ -50,6 +50,9 @@ SLOT_COUNT = 0xF8
 # 1 once text page p matched its stored hash (the binder writes them
 # between entries; the code only reads them).
 SLOT_PSTATE = 0x100
+# Where a call to a memory-access routine keeps the guest's x30 (the call
+# overwrites it): the last 8 bytes of the 0x110-byte frame.
+SLOT_LR = 0x108
 # CrossTable::Entry (aot_runtime.hpp): the offsets the cross-library thunk
 # reads from the entry the host answers with.
 CROSS_BIAS, CROSS_PAGES = 16, 24
@@ -75,6 +78,11 @@ ABSOLUTE = 0x100
 PAGE = 4096
 ENTRY_MAGIC = b"UMLAOTB2"
 HEADER_SIZE = 256
+# How a plain load or store reaches its software-TLB probe: inline (the
+# reference), by a call that returns the compare (the miss exit stays at the
+# site), or by a call that also takes the miss exit (the site names its
+# entry-table slot in a marker word).
+MEMORY_CALLS = ("inline", "probe", "probe-miss")
 LIB_RECORD_SIZE = 256
 
 
@@ -220,12 +228,14 @@ TPIDR_MASK = 0xffffffe0
 # emitter that knows a word's purpose tags it, and the untagged words of an
 # instruction take the instruction's class. "mem.probe" is the inline TLB
 # probe of plain loads and stores only: an atomic's probe is part of
-# "atomic", a copy's or set's of "mops.site" and "mops.thunk".
+# "atomic", a copy's or set's of "mops.site" and "mops.thunk". With
+# memory_call other than inline the site's save, call, restore and marker
+# words are "mem.call" and the shared routines "mem.routine".
 CENSUS = ("other", "insn", "spill", "branch", "pcrel", "step", "hint",
           "atomic", "mops.site", "mem.ea", "mem.probe", "mem.access",
           "mem.wb", "charge", "gate", "stub.mm", "stub.st", "stub.xu",
           "stub.ma", "stub.xb", "exits", "mops.thunk", "table", "src",
-          "stub.refill")
+          "stub.refill", "mem.call", "mem.routine")
 CENSUS_CODE = {name: code for code, name in enumerate(CENSUS)}
 CENSUS_OUTER = {"branch_imm": "branch", "condbranch": "branch",
                 "compbranch": "branch", "testbranch": "branch",
@@ -256,8 +266,13 @@ class Library:
 
     def __init__(self, index: int, name: str, elf: elf64.Elf,
                  decoder: a64decode.Decoder, layout: dict[str, int],
-                 count_retired: bool = False) -> None:
+                 count_retired: bool = False,
+                 memory_call: str = "inline") -> None:
+        if memory_call not in MEMORY_CALLS:
+            raise ValueError(f"unknown memory_call {memory_call!r}")
         self.count_retired = count_retired
+        self.memory_call = memory_call
+        self.mem_routines: set[tuple[str, int, int]] = set()
         self.index = index
         self.name = name
         self.elf = elf
@@ -462,6 +477,7 @@ class Library:
         asm = self.asm = A.Assembler()
         self.xb_emitted = {}
         self.refill_used = set()
+        self.mem_routines = set()
         asm.label("UNIT")
         emit_exits(asm, self)
         self.tag("exits", 0)
@@ -472,6 +488,9 @@ class Library:
         emit_mops_thunks(asm, self)
         self.stats.words["mops_thunks"] += len(asm._w) - before
         self.tag("mops.thunk", before)
+        before = len(asm._w)
+        emit_memory_routines(asm, self)
+        self.tag("mem.routine", before)
         before = len(asm._w)
         emit_refill_stubs(asm, self)
         self.tag("stub.refill", before)
@@ -1009,16 +1028,20 @@ class Library:
         if literal is None and base_g != "sp":
             asm.word(A.ubfx(T0, ea, 0, 56))
         entry = 0 if load else 16
-        self.fn_mm.append((offset, "LOAD" if load else "STORE", total))
-        asm.word(A.ubfx(T2, T0, 12, 14))
-        asm.word(A.add_reg(T2, TLB, T2, shift=0, amount=5))
-        asm.word(A.ldp_x(T1, T2, T2, entry))
-        if total > 1:
-            asm.word(A.add_reg(T2, T2, T0))
-            asm.word(A.add_imm(T0, T0, total - 1))
-        asm.word(A.eor_reg(T1, T1, T0, shift=1, amount=12))
-        asm.cbz(T1, self.lab("MM", offset), sf=1, nz=True)
-        self.tag("mem.probe", census_start)
+        if self.memory_call != "inline":
+            self._call_probe(offset, "LOAD" if load else "STORE", total)
+            self.tag("mem.call", census_start)
+        else:
+            self.fn_mm.append((offset, "LOAD" if load else "STORE", total))
+            asm.word(A.ubfx(T2, T0, 12, 14))
+            asm.word(A.add_reg(T2, TLB, T2, shift=0, amount=5))
+            asm.word(A.ldp_x(T1, T2, T2, entry))
+            if total > 1:
+                asm.word(A.add_reg(T2, T2, T0))
+                asm.word(A.add_imm(T0, T0, total - 1))
+            asm.word(A.eor_reg(T1, T1, T0, shift=1, amount=12))
+            asm.cbz(T1, self.lab("MM", offset), sf=1, nz=True)
+            self.tag("mem.probe", census_start)
         census_start = len(asm._w)
         # ---- the access, through the entry's host delta
         if pair:
@@ -1080,6 +1103,41 @@ class Library:
         self.stats.inlined += 1
         self.stats.kinds["pair" if pair else "mem"] += 1
         return True
+
+    def _call_probe(self, offset: int, kind: str, total: int) -> None:
+        """The probe by a call. T0 holds the address (the strip is done) and
+        the routine leaves exactly what the inline probe leaves: T2 the host
+        address (an access of more than one byte: with T0 the address of
+        its last byte), T1 zero on a hit. The call overwrites x30, the
+        guest's link register, so the site keeps it in the frame slot
+        SLOT_LR across the call and restores it before anything else reads
+        it (the miss exit, the access, a refill). Neither the routine nor
+        the call changes a flag.
+
+        probe: the routine returns the compare and the site branches to its
+        own miss stub, as the inline probe does.
+
+        probe-miss: the routine takes the miss exit itself. The site has no
+        stub; it names its slot in the entry table in a marker word, a MOVZ
+        into XZR (it has no effect) holding slot / 4 in 18 bits, which the
+        routine reads at the return address less 8 on a miss. The routine
+        exists once per 1 MiB of the table (the slot's higher bits)."""
+        asm = self.asm
+        asm.word(A.str_x(30, 31, SLOT_LR))
+        if self.memory_call == "probe":
+            self.mem_routines.add((kind, total, 0))
+            asm.bl(f"MEMP_{kind}_{total}")
+            asm.word(A.ldr_x(30, 31, SLOT_LR))
+            self.fn_mm.append((offset, kind, total))
+            asm.cbz(T1, self.lab("MM", offset), sf=1, nz=True)
+            return
+        slot = offset - self.table_base
+        chunk = slot >> 20
+        self.mem_routines.add((kind, total, chunk))
+        value = (slot >> 2) & 0x3ffff
+        asm.word(A.movz(31, value & 0xffff, value >> 16))
+        asm.bl(f"MEMC_{kind}_{total}_{chunk}")
+        asm.word(A.ldr_x(30, 31, SLOT_LR))
 
     def _simd_struct(self, offset: int, word: int, cls: str) -> bool:
         """LDn, STn, LDnR and the lane forms: the host executes the same
@@ -1694,6 +1752,45 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     asm.word(A.br(T2))
 
 
+def emit_memory_routines(asm: A.Assembler, library: "Library") -> None:
+    """The routines the call sites of `_call_probe` enter: the inline probe
+    word for word, then a return. They sit before the refill routines at
+    the unit's end, as every shared routine does, so a `bl` reaches them by
+    the unit's own limit (the +-128 MiB of b). Only the routines a site
+    of this library calls exist."""
+    for kind, total, chunk in sorted(library.mem_routines):
+        entry = 0 if kind == "LOAD" else 16
+        probe = library.memory_call == "probe"
+        name = f"MEMP_{kind}_{total}" if probe else \
+            f"MEMC_{kind}_{total}_{chunk}"
+        asm.label(name)
+        asm.word(A.ubfx(T2, T0, 12, 14))
+        asm.word(A.add_reg(T2, TLB, T2, shift=0, amount=5))
+        asm.word(A.ldp_x(T1, T2, T2, entry))
+        if total > 1:
+            asm.word(A.add_reg(T2, T2, T0))
+            asm.word(A.add_imm(T0, T0, total - 1))
+        asm.word(A.eor_reg(T1, T1, T0, shift=1, amount=12))
+        if probe:
+            asm.word(A.ret_())
+            continue
+        asm.cbz(T1, f"{name}_miss", sf=1, nz=True)
+        asm.word(A.ret_())
+        # A miss: the site's marker names its slot; the guest's x30 comes
+        # back before the refill saves it. The refill routine of this
+        # (kind, total) takes T0 (the last byte), T1 (the slot).
+        asm.label(f"{name}_miss")
+        asm.word(A.ldst_unscaled(T2, 30, -8, 2, load=True))
+        asm.word(A.ubfx(T1, T2, 5, 18))
+        asm.word(A.ubfm(T1, T1, 62, 61))
+        if chunk:
+            asm.word(A.movz(T2, chunk << 4, 1, sf=0))
+            asm.word(A.orr_reg(T1, T1, T2))
+        asm.word(A.ldr_x(30, 31, SLOT_LR))
+        library.refill_used.add((kind, total, 0))
+        asm.b(f"REFILL_{kind}_{total}")
+
+
 def emit_refill_stubs(asm: A.Assembler, library: "Library") -> None:
     """The routines a cold miss stub enters, after the functions that name
     them: REFILL_<kind>_<bytes> with T0 = the address the probe formed (an
@@ -1925,12 +2022,12 @@ def resolve_library(root: pathlib.Path, mounts: dict[str, pathlib.Path],
 
 def build_unit(job: tuple) -> dict:
     """One library to its self-contained unit (runs in a worker process)."""
-    index, name, file_path, count_retired = job
+    index, name, file_path, count_retired, memory_call = job
     decoder = a64decode.Decoder(a64decode.DEFAULT_TABLE)
     layout = read_layout(LAYOUT_HEADER)
     data = pathlib.Path(file_path).read_bytes()
     library = Library(index, name, elf64.Elf(data), decoder, layout,
-                      count_retired)
+                      count_retired, memory_call)
     segment = library.segment
     digests = []
     pages = []
@@ -1943,6 +2040,7 @@ def build_unit(job: tuple) -> dict:
     unit = library.build(digests, b"".join(pages))
     unit.update({
         "index": index,
+        "memory_call": library.memory_call,
         "path": name,
         "sha256": library.elf.sha256,
         "build_id": library.elf.build_id,
@@ -2036,6 +2134,7 @@ def build_blob(units: list[dict], layout: dict[str, int],
             base + unit["hashes_at"])
     manifest = {
         "release_id": release_id,
+        "memory_call": units[0]["memory_call"] if units else "inline",
         "blob_bytes": len(blob),
         # What is not in a unit: the header and library records, ENTER, the
         # page-digest hash, and the padding that aligns the units.
@@ -2092,6 +2191,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="count the instructions each entry starts and "
                         "report that count (a diagnostics build, to measure "
                         "the budget's bound independently)")
+    parser.add_argument("--memory-call", choices=MEMORY_CALLS,
+                        default="inline",
+                        help="how a plain load or store reaches its probe: "
+                        "inline (the product), or a call to a routine of "
+                        "the unit (an experiment, see tools/aot/README.md)")
     parser.add_argument("--jobs", type=int, default=0,
                         help="worker processes (default: about half the CPUs)")
     arguments = parser.parse_args(argv)
@@ -2100,11 +2204,12 @@ def main(argv: list[str] | None = None) -> int:
         guest, _, directory = item.partition("=")
         mounts[guest.rstrip("/")] = pathlib.Path(directory)
     count = arguments.count_retired
+    call = arguments.memory_call
     jobs = [(index, path, str(resolve_library(arguments.root, mounts, path)),
-             count) for index, path in enumerate(arguments.library)]
+             count, call) for index, path in enumerate(arguments.library)]
     for item in arguments.generated:
         guest, _, host = item.partition("=")
-        jobs.append((len(jobs), guest, host, count))
+        jobs.append((len(jobs), guest, host, count, call))
     workers = arguments.jobs or max(1, (os.cpu_count() or 2) // 2)
     order = sorted(jobs, key=lambda job: -pathlib.Path(job[2]).stat().st_size)
     if workers == 1 or len(jobs) == 1:

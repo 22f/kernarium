@@ -60,6 +60,10 @@ set(UML_AOT_LIBRARIES
     "Libraries of the release to rewrite, as absolute guest paths")
 option(UML_AOT_DIAGNOSTICS
     "Compose the AOT runtime variant with its counters, report and test switches (never for a product)" OFF)
+set(UML_AOT_MEMORY_CALL "inline" CACHE STRING
+    "How rewritten loads and stores reach their TLB probe: inline (the product), probe (a call returns the compare) or probe-miss (a call also takes the miss exit); the other two are experiments")
+set_property(CACHE UML_AOT_MEMORY_CALL PROPERTY STRINGS
+    inline probe probe-miss)
 option(UML_AOT_COUNT_RETIRED
     "With UML_AOT_DIAGNOSTICS, rewrite the libraries to count each instruction an entry runs (the blob then differs from the product's)" OFF)
 set(UML_AOT OFF)

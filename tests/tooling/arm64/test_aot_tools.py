@@ -144,11 +144,12 @@ class FakeElf:
         return self.code[vaddr - self.base:vaddr - self.base + size]
 
 
-def library_of(words: list[int], functions: list[tuple[int, int]]
-               ) -> "rewrite.Library":
+def library_of(words: list[int], functions: list[tuple[int, int]],
+               memory_call: str = "inline") -> "rewrite.Library":
     layout = rewrite.read_layout(rewrite.LAYOUT_HEADER)
     return rewrite.Library(0, "/test/lib.so", FakeElf(words, functions),
-                           a64decode.Decoder(), layout)
+                           a64decode.Decoder(), layout,
+                           memory_call=memory_call)
 
 
 def unit_words(library: "rewrite.Library") -> list[int]:
@@ -206,6 +207,121 @@ class AssemblerFarBranchTests(unittest.TestCase):
         self.assertIn("128 MiB", str(raised.exception))
         A.b_word((1 << 25) - 1)
         A.b_word(-(1 << 25))
+
+
+class MemoryCallTests(unittest.TestCase):
+    """A plain load or store may reach its probe by a call to a routine of
+    its unit (an experiment; the inline probe stays the default)."""
+
+    LDR = 0xf9400020      # ldr x0, [x1]
+    STR = 0xf9000022      # str x2, [x1]
+    RET = RET
+
+    def build(self, mode: str, words=None, functions=None):
+        words = words or [self.LDR, self.STR, self.RET]
+        functions = functions or [(0, 4 * len(words))]
+        library = library_of(words, functions, mode)
+        unit = unit_words(library)
+        return library, unit
+
+    def calls(self, library, unit):
+        """The word index of every bl in the unit and its target address."""
+        found = []
+        for index, word in enumerate(unit):
+            if word >> 26 == 0b100101:
+                delta = word & 0x3ffffff
+                delta -= (delta & 0x2000000) << 1
+                found.append((index, 4 * (index + delta)))
+        return found
+
+    def test_the_default_is_the_inline_probe(self) -> None:
+        library, _ = self.build("inline")
+        census = library.stats.census
+        self.assertEqual(census["mem.call"], 0)
+        self.assertEqual(census["mem.routine"], 0)
+        self.assertEqual(census["mem.probe"], 2 * 8 * 4)
+
+    def test_an_unknown_mode_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            library_of([self.RET], [(0, 4)], "everywhere")
+
+    def test_probe_call_keeps_the_stub_and_moves_the_compare(self) -> None:
+        library, unit = self.build("probe")
+        census = library.stats.census
+        self.assertEqual(sum(census.values()), 4 * len(unit))
+        self.assertEqual(census["other"], 0)
+        self.assertEqual(census["mem.probe"], 0)
+        # untag, save x30, call, restore x30, branch to the stub: five words
+        # a site, and the two-word stub is still there.
+        self.assertEqual(census["mem.call"], 2 * 5 * 4)
+        self.assertEqual(census["stub.mm"], 2 * 2 * 4)
+        # the probe word for word, without the branch, and a return
+        self.assertEqual(census["mem.routine"], 2 * 7 * 4)
+        self.assertEqual(census["stub.refill"], 2 * 2 * 4)
+        calls = self.calls(library, unit)
+        self.assertEqual(len(calls), 2)
+        asm = library.asm
+        self.assertEqual({target for _, target in calls},
+                         {asm.label_address("MEMP_LOAD_8"),
+                          asm.label_address("MEMP_STORE_8")})
+        for index, _ in calls:
+            self.assertEqual(unit[index - 1],
+                             A.str_x(30, 31, rewrite.SLOT_LR))
+            self.assertEqual(unit[index + 1],
+                             A.ldr_x(30, 31, rewrite.SLOT_LR))
+
+    def test_probe_miss_call_has_no_stub_and_names_its_slot(self) -> None:
+        library, unit = self.build("probe-miss")
+        census = library.stats.census
+        self.assertEqual(sum(census.values()), 4 * len(unit))
+        self.assertEqual(census["other"], 0)
+        self.assertEqual(census["mem.probe"], 0)
+        self.assertEqual(census["stub.mm"], 0)
+        # untag, save x30, marker, call, restore x30
+        self.assertEqual(census["mem.call"], 2 * 5 * 4)
+        # six probe words, the branch to the miss tail, a return, and the
+        # five-word tail
+        self.assertEqual(census["mem.routine"], 2 * 13 * 4)
+        self.assertEqual(census["stub.refill"], 2 * 2 * 4)
+        for index, target in self.calls(library, unit):
+            marker = unit[index - 1]
+            # the routine reads the marker at the return address less 8
+            self.assertEqual((4 * (index + 1)) - 8, 4 * (index - 1))
+            self.assertEqual(marker & 0x1f, 31)           # into XZR
+            self.assertEqual(marker >> 23, 0b110100101)   # MOVZ, 64-bit
+            self.assertEqual(unit[index - 2],
+                             A.str_x(30, 31, rewrite.SLOT_LR))
+        slots = sorted(((unit[i - 1] >> 5) & 0x3ffff) * 4
+                       for i, _ in self.calls(library, unit))
+        self.assertEqual(slots, [0, 4])
+
+    def test_a_slot_beyond_a_mebibyte_has_its_own_routine(self) -> None:
+        count = (3 << 20) // 4 + 8     # the load's slot is 3 MiB + 32
+        words = [NOP] * count + [self.LDR, self.RET]
+        library, unit = self.build(
+            "probe-miss", words, [(4 * count, 4 * count + 8)])
+        asm = library.asm
+        self.assertIn("MEMC_LOAD_8_3", asm._labels)
+        self.assertNotIn("MEMC_LOAD_8_0", asm._labels)
+        # the tail of a later chunk forms the higher bits of the slot (a
+        # movz and an orr more)
+        self.assertEqual(library.stats.census["mem.routine"], 15 * 4)
+        index = self.calls(library, unit)[0][0]
+        slot = 4 * count
+        self.assertEqual(((unit[index - 1] >> 5) & 0x3ffff) * 4,
+                         slot & ((1 << 20) - 1))
+
+    def test_a_pair_and_a_byte_load_use_their_own_routines(self) -> None:
+        ldrb = 0x39400020   # ldrb w0, [x1]
+        ldp = 0xa9400820    # ldp x0, x2, [x1]
+        library, unit = self.build("probe", [ldrb, ldp, self.RET])
+        asm = library.asm
+        self.assertIn("MEMP_LOAD_1", asm._labels)
+        self.assertIn("MEMP_LOAD_16", asm._labels)
+        # a one-byte access has no last-byte arithmetic: six words
+        # (untag at the site) and five in the routine
+        self.assertEqual(library.stats.census["mem.routine"],
+                         (5 + 7) * 4)
 
 
 class SimdRegisterFieldTests(unittest.TestCase):

@@ -32,6 +32,14 @@ Homebrew `erofs-utils` is built without libzstd and cannot read the release
 (CMake fails the configure step when the tool's `--help` does not list
 `zstd`).
 
+`UML_AOT_MEMORY_CALL` (`--memory-call`) selects how a plain load or store
+reaches its TLB probe: `inline` (the product), `probe` (a call to a routine of
+the same unit that returns the compare; the miss exit stays at the site) or
+`probe-miss` (the routine also takes the miss exit; the site names its
+entry-table slot in a marker word). The call saves the guest's x30 in the
+frame's last slot. The two calls are measurement variants of the same
+contract; the differential and the guest runs hold each of them.
+
 Entry points: `ctest -R '^arm64-aot-tools$'` for the encoders, decoder and
 assembler, and `ctest -R '^arm64-aot-differential$'` (a configuration with
 `UML_AOT_DIAGNOSTICS=ON`) for the rewritten libraries against the gadget

@@ -274,6 +274,10 @@ def b_word(delta_words: int) -> int:
     return (0b000101 << 26) | _branch_reach(delta_words)
 
 
+def bl_word(delta_words: int) -> int:
+    return (0b100101 << 26) | _branch_reach(delta_words)
+
+
 def bcond_word(cond: int, delta_words: int) -> int:
     return 0x54000000 | (_s(delta_words, 19) << 5) | cond
 
@@ -302,7 +306,7 @@ def adrp_word(rd: int, delta_pages: int) -> int:
 
 # ---- the assembler -------------------------------------------------------
 
-_B, _BC, _CBZ, _TBZ, _ADRP = range(5)
+_B, _BC, _CBZ, _TBZ, _ADRP, _BL = range(6)
 
 
 class Assembler:
@@ -358,6 +362,10 @@ class Assembler:
         self._sp[self._here()] = (_B, target)
         self._w.append(0)
 
+    def bl(self, target: str) -> None:
+        self._sp[self._here()] = (_BL, target)
+        self._w.append(0)
+
     def bcond(self, cond: int, target: str) -> None:
         self._sp[self._here()] = (_BC, cond, target)
         self._w.append(0)
@@ -399,7 +407,8 @@ class Assembler:
             added = False
             for position, item in sp.items():
                 kind = item[0]
-                if kind == _B or kind == _ADRP or position in expanded:
+                if (kind == _B or kind == _BL or kind == _ADRP or
+                        position in expanded):
                     continue
                 target = item[3] if kind == _TBZ else item[2]
                 index = self._label_index(target)
@@ -421,9 +430,9 @@ class Assembler:
             item = sp[position]
             kind = item[0]
             here = 4 * len(out)
-            if kind == _B:
+            if kind == _B or kind == _BL:
                 delta = self._address(self._label_index(item[1])) - here
-                out.append(b_word(delta // 4))
+                out.append((b_word if kind == _B else bl_word)(delta // 4))
                 last = position + 1
             elif kind == _ADRP:
                 rd, target = item[1], item[2]

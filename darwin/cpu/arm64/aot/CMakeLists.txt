@@ -157,6 +157,15 @@ if(UML_AOT_DIAGNOSTICS)
     list(APPEND _uml_aot_generated_files ${_uml_aot_fixture})
 endif()
 
+if(NOT UML_AOT_MEMORY_CALL MATCHES "^(inline|probe|probe-miss)$")
+    message(FATAL_ERROR
+        "UML_AOT_MEMORY_CALL must be inline, probe or probe-miss")
+endif()
+if(NOT UML_AOT_MEMORY_CALL STREQUAL "inline")
+    list(APPEND _uml_aot_generated_args
+        --memory-call ${UML_AOT_MEMORY_CALL})
+endif()
+
 # Rewrite the libraries into one position-independent blob.
 add_custom_command(
     OUTPUT ${_uml_aot_blob} ${_uml_aot_manifest}
