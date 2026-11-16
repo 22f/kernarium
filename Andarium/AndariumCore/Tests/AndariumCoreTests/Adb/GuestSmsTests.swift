@@ -58,17 +58,54 @@ struct GuestSmsTests {
         // Full-width digits and plus.
         #expect(GuestSms.sender("\u{FF0B}\u{FF18}\u{FF16}\u{FF11}\u{FF12}\u{FF13}\u{FF14}") == "+861234")
         #expect(GuestSms.sender("\u{FF11}\u{FF12}\u{FF13}") == "123")
+        // Full-width letters are the plain letters.
+        #expect(GuestSms.sender("\u{FF22}ank") == "Bank")
         // A name keeps its plain letters and its single spaces; the marks around it go.
         #expect(GuestSms.sender("\u{200F}My\u{00A0}Bank\u{200E}") == "My Bank")
         // What no rule makes plain stays refused.
         #expect(GuestSms.sender("Ba\u{200B}nk") == nil)
         #expect(GuestSms.sender("Bank\u{200D}") == nil)
-        #expect(GuestSms.sender("\u{FF22}ank") == nil)
         #expect(GuestSms.sender("Ban\u{0301}k") == nil)
         #expect(GuestSms.sender("\u{0661}\u{0662}\u{0663}") == nil)
         // The refusal judges the cleaned sender, and says what is wrong with it.
         #expect(GuestSms.refusal(sender: "\u{200E}\u{00A0}", text: "hi") == .noSender)
         #expect(GuestSms.refusal(sender: "\u{200E}+98\u{00A0}912\u{2011}123\u{2013}4567", text: "hi") == nil)
+    }
+
+    /// A number typed on a Chinese or Japanese keyboard comes out in full-width forms and, on a kana
+    /// keyboard, with the prolonged sound mark for a hyphen: it is the number its ASCII form is.
+    @Test func aNumberTypedOnACjkKeyboardIsTheSameNumberAsItsAsciiForm() {
+        let pairs: [(typed: String, ascii: String)] = [
+            ("\u{FF10}\u{FF19}\u{FF10}\u{30FC}\u{FF11}\u{FF12}\u{FF13}\u{FF14}\u{30FC}\u{FF15}\u{FF16}\u{FF17}\u{FF18}", "090-1234-5678"),
+            ("\u{FF0B}\u{FF18}\u{FF11}\u{3000}\u{FF19}\u{FF10}\u{FF08}\u{FF11}\u{FF12}\u{FF13}\u{FF14}\u{FF09}\u{FF15}\u{FF16}\u{FF17}\u{FF18}", "+81 90(1234)5678"),
+            ("\u{FF0B}\u{FF18}\u{FF16}\u{FF0D}\u{FF11}\u{FF12}\u{FF0E}\u{FF13}\u{FF14}", "+86-12.34"),
+            ("\u{FF11}\u{FF12}\u{FF13}\u{FF0D}\u{FF14}\u{FF15}\u{FF16}", "123-456"),
+        ]
+        for (typed, ascii) in pairs {
+            let sender = GuestSms.sender(ascii)
+            #expect(sender != nil, "\(ascii)")
+            #expect(GuestSms.sender(typed) == sender, "\(typed.debugDescription)")
+            #expect(GuestSms.refusal(sender: typed, text: "hi") == nil, "\(typed.debugDescription)")
+        }
+        #expect(GuestSms.sender("\u{FF10}\u{FF19}\u{FF10}\u{30FC}\u{FF11}\u{FF12}\u{FF13}\u{FF14}\u{30FC}\u{FF15}\u{FF16}\u{FF17}\u{FF18}") == "09012345678")
+        // The mark is a hyphen only between two digits.
+        for typed in ["\u{30FC}", "1\u{30FC}", "\u{30FC}1", "Ab\u{30FC}12", "1\u{30FC}\u{30FC}2", "\u{30FC}A", "\u{3042}\u{30FC}"] {
+            #expect(GuestSms.sender(typed) == nil, "\(typed.debugDescription)")
+        }
+        // A name typed plainly is unchanged.
+        #expect(GuestSms.sender("My Bank 12") == "My Bank 12")
+        #expect(GuestSms.cleaned("My Bank 12") == "My Bank 12")
+    }
+
+    /// Each limit is stated once, as a constant, and the check and the words follow it.
+    @Test func theLimitsOfASenderAreTheConstantsAtTheirEdges() {
+        let name = GuestSms.maximumNameLength, digits = GuestSms.maximumNumberDigits
+        #expect(GuestSms.senderRefusal(String(repeating: "x", count: name)) == nil)
+        #expect(GuestSms.senderRefusal(String(repeating: "x", count: name + 1)) == .senderLongName)
+        #expect(GuestSms.senderRefusal(String(repeating: "9", count: digits)) == nil)
+        #expect(GuestSms.senderRefusal(String(repeating: "9", count: digits + 1)) == .senderLongNumber)
+        // A name of digits and spaces counts its characters, not the digits it has.
+        #expect(GuestSms.senderRefusal("1 2 3 4 5 6") == nil)
     }
 
     @Test func aSenderIsRefusedForTheRightReason() {
@@ -152,19 +189,29 @@ struct GuestSmsTests {
     }
 
     /// A sender is a number or a short name: nothing else becomes one, whatever it would mean to a shell.
-    @Test func hostileSendersAreRefusedAndNeverBuildACommand() {
-        let senders = [
-            "'; id; '", "$(id)", "`id`", "a\nb", "Bank\u{0}", "a|b", "a&b", "\"Bank\"", "a;b", "a b\\", "../x", "a/b",
-            "Bank\u{202E}", "Bank\u{200B}", "\u{FF21}\u{FF22}", "\u{0661}\u{0662}", "+", "++1", "1+", "1\u{0}2", "a\tb", "😀",
+    /// What cleans to a valid sender is listed with the exact value it is sent as; every other input is
+    /// refused, and the row asserts that for each of them whether or not the validator agrees.
+    @Test func hostileSendersAreRefusedAndNeverBuildACommand() throws {
+        let cleaned: [(typed: String, sent: String)] = [
+            ("\u{202E}Bank\u{200E}", "Bank"), ("Bank\u{202E}", "Bank"), ("Bank\u{200B}", "Bank"),
+            ("\u{FF21}\u{FF22}", "AB"), ("\u{FF0B}\u{FF11}", "+1"),
         ]
-        for sender in senders {
-            if GuestSms.sender(sender) == nil {
-                #expect(GuestSms.senderRefusal(sender) != nil, "\(sender.debugDescription)")
-                #expect(GuestSms.command(sender: sender, text: "hi", identifier: Self.identifier) == nil, "\(sender.debugDescription)")
-            }
+        for (typed, sent) in cleaned {
+            #expect(GuestSms.sender(typed) == sent, "\(typed.debugDescription)")
+            #expect(GuestSms.senderRefusal(typed) == nil, "\(typed.debugDescription)")
+            let command = try #require(GuestSms.command(sender: typed, text: "hi", identifier: Self.identifier))
+            #expect(command == GuestSms.command(sender: sent, text: "hi", identifier: Self.identifier), "\(typed.debugDescription)")
         }
-        // What cleans to a valid sender is sent as that, and only that.
-        #expect(GuestSms.sender("\u{202E}Bank\u{200E}") == "Bank")
+        let refused = [
+            "'; id; '", "$(id)", "`id`", "a\nb", "Bank\u{0}", "a|b", "a&b", "\"Bank\"", "a;b", "a b\\", "../x", "a/b",
+            "Ba\u{200B}nk", "\u{0661}\u{0662}", "+", "++1", "1+", "1\u{0}2", "a\tb", "😀",
+            "\u{FF07}\u{FF1B}id\u{FF1B}\u{FF07}", "\u{FF04}\u{FF08}id\u{FF09}", "\u{FF5C}", "\u{FF1B}",
+        ]
+        for sender in refused {
+            #expect(GuestSms.sender(sender) == nil, "\(sender.debugDescription)")
+            #expect(GuestSms.senderRefusal(sender) != nil, "\(sender.debugDescription)")
+            #expect(GuestSms.command(sender: sender, text: "hi", identifier: Self.identifier) == nil, "\(sender.debugDescription)")
+        }
     }
 
     /// The edges of what Android takes, in the units the guest counts: the text that takes the most parts, an

@@ -42,34 +42,63 @@ public enum GuestSms {
         case unsendableCharacter
     }
 
-    /// The sender with what a pasted number brings along that the rules refuse
-    /// made plain: direction marks dropped, no-break spaces and hyphens made
-    /// ordinary, a full-width plus and full-width digits made ASCII.
+    /// The sender with what a pasted or typed number brings along that the rules
+    /// refuse made plain: direction marks dropped, no-break and ideographic
+    /// spaces made ordinary, hyphens of every width made "-", the full-width
+    /// forms of ASCII (U+FF01 to U+FF5E: digits, plus, brackets, full stop,
+    /// letters) made ASCII, and the prolonged sound mark a Japanese keyboard
+    /// types for a hyphen (U+30FC) made "-" between two digits.
     public static func cleaned(_ typed: String) -> String {
-        var out = String.UnicodeScalarView()
+        var scalars: [Unicode.Scalar] = []
         for scalar in typed.unicodeScalars {
             switch scalar.value {
             case 0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069: continue
-            case 0x00A0, 0x2007, 0x202F: out.append(" ")
-            case 0x2010...0x2013, 0x2212: out.append("-")
-            case 0xFF0B: out.append("+")
-            case 0xFF10...0xFF19: out.append(Unicode.Scalar(scalar.value - 0xFF10 + 0x30) ?? scalar)
-            default: out.append(scalar)
+            case 0x00A0, 0x2007, 0x202F, 0x3000: scalars.append(" ")
+            case 0x2010...0x2013, 0x2212: scalars.append("-")
+            case 0xFF01...0xFF5E: scalars.append(Unicode.Scalar(scalar.value - 0xFEE0) ?? scalar)
+            default: scalars.append(scalar)
             }
         }
+        func isDigit(_ scalar: Unicode.Scalar?) -> Bool { scalar.map { ("0"..."9").contains($0) } ?? false }
+        for index in scalars.indices where scalars[index].value == 0x30FC {
+            let before = index > scalars.startIndex ? scalars[index - 1] : nil
+            let after = index + 1 < scalars.endIndex ? scalars[index + 1] : nil
+            if isDigit(before), isDigit(after) { scalars[index] = "-" }
+        }
+        var out = String.UnicodeScalarView()
+        out.append(contentsOf: scalars)
         return String(out)
     }
 
+    /// `text` is an optional "+" and then digits, at most `limit` of them when
+    /// there is a limit.
+    private static func isNumber(_ text: String, atMost limit: Int?) -> Bool {
+        var digits = text.unicodeScalars[...]
+        if digits.first == "+" { digits = digits.dropFirst() }
+        guard !digits.isEmpty, digits.allSatisfy({ ("0"..."9").contains($0) }) else { return false }
+        return limit.map { digits.count <= $0 } ?? true
+    }
+
+    /// `text` is letters A to Z, digits and spaces, at most `limit` of them
+    /// when there is a limit.
+    private static func isName(_ text: String, atMost limit: Int?) -> Bool {
+        let scalars = text.unicodeScalars
+        guard !scalars.isEmpty, scalars.allSatisfy({
+            ("A"..."Z").contains($0) || ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == " "
+        }) else { return false }
+        return limit.map { scalars.count <= $0 } ?? true
+    }
+
     /// The sender as the guest takes it, once it is cleaned: a phone number of
-    /// at most 20 digits, international with a leading +, with the spaces,
-    /// dashes and brackets people type left out; or a name of at most 11
-    /// letters, digits and spaces, as a network sends a service's. nil for
-    /// anything else.
+    /// at most `maximumNumberDigits` digits, international with a leading +,
+    /// with the spaces, dashes and brackets people type left out; or a name of
+    /// at most `maximumNameLength` letters, digits and spaces, as a network
+    /// sends a service's. nil for anything else.
     public static func sender(_ typed: String) -> String? {
         let trimmed = cleaned(typed).trimmingCharacters(in: .whitespaces)
         let digits = trimmed.filter { !" -().".contains($0) }
-        if digits.wholeMatch(of: /\+?[0-9]{1,20}/) != nil { return digits }
-        if trimmed.wholeMatch(of: /[A-Za-z0-9 ]{1,11}/) != nil { return trimmed }
+        if isNumber(digits, atMost: maximumNumberDigits) { return digits }
+        if isName(trimmed, atMost: maximumNameLength) { return trimmed }
         return nil
     }
 
@@ -78,8 +107,8 @@ public enum GuestSms {
         let trimmed = cleaned(typed).trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { return .noSender }
         if sender(typed) != nil { return nil }
-        if trimmed.filter({ !" -().".contains($0) }).wholeMatch(of: /\+?[0-9]+/) != nil { return .senderLongNumber }
-        if trimmed.wholeMatch(of: /[A-Za-z0-9 ]+/) != nil { return .senderLongName }
+        if isNumber(trimmed.filter({ !" -().".contains($0) }), atMost: nil) { return .senderLongNumber }
+        if isName(trimmed, atMost: nil) { return .senderLongName }
         return .senderCharacters
     }
 
