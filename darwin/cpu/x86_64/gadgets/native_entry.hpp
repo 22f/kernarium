@@ -29,6 +29,12 @@ struct NativeExecutionContext final {
 	/* This run holds the lock that serializes locked operands no exclusive
 	 * access can cover; the fault tail releases it. */
 	std::uint8_t split_lock{};
+	/* A store of this run wrote, through another address of its frame, into
+	 * the block that is running. It stays set for the rest of the run, so the
+	 * instruction that finishes after a helper published the store leaves
+	 * the block as the store's own epilogue does. It sits in the padding
+	 * after `split_lock`; no offset the assembly names moves. */
+	std::uint8_t write_reached{};
 	std::size_t instruction_limit{};
 	IndirectLink *indirect_miss{};
 	const TargetLinkEntry *target_links{};

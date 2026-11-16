@@ -23,6 +23,9 @@
  *   transient  a registration that fails (allocation) runs the instruction
  *              as a one-instruction transient program and registers on the
  *              next dispatch; no translation becomes runnable unregistered.
+ *   helpers    a store that a helper makes and publishes -- x87, extended
+ *              state, string, ENTER, the segment model's, across a page --
+ *              leaves the running block as the ordinary store does.
  */
 #include "address_space_types.hpp"
 #include "allocation_fault.hpp"
@@ -42,6 +45,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <initializer_list>
 #include <memory>
 #include <sys/mman.h>
@@ -558,6 +562,218 @@ void test_registration_failure()
 	require(space.diagnostics().walked_refusals == 0);
 }
 
+
+/* Every helper that stores, one instruction each: the program is the store,
+ * nops up to offset 64, then `mov eax, 1 ; syscall`, and the store writes
+ * through W starting at that `mov`, so it lands in the block that is running.
+ * The block leaves after the store -- one retired instruction, no system
+ * call -- whatever helper stored, because the writing thread's next
+ * instruction sees the new bytes. A store the engine publishes through a
+ * helper and then forgets reaching the running block runs the old `mov` and
+ * the system call in this dispatch.
+ *
+ *   x87 stores and x87 environment saves (bulk helper, same page), the
+ *   extended-state saves (bulk helper, always leave), the segment model's
+ *   SLDT and STR, the string stores (single and repeated, the element and
+ *   the bulk path), ENTER, and the cross-page scalar and vector stores below.
+ */
+struct StoreForm final {
+	const char *name;
+	std::vector<std::uint8_t> code;
+	void (*prepare)(CpuState &, std::uint64_t target);
+};
+
+void prepare_pointer(CpuState &cpu, std::uint64_t target)
+{
+	cpu.gpr(Register::rdx) = target;
+	cpu.gpr(Register::rbx) = target;
+}
+
+/* The x87 store of ST(0): the value's ten bytes are `mov eax, 2 ; syscall`. */
+void prepare_x87(CpuState &cpu, std::uint64_t target)
+{
+	prepare_pointer(cpu, target);
+	cpu.x87_top = 0;
+	cpu.x87_tag = 0xfffc;
+	cpu.x87[0].significand = 0x0005'0f00'0000'02b8ULL;
+	cpu.x87[0].sign_exponent = 0;
+}
+
+void prepare_x87_zero(CpuState &cpu, std::uint64_t target)
+{
+	prepare_x87(cpu, target);
+	cpu.x87[0].significand = 0;
+}
+
+void prepare_extended(CpuState &cpu, std::uint64_t target)
+{
+	prepare_pointer(cpu, target);
+	cpu.gpr(Register::rdx) = 0;
+	cpu.gpr(Register::rax) = 3;
+}
+
+void prepare_string(CpuState &cpu, std::uint64_t target)
+{
+	prepare_pointer(cpu, target);
+	cpu.gpr(Register::rdi) = target;
+	cpu.gpr(Register::rsi) = target + 0x400;
+	cpu.gpr(Register::rcx) = 64;
+	cpu.gpr(Register::rax) = 0;
+}
+
+void prepare_enter(CpuState &cpu, std::uint64_t target)
+{
+	prepare_pointer(cpu, target);
+	cpu.gpr(Register::rsp) = target + 8;
+	cpu.gpr(Register::rbp) = 0x1122'3344'5566'7788ULL;
+}
+
+void test_helper_stores_leave_the_block()
+{
+	const Clean clean;
+	const std::vector<StoreForm> forms{
+		{"fstp tbyte", {0xdb, 0x3a}, prepare_x87},
+		{"fbstp", {0xdf, 0x32}, prepare_x87_zero},
+		{"fnstenv (28)", {0xd9, 0x32}, prepare_x87},
+		{"fnstenv (14)", {0x66, 0xd9, 0x32}, prepare_x87},
+		{"fnsave (108)", {0xdd, 0x32}, prepare_x87},
+		{"fnsave (94)", {0x66, 0xdd, 0x32}, prepare_x87},
+		{"fxsave", {0x0f, 0xae, 0x03}, prepare_extended},
+		{"fxsave64", {0x48, 0x0f, 0xae, 0x03}, prepare_extended},
+		{"xsave", {0x0f, 0xae, 0x23}, prepare_extended},
+		{"sldt", {0x0f, 0x00, 0x02}, prepare_pointer},
+		{"str", {0x0f, 0x00, 0x0a}, prepare_pointer},
+		{"stosb", {0xaa}, prepare_string},
+		{"rep stosb", {0xf3, 0xaa}, prepare_string},
+		{"rep movsb", {0xf3, 0xa4}, prepare_string},
+		{"enter", {0xc8, 0x08, 0x00, 0x00}, prepare_enter},
+	};
+	unsigned long generation = 9300;
+	/* Every form runs before the row fails, so a failure names them all. */
+	unsigned failures = 0;
+	for (const auto &form : forms) {
+		constexpr std::uint64_t executable = 0x1500'0000;
+		constexpr std::uint64_t alias = 0x2500'0000;
+		ScratchBacking frame{"uml-x86-alias-helper-XXXXXX", page};
+		std::vector<std::uint8_t> bytes = form.code;
+		bytes.resize(64, 0x90);
+		for (const auto byte : {0xb8, 0x01, 0x00, 0x00, 0x00, 0x0f, 0x05})
+			bytes.push_back(static_cast<std::uint8_t>(byte));
+		std::vector<std::byte> data;
+		for (const auto byte : bytes)
+			data.push_back(static_cast<std::byte>(byte));
+		frame.put(0, data);
+		Space space{generation++};
+		space.map(executable, frame, 0, rx, 1);
+		space.map(alias, frame, 0, rw, 0);
+		CpuState cpu{};
+		cpu.rip = executable;
+		form.prepare(cpu, alias + 64);
+		const auto first = space.step(cpu);
+		if (first.event != EngineEvent::continued || first.retired != 1) {
+			std::fprintf(stderr, "%s: event %d after %zu instructions\n",
+				form.name, static_cast<int>(first.event), first.retired);
+			++failures;
+			continue;
+		}
+		require(space.diagnostics().unheld_runnable == 0);
+		require(first.rip == executable + form.code.size(),
+			"the block left with RIP at another instruction");
+	}
+	require(failures == 0, "a helper store did not leave the running block");
+}
+
+/* The value the next instruction runs is the one the store wrote: the x87
+ * store of ten bytes and a store across a page, scalar and vector. */
+void test_helper_stores_are_seen_by_the_next_instruction()
+{
+	const Clean clean;
+	constexpr std::uint64_t executable = 0x1600'0000;
+	constexpr std::uint64_t alias = 0x2600'0000;
+	ScratchBacking frame{"uml-x86-alias-seen-XXXXXX", page};
+	ScratchBacking next{"uml-x86-alias-next-XXXXXX", page};
+	std::vector<std::byte> bytes(page, std::byte{0x90});
+	const auto set = [&](std::size_t at, std::initializer_list<std::uint8_t> v) {
+		for (const auto byte : v)
+			bytes[at++] = static_cast<std::byte>(byte);
+	};
+	/* fstp tbyte [rdx] ; mov eax, 1 ; syscall */
+	set(0, {0xdb, 0x3a});
+	set(64, {0xb8, 0x01, 0x00, 0x00, 0x00, 0x0f, 0x05});
+	frame.put(0, bytes);
+	Space space{9320};
+	space.map(executable, frame, 0, rx, 1);
+	space.map(alias, frame, 0, rw, 0);
+	CpuState cpu{};
+	cpu.rip = executable;
+	prepare_x87(cpu, alias + 64);
+	Run result{};
+	for (unsigned dispatch = 0; dispatch < 4; ++dispatch) {
+		result = space.step(cpu);
+		if (result.event == EngineEvent::system_call)
+			break;
+	}
+	require(result.event == EngineEvent::system_call && result.rax == 2,
+		"the instruction after an x87 store ran its old bytes");
+}
+
+/* A store across the end of W's page: the part in W is the next instruction
+ * of the block at the end of X's page. The page after W is another frame. */
+void test_cross_page_stores_leave_the_block()
+{
+	const Clean clean;
+	struct Case final {
+		const char *name;
+		std::vector<std::uint8_t> code;
+		bool vector;
+	};
+	const std::vector<Case> cases{
+		{"mov [rdx], rbx", {0x48, 0x89, 0x1a}, false},
+		{"movups [rdx], xmm0", {0x0f, 0x11, 0x02}, true},
+	};
+	unsigned long generation = 9330;
+	for (const auto &item : cases) {
+		constexpr std::uint64_t executable = 0x1700'0000;
+		constexpr std::uint64_t alias = 0x2700'0000;
+		ScratchBacking frame{"uml-x86-alias-cross-XXXXXX", page};
+		ScratchBacking beyond{"uml-x86-alias-beyond-XXXXXX", page};
+		std::vector<std::byte> bytes(page, std::byte{0x90});
+		std::size_t at = 0xff0;
+		for (const auto byte : item.code)
+			bytes[at++] = static_cast<std::byte>(byte);
+		/* mov al, 1 ; syscall, the last four bytes of the page */
+		at = 0xffc;
+		for (const auto byte : {0xb0, 0x01, 0x0f, 0x05})
+			bytes[at++] = static_cast<std::byte>(byte);
+		frame.put(0, bytes);
+		Space space{generation++};
+		space.map(executable, frame, 0, rx, 1);
+		space.map(alias, frame, 0, rw, 0);
+		space.map(alias + page, beyond, 0, rw, 0);
+		CpuState cpu{};
+		cpu.rip = executable + 0xff0;
+		cpu.gpr(Register::rdx) = alias + 0xffc;
+		cpu.gpr(Register::rbx) = 0x050f'02b0ULL;
+		const std::uint32_t changed = 0x050f'02b0U;
+		std::memcpy(cpu.vectors[0].data(), &changed, sizeof(changed));
+		const auto first = space.step(cpu);
+		if (first.event != EngineEvent::continued || first.retired != 1) {
+			std::fprintf(stderr, "%s: event %d after %zu instructions\n",
+				item.name, static_cast<int>(first.event), first.retired);
+			require(false, "a store across a page did not leave the block");
+		}
+		Run result{};
+		for (unsigned dispatch = 0; dispatch < 4; ++dispatch) {
+			result = space.step(cpu);
+			if (result.event == EngineEvent::system_call)
+				break;
+		}
+		require(result.event == EngineEvent::system_call &&
+			(result.rax & 0xff) == 2,
+			"the instruction after a store across a page ran its old bytes");
+	}
+}
+
 } // namespace
 
 int main()
@@ -577,6 +793,12 @@ int main()
 	std::puts("removed ok");
 	test_registration_failure();
 	std::puts("transient ok");
+	test_helper_stores_leave_the_block();
+	std::puts("helper stores ok");
+	test_helper_stores_are_seen_by_the_next_instruction();
+	std::puts("helper store value ok");
+	test_cross_page_stores_leave_the_block();
+	std::puts("cross-page stores ok");
 	const auto now = FrameAccounting::diagnostics();
 	require(now.holder_leaks == start.holder_leaks, "a holder leaked");
 	require(now.unquiesced_holder_removals == start.unquiesced_holder_removals);

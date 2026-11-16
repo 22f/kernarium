@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <initializer_list>
 #include <memory>
 #include <new>
@@ -545,6 +546,115 @@ void test_registration_failure()
 
 } // namespace
 
+/* The next instruction sees what a helper-shaped store wrote through W: an
+ * x87 store of ten bytes, a string store, ENTER's push, SLDT, and a scalar and
+ * a vector store across the end of W's page. Each writes over the `mov eax,
+ * imm32 ; syscall` that follows it in the unit, at offset 64 of the frame
+ * (the last four bytes of the page for the stores across it), and the system
+ * call returns the value the store wrote. The unit leaves before it runs the
+ * overwritten bytes, whichever form stored; the extended-state and
+ * environment saves write structured bytes over everything after them, so
+ * they cannot return a value and are not rows here. */
+struct StoreForm final {
+	const char *name;
+	std::vector<std::uint8_t> code;
+	std::size_t at;
+	std::uint64_t expected;
+	void (*prepare)(x86_64::CpuState &, std::uint64_t alias);
+};
+
+void prepare_x87(x86_64::CpuState &cpu, std::uint64_t alias)
+{
+	cpu.gpr(x86_64::Register::rdx) = alias + 64;
+	cpu.x87_top = 0;
+	cpu.x87_tag = 0xfffc;
+	cpu.x87[0].significand = 0x0005'0f00'0000'02b8ULL;
+	cpu.x87[0].sign_exponent = 0;
+}
+
+void prepare_string(x86_64::CpuState &cpu, std::uint64_t alias)
+{
+	cpu.gpr(x86_64::Register::rdi) = alias + 65;
+	cpu.gpr(x86_64::Register::rcx) = 1;
+	cpu.gpr(x86_64::Register::rax) = 2;
+}
+
+void prepare_enter(x86_64::CpuState &cpu, std::uint64_t alias)
+{
+	cpu.gpr(x86_64::Register::rsp) = alias + 64 + 8;
+	cpu.gpr(x86_64::Register::rbp) = 0x0005'0f00'0000'02b8ULL;
+}
+
+void prepare_sldt(x86_64::CpuState &cpu, std::uint64_t alias)
+{
+	cpu.gpr(x86_64::Register::rdx) = alias + 65;
+}
+
+void prepare_across(x86_64::CpuState &cpu, std::uint64_t alias)
+{
+	cpu.gpr(x86_64::Register::rdx) = alias + 0xffc;
+	cpu.gpr(x86_64::Register::rbx) = 0x050f'02b0ULL;
+	const std::uint32_t changed = 0x050f'02b0U;
+	std::memcpy(cpu.vectors[0].data(), &changed, sizeof(changed));
+}
+
+void test_helper_stores_reach_the_next_instruction()
+{
+	const Clean clean;
+	const std::vector<StoreForm> forms{
+		{"fstp tbyte", {0xdb, 0x3a}, 64, 2, prepare_x87},
+		{"rep stosb", {0xf3, 0xaa}, 64, 2, prepare_string},
+		{"enter", {0xc8, 0x08, 0x00, 0x00}, 64, 2, prepare_enter},
+		{"sldt", {0x0f, 0x00, 0x02}, 64, 0, prepare_sldt},
+		{"mov across a page", {0x48, 0x89, 0x1a}, 0xffc, 2, prepare_across},
+		{"movups across a page", {0x0f, 0x11, 0x02}, 0xffc, 2, prepare_across},
+	};
+	unsigned long generation = 9340;
+	unsigned failures = 0;
+	for (const auto &form : forms) {
+		constexpr std::uint64_t executable = 0x1500'0000;
+		constexpr std::uint64_t alias = 0x2500'0000;
+		ScratchBacking frame{"uml-x86-jit-helper-XXXXXX", page};
+		ScratchBacking beyond{"uml-x86-jit-beyond-XXXXXX", page};
+		std::vector<std::byte> bytes(page, std::byte{0x90});
+		const std::size_t start = form.at == 64 ? 0 : 0xff0;
+		std::size_t at = start;
+		for (const auto byte : form.code)
+			bytes[at++] = static_cast<std::byte>(byte);
+		if (form.at == 64) {
+			at = 64;
+			for (const auto byte : {0xb8, 0x01, 0x00, 0x00, 0x00, 0x0f, 0x05})
+				bytes[at++] = static_cast<std::byte>(byte);
+		} else {
+			at = 0xffc;
+			for (const auto byte : {0xb0, 0x01, 0x0f, 0x05})
+				bytes[at++] = static_cast<std::byte>(byte);
+		}
+		frame.put(0, bytes);
+		Space space{generation++};
+		space.map(executable, frame, 0, rx, 1);
+		space.map(alias, frame, 0, rw, 0);
+		space.map(alias + page, beyond, 0, rw, 0);
+		auto cpu = Space::cpu_at(executable + start);
+		form.prepare(cpu, alias);
+		std::uint64_t result = ~std::uint64_t{0};
+		for (unsigned dispatch = 0; dispatch < 8; ++dispatch) {
+			if (space.run(cpu).execution.reason ==
+				uml::cpu::ExitReason::system_call) {
+				result = cpu.gpr(x86_64::Register::rax) & 0xff;
+				break;
+			}
+		}
+		if (result != form.expected) {
+			std::fprintf(stderr, "%s: the unit returned %llu\n", form.name,
+				static_cast<unsigned long long>(result));
+			++failures;
+		}
+	}
+	require(failures == 0,
+		"the instruction after a helper-shaped store ran its old bytes");
+}
+
 int main()
 {
 	const auto start = FrameAccounting::diagnostics();
@@ -562,6 +672,8 @@ int main()
 	std::puts("failure ok");
 	test_without_a_registry();
 	std::puts("no registry ok");
+	test_helper_stores_reach_the_next_instruction();
+	std::puts("helper stores ok");
 	const auto now = FrameAccounting::diagnostics();
 	require(now.holder_leaks == start.holder_leaks, "a holder leaked");
 	require(now.unquiesced_holder_removals == start.unquiesced_holder_removals);

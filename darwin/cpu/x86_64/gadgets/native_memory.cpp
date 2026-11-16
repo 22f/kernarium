@@ -151,6 +151,8 @@ bool publish_code_write(NativeExecutionContext &context,
 		}
 		completed += count;
 	}
+	if (overlaps)
+		context.write_reached = 1;
 	return overlaps;
 }
 
@@ -292,6 +294,12 @@ extern "C" std::uint32_t uml_x86_64_gadget_publish_code_write(
 	 */
 	if (context == nullptr || context->memory == nullptr || size == 0)
 		return 0;
+	/* A helper that stored and published itself -- a bulk store, a store
+	 * across a page, the segment model's -- found the store in the block
+	 * that is running and left that to the instruction's epilogue, which is
+	 * this call: the publication is not owed twice, the exit is. */
+	if (context->write_reached != 0)
+		return 1;
 	if (((address ^ (address + size - 1U)) & page_mask) != 0)
 		return publish_code_write(*context, address, size) ? 1U : 0U;
 	invalidate_cached_code(*context, address, size);
@@ -299,6 +307,8 @@ extern "C" std::uint32_t uml_x86_64_gadget_publish_code_write(
 	if (context->write_code != write_code_published &&
 	    !publish_frame_holders(*context, address, size, overlaps))
 		publish_code_page(*context, address);
+	if (overlaps)
+		context->write_reached = 1;
 	return overlaps ? 1U : 0U;
 }
 
@@ -390,7 +400,9 @@ extern "C" std::uint32_t uml_x86_64_gadget_run_segment_instruction(
 		decoded.instruction);
 	switch (result.outcome) {
 	case SegmentOutcome::retired:
-		if (!decoded.instruction.terminal())
+		/* A store the instruction made reached the block that is running:
+		 * the block leaves with RIP at the next instruction. */
+		if (!decoded.instruction.terminal() && context->write_reached == 0)
 			return UML_X86_64_SEGMENT_NEXT;
 		[[fallthrough]];
 	case SegmentOutcome::retired_changed:

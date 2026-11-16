@@ -224,11 +224,12 @@ Known deviations from x86 that remain:
   entry publishes at every holder: the holders in this generation cool their
   blocks, those in another generation are published in theirs. A store that
   writes, through such an alias, into the block that is running leaves the
-  block after the store, as a store at the block's own address does. The
-  ordinary and baked stores and PUSH and CALL do; a store that crosses a page,
-  a vector or bulk store, ENTER and an extended-state store publish but do not
-  stop the running block, so the running block can run old bytes of its own
-  through an alias until its next exit.
+  block after the store, as a store at the block's own address does, whatever
+  instruction stored: an ordinary or baked store, PUSH and CALL, a store across
+  a page, a vector, x87 or bulk store, a string store, ENTER, an extended-state
+  save and the segment model's SLDT and STR. A helper that stores and
+  publishes itself records the store's reach in the run, and the instruction's
+  epilogue leaves on it.
 - Every store to a page that holds cached code owes a publication of its own,
   and the program performs it before its next store: another vCPU may
   revalidate the page between two stores, so a program that patches a page
