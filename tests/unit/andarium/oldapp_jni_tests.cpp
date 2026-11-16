@@ -3882,17 +3882,26 @@ void check_an_elements_pointer_of_the_runtime_released_through_a_block_reaches_t
 // releases it: the layer records the runtime's pointers from the first one on, not from the first block. (Fails on a layer that
 // records them only once a block has been made: the release is taken for the application's buffer and never reaches the runtime.)
 void check_a_runtime_elements_pointer_got_before_the_first_block_is_released_by_the_runtime() {
-    Fixture f = make();
-    jobject array = byte_array(sample(64));
-    Obj* object = object_of(array);
-    object->held = true;
-    require(counters().shadows_created == 0, "no block has been made yet");
-    jbyte* theirs = get_elements(f, array);  // the runtime's pointer, before any block
-    Made made = obtain_again(f, object);      // the first block, of the same array
-    require(is_shadow_block(made.shadow) && counters().shadows_created == 1, "the first block");
-    const size_t before = world.released.size();
-    release_elements(f, made.shadow, theirs, 0);
-    require(world.released.size() == before + 1 && world.released.back() == theirs, "the runtime's own Release ran with its own pointer");
+    for (const jint mode : {jint(0), jint(kReleaseCommit), jint(kReleaseAbort)}) {
+        Fixture f = make();
+        jobject array = byte_array(sample(64));
+        Obj* object = object_of(array);
+        object->held = true;
+        require(counters().shadows_created == 0, "no block has been made yet");
+        jbyte* theirs = get_elements(f, array);  // the runtime's pointer, before any block
+        Made made = obtain_again(f, object);      // the first block, of the same array
+        require(is_shadow_block(made.shadow) && counters().shadows_created == 1, "the first block");
+        const size_t before = world.released.size();
+        release_elements(f, made.shadow, theirs, mode);
+        require(world.released.size() == before + 1 && world.released.back() == theirs,
+                "the runtime's own Release ran with its own pointer, whatever the mode");
+        if (mode == kReleaseCommit) {  // the pointer stays valid after a commit: the record stays, and the final release finds it
+            release_elements(f, made.shadow, theirs, 0);
+            require(world.released.size() == before + 2, "the release that ends a committed pointer reached the runtime too");
+        }
+        release_elements(f, made.shadow, theirs, 0);
+        require(world.released.size() == before + (mode == kReleaseCommit ? 2 : 1), "and the record is gone after the last release");
+    }
 }
 
 // The same for a critical pointer, which another thread holds when the first block is made: its region closes at the release through
