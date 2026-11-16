@@ -36,7 +36,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 62 insertions(+), 2 deletions(-)
 
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index 0ec7f250b7def8c261b2da1db3f762db98451317..f85832777c31831bc98ee61721e4a96a7988de1f 100644
+index 6a66ba5db916db4f12f634a3014cf6114a42f1a9..0d7c1a8af6fc0f0d722d98eda8b8add2ed284f1e 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -9885,6 +9885,33 @@ static inline bool resource_contains_box(struct vrend_resource *res,

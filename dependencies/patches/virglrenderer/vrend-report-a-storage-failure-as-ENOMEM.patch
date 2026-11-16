@@ -48,7 +48,7 @@ index 168cd8a1755ded1861f0e4a3042d4e2f3f5799d2..8f7cc928f1656969b6c6f6b50574678d
     map_info = vrend_renderer_resource_get_map_info(pipe_res);
     res = virgl_resource_create_from_pipe(args->handle, pipe_res, iov, num_iovs);
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index 9a59701fb8d40b761fff9e12dedd4b0e243af2b1..bae72b710aa0ecc6df0b06cd8cb15144042d5ae2 100644
+index b1ae9ad2f915c02469409a0ad8263bbb19aed7ec..5d756fc0e84f604bda6ab044d13bcc72eea0ab06 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -474,6 +474,43 @@ static bool vrend_pin_host_pages(GLuint buffer, void *ptr, uint64_t size)
@@ -295,7 +295,7 @@ index 9a59701fb8d40b761fff9e12dedd4b0e243af2b1..bae72b710aa0ecc6df0b06cd8cb15144
     res->blob_id = blob_id;
     list_addtail(&res->head, &ctx->vrend_resources);
 diff --git a/src/vrend/vrend_renderer.h b/src/vrend/vrend_renderer.h
-index b520f319ba1c8062c0b0c3a042e0ae6cd725814e..b3b7ee7501169b405c1add95d915d8a644d6ae6d 100644
+index 07d80e63002b023266dbaa358c5076c057313eea..dc17fef860c4ac21f693d705785ad7c58e206ad3 100644
 --- a/src/vrend/vrend_renderer.h
 +++ b/src/vrend/vrend_renderer.h
 @@ -352,9 +352,13 @@ struct vrend_renderer_resource_set_type_args {
