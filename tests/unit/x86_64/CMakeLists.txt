@@ -317,6 +317,18 @@ if(TARGET uml_x86_64_jit)
         COMMAND uml_x86_64_jit_alias_tests
         LABELS cpu;x86-64
         TIMEOUT 300)
+    # What a vCPU hands the JIT before each run: the stuck participants are
+    # settled first, before either early return.
+    uml_add_x86_64_test_binary(uml_x86_64_jit_sync_tests
+        x86_64_jit_sync_tests.cpp JIT
+        LIBRARIES UML::MemoryTestComponent UML::BridgeAbi)
+    target_include_directories(uml_x86_64_jit_sync_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/darwin/memory
+        ${PROJECT_SOURCE_DIR}/darwin/memory/mmu)
+    uml_add_unit_test(
+        NAME x86-64-jit-sync
+        COMMAND uml_x86_64_jit_sync_tests
+        LABELS cpu;x86-64)
     # CPUID through the JIT answers every leaf and subleaf as cpuid.hpp does,
     # AVX-VNNI's included.
     uml_add_x86_64_test_binary(uml_x86_64_jit_cpuid_tests
