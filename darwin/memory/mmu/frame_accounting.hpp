@@ -167,6 +167,9 @@ public:
 		std::uint64_t unresolved_kernel_writes;
 		/* Direct ranges the table had no slot for. */
 		std::uint64_t direct_range_drops;
+		/* Holds answered `global`: the writers were too many for the
+		 * buffer or not known by kind. */
+		std::uint64_t global_holds;
 	};
 	[[nodiscard]] static Diagnostics diagnostics() noexcept;
 	static void note_nonempty_state_destruction() noexcept;

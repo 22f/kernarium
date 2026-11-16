@@ -307,4 +307,21 @@ struct FrameRegistrationOutcome final {
 	::uml::memory::GuestAddressSpace &memory, void *execution_context,
 	const CodePageRegistry::Participant *self, std::uint64_t page) noexcept;
 
+/* What the process's registrations came to, summed over every engine and
+ * address space, for a run's report. Always compiled in; they move on cold
+ * paths only. */
+struct RegistrationTotals final {
+	/* Calls of `register_frame`, and how they ended when they did not
+	 * settle. */
+	std::uint64_t registrations;
+	std::uint64_t failures;
+	std::uint64_t refusals;
+	std::uint64_t unsettled;
+	/* Stamp hits the gadget engine refused because the generation's flush
+	 * serial had moved. */
+	std::uint64_t flush_serial_misses;
+};
+[[nodiscard]] RegistrationTotals registration_totals() noexcept;
+void note_flush_serial_miss() noexcept;
+
 } // namespace uml::cpu::x86_64

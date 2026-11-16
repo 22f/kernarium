@@ -664,9 +664,12 @@ void test_a_debt_larger_than_the_buffer()
 
 		/* No room at all: the fallback registers the holder and one clearing
 		 * settles it. */
+		const auto globals = FrameAccounting::diagnostics().global_holds;
 		const auto global = hold_frame_with(990, base + 2 * page, 0, true);
 		require(global.result == DARWIN_UML_STATIC_FRAME_GLOBAL &&
 			global.hold.owed == writers, "the fallback did not report its debt");
+		require(FrameAccounting::diagnostics().global_holds == globals + 1,
+			"a global hold was not counted");
 		require(holders_of(kept, 2).size() == 1, "the fallback did not register");
 		darwin_uml_static_vm_clear_code_debt(nullptr, 990, base + 2 * page,
 			global.hold.record_identity, global.hold.debt_sequence);

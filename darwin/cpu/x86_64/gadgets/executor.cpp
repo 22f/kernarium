@@ -2123,8 +2123,10 @@ private:
 		if (recorded.complete && current_stamps.complete &&
 		    recorded.flush_serial != current_stamps.flush_serial &&
 		    recorded.count == current_stamps.count &&
-		    recorded.pages == current_stamps.pages)
+		    recorded.pages == current_stamps.pages) {
 			++diagnostics.flush_serial_misses;
+			note_flush_serial_miss();
+		}
 
 		/* The body may run only where its pages are registered holders of
 		 * their frames: register them now, before a byte of the source is

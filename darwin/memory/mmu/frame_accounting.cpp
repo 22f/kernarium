@@ -162,6 +162,7 @@ std::atomic_uint64_t registration_failures{};
 std::atomic_uint64_t publications{};
 std::atomic_uint64_t unresolved_writes{};
 std::atomic_uint64_t direct_range_drops{};
+std::atomic_uint64_t global_holds{};
 
 /* The source of every flush serial. The 64-bit value moves once per walk of
  * a generation, and once for each state made; at a million moves a second it
@@ -552,7 +553,8 @@ FrameAccounting::Diagnostics FrameAccounting::diagnostics() noexcept
 		registration_failures.load(std::memory_order_relaxed),
 		publications.load(std::memory_order_relaxed),
 		unresolved_writes.load(std::memory_order_relaxed),
-		direct_range_drops.load(std::memory_order_relaxed)};
+		direct_range_drops.load(std::memory_order_relaxed),
+		global_holds.load(std::memory_order_relaxed)};
 }
 
 void FrameAccounting::note_nonempty_state_destruction() noexcept
@@ -730,6 +732,8 @@ FrameAccounting::HoldReport FrameAccounting::hold(GenerationState &state,
 				}
 				report.record_identity = MappedBacking::record_identity(*record);
 				report.debt_sequence = record->debt_sequence;
+				if (global)
+					global_holds.fetch_add(1, std::memory_order_relaxed);
 				report.owed = global ? count : written;
 				report.result = global ? HoldResult::global :
 					written == 0 ? HoldResult::settled : HoldResult::owed;

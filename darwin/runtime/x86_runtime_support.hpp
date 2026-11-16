@@ -124,6 +124,14 @@ void note_x86_mm_shared(unsigned long generation, bool shared,
 void note_x86_jit_ordering(unsigned long generation, bool marked,
 	bool ordered, std::uint64_t rip) noexcept;
 
+/* Appends one "accounting" line to the file UML_X86_ACCOUNTING_LOG names, if
+ * it is set: the counts of the run's frame accounting and code-page
+ * registrations, which stay near zero in an ordinary guest where they name an
+ * expensive path (kernel writes no frame was found for, direct ranges
+ * dropped, global holds, failed, refused and unsettled registrations, stamp
+ * hits lost to a flush). The kernel's exit calls it once. */
+void report_x86_run_counters() noexcept;
+
 } // namespace uml::runtime
 
 #endif

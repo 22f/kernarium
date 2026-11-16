@@ -448,7 +448,15 @@ void CodePageRegistry::remove(std::uint64_t page) noexcept
 	retire_write_translations(page);
 }
 
-FrameRegistrationOutcome register_frame(
+namespace {
+
+std::atomic_uint64_t total_registrations{};
+std::atomic_uint64_t total_failures{};
+std::atomic_uint64_t total_refusals{};
+std::atomic_uint64_t total_unsettled{};
+std::atomic_uint64_t total_flush_serial_misses{};
+
+FrameRegistrationOutcome register_frame_uncounted(
 	::uml::memory::GuestAddressSpace &memory, void *execution_context,
 	const CodePageRegistry::Participant *self, std::uint64_t page) noexcept
 {
@@ -549,6 +557,45 @@ FrameRegistrationOutcome register_frame(
 	memory.clear_code_debt(page, execution_context, hold);
 	outcome.status = FrameRegistration::settled;
 	return outcome;
+}
+
+} // namespace
+
+FrameRegistrationOutcome register_frame(
+	::uml::memory::GuestAddressSpace &memory, void *execution_context,
+	const CodePageRegistry::Participant *self, std::uint64_t page) noexcept
+{
+	auto outcome = register_frame_uncounted(memory, execution_context, self,
+		page);
+	total_registrations.fetch_add(1, std::memory_order_relaxed);
+	switch (outcome.status) {
+	case FrameRegistration::settled:
+		break;
+	case FrameRegistration::unsettled:
+		total_unsettled.fetch_add(1, std::memory_order_relaxed);
+		break;
+	case FrameRegistration::failed:
+		total_failures.fetch_add(1, std::memory_order_relaxed);
+		break;
+	case FrameRegistration::refused:
+		total_refusals.fetch_add(1, std::memory_order_relaxed);
+		break;
+	}
+	return outcome;
+}
+
+RegistrationTotals registration_totals() noexcept
+{
+	return {total_registrations.load(std::memory_order_relaxed),
+		total_failures.load(std::memory_order_relaxed),
+		total_refusals.load(std::memory_order_relaxed),
+		total_unsettled.load(std::memory_order_relaxed),
+		total_flush_serial_misses.load(std::memory_order_relaxed)};
+}
+
+void note_flush_serial_miss() noexcept
+{
+	total_flush_serial_misses.fetch_add(1, std::memory_order_relaxed);
 }
 
 } // namespace uml::cpu::x86_64
