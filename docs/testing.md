@@ -739,10 +739,10 @@ blocker in every one of them.
 
 - `arm64-instruction-corpus` runs the generated A64 corpus through both
   engines; the special records (native SME, absent features, the SM = 0 family,
-  top-byte ignore, indirect-branch targets, native floating-point traps) have
-  their own `arm64-instruction-corpus-*` and `arm64-absent-*` tests that
-  re-derive them from their generators, and records that need SME or
-  FEAT_AFP/BF16 run only on a host that has them.
+  top-byte ignore, indirect-branch targets, compare-retry exclusives, native
+  floating-point traps) have their own `arm64-instruction-corpus-*` and
+  `arm64-absent-*` tests that re-derive them from their generators, and records
+  that need SME or FEAT_AFP/BF16 run only on a host that has them.
   The runner also runs a case again, up to 16 attempts in all, when its
   program is a load, one store-exclusive that discards its status, CLREX and
   SVC in four straight-line words and the only difference from the pack is
@@ -769,14 +769,17 @@ blocker in every one of them.
   `arm64-a32-corpus` and `arm64-aarch32-semantics*` check the AArch32 decoder,
   generated tables, corpus and semantic library without an engine;
   `arm64-aarch32-corpus` also proves the store-exclusive ranges the retry
-  compares and what it refuses. The corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
+  compares and what it refuses, and which retirement excess it takes. The corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
   case that differs only by a spurious store-exclusive failure (its own bytes
-  unwritten, the case's other stores in the data), and the `-interrupted`
+  unwritten, the case's other stores in the data; in a recognized
+  `exclusive-retry` loop, whole extra iterations), and the `-interrupted`
   tests provoke that failure on purpose. Only the gadget one runs the spill
   suite, whose cases store between the pair: the JIT does not lose a
   reservation there. The `-injected` tests make an attempt end as a lost
   reservation with another register or a thread register wrong, and as other
-  faults, and require that only a plain loss is retried.
+  faults, and require that only a plain loss is retried; a retry loop's excess
+  that is not whole iterations fails, and one made on every attempt fails when
+  the attempts are used up.
 - `guest-aarch32-engine-gadgets` and `-jit` boot the freestanding engine probe
   in `tests/integration/aarch32/engine_probe/` and count every `SIGILL`.
 
