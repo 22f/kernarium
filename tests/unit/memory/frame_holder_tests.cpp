@@ -79,6 +79,23 @@ private:
 	std::uint64_t id_;
 };
 
+/* A kernel write the table does not resolve, with every allocation of this
+ * thread refused: the bytes have changed by the time the fallback publishes,
+ * so it can fail neither by an allocation nor by any other means. Refused
+ * attempts are counted, whether or not the path survives them. */
+int copy_kernel_write_refusing(unsigned long address, const void *bytes,
+	std::size_t length)
+{
+	const auto before = uml::memory::testing::refused_allocations();
+	uml::memory::testing::refuse_allocations(true);
+	const int result = darwin_uml_static_vm_copy_kernel_write(
+		address, bytes, length);
+	uml::memory::testing::refuse_allocations(false);
+	require(uml::memory::testing::refused_allocations() == before,
+		"the all-generations fallback allocated");
+	return result;
+}
+
 int map(unsigned long generation, unsigned long address, ScratchBacking &backing,
 	unsigned long first_page, unsigned long pages, int protection,
 	int guest_code = 1)
@@ -532,8 +549,9 @@ void test_publication()
 		std::array<unsigned char, 8> loose{};
 		const auto serial = flush_serial_of(721);
 		const auto seq_all = sequence_of(722);
-		require(darwin_uml_static_vm_copy_kernel_write(
-			base + 11 * page, loose.data(), loose.size()) == 0);
+		require(copy_kernel_write_refusing(
+			base + 11 * page, loose.data(), loose.size()) == 0,
+			"the fallback failed without memory");
 		require(FrameAccounting::diagnostics().unresolved_kernel_writes ==
 			unresolved + 1);
 		require(flush_serial_of(721) != serial);
@@ -1016,8 +1034,9 @@ void test_kernel_write_frames()
 		const auto seq803 = sequence_of(803);
 		const auto serial = flush_serial_of(803);
 		const auto counted = FrameAccounting::diagnostics().unresolved_kernel_writes;
-		require(darwin_uml_static_vm_copy_kernel_write(
-			base + page + 0x40, loose.data(), loose.size()) == 0);
+		require(copy_kernel_write_refusing(
+			base + page + 0x40, loose.data(), loose.size()) == 0,
+			"the fallback failed without memory");
 		require(FrameAccounting::diagnostics().unresolved_kernel_writes ==
 			counted + 1, "a buffer outside the table was not counted");
 		require(flush_serial_of(803) != serial,

@@ -1419,18 +1419,14 @@ public:
 
 	/* Every generation of the address space reads every translation again:
 	 * the fallback for a write that names no frame. The flush serial moves,
-	 * because a stamp does not. */
-	void publish_all_generations()
+	 * because a stamp does not. It runs after the bytes changed, so it
+	 * cannot fail: it walks the live table and allocates nothing, and the
+	 * two calls it makes are atomic stores. */
+	void publish_all_generations() noexcept
 	{
-		std::vector<std::shared_ptr<GenerationState>> states;
-		{
-			std::shared_lock lock{states_mutex_};
-			for (const auto &[generation, state] : states_) {
-				(void)generation;
-				states.push_back(state);
-			}
-		}
-		for (const auto &state : states) {
+		std::shared_lock lock{states_mutex_};
+		for (const auto &[generation, state] : states_) {
+			(void)generation;
 			FrameAccounting::bump_flush_serial(*state);
 			::uml::memory::publish_code_change(*state, 0, 0);
 		}

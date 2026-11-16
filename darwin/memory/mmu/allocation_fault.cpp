@@ -19,6 +19,8 @@ std::atomic<AllocationObserver> allocation_observer{};
 std::atomic_size_t stripe_allocations{};
 std::atomic<std::ptrdiff_t> frame_bytes{};
 thread_local unsigned stripe_depth{};
+thread_local bool refusing{};
+std::atomic_size_t refusals{};
 std::array<std::atomic_size_t,
 	static_cast<std::size_t>(AllocationSite::count)> allocation_attempts{};
 
@@ -50,7 +52,8 @@ void set_allocation_observer(const AllocationObserver observer) noexcept
 
 void allocation_checkpoint(const AllocationSite site)
 {
-	allocator_probe();
+	if (allocator_probe())
+		throw std::bad_alloc{};
 	if (const auto observer =
 		    allocation_observer.load(std::memory_order_acquire))
 		observer(site);
@@ -97,10 +100,23 @@ void stripe_lock_left() noexcept
 	--stripe_depth;
 }
 
-void allocator_probe() noexcept
+bool allocator_probe() noexcept
 {
 	if (stripe_depth != 0)
 		stripe_allocations.fetch_add(1, std::memory_order_relaxed);
+	if (refusing)
+		refusals.fetch_add(1, std::memory_order_relaxed);
+	return refusing;
+}
+
+void refuse_allocations(const bool refuse) noexcept
+{
+	refusing = refuse;
+}
+
+std::size_t refused_allocations() noexcept
+{
+	return refusals.load(std::memory_order_relaxed);
 }
 
 void frame_bytes_changed(const std::ptrdiff_t delta) noexcept

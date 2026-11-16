@@ -19,7 +19,8 @@ namespace {
 
 [[nodiscard]] void *probed_allocate(std::size_t size, std::size_t alignment)
 {
-	::uml::memory::testing::allocator_probe();
+	if (::uml::memory::testing::allocator_probe())
+		return nullptr;
 	void *block = nullptr;
 	if (alignment <= alignof(std::max_align_t))
 		block = std::malloc(size == 0 ? 1 : size);
