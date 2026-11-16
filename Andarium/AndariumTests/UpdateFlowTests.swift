@@ -229,7 +229,16 @@ final class StubDriver: RuntimeDriver {
     /// What Android's storage reads as; a test sets it as a boot would.
     var storage: Bool? = true
     func storageReady() async -> Bool? { storage }
-    func sendSms(sender: String, text: String, identifier: String) async -> GuestSms.Outcome { .handedToAndroid(parts: 1) }
+    /// Each text message the model handed over, in order.
+    private(set) var smsSent: [(sender: String, text: String, identifier: String)] = []
+    /// How the stub answers a text message: a test sets it to hold the
+    /// answer back or to say it was not confirmed. Absent, Android took it.
+    var smsAnswer: (@MainActor (String, String, String) async -> GuestSms.Outcome)?
+    func sendSms(sender: String, text: String, identifier: String) async -> GuestSms.Outcome {
+        smsSent.append((sender, text, identifier))
+        if let smsAnswer { return await smsAnswer(sender, text, identifier) }
+        return .handedToAndroid(parts: 1)
+    }
     func startAdbOverNetwork() throws {
         if let startError { throw startError }
         listening = true

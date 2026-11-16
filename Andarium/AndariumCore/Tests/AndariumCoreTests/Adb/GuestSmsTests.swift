@@ -132,6 +132,64 @@ struct GuestSmsTests {
         }
     }
 
+    /// The shell reads nothing of the sender or the text: whatever is typed or pasted travels as base64, so the
+    /// command is the same shape for every message.
+    @Test func hostileTextReachesTheShellOnlyAsBase64() throws {
+        let texts = [
+            "'; rm -rf /; '", "$(id)", "`id`", "\\'\"", "a\nb\r\nc", "tab\there", "nul\u{0}byte", "|&;<>(){}[]*?~#!",
+            "--arg x", "\u{2028}\u{2029}", "\u{202E}reversed", "\u{FEFF}\u{FEFF}", "😀 and 日本語 and العربية",
+            "\u{0301}\u{200D}\u{200B}", "%s %n %d", "../../etc/passwd", "content://other", " ",
+        ]
+        for text in texts {
+            let command = try #require(GuestSms.command(sender: "Bank", text: text, identifier: Self.identifier), "\(text.debugDescription)")
+            let argument = try #require(command.firstMatch(of: /--arg '([A-Za-z0-9+\/=.]+)'$/)?.1, "\(text.debugDescription)")
+            // One quoted argument, three fields, and nothing outside the quotes but the fixed words.
+            #expect(command.filter { $0 == "'" }.count == 2)
+            let fields = argument.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+            #expect(fields.count == 3)
+            #expect(String(decoding: try #require(Data(base64Encoded: fields[1])), as: UTF8.self) == text)
+        }
+    }
+
+    /// A sender is a number or a short name: nothing else becomes one, whatever it would mean to a shell.
+    @Test func hostileSendersAreRefusedAndNeverBuildACommand() {
+        let senders = [
+            "'; id; '", "$(id)", "`id`", "a\nb", "Bank\u{0}", "a|b", "a&b", "\"Bank\"", "a;b", "a b\\", "../x", "a/b",
+            "Bank\u{202E}", "Bank\u{200B}", "\u{FF21}\u{FF22}", "\u{0661}\u{0662}", "+", "++1", "1+", "1\u{0}2", "a\tb", "😀",
+        ]
+        for sender in senders {
+            if GuestSms.sender(sender) == nil {
+                #expect(GuestSms.senderRefusal(sender) != nil, "\(sender.debugDescription)")
+                #expect(GuestSms.command(sender: sender, text: "hi", identifier: Self.identifier) == nil, "\(sender.debugDescription)")
+            }
+        }
+        // What cleans to a valid sender is sent as that, and only that.
+        #expect(GuestSms.sender("\u{202E}Bank\u{200E}") == "Bank")
+    }
+
+    /// The edges of what Android takes, in the units the guest counts: the text that takes the most parts, an
+    /// emoji's two units, and the one unit over.
+    @Test func theTextLimitIsCountedInUtf16Units() {
+        func refusal(_ text: String) -> GuestSms.Refusal? { GuestSms.refusal(sender: "Bank", text: text) }
+        #expect(refusal(String(repeating: "x", count: GuestSms.maximumUnits)) == nil)
+        #expect(refusal(String(repeating: "x", count: GuestSms.maximumUnits + 1)) == .tooLong)
+        #expect(refusal(String(repeating: "😀", count: GuestSms.maximumUnits / 2)) == nil)
+        #expect(refusal(String(repeating: "😀", count: GuestSms.maximumUnits / 2) + "x") == .tooLong)
+        // A combining sequence is as many units as it has scalars.
+        #expect(refusal(String(repeating: "e\u{0301}", count: GuestSms.maximumUnits / 2)) == nil)
+        #expect(refusal(String(repeating: "e\u{0301}", count: GuestSms.maximumUnits / 2) + "x") == .tooLong)
+        #expect(refusal("") == .noText)
+    }
+
+    /// The longest command is well inside the guest console's line, whatever the text is made of.
+    @Test func theLongestCommandFitsTheConsoleLine() throws {
+        // Three UTF-8 bytes for each unit is the most the units allow.
+        let text = String(repeating: "\u{20AC}", count: GuestSms.maximumUnits)
+        let sender = String(repeating: "1", count: GuestSms.maximumNumberDigits)
+        let command = try #require(GuestSms.command(sender: sender, text: text, identifier: Self.identifier))
+        #expect(command.utf8.count < 4096, "\(command.utf8.count)")
+    }
+
     private static func shell(_ stdout: String = "", stderr: String = "", exit: Int? = 0) -> ShellResult {
         ShellResult(stdout: Data(stdout.utf8), stderr: Data(stderr.utf8), exitCode: exit)
     }
