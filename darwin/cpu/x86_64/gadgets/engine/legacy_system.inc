@@ -206,8 +206,7 @@ gadget bound_\width
 	.else
 	ldrsh x24, [_vcpu, x8]
 	.endif
-	page_cross_check (\width / 4), Lx86_bound_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 4)
+	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 4), cross=Lx86_bound_cross\@
 	.if \width == 32
 	ldr x26, [x7]
 	.else
@@ -282,8 +281,7 @@ gadget arpl_16_mr
 	b.hs Lx86_arpl_memory_unchanged
 	bfi w26, w24, #0, #2
 	mov x7, x25
-	page_cross_check 2, Lx86_arpl_write_cross
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, 2
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, 2, cross=Lx86_arpl_write_cross
 	strh w26, [x7]
 	b Lx86_arpl_memory_written
 Lx86_arpl_write_cross:
@@ -303,8 +301,7 @@ gadget push_all_\width
 	ldr x26, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
 	sub w25, w26, #(8 * (\width / 8))
 	mov x7, x25
-	page_cross_check (8 * (\width / 8)), Lx86_push_all_cross\@
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, (8 * (\width / 8))
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, (8 * (\width / 8)), cross=Lx86_push_all_cross\@
 	.if \width == 32
 	ldr w8, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 7 * 8)]
 	ldr w9, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 6 * 8)]
@@ -426,8 +423,7 @@ gadget pop_all_\width
 	ldr x23, [_stream], #8
 	ldr w25, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
 	mov x7, x25
-	page_cross_check (8 * (\width / 8)), Lx86_pop_all_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, (8 * (\width / 8))
+	translate 0, UML_X86_64_TLB_READ_PAGE, (8 * (\width / 8)), cross=Lx86_pop_all_cross\@
 	.if \width == 32
 	ldp w8, w9, [x7]
 	ldp w10, w11, [x7, #8]
@@ -499,8 +495,7 @@ gadget push_segment_32
 	ldr x25, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
 	sub w25, w25, #4
 	mov x7, x25
-	page_cross_check 4, Lx86_push_segment_32_cross
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, 4
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, 4, cross=Lx86_push_segment_32_cross
 	str w24, [x7]
 Lx86_push_segment_32_done:
 	str x25, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
@@ -520,8 +515,7 @@ gadget push_segment_64
 	ldr x25, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
 	sub x25, x25, #8
 	mov x7, x25
-	page_cross_check 8, Lx86_push_segment_64_cross
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, 8
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, 8, cross=Lx86_push_segment_64_cross
 	str x24, [x7]
 Lx86_push_segment_64_done:
 	str x25, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
@@ -605,8 +599,7 @@ gadget store_\name
 	effective_address
 	mov x25, x7
 	descriptor_table_base x24, \base
-	page_cross_check \size, Lx86_store_\name\()_cross
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, \size
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, \size, cross=Lx86_store_\name\()_cross
 	strh wzr, [x7]
 	.if \size == 10
 	stur x24, [x7, #2]

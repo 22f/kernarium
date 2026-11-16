@@ -132,13 +132,21 @@ def base_address(o, base):
         o.emit('\tadd x7, x14, x10')
 
 
-def translate(o, write, size, record_stack=False, miss='Lx86_baked_miss'):
-    """The ordinary translation with its miss tail shared; x19 carries the continuation."""
+def translate(o, write, size, record_stack=False, miss='Lx86_baked_miss', cross=None):
+    """The ordinary translation with its miss tail shared; x19 carries the continuation.
+    `cross` names the site's crossing path, as `translate`'s does in common.inc:
+    the key is then the access's last byte, and a crossing access, which can only
+    miss, leaves for `cross` from the miss path."""
     hit, done = o.label('hit'), o.label('done')
+    keyed = cross is not None and size > 1
     o.emit('\tx86_marks_guest_memory')
     if write:
         o.emit('\tand x23, x23, #~(1 << 60)')
-    o.emit('\tand x9, x7, #0xfffffffffffff000')
+    if keyed:
+        o.emit(f'\tadd x9, x7, #{size - 1}')
+        o.emit('\tand x9, x9, #0xfffffffffffff000')
+    else:
+        o.emit('\tand x9, x7, #0xfffffffffffff000')
     o.emit('\tubfx x10, x7, #12, #UML_X86_64_TLB_INDEX_BITS')
     o.emit('\tldr x11, [_context, #UML_X86_64_CONTEXT_TLB]')
     o.emit('\tadd x11, x11, x10, lsl #5')
@@ -154,6 +162,8 @@ def translate(o, write, size, record_stack=False, miss='Lx86_baked_miss'):
     else:
         o.emit('\teor x14, x9, x12')
     o.emit(f'\tcbz x14, {hit}')
+    if keyed:
+        page_cross(o, size, cross)
     o.emit(f'\tadr x19, {done}')
     o.emit(f'\tb {miss}_{1 if write else 0}_{size}')
     o.emit(f'{hit}:')
@@ -576,8 +586,7 @@ def addresses(o):
 
 def load_body(o, size, ld, lr, cross, st, sr, v):
     crossed, write = o.label('lcross'), o.label('lwrite')
-    page_cross(o, size, crossed)
-    translate(o, False, size)
+    translate(o, False, size, cross=crossed)
     o.emit(f'\t{ld} {lr}11, [x7]')
     o.emit(f'{write}:')
     o.emit(f'\t{st} {sr}11, [_vcpu, #{v}]')
@@ -619,8 +628,7 @@ def loads(o):
 
 def store_body(o, size, st, hr):
     crossed, finish = o.label('scross'), o.label('sfinish')
-    page_cross(o, size, crossed)
-    translate(o, True, size)
+    translate(o, True, size, cross=crossed)
     o.emit(f'\t{st} {hr}24, [x7]')
     o.emit(f'{finish}:')
     finish_store(o, size)
@@ -677,8 +685,7 @@ def arith_source_body(o, op, width, v):
     ld, st, hr, sr = WIDTHS[width]
     host, flagop, writes = instr_for(op, width)
     crossed, loaded, from_cross = o.label('rmcross'), o.label('rmloaded'), o.label('rmfromcross')
-    page_cross(o, width // 8, crossed)
-    translate(o, False, width // 8)
+    translate(o, False, width // 8, cross=crossed)
     o.emit(f'\t{ld} {hr}12, [x7]')
     o.emit(f'{loaded}:')
     o.emit(f'\t{ld} {hr}11, [_vcpu, #{v}]')
@@ -706,8 +713,7 @@ def arith_destination_body(o, op, width):
     host, flagop, writes = instr_for(op, width)
     size = width // 8
     crossed, computed = o.label('mrcross'), o.label('mrcomputed')
-    page_cross(o, size, crossed)
-    translate(o, writes, size)
+    translate(o, writes, size, cross=crossed)
     o.emit(f'\t{ld} {hr}24, [x7]')
     o.emit(f'\t{host} {hr}27, {hr}24, {hr}26')
     normalize(o, width, f'{hr}27')
