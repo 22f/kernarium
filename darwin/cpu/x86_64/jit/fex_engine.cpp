@@ -638,8 +638,10 @@ namespace {
 
 bool Space::hold_code_page(std::uint64_t page) noexcept
 {
-	if (!registry || code_pages.contains(page))
-		return true;
+	/* The frame is registered at every query, before the early returns
+	 * below: a space with no registry (its acquisition or join failed under
+	 * memory pressure) still compiles from the frame, and a store through
+	 * another mapping of it must reach this space. */
 	auto registration = register_frame(
 		*engine->memory, engine->execution_context, &participant, page);
 	if (diagnostics != nullptr)
@@ -663,21 +665,24 @@ bool Space::hold_code_page(std::uint64_t page) noexcept
 	consecutive_failures = 0;
 	if (diagnostics != nullptr)
 		diagnostics->consecutive_registration_failures = 0;
-	try {
-		code_pages.insert(page);
-	} catch (...) {
-		/* The count can never be returned: the page stays held,
-		 * which costs publications, not correctness. */
+	CodePageRegistry::Settlement settlement;
+	if (registry && !code_pages.contains(page)) {
+		try {
+			code_pages.insert(page);
+		} catch (...) {
+			/* The count can never be returned: the page stays held,
+			 * which costs publications, not correctness. */
+		}
+		/* A compile runs between two guest instructions, with no store
+		 * translated and pending, so the registration need not wait for
+		 * this participant to leave the engine. */
+		const bool inside = (participant.engine_epoch.load(std::memory_order_relaxed) & 1U) != 0;
+		if (inside)
+			participant.engine_epoch.fetch_add(1, std::memory_order_release);
+		settlement = registry->add(page, &participant);
+		if (inside)
+			participant.engine_epoch.fetch_add(1, std::memory_order_seq_cst);
 	}
-	/* A compile runs between two guest instructions, with no store
-	 * translated and pending, so the registration need not wait for
-	 * this participant to leave the engine. */
-	const bool inside = (participant.engine_epoch.load(std::memory_order_relaxed) & 1U) != 0;
-	if (inside)
-		participant.engine_epoch.fetch_add(1, std::memory_order_release);
-	const auto settlement = registry->add(page, &participant);
-	if (inside)
-		participant.engine_epoch.fetch_add(1, std::memory_order_seq_cst);
 	/* A participant stuck inside the engine may still land a store that
 	 * publishes nothing; the code compiled from this page is dropped at
 	 * each hand-over until it has moved. */
@@ -693,7 +698,6 @@ bool Space::hold_code_page(std::uint64_t page) noexcept
 	}
 	return true;
 }
-
 
 bool Space::stores_publish(GuestAddressSpace &memory, std::uint64_t address) const
 {

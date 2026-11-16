@@ -20,6 +20,7 @@
 #include "address_space_types.hpp"
 #include "allocation_fault.hpp"
 #include "cpu/execution_types.hpp"
+#include "cpu/x86_64/code_page_registry.hpp"
 #include "cpu/x86_64/cpu_state.hpp"
 #include "cpu/x86_64/jit/fex_engine.hpp"
 #include "cpu/x86_64/segments.hpp"
@@ -32,14 +33,29 @@
 #include "uml_darwin_static_mmu.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
 #include <memory>
+#include <new>
 #include <sys/mman.h>
 #include <vector>
+
+/* The next allocation of exactly this many bytes fails: the registry's page
+ * counts are the only array of this size a space makes. */
+std::atomic<std::size_t> failing_array_size{0};
+
+void *operator new[](std::size_t size)
+{
+	auto armed = failing_array_size.load(std::memory_order_relaxed);
+	if (armed != 0 && size == armed &&
+	    failing_array_size.compare_exchange_strong(armed, 0))
+		throw std::bad_alloc{};
+	return ::operator new(size);
+}
 
 namespace {
 
@@ -320,6 +336,39 @@ void test_decoder_range()
 	require(held_at(backing, space.generation(), executable));
 }
 
+/* E5: a space whose registry could not be made still registers the frames it
+ * compiles from, so that a store through another mapping of one reaches its
+ * code. */
+void test_without_a_registry()
+{
+	constexpr std::uint64_t executable = 0x1500'0000;
+	constexpr std::uint64_t alias = 0x2500'0000;
+	constexpr std::uint64_t writer = 0x3500'0000;
+	constexpr std::size_t page_counts = std::size_t{1} << 18;
+	ScratchBacking frame{"uml-x86-jit-bare-XXXXXX", page};
+	ScratchBacking code{"uml-x86-jit-bare-code-XXXXXX", page};
+	load_return(frame, 1);
+	load_writer(code);
+	Space space{9205};
+	space.map(writer, code, 0, rx, 1);
+	space.map(executable, frame, 0, rx, 1);
+	space.map(alias, frame, 0, rw, 0);
+	const auto backing = uml::memory::testing::mapped_backing(frame.descriptor());
+	require(backing != nullptr);
+
+	failing_array_size.store(page_counts);
+	require(space.to_system_call(executable) == 1);
+	require(failing_array_size.load() == 0 &&
+		uml::cpu::x86_64::CodePageRegistry::find(space.generation()) == nullptr,
+		"the registry of the space was made");
+	require(held_at(backing, space.generation(), executable),
+		"a space without a registry compiled from a frame it had not registered");
+	(void)space.to_system_call(writer, 2, alias + 1);
+	require(space.to_system_call(executable) == 2,
+		"a store through another address did not reach a space with no registry");
+	require(space.engine().diagnostics().registration_failures == 0);
+}
+
 /* Fails every registration that reaches the holder list, as memory that
  * stays exhausted would. */
 void fail_every_holder_list(uml::memory::testing::AllocationSite site) noexcept
@@ -397,6 +446,8 @@ int main()
 	std::puts("decoder ok");
 	test_registration_failure();
 	std::puts("failure ok");
+	test_without_a_registry();
+	std::puts("no registry ok");
 	const auto now = FrameAccounting::diagnostics();
 	require(now.holder_leaks == start.holder_leaks, "a holder leaked");
 	require(now.unquiesced_holder_removals == start.unquiesced_holder_removals);

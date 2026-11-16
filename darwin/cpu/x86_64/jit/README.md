@@ -91,9 +91,10 @@ lists the one record a handover changes. The x86 guest runners take
   moved or left. A publishing store into the code of the unit running it
   stops that unit before it stores.
 - The engine registers the frame a page maps before the decoder reads the
-  page, the first time a query names it and again after the page's code is
-  dropped, so a store through another address of the frame publishes at this
-  address space. A store publishes when the frame has a holder at another
+  page, at every query that names it (FEXCore asks again only after the
+  page's code is dropped), also when the address space has no registry, so a
+  store through another address of the frame publishes at this address
+  space. A store publishes when the frame has a holder at another
   address, whether or not its own page is executable: the store is not
   filled into the TLB, lands, and publishes at every holder, and a unit that
   holds such an address stops before it stores. A registration that fails or
