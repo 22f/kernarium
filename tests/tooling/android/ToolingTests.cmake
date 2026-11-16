@@ -91,6 +91,15 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 60)
 
+# The accessibility applications' licence modules name what each APK holds, for
+# the image's NOTICE, with the text of every copyleft kind they name.
+uml_add_tooling_test(
+    NAME lineage24-accessibility-licenses
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_accessibility_licenses.py
+    LABELS android;audit
+    TIMEOUT 60)
+
 # The list of paths that decide a release names every producer, and the object
 # IDs it yields do not depend on history.
 uml_add_tooling_test(
