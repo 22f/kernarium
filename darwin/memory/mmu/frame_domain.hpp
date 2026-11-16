@@ -29,8 +29,9 @@ struct GenerationState;
  * which are the only readers, so the table outlives them.
  *
  * The entries sit in stable chunks of a three-level radix that never move
- * before the domain is gone, so a reader (a publication under a stripe lock, a
- * registration) finds an entry with acquiring loads and takes no lock. The id
+ * before the domain is gone (a leaf of 1024 entries is 32 KiB), so a reader (a
+ * publication under a stripe lock, a registration) finds an entry with
+ * acquiring loads and takes no lock. The id
  * mutex serializes allocating and freeing an id, which happen at a state's
  * creation and in its `finish`; no stripe lock is ever held across it. The
  * chunks come from the domain's heap. */
@@ -88,6 +89,8 @@ private:
 	static constexpr unsigned root_bits = 8;
 	static_assert(leaf_bits + mid_bits + root_bits == 26);
 	using Leaf = std::array<Entry, std::size_t{1} << leaf_bits>;
+	static_assert(sizeof(Leaf) == std::size_t{32} * 1024,
+		"the alias table's leaf chunk is 32 KiB");
 	using Mid = std::array<std::atomic<Leaf *>, std::size_t{1} << mid_bits>;
 	using Root = std::array<std::atomic<Mid *>, std::size_t{1} << root_bits>;
 

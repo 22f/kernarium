@@ -213,12 +213,13 @@ Known deviations from x86 that remain:
   writer locations the registration names.
 - A translation is built and validated only from a frame its generation holds:
   the executor registers the frame at the page's location before it reads a
-  byte, and runs nothing from a page whose registration did not settle (an
-  unsettled or failed one gives a transient program, one instruction when no
-  holder stands, rebuilt at the next dispatch; a refused one, a page that is
-  not executable, gives none). Every body records the generation's flush
-  serial with its page stamps, so a flush of the generation makes a body
-  compare its source and register again though no stamp moved.
+  byte, and runs nothing from a page whose registration did not settle: an
+  unsettled, failed or refused one gives a transient program, one instruction
+  when no holder stands, never cached and rebuilt at the next dispatch (a
+  refused first page, one that is not a code page or whose generation is
+  gone, runs that one instruction and no more). Every body records the generation's
+  flush serial with its page stamps, so a flush of the generation makes a
+  body compare its source and register again though no stamp moved.
 - A write fill is tagged when its frame has a holder at another location,
   whether or not the page it fills is executable, and a store through that
   entry publishes at every holder: the holders in this generation cool their
