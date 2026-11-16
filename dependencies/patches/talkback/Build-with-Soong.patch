@@ -14,18 +14,19 @@ with the BuildConfig the Gradle build would generate for a release
 build, the braille modules and the material preference modules. The
 translation and key tables the Gradle build zips into res/raw become
 genrules, and liblouis and BRLTTY with its braille drivers build as
-native libraries against the NDK API level of the app's minSdk. The
-ndk-build makefiles of the braille libraries carry a .find-ignore, so
-that the platform makefile search leaves them alone.
+native libraries against the NDK API level of the app's minSdk, with the
+platform's JNI headers. The ndk-build makefiles of the braille libraries
+carry a .find-ignore, so that the platform makefile search leaves them
+alone.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- Android.bp                                    |  97 +++++
+ Android.bp                                    |  98 +++++
  braille/brailledisplay/Android.bp             |  24 ++
  braille/brailledisplayanalytics/Android.bp    |  15 +
  braille/brailleime/Android.bp                 |  22 +
  braille/brailleimeanalytics/Android.bp        |  17 +
- braille/brltty/Android.bp                     | 389 ++++++++++++++++++
+ braille/brltty/Android.bp                     | 394 ++++++++++++++++++
  braille/brltty/src/phone/jni/.find-ignore     |   0
  braille/common/Android.bp                     |  24 ++
  braille/interfaces/Android.bp                 |  15 +
@@ -36,7 +37,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  proguard/Android.bp                           |   9 +
  utils/Android.bp                              |  18 +
  .../accessibility/utils/BuildConfig.java      |  14 +
- 16 files changed, 750 insertions(+)
+ 16 files changed, 756 insertions(+)
  create mode 100644 Android.bp
  create mode 100644 braille/brailledisplay/Android.bp
  create mode 100644 braille/brailledisplayanalytics/Android.bp
@@ -56,10 +57,10 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 
 diff --git a/Android.bp b/Android.bp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ac1f5c1e4aaf034f009b0397e4b76283b7e76b6d
+index 0000000000000000000000000000000000000000..5ddfcef3a8f3a7a5f314765f6894e564d7e1e57e
 --- /dev/null
 +++ b/Android.bp
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,98 @@
 +// SPDX-License-Identifier: Apache-2.0
 +
 +//
@@ -155,6 +156,7 @@ index 0000000000000000000000000000000000000000..ac1f5c1e4aaf034f009b0397e4b76283
 +    name: "TalkBack-native-defaults",
 +    sdk_version: "26",
 +    stl: "none",
++    header_libs: ["jni_headers"],
 +    cflags: ["-Wno-error"],
 +}
 diff --git a/braille/brailledisplay/Android.bp b/braille/brailledisplay/Android.bp
@@ -261,10 +263,10 @@ index 0000000000000000000000000000000000000000..5637fc519662ffe493b8b5ec892f571d
 +}
 diff --git a/braille/brltty/Android.bp b/braille/brltty/Android.bp
 new file mode 100644
-index 0000000000000000000000000000000000000000..dfa8b74775bf47d1984f491dbd42d7e09a6d62be
+index 0000000000000000000000000000000000000000..c20f7f875fbdde8e1775df418fbf9264cf77a5df
 --- /dev/null
 +++ b/braille/brltty/Android.bp
-@@ -0,0 +1,389 @@
+@@ -0,0 +1,394 @@
 +// SPDX-License-Identifier: Apache-2.0
 +
 +// The BRLTTY braille display drivers and their Java side: the key tables as a raw
@@ -316,7 +318,12 @@ index 0000000000000000000000000000000000000000..dfa8b74775bf47d1984f491dbd42d7e0
 +        "src/phone/jni/brlttywrapper/third_party/brltty/Headers",
 +        "src/phone/jni/brlttywrapper",
 +    ],
-+    cflags: ["-DHAVE_CONFIG_H"],
++    cflags: [
++        "-DHAVE_CONFIG_H",
++        // The driver tables record the compile date and time (__DATE__,
++        // __TIME__), as the upstream code does.
++        "-Wno-date-time",
++    ],
 +}
 +
 +cc_library_static {
