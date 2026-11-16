@@ -126,7 +126,7 @@ index 4e612c56f7b4bad89c13a43a1dc54fbc91f6beb5..c5446b243f11394b2827ad4dcb1b9912
                                      (struct vrend_renderer_resource_info *)info);
  
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index 0630ff3ca27502045c43c144a0a9001df121ea12..c2feae32a0ebbe9b8f0cc414159a7fba9d60da9d 100644
+index 2ead12a941345410cfd679d3aa335471e7daee31..fc8a90de3a5be4a944ce14bdfbef7609a08f05d7 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -367,6 +367,8 @@ struct global_renderer_state {
@@ -322,7 +322,7 @@ index 0630ff3ca27502045c43c144a0a9001df121ea12..c2feae32a0ebbe9b8f0cc414159a7fba
        return pres->width0;
  
 diff --git a/src/vrend/vrend_renderer.h b/src/vrend/vrend_renderer.h
-index 31496144de44ddd935b198eab280724404aee6fd..4bc6a9bb55ac45484f3555dbc9a3298e65aab6e6 100644
+index 815f53675e4a57fffc36d63734a8e70ba1358715..46903d6e1691ea81b5ed404ed199eb0488ad5120 100644
 --- a/src/vrend/vrend_renderer.h
 +++ b/src/vrend/vrend_renderer.h
 @@ -93,6 +93,11 @@ struct vrend_resource {
