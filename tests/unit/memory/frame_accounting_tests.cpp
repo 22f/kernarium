@@ -11,6 +11,7 @@
  * indexes (the test variant's audit). The diagnostics must show no accounting
  * error and no state destroyed with its locations. */
 #include "domain_contract.hpp"
+#include "domain_heap.hpp"
 #include "frame_accounting.hpp"
 #include "allocation_fault.hpp"
 #include "address_space_types.hpp"
@@ -575,6 +576,52 @@ void test_a_states_alias_id_is_fixed_from_its_creation()
 	baseline.clean("E9 ids");
 }
 
+/* M14 (cost): what the accounting keeps in the domain's heap per GiB of
+ * guest memory a generation maps writable, and per further writer location of
+ * a frame: the bytes its metadata holds (index, records, lists, alias table)
+ * beyond those of a read-only generation of the same pages. The numbers are
+ * printed. */
+void test_the_heap_cost_of_the_accounting()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0x4000'0000;
+	constexpr unsigned long pages = 262144; /* 1 GiB */
+	ScratchBacking backing{"uml-frame-accounting-cost-XXXXXX", pages * page};
+	Domain domain{71'008};
+	std::size_t first_writer = 0;
+	std::size_t each_further = 0;
+	domain.run([&] {
+		const auto grew = [&](unsigned long generation, int protection) {
+			const auto before = uml::memory::testing::frame_metadata_bytes();
+			require(map(generation, base, backing, 0, pages, protection, 0) == 0);
+			return uml::memory::testing::frame_metadata_bytes() - before;
+		};
+		/* Same pages, same kind of generation: read only, then writable. */
+		const auto read_only = grew(900, ro);
+		const auto writable = grew(901, rw);
+		first_writer = writable > read_only ? writable - read_only : 0;
+		/* A second writable alias of every frame: records and lists. */
+		const auto second_read_only = grew(902, ro);
+		const auto second_writable = grew(903, rw);
+		each_further = second_writable > second_read_only ?
+			second_writable - second_read_only : 0;
+		audit("cost", 2 * pages);
+		require(darwin_uml_static_vm_destroy(901) == 0);
+		require(darwin_uml_static_vm_destroy(903) == 0);
+		audit("cost destroyed", 0);
+	});
+	domain.retire();
+	std::printf("1 GiB writable: heap +%zu bytes (%.2f MiB) over read only; "
+		"a second writer of every frame: +%zu bytes (%.1f bytes per frame)\n",
+		first_writer, static_cast<double>(first_writer) / (1 << 20),
+		each_further, static_cast<double>(each_further) / pages);
+	require(first_writer <= (std::size_t{3} << 20),
+		"the writer index costs more than 3 MiB per GiB");
+	require(each_further / pages <= 256,
+		"a further writer location costs more than 256 bytes");
+	baseline.clean("M14 cost");
+}
+
 } // namespace
 
 int main()
@@ -588,6 +635,7 @@ int main()
 	test_writer_lists_grow_and_nothing_allocates_under_a_stripe_lock();
 	test_a_large_plan_makes_room_geometrically();
 	test_a_states_alias_id_is_fixed_from_its_creation();
+	test_the_heap_cost_of_the_accounting();
 	uml::memory::set_domain_provider(nullptr);
 	std::puts("frame accounting tests passed");
 	return EXIT_SUCCESS;

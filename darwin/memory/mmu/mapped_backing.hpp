@@ -125,17 +125,39 @@ public:
 	/* The frame's word, or null while its leaf does not exist. */
 	[[nodiscard]] std::uint64_t *writer_word(std::uint64_t offset) noexcept;
 
+	/* A writer location with the retirement debt it was last owed (0 for
+	 * none); see FrameAccounting::hold. */
+	struct WriterNode final {
+		WriterLocation location;
+		std::uint64_t debt;
+	};
 	/* What the frame accounting keeps per frame beside the stamp: the writer
-	 * locations of a frame with several. The list lives in the heap of the
+	 * locations of a frame with several, the debt of a single writer, the
+	 * holders (locations at which an x86 translator registered the frame),
+	 * and the retirement debt counters. The lists live in the heap of the
 	 * address space that made the backing, as the generations' own indexes
-	 * do, and gives its room back when the writers are gone. Guarded by the
-	 * frame's stripe lock. */
+	 * do, and give their room back when they empty. Every field is guarded by
+	 * the frame's stripe lock, except `summary` and `alias_changes`, which
+	 * the write fill reads without it. */
 	struct FrameRecord {
 		explicit FrameRecord(DomainHeap *heap) noexcept
-			: writers{FrameAllocator<WriterLocation>{heap}}
+			: writers{FrameAllocator<WriterNode>{heap}},
+			  holders{FrameAllocator<WriterLocation>{heap}}
 		{
 		}
-		std::vector<WriterLocation, FrameAllocator<WriterLocation>> writers;
+		std::vector<WriterNode, FrameAllocator<WriterNode>> writers;
+		/* The debt of the single writer the frame's word names. */
+		std::uint64_t single_debt{};
+		std::vector<WriterLocation, FrameAllocator<WriterLocation>> holders;
+		/* None (0), the one holder (kind single) or several (kind several),
+		 * in the frame word's encoding. */
+		std::atomic_uint64_t summary{0};
+		/* Advanced at every holder addition and at the record's creation. */
+		std::atomic_uint64_t alias_changes{1};
+		/* The highest debt sequence given out, and the highest a completed
+		 * retirement covers. */
+		std::uint64_t debt_sequence{};
+		std::uint64_t debt_cleared{};
 	};
 	/* The frame's record, made if it has none; null when memory ran out.
 	 * Allocates and takes the records' mutex: never call under a stripe
@@ -146,6 +168,12 @@ public:
 	 * record index exists has frames with writers (prepare_writers), so the
 	 * index is all that is looked in. */
 	[[nodiscard]] FrameRecord *find_frame_record(std::uint64_t offset) noexcept;
+	/* The record's stamp identity, unique and never reused. */
+	[[nodiscard]] static std::uint64_t record_identity(
+		const FrameRecord &record) noexcept;
+	/* Moves the record's stamp, as retire_code_page does for an offset. For a
+	 * caller under a stripe lock, which must not look an offset up. */
+	static void move_stamp(FrameRecord &record) noexcept;
 	/* The heap the frames' lists live in, or null for the process's. */
 	[[nodiscard]] DomainHeap *heap() const noexcept { return domain_->heap(); }
 	/* The domain whose alias table resolves the locations in the frames. */

@@ -207,10 +207,10 @@ Known deviations from x86 that remain:
   long as that participant stays inside, and the gadget engine builds the
   translation of an unsettled page again at every dispatch instead of
   caching it.
-- The memory layer accounts the writable locations of each frame
-  ([`docs/architecture.md`](../../../../docs/architecture.md#domain-heaps));
-  a translator that registers a frame retires the write translations of those
-  locations.
+- The memory layer accounts the writer locations and the holders of each frame
+  ([`docs/architecture.md`](../../../../docs/architecture.md#x86-64-frame-accounting)).
+  A translator that registers a frame retires the write translations of the
+  writer locations the registration names.
 - Every store to a page that holds cached code owes a publication of its own,
   and the program performs it before its next store: another vCPU may
   revalidate the page between two stores, so a program that patches a page

@@ -9,6 +9,9 @@
 #if UML_MEMORY_HAS_NATIVE_VM
 #include "bridge_call.hpp"
 #include "native_address_space.hpp"
+#if DARWIN_UML_X86_64_GUEST
+#include "frame_accounting.hpp"
+#endif
 #endif
 
 #include <atomic>
@@ -125,6 +128,12 @@ extern "C" int darwin_uml_vm_map(void *address, int fd, unsigned long long offse
 		const auto result = space.map_direct(
 			reinterpret_cast<std::uintptr_t>(address), fd, offset,
 			length, direct_protection);
+#if DARWIN_UML_X86_64_GUEST
+		/* A kernel write through this alias names its frame. */
+		if (result >= 0)
+			uml::memory::FrameAccounting::note_direct_map(
+				address, length, fd, offset);
+#endif
 		if (result < 0 && shadow && errno == EBUSY)
 			return space.map(
 				reinterpret_cast<std::uintptr_t>(address), fd, offset,
@@ -209,6 +218,9 @@ extern "C" int darwin_uml_vm_unmap(void *address, unsigned long length)
 				reinterpret_cast<std::uintptr_t>(address), 0, length))
 			return space.unmap(
 				reinterpret_cast<std::uintptr_t>(address), length);
+#if DARWIN_UML_X86_64_GUEST
+		uml::memory::FrameAccounting::note_direct_unmap(address, length);
+#endif
 		return space.unmap_direct(
 			reinterpret_cast<std::uintptr_t>(address), length);
 	});
@@ -239,6 +251,9 @@ extern "C" int darwin_uml_vm_unmap_generation(unsigned long generation, void *ad
 				reinterpret_cast<std::uintptr_t>(address), 0, length))
 			return space.unmap(
 				reinterpret_cast<std::uintptr_t>(address), length);
+#if DARWIN_UML_X86_64_GUEST
+		uml::memory::FrameAccounting::note_direct_unmap(address, length);
+#endif
 		return space.unmap_direct(
 			reinterpret_cast<std::uintptr_t>(address), length);
 	});

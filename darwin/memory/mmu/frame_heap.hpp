@@ -28,14 +28,16 @@ namespace uml::memory {
 	DomainHeap *heap, std::size_t bytes, std::size_t alignment)
 {
 	UML_MEMORY_ALLOCATOR_PROBE();
-	if (heap != nullptr)
-		return heap->allocate(bytes, alignment);
-	return ::operator new(bytes, std::align_val_t{alignment});
+	void *block = heap != nullptr ? heap->allocate(bytes, alignment) :
+		::operator new(bytes, std::align_val_t{alignment});
+	UML_MEMORY_FRAME_BYTES(static_cast<std::ptrdiff_t>(bytes));
+	return block;
 }
 
 inline void frame_deallocate(DomainHeap *heap, void *block, std::size_t bytes,
 	std::size_t alignment) noexcept
 {
+	UML_MEMORY_FRAME_BYTES(-static_cast<std::ptrdiff_t>(bytes));
 	if (heap != nullptr)
 		heap->deallocate(block, bytes, alignment);
 	else

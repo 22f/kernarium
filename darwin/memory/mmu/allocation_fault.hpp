@@ -31,6 +31,7 @@ enum class AllocationSite : std::uint8_t {
 	native_owner_registry,
 	native_slot,
 	writers,
+	holders,
 	records,
 	count,
 };
@@ -59,6 +60,9 @@ void stripe_lock_left() noexcept;
  * of the global operator new, reports here; one made under a stripe lock is
  * counted. */
 void allocator_probe() noexcept;
+/* The bytes the frame accounting's metadata holds now (frame_heap.hpp). */
+void frame_bytes_changed(std::ptrdiff_t delta) noexcept;
+[[nodiscard]] std::size_t frame_metadata_bytes() noexcept;
 [[nodiscard]] std::size_t allocations_under_stripe_lock() noexcept;
 
 void backing_mapping_created() noexcept;
@@ -71,6 +75,8 @@ void backing_mapping_destroyed() noexcept;
 	::uml::memory::testing::allocation_checkpoint(site)
 #define UML_MEMORY_ALLOCATOR_PROBE() \
 	::uml::memory::testing::allocator_probe()
+#define UML_MEMORY_FRAME_BYTES(delta) \
+	::uml::memory::testing::frame_bytes_changed(delta)
 #define UML_MEMORY_STRIPE_LOCK_ENTERED() \
 	::uml::memory::testing::stripe_lock_entered()
 #define UML_MEMORY_STRIPE_LOCK_LEFT() \
@@ -85,6 +91,7 @@ void backing_mapping_destroyed() noexcept;
  * product symbol, load, branch, or call even in an unoptimized build. */
 #define UML_MEMORY_ALLOCATION_CHECKPOINT(...) ((void)0)
 #define UML_MEMORY_ALLOCATOR_PROBE() ((void)0)
+#define UML_MEMORY_FRAME_BYTES(...) ((void)0)
 #define UML_MEMORY_STRIPE_LOCK_ENTERED() ((void)0)
 #define UML_MEMORY_STRIPE_LOCK_LEFT() ((void)0)
 #define UML_MEMORY_BACKING_MAPPING_CREATED() ((void)0)

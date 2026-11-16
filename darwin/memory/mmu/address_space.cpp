@@ -140,7 +140,13 @@ struct PageMapping final {
  * guest-code page that grants execute. */
 [[nodiscard]] bool can_hold_translation(const PageMapping &mapping) noexcept
 {
+#if DARWIN_UML_X86_64_GUEST
+	/* The one predicate of every holder site (frame_accounting.hpp). */
+	return FrameAccounting::translatable(
+		mapping.guest_code, (mapping.protection & PROT_EXEC) != 0);
+#else
 	return mapping.guest_code && (mapping.protection & PROT_EXEC) != 0;
+#endif
 }
 
 #if DARWIN_UML_X86_64_GUEST
@@ -151,7 +157,8 @@ struct PageMapping final {
 	if (!mapping)
 		return {};
 	return {mapping->backing, mapping->offset,
-		(mapping->protection & PROT_WRITE) != 0};
+		(mapping->protection & PROT_WRITE) != 0,
+		can_hold_translation(*mapping)};
 }
 #endif
 
@@ -732,9 +739,14 @@ public:
 				fields.exec = (protection & PROT_EXEC) != 0;
 				state->fill_index.store(page, FillIndex::encode(fields));
 #if DARWIN_UML_X86_64_GUEST
-				if (FillIndex::decode(word).write &&
-				    (protection & PROT_WRITE) == 0)
-					FrameAccounting::release_word(*state, page, word);
+				const auto before = FillIndex::decode(word);
+				if (before.write && (protection & PROT_WRITE) == 0)
+					FrameAccounting::release_writer(*state, page, word);
+				if (FrameAccounting::translatable(
+					    before.guest_code, before.exec) &&
+				    !FrameAccounting::translatable(
+					    before.guest_code, (protection & PROT_EXEC) != 0))
+					FrameAccounting::release_holder(*state, page, word);
 #endif
 				return false;
 			});
@@ -1004,22 +1016,54 @@ public:
 			active.address_space == this && active.state &&
 				!active.state->retired.load(std::memory_order_acquire) ?
 				active.generation : 0);
+#if DARWIN_UML_X86_64_GUEST
+		/* A kernel write reaches the frame through the kernel's own alias of
+		 * it, which `buffer` is. Name the frame before any generation lock is
+		 * taken: the table the host keeps of those aliases has a lock of its
+		 * own, and the descriptor table another. */
+		std::shared_ptr<MappedBacking> alias_backing;
+		std::uint64_t alias_offset = 0;
+		if (kernel_write) {
+			int fd = -1;
+			if (FrameAccounting::resolve_direct(buffer, fd, alias_offset))
+				alias_backing = existing_backing(fd);
+		}
+#endif
 		auto reference = reference_for(generation);
 		std::shared_lock lock{reference.state->mappings_mutex};
 		const auto word = reference.state->fill_index.lookup(page);
-		if (word == 0)
-			return 0;
-		std::memcpy(reinterpret_cast<void *>(
-				    (word & FillIndex::address_mask) + in_page),
-			buffer, length);
-		if ((word & FillIndex::guest_code_page) != 0 &&
-		    (!kernel_write || kernel_code_write_publishes())) {
-			if (const auto mapping = decode_page(
-				    *reference.state, page, word))
-				MappedBacking::invalidate_code_page(
-					mapping->backing->code_page_handle(mapping->offset));
-			publish_code_change(*reference.state, page);
+		if (word != 0) {
+			std::memcpy(reinterpret_cast<void *>(
+					    (word & FillIndex::address_mask) + in_page),
+				buffer, length);
+			if ((word & FillIndex::guest_code_page) != 0 &&
+			    (!kernel_write || kernel_code_write_publishes())) {
+				if (const auto mapping = decode_page(
+					    *reference.state, page, word))
+					MappedBacking::invalidate_code_page(
+						mapping->backing->code_page_handle(
+							mapping->offset));
+				publish_code_change(*reference.state, page);
+			}
 		}
+#if DARWIN_UML_X86_64_GUEST
+		/* The bytes are in the shared backing at the write, so the
+		 * publication follows them: at every holder of the frame, whichever
+		 * generation and address registered it. */
+		if (kernel_write && kernel_code_write_publishes()) {
+			if (alias_backing) {
+				FrameAccounting::publish_kernel_write(*alias_backing,
+					alias_offset & ~(page_size - 1),
+					alias_offset & (page_size - 1), length);
+			} else if (word == 0) {
+				/* Neither the frame nor the user word is known: every
+				 * generation reads every translation again. */
+				FrameAccounting::note_unresolved_kernel_write();
+				lock.unlock();
+				publish_all_generations();
+			}
+		}
+#endif
 		return 0;
 	}
 
@@ -1231,6 +1275,13 @@ public:
 					MappedBacking::invalidate_code_page(
 						mapping->backing->code_page_handle(
 							mapping->offset));
+#if DARWIN_UML_X86_64_GUEST
+					/* The page's frame may be translated at other
+					 * addresses and in other generations. */
+					if (kernel_code_write_publishes())
+						FrameAccounting::publish_kernel_write(
+							*mapping->backing, mapping->offset, 0, page_size);
+#endif
 				}
 				publish_first = std::min(publish_first, page);
 				publish_end = page + page_size;
@@ -1241,6 +1292,116 @@ public:
 				publish_end - publish_first);
 		return 0;
 	}
+
+#if DARWIN_UML_X86_64_GUEST
+	/* The state an x86 translator's frame calls act on: the entered
+	 * context's, or the generation's. */
+	[[nodiscard]] GenerationReference frame_call_state(
+		void *opaque, std::uint64_t generation, std::uint64_t page)
+	{
+		auto *context = static_cast<ExecutionContext *>(opaque);
+		if (context != nullptr && context->entered &&
+		    context->generation == generation &&
+		    !context->state->retired.load(std::memory_order_acquire))
+			return {{}, context->state.get()};
+		return reference_for(generation_for(page, generation));
+	}
+
+	/* Registers the page as a holder of its frame (frame_accounting.hpp). */
+	int hold_code_frame(void *context, std::uint64_t generation,
+		std::uint64_t address, darwin_uml_static_frame_location *owed,
+		std::size_t capacity, darwin_uml_static_frame_hold *hold)
+	{
+		if (hold == nullptr || (capacity != 0 && owed == nullptr))
+			return DARWIN_UML_STATIC_FRAME_FAILED;
+		*hold = {};
+		constexpr std::size_t maximum_debt = 16;
+		std::array<FrameAccounting::DebtLocation, maximum_debt> debts{};
+		const auto page = address & ~(page_size - 1);
+		auto reference = frame_call_state(context, generation, page);
+		std::shared_lock lock{reference.state->mappings_mutex};
+		const auto report = FrameAccounting::hold(*reference.state, page,
+			debts.data(), std::min(capacity, maximum_debt));
+		for (std::size_t index = 0; index < report.owed; ++index)
+			owed[index] = {debts[index].generation, debts[index].page};
+		hold->record_identity = report.record_identity;
+		hold->debt_sequence = report.debt_sequence;
+		hold->owed = report.owed;
+		switch (report.result) {
+		case FrameAccounting::HoldResult::settled:
+			return DARWIN_UML_STATIC_FRAME_SETTLED;
+		case FrameAccounting::HoldResult::owed:
+			return DARWIN_UML_STATIC_FRAME_OWED;
+		case FrameAccounting::HoldResult::refused:
+			return DARWIN_UML_STATIC_FRAME_REFUSED;
+		case FrameAccounting::HoldResult::failed:
+			break;
+		}
+		return DARWIN_UML_STATIC_FRAME_FAILED;
+	}
+
+	void clear_code_debt(void *context, std::uint64_t generation,
+		std::uint64_t address, std::uint64_t record_identity,
+		std::uint64_t debt_sequence)
+	{
+		const auto page = address & ~(page_size - 1);
+		auto reference = frame_call_state(context, generation, page);
+		std::shared_lock lock{reference.state->mappings_mutex};
+		FrameAccounting::clear_debt(*reference.state, page, record_identity,
+			debt_sequence);
+	}
+
+	int frame_state(void *context, std::uint64_t generation,
+		std::uint64_t address, darwin_uml_static_frame_state *state)
+	{
+		if (state == nullptr)
+			return -1;
+		const auto page = address & ~(page_size - 1);
+		auto reference = frame_call_state(context, generation, page);
+		std::shared_lock lock{reference.state->mappings_mutex};
+		const auto fill = FrameAccounting::fill_state(*reference.state, page);
+		*state = {fill.backing, fill.offset, fill.record, fill.alias_changes,
+			fill.other_holder ? 1 : 0};
+		return 0;
+	}
+
+	int publish_frame_store(void *context, std::uint64_t generation,
+		std::uint64_t address, std::uint64_t length, std::uint64_t *own,
+		std::size_t capacity, darwin_uml_static_frame_publication *result)
+	{
+		if (result == nullptr || length == 0)
+			return -1;
+		*result = {};
+		const auto page = address & ~(page_size - 1);
+		auto reference = frame_call_state(context, generation, page);
+		std::shared_lock lock{reference.state->mappings_mutex};
+		const auto done = FrameAccounting::publish_store(*reference.state,
+			page, address & (page_size - 1), length, own, capacity);
+		result->own_count = done.own_count;
+		result->own_records = done.own_records;
+		result->overflow = done.overflow ? 1 : 0;
+		return done.handled ? 1 : 0;
+	}
+
+	/* Every generation of the address space reads every translation again:
+	 * the fallback for a write that names no frame. The flush serial moves,
+	 * because a stamp does not. */
+	void publish_all_generations()
+	{
+		std::vector<std::shared_ptr<GenerationState>> states;
+		{
+			std::shared_lock lock{states_mutex_};
+			for (const auto &[generation, state] : states_) {
+				(void)generation;
+				states.push_back(state);
+			}
+		}
+		for (const auto &state : states) {
+			FrameAccounting::bump_flush_serial(*state);
+			::uml::memory::publish_code_change(*state, 0, 0);
+		}
+	}
+#endif
 
 	[[nodiscard]] std::uint64_t active_generation() const noexcept
 	{
@@ -1255,6 +1416,19 @@ public:
 		std::lock_guard lock{backing_mutex_};
 		descriptor_backings_.erase(fd);
 	}
+
+#if DARWIN_UML_X86_64_GUEST
+	/* The backing this address space made for the descriptor, if it still has
+	 * one. */
+	[[nodiscard]] std::shared_ptr<MappedBacking> existing_backing(int fd)
+	{
+		std::shared_lock lock{backing_mutex_};
+		if (const auto found = descriptor_backings_.find(fd);
+		    found != descriptor_backings_.end())
+			return found->second.lock();
+		return {};
+	}
+#endif
 
 	int begin_batch(std::uint64_t generation)
 	{
@@ -2685,6 +2859,73 @@ extern "C" void darwin_uml_static_vm_invalidate_code(unsigned long address)
 		return 0;
 	});
 }
+
+#if DARWIN_UML_X86_64_GUEST
+extern "C" int darwin_uml_static_vm_hold_code_frame(
+	void *context, unsigned long generation, unsigned long address,
+	struct darwin_uml_static_frame_location *owed, size_t capacity,
+	struct darwin_uml_static_frame_hold *hold)
+{
+	const int result = with_address_space([&](auto &space) {
+		return space.hold_code_frame(
+			context, generation, address, owed, capacity, hold);
+	});
+	/* No address space to ask is a failure the caller treats as any other. */
+	return result < 0 ? DARWIN_UML_STATIC_FRAME_FAILED : result;
+}
+
+extern "C" void darwin_uml_static_vm_clear_code_debt(
+	void *context, unsigned long generation, unsigned long address,
+	uint64_t record_identity, uint64_t debt_sequence)
+{
+	(void)with_address_space([&](auto &space) {
+		space.clear_code_debt(context, generation, address, record_identity,
+			debt_sequence);
+		return 0;
+	});
+}
+
+extern "C" int darwin_uml_static_vm_frame_state(
+	void *context, unsigned long generation, unsigned long address,
+	struct darwin_uml_static_frame_state *state)
+{
+	return with_address_space([&](auto &space) {
+		return space.frame_state(context, generation, address, state);
+	});
+}
+
+extern "C" int darwin_uml_static_vm_frame_state_unchanged(
+	const struct darwin_uml_static_frame_state *state)
+{
+	if (state == nullptr)
+		return 1;
+	return uml::memory::FrameAccounting::fill_unchanged(
+		{state->record, state->alias_changes, state->other_holder != 0,
+			const_cast<uml::memory::MappedBacking *>(
+				static_cast<const uml::memory::MappedBacking *>(
+					state->backing)),
+			state->offset}) ? 1 : 0;
+}
+
+extern "C" int darwin_uml_static_vm_publish_frame_store(
+	void *context, unsigned long generation, unsigned long address,
+	unsigned long length, uint64_t *own, size_t capacity,
+	struct darwin_uml_static_frame_publication *publication)
+{
+	return with_address_space([&](auto &space) {
+		return space.publish_frame_store(context, generation, address,
+			length, own, capacity, publication);
+	});
+}
+
+extern "C" uint64_t darwin_uml_static_vm_execution_context_flush_serial(
+	void *context)
+{
+	const auto *entered = static_cast<uml::memory::ExecutionContext *>(context);
+	return entered == nullptr || !entered->state ? 0 :
+		uml::memory::FrameAccounting::flush_serial(*entered->state);
+}
+#endif
 
 #if UML_MEMORY_ALLOCATION_TESTING && DARWIN_UML_X86_64_GUEST
 namespace uml::memory::testing {

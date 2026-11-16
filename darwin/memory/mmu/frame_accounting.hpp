@@ -19,11 +19,13 @@ namespace uml::memory {
 
 struct GenerationState;
 
-/* The frame a fill index word maps, as far as writer accounting needs it. */
+/* The frame a fill index word maps, as far as the accounting needs it. */
 struct FrameRef final {
 	MappedBacking *backing{};
 	std::uint64_t offset{};
 	bool writable{};
+	/* `FrameAccounting::translatable` of the word's fields. */
+	bool translatable{};
 };
 
 /* Per 4 KiB frame of a backing, the exact locations at which a generation's
@@ -50,6 +52,16 @@ public:
 	static constexpr std::uint32_t maximum_alias =
 		FrameAccountingDomain::maximum_alias;
 
+	/* Whether a word with these fields can hold a translation: a guest-code
+	 * page that grants execute. The one predicate of every site that adds or
+	 * removes a holder (registration, `apply`, the walks, `protect`), so that
+	 * a holder exists only where a translatable word does. */
+	[[nodiscard]] static constexpr bool translatable(
+		bool guest_code, bool executable) noexcept
+	{
+		return guest_code && executable;
+	}
+
 	/* Only a page an entered context can fill is a location: the fill never
 	 * serves a page at or above the guest address limit. */
 	[[nodiscard]] static constexpr bool tracks(std::uint64_t page) noexcept
@@ -74,14 +86,26 @@ public:
 	static void reserve(GenerationState &state, std::uint64_t page,
 		const FrameRef &final);
 	/* Applies the change of one committed page from `before` to `after`:
-	 * removes the location of `before` unless the page stays writable to the
-	 * same frame. Called after the word changed and before the backing slot
-	 * of `before` is given back. Allocates nothing. */
+	 * removes the writer location of `before` unless the page stays writable
+	 * to the same frame, and its holder unless the page stays translatable to
+	 * the same frame. The holder step does not depend on the page being
+	 * writable: a read-execute page is the common holder. Called after the
+	 * word changed and before the backing slot of `before` is given back.
+	 * Allocates nothing. */
 	static void apply(GenerationState &state, std::uint64_t page,
 		const FrameRef &before, const FrameRef &after) noexcept;
-	/* The location of the writable fill index word `word` of `page`, which
-	 * is going away. */
+	/* The locations of the fill index word `word` of `page`, which is going
+	 * away: its writer location if it is writable, and its holder if it is
+	 * translatable. */
 	static void release_word(GenerationState &state, std::uint64_t page,
+		std::uintptr_t word) noexcept;
+	/* Only the writer location of `word`, for a word that stays but stops
+	 * being writable (`protect`). */
+	static void release_writer(GenerationState &state, std::uint64_t page,
+		std::uintptr_t word) noexcept;
+	/* Only the holder of `word`, for a word that stays but stops being
+	 * translatable (`protect` without execute). */
+	static void release_holder(GenerationState &state, std::uint64_t page,
 		std::uintptr_t word) noexcept;
 
 	/* The change of the primitive that reserved took effect or did not: the
@@ -89,11 +113,15 @@ public:
 	static void commit(GenerationState &state) noexcept;
 	static void settle(GenerationState &state) noexcept;
 
-	/* Removes every writer location of the generation, before its words go
-	 * (`clear_mappings`). The generation stays usable. */
+	/* Removes every writer location and every holder of the generation, before
+	 * its words go (`clear_mappings`), and moves the generation's flush
+	 * serial, so that no translation recorded before the walk is taken for
+	 * current. The bump follows the last holder removal and sits in this
+	 * function, so every caller gets it. The generation stays usable. */
 	static void walk(GenerationState &state) noexcept;
 	/* The generation is gone: marks its state walked and gives back its alias
-	 * id. Later reservations on it are refused. */
+	 * id (retiring it for good if a holder still names it). Later
+	 * reservations and registrations on it are refused. */
 	static void finish(GenerationState &state) noexcept;
 	/* The retire walk: the same for a state whose words stay as they are. */
 	static void retire(GenerationState &state) noexcept;
@@ -114,14 +142,139 @@ public:
 		/* Times a reservation made room for more entries: a plan of N pages
 		 * takes O(log N), never N. */
 		std::uint64_t reservation_growths;
+		std::uint64_t holder_additions;
+		std::uint64_t holder_removals;
+		/* Flush serial moves: one per walk. */
+		std::uint64_t serial_bumps;
+		/* Alias ids retired for good because a holder still named them when
+		 * their state was walked for the last time; must stay 0. */
+		std::uint64_t holder_leaks;
+		/* Holder removals made while the generation could still run, other
+		 * than the retire walk's; must stay 0. */
+		std::uint64_t unquiesced_holder_removals;
+		/* Holder removals for a change the code-change predicate does not
+		 * name; must stay 0. */
+		std::uint64_t unmarked_holder_removals;
+		/* Registrations refused because the state was walked. */
+		std::uint64_t walked_refusals;
+		/* Registrations that failed (memory, an unknown frame, too much
+		 * debt) and changed nothing. */
+		std::uint64_t registration_failures;
+		/* Publications of stores and kernel writes at the holders of a frame. */
+		std::uint64_t publications;
+		/* Kernel writes whose buffer named no frame. */
+		std::uint64_t unresolved_kernel_writes;
 	};
 	[[nodiscard]] static Diagnostics diagnostics() noexcept;
 	static void note_nonempty_state_destruction() noexcept;
+
+	enum class HoldResult : std::uint8_t {
+		/* The holder stands and nothing is owed. */
+		settled,
+		/* The holder stands; `owed` locations were written to the caller's
+		 * buffer, and their write translations are to be retired and the
+		 * participants waited for. */
+		owed,
+		/* The page is not translatable here, or the state is gone. */
+		refused,
+		/* Nothing changed: memory ran out, the frame's accounting is in
+		 * error, or the debt is more than the caller's buffer holds. */
+		failed,
+	};
+	struct DebtLocation final {
+		std::uint64_t generation;
+		std::uint64_t page;
+	};
+	struct HoldReport final {
+		HoldResult result;
+		/* The frame record's identity and the debt sequence the owed
+		 * locations belong to, for clear_debt. */
+		std::uint64_t record_identity;
+		std::uint64_t debt_sequence;
+		std::size_t owed;
+	};
+	/* Registers the page as a holder of its frame before the caller reads a
+	 * byte of it. For a holder of the generation's mapping lock shared, who
+	 * keeps it for the whole call: the word is read once, and the record and
+	 * the room the list needs are made before the stripe lock, never under
+	 * it. */
+	[[nodiscard]] static HoldReport hold(GenerationState &state,
+		std::uint64_t page, DebtLocation *owed, std::size_t capacity) noexcept;
+	/* A completed retirement covers the debt up to `debt_sequence` of the
+	 * record `record_identity`, if the page still maps that record. For a
+	 * holder of the mapping lock shared. */
+	static void clear_debt(GenerationState &state, std::uint64_t page,
+		std::uint64_t record_identity, std::uint64_t debt_sequence) noexcept;
+
+	/* What the write fill reads, without a lock: whether the frame the page
+	 * maps has a holder other than the page, and the words whose change tells
+	 * the fill to start over. */
+	struct FillState final {
+		const void *record;
+		std::uint64_t alias_changes;
+		bool other_holder;
+		/* The frame, so that the fill can ask again whether the two words
+		 * moved. */
+		MappedBacking *backing;
+		std::uint64_t offset;
+	};
+	[[nodiscard]] static FillState fill_state(const GenerationState &state,
+		std::uint64_t page) noexcept;
+	/* Whether the frame still has the record and alias count `was` read. For
+	 * a caller holding the generation's execution gate, with no lock. */
+	[[nodiscard]] static bool fill_unchanged(const FillState &was) noexcept;
+	/* What a store publication did. */
+	struct Publication final {
+		/* The frame has a holder other than the writer's page and the
+		 * store was published at every holder. Otherwise nothing was
+		 * done and the caller publishes as it always did. */
+		bool handled;
+		/* The generation's holder addresses did not fit the caller's
+		 * buffer: the caller must cool everything. */
+		bool overflow;
+		/* The holder addresses in the writer's own generation, and how
+		 * many ring records the call added there. */
+		std::size_t own_count;
+		std::uint64_t own_records;
+	};
+	/* Publishes the store of `length` bytes at `in_page` of the page the
+	 * writer maps at `page`, after its bytes were written. For a holder of
+	 * the mapping lock shared. */
+	[[nodiscard]] static Publication publish_store(GenerationState &writer,
+		std::uint64_t page, std::uint64_t in_page, std::uint64_t length,
+		std::uint64_t *own, std::size_t capacity) noexcept;
+	/* The same for a write the kernel made through its own alias of the
+	 * frame. */
+	static void publish_kernel_write(MappedBacking &backing,
+		std::uint64_t frame_offset, std::uint64_t in_page,
+		std::uint64_t length) noexcept;
+	/* The generation's flush serial; see walk. */
+	[[nodiscard]] static std::uint64_t flush_serial(
+		const GenerationState &state) noexcept;
+	/* Moves the flush serial to a value no state has held. The walk does it
+	 * after its last holder removal; a write that names no frame does it for
+	 * every generation, because a stamp does not move for it. */
+	static void bump_flush_serial(GenerationState &state) noexcept;
+	/* The host ranges the kernel maps shared from a descriptor, so that a
+	 * kernel write through its alias names its frame. */
+	static void note_direct_map(const void *address, std::uint64_t length,
+		int fd, std::uint64_t offset) noexcept;
+	static void note_direct_unmap(const void *address,
+		std::uint64_t length) noexcept;
+	[[nodiscard]] static bool resolve_direct(const void *address, int &fd,
+		std::uint64_t &offset) noexcept;
+	static void note_unresolved_kernel_write() noexcept;
 #if UML_MEMORY_ALLOCATION_TESTING
 	/* The locations of the frame at `offset`; false when its accounting is in
 	 * error. For a test that excludes every change. */
 	[[nodiscard]] static bool locations_for_testing(MappedBacking &backing,
 		std::uint64_t offset, std::vector<WriterLocation> &locations);
+	/* The holders of the frame at `offset`, and the count the alias table
+	 * keeps for `alias` in the backing's domain. */
+	static void holders_for_testing(MappedBacking &backing,
+		std::uint64_t offset, std::vector<WriterLocation> &holders);
+	[[nodiscard]] static std::uint64_t alias_holders_for_testing(
+		const MappedBacking &backing, std::uint32_t alias) noexcept;
 #endif
 };
 
@@ -179,8 +332,13 @@ struct StateAccounting final {
 	 * same until it is destroyed, never 0. After `finish` the id is free for
 	 * another state, and this state no longer uses it. */
 	const std::uint32_t alias;
-	/* Set once the generation is gone; a walked state refuses reservations. */
+	/* Set once the generation is gone; a walked state refuses reservations
+	 * and registrations. */
 	bool walked{};
+	/* Moves at every walk; see FrameAccounting::walk. Every value, the first
+	 * included, comes from one process-wide 64-bit source, so no two states
+	 * and no two moments of one state share one. */
+	std::atomic_uint64_t flush_serial{0};
 	/* A location may name the id: the state has reserved one. */
 	bool used{};
 	WriterReservation reservation;

@@ -57,7 +57,6 @@ private:
 };
 
 using WriterList = std::vector<WriterLocation, FrameAllocator<WriterLocation>>;
-
 /* A frame's word: its kind in the top two bits, and for a single writer its
  * location, the alias id and the page number. "Several" keeps its locations
  * in the frame's code-page record. */
@@ -91,21 +90,103 @@ constexpr std::uint64_t page_number_mask = (std::uint64_t{1} << alias_shift) - 1
 		(word & page_number_mask) * frame_bytes};
 }
 
+using NodeList = std::vector<MappedBacking::WriterNode,
+	FrameAllocator<MappedBacking::WriterNode>>;
+
+[[nodiscard]] bool contains(const WriterList &list,
+	const WriterLocation &location) noexcept
+{
+	return std::find(list.begin(), list.end(), location) != list.end();
+}
+
+/* The summary word of a holder list: none, the one holder, or several. */
+[[nodiscard]] std::uint64_t summary_of(const WriterList &holders) noexcept
+{
+	if (holders.empty())
+		return 0;
+	return holders.size() == 1 ? single_word(holders.front()) :
+		kind_word(Kind::several);
+}
+
+/* The host ranges the kernel maps shared from a descriptor, as a small table
+ * of sequence-locked entries: written under a mutex and read without a lock. */
+struct DirectRange final {
+	std::atomic_uint64_t sequence{0};
+	std::atomic_uintptr_t begin{0};
+	std::atomic_uintptr_t end{0};
+	std::atomic_int fd{-1};
+	std::atomic_uint64_t offset{0};
+
+	void store(std::uintptr_t first, std::uintptr_t last, int descriptor,
+		std::uint64_t file_offset) noexcept
+	{
+		const auto before = sequence.load(std::memory_order_relaxed);
+		sequence.store(before + 1U, std::memory_order_relaxed);
+		std::atomic_thread_fence(std::memory_order_release);
+		begin.store(first, std::memory_order_relaxed);
+		end.store(last, std::memory_order_relaxed);
+		fd.store(descriptor, std::memory_order_relaxed);
+		offset.store(file_offset, std::memory_order_relaxed);
+		sequence.store(before + 2U, std::memory_order_release);
+	}
+};
+
+constexpr std::size_t direct_range_count = 32;
+
+struct DirectTable final {
+	std::mutex mutex;
+	std::array<DirectRange, direct_range_count> ranges;
+};
+
+[[nodiscard]] DirectTable &direct_table()
+{
+	static auto *table = new DirectTable;
+	return *table;
+}
+
+
 std::atomic_uint64_t accounting_errors{};
 std::atomic_uint64_t nonempty_destructions{};
 std::atomic_uint64_t writer_additions{};
 std::atomic_uint64_t writer_removals{};
 std::atomic_uint64_t reservation_rollbacks{};
 std::atomic_uint64_t reservation_growths{};
+std::atomic_uint64_t holder_additions{};
+std::atomic_uint64_t holder_removals{};
+std::atomic_uint64_t serial_bumps{};
+std::atomic_uint64_t holder_leaks{};
+std::atomic_uint64_t unquiesced_removals{};
+std::atomic_uint64_t unmarked_removals{};
+std::atomic_uint64_t walked_refusals{};
+std::atomic_uint64_t registration_failures{};
+std::atomic_uint64_t publications{};
+std::atomic_uint64_t unresolved_writes{};
+
+/* The source of every flush serial. The 64-bit value moves once per walk of
+ * a generation, and once for each state made; at a million moves a second it
+ * would take over half a million years to wrap, so no two states and no two
+ * moments of one state ever share a value, and a body recorded under a
+ * serial can never stamp-hit under another. */
+std::atomic_uint64_t flush_serial_source{1};
+
+constexpr std::uint64_t execution_gate_closed = std::uint64_t{1} << 63;
+
+/* Whether the generation's execution is quiesced: every store through its
+ * locations has happened before. */
+[[nodiscard]] bool quiesced(const GenerationState &state) noexcept
+{
+	return state.execution_gate.load(std::memory_order_acquire) ==
+		execution_gate_closed;
+}
 
 /* Adds `location` to the frame's writers, under the frame's stripe lock.
  * `record` is the frame's record, found before the lock was taken; null if it
  * has none. When the list needs a record or more room than `spare` brings,
  * returns false with the room wanted in `wanted`; the caller makes the record
  * and `spare` outside the lock and tries again. */
-[[nodiscard]] bool try_add(MappedBacking &backing,
-	MappedBacking::FrameRecord *record, std::uint64_t offset,
-	const WriterLocation &location, WriterList &spare, std::size_t &wanted,
+[[nodiscard]] bool try_add(MappedBacking &backing, std::uint64_t offset,
+	MappedBacking::FrameRecord *record, const WriterLocation &location,
+	NodeList &spare, std::size_t &wanted,
 	bool &added) noexcept
 {
 	auto *word = backing.writer_word(offset);
@@ -119,6 +200,8 @@ std::atomic_uint64_t reservation_growths{};
 	switch (kind_of(*word)) {
 	case Kind::none:
 		*word = single_word(location);
+		if (record != nullptr)
+			record->single_debt = 0;
 		added = true;
 		writer_additions.fetch_add(1, std::memory_order_relaxed);
 		return true;
@@ -132,18 +215,19 @@ std::atomic_uint64_t reservation_growths{};
 			wanted = 2;
 			return false;
 		}
-		auto *list = &record->writers;
-		if (list->capacity() < 2) {
+		auto &list = record->writers;
+		if (list.capacity() < 2) {
 			if (spare.capacity() < 2) {
 				wanted = 2;
 				return false;
 			}
-			spare.assign(list->begin(), list->end());
-			list->swap(spare);
+			spare.assign(list.begin(), list.end());
+			list.swap(spare);
 		}
-		list->clear();
-		list->push_back(existing);
-		list->push_back(location);
+		list.clear();
+		list.push_back({existing, record->single_debt});
+		list.push_back({location, 0});
+		record->single_debt = 0;
 		*word = kind_word(Kind::several);
 		added = true;
 		writer_additions.fetch_add(1, std::memory_order_relaxed);
@@ -151,24 +235,27 @@ std::atomic_uint64_t reservation_growths{};
 	}
 	case Kind::several: {
 		if (record == nullptr) {
-			/* Several writers without their record: an error. */
+			/* Several writers without their list: an error. */
 			accounting_errors.fetch_add(1, std::memory_order_relaxed);
 			*word = kind_word(Kind::unknown);
 			return true;
 		}
-		auto *list = &record->writers;
-		if (std::find(list->begin(), list->end(), location) != list->end())
+		auto &list = record->writers;
+		if (std::any_of(list.begin(), list.end(),
+			    [&](const MappedBacking::WriterNode &node) {
+				    return node.location == location;
+			    }))
 			return true;
-		if (list->size() == list->capacity()) {
-			const auto room = std::max<std::size_t>(4, list->size() * 2U);
+		if (list.size() == list.capacity()) {
+			const auto room = std::max<std::size_t>(4, list.size() * 2U);
 			if (spare.capacity() < room) {
 				wanted = room;
 				return false;
 			}
-			spare.assign(list->begin(), list->end());
-			list->swap(spare);
+			spare.assign(list.begin(), list.end());
+			list.swap(spare);
 		}
-		list->push_back(location);
+		list.push_back({location, 0});
 		added = true;
 		writer_additions.fetch_add(1, std::memory_order_relaxed);
 		return true;
@@ -177,12 +264,62 @@ std::atomic_uint64_t reservation_growths{};
 	return true;
 }
 
+/* Removes `location` from the holders of the frame at `offset`, if it is
+ * one. The record is found before the lock and the room a list gives up is
+ * freed after it. */
+void remove_holder(const GenerationState &state, MappedBacking &backing,
+	std::uint64_t offset, const WriterLocation &location) noexcept
+{
+	auto *record = backing.find_frame_record(offset);
+	if (record == nullptr)
+		return;
+	WriterList released{FrameAllocator<WriterLocation>{backing.heap()}};
+	const StripeLock lock{stripe_for(&backing, offset)};
+	auto &holders = record->holders;
+	const auto found = std::find(holders.begin(), holders.end(), location);
+	if (found == holders.end())
+		return;
+	if (!quiesced(state) && !state.retired.load(std::memory_order_acquire))
+		unquiesced_removals.fetch_add(1, std::memory_order_relaxed);
+	*found = holders.back();
+	holders.pop_back();
+	record->summary.store(summary_of(holders), std::memory_order_release);
+	if (auto *entry = backing.domain().entry(location.alias); entry != nullptr)
+		entry->holders.fetch_sub(1, std::memory_order_relaxed);
+	holder_removals.fetch_add(1, std::memory_order_relaxed);
+	if (holders.empty())
+		holders.swap(released);
+}
+
+/* Where the word of `page` lies. */
+struct WordFrame final {
+	MappedBacking *backing{};
+	std::uint64_t offset{};
+	bool writable{};
+	bool translatable{};
+};
+
+[[nodiscard]] WordFrame frame_of_word(const GenerationState &state,
+	std::uint64_t page, std::uintptr_t word) noexcept
+{
+	if (word == 0)
+		return {};
+	const auto fields = FillIndex::decode(word);
+	const auto entry = state.backings.entry(fields.slot, page);
+	if (entry.backing == nullptr)
+		return {};
+	return {entry.backing,
+		fields.host - reinterpret_cast<std::uintptr_t>(entry.backing->base()),
+		fields.write,
+		FrameAccounting::translatable(fields.guest_code, fields.exec)};
+}
+
 } // namespace
 
 bool FrameAccounting::add_writer(MappedBacking &backing,
 	std::uint64_t offset, const WriterLocation &location)
 {
-	WriterList spare{FrameAllocator<WriterLocation>{backing.heap()}};
+	NodeList spare{FrameAllocator<MappedBacking::WriterNode>{backing.heap()}};
 	std::size_t wanted = 0;
 	for (;;) {
 		UML_MEMORY_ALLOCATION_CHECKPOINT(testing::AllocationSite::writers);
@@ -197,7 +334,7 @@ bool FrameAccounting::add_writer(MappedBacking &backing,
 		bool added = false;
 		{
 			const StripeLock lock{stripe_for(&backing, offset)};
-			if (try_add(backing, record, offset, location, spare, more, added))
+			if (try_add(backing, offset, record, location, spare, more, added))
 				return added;
 		}
 		wanted = more;
@@ -210,7 +347,7 @@ void FrameAccounting::remove_writer(MappedBacking &backing,
 	/* Found without the lock, and the room a list gives up is freed after
 	 * it. */
 	auto *record = backing.find_frame_record(offset);
-	WriterList released{FrameAllocator<WriterLocation>{backing.heap()}};
+	NodeList released{FrameAllocator<MappedBacking::WriterNode>{backing.heap()}};
 	const StripeLock lock{stripe_for(&backing, offset)};
 	auto *word = backing.writer_word(offset);
 	if (word == nullptr) {
@@ -230,28 +367,37 @@ void FrameAccounting::remove_writer(MappedBacking &backing,
 	case Kind::single:
 		if (location_of(*word) == location) {
 			*word = 0;
+			if (record != nullptr)
+				record->single_debt = 0;
 			writer_removals.fetch_add(1, std::memory_order_relaxed);
 		} else {
 			fail();
 		}
 		return;
 	case Kind::several: {
-		auto *list = record == nullptr ? nullptr : &record->writers;
-		const auto found = list == nullptr ? WriterList::iterator{} :
-			std::find(list->begin(), list->end(), location);
-		if (list == nullptr || found == list->end()) {
+		if (record == nullptr) {
 			fail();
 			return;
 		}
-		list->erase(found);
+		auto &list = record->writers;
+		const auto found = std::find_if(list.begin(), list.end(),
+			[&](const MappedBacking::WriterNode &node) {
+				return node.location == location;
+			});
+		if (found == list.end()) {
+			fail();
+			return;
+		}
+		list.erase(found);
 		writer_removals.fetch_add(1, std::memory_order_relaxed);
-		if (list->size() == 1) {
-			*word = single_word(list->front());
-			list->clear();
-			list->swap(released);
-		} else if (list->empty()) {
+		if (list.size() == 1) {
+			*word = single_word(list.front().location);
+			record->single_debt = list.front().debt;
+			list.clear();
+			list.swap(released);
+		} else if (list.empty()) {
 			*word = 0;
-			list->swap(released);
+			list.swap(released);
 		}
 		return;
 	}
@@ -270,29 +416,65 @@ void FrameAccounting::reserve(GenerationState &state, std::uint64_t page,
 void FrameAccounting::apply(GenerationState &state, std::uint64_t page,
 	const FrameRef &before, const FrameRef &after) noexcept
 {
-	if (!before.writable || before.backing == nullptr || !tracks(page))
+	if (before.backing == nullptr || !tracks(page))
 		return;
-	if (after.writable && after.backing == before.backing &&
-	    after.offset / frame_bytes == before.offset / frame_bytes)
-		return;
-	remove_writer(*before.backing, before.offset,
-		{state.accounting.alias, page});
+	const bool same_frame = after.backing == before.backing &&
+		after.offset / frame_bytes == before.offset / frame_bytes;
+	const WriterLocation here{state.accounting.alias, page};
+	if (before.writable && !(after.writable && same_frame))
+		remove_writer(*before.backing, before.offset, here);
+	/* Where the code-change predicate names the page, so that the stamp move
+	 * and the holder removal always go together. */
+	if (before.translatable && !(after.translatable && same_frame))
+		remove_holder(state, *before.backing, before.offset, here);
 }
 
 void FrameAccounting::release_word(GenerationState &state,
 	std::uint64_t page, std::uintptr_t word) noexcept
 {
-	const auto fields = FillIndex::decode(word);
-	if (!fields.write || !tracks(page))
+	if (!tracks(page) || word == 0)
 		return;
-	const auto entry = state.backings.entry(fields.slot, page);
-	if (entry.backing == nullptr) {
+	const auto fields = FillIndex::decode(word);
+	if (!fields.write && !(fields.guest_code && fields.exec))
+		return;
+	const auto frame = frame_of_word(state, page, word);
+	if (frame.backing == nullptr) {
 		accounting_errors.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
-	const auto offset = fields.host -
-		reinterpret_cast<std::uintptr_t>(entry.backing->base());
-	remove_writer(*entry.backing, offset, {state.accounting.alias, page});
+	const WriterLocation here{state.accounting.alias, page};
+	if (frame.writable)
+		remove_writer(*frame.backing, frame.offset, here);
+	if (frame.translatable)
+		remove_holder(state, *frame.backing, frame.offset, here);
+}
+
+void FrameAccounting::release_writer(GenerationState &state,
+	std::uint64_t page, std::uintptr_t word) noexcept
+{
+	if (!tracks(page) || word == 0)
+		return;
+	const auto frame = frame_of_word(state, page, word);
+	if (!frame.writable)
+		return;
+	if (frame.backing == nullptr) {
+		accounting_errors.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	remove_writer(*frame.backing, frame.offset,
+		{state.accounting.alias, page});
+}
+
+void FrameAccounting::release_holder(GenerationState &state,
+	std::uint64_t page, std::uintptr_t word) noexcept
+{
+	if (!tracks(page) || word == 0)
+		return;
+	const auto frame = frame_of_word(state, page, word);
+	if (frame.backing == nullptr || !frame.translatable)
+		return;
+	remove_holder(state, *frame.backing, frame.offset,
+		{state.accounting.alias, page});
 }
 
 void FrameAccounting::commit(GenerationState &state) noexcept
@@ -314,6 +496,18 @@ void FrameAccounting::walk(GenerationState &state) noexcept
 				release_word(state, page, word);
 				return false;
 			});
+	/* After the holders are gone: no translation recorded before this point
+	 * may be taken for current, because none of them stands any more. */
+	bump_flush_serial(state);
+}
+
+void FrameAccounting::bump_flush_serial(GenerationState &state) noexcept
+{
+	/* The value is one no state has held. */
+	state.accounting.flush_serial.store(
+		flush_serial_source.fetch_add(1, std::memory_order_relaxed),
+		std::memory_order_release);
+	serial_bumps.fetch_add(1, std::memory_order_relaxed);
 }
 
 void FrameAccounting::finish(GenerationState &state) noexcept
@@ -322,7 +516,15 @@ void FrameAccounting::finish(GenerationState &state) noexcept
 	if (accounting.walked)
 		return;
 	accounting.walked = true;
-	accounting.domain->release(accounting.alias, false);
+	/* By invariant H-W the walk removed every holder of this state. One that
+	 * is left escaped it: the id then stays retired, never reused, and its
+	 * entry names no state, so a publication skips those holders. */
+	const auto *entry = accounting.domain->entry(accounting.alias);
+	const bool leaked = entry != nullptr &&
+		entry->holders.load(std::memory_order_relaxed) != 0;
+	if (leaked)
+		holder_leaks.fetch_add(1, std::memory_order_relaxed);
+	accounting.domain->release(accounting.alias, leaked);
 }
 
 void FrameAccounting::retire(GenerationState &state) noexcept
@@ -338,7 +540,17 @@ FrameAccounting::Diagnostics FrameAccounting::diagnostics() noexcept
 		writer_additions.load(std::memory_order_relaxed),
 		writer_removals.load(std::memory_order_relaxed),
 		reservation_rollbacks.load(std::memory_order_relaxed),
-		reservation_growths.load(std::memory_order_relaxed)};
+		reservation_growths.load(std::memory_order_relaxed),
+		holder_additions.load(std::memory_order_relaxed),
+		holder_removals.load(std::memory_order_relaxed),
+		serial_bumps.load(std::memory_order_relaxed),
+		holder_leaks.load(std::memory_order_relaxed),
+		unquiesced_removals.load(std::memory_order_relaxed),
+		unmarked_removals.load(std::memory_order_relaxed),
+		walked_refusals.load(std::memory_order_relaxed),
+		registration_failures.load(std::memory_order_relaxed),
+		publications.load(std::memory_order_relaxed),
+		unresolved_writes.load(std::memory_order_relaxed)};
 }
 
 void FrameAccounting::note_nonempty_state_destruction() noexcept
@@ -352,6 +564,9 @@ StateAccounting::StateAccounting(
 	: domain{std::move(frame_domain)},
 	  alias{domain->allocate(state, generation)}
 {
+	flush_serial.store(
+		flush_serial_source.fetch_add(1, std::memory_order_relaxed),
+		std::memory_order_relaxed);
 }
 
 StateAccounting::~StateAccounting()
@@ -365,6 +580,335 @@ StateAccounting::~StateAccounting()
 	if (used)
 		FrameAccounting::note_nonempty_state_destruction();
 	domain->release(alias, used);
+}
+
+std::uint64_t FrameAccounting::flush_serial(const GenerationState &state) noexcept
+{
+	return state.accounting.flush_serial.load(std::memory_order_acquire);
+}
+
+FrameAccounting::HoldReport FrameAccounting::hold(GenerationState &state,
+	std::uint64_t page, DebtLocation *owed, std::size_t capacity) noexcept
+{
+	HoldReport report{HoldResult::failed, 0, 0, 0};
+	const auto fail = [&]() -> HoldReport {
+		registration_failures.fetch_add(1, std::memory_order_relaxed);
+		report.result = HoldResult::failed;
+		return report;
+	};
+	auto &accounting = state.accounting;
+	if (accounting.walked) {
+		walked_refusals.fetch_add(1, std::memory_order_relaxed);
+		report.result = HoldResult::refused;
+		return report;
+	}
+	accounting.used = true;
+	const auto word = state.fill_index.lookup(page);
+	const auto frame = frame_of_word(state, page, word);
+	if (frame.backing == nullptr || !frame.translatable) {
+		report.result = HoldResult::refused;
+		return report;
+	}
+	if (!tracks(page))
+		return fail();
+	auto &backing = *frame.backing;
+	const auto offset = frame.offset;
+	MappedBacking::FrameRecord *record = nullptr;
+	try {
+		/* Made before the stripe lock; null when the backing has no record
+		 * index or memory ran out. */
+		record = backing.frame_record(offset);
+	} catch (...) {
+	}
+	if (record == nullptr)
+		return fail();
+
+	const WriterLocation here{accounting.alias, page};
+	WriterList spare{FrameAllocator<WriterLocation>{backing.heap()}};
+	std::size_t wanted = 0;
+	for (;;) {
+		try {
+			UML_MEMORY_ALLOCATION_CHECKPOINT(
+				testing::AllocationSite::holders);
+			if (wanted > spare.capacity())
+				spare.reserve(wanted);
+		} catch (...) {
+			return fail();
+		}
+		std::size_t more = 0;
+		{
+			const StripeLock lock{stripe_for(&backing, offset)};
+			auto *writer_word = backing.writer_word(offset);
+			const auto kind = writer_word == nullptr ? Kind::none :
+				kind_of(*writer_word);
+			if (kind == Kind::unknown)
+				return fail();
+			auto &holders = record->holders;
+			const bool repeat = contains(holders, here);
+			/* The writers, with the debt each carries. */
+			const auto each_writer = [&](auto &&visit) {
+				if (kind == Kind::single)
+					visit(location_of(*writer_word), record->single_debt);
+				else if (kind == Kind::several)
+					for (auto &node : record->writers)
+						visit(node.location, node.debt);
+			};
+			/* Who this registration newly owes. */
+			const auto newly_owed = [&](const WriterLocation &writer) {
+				if (repeat)
+					return false;
+				if (holders.empty())
+					return !(writer == here);
+				return holders.size() == 1 && holders.front() == writer;
+			};
+			std::size_t count = 0;
+			bool any_new = false;
+			each_writer([&](const WriterLocation &writer, std::uint64_t debt) {
+				const bool is_new = newly_owed(writer);
+				any_new = any_new || is_new;
+				if (is_new || debt > record->debt_cleared)
+					++count;
+			});
+			if (count > capacity)
+				return fail();
+			if (!repeat && holders.size() == holders.capacity() &&
+			    spare.capacity() <= holders.size()) {
+				more = std::max<std::size_t>(4, holders.size() * 2U);
+			} else {
+				if (any_new)
+					++record->debt_sequence;
+				const auto sequence = record->debt_sequence;
+				std::size_t written = 0;
+				const auto note = [&](const WriterLocation &writer,
+					std::uint64_t &debt) {
+					if (newly_owed(writer))
+						debt = sequence;
+					if (debt <= record->debt_cleared)
+						return;
+					const auto *entry = accounting.domain->entry(writer.alias);
+					if (entry != nullptr && owed != nullptr && written < capacity)
+						owed[written++] = {entry->generation.load(
+							std::memory_order_relaxed), writer.page};
+				};
+				if (kind == Kind::single) {
+					auto writer = location_of(*writer_word);
+					note(writer, record->single_debt);
+				} else if (kind == Kind::several) {
+					for (auto &node : record->writers)
+						note(node.location, node.debt);
+				}
+				if (!repeat) {
+					if (holders.size() == holders.capacity()) {
+						spare.assign(holders.begin(), holders.end());
+						holders.swap(spare);
+					}
+					holders.push_back(here);
+					record->summary.store(summary_of(holders),
+						std::memory_order_release);
+					record->alias_changes.fetch_add(1,
+						std::memory_order_release);
+					if (auto *entry = accounting.domain->entry(here.alias);
+					    entry != nullptr)
+						entry->holders.fetch_add(1, std::memory_order_relaxed);
+					holder_additions.fetch_add(1, std::memory_order_relaxed);
+				}
+				report.record_identity = MappedBacking::record_identity(*record);
+				report.debt_sequence = record->debt_sequence;
+				report.owed = written;
+				report.result = written == 0 ? HoldResult::settled :
+					HoldResult::owed;
+				return report;
+			}
+		}
+		wanted = more;
+	}
+}
+
+void FrameAccounting::clear_debt(GenerationState &state, std::uint64_t page,
+	std::uint64_t record_identity, std::uint64_t debt_sequence) noexcept
+{
+	const auto frame = frame_of_word(state, page, state.fill_index.lookup(page));
+	if (frame.backing == nullptr)
+		return;
+	auto *record = frame.backing->find_frame_record(frame.offset);
+	if (record == nullptr ||
+	    MappedBacking::record_identity(*record) != record_identity)
+		return;
+	const StripeLock lock{stripe_for(frame.backing, frame.offset)};
+	if (debt_sequence > record->debt_cleared)
+		record->debt_cleared = debt_sequence;
+}
+
+FrameAccounting::FillState FrameAccounting::fill_state(
+	const GenerationState &state, std::uint64_t page) noexcept
+{
+	FillState result{nullptr, 0, false, nullptr, 0};
+	const auto frame = frame_of_word(state, page, state.fill_index.lookup(page));
+	if (frame.backing == nullptr)
+		return result;
+	result.backing = frame.backing;
+	result.offset = frame.offset;
+	auto *record = frame.backing->find_frame_record(frame.offset);
+	if (record == nullptr)
+		return result;
+	result.record = record;
+	result.alias_changes = record->alias_changes.load(std::memory_order_acquire);
+	const auto summary = record->summary.load(std::memory_order_acquire);
+	switch (kind_of(summary)) {
+	case Kind::none:
+		break;
+	case Kind::single:
+		result.other_holder = !(location_of(summary) ==
+			WriterLocation{state.accounting.alias, page});
+		break;
+	default:
+		result.other_holder = true;
+		break;
+	}
+	return result;
+}
+
+bool FrameAccounting::fill_unchanged(const FillState &was) noexcept
+{
+	if (was.backing == nullptr)
+		return true;
+	const auto *record = was.backing->find_frame_record(was.offset);
+	if (record != was.record)
+		return false;
+	return record == nullptr || record->alias_changes.load(
+		std::memory_order_acquire) == was.alias_changes;
+}
+
+namespace {
+
+/* Publishes at every holder of the frame; see FrameAccounting::publish_store.
+ * `writer` is the writing location, or null for a kernel write. */
+FrameAccounting::Publication publish_at_holders(MappedBacking &backing,
+	std::uint64_t frame_offset, std::uint64_t in_page, std::uint64_t length,
+	const GenerationState *writer_state, const WriterLocation *writer,
+	std::uint64_t *own, std::size_t capacity) noexcept
+{
+	FrameAccounting::Publication result{};
+	auto *record = backing.find_frame_record(frame_offset);
+	if (record == nullptr)
+		return result;
+	const StripeLock lock{stripe_for(&backing, frame_offset)};
+	const auto &holders = record->holders;
+	if (holders.empty())
+		return result;
+	if (writer != nullptr &&
+	    std::all_of(holders.begin(), holders.end(),
+		    [&](const WriterLocation &holder) { return holder == *writer; }))
+		return result;
+	MappedBacking::move_stamp(*record);
+	result.handled = true;
+	publications.fetch_add(1, std::memory_order_relaxed);
+	for (const auto &holder : holders) {
+		auto *state = backing.domain().state_of(holder.alias);
+		if (state == nullptr)
+			continue;
+		const auto address = holder.page + in_page;
+		publish_code_change(*state, address, length);
+		if (state != writer_state)
+			continue;
+		++result.own_records;
+		if (result.own_count < capacity && own != nullptr)
+			own[result.own_count++] = address;
+		else
+			result.overflow = true;
+	}
+	return result;
+}
+
+} // namespace
+
+FrameAccounting::Publication FrameAccounting::publish_store(
+	GenerationState &writer, std::uint64_t page, std::uint64_t in_page,
+	std::uint64_t length, std::uint64_t *own, std::size_t capacity) noexcept
+{
+	const auto frame = frame_of_word(writer, page, writer.fill_index.lookup(page));
+	if (frame.backing == nullptr)
+		return {};
+	const WriterLocation here{writer.accounting.alias, page};
+	return publish_at_holders(*frame.backing, frame.offset, in_page, length,
+		&writer, &here, own, capacity);
+}
+
+void FrameAccounting::publish_kernel_write(MappedBacking &backing,
+	std::uint64_t frame_offset, std::uint64_t in_page,
+	std::uint64_t length) noexcept
+{
+	(void)publish_at_holders(backing, frame_offset, in_page, length, nullptr,
+		nullptr, nullptr, 0);
+}
+
+void FrameAccounting::note_direct_map(const void *address,
+	std::uint64_t length, int fd, std::uint64_t offset) noexcept
+{
+	const auto first = reinterpret_cast<std::uintptr_t>(address);
+	if (length == 0 || first + length < first)
+		return;
+	auto &table = direct_table();
+	const std::lock_guard lock{table.mutex};
+	DirectRange *free_range = nullptr;
+	for (auto &range : table.ranges) {
+		const auto begin = range.begin.load(std::memory_order_relaxed);
+		const auto end = range.end.load(std::memory_order_relaxed);
+		if (begin == end) {
+			if (free_range == nullptr)
+				free_range = &range;
+		} else if (first < end && first + length > begin) {
+			/* A new mapping over an old one replaces it. */
+			range.store(first, first + length, fd, offset);
+			return;
+		}
+	}
+	if (free_range != nullptr)
+		free_range->store(first, first + length, fd, offset);
+}
+
+void FrameAccounting::note_direct_unmap(const void *address,
+	std::uint64_t length) noexcept
+{
+	const auto first = reinterpret_cast<std::uintptr_t>(address);
+	auto &table = direct_table();
+	const std::lock_guard lock{table.mutex};
+	for (auto &range : table.ranges) {
+		const auto begin = range.begin.load(std::memory_order_relaxed);
+		const auto end = range.end.load(std::memory_order_relaxed);
+		if (begin != end && first < end && first + length > begin)
+			range.store(0, 0, -1, 0);
+	}
+}
+
+bool FrameAccounting::resolve_direct(const void *address, int &fd,
+	std::uint64_t &offset) noexcept
+{
+	const auto where = reinterpret_cast<std::uintptr_t>(address);
+	auto &table = direct_table();
+	for (auto &range : table.ranges) {
+		const auto before = range.sequence.load(std::memory_order_acquire);
+		if ((before & 1U) != 0 || before == 0)
+			continue;
+		const auto begin = range.begin.load(std::memory_order_relaxed);
+		const auto end = range.end.load(std::memory_order_relaxed);
+		const auto descriptor = range.fd.load(std::memory_order_relaxed);
+		const auto file_offset = range.offset.load(std::memory_order_relaxed);
+		std::atomic_thread_fence(std::memory_order_acquire);
+		if (range.sequence.load(std::memory_order_relaxed) != before)
+			continue;
+		if (where < begin || where >= end)
+			continue;
+		fd = descriptor;
+		offset = file_offset + (where - begin);
+		return true;
+	}
+	return false;
+}
+
+void FrameAccounting::note_unresolved_kernel_write() noexcept
+{
+	unresolved_writes.fetch_add(1, std::memory_order_relaxed);
 }
 
 #if UML_MEMORY_ALLOCATION_TESTING
@@ -396,13 +940,42 @@ bool FrameAccounting::locations_for_testing(MappedBacking &backing,
 				room = record->writers.size();
 				continue;
 			}
-			locations.insert(locations.end(), record->writers.begin(),
-				record->writers.end());
+			for (const auto &node : record->writers)
+				locations.push_back(node.location);
 			return true;
 		}
 		}
 		return true;
 	}
+}
+
+void FrameAccounting::holders_for_testing(MappedBacking &backing,
+	std::uint64_t offset, std::vector<WriterLocation> &holders)
+{
+	/* The room is made before the lock, as everywhere. */
+	std::size_t room = 2;
+	for (;;) {
+		holders.reserve(holders.size() + room);
+		const auto *record = backing.find_frame_record(offset);
+		if (record == nullptr)
+			return;
+		const StripeLock lock{stripe_for(&backing, offset)};
+		if (holders.capacity() - holders.size() < record->holders.size()) {
+			room = record->holders.size();
+			continue;
+		}
+		holders.insert(holders.end(), record->holders.begin(),
+			record->holders.end());
+		return;
+	}
+}
+
+std::uint64_t FrameAccounting::alias_holders_for_testing(
+	const MappedBacking &backing, std::uint32_t alias) noexcept
+{
+	const auto *entry = backing.domain().entry(alias);
+	return entry == nullptr ? 0 :
+		entry->holders.load(std::memory_order_relaxed);
 }
 #endif
 

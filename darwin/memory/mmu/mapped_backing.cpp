@@ -297,6 +297,10 @@ std::uint64_t *MappedBacking::writer_word(std::uint64_t offset) noexcept
 MappedBacking::FrameRecord *MappedBacking::frame_record(
 	std::uint64_t offset) noexcept
 {
+	/* A frame without a slot in the record index would later be looked up
+	 * under the records' mutex: it has no record (see prepare_writers). */
+	if (!code_index_ || offset / page_size >= code_index_pages_)
+		return nullptr;
 	return static_cast<CodePage *>(code_page_handle(offset));
 }
 
@@ -313,6 +317,16 @@ MappedBacking::FrameRecord *MappedBacking::find_frame_record(
 		return nullptr;
 	return (*leaf)[page % code_index_leaf_pages].load(
 		std::memory_order_acquire);
+}
+
+std::uint64_t MappedBacking::record_identity(const FrameRecord &record) noexcept
+{
+	return static_cast<const CodePage &>(record).identity;
+}
+
+void MappedBacking::move_stamp(FrameRecord &record) noexcept
+{
+	invalidate_code_page(&static_cast<CodePage &>(record));
 }
 
 } // namespace uml::memory

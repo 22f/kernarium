@@ -133,6 +133,22 @@ if(UML_BUILD_X86_64_GUEST)
         UML_MEMORY_ALLOCATION_TESTING=1)
     uml_add_unit_test(NAME memory-frame-accounting
         COMMAND uml_frame_accounting_tests LABELS tsan)
+
+    # The holders of those frames: registration, the debt it owes, and the
+    # publication of a store or a kernel write at every holder.
+    add_executable(uml_frame_holder_tests
+        frame_holder_tests.cpp
+        $<TARGET_OBJECTS:uml_static_mmu_test_variant>)
+    target_link_libraries(uml_frame_holder_tests PRIVATE
+        UML::BridgeAbi
+        UML::MemorySharedBacking)
+    target_include_directories(uml_frame_holder_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/darwin/memory
+        ${PROJECT_SOURCE_DIR}/darwin/memory/mmu)
+    target_compile_definitions(uml_frame_holder_tests PRIVATE
+        UML_MEMORY_ALLOCATION_TESTING=1)
+    uml_add_unit_test(NAME memory-frame-holders
+        COMMAND uml_frame_holder_tests LABELS tsan)
 endif()
 
 # What a mapping change publishes as a code change.

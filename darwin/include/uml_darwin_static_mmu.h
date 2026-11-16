@@ -171,6 +171,85 @@ void darwin_uml_static_vm_invalidate_code(unsigned long address);
 int darwin_uml_static_vm_invalidate_code_generation(
 	unsigned long generation, unsigned long address, unsigned long length);
 
+#if defined(DARWIN_UML_X86_64_GUEST) && DARWIN_UML_X86_64_GUEST
+/* The x86-64 guest's frame holders (darwin/memory/mmu/frame_accounting.hpp):
+ * the locations at which a translator registered a physical page, so that a
+ * store through any alias of it reaches them. Host-internal; not the kernel
+ * bridge. */
+struct darwin_uml_static_frame_location {
+	uint64_t generation;
+	uint64_t page;
+};
+
+struct darwin_uml_static_frame_hold {
+	uint64_t record_identity;
+	uint64_t debt_sequence;
+	size_t owed;
+};
+
+enum darwin_uml_static_frame_hold_result {
+	/* The holder stands and nothing is owed. */
+	DARWIN_UML_STATIC_FRAME_SETTLED = 0,
+	/* The holder stands; `owed` write locations are to be retired and the
+	 * participants waited for before the page's bytes are read. */
+	DARWIN_UML_STATIC_FRAME_OWED = 1,
+	/* The page is not translatable here, or the generation is gone. */
+	DARWIN_UML_STATIC_FRAME_REFUSED = 2,
+	/* Nothing changed; the caller must not cache what it translates. */
+	DARWIN_UML_STATIC_FRAME_FAILED = 3,
+};
+
+/* Registers the page at `address` of `generation` as a holder of its frame,
+ * before the caller reads a byte of it. At most `capacity` owed locations are
+ * written to `owed`. */
+int darwin_uml_static_vm_hold_code_frame(
+	void *context, unsigned long generation, unsigned long address,
+	struct darwin_uml_static_frame_location *owed, size_t capacity,
+	struct darwin_uml_static_frame_hold *hold);
+/* A completed retirement of the locations a hold reported covers its debt. */
+void darwin_uml_static_vm_clear_code_debt(
+	void *context, unsigned long generation, unsigned long address,
+	uint64_t record_identity, uint64_t debt_sequence);
+
+struct darwin_uml_static_frame_state {
+	const void *backing;
+	uint64_t offset;
+	const void *record;
+	uint64_t alias_changes;
+	/* The frame has a holder other than the page itself. */
+	int other_holder;
+};
+
+/* The write fill's read of the frame at `address`: 0, or -1 when the context
+ * cannot say. */
+int darwin_uml_static_vm_frame_state(
+	void *context, unsigned long generation, unsigned long address,
+	struct darwin_uml_static_frame_state *state);
+/* 1 while the two words the state read have not moved. */
+int darwin_uml_static_vm_frame_state_unchanged(
+	const struct darwin_uml_static_frame_state *state);
+
+struct darwin_uml_static_frame_publication {
+	/* Holder addresses in the writer's generation, and the ring records the
+	 * call added there. */
+	size_t own_count;
+	uint64_t own_records;
+	int overflow;
+};
+
+/* Publishes the store of `length` bytes at `address`, after its bytes were
+ * written, at every holder of the frame it lands in. Returns 1 if it did, 0
+ * when the frame has no holder but the writer's own page (the caller publishes
+ * as it always did), -1 when the context cannot say. */
+int darwin_uml_static_vm_publish_frame_store(
+	void *context, unsigned long generation, unsigned long address,
+	unsigned long length, uint64_t *own, size_t capacity,
+	struct darwin_uml_static_frame_publication *publication);
+/* The generation's flush serial; see FrameAccounting::walk. 0 for no
+ * context. */
+uint64_t darwin_uml_static_vm_execution_context_flush_serial(void *context);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

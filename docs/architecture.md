@@ -238,18 +238,41 @@ one operation's temporaries. The GPU stack, Metal, system frameworks, devices an
 the process's own objects stay in the default zone, whose residue is what
 remains.
 
-The x86-64 guest's frame accounting (`memory/mmu/frame_accounting.hpp`) keeps,
-for each 4 KiB frame of a backing, the exact set of {generation, page}
-locations whose mapping is writable. A location exists for as long as its
-writable mapping: the four mapping primitives add it before the mapping is
-installed and take it back after the mapping is gone, and a change that fails or
-is abandoned takes back only what it added. Every change of a frame's locations
-happens under that frame's stripe lock, and nothing under it allocates, makes a
-record or takes another lock: the index leaf, the frame's record and the room a
-list needs are made before the lock, and a lookup under it only finds. The
-accounting's whole metadata (the writer index, the records and their lists, and
-the plan's entries in thread scratch) comes from the domain heap, so a
-guest's frames never grow the default zone. The x86-64 guest alone compiles it.
+### x86-64 frame accounting
+
+An x86 guest sees a store through any alias of a frame at once, so a code
+change must reach every address at which some executor holds a translation of
+the frame. The memory layer (`memory/mmu/frame_accounting.hpp`) keeps, for each
+4 KiB frame of a backing:
+
+- the writer locations: the {generation, page} pairs whose mapping is writable.
+  A location exists for as long as its writable mapping: the four mapping
+  primitives add it before the mapping is installed and take it back after the
+  mapping is gone, and a change that fails or is abandoned takes back only
+  what it added;
+- the holders: the locations at which an x86 translator registered the frame
+  before reading a byte of it, each with a translatable word (guest code with
+  execute) naming the frame. Registration also returns the writer locations
+  whose write translations may predate it; the translator retires them and
+  waits for the participants inside the engine before it caches anything; and
+- one flush serial per generation, which every walk of the generation moves
+  after removing its holders, so that a translation recorded before the walk
+  never stamp-hits after it.
+
+A write fill tags a store for publication when the frame has a holder other
+than the writer's own location, and a tagged store, a kernel write through the
+kernel's own alias of the frame, and `invalidate_code` publish at every holder.
+
+Every change of a frame's locations happens under that frame's stripe lock, and
+nothing under it allocates, makes a record or takes another lock: the index
+leaf, the frame's record and the room a list needs are made before the lock,
+and a lookup under it only finds. The alias ids that name a generation in a
+location resolve through a per-domain table that readers need no lock for. All
+of the accounting's metadata (the writer index, the records and their lists,
+the alias table, and a plan's entries in thread scratch) comes from the domain
+heap, so a guest's frames never grow the default zone: about 2 MiB per GiB of
+guest memory mapped writable, and about 230 bytes for each frame with two or
+more writers. The x86-64 guest alone compiles it.
 
 ### Executable code
 

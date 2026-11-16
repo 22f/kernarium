@@ -17,6 +17,7 @@ std::atomic_size_t failure_occurrence{};
 std::atomic_size_t backing_mappings{};
 std::atomic<AllocationObserver> allocation_observer{};
 std::atomic_size_t stripe_allocations{};
+std::atomic<std::ptrdiff_t> frame_bytes{};
 thread_local unsigned stripe_depth{};
 std::array<std::atomic_size_t,
 	static_cast<std::size_t>(AllocationSite::count)> allocation_attempts{};
@@ -100,6 +101,16 @@ void allocator_probe() noexcept
 {
 	if (stripe_depth != 0)
 		stripe_allocations.fetch_add(1, std::memory_order_relaxed);
+}
+
+void frame_bytes_changed(const std::ptrdiff_t delta) noexcept
+{
+	frame_bytes.fetch_add(delta, std::memory_order_relaxed);
+}
+
+std::size_t frame_metadata_bytes() noexcept
+{
+	return static_cast<std::size_t>(frame_bytes.load(std::memory_order_relaxed));
 }
 
 std::size_t allocations_under_stripe_lock() noexcept
