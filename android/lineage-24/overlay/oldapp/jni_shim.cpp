@@ -2024,11 +2024,11 @@ const MethodInfo* find_method(const void* id) {
 }
 
 // A method ID the layer did not see being looked up (FromReflectedMethod, or one whose node could not be allocated then):
-// asks the platform what its parameters are. `object_or_class` is the receiver (an instance call) or the class (a static call
-// or a constructor). Null when they cannot be had now (nothing is remembered about that: the next call asks again). A call made
-// with an exception pending, which ART does not refuse, is learned with the exception taken out for the time and put back.
-const MethodInfo* learn_method(Env* env, void* id, bool is_static, jobject object_or_class) {
-    if (id == nullptr || object_or_class == nullptr || g.platform.describe_method == nullptr) {
+// asks the platform what its parameters are, from the ID alone (no receiver and no class). Null when they cannot be had now
+// (nothing is remembered about that: the next call asks again). A call made with an exception pending, which ART does not refuse,
+// is learned with the exception taken out for the time and put back.
+const MethodInfo* learn_method(Env* env, void* id, bool is_static) {
+    if (id == nullptr || g.platform.describe_method == nullptr) {
         return nullptr;
     }
     jobject pending = nullptr;
@@ -2040,22 +2040,12 @@ const MethodInfo* learn_method(Env* env, void* id, bool is_static, jobject objec
         original<void (*)(Env*)>(slot::ExceptionClear)(env);
     }
     const MethodInfo* learned = nullptr;
-    jobject hint = object_or_class;
-    jobject owned = nullptr;
-    if (!is_static) {
-        owned = original<jobject (*)(Env*, jobject)>(slot::GetObjectClass)(env, object_or_class);
-        hint = owned;
-    }
-    if (hint != nullptr) {
-        char kinds[kMaxParams + 1];
-        unsigned count = 0;
-        if (g.platform.describe_method(env, g.orig, id, is_static, hint, kinds, kMaxParams, &count) &&
-            store_method(id, kinds, count, false)) {
-            learned = find_method(id);
-        }
-    }
-    if (owned != nullptr) {
-        original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, owned);
+    char kinds[kMaxParams + 1];
+    unsigned count = 0;
+    // From the ID alone: no receiver and no class are needed, so a static call with a null class (which the runtime accepts: it
+    // ignores the class of a CallStatic*) is learned like any other.
+    if (g.platform.describe_method(env, g.orig, id, is_static, kinds, kMaxParams, &count) && store_method(id, kinds, count, false)) {
+        learned = find_method(id);
     }
     if (pending != nullptr) {
         original<jint (*)(Env*, jobject)>(slot::Throw)(env, pending);
@@ -2064,9 +2054,9 @@ const MethodInfo* learn_method(Env* env, void* id, bool is_static, jobject objec
     return learned;
 }
 
-// A call whose parameters the layer cannot learn (no method ID, an ID it cannot describe, nothing to describe it from, memory
-// for its node gone): it cannot say which of the call's values are references, and a block's address that reached the runtime
-// would be taken for one. So the call does not reach the runtime: the process stops, with one line in the log.
+// A call whose parameters the layer cannot learn (no method ID, an ID it cannot describe, no reflection to describe it with,
+// memory for its node gone): it cannot say which of the call's values are references, and a block's address that reached the
+// runtime would be taken for one. So the call does not reach the runtime: the process stops, with one line in the log.
 [[noreturn]] void stop_for_unknown_parameters(const void* method) {
     if (g.platform.log != nullptr) {
         g.platform.log("a call's parameters cannot be learned and a block's address must not reach the runtime: the process stops; method:",
@@ -2216,7 +2206,7 @@ R run_va(Env* e, jobject l0, jobject l1, jmethodID m, va_list ap, bool app) {
             receiver = receiver_set.hold(l0);
         }
         if (info == nullptr) {
-            info = learn_method(e, m, K == Kind::kStatic, receiver);
+            info = learn_method(e, m, K == Kind::kStatic);
             if (info == nullptr) {
                 stop_for_unknown_parameters(m);
             }
@@ -2257,7 +2247,7 @@ R run_array(Env* e, jobject l0, jobject l1, jmethodID m, const jvalue* args, boo
             receiver = receiver_set.hold(l0);
         }
         if (info == nullptr) {
-            info = learn_method(e, m, K == Kind::kStatic, receiver);
+            info = learn_method(e, m, K == Kind::kStatic);
             if (info == nullptr) {
                 stop_for_unknown_parameters(m);
             }

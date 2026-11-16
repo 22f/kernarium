@@ -36,10 +36,12 @@ struct Platform {
     bool (*make_writable)(void* address, size_t length);
     bool (*make_read_only)(void* address, size_t length);
     // The kinds of the parameters of a method the layer did not see being looked up
-    // (Z B C S I J F D, or L for every reference), by reflection on the original table.
-    // `hint` is a class the method can be asked about. Returns false when it cannot say.
-    bool (*describe_method)(jni::Env* env, void* const* original_table, void* method_id, bool is_static,
-                            jni::jobject hint, char* kinds, unsigned capacity, unsigned* count);
+    // (Z B C S I J F D, or L for every reference), by reflection on the original table, from the
+    // method ID alone: the runtime's ToReflectedMethod takes the ID and ignores its class and
+    // static-flag arguments, so the platform passes a class of its own (CheckJNI refuses a null one).
+    // Returns false when it cannot say.
+    bool (*describe_method)(jni::Env* env, void* const* original_table, void* method_id, bool is_static, char* kinds,
+                            unsigned capacity, unsigned* count);
     // A monotonic clock in milliseconds (it may wrap): the rate limit of the diagnosis lines. Null: no limit.
     uint32_t (*now_ms)();
     // The memory of a block's baseline (the bytes as of its last synchronization): outside the low arena, any

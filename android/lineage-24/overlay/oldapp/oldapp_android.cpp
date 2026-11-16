@@ -926,8 +926,8 @@ char kind_of_class_name(const char* name) {
 
 // Executable.getParameterTypes() of the method's reflected object, and the name of each class: every function is
 // taken from the table as it was before the layer, and the locals of the lookup are gone when it returns.
-bool describe_method(jni::Env* env, void* const* original, void* id, bool is_static, jni::jobject hint, char* kinds,
-                     unsigned capacity, unsigned* count) {
+bool describe_method(jni::Env* env, void* const* original, void* id, bool is_static, char* kinds, unsigned capacity,
+                     unsigned* count) {
     using namespace jni;
     auto push_frame = reinterpret_cast<jint (*)(Env*, jint)>(original[slot::PushLocalFrame]);
     auto pop_frame = reinterpret_cast<jobject (*)(Env*, jobject)>(original[slot::PopLocalFrame]);
@@ -948,10 +948,15 @@ bool describe_method(jni::Env* env, void* const* original, void* id, bool is_sta
         auto element = reinterpret_cast<jobject (*)(Env*, jobject, jsize)>(original[slot::GetObjectArrayElement]);
         auto utf_chars = reinterpret_cast<const char* (*)(Env*, jobject, jboolean*)>(original[slot::GetStringUTFChars]);
         auto release_chars = reinterpret_cast<void (*)(Env*, jobject, const char*)>(original[slot::ReleaseStringUTFChars]);
-        jobject reflected = to_reflected(env, hint, id, is_static ? 1 : 0);
+        // The runtime's ToReflectedMethod decodes the method ID and ignores its class and static-flag arguments, so a method is
+        // described from its ID alone: any class does for the call, and one is needed because CheckJNI refuses a null one.
         jobject executable = find_class(env, "java/lang/reflect/Executable");
         jobject class_class = find_class(env, "java/lang/Class");
-        if (reflected == nullptr || executable == nullptr || class_class == nullptr || exception_check(env)) {
+        if (executable == nullptr || class_class == nullptr || exception_check(env)) {
+            break;
+        }
+        jobject reflected = to_reflected(env, executable, id, is_static ? 1 : 0);
+        if (reflected == nullptr || exception_check(env)) {
             break;
         }
         jmethodID get_types = get_method(env, executable, "getParameterTypes", "()[Ljava/lang/Class;");

@@ -385,7 +385,7 @@ bool fake_make_writable(void*, size_t) { return g_writable_ok; }
 bool fake_make_read_only(void*, size_t) { return g_read_only_ok; }
 
 // The kinds of a method's parameters from its signature, for an ID the layer never saw being looked up.
-bool fake_describe(Env*, void* const*, void* id, bool, jobject, char* kinds, unsigned capacity, unsigned* count) {
+bool fake_describe(Env*, void* const*, void* id, bool, char* kinds, unsigned capacity, unsigned* count) {
     WorldGuard guard;
     ++world.describe_calls;
     const auto found = world.methods.find(id);
@@ -5570,8 +5570,10 @@ void check_a_method_that_cannot_be_described_stops_the_call_and_is_asked_about_a
 }
 
 // Every other way the parameters can be unobtainable at a call stops it too, and none lets the runtime see the block's address:
-// nothing to describe from (a platform without reflection), no method ID, no receiver to describe an instance method by, and no
-// memory for the method's node (the lookup then stored nothing, and the first call learns it again once memory is back).
+// nothing to describe from (a platform without reflection), no method ID (the runtime aborts on that itself), and no memory for the
+// method's node (the lookup then stored nothing, and the first call learns it again once memory is back). A method is described
+// from its ID alone, so a null receiver or class is no cause: an instance call without a receiver is forwarded for the runtime to
+// refuse (it aborts on a null receiver), and a static call with a null class runs (see the row for it).
 void check_the_other_causes_of_unknown_parameters_stop_the_call() {
     {
         g_without_describe = true;
@@ -5591,8 +5593,12 @@ void check_the_other_causes_of_unknown_parameters_stop_the_call() {
         Made made = make_shadow_of(f, sample(16));
         jmethodID unseen = unseen_method("([B)Ljava/lang/Object;");
         forget_the_last_call();
-        require(the_process_stops([&] { (void)call_object_v(f, nullptr, unseen, made.shadow); }) && world.last_call.empty() && world.describe_calls == 0,
-                "an instance call without a receiver to describe the method by: the call stops");
+        g_null_receiver_ok = true;  // the fake notes a null receiver and goes on; the real runtime aborts on it
+        (void)call_object_v(f, nullptr, unseen, made.shadow);
+        g_null_receiver_ok = false;
+        require(g_stops == 0 && world.describe_calls == 1 && !world.last_call.empty() && world.last_array_args.size() == 1 &&
+                    world.last_array_args[0] == made.object,
+                "an instance call without a receiver is learned from the ID and forwarded converted: no stop of the layer's");
         (void)kit;
     }
     {
@@ -5609,6 +5615,46 @@ void check_the_other_causes_of_unknown_parameters_stop_the_call() {
                     world.describe_calls == 2,
                 "with memory back the call learns the method and is converted");
     }
+}
+
+// The runtime ignores the class argument of a CallStatic* (only the method ID is checked), so a static call with a null class runs,
+// and so it does here whether or not the ID was seen at a lookup: an ID the layer must describe is described from the ID alone.
+// (Fails on a layer that describes a method by a receiver or class: the call stops the process, and nothing reaches the runtime.)
+void check_a_static_call_with_a_null_class_runs_converted() {
+    Fixture f = make();
+    Made made = make_shadow_of(f, sample(16));
+    auto variadic = fn<jint (*)(Env*, jclass, jmethodID, ...)>(*f.table, static_call_slot(kInt, kVarargs));
+    auto array = fn<jint (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kInt, kArray));
+    auto va_form = [&](jclass cls, jmethodID m, ...) {
+        va_list ap;
+        va_start(ap, m);
+        const jint r = fn<jint (*)(Env*, jclass, jmethodID, va_list)>(*f.table, static_call_slot(kInt, kVa))(f.env, cls, m, ap);
+        va_end(ap);
+        return r;
+    };
+    const auto converted = [&](const char* form) {
+        require(world.last_array_args.size() == 1 && world.last_array_args[0] == made.object && g_stops == 0, form);
+        forget_the_last_call();
+    };
+    forget_the_last_call();
+    jmethodID unseen_variadic = unseen_method("(I[B)I");
+    require(variadic(f.env, nullptr, unseen_variadic, 5, made.shadow) == 7, "the variadic form runs");
+    converted("a static call with a null class, variadic, an unseen ID: the block is converted");
+    jmethodID unseen_v = unseen_method("(I[B)I");
+    require(va_form(nullptr, unseen_v, 5, made.shadow) == 7, "the V form runs");
+    converted("and in the V form");
+    jmethodID unseen_a = unseen_method("(I[B)I");
+    jvalue args[2] = {};
+    args[0].i = 5;
+    args[1].l = made.shadow;
+    require(array(f.env, nullptr, unseen_a, args) == 7, "the A form runs");
+    converted("and in the A form");
+    require(world.describe_calls == 3, "each unseen ID was described once, from the ID alone");
+    require(variadic(f.env, nullptr, unseen_variadic, 6, made.shadow) == 7 && world.describe_calls == 3, "and the answer is kept");
+    converted("a second call with the same ID");
+    jmethodID looked_up = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetStaticMethodID)(f.env, f.cls, "m", "(I[B)I");
+    require(variadic(f.env, nullptr, looked_up, 7, made.shadow) == 7 && world.describe_calls == 3, "an ID that was looked up runs with a null class as well");
+    converted("and its block is converted");
 }
 
 // A call made with an exception pending (ART does not refuse it) is no cause: the parameters of an ID the layer has to describe
@@ -6841,6 +6887,7 @@ int main(int argc, char** argv) {
     check_every_method_the_application_looks_up_is_known();
     check_a_method_that_cannot_be_described_stops_the_call_and_is_asked_about_again();
     check_the_other_causes_of_unknown_parameters_stop_the_call();
+    check_a_static_call_with_a_null_class_runs_converted();
     check_an_unseen_method_is_learned_with_an_exception_pending();
     check_after_a_merge_and_a_new_cut_a_place_is_a_block_only_where_one_starts();
     check_a_block_made_at_a_stale_address_during_PopLocalFrame_is_left_alone();
