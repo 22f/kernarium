@@ -127,6 +127,8 @@ struct World {
     std::set<Ref*> revoked;     // globals that stopped being valid (what a re-entrant end of a block would make them)
     bool revoke_next = false;   // the next array function revokes the globals of every array first
     int set_fails = 0;          // the next SetByteArrayRegion calls are refused (an exception, nothing written)
+    int receiver_calls = 0;     // instance and nonvirtual calls that reached the runtime
+    Obj* last_receiver = nullptr;  // the object behind the receiver of the latest of them (null: the receiver was null)
 };
 World world;
 
@@ -973,10 +975,17 @@ jobject f_NewObjectA(Env*, jclass, jmethodID m, const jvalue* a) {
     return new_local(new Obj{});
 }
 // What Java reads and writes through the receiver of an instance call.
+bool g_null_receiver_ok = false;  // a row that has the layer replace a receiver by null: the fake notes it and goes on
 void touch_receiver(jobject o) {
     WorldGuard guard;
     revoke_if_asked();
+    ++world.receiver_calls;
+    if (o == nullptr && g_null_receiver_ok) {
+        world.last_receiver = nullptr;
+        return;
+    }
     Obj* object = object_of(o);
+    world.last_receiver = object;
     world.seen_receiver.clear();
     if (object->is_array) {
         world.seen_receiver = object->bytes;
@@ -1131,6 +1140,7 @@ void reset_world() {
     g_after_set = nullptr;
     g_in_pop = nullptr;
     g_before_lock = nullptr;
+    g_null_receiver_ok = false;
     g_ref_type_asked_with_a_reference = 0;
     g_before_first_critical = nullptr;
     g_in_release_critical = nullptr;
@@ -4831,6 +4841,232 @@ void check_a_collected_block_is_an_ended_block_of_its_length_until_a_sweep_recla
     require(is_shadow_block(left.shadow) && length_of(f, left.shadow) == 100, "the other block is as it was");
 }
 
+// ---- every call form converts once a shadow may have reached the application: the current counts decide nothing
+//
+// A call hands the runtime what the layer made of each reference in it: the array for a block, null for any other address of the
+// region. The numbers of live and ended blocks say nothing about that: both are zero while a block is revived (counted live after
+// its contents are synchronized) or built, and after the last block was reclaimed or never published, while an application
+// keeps the address of a block it once had.
+
+// The methods the rows below call. Each form hands the runtime one reference that the row chooses, as the byte[] argument of a
+// method or as the receiver of one, so what the fake runtime receives says what the layer made of it.
+struct CallKit {
+    jmethodID take;   // ([B)Ljava/lang/Object;  (instance)
+    jmethodID touch;  // ()Ljava/lang/Object;    (instance)
+    jobject plain;    // a real object: the receiver of the argument forms
+};
+CallKit make_call_kit(Fixture& f) {
+    auto get_method = fn<jmethodID (*)(Env*, jclass, const char*, const char*)>(*f.table, slot::GetMethodID);
+    return CallKit{get_method(f.env, f.cls, "take", "([B)Ljava/lang/Object;"), get_method(f.env, f.cls, "touch", "()Ljava/lang/Object;"),
+                   string_object()};
+}
+
+jobject call_nonvirtual_object_v(Fixture& f, jobject receiver, jmethodID m, ...) {
+    va_list ap;
+    va_start(ap, m);
+    jobject r = fn<jobject (*)(Env*, jobject, jclass, jmethodID, va_list)>(*f.table, nonvirtual_slot(kObject, kVa))(f.env, receiver, f.cls, m, ap);
+    va_end(ap);
+    return r;
+}
+jobject construct_v(Fixture& f, jmethodID m, ...) {
+    va_list ap;
+    va_start(ap, m);
+    jobject r = fn<jobject (*)(Env*, jclass, jmethodID, va_list)>(*f.table, slot::NewObjectV)(f.env, f.cls, m, ap);
+    va_end(ap);
+    return r;
+}
+
+struct CallForm {
+    const char* name;
+    bool receiver;  // the reference is the receiver of the call; otherwise it is the byte[] argument
+    void (*issue)(Fixture&, const CallKit&, jobject);
+};
+using ObjectA = jobject (*)(Env*, jobject, jmethodID, const jvalue*);
+using NonvirtualA = jobject (*)(Env*, jobject, jclass, jmethodID, const jvalue*);
+const CallForm kCallForms[] = {
+    {"CallStaticIntMethodV", false, [](Fixture& f, const CallKit&, jobject o) { (void)call_static_int_v(f, f.consume, o); }},
+    {"CallStaticIntMethodA", false,
+     [](Fixture& f, const CallKit&, jobject o) {
+         jvalue a[1] = {};
+         a[0].l = o;
+         (void)fn<jint (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kInt, kArray))(f.env, f.cls, f.consume, a);
+     }},
+    {"CallStaticIntMethod", false,
+     [](Fixture& f, const CallKit&, jobject o) {
+         (void)fn<jint (*)(Env*, jclass, jmethodID, ...)>(*f.table, static_call_slot(kInt, kVarargs))(f.env, f.cls, f.consume, o);
+     }},
+    {"CallStaticVoidMethodV", false, [](Fixture& f, const CallKit&, jobject o) { call_static_void_v(f, f.consume_void, jint(1), o); }},
+    {"CallStaticVoidMethodA", false,
+     [](Fixture& f, const CallKit&, jobject o) {
+         jvalue a[2] = {};
+         a[0].z = 1;
+         a[1].l = o;
+         fn<void (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, static_call_slot(kVoid, kArray))(f.env, f.cls, f.consume_void, a);
+     }},
+    {"CallStaticVoidMethod", false,
+     [](Fixture& f, const CallKit&, jobject o) {
+         fn<void (*)(Env*, jclass, jmethodID, ...)>(*f.table, static_call_slot(kVoid, kVarargs))(f.env, f.cls, f.consume_void, jint(1), o);
+     }},
+    {"CallObjectMethodV", false, [](Fixture& f, const CallKit& k, jobject o) { (void)call_object_v(f, k.plain, k.take, o); }},
+    {"CallObjectMethodA", false,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         jvalue a[1] = {};
+         a[0].l = o;
+         (void)fn<ObjectA>(*f.table, call_slot(kObject, kArray))(f.env, k.plain, k.take, a);
+     }},
+    {"CallObjectMethod", false,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         (void)fn<jobject (*)(Env*, jobject, jmethodID, ...)>(*f.table, call_slot(kObject, kVarargs))(f.env, k.plain, k.take, o);
+     }},
+    {"CallNonvirtualObjectMethodV", false, [](Fixture& f, const CallKit& k, jobject o) { (void)call_nonvirtual_object_v(f, k.plain, k.take, o); }},
+    {"CallNonvirtualObjectMethodA", false,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         jvalue a[1] = {};
+         a[0].l = o;
+         (void)fn<NonvirtualA>(*f.table, nonvirtual_slot(kObject, kArray))(f.env, k.plain, f.cls, k.take, a);
+     }},
+    {"CallNonvirtualObjectMethod", false,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         (void)fn<jobject (*)(Env*, jobject, jclass, jmethodID, ...)>(*f.table, nonvirtual_slot(kObject, kVarargs))(f.env, k.plain, f.cls, k.take, o);
+     }},
+    {"NewObjectV", false, [](Fixture& f, const CallKit&, jobject o) { (void)construct_v(f, f.construct, o); }},
+    {"NewObjectA", false,
+     [](Fixture& f, const CallKit&, jobject o) {
+         jvalue a[1] = {};
+         a[0].l = o;
+         (void)fn<jobject (*)(Env*, jclass, jmethodID, const jvalue*)>(*f.table, slot::NewObjectA)(f.env, f.cls, f.construct, a);
+     }},
+    {"NewObject", false,
+     [](Fixture& f, const CallKit&, jobject o) {
+         (void)fn<jobject (*)(Env*, jclass, jmethodID, ...)>(*f.table, slot::NewObject)(f.env, f.cls, f.construct, o);
+     }},
+    {"CallObjectMethodV (receiver)", true, [](Fixture& f, const CallKit& k, jobject o) { (void)call_object_v(f, o, k.touch); }},
+    {"CallObjectMethodA (receiver)", true,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         const jvalue none[1] = {};
+         (void)fn<ObjectA>(*f.table, call_slot(kObject, kArray))(f.env, o, k.touch, none);
+     }},
+    {"CallObjectMethod (receiver)", true,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         (void)fn<jobject (*)(Env*, jobject, jmethodID, ...)>(*f.table, call_slot(kObject, kVarargs))(f.env, o, k.touch);
+     }},
+    {"CallNonvirtualObjectMethodV (receiver)", true, [](Fixture& f, const CallKit& k, jobject o) { (void)call_nonvirtual_object_v(f, o, k.touch); }},
+    {"CallNonvirtualObjectMethodA (receiver)", true,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         const jvalue none[1] = {};
+         (void)fn<NonvirtualA>(*f.table, nonvirtual_slot(kObject, kArray))(f.env, o, f.cls, k.touch, none);
+     }},
+    {"CallNonvirtualObjectMethod (receiver)", true,
+     [](Fixture& f, const CallKit& k, jobject o) {
+         (void)fn<jobject (*)(Env*, jobject, jclass, jmethodID, ...)>(*f.table, nonvirtual_slot(kObject, kVarargs))(f.env, o, f.cls, k.touch);
+     }},
+};
+
+Obj g_not_reached;  // what the fake notes before a call: it is never handed out, so a call that did not reach the runtime shows
+void forget_the_last_call() {
+    WorldGuard guard;
+    world.last_call.clear();
+    world.last_array_args.assign(1, &g_not_reached);
+    world.receiver_calls = 0;
+    world.last_receiver = &g_not_reached;
+}
+// The object behind the reference the runtime was handed by the call since forget_the_last_call, or null when it was handed null.
+Obj* runtime_was_handed(const CallForm& form) {
+    WorldGuard guard;
+    const std::string at = std::string(form.name) + ": ";
+    if (form.receiver) {
+        require(world.receiver_calls == 1 && world.last_receiver != &g_not_reached, (at + "the call reached the runtime once").c_str());
+        return world.last_receiver;
+    }
+    require(!world.last_call.empty() && world.last_array_args.size() == 1 && world.last_array_args[0] != &g_not_reached,
+            (at + "the call reached the runtime with its one reference").c_str());
+    return world.last_array_args[0];
+}
+
+// A block is revived while another thread calls with its old pointer: the array is obtained again, the block is live in the record
+// and neither counted live nor ended (the live count follows the synchronization), and the pointer is a kept reference of a
+// reachable array, so every call form must give the runtime a reference of its own to the array. (Fails on a layer that skips the
+// conversion while the counts are zero: the runtime is handed the address of the block.)
+void check_a_call_during_a_revival_is_handed_the_array_by_a_reference_of_the_runtime() {
+    constexpr const char* kCase = "check_a_call_during_a_revival_is_handed_the_array_by_a_reference_of_the_runtime";
+    for (const CallForm& form : kCallForms) {
+        Fixture f = make();
+        const CallKit kit = make_call_kit(f);
+        Other caller_env(f);
+        Made x = make_held(f, std::vector<uint8_t>(100, 0x11));
+        end_ref(f, x.shadow);
+        require(is_ended_block(x.shadow) && counters().shadows_ended == 1, "the block ended, and its array is reachable");
+        std::atomic<bool> tried_the_lock{false}, finished{false};
+        std::thread caller;
+        int pauses = 0;
+        forget_the_last_call();
+        g_before_lock = [&] { tried_the_lock = true; };
+        g_after_get = [&] {  // the revival copies the array into the block, under the mutex
+            ++pauses;
+            require(counters().shadows_live == 0 && counters().shadows_ended == 0 && counters().blocks_revived == 0,
+                    "the revival has left the ended count and not yet joined the live count");
+            require(is_shadow_block(x.shadow) && length_of(f, x.shadow) == 100, "and the record says the block is live and whole");
+            caller = std::thread([&] {
+                t_pause_at_lock = true;
+                form.issue(caller_env.f, kit, x.shadow);
+                t_pause_at_lock = false;
+                finished = true;
+            });
+            // A conversion waits for the mutex the revival holds; a call that skips it reaches the runtime at once.
+            require(waitUntil([&] { return tried_the_lock.load() || finished.load(); }, kHandOffLimit),
+                    (std::string(kCase) + ": the call neither waited for the mutex nor finished").c_str());
+        };
+        Made again = obtain_again(f, x.object);
+        require(pauses == 1 && caller.joinable(), "the revival paused once, and the call was made meanwhile");
+        caller.join();
+        require(again.shadow == x.shadow && counters().shadows_live == 1 && counters().blocks_revived == 1, "the array has its block back");
+        require(runtime_was_handed(form) == x.object, (std::string(form.name) + ": the runtime was handed the array").c_str());
+    }
+}
+
+// The address of a block that is gone is no block, whichever numbers are zero: after a failed creation reclaimed the last block, and
+// while a block is being built at that very address (nothing is published, nothing is counted), every call form gives the runtime
+// null for it, and no address of the region. (Fails on a layer that skips the conversion while the counts are zero.)
+void check_a_call_with_the_address_of_a_block_that_is_gone_is_handed_null() {
+    for (const CallForm& form : kCallForms) {
+        Fixture f = make();
+        const CallKit kit = make_call_kit(f);
+        Other reader(f);
+        Made x = make_shadow_of(f, std::vector<uint8_t>(100, 0x11));
+        end_ref(f, x.shadow);
+        collect();
+        g_null_receiver_ok = true;
+        // (a) a replacement is being built at x's address: its contents are copied in, nothing is published or counted
+        int pauses = 0;
+        g_after_get = [&] {
+            ++pauses;
+            require(counters().shadows_live == 0 && counters().shadows_ended == 0, "no block is counted while the replacement is built");
+            require(!is_shadow_block(x.shadow) && !is_ended_block(x.shadow) && length_of(f, x.shadow) == 0, "and none is published yet");
+            require(static_cast<const uint8_t*>(g_last_get_buffer.load()) - 16 == x.shadow, "the replacement is being built at x's address");
+            std::thread([&] {
+                forget_the_last_call();
+                form.issue(reader.f, kit, x.shadow);
+                require(runtime_was_handed(form) == nullptr, (std::string(form.name) + ": (a) the runtime was handed null").c_str());
+            }).join();
+        };
+        Made y = make_shadow_of(f, std::vector<uint8_t>(100, 0x66));
+        require(pauses == 1 && y.shadow == x.shadow, "the replacement took x's address");
+        // (b) the replacement ended and was collected; the next creation fails after it has reclaimed it: nothing is left
+        end_ref(f, y.shadow);
+        collect();
+        g_baseline_fails = true;
+        Made declined = make_shadow_of(f, std::vector<uint8_t>(100, 0x77));
+        g_baseline_fails = false;
+        require(!is_shadow_block(declined.shadow) && counters().shadows_live == 0 && counters().shadows_ended == 0 &&
+                    counters().blocks_collected == 2,
+                "every block was reclaimed, and the failed creation published none");
+        require(!is_shadow_block(x.shadow) && !is_ended_block(x.shadow) && length_of(f, x.shadow) == 0, "x's address is no block");
+        forget_the_last_call();
+        form.issue(f, kit, x.shadow);
+        require(runtime_was_handed(form) == nullptr, (std::string(form.name) + ": (b) the runtime was handed null").c_str());
+    }
+}
+
 // The ids of the layer's own calls are resolved at the installation, before the first block can be made.
 void check_the_ids_are_resolved_before_the_first_block() {
     Fixture f = make();
@@ -6029,6 +6265,8 @@ int main(int argc, char** argv) {
     check_a_forged_header_inside_a_live_blocks_contents_is_no_block();
     check_shadows_need_a_record_the_region_can_be_described_by();
     check_a_collected_block_is_an_ended_block_of_its_length_until_a_sweep_reclaims_it();
+    check_a_call_during_a_revival_is_handed_the_array_by_a_reference_of_the_runtime();
+    check_a_call_with_the_address_of_a_block_that_is_gone_is_handed_null();
     check_after_a_merge_and_a_new_cut_a_place_is_a_block_only_where_one_starts();
     check_a_block_made_at_a_stale_address_during_PopLocalFrame_is_left_alone();
     check_a_block_made_at_a_collected_address_before_the_mutex_is_taken_is_acted_on_whole();

@@ -179,6 +179,7 @@ struct Globals {
     const uint8_t* shadow_lo;
     const uint8_t* shadow_hi;
     uint32_t* record;  // the block record's memory (Platform::map_record)
+    uint32_t exposed;  // set once, before the first block is published, never cleared (atomic): a shadow may have reached the application
     BlockHeader* pending;  // blocks of ended threads, waiting for an environment
     uint32_t declined_logged;  // the first declined shadow of the process has been logged
     uint32_t peak_logged;      // the highest block count that has been logged, and when
@@ -252,9 +253,19 @@ inline bool is_shadow(const void* object) {
 }
 
 inline uint32_t live_shadows() { return __atomic_load_n(&g.counters.shadows_live, __ATOMIC_RELAXED); }
-inline uint32_t ended_shadows() { return __atomic_load_n(&g.counters.shadows_ended, __ATOMIC_RELAXED); }
-// Whether any reference to a block can exist: a live block, or an ended one whose reference the application may keep.
-inline bool blocks_exist() { return live_shadows() != 0 || ended_shadows() != 0; }
+
+// Whether the address of a block may be in the application's hands. The state is set once, by the first make_shadow that
+// publishes a block, before the block is published, and never cleared. It is not the number of blocks that exist: that is zero
+// while a block is being revived (counted live after its contents are synchronized) or built, and after the last one has been
+// reclaimed, and an application keeps the address of a block long after the block is gone. Until it is set no address of the
+// region has been handed out, so no call, release or recorded pointer has a shadow to find. A thread has an address only from
+// the thread that published the block, through a chain of synchronization that includes the store, so a relaxed load sees it.
+inline bool shadows_exposed() { return __atomic_load_n(&g.exposed, __ATOMIC_RELAXED) != 0; }
+inline void expose_shadows() {
+    if (!shadows_exposed()) {
+        __atomic_store_n(&g.exposed, 1u, __ATOMIC_RELEASE);
+    }
+}
 
 ThreadState* thread() { return static_cast<ThreadState*>(g.platform.thread_state(sizeof(ThreadState))); }
 
@@ -1605,6 +1616,7 @@ jobject make_shadow(Env* env, jobject local) {
         __builtin_memcpy(room.baseline, block->data, bytes);
     }
     __builtin_memset(block->data + bytes, 0, kBlockTail);
+    expose_shadows();  // before the block can be found: from here a shadow may reach the application
     mark(header, kBlockLive);
     record_publish(header, static_cast<uint32_t>(bytes));  // the last store to the block
     state->blocks[state->count++] = header;
@@ -2179,12 +2191,14 @@ bool collect_array(const MethodInfo& info, const jvalue* in, jvalue* pack, HoldS
 
 // A call is passed blocks as its arguments and, for an instance or nonvirtual call, as its receiver (clone(), or any
 // method without parameters, reads the array through the receiver). The blocks are held for the call and synchronized
-// around it.
+// around it. Every call converts once a shadow may have reached the application (shadows_exposed), whatever blocks exist at
+// the moment: a reference that is a block becomes a reference the runtime holds, any other address of the region (a block
+// that is gone, one being built or revived) becomes null, and no address of the region reaches the runtime.
 template <class R, Kind K, int SlotV, int SlotA>
 R run_va(Env* e, jobject l0, jobject l1, jmethodID m, va_list ap, bool app) {
-    const bool blocks = blocks_exist();
-    const MethodInfo* info = ((IsObject<R>::value && app) || blocks) ? find_method(m) : nullptr;
-    if (blocks) {
+    const bool convert = shadows_exposed();
+    const MethodInfo* info = ((IsObject<R>::value && app) || convert) ? find_method(m) : nullptr;
+    if (convert) {
         constexpr bool kHasReceiver = K == Kind::kInstance || K == Kind::kNonvirtual;
         Access receiver_item[1];
         HoldSet receiver_set(e, receiver_item, 1);
@@ -2220,9 +2234,9 @@ R run_va(Env* e, jobject l0, jobject l1, jmethodID m, va_list ap, bool app) {
 
 template <class R, Kind K, int SlotV, int SlotA>
 R run_array(Env* e, jobject l0, jobject l1, jmethodID m, const jvalue* args, bool app) {
-    const bool blocks = blocks_exist();
-    const MethodInfo* info = ((IsObject<R>::value && app) || blocks) ? find_method(m) : nullptr;
-    if (blocks) {
+    const bool convert = shadows_exposed();
+    const MethodInfo* info = ((IsObject<R>::value && app) || convert) ? find_method(m) : nullptr;
+    if (convert) {
         constexpr bool kHasReceiver = K == Kind::kInstance || K == Kind::kNonvirtual;
         Access receiver_item[1];
         HoldSet receiver_set(e, receiver_item, 1);

@@ -662,7 +662,13 @@ patches ART's one JNI function table in place and gives the application:
   and gives the runtime only that, never the block's own reference (Java code that
   runs during a call can end the block), so identity
   (`IsSameObject`, `NewGlobalRef`, monitors) and writes (`SetByteArrayRegion`,
-  `Release*Elements`, `ReleasePrimitiveArrayCritical`) keep their meaning. The layer reads the
+  `Release*Elements`, `ReleasePrimitiveArrayCritical`) keep their meaning. From the
+  first block on, the runtime is never handed an address of the region: every call
+  form (`Call*`, `CallStatic*`, `CallNonvirtual*`, `NewObject*`, the variadic, `V` and
+  `A` entries) gives it the array for a reference that is a block, and null for any
+  other address of the region (a block that was reclaimed, or one that is being built
+  or revived), whatever blocks exist at that moment (a method whose parameters the layer
+  could not learn is forwarded unchanged). The layer reads the
   length from its own record, never from the length word, which the application
   can overwrite. The block and its array behave as one memory at the points
   where the application meets Java: before and after a call that is passed the
