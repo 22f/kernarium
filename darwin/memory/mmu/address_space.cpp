@@ -1341,6 +1341,8 @@ public:
 		hold->record_identity = report.record_identity;
 		hold->debt_sequence = report.debt_sequence;
 		hold->owed = report.owed;
+		hold->record = report.record;
+		hold->alias_changes = report.alias_changes;
 		switch (report.result) {
 		case FrameAccounting::HoldResult::settled:
 			return DARWIN_UML_STATIC_FRAME_SETTLED;

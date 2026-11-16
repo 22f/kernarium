@@ -8,6 +8,7 @@
 #include "cpu/gadget_cache_census.hpp"
 #endif
 #include "cpu/x86_64/code_page_registry.hpp"
+#include "cpu/x86_64/registration_memo.hpp"
 
 #include "native_entry.hpp"
 #include "native_symbols.hpp"
@@ -305,6 +306,10 @@ struct CodePageRegistries final {
 	std::shared_ptr<CodePageRegistry> current;
 	std::uint64_t current_generation{};
 	CodePageRegistry::Participant participant;
+	/* The frame registrations that settled, for the generation the executor
+	 * last prepared (Executor::prepare ends the memo's epoch at every change
+	 * of mapping and of generation). */
+	RegistrationMemo memo;
 
 	~CodePageRegistries() { unbind(); }
 
@@ -352,16 +357,24 @@ struct CodePageRegistries final {
 };
 
 /* Registers the frame the page at `page` maps as held by this generation
- * (register_frame), all before the caller reads a byte of the page. */
+ * (register_frame), all before the caller reads a byte of the page, unless
+ * the executor's memo says the last registration of the page still stands.
+ * `serial` is the generation's flush serial, read before the call. */
 [[nodiscard]] FrameRegistration hold_frame(
 	::uml::memory::GuestAddressSpace &memory, void *execution_context,
-	CodePageRegistries *registries, std::uint64_t page,
+	CodePageRegistries *registries, std::uint64_t page, std::uint64_t serial,
 	ProgramCacheDiagnostics &diagnostics) noexcept
 {
+	if (registries != nullptr && registries->memo.holds(memory, page, serial)) {
+		++diagnostics.registration_memo_hits;
+		return FrameRegistration::settled;
+	}
 	++diagnostics.holder_registrations;
-	return register_frame(memory, execution_context,
-		registries != nullptr ? &registries->participant : nullptr, page)
-		.status;
+	const auto outcome = register_frame(memory, execution_context,
+		registries != nullptr ? &registries->participant : nullptr, page);
+	if (registries != nullptr)
+		registries->memo.remember(page, serial, outcome);
+	return outcome.status;
 }
 
 /* Holds a translation's possible pages in the registry while their bytes are
@@ -396,9 +409,10 @@ public:
 		/* The frame of each page, registered whether or not the cache can
 		 * hold the translation, so that a store through any alias of it
 		 * reaches this generation. */
+		const auto serial = memory.flush_serial(execution_context);
 		for (std::size_t index = 0; index < count_; ++index) {
 			frames_[index] = hold_frame(memory, execution_context, registries,
-				pages_[index], diagnostics);
+				pages_[index], serial, diagnostics);
 			if (frames_[index] == FrameRegistration::unsettled)
 				settled_ = false;
 		}
@@ -2138,9 +2152,10 @@ private:
 		 * failed leaves the body undecided; one that is refused means the
 		 * body cannot run at this location. */
 		FrameRegistration registered = FrameRegistration::settled;
+		const auto serial = memory.flush_serial(execution_context);
 		for_each_program_page(program, [&](std::uint64_t page) {
-			const auto result = hold_frame(
-				memory, execution_context, registries_, page, diagnostics);
+			const auto result = hold_frame(memory, execution_context,
+				registries_, page, serial, diagnostics);
 			/* settled < unsettled < failed < refused */
 			if (result > registered)
 				registered = result;
@@ -2368,6 +2383,10 @@ void Executor::prepare(::uml::memory::GuestAddressSpace &memory,
 		storage_->code_changes != code_changes;
 	storage_->mapping_change_reader = mapping_change_reader;
 	if (mapping_changed) {
+		/* A holder leaves its frame with the page's mapping, so no
+		 * remembered registration outlives a change of mapping or a move to
+		 * another generation. */
+		storage_->registries.memo.clear();
 		/* The address space hands a reader the ranges it has not seen, so a
 		 * reader only a few changes behind retires exactly those pages
 		 * instead of every entry it holds. Anything it cannot describe, and

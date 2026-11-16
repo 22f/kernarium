@@ -35,8 +35,10 @@ struct ProgramCacheDiagnostics final {
 	/* A translation became runnable from a registration that was not
 	 * settled. Must stay 0: an unsettled page's translation is transient. */
 	std::uint64_t unheld_runnable{};
-	/* Frame registrations by builds and by source compares. */
+	/* Frame registrations by builds and by source compares that asked the
+	 * address space, and those the executor's memo answered instead. */
 	std::uint64_t holder_registrations{};
+	std::uint64_t registration_memo_hits{};
 	/* Stamp hits refused because the generation's flush serial had moved:
 	 * the body compared its source instead. */
 	std::uint64_t flush_serial_misses{};

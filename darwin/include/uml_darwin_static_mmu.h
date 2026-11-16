@@ -190,6 +190,11 @@ struct darwin_uml_static_frame_hold {
 	/* In: take the global fallback for a debt larger than the buffer
 	 * instead of reporting CROWDED. */
 	int global_ok;
+	/* Out: the frame's record and its holder change count as the hold left
+	 * them, for a caller that remembers a settled registration; null when
+	 * no holder stands. */
+	const void *record;
+	uint64_t alias_changes;
 };
 
 enum darwin_uml_static_frame_hold_result {

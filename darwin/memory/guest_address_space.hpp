@@ -52,6 +52,10 @@ struct FrameHold final {
 	std::uint64_t record_identity{};
 	std::uint64_t debt_sequence{};
 	std::size_t owed{};
+	/* The frame's record and its holder change count as the hold left them;
+	 * null when nothing stands (see frame_hold_unchanged). */
+	const void *record{};
+	std::uint64_t alias_changes{};
 };
 /* What the write fill read of the frame a page maps. */
 struct FrameFill final {
@@ -137,6 +141,16 @@ public:
 	virtual void clear_code_debt(
 		std::uint64_t, void *, const FrameHold &) noexcept
 	{
+	}
+	/* Whether no holder has been added to the frame `hold` registered a page
+	 * of since the hold, so that registering the same page again, with the
+	 * mapping and the flush serial as they were, would add nothing and owe
+	 * nothing. Lock-free; for a caller that is entered in the address space.
+	 * A memory that cannot say answers false. */
+	[[nodiscard]] virtual bool frame_hold_unchanged(
+		const FrameHold &) noexcept
+	{
+		return false;
 	}
 	/* The write fill's lock-free read of the frame; false when the memory
 	 * cannot say (the fill then tags from the registry alone). */

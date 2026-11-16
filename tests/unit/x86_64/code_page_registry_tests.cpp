@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "cpu/x86_64/code_page_registry.hpp"
+#include "cpu/x86_64/registration_memo.hpp"
 #include "cpu/x86_64/software_tlb.hpp"
 #include "require.hpp"
 
@@ -579,6 +580,13 @@ public:
 	std::atomic_uint cleared{};
 	/* Registrations of one frame may run on several threads. */
 	std::mutex mutex;
+	/* The frame's holder change count, which a registration reports and
+	 * `frame_hold_unchanged` compares; a test moves it as another holder's
+	 * addition does. `always_unchanged` is a memory that never says a frame
+	 * moved. */
+	std::uint64_t alias_changes{1};
+	bool always_unchanged{};
+	int record_token{};
 
 	[[nodiscard]] bool read(std::uint64_t, std::span<std::byte>) override
 	{
@@ -597,6 +605,8 @@ public:
 		FrameHold hold;
 		hold.record_identity = 7;
 		hold.debt_sequence = 3;
+		hold.record = &record_token;
+		hold.alias_changes = alias_changes;
 		const auto count = unnameable ? std::size_t{1} << 62 : writers.size();
 		if (count > capacity) {
 			hold.result = global_ok ? FrameHoldResult::global :
@@ -615,6 +625,12 @@ public:
 	void clear_code_debt(std::uint64_t, void *, const FrameHold &) noexcept override
 	{
 		++cleared;
+	}
+	[[nodiscard]] bool frame_hold_unchanged(
+		const FrameHold &hold) noexcept override
+	{
+		return always_unchanged ||
+			(hold.record == &record_token && hold.alias_changes == alias_changes);
 	}
 };
 
@@ -828,8 +844,146 @@ void test_gadget_and_jit_participants_of_one_generation_are_both_retired()
 		"the global retirement left a kind of participant behind");
 }
 
+/* The memo of an executor answers for a page whose registration settled, and
+ * for no other page, including one that falls in the same slot. */
+void test_a_memo_answers_for_a_page_that_is_still_held()
+{
+	using uml::cpu::x86_64::FrameRegistration;
+	using uml::cpu::x86_64::RegistrationMemo;
+	ScriptedMemory memory;
+	RegistrationMemo memo;
+	const auto outcome = uml::cpu::x86_64::register_frame(
+		memory, nullptr, nullptr, page_at(60));
+	require(outcome.status == FrameRegistration::settled &&
+			outcome.record == &memory.record_token &&
+			outcome.alias_changes == memory.alias_changes,
+		"a settled registration did not report its frame's record");
+	require(!memo.holds(memory, page_at(60), 5),
+		"a memo that remembered nothing answered");
+	memo.remember(page_at(60), 5, outcome);
+	require(memo.holds(memory, page_at(60), 5),
+		"a settled registration was not remembered");
+	require(!memo.holds(memory, page_at(61), 5),
+		"a memo answered for another page");
+	require(!memo.holds(memory, page_at(60 + 256), 5),
+		"a memo answered for a page that falls in the same slot");
+}
+
+/* A holder added to the frame after the registration moves its change count:
+ * the page is registered again, and what that registration leaves is
+ * remembered in turn. */
+void test_a_memo_misses_once_another_holder_was_added()
+{
+	using uml::cpu::x86_64::RegistrationMemo;
+	ScriptedMemory memory;
+	RegistrationMemo memo;
+	memo.remember(page_at(62), 5,
+		uml::cpu::x86_64::register_frame(memory, nullptr, nullptr, page_at(62)));
+	require(memo.holds(memory, page_at(62), 5));
+	memory.alias_changes += 1;
+	require(!memo.holds(memory, page_at(62), 5),
+		"a holder added to the frame did not end the memo's answer");
+	memo.remember(page_at(62), 5,
+		uml::cpu::x86_64::register_frame(memory, nullptr, nullptr, page_at(62)));
+	require(memo.holds(memory, page_at(62), 5),
+		"the registration made after the addition was not remembered");
+}
+
+/* A change of mapping, or a move to another generation, ends the memo's epoch:
+ * nothing made before it answers, and what is remembered after it does. */
+void test_a_memo_is_dropped_at_a_mapping_change()
+{
+	using uml::cpu::x86_64::RegistrationMemo;
+	ScriptedMemory memory;
+	RegistrationMemo memo;
+	for (std::uint64_t index = 0; index < 4; ++index)
+		memo.remember(page_at(64 + index), 5,
+			uml::cpu::x86_64::register_frame(
+				memory, nullptr, nullptr, page_at(64 + index)));
+	require(memo.holds(memory, page_at(64), 5) && memo.holds(memory, page_at(67), 5));
+	memo.clear();
+	for (std::uint64_t index = 0; index < 4; ++index)
+		require(!memo.holds(memory, page_at(64 + index), 5),
+			"a mapping change did not drop a remembered registration");
+	memo.remember(page_at(64), 5,
+		uml::cpu::x86_64::register_frame(memory, nullptr, nullptr, page_at(64)));
+	require(memo.holds(memory, page_at(64), 5) && !memo.holds(memory, page_at(65), 5),
+		"a registration after the drop was not remembered alone");
+}
+
+/* A flush of the generation removes its holders and moves its serial: what was
+ * remembered under the old serial does not answer under the new one. */
+void test_a_memo_is_dropped_at_a_serial_move()
+{
+	using uml::cpu::x86_64::RegistrationMemo;
+	ScriptedMemory memory;
+	RegistrationMemo memo;
+	memo.remember(page_at(68), 5,
+		uml::cpu::x86_64::register_frame(memory, nullptr, nullptr, page_at(68)));
+	require(memo.holds(memory, page_at(68), 5));
+	require(!memo.holds(memory, page_at(68), 6),
+		"a move of the flush serial did not end the memo's answer");
+}
+
+/* Only a registration that settled and named its frame is remembered: an
+ * unsettled one still owes its debt, a failed or refused one holds nothing,
+ * and a memory that cannot name the frame cannot say it is unchanged. The
+ * memory here never says a frame moved, so only the memo can refuse. */
+void test_only_a_settled_registration_is_remembered()
+{
+	using uml::cpu::x86_64::FrameRegistration;
+	using uml::cpu::x86_64::FrameRegistrationOutcome;
+	using uml::cpu::x86_64::RegistrationMemo;
+	ScriptedMemory memory;
+	memory.always_unchanged = true;
+	const auto settled = uml::cpu::x86_64::register_frame(
+		memory, nullptr, nullptr, page_at(70));
+	require(settled.status == FrameRegistration::settled);
+	std::uint64_t index = 0;
+	for (const auto status : {FrameRegistration::unsettled,
+		     FrameRegistration::failed, FrameRegistration::refused}) {
+		RegistrationMemo memo;
+		FrameRegistrationOutcome other = settled;
+		other.status = status;
+		memo.remember(page_at(70 + index), 5, other);
+		require(!memo.holds(memory, page_at(70 + index), 5),
+			"a registration that did not settle was remembered");
+		++index;
+	}
+	RegistrationMemo memo;
+	FrameRegistrationOutcome unnamed = settled;
+	unnamed.record = nullptr;
+	memo.remember(page_at(74), 5, unnamed);
+	require(!memo.holds(memory, page_at(74), 5),
+		"a registration that named no frame was remembered");
+	memo.remember(page_at(74), 5, settled);
+	require(memo.holds(memory, page_at(74), 5));
+
+	/* A real registration that stayed unsettled names no frame either. */
+	using namespace std::chrono_literals;
+	ScriptedMemory stuck_memory;
+	stuck_memory.always_unchanged = true;
+	stuck_memory.unnameable = true;
+	Generation stuck{9700, {.slice = 10ms, .slices = 2}};
+	stuck.participant.engine_epoch.store(1, std::memory_order_release);
+	const auto unsettled = uml::cpu::x86_64::register_frame(
+		stuck_memory, nullptr, nullptr, page_at(75));
+	require(unsettled.status == FrameRegistration::unsettled,
+		"a stuck participant did not leave the registration unsettled");
+	RegistrationMemo after_stuck;
+	after_stuck.remember(page_at(75), 5, unsettled);
+	require(!after_stuck.holds(stuck_memory, page_at(75), 5),
+		"an unsettled registration was remembered");
+	stuck.participant.engine_epoch.store(2, std::memory_order_release);
+}
+
 int main()
 {
+	test_a_memo_answers_for_a_page_that_is_still_held();
+	test_a_memo_misses_once_another_holder_was_added();
+	test_a_memo_is_dropped_at_a_mapping_change();
+	test_a_memo_is_dropped_at_a_serial_move();
+	test_only_a_settled_registration_is_remembered();
 	test_gadget_and_jit_participants_of_one_generation_are_both_retired();
 	test_a_repeat_registration_waits_for_the_pending_one();
 	test_membership_is_counted();

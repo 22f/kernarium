@@ -601,7 +601,7 @@ FrameAccounting::HoldReport FrameAccounting::hold(GenerationState &state,
 	std::uint64_t page, DebtLocation *owed, std::size_t capacity,
 	bool global_ok) noexcept
 {
-	HoldReport report{HoldResult::failed, 0, 0, 0};
+	HoldReport report{HoldResult::failed, 0, 0, 0, nullptr, 0};
 	const auto fail = [&]() -> HoldReport {
 		registration_failures.fetch_add(1, std::memory_order_relaxed);
 		report.result = HoldResult::failed;
@@ -732,6 +732,9 @@ FrameAccounting::HoldReport FrameAccounting::hold(GenerationState &state,
 				}
 				report.record_identity = MappedBacking::record_identity(*record);
 				report.debt_sequence = record->debt_sequence;
+				report.record = record;
+				report.alias_changes =
+					record->alias_changes.load(std::memory_order_acquire);
 				if (global)
 					global_holds.fetch_add(1, std::memory_order_relaxed);
 				report.owed = global ? count : written;

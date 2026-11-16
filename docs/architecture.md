@@ -272,7 +272,7 @@ resolve, or resolves to a descriptor with no backing alive, is counted and makes
 every generation read every translation again.
 When a run of the emulator ends it appends the process's counts so far, which
 nothing resets (unresolved kernel writes, dropped direct ranges, global holds,
-registrations and their failures, refusals and lost stamp hits), to the file
+registrations that reached the address space and their failures, refusals and lost stamp hits), to the file
 `UML_X86_ACCOUNTING_LOG` names; the unresolved writes and global holds stay
 near zero in an ordinary guest.
 

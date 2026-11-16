@@ -296,6 +296,10 @@ struct FrameRegistrationOutcome final {
 	std::vector<Wait> stuck;
 	/* An unsettled wait could not be recorded in `stuck`. */
 	bool stuck_lost{};
+	/* For a settled registration: the frame's record and its holder change
+	 * count as the registration left them (RegistrationMemo). */
+	const void *record{};
+	std::uint64_t alias_changes{};
 };
 
 /* Registers the frame the page at `page` maps as held by the generation the

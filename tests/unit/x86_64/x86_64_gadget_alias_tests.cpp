@@ -34,6 +34,9 @@
  *              generation, still sees its stores.
  *   registry   a registry that could not be made is made again by the next
  *              prepare of its generation.
+ *   memo       an executor does not ask the address space again for a page
+ *              whose registration settled, until another holder is added to
+ *              the frame, the flush serial moves or the mapping changes.
  */
 #include "address_space_types.hpp"
 #include "allocation_fault.hpp"
@@ -492,6 +495,132 @@ void test_flush_serial()
 	require(first_after.validation_hits == first_before.validation_hits + 1,
 		"the flushed generation's body did not match its source");
 	require(first_after.unheld_runnable == 0 && second_after.unheld_runnable == 0);
+}
+
+/* The registration memo: a block built on a page its executor has already
+ * registered does not ask the address space again. What ends the memo's
+ * answer: a holder another generation adds to the frame, a move of the flush
+ * serial (here with no change of mapping), and a change of the mapping that
+ * took the page's holder with it. Each asks, and the holder is there after. */
+void test_a_remembered_registration_is_skipped_until_something_moves()
+{
+	const Clean clean;
+	namespace testing = uml::memory::testing;
+	constexpr std::uint64_t x = 0x1800'0000;
+	ScratchBacking frame{"uml-x86-alias-memo-XXXXXX", page};
+	/* mov eax, 10 + n ; syscall, one block every 0x100 bytes. */
+	for (std::uint8_t block = 0; block < 6; ++block)
+		put(frame, block * 0x100,
+			{0xb8, static_cast<std::uint8_t>(10 + block), 0x00, 0x00, 0x00,
+				0x0f, 0x05});
+	Space space{9120};
+	Space other{9121};
+	space.map(x, frame, 0, rx, 1);
+	const auto backing = testing::mapped_backing(frame.descriptor());
+	require(backing != nullptr);
+	const auto registered = [&](const gadgets::ProgramCacheDiagnostics &before,
+				    const gadgets::ProgramCacheDiagnostics &after,
+				    std::uint64_t asked, std::uint64_t answered) {
+		return after.holder_registrations == before.holder_registrations + asked &&
+			after.registration_memo_hits ==
+				before.registration_memo_hits + answered;
+	};
+
+	auto before = space.diagnostics();
+	require(space.run(x).rax == 10);
+	auto after = space.diagnostics();
+	require(registered(before, after, 1, 0),
+		"the first block of a page did not register it");
+	require(held_at(holders_of(backing, 0), space.generation(), x));
+
+	before = after;
+	require(space.run(x + 0x100).rax == 11);
+	after = space.diagnostics();
+	require(registered(before, after, 0, 1),
+		"a block on a page already registered asked the address space again");
+
+	/* Another generation holds the frame now: its addition moved the frame's
+	 * change count. */
+	other.map(x, frame, 0, rx, 1);
+	require(other.run(x).rax == 10);
+	require(held_at(holders_of(backing, 0), other.generation(), x));
+	before = after;
+	require(space.run(x + 0x200).rax == 12);
+	after = space.diagnostics();
+	require(registered(before, after, 1, 0),
+		"a holder added by another generation did not end the memo's answer");
+	/* What that registration left is remembered in turn. */
+	before = after;
+	require(space.run(x + 0x300).rax == 13);
+	after = space.diagnostics();
+	require(registered(before, after, 0, 1),
+		"the registration made after another holder's was not remembered");
+
+	/* The generation's serial moves, its mapping and holders do not. */
+	FrameAccounting::bump_flush_serial(*testing::generation_state(space.generation()));
+	before = after;
+	require(space.run(x + 0x400).rax == 14);
+	after = space.diagnostics();
+	require(registered(before, after, 1, 0),
+		"a move of the flush serial did not end the memo's answer");
+	require(held_at(holders_of(backing, 0), space.generation(), x));
+
+	/* The page goes and comes back: its holder is out of the frame until a
+	 * block registers it again. */
+	space.unmap(x);
+	require(!held_at(holders_of(backing, 0), space.generation(), x),
+		"an unmap left the page's holder");
+	space.map(x, frame, 0, rx, 1);
+	before = after;
+	require(space.run(x + 0x500).rax == 15);
+	after = space.diagnostics();
+	require(registered(before, after, 1, 0),
+		"a change of mapping did not end the memo's answer");
+	require(held_at(holders_of(backing, 0), space.generation(), x),
+		"a block ran on a page whose holder was not registered again");
+	require(after.unheld_runnable == 0 && other.diagnostics().unheld_runnable == 0);
+}
+
+/* A body whose page stamp moved without its bytes changing validates by its
+ * source, and the registration that validation makes is the memo's too: a
+ * store past the block's bytes, through another address, moves the stamp, and
+ * the validation that follows asks the address space nothing. */
+void test_a_revalidation_uses_the_memo()
+{
+	const Clean clean;
+	namespace testing = uml::memory::testing;
+	constexpr std::uint64_t executable = 0x1900'0000;
+	constexpr std::uint64_t alias = 0x2900'0000;
+	/* Not in the memo's slot of the executable page. */
+	constexpr std::uint64_t writer = 0x3900'1000;
+	ScratchBacking frame{"uml-x86-alias-memo-v-XXXXXX", page};
+	ScratchBacking code{"uml-x86-alias-memo-w-XXXXXX", page};
+	load_return(frame, 1);
+	load_writer(code);
+	Space space{9122};
+	space.map(writer, code, 0, rx, 1);
+	space.map(executable, frame, 0, rx, 1);
+	space.map(alias, frame, 0, rw, 0);
+	const auto backing = testing::mapped_backing(frame.descriptor());
+	require(backing != nullptr);
+	require(space.run(executable).rax == 1);
+	require(held_at(holders_of(backing, 0), space.generation(), executable));
+
+	/* A store through another address, past the block's bytes: it moves the
+	 * page's stamp and leaves the body's code as it was. */
+	require(space.run(writer, 1, alias + 0x800).event == EngineEvent::system_call);
+	const auto before = space.diagnostics();
+	require(space.run(executable).rax == 1);
+	const auto after = space.diagnostics();
+	require(after.validation_hits == before.validation_hits + 1 &&
+			after.validation_stamp_hits == before.validation_stamp_hits &&
+			after.translations == before.translations,
+		"the body was not validated by its source after the store");
+	require(after.holder_registrations == before.holder_registrations,
+		"a validation asked the address space for a registration the executor had");
+	require(after.registration_memo_hits == before.registration_memo_hits + 1,
+		"a validation did not use the executor's memo");
+	require(after.unheld_runnable == 0);
 }
 
 /* E7: units that link to each other stay safe when the frame of one of them
@@ -1055,6 +1184,12 @@ int main(int argc, char **argv)
 	if (selected("registry")) {
 		test_a_failed_registry_is_made_again();
 		std::puts("failed registry ok");
+	}
+	if (selected("memo")) {
+		test_a_remembered_registration_is_skipped_until_something_moves();
+		std::puts("registration memo ok");
+		test_a_revalidation_uses_the_memo();
+		std::puts("revalidation memo ok");
 	}
 	const auto now = FrameAccounting::diagnostics();
 	require(now.holder_leaks == start.holder_leaks, "a holder leaked");

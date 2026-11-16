@@ -145,6 +145,8 @@ void StaticGuestMemory::invalidate_code(
 	result.record_identity = hold.record_identity;
 	result.debt_sequence = hold.debt_sequence;
 	result.owed = hold.owed;
+	result.record = hold.record;
+	result.alias_changes = hold.alias_changes;
 	if (status == DARWIN_UML_STATIC_FRAME_OWED)
 		for (std::size_t index = 0; index < std::min(hold.owed, capacity); ++index)
 			debts[index] = {owed[index].generation, owed[index].page};
@@ -177,6 +179,16 @@ void StaticGuestMemory::clear_code_debt(std::uint64_t address,
 	darwin_uml_static_vm_clear_code_debt(execution_context, generation_,
 		static_cast<unsigned long>(address), hold.record_identity,
 		hold.debt_sequence);
+}
+
+bool StaticGuestMemory::frame_hold_unchanged(
+	const ::uml::memory::FrameHold &hold) noexcept
+{
+	if (hold.record == nullptr)
+		return false;
+	const darwin_uml_static_frame_state state{nullptr, 0, hold.record,
+		hold.alias_changes, 0};
+	return darwin_uml_static_vm_frame_state_unchanged(&state) != 0;
 }
 
 bool StaticGuestMemory::frame_fill(std::uint64_t address,

@@ -204,6 +204,11 @@ public:
 		std::uint64_t record_identity;
 		std::uint64_t debt_sequence;
 		std::size_t owed;
+		/* The frame's record and its holder change count as this call left
+		 * them, under the frame's lock: a caller that read the same count
+		 * later knows no holder was added since. Null when nothing stands. */
+		const void *record;
+		std::uint64_t alias_changes;
 	};
 	/* Registers the page as a holder of its frame before the caller reads a
 	 * byte of it. For a holder of the generation's mapping lock shared, who

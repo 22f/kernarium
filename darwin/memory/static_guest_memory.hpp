@@ -43,6 +43,8 @@ public:
 		bool global_ok) noexcept override;
 	void clear_code_debt(std::uint64_t address, void *execution_context,
 		const ::uml::memory::FrameHold &hold) noexcept override;
+	[[nodiscard]] bool frame_hold_unchanged(
+		const ::uml::memory::FrameHold &hold) noexcept override;
 	[[nodiscard]] bool frame_fill(std::uint64_t address,
 		void *execution_context,
 		::uml::memory::FrameFill &fill) noexcept override;

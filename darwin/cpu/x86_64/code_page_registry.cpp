@@ -497,6 +497,8 @@ FrameRegistrationOutcome register_frame_uncounted(
 	switch (hold.result) {
 	case ::uml::memory::FrameHoldResult::settled:
 		outcome.status = FrameRegistration::settled;
+		outcome.record = hold.record;
+		outcome.alias_changes = hold.alias_changes;
 		return outcome;
 	case ::uml::memory::FrameHoldResult::refused:
 		outcome.status = FrameRegistration::refused;
@@ -556,6 +558,8 @@ FrameRegistrationOutcome register_frame_uncounted(
 	}
 	memory.clear_code_debt(page, execution_context, hold);
 	outcome.status = FrameRegistration::settled;
+	outcome.record = hold.record;
+	outcome.alias_changes = hold.alias_changes;
 	return outcome;
 }
 
