@@ -368,7 +368,11 @@ void fake_abort() {
 }
 bool g_baseline_fails = false;
 void* fake_alloc_baseline(size_t bytes) { return g_baseline_fails ? nullptr : std::malloc(bytes); }
-void fake_free_baseline(void* baseline) { std::free(baseline); }
+Hook<> g_in_free_baseline;  // runs inside the free of a baseline, the last step before a reclaimed block's memory goes back to the arena
+void fake_free_baseline(void* baseline) {
+    if (auto hook = g_in_free_baseline.take()) hook();
+    std::free(baseline);
+}
 bool g_writable_ok = true;
 bool g_read_only_ok = true;
 bool fake_make_writable(void*, size_t) { return g_writable_ok; }
@@ -1131,6 +1135,7 @@ F fn(const Table& table, int slot) {
 }
 
 void reset_world() {
+    g_in_free_baseline = nullptr;
     reset_for_test();
     for (Ref* r : world.locals) delete r;
     for (Ref* r : world.globals) delete r;
@@ -4771,6 +4776,15 @@ void check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_l
         return made;
     };
     std::vector<const void*> watched;
+    // A block that stays live through the churn, read all the while: the readers must see it whole every time, and no block
+    // at the places inside it (a layer that answered "no block" for everything would pass the rest of the row).
+    constexpr size_t kAnchorBytes = 120;
+    Made anchor = make_logged(kAnchorBytes);
+    require(is_shadow_block(anchor.shadow) && length_of(f, anchor.shadow) == jsize(kAnchorBytes), "the anchor is a live block");
+    const uint8_t* const anchor_start = static_cast<const uint8_t*>(anchor.shadow);
+    const std::set<const void*> anchor_inside = {anchor_start + 16, anchor_start + 48, anchor_start + 64};
+    watched.push_back(anchor.shadow);
+    watched.insert(watched.end(), anchor_inside.begin(), anchor_inside.end());
     {
         std::vector<Made> first;
         for (int i = 0; i < 24; ++i) {
@@ -4792,6 +4806,8 @@ void check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_l
         jint type;
     };
     std::vector<Seen> seen[kReaders];
+    std::atomic<size_t> anchor_seen[kReaders] = {};
+    std::atomic<size_t> inside_seen[kReaders] = {};
     std::atomic<int> started{0};
     std::atomic<bool> stop{false};
     std::vector<std::unique_ptr<Other>> readers;
@@ -4806,6 +4822,18 @@ void check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_l
                 for (const void* address : watched) {
                     Seen now{address, is_shadow_block(address), is_ended_block(address), length_of(reader.f, const_cast<void*>(address)),
                              fn<jint (*)(Env*, jobject)>(*reader.f.table, slot::GetObjectRefType)(reader.f.env, const_cast<void*>(address))};
+                    if (address == anchor.shadow) {
+                        require(now.live && !now.ended && now.length == jsize(kAnchorBytes) && now.type == kRefTypeLocal,
+                                "the block that stays live is a live block of its length, whatever the churn does");
+                        ++anchor_seen[i];
+                        continue;
+                    }
+                    if (anchor_inside.count(address) != 0) {
+                        require(!now.live && !now.ended && now.length == 0 && now.type != kRefTypeLocal,
+                                "a place inside the live block is no block");
+                        ++inside_seen[i];
+                        continue;
+                    }
                     if ((now.live || now.ended || now.length != 0 || now.type == kRefTypeLocal) && seen[i].size() < 400000) {
                         seen[i].push_back(now);
                     }
@@ -4826,6 +4854,10 @@ void check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_l
     for (std::thread& thread : threads) thread.join();
     require(g_ref_type_asked_with_a_reference == 0,
             "GetObjectRefType of an address of the region that no block started at reached the runtime as the null reference: it was not looked up a second time");
+    for (int i = 0; i < kReaders; ++i) {
+        require(anchor_seen[i].load() > 0 && inside_seen[i].load() > 0, "each reader looked at the block that stayed live, and at the places inside it");
+    }
+    require(is_shadow_block(anchor.shadow) && length_of(f, anchor.shadow) == jsize(kAnchorBytes), "and it is live and whole after the churn");
     size_t observations = 0;
     for (int i = 0; i < kReaders; ++i) {
         for (const Seen& now : seen[i]) {
@@ -4901,6 +4933,28 @@ void check_a_collected_block_is_an_ended_block_of_its_length_until_a_sweep_recla
     require(next.shadow == gone.shadow && !is_ended_block(gone.shadow) && is_shadow_block(gone.shadow) && length_of(f, gone.shadow) == 300,
             "its address is now the block made there, with that block's length");
     require(is_shadow_block(left.shadow) && length_of(f, left.shadow) == 100, "the other block is as it was");
+}
+
+// The record is cleared before the memory of a reclaimed block goes back to the arena: by the time the block's baseline is freed (the
+// last step before the release) the reclaimed block's reference is already no block, of either kind, with no length, while the block
+// beside it is as it was. (Fails on a layer that clears the record after the release: another block could be made at the address
+// and published, and the clear would then take that block out of the record.)
+void check_the_record_is_cleared_before_the_memory_goes_back_to_the_arena() {
+    Fixture f = make();
+    Made left = make_shadow_of(f, sample(100));  // live beside it
+    Made gone = make_shadow_of(f, sample(100));
+    end_ref(f, gone.shadow);
+    collect();
+    int frees = 0;
+    g_in_free_baseline = [&] {
+        ++frees;
+        require(!is_shadow_block(gone.shadow) && !is_ended_block(gone.shadow) && length_of(f, gone.shadow) == 0,
+                "the reclaimed block's reference is no block by the time its baseline is freed");
+        require(is_shadow_block(left.shadow) && length_of(f, left.shadow) == 100, "the block beside it is as it was");
+    };
+    Made next = make_shadow_of(f, sample(300));  // a creation after the collection sweeps the ended block
+    require(frees == 1 && counters().blocks_collected == 1, "the sweep reclaimed it, and the hook ran once");
+    require(is_shadow_block(next.shadow), "and the creation went on");
 }
 
 // ---- every call form converts once a shadow may have reached the application: the current counts decide nothing
@@ -5353,8 +5407,11 @@ void check_live_blocks_of_many_threads_count_against_the_cap() {
 void check_a_header_is_published_whole_to_readers_without_the_mutex() {
     constexpr const char* kCase = "check_a_header_is_published_whole_to_readers_without_the_mutex";
     constexpr int kGenerations = 1500;
-    // Both sizes take the same chunk of the arena, so that the freed block's address is the next block's.
-    const auto size_of = [](int generation) -> size_t { return generation % 2 != 0 ? 100 : 101; };
+    // Both sizes take the same chunk of the arena, so that the freed block's address is the next block's. They are long: the layer
+    // copies the contents again for the baseline after it has built the block, and a layer that published the block before that
+    // copy is seen by the stale reader almost every time it makes a block.
+    constexpr size_t kShort = 32769, kLong = 32770;
+    const auto size_of = [](int generation) -> size_t { return generation % 2 != 0 ? kShort : kLong; };
     const auto fill_of = [](int generation) -> uint8_t { return generation % 2 != 0 ? 0xA1 : 0x5E; };
     Fixture f = make();
     Other reader(f);
@@ -5408,7 +5465,7 @@ void check_a_header_is_published_whole_to_readers_without_the_mutex() {
             const jint type = fn<jint (*)(Env*, jobject)>(*f.table, slot::GetObjectRefType)(reader.f.env, const_cast<void*>(address));
             require(type == 0 || type == kRefTypeLocal, "the kind of a reference to the address is a block's (local) or the null reference's (invalid)");
             const jsize length = length_of_block(address);
-            require(length == 0 || length == 100 || length == 101,
+            require(length == 0 || length == jsize(kShort) || length == jsize(kLong),
                     "a length read without the mutex is the length of a block that was or is at the address, never a link");
             if (at % 2 != 0 && live) {
                 // Block g is being made and the one before it has ended: the live block is g, and nothing of it is old.
@@ -6478,6 +6535,7 @@ int main(int argc, char** argv) {
     check_a_forged_header_inside_a_live_blocks_contents_is_no_block();
     check_shadows_need_a_record_the_region_can_be_described_by();
     check_a_collected_block_is_an_ended_block_of_its_length_until_a_sweep_reclaims_it();
+    check_the_record_is_cleared_before_the_memory_goes_back_to_the_arena();
     check_a_call_during_a_revival_is_handed_the_array_by_a_reference_of_the_runtime();
     check_a_call_with_the_address_of_a_block_that_is_gone_is_handed_null();
     check_every_method_the_application_looks_up_is_known();

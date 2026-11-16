@@ -735,7 +735,8 @@ patches ART's one JNI function table in place and gives the application:
   and it is a block again only if a new block starts at exactly that address. A
   block is complete before the record names it, so a thread that looks without the
   lock at the reference of a live or ended block (its kind, its length) finds it
-  whole. The record is up to 2 MiB of address space, a mapping of its own, resident
+  whole. The record is a mapping of its own, one 32-bit word for each 64 bytes of the
+  region (2 MiB of address space for the product's 32 MiB region), resident
   by page only where block starts have been recorded; a page stays resident after
   its blocks are gone.
   A pointer from `Get...Elements` or `Get...Critical` pins its block as Dalvik
