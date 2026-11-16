@@ -17,8 +17,10 @@ import java.util.TimeZone;
  * lose that character, so such a part carries a second U+FEFF in front, which
  * the decoder takes as the mark; that unit comes out of the part's 67. U+FFFE
  * cannot be sent at all: at the start of a part the decoder reads it as the
- * reversed mark and swaps every byte after it, and elsewhere as a malformed
- * unit that it replaces with U+FFFD. Message refuses it.
+ * reversed mark and swaps every byte after it, and elsewhere the JDK's
+ * "UTF-16" decoder, which the host test reads the PDUs back with, takes it as
+ * a malformed unit and replaces it with U+FFFD; what Android's own decoder
+ * does with it there is not established. Message refuses it everywhere.
  */
 final class DeliverPdu {
     private static final int SINGLE_UNITS = 70;

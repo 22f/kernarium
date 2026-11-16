@@ -7,7 +7,7 @@
     <application
         android:label="Andarium SMS"
         android:allowBackup="false">
-        <!-- Any caller reaches call(), which refuses every uid but the shell's. -->
+        <!-- Any caller reaches call(), which serves only the adb shell's uid and root's. -->
         <provider
             android:name=".InjectProvider"
             android:authorities="android.kernarium.sms"
