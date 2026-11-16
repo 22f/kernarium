@@ -3256,7 +3256,12 @@ bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_r
         g.shadows_on = g.record != nullptr;
     }
     if (!g.shadows_on) {
-        return true;  // nothing to intercept
+        // Nothing to intercept. The query bounds of an earlier attempt that was refused later (the table could not be written)
+        // are cleared: the queries range-test an address first, and an address of the region must not reach a record that is not
+        // there.
+        g.shadow_lo = nullptr;
+        g.shadow_hi = nullptr;
+        return true;
     }
     g.ended_head.list_next = &g.ended_head;
     g.ended_head.list_prev = &g.ended_head;
@@ -3265,6 +3270,8 @@ bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_r
     g.shadow_hi = static_cast<const uint8_t*>(shadow_region) + shadow_size;
     if (!platform.make_writable(table, kSlotCount * sizeof(void*))) {
         g.shadows_on = false;
+        g.shadow_lo = nullptr;
+        g.shadow_hi = nullptr;
         return false;
     }
     g.installed = true;

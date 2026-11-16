@@ -5183,6 +5183,54 @@ void check_a_call_with_the_address_of_a_block_that_is_gone_is_handed_null() {
     }
 }
 
+// A setup that is refused leaves no query bounds behind: the queries range-test an address before they read the record, and a
+// refused attempt after an attempt that was refused later (the table could not be written, the record was already mapped) must not
+// leave the range of the first for an address to match with no record to read. A fresh refusal and the retry sequence both answer
+// "no block" for an address inside the region. (Fails with a null dereference on a layer that keeps the bounds.)
+void check_a_refused_install_leaves_no_query_bounds() {
+    const void* const inside = g_shadow_region + kHeadBytes + 16;
+    const auto require_no_block = [&](const char* what) {
+        require(!is_shadow_block(inside) && !is_ended_block(inside), what);
+    };
+    {  // a fresh install whose record cannot be had
+        reset_world();
+        Table* table = new Table;
+        g_record_expected_bytes = shadow_record_bytes(sizeof(g_shadow_region));
+        g_record_fails = true;
+        require(install_jni_wrappers(table->slots, kPlatform, g_shadow_region, sizeof(g_shadow_region), &table->env), "the refused install returns");
+        g_record_fails = false;
+        require_no_block("a fresh install without a record: an address of the region is no block");
+    }
+    {  // the table cannot be written, and the retry cannot have its record
+        reset_world();
+        Table* table = new Table;
+        g_record_expected_bytes = shadow_record_bytes(sizeof(g_shadow_region));
+        g_writable_ok = false;
+        require(!install_jni_wrappers(table->slots, kPlatform, g_shadow_region, sizeof(g_shadow_region), &table->env),
+                "the first attempt is refused: the table cannot be written");
+        require_no_block("after the first refusal: an address of the region is no block");
+        g_writable_ok = true;
+        g_record_fails = true;
+        require(install_jni_wrappers(table->slots, kPlatform, g_shadow_region, sizeof(g_shadow_region), &table->env),
+                "the retry returns, with shadows off");
+        g_record_fails = false;
+        require(table->slots[slot::GetArrayLength] == reinterpret_cast<void*>(&f_GetArrayLength), "and leaves the table as it was");
+        require_no_block("after the retry without a record: an address of the region is no block");
+    }
+    {  // a retry that works after a refusal makes blocks
+        reset_world();
+        Table* table = new Table;
+        g_record_expected_bytes = shadow_record_bytes(sizeof(g_shadow_region));
+        g_writable_ok = false;
+        require(!install_jni_wrappers(table->slots, kPlatform, g_shadow_region, sizeof(g_shadow_region), &table->env), "refused");
+        g_writable_ok = true;
+        require(install_jni_wrappers(table->slots, kPlatform, g_shadow_region, sizeof(g_shadow_region), &table->env), "and then accepted");
+        require(table->slots[slot::GetArrayLength] != reinterpret_cast<void*>(&f_GetArrayLength), "wrapped");
+    }
+    g_record_fails = false;
+    g_writable_ok = true;
+}
+
 // ---- a call never reaches the runtime unconverted: the parameters of a method are known, or the process stops
 //
 // Which of a call's values are references is known from the method: its signature at the lookup, else the platform's reflection
@@ -6534,6 +6582,7 @@ int main(int argc, char** argv) {
     check_a_collected_reference_covered_by_another_blocks_contents_is_no_block();
     check_a_forged_header_inside_a_live_blocks_contents_is_no_block();
     check_shadows_need_a_record_the_region_can_be_described_by();
+    check_a_refused_install_leaves_no_query_bounds();
     check_a_collected_block_is_an_ended_block_of_its_length_until_a_sweep_reclaims_it();
     check_the_record_is_cleared_before_the_memory_goes_back_to_the_arena();
     check_a_call_during_a_revival_is_handed_the_array_by_a_reference_of_the_runtime();
