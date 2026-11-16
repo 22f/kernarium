@@ -20,7 +20,9 @@
  *			instructions at the address;
  *	shared		a process rewrites and synchronizes code on a page it
  *			shares with another process, which only runs it and
- *			has translated it since the fork;
+ *			has translated it since the fork, the executable view
+ *			at the null page in a second run, which the guest's
+ *			root can map;
  *	lazy-remote	another process writes the page with process_vm_writev(),
  *			into a mapping its owner has not touched since the fork;
  *	vcpu		threads on other vCPUs ran the function, and the caller
@@ -452,8 +454,10 @@ void case_remap()
  * function; the child rewrites it through the writable view and synchronizes
  * it for the executable one, as __clear_cache does, and tells the parent. The
  * parent warms after the fork, which flushes its own translations, so the
- * translation it holds is the one the child's change must reach. */
-void case_shared_code()
+ * translation it holds is the one the child's change must reach. A process
+ * with the privilege can map the executable view at the null page, which asks
+ * the same of the synchronization there; mapping it must succeed. */
+void case_shared_code(bool at_null_page)
 {
 	constexpr u32 rounds = 8;
 	constexpr u32 warm_calls = 200;
@@ -463,10 +467,15 @@ void case_shared_code()
 		print("code-change: memfd failed\n");
 		leave(4);
 	}
+	const char *const check_name =
+		at_null_page ? "shared-null-page" : "shared-memfd";
 	const long writable = raw_syscall(nr_mmap, 0, static_cast<long>(page),
 		prot_read | prot_write, map_shared, fd, 0);
+	/* The null page is a page like another to the guest's kernel, which lets
+	 * a privileged process map code there. */
 	const long executable = raw_syscall(nr_mmap, 0, static_cast<long>(page),
-		prot_read | prot_exec, map_shared, fd, 0);
+		prot_read | prot_exec, map_shared | (at_null_page ? map_fixed : 0),
+		fd, 0);
 	if ((writable < 0 && writable > -4096) ||
 	    (executable < 0 && executable > -4096)) {
 		print("code-change: shared mmap failed\n");
@@ -522,11 +531,12 @@ void case_shared_code()
 			print("code-change: shared read failed\n");
 			leave(4);
 		}
-		expect("shared-memfd", 10 + round, run());
+		expect(check_name, 10 + round, run());
 	}
 	int status = 0;
 	raw_syscall(nr_wait4, child, reinterpret_cast<long>(&status), 0, 0);
-	expect("shared-memfd-child", 0, status);
+	expect(at_null_page ? "shared-null-page-child" : "shared-memfd-child", 0,
+		status);
 }
 
 /* A page of a memfd, mapped writable and executable and shared, is run by
@@ -915,7 +925,8 @@ int guest_main()
 	case_fork("fork-child-first", false, false);
 	case_fork("fork-child-gone", true, true);
 	case_remap();
-	case_shared_code();
+	case_shared_code(false);
+	case_shared_code(true);
 	case_vcpu(false);
 	case_vcpu(true);
 	case_flood();

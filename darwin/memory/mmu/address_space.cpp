@@ -1128,9 +1128,7 @@ public:
 	/* A guest code synchronization (IC IVAU) at `address`, in the thread's
 	 * active generation. False when the address names a guest page that the
 	 * generation maps nothing at: the instruction would have faulted on
-	 * hardware, and which frame it meant is unknown. The null page is never
-	 * one a Linux guest maps, so no frame under it holds a translation and an
-	 * IC IVAU there completes, as the architecture's XZR case does. */
+	 * hardware, and which frame it meant is unknown. */
 	bool invalidate_code(std::uint64_t address)
 	{
 		const auto &active = active_thread_generation();
@@ -1784,7 +1782,7 @@ private:
 		std::shared_lock lock{state.mappings_mutex};
 		const auto mapping = find_page(state, page);
 		if (!mapping)
-			return !AddressLayout::is_guest(page) || page == 0;
+			return !AddressLayout::is_guest(page);
 		if (mapping->guest_code)
 			MappedBacking::invalidate_code_page(
 				mapping->backing->code_page_handle(mapping->offset));
