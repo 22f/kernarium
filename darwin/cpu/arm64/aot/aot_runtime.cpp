@@ -156,6 +156,9 @@ enum class FindResult : unsigned {
 	no_entry,
 	/* The instance the page was bound to was replaced. */
 	stale,
+	/* The page's mapping does not carry the kernel's immutable fact: no
+	 * entry is given for it. */
+	mutable_page,
 };
 
 #if UML_AOT_DIAGNOSTICS
@@ -202,7 +205,7 @@ std::atomic<std::uint64_t> g_learning_epoch{0};
 [[nodiscard]] const char *find_result_name(std::size_t kind) noexcept
 {
 	constexpr const char *names[] = {"hit", "uncovered", "not_ready",
-		"poisoned", "unverified", "no_entry", "stale"};
+		"poisoned", "unverified", "no_entry", "stale", "mutable_page"};
 	return names[kind];
 }
 
@@ -212,7 +215,7 @@ std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
 	refill_failures{0}, cross_hits{0}, cross_misses{0}, max_retired{0},
 	verify_nanos{0}, step_nanos{0}, steps_run{0}, code_bumps{0},
 	history_queries{0}, mops_slow{0}, mops_fault{0}, mops_illegal{0},
-	shared_hits{0};
+	shared_hits{0}, mutable_pages{0};
 std::array<std::atomic<std::uint64_t>, 5> refusals{};
 /* The guest addresses AOT code stepped at most: library << 40 | offset. */
 constexpr std::size_t step_slots = 32768;
@@ -224,11 +227,13 @@ std::array<std::atomic<std::uint64_t>, 64> library_steps{};
  * verification the shared table answered. */
 std::array<std::atomic<std::uint64_t>, 64> library_verifications{};
 std::array<std::atomic<std::uint64_t>, 64> library_shared_hits{};
+/* Page verifications refused for lack of the kernel's immutable fact. */
+std::array<std::atomic<std::uint64_t>, 64> library_mutable_pages{};
 /* What find() answered: an entry, or why not (FindResult), in all and per
  * library where the answer names one; and what a cross-library lookup that
  * found no entry looked at (CrossMiss). */
-std::array<std::atomic<std::uint64_t>, 7> find_results{};
-std::array<std::array<std::atomic<std::uint64_t>, 7>, 64> library_finds{};
+std::array<std::atomic<std::uint64_t>, 8> find_results{};
+std::array<std::array<std::atomic<std::uint64_t>, 8>, 64> library_finds{};
 std::array<std::atomic<std::uint64_t>, 3> cross_miss_kinds{};
 std::array<std::atomic<std::uint64_t>, 64> library_cross_misses{};
 std::atomic<bool> reporter_started{false};
@@ -385,12 +390,13 @@ void write_report() noexcept
 	std::fprintf(file,
 		"max_retired %llu verify_nanos %llu step_nanos %llu steps_run %llu "
 		"code_bumps %llu history_queries %llu mops_slow %llu mops_fault %llu "
-		"mops_illegal %llu shared_hits %llu\n",
+		"mops_illegal %llu shared_hits %llu mutable_pages %llu\n",
 		get(counters::max_retired), get(counters::verify_nanos),
 		get(counters::step_nanos), get(counters::steps_run),
 		get(counters::code_bumps), get(counters::history_queries),
 		get(counters::mops_slow), get(counters::mops_fault),
-		get(counters::mops_illegal), get(counters::shared_hits));
+		get(counters::mops_illegal), get(counters::shared_hits),
+		get(counters::mutable_pages));
 	std::fprintf(file, "stack_free %llu stack_size %llu\n",
 		get(counters::stack_min_free), get(counters::stack_size_at_min));
 	std::fprintf(file, "refused tbi %llu sp %llu exclusive %llu fp %llu "
@@ -414,12 +420,14 @@ void write_report() noexcept
 		const auto cross = get(counters::library_cross_misses[library]);
 		const auto hashed = get(counters::library_verifications[library]);
 		const auto shared = get(counters::library_shared_hits[library]);
+		const auto refused = get(counters::library_mutable_pages[library]);
 		if (enters == 0 && finds == 0 && cross == 0 && hashed == 0 &&
-		    shared == 0)
+		    shared == 0 && refused == 0)
 			continue;
 		std::fprintf(file, "library %zu enters %llu steps %llu cross_misses "
-			"%llu verified %llu shared %llu", library, enters,
-			get(counters::library_steps[library]), cross, hashed, shared);
+			"%llu verified %llu shared %llu mutable %llu", library, enters,
+			get(counters::library_steps[library]), cross, hashed, shared,
+			refused);
 		for (std::size_t kind = 0;
 		     kind < counters::library_finds[library].size(); ++kind)
 			std::fprintf(file, " %s %llu", find_result_name(kind),
@@ -691,6 +699,7 @@ Stats stats() noexcept
 	for (std::size_t i = 0; i < result.finds.size(); ++i)
 		result.finds[i] = get(counters::find_results[i]);
 	result.shared_hits = get(counters::shared_hits);
+	result.mutable_pages = get(counters::mutable_pages);
 	return result;
 }
 
@@ -706,7 +715,7 @@ void reset_stats() noexcept
 		     &counters::steps_run, &counters::code_bumps,
 		     &counters::history_queries, &counters::mops_slow,
 		     &counters::mops_fault, &counters::mops_illegal,
-		     &counters::shared_hits})
+		     &counters::shared_hits, &counters::mutable_pages})
 		counter->store(0, std::memory_order_relaxed);
 	for (auto &counter : counters::refusals)
 		counter.store(0, std::memory_order_relaxed);
@@ -760,6 +769,21 @@ Binder::Verdict Binder::verify_page(
 	const auto library = directory().library(instance.library);
 	const auto address =
 		instance.bias + library.table_base + index * page_size;
+	/* Rewritten code runs only for a page whose mapping carries the kernel's
+	 * immutable fact. A page without it can be rewritten through another
+	 * mapping of the frame with no publication this address space sees, and
+	 * rewritten code would go on running the bytes it was hashed as. A page
+	 * that cannot be stamped is one nothing can be fetched from either. */
+	{
+		::uml::memory::ExtendedCodePageStamp admission;
+		if (!memory.extended_code_page_stamp(address, nullptr, admission))
+			return Verdict::unreadable;
+		if (!admission.immutable) {
+			UML_AOT_COUNT(mutable_pages, 1);
+			UML_AOT_COUNT_LIBRARY(library_mutable_pages, instance.library);
+			return Verdict::mutable_page;
+		}
+	}
 	const auto outcome = verify_through_table(g_verdicts,
 		[&](std::uint64_t at, PageStamp &stamp) noexcept {
 #if !UML_AOT_SHARED_VERDICTS
@@ -987,7 +1011,8 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 	}
 	if (instance.pages[page_index] == 0) {
 		if (ticks_ < slot.retry_at) {
-			note_find(FindResult::unverified, instance.library);
+			note_find(slot.mutable_page ? FindResult::mutable_page :
+				FindResult::unverified, instance.library);
 			return {};
 		}
 #if UML_AOT_DIAGNOSTICS
@@ -1003,13 +1028,22 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 		switch (verdict) {
 		case Verdict::match:
 			slot.backoff = 0;
+			slot.mutable_page = false;
 			break;
 		case Verdict::unreadable:
 			UML_AOT_COUNT(unreadable, 1);
 			slot.backoff = std::min<std::uint64_t>(
 				std::max<std::uint64_t>(slot.backoff * 2, 64), 65536);
 			slot.retry_at = ticks_ + slot.backoff;
+			slot.mutable_page = false;
 			note_find(FindResult::unverified, instance.library);
+			return {};
+		case Verdict::mutable_page:
+			slot.backoff = std::min<std::uint64_t>(
+				std::max<std::uint64_t>(slot.backoff * 2, 64), 65536);
+			slot.retry_at = ticks_ + slot.backoff;
+			slot.mutable_page = true;
+			note_find(FindResult::mutable_page, instance.library);
 			return {};
 		case Verdict::mismatch:
 			instance.poisoned = true;

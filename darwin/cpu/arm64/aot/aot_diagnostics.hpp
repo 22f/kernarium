@@ -55,11 +55,14 @@ struct Stats final {
 	std::uint64_t mops_fault{};
 	std::uint64_t mops_illegal{};
 	/* What binder lookups answered: hit, uncovered, not_ready, poisoned,
-	 * unverified, no_entry, stale. */
-	std::array<std::uint64_t, 7> finds{};
+	 * unverified, no_entry, stale, mutable_page. */
+	std::array<std::uint64_t, 8> finds{};
 	/* Pages whose verification the shared table answered: nothing was
 	 * fetched or hashed for them, so they are not in `verifications`. */
 	std::uint64_t shared_hits{};
+	/* Page verifications refused because the page's mapping lacks the
+	 * kernel's immutable fact (each retry after a backoff counts again). */
+	std::uint64_t mutable_pages{};
 };
 
 /* Override DARWIN_UML_AOT (nullopt: read the environment again). */

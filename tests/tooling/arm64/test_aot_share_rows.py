@@ -89,14 +89,14 @@ class CountsTest(unittest.TestCase):
         with self.assertRaises(rows.ShareFailure):
             rows.check_counts("fork", {"shared": rows.FORK_MIN_SHARED - 1}, None)
 
-    def test_the_copy_mode_shares_a_fraction_of_the_fork_mode_and_hashes(self):
-        rows.check_counts("copy", {"shared": 5, "verified": 20}, 100)
+    def test_the_copy_mode_is_refused_for_lack_of_the_fact_and_shares_little(self):
+        rows.check_counts("copy", {"shared": 5, "verified": 0, "mutable": 20}, 100)
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("copy", {"shared": 60, "verified": 20}, 100)
+            rows.check_counts("copy", {"shared": 60, "verified": 0, "mutable": 20}, 100)
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("copy", {"shared": 0, "verified": 11}, 100)
+            rows.check_counts("copy", {"shared": 0, "verified": 20, "mutable": 11}, 100)
         with self.assertRaises(rows.ShareFailure):
-            rows.check_counts("copy", {"shared": 0, "verified": 20}, None)
+            rows.check_counts("copy", {"shared": 0, "mutable": 20}, None)
 
     def test_the_other_modes_only_report(self):
         for mode in ("cow", "mprotect", "pressure"):

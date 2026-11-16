@@ -542,7 +542,8 @@ class Arm:
                 after = counters()
                 self.share_counts[mode] = {
                     key: after.get(f"library.{libz}.{field}", 0) - before.get(f"library.{libz}.{field}", 0)
-                    for key, field in (("shared", "shared"), ("verified", "verified"))}
+                    for key, field in (("shared", "shared"), ("verified", "verified"),
+                                       ("mutable", "mutable"))}
 
 
 def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:

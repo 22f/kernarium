@@ -59,6 +59,9 @@ void test_the_stamp_says_whether_the_page_may_be_shared()
 	for (std::size_t index = 0; index < stamps.size(); ++index)
 		require(stamp_of(memory, base + index * page, stamps[index]));
 	require(stamps[0].shareable && !stamps[1].shareable && stamps[2].shareable);
+	/* The fact itself is what admits rewritten code to a page; sharing needs
+	 * more. */
+	require(stamps[0].immutable && !stamps[1].immutable && stamps[2].immutable);
 
 	/* The two mappings of one frame name the same page at the same version
 	 * and the same epoch; the fact is the mapping's. */
@@ -90,18 +93,18 @@ void test_the_stamp_says_whether_the_page_may_be_shared()
 	ExtendedCodePageStamp alias{};
 	require(stamp_of(memory, base + page, alias));
 	require(alias.stamp == after.stamp && alias.epoch == after.epoch &&
-		!alias.shareable);
+		!alias.shareable && !alias.immutable);
 
 	/* Flipping the fact is a mapping change, which the executor consumes
 	 * before it asks again. */
 	map(generation, base + page, backing, 0, rwx, 3);
 	memory.set_generation(generation);
 	require(stamp_of(memory, base + page, alias));
-	require(alias.shareable);
+	require(alias.shareable && alias.immutable);
 	map(generation, base, backing, 0, rwx, 1);
 	memory.set_generation(generation);
 	require(stamp_of(memory, base, after));
-	require(!after.shareable);
+	require(!after.shareable && !after.immutable);
 	require(darwin_uml_static_vm_destroy(generation) == 0);
 }
 

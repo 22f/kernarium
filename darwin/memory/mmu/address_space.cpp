@@ -202,6 +202,20 @@ std::atomic_bool &coherent_kernel_code_writes()
 		before->offset != after->offset;
 }
 
+/* Whether the page keeps its place and its execute right but stops carrying
+ * the kernel's immutable fact. What a consumer kept about its bytes on the
+ * strength of the fact (rewritten code, bound to the page by a hash) no
+ * longer holds, since another mapping of the frame can change them with no
+ * word to this address space. */
+[[nodiscard]] bool revokes_immutable_fact(
+	const std::optional<PageMapping> &before,
+	const std::optional<PageMapping> &after) noexcept
+{
+	return before && after && can_hold_translation(*before) &&
+		can_hold_translation(*after) && before->immutable &&
+		!after->immutable;
+}
+
 /* The pages of one mapping change whose code changes, as the smallest span
  * covering them, or the whole address space. */
 struct CodeSpan final {
@@ -234,8 +248,14 @@ void note_code_change(CodeSpan &code, std::uint64_t address,
 	const std::optional<PageMapping> &before,
 	const std::optional<PageMapping> &after) noexcept
 {
-	if (!changes_translatable_code(before, after))
+	if (!changes_translatable_code(before, after)) {
+		/* Translations of the page are right still (the bytes are the
+		 * same), so its stamp stays: the change is published for what
+		 * relied on the fact. */
+		if (revokes_immutable_fact(before, after))
+			code.add(address);
 		return;
+	}
 	code.add(address);
 	before->backing->retire_code_page(before->offset);
 }

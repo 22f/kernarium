@@ -161,8 +161,10 @@ private:
 		std::uint64_t bias{};
 		bool poisoned{};
 		bool used{};
-		/* One byte per text page: 1 = matched its stored hash and
-		 * not named by a code change since; as of `state_changes`. */
+		/* One byte per text page: 1 = its mapping carried the kernel's
+		 * immutable fact, it matched its stored hash and no code change
+		 * names it since (a mapping that loses the fact is one); as of
+		 * `state_changes`. */
 		std::vector<std::uint8_t> pages{};
 		std::uint64_t state_changes{};
 	};
@@ -171,16 +173,21 @@ private:
 		std::uint64_t stamp{};
 		std::uint64_t page{1};
 		std::int32_t instance{-1};
-		/* An unreadable page is not tried again before this many lookups. */
+		/* An unreadable page, or a page of a mapping without the kernel's
+		 * immutable fact, is not tried again before this many lookups. */
 		std::uint64_t retry_at{};
 		std::uint64_t backoff{};
+		/* The retry waits for a mapping that lacks the fact. */
+		bool mutable_page{};
 	};
 
 	/* resolve() answers an instance index, none (not a library page, or a
 	 * poisoned instance: remembered), or not_ready (do not remember). */
 	static constexpr std::int32_t none = -1;
 	static constexpr std::int32_t not_ready = -2;
-	enum class Verdict { match, unreadable, mismatch };
+	/* `mutable_page`: the mapping does not carry the kernel's immutable fact,
+	 * so nothing says the bytes stay what they were hashed as. */
+	enum class Verdict { match, unreadable, mutable_page, mismatch };
 	[[nodiscard]] std::int32_t resolve(
 		::uml::memory::StaticGuestMemory &memory, void *context,
 		unsigned long generation, std::uint64_t code_changes,

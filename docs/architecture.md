@@ -537,10 +537,13 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   runs from a page that was not verified. A page the
   guest has not mapped yet is not entered and is tried again later; a page
   that differs retires the library's instance for that address space, and the
-  engine runs the code. Covered text must not be writable through another
-  alias or from another process, because only the address space's own
-  code-change history reaches the binder; today only the Android image's own
-  read-only files are covered.
+  engine runs the code. A page is entered only while its mapping carries the
+  kernel's immutable fact (bit 1 of the map call's `guest_code`): without it
+  another alias or process can change the bytes with no word to the address
+  space that compared them, since only its own code-change history reaches the
+  binder. A mapping without the fact is the engine's (counted as refused), and
+  one that loses it is published as a code change of the page, so the pages
+  compared on its strength are compared again or refused.
 - Shared verdicts: the SHA-256 comparison of a physical page is kept for
   every address space that maps the page, under the page's identity and
   epoch, only when the kernel reports the page immutable in the mapping
@@ -548,9 +551,10 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   counts its executable mappings exactly. The epoch moves at every
   publication of a change to the page's code and when its last executable
   mapping departs, so a verdict is answered only while the page has stayed
-  executable in some address space since it was filed. A mapping that is not
-  immutable, cannot execute, or has no stamp is compared as before, and the
-  table (process-global, direct-mapped) is a hint that may forget.
+  executable in some address space since it was filed. A mapping that cannot
+  execute or has no stamp is never answered, and one that is not immutable is
+  not entered; the table (process-global, direct-mapped) is a hint that may
+  forget.
   `UML_AOT_SHARED_VERDICTS=OFF` builds a runtime that never asks, to measure
   what sharing buys; the differential's shared rows expect a second hash
   there and pass in both settings.

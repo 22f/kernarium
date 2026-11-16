@@ -234,7 +234,8 @@ void *StaticGuestMemory::code_page_handle(std::uint64_t address,
 	if (stamp != nullptr)
 		*stamp = {{observed.identity, observed.version}, observed.epoch,
 			entry.immutable &&
-				(observed.flags & DARWIN_UML_STATIC_STAMP_NEVER_SHARE) == 0};
+				(observed.flags & DARWIN_UML_STATIC_STAMP_NEVER_SHARE) == 0,
+			entry.immutable};
 	return entry.code_page;
 }
 

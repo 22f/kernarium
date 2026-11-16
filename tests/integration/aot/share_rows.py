@@ -7,8 +7,9 @@ a byte-identical copy on a writable one, a page of the library copied by a
 write, one whose protection changed, and a library whose pages the kernel was made to
 reclaim between rounds. Every mode runs once without the component and once
 with it, and the lines it prints must be equal. In a diagnostics build the
-runner also reads how often the framework hashed a page and how often a
-verdict it kept answered instead (`shared_hits`), around each mode.
+runner also reads how often the framework hashed a page, how often a
+verdict it kept answered instead (`shared_hits`) and how often it refused a page
+whose mapping lacks the kernel's immutable fact, around each mode.
 """
 
 from __future__ import annotations
@@ -86,7 +87,9 @@ def check_counts(mode: str, delta: dict[str, int], fork_shared: int | None) -> s
     `fork_shared` is `shared` of the fork mode."""
     shared = delta.get("shared", 0)
     hashed = delta.get("verified", 0)
-    text = f"share row {mode}: libz.so pages verified by hash {hashed}, answered by a shared verdict {shared}"
+    refused = delta.get("mutable", 0)
+    text = (f"share row {mode}: libz.so pages verified by hash {hashed}, answered by a "
+            f"shared verdict {shared}, refused for lack of the immutable fact {refused}")
     if mode == "fork" and shared < FORK_MIN_SHARED:
         raise ShareFailure(f"{text}: sixteen children over the read-only library "
                            f"found fewer than {FORK_MIN_SHARED} verdicts to reuse")
@@ -94,6 +97,8 @@ def check_counts(mode: str, delta: dict[str, int], fork_shared: int | None) -> s
         if fork_shared is None or shared * 4 > fork_shared:
             raise ShareFailure(f"{text}: a copy on a writable file system shared "
                                f"verdicts (fork mode: {fork_shared})")
-        if hashed < 12:
-            raise ShareFailure(f"{text}: the copy's children hashed no pages")
+        # The kernel does not declare the copy's pages immutable: rewritten
+        # code is not entered for them, and the page verification says so.
+        if refused < 12:
+            raise ShareFailure(f"{text}: the copy's pages were not refused")
     return text

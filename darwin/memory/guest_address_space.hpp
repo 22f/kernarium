@@ -32,14 +32,19 @@ struct CodePageStamp final {
 /* What a code page says about itself, for a consumer that keeps verdicts
  * about the page's bytes across address spaces. `epoch` moves at a
  * publication and when the last executable mapping of the page departs, and
- * nowhere else. `shareable` is true when the mapping the stamp was taken
- * through carries the kernel's immutable fact and the page's record counts its
- * executable mappings exactly. A verdict is kept only for a shareable page,
+ * nowhere else. `immutable` is the kernel's fact for the mapping the stamp was
+ * taken through: no one can change the page's bytes while it holds. A page
+ * without it can be rewritten through another mapping of the frame with no
+ * word to the address space that checked it, so a consumer that keeps a
+ * verdict about the bytes in a mapping must require it. `shareable` is true
+ * when `immutable` holds and the page's record counts its executable mappings
+ * exactly. A verdict is kept across address spaces only for a shareable page,
  * under (identity, epoch). */
 struct ExtendedCodePageStamp final {
 	CodePageStamp stamp{};
 	std::uint64_t epoch{};
 	bool shareable{};
+	bool immutable{};
 
 	friend bool operator==(const ExtendedCodePageStamp &,
 			       const ExtendedCodePageStamp &) = default;

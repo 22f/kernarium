@@ -489,8 +489,12 @@ void test_a_published_page_moves_its_stamp()
  * something only for guest code (bit 0). A caller that passes 0 or 1 never
  * sets it, and 3 does. The fact belongs to the mapping: changing it replaces
  * the mapping, which a translator sees as a mapping change, but it changes
- * neither the bytes nor the right to execute them, so it publishes no code
- * change and moves no stamp. A replay of the same fact changes nothing. */
+ * neither the bytes nor the right to execute them, so it moves no stamp.
+ * Gaining the fact publishes no code change. Losing it does, for the page
+ * alone: what a consumer kept about the bytes on the strength of the fact
+ * (rewritten code bound to the page by a hash) holds no longer, since another
+ * mapping of the frame can change them with no word to this address space. A
+ * replay of the same fact changes nothing. */
 void test_the_immutable_fact_replaces_a_mapping_without_a_code_change()
 {
 	constexpr unsigned long generation = 509;
@@ -533,15 +537,32 @@ void test_the_immutable_fact_replaces_a_mapping_without_a_code_change()
 	require_code(seen, 0, 0);
 	require(seen.mapping.empty());
 
-	/* A fact that goes off again replaces the mapping again, and so does
-	 * the protection round trip of a flagged page not at all. */
+	/* The protection round trip of a flagged page changes nothing; a fact
+	 * that goes off replaces the mapping again and is published as a code
+	 * change of that page, with the stamp where it was. */
 	protect(base + page, 1, rx);
 	protect(base + page, 1, rwx);
+	seen.consume();
+	require_code(seen, 0, 0);
+	map(generation, base + page, backing, page, 1, rwx, 1);
+	seen.consume();
+	require_code(seen, base + page, 1);
+	require(!seen.mapping_untracked && !seen.mapping.empty());
+	require(!moved());
+	/* Off to off again is a replay, and the fact coming back is a gain. */
 	map(generation, base + page, backing, page, 1, rwx, 1);
 	seen.consume();
 	require_code(seen, 0, 0);
-	require(!seen.mapping_untracked && !seen.mapping.empty());
+	map(generation, base + page, backing, page, 1, rwx, 3);
+	seen.consume();
+	require_code(seen, 0, 0);
 	require(!moved());
+	/* Losing it on a page that cannot hold code publishes nothing. */
+	protect(base + page, 1, PROT_READ);
+	seen.consume();
+	map(generation, base + page, backing, page, 1, PROT_READ, 1);
+	seen.consume();
+	require_code(seen, 0, 0);
 
 	/* Not guest code, flagged or not: a page that is not code is not made
 	 * code by the fact. */

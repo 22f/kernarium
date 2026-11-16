@@ -347,14 +347,16 @@ struct Vcpu final {
 struct Environment final {
 	/* `shared` is a backing several generations map (the library's bytes are
 	 * its owner's to put); `guest_code` is the map call's argument for the
-	 * library (3: the kernel calls the pages immutable); `protection` is
-	 * what the library's pages grant. */
+	 * library (3, the default: the kernel calls the pages immutable, which
+	 * rewritten code needs of a page; 1: guest code the kernel does not
+	 * promise to leave alone); `protection` is what the library's pages
+	 * grant. */
 	Environment(unsigned long generation_, std::uint64_t bias_,
 		const LibraryImage &image_,
 		std::size_t mapped_pages = SIZE_MAX,
-		const JitBacking *shared = nullptr, int guest_code = 1,
+		const JitBacking *shared = nullptr, int guest_code = 3,
 		int protection = PROT_READ | PROT_EXEC)
-		: generation{generation_}, bias{bias_},
+		: generation{generation_}, bias{bias_}, guest_code{guest_code},
 		  backing{image_.pages},
 		  stub_backing{1},
 		  mapped{std::min(mapped_pages, image_.pages)},
@@ -383,7 +385,7 @@ struct Environment final {
 			mapped * page_bytes, pages * page_bytes));
 		tail_map = std::make_unique<GenerationMapping>(generation,
 			bias + mapped * page_bytes, *tail_backing, pages,
-			PROT_READ | PROT_EXEC, true);
+			PROT_READ | PROT_EXEC, guest_code, false);
 		mapped = image.pages;
 	}
 
@@ -393,7 +395,7 @@ struct Environment final {
 		extra_backing->put(0, image.bytes);
 		extra_map = std::make_unique<GenerationMapping>(generation,
 			other_bias, *extra_backing, image.pages,
-			PROT_READ | PROT_EXEC, true);
+			PROT_READ | PROT_EXEC, guest_code, false);
 		extra_stub_backing = std::make_unique<JitBacking>(1);
 		extra_stub_backing->put32(0, system_call);
 		extra_stub_map = std::make_unique<GenerationMapping>(generation,
@@ -403,6 +405,7 @@ struct Environment final {
 
 	unsigned long generation;
 	std::uint64_t bias;
+	int guest_code;
 	JitBacking backing;
 	JitBacking stub_backing;
 	std::size_t mapped;
@@ -1562,8 +1565,9 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 			static_cast<unsigned long long>(b.stats.shared_hits));
 	}
 
-	/* A mapping without the fact is never answered and never files, also
-	 * beside mappings that have it. */
+	/* A mapping without the fact is not entered at all: it is never
+	 * answered, never files and never compares the page, also beside
+	 * mappings that have the fact. */
 	{
 		aot::clear_shared_verdicts();
 		SharedFrame frame{image, generation++};
@@ -1572,17 +1576,19 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 		auto second = guest(frame, false);
 		const auto b = run_shared(*second, c);
 		require(same(want, a.result, c) && same(want, b.result, c));
-		require(b.stats.shared_hits == 0 &&
-			b.stats.verifications == a.stats.verifications);
+		require(a.stats.enters == 0 && b.stats.enters == 0);
+		require(a.stats.verifications == 0 && b.stats.verifications == 0);
+		require(a.stats.shared_hits == 0 && b.stats.shared_hits == 0);
+		require(a.stats.mutable_pages >= 1 && b.stats.mutable_pages >= 1);
 
 		/* The third guest has the fact; nothing was filed for it. */
 		auto third = guest(frame, true);
 		const auto d = run_shared(*third, c);
 		require(same(want, d.result, c));
-		require(d.stats.shared_hits == 0 &&
-			d.stats.verifications == a.stats.verifications);
+		require(d.stats.enters > 0 && d.stats.shared_hits == 0 &&
+			d.stats.verifications >= 1);
 		/* It filed its own: a fourth with the fact is answered; a fifth
-		 * without it is not. */
+		 * without it is not, and is not entered either. */
 		auto fourth = guest(frame, true);
 		const auto e = run_shared(*fourth, c);
 		require(same(want, e.result, c));
@@ -1590,8 +1596,8 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 		auto fifth = guest(frame, false);
 		const auto f = run_shared(*fifth, c);
 		require(same(want, f.result, c));
-		require(f.stats.shared_hits == 0 &&
-			f.stats.verifications == a.stats.verifications);
+		require(f.stats.enters == 0 && f.stats.shared_hits == 0 &&
+			f.stats.verifications == 0);
 	}
 
 	/* A mapping that cannot execute gets no answer from the table, however
@@ -2514,7 +2520,7 @@ struct Copy final {
 		const LibraryImage &image)
 		: text{image.pages}, stub{1},
 		  text_map{generation, bias, text, image.pages,
-			PROT_READ | PROT_EXEC, true},
+			PROT_READ | PROT_EXEC, 3, false},
 		  stub_map{generation, bias + stub_offset, stub, 1,
 			PROT_READ | PROT_EXEC, true}
 	{
@@ -4705,6 +4711,105 @@ void a_breakpoint_published_through_the_bridge_stops_rewritten_code(
 		"vCPU running during the publication\n", attempts, raced);
 }
 
+/* The kernel declares a page immutable (`guest_code` 3) or it does not (1).
+ * Rewritten code is entered only for pages that have the fact. Another
+ * address space can map the frame of a mutable page writable and publish new
+ * bytes, and the address space that compared the page is told nothing: its
+ * verdict about the page holds for the bytes at the time, and rewritten code
+ * would go on running them for every function of the page, one that was never
+ * entered before included, where the engine reads the new bytes when it first
+ * translates it. Two address spaces share one frame. The first runs a loop of
+ * the page, which compares the page; the second publishes a changed word of
+ * another function through the bridge; the first then runs that function and
+ * must do what the engine does, whether its page never had the fact or lost it
+ * after rewritten code was entered. */
+[[gnu::noinline]]
+void a_page_without_the_immutable_fact_is_not_run_natively(
+	const LibraryImage &image)
+{
+	const auto bias = Fixture::bias;
+	const auto base = arena_base(bias);
+	const auto row_pc = mops_at + row_cpyf * mops_step;
+	const auto changed_at = row_pc + 8;
+	constexpr std::uint32_t nop = 0xd503201fU;
+	SplitMix rng{61};
+	auto c = make_case_from_seed(rng.next(), bias, row_pc, true, true, base);
+	enterable(c);
+	c.kinds.assign(arena_pages + stack_pages, 2);
+	c.cpu.registers[0] = base + 4 * page_bytes + 0x300;
+	c.cpu.registers[1] = base + 2 * page_bytes + 0x100;
+	c.cpu.registers[2] = 16;
+	/* The loop that is run first, on the page of the row. */
+	auto warm = flip_case(FlipLoop::add, bias, 3000);
+	warm.kinds.assign(arena_pages + stack_pages, 2);
+	require(hammer_add / page_bytes == row_pc / page_bytes);
+	LibraryImage changed = image;
+	std::memcpy(&changed.bytes[changed_at], &nop, 4);
+	aot::set_enabled(false);
+	Fixture ref_original{5801, image}, ref_changed{5802, changed};
+	const auto want_warm = drive(ref_original.env, ref_original.arena, warm,
+		max_blocks);
+	const auto want_original = drive(ref_original.env, ref_original.arena, c,
+		max_blocks);
+	const auto want_changed = drive(ref_changed.env, ref_changed.arena, c,
+		max_blocks);
+	require(want_warm.done() && want_original.done() && want_changed.done());
+	require(!identical(want_original, want_changed));
+
+	enum Arm : int { mutable_page, revoked_after_entry, arms };
+	static constexpr const char *what[arms] = {
+		"a mutable page", "a page that lost the fact"};
+	unsigned long generation = 5810;
+	for (int arm = 0; arm < arms; ++arm) {
+		JitBacking frame{image.pages};
+		frame.put(0, image.bytes);
+		Environment env{generation++, bias, image, SIZE_MAX, &frame,
+			arm == mutable_page ? 1 : 3};
+		Arena arena{env.generation, base};
+		/* The second address space: the frame, writable. */
+		const auto writer_generation = generation++;
+		GenerationMapping writer{writer_generation, bias, frame,
+			image.pages, PROT_READ | PROT_WRITE | PROT_EXEC, true};
+		const auto run = [&](const Case &which, const Result &want,
+		                     std::size_t times, const char *phase) {
+			for (std::size_t i = 0; i < times; ++i) {
+				const auto have = drive(env, arena, which, aot_max_blocks);
+				if (!same(want, have, which)) {
+					const auto st = aot::stats();
+					std::fprintf(stderr, "  %s, %s, run %zu: enters %llu "
+						"mutable pages %llu\n", what[arm], phase, i,
+						static_cast<unsigned long long>(st.enters),
+						static_cast<unsigned long long>(st.mutable_pages));
+					require(false);
+				}
+			}
+		};
+		aot::reset_stats();
+		aot::set_enabled(true);
+		run(warm, want_warm, 8, "warming");
+		const auto warmed = aot::stats();
+		if (arm == revoked_after_entry)
+			require(warmed.enters >= 2);
+		if (arm == revoked_after_entry) {
+			/* The kernel maps the range again without the fact. */
+			require(darwin_uml_static_vm_activate(env.generation) == 0);
+			require(darwin_uml_static_vm_map_generation(env.generation,
+				reinterpret_cast<void *>(bias),
+				frame.descriptor(), 0, image.pages * page_bytes,
+				PROT_READ | PROT_EXEC, 1, 0) == 0);
+		}
+		frame.put32(changed_at, nop);
+		require(darwin_uml_static_vm_invalidate_code_generation(
+			writer_generation, bias + changed_at, 4) == 0);
+		run(c, want_changed, 200, "after the publication");
+		aot::set_enabled(false);
+		/* Nothing was entered without the fact, nor once it was gone. */
+		require(aot::stats().enters == warmed.enters);
+		require(arm != mutable_page || warmed.enters == 0);
+		require(aot::stats().poisoned == 0);
+	}
+}
+
 /* The engine adapter chooses between the plain block loop and the one with
  * rewritten code when its executor is made, once, and neither loop tests it
  * again. So an engine made while rewritten code is off never enters it, even
@@ -4943,6 +5048,7 @@ int main(int argc, char **argv)
 			a_stop_takes_effect_within_one_run_block(image);
 			a_breakpoint_published_through_the_bridge_stops_rewritten_code(
 				image);
+			a_page_without_the_immutable_fact_is_not_run_natively(image);
 			the_dispatch_choice_is_made_when_the_executor_is_made(image);
 		}
 		/* The scenarios are about the mechanism, not about the code:
