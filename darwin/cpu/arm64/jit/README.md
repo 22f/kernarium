@@ -44,14 +44,16 @@ optimized
 
 The cache's whole-process budget is divided by the budget and the executor
 count alone, the same on every platform. Each executor's private cache takes
-min(256 MiB, budget / executors); the shared translation tier takes what is
-left when that is at least 768 MiB and two or more executors run, and does
-not exist otherwise (what is left below that is not allocated). Without a
-tier no executor looks in it, publishes to it, locks it or sweeps it, and each
-keeps its own validation words; with one, it admits new translations only
-while two executors live. A tier under the floor costs more in lookups,
-publications and reclaim sweeps than the compilations it saves. An iOS
-device's budget is all private
+min(cap, budget / executors), where the cap is 256 MiB unless a lower one is
+configured; the shared translation tier takes what is left when that is at
+least 768 MiB and the configured executor count is two or more, and does not
+exist otherwise (what is left below that is not allocated). Without a tier no
+executor looks in it, publishes to it, locks it or sweeps it, and each keeps
+its own validation words. With one, an executor still finds its entries
+whatever the count, and it admits new translations only while two executors
+live. The 768 MiB floor is where a tier paid for its lookups, publications
+and reclaim sweeps in the experiment behind it, not a bound for every
+workload. An iOS device's budget is all private
 ([`jit_cache_geometry.hpp`](jit_cache_geometry.hpp)).
 
 ## Top-byte ignore
