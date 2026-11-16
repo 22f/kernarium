@@ -393,7 +393,7 @@ struct AppEntry {
             if screen == "session-camera-off-notice" { model.previewCameraNotice(.blockedInUse) }
         case "sms-bar", "sms-bar-typing", "sms-bar-near-limit", "sms-bar-sending", "sms-bar-sent",
              "sms-bar-not-confirmed", "sms-bar-unsupported", "sms-bar-bad-sender", "sms-bar-long-sender",
-             "sms-bar-no-sender", "sms-bar-too-long", "sms-bar-unsendable":
+             "sms-bar-no-sender", "sms-bar-too-long", "sms-bar-unsendable", "sms-bar-paused":
             model.phase = .running(.normal)
             model.previewTextMessage(screen)
         case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",

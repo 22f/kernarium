@@ -44,6 +44,11 @@ extension AppModel {
             state.setText(String(repeating: "a", count: GuestSms.maximumUnits + 12))
         case "sms-bar-unsendable":
             state.setText("Code \u{FFFE} 482913")
+        case "sms-bar-paused":
+            // The low-space screen covers the session; under it the bar says
+            // Android is paused and Send is off.
+            state.setText(code)
+            spacePause = SpacePause(freeBytes: 820 * Limits.bytesPerMiB)
         default:
             break
         }
