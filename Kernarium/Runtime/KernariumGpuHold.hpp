@@ -69,7 +69,8 @@ public:
      * waits for the next one). A gate that is held already was closed by a
      * hold that waited for its requests under this mutex, which this call
      * waited for: it does not wait for them again, so two holds that meet
-     * cost the drain once. */
+     * cost the drain once, and it answers what that drain found, until the
+     * requests are given back. */
     int close()
     {
         std::lock_guard lock(mutex_);
@@ -77,14 +78,17 @@ public:
         if (gpu_ == nullptr)
             return -1;
         if (gpu_->requestsHeld())
-            return 1;
-        return gpu_->holdRequests(timing_.drain) ? 1 : 0;
+            return timedOut_ == gpu_ ? 0 : 1;
+        const bool drained = gpu_->holdRequests(timing_.drain);
+        timedOut_ = drained ? nullptr : gpu_;
+        return drained ? 1 : 0;
     }
 
     int release()
     {
         std::lock_guard lock(mutex_);
         lifecycle_.setGpuHoldRequested(false);
+        timedOut_ = nullptr;
         if (gpu_ != nullptr)
             gpu_->releaseRequests();
         /* A restarted guest waits for this. */
@@ -134,6 +138,9 @@ private:
     Gpu*& gpu_;
     restart::Lifecycle& lifecycle_;
     const Timing timing_;
+    /* The service whose drain a request outlasted, while its gate stays held:
+     * what a later hold of it answers. Guarded by `mutex_`. */
+    const Gpu* timedOut_ {};
 };
 
 } // namespace kernarium::gpu_hold

@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -181,6 +182,36 @@ void aGuestWithNoCameraIsHeldAndReleasedWithoutAWait()
     require(runtime.lifecycle.gpuHoldRequested(), "and is kept");
     require(runtime.gate.set(kernarium::gpu_hold::released, nullptr, saysNothing) == -1 && !runtime.lifecycle.gpuHoldRequested(),
             "and given back");
+}
+
+/* Two holds that meet wait for a request that runs once, and the second is told what the first's wait found: the request
+ * outlasted the drain (0), and still does. */
+void aSecondHoldOfAGateThatDidNotDrainIsToldSo()
+{
+    Runtime runtime {Timing {300ms, 1000ms}};
+    std::optional<uml::gpu::RequestGate::Entry> stuck;
+    stuck.emplace(runtime.gpu.gate.enter());
+    require(bool(*stuck), "a request is running");
+
+    int first = -2;
+    int second = -2;
+    const auto began = Clock::now();
+    std::thread closer([&] { first = runtime.gate.set(kernarium::gpu_hold::atOnce, nullptr, saysNothing); });
+    std::this_thread::sleep_for(60ms);
+    require(runtime.gpu.requestsHeld(), "the first hold has closed the gate and waits for the request");
+    std::thread meeting([&] { second = runtime.gate.set(kernarium::gpu_hold::atOnce, nullptr, saysNothing); });
+    closer.join();
+    meeting.join();
+    require(first == 0, "the first hold found the request still running after the drain");
+    require(second == 0, "and the hold that met it is told the same, not that the requests are drained");
+    require(since(began) < 300ms + 250ms, "after one wait for the request, not two");
+    require(runtime.gate.set(kernarium::gpu_hold::atOnce, nullptr, saysNothing) == 0, "a later hold of the held gate is told so as well");
+
+    /* The requests are given back and the request ends: the next hold finds nothing to wait for. */
+    (void)runtime.gate.set(kernarium::gpu_hold::released, nullptr, saysNothing);
+    stuck.reset();
+    require(runtime.gate.set(kernarium::gpu_hold::atOnce, nullptr, saysNothing) == 1, "a gate that drained is held with 1");
+    require(runtime.gate.set(kernarium::gpu_hold::atOnce, nullptr, saysNothing) == 1, "and so is a hold that meets it");
 }
 
 /* ---- The edge's own bound and the hold that waits for the camera. A job whose display stays on, a video that never
@@ -429,6 +460,7 @@ int main(int argc, char** argv)
     ROW(aDeadlineLeavesTheCameraWhatIsLeftAfterTheDrain);
     ROW(aHoldWithADeadlineWaitsForTheCameraOnlyWithinIt);
     ROW(aGuestWithNoCameraIsHeldAndReleasedWithoutAWait);
+    ROW(aSecondHoldOfAGateThatDidNotDrainIsToldSo);
     ROW(theBoundHoldsByItsTimeAndTheMainPathEndsInsideTheEdge);
     ROW(aMainPathThatCameLateWaitsForTheCameraOnlyWhatTheEdgeLeaves);
     ROW(aGuestThatRestartsWhileTheHoldWaitsForTheCameraBootsAfterTheRelease);

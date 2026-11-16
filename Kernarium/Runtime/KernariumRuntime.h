@@ -435,8 +435,9 @@ typedef int (*kernarium_runtime_send_console_input_function)(
  * pending. A hold asked for keeps a guest that restarts from booting until the
  * requests are given back, from the moment of the call. Returns 1 when the
  * setting is in effect and no request was still running after one second, 0
- * when one was (the hold is in effect regardless), and -1 when no guest is
- * running: the setting is kept and applies to the guest's GPU once it starts.
+ * when one was (the hold is in effect regardless; a hold that finds the gate
+ * held already answers what the hold that closed it found), and -1 when no
+ * guest is running: the setting is kept and applies to the guest's GPU once it starts.
  * Callers serialize their holds and releases: a release that overtakes a hold
  * still waiting for the camera is undone by that hold's close. */
 typedef int (*kernarium_runtime_set_gpu_hold_function)(int held);
