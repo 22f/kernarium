@@ -288,7 +288,15 @@ if(TARGET uml_gpu_service)
         LIBRARIES ${_uml_host_gl_libraries}
         INCLUDES ${_uml_gpu_device_directory}
         VULKAN UNIT_DIRECTORY TIMEOUT 240)
+    # The GL case is the same binary's gl-coherent-buffer mode, run by itself:
+    # a renderer without pinned host memory skips it with status 77.
+    uml_add_unit_test(NAME gpu-blob-size-bounds-gl
+        COMMAND uml_gpu_blob_size_bounds_tests gl-coherent-buffer
+        LABELS gpu
+        WORKING_DIRECTORY "${_uml_unit_binary_directory}"
+        TIMEOUT 120)
     set_tests_properties(gpu-blob-size-bounds PROPERTIES SKIP_RETURN_CODE 77)
+    set_tests_properties(gpu-blob-size-bounds-gl PROPERTIES SKIP_RETURN_CODE 77)
 
     uml_add_gpu_unit_test(gpu-host-gl-provider-lifetime
         uml_gpu_host_gl_provider_tests host_gl_provider_lifetime_tests.cpp

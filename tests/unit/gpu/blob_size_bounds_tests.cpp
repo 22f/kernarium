@@ -17,8 +17,10 @@
 //  - a GL blob larger than the shared pages behind a persistent coherent
 //    buffer is refused, and the buffer can then be taken at its own size.
 //
-// Each case runs in a child of its own: a renderer without the bound ends the
-// process that holds it, and the backing is chosen once per process.
+// The Venus cases run in a child each, because a renderer without the bound
+// ends the process that holds it and the backing is chosen once per process.
+// The GL case is the test gpu-blob-size-bounds-gl: it needs the host's pinned
+// memory path, and a renderer without it reports the test skipped.
 
 #include "gpu_test_support.hpp"
 #include "host_gl_test_support.hpp"
@@ -333,9 +335,46 @@ void refuseOversizedVenusBlobsWithoutRetention()
     renderer.destroyContext(VenusGuest::ctxId);
 }
 
+// PIPE_RESOURCE_CREATE of a 16 KiB buffer with persistent, coherent storage
+// that the blob id names.
+[[nodiscard]] int createCoherentBuffer(
+    VirglRenderer& renderer, std::uint32_t contextId, std::uint32_t blobId)
+{
+    constexpr std::uint32_t commandPipeResourceCreate = 48;
+    constexpr std::uint32_t pipeBuffer = 0;
+    constexpr std::uint32_t virglFormatR8Unorm = 64;
+    constexpr std::uint32_t virglBindVertexBuffer = 1U << 4U;
+    constexpr std::uint32_t mapPersistentCoherent = (1U << 1U) | (1U << 2U);
+    const std::vector<std::uint32_t> words {
+        (11U << 16U) | commandPipeResourceCreate, pipeBuffer,
+        virglFormatR8Unorm, virglBindVertexBuffer,
+        static_cast<std::uint32_t>(pageBytes), 1, 1, 1, 0, 0,
+        mapPersistentCoherent, blobId,
+    };
+    return renderer.submit(contextId,
+        {reinterpret_cast<const std::uint8_t*>(words.data()),
+            words.size() * sizeof(std::uint32_t)});
+}
+
+[[nodiscard]] int createGlBlob(VirglRenderer& renderer,
+    std::uint32_t contextId, std::uint32_t resourceId, std::uint32_t blobId,
+    std::uint64_t size)
+{
+    return renderer.createResourceBlob(VirglRenderer::ResourceBlob {
+        .resourceId = resourceId,
+        .contextId = contextId,
+        .memory = protocol::blobMemoryHost3d,
+        .flags = protocol::blobFlagMappable,
+        .blobId = blobId,
+        .size = size,
+    });
+}
+
 // A persistent coherent GL buffer is backed by shared host pages, which the
 // guest maps whole; a blob of it that is larger than the pages is refused,
-// and the buffer stays for a blob of its own size.
+// and the buffer stays for a blob of its own size. A renderer whose host
+// driver has no pinned memory backs the buffer with nothing a guest can map:
+// that is found out on a buffer of its own first, and the case is skipped.
 void refuseOversizedGlBlob()
 {
     std::unique_ptr<VirglRenderer> renderer;
@@ -349,42 +388,40 @@ void refuseOversizedGlBlob()
                 "blob-bounds") == 0,
         "the GL context could not be created");
 
-    // PIPE_RESOURCE_CREATE of a buffer with persistent, coherent storage that
-    // the blob id 1 names.
-    constexpr std::uint32_t commandPipeResourceCreate = 48;
-    constexpr std::uint32_t pipeBuffer = 0;
-    constexpr std::uint32_t virglFormatR8Unorm = 64;
-    constexpr std::uint32_t virglBindVertexBuffer = 1U << 4U;
-    constexpr std::uint32_t mapPersistentCoherent = (1U << 1U) | (1U << 2U);
-    constexpr std::uint32_t blobId = 1;
-    const std::vector<std::uint32_t> words {
-        (11U << 16U) | commandPipeResourceCreate, pipeBuffer,
-        virglFormatR8Unorm, virglBindVertexBuffer,
-        static_cast<std::uint32_t>(pageBytes), 1, 1, 1, 0, 0,
-        mapPersistentCoherent, blobId,
-    };
-    require(renderer->submit(contextId,
-                {reinterpret_cast<const std::uint8_t*>(words.data()),
-                    words.size() * sizeof(std::uint32_t)}) == 0,
-        "the persistent buffer could not be created");
+    constexpr std::uint32_t probeBlobId = 2;
+    constexpr std::uint32_t probeResource = 11;
+    bool sharedPages = createCoherentBuffer(*renderer, contextId, probeBlobId) == 0 &&
+        createGlBlob(*renderer, contextId, probeResource, probeBlobId,
+            pageBytes) == 0;
+    if (sharedPages) {
+        int fd = -1;
+        std::uint32_t fdType = 0;
+        sharedPages = renderer->exportResourceBlob(probeResource, fdType, fd) == 0 &&
+            fd >= 0 && fdType == VirglRenderer::sharedMemoryBlobDescriptor;
+        if (fd >= 0)
+            ::close(fd);
+        renderer->unrefResource(probeResource);
+    }
+    if (!sharedPages) {
+        std::fputs("skipping: this renderer backs a coherent buffer with "
+                   "nothing a guest can map (no pinned host memory)\n",
+            stderr);
+        std::exit(77);
+    }
 
-    const auto blob = [&](std::uint32_t resourceId, std::uint64_t size) {
-        return renderer->createResourceBlob(VirglRenderer::ResourceBlob {
-            .resourceId = resourceId,
-            .contextId = contextId,
-            .memory = protocol::blobMemoryHost3d,
-            .flags = protocol::blobFlagMappable,
-            .blobId = blobId,
-            .size = size,
-        });
-    };
-    require(blob(10, oversizedBytes) != 0,
+    constexpr std::uint32_t blobId = 1;
+    constexpr std::uint32_t resourceId = 10;
+    require(createCoherentBuffer(*renderer, contextId, blobId) == 0,
+        "the persistent buffer could not be created");
+    require(createGlBlob(*renderer, contextId, resourceId, blobId,
+                oversizedBytes) != 0,
         "a blob larger than its coherent buffer was accepted");
-    require(blob(10, pageBytes) == 0,
+    require(createGlBlob(*renderer, contextId, resourceId, blobId,
+                pageBytes) == 0,
         "the buffer could not be taken at its own size after a refusal");
-    require(exportedBytes(*renderer, 10) >= pageBytes,
+    require(exportedBytes(*renderer, resourceId) >= pageBytes,
         "the pages behind a blob are shorter than the blob");
-    renderer->unrefResource(10);
+    renderer->unrefResource(resourceId);
 }
 
 [[noreturn]] void runMode(std::string_view mode)
@@ -444,8 +481,7 @@ int main(int argc, char** argv)
     int failed = 0;
     constexpr const char* modes[] = {
         "venus-unlinked-reexport", "venus-posix-shm-reexport",
-        "venus-unlinked-use", "venus-posix-shm-use", "venus-retention",
-        "gl-coherent-buffer"};
+        "venus-unlinked-use", "venus-posix-shm-use", "venus-retention"};
     for (const char* mode : modes) {
         const int result = runChild(argv[0], mode);
         skipped += result == 77 ? 1 : 0;
