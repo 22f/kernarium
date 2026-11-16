@@ -10,22 +10,48 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <fcntl.h>
 #include <new>
 #include <optional>
 #include <source_location>
 #include <stdexcept>
 #include <string_view>
 #include <sys/event.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <unistd.h>
 #include <utility>
 
 namespace uml::gpu::testing {
 namespace {
+
+/* An unnamed shared-memory file of `bytes` bytes, as the renderer exports for
+ * a blob, or -1. */
+[[nodiscard]] int sizedFile(std::uint64_t bytes) noexcept
+{
+    static std::atomic<unsigned> counter {};
+    char name[32];
+    std::snprintf(name, sizeof(name), "/umlgpu-%d.%u",
+        static_cast<int>(::getpid()), counter.fetch_add(1));
+    const int descriptor = ::shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (descriptor < 0)
+        return -1;
+    (void)::shm_unlink(name);
+    if (::ftruncate(descriptor, static_cast<off_t>(bytes)) != 0) {
+        const int saved = errno;
+        ::close(descriptor);
+        errno = saved;
+        return -1;
+    }
+    return descriptor;
+}
 
 using ::uml::testing::cancel_pending_allocation_failure;
 using ::uml::testing::fail;
@@ -222,6 +248,7 @@ public:
         if (reject(Operation::create_resource_refused))
             return -ENOMEM;
         try {
+            blobBytes[resource.resourceId] = resource.size;
             resources.insert(resource.resourceId);
         } catch (...) {
             return ENOMEM;
@@ -238,9 +265,20 @@ public:
     {
         if (!resources.contains(resourceId))
             return ENOENT;
+        /* The renderer exports a file that covers the blob, in whole pages of
+         * the aperture, unless a test says otherwise. */
+        constexpr auto page = protocol::hostVisibleSharedMemoryAlignment;
+        std::uint64_t bytes = page;
+        if (const auto blob = blobBytes.find(resourceId); blob != blobBytes.end())
+            bytes = (blob->second + page - 1U) / page * page;
+        if (exportedFileBytes)
+            bytes = *exportedFileBytes;
         descriptorType = VirglRenderer::sharedMemoryBlobDescriptor;
-        descriptor = ::dup(STDERR_FILENO);
-        return descriptor < 0 ? errno : 0;
+        descriptor = sizedFile(bytes);
+        if (descriptor < 0)
+            return errno;
+        lastExportedDescriptor = descriptor;
+        return 0;
     }
 
     [[nodiscard]] int resourceMapInfo(
@@ -578,6 +616,11 @@ public:
         blobPixels {};
     std::unordered_set<std::uint32_t> contexts;
     std::unordered_set<std::uint32_t> resources;
+    // The size of the blob each resource was created with.
+    std::unordered_map<std::uint32_t, std::uint64_t> blobBytes;
+    // When set, the size of the file every export hands out.
+    std::optional<std::uint64_t> exportedFileBytes;
+    int lastExportedDescriptor {-1};
     void* attachedBackingAddress {};
     std::uint32_t attachedBackingResource {};
     unsigned clearCount {};
@@ -1505,6 +1548,65 @@ void refusedBlobIsAnsweredAsOutOfMemory()
     require(dependencies.resources.contains(create.resourceId));
     require(dependencies.memoryRefusalCount == 1,
         "a blob that was created was counted as a refusal");
+}
+
+/* The guest is given the file the renderer exports, and the host maps the
+ * same range of it, so a mapping longer than the file is one the host cannot
+ * touch. The renderer bounds a blob where it is created; the device answers
+ * the guest an error, queues no action, and keeps nothing of the export when
+ * the file is shorter than what the blob charges the aperture, and the
+ * resource maps once the file covers it. */
+void blobMapRefusesAFileShorterThanItsCharge()
+{
+    FakeGpuDependencies dependencies;
+    VirtioGpuDevice device {dependencies, noGuestReads, noGuestMappings};
+    const auto context = createContext(0x921, protocol::venusCapsetId);
+    requireOk(device, requestBytes(context));
+
+    constexpr auto page = protocol::hostVisibleSharedMemoryAlignment;
+    auto create = newRequest<protocol::GpuResourceCreateBlob>(
+        GpuCommand::resourceCreateBlob);
+    create.header.contextId = context.header.contextId;
+    create.resourceId = 0x922;
+    create.memory = protocol::blobMemoryHost3d;
+    create.flags = protocol::blobFlagMappable;
+    create.size = 4U * page;
+    requireOk(device, requestBytes(create));
+
+    auto map = newRequest<protocol::GpuResourceMapBlob>(
+        GpuCommand::resourceMapBlob);
+    map.resourceId = create.resourceId;
+    map.offset = 0;
+
+    // A file of one page where the blob charges four.
+    dependencies.exportedFileBytes = page;
+    requireResponse(device, requestBytes(map),
+        protocol::GpuResponse::errorInvalidParameter);
+    require(!device.takeSharedMemoryAction().has_value(),
+        "a mapping the file cannot back was queued");
+    require(dependencies.lastExportedDescriptor >= 0 &&
+            ::fcntl(dependencies.lastExportedDescriptor, F_GETFD) == -1 &&
+            errno == EBADF,
+        "the refused export's descriptor was kept");
+
+    // The file ends a page short of the charge.
+    dependencies.exportedFileBytes = 3U * page;
+    requireResponse(device, requestBytes(map),
+        protocol::GpuResponse::errorInvalidParameter);
+    require(!device.takeSharedMemoryAction().has_value(),
+        "a mapping one page past the file was queued");
+
+    // Nothing of the refusals is left in the aperture or on the resource: a
+    // file that covers the charge maps at the same offset.
+    dependencies.exportedFileBytes = 4U * page;
+    requireResponse(device, requestBytes(map),
+        protocol::GpuResponse::okMapInfo);
+    const auto action = completeAction(device);
+    require(action.length == 4U * page && action.regionOffset == 0);
+    struct stat status {};
+    require(::fstat(action.descriptor.get(), &status) == 0 &&
+            static_cast<std::uint64_t>(status.st_size) >= action.length,
+        "the queued descriptor is shorter than the queued length");
 }
 
 void edidReportsDisplayPixelsAndEffectiveDensity()
@@ -3736,6 +3838,7 @@ int main()
     contextCreateIsRetryableAfterEachAllocationFailure();
     blobCommandsAllocateBeforeCommitAndRetry();
     refusedBlobIsAnsweredAsOutOfMemory();
+    blobMapRefusesAFileShorterThanItsCharge();
     rendererExecutionFailuresPreserveDeviceState();
     softwareScanoutProgressesWhileRendererFenceIsPending();
     deferredFencesUseHostTimelineAndMergedRetirement();
