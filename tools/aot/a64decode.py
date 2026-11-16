@@ -86,6 +86,12 @@ class Decoder:
         self._masks = sorted(self._by_mask, key=lambda m: -bin(m).count("1"))
         self._cache: dict[int, Encoding | None] = {}
 
+    def encodings(self) -> list[Encoding]:
+        """Every encoding of the table, in a fixed order."""
+        return [encoding for mask in sorted(self._by_mask)
+                for value in sorted(self._by_mask[mask])
+                for encoding in self._by_mask[mask][value]]
+
     def decode(self, word: int) -> Encoding | None:
         """The one encoding that holds `word`, or None when none does."""
         if word in self._cache:

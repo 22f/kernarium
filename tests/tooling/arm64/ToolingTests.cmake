@@ -44,6 +44,16 @@ uml_add_tooling_test(
     LABELS cpu
     TIMEOUT 60)
 
+# The register fields the AOT rewriter substitutes, against the system
+# disassembler's idea of which are general registers (skips without it).
+uml_add_tooling_test(
+    NAME arm64-aot-register-fields
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/arm64/test_aot_register_fields.py
+    LABELS cpu
+    TIMEOUT 300)
+set_tests_properties(arm64-aot-register-fields PROPERTIES SKIP_RETURN_CODE 77)
+
 # The product compilation of the AOT runtime holds none of the counters,
 # report or test switches that a diagnostics build composes in separately.
 if(TARGET uml_arm64_aot_runtime)
