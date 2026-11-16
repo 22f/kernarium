@@ -42,11 +42,15 @@ report = os.environ.get("DARWIN_UML_AOT_REPORT")
 template = scenario.get("report", {}).get(arm)
 clock = scenario.get("audit_clock")
 begun = time.monotonic()
+started_at = time.clock_gettime_ns(time.CLOCK_UPTIME_RAW)
 def write_report():
     # What the diagnostics runtime writes: a whole report each time, in which
     # the audits begin and finish as the clock says (one every tenth of a
     # second; with a stop_at, none finishes after that many seconds).
-    text = template
+    # The stamp is when the counters were read; with frozen_stamp the report
+    # is one sampled before the guest's work and published late.
+    stamp = started_at if (clock or {}).get("frozen_stamp") else time.clock_gettime_ns(time.CLOCK_UPTIME_RAW)
+    text = template.replace("{report_at}", str(stamp))
     if clock is not None:
         elapsed = time.monotonic() - begun
         started = 1 + int(elapsed / 0.1)
@@ -134,6 +138,8 @@ runner.LAUNCHER = {launcher!r}
 runner.SETTLE_SECONDS = 0
 runner.REPORT_SECONDS = 0
 runner.AUDIT_WAIT_SECONDS = 2
+runner.REPORT_WAIT_SECONDS = 3
+runner.REPORT_POLL_SECONDS = 0.05
 sys.exit(runner.main())
 """
 
@@ -172,6 +178,7 @@ def audit_line(runs: str = "{runs}", records: int = 40, mismatches: int = 0, ano
             f"last_mismatches {last_mismatches} anomalies {anomalies} {nanos} {sequence}\n")
 
 
+REPORT_STAMP = "report at {report_at}\n"
 GOOD_AUDIT = audit_line()
 GOOD_STACK = ("stack_free 59200 stack_size 65536 stack_kind 0 "
               "stack_task_bytes 65536 stack_engine_free 62000 stack_growth 2800\n")
@@ -182,7 +189,7 @@ def good_scenario() -> dict:
     return {"workloads": {"off": text, "on": text},
             "audit_clock": {"stop_at": None},
             "probe": {"off": [good_probe()], "on": [good_probe()]},
-            "report": {"on": "binds 3 enters 9 steps 2 poisoned 0 refills 0\n" +
+            "report": {"on": REPORT_STAMP + "binds 3 enters 9 steps 2 poisoned 0 refills 0\n" +
                        GOOD_AUDIT + GOOD_STACK,
                        "off": None},
             "vmmap": {"off": vmmap_text("16K"), "on": vmmap_text("19.3M")}}
@@ -377,7 +384,7 @@ class RunnerTest(unittest.TestCase):
     def test_diagnostics_report_is_judged(self):
         self.passes(good_scenario(), "--diagnostics")
         scenario = good_scenario()
-        scenario["report"]["on"] = "binds 3 enters 0 steps 0 poisoned 0\n" + GOOD_AUDIT
+        scenario["report"]["on"] = REPORT_STAMP + "binds 3 enters 0 steps 0 poisoned 0\n" + GOOD_AUDIT
         self.fails(scenario, "never entered rewritten code", "--diagnostics")
         scenario = good_scenario()
         scenario["report"]["off"] = "binds 3 enters 4 steps 0 poisoned 0\n"
@@ -394,7 +401,7 @@ class RunnerTest(unittest.TestCase):
             " nanos_total 9000000 nanos_max 3200000", "")
         self.fails(scenario, "lacks nanos_total, nanos_max", "--diagnostics")
 
-    BASE = "binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
+    BASE = REPORT_STAMP + "binds 3 enters 9 steps 2 poisoned 0 refills 0\n"
 
     def test_the_count_audit_is_judged(self):
         """The run recounts the executable-mapping counts and fails on a
@@ -442,6 +449,47 @@ class RunnerTest(unittest.TestCase):
         scenario["audit_clock"] = {"stop_at": 0.3}
         self.fails(scenario, "no exact count audit finished after the guest's work was done",
                    "--diagnostics")
+
+    def test_a_report_sampled_before_the_work_is_not_one_written_after_it(self):
+        """A report whose counters were read before the guest's work ended and
+        that is published late (the writer paused before the rename) shows
+        audits that finished and began before the work, whatever their
+        numbers say. The report carries when its counters were read."""
+        scenario = good_scenario()
+        scenario["audit_clock"] = {"stop_at": None, "frozen_stamp": True}
+        self.fails(scenario, "no report was written after the guest's work was done",
+                   "--diagnostics")
+
+    def test_a_report_without_the_time_it_was_sampled_is_refused(self):
+        scenario = good_scenario()
+        scenario["report"]["on"] = scenario["report"]["on"].replace(REPORT_STAMP, "")
+        self.fails(scenario, "carries no time stamp", "--diagnostics")
+
+    def test_the_audit_to_exceed_comes_from_a_report_sampled_after_the_work(self):
+        """The late publication of the review's schedule, as the runner sees it
+        report by report: audit 6 finished before the work ended but its
+        report appears after; the runner may take its audit number only from
+        a report stamped after the work (7, with audit 7 begun), and needs an
+        exact audit above that one (8)."""
+        work_end = 1_000_000
+        sequence = [
+            {"report.at": work_end - 500, "count_audit.started": 5, "count_audit.last_exact": 5},
+            {"report.at": work_end - 100, "count_audit.started": 6, "count_audit.last_exact": 6},
+            {"report.at": work_end + 400, "count_audit.started": 7, "count_audit.last_exact": 6},
+            {"report.at": work_end + 900, "count_audit.started": 8, "count_audit.last_exact": 7},
+            {"report.at": work_end + 1400, "count_audit.started": 9, "count_audit.last_exact": 8},
+        ]
+        base = {"count_audit.runs": 9, **{f"count_audit.{name}": 0 for name in runner.COUNT_AUDIT_FIELDS}}
+        reports = iter([{**base, **step} for step in sequence])
+        arm = types.SimpleNamespace(options=types.SimpleNamespace(diagnostics=True), aot=True)
+        with unittest.mock.patch.object(runner.time, "sleep"), \
+                unittest.mock.patch.object(runner.time, "clock_gettime_ns", return_value=work_end), \
+                unittest.mock.patch.object(runner, "read_report", side_effect=lambda _path: next(reports)):
+            settled = runner.Arm.settled_report(arm, pathlib.Path("unused"))
+        # The report that began audit 7 after the work is where `begun` comes
+        # from; the first exact audit above 7 is the one that counts.
+        self.assertEqual(settled["count_audit.last_exact"], 8)
+        self.assertEqual(settled["report.at"], work_end + 1400)
 
     def with_stack(self, stack: str) -> dict:
         scenario = good_scenario()

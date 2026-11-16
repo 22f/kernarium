@@ -874,8 +874,10 @@ blocker in every one of them.
   all at once): a mismatch or an accounting anomaly fails the
   run, and so does a run that never audited, a report without every result
   of the audit, and one in which no exact audit finished after the guest's
-  work was done (the report names the last exact audit it finished by its
-  sequence number, and the runner waits for one that began after the work). A product build has residency
+  work was done (every report carries the instant its counters were read and
+  the last exact audit it finished by sequence number; the runner takes the
+  number to exceed from a report read after the work ended, and waits for an
+  audit numbered above it). A product build has residency
   evidence: the framework's text became resident in the emulator process
   (`vmmap`, macOS) and was not with the component off. Reading the text
   raises residency too, so that proves the framework was touched and not that

@@ -25,6 +25,7 @@
 #include <signal.h>
 #include <string>
 #include <thread>
+#include <time.h>
 #endif
 
 /* The framework's blob (aot_blob.S). */
@@ -509,6 +510,13 @@ void write_report() noexcept
 	std::FILE *file = std::fopen(part.c_str(), "w");
 	if (file == nullptr)
 		return;
+	/* The instant the counters below were read, on the clock a reader on
+	 * this host reads: taken before the first of them, so a report stamped
+	 * later than the end of a piece of work holds only what the work left.
+	 * The stamp, not the order in which reports appear, is the evidence: a
+	 * report can be published late. */
+	std::fprintf(file, "report at %llu\n", static_cast<unsigned long long>(
+		clock_gettime_nsec_np(CLOCK_UPTIME_RAW)));
 	auto get = [](const std::atomic<std::uint64_t> &value) {
 		return static_cast<unsigned long long>(
 			value.load(std::memory_order_relaxed));

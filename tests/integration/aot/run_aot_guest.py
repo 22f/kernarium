@@ -81,6 +81,10 @@ import slot_ports  # noqa: E402
 DEFAULT_ADB_PORT = 5585
 SETTLE_SECONDS = 20
 REPORT_SECONDS = 3
+# How long to wait for a report whose counters were read after a given
+# instant, and how often to look; the runtime writes one twice a second.
+REPORT_WAIT_SECONDS = 30
+REPORT_POLL_SECONDS = 0.25
 # How long the diagnostics arm waits, after the guest's work is done, for an
 # exact count audit that began after it (the runtime audits every two seconds
 # and the audit is skipped when an address space is busy).
@@ -377,7 +381,7 @@ def read_report(path: pathlib.Path) -> dict[str, int]:
         prefix = ""
         if head == "library" and rest:
             prefix, rest = f"library.{rest[0]}.", rest[1:]
-        elif head in ("find", "cross_miss", "refused", "count_audit", "count_audit_detail"):
+        elif head in ("find", "cross_miss", "refused", "count_audit", "count_audit_detail", "report"):
             prefix = head + "."
         elif head in ("binds", "max_retired", "stack_free"):
             rest = fields
@@ -387,6 +391,33 @@ def read_report(path: pathlib.Path) -> dict[str, int]:
             if number.isdigit():
                 values[prefix + key] = int(number)
     return values
+
+
+def report_after(path: pathlib.Path, since_ns: int) -> dict[str, int]:
+    """The first report of a diagnostics build whose counters were all read
+    after `since_ns` on the host's uptime clock (the `report at` stamp the
+    runtime takes before it reads the first counter). A report is made twice
+    a second, but one that was read before a piece of work may be published
+    after it, so a reader that wants what the work left waits for a stamp,
+    never for the next file."""
+    deadline = time.monotonic() + REPORT_WAIT_SECONDS
+    newest = None
+    while True:
+        seen = read_report(path)
+        stamp = seen.get("report.at")
+        if seen and stamp is None:
+            raise Failure("the report carries no time stamp (`report at`): when its counters "
+                          "were read cannot be told from when it appeared")
+        if stamp is not None:
+            newest = stamp
+            if stamp > since_ns:
+                return seen
+        if time.monotonic() > deadline:
+            behind = "" if newest is None else (
+                f"; the newest was read {(since_ns - newest) / 1e6:.0f} ms before the work ended")
+            raise Failure(f"no report was written after the guest's work was done "
+                          f"({REPORT_WAIT_SECONDS} s{behind})")
+        time.sleep(REPORT_POLL_SECONDS)
 
 
 def kernel_stack_bytes(config: pathlib.Path = KERNEL_CONFIG) -> int:
@@ -612,15 +643,21 @@ class Arm:
     def settled_report(self, report: pathlib.Path) -> dict[str, int]:
         """The report once the guest's work is done. In the diagnostics arm
         it is the first that shows an exact count audit which began after
-        that work: the report is written twice a second, so one read after
-        REPORT_SECONDS is of a report written after the work, and the audits
-        it counts as begun are the ones that began before; the report that
-        names a later one as the last it finished is the evidence. The
-        lifetime count of audits is not: it cannot tell the ones that saw
-        the state the work left from the ones that saw the state before."""
-        time.sleep(REPORT_SECONDS)
-        seen = read_report(report)
-        if not (self.options.diagnostics and self.aot) or "count_audit.runs" not in seen:
+        that work. The audits a report counts as begun are those that began
+        before its counters were read, so the number to exceed comes from a
+        report whose counters were read after the work ended (the stamp it
+        carries, report_after), and the audit that must finish is one
+        numbered above it; the report that names a later one as the last it
+        finished is the evidence. Neither the lifetime count of audits nor
+        the order in which reports appear is: a report can be published
+        late, and one count cannot tell the audits that saw the state the
+        work left from those that saw the state before."""
+        work_end = time.clock_gettime_ns(time.CLOCK_UPTIME_RAW)
+        if not (self.options.diagnostics and self.aot):
+            time.sleep(REPORT_SECONDS)
+            return read_report(report)
+        seen = report_after(report, work_end)
+        if "count_audit.runs" not in seen:
             return seen
         absent = missing_audit_fields(seen)
         if absent:
@@ -634,8 +671,8 @@ class Arm:
                               f"({AUDIT_WAIT_SECONDS} s after audit {begun} had begun, the last "
                               f"exact one was number {seen.get('count_audit.last_exact', 0)}, "
                               f"{seen.get('count_audit.skipped', 0)} skipped)")
-            time.sleep(max(REPORT_SECONDS, 0.05))
-            seen = read_report(report)
+            time.sleep(REPORT_POLL_SECONDS)
+            seen = report_after(report, seen["report.at"])
         return seen
 
     def run_debug_rows(self, device: "Device", serial: str) -> None:
@@ -674,9 +711,8 @@ class Arm:
             libz = names.index("/system/lib64/libz.so")
 
         def counters() -> dict[str, int]:
-            # The report is written a few times a second.
-            time.sleep(REPORT_SECONDS)
-            return read_report(report)
+            # What the guest's work so far has left: a report read after now.
+            return report_after(report, time.clock_gettime_ns(time.CLOCK_UPTIME_RAW))
 
         fields = (("shared", "shared"), ("verified", "verified"), ("mutable", "mutable"),
                   ("rehash", "rehash"))

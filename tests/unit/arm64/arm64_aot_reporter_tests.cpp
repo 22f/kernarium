@@ -3,7 +3,10 @@
  * thread that writes the report, and a process that started it and then ends
  * through exit() with that thread still running. A guest run reads the report
  * a few times a second while the emulator runs, and the emulator itself ends
- * through _exit(), so only a row like this one sees what exit() does to it. */
+ * through _exit(), so only a row like this one sees what exit() does to it.
+ * Every report names the instant its counters were read (`report at`, on the
+ * clock the runner reads), so that a reader that knows when its work ended
+ * can tell a report sampled after it from one that was written late. */
 
 #include "cpu/arm64/aot/aot_runtime.hpp"
 
@@ -17,6 +20,7 @@
 #include <string>
 #include <thread>
 
+#include <time.h>
 #include <unistd.h>
 
 namespace aot = uml::cpu::arm64::aot;
@@ -45,6 +49,14 @@ std::string read_file(const fs::path &path)
 
 /* The report once it has this text in it (the reporter writes every half
  * second); an empty string if it does not come. */
+/* The `report at` stamp of a report text; 0 when it has none. */
+std::uint64_t stamp_of(const std::string &text)
+{
+	const auto at = text.find("report at ");
+	return at == std::string::npos ? 0 :
+		std::strtoull(text.c_str() + at + 10, nullptr, 10);
+}
+
 std::string wait_for_report(const fs::path &path, const std::string &needle)
 {
 	const auto deadline = std::chrono::steady_clock::now() + wait_limit;
@@ -69,9 +81,21 @@ int main()
 	require(setenv("DARWIN_UML_AOT_REPORT", report.c_str(), 1) == 0);
 
 	/* The first ask for the component starts the reporter. */
+	const auto before = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 	require(aot::enabled());
 	const auto text = wait_for_report(report, "count_audit runs");
 	require(!text.empty());
+	/* Its counters were read after the process asked for the component, and
+	 * a later report was read later still. */
+	const auto first = stamp_of(text);
+	require(first > before);
+	std::string later;
+	const auto deadline = std::chrono::steady_clock::now() + wait_limit;
+	while (std::chrono::steady_clock::now() < deadline &&
+	       stamp_of(later = read_file(report)) <= first)
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	require(stamp_of(later) > first);
+	require(stamp_of(later) <= clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
 	/* The report is made beside and renamed: no front of one is left. */
 	require(!fs::exists(fs::path{report}.concat(".part")) ||
 		!read_file(report).empty());
