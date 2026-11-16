@@ -15,6 +15,9 @@
  *               page is mapped, the instruction runs and the guest goes on.
  *   mapped      A page mapped without execute, as a writable view is, does not
  *               fault.
+ *   null page   IC IVAU at the null page, which a Linux guest never maps,
+ *               completes: no frame under it holds a translation, and the
+ *               architecture's XZR case of the instruction corpus names it.
  *   lazy-view   A writes the code through its writable view and invalidates the
  *               instruction cache at the executable view, which A has not
  *               mapped yet. The fault maps the view; B, which translated the
@@ -89,6 +92,15 @@ void unmapped_and_mapped(uml::cpu::EngineKind kind, unsigned long &next)
 		expect(quiet.reason == uml::cpu::ExitReason::system_call &&
 			writable.registers[0] == 7, engine_label,
 			"an IC IVAU at a writable view faulted");
+
+		/* The null page is no page a translation could be under. */
+		arm64::CpuState null_page{};
+		null_page.pc = shared_base;
+		null_page.registers[1] = 0;
+		const auto null_run = run(*engine, generation, null_page);
+		expect(null_run.reason == uml::cpu::ExitReason::system_call &&
+			null_page.registers[0] == 7, engine_label,
+			"an IC IVAU at the null page faulted");
 	}
 	require(darwin_uml_static_vm_destroy(generation) == 0);
 }
