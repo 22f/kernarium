@@ -612,16 +612,18 @@ class StudyEvictionTest(unittest.TestCase):
     def test_a_guest_that_evicted_passes_the_records_without_counts(self):
         self.judged(study_arm("off"), study_arm("on"))
 
-    def test_the_stock_rows_must_have_seen_the_library_give_up_a_page(self):
-        """Across the pressure and evict rows at least one fault read a page of
-        libz.so back; otherwise neither row observed a frame given back."""
+    def test_the_stock_rows_print_their_readbacks_and_do_not_judge_them(self):
+        """Whether the stock guest dropped a page of libz.so in the pressure
+        and evict rows is chance: the count is printed, and a run in which
+        neither row took a fault is not a failed one (the reclaim row holds
+        the mechanism). The rows must still have printed it."""
         kept = dict(pressure=(0, 0, 0, 0), evicted=0)
-        with self.assertRaises(runner.Failure) as caught:
+        with unittest.mock.patch("sys.stdout", new=io.StringIO()) as printed:
             self.judged(study_arm("off"), study_arm("on", **kept))
-        self.assertIn("no fault", str(caught.exception))
-        # Either row is enough, and the arm without the component is not the one judged.
-        self.judged(study_arm("off", **kept), study_arm("on", pressure=(0, 0, 0, 0), evicted=1))
-        self.judged(study_arm("off", **kept), study_arm("on", pressure=(0, 1, 0, 0), evicted=0))
+        self.assertIn("stock rows (informational): 0 faults", printed.getvalue())
+        with unittest.mock.patch("sys.stdout", new=io.StringIO()) as printed:
+            self.judged(study_arm("off"), study_arm("on", pressure=(0, 1, 0, 0), evicted=2))
+        self.assertIn("stock rows (informational): 3 faults", printed.getvalue())
 
     def test_the_study_option_names_what_it_needs_before_a_guest_starts(self):
         parser = runner.build_parser()

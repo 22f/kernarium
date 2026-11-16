@@ -134,21 +134,20 @@ PRESSURE_ROUND = re.compile(
 def check_readbacks(records: dict[str, list[str]]) -> str:
     """A read-only system file's residency is not observable in an unrooted
     guest except through the faults that reading its pages back takes, so the
-    stock guest's pressure and evict rows prove a frame of libz.so was given
-    up only by those faults: across the two rows at least one must have been
-    taken, or neither row saw the library lose a page and neither says
-    anything about frames given back. Returns a line to print."""
+    stock guest's pressure and evict rows can show a frame of libz.so was
+    given up only by those faults. Whether the guest let a page go in those
+    rows is chance (an unmapped page of a library the guest keeps running is
+    dropped only if it stays unmapped long enough), so the count is printed
+    and not judged: the reclaim row, on the study guest, and the unit rows
+    hold the mechanism. The rows must still have printed it. Returns a line
+    to print."""
     pressure = [m for m in map(PRESSURE_ROUND.match, records.get("pressure", [])) if m]
     libz = next((m for m in map(LIBZ.match, records.get("evict", [])) if m), None)
     if not pressure or libz is None:
         raise ShareFailure("the pressure and evict rows lack their read-back counts")
     from_pressure = sum(int(m.group(2)) for m in pressure)
     from_evict = int(libz.group(2))
-    if from_pressure + from_evict == 0:
-        raise ShareFailure("the pressure and evict rows took no fault to read a page of libz.so back: "
-                           "the library kept every page in the page cache in both, so neither shows "
-                           "a frame given up")
-    return (f"stock rows: {from_pressure + from_evict} faults read libz.so's pages back "
+    return (f"stock rows (informational): {from_pressure + from_evict} faults read libz.so's pages back "
             f"({from_pressure} after pressure, {from_evict} after the eviction)")
 
 

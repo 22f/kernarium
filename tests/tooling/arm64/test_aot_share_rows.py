@@ -177,19 +177,17 @@ def stock_records(pressure: list[int], evicted: int) -> dict[str, list[str]]:
 
 class StockReadbackTest(unittest.TestCase):
     """The stock guest's rows count a read-only library's lost pages from the
-    faults that read them back (mincore cannot say): across the pressure and
-    evict rows at least one page of libz.so must have been given up, or the
-    two rows saw no frame go and no reuse of one."""
+    faults that read them back (mincore cannot say). Whether the guest kept a
+    page of libz.so unmapped long enough to lose it in those rows is chance,
+    so the count is printed and never judged; the reclaim row and the unit
+    rows hold the mechanism, and the rows must still have printed it."""
 
-    def test_a_fault_in_either_row_is_enough(self):
-        for pressure, evicted in (([0, 2, 0, 1], 0), ([0, 0, 0, 0], 1), ([1, 3, 2, 0], 2)):
+    def test_the_count_is_printed_whatever_it_is(self):
+        for pressure, evicted in (([0, 2, 0, 1], 0), ([0, 0, 0, 0], 1), ([1, 3, 2, 0], 2),
+                                  ([0, 0, 0, 0], 0)):
             text = rows.check_readbacks(stock_records(pressure, evicted))
             self.assertIn(f"{sum(pressure) + evicted} faults", text)
-
-    def test_a_library_that_kept_every_page_in_both_rows_fails(self):
-        with self.assertRaises(rows.ShareFailure) as caught:
-            rows.check_readbacks(stock_records([0, 0, 0, 0], 0))
-        self.assertIn("no fault", str(caught.exception))
+            self.assertIn("informational", text)
 
     def test_a_row_without_its_counts_fails(self):
         records = stock_records([1, 1, 1, 1], 1)

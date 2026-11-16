@@ -844,10 +844,10 @@ blocker in every one of them.
   files nor `libz.so`, and the owner and capability exceptions do not apply
   to it). The `pressure` and `evict` rows print that count and
   require the pages that stayed to share their verdicts, and `evict` also
-  requires that a file nothing maps loses its pages. Across the two rows at
-  least one fault must have read a page of `libz.so` back, since that is the
-  only sign that either saw the library give a frame up; the frame's last
-  departure and reuse are the memory layer's unit rows.
+  requires that a file nothing maps loses its pages. The faults that read a
+  page of `libz.so` back across the two rows are printed as informational,
+  since whether the guest let a page go there is chance; the frame's last
+  departure and reuse are the reclaim row's and the memory layer's unit rows.
   `--study-eviction` adds the `reclaim` row, for a guest kernel that treats
   every caller as the owner of every file for the page cache (a study-only
   change to `madvise(MADV_PAGEOUT)` and `mincore`; no artifact of it is
