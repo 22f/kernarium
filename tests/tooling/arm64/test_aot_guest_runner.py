@@ -139,6 +139,8 @@ def good_probe() -> str:
 
 GOOD_AUDIT = ("count_audit runs 5 skipped 1 records 40 mismatches 0 "
               "last_mismatches 0 anomalies 0\n")
+GOOD_STACK = ("stack_free 59200 stack_size 65536 stack_kind 0 "
+              "stack_task_bytes 65536 stack_engine_free 62000 stack_growth 2800\n")
 
 
 def good_scenario() -> dict:
@@ -146,7 +148,7 @@ def good_scenario() -> dict:
     return {"workloads": {"off": text, "on": text},
             "probe": {"off": [good_probe()], "on": [good_probe()]},
             "report": {"on": "binds 3 enters 9 steps 2 poisoned 0 refills 0\n" +
-                       GOOD_AUDIT,
+                       GOOD_AUDIT + GOOD_STACK,
                        "off": None},
             "vmmap": {"off": vmmap_text("16K"), "on": vmmap_text("19.3M")}}
 
@@ -368,13 +370,63 @@ class RunnerTest(unittest.TestCase):
             scenario["report"]["on"] = report
             self.fails(scenario, expected, "--diagnostics")
 
-    def test_the_stack_the_runtime_left_is_judged(self):
+    def with_stack(self, stack: str) -> dict:
         scenario = good_scenario()
-        scenario["report"]["on"] += "stack_free 60000 stack_size 65536\n"
-        self.passes(scenario, "--diagnostics")
-        scenario["report"]["on"] = scenario["report"]["on"].replace(
-            "stack_free 60000", "stack_free 4096")
-        self.fails(scenario, "bytes of stack left", "--diagnostics")
+        scenario["report"]["on"] = scenario["report"]["on"].replace(GOOD_STACK, stack)
+        return scenario
+
+    def test_the_stack_the_runtime_left_is_judged(self):
+        self.passes(good_scenario(), "--diagnostics")
+        self.fails(self.with_stack(GOOD_STACK.replace("59200", "4096")),
+                   "bytes of stack left", "--diagnostics")
+
+    def test_a_report_without_a_stack_sample_is_not_a_run_that_had_room(self):
+        sentinel = (1 << 64) - 1
+        self.fails(self.with_stack(""), "no stack sample", "--diagnostics")
+        self.fails(self.with_stack("stack_free 59200 stack_size 65536\n"),
+                   "no stack sample", "--diagnostics")
+        # What the sampler holds when no thread sampled at all.
+        self.fails(self.with_stack(
+            f"stack_free {sentinel} stack_size 0 stack_kind 0 "
+            f"stack_task_bytes 65536 stack_engine_free {sentinel} stack_growth 0\n"),
+                   "holds the sentinel", "--diagnostics")
+        self.fails(self.with_stack(GOOD_STACK.replace("stack_size 65536", "stack_size 0")),
+                   "zero bytes", "--diagnostics")
+        self.fails(self.with_stack(GOOD_STACK.replace("stack_free 59200", "stack_free 70000")),
+                   "bytes free of a stack of", "--diagnostics")
+
+    def test_the_stack_size_is_the_kernels(self):
+        # The runtime's assumption must be the kernel's configuration, and a
+        # sample on a task stack must name that size.
+        self.fails(self.with_stack(GOOD_STACK.replace("stack_task_bytes 65536",
+                                                     "stack_task_bytes 32768")),
+                   "configuration gives 65536", "--diagnostics")
+        self.fails(self.with_stack(GOOD_STACK.replace("stack_size 65536", "stack_size 131072")),
+                   "names a stack of 131072", "--diagnostics")
+        # A thread on a host stack measures against that stack.
+        self.passes(self.with_stack(GOOD_STACK.replace("stack_size 65536", "stack_size 524288")
+                                    .replace("stack_kind 0", "stack_kind 1")),
+                    "--diagnostics")
+
+    def test_the_growth_over_the_engine_is_bounded(self):
+        self.fails(self.with_stack(GOOD_STACK.replace("stack_growth 2800", "stack_growth 20000")),
+                   "deeper than the engine's own frame", "--diagnostics")
+        self.fails(self.with_stack(GOOD_STACK.replace(" stack_growth 2800", "")),
+                   "no stack sample", "--diagnostics")
+        # The budget itself is allowed.
+        self.passes(self.with_stack(GOOD_STACK.replace("stack_growth 2800",
+                                                      f"stack_growth {runner.STACK_GROWTH_BUDGET}")),
+                    "--diagnostics")
+
+    def test_the_kernel_stack_comes_from_the_kernel_configuration(self):
+        self.assertEqual(runner.kernel_stack_bytes(), 65536)
+        with tempfile.TemporaryDirectory(prefix="aot-config-test-") as name:
+            config = pathlib.Path(name) / "fragment"
+            config.write_text("CONFIG_PAGE_SIZE_4KB=y\nCONFIG_KERNEL_STACK_ORDER=3\n")
+            self.assertEqual(runner.kernel_stack_bytes(config), 32768)
+            config.write_text("CONFIG_PAGE_SIZE_4KB=y\n")
+            with self.assertRaises(runner.Failure):
+                runner.kernel_stack_bytes(config)
 
 
 if __name__ == "__main__":

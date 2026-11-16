@@ -3887,10 +3887,10 @@ void a_stepped_fault_hint_survives_changes_as_a_hint_only(
 	require(st.poisoned == 0);
 }
 
-/* The guest kernel's threads run the executor on a 64 KiB stack, with its own
- * frames and a signal frame above ours: nothing on the way into rewritten
- * code may need much of it (a 64 KiB temporary in the executor killed the
- * first boot of a guest). The scenarios below run on the last 64 KiB of a
+/* The guest kernel's threads run the executor on a task stack (the size the
+ * kernel configuration gives), with its own frames and a signal frame above
+ * ours: nothing on the way into rewritten code may need much of it (a 64 KiB
+ * temporary in the executor killed the first boot of a guest). The scenarios below run on the last such stack of a
  * mapping whose first megabyte is inaccessible, painted beforehand, so an
  * overflow faults and the high-water mark is measured: a first entry (the
  * verification of a page and a refill), a native copy, the host routine
@@ -3900,7 +3900,7 @@ void a_stepped_fault_hint_survives_changes_as_a_hint_only(
 [[gnu::noinline]]
 void rewritten_code_stays_within_a_stack_budget(const LibraryImage &image)
 {
-	constexpr std::size_t stack_bytes = 64 * 1024;
+	constexpr std::size_t stack_bytes = AOT_TEST_KERNEL_STACK_BYTES;
 	constexpr std::size_t moat_bytes = 1024 * 1024;
 	/* What the executor, the harness and the host routines may use beyond
 	 * the thread's own start-up. */
@@ -4014,6 +4014,31 @@ void rewritten_code_stays_within_a_stack_budget(const LibraryImage &image)
 		start_up, high_water, budget);
 	require(aot::stats().enters > 0);
 	require(high_water <= start_up + budget);
+	/* The runtime's own measure agrees with the painted stack: the sampler
+	 * assumes the kernel's task stack size, finds the pthread's stack to be
+	 * the host stack it is, never reports more free than the stack held at
+	 * its deepest, saw the thread's own start-up above it, and stayed
+	 * inside the growth budget over the start of each run. */
+	const auto seen = aot::stats();
+	std::fprintf(stderr, "stack: sampled %llu left of %llu (kind %llu); "
+		"engine %llu at run start; deepest sample %llu below it\n",
+		static_cast<unsigned long long>(seen.stack_min_free),
+		static_cast<unsigned long long>(seen.stack_size_at_min),
+		static_cast<unsigned long long>(seen.stack_kind_at_min),
+		static_cast<unsigned long long>(seen.stack_engine_free),
+		static_cast<unsigned long long>(seen.stack_max_growth));
+	require(seen.stack_task_bytes == stack_bytes);
+	require(seen.stack_kind_at_min == 1);
+	require(seen.stack_size_at_min == stack_bytes);
+	require(seen.stack_min_free <= stack_bytes);
+	require(seen.stack_engine_free <= stack_bytes);
+	require(stack_bytes - seen.stack_min_free >= start_up);
+	require(stack_bytes - seen.stack_min_free <= high_water);
+	require(seen.stack_engine_free >= seen.stack_min_free);
+	/* A first entry verifies a page into a buffer of its own: deeper than the
+	 * start of the run, by something, and by no more than the budget. */
+	require(seen.stack_max_growth > 0);
+	require(seen.stack_max_growth <= budget);
 }
 
 /* ---- Every exit lies on the stepped trace ---------------------------------

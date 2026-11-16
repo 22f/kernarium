@@ -87,6 +87,13 @@ WORKLOAD_SECONDS = 900
 # which the sampling points above them cannot see (the differential test
 # paints a 64 KiB stack and measures the calls).
 MIN_STACK_FREE = 16 * 1024
+# The most stack the runtime may add to the engine's own at the points where
+# it samples (the differential test's painted-stack row holds the same budget).
+STACK_GROWTH_BUDGET = 16 * 1024
+UNSAMPLED = (1 << 64) - 1
+KIND_TASK = 0
+KERNEL_CONFIG = (pathlib.Path(__file__).resolve().parents[3] / "kernel" / "common" /
+                 "config" / "darwin-uml.fragment")
 PROBE_SECONDS = 120
 TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
@@ -375,6 +382,57 @@ def read_report(path: pathlib.Path) -> dict[str, int]:
     return values
 
 
+def kernel_stack_bytes(config: pathlib.Path = KERNEL_CONFIG) -> int:
+    """The size of a Linux task stack the guests run on, from the kernel's own
+    configuration (CONFIG_KERNEL_STACK_ORDER at 4 KiB pages)."""
+    for line in config.read_text().splitlines():
+        found = re.fullmatch(r"CONFIG_KERNEL_STACK_ORDER=(\d+)", line.strip())
+        if found:
+            return (1 << int(found.group(1))) * 4096
+    raise Failure(f"{config} sets no CONFIG_KERNEL_STACK_ORDER")
+
+
+def judge_stack(report: dict[str, int], expected_task_bytes: int | None = None) -> str:
+    """The stack the runtime left. The report must carry a sample (a report
+    without one, the sentinel of an unsampled run, a size of zero, or more
+    free than the stack holds, is a sampler that did not run, not a stack
+    with room); a sample on a Linux task stack must be the size the kernel's
+    configuration gives, which is what the sampler assumes; and the runtime
+    may add no more than the budget to the depth the engine itself had where
+    the run started, on the same thread (stack_growth, the most any sample
+    site was deeper than that). Returns the line to print."""
+    expected = kernel_stack_bytes() if expected_task_bytes is None else expected_task_bytes
+    keys = ("stack_free", "stack_size", "stack_kind", "stack_task_bytes", "stack_engine_free",
+            "stack_growth")
+    missing = [key for key in keys if key not in report]
+    if missing:
+        raise Failure(f"the report has no stack sample ({', '.join(missing)} missing)")
+    free, size, kind = report["stack_free"], report["stack_size"], report["stack_kind"]
+    task, engine = report["stack_task_bytes"], report["stack_engine_free"]
+    if free == UNSAMPLED or engine == UNSAMPLED:
+        raise Failure("no thread sampled its stack: the report holds the sentinel")
+    if size == 0:
+        raise Failure("the stack sample names a stack of zero bytes")
+    if free > size:
+        raise Failure(f"the stack sample has {free} bytes free of a stack of {size}")
+    if task != expected:
+        raise Failure(f"the runtime assumes a task stack of {task} bytes; the kernel's "
+                      f"configuration gives {expected}")
+    if kind == KIND_TASK and size != task:
+        raise Failure(f"a sample on a task stack names a stack of {size} bytes, not {task}")
+    if free < MIN_STACK_FREE:
+        raise Failure(f"a thread had {free} bytes of stack left in the runtime, "
+                      f"less than the {MIN_STACK_FREE} the memory layer's own calls "
+                      "and a signal frame need")
+    growth = report["stack_growth"]
+    if growth > STACK_GROWTH_BUDGET:
+        raise Failure(f"the runtime went {growth} bytes deeper than the engine's own frame "
+                      f"at the same points, more than the {STACK_GROWTH_BUDGET} it may")
+    return (f"stack: the least a thread had left where the runtime is deepest "
+            f"(entry, refill, page verification): {free} bytes of {size}; "
+            f"{growth} bytes deeper than the engine's own frame at the start of the run")
+
+
 def judge_count_audit(report: dict[str, int]) -> str:
     """The audit of the memory layer's executable-mapping counts that a
     diagnostics build runs every two seconds while the guest runs and once at
@@ -653,15 +711,7 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
               "refills {refills}".format(**{k: on.report.get(k, 0) for k in (
                   "enters", "steps", "poisoned", "refills")}))
         print(judge_count_audit(on.report))
-        left = on.report.get("stack_free")
-        if left is not None:
-            print(f"stack: the least a thread had left where the runtime is deepest "
-                  f"(entry, refill, page verification): {left} bytes of "
-                  f"{on.report.get('stack_size', 0)}")
-            if left < MIN_STACK_FREE:
-                raise Failure(f"a thread had {left} bytes of stack left in the runtime, "
-                              f"less than the {MIN_STACK_FREE} the memory layer's own calls "
-                              "and a signal frame need")
+        print(judge_stack(on.report))
         report_libraries(on.report, options)
 
 

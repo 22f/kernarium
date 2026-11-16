@@ -63,6 +63,17 @@ struct Stats final {
 	/* Page verifications refused because the page's mapping lacks the
 	 * kernel's immutable fact (each retry after a backoff counts again). */
 	std::uint64_t mutable_pages{};
+	/* The stack the runtime measured (see the report's stack_ fields): the
+	 * least left at a sample site (all ones: none sampled), the size of the
+	 * stack that was on, its kind (0 task, 1 host, 2 signal), the task stack
+	 * size the runtime assumes, the least left at the start of a run, and
+	 * the most a sample site was deeper than the start of its own run. */
+	std::uint64_t stack_min_free{};
+	std::uint64_t stack_size_at_min{};
+	std::uint64_t stack_kind_at_min{};
+	std::uint64_t stack_task_bytes{};
+	std::uint64_t stack_engine_free{};
+	std::uint64_t stack_max_growth{};
 };
 
 /* Override DARWIN_UML_AOT (nullopt: read the environment again). */

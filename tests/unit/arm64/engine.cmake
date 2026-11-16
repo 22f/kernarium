@@ -487,11 +487,13 @@
             OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS}
                 $<TARGET_OBJECTS:uml_arm64_gadget_engine>)
         get_property(_uml_aot_libraries GLOBAL PROPERTY UML_AOT_LIBRARY_FILES)
+        get_property(_uml_aot_stack_bytes GLOBAL PROPERTY UML_AOT_KERNEL_STACK_BYTES)
         get_property(_uml_aot_functions GLOBAL PROPERTY UML_AOT_FUNCTIONS)
         get_property(_uml_aot_sites GLOBAL PROPERTY UML_AOT_SITES)
         target_compile_definitions(uml_arm64_aot_differential_tests PRIVATE
             UML_AOT_DIAGNOSTICS=1
             UML_MEMORY_COUNT_AUDIT=1
+            AOT_TEST_KERNEL_STACK_BYTES=${_uml_aot_stack_bytes}
             AOT_TEST_COUNT_RETIRED=$<BOOL:${UML_AOT_COUNT_RETIRED}>
             AOT_TEST_SHARED_VERDICTS=$<BOOL:${UML_AOT_SHARED_VERDICTS}>
             AOT_TEST_LIBRARIES="${_uml_aot_libraries}"

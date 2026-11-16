@@ -250,21 +250,44 @@ std::atomic<std::uint64_t> audit_runs{0}, audit_skipped{0}, audit_records{0},
  * of the thread that had it. */
 std::atomic<std::uint64_t> stack_min_free{~std::uint64_t{0}};
 std::atomic<std::uint64_t> stack_size_at_min{0};
+std::atomic<std::uint64_t> stack_kind_at_min{0};
+/* The same measure at the start of each run, in the engine's own frame
+ * before any runtime call: the least over all threads, and the most any
+ * sample site was deeper than the start of its own run on its own thread
+ * (the stack the runtime adds to the engine's). */
+std::atomic<std::uint64_t> stack_engine_free{~std::uint64_t{0}};
+std::atomic<std::uint64_t> stack_max_growth{0};
 } // namespace counters
 
-/* A Linux task stack: CONFIG_KERNEL_STACK_ORDER 4 at 4 KiB pages, in guest
- * memory (never a host stack), aligned to its size like every page-order
- * allocation. The guest kernel's threads run the executor on one. */
-constexpr std::uint64_t kernel_stack_bytes = 64 * 1024;
+/* A Linux task stack, in guest memory (never a host stack), aligned to its
+ * size like every page-order allocation: the size the kernel configuration
+ * gives (CONFIG_KERNEL_STACK_ORDER at 4 KiB pages), which the build derives
+ * from the same file the kernel is configured from. The guest kernel's
+ * threads run the executor on one. */
+#ifndef UML_AOT_KERNEL_STACK_BYTES
+#error "the build names the kernel's task stack size"
+#endif
+constexpr std::uint64_t kernel_stack_bytes = UML_AOT_KERNEL_STACK_BYTES;
+static_assert((kernel_stack_bytes & (kernel_stack_bytes - 1)) == 0,
+	"a task stack is a power-of-two page order");
 
 /* Record how much of the stack the caller's frame is on is left. A frame on
  * the thread's own host stack or its signal stack measures against that
  * stack; any other is a Linux task stack, whose base is the frame rounded
- * down to the stack size. */
-#define UML_AOT_SAMPLE_STACK() sample_stack(__builtin_frame_address(0))
-#define UML_AOT_SAMPLE_STACK_AT(lowest) sample_stack(lowest)
+ * down to the stack size. The report names which (stack_kind): 0 a task
+ * stack, 1 the host stack, 2 the signal stack. */
+#define UML_AOT_SAMPLE_STACK() sample_stack(__builtin_frame_address(0), false)
+#define UML_AOT_SAMPLE_STACK_AT(lowest) sample_stack(lowest, false)
+#define UML_AOT_SAMPLE_ENGINE_STACK() \
+	sample_stack(__builtin_frame_address(0), true)
 
-[[gnu::noinline]] void sample_stack(const void *frame) noexcept
+/* The engine's own depth at the start of the run this thread is in, and
+ * the kind of stack it was on (a sample on the signal stack is not measured
+ * against it). */
+thread_local std::uint64_t t_run_start_left = ~std::uint64_t{0};
+thread_local std::uint64_t t_run_start_kind = 0;
+
+[[gnu::noinline]] void sample_stack(const void *frame, bool run_start) noexcept
 {
 	struct HostStacks {
 		std::uintptr_t low[2];
@@ -289,11 +312,34 @@ constexpr std::uint64_t kernel_stack_bytes = 64 * 1024;
 	const auto here = reinterpret_cast<std::uintptr_t>(frame);
 	std::uint64_t left = here & (kernel_stack_bytes - 1);
 	std::uint64_t size = kernel_stack_bytes;
+	std::uint64_t kind = 0;
 	for (int i = 0; i < 2; ++i) {
 		if (here >= host.low[i] && here < host.high[i]) {
 			left = here - host.low[i];
 			size = host.high[i] - host.low[i];
+			kind = 1 + static_cast<std::uint64_t>(i);
 			break;
+		}
+	}
+	if (run_start) {
+		t_run_start_left = left;
+		t_run_start_kind = kind;
+		auto engine = counters::stack_engine_free.load(
+			std::memory_order_relaxed);
+		while (left < engine &&
+		       !counters::stack_engine_free.compare_exchange_weak(
+		           engine, left, std::memory_order_relaxed)) {
+		}
+		return;
+	}
+	if (t_run_start_left != ~std::uint64_t{0} && t_run_start_kind == kind &&
+	    t_run_start_left > left) {
+		const auto growth = t_run_start_left - left;
+		auto most = counters::stack_max_growth.load(
+			std::memory_order_relaxed);
+		while (growth > most &&
+		       !counters::stack_max_growth.compare_exchange_weak(
+		           most, growth, std::memory_order_relaxed)) {
 		}
 	}
 	auto least = counters::stack_min_free.load(std::memory_order_relaxed);
@@ -301,6 +347,8 @@ constexpr std::uint64_t kernel_stack_bytes = 64 * 1024;
 		if (counters::stack_min_free.compare_exchange_weak(
 		        least, left, std::memory_order_relaxed)) {
 			counters::stack_size_at_min.store(size,
+				std::memory_order_relaxed);
+			counters::stack_kind_at_min.store(kind,
 				std::memory_order_relaxed);
 			break;
 		}
@@ -427,8 +475,12 @@ void write_report() noexcept
 		get(counters::mops_slow), get(counters::mops_fault),
 		get(counters::mops_illegal), get(counters::shared_hits),
 		get(counters::mutable_pages));
-	std::fprintf(file, "stack_free %llu stack_size %llu\n",
-		get(counters::stack_min_free), get(counters::stack_size_at_min));
+	std::fprintf(file, "stack_free %llu stack_size %llu stack_kind %llu "
+		"stack_task_bytes %llu stack_engine_free %llu stack_growth %llu\n",
+		get(counters::stack_min_free), get(counters::stack_size_at_min),
+		get(counters::stack_kind_at_min),
+		static_cast<unsigned long long>(kernel_stack_bytes),
+		get(counters::stack_engine_free), get(counters::stack_max_growth));
 	std::fprintf(file, "count_audit runs %llu skipped %llu records %llu "
 		"mismatches %llu last_mismatches %llu anomalies %llu\n",
 		get(counters::audit_runs), get(counters::audit_skipped),
@@ -511,6 +563,7 @@ inline void note_find(FindResult, std::uint32_t) noexcept {}
 #define UML_AOT_COUNT_LIBRARY(name, library) ((void)0)
 #define UML_AOT_SAMPLE_STACK() ((void)0)
 #define UML_AOT_SAMPLE_STACK_AT(lowest) ((void)0)
+#define UML_AOT_SAMPLE_ENGINE_STACK() ((void)0)
 constexpr std::uint32_t no_library = 0xffffffffU;
 #endif
 
@@ -657,6 +710,7 @@ void note_refusal(Refusal reason) noexcept
 void note_run_start() noexcept
 {
 #if UML_AOT_DIAGNOSTICS
+	UML_AOT_SAMPLE_ENGINE_STACK();
 	if (const auto hook = g_run_hook.load(std::memory_order_acquire))
 		hook(g_run_hook_context.load(std::memory_order_relaxed));
 #endif
@@ -745,6 +799,12 @@ Stats stats() noexcept
 		result.finds[i] = get(counters::find_results[i]);
 	result.shared_hits = get(counters::shared_hits);
 	result.mutable_pages = get(counters::mutable_pages);
+	result.stack_min_free = get(counters::stack_min_free);
+	result.stack_size_at_min = get(counters::stack_size_at_min);
+	result.stack_kind_at_min = get(counters::stack_kind_at_min);
+	result.stack_task_bytes = kernel_stack_bytes;
+	result.stack_engine_free = get(counters::stack_engine_free);
+	result.stack_max_growth = get(counters::stack_max_growth);
 	return result;
 }
 
@@ -761,6 +821,11 @@ void reset_stats() noexcept
 		     &counters::history_queries, &counters::mops_slow,
 		     &counters::mops_fault, &counters::mops_illegal,
 		     &counters::shared_hits, &counters::mutable_pages})
+		counter->store(0, std::memory_order_relaxed);
+	for (auto *counter : {&counters::stack_min_free, &counters::stack_engine_free})
+		counter->store(~std::uint64_t{0}, std::memory_order_relaxed);
+	for (auto *counter : {&counters::stack_size_at_min,
+		     &counters::stack_kind_at_min, &counters::stack_max_growth})
 		counter->store(0, std::memory_order_relaxed);
 	for (auto &counter : counters::refusals)
 		counter.store(0, std::memory_order_relaxed);

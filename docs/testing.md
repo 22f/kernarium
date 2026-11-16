@@ -764,9 +764,13 @@ blocker in every one of them.
   Admission and retry decisions are performance hints: rows warm them and
   then change the text, restore it, and move the executor to another address
   space, and the result must stay the engine's. Entering rewritten code must
-  not need more than a bounded part of the 64 KiB stack the guest kernel's
-  threads run on: a row runs the paths on a painted stack and holds the
-  high-water mark to a budget.
+  not need more than a bounded part of the task stack the guest kernel's
+  threads run on (the size the kernel configuration gives, which the build
+  reads from it): a row runs the paths on a painted stack, holds the
+  high-water mark to a budget, and requires the runtime's own sampler to
+  agree with it. The guest runner requires the sample, rejects an unsampled
+  report and a size that is not the kernel's, and bounds how much deeper
+  than the start of its run the runtime went.
   Every state rewritten code returns the engine at, every fault and the end
   of a run lie, in order, on the path of the same run one instruction at a
   time (registers, flags, FPCR and FPSR, thread pointer, vector registers

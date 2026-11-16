@@ -5,6 +5,23 @@
 # from the accepted release named by UML_AOT_IMAGE and is bound to it; it is
 # never committed. A build without the image has no AOT component at all.
 
+# The size of a Linux task stack, from the kernel configuration the guests
+# are built with: the diagnostics sampler and the stack-budget test measure
+# against it.
+set(_uml_aot_kernel_fragment
+    ${PROJECT_SOURCE_DIR}/kernel/common/config/darwin-uml.fragment)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_uml_aot_kernel_fragment})
+file(STRINGS ${_uml_aot_kernel_fragment} _uml_aot_stack_order
+    REGEX "^CONFIG_KERNEL_STACK_ORDER=[0-9]+$")
+if(NOT _uml_aot_stack_order MATCHES "^CONFIG_KERNEL_STACK_ORDER=([0-9]+)$")
+    message(FATAL_ERROR
+        "${_uml_aot_kernel_fragment} sets no CONFIG_KERNEL_STACK_ORDER")
+endif()
+math(EXPR _uml_aot_kernel_stack_bytes "4096 << ${CMAKE_MATCH_1}")
+set_property(GLOBAL PROPERTY UML_AOT_KERNEL_STACK_BYTES
+    ${_uml_aot_kernel_stack_bytes})
+
 set(_uml_aot_dir ${CMAKE_CURRENT_BINARY_DIR})
 set(_uml_aot_tools ${PROJECT_SOURCE_DIR}/tools/aot)
 set(_uml_aot_image_dir ${_uml_aot_dir}/image)
@@ -249,6 +266,7 @@ function(_uml_aot_add_runtime TARGET DIAGNOSTICS)
     target_compile_definitions(${TARGET} PRIVATE
         UML_AOT_DIAGNOSTICS=${DIAGNOSTICS}
         UML_MEMORY_COUNT_AUDIT=${DIAGNOSTICS}
+        UML_AOT_KERNEL_STACK_BYTES=${_uml_aot_kernel_stack_bytes}
         UML_AOT_SHARED_VERDICTS=$<BOOL:${UML_AOT_SHARED_VERDICTS}>)
 endfunction()
 
