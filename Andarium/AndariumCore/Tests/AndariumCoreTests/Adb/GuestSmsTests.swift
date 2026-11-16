@@ -37,6 +37,17 @@ struct GuestSmsTests {
         #expect(GuestSms.maximumParts * 65 + 1 > GuestSms.maximumUnits)
     }
 
+    /// The words say these numbers, so they are the rule's.
+    @Test func theSenderLimitsAreTheRules() {
+        #expect(GuestSms.maximumNameLength == 11)
+        #expect(GuestSms.maximumNumberDigits == 20)
+        #expect(GuestSms.sender(String(repeating: "a", count: GuestSms.maximumNameLength)) != nil)
+        #expect(GuestSms.sender(String(repeating: "a", count: GuestSms.maximumNameLength + 1)) == nil)
+        #expect(GuestSms.sender(String(repeating: "1", count: GuestSms.maximumNumberDigits)) != nil)
+        #expect(GuestSms.sender("+" + String(repeating: "1", count: GuestSms.maximumNumberDigits)) != nil)
+        #expect(GuestSms.sender(String(repeating: "1", count: GuestSms.maximumNumberDigits + 1)) == nil)
+    }
+
     @Test func refusalsNameWhatIsWrong() {
         #expect(GuestSms.refusal(sender: " ", text: "hi") == .noSender)
         #expect(GuestSms.refusal(sender: "a@b", text: "hi") == .badSender)

@@ -472,17 +472,17 @@ struct TextMessageSection: View {
 
     var body: some View {
         Section {
-            TextField("From: number or name", text: $sender)
+            TextField(SmsMessages.senderPlaceholder, text: $sender)
                 .textContentType(.telephoneNumber)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
-                .accessibilityLabel("Sender")
-            TextField("Message", text: $text, axis: .vertical)
+                .accessibilityLabel(SmsMessages.from)
+            TextField(SmsMessages.message, text: $text, axis: .vertical)
                 .lineLimit(3...8)
                 .focused($focused)
-                .accessibilityLabel("Message")
+                .accessibilityLabel(SmsMessages.message)
             HStack {
-                Text("\(text.utf16.count)/\(GuestSms.maximumUnits)")
+                Text(verbatim: "\(text.utf16.count)/\(GuestSms.maximumUnits)")
                     .font(.footnote)
                     .monospacedDigit()
                     .foregroundStyle(text.utf16.count > GuestSms.maximumUnits ? Color.red : Color(.secondaryLabel))
@@ -490,18 +490,18 @@ struct TextMessageSection: View {
                 if sending {
                     ProgressView()
                 } else {
-                    Button("Send", systemImage: "paperplane.fill", action: send)
+                    Button(SmsMessages.send, systemImage: "paperplane.fill", action: send)
                         .disabled(GuestSms.refusal(sender: sender, text: text) != nil
                             || model.fileBrowser?.busy == true)
                 }
             }
         } header: {
-            Text("Text message")
+            Text(SmsMessages.name)
         } footer: {
             switch result {
             case .delivered(let words)?: Text(words)
             case .refused(let words)?: Text(words).foregroundStyle(.red)
-            case nil: Text("Android receives it as a text message from this sender, as if from its SIM card.")
+            case nil: Text(SmsMessages.senderHint)
             }
         }
         // Typing a new message clears the last result; the send's own

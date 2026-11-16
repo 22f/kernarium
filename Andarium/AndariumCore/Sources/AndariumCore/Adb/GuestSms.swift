@@ -15,6 +15,10 @@ public enum GuestSms {
     /// a surrogate pair: every part but the last takes at least 65 units, so
     /// 670 take at most 11. Message.MAXIMUM_PARTS is the service's own count.
     public static let maximumParts = 11
+    /// The longest name a sender can be, in characters, and the most digits of
+    /// a number (the service's `Message.NAME` and `Message.NUMBER`).
+    public static let maximumNameLength = 11
+    public static let maximumNumberDigits = 20
     /// The authority of the guest's service.
     public static let authority = "android.kernarium.sms"
 

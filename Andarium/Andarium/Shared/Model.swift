@@ -1037,17 +1037,19 @@ final class AppModel {
     /// returns what to say of it under the message box; the preview, with no
     /// guest, says it was delivered.
     func sendSms(sender: String, text: String) async -> SmsSendResult {
-        if let refusal = GuestSms.refusal(sender: sender, text: text) { return .refused(SmsMessages.refusal(refusal)) }
+        if let refusal = GuestSms.refusal(sender: sender, text: text) {
+            return .refused(SmsMessages.refusal(refusal, text: text))
+        }
         guard case .running(.normal) = phase else { return .refused(SmsMessages.notRunning) }
-        guard let driver else { return .delivered(SmsMessages.delivered(parts: 1)) }
+        guard let driver else { return .delivered(SmsMessages.sentToAndroid) }
         let identifier = smsRetries.identifier(sender: sender, text: text)
         let outcome = await driver.sendSms(sender: sender, text: text, identifier: identifier)
         // Only a send that was not confirmed may have reached Android: sent again, it keeps its identifier.
         smsRetries.settle(sender: sender, text: text, identifier: identifier, confirmed: outcome != .notConfirmed)
         return switch outcome {
-        case .handedToAndroid(let parts): .delivered(SmsMessages.delivered(parts: parts))
+        case .handedToAndroid: .delivered(SmsMessages.sentToAndroid)
         case .unsupported: .refused(SmsMessages.unsupported)
-        case .notConfirmed: .refused(SmsMessages.failed)
+        case .notConfirmed: .refused(SmsMessages.notConfirmedAdvice)
         }
     }
 
