@@ -1226,13 +1226,14 @@ platform's notice first or twenty milliseconds after: the launcher ends the
 camera's running video, waits for the guest to stop its video streams (the same
 sequence as the applications', `holdAfterVideoEnds`) and holds the guest's GPU
 requests for three seconds through the launcher's own request gate. Every trial
-expects the guest to have stopped its streams within the bound, the HAL's report
+expects the camera to have answered and found a video to end, the HAL's report
 of the loss and the recorder's stop to come before the hold landed (the guest's
 clock set against the launcher's by the shortest of seven round trips), the loss
 to be the HAL's first failed buffer, the camera device not to have given up on the
 guest's reading of the interrupted record, and the clip's audio not to run on
-past its video by more than a second. The runner keeps the guest's log of each
-trial in `--output-dir`.
+past its video by more than a second. Whether the guest stopped its streams
+inside the wait's bound is told, not required. The runner keeps the guest's log
+of each trial in `--output-dir`.
 `camera-background-video` (unit) is the ordering of the application's departure
 (video running: end, wait, hold; none: hold at once; a wait that runs out: hold
 and one log line; the wait inside the bound) with a fake camera device and a

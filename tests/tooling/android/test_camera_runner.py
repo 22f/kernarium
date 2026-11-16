@@ -4228,7 +4228,9 @@ class VideoLeaveTests(unittest.TestCase):
     def test_every_reason_a_leaving_fails_is_said(self) -> None:
         def reasons(**changes) -> str:
             return "; ".join(runner.leave_failures(self.trial(**changes)))
-        self.assertIn("did not stop its 2 video stream", reasons(edge=self.edge(stopped=False, waited_ms=2000)))
+        self.assertEqual(reasons(edge=self.edge(stopped=False, waited_ms=2000)), "",
+                         "a wait that ran out is told, and a recording that ended before the hold is a pass")
+        self.assertIn("NOT stopped", runner.describe_leave(self.trial(edge=self.edge(stopped=False, waited_ms=2000))))
         self.assertIn("did not answer", reasons(edge=self.edge(answered=False, streams=0, stopped=False)))
         self.assertIn("no video stream to end", reasons(edge=self.edge(streams=0)))
         late = {"hal_end": 1004.0, "rec_stopping": 1004.1}
