@@ -121,6 +121,18 @@ it. The bridge fields used below are defined by the comments in
 
 ## arm64 task interface
 
+- An arm64 task has a `[vdso]` beside the `[sigpage]`, which `AT_SYSINFO_EHDR`
+  names. It is the ELF shared object of native arm64's vDSO (a `LINUX_2.6.39`
+  version node, both hash tables, unwind tables) with the same three entries,
+  `__kernel_clock_gettime`, `__kernel_gettimeofday` and `__kernel_clock_getres`,
+  each a plain system call: the guest has no counter a task could read, so
+  every clock and its resolution come from the kernel, and a C library that
+  reaches `clock_gettime` only through the vDSO (the glibc of a guest
+  application's own root file system) gets valid values. Signal return stays on
+  the `[sigpage]`, so `__kernel_rt_sigreturn` is not exported. An AArch32 task
+  and the x86_64 slice's tasks have no vDSO. `guest-vdso-gadgets` and `-jit`
+  check the object and its entries with no C library, `guest-vdso-libc-gadgets`
+  and `-jit` that glibc calls them, and `android-vdso` that bionic does.
 - A signal handler installed without `SA_RESTORER` returns to a trampoline in
   the read-only `[sigpage]` above `STACK_TOP`, where the host runs
   `rt_sigreturn`, and a frame record lets unwinders cross a signal frame as on

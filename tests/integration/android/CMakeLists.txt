@@ -481,3 +481,23 @@ if(UML_ANDROID_OLDAPP_RELEASE AND TARGET uml-darwin-android17)
         PROCESSORS 4
         RESOURCE_GROUPS cpus:4)
 endif()
+
+# The guest kernel's vDSO (kernel/common/README.md, arm64 task interface) on
+# Android: the probes of guest-vdso-* run as the shell user, and bionic's own
+# clock_gettime, gettimeofday and time are checked to call the vDSO. The probes
+# are built with the host's clang++ and ld.lld (PATH), and the test boots Android
+# with the macOS launcher, so it is opt-in: name the release under test.
+set(UML_ANDROID_VDSO_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-vdso test boots")
+if(UML_ANDROID_VDSO_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-vdso
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_vdso.py
+            --release ${UML_ANDROID_VDSO_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
