@@ -225,8 +225,12 @@ application's statements (the sensor orientation, the rotation that
   the guest's camera HAL to decide (the wire's README has the rule). Every other
   interruption (another application or a call, iPad multitasking, the system's
   pressure, a restart after an error), and a camera with no video stream, only
-  get the dark gap above. A blocked session hears of none. The report line names
-  the camera and says the video ended.
+  get the dark gap above. A platform session opened while the application is
+  away never ran in the foreground, so it reports an ordinary interruption: the
+  guest's camera layer, which reopens its streams after the loss, gets one held
+  session whose frames are dark and interrupted and whose stills fail until the
+  application is back, not a loss for each reopening. A blocked session hears of
+  none. The report line names the camera and says the video ended.
 - **Video mode.** The device tells its owner (`onVideoMode`) whether the guest
   is in video mode: a live camera's video runs, uninterrupted, and the guest
   asks for the picture stabilized, which Android's record template does and its

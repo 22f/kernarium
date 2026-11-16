@@ -1205,7 +1205,10 @@ public:
         if (!core_.options_.authorized) return nullptr;
         auto session = std::make_unique<Session>(core_, delegate);
         // The cause of an interruption outlives a session: one opened while it
-        // lasts is interrupted as it starts, as the host's is.
+        // lasts is interrupted as it starts, as the host's is. A session opened
+        // while the application is away never ran in the foreground, so what it
+        // reports is an ordinary interruption: the departure that ended the video
+        // of an earlier session is not its own.
         CameraEventKind kind {};
         bool interrupted;
         {
@@ -1213,6 +1216,7 @@ public:
             interrupted = core_.interrupted;
             kind = core_.interruptKind;
         }
+        if (kind == CameraEventKind::interruptedInBackground) kind = CameraEventKind::interrupted;
         if (interrupted) session->deliver({allCameras, kind});
         return session;
     }

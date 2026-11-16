@@ -880,7 +880,8 @@ anywhere is a blocker. The candidate must show:
   no sensor privacy reminder for the camera, `android-camera-restart`
   passes for the phone profile, and `android-camera-video-lost` passes on an
   image that carries the HAL topic that handles the host's end of a camera's
-  video; the VTS camera provider test
+  video and the camera application topic that ends a recording on the camera's
+  recoverable error; the VTS camera provider test
   (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy provider; and
   these CTS modules pass sharded, with the failures rerun alone and a result
   that differs from the accepted release's explained:
@@ -1183,17 +1184,37 @@ still of one, with its DNG.
 `android-camera-video-lost` (`--mode video-lost`) tells the synthetic camera,
 through its control pipe (`UML_SYNTHETIC_CAMERA_CONTROL`, test-only), that the
 application left the foreground while the video mode records, and expects the
-recording to end by itself with its clip (which holds encoded video samples)
-saved, the camera application to stay in front, and a recording to work again
+recording to end by itself with its clip saved, the camera application to stay
+in front, and a recording to work again
 once the application is started again after the person returns (that step starts
-the activity again and shows only that the camera can be opened again). Two more
+the activity again and shows only that the camera can be opened again). The clip,
+which the runner pulls once it is a finished movie, holds encoded video samples,
+ends soon after the video before the loss, has the frame rate of a recording and
+no step between two video samples, and its audio holds what its time stamps span
+and ends with its video: CameraX keeps a recording over the reopening of a
+camera, so a clip with a step where the camera was away means the camera
+application did not end it. The checks read the clip's timing and cadence, not
+its pictures (the runner reads the container's tables and decodes no video). The pause and
+resume button is pressed at once after the loss, while the stopped recording is
+not finalized yet; the application's log must show that presses landed in that
+window and were ignored, and the application must not crash. A last case presses
+the start key and ends the camera at once, in a loop: a loss in the half second
+before the recording exists cancels the start, the application's log must show
+that at least once and say what the loss did (a cancelled start or a stopped
+recording) in three of the five attempts, and the recording the next key press
+starts after such an attempt must be an ordinary clip (encoded video, no longer
+than the time between the keys that start and stop it allows), not one that
+went on over the loss. Two more
 cases leave a viewfinder with no recording, the video mode's (which binds an
 encoder surface) and the photo mode's, and expect each live again within 45 s of
 the return (one deadline for the camera, the picture and the frame counters), in
 the same process, with no activity start and no error window; the photo mode's
 viewfinder must not be told the device is gone, and the HAL's log must show that
-it closed and reopened its video streams. The release must carry the HAL topic
-that handles the host's end of a camera's video.
+it closed and reopened its video streams once for the loss. After each loss
+the camera service's log must hold no leaked stream, the line it prints at the
+close of a device whose requests the HAL ended without a request error. The
+release must carry the HAL topic that handles the host's end of a camera's
+video and the camera application topic that ends the recording.
 `android17-camera-runner` (tooling) runs its
 parsers and the expectations of every layout without a guest,
 `android17-camera-layouts` (tooling) the layout set, its fallback order and the
@@ -1203,8 +1224,9 @@ The HAL's result path (the lens shading map and the empty hot pixel map for the
 mode ON) has no check of its own outside the camera CTS modules.
 `android17-camera-device-lost` (tooling) compiles the series' sensor source
 against stub headers and runs its callback path (a request that met the loss
-returns every buffer as an error and tells the framework once, the requests the
-session still holds drain without the frame source); the rest of the series'
+returns every buffer as an error, fails as a request and tells the framework
+the device is gone once besides, the requests the session still holds drain
+without the frame source); the rest of the series'
 wiring it reads as text, which is a structural check.
 `android17-camera-crop-region` (tooling) is a structural check as well: it reads
 what the series does to the request state, and the rule it uses is the unit row
