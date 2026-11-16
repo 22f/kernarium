@@ -122,6 +122,7 @@ struct AppEntry {
         "settings-feedback": "diagnostics",
         "settings-text-message": "developer",
         "settings-accessibility": "accessibility",
+        "settings-accessibility-left": "accessibility",
     ]
 
     /// The page of Info a screen opens on.
@@ -367,7 +368,7 @@ struct AppEntry {
             model.jitOn = true
             model.jitLastStart = .noDebugger
             boot(.normal, stage: 1, seconds: 4)
-        case "session", "session-tip", "session-tip-left", "session-open", "session-keyboard", "session-stats",
+        case "session", "session-closed-left", "session-tip", "session-tip-left", "session-open", "session-keyboard", "session-stats",
              "session-power", "session-setup", "session-off", "session-left", "session-volume",
              "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi",
              "session-camera-notice", "session-camera-off-notice":
@@ -376,7 +377,7 @@ struct AppEntry {
             model.sessionPreset = SessionPreset(
                 volumePanel: screen == "session-volume",
                 powerMenu: screen == "session-power",
-                leftEdge: ["session-left", "session-volume", "session-tip-left"].contains(screen),
+                leftEdge: ["session-left", "session-closed-left", "session-volume", "session-tip-left"].contains(screen),
                 guestScreen: {
                     switch screen {
                     case "session-setup": .setup
@@ -399,7 +400,7 @@ struct AppEntry {
             model.phase = .running(.normal)
             model.previewTextMessage(screen)
         case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
-             "settings-feedback", "settings-text-message", "settings-accessibility", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
+             "settings-feedback", "settings-text-message", "settings-accessibility", "settings-accessibility-left", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
              "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container",
              "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split",
              "install-part-too-large", "install-legacy-hint", "install-legacy-hint-data",
@@ -426,7 +427,8 @@ struct AppEntry {
                 settings: !operation,
                 settingsLarge: Self.settingsScrolls.keys.contains(screen) || screen == "settings",
                 settingsScroll: Self.settingsScrolls[screen],
-                oldAppsPage: screen.hasPrefix("settings-old-apps-")
+                oldAppsPage: screen.hasPrefix("settings-old-apps-"),
+                leftEdge: screen == "settings-accessibility-left"
             )
             model.phase = .running(.normal)
             // The real operation lasts a few seconds, too short for a

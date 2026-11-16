@@ -21,6 +21,12 @@ enum SideKeyFocus: Hashable {
     case closed, power
 }
 
+/// The screen edge the closed side keys are on. The words that tell a person
+/// where to touch to come back to VoiceOver name it (`ScreenReaderWords.wayBack`).
+enum KeysEdge: Equatable {
+    case left, right
+}
+
 /// The side keys on the screen edge: closed they are a pair of slim glass
 /// keys; tapped they swell in place into Power and a volume rocker, with
 /// Settings and a Back and Home pair right beside them as one small group.
@@ -89,6 +95,8 @@ struct SideKeysOverlay: View {
         }
         .ignoresSafeArea(.keyboard)
         .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+        .onAppear { publishEdge() }
+        .onChange(of: leading) { publishEdge() }
         .onChange(of: open) { _, isOpen in
             guard isOpen else { return }
             // VoiceOver goes to the first key once the keys have swollen.
@@ -243,6 +251,12 @@ struct SideKeysOverlay: View {
                 }
                 dragStart = nil
             }
+    }
+
+    /// The session says where the keys are, so the words that send a person back
+    /// to them name the edge they are on.
+    private func publishEdge() {
+        model?.session.keysEdge = leading ? .left : .right
     }
 
     private func setOpen(_ value: Bool) {
@@ -460,6 +474,7 @@ struct KeyRail: View {
     let lit: Bool
     let actions: SideKeyActions
     @State private var keyPresses = 0
+    @Environment(AppModel.self) private var model: AppModel?
 
     var body: some View {
         let recovery = mode == .recovery
@@ -483,6 +498,8 @@ struct KeyRail: View {
         .foregroundStyle(.primary)
         .environment(\.colorScheme, .dark)
         .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+        // The rail is not on an edge: the way back names none.
+        .onAppear { model?.session.keysEdge = nil }
     }
 
     private func pressed(_ action: () -> Void) {

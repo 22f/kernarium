@@ -555,11 +555,16 @@ line from a probe session's Settings.
 (`xcodebuild test -scheme AndariumPreview`): the screens it lists pass the
 accessibility audit for element descriptions and traits once the sheet or card
 they open on is up; the switch for Android's screen reader, last in the
-session's Settings, shows each state it has; and under VoiceOver a card asks
-before the screen reader is turned on, at a first start too. The Simulator has
-no VoiceOver, so these tests drive the interface and read no speech. The hosted
+session's Settings, shows off, on, not in the system image, couldn't check,
+turning on, didn't turn on and the file transfer that holds it; and under
+VoiceOver a card asks before the screen reader is turned on, at a first start
+too, starts with its title, and names the edge the side keys are on, as the
+Settings footer does after the keys are moved. The Simulator has no VoiceOver,
+so these tests drive the interface and read no speech. The hosted
 `TalkBackSwitchTests` run the model against a driver that can delay and fail:
-overlapping reads and changes, a change that outlives its session and the card.
+overlapping reads and changes, a change that outlives its session, the card, the
+display's direct touch, and what VoiceOver is told (once per event, with the way
+back).
 
 The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
 `andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.

@@ -51,8 +51,9 @@ struct LowSpaceOverlay: View {
     }
 
     /// What VoiceOver says as the screen appears: the words the screen shows.
-    static func spoken(_ pause: SpacePause) -> String {
-        "\(SpacePauseWords.title(pause)). \(SpacePauseWords.detail(pause))"
+    /// A test asks for a language by `locale`.
+    static func spoken(_ pause: SpacePause, locale: Locale = .current) -> String {
+        "\(SpacePauseWords.title(pause, locale: locale)). \(SpacePauseWords.detail(pause, locale: locale))"
     }
 
     @ViewBuilder

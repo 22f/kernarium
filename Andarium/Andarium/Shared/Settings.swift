@@ -238,7 +238,7 @@ struct SessionSettingsSheet: View {
         } header: {
             Text(ScreenReaderWords.section)
         } footer: {
-            Text(unavailable ? ScreenReaderWords.footerUnavailable : ScreenReaderWords.footer)
+            Text(unavailable ? ScreenReaderWords.footerUnavailable : ScreenReaderWords.footer(session.keysEdge))
         }
         .id("accessibility")
     }

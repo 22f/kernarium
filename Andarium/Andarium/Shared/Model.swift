@@ -71,6 +71,10 @@ final class SessionState {
     /// The side keys are open. The session owns it because a touch on the
     /// guest's display, which is another view, closes them.
     var sideKeysOpen = false
+    /// The edge the side keys are on, which they report as they appear and
+    /// move; nil where they are not on an edge (the key rail). The words that
+    /// send a person back to the keys name it.
+    var keysEdge: KeysEdge?
     /// Android's screen reader in this session: what Android last said of it,
     /// a change under way and the card that asks about it.
     let reader = ScreenReaderSession()
@@ -642,6 +646,10 @@ final class AppModel {
     var adbWatchInterval = Duration.seconds(2)
     /// Whether VoiceOver is running; a test answers for it.
     @ObservationIgnored var voiceOverRunning: @MainActor () -> Bool = { UIAccessibility.isVoiceOverRunning }
+    /// What VoiceOver is told of its own accord; a test collects it.
+    @ObservationIgnored var announcer: @MainActor (_ text: String, _ queued: Bool) -> Void = {
+        VoiceOver.announce($0, queued: $1)
+    }
     /// The preview's mock guest screen reader, where no runtime is behind the
     /// screens; nil in the application.
     @ObservationIgnored var screenReaderStandIn: (any ScreenReaderStandIn)?

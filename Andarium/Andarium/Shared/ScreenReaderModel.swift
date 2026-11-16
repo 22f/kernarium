@@ -91,8 +91,14 @@ final class ScreenReaderSession {
     var card: Card?
     /// Why the card's last Turn On did not turn it on.
     var cardFailure: String?
-    /// The person chose Not Now: no card again in this session.
+    /// The person answered the card's question with Not Now, or turned the
+    /// screen reader off, in Settings or in Android: no card again in this
+    /// session.
     var declined = false
+    /// VoiceOver has been told that the screen reader is on, and how to come
+    /// back, in this session: by the change that turned it on, or at the first
+    /// read that found it on.
+    var toldOn = false
     /// The card that says the image has none has been shown in this session.
     var toldMissing = false
     /// How many Settings sheets watch the state.
@@ -100,6 +106,8 @@ final class ScreenReaderSession {
     /// The loop that reads while VoiceOver runs.
     @ObservationIgnored var watcher: Task<Void, Never>?
 
+    /// Android has shown the screen reader on in this session.
+    @ObservationIgnored private var hasBeenOn = false
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var started = 0
     @ObservationIgnored private var applied = 0
@@ -128,6 +136,11 @@ final class ScreenReaderSession {
         applied = ticket.order
         state = answer
         readFailed = answer == nil
+        if let answer {
+            noticeTurnedOff(answer)
+            // What the card said about not being able to ask is answered.
+            if failure == nil { cardFailure = nil }
+        }
         if let failure, let answer, answer.isOn == failure.turningOn { self.failure = nil }
         return true
     }
@@ -150,6 +163,18 @@ final class ScreenReaderSession {
         changing = nil
         state = after
         readFailed = false
+        noticeTurnedOff(after)
+    }
+
+    /// A screen reader that was on and is shown off was turned off, by the
+    /// person in Settings or in Android: that answers the card's question as
+    /// Not Now does.
+    private func noticeTurnedOff(_ shown: ScreenReaderState) {
+        if shown.isOn {
+            hasBeenOn = true
+        } else if hasBeenOn {
+            declined = true
+        }
     }
 
     /// The change did not happen. What Android has now is not known until a

@@ -873,7 +873,9 @@ requires reopening Andarium.
   element (`GuestDisplayAccessibility`) whose value is Android's screen reader's
   state and whose activation sends Android no touch; while the screen reader is
   on it is a direct-touch area, so touches reach Android and it speaks instead of
-  VoiceOver ([Android's screen reader](#android-operations)).
+  VoiceOver ([Android's screen reader](#android-operations)). Each option row on
+  Home reads as one element, its control, which carries the row's title as its
+  label (the title is no second stop), followed by the line under it.
 - **Keyboard and mouse.** The guest has a hardware keyboard and a mouse
   (virtio-input devices, plugged and unplugged at run time) while iOS has the
   hardware. Every key goes to Android as its position (the usage on the HID
@@ -1130,8 +1132,13 @@ is on. `AndariumCore/Adb` speaks the protocol.
   and, while VoiceOver runs, every few seconds. While VoiceOver runs and the
   screen reader is off, a card over Android says that VoiceOver cannot read
   Android's screen, that the screen reader can and how to come back (touch the
-  side keys), and asks; nothing turns the screen reader on but the person's own
-  action. The system image carries TalkBack and eSpeak NG
+  side keys, on the edge they are on: the keys report it as they move), and
+  asks; nothing turns the screen reader on but the person's own action, and
+  turning it off, in Settings or in Android, ends the asking for the run.
+  Turning it on says so with the way back, and so does the first read of a run
+  that finds it on already; the display's hint ends with the way back too. The
+  card that says a system has no screen reader shows once per run, not once per
+  virtual machine. The system image carries TalkBack and eSpeak NG
   ([Android README](../android/lineage-24/README.md#accessibility)); a virtual
   machine whose system has none shows the switch as unavailable and the card says
   so.

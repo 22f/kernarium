@@ -1,6 +1,28 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "%@ %@" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@%2$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@%2$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@%2$@"
+          }
+        }
+      }
+    },
     "%@ by %@" : {
       "comment" : "What VoiceOver reads for a resolution, width then height (1206 by 2334). Written as words because VoiceOver reads the sign × as a letter in some languages.",
       "localizations" : {
@@ -2484,24 +2506,24 @@
         }
       }
     },
-    "Android’s screen reader speaks what you touch. While it is on, VoiceOver can’t read Android’s screen, and your touches go to it. To come back to VoiceOver, touch the side keys." : {
+    "Android’s screen reader speaks what you touch on Android’s screen. While it is on, VoiceOver is silent there and your touches go to the screen reader." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Androidのスクリーンリーダーは、タッチしたものを読み上げます。オンの間は、VoiceOverでAndroidの画面を読み上げられず、タッチはスクリーンリーダーに届きます。VoiceOverに戻るには、サイドキーに触れてください。"
+            "value" : "Androidのスクリーンリーダーは、Androidの画面でタッチしたものを読み上げます。オンの間、その画面ではVoiceOverは読み上げず、タッチはスクリーンリーダーに届きます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android的屏幕阅读器会朗读你触摸的内容。开启后，旁白无法读取Android的屏幕，你的触摸会交给它。要回到旁白，请触摸侧边按键。"
+            "value" : "Android的屏幕阅读器会朗读你在Android屏幕上触摸的内容。开启后，旁白在这里不再朗读，你的触摸会交给屏幕阅读器。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android的螢幕閱讀器會朗讀你觸碰的內容。開啟後，旁白無法讀取Android的畫面，你的觸碰會交給它。若要回到旁白，請觸碰側邊按鍵。"
+            "value" : "Android的螢幕閱讀器會朗讀你在Android畫面上觸碰的內容。開啟後，旁白在這裡不再朗讀，你的觸碰會交給螢幕閱讀器。"
           }
         }
       }
@@ -11429,6 +11451,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此系統映像檔中沒有供Android使用的螢幕閱讀器。"
+          }
+        }
+      }
+    },
+    "To come back to VoiceOver, touch the side keys on the left edge." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VoiceOverに戻るには、画面の左端にあるサイドキーに触れてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要回到旁白，请触摸屏幕左侧边缘的侧边按键。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "若要回到旁白，請觸碰螢幕左側邊緣的側邊按鍵。"
+          }
+        }
+      }
+    },
+    "To come back to VoiceOver, touch the side keys on the right edge." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VoiceOverに戻るには、画面の右端にあるサイドキーに触れてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要回到旁白，请触摸屏幕右侧边缘的侧边按键。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "若要回到旁白，請觸碰螢幕右側邊緣的側邊按鍵。"
           }
         }
       }

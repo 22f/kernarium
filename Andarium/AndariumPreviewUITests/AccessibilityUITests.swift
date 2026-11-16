@@ -231,6 +231,76 @@ final class AccessibilityUITests: XCTestCase {
     }
 
     @MainActor
+    func testTheCardStartsWithItsTitleAndEndsWithItsButtons() {
+        let app = launch("session", "-voiceOver", "YES")
+        let card = app.descendants(matching: .any)["screen-reader-card"]
+        XCTAssertTrue(card.waitForExistence(timeout: 20), "no card asks")
+        // VoiceOver lands on a modal's first element and reads on in order.
+        let texts = card.descendants(matching: .any).allElementsBoundByIndex
+            .filter { $0.elementType == .staticText || $0.elementType == .button }
+        XCTAssertEqual(texts.first?.label, "Turn on TalkBack?", "the card does not start with its title")
+        XCTAssertEqual(texts.last?.label, "Turn On")
+    }
+
+    /// The footer under Settings' screen reader row, scrolled to; it is the
+    /// last text of the last section.
+    @MainActor
+    private func footer(in app: XCUIApplication, saying words: String) -> XCUIElement {
+        _ = talkBackSwitch(in: app)
+        let text = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", words)).firstMatch
+        var swipes = 0
+        while !(text.waitForExistence(timeout: 1) && text.isHittable), swipes < 6 {
+            app.swipeUp()
+            swipes += 1
+        }
+        return text
+    }
+
+    @MainActor
+    func testTheCardAndTheFooterNameTheEdgeTheKeysAreOn() {
+        var app = launch("session", "-voiceOver", "YES")
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "side keys on the right edge"))
+            .firstMatch.waitForExistence(timeout: 20), "the card does not name the right edge")
+        app = launch("session-closed-left", "-voiceOver", "YES")
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "side keys on the left edge"))
+            .firstMatch.waitForExistence(timeout: 20), "the card does not name the left edge")
+        app = launch("settings-accessibility")
+        XCTAssertTrue(footer(in: app, saying: "side keys on the right edge").exists, "the footer does not name the right edge")
+        app = launch("settings-accessibility-left")
+        XCTAssertTrue(footer(in: app, saying: "side keys on the left edge").exists, "the footer does not name the left edge")
+    }
+
+    /// The keys are dragged across, as a person moves them; the way back
+    /// follows them to the other edge.
+    @MainActor
+    func testMovingTheKeysMovesTheWayBack() {
+        let app = launch("session")
+        let keys = app.descendants(matching: .any)["side-keys"]
+        XCTAssertTrue(keys.waitForExistence(timeout: 90), "the session did not start")
+        let landed = expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: keys)
+        wait(for: [landed], timeout: 10)
+        keys.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(
+            forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.4)))
+        openSettings(in: app)
+        XCTAssertTrue(footer(in: app, saying: "side keys on the left edge").exists, "the way back did not follow the keys")
+    }
+
+    /// Turning the screen reader off is the person's answer: the card that asks
+    /// does not come back when Settings closes.
+    @MainActor
+    func testTurningTheScreenReaderOffInSettingsDoesNotBringTheCardBack() {
+        let app = launch("session", "-voiceOver", "YES", "-talkBack", "on")
+        openSettings(in: app)
+        let toggle = talkBackSwitch(in: app)
+        expect(toggle, value: "1")
+        flip(toggle)
+        expect(toggle, value: "0")
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["side-keys"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["screen-reader-card-turn-on"].waitForExistence(timeout: 5), "the card asked again")
+    }
+
+    @MainActor
     func testASystemWithoutAScreenReaderIsToldSoOnTheCard() {
         let app = launch("session", "-voiceOver", "YES", "-talkBack", "missing")
         let ok = app.buttons["screen-reader-card-ok"]

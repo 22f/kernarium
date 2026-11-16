@@ -8,13 +8,20 @@ import Testing
 /// What VoiceOver says as a screen appears is the text the screen shows.
 @MainActor
 struct SpokenTextTests {
-    @Test func theLowSpaceScreenSpeaksTheWordsItShows() {
-        // The words are `SpacePauseWords`', which a language translates; the
-        // runtime's English `title` and `detail` are not what the screen shows.
-        // In English the two read alike, so this fixes where the text comes from.
+    /// The words are `SpacePauseWords`', which a language translates; the
+    /// runtime's English `title` and `detail` are not what the screen shows. In
+    /// English the two read alike, so the other languages are where a speech
+    /// that took the runtime's text would differ.
+    @Test(arguments: ["en", "ja", "zh-Hans", "zh-Hant"])
+    func theLowSpaceScreenSpeaksTheWordsItShows(language: String) {
+        let locale = Locale(identifier: language)
         for stage in [SpacePause.Stage.pausing, .paused, .notPaused] {
             let pause = SpacePause(freeBytes: 820 * Limits.bytesPerMiB, stage: stage)
-            #expect(LowSpaceOverlay.spoken(pause) == "\(SpacePauseWords.title(pause)). \(SpacePauseWords.detail(pause))")
+            let shown = "\(SpacePauseWords.title(pause, locale: locale)). \(SpacePauseWords.detail(pause, locale: locale))"
+            #expect(LowSpaceOverlay.spoken(pause, locale: locale) == shown, "\(language) \(stage)")
+            if language != "en" {
+                #expect(shown != "\(pause.title). \(pause.detail)", "\(language) \(stage) is still English")
+            }
         }
     }
 

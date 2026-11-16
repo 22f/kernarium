@@ -42,10 +42,12 @@ struct ScreenReaderCard: View {
             .accessibilityAddTraits(.isHeader)
     }
 
+    /// The card's text is primary: it is read over a screen the person cannot
+    /// choose, which secondary text on the glass does not hold against.
     private func body(_ text: String) -> some View {
         Text(text.keepingTogether)
             .font(.subheadline)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.primary)
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -54,29 +56,54 @@ struct ScreenReaderCard: View {
         title(ScreenReaderWords.askTitle)
         body(ScreenReaderWords.cantRead)
         body(ScreenReaderWords.canRead)
-        body(ScreenReaderWords.wayBack)
+        body(ScreenReaderWords.wayBack(model.session.keysEdge))
         if let reason = reader.cardFailure {
-            Text(reason.keepingTogether)
-                .font(.subheadline)
-                .foregroundStyle(.red)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("screen-reader-card-failure")
+            // The reason in primary text, with the warning symbol beside it:
+            // red text on the glass does not hold its contrast.
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .accessibilityHidden(true)
+                Text(reason.keepingTogether)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("screen-reader-card-failure")
+            }
+            .font(.subheadline)
         }
         HStack(spacing: 10) {
             Spacer()
             Button(ScreenReaderWords.notNow) { model.declineScreenReaderCard() }
                 .buttonStyle(.bordered)
+                .tint(.primary)
                 .disabled(reader.changing != nil)
                 .accessibilityIdentifier("screen-reader-card-not-now")
-            Button {
-                model.turnOnScreenReaderFromCard()
-            } label: {
-                Text(reader.changing == true ? ScreenReaderWords.turningOn
-                    : reader.cardFailure != nil ? ScreenReaderWords.tryAgain : ScreenReaderWords.turnOn)
+            turnOn(reader)
+        }
+    }
+
+    /// Turn On, Try Again after a failure, and "Turning on…" while the change
+    /// runs. The button is not disabled for that: a disabled button dims its
+    /// label out of reach of the contrast, and a press while it runs does
+    /// nothing (`AppModel.setScreenReader`).
+    @ViewBuilder
+    private func turnOn(_ reader: ScreenReaderSession) -> some View {
+        let button = Button {
+            model.turnOnScreenReaderFromCard()
+        } label: {
+            if reader.changing == true {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text(ScreenReaderWords.turningOn)
+                }
+            } else {
+                Text(reader.cardFailure != nil ? ScreenReaderWords.tryAgain : ScreenReaderWords.turnOn)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(reader.changing != nil)
-            .accessibilityIdentifier("screen-reader-card-turn-on")
+        }
+        if reader.changing == true {
+            button.buttonStyle(.bordered).tint(.primary).accessibilityIdentifier("screen-reader-card-turn-on")
+        } else {
+            button.buttonStyle(.borderedProminent).accessibilityIdentifier("screen-reader-card-turn-on")
         }
     }
 

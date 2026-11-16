@@ -38,6 +38,23 @@ struct TalkBackSwitchTests {
         return (model, driver)
     }
 
+    /// What VoiceOver is told of the model's own accord.
+    private final class Said {
+        var lines: [String] = []
+        var queued: [Bool] = []
+    }
+
+    /// Listens to what the model tells VoiceOver. Call it before anything awaits:
+    /// the first read of a start comes as soon as the test suspends.
+    private func listen(to model: AppModel) -> Said {
+        let said = Said()
+        model.announcer = { text, queued in
+            said.lines.append(text)
+            said.queued.append(queued)
+        }
+        return said
+    }
+
     private func reading(_ services: [String], installed: String? = nil) -> ScreenReaderState {
         ScreenReaderState(installedService: installed ?? talkBack, enabledServices: services)
     }
@@ -169,16 +186,34 @@ struct TalkBackSwitchTests {
         #expect(model.session.reader.isOn)
     }
 
-    @Test func aReadThatAnsweredWhileAChangeWasUnderWayNeverOverwritesIt() async throws {
+    /// A read that began while a change ran saw Android half way: it never
+    /// applies, whatever it answers.
+    @Test func aReadThatBeganDuringAChangeNeverApplies() {
+        let reader = ScreenReaderSession()
+        let before = reading([])
+        #expect(reader.apply(read: before, reader.beginRead()))
+        #expect(reader.beginChange(turningOn: true))
+        let during = reader.beginRead()
+        #expect(!reader.apply(read: nil, during))
+        #expect(!reader.apply(read: reading([talkBack]), during))
+        #expect(reader.state == before)
+        #expect(!reader.readFailed)
+        reader.finishChange(reading([talkBack]))
+        #expect(reader.isOn)
+    }
+
+    /// While a change runs the model does not ask Android at all: a read would
+    /// wait behind it on the same channel.
+    @Test func nothingIsReadWhileAChangeRuns() async throws {
         let (model, driver) = started()
         _ = await read(model)
-        driver.screenReaderReadDelays = [.zero, .milliseconds(100)]
-        driver.screenReaderChangeDelay = .milliseconds(400)
-        let early = Task { await model.refreshScreenReader() }
-        try await settle { driver.screenReaderReads == 2 }
+        driver.screenReaderChangeDelay = .milliseconds(300)
+        let reads = driver.screenReaderReads
         model.setScreenReader(true)
-        await early.value
-        // Answered and dropped while the change ran: nothing shown is stale.
+        try await settle { driver.screenReaderChanges.count == 1 }
+        await model.refreshScreenReader()
+        await model.refreshScreenReader()
+        #expect(driver.screenReaderReads == reads, "a read began while the change ran")
         #expect(model.screenReaderRow == .switching(turningOn: true))
         try await settle { model.session.reader.changing == nil }
         #expect(model.screenReaderRow == .on)
@@ -196,19 +231,6 @@ struct TalkBackSwitchTests {
         #expect(model.screenReaderRow == .on)
         await older.value
         #expect(model.screenReaderRow == .on)
-    }
-
-    @Test func aChangeKeepsAServiceTurnedOnInAndroidSinceTheLastRead() async throws {
-        let (model, driver) = started()
-        _ = await read(model)
-        // Android's own settings turned another service on since the read.
-        driver.screenReaderState = reading([other])
-        model.setScreenReader(true)
-        try await settle { model.session.reader.changing == nil && model.session.reader.isOn }
-        #expect(driver.screenReaderState?.enabledServices == [other, talkBack])
-        model.setScreenReader(false)
-        try await settle { model.session.reader.changing == nil && !model.session.reader.isOn }
-        #expect(driver.screenReaderState?.enabledServices == [other])
     }
 
     // MARK: A session's own
@@ -275,7 +297,48 @@ struct TalkBackSwitchTests {
         driver.screenReaderState = reading([talkBack])
         try await settle { model.session.reader.isOn }
         #expect(model.session.reader.isOn)
-        #expect(ScreenReaderWords.displayHint(model.session.reader) == ScreenReaderWords.displayHintDirect)
+        #expect(ScreenReaderWords.displayHint(model.session.reader, edge: nil)
+            == ScreenReaderWords.sentences(ScreenReaderWords.displayHintDirect, ScreenReaderWords.wayBack(nil)))
+    }
+
+    /// The display is a direct-touch area exactly while Android's screen reader
+    /// is on, so VoiceOver speaks and touches reach Android only then; a read
+    /// that gets no answer leaves VoiceOver in charge.
+    @Test func theDisplaysDirectTouchFollowsTheState() async throws {
+        let (model, driver) = started(voiceOver: true, interval: .milliseconds(20))
+        try await settle { model.session.reader.state != nil }
+        #expect(GuestLayer.accessibility(of: model)?.directTouch == false)
+        driver.screenReaderState = reading([talkBack])
+        try await settle { model.session.reader.isOn }
+        let on = GuestLayer.accessibility(of: model)
+        #expect(on?.directTouch == true)
+        #expect(on?.value == ScreenReaderWords.displayValue(model.session.reader))
+        driver.screenReaderState = nil
+        try await settle { model.session.reader.readFailed }
+        #expect(GuestLayer.accessibility(of: model)?.directTouch == false)
+        driver.screenReaderState = reading([other])
+        try await settle { model.session.reader.state != nil }
+        #expect(GuestLayer.accessibility(of: model)?.directTouch == false)
+        // The display is described only while the session shows it.
+        model.phase = .home
+        #expect(GuestLayer.accessibility(of: model) == nil)
+    }
+
+    /// The hint VoiceOver reads on the direct-touch display ends with the way
+    /// back, naming the edge the side keys are on.
+    @Test func theHintOnTheDirectTouchDisplayEndsWithTheWayBack() async throws {
+        let (model, _) = started(guestState: reading([talkBack]))
+        model.session.keysEdge = .right
+        _ = await read(model)
+        let right = try #require(GuestLayer.accessibility(of: model)?.hint)
+        #expect(right.hasSuffix(ScreenReaderWords.wayBack(.right)))
+        #expect(right.hasPrefix(ScreenReaderWords.displayHintDirect))
+        model.session.keysEdge = .left
+        let left = try #require(GuestLayer.accessibility(of: model)?.hint)
+        #expect(left.hasSuffix(ScreenReaderWords.wayBack(.left)))
+        #expect(left != right)
+        model.session.keysEdge = nil
+        #expect(GuestLayer.accessibility(of: model)?.hint?.hasSuffix(ScreenReaderWords.wayBack(nil)) == true)
     }
 
     // MARK: Nothing turns on by itself
@@ -380,26 +443,178 @@ struct TalkBackSwitchTests {
         try await settle { model.session.reader.card == .ask }
     }
 
+    // MARK: The way back
+
+    @Test func theWayBackNamesTheEdgeTheKeysAreOn() {
+        let right = ScreenReaderWords.wayBack(.right)
+        let left = ScreenReaderWords.wayBack(.left)
+        let none = ScreenReaderWords.wayBack(nil)
+        #expect(Set([right, left, none]).count == 3)
+        #expect(right.contains("right") && left.contains("left") && !none.contains("edge"))
+        // The footer says it too, and follows the edge as the keys move.
+        #expect(ScreenReaderWords.footer(.right).hasSuffix(right))
+        #expect(ScreenReaderWords.footer(.left).hasSuffix(left))
+        #expect(ScreenReaderWords.announcement(on: true, edge: .left).hasSuffix(left))
+        #expect(ScreenReaderWords.announcement(on: false, edge: .left) == ScreenReaderWords.announcement(on: false, edge: .right))
+    }
+
+    // MARK: What VoiceOver is told
+
+    @Test func turningItOnSaysSoOnceWithTheWayBackAndTurningItOffSaysSoOnce() async throws {
+        let (model, _) = started(voiceOver: true)
+        let said = listen(to: model)
+        model.session.keysEdge = .right
+        try await settle { model.session.reader.card == .ask }
+        model.turnOnScreenReaderFromCard()
+        try await settle { model.session.reader.isOn }
+        #expect(said.lines == [ScreenReaderWords.announcement(on: true, edge: .right)])
+        #expect(said.lines.first?.hasSuffix(ScreenReaderWords.wayBack(.right)) == true)
+        // The loop reads on and finds it on: nothing more is said.
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(said.lines.count == 1)
+        model.setScreenReader(false)
+        try await settle { !model.session.reader.isOn && model.session.reader.changing == nil }
+        #expect(said.lines == [ScreenReaderWords.announcement(on: true, edge: .right), ScreenReaderWords.announcement(on: false, edge: .right)])
+    }
+
+    @Test func aChangeThatFailsSaysSoOnce() async throws {
+        let (model, driver) = started(voiceOver: true)
+        let said = listen(to: model)
+        try await settle { model.session.reader.card == .ask }
+        let reason = "The virtual machine couldn\u{2019}t change Android\u{2019}s screen reader."
+        driver.screenReaderError = AdbFailure(message: reason)
+        model.turnOnScreenReaderFromCard()
+        try await settle { model.session.reader.cardFailure != nil }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(said.lines == [ScreenReaderWords.changeFailure(turningOn: true, reason: reason)])
+    }
+
+    @Test func theCardsTurnOnNeverDoesNothingSilently() async throws {
+        let (model, driver) = started(voiceOver: true)
+        let said = listen(to: model)
+        try await settle { model.session.reader.card == .ask }
+        // A transfer holds the channel: the card says so in Settings' words.
+        model.busy = BusyState(title: "Working", detail: "Detail", progress: 0)
+        model.turnOnScreenReaderFromCard()
+        #expect(model.session.reader.cardFailure == ScreenReaderWords.waitsForTransfer)
+        #expect(said.lines == [ScreenReaderWords.changeFailure(turningOn: true, reason: ScreenReaderWords.waitsForTransfer)])
+        model.busy = nil
+        // The last read got no answer: it says so and reads again.
+        driver.screenReaderState = nil
+        await model.refreshScreenReader()
+        #expect(model.session.reader.state == nil)
+        let reads = driver.screenReaderReads
+        said.lines.removeAll()
+        driver.screenReaderState = reading([])
+        model.turnOnScreenReaderFromCard()
+        #expect(model.session.reader.cardFailure == ScreenReaderWords.couldntCheck)
+        #expect(said.lines == [ScreenReaderWords.changeFailure(turningOn: true, reason: ScreenReaderWords.couldntCheck)])
+        try await settle { driver.screenReaderReads > reads }
+        #expect(driver.screenReaderChanges.isEmpty)
+        // The read answered: the note goes, and the next press turns it on.
+        try await settle { model.session.reader.state != nil }
+        #expect(model.session.reader.cardFailure == nil)
+        model.turnOnScreenReaderFromCard()
+        try await settle { model.session.reader.isOn }
+        #expect(driver.screenReaderChanges == [.init(on: true, service: talkBack)])
+    }
+
+    // MARK: A start where the screen reader is on already
+
+    @Test func aStartWhereTheScreenReaderIsOnTellsVoiceOverOnceWithTheWayBack() async throws {
+        let (model, _) = started(voiceOver: true, guestState: reading([talkBack]), interval: .milliseconds(20))
+        let said = listen(to: model)
+        model.session.keysEdge = .right
+        try await settle { !said.lines.isEmpty }
+        // Reads go on every few milliseconds; Settings opens and closes.
+        try await Task.sleep(for: .milliseconds(150))
+        let reader = model.settingsOpened()
+        try await Task.sleep(for: .milliseconds(60))
+        model.settingsClosed(reader)
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(said.lines == [ScreenReaderWords.announcement(on: true, edge: .right)])
+        // After the run sentence, not over it; and no card asks.
+        #expect(said.queued == [true])
+        #expect(model.session.reader.card == nil)
+    }
+
+    @Test func aStartWhereTheScreenReaderIsOffTellsVoiceOverNothing() async throws {
+        let (model, _) = started(voiceOver: true, interval: .milliseconds(20))
+        let said = listen(to: model)
+        try await settle { model.session.reader.card == .ask }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(said.lines.isEmpty)
+    }
+
+    @Test func withoutVoiceOverNothingIsSaid() async throws {
+        let (model, _) = started(voiceOver: false, guestState: reading([talkBack]))
+        let said = listen(to: model)
+        _ = await read(model)
+        #expect(model.session.reader.isOn)
+        #expect(said.lines.isEmpty)
+    }
+
+    @Test func theSentenceAtStartNamesTheEdgeTheKeysAreOn() async throws {
+        let (model, _) = started(voiceOver: true, guestState: reading([talkBack]), interval: .milliseconds(20))
+        let said = listen(to: model)
+        model.session.keysEdge = .left
+        try await settle { !said.lines.isEmpty }
+        let line = try #require(said.lines.first, "nothing was said")
+        #expect(line == ScreenReaderWords.announcement(on: true, edge: .left))
+        #expect(line.hasSuffix(ScreenReaderWords.wayBack(.left)))
+    }
+
+    // MARK: Turning it off is an answer
+
+    @Test func turningItOffInSettingsKeepsTheCardAwayForTheSession() async throws {
+        let (model, driver) = started(voiceOver: true, guestState: reading([talkBack]), interval: .milliseconds(20))
+        try await settle { model.session.reader.isOn }
+        let reader = model.settingsOpened()
+        model.setScreenReader(false)
+        try await settle { model.session.reader.changing == nil && !model.session.reader.isOn }
+        model.settingsClosed(reader)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(model.session.reader.card == nil)
+        #expect(driver.screenReaderChanges.map(\.on) == [false])
+    }
+
+    @Test func turningItOffInAndroidKeepsTheCardAwayForTheSession() async throws {
+        let (model, driver) = started(voiceOver: true, guestState: reading([talkBack]), interval: .milliseconds(20))
+        try await settle { model.session.reader.isOn }
+        driver.screenReaderState = reading([])
+        try await settle { model.session.reader.state != nil && !model.session.reader.isOn }
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(model.session.reader.card == nil)
+        // A session that never had it on asks, as before; and so does the next.
+        model.powerOff()
+        #expect(!model.session.reader.declined)
+    }
+
     // MARK: The words
 
     @Test func theDisplaySaysWhatItHasAndOffersNoHintWhereThereIsNoScreenReader() async throws {
         let (model, driver) = started()
         let reader = model.session.reader
         #expect(ScreenReaderWords.displayValue(reader) == String(localized: "Checking Android\u{2019}s screen reader\u{2026}"))
-        #expect(ScreenReaderWords.displayHint(reader) == nil)
+        #expect(ScreenReaderWords.displayHint(reader, edge: .right) == nil)
         _ = await read(model)
-        #expect(ScreenReaderWords.displayHint(reader) == ScreenReaderWords.displayHintOff)
+        #expect(ScreenReaderWords.displayHint(reader, edge: .right) == ScreenReaderWords.displayHintOff)
         driver.screenReaderState = ScreenReaderState(installedService: nil, enabledServices: [])
         _ = await read(model)
-        #expect(ScreenReaderWords.displayHint(reader) == nil)
+        #expect(ScreenReaderWords.displayHint(reader, edge: .right) == nil)
         #expect(ScreenReaderWords.displayValue(reader) == String(localized: "No screen reader for Android in this system image"))
     }
 
     @Test func theWordsKeepTalkBackToTheTitle() {
-        let explanations = [
-            ScreenReaderWords.footer, ScreenReaderWords.cantRead, ScreenReaderWords.canRead, ScreenReaderWords.wayBack,
+        let edges: [KeysEdge?] = [.right, .left, nil]
+        let explanations = edges.flatMap { edge in
+            [
+                ScreenReaderWords.footer(edge), ScreenReaderWords.wayBack(edge),
+                ScreenReaderWords.announcement(on: true, edge: edge), ScreenReaderWords.announcement(on: false, edge: edge),
+            ]
+        } + [
+            ScreenReaderWords.cantRead, ScreenReaderWords.canRead,
             ScreenReaderWords.noReader, ScreenReaderWords.displayHintDirect, ScreenReaderWords.displayHintOff,
-            ScreenReaderWords.announcement(on: true), ScreenReaderWords.announcement(on: false),
             ScreenReaderWords.changeFailure(turningOn: true, reason: ""), ScreenReaderWords.notReady,
         ]
         for text in explanations {

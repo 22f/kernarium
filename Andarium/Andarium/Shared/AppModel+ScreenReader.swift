@@ -136,7 +136,13 @@ extension AppModel {
                     return
                 }
                 reader.finishChange(after)
-                VoiceOver.announce(ScreenReaderWords.announcement(on: on))
+                if on {
+                    // The way back is said with the news, once.
+                    reader.toldOn = true
+                    announce(ScreenReaderWords.announcement(on: true, edge: session.keysEdge))
+                } else {
+                    announce(ScreenReaderWords.announcement(on: false, edge: session.keysEdge))
+                }
                 evaluateScreenReaderCard()
             } catch {
                 guard session === current else { return }
@@ -148,7 +154,7 @@ extension AppModel {
 
     private func failScreenReader(_ reader: ScreenReaderSession, turningOn on: Bool, reason: String) {
         reader.failChange(turningOn: on, reason: reason)
-        VoiceOver.announce(ScreenReaderWords.changeFailure(turningOn: on, reason: reason))
+        announce(ScreenReaderWords.changeFailure(turningOn: on, reason: reason))
     }
 
     /// Opens Android's Accessibility page; Settings closes for it.
@@ -181,6 +187,12 @@ extension AppModel {
             if canShow, !reader.toldMissing { present(.unavailable, in: reader) }
         } else if state.isOn {
             if reader.card == .ask { reader.card = nil }
+            // A start where Android's screen reader was on already: VoiceOver
+            // is told, once, with the way back (no card; nothing to ask).
+            if !reader.toldOn, reader.changing == nil {
+                reader.toldOn = true
+                announce(ScreenReaderWords.announcement(on: true, edge: session.keysEdge), queued: true)
+            }
         } else if canShow, !reader.declined, reader.changing == nil {
             present(.ask, in: reader)
         }
@@ -195,9 +207,31 @@ extension AppModel {
     }
 
     /// Turn On on the card; the card goes when the screen reader is on, and
-    /// stays, with the reason, when it did not turn on.
+    /// stays, with the reason, when it did not turn on. When nothing can be
+    /// asked of Android just now it says why in Settings' words, and reads
+    /// again.
     func turnOnScreenReaderFromCard() {
-        setScreenReader(true)
+        let reader = session.reader
+        let reason: String?
+        if screenReaderChannelBusy {
+            reason = ScreenReaderWords.waitsForTransfer
+        } else if reader.state == nil, reader.changing == nil {
+            reason = ScreenReaderWords.couldntCheck
+        } else {
+            reason = nil
+        }
+        guard let reason else {
+            setScreenReader(true)
+            return
+        }
+        reader.cardFailure = reason
+        announce(ScreenReaderWords.changeFailure(turningOn: true, reason: reason))
+        if reader.state == nil { Task { await refreshScreenReader() } }
+    }
+
+    /// What VoiceOver is told of its own accord (`announcer` is a test's).
+    func announce(_ text: String, queued: Bool = false) {
+        announcer(text, queued)
     }
 
     /// Not Now on the card: no card again in this session.
