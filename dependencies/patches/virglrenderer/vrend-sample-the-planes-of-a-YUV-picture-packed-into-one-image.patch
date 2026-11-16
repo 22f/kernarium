@@ -341,7 +341,7 @@ index 91e24352f6d569f84c92ebe11e87de187f3731a3..67939c7dd35b8410ec418045e248e56b
 +
  #endif
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index 2a5d63894125f65a1c273e82f2932ae33f5a5220..5d2f0d655a112555897d6ef9f2ad82e7010a232d 100644
+index f33007e2fa3a416857880e3285f659747c8523d6..257f1986718c13bd46bfe08fef0b6fd848d83bb0 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -923,6 +923,14 @@ static void vrend_apply_sampler_state(struct vrend_sub_context *sub_ctx,
@@ -1018,7 +1018,7 @@ index 2a5d63894125f65a1c273e82f2932ae33f5a5220..5d2f0d655a112555897d6ef9f2ad82e7
      * segment before every GL read, because another context may have written
      * the segment since (see vrend_resource_sync_shm_import()); a presenter
 diff --git a/src/vrend/vrend_renderer.h b/src/vrend/vrend_renderer.h
-index e8cc02e843c9f056e09d3dadaba1d7f4131d4d1a..5589b218a457645d6d341f879ae49f393bd9aabd 100644
+index cd27d56c03c303d0446b0ddde7f0d9e41ce3fab7..73c0b43737f92501aa7090f7b6805addbc5bf12a 100644
 --- a/src/vrend/vrend_renderer.h
 +++ b/src/vrend/vrend_renderer.h
 @@ -151,6 +151,32 @@ struct vrend_resource {
