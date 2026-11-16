@@ -579,9 +579,10 @@ StateAccounting::~StateAccounting()
 	 * reserved gives its id back. */
 	if (walked)
 		return;
-	if (used)
+	const bool reserved = used.load(std::memory_order_relaxed);
+	if (reserved)
 		FrameAccounting::note_nonempty_state_destruction();
-	domain->release(alias, used);
+	domain->release(alias, reserved);
 }
 
 std::uint64_t FrameAccounting::flush_serial(const GenerationState &state) noexcept
@@ -605,7 +606,7 @@ FrameAccounting::HoldReport FrameAccounting::hold(GenerationState &state,
 		report.result = HoldResult::refused;
 		return report;
 	}
-	accounting.used = true;
+	accounting.used.store(true, std::memory_order_relaxed);
 	const auto word = state.fill_index.lookup(page);
 	const auto frame = frame_of_word(state, page, word);
 	if (frame.backing == nullptr || !frame.translatable) {
@@ -1256,7 +1257,7 @@ void WriterReservation::add(GenerationState &state, MappedBacking &backing,
 	 * fails the primitive like any other the primitive cannot complete. */
 	if (accounting.walked)
 		throw std::bad_alloc{};
-	accounting.used = true;
+	accounting.used.store(true, std::memory_order_relaxed);
 	UML_MEMORY_ALLOCATION_CHECKPOINT(testing::AllocationSite::writers);
 	/* The room for the entry is had before the location is added, so that
 	 * recording it cannot fail. The entries live in the thread's scratch

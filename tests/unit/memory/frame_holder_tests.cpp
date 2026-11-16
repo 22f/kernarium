@@ -1059,6 +1059,40 @@ void test_kernel_write_frames()
 	baseline.clean("K1 K2");
 }
 
+/* M16: two vCPUs of one generation register frames at once. Registrations
+ * hold the generation's mapping lock shared, so everything they write in the
+ * state is atomic or under a stripe lock: the thread sanitizer says whether it
+ * is. */
+void test_concurrent_registrations_of_one_state()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0x800'0000;
+	ScratchBacking backing{"uml-frame-concurrent-XXXXXX", 8 * page};
+	Domain domain{73'008};
+	domain.run([&] {
+		for (unsigned long frame = 1; frame <= 4; ++frame)
+			require(map(960, base + frame * page, backing, frame, 1, rx) == 0);
+		std::array<std::thread, 4> threads;
+		std::atomic_bool go{};
+		for (unsigned long index = 0; index < threads.size(); ++index)
+			threads[index] = std::thread{[&, index] {
+				while (!go.load(std::memory_order_acquire))
+					std::this_thread::yield();
+				for (unsigned round = 0; round < 200; ++round)
+					require(hold_frame(960, base + (index + 1) * page).result ==
+						DARWIN_UML_STATIC_FRAME_SETTLED);
+			}};
+		go.store(true, std::memory_order_release);
+		for (auto &thread : threads)
+			thread.join();
+		const auto kept = uml::memory::testing::mapped_backing(backing.descriptor());
+		for (unsigned long frame = 1; frame <= 4; ++frame)
+			require(holders_of(kept, frame).size() == 1);
+	});
+	domain.retire();
+	baseline.clean("M16");
+}
+
 } // namespace
 
 int main()
@@ -1073,6 +1107,7 @@ int main()
 	test_kernel_write_frames();
 	test_unknown_frame();
 	test_a_debt_larger_than_the_buffer();
+	test_concurrent_registrations_of_one_state();
 	test_flush_serial();
 	test_registration_allocation_failures();
 	test_reservation_and_registration_race();

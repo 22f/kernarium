@@ -361,8 +361,9 @@ struct StateAccounting final {
 	 * included, comes from one process-wide 64-bit source, so no two states
 	 * and no two moments of one state share one. */
 	std::atomic_uint64_t flush_serial{0};
-	/* A location may name the id: the state has reserved one. */
-	bool used{};
+	/* A location may name the id: the state has reserved one. Registrations
+	 * set it under the mapping lock held shared, so two may at once. */
+	std::atomic_bool used{false};
 	WriterReservation reservation;
 
 	/* Throws std::bad_alloc, with nothing taken, when no id can be had. */
