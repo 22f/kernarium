@@ -571,7 +571,9 @@ PRODUCT_PACKAGES += kernarium_oldapp
 # A Vulkan hardware-buffer import check: it fills gralloc buffers of several
 # formats and widths through the CPU, imports each into Vulkan and reads it
 # back, so a row pitch the driver cannot import or the renderer misreads fails
-# the run.
+# the run. It also shares host-visible memory as a file descriptor (the opaque-fd
+# and dma-buf handle types) and maps, reads and imports it, so a driver that does
+# not offer the fd extensions beside the hardware buffer ones fails the run.
 PRODUCT_PACKAGES += kernarium_vk_ahb_import
 PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += system/bin/kernarium_vk_ahb_import
 
