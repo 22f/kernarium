@@ -241,7 +241,7 @@ public final class ChannelTest {
         for (String name : new String[] {"reject-magic", "reject-version", "reject-version-0", "reject-request-length-0",
             "reject-request-length-8193"}) {
             final Handling handling = new Handling();
-            final Script conn = new Script(new ArrayList<>()).sends(Golden.bytes(golden.fields(name)[0]), new byte[5]);
+            final Script conn = new Script(new ArrayList<>()).sends(Golden.bytes(golden.fields(name)[0]));
             serve(handling, new ArrayList<>(), conn);
             check(handling.payloads.isEmpty(), name + ": no dispatch");
             check(Arrays.equals(zero, conn.written.toByteArray()), name + ": the zero-length answer");

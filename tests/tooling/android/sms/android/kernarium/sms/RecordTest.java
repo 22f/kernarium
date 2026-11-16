@@ -345,7 +345,8 @@ public final class RecordTest {
                 final String answer = Rig.answer(rig.record(files, RecordStore.CAPACITY), retry, X, "Bank", "hello");
                 same(retry ? unsettled(X) : notHanded(X, "store"), answer, names[i] + ": the request fails closed");
                 same(0, rig.stepRuns.get(), names[i] + ": no step");
-                check(Arrays.equals(bad[i], Files.readAllBytes(rig.dir.resolve(RecordStore.CORRUPT))),
+                check(Files.exists(rig.dir.resolve(RecordStore.CORRUPT))
+                        && Arrays.equals(bad[i], Files.readAllBytes(rig.dir.resolve(RecordStore.CORRUPT))),
                         names[i] + ": the old bytes are in .corrupt");
                 check(rig.recordBytes() == null, names[i] + ": the record is gone");
                 final List<String> seen = files.ops;
