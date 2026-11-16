@@ -43,10 +43,13 @@ VIEW_MODEL_CODE = (
     ("recording.stop()", 1),
     ("isVideoRecordingEnding(", 3),  # the definition, the pause and resume button, the microphone toggle
     ("endingVideoRecording.compareAndSet(recordingId, 0L)", 1),  # the Finalize clears the mark of its own recording
+    ("videoRecording.compareAndSet(", 2),  # the Finalize retires its own handle, and a Finalize before the handle is stored does
     ("else -> Log.w(", 1),  # the button pressed with no recording to pause or resume is logged, it does not throw
 )
 FINALIZE_CLEAR = "endingVideoRecording.compareAndSet(recordingId, 0L)"
-FINALIZE_RESET = ("cameraState.value = CameraState.IDLE", "videoRecording.value = null")
+FINALIZE_RETIRE = "videoRecording.compareAndSet(started.get(), null)"
+FINALIZE_IDLE = "cameraState.value = CameraState.IDLE"
+FINALIZE_DROP = "videoRecording.value = null"
 
 
 def fail(message: str) -> None:
@@ -155,21 +158,23 @@ def view_model_code(patches: str) -> list[str]:
     return added
 
 
-def clears_after_the_reset(patches: str) -> bool:
-    """The Finalize handler clears the ending mark after it has reset the state and dropped the recording: a press handled before
-    that still finds the closed recording and throws on it. In the hunk that adds the clear, the state reset and the drop come
-    before it, in that order."""
+def finalize_order(patches: str) -> bool:
+    """The Finalize handler ends a recording's hold on the view model in this order: it retires the handle of its OWN recording
+    (compare-and-set against the handle it started, never a plain write that a later recording's handle could lose to), then
+    publishes idle, which lets the next recording start and store its handle, then clears the ending mark. In the hunk that adds
+    the clear the three come in that order, and no plain write of null is left."""
     for hunk in file_diffs(patches).get(VIEW_MODEL_FILE, []):
         body = code_of(body_of(hunk))
         for index, (added, code) in enumerate(body):
             if added and FINALIZE_CLEAR in code:
-                before = [text for _, text in body[:index]]
+                texts = [text for _, text in body]
+                before = texts[:index]
                 try:
-                    reset = len(before) - 1 - before[::-1].index(FINALIZE_RESET[0])
-                    drop = len(before) - 1 - before[::-1].index(FINALIZE_RESET[1])
+                    retire = len(before) - 1 - before[::-1].index(FINALIZE_RETIRE)
+                    idle = len(before) - 1 - before[::-1].index(FINALIZE_IDLE)
                 except ValueError:
                     return False
-                return reset < drop
+                return retire < idle and FINALIZE_DROP not in texts
     return False
 
 
@@ -229,9 +234,9 @@ def check(android_root: Path) -> None:
             fail(f"the camera application's patches add {needle!r} as code on {found} line(s) of the view model, {count} needed")
     if "endVideoRecording()" not in model:
         fail("the camera application's patches do not stop a recording from the shutter through endVideoRecording()")
-    if not clears_after_the_reset(patches):
-        fail("the camera application's patches do not clear the ending mark after the Finalize handler has reset the state and "
-             "dropped the recording")
+    if not finalize_order(patches):
+        fail("the camera application's patches do not end the Finalize handler as the contract says: retire the handle of its own "
+             "recording, publish idle, then clear the ending mark, with no plain write of a null handle")
 
 
 def fixtures(android_root: Path) -> None:
@@ -308,6 +313,10 @@ def fixtures(android_root: Path) -> None:
                 ("a mute without its guard", 'if (!isVideoRecordingEnding("Muting the recording")) {', "if (true) {"),
                 ("a Finalize that never clears the mark", "endingVideoRecording.compareAndSet(recordingId, 0L)", "recordingId"),
                 ("a button that throws with no recording to press", "else -> Log.w(", "else -> error("),
+                ("a Finalize before the handle is stored that leaves the handle", "videoRecording.compareAndSet(recording, null)",
+                 "recording"),
+                ("a Finalize that retires whatever handle is there", FINALIZE_RETIRE, "videoRecording.compareAndSet(videoRecording.value, null)"),
+                ("a Finalize that writes a null handle", FINALIZE_RETIRE, FINALIZE_DROP),
             ):
                 if old not in text:
                     fail(f"the fixture for {label} found nothing to change in the patch")
@@ -318,14 +327,31 @@ def fixtures(android_root: Path) -> None:
             text = patch.read_text(encoding="utf-8")
             if FINALIZE_CLEAR not in text:
                 continue
-            # The earlier order: the clear before the state reset, as the first commit of the topic had it.
             lines = text.split("\n")
-            clear = next(number for number, line in enumerate(lines) if line.startswith("+") and FINALIZE_CLEAR in line)
-            reset = next(number for number, line in enumerate(lines[:-1])
-                         if line.startswith(" ") and FINALIZE_RESET[0] in line and FINALIZE_RESET[1] in lines[number + 1])
-            moved = lines[:reset] + [lines[clear]] + lines[reset:clear] + lines[clear + 1:]
-            patch.write_text("\n".join(moved), encoding="utf-8")
-            expect_failure(lambda: check(copy), "a patch that clears the ending mark before the state is reset")
+
+            def find(needle: str, prefix: str) -> int:
+                return next(number for number, line in enumerate(lines) if line.startswith(prefix) and needle in line)
+
+            retire, idle, clear = find(FINALIZE_RETIRE, "+"), find(FINALIZE_IDLE, " "), find(FINALIZE_CLEAR, "+")
+            if not retire < idle < clear:
+                fail("the fixtures for the order of the Finalize handler found its lines out of order in the patch")
+
+            def move(source: int, before: int) -> list[str]:
+                """The patch with the line `source` moved in front of the line `before`."""
+                rest = lines[:source] + lines[source + 1:]
+                position = before - (1 if source < before else 0)
+                return rest[:position] + [lines[source]] + rest[position:]
+
+            swapped = list(lines)
+            swapped[retire], swapped[idle] = lines[idle], lines[retire]
+            for label, variant in (
+                ("a patch that publishes idle before it retires the handle", swapped),
+                ("a patch that clears the ending mark before the state goes idle", move(clear, idle)),
+                ("a patch that clears the ending mark before it retires the handle", move(clear, retire)),
+                ("a patch that writes a null handle after idle", lines[:idle + 1] + ["+" + " " * 24 + FINALIZE_DROP] + lines[idle + 1:]),
+            ):
+                patch.write_text("\n".join(variant), encoding="utf-8")
+                expect_failure(lambda: check(copy), label)
             patch.write_text(text, encoding="utf-8")
         check(copy)
 

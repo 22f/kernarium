@@ -29,15 +29,21 @@ recording), and a second stop does nothing. The button pressed when no
 recording runs, as a press queued behind the Finalize is, is logged and
 ignored where it used to throw.
 
+The Finalize event retires the handle of its own recording, and before
+it publishes idle: the next recording may start as soon as the state is
+idle and store its own handle, which a late event must not take. A
+recording that finalizes before its handle is stored retires it when it
+is stored.
+
 A start that still waits for its sound has no recording to stop: it is
 cancelled, the state goes back to idle and the activity puts the shutter
 back.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- .../org/lineageos/aperture/CameraActivity.kt  | 11 ++-
- .../aperture/viewmodels/CameraViewModel.kt    | 90 +++++++++++++++++--
- 2 files changed, 95 insertions(+), 6 deletions(-)
+ .../org/lineageos/aperture/CameraActivity.kt  |  11 +-
+ .../aperture/viewmodels/CameraViewModel.kt    | 112 ++++++++++++++++--
+ 2 files changed, 115 insertions(+), 8 deletions(-)
 
 diff --git a/app/src/main/java/org/lineageos/aperture/CameraActivity.kt b/app/src/main/java/org/lineageos/aperture/CameraActivity.kt
 index a1f5caa90d4d66ca80f4fa28910d7a3d60e3a95f..38512bdf2875c8d32f91fd51aebf3116b2c95d71 100644
@@ -62,7 +68,7 @@ index a1f5caa90d4d66ca80f4fa28910d7a3d60e3a95f..38512bdf2875c8d32f91fd51aebf3116
                          }
  
 diff --git a/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt b/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
-index bc83de246e4288742eb3a6288bd4e66623dbefc4..e58529930d62d4397435f54ba253d07ccf77dccb 100644
+index bc83de246e4288742eb3a6288bd4e66623dbefc4..f0879784670702f0f19af6b4821d0aa62659a5dc 100644
 --- a/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
 +++ b/app/src/main/java/org/lineageos/aperture/viewmodels/CameraViewModel.kt
 @@ -35,6 +35,7 @@ import androidx.lifecycle.asFlow
@@ -73,15 +79,18 @@ index bc83de246e4288742eb3a6288bd4e66623dbefc4..e58529930d62d4397435f54ba253d07c
  import kotlinx.coroutines.channels.awaitClose
  import kotlinx.coroutines.delay
  import kotlinx.coroutines.flow.MutableSharedFlow
-@@ -97,6 +98,7 @@ import java.io.ByteArrayOutputStream
+@@ -96,7 +97,10 @@ import org.lineageos.aperture.utils.StorageUtils
+ import java.io.ByteArrayOutputStream
  import java.util.concurrent.ExecutorService
  import java.util.concurrent.Executors
++import java.util.concurrent.atomic.AtomicBoolean
  import java.util.concurrent.atomic.AtomicInteger
 +import java.util.concurrent.atomic.AtomicLong
++import java.util.concurrent.atomic.AtomicReference
  import kotlin.reflect.safeCast
  
  /**
-@@ -808,6 +810,24 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
+@@ -808,6 +812,24 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
       */
      val videoRecording = MutableStateFlow<Recording?>(null)
  
@@ -106,7 +115,7 @@ index bc83de246e4288742eb3a6288bd4e66623dbefc4..e58529930d62d4397435f54ba253d07c
      val isVideoMicButtonEnabled = combine(
          cameraState,
          videoRecording,
-@@ -1169,7 +1189,7 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
+@@ -1169,7 +1191,7 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
          if (cameraState.value != CameraState.IDLE) {
              if (cameraController.isRecording) {
                  // Stop the current recording session.
@@ -115,7 +124,7 @@ index bc83de246e4288742eb3a6288bd4e66623dbefc4..e58529930d62d4397435f54ba253d07c
              }
              return
          }
-@@ -1190,7 +1210,9 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
+@@ -1190,11 +1212,18 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
          // Play shutter sound
          val delayTime = if (cameraSoundsUtils.playStartVideoRecording()) 500L else 0L
  
@@ -125,11 +134,28 @@ index bc83de246e4288742eb3a6288bd4e66623dbefc4..e58529930d62d4397435f54ba253d07c
 +        videoRecordingStart = viewModelScope.launch {
              delay(delayTime)
  
++            // The handle of this recording, which only its own Finalize event retires, and
++            // whether that event came before the handle was stored
++            val started = AtomicReference<Recording?>()
++            val finalized = AtomicBoolean()
++
              // Start recording
-@@ -1234,18 +1256,74 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
+-            videoRecording.value = cameraController.startRecording(
++            val recording = cameraController.startRecording(
+                 outputOptions,
+                 videoAudioConfig,
+                 cameraExecutor,
+@@ -1232,20 +1261,87 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
+                                 mediaRepository.broadcastNewVideo(it.outputResults.outputUri)
+                             }
                          }
++                        // Retire the handle before the state goes idle: from idle on the
++                        // next recording may start and store its own at once, and the handle
++                        // retired is this recording's only
++                        finalized.set(true)
++                        videoRecording.compareAndSet(started.get(), null)
                          cameraState.value = CameraState.IDLE
-                         videoRecording.value = null
+-                        videoRecording.value = null
 +
 +                        // Only now is the recording over for its controls: clear its mark,
 +                        // and no later recording's
@@ -137,6 +163,13 @@ index bc83de246e4288742eb3a6288bd4e66623dbefc4..e58529930d62d4397435f54ba253d07c
                      }
                  }
              }
++
++            started.set(recording)
++            videoRecording.value = recording
++            if (finalized.get()) {
++                // It finalized before its handle was stored, retire the handle now
++                videoRecording.compareAndSet(recording, null)
++            }
          }
      }
  
@@ -203,7 +236,7 @@ index bc83de246e4288742eb3a6288bd4e66623dbefc4..e58529930d62d4397435f54ba253d07c
              )
          }
      }
-@@ -1527,7 +1605,9 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
+@@ -1527,7 +1623,9 @@ class CameraViewModel(application: Application) : ApertureViewModel(application)
              false -> AudioConfig.AUDIO_DISABLED
          }
  
