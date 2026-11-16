@@ -32,7 +32,13 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
+
+#if defined(__APPLE__) && defined(__aarch64__)
+#include <mach/arm/thread_status.h>
+#include <sys/ucontext.h>
+#endif
 
 #include "jni_abi.hpp"
 #include "jni_shim.hpp"
@@ -4968,6 +4974,156 @@ void check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_l
     }
 }
 
+// ---- GetObjectRefType looks at the record once, and a block made at that moment is not what the reference was
+
+// The answer for an address of the region that no block starts at is the null reference to the runtime, however a block comes to
+// stand there before the call returns. A layer that looked the address up a second time (a conversion of the reference) would
+// hand the runtime the new block's array, and nothing a fake runtime can pause on lies between the two loads of the record. So
+// the row pauses the load itself: the record is the platform's memory, supplied by the fake map_record, and its first page is
+// protected; the first acquire load of that page faults, the handler answers the load with the zero word that was there, and
+// holds the thread while another thread publishes a block at exactly the queried address, then lets the load's thread go on.
+// It exists in the test target only, on an arm64 macOS host (the handler reads the AArch64 instruction and the Mach thread
+// state), and not under a sanitizer (whose runtime makes the load). The handler accepts only a 32-bit LDAR or LDAPR and stops
+// the process with a message at any other fault; the hold is bounded; and the page, the handlers and the record are restored
+// on every way out of the row.
+#if defined(__APPLE__) && defined(__aarch64__) && !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__)
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
+#define UML_OLDAPP_NO_LOAD_PAUSE 1
+#endif
+#endif
+#else
+#define UML_OLDAPP_NO_LOAD_PAUSE 1
+#endif
+
+#ifndef UML_OLDAPP_NO_LOAD_PAUSE
+struct LoadPause {
+    void* page = nullptr;
+    size_t size = 0;
+    std::atomic<int> phase{0};  // 1: the load was caught and the page is open again; 2: the other thread has published
+    std::atomic<unsigned> faults{0};
+};
+LoadPause g_load_pause;
+[[noreturn]] void load_pause_stops(const char* message, int code) {
+    const ssize_t written = write(2, message, strlen(message));
+    (void)written;
+    _Exit(code);
+}
+uint64_t monotonic_ns() {
+    timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return uint64_t(now.tv_sec) * 1000000000u + uint64_t(now.tv_nsec);
+}
+void load_pause_handler(int, siginfo_t* info, void* context) {
+    const uintptr_t at = reinterpret_cast<uintptr_t>(info->si_addr);
+    const uintptr_t start = reinterpret_cast<uintptr_t>(g_load_pause.page);
+    if (at < start || at >= start + g_load_pause.size) {
+        load_pause_stops("oldapp_jni_tests: a fault outside the protected page of the record\n", 91);
+    }
+    auto& state = static_cast<ucontext_t*>(context)->uc_mcontext->__ss;
+    const uintptr_t pc = arm_thread_state64_get_pc(state);
+    const uint32_t instruction = *reinterpret_cast<const uint32_t*>(pc);
+    // LDAR Wt, [Xn] and LDAPR Wt, [Xn]: what an acquire load of a 32-bit word compiles to, with or without the RCpc extension.
+    const uint32_t shape = instruction & 0xfffffc00u;
+    const uint32_t target = instruction & 31u;
+    if ((shape != 0x88dffc00u && shape != 0xb8bfc000u) || target >= 29u) {
+        char message[] = "oldapp_jni_tests: the faulting instruction is not an acquire load of a word: 00000000\n";
+        for (unsigned i = 0; i < 8; ++i) message[sizeof(message) - 10 + i] = "0123456789abcdef"[(instruction >> (28 - 4 * i)) & 15u];
+        load_pause_stops(message, 92);
+    }
+    state.__x[target] = 0;  // the word that was there before the other thread publishes
+    arm_thread_state64_set_pc_fptr(state, reinterpret_cast<void (*)()>(pc + 4));
+    if (mprotect(g_load_pause.page, g_load_pause.size, PROT_READ | PROT_WRITE) != 0) {
+        load_pause_stops("oldapp_jni_tests: the record's page cannot be opened again\n", 93);
+    }
+    ++g_load_pause.faults;
+    g_load_pause.phase.store(1, std::memory_order_release);
+    const uint64_t deadline = monotonic_ns() + 10u * 1000000000u;
+    while (g_load_pause.phase.load(std::memory_order_acquire) != 2) {
+        if (monotonic_ns() > deadline) {
+            load_pause_stops("oldapp_jni_tests: the other thread did not publish within 10 s\n", 94);
+        }
+    }
+}
+// The record's memory for one row, and everything the row changes, put back by the destructor.
+class ProtectedRecord {
+public:
+    explicit ProtectedRecord(size_t bytes) : bytes_(bytes) {
+        mapping_ = mmap(nullptr, bytes_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        require(mapping_ != MAP_FAILED, "the record's memory is mapped");
+        g_record_memory = static_cast<uint32_t*>(mapping_);
+        g_record_memory_bytes = bytes_;
+    }
+    ProtectedRecord(const ProtectedRecord&) = delete;
+    ProtectedRecord& operator=(const ProtectedRecord&) = delete;
+    ~ProtectedRecord() {
+        disarm();
+        g_record_memory = g_record_storage;
+        g_record_memory_bytes = sizeof(g_record_storage);
+        munmap(mapping_, bytes_);
+    }
+    // The first page of the record is protected, and the handler is in place.
+    void arm() {
+        g_load_pause.page = mapping_;
+        g_load_pause.size = size_t(getpagesize());
+        g_load_pause.phase = 0;
+        g_load_pause.faults = 0;
+        struct sigaction action;
+        std::memset(&action, 0, sizeof(action));
+        action.sa_sigaction = load_pause_handler;
+        action.sa_flags = SA_SIGINFO;
+        sigemptyset(&action.sa_mask);
+        require(sigaction(SIGBUS, &action, &old_bus_) == 0 && sigaction(SIGSEGV, &action, &old_segv_) == 0, "the fault handlers");
+        armed_ = true;
+        require(mprotect(mapping_, g_load_pause.size, PROT_NONE) == 0, "the first page of the record is protected");
+    }
+    void disarm() {
+        if (!armed_) return;
+        armed_ = false;
+        mprotect(mapping_, g_load_pause.size, PROT_READ | PROT_WRITE);
+        sigaction(SIGBUS, &old_bus_, nullptr);
+        sigaction(SIGSEGV, &old_segv_, nullptr);
+        g_load_pause.page = nullptr;
+    }
+
+private:
+    void* mapping_ = nullptr;
+    size_t bytes_;
+    bool armed_ = false;
+    struct sigaction old_bus_;
+    struct sigaction old_segv_;
+};
+#endif
+
+void check_get_object_ref_type_looks_at_the_record_once() {
+    constexpr const char* kCase = "check_get_object_ref_type_looks_at_the_record_once";
+#ifdef UML_OLDAPP_NO_LOAD_PAUSE
+    std::printf("%s: skipped: it intercepts an AArch64 acquire load in the signal context, so it needs an arm64 macOS host and no sanitizer\n",
+                kCase);
+#else
+    ProtectedRecord record(shadow_record_bytes(sizeof(g_shadow_region)));
+    Fixture f = make();
+    Other writer(f);
+    void* const candidate = g_region + kHeadBytes + 16;
+    require(!is_shadow_block(candidate), "the address starts empty");
+    Made published{};
+    std::thread maker([&] {
+        wait_for_counter(kCase, "the pause", g_load_pause.phase, 1, "the writer (the query's load is caught)");
+        published = make_shadow_of(writer.f, sample(100));
+        require(published.shadow == candidate, "the writer publishes a block at exactly the queried address");
+        g_load_pause.phase.store(2, std::memory_order_release);
+    });
+    record.arm();
+    const jint type = fn<jint (*)(Env*, jobject)>(*f.table, slot::GetObjectRefType)(f.env, candidate);
+    maker.join();
+    record.disarm();
+    require(g_load_pause.faults.load() == 1 && g_load_pause.phase.load() == 2, "the one load of the record was caught and let go on");
+    require(is_shadow_block(candidate) && length_of(f, candidate) == 100, "the block was published before the query went on");
+    require(type == 0, "the answer follows the one load: no block (invalid)");
+    require(g_ref_type_asked_with_a_reference == 0, "and the runtime was handed the null reference, not the block that appeared");
+#endif
+}
+
 // The block record has its own memory, which the platform gives and the layer never clears; a region it cannot cover gets no
 // shadows. The layer asks for the record of its region and for nothing else; it writes nothing to the memory it is given at the
 // installation (the platform's memory is zero-filled); and no shadow is made where the record cannot be had, the region's base is
@@ -6691,6 +6847,7 @@ int main(int argc, char** argv) {
     check_a_block_made_at_a_collected_address_before_the_mutex_is_taken_is_acted_on_whole();
     check_the_record_follows_makes_ends_collections_and_revivals();
     check_stale_and_interior_readers_during_churn_see_no_block_or_a_published_length();
+    check_get_object_ref_type_looks_at_the_record_once();
     check_the_ids_are_resolved_before_the_first_block();
     check_live_blocks_of_many_threads_count_against_the_cap();
     check_a_header_is_published_whole_to_readers_without_the_mutex();
