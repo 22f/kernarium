@@ -790,13 +790,29 @@ blocker in every one of them.
   scripted guests: a complete pair of arms passes, and every failed or
   incomplete one (an exit status, a missing or empty workload row, a probe
   that skipped scenarios or recorded no faults, a product arm without
-  residency evidence) fails.
+  residency evidence) fails. `arm64-aot-debug-rows` does the same for the
+  debug rows on scripted tombstones and records: a moved frame, a register
+  that changes only with the component and an incomplete mode fail, and only
+  a field that two runs of one engine already differ in is masked.
 - `aot-guest-workloads` (integration, opt-in like the other Android guest
   tests: it exists where `UML_AOT_IMAGE` and the Android launcher target do)
   boots the release twice, without and with `DARWIN_UML_AOT=1`, runs the
   covered library families' workloads, three times each, and the guest probe
   (faults inside rewritten libz code, text patched at run time), and requires
-  every command to succeed with identical output. Execution evidence exists
+  every command to succeed with identical output. The debug program
+  (`aot_guest_debug.cpp`, rows in `debug_rows.py`) adds what a debugger and
+  the crash reporter see: the tombstone of a SIGSEGV in libc's memcpy reached
+  through libz (the first access of its sequence crosses into an unmapped
+  page), of an abort, and of an abort while another thread runs libz; a
+  tracer's attach, registers, breakpoint, single steps from libz into libc and
+  back, changed register and pc, and detach; and a breakpoint written into
+  libz by a tracer that never stops the thread running it, at the function's
+  entry and at the pc where that thread was found. Each mode runs three times
+  without the component and once with it; a field that differs between two of
+  the runs without it (an address under ASLR, a process id) is masked, and
+  everything else, frame for frame, must be equal. The image is a user build,
+  so `debuggerd -b` and `kill -3` of a system process (which need root) are
+  not run. Execution evidence exists
   only in a diagnostics build, where the libraries the run names must have
   been entered. A product build has residency evidence: the framework's text
   became resident in the emulator process (`vmmap`, macOS) and was not with

@@ -24,6 +24,16 @@ uml_add_tooling_test(
     LABELS cpu
     TIMEOUT 180)
 
+# The debugger and crash-report rows of that runner on scripted records: a
+# tombstone's digest, what each mode must show, and the comparison that masks
+# only what two runs of one engine already differ in.
+uml_add_tooling_test(
+    NAME arm64-aot-debug-rows
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/arm64/test_aot_debug_rows.py
+    LABELS cpu
+    TIMEOUT 60)
+
 # The product compilation of the AOT runtime holds none of the counters,
 # report or test switches that a diagnostics build composes in separately.
 if(TARGET uml_arm64_aot_runtime)

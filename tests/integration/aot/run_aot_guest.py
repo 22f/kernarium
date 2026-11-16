@@ -66,6 +66,8 @@ from typing import Callable, NamedTuple
 REPOSITORY = pathlib.Path(__file__).resolve().parents[3]
 LAUNCHER = REPOSITORY / "tools" / "boot_android.py"
 sys.path.insert(0, str(REPOSITORY / "tests" / "integration" / "support"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import debug_rows  # noqa: E402
 import slot_ports  # noqa: E402
 
 DEFAULT_ADB_PORT = 5585
@@ -381,6 +383,7 @@ class Arm:
         self.scratch = scratch
         self.workloads: dict[tuple[str, int], Run] = {}
         self.probe: list[str] = []
+        self.debug: dict[str, list[list[str]]] = {}
         self.report: dict[str, int] = {}
         self.resident: int | None = None
 
@@ -442,6 +445,8 @@ class Arm:
                                       f"exited {ran.returncode}:\n{ran.stdout}")
                     verify_probe(ran.stdout)
                     self.probe.append(ran.stdout)
+            if options.debug_program:
+                self.run_debug_rows(device, serial)
             if guest.poll() is not None:
                 raise Failure(f"the launcher exited ({guest.returncode}) "
                               "before the guest's work was done")
@@ -469,6 +474,25 @@ class Arm:
                                check=False)
             for name in TERMINATION_SIGNALS:
                 signal.signal(name, terminate_on_signal)
+
+
+    def run_debug_rows(self, device: "Device", serial: str) -> None:
+        """The debugger and crash-report rows (debug_rows.py): every mode
+        several times without the component, once with it."""
+        pushed = device.run("-s", serial, "push", str(self.options.debug_program),
+                            debug_rows.PROGRAM, timeout=60)
+        if pushed.returncode != 0:
+            raise Failure(f"pushing the debug program exited "
+                          f"{pushed.returncode}:\n{pushed.stdout}")
+        for mode in debug_rows.MODES:
+            for _ in range(1 if self.aot else debug_rows.OFF_RUNS):
+                try:
+                    record = debug_rows.run_mode(
+                        lambda text, seconds=60: device.shell(text, timeout=seconds),
+                        mode)
+                except (debug_rows.DebugFailure, subprocess.TimeoutExpired) as problem:
+                    raise Failure(f"{self.label}: debug row {mode}: {problem}")
+                self.debug.setdefault(mode, []).append(record)
 
 
 def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
@@ -500,6 +524,18 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
         if checked == 0:
             raise Failure("the probe compared no registers")
         print(f"probe: {checked} registers compared, identical")
+    if options.debug_program:
+        for mode in debug_rows.MODES:
+            if len(off.debug.get(mode, [])) != debug_rows.OFF_RUNS or len(on.debug.get(mode, [])) != 1:
+                raise Failure(f"debug row {mode} ran {len(off.debug.get(mode, []))} times "
+                              f"without the component and {len(on.debug.get(mode, []))} with it, "
+                              f"not {debug_rows.OFF_RUNS} and 1")
+            try:
+                compared, masked = debug_rows.compare(mode, off.debug[mode], on.debug[mode][0])
+            except debug_rows.DebugFailure as problem:
+                raise Failure(f"debug row {problem}")
+            print(f"debug row {mode}: {len(on.debug[mode][0])} lines, "
+                  f"{compared} fields compared, {masked} masked, identical")
     if not options.diagnostics:
         assert off.resident is not None and on.resident is not None
         if on.resident < MIN_RESIDENT_BYTES:
@@ -564,6 +600,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--boot-timeout", type=int, default=900)
     parser.add_argument("--probe", type=pathlib.Path,
                         help="the built guest probe (libaotprobe.so)")
+    parser.add_argument("--debug-program", type=pathlib.Path,
+                        help="the built guest debug program "
+                        "(libaotdebug.so): breakpoints, single steps, a "
+                        "thread nobody stops, and crash reports")
     parser.add_argument("--vmmap", default="vmmap",
                         help="the tool that lists the emulator's regions "
                         "(the product mode reads the framework's residency)")

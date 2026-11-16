@@ -1,0 +1,883 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * A guest program that debugs, and crashes inside, the Android image's
+ * rewritten libz.so and libc.so: what a debugger or a crash reporter sees must
+ * be the same with the ahead-of-time component on and off.
+ *
+ * It is built like aot_guest_probe.cpp (Android arm64, the image's own libc.so
+ * and libz.so, no headers, no runtime of its own) and loaded into a stock
+ * process: AOT_DEBUG_MODE=<mode> LD_PRELOAD=<this library> toybox true. The
+ * mode names what it does:
+ *
+ *   crash-memcpy   libc's memcpy faults on a source that runs into an
+ *                  unmapped page, called by libz (inflateSetDictionary), so
+ *                  that the backtrace has two rewritten libraries above the
+ *                  program; the access that faults is the first of its
+ *                  sequence and crosses the page. The process dies of SIGSEGV
+ *                  and the crash reporter writes its tombstone.
+ *   crash-cross    libc's memcmp loads eight bytes across the end of a mapped
+ *                  page: a plain load of a rewritten sequence whose first
+ *                  access cannot be refilled (the page after it is unmapped).
+ *   crash-abort    covered calls, then abort() (tgkill).
+ *   crash-sibling  the same abort while another thread runs libz: the crash
+ *                  reporter stops every thread of the process (a thread
+ *                  running rewritten code included) to unwind it.
+ *   ptrace         a tracer and its tracee: attach, registers, a breakpoint
+ *                  in libz, single steps, steps from libz into libc and back,
+ *                  a changed register and a changed pc, detach and the
+ *                  rewritten code entered again.
+ *   sibling        a thread running libz in a loop gets a breakpoint written
+ *                  by a tracer that never stops it, and, in a second round,
+ *                  a breakpoint at the pc where it was found.
+ *
+ * Every line it prints is a function of the guest's architectural behaviour
+ * alone: the runner (run_aot_guest.py) compares the same mode run with the
+ * component on and off, after masking the values that differ between two runs
+ * of the same engine (addresses under ASLR).
+ */
+#include <stddef.h>
+#include <stdint.h>
+
+extern "C" {
+struct SigInfo {
+    int signo;
+    int err;
+    int code;
+    int pad;
+    uint64_t addr;
+};
+struct SigAction {
+    int flags;
+    void (*handler)(int, SigInfo *, void *);
+    uint64_t mask;
+    void (*restorer)(void);
+};
+struct DlInfo {
+    const char *fname;
+    void *fbase;
+    const char *sname;
+    void *saddr;
+};
+struct IoVec {
+    void *base;
+    size_t len;
+};
+int sigaction(int, const SigAction *, SigAction *);
+void *mmap(void *, size_t, int, int, int, long);
+int mprotect(void *, size_t, int);
+long write(int, const void *, size_t);
+int dprintf(int, const char *, ...);
+int dladdr(const void *, DlInfo *);
+void *memset(void *, int, size_t);
+void *memcpy(void *, const void *, size_t);
+char *strrchr(const char *, int);
+int strcmp(const char *, const char *);
+int memcmp(const void *, const void *, size_t);
+char *getenv(const char *);
+void abort(void) __attribute__((noreturn));
+void _exit(int) __attribute__((noreturn));
+int fork();
+int raise(int);
+int kill(int, int);
+int *__errno();
+long ptrace(int, ...);
+int waitpid(int, int *, int);
+unsigned alarm(unsigned);
+int prctl(int, ...);
+long syscall(long, ...);
+int usleep(unsigned);
+int pthread_create(unsigned long *, const void *, void *(*)(void *), void *);
+
+// libz.so (zlib 1.3.x); z_stream is the LP64 layout.
+struct ZStream {
+    const uint8_t *next_in;
+    uint32_t avail_in;
+    uint64_t total_in;
+    uint8_t *next_out;
+    uint32_t avail_out;
+    uint64_t total_out;
+    const char *msg;
+    void *state;
+    void *zalloc;
+    void *zfree;
+    void *opaque;
+    int data_type;
+    uint64_t adler;
+    uint64_t reserved;
+};
+unsigned long adler32(unsigned long, const uint8_t *, unsigned);
+unsigned long crc32(unsigned long, const uint8_t *, unsigned);
+const char *zlibVersion();
+int deflateInit_(ZStream *, int, const char *, int);
+int deflate(ZStream *, int);
+int deflateEnd(ZStream *);
+int inflateInit2_(ZStream *, int, const char *, int);
+int inflateSetDictionary(ZStream *, const uint8_t *, unsigned);
+int inflateEnd(ZStream *);
+}
+
+namespace {
+
+constexpr size_t kPage = 4096;
+constexpr int kRead = 1;
+constexpr int kWrite = 2;
+constexpr int kExec = 4;
+
+constexpr int kSigTrap = 5;
+constexpr int kSigKill = 9;
+constexpr int kSigStop = 19;
+constexpr int kWAll = 0x40000000;
+
+constexpr int kPtraceTraceMe = 0;
+constexpr int kPtracePeekText = 1;
+constexpr int kPtracePokeText = 4;
+constexpr int kPtraceCont = 7;
+constexpr int kPtraceSingleStep = 9;
+constexpr int kPtraceAttach = 16;
+constexpr int kPtraceDetach = 17;
+constexpr int kPtraceGetRegSet = 0x4204;
+constexpr int kPtraceSetRegSet = 0x4205;
+constexpr long kNtPrStatus = 1;
+constexpr long kSysGettid = 178;
+constexpr uint32_t kBrk = 0xd4200000U;  // brk #0, the instruction debuggers write
+
+struct Regs {
+    uint64_t x[31];
+    uint64_t sp;
+    uint64_t pc;
+    uint64_t pstate;
+};
+
+const char *base_name(const char *path) {
+    const char *slash = path != nullptr ? strrchr(path, '/') : nullptr;
+    return slash != nullptr ? slash + 1 : (path != nullptr ? path : "?");
+}
+
+// The library and the offset in it of an address; the name alone when only
+// the library matters.
+const char *library_of(uint64_t pc) {
+    DlInfo info{};
+    if (dladdr(reinterpret_cast<void *>(pc), &info) != 0 && info.fbase != nullptr) {
+        return base_name(info.fname);
+    }
+    return "?";
+}
+
+void print_location(const char *label, uint64_t pc) {
+    DlInfo info{};
+    if (dladdr(reinterpret_cast<void *>(pc), &info) != 0 && info.fbase != nullptr) {
+        dprintf(1, " %s=%s+%#llx", label, base_name(info.fname),
+                static_cast<unsigned long long>(pc - reinterpret_cast<uint64_t>(info.fbase)));
+        return;
+    }
+    dprintf(1, " %s=%#llx", label, static_cast<unsigned long long>(pc));
+}
+
+struct Range {
+    const char *name;
+    uint64_t low;
+    uint64_t high;
+};
+Range ranges[3];
+int range_count;
+
+void print_value(const char *label, uint64_t value) {
+    for (int i = 0; i < range_count; ++i) {
+        if (value >= ranges[i].low && value < ranges[i].high) {
+            dprintf(1, " %s=%s+%#llx", label, ranges[i].name,
+                    static_cast<unsigned long long>(value - ranges[i].low));
+            return;
+        }
+    }
+    // An address in a loaded library is named by the library, so that two
+    // runs with different load addresses print the same.
+    DlInfo info{};
+    if (value > 0x10000 && value < (1ULL << 48) && dladdr(reinterpret_cast<void *>(value), &info) != 0 &&
+        info.fbase != nullptr) {
+        dprintf(1, " %s=%s+%#llx", label, base_name(info.fname),
+                static_cast<unsigned long long>(value - reinterpret_cast<uint64_t>(info.fbase)));
+        return;
+    }
+    dprintf(1, " %s=%#llx", label, static_cast<unsigned long long>(value));
+}
+
+void fail(const char *what) {
+    dprintf(1, "FAIL %s\n", what);
+}
+
+// A pool for libz's own allocations: the library's calls to malloc would leave
+// the allocator's random values in registers, which would differ between two
+// runs of one engine.
+alignas(16) uint8_t pool[1 << 20];
+size_t pool_used;
+extern "C" void *pool_alloc(void *, unsigned items, unsigned size) {
+    const size_t bytes = (static_cast<size_t>(items) * size + 63U) & ~size_t{63};
+    if (pool_used + bytes > sizeof(pool)) {
+        return nullptr;
+    }
+    void *p = pool + pool_used;
+    pool_used += bytes;
+    memset(p, 0, bytes);
+    return p;
+}
+extern "C" void pool_free(void *, void *) {}
+
+// The sibling's buffer is large so that nearly all of its time is inside
+// libz, in the rewritten code, and almost none in this program's own loop.
+constexpr unsigned kSiblingBytes = 1U << 20;
+uint8_t *sibling_buffer;
+
+uint8_t *data;  // the pages the work reads: deterministic content
+constexpr size_t kDataPages = 4;
+constexpr unsigned kWorkBytes = 3 * 1024 + 129;
+
+void fill_data() {
+    data = static_cast<uint8_t *>(mmap(nullptr, 8 * kPage, kRead | kWrite, 0x22, -1, 0));
+    sibling_buffer = static_cast<uint8_t *>(mmap(nullptr, kSiblingBytes, kRead | kWrite, 0x22, -1, 0));
+    uint32_t state = 0x2545f491U;
+    for (size_t i = 0; i < kDataPages * kPage; ++i) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        data[i] = (state & 7U) == 0U ? static_cast<uint8_t>(state >> 8) : "etaoin shrdlu"[(state >> 4) % 13U];
+    }
+}
+
+// The covered calls the tracee makes: the same on every round, and a function
+// of the data alone.
+unsigned long work(unsigned round) {
+    uint8_t out[4096];
+    const size_t at = (round * 37U) % 512U;
+    unsigned long sum = crc32(round, data + at, kWorkBytes);
+    sum ^= adler32(round + 1, data + at, kWorkBytes);
+    ZStream stream{};
+    pool_used = 0;
+    stream.zalloc = reinterpret_cast<void *>(pool_alloc);
+    stream.zfree = reinterpret_cast<void *>(pool_free);
+    if (deflateInit_(&stream, 6, zlibVersion(), sizeof(ZStream)) == 0) {
+        stream.next_in = data + at;
+        stream.avail_in = 700;
+        stream.next_out = out;
+        stream.avail_out = sizeof(out);
+        deflate(&stream, 4);
+        sum += crc32(0, out, static_cast<unsigned>(stream.total_out));
+        deflateEnd(&stream);
+    }
+    return sum;
+}
+
+// ---- tombstones ------------------------------------------------------------
+
+void crash_memcpy() {
+    uint8_t *region = static_cast<uint8_t *>(mmap(nullptr, 3 * kPage, kRead | kWrite, 0x22, -1, 0));
+    mprotect(region + 2 * kPage, kPage, 0);
+    for (size_t i = 0; i < 2 * kPage; ++i) {
+        region[i] = static_cast<uint8_t>(i * 7U);
+    }
+    // Warm the covered code before the fault.
+    unsigned long sum = 0;
+    for (unsigned i = 0; i < 400; ++i) {
+        sum += crc32(sum, region + (i % 17U), 513);
+    }
+    dprintf(1, "warm sum=%#lx\n", sum);
+    ZStream stream{};
+    stream.zalloc = reinterpret_cast<void *>(pool_alloc);
+    stream.zfree = reinterpret_cast<void *>(pool_free);
+    if (inflateInit2_(&stream, -15, zlibVersion(), sizeof(ZStream)) != 0) {
+        fail("inflateInit2_");
+        return;
+    }
+    // The dictionary's last 24 bytes lie below the unmapped page and the rest
+    // above it: libz copies it into the window with libc's memcpy, whose first
+    // access crosses into the unmapped page.
+    dprintf(1, "dictionary crosses the page\n");
+    inflateSetDictionary(&stream, region + 2 * kPage - 24, 64);
+    fail("the copy did not fault");
+}
+
+// A covered libc routine whose first access crosses into an unmapped page: a
+// small memcmp loads eight bytes from each side, the first of them across the
+// end of the mapped page.
+void crash_cross() {
+    uint8_t *region = static_cast<uint8_t *>(mmap(nullptr, 3 * kPage, kRead | kWrite, 0x22, -1, 0));
+    mprotect(region + 2 * kPage, kPage, 0);
+    for (size_t i = 0; i < 2 * kPage; ++i) {
+        region[i] = static_cast<uint8_t>(i * 7U);
+    }
+    int sum = 0;
+    for (unsigned i = 0; i < 400; ++i) {
+        sum += memcmp(region + (i % 17U), region + 1024 + (i % 13U), 12);
+    }
+    dprintf(1, "warm sum=%d\n", sum);
+    dprintf(1, "memcmp crosses the page\n");
+    sum = memcmp(region + 2 * kPage - 6, region + 64, 12);
+    dprintf(1, "FAIL the compare did not fault (%d)\n", sum);
+}
+
+void crash_abort() {
+    unsigned long sum = 0;
+    for (unsigned i = 0; i < 400; ++i) {
+        sum += crc32(sum, data + (i % 17U), 513);
+    }
+    dprintf(1, "warm sum=%#lx\n", sum);
+    abort();
+}
+
+// ---- ptrace helpers --------------------------------------------------------
+
+bool get_regs(int pid, Regs &regs) {
+    IoVec vec{&regs, sizeof(regs)};
+    return ptrace(kPtraceGetRegSet, pid, reinterpret_cast<void *>(kNtPrStatus), &vec) == 0;
+}
+
+bool set_regs(int pid, Regs &regs) {
+    IoVec vec{&regs, sizeof(regs)};
+    return ptrace(kPtraceSetRegSet, pid, reinterpret_cast<void *>(kNtPrStatus), &vec) == 0;
+}
+
+void print_regs(const char *tag, const Regs &regs) {
+    dprintf(1, "  regs %s", tag);
+    char label[8];
+    for (int i = 0; i < 31; ++i) {
+        label[0] = 'x';
+        label[1] = static_cast<char>('0' + i / 10);
+        label[2] = static_cast<char>('0' + i % 10);
+        label[3] = 0;
+        print_value(label, regs.x[i]);
+    }
+    print_value("sp", regs.sp);
+    print_location("pc", regs.pc);
+    dprintf(1, " nzcv=%#llx\n", static_cast<unsigned long long>(regs.pstate & 0xf0000000ULL));
+}
+
+// Waits for the next event of a tracee; returns the stop signal, or -1 when it
+// ended.
+int wait_stop(int pid) {
+    int status = 0;
+    const int r = waitpid(pid, &status, kWAll);
+    if (r != pid) {
+        return -1;
+    }
+    if ((status & 0xff) != 0x7f) {
+        dprintf(1, "  tracee ended status=%#x\n", status);
+        return -1;
+    }
+    return (status >> 8) & 0xff;
+}
+
+struct Breakpoint {
+    uint64_t address;
+    uint32_t saved;
+    bool set;
+};
+
+bool set_breakpoint(int pid, Breakpoint &bp, uint64_t address) {
+    *__errno() = 0;
+    const long word = ptrace(kPtracePeekText, pid, reinterpret_cast<void *>(address), nullptr);
+    if (*__errno() != 0) {
+        return false;
+    }
+    bp.address = address;
+    bp.saved = static_cast<uint32_t>(word);
+    const uint64_t patched = (static_cast<uint64_t>(word) & ~0xffffffffULL) | kBrk;
+    if (ptrace(kPtracePokeText, pid, reinterpret_cast<void *>(address), reinterpret_cast<void *>(patched)) != 0) {
+        return false;
+    }
+    bp.set = true;
+    return true;
+}
+
+bool clear_breakpoint(int pid, Breakpoint &bp) {
+    if (!bp.set) {
+        return true;
+    }
+    *__errno() = 0;
+    const long word = ptrace(kPtracePeekText, pid, reinterpret_cast<void *>(bp.address), nullptr);
+    const uint64_t restored = (static_cast<uint64_t>(word) & ~0xffffffffULL) | bp.saved;
+    bp.set = false;
+    return ptrace(kPtracePokeText, pid, reinterpret_cast<void *>(bp.address), reinterpret_cast<void *>(restored)) == 0;
+}
+
+// Runs the tracee to its next stop; true when it stopped with `expected`.
+bool resume_to(int pid, int request, int expected, Regs &regs) {
+    if (ptrace(request, pid, nullptr, nullptr) != 0) {
+        fail("resume");
+        return false;
+    }
+    const int sig = wait_stop(pid);
+    if (sig != expected) {
+        dprintf(1, "FAIL stop signal %d, expected %d\n", sig, expected);
+        return false;
+    }
+    return get_regs(pid, regs);
+}
+
+[[noreturn]] void tracee() {
+    prctl(1, kSigKill);  // PR_SET_PDEATHSIG
+    alarm(240);
+    ptrace(kPtraceTraceMe, 0, nullptr, nullptr);
+    raise(kSigStop);
+    unsigned long sum = 0;
+    for (unsigned round = 0; round < 300; ++round) {
+        sum += work(round);
+    }
+    dprintf(1, "tracee done sum=%#lx\n", sum);
+    _exit(0);
+}
+
+bool in_library(uint64_t pc, const char *name) {
+    return strcmp(library_of(pc), name) == 0;
+}
+
+// A call into the tracee's covered function: the hit, the arguments and the
+// registers there.
+bool run_to(int pid, Breakpoint &bp, uint64_t address, const char *what, Regs &regs) {
+    if (!set_breakpoint(pid, bp, address)) {
+        fail("set breakpoint");
+        return false;
+    }
+    if (!resume_to(pid, kPtraceCont, kSigTrap, regs)) {
+        return false;
+    }
+    dprintf(1, "%s", what);
+    print_location(" hit", regs.pc);
+    dprintf(1, " at_breakpoint=%s\n", regs.pc == address ? "yes" : "NO");
+    if (regs.pc != address) {
+        fail("not at the breakpoint");
+        return false;
+    }
+    return clear_breakpoint(pid, bp);
+}
+
+// The next call of `address` that reads the data pages (the tracee also
+// calls it on its own stack): the process can compute the answer itself.
+bool run_to_data_call(int pid, Breakpoint &bp, uint64_t address, const char *what, Regs &regs) {
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        if (attempt > 0 && !resume_to(pid, kPtraceSingleStep, kSigTrap, regs)) {
+            return false;  // off the instruction the last breakpoint was on
+        }
+        if (!run_to(pid, bp, address, what, regs)) {
+            return false;
+        }
+        if (regs.x[1] >= ranges[0].low && regs.x[1] < ranges[0].high) {
+            return true;
+        }
+        dprintf(1, "  (not the data: buffer is not in D, going on)\n");
+    }
+    fail("no call on the data");
+    return false;
+}
+
+void ptrace_mode() {
+    alarm(480);
+    fill_data();
+    ranges[0] = {"D", reinterpret_cast<uint64_t>(data), reinterpret_cast<uint64_t>(data) + 8 * kPage};
+    range_count = 1;
+    const int pid = fork();
+    if (pid == 0) {
+        tracee();
+    }
+    if (wait_stop(pid) != kSigStop) {
+        fail("the tracee did not stop at its raise");
+        return;
+    }
+    Regs regs{};
+    if (!get_regs(pid, regs)) {
+        fail("GETREGSET");
+        return;
+    }
+    dprintf(1, "attached");
+    print_location(" pc", regs.pc);
+    dprintf(1, "\n");
+
+    // 1. A breakpoint on a covered libz function and the state there.
+    const uint64_t crc_entry = reinterpret_cast<uint64_t>(&crc32);
+    const uint64_t adler_entry = reinterpret_cast<uint64_t>(&adler32);
+    const uint64_t compress_entry = reinterpret_cast<uint64_t>(&deflate);
+    Breakpoint bp{};
+    if (!run_to(pid, bp, crc_entry, "breakpoint crc32", regs)) {
+        return;
+    }
+    range_count = 2;
+    ranges[1] = {"S", regs.sp - 0x10000, regs.sp + 0x10000};
+    print_regs("crc32", regs);
+    const uint64_t return_address = regs.x[30];
+    print_location(" returns_to", return_address);
+    dprintf(1, "\n");
+
+    // 2. Single steps through the function.
+    for (int step = 0; step < 40; ++step) {
+        if (!resume_to(pid, kPtraceSingleStep, kSigTrap, regs)) {
+            return;
+        }
+        dprintf(1, "step %d", step);
+        print_location(" pc", regs.pc);
+        dprintf(1, "\n");
+        if (step == 0 || step == 9 || step == 39) {
+            print_regs("step", regs);
+        }
+    }
+
+    // 3. Leave the function: run to the return address, with the result.
+    Breakpoint back{};
+    if (!set_breakpoint(pid, back, return_address) || !resume_to(pid, kPtraceCont, kSigTrap, regs)) {
+        return;
+    }
+    clear_breakpoint(pid, back);
+    dprintf(1, "returned");
+    print_location(" pc", regs.pc);
+    dprintf(1, " at_return=%s\n", regs.pc == return_address ? "yes" : "NO");
+
+    // 4. A changed register: a shorter length; the result is the library's
+    // answer for it, which this process computes itself (from the call that
+    // reads the data, whose bytes it has too).
+    if (!run_to_data_call(pid, bp, crc_entry, "breakpoint crc32 on the data", regs)) {
+        return;
+    }
+    const uint64_t seed = regs.x[0];
+    const uint64_t buffer = regs.x[1];
+    const uint64_t length = regs.x[2];
+    const uint64_t back_address = regs.x[30];
+    regs.x[2] = length - 9;
+    if (!set_regs(pid, regs)) {
+        fail("SETREGSET");
+        return;
+    }
+    if (!set_breakpoint(pid, back, back_address) || !resume_to(pid, kPtraceCont, kSigTrap, regs)) {
+        return;
+    }
+    clear_breakpoint(pid, back);
+    const unsigned long expected =
+        crc32(seed, reinterpret_cast<const uint8_t *>(buffer), static_cast<unsigned>(length - 9));
+    dprintf(1, "changed length: result %s the library's answer\n", regs.x[0] == expected ? "is" : "IS NOT");
+    if (regs.x[0] != expected) {
+        fail("the changed length");
+        return;
+    }
+
+    // 5. A changed pc: the next crc32 call on the data becomes a call of
+    // adler32 (same arguments, same return address).
+    if (!run_to_data_call(pid, bp, crc_entry, "breakpoint crc32 on the data again", regs)) {
+        return;
+    }
+    const uint64_t seed3 = regs.x[0];
+    const uint64_t buffer3 = regs.x[1];
+    const uint64_t length3 = regs.x[2];
+    const uint64_t back3 = regs.x[30];
+    regs.pc = adler_entry;
+    if (!set_regs(pid, regs)) {
+        fail("SETREGSET pc");
+        return;
+    }
+    if (!set_breakpoint(pid, back, back3) || !resume_to(pid, kPtraceCont, kSigTrap, regs)) {
+        return;
+    }
+    clear_breakpoint(pid, back);
+    const unsigned long adler =
+        adler32(seed3, reinterpret_cast<const uint8_t *>(buffer3), static_cast<unsigned>(length3));
+    dprintf(1, "changed pc: result %s adler32's answer\n", regs.x[0] == adler ? "is" : "IS NOT");
+    if (regs.x[0] != adler) {
+        fail("the changed pc");
+        return;
+    }
+
+    // 6. From libz into libc and back, one instruction at a time: every
+    // change of library is recorded with the step it happens at.
+    if (!run_to(pid, bp, compress_entry, "breakpoint deflate", regs)) {
+        return;
+    }
+    const char *current = library_of(regs.pc);
+    int transitions = 0;
+    int libc_steps = 0;
+    int steps = 0;
+    for (; steps < 6000 && transitions < 24; ++steps) {
+        if (!resume_to(pid, kPtraceSingleStep, kSigTrap, regs)) {
+            return;
+        }
+        const char *now = library_of(regs.pc);
+        if (strcmp(now, "libc.so") == 0) {
+            ++libc_steps;
+        }
+        if (strcmp(now, current) != 0) {
+            ++transitions;
+            dprintf(1, "step %d: %s -> %s", steps, current, now);
+            print_location(" pc", regs.pc);
+            dprintf(1, "\n");
+            current = now;
+        }
+    }
+    dprintf(1, "after %d steps: %d library changes, %d instructions in libc\n", steps, transitions, libc_steps);
+
+    // 7. Detach: the tracee runs its remaining rounds on its own, through the
+    // rewritten code, and prints its sum.
+    if (ptrace(kPtraceDetach, pid, nullptr, nullptr) != 0) {
+        fail("detach");
+        return;
+    }
+    int status = 0;
+    if (waitpid(pid, &status, kWAll) != pid) {
+        fail("waitpid after detach");
+        return;
+    }
+    dprintf(1, "detached tracee status=%#x\n", status);
+}
+
+// The extent of the library that holds `address`, from its program headers
+// in memory: the tracer, a forked child of a threaded process, must not call
+// dladdr.
+struct Extent {
+    uint64_t low;
+    uint64_t high;
+};
+
+Extent extent_of(uint64_t address) {
+    DlInfo info{};
+    Extent extent{0, 0};
+    if (dladdr(reinterpret_cast<void *>(address), &info) == 0 || info.fbase == nullptr) {
+        return extent;
+    }
+    const auto *base = static_cast<const uint8_t *>(info.fbase);
+    const uint64_t phoff = *reinterpret_cast<const uint64_t *>(base + 32);
+    const unsigned phnum = *reinterpret_cast<const uint16_t *>(base + 56);
+    uint64_t high = 0;
+    for (unsigned i = 0; i < phnum; ++i) {
+        const uint8_t *header = base + phoff + 56 * i;
+        if (*reinterpret_cast<const uint32_t *>(header) == 1) {  // PT_LOAD
+            const uint64_t end = *reinterpret_cast<const uint64_t *>(header + 16) + *reinterpret_cast<const uint64_t *>(header + 40);
+            if (end > high) {
+                high = end;
+            }
+        }
+    }
+    extent.low = reinterpret_cast<uint64_t>(info.fbase);
+    extent.high = extent.low + high;
+    return extent;
+}
+
+// ---- a thread that is never stopped ---------------------------------------
+
+// Shared with the tracer, which is another process: the breakpoint it writes
+// and the word it replaced, set before the breakpoint is.
+struct Shared {
+    volatile uint64_t address;
+    volatile uint32_t saved;
+};
+Shared *shared;
+
+volatile uint64_t g_calls;
+volatile int g_tid_b;
+volatile int g_hits;
+volatile uint64_t g_hit_pc;
+volatile int g_hit_code;
+volatile int g_hit_tid;
+volatile int g_stop_b;
+
+void flush(void *start, size_t size) {
+    const uint64_t first = reinterpret_cast<uint64_t>(start) & ~uint64_t{63};
+    const uint64_t last = reinterpret_cast<uint64_t>(start) + size;
+    for (uint64_t at = first; at < last; at += 64) {
+        asm volatile("dc cvau, %0" ::"r"(at) : "memory");
+    }
+    asm volatile("dsb ish" ::: "memory");
+    for (uint64_t at = first; at < last; at += 64) {
+        asm volatile("ic ivau, %0" ::"r"(at) : "memory");
+    }
+    asm volatile("dsb ish\n\tisb" ::: "memory");
+}
+
+constexpr size_t kContext = 176;
+
+// The breakpoint was hit by a thread that nobody stopped: the handler records
+// where and puts the instruction back, so that the thread runs it again.
+void on_trap(int, SigInfo *info, void *context) {
+    auto *words = reinterpret_cast<uint64_t *>(static_cast<uint8_t *>(context) + kContext);
+    g_hit_pc = words[33];
+    g_hit_code = info->code;
+    g_hit_tid = static_cast<int>(syscall(kSysGettid));
+    const uint64_t address = shared->address;
+    auto *at = reinterpret_cast<uint32_t *>(address);
+    void *page = reinterpret_cast<void *>(address & ~(kPage - 1));
+    mprotect(page, kPage, kRead | kWrite | kExec);
+    *at = shared->saved;
+    flush(at, 4);
+    mprotect(page, kPage, kRead | kExec);
+    g_hits = g_hits + 1;
+}
+
+void *thread_b(void *) {
+    g_tid_b = static_cast<int>(syscall(kSysGettid));
+    while (g_stop_b == 0) {
+        g_calls = g_calls + 1;
+        crc32(0, sibling_buffer, kSiblingBytes);
+    }
+    return nullptr;
+}
+
+bool wait_for_calls(uint64_t more, int seconds) {
+    const uint64_t first = g_calls;
+    for (int i = 0; i < seconds * 1000; ++i) {
+        if (g_calls >= first + more) {
+            return true;
+        }
+        usleep(1000);
+    }
+    return false;
+}
+
+// The tracer, a process of its own: finds the address (the entry of crc32, or
+// the pc where it catches the sibling `sampler` running in libz), stops the
+// thread `target` (a thread that is not the sibling), writes a breakpoint
+// there through it and lets it go. The sibling is never stopped while the
+// breakpoint is written.
+[[noreturn]] void tracer_writes(int target, bool find_pc, int sampler, Extent libz) {
+    alarm(120);
+    uint64_t address = reinterpret_cast<uint64_t>(&crc32);
+    if (find_pc) {
+        address = 0;
+        for (int attempt = 0; attempt < 40 && address == 0; ++attempt) {
+            if (ptrace(kPtraceAttach, sampler, nullptr, nullptr) != 0) {
+                _exit(2);
+            }
+            if (wait_stop(sampler) < 0) {
+                _exit(3);
+            }
+            Regs regs{};
+            if (!get_regs(sampler, regs)) {
+                _exit(4);
+            }
+            ptrace(kPtraceDetach, sampler, nullptr, nullptr);
+            if (regs.pc >= libz.low && regs.pc < libz.high) {
+                address = regs.pc;
+            } else {
+                usleep(2000);
+            }
+        }
+        if (address == 0) {
+            _exit(5);
+        }
+    }
+    if (ptrace(kPtraceAttach, target, nullptr, nullptr) != 0) {
+        _exit(6);
+    }
+    if (wait_stop(target) < 0) {
+        _exit(7);
+    }
+    *__errno() = 0;
+    const long word = ptrace(kPtracePeekText, target, reinterpret_cast<void *>(address), nullptr);
+    if (*__errno() != 0) {
+        _exit(8);
+    }
+    shared->address = address;
+    shared->saved = static_cast<uint32_t>(word);
+    asm volatile("dmb ish" ::: "memory");
+    const uint64_t patched = (static_cast<uint64_t>(word) & ~0xffffffffULL) | kBrk;
+    if (ptrace(kPtracePokeText, target, reinterpret_cast<void *>(address), reinterpret_cast<void *>(patched)) != 0) {
+        _exit(9);
+    }
+    ptrace(kPtraceDetach, target, nullptr, nullptr);
+    _exit(0);
+}
+
+void sibling_round(const char *name, bool in_loop, int main_tid) {
+    const Extent libz = extent_of(reinterpret_cast<uint64_t>(&crc32));
+    g_hits = 0;
+    g_hit_pc = 0;
+    if (!wait_for_calls(30, 30)) {
+        fail("the thread does not run");
+        return;
+    }
+    const int tracer = fork();
+    if (tracer == 0) {
+        tracer_writes(main_tid, in_loop, g_tid_b, libz);
+    }
+    int status = 0;
+    if (waitpid(tracer, &status, 0) != tracer || status != 0) {
+        dprintf(1, "FAIL tracer status=%#x\n", status);
+        return;
+    }
+    for (int i = 0; i < 10000 && g_hits == 0; ++i) {
+        usleep(1000);
+    }
+    dprintf(1, "%s: breakpoint hit by the running thread: %s", name, g_hits == 1 ? "yes" : "NO");
+    dprintf(1, " by_sibling=%s", g_hit_tid == g_tid_b ? "yes" : "NO");
+    dprintf(1, " pc_at_breakpoint=%s", g_hit_pc == shared->address ? "yes" : "NO");
+    dprintf(1, " in_libz=%s", in_library(g_hit_pc, "libz.so") ? "yes" : "NO");
+    dprintf(1, " code=%d", g_hit_code);
+    if (!in_loop) {
+        print_location(" pc", g_hit_pc);
+    }
+    dprintf(1, "\n");
+    if (g_hits != 1) {
+        fail("no hit");
+        return;
+    }
+    dprintf(1, "%s: the thread runs on after the restore: %s\n", name, wait_for_calls(20, 30) ? "yes" : "NO");
+}
+
+void sibling_mode() {
+    alarm(240);
+    fill_data();
+    shared = static_cast<Shared *>(mmap(nullptr, kPage, kRead | kWrite, 0x21, -1, 0));  // MAP_SHARED | MAP_ANONYMOUS
+    SigAction action{};
+    action.handler = on_trap;
+    action.flags = 4 | 0x40000000;  // SA_SIGINFO | SA_NODEFER
+    sigaction(kSigTrap, &action, nullptr);
+    unsigned long thread = 0;
+    if (pthread_create(&thread, nullptr, thread_b, nullptr) != 0) {
+        fail("pthread_create");
+        return;
+    }
+    const int main_tid = static_cast<int>(syscall(kSysGettid));
+    for (int i = 0; i < 20000 && g_tid_b == 0; ++i) {
+        usleep(1000);
+    }
+    sibling_round("entry", false, main_tid);
+    sibling_round("in loop", true, main_tid);
+    g_stop_b = 1;
+}
+
+// The process aborts while another thread runs libz: the crash reporter
+// stops every thread of the process to unwind it, this one included.
+void crash_with_sibling() {
+    alarm(240);
+    fill_data();
+    unsigned long thread = 0;
+    if (pthread_create(&thread, nullptr, thread_b, nullptr) != 0) {
+        fail("pthread_create");
+        return;
+    }
+    if (!wait_for_calls(20, 30)) {
+        fail("the thread does not run");
+        return;
+    }
+    dprintf(1, "sibling is running\n");
+    abort();
+}
+
+__attribute__((constructor)) void run() {
+    const char *mode = getenv("AOT_DEBUG_MODE");
+    if (mode == nullptr) {
+        return;
+    }
+    if (strcmp(mode, "crash-memcpy") == 0) {
+        fill_data();
+        crash_memcpy();
+    } else if (strcmp(mode, "crash-cross") == 0) {
+        crash_cross();
+    } else if (strcmp(mode, "crash-abort") == 0) {
+        fill_data();
+        crash_abort();
+    } else if (strcmp(mode, "crash-sibling") == 0) {
+        crash_with_sibling();
+    } else if (strcmp(mode, "ptrace") == 0) {
+        ptrace_mode();
+    } else if (strcmp(mode, "sibling") == 0) {
+        sibling_mode();
+    } else {
+        dprintf(1, "FAIL unknown mode\n");
+    }
+    dprintf(1, "done mode=%s\n", mode);
+    _exit(0);
+}
+
+}  // namespace

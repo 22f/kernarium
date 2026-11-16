@@ -29,6 +29,26 @@ if(TARGET uml_arm64_aot_framework AND TARGET uml-darwin-android17)
     add_custom_target(uml-aot-guest-probe DEPENDS ${_uml_aot_probe})
     add_dependencies(integration-test-binaries uml-aot-guest-probe)
 
+    # The debug program is built the same way, against libc.so and libz.so.
+    set(_uml_aot_debug ${CMAKE_CURRENT_BINARY_DIR}/libaotdebug.so)
+    add_custom_command(
+        OUTPUT ${_uml_aot_debug}
+        COMMAND ${CMAKE_CXX_COMPILER}
+            --target=aarch64-linux-android30 -std=c++20 -O1 -fPIC
+            -ffreestanding -fno-exceptions -fno-rtti -fno-builtin -nostdlib
+            -nostdinc++ -fuse-ld=lld -shared -Wall -Wextra -Werror
+            -Wl,-soname,libaotdebug.so -Wl,--no-undefined
+            -Wl,-z,max-page-size=16384
+            ${CMAKE_CURRENT_SOURCE_DIR}/aot_guest_debug.cpp
+            -L${_uml_aot_root}/system/lib64/bootstrap
+            -L${_uml_aot_root}/system/lib64 -lc -ldl -lz
+            -o ${_uml_aot_debug}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/aot_guest_debug.cpp
+        COMMENT "Building the AOT guest debug program"
+        VERBATIM)
+    add_custom_target(uml-aot-guest-debug DEPENDS ${_uml_aot_debug})
+    add_dependencies(integration-test-binaries uml-aot-guest-debug)
+
     set(_uml_aot_diagnostics_args)
     if(UML_AOT_DIAGNOSTICS)
         get_property(_uml_aot_manifest GLOBAL PROPERTY UML_AOT_MANIFEST)
@@ -45,6 +65,7 @@ if(TARGET uml_arm64_aot_framework AND TARGET uml-darwin-android17)
             --release ${UML_AOT_IMAGE}
             --emulator $<TARGET_FILE:uml-darwin-android17>
             --probe ${_uml_aot_probe}
+            --debug-program ${_uml_aot_debug}
             ${_uml_aot_diagnostics_args}
         LABELS guest;boot;android;aot
         TIMEOUT 3600
