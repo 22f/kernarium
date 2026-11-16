@@ -117,8 +117,9 @@ interface to the wire.
 
 - **Discovery** (`cameras()`, `concurrentSets()`) reads devices, formats, ranges
   and the multi-camera sets and needs no authorization; it never prompts. A
-  discovery that raises an Objective-C exception (a C++ handler does not see it,
-  and it would end the process) lists no cameras and logs one line. The
+  discovery that raises an Objective-C exception (`catch (const std::exception&)`
+  does not catch it: a start with a catch-all fails, a caller with none is
+  ended) lists no cameras and logs one line. The
   iOS 27.1 outer and inner ultra wide device types (the foldable iPhone's) are
   read only behind an availability check, and a device on 27.0 lists none. The
   order is stable, and every index in the interface is an index into it. A

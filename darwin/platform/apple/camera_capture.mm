@@ -2899,8 +2899,9 @@ private:
 class AppleCamera final : public Camera {
 public:
     // Discovery calls the platform, which can raise where a host lacks what the build assumes (an iPad app on a Mac
-    // lacks the rotation coordinator's angles). A C++ handler does not see an Objective-C exception and it ends the
-    // process, so the exception stops here: the host presents no cameras, with one line saying why.
+    // lacks the rotation coordinator's angles). `catch (const std::exception&)` does not catch an Objective-C
+    // exception: a start with a catch-all fails on it and a caller with none is ended by it, so the exception stops
+    // here: the host presents no cameras, with one line saying why.
     AppleCamera()
     {
         @try {
