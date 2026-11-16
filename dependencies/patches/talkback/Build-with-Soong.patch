@@ -22,9 +22,12 @@ against the NDK API level of the app's minSdk, with the platform's JNI
 headers. The ndk-build makefiles of the braille libraries carry a
 .find-ignore, so that the platform makefile search leaves them alone.
 
+The libraries take the app's minimum SDK (26), so that the manifest
+merge accepts them in an app of that minimum.
+
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- Android.bp                                    | 123 ++++++
+ Android.bp                                    | 125 ++++++
  braille/brailledisplay/Android.bp             |  24 ++
  braille/brailledisplayanalytics/Android.bp    |  15 +
  braille/brailleime/Android.bp                 |  22 +
@@ -45,7 +48,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  talkback/src/soong/res/values/app_id.xml      |   6 +
  utils/Android.bp                              |  18 +
  .../accessibility/utils/BuildConfig.java      |  14 +
- 21 files changed, 869 insertions(+), 2 deletions(-)
+ 21 files changed, 871 insertions(+), 2 deletions(-)
  create mode 100644 Android.bp
  create mode 100644 braille/brailledisplay/Android.bp
  create mode 100644 braille/brailledisplayanalytics/Android.bp
@@ -69,10 +72,10 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 
 diff --git a/Android.bp b/Android.bp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ac18f6620a120736fede279b957f17f0f5122d85
+index 0000000000000000000000000000000000000000..13082805ee8ccce33dd9eb82e08e2773a14ced4d
 --- /dev/null
 +++ b/Android.bp
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,125 @@
 +// SPDX-License-Identifier: Apache-2.0
 +
 +//
@@ -127,10 +130,13 @@ index 0000000000000000000000000000000000000000..ac18f6620a120736fede279b957f17f0
 +// What every Android library of the phone build shares: the platform's own
 +// copies of the libraries the Gradle build declares in shared.gradle, at the
 +// versions the tree carries. R classes are transitive, as the Gradle build
-+// leaves them (nonTransitiveRClass=false).
++// leaves them (nonTransitiveRClass=false). The minimum SDK is the app's: a
++// library without one takes its compile SDK (36), which the manifest merger
++// refuses for an app of minSdk 26.
 +java_defaults {
 +    name: "TalkBack-defaults",
 +    sdk_version: "36",
++    min_sdk_version: "26",
 +    java_version: "17",
 +    kotlin_lang_version: "1.9",
 +    use_resource_processor: false,
@@ -181,7 +187,6 @@ index 0000000000000000000000000000000000000000..ac18f6620a120736fede279b957f17f0
 +    name: "TalkBack",
 +    defaults: ["TalkBack-defaults"],
 +    manifest: "src/soong/AndroidManifest.xml",
-+    min_sdk_version: "26",
 +    target_sdk_version: "30",
 +    product_specific: true,
 +    optimize: {
