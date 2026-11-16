@@ -25,7 +25,9 @@ inline constexpr std::size_t native_tlb_entry_count =
 	std::size_t{1} << UML_X86_64_TLB_INDEX_BITS;
 
 /* The executor retires a write translation when a page gains cached code, so
- * it needs the same index the miss handler fills.
+ * it needs the same index the miss handler fills. The index never puts two
+ * neighbouring pages in one entry: a translation keyed by its last byte
+ * relies on that to miss whenever it crosses a page.
  */
 [[nodiscard]] inline constexpr std::size_t native_tlb_index(
 	std::uint64_t address) noexcept

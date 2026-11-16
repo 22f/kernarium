@@ -142,7 +142,10 @@ tail and resolves the same address.
   (`../layout/assembly_offsets.h`); `native_tlb_index` in
   `../software_tlb.hpp` and the three assembly copies of the index
   (`translate` and `translate_plain` in `engine/common.inc`, and the baked
-  entries in `engine/generate_baked.py`) all read that constant.
+  entries in `engine/generate_baked.py`) all read that constant. A
+  translation compares the page of its access's last byte, and an index that
+  never puts neighbouring pages in one entry is what makes every access that
+  crosses a page miss and take its crossing path.
 
 ## Floating-point environment
 
