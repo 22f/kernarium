@@ -311,6 +311,25 @@ void theWaitIsWithinTheBoundAndNeverAddedToIt()
             "so the hold lands at the bound at the latest");
 }
 
+/* A call that is queued behind another keeps its own deadline: the one before it may be waiting for a device that does not
+ * answer, and the caller of the later one has less time than that. */
+void aCallQueuedBehindAnotherEndsAtItsOwnDeadline()
+{
+    BackgroundVideo control;
+    std::atomic<bool> asked {};
+    control.attach([&] { asked.store(true); });
+    std::thread first([&] { (void)control.end(Clock::now() + 600ms); });
+    const auto until = Clock::now() + 5s;
+    while (!asked.load() && Clock::now() < until) std::this_thread::sleep_for(1ms);
+    require(asked.load(), "the first call asked the device");
+    const auto began = Clock::now();
+    const auto outcome = control.end(began + 50ms);
+    require(!outcome.answered && !outcome.stopped && outcome.streams == 0, "the queued call was not answered");
+    require(since(began) >= 40ms && since(began) < 300ms, "and returned at its own deadline, not after the first call's");
+    first.join();
+    control.detach();
+}
+
 } // namespace
 
 int main()
@@ -330,5 +349,6 @@ int main()
     noVideoMeansTheHoldAtOnce();
     aBoundThatRunsOutHoldsAndSaysSoOnce();
     theWaitIsWithinTheBoundAndNeverAddedToIt();
+    aCallQueuedBehindAnotherEndsAtItsOwnDeadline();
     return 0;
 }

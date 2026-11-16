@@ -7,7 +7,8 @@ namespace uml::camera {
 
 BackgroundVideo::Outcome BackgroundVideo::end(Clock::time_point deadline)
 {
-    std::lock_guard serial(callMutex_);
+    std::unique_lock serial(callMutex_, std::defer_lock);
+    if (!serial.try_lock_until(deadline)) return {0, false, false};
     std::unique_lock lock(mutex_);
     if (!attached_) return {};
     const auto request = ++asked_;

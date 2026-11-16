@@ -45,7 +45,9 @@ public:
     };
 
     /* Ends the guest's running video and waits until the guest has stopped its streams, or until `deadline`: one deadline
-     * for the device's answer and the wait together, so the call never takes longer than it. Calls serialize. */
+     * for the device's answer and the wait together, so the call never takes longer than it. Calls serialize, and the wait
+     * for an earlier call is under the same deadline: a call that is still queued behind another at its deadline returns
+     * unanswered (`answered` false), and the caller holds as it would after any wait that ran out. */
     [[nodiscard]] Outcome end(Clock::time_point deadline);
 
     /* Ends the wait of a call of `end` that is in progress, as the application's other way to hold the GPU does when it lands
@@ -72,7 +74,7 @@ public:
     void remaining(std::uint32_t streams);
 
 private:
-    std::mutex callMutex_;
+    std::timed_mutex callMutex_;
     std::mutex mutex_;
     std::condition_variable changed_;
     std::function<void()> wake_;
