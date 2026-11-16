@@ -161,6 +161,29 @@ if(UML_ANDROID_GUEST_PROC_RELEASE AND TARGET uml-darwin-android17)
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# The image's Vulkan check (kernarium_vk_ahb_import): CPU-written hardware buffers
+# imported and read back, and the driver's guest memory file descriptors beside
+# them (VK_KHR_external_memory_fd and VK_EXT_external_memory_dma_buf offered and
+# enabled, host-visible memory exported, mapped by the Vulkan mapping, by the fd
+# and by another process, read by the GPU and imported again, by another
+# instance started with exec as well, including after the exporter freed it and
+# with the fd outliving the devices). It boots Android
+# with the macOS launcher, so it is opt-in: name the release under test.
+set(UML_ANDROID_VULKAN_SMOKE_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-vulkan-smoke test boots")
+if(UML_ANDROID_VULKAN_SMOKE_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-vulkan-smoke
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_vulkan_smoke.py
+            --release ${UML_ANDROID_VULKAN_SMOKE_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
 # The host's hardware keyboard and mouse (the image's device configuration,
 # the on-screen keyboard default and the pointer capture LED of the input
 # topic): the runner plays the display's user over the launcher's VNC display
