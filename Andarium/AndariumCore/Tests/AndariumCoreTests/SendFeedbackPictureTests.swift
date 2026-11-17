@@ -223,6 +223,27 @@ struct SendFeedbackPictureTests {
         #expect(small.image.width <= SendFeedbackPicture.thumbnailPixels, "a small picture is not enlarged past its size")
     }
 
+    @Test func anAncillaryChunkThatFollowsTheImageDataIsSkippedAndTheEndIsStillAccepted() throws {
+        // IHDR, IDAT, tEXt, IEND (84 bytes): the text is left out and the picture opens.
+        var parts = PNGParts(PNGParts.real(width: 1, height: 1))
+        parts.chunks.removeAll { !Self.critical.contains($0.type) }
+        let end = parts.chunks.count - 1
+        parts.chunks.insert(contentsOf: [PNGParts.Chunk("tEXt", Data("Comment\0hi".utf8)), PNGParts.Chunk("tIME", Data(count: 7))], at: end)
+        let input = parts.data()
+        let rebuilt = try SendFeedbackPicture.rebuilt(from: input)
+        #expect(types(of: rebuilt.stream) == ["IHDR", "IDAT", "IEND"] && rebuilt.stream.count < input.count)
+        let thumbnail = try SendFeedbackPicture.thumbnail(of: input)
+        #expect(thumbnail.width == 1 && thumbnail.height == 1)
+    }
+
+    @Test func aSecondRunOfImageDataAfterASkippedChunkIsStillRefused() {
+        var parts = PNGParts(PNGParts.real(width: 1, height: 1))
+        parts.chunks.removeAll { !Self.critical.contains($0.type) }
+        let idat = parts.chunks[parts.chunks.firstIndex { $0.type == "IDAT" }!]
+        parts.chunks.insert(contentsOf: [PNGParts.Chunk("tEXt", Data("a\0b".utf8)), idat], at: parts.chunks.count - 1)
+        #expect(throws: SendFeedbackPicture.Refusal.notPicture) { try SendFeedbackPicture.rebuilt(from: parts.data()) }
+    }
+
     // MARK: What a row says
 
     @Test func onlyAPNGIsAPictureAndAJPEGIsOneThatIsNotShown() async throws {

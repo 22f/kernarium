@@ -92,7 +92,7 @@ nonisolated enum SendFeedbackPicture {
     /// Walks the chunks of the PNG in `data`, within `maxChunks`, reads and checks its header, and gives back the
     /// stream of its critical chunks alone, with the size its header declared. Every chunk's length must fit what
     /// is left of the file; the header comes first and once, the palette and the transparency come once and
-    /// before the image data, the image data is one run of chunks, and the end chunk is present. What follows the
+    /// before the image data, the image data is one run of chunks (skipped chunks may follow it, and then only the end chunk), and the end chunk is present. What follows the
     /// end chunk, and every chunk that is not critical, is left out.
     static func rebuilt(from data: Data) throws -> Rebuilt {
         try data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> Rebuilt in
@@ -140,7 +140,8 @@ nonisolated enum SendFeedbackPicture {
                     stage = .inData
                     keep = true
                 case Chunk.end:
-                    guard stage == .inData, length == 0 else { throw Refusal.notPicture }
+                    // Chunks that are left out may stand between the image data and the end; image data may not.
+                    guard stage == .inData || stage == .afterData, length == 0 else { throw Refusal.notPicture }
                     ended = true
                     keep = true
                 default:
