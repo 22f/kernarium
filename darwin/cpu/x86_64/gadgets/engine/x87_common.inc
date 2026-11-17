@@ -262,8 +262,7 @@ Lx86_x87_integer_compare_done\@:
 .endm
 
 .macro x87_scalar_load size, destination
-	page_cross_check (\size), Lx86_x87_scalar_load_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, \size
+	translate 0, UML_X86_64_TLB_READ_PAGE, \size, cross=Lx86_x87_scalar_load_cross\@
 	.if \size == 2
 	ldrh w9, [x7]
 	.elseif \size == 4
@@ -285,8 +284,7 @@ Lx86_x87_scalar_load_done\@:
 .macro x87_scalar_store size, source
 	mov x24, \source
 	mov x7, x25
-	page_cross_check (\size), Lx86_x87_scalar_store_cross\@
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, \size
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, \size, cross=Lx86_x87_scalar_store_cross\@
 	.if \size == 2
 	strh w24, [x7]
 	.elseif \size == 4

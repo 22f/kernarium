@@ -13,8 +13,7 @@ gadget \name\()_\width\()_r
 gadget \name\()_\width\()_m
 	effective_address
 	mov x25, x7
-	page_cross_check (\width / 8), Lx86_divide_read_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8)
+	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8), cross=Lx86_divide_read_cross\@
 	\load \host_register\()15, [x7]
 	/* The shared tail belongs to the register form and carries no barrier. */
 	x86_memory_order_boundary
