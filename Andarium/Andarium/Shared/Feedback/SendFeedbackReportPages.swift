@@ -321,7 +321,7 @@ struct SendFeedbackFileRow: View {
             }
         }
         // On every appearance: a picture that was refused while it was open is a dimmed row when the list is back.
-        .task { kind = (try? await reader.kind(of: file.entry.id)) ?? .notShown(.problem(.damaged)) }
+        .task { kind = await SendFeedbackEntryKind.shown(after: { try await reader.kind(of: file.entry.id) }, keeping: kind) }
     }
 
     private var content: some View {

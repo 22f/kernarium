@@ -172,6 +172,23 @@ nonisolated enum SendFeedbackEntryKind: Equatable, Sendable {
     case notShown(SendFeedbackEntryContent.Reason)
 }
 
+extension SendFeedbackEntryKind {
+    /// What a row shows once the read of its kind is over: what was read; what the row showed before when the read
+    /// was cancelled (a row that was left, or that came back, has not found its file damaged); and damaged when
+    /// the read failed.
+    static func shown(after read: () async throws -> SendFeedbackEntryKind, keeping previous: SendFeedbackEntryKind?) async
+        -> SendFeedbackEntryKind?
+    {
+        do {
+            return try await read()
+        } catch is CancellationError {
+            return previous
+        } catch {
+            return .notShown(.problem(.damaged))
+        }
+    }
+}
+
 /// What the report is, from its directory: what the first page and the row say.
 nonisolated struct SendFeedbackArchiveFacts: Equatable, Sendable {
     /// Entries that are files and not folders, the ones listed and the ones the bound left out.

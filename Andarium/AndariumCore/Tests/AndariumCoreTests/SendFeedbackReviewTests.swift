@@ -211,4 +211,27 @@ struct SendFeedbackReviewTests {
         await archive.releaseNested()
         #expect(await archive.nestedCount == 0, "the pages are gone: nothing stays open")
     }
+
+    // MARK: N1 a cancelled read of a kind is not damage
+
+    @Test func aCancelledReadOfAKindIsNotDamageAndLeavesWhatTheRowShowed() async throws {
+        let cancelled: () async throws -> SendFeedbackEntryKind = { throw CancellationError() }
+        #expect(await SendFeedbackEntryKind.shown(after: cancelled, keeping: nil) == nil, "a row that showed nothing still shows nothing")
+        #expect(await SendFeedbackEntryKind.shown(after: cancelled, keeping: .text) == .text, "a row keeps what it showed")
+        #expect(
+            await SendFeedbackEntryKind.shown(after: { throw SendFeedbackArchiveError.damaged }, keeping: .text) == .notShown(.problem(.damaged)),
+            "a read that failed is a file that is damaged")
+        #expect(await SendFeedbackEntryKind.shown(after: { .picture }, keeping: nil) == .picture)
+    }
+
+    @Test func theReadOfTheKindOfADeflatedEntryEndsWithACancelAndLeavesNoKindBehind() async throws {
+        let archive = try reader(SendFeedbackMemoryBytes(SyntheticZip([.deflated("a.txt", Data(repeating: 0x61, count: 5_000))]).data()))
+        let task = Task {
+            while !Task.isCancelled { await Task.yield() }
+            return try await archive.kind(of: 0)
+        }
+        task.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(try await archive.kind(of: 0) == .text, "asked again, the kind is read")
+    }
 }
