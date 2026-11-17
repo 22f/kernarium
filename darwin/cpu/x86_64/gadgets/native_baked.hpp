@@ -104,13 +104,18 @@ extern const std::uintptr_t uml_x86_64_baked_lea_64[];
 extern const std::uintptr_t uml_x86_64_baked_lea_64_x[];
 extern const std::uintptr_t uml_x86_64_baked_push_64_r[];
 extern const std::uintptr_t uml_x86_64_baked_pop_64_r[];
-/* CMP or TEST reg, imm with the conditional branch after it, indexed by the
- * branch's x86 condition code times gpr_slots plus the register; a condition
- * the pair cannot answer from the host flags is a null entry. */
+/* CMP or TEST reg, imm or reg, reg with the conditional branch after it,
+ * indexed by the branch's x86 condition code times gpr_slots plus the
+ * destination register; a condition the pair cannot answer from the host
+ * flags is a null entry. */
 extern const std::uintptr_t uml_x86_64_baked_cmp_32_ri_jcc[];
 extern const std::uintptr_t uml_x86_64_baked_cmp_64_ri_jcc[];
 extern const std::uintptr_t uml_x86_64_baked_test_32_ri_jcc[];
 extern const std::uintptr_t uml_x86_64_baked_test_64_ri_jcc[];
+extern const std::uintptr_t uml_x86_64_baked_cmp_32_rr_jcc[];
+extern const std::uintptr_t uml_x86_64_baked_cmp_64_rr_jcc[];
+extern const std::uintptr_t uml_x86_64_baked_test_32_rr_jcc[];
+extern const std::uintptr_t uml_x86_64_baked_test_64_rr_jcc[];
 
 } // extern "C"
 

@@ -5978,18 +5978,19 @@ UML_X86_BAKED_CARRY_TABLES(decrement)
 		instruction.source.kind != OperandKind::memory;
 }
 
-/* A CMP or TEST of a 32- or 64-bit register against an immediate and the
- * conditional branch right after it become one baked entry, whose words are
- * the immediate and the taken target's link, when the branch would take its
- * inline form: its fall-through is translated behind it and its target has a
- * link. The entry writes the compare's record, retires both instructions and
- * branches on the host condition the compare left, so the pair is one
- * dispatch. Neither instruction can fault or leave, so no exit sees the
- * compare retired and the branch not. The branch is marked absorbed and
- * emits nothing; a build without links, a budget-limited replay, keeps the
- * two apart. The branch needs no position check of its own: the instruction
- * after it is further into the block and passes its own, or the block ends
- * before it and the rebuild leaves the branch last, unjoined. */
+/* A CMP or TEST of a 32- or 64-bit register against an immediate or a
+ * register and the conditional branch right after it become one baked entry,
+ * whose words are the immediate or the source register's offset and the taken
+ * target's link, when the branch would take its inline form: its
+ * fall-through is translated behind it and its target has a link. The entry
+ * writes the compare's record, retires both instructions and branches on the
+ * host condition the compare left, so the pair is one dispatch. Neither
+ * instruction can fault or leave, so no exit sees the compare retired and the
+ * branch not. The branch is marked absorbed and emits nothing; a build
+ * without links, a budget-limited replay, keeps the two apart. The branch
+ * needs no position check of its own: the instruction after it is further
+ * into the block and passes its own, or the block ends before it and the
+ * rebuild leaves the branch last, unjoined. */
 [[nodiscard]] bool append_compare_branch(StreamWords &stream,
 	const Gadget &gadget, ExecutionMode mode, ProgramLinkResolver links,
 	std::span<const Gadget> rest, FlagState &produced)
@@ -5999,17 +6000,21 @@ UML_X86_BAKED_CARRY_TABLES(decrement)
 		rest.size() < 2U || links.resolve == nullptr)
 		return false;
 	const bool compare = instruction.operation == Operation::compare;
+	const auto &source = instruction.source;
 	if ((!compare && instruction.operation != Operation::test) ||
 		instruction.locked ||
 		instruction.destination.kind != OperandKind::reg ||
-		instruction.source.kind != OperandKind::immediate)
+		(source.kind != OperandKind::immediate &&
+		 source.kind != OperandKind::reg))
 		return false;
 	const auto width = instruction.destination.width;
 	if (width != OperandWidth::dword && width != OperandWidth::qword)
 		return false;
 	/* At 32 and 64 bits a register operand is one of the sixteen general
-	 * registers, whose baked slot is its index. */
+	 * registers, whose baked slot is its index, and CMP and TEST give both
+	 * operands one width. */
 	const unsigned d = instruction.destination.reg.index;
+	const bool immediate = source.kind == OperandKind::immediate;
 	const auto &branch = rest[0];
 	if (branch.instruction.operation != Operation::jump_conditional ||
 		!fused_condition(branch.instruction.condition,
@@ -6019,17 +6024,24 @@ UML_X86_BAKED_CARRY_TABLES(decrement)
 		relative_target(branch, mode), mode);
 	if (taken == nullptr)
 		return false;
-	const auto *table = compare ?
-		(width == OperandWidth::qword ? baked::uml_x86_64_baked_cmp_64_ri_jcc :
-			baked::uml_x86_64_baked_cmp_32_ri_jcc) :
-		(width == OperandWidth::qword ? baked::uml_x86_64_baked_test_64_ri_jcc :
-			baked::uml_x86_64_baked_test_32_ri_jcc);
+	const bool wide = width == OperandWidth::qword;
+	const auto *table = immediate ?
+		(compare ?
+			(wide ? baked::uml_x86_64_baked_cmp_64_ri_jcc :
+				baked::uml_x86_64_baked_cmp_32_ri_jcc) :
+			(wide ? baked::uml_x86_64_baked_test_64_ri_jcc :
+				baked::uml_x86_64_baked_test_32_ri_jcc)) :
+		(compare ?
+			(wide ? baked::uml_x86_64_baked_cmp_64_rr_jcc :
+				baked::uml_x86_64_baked_cmp_32_rr_jcc) :
+			(wide ? baked::uml_x86_64_baked_test_64_rr_jcc :
+				baked::uml_x86_64_baked_test_32_rr_jcc));
 	const auto entry = table[static_cast<unsigned>(branch.instruction.condition) *
 		baked::gpr_slots + d];
 	if (entry == 0)
 		return false;
 	stream.push_back(entry);
-	stream.push_back(instruction.source.immediate);
+	stream.push_back(immediate ? source.immediate : *register_offset(source));
 	stream.push_back(reinterpret_cast<std::uintptr_t>(taken));
 	produced = {};
 	produced.absorbed = true;

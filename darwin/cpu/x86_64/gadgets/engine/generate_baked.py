@@ -33,11 +33,12 @@ and overlap exits read the position, and they rebuild the RIP from it.
 PUSH and POP of a register carry no word at all: their exits leave with the
 stream pointer, and the runtime finds the instruction from it (program.cpp).
 
-A CMP or TEST of a 32- or 64-bit register against an immediate and the
-conditional branch right after it, whose fall-through the block translates
-behind it, are one entry with the immediate and the taken target's link as its
-two words: it writes the compare's record, retires both and branches on the
-host condition, so the pair costs one dispatch. Those entries are written to a
+A CMP or TEST of a 32- or 64-bit register against an immediate or a register
+and the conditional branch right after it, whose fall-through the block
+translates behind it, are one entry with the immediate or the source
+register's offset and the taken target's link as its two words: it writes the
+compare's record, retires both and branches on the host condition, so the pair
+costs one dispatch. Those entries are written to a
 second file (--tail-output), a group behind the region's last, so no other
 entry moves.
 
@@ -994,35 +995,44 @@ CARRY_CONDITIONS = ('b', 'ae', 'be', 'a')
 
 
 def compare_branch(o):
-    """CMP or TEST reg, imm and the inline conditional branch after it. A table
-    per operation and width, condition-major in x86's condition-code order,
-    then registers; a condition the pair cannot answer from NZCV is a zero."""
-    for op in ('cmp', 'test'):
-        for width in (32, 64):
-            host, flagop, _ = instr_for(op, width)
-            hr = 'x' if width == 64 else 'w'
-            entries = []
-            for condition, host_condition in CONDITIONS:
-                answered = host_condition is not None and not (
-                    op == 'test' and condition in CARRY_CONDITIONS)
-                for d in GPR:
-                    if not answered:
-                        entries.append(None)
-                        continue
-                    name = f'{op}_{width}_ri_j{condition}_{d}'
-                    taken = o.label('taken')
-                    o.gadget(name)
-                    o.emit('\tldp x12, x16, [_stream], #16')
-                    o.emit(f'\tldr {hr}11, [_vcpu, #{d}]')
-                    o.emit(f'\t{host} {hr}13, {hr}11, {hr}12')
-                    record(o, flagop, width)
-                    o.emit('\tadd _executed, _executed, #2')
-                    o.emit(f'\tb.{host_condition} {taken}')
-                    o.emit('\tnext_gadget')
-                    o.emit(f'{taken}:')
-                    o.emit('\tfollow_block_link x16')
-                    entries.append(name)
-            o.table(f'{op}_{width}_ri_jcc', entries)
+    """CMP or TEST reg, imm or reg, reg and the inline conditional branch after
+    it. A table per operation, width and source, condition-major in x86's
+    condition-code order, then the destination register; a condition the pair
+    cannot answer from NZCV is a zero. The first stream word is the immediate,
+    or the source register's CpuState offset."""
+    for source in ('ri', 'rr'):
+        for op in ('cmp', 'test'):
+            for width in (32, 64):
+                compare_branch_table(o, source, op, width)
+
+
+def compare_branch_table(o, source, op, width):
+    host, flagop, _ = instr_for(op, width)
+    hr = 'x' if width == 64 else 'w'
+    entries = []
+    for condition, host_condition in CONDITIONS:
+        answered = host_condition is not None and not (
+            op == 'test' and condition in CARRY_CONDITIONS)
+        for d in GPR:
+            if not answered:
+                entries.append(None)
+                continue
+            name = f'{op}_{width}_{source}_j{condition}_{d}'
+            taken = o.label('taken')
+            o.gadget(name)
+            o.emit('\tldp x12, x16, [_stream], #16')
+            if source == 'rr':
+                o.emit(f'\tldr {hr}12, [_vcpu, x12]')
+            o.emit(f'\tldr {hr}11, [_vcpu, #{d}]')
+            o.emit(f'\t{host} {hr}13, {hr}11, {hr}12')
+            record(o, flagop, width)
+            o.emit('\tadd _executed, _executed, #2')
+            o.emit(f'\tb.{host_condition} {taken}')
+            o.emit('\tnext_gadget')
+            o.emit(f'{taken}:')
+            o.emit('\tfollow_block_link x16')
+            entries.append(name)
+    o.table(f'{op}_{width}_{source}_jcc', entries)
 
 
 def main():
