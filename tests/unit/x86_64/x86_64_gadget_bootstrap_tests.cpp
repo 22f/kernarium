@@ -4166,6 +4166,720 @@ void pages_sharing_an_entry_keep_their_own_bytes()
 	require(kept, "a store wrote another page that shares its entry");
 }
 
+/* ---- stack twins ------------------------------------------------------------
+ *
+ * A baked [rsp + displacement] access runs a twin that tries the stack's own
+ * TLB entry (`stack_fast`, the entry of RSP's page at a run's start) before it
+ * hashes, and the ordinary entry for anything else. These run each twin
+ * against the same instruction through RBP, which takes the ordinary entry,
+ * with the pages' entries planted to point at buffers of their own between
+ * guard pages, so a twin that used another page's translation reads or writes
+ * other bytes.
+ */
+
+/* A fused access form around a ModRM byte whose reg field is `reg`: DL, DX,
+ * EDX or RDX, DH for 6, or an opcode extension: not RCX, which SYSCALL
+ * writes. */
+struct StackForm final {
+	const char *name;
+	std::vector<std::uint8_t> opcode;
+	std::uint8_t reg;
+	std::vector<std::uint8_t> immediate;
+	unsigned size;
+};
+
+[[nodiscard]] const std::vector<StackForm> &stack_forms()
+{
+	static const std::vector<StackForm> forms{
+		{"mov rdx,[m]", {0x48, 0x8b}, 2, {}, 8},
+		{"mov edx,[m]", {0x8b}, 2, {}, 4},
+		{"mov dx,[m]", {0x66, 0x8b}, 2, {}, 2},
+		{"mov dl,[m]", {0x8a}, 2, {}, 1},
+		{"mov dh,[m]", {0x8a}, 6, {}, 1},
+		{"movzx edx,word [m]", {0x0f, 0xb7}, 2, {}, 2},
+		{"movsx rdx,byte [m]", {0x48, 0x0f, 0xbe}, 2, {}, 1},
+		{"movsx rdx,word [m]", {0x48, 0x0f, 0xbf}, 2, {}, 2},
+		{"movsxd rdx,[m]", {0x48, 0x63}, 2, {}, 4},
+		{"mov [m],rdx", {0x48, 0x89}, 2, {}, 8},
+		{"mov [m],edx", {0x89}, 2, {}, 4},
+		{"mov [m],dx", {0x66, 0x89}, 2, {}, 2},
+		{"mov [m],dl", {0x88}, 2, {}, 1},
+		{"mov [m],dh", {0x88}, 6, {}, 1},
+		{"mov qword [m],-2", {0x48, 0xc7}, 0, {0xfe, 0xff, 0xff, 0xff}, 8},
+		{"mov dword [m],0x1234", {0xc7}, 0, {0x34, 0x12, 0x00, 0x00}, 4},
+		{"mov word [m],0x1234", {0x66, 0xc7}, 0, {0x34, 0x12}, 2},
+		{"mov byte [m],0x5a", {0xc6}, 0, {0x5a}, 1},
+		{"add rdx,[m]", {0x48, 0x03}, 2, {}, 8},
+		{"sub edx,[m]", {0x2b}, 2, {}, 4},
+		{"and dx,[m]", {0x66, 0x23}, 2, {}, 2},
+		{"xor dl,[m]", {0x32}, 2, {}, 1},
+		{"or rdx,[m]", {0x48, 0x0b}, 2, {}, 8},
+		{"cmp rdx,[m]", {0x48, 0x3b}, 2, {}, 8},
+		{"cmp [m],edx", {0x39}, 2, {}, 4},
+		{"test [m],dx", {0x66, 0x85}, 2, {}, 2},
+		{"add [m],rdx", {0x48, 0x01}, 2, {}, 8},
+		{"sub [m],edx", {0x29}, 2, {}, 4},
+		{"and [m],dx", {0x66, 0x21}, 2, {}, 2},
+		{"or [m],dl", {0x08}, 2, {}, 1},
+		{"xor [m],rdx", {0x48, 0x31}, 2, {}, 8},
+		{"add qword [m],5", {0x48, 0x83}, 0, {0x05}, 8},
+		{"sub dword [m],0x100", {0x81}, 5, {0x00, 0x01, 0x00, 0x00}, 4},
+		{"and word [m],-16", {0x66, 0x83}, 4, {0xf0}, 2},
+		{"xor byte [m],0x33", {0x80}, 6, {0x33}, 1},
+		{"cmp dword [m],7", {0x83}, 7, {0x07}, 4},
+		{"test byte [m],0x81", {0xf6}, 0, {0x81}, 1},
+	};
+	return forms;
+}
+
+/* The stack twins are the bank's last group, behind the unrecorded twins,
+ * whose last entry is XOR's at 64 bits from an immediate into R15. */
+[[nodiscard]] bool is_stack_twin(std::uintptr_t word) noexcept
+{
+	return word >
+		uml::cpu::x86_64::gadgets::baked::uml_x86_64_baked_xor_64_ri_unrecorded[15];
+}
+
+/* The data pages of the stack-twin runs follow the code page. */
+constexpr std::uint64_t stack_test_page = tlb_test_base + 2U * 4096U;
+
+/* A planted page's buffer: the page between two guard pages. */
+constexpr std::size_t planted_span = 3U * 4096U;
+
+struct StackRun final {
+	uml::cpu::EngineEvent event{};
+	std::size_t retired{};
+	std::uint64_t rdx{};
+	std::uint64_t flags{};
+	std::uintptr_t first_word{};
+	std::size_t atomic_pointers{};
+	std::vector<std::uint8_t> memory;
+	std::vector<std::uint8_t> planted;
+};
+
+[[nodiscard]] bool same_effects(const StackRun &left, const StackRun &right)
+{
+	return left.event == right.event && left.retired == right.retired &&
+		left.rdx == right.rdx && left.flags == right.flags &&
+		left.atomic_pointers == right.atomic_pointers &&
+		left.memory == right.memory && left.planted == right.planted;
+}
+
+/* What a failed comparison names: everything but the bytes. */
+[[nodiscard]] std::string describe(const StackRun &run)
+{
+	return "event " + std::to_string(static_cast<int>(run.event)) +
+		", retired " + std::to_string(run.retired) + ", rdx " +
+		std::to_string(run.rdx) + ", flags " + std::to_string(run.flags) +
+		", misses " + std::to_string(run.atomic_pointers);
+}
+
+/* The planted buffers as a run starts: each page's bytes its own, the guard
+ * pages 0xee. */
+[[nodiscard]] std::vector<std::uint8_t> fresh_planted(std::size_t pages)
+{
+	std::vector<std::uint8_t> bytes(pages * planted_span, 0xee);
+	for (std::size_t page = 0; page < pages; ++page)
+		for (unsigned index = 0; index < 4096U; ++index)
+			bytes[page * planted_span + 4096U + index] =
+				static_cast<std::uint8_t>(0x80U + 0x10U * page + index * 7U);
+	return bytes;
+}
+
+/* Runs `form` at `address` with RSP and RBP at `base` and the form through
+ * RSP or RBP, the entries of the pages in `planted` pointing into buffers of
+ * their own, and reports what it did. */
+[[nodiscard]] StackRun run_stack_form(const StackForm &form, bool through_rsp,
+	std::uint64_t base, std::uint64_t address,
+	std::initializer_list<std::uint64_t> planted)
+{
+	using namespace uml::cpu::x86_64;
+	TestMemory memory{tlb_test_base};
+	auto code = form.opcode;
+	code.push_back(static_cast<std::uint8_t>(
+		0x80U | (form.reg << 3U) | (through_rsp ? 4U : 5U)));
+	if (through_rsp)
+		code.push_back(0x24);
+	const auto displacement = static_cast<std::uint32_t>(address - base);
+	for (unsigned byte = 0; byte < 4U; ++byte)
+		code.push_back(static_cast<std::uint8_t>(displacement >> (8U * byte)));
+	code.insert(code.end(), form.immediate.begin(), form.immediate.end());
+	code.insert(code.end(), {0x0f, 0x05}); // syscall
+	memory.fill(tlb_test_base, std::as_bytes(std::span{code}));
+	std::vector<std::uint8_t> data(3U * 4096U);
+	for (unsigned index = 0; index < data.size(); ++index)
+		data[index] = static_cast<std::uint8_t>(index * 13U + 5U);
+	memory.fill(tlb_test_base + 4096U, std::as_bytes(std::span{data}));
+	const auto built = require_built(gadgets::build(memory, tlb_test_base),
+		std::string{form.name} + " did not build");
+	gadgets::Executor executor;
+	executor.prepare(memory);
+	auto buffers = fresh_planted(planted.size());
+	std::size_t index = 0;
+	for (const auto page : planted) {
+		const auto delta = reinterpret_cast<std::uintptr_t>(
+			buffers.data() + index++ * planted_span + 4096U) - page;
+		executor.tlb_entries()[native_tlb_index(page)] = {
+			.read_page = page,
+			.read_data_minus_address = delta,
+			.write_page = page,
+			.write_data_minus_address = delta,
+		};
+	}
+	CpuState cpu{};
+	cpu.rip = tlb_test_base;
+	cpu.gpr(Register::rsp) = base;
+	cpu.gpr(Register::rbp) = base;
+	cpu.gpr(Register::rdx) = 0x8877'6655'4433'2211ULL;
+	memory.reset_atomic_pointers();
+	const auto result = gadgets::execute(built.program, cpu, memory,
+		executor, 4);
+	StackRun run{
+		.event = result.event,
+		.retired = result.retired_instructions,
+		.rdx = cpu.gpr(Register::rdx),
+		.flags = cpu.gpr(Register::r11),
+		.first_word = built.program.native_stream().front(),
+		.atomic_pointers = memory.atomic_pointers(),
+		.memory = {},
+		.planted = std::move(buffers),
+	};
+	for (unsigned offset = 0; offset < data.size(); ++offset)
+		run.memory.push_back(memory.byte(tlb_test_base + 4096U + offset));
+	return run;
+}
+
+/* Each twin does what its ordinary entry does at the start of RSP's page,
+ * inside it and ending on its last byte, from a displacement below RSP and
+ * above it, and only a base of RSP takes it. RSP's page's entry is planted,
+ * so every twin hits. */
+void stack_twins_match_their_ordinary_entries()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t page = stack_test_page;
+	for (const auto &form : stack_forms()) {
+		for (const std::uint64_t offset : {std::uint64_t{0}, std::uint64_t{8},
+			std::uint64_t{4096U - form.size}}) {
+			const auto what = std::string{form.name} + " at page offset " +
+				std::to_string(offset);
+			const auto twin = run_stack_form(form, true, page + 64U,
+				page + offset, {page - 4096U, page, page + 4096U});
+			const auto plain = run_stack_form(form, false, page + 64U,
+				page + offset, {page - 4096U, page, page + 4096U});
+			require(is_stack_twin(twin.first_word) &&
+					!is_stack_twin(plain.first_word),
+				what + " did not take a stack twin through RSP alone");
+			require(plain.event == uml::cpu::EngineEvent::system_call &&
+					plain.retired == 2 && plain.atomic_pointers == 0,
+				what + " through RBP did not use its planted entry");
+			require(same_effects(twin, plain),
+				what + " through RSP did not do what it does through RBP: " +
+					describe(twin) + " against " + describe(plain));
+		}
+	}
+}
+
+/* A twin across a page edge takes the ordinary entry's crossing path,
+ * which asks the address space for the bytes, with RSP below the edge, where
+ * the entry it starts from is the first byte's page, and above it, where it
+ * is the last byte's. Each form runs at every amount it can cross by, its
+ * last byte alone on the next page included. Both pages' entries are
+ * planted, so a twin that used either for the whole access would reach into
+ * a guard page. */
+void stack_twins_refuse_an_access_across_a_page()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t edge = stack_test_page;
+	const auto untouched = fresh_planted(2);
+	for (const auto &form : stack_forms()) {
+		for (unsigned over = 1; over < form.size; ++over) {
+			for (const bool below : {true, false}) {
+				const auto what = std::string{form.name} + " across a page by " +
+					std::to_string(over) + (below ? " above RSP" : " below RSP");
+				const auto address = edge - (form.size - over);
+				const auto base = below ? edge - 64U : edge + 64U;
+				const auto twin = run_stack_form(form, true, base, address,
+					{edge - 4096U, edge});
+				const auto plain = run_stack_form(form, false, base, address,
+					{edge - 4096U, edge});
+				require(is_stack_twin(twin.first_word),
+					what + " did not take its stack twin");
+				require(plain.event == uml::cpu::EngineEvent::system_call &&
+						plain.retired == 2 && plain.atomic_pointers == 0 &&
+						plain.planted == untouched,
+					what + " through RBP used a page's translation");
+				require(same_effects(twin, plain),
+					what + " through RSP did not do what it does through RBP: " +
+						describe(twin) + " against " + describe(plain));
+			}
+		}
+	}
+}
+
+/* A twin on another page than RSP's takes the ordinary translation: the
+ * next page, and the one below RSP's page, each with an entry of its own. */
+void stack_twins_take_the_ordinary_path_off_their_page()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t page = stack_test_page;
+	for (const auto &form : stack_forms()) {
+		for (const auto address : {page + 4096U + 8U, page - 16U}) {
+			const auto what = std::string{form.name} + " on the page " +
+				(address > page ? "above" : "below") + " RSP's";
+			const auto twin = run_stack_form(form, true, page + 64U, address,
+				{page - 4096U, page, page + 4096U});
+			const auto plain = run_stack_form(form, false, page + 64U, address,
+				{page - 4096U, page, page + 4096U});
+			require(is_stack_twin(twin.first_word),
+				what + " did not take its stack twin");
+			require(plain.event == uml::cpu::EngineEvent::system_call &&
+					plain.retired == 2 && plain.atomic_pointers == 0,
+				what + " through RBP did not use its planted entry");
+			require(same_effects(twin, plain),
+				what + " through RSP did not do what it does through RBP: " +
+					describe(twin) + " against " + describe(plain));
+		}
+	}
+}
+
+/* RSP moving among pages that share one entry, as a stack switch or RSP
+ * used as a pointer leaves it: the first access of each page finds the entry
+ * holding another and takes the ordinary translation, which fills it with
+ * its own page, so every load and store reaches its own page. The high page
+ * differs from the near one only above bit 31. */
+void stack_twins_keep_pages_sharing_their_entry_apart()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t code = tlb_test_base;
+	const std::uint64_t near = tlb_test_base + 4096U;
+	const auto far = page_sharing_entry(near, 1U);
+	const auto high = page_sharing_entry(near, std::uint64_t{1} << 20U);
+	require(native_tlb_index(far) == native_tlb_index(near) &&
+			native_tlb_index(high) == native_tlb_index(near) &&
+			(high & 0xffffffffU) == (near & 0xffffffffU),
+		"the far pages do not share the near page's entry");
+	const std::uint64_t high_backing = tlb_test_base + 2U * 4096U;
+	const std::uint64_t far_backing = tlb_test_base + 3U * 4096U;
+	FarPageMemory memory{tlb_test_base,
+		{{high, high_backing}, {far, far_backing}}};
+	memory.load(code, {
+		0x48, 0x8b, 0x44, 0x24, 0x08,       // mov rax,[rsp+8]
+		0x48, 0x89, 0x44, 0x24, 0x10,       // mov [rsp+16],rax
+		0x48, 0x89, 0xdc,                   // mov rsp,rbx
+		0x48, 0x8b, 0x54, 0x24, 0x08,       // mov rdx,[rsp+8]
+		0x48, 0x89, 0x54, 0x24, 0x10,       // mov [rsp+16],rdx
+		0x48, 0x01, 0x54, 0x24, 0x18,       // add [rsp+24],rdx
+		0x48, 0x89, 0xf4,                   // mov rsp,rsi
+		0x4c, 0x8b, 0x44, 0x24, 0x08,       // mov r8,[rsp+8]
+		0x4c, 0x89, 0x44, 0x24, 0x10,       // mov [rsp+16],r8
+		0x48, 0x89, 0xfc,                   // mov rsp,rdi
+		0x4c, 0x8b, 0x4c, 0x24, 0x08,       // mov r9,[rsp+8]
+		0x4c, 0x01, 0x4c, 0x24, 0x18,       // add [rsp+24],r9
+		0x0f, 0x05,                         // syscall
+	});
+	const std::array<std::uint64_t, 3> pages{near, high_backing, far_backing};
+	for (unsigned page = 0; page < pages.size(); ++page)
+		for (unsigned index = 0; index < 32U; ++index)
+			memory.load(pages[page] + index, {static_cast<std::uint8_t>(
+				0x10U + 0x40U * page + index)});
+	const auto word = [&](unsigned page, unsigned offset) {
+		return memory.qword(pages[page] + offset);
+	};
+	const auto near_8 = word(0, 8);
+	const auto near_24 = word(0, 24);
+	const auto high_8 = word(1, 8);
+	const auto high_24 = word(1, 24);
+	const auto far_8 = word(2, 8);
+	const auto built = require_built(gadgets::build(memory, code),
+		"the stack-switching sequence did not build");
+	gadgets::Executor executor;
+	executor.prepare(memory);
+	CpuState cpu{};
+	cpu.rip = code;
+	cpu.gpr(Register::rsp) = near;
+	cpu.gpr(Register::rbx) = high;
+	cpu.gpr(Register::rsi) = far;
+	cpu.gpr(Register::rdi) = near;
+	const auto result = gadgets::execute(built.program, cpu, memory,
+		executor, 32);
+	require(result.event == uml::cpu::EngineEvent::system_call &&
+			result.retired_instructions == 13,
+		"the stack-switching sequence did not reach SYSCALL");
+	require(cpu.gpr(Register::rax) == near_8 &&
+			cpu.gpr(Register::rdx) == high_8 &&
+			cpu.gpr(Register::r8) == far_8 &&
+			cpu.gpr(Register::r9) == near_8,
+		"a stack load read another page that shares its entry");
+	require(word(0, 16) == near_8 && word(1, 16) == high_8 &&
+			word(2, 16) == far_8 && word(1, 24) == high_24 + high_8 &&
+			word(0, 24) == near_24 + near_8,
+		"a stack store wrote another page that shares its entry");
+}
+
+/* A twin's store owes a publication exactly where the ordinary store does:
+ * none to an executable page no executor holds code on, and one for every
+ * store once an executor, another or its own, translates code on the
+ * stack's page. Each run begins at that page's entry, whose read tag the
+ * load before the store keeps the plain page and whose write tag then
+ * carries a code bit, in a run that has not published yet. */
+void stack_twin_stores_publish_where_ordinary_stores_do()
+{
+	using namespace uml::cpu::x86_64;
+	TestMemory memory;
+	/* Page 0: mov rax,[rsp+8]; mov [rsp+16],rcx; SYSCALL. Page 1, the
+	 * stack's: SYSCALL. */
+	memory.load(0, {0x48, 0x8b, 0x44, 0x24, 0x08, 0x48, 0x89, 0x4c, 0x24,
+		0x10, 0x0f, 0x05});
+	memory.load(0x1000, {0x0f, 0x05});
+	memory.set_every_page_executable(true);
+	gadgets::Executor writer;
+	writer.prepare(memory, 7, 1, 1);
+	const auto block = writer.select_program(
+		memory, 0, ExecutionMode::long64);
+	require(block.program != nullptr &&
+			is_stack_twin(block.program->native_stream()[0]) &&
+			is_stack_twin(block.program->native_stream()[2]),
+		"the stack load and store did not take their twins");
+	const auto run = [&](std::uint64_t value, std::size_t publications,
+		const char *message) {
+		CpuState cpu{};
+		cpu.gpr(Register::rsp) = 0x1800;
+		cpu.gpr(Register::rcx) = value;
+		const auto result = gadgets::execute(
+			*block.program, cpu, memory, writer, 64);
+		require(result.event == uml::cpu::EngineEvent::system_call &&
+				memory.qword(0x1810) == value,
+			"a stack store did not run");
+		require(memory.invalidations() == publications, message);
+	};
+	run(1, 0, "a stack store to a page holding no code published");
+	run(2, 0, "a stack store through its own entry published");
+	gadgets::Executor reader;
+	reader.prepare(memory, 7, 1, 1);
+	require(reader.select_program(memory, 0x1000, ExecutionMode::long64)
+			.program != nullptr,
+		"the stack page's code did not build");
+	run(3, 1, "a stack store to a page another executor translated did not "
+		"publish");
+	run(4, 2, "a stack store whose entry holds code did not publish");
+	reader = gadgets::Executor{};
+	run(5, 2, "a stack store to a page that lost its code still published");
+	require(writer.select_program(memory, 0x1000, ExecutionMode::long64)
+			.program != nullptr,
+		"the stack page's code did not build in the writer");
+	run(6, 3, "a stack store to a page its own executor translated did not "
+		"publish");
+	run(7, 4, "a stack store whose entry holds its own code did not publish");
+}
+
+/* TestMemory whose page `page` is backed by one of two pages of its span,
+ * as a remapping leaves it. */
+class RemappedPageMemory final : public TestMemory {
+public:
+	RemappedPageMemory(std::uint64_t base, std::uint64_t page,
+		std::uint64_t first, std::uint64_t second)
+		: TestMemory{base}, page_{page}, first_{first}, second_{second} {}
+
+	void remap() noexcept { remapped_ = !remapped_; }
+
+	[[nodiscard]] bool read(std::uint64_t address,
+		std::span<std::byte> destination) override
+	{
+		return TestMemory::read(backing(address), destination);
+	}
+
+	[[nodiscard]] bool write(std::uint64_t address,
+		std::span<const std::byte> source) override
+	{
+		return TestMemory::write(backing(address), source);
+	}
+
+	[[nodiscard]] std::byte *atomic_pointer(std::uint64_t address,
+		std::size_t size, uml::memory::MemoryAccess access) override
+	{
+		return TestMemory::atomic_pointer(backing(address), size, access);
+	}
+
+private:
+	[[nodiscard]] std::uint64_t backing(std::uint64_t address) const noexcept
+	{
+		if (address - page_ < 4096U)
+			return address - page_ + (remapped_ ? second_ : first_);
+		return address;
+	}
+
+	std::uint64_t page_;
+	std::uint64_t first_;
+	std::uint64_t second_;
+	bool remapped_{};
+};
+
+/* A twin reaches a remapped stack page through its new mapping whether the
+ * executor retires the changed range, clears the whole table because it
+ * cannot replay the change, or clears it for a new generation: the entry a
+ * run starts from is the entry each of them retires. */
+void stack_twins_follow_a_remapped_page()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t code = tlb_test_base;
+	const std::uint64_t stack = tlb_test_base + 4096U;
+	const std::uint64_t first = tlb_test_base + 2U * 4096U;
+	const std::uint64_t second = tlb_test_base + 3U * 4096U;
+	RemappedPageMemory memory{tlb_test_base, stack, first, second};
+	memory.load(code, {
+		0x48, 0x8b, 0x44, 0x24, 0x08,       // mov rax,[rsp+8]
+		0x48, 0x89, 0x54, 0x24, 0x10,       // mov [rsp+16],rdx
+		0x0f, 0x05,                         // syscall
+	});
+	for (unsigned index = 0; index < 16U; ++index) {
+		memory.load(first + index, {static_cast<std::uint8_t>(0x20U + index)});
+		memory.load(second + index, {static_cast<std::uint8_t>(0x60U + index)});
+	}
+	const auto first_8 = memory.qword(first + 8U);
+	const auto second_8 = memory.qword(second + 8U);
+	const auto built = require_built(gadgets::build(memory, code),
+		"the remapped-stack sequence did not build");
+	struct Changes final {
+		std::uint64_t stack;
+		std::uint64_t sequence;
+	} changes{stack, 1};
+	const gadgets::MappingChangeReader replay = [](void *context,
+		std::uint64_t, std::uint64_t, gadgets::ProgramMappingChange *ranges,
+		std::size_t capacity, std::uint64_t *current) noexcept -> int {
+		const auto &state = *static_cast<const Changes *>(context);
+		if (capacity == 0)
+			return -1;
+		ranges[0] = {.address = state.stack, .length = 4096U};
+		*current = state.sequence;
+		return 1;
+	};
+	gadgets::Executor executor;
+	const auto run = [&](std::uint64_t value, std::uint64_t loaded,
+		std::uint64_t stored_at, const char *message) {
+		CpuState cpu{};
+		cpu.rip = code;
+		cpu.gpr(Register::rsp) = stack;
+		cpu.gpr(Register::rdx) = value;
+		const auto result = gadgets::execute(built.program, cpu, memory,
+			executor, 8);
+		require(result.event == uml::cpu::EngineEvent::system_call &&
+				cpu.gpr(Register::rax) == loaded &&
+				memory.qword(stored_at + 16U) == value,
+			message);
+	};
+	executor.prepare(memory, 5, changes.sequence, 1, &changes, nullptr,
+		nullptr, replay);
+	run(1, first_8, first, "a stack access missed its first mapping");
+	memory.remap();
+	changes.sequence = 2;
+	executor.prepare(memory, 5, changes.sequence, 1, &changes, nullptr,
+		nullptr, replay);
+	run(2, second_8, second,
+		"a stack access kept a mapping the executor retired by range");
+	require(memory.qword(first + 16U) == 1,
+		"a stack store wrote through a mapping retired by range");
+	memory.remap();
+	changes.sequence = 3;
+	executor.prepare(memory, 5, changes.sequence, 1, &changes);
+	run(3, first_8, first,
+		"a stack access kept a mapping the executor cleared");
+	memory.remap();
+	executor.prepare(memory, 6, changes.sequence, 1, &changes);
+	run(4, second_8, second,
+		"a stack access kept a mapping of another generation");
+}
+
+/* TestMemory whose page `page` is mapped read-only. */
+class ReadOnlyPageMemory final : public TestMemory {
+public:
+	ReadOnlyPageMemory(std::uint64_t base, std::uint64_t page)
+		: TestMemory{base}, page_{page} {}
+
+	[[nodiscard]] bool write(std::uint64_t address,
+		std::span<const std::byte> source) override
+	{
+		if (touches(address, source.size())) {
+			refuse(address);
+			return false;
+		}
+		return TestMemory::write(address, source);
+	}
+
+	[[nodiscard]] std::byte *atomic_pointer(std::uint64_t address,
+		std::size_t size, uml::memory::MemoryAccess access) override
+	{
+		if (access == uml::memory::MemoryAccess::write &&
+			touches(address, size)) {
+			refuse(address);
+			return nullptr;
+		}
+		return TestMemory::atomic_pointer(address, size, access);
+	}
+
+	[[nodiscard]] uml::memory::MemoryFault last_fault() const noexcept override
+	{
+		return refused_ ? fault_ : TestMemory::last_fault();
+	}
+
+	[[nodiscard]] bool has_fault() const noexcept override
+	{
+		return refused_ || TestMemory::has_fault();
+	}
+
+private:
+	[[nodiscard]] bool touches(std::uint64_t address,
+		std::size_t size) const noexcept
+	{
+		return address < page_ + 4096U && address + size > page_;
+	}
+
+	void refuse(std::uint64_t address) noexcept
+	{
+		fault_ = {address, uml::memory::MemoryAccess::write};
+		refused_ = true;
+	}
+
+	std::uint64_t page_;
+	uml::memory::MemoryFault fault_{};
+	bool refused_{};
+};
+
+/* A stack page that a load has just translated for reading but that maps
+ * read-only: the store after it faults there, at its own instruction. */
+void a_stack_twin_store_to_a_read_only_page_faults()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t code = tlb_test_base;
+	const std::uint64_t stack = tlb_test_base + 4096U;
+	ReadOnlyPageMemory memory{tlb_test_base, stack};
+	memory.load(code, {
+		0x48, 0x8b, 0x44, 0x24, 0x08,       // mov rax,[rsp+8]
+		0x48, 0x89, 0x44, 0x24, 0x10,       // mov [rsp+16],rax
+		0x0f, 0x05,                         // syscall
+	});
+	memory.load(stack + 8U, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88});
+	const auto built = require_built(gadgets::build(memory, code),
+		"the read-only stack sequence did not build");
+	gadgets::Executor executor;
+	executor.prepare(memory);
+	CpuState cpu{};
+	cpu.rip = code;
+	cpu.gpr(Register::rsp) = stack;
+	const auto result = gadgets::execute(built.program, cpu, memory,
+		executor, 8);
+	require(result.event == uml::cpu::EngineEvent::memory_fault &&
+			result.retired_instructions == 1 && cpu.rip == code + 5U &&
+			result.fault.address == stack + 16U &&
+			result.fault.access == uml::memory::MemoryAccess::write,
+		"a stack store to a read-only page did not fault at itself");
+	require(memory.qword(stack + 16U) == 0 &&
+			cpu.gpr(Register::rax) == memory.qword(stack + 8U),
+		"a stack store to a read-only page changed memory");
+}
+
+/* A twin's store into the block that is running, on a page no executor
+ * holds code on, hits the stack's entry and still leaves through the
+ * overlap exit for the instruction after it. */
+void a_stack_twin_store_into_its_block_leaves_after_itself()
+{
+	using namespace uml::cpu::x86_64;
+	TestMemory memory;
+	memory.load(0, {
+		0x48, 0x89, 0x8c, 0x24, 0x00, 0x08, 0x00, 0x00, // mov [rsp+0x800],rcx
+		0x48, 0x89, 0x4c, 0x24, 0x10,       // mov [rsp+16],rcx
+		0x90, 0x90, 0x90,                   // nop x3
+		0x0f, 0x05,                         // syscall
+	});
+	const auto built = require_built(gadgets::build(memory, 0),
+		"the self-overwriting stack sequence did not build");
+	require(is_stack_twin(built.program.native_stream()[2]),
+		"the store into its block did not take its twin");
+	gadgets::Executor executor;
+	executor.prepare(memory);
+	CpuState cpu{};
+	cpu.gpr(Register::rsp) = 0;
+	constexpr std::uint64_t value = 0x1122'3344'5566'7788ULL;
+	cpu.gpr(Register::rcx) = value;
+	const auto result = gadgets::execute(built.program, cpu, memory,
+		executor, 16);
+	require(result.event == uml::cpu::EngineEvent::continued &&
+			result.retired_instructions == 2 && cpu.rip == 13U,
+		"a stack store into its own block did not leave after itself");
+	require(memory.qword(0x10) == value && memory.qword(0x800) == value,
+		"a stack store into its own block lost its bytes");
+}
+
+/* What the builder keeps off the twins, each reading what its address names:
+ * an access with an index, one with a segment override, a 32-bit address in
+ * long mode, a locked update, and any access in compatibility mode, whose
+ * address wraps at 4 GiB. */
+void stack_operands_without_a_twin_keep_their_addresses()
+{
+	using namespace uml::cpu::x86_64;
+	struct Case final {
+		const char *name;
+		std::vector<std::uint8_t> code;
+		ExecutionMode mode;
+		std::uint64_t memory_base;
+		std::uint64_t rsp;
+		std::uint64_t address;
+		std::uint64_t fs_base;
+		bool locked_add;
+	};
+	const std::uint64_t page = 0x2000;
+	const Case cases[] = {
+		{"mov rax,[rsp+rcx*8+8]", {0x48, 0x8b, 0x44, 0xcc, 0x08},
+			ExecutionMode::long64, 0, page, page + 24U, 0, false},
+		{"mov rax,fs:[rsp+8]", {0x64, 0x48, 0x8b, 0x44, 0x24, 0x08},
+			ExecutionMode::long64, 0, page, page + 0x1008U, 0x1000, false},
+		{"mov eax,[esp+8]", {0x67, 0x8b, 0x44, 0x24, 0x08},
+			ExecutionMode::long64, 0, (std::uint64_t{1} << 32U) | page,
+			page + 8U, 0, false},
+		{"lock add [rsp+8],rax", {0xf0, 0x48, 0x01, 0x44, 0x24, 0x08},
+			ExecutionMode::long64, 0, page, page + 8U, 0, true},
+		{"compat32 mov eax,[esp+8]", {0x8b, 0x44, 0x24, 0x08},
+			ExecutionMode::compat32, 0xffff'f000ULL, 0xffff'fffcULL, 4U, 0,
+			false},
+	};
+	for (const auto &test : cases) {
+		TestMemory memory{test.memory_base};
+		memory.set_wrap32(test.mode == ExecutionMode::compat32);
+		auto code = test.code;
+		if (test.mode == ExecutionMode::compat32)
+			code.insert(code.end(), {0xcd, 0x80}); // int 80h
+		else
+			code.insert(code.end(), {0x0f, 0x05}); // syscall
+		memory.fill(test.memory_base, std::as_bytes(std::span{code}));
+		for (unsigned index = 0; index < 8U; ++index)
+			memory.load(test.address + index,
+				{static_cast<std::uint8_t>(0x31U + 0x11U * index)});
+		const auto before = memory.qword(test.address);
+		const auto built = require_built(
+			gadgets::build(memory, test.memory_base, test.mode),
+			std::string{test.name} + " did not build");
+		require(!is_stack_twin(built.program.native_stream().front()),
+			std::string{test.name} + " took a stack twin");
+		CpuState cpu{};
+		cpu.execution_mode = test.mode;
+		cpu.rip = test.memory_base;
+		cpu.fs_base = test.fs_base;
+		cpu.gpr(Register::rsp) = test.rsp;
+		cpu.gpr(Register::rcx) = 2;
+		cpu.gpr(Register::rax) = test.locked_add ? 0x1000 : 0;
+		const auto result = gadgets::execute(built.program, cpu, memory, 4);
+		require(result.retired_instructions == 2,
+			std::string{test.name} + " did not run");
+		if (test.locked_add)
+			require(memory.qword(test.address) == before + 0x1000,
+				std::string{test.name} + " updated another address");
+		else
+			require(cpu.gpr(Register::rax) == (test.code.front() == 0x67 ||
+					test.mode == ExecutionMode::compat32 ?
+					before & 0xffffffffU : before),
+				std::string{test.name} + " read another address");
+	}
+}
+
 /* PMOVMSKB collapses one sign bit per byte into a bit mask. The corpus carries
  * only one or two cases per width, which a lane-ordering mistake can survive,
  * so walk a single set bit through every position instead.
@@ -10407,7 +11121,8 @@ struct FaultingAccess final {
 
 /* The shapes of baked access that fault: loads and stores through a base, a
  * base and an index and no base, memory,immediate forms, the widening load,
- * both stack forms, and the immediate the access word cannot hold. */
+ * both stack forms, the immediate the access word cannot hold, and the
+ * stack twins of loads, stores, a read-modify-write and a compare. */
 [[nodiscard]] std::vector<FaultingAccess> faulting_accesses()
 {
 	using uml::memory::MemoryAccess;
@@ -10443,6 +11158,17 @@ struct FaultingAccess final {
 			AddressField::absolute, MemoryAccess::read, 8, 0, false, 0},
 		{"push rax", {0x50}, none, MemoryAccess::write, 8, 0, true, 8},
 		{"pop rax", {0x58}, none, MemoryAccess::read, 8, 0, true, 0},
+		{"mov rax,[rsp+8]", {0x48, 0x8b, 0x44, 0x24, 0x08}, none,
+			MemoryAccess::read, 8, 0, true, -8},
+		{"mov [rsp-8],rax", {0x48, 0x89, 0x44, 0x24, 0xf8}, none,
+			MemoryAccess::write, 8, 0, true, 8},
+		{"mov word [rsp+8],-1",
+			{0x66, 0xc7, 0x44, 0x24, 0x08, 0xff, 0xff}, none,
+			MemoryAccess::write, 2, 0, true, -8},
+		{"add [rsp+8],eax", {0x01, 0x44, 0x24, 0x08}, none,
+			MemoryAccess::write, 4, 0, true, -8, true},
+		{"cmp rax,[rsp+8]", {0x48, 0x3b, 0x44, 0x24, 0x08}, none,
+			MemoryAccess::read, 8, 0, true, -8},
 	};
 }
 
@@ -11947,6 +12673,15 @@ int main(int argc, char **argv)
 	each_translation_finds_the_entry_its_miss_filled();
 	a_page_crossing_access_matches_no_translation();
 	pages_sharing_an_entry_keep_their_own_bytes();
+	stack_twins_match_their_ordinary_entries();
+	stack_twins_refuse_an_access_across_a_page();
+	stack_twins_take_the_ordinary_path_off_their_page();
+	stack_twins_keep_pages_sharing_their_entry_apart();
+	stack_twin_stores_publish_where_ordinary_stores_do();
+	stack_twins_follow_a_remapped_page();
+	a_stack_twin_store_to_a_read_only_page_faults();
+	a_stack_twin_store_into_its_block_leaves_after_itself();
+	stack_operands_without_a_twin_keep_their_addresses();
 	execute_byte_sign_masks();
 	execute_call_and_return();
 	decode_compat32_defaults();
