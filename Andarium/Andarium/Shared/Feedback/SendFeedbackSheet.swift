@@ -180,7 +180,7 @@ struct SendFeedbackSheet: View {
         )
         // The page the row pushes comes up over the fields: the keyboard goes.
         .onChange(of: model.viewing != nil) { _, viewing in
-            if viewing { focus = nil }
+            if viewing { focus = nil } else { model.releaseViewerReaders() }
         }
         .onChange(of: picked) { _, items in
             guard !items.isEmpty else { return }

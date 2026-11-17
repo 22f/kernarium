@@ -564,6 +564,13 @@ final class SendFeedbackModel {
         }
     }
 
+    /// The pages that showed what a bug report holds are gone: the archives opened inside it are let go.
+    func releaseViewerReaders() {
+        for case .ready(let reader) in reports.values {
+            Task { await reader.releaseNested() }
+        }
+    }
+
     /// Takes a file out of the mail. A staged file is deleted; a file kept
     /// where the person has it is only let go.
     func remove(_ attachment: SendFeedbackAttachment) {

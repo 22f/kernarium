@@ -182,4 +182,33 @@ struct SendFeedbackReviewTests {
         #expect(entry.path.utf8.count == SendFeedbackArchiveLimits.maxNameBytes, "the name was read to the bound and no further")
         #expect(entry.isFolder, "a name that is cut is still told by its last byte")
     }
+
+    // MARK: C3 archives inside are not kept for ever
+
+    @Test func sixtyFourAliasesOfOneArchiveNeverHoldMoreThanTheBoundOpen() async throws {
+        let inner = SyntheticZip((0..<50).map { .stored("\($0)/a/b/x.txt", Data([0x41])) }).data()
+        var entries = [SyntheticZip.stored("n0.zip", inner)]
+        for index in 1..<64 {
+            var alias = SyntheticZip.stored("n\(index).zip", Data())
+            alias.headerOffset = 0
+            alias.size = UInt32(inner.count)
+            alias.compressedSize = UInt32(inner.count)
+            entries.append(alias)
+        }
+        let archive = try reader(SendFeedbackMemoryBytes(SyntheticZip(entries).data()))
+        for index in entries.indices {
+            #expect(try await archive.kind(of: index) == .archive)
+            #expect(await archive.nestedCount <= SendFeedbackArchiveReader.nestedKept)
+        }
+        for index in entries.indices {
+            guard case .archive(let opened) = try await archive.content(of: index) else {
+                Issue.record("entry \(index) is not an archive")
+                return
+            }
+            #expect(opened.listing.entries.count == 50, "an archive that was let go is opened again when it is asked for")
+            #expect(await archive.nestedCount <= SendFeedbackArchiveReader.nestedKept)
+        }
+        await archive.releaseNested()
+        #expect(await archive.nestedCount == 0, "the pages are gone: nothing stays open")
+    }
 }

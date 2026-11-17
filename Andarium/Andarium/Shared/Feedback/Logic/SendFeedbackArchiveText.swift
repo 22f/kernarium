@@ -186,6 +186,19 @@ actor SendFeedbackArchiveReader {
     private let archive: SendFeedbackArchive
     private var kinds: [Int: SendFeedbackEntryKind] = [:]
     private var nested: [Int: SendFeedbackArchiveReader] = [:]
+    /// The entries whose archive is kept open, the oldest first.
+    private var nestedOrder: [Int] = []
+    /// How many archives inside this one are kept open at once: the page shown and the one it came from.
+    static let nestedKept = 2
+
+    /// How many archives inside this one are open now (for the tests of the bound).
+    var nestedCount: Int { nested.count }
+
+    /// Lets go of the archives opened inside this one, when the pages that showed them are gone.
+    func releaseNested() {
+        nested = [:]
+        nestedOrder = []
+    }
 
     nonisolated var listing: SendFeedbackArchiveListing { archive.listing }
     nonisolated var depth: Int { archive.depth }
@@ -240,6 +253,30 @@ actor SendFeedbackArchiveReader {
         kinds[entryID] = .notShown(.pictureRefused)
     }
 
+    /// The archive stored in the bytes of `location`, one level down; nil when it does not open.
+    private func openInner(_ location: SendFeedbackEntryLocation) -> SendFeedbackArchive? {
+        guard let range = SendFeedbackRangeBytes(
+            parent: archive.source, start: location.dataStart, length: location.size) else { return nil }
+        return try? SendFeedbackArchive.open(range, depth: archive.depth + 1)
+    }
+
+    /// The reader of the archive an entry holds: the ones kept (at most `nestedKept`, the oldest let go first), or
+    /// one opened now.
+    private func nestedReader(_ entryID: Int) throws -> SendFeedbackArchiveReader {
+        if let kept = nested[entryID] {
+            nestedOrder.removeAll { $0 == entryID }
+            nestedOrder.append(entryID)
+            return kept
+        }
+        guard let entry = archive.listing.entries.first(where: { $0.id == entryID }),
+              let opened = openInner(try archive.location(of: entry)) else { throw SendFeedbackArchiveError.damaged }
+        let reader = SendFeedbackArchiveReader(opened)
+        nested[entryID] = reader
+        nestedOrder.append(entryID)
+        while nestedOrder.count > Self.nestedKept { nested[nestedOrder.removeFirst()] = nil }
+        return reader
+    }
+
     private func classify(_ entryID: Int) throws -> SendFeedbackEntryKind {
         guard let entry = archive.listing.entries.first(where: { $0.id == entryID }) else {
             throw SendFeedbackArchiveError.damaged
@@ -256,11 +293,8 @@ actor SendFeedbackArchiveReader {
         if SendFeedbackText.looksLikeArchive(head) {
             if archive.depth >= 1 { return .notShown(.tooDeep) }
             guard !location.deflated else { return .notShown(.compressedArchive) }
-            if let inner = SendFeedbackRangeBytes(parent: archive.source, start: location.dataStart, length: location.size),
-               let opened = try? SendFeedbackArchive.open(inner, depth: archive.depth + 1) {
-                nested[entryID] = SendFeedbackArchiveReader(opened)
-                return .archive
-            }
+            // Only told apart here: the archive is opened again when a page asks for it (`nestedReader`).
+            if openInner(location) != nil { return .archive }
             return .notShown(.notText)
         }
         return SendFeedbackText.looksLikeText(head) ? .text : .notShown(.notText)
@@ -274,8 +308,7 @@ actor SendFeedbackArchiveReader {
             }
             return .text(SendFeedbackTextReader(try archive.location(of: entry)))
         case .archive:
-            guard let inner = nested[entryID] else { throw SendFeedbackArchiveError.damaged }
-            return .archive(inner)
+            return .archive(try nestedReader(entryID))
         case .picture(let format): return .picture(format)
         case .empty: return .empty
         case .notShown(let reason): return .unavailable(reason)
