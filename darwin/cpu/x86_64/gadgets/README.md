@@ -53,11 +53,15 @@ rejects.
   128-byte line. Setting those rows' slots moves later groups by whole lines
   and keeps their phase, so the commit says which slots grew and needs no pad
   control ([optimization history](../../../../docs/optimization-history.md)).
-- A phase never changes. A new group takes a new row with phase 0: a new
-  `engine/*.inc` file's at the end of the table, a new baked family's after the
-  last baked one, or at the end of the table when the generator writes it to
-  `baked_tail.inc`. A group at the end moves no other bank group; the cold part
-  starts on the first page after the bank's slots and moves by whole pages.
+- A phase never changes. A new group takes a new row with phase 0, in the
+  order `engine.S` emits it: a family the generator writes to
+  `baked_scalar.inc` after the last of those; a new `engine/*.inc` file's after
+  the last of those, in front of the tail families, which then move by whole
+  lines and keep their phase; and a family the generator writes to
+  `baked_tail.inc` after the last tail group, `baked_compare_branch` being the
+  first. The tail families end the table, so a new one moves no other bank
+  group; the cold part starts on the first page after the bank's slots and
+  moves by whole pages.
 - A call to a helper outside the engine is a `helper_call`, and a new helper
   is appended to the island's list in `engine/common.inc`.
 
