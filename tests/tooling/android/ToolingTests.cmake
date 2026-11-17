@@ -40,6 +40,17 @@ uml_add_tooling_test(
     LABELS android;audit
     TIMEOUT 300)
 
+# TalkBack, eSpeak NG and libsonic are pinned in the metadata and in the
+# dependency manifest alike, and a checkout is accepted only at its pin and
+# its series' tree.
+uml_add_tooling_test(
+    NAME lineage24-accessibility-source-contract
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_accessibility_source_contract.py
+        --source-root ${PROJECT_SOURCE_DIR}
+    LABELS android;audit
+    TIMEOUT 120)
+
 uml_add_tooling_test(
     NAME lineage24-mesa-venus-port-generator
     COMMAND ${Python3_EXECUTABLE} -B

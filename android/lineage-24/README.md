@@ -15,7 +15,8 @@ outside this repository.
 ## Producer boundary
 
 `build/prepare-sources.sh` is the only producer command allowed to use the
-network; it pins the Android source and the guest Mesa source. Patching, builds,
+network; it pins the Android source, the guest Mesa source and the sources of
+TalkBack and eSpeak NG. Patching, builds,
 verification, image assembly, and publication are offline (a `build/make` topic,
 route `p0002`, keeps `lunch` from calling LineageOS's network-reading
 `roomservice.py`).
@@ -46,6 +47,11 @@ guest bundle.
   synchronized as one verified unit.
 - `third_party/mesa-venus/` and `third_party/meson2hermetic/` pin the guest
   Mesa source and the Soong-port converter, each with its own series.
+  `third_party/accessibility/` pins the upstream commits of TalkBack, eSpeak NG
+  and libsonic, which `build/prepare-sources.sh` materializes at
+  `external/talkback`, `external/espeak-ng` and `external/espeak-ng/sonic`
+  with the series of `dependencies/patches/` (see
+  [Accessibility](#accessibility)).
 - `tools/` holds the regenerators, verifiers and release tools; `support/`
   holds the tracked disk, release and instance policies.
 

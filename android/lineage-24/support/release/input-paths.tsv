@@ -65,6 +65,7 @@ excluded	android/lineage-24/tools/regenerate-aosp-patches.py	regenerates the ser
 excluded	android/lineage-24/tools/regenerate-mesa-venus-patches.py	regenerates the series, which are the input
 excluded	android/lineage-24/tools/selinux_policy.py	reads a policy for a verifier
 excluded	android/lineage-24/tools/snapshot-source.py	rewrites the metadata, which is the input
+excluded	android/lineage-24/tools/verify-accessibility-source.py	verifier
 excluded	android/lineage-24/tools/verify-aosp-patches.py	verifier
 excluded	android/lineage-24/tools/verify-initramfs.py	verifier
 excluded	android/lineage-24/tools/verify-lineage-recovery.py	verifier
