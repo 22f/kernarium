@@ -807,11 +807,13 @@ blocker in every one of them.
   that changes only with the component and an incomplete mode fail, and only
   a field that two runs of one engine already differ in is masked.
   `arm64-aot-share-rows` does the same for the share rows' records and
-  counter bounds. `arm64-aot-mapping-names` builds, on the host, the header
-  the guest debug program names a register's mapping with and holds it to the
-  tombstone digest's naming on layouts of any number of shapes, and runs the
-  program's own printing functions through the runner for a name or a maps
-  text that does not fit its buffers (the row fails).
+  counter bounds. `arm64-aot-records` holds the records the guest debug
+  program prints to their one reader: it decodes hand-written lines exactly
+  (every malformed number, text, place and record is refused), builds on the
+  host the header the program prints with and requires the same line as the
+  Python encoder for the same value (names of any bytes, layouts of any number
+  of shapes), and runs the program's own maps reading through the runner for a
+  text that does not fit its buffer (the row fails).
 - `aot-guest-workloads` (integration, opt-in like the other Android guest
   tests: it exists where `UML_AOT_IMAGE` and the Android launcher target do)
   boots the release twice, without and with `DARWIN_UML_AOT=1`, runs the
@@ -827,18 +829,26 @@ blocker in every one of them.
   unnamed mapping by its size, its protection, its place among the unnamed
   mappings of that shape, lowest address first, and how many there are),
   because the image's userspace still places libraries and stacks at random.
-  A pointer into an unnamed mapping is proved over the whole line, field by
-  name, or the row fails and the field is never masked: every run compared
-  must record it as a pointer into mappings of one shape counted among the
-  same number of them, and the baselines must record it alike (equal counts
-  are necessary, not sufficient, for the same set of mappings). Only a field
-  that names nothing (a process id, a random value) may differ between two
-  runs of one engine, and few of them. Every error the program prints is a
-  line of its own that begins with `FAIL`; the runner rejects an output with
-  `FAIL` anywhere, a record line that is not a whole line the program
-  prints, and a register line without every field of its format. The image is a user build,
-  so `debuggerd -b` and `kill -3` of a system process (which need root) are
-  not run.
+  What the program prints is records, one field per line (the kind, the
+  field, a type and the value, tab-separated; every byte of a text outside a
+  small safe set is written `%xx`, so a mapping name of any bytes is one
+  value); `records.py` is the one reader, and accepts a line only if encoding
+  what it read gives the line back and a record only if it has every field of
+  its kind once, in order. A tombstone is the one free text the runner reads:
+  its digest builds the same records and fails on a line or a value it cannot
+  read. Records are compared field by name, and the mask is a set of record
+  kind and field pairs, never a position in text. A pointer into an unnamed
+  mapping is proved over the whole record, field by name, or the row fails and
+  the field is never masked: every run compared must record it as a pointer
+  into mappings of one shape counted among the same number of them, and the
+  baselines must record it alike (equal counts are necessary, not sufficient,
+  for the same set of mappings). Only a field that names nothing (a process id,
+  a random value) may differ between two runs of one engine, and few of them.
+  Every error the program prints is a line of its own that begins with `FAIL`;
+  the runner rejects an output with `FAIL` anywhere and a line that is not a
+  whole record of the program's schema. The image is a user build, so
+  `debuggerd -b` and `kill -3` of a system process (which need root) are not
+  run.
   The share rows (`aot_guest_share.cpp`, `share_rows.py`) run libz in many
   processes: the read-only file system's library, a copy on the writable one,
   a page copied by a write (in the children, or in their parent before they

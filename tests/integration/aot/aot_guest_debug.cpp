@@ -46,7 +46,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "mapping_names.hpp"
+#include "guest_records.hpp"
 
 extern "C" {
 struct SigInfo {
@@ -179,14 +179,16 @@ const char *library_of(uint64_t pc) {
     return "?";
 }
 
-void print_location(const char *label, uint64_t pc) {
+// The library and the offset in it of an address, as a record's value; the
+// number itself when no loaded library holds it.
+aot_records::Value location(uint64_t pc) {
     DlInfo info{};
     if (dladdr(reinterpret_cast<void *>(pc), &info) != 0 && info.fbase != nullptr) {
-        dprintf(1, " %s=%s+%#llx", label, base_name(info.fname),
-                static_cast<unsigned long long>(pc - reinterpret_cast<uint64_t>(info.fbase)));
-        return;
+        const char *name = base_name(info.fname);
+        return aot_records::named_value(name, aot_records::length_of(name),
+                                        pc - reinterpret_cast<uint64_t>(info.fbase));
     }
-    dprintf(1, " %s=%#llx", label, static_cast<unsigned long long>(pc));
+    return aot_records::number_value(pc);
 }
 
 struct Range {
@@ -197,9 +199,27 @@ struct Range {
 Range ranges[3];
 int range_count;
 
+// What the program prints is records (guest_records.hpp, schema in
+// records.py): a field is a line of its own, and what the runner reads is
+// exactly that.
+void write_to_output(void *, const char *data, size_t length) {
+    write(1, data, length);
+}
+
+const aot_records::Sink output{write_to_output, nullptr};
+
+aot_records::Record record(const char *kind) {
+    return aot_records::Record(output, kind);
+}
+
+// A count or a sum, as the number it is.
+uint64_t unsigned_of(long value) {
+    return static_cast<uint64_t>(static_cast<int64_t>(value));
+}
+
 // The tracee's mappings (/proc/<pid>/maps), read before its registers are
 // printed: a value that points into one is named by it, whatever address the
-// mapping has in this run (mapping_names.hpp says how). A text that does not
+// mapping has in this run (guest_records.hpp says how). A text that does not
 // fit the buffer is a failure of the row: a layout that is cut short names
 // nothing reliably.
 char maps_text[1 << 17];
@@ -240,26 +260,14 @@ void load_maps(int pid) {
     }
 }
 
-bool print_mapped(const char *label, uint64_t value) {
-    char name[512];
-    const size_t length = aot_mapping_names::name(maps_text, value, name, sizeof(name));
-    if (length == 0) {
-        return false;
-    }
-    if (length == aot_mapping_names::kOverflow) {
-        dprintf(1, "\nFAIL the name of the mapping that holds %s does not fit %zu bytes\n", label, sizeof(name));
-    } else {
-        dprintf(1, " %s=%s", label, name);
-    }
-    return true;
-}
-
-void print_value(const char *label, uint64_t value) {
+// Where a register's value points, as the run does not choose it: a range the
+// program knows, the library that holds it, a mapping of the tracee (by its
+// name, or the shape of an unnamed one and the place in it), or the number.
+aot_records::Value resolve_value(uint64_t value) {
     for (int i = 0; i < range_count; ++i) {
         if (value >= ranges[i].low && value < ranges[i].high) {
-            dprintf(1, " %s=%s+%#llx", label, ranges[i].name,
-                    static_cast<unsigned long long>(value - ranges[i].low));
-            return;
+            return aot_records::named_value(ranges[i].name, aot_records::length_of(ranges[i].name),
+                                            value - ranges[i].low);
         }
     }
     // An address in a loaded library is named by the library, so that two
@@ -267,14 +275,15 @@ void print_value(const char *label, uint64_t value) {
     DlInfo info{};
     if (value > 0x10000 && value < (1ULL << 48) && dladdr(reinterpret_cast<void *>(value), &info) != 0 &&
         info.fbase != nullptr) {
-        dprintf(1, " %s=%s+%#llx", label, base_name(info.fname),
-                static_cast<unsigned long long>(value - reinterpret_cast<uint64_t>(info.fbase)));
-        return;
+        const char *name = base_name(info.fname);
+        return aot_records::named_value(name, aot_records::length_of(name),
+                                        value - reinterpret_cast<uint64_t>(info.fbase));
     }
-    if (value > 0x10000 && maps_size > 0 && print_mapped(label, value)) {
-        return;
+    aot_records::Value mapped;
+    if (value > 0x10000 && maps_size > 0 && aot_records::resolve(maps_text, value, mapped)) {
+        return mapped;
     }
-    dprintf(1, " %s=%#llx", label, static_cast<unsigned long long>(value));
+    return aot_records::number_value(value);
 }
 
 // An error is a line of its own that begins with FAIL, wherever the program
@@ -359,7 +368,7 @@ void crash_memcpy() {
     for (unsigned i = 0; i < 400; ++i) {
         sum += crc32(sum, region + (i % 17U), 513);
     }
-    dprintf(1, "warm sum=%#lx\n", sum);
+    record("warm").number("sum", sum);
     ZStream stream{};
     stream.zalloc = reinterpret_cast<void *>(pool_alloc);
     stream.zfree = reinterpret_cast<void *>(pool_free);
@@ -370,7 +379,7 @@ void crash_memcpy() {
     // The dictionary's last 24 bytes lie below the unmapped page and the rest
     // above it: libz copies it into the window with libc's memcpy, whose first
     // access crosses into the unmapped page.
-    dprintf(1, "dictionary crosses the page\n");
+    record("note").text("text", "dictionary crosses the page");
     inflateSetDictionary(&stream, region + 2 * kPage - 24, 64);
     fail("the copy did not fault");
 }
@@ -388,8 +397,8 @@ void crash_cross() {
     for (unsigned i = 0; i < 400; ++i) {
         sum += memcmp(region + (i % 17U), region + 1024 + (i % 13U), 12);
     }
-    dprintf(1, "warm sum=%d\n", sum);
-    dprintf(1, "memcmp crosses the page\n");
+    record("warm").number("sum", unsigned_of(sum));
+    record("note").text("text", "memcmp crosses the page");
     sum = memcmp(region + 2 * kPage - 6, region + 64, 12);
     dprintf(1, "\nFAIL the compare did not fault (%d)\n", sum);
 }
@@ -399,7 +408,7 @@ void crash_abort() {
     for (unsigned i = 0; i < 400; ++i) {
         sum += crc32(sum, data + (i % 17U), 513);
     }
-    dprintf(1, "warm sum=%#lx\n", sum);
+    record("warm").number("sum", sum);
     abort();
 }
 
@@ -419,18 +428,19 @@ int g_tracee;
 
 void print_regs(const char *tag, const Regs &regs) {
     load_maps(g_tracee);
-    dprintf(1, "  regs %s", tag);
-    char label[8];
+    aot_records::Record r = record("regs");
+    r.text("tag", tag);
+    char label[4];
     for (int i = 0; i < 31; ++i) {
         label[0] = 'x';
         label[1] = static_cast<char>('0' + i / 10);
         label[2] = static_cast<char>('0' + i % 10);
         label[3] = 0;
-        print_value(label, regs.x[i]);
+        r.value(label, resolve_value(regs.x[i]));
     }
-    print_value("sp", regs.sp);
-    print_location("pc", regs.pc);
-    dprintf(1, " nzcv=%#llx\n", static_cast<unsigned long long>(regs.pstate & 0xf0000000ULL));
+    r.value("sp", resolve_value(regs.sp));
+    r.value("pc", location(regs.pc));
+    r.number("nzcv", regs.pstate & 0xf0000000ULL);
 }
 
 // Waits for the next event of a tracee; returns the stop signal, or -1 when it
@@ -442,7 +452,7 @@ int wait_stop(int pid) {
         return -1;
     }
     if ((status & 0xff) != 0x7f) {
-        dprintf(1, "  tracee ended status=%#x\n", status);
+        record("tracee_ended").number("status", static_cast<uint64_t>(status));
         return -1;
     }
     return (status >> 8) & 0xff;
@@ -504,7 +514,7 @@ bool resume_to(int pid, int request, int expected, Regs &regs) {
     for (unsigned round = 0; round < 300; ++round) {
         sum += work(round);
     }
-    dprintf(1, "tracee done sum=%#lx\n", sum);
+    record("tracee_done").number("sum", sum);
     _exit(0);
 }
 
@@ -522,9 +532,10 @@ bool run_to(int pid, Breakpoint &bp, uint64_t address, const char *what, Regs &r
     if (!resume_to(pid, kPtraceCont, kSigTrap, regs)) {
         return false;
     }
-    dprintf(1, "%s", what);
-    print_location(" hit", regs.pc);
-    dprintf(1, " at_breakpoint=%s\n", regs.pc == address ? "yes" : "NO");
+    aot_records::Record r = record("breakpoint");
+    r.text("what", what);
+    r.value("hit", location(regs.pc));
+    r.text("at_breakpoint", regs.pc == address ? "yes" : "NO");
     if (regs.pc != address) {
         fail("not at the breakpoint");
         return false;
@@ -545,7 +556,7 @@ bool run_to_data_call(int pid, Breakpoint &bp, uint64_t address, const char *wha
         if (regs.x[1] >= ranges[0].low && regs.x[1] < ranges[0].high) {
             return true;
         }
-        dprintf(1, "  (not the data: buffer is not in D, going on)\n");
+        record("note").text("text", "not the data: buffer is not in D, going on");
     }
     fail("no call on the data");
     return false;
@@ -570,9 +581,7 @@ void ptrace_mode() {
         fail("GETREGSET");
         return;
     }
-    dprintf(1, "attached");
-    print_location(" pc", regs.pc);
-    dprintf(1, "\n");
+    record("attached").value("pc", location(regs.pc));
 
     // 1. A breakpoint on a covered libz function and the state there.
     const uint64_t crc_entry = reinterpret_cast<uint64_t>(&crc32);
@@ -586,17 +595,16 @@ void ptrace_mode() {
     ranges[1] = {"S", regs.sp - 0x10000, regs.sp + 0x10000};
     print_regs("crc32", regs);
     const uint64_t return_address = regs.x[30];
-    print_location(" returns_to", return_address);
-    dprintf(1, "\n");
+    record("returns_to").value("location", location(return_address));
 
     // 2. Single steps through the function.
     for (int step = 0; step < 40; ++step) {
         if (!resume_to(pid, kPtraceSingleStep, kSigTrap, regs)) {
             return;
         }
-        dprintf(1, "step %d", step);
-        print_location(" pc", regs.pc);
-        dprintf(1, "\n");
+        aot_records::Record r = record("step");
+        r.integer("n", step);
+        r.value("pc", location(regs.pc));
         if (step == 0 || step == 9 || step == 39) {
             print_regs("step", regs);
         }
@@ -608,9 +616,9 @@ void ptrace_mode() {
         return;
     }
     clear_breakpoint(pid, back);
-    dprintf(1, "returned");
-    print_location(" pc", regs.pc);
-    dprintf(1, " at_return=%s\n", regs.pc == return_address ? "yes" : "NO");
+    aot_records::Record back_at = record("returned");
+    back_at.value("pc", location(regs.pc));
+    back_at.text("at_return", regs.pc == return_address ? "yes" : "NO");
 
     // 4. A changed register: a shorter length; the result is the library's
     // answer for it, which this process computes itself (from the call that
@@ -633,7 +641,9 @@ void ptrace_mode() {
     clear_breakpoint(pid, back);
     const unsigned long expected =
         crc32(seed, reinterpret_cast<const uint8_t *>(buffer), static_cast<unsigned>(length - 9));
-    dprintf(1, "changed length: result %s the library's answer\n", regs.x[0] == expected ? "is" : "IS NOT");
+    aot_records::Record length_changed = record("changed");
+    length_changed.text("what", "length");
+    length_changed.text("verdict", regs.x[0] == expected ? "is" : "IS NOT");
     if (regs.x[0] != expected) {
         fail("the changed length");
         return;
@@ -659,7 +669,9 @@ void ptrace_mode() {
     clear_breakpoint(pid, back);
     const unsigned long adler =
         adler32(seed3, reinterpret_cast<const uint8_t *>(buffer3), static_cast<unsigned>(length3));
-    dprintf(1, "changed pc: result %s adler32's answer\n", regs.x[0] == adler ? "is" : "IS NOT");
+    aot_records::Record pc_changed = record("changed");
+    pc_changed.text("what", "pc");
+    pc_changed.text("verdict", regs.x[0] == adler ? "is" : "IS NOT");
     if (regs.x[0] != adler) {
         fail("the changed pc");
         return;
@@ -684,13 +696,18 @@ void ptrace_mode() {
         }
         if (strcmp(now, current) != 0) {
             ++transitions;
-            dprintf(1, "step %d: %s -> %s", steps, current, now);
-            print_location(" pc", regs.pc);
-            dprintf(1, "\n");
+            aot_records::Record r = record("transition");
+            r.integer("step", steps);
+            r.text("from", current);
+            r.text("to", now);
+            r.value("pc", location(regs.pc));
             current = now;
         }
     }
-    dprintf(1, "after %d steps: %d library changes, %d instructions in libc\n", steps, transitions, libc_steps);
+    aot_records::Record summary = record("steps");
+    summary.integer("steps", steps);
+    summary.integer("changes", transitions);
+    summary.integer("libc", libc_steps);
 
     // 7. Detach: the tracee runs its remaining rounds on its own, through the
     // rewritten code, and prints its sum.
@@ -703,7 +720,7 @@ void ptrace_mode() {
         fail("waitpid after detach");
         return;
     }
-    dprintf(1, "detached tracee status=%#x\n", status);
+    record("detached").number("status", static_cast<uint64_t>(status));
 }
 
 // The extent of the library that holds `address`, from its program headers
@@ -882,20 +899,23 @@ void sibling_round(const char *name, bool in_loop, int main_tid) {
     for (int i = 0; i < 10000 && g_hits == 0; ++i) {
         usleep(1000);
     }
-    dprintf(1, "%s: breakpoint hit by the running thread: %s", name, g_hits == 1 ? "yes" : "NO");
-    dprintf(1, " by_sibling=%s", g_hit_tid == g_tid_b ? "yes" : "NO");
-    dprintf(1, " pc_at_breakpoint=%s", g_hit_pc == shared->address ? "yes" : "NO");
-    dprintf(1, " in_libz=%s", in_library(g_hit_pc, "libz.so") ? "yes" : "NO");
-    dprintf(1, " code=%d", g_hit_code);
+    aot_records::Record hit = record(in_loop ? "sibling_loop" : "sibling_entry");
+    hit.text("round", name);
+    hit.text("hit", g_hits == 1 ? "yes" : "NO");
+    hit.text("by_sibling", g_hit_tid == g_tid_b ? "yes" : "NO");
+    hit.text("pc_at_breakpoint", g_hit_pc == shared->address ? "yes" : "NO");
+    hit.text("in_libz", in_library(g_hit_pc, "libz.so") ? "yes" : "NO");
+    hit.integer("code", g_hit_code);
     if (!in_loop) {
-        print_location(" pc", g_hit_pc);
+        hit.value("pc", location(g_hit_pc));
     }
-    dprintf(1, "\n");
     if (g_hits != 1) {
         fail("no hit");
         return;
     }
-    dprintf(1, "%s: the thread runs on after the restore: %s\n", name, wait_for_calls(20, 30) ? "yes" : "NO");
+    aot_records::Record goes_on = record("sibling_runs_on");
+    goes_on.text("round", name);
+    goes_on.text("yes", wait_for_calls(20, 30) ? "yes" : "NO");
 }
 
 void sibling_mode() {
@@ -934,7 +954,7 @@ void crash_with_sibling() {
         fail("the thread does not run");
         return;
     }
-    dprintf(1, "sibling is running\n");
+    record("note").text("text", "sibling is running");
     abort();
 }
 
@@ -1005,7 +1025,7 @@ __attribute__((constructor)) void run() {
     if (!without_randomization()) {
         _exit(0);
     }
-    dprintf(1, "randomization: off\n");
+    record("randomization").text("state", "off");
     if (strcmp(mode, "crash-memcpy") == 0) {
         fill_data();
         crash_memcpy();
@@ -1023,7 +1043,7 @@ __attribute__((constructor)) void run() {
     } else {
         dprintf(1, "\nFAIL unknown mode\n");
     }
-    dprintf(1, "done mode=%s\n", mode);
+    record("done").text("mode", mode);
     _exit(0);
 }
 

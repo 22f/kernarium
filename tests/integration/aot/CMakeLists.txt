@@ -44,7 +44,7 @@ if(TARGET uml_arm64_aot_framework AND TARGET uml-darwin-android17)
             -L${_uml_aot_root}/system/lib64 -lc -ldl -lz
             -o ${_uml_aot_debug}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/aot_guest_debug.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/mapping_names.hpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/guest_records.hpp
         COMMENT "Building the AOT guest debug program"
         VERBATIM)
     add_custom_target(uml-aot-guest-debug DEPENDS ${_uml_aot_debug})

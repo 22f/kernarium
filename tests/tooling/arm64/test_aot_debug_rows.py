@@ -3,21 +3,26 @@
 """The debugger and crash-report rows of the AOT guest runner, on scripted
 records.
 
-tests/integration/aot/debug_rows.py digests tombstones, checks that each mode
-showed what it exists to show, and compares the runs of a mode with the
-component off and on. These rows give it a good record and every kind of bad
-one: a frame that moved, a register that changed only with the component, a
-record that is incomplete, a crash that left no tombstone.
+tests/integration/aot/debug_rows.py digests tombstones into records, checks
+that each mode showed what it exists to show, and compares the records of a
+mode with the component off and on, field by field. These rows give it a good
+record and every kind of bad one: a frame that moved, a register that changed
+only with the component, a record that is incomplete or does not decode, a
+crash that left no tombstone, a name that looks like a field, a value that is
+cut short.
 """
 
 __import__("sys").dont_write_bytecode = True
 
 import pathlib
+import re
 import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "integration" / "aot"))
 import debug_rows as rows  # noqa: E402
+import records as rec  # noqa: E402
+from records import Named, Record, Unnamed  # noqa: E402
 
 
 def quoted(address: int) -> str:
@@ -104,30 +109,148 @@ backtrace:
 """
 
 
+
+
+class Wire:
+    """What the guest program prints: the lines of its records."""
+
+    @staticmethod
+    def lines(recs):
+        return [line for each in recs for line in rec.encode_record(each)]
+
+    @staticmethod
+    def text(recs, extra=""):
+        return "\n".join(Wire.lines(recs)) + "\n" + extra
+
+
+def regs_record(tag: str = "crc32", **fields) -> Record:
+    """A register record of the guest program: x00 to x30, sp, pc and nzcv,
+    with the values of `fields` in place of the defaults."""
+    values = {"x00": 0, "x01": Named("D", 0), "x02": 0xc81, "x03": Named("S", 0xff40),
+              "x04": Named("linker64", 0x1d5058), "x05": 0x7262006563617375,
+              "sp": Named("S", 0), "pc": Named("libz.so", 0x12190), "nzcv": 0}
+    values.update(fields)
+    return Record("regs", (("tag", tag),) + tuple((name, values.get(name, 0)) for name in rec.REGISTERS))
+
+
+def step(n: int) -> Record:
+    return Record("step", (("n", n), ("pc", Named("libz.so", 0x12194 + 4 * n))))
+
+
+def breakpoint(what: str, offset: int = 0x12190, at: str = "yes") -> Record:
+    return Record("breakpoint", (("what", what), ("hit", Named("libz.so", offset)), ("at_breakpoint", at)))
+
+
+def randomization() -> Record:
+    return Record("randomization", (("state", "off"),))
+
+
+def done(mode: str) -> Record:
+    return Record("done", (("mode", mode),))
+
+
+def ptrace_records(with_marker: bool = False) -> list[Record]:
+    out = [randomization()] if with_marker else []
+    out += [Record("attached", (("pc", Named("libc.so", 0x97798)),)), breakpoint("crc32"),
+            regs_record(), Record("returns_to", (("location", Named("libaotdebug.so", 0x5eb4)),))]
+    out += [step(n) for n in range(40)]
+    out += [Record("returned", (("pc", Named("libaotdebug.so", 0x5eb4)), ("at_return", "yes"))),
+            breakpoint("crc32 on the data"),
+            Record("changed", (("what", "length"), ("verdict", "is"))),
+            breakpoint("crc32 on the data again"),
+            Record("changed", (("what", "pc"), ("verdict", "is")))]
+    out += [breakpoint("deflate", 0x12d20)] * 3
+    for at, source, target, offset, place in ((110, "libz.so", "libc.so", 0x95610, "libc.so"),
+                                             (124, "libc.so", "libz.so", 0xd5f0, "libz.so"),
+                                             (153, "libz.so", "libc.so", 0x70d40, "libc.so"),
+                                             (159, "libc.so", "libz.so", 0x1385c, "libz.so")):
+        out.append(Record("transition", (("step", at), ("from", source), ("to", target),
+                                         ("pc", Named(place, offset)))))
+    out += [Record("steps", (("steps", 6000), ("changes", 8), ("libc", 32))),
+            Record("tracee_done", (("sum", 0x13b56ea3f8e),)),
+            Record("detached", (("status", 0),)), done("ptrace")]
+    return out
+
+
+def sibling_hit(kind: str, round_name: str, **changes) -> Record:
+    values = {"round": round_name, "hit": "yes", "by_sibling": "yes", "pc_at_breakpoint": "yes",
+              "in_libz": "yes", "code": 1}
+    if kind == "sibling_entry":
+        values["pc"] = Named("libz.so", 0x12190)
+    values.update(changes)
+    return Record(kind, tuple(values.items()))
+
+
+def sibling_records(with_marker: bool = False) -> list[Record]:
+    out = [randomization()] if with_marker else []
+    return out + [sibling_hit("sibling_entry", "entry"),
+                  Record("sibling_runs_on", (("round", "entry"), ("yes", "yes"))),
+                  sibling_hit("sibling_loop", "in loop"),
+                  Record("sibling_runs_on", (("round", "in loop"), ("yes", "yes"))), done("sibling")]
+
+
+def tombstone_field(records_of_run, kind, name):
+    return next(each for each in records_of_run if each.kind == kind).get(name)
+
+
 class DigestTest(unittest.TestCase):
     def test_the_digest_keeps_the_crash_and_drops_the_rest(self):
-        record = rows.digest_tombstone(tombstone())
-        text = "\n".join(record)
-        self.assertIn("SEGV_ACCERR", text)
-        self.assertIn("libc.so (__memmove_aarch64_mops+16)", text)
-        self.assertIn("= memory near pc", text)
-        self.assertNotIn("Timestamp", text)
-        self.assertNotIn("memory map", text)
-        self.assertNotIn("memory near x3", text)
-        self.assertEqual(sum(1 for line in record if line.startswith("=       #")), 4)
+        recs = rows.digest_tombstone(tombstone())
+        shown = "\n".join(str(each) for each in recs)
+        self.assertEqual(tombstone_field(recs, "tomb.signal", "code_name"), "SEGV_ACCERR")
+        frames = [each for each in recs if each.kind == "tomb.frame"]
+        self.assertEqual(len(frames), 4)
+        self.assertIn("__memmove_aarch64_mops+16", frames[0].get("detail"))
+        self.assertTrue(frames[0].get("path").endswith("libc.so"))
+        self.assertEqual({each.get("region") for each in recs if each.kind == "tomb.code"}, {"pc"})
+        self.assertEqual(sum(1 for each in recs if each.kind == "tomb.code"), 2)
+        for dropped in ("Timestamp", "memory map", "memory near x3"):
+            self.assertNotIn(dropped, shown)
 
     def test_another_thread_keeps_its_library_and_not_its_position(self):
         one = rows.digest_tombstone(tombstone(extra_threads=sibling_block(360, "crc32_z")))
         two = rows.digest_tombstone(tombstone(extra_threads=sibling_block(352, "crc32")))
         self.assertEqual(one[-3:], two[-3:])
-        self.assertIn("= thread frame 00 /system/lib64/libz.so", one)
+        self.assertEqual([each.kind for each in one[-3:]], ["tomb.thread", "tomb.thread_frame", "tomb.thread_frame"])
+        self.assertEqual(one[-2].fields, (("index", 0), ("path", "/system/lib64/libz.so"), ("symbol", "")))
 
     def test_registers_and_ids_vary_and_frames_do_not(self):
-        record = rows.digest_tombstone(tombstone())
-        varying = [line for line in record if line.startswith("~ ")]
-        self.assertTrue(any("x13" in line for line in varying))
-        self.assertTrue(any(line.startswith("~ pid:") for line in varying))
-        self.assertFalse(any("#00" in line for line in varying))
+        recs = rows.digest_tombstone(tombstone())
+        self.assertIn("x13", recs[[each.kind for each in recs].index("tomb.regs")].names())
+        self.assertIn("tomb.regs", rows.MASKABLE)
+        self.assertIn("tomb.process", rows.MASKABLE)
+        self.assertTrue({each.kind for each in recs if each.kind.startswith("tomb.frame")}.isdisjoint(rows.MASKABLE))
+
+    def test_a_register_seen_twice_is_a_failure(self):
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.digest_tombstone(tombstone().replace("  x7  ", "  x4  ", 1))
+        self.assertIn("x4", str(caught.exception))
+
+    def test_a_register_line_it_cannot_read_is_a_failure(self):
+        base = tombstone()
+        for broken in (base.replace("  x5  ", "  x5  zzzz  x9  ", 1), base.replace("x5  0000", "x5  000", 1),
+                       base.replace("  x6  ", "  x6   ", 1).replace("x6   0", "x6   g", 1)):
+            with self.subTest(broken=broken[broken.index("x4 "):][:90]):
+                with self.assertRaises(rows.DebugFailure):
+                    rows.digest_tombstone(broken)
+
+    def test_lines_it_cannot_read_are_failures_and_never_guesses(self):
+        base = tombstone()
+        for broken in (base.replace("ppid: 2036,", "ppid: ,", 1), base.replace("(SEGV_ACCERR)", "SEGV_ACCERR", 1),
+                       base.replace("#00 pc 0000000000070d50", "#00 pc zz", 1),
+                       base.replace("uid: 2000", "uid: 2000\nuid: 2001", 1)):
+            with self.subTest(broken=broken[:20]):
+                with self.assertRaises(rows.DebugFailure):
+                    rows.digest_tombstone(broken)
+
+    def test_text_in_a_mapping_name_is_never_read_as_a_field(self):
+        """A name that looks like a register does not overwrite the register
+        it looks like: the digest never reads the names of the map as fields."""
+        recs = rows.digest_tombstone(tombstone(stack_name="[anon:space x6  0 x4  0]"))
+        regs = next(each for each in recs if each.kind == "tomb.regs")
+        self.assertEqual(regs.get("x7"), Named("[anon:space x6  0 x4  0]", 0xf8c00))
+        self.assertEqual(regs.get("x6"), Unnamed(0x100000, "rw-", 0, 1, 0x1234))
+        self.assertEqual(regs.get("x4"), Named("libc.so", 0x2854d))
 
 
 class VerifyTest(unittest.TestCase):
@@ -140,11 +263,11 @@ class VerifyTest(unittest.TestCase):
             rows.verify_tombstone("crash-memcpy", rows.digest_tombstone(text))
 
     def test_the_place_in_the_page_of_a_fault_is_compared(self):
-        def signal_line(address):
-            return next(line for line in rows.digest_tombstone(tombstone(address=address)) if "signal 11" in line)
+        def offset(address):
+            return tombstone_field(rows.digest_tombstone(tombstone(address=address)), "tomb.signal", "page_offset")
 
-        self.assertEqual(signal_line(0x7ff1b1f19000), signal_line(0x7ff1b1f2a000))
-        self.assertNotEqual(signal_line(0x7ff1b1f19000), signal_line(0x7ff1b1f2a008))
+        self.assertEqual(offset(0x7ff1b1f19000), offset(0x7ff1b1f2a000))
+        self.assertNotEqual(offset(0x7ff1b1f19000), offset(0x7ff1b1f2a008))
         off = [rows.digest_tombstone(tombstone(address=0x7ff1b1f19000, pid=2038 + n)) for n in range(3)]
         with self.assertRaises(rows.DebugFailure):
             rows.compare("crash-memcpy", off, rows.digest_tombstone(tombstone(address=0x7ff1b1f2a008, pid=2100)))
@@ -160,100 +283,76 @@ class VerifyTest(unittest.TestCase):
         rows.verify_tombstone("crash-sibling", rows.digest_tombstone(text + sibling_block()))
 
 
-def regs_line(fields: int = 31, tag: str = "crc32") -> str:
-    """A register line of the guest program: x00 to x30 (`fields` of them),
-    sp, pc and nzcv."""
-    values = ["0", "D+0", "0xc81", "S+0xff40", "linker64+0x1d5058", "0x7262006563617375"] + ["0"] * 25
-    return (f"  regs {tag} " + " ".join(f"x{n:02d}={values[n]}" for n in range(fields)) +
-            " sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0")
-
-
-PTRACE = """attached  pc=libc.so+0x97798
-breakpoint crc32  hit=libz.so+0x12190 at_breakpoint=yes
-""" + regs_line() + """
-  returns_to=libaotdebug.so+0x5eb4
-""" + "".join(f"step {n}  pc=libz.so+{0x12194 + 4 * n:#x}\n" for n in range(40)) + """returned  pc=libaotdebug.so+0x5eb4 at_return=yes
-breakpoint crc32 on the data  hit=libz.so+0x12190 at_breakpoint=yes
-changed length: result is the library's answer
-breakpoint crc32 on the data again  hit=libz.so+0x12190 at_breakpoint=yes
-changed pc: result is adler32's answer
-breakpoint deflate  hit=libz.so+0x12d20 at_breakpoint=yes
-breakpoint deflate  hit=libz.so+0x12d20 at_breakpoint=yes
-breakpoint deflate  hit=libz.so+0x12d20 at_breakpoint=yes
-step 110: libz.so -> libc.so  pc=libc.so+0x95610
-step 124: libc.so -> libz.so  pc=libz.so+0xd5f0
-step 153: libz.so -> libc.so  pc=libc.so+0x70d40
-step 159: libc.so -> libz.so  pc=libz.so+0x1385c
-after 6000 steps: 8 library changes, 32 instructions in libc
-tracee done sum=0x13b56ea3f8e
-detached tracee status=0
-done mode=ptrace
-"""
-
-MARKER = "randomization: off\n"
-
-SIBLING = """entry: breakpoint hit by the running thread: yes by_sibling=yes pc_at_breakpoint=yes in_libz=yes code=1  pc=libz.so+0x12190
-entry: the thread runs on after the restore: yes
-in loop: breakpoint hit by the running thread: yes by_sibling=yes pc_at_breakpoint=yes in_libz=yes code=1
-in loop: the thread runs on after the restore: yes
-done mode=sibling
-"""
-
-
 class GuestProgramTest(unittest.TestCase):
-    """The program names a register that points into a mapping with the
-    header it shares with the host (mapping_names.hpp, which
-    test_aot_mapping_names.py holds to the digest's naming): the guest runs
-    only in a guest, so what it uses is read from its source."""
+    """The program prints records with the header it shares with the host
+    (guest_records.hpp, which test_aot_records.py builds and reads back): the
+    guest runs only in a guest, so what it uses is read from its source."""
 
     SOURCE = (pathlib.Path(__file__).resolve().parents[2] / "integration" / "aot" / "aot_guest_debug.cpp")
 
-    def test_a_mapping_is_named_by_the_shared_formatter_and_not_by_a_table_of_its_own(self):
+    def test_everything_it_prints_is_a_record_or_a_failure_line(self):
         text = self.SOURCE.read_text()
-        self.assertIn('#include "mapping_names.hpp"', text)
-        self.assertIn("aot_mapping_names::name(maps_text", text)
-        self.assertNotIn("shapes[", text)
-        self.assertNotIn("value & 0xfff", text)
+        self.assertIn('#include "guest_records.hpp"', text)
+        printed = re.findall(r'dprintf\(1, "([^"]*)"', text)
+        self.assertTrue(printed)
+        self.assertTrue(all(literal.startswith("\\nFAIL ") for literal in printed), printed)
+        for gone in ("print_location", "print_mapped", "print_value", "shapes[", "value & 0xfff"):
+            self.assertNotIn(gone, text)
 
     def test_every_error_the_program_prints_is_a_line_of_its_own(self):
         text = self.SOURCE.read_text()
         self.assertNotRegex(text, r'"FAIL ')
-        self.assertGreaterEqual(text.count('"\\nFAIL '), 10)
+        self.assertGreaterEqual(text.count('"\\nFAIL '), 8)
 
     def test_a_maps_text_that_was_cut_short_fails_the_row(self):
         text = self.SOURCE.read_text()
         self.assertIn("FAIL the maps of process %d do not fit", text)
-        self.assertIn("does not fit %zu bytes", text)
 
 
 class RecordTest(unittest.TestCase):
     def test_good_records(self):
-        rows.verify_record("ptrace", PTRACE.splitlines())
-        rows.verify_record("sibling", SIBLING.splitlines())
+        rows.verify_record("ptrace", ptrace_records())
+        rows.verify_record("sibling", sibling_records())
+
+    def without(self, recs, kind, **fields):
+        return [each for each in recs if not (each.kind == kind and all(each.get(n) == v for n, v in fields.items()))]
 
     def test_ptrace_record_missing_a_part(self):
-        for needle in ("changed pc: result is adler32's answer\n", "detached tracee status=0\n",
-                       "done mode=ptrace\n", "tracee done sum=0x13b56ea3f8e\n"):
-            with self.subTest(needle=needle):
+        for kind, fields in (("changed", {"what": "pc"}), ("detached", {}), ("done", {}), ("tracee_done", {})):
+            with self.subTest(kind=kind):
                 with self.assertRaises(rows.DebugFailure):
-                    rows.verify_record("ptrace", PTRACE.replace(needle, "").splitlines())
+                    rows.verify_record("ptrace", self.without(ptrace_records(), kind, **fields))
 
     def test_ptrace_record_that_never_reached_libc(self):
-        text = PTRACE.replace("8 library changes, 32 instructions", "1 library changes, 0 instructions")
+        recs = [Record("steps", (("steps", 6000), ("changes", 1), ("libc", 0))) if each.kind == "steps" else each
+                for each in ptrace_records()]
         with self.assertRaises(rows.DebugFailure):
-            rows.verify_record("ptrace", text.splitlines())
+            rows.verify_record("ptrace", recs)
 
     def test_sibling_that_hit_once(self):
-        text = SIBLING.replace("in loop: breakpoint hit by the running thread: yes by_sibling=yes",
-                               "in loop: breakpoint hit by the running thread: NO by_sibling=yes")
+        recs = [sibling_hit("sibling_loop", "in loop", hit="NO") if each.kind == "sibling_loop" else each
+                for each in sibling_records()]
         with self.assertRaises(rows.DebugFailure):
-            rows.verify_record("sibling", text.splitlines())
+            rows.verify_record("sibling", recs)
 
 
 class CompareTest(unittest.TestCase):
+    LOADS = (0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000)
+
     def runs(self):
         return [rows.digest_tombstone(tombstone(x13=value, pid=2038 + 4 * n))
                 for n, value in enumerate((1, 0, 1))]
+
+    def baselines(self, *layouts):
+        """One run per layout (keywords of tombstone), at three load addresses."""
+        return [rows.digest_tombstone(tombstone(load=load, pid=2038 + n, **layout))
+                for n, (load, layout) in enumerate(zip(self.LOADS, layouts))]
+
+    def three(self, **layout):
+        return self.baselines(layout, layout, layout)
+
+    def with_component(self, **layout):
+        return rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000, **layout))
 
     def test_identical_apart_from_what_the_engine_varies(self):
         off = self.runs()
@@ -270,82 +369,58 @@ class CompareTest(unittest.TestCase):
         self.assertIn("with it", str(caught.exception))
 
     def test_pointers_are_named_by_what_they_point_into(self):
-        text = "\n".join(rows.digest_tombstone(tombstone()))
-        self.assertIn("@libc.so+0x2854d", text)
-        self.assertIn("@[anon:.bss]+0x2070", text)
-        # An unnamed mapping is named by its size and protection, its place
-        # among the mappings of that shape and how many there are, and the
-        # offset in the whole mapping is kept.
-        self.assertIn("@anon[0x100000,rw-]#0/1+0x1234", text)
-        self.assertIn("@[anon:stack_and_tls:*]+0xf8c00", text)
-        self.assertIn("pc  @libc.so+0x70d50", text)
+        regs = next(each for each in rows.digest_tombstone(tombstone()) if each.kind == "tomb.regs")
+        self.assertEqual(regs.get("x4"), Named("libc.so", 0x2854d))
+        self.assertEqual(regs.get("x5"), Named("[anon:.bss]", 0x2070))
+        # An unnamed mapping is its shape, its place among the mappings of that
+        # shape and how many there are, and the offset in the whole mapping.
+        self.assertEqual(regs.get("x6"), Unnamed(0x100000, "rw-", 0, 1, 0x1234))
+        self.assertEqual(regs.get("x7"), Named("[anon:stack_and_tls:*]", 0xf8c00))
+        self.assertEqual(regs.get("pc"), Named("libc.so", 0x70d50))
 
     def test_a_library_loaded_elsewhere_is_the_same_run(self):
         off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n, stack_name=f"[anon:stack_and_tls:{2040 + n}]"))
-               for n, load in enumerate((0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000))]
+               for n, load in enumerate(self.LOADS)]
         on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000, stack_name="[anon:stack_and_tls:3002]"))
         compared, masked = rows.compare("crash-memcpy", off, on)
         self.assertLessEqual(masked, 3)
         self.assertGreater(compared, 10)
 
     def test_a_pointer_that_moves_only_with_the_component_fails(self):
-        off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n))
-               for n, load in enumerate((0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000))]
-        on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pointer=0x28555, pid=3000))
+        on = self.with_component(pointer=0x28555)
         with self.assertRaises(rows.DebugFailure) as caught:
-            rows.compare("crash-memcpy", off, on)
+            rows.compare("crash-memcpy", self.three(), on)
         self.assertIn("with it", str(caught.exception))
 
     def test_a_pointer_moved_inside_an_unnamed_mapping_fails(self):
-        off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n))
-               for n, load in enumerate((0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000))]
-        # The same page offset, a page further in: the old naming kept only
-        # the offset in the page and called these the same pointer.
+        # The same page offset, a page further in: naming only the offset in
+        # the page called these the same pointer.
         for moved in (0x1234 + 0x1000, 0x1234 + 0x10000):
-            on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, unnamed=moved, pid=3000))
             with self.assertRaises(rows.DebugFailure) as caught:
-                rows.compare("crash-memcpy", off, on)
+                rows.compare("crash-memcpy", self.three(), self.with_component(unnamed=moved))
             self.assertIn("with it", str(caught.exception))
             self.assertIn("x6", str(caught.exception))
 
     def test_a_pointer_into_another_unnamed_mapping_fails(self):
-        off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n))
-               for n, load in enumerate((0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000))]
-        on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, unnamed_size=0x80000, pid=3000))
         with self.assertRaises(rows.DebugFailure):
-            rows.compare("crash-memcpy", off, on)
+            rows.compare("crash-memcpy", self.three(), self.with_component(unnamed_size=0x80000))
 
     def test_a_pointer_moved_to_another_mapping_of_the_same_shape_fails(self):
         """Two unnamed mappings of one size and protection are two places: x6
         moved from one to the other, at the same offset, is a moved pointer."""
-        off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n, second_unnamed=True))
-               for n, load in enumerate((0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000))]
-        on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000, second_unnamed=True,
-                                             unnamed_target=1))
+        off = self.three(second_unnamed=True)
         with self.assertRaises(rows.DebugFailure) as caught:
-            rows.compare("crash-memcpy", off, on)
+            rows.compare("crash-memcpy", off, self.with_component(second_unnamed=True, unnamed_target=1))
         self.assertIn("with it", str(caught.exception))
         self.assertIn("x6", str(caught.exception))
         # The same pointer in the same one is the same pointer, at any load address.
-        same = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000, second_unnamed=True))
-        compared, _ = rows.compare("crash-memcpy", off, same)
+        compared, _ = rows.compare("crash-memcpy", off, self.with_component(second_unnamed=True))
         self.assertGreater(compared, 10)
 
-    LOADS = (0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000)
-
-    def baselines(self, *layouts):
-        """One run per layout (keywords of tombstone), at three load addresses."""
-        return [rows.digest_tombstone(tombstone(load=load, pid=2038 + n, **layout))
-                for n, (load, layout) in enumerate(zip(self.LOADS, layouts))]
-
-    def ambiguity(self, off, **layout):
-        with self.assertRaises(rows.DebugFailure) as caught:
-            rows.compare("crash-memcpy", off, rows.digest_tombstone(
-                tombstone(load=0x7ff1a8100000, pid=3000, **layout)))
-        return str(caught.exception)
-
     def assert_ambiguous(self, off, target):
-        message = self.ambiguity(off, lower_unnamed=True, unnamed_target=target)
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", off, self.with_component(lower_unnamed=True, unnamed_target=target))
+        message = str(caught.exception)
         self.assertIn("ambiguous identity", message)
         self.assertIn("anon[0x100000,rw-]", message)
         self.assertIn("1 in one run and 2 in another", message)
@@ -357,10 +432,10 @@ class CompareTest(unittest.TestCase):
     # first mapping, `unnamed_target=0`) or a wrong one (the mapping that
     # appeared, `unnamed_target=2`), and the row says so instead of judging it.
     def test_a_correct_pointer_is_not_judged_by_a_place_among_a_changed_set(self):
-        self.assert_ambiguous(self.baselines({}, {}, {}), 0)
+        self.assert_ambiguous(self.three(), 0)
 
     def test_a_wrong_pointer_into_a_mapping_that_appeared_is_not_accepted(self):
-        self.assert_ambiguous(self.baselines({}, {}, {}), 2)
+        self.assert_ambiguous(self.three(), 2)
 
     # The runs without the component differ among themselves in the set: no
     # run with it can be compared by a place in it.
@@ -373,21 +448,19 @@ class CompareTest(unittest.TestCase):
     def test_runs_that_agree_on_the_set_are_compared_by_their_place_in_it(self):
         both = {"lower_unnamed": True}
         off = self.baselines(both, both, both)
-        same = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000, lower_unnamed=True))
-        compared, _ = rows.compare("crash-memcpy", off, same)
+        compared, _ = rows.compare("crash-memcpy", off, self.with_component(lower_unnamed=True))
         self.assertGreater(compared, 10)
-        message = self.ambiguity(off, lower_unnamed=True, unnamed_target=2)
-        self.assertIn("with it", message)
-        self.assertNotIn("ambiguous", message)
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", off, self.with_component(lower_unnamed=True, unnamed_target=2))
+        self.assertIn("with it", str(caught.exception))
+        self.assertNotIn("ambiguous", str(caught.exception))
 
     def test_a_mapping_of_another_shape_leaves_the_place_alone(self):
-        off = self.baselines({}, {}, {})
-        on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000, lower_unnamed=True,
-                                             lower_size=0x80000))
-        compared, _ = rows.compare("crash-memcpy", off, on)
+        compared, _ = rows.compare("crash-memcpy", self.three(),
+                                   self.with_component(lower_unnamed=True, lower_size=0x80000))
         self.assertGreater(compared, 10)
 
-    # An unnamed pointer's identity is proved over the whole row, field by
+    # An unnamed pointer's identity is proved over the whole record, field by
     # name, or it has none: a field that is an unnamed pointer in one run and
     # something else (another mapping, no mapping, nothing) in another fails,
     # whatever the other fields hold and however many baselines there are.
@@ -395,8 +468,7 @@ class CompareTest(unittest.TestCase):
         """x5 is an unnamed pointer in one baseline and the .bss in the other;
         x6 points into the only mapping of its shape in the first and into one
         of two in the second; the run with the component has a mapping below
-        and x6 into it. Pairing the matches of the lines in turn puts x5 of
-        one run against x6 of another and never looks at x6's count."""
+        and x6 into it."""
         load = 0x700000000000
         first = rows.digest_tombstone(tombstone(load=load, x5_unnamed=True))
         second = rows.digest_tombstone(tombstone(load=load, second_unnamed=True))
@@ -426,51 +498,76 @@ class CompareTest(unittest.TestCase):
         judged by the engine's own values, an unnamed mapping's place is not."""
         off = self.baselines({"unnamed": 0x1234}, {"unnamed": 0x1238}, {"unnamed": 0x1234})
         with self.assertRaises(rows.DebugFailure) as caught:
-            rows.compare("crash-memcpy", off, rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000)))
+            rows.compare("crash-memcpy", off, self.with_component())
         self.assertIn("x6", str(caught.exception))
         self.assertIn("never masked", str(caught.exception))
 
-    def test_the_programs_register_lines_are_judged_by_the_same_rule(self):
-        """The guest program prints `x06=value`: a place counted among
-        another number of mappings fails, and a place that differs between
-        the baselines is never masked."""
-        def line(value):
-            return [f"  regs crc32 x05=D+0x10 x06={value} x07=0x1 sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0"]
+    def raw_shift(self, left, right, offset):
+        """x4 points into a mapping named `left` and x7 into one named
+        `right`; x5 and x6 point into the same unnamed mapping, x6 at
+        `offset`. A name with spaces in it shifts every field after it by as
+        many whitespace-separated tokens."""
+        load = 0x700000000000
+        text = tombstone(load=load, stack_name=right, unnamed=offset)
+        text = text.replace(f"{load + 0x2854d:016x}", f"{load + 0x700020:016x}")
+        text = text.replace(f"{load + 0xb2070:016x}", f"{load + 0x200020:016x}")
+        text += (f"    {quoted(load + 0x700000)}-{quoted(load + 0x701000 - 1)} rw-         0    1000  {left}\n"
+                 "                               VmFlags: rd wr mr mw me ac\n")
+        return rows.digest_tombstone(text)
 
-        alike = line("anon[0x1000,rw-]#0/1+0x10")
-        rows.compare("ptrace", [alike] * 3, alike)
+    def test_names_that_shift_the_whitespace_do_not_make_one_field_another(self):
+        """The baselines' x4 and x7 names hold two spaces more or less, so that
+        the whitespace-separated tokens of the two lines are as many and x6 of
+        one lines up with x5 of the other; the run with the component moves x6
+        to x5's place. Fields are compared by name: x6 is x6."""
+        first = self.raw_shift("[anon:left]", "[anon:right one two]", 0x10)
+        second = self.raw_shift("[anon:left one two]", "[anon:right]", 0x10)
+        wrong = self.raw_shift("[anon:left]", "[anon:right one two]", 0x20)
+        for each in (first, second, wrong):
+            rows.verify_tombstone("crash-memcpy", each)
         with self.assertRaises(rows.DebugFailure) as caught:
-            rows.compare("ptrace", [alike] * 3, line("anon[0x1000,rw-]#0/2+0x10"))
-        self.assertIn("ambiguous identity", str(caught.exception))
-        self.assertIn("x06", str(caught.exception))
-        with self.assertRaises(rows.DebugFailure) as caught:
-            rows.compare("ptrace", [alike, line("anon[0x1000,rw-]#0/1+0x20"), alike], alike)
-        self.assertIn("never masked", str(caught.exception))
-
-    def test_a_value_with_spaces_in_its_name_is_one_field(self):
-        value = "[anon:dalvik-main space (region space)]+0x10"
-        record = f"  regs crc32 x05=D+0x10 x06={value} x07=0x1 sp=S+0x0"
-        self.assertEqual(rows.fields(record)["x06"], value)
-        self.assertEqual(rows.fields(record)["x07"], "0x1")
-        digest = f"~     x4  @libc.so+0x2854d  x5  @{value}  x6  0x1"
-        self.assertEqual(rows.fields(digest)["x5"], "@" + value)
-        self.assertEqual(rows.fields(digest)["x6"], "0x1")
-
-    def test_same_shaped_unnamed_mappings_are_numbered_in_address_order(self):
-        names = lambda target: next(line for line in rows.digest_tombstone(
-            tombstone(second_unnamed=True, unnamed_target=target)) if " x6 " in line)
-        self.assertIn("#0/2+0x1234", names(0))
-        self.assertIn("#1/2+0x1234", names(1))
-        # A mapping that is alone of its shape is the first of one.
-        alone = next(line for line in rows.digest_tombstone(tombstone()) if " x6 " in line)
-        self.assertIn("#0/1+0x1234", alone)
-
-    def test_an_unnamed_mapping_at_another_address_is_the_same_pointer(self):
-        off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n))
-               for n, load in enumerate((0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000))]
-        on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000))
-        compared, _ = rows.compare("crash-memcpy", off, on)
+            rows.compare("crash-memcpy", [first, second, first], wrong)
+        self.assertIn("x6", str(caught.exception))
+        # the control: the same shift with x6 where it was passes
+        compared, _ = rows.compare("crash-memcpy", [first, second, first],
+                                   self.raw_shift("[anon:left]", "[anon:right one two]", 0x10))
         self.assertGreater(compared, 10)
+
+    def test_names_that_look_like_fields_do_not_overwrite_the_field_they_look_like(self):
+        """The mapping x7 points into is named like x6 and x4, with values:
+        x6 stays the pointer it is, so the run with the component that moves
+        it is judged by x6 and not by the name."""
+        left, right = "[anon:left x4  0x1  x6  0x2]", "[anon:right x6  0x20 x4  0]"
+        first = self.raw_shift(left, right, 0x10)
+        second = self.raw_shift("[anon:left]", right, 0x10)
+        wrong = self.raw_shift(left, right, 0x20)
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", [first, second, first], wrong)
+        self.assertIn("x6", str(caught.exception))
+        compared, _ = rows.compare("crash-memcpy", [first, second, first], self.raw_shift(left, right, 0x10))
+        self.assertGreater(compared, 10)
+
+    def test_a_register_record_is_compared_field_by_field_whatever_its_names_hold(self):
+        """x07's name has other numbers of spaces from run to run and looks
+        like x06: the records are compared by field, so x06 that moved is x06
+        that moved, and x07 is judged by the names the baselines show."""
+        place, moved = Unnamed(0x1000, "rw-", 0, 1, 0x10), Unnamed(0x1000, "rw-", 0, 1, 0x20)
+
+        def run(x06, name):
+            return [regs_record(x06=x06, x07=Named(name, 0x20))]
+
+        for one, other in (("[anon:a b c]", "[anon:a]"), ("[anon:x06 0 x06 0]", "[anon:x06=0]"),
+                           ("[anon:\nAOT\tregs\tx06\tn\t0]", "[anon:]")):
+            with self.subTest(one=one):
+                off = [run(place, one), run(place, other), run(place, one)]
+                compared, masked = rows.compare("ptrace", off, run(place, one))
+                self.assertGreaterEqual(compared, 30)
+                self.assertEqual(masked, 1)
+                with self.assertRaises(rows.DebugFailure) as caught:
+                    rows.compare("ptrace", off, run(moved, one))
+                self.assertIn("x06", str(caught.exception))
+                with self.assertRaises(rows.DebugFailure):
+                    rows.compare("ptrace", off, run(place, "[anon:a name no baseline showed]"))
 
     def test_a_named_location_that_varies_in_the_engine_is_judged_by_the_engines_values(self):
         off = [rows.digest_tombstone(tombstone(pointer=pointer, pid=2038 + n))
@@ -485,17 +582,27 @@ class CompareTest(unittest.TestCase):
         self.assertIn("the engine's own runs differ", str(caught.exception))
         self.assertIn("run with the component shows", str(caught.exception))
 
+    def test_the_mask_is_the_set_of_kind_and_field_pairs_that_differ(self):
+        result = rows.compare_fields("crash-memcpy", self.runs(), rows.digest_tombstone(tombstone(x13=0, pid=3000)))
+        self.assertIn(("tomb.regs", "x13"), result.mask)
+        self.assertIn(("tomb.process", "pid"), result.mask)
+        self.assertIn(("tomb.process", "tid"), result.mask)
+        self.assertEqual(result.masked, 3)
+        self.assertEqual(result.compared + result.masked, sum(len(each.fields) for each in self.runs()[0]))
+
     def test_only_a_few_fields_may_be_masked(self):
-        runs = [[f"  regs crc32 " + " ".join(f"x{n:02d}=0x{n + 100 * value:x}" for n in range(rows.MAX_MASKED + 4))]
-                for value in (1, 2, 3)]
+        def run(value):
+            return [Record("regs", (("tag", "crc32"),) + tuple((f"x{n:02d}", n + 100 * value)
+                                                               for n in range(rows.MAX_MASKED + 4)))]
+
         with self.assertRaises(rows.DebugFailure) as caught:
-            rows.compare("ptrace", runs, runs[0])
+            rows.compare("ptrace", [run(1), run(2), run(3)], run(1))
         self.assertIn("process ids and random values", str(caught.exception))
 
     def test_the_code_around_the_pc_is_compared_whatever_the_dump_starts_at(self):
         one = rows.digest_tombstone(tombstone(load=0x7ff1ae500000))
         two = rows.digest_tombstone(tombstone(load=0x7ff1a1a00000))
-        dump = lambda record: [line for line in record if line.startswith("=     +0x")]
+        dump = lambda recs: [each for each in recs if each.kind == "tomb.code"]
         self.assertEqual(dump(one), dump(two))
         self.assertEqual(len(dump(one)), 2)
 
@@ -517,29 +624,68 @@ class CompareTest(unittest.TestCase):
             rows.compare("crash-memcpy", off, rows.digest_tombstone(tombstone() + sibling_block()))
 
     def test_register_records_mask_only_values(self):
-        lines = ["  regs crc32 x00=0 x05=0x7262 sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0"]
-        off = [["  regs crc32 x00=0 x05=0x%x sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0" % value] for value in (1, 2, 3)]
-        compared, masked = rows.compare("ptrace", off, lines[0:1])
+        off = [[regs_record(x05=value)] for value in (1, 2, 3)]
+        compared, masked = rows.compare("ptrace", off, [regs_record(x05=0x7262)])
         self.assertEqual(masked, 1)
-        self.assertGreaterEqual(compared, 5)
-        moved = [["  regs crc32 x00=0 x05=0x1 sp=S+0x0 pc=libz.so+0x12194 nzcv=0x0"]]
+        self.assertGreaterEqual(compared, 30)
+        steady = [[regs_record(x05=1)]] * 3
         with self.assertRaises(rows.DebugFailure):
-            rows.compare("ptrace", [["  regs crc32 x00=0 x05=0x1 sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0"]] * 3, moved[0])
-        changed = ["  regs crc32 x00=5 x05=0x1 sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0"]
+            rows.compare("ptrace", steady, [regs_record(x05=1, pc=Named("libz.so", 0x12194))])
         with self.assertRaises(rows.DebugFailure):
-            rows.compare("ptrace", [["  regs crc32 x00=0 x05=0x1 sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0"]] * 3, changed)
+            rows.compare("ptrace", steady, [regs_record(x05=1, x00=5)])
 
     def test_a_symbolic_field_that_differs_between_the_engines_own_runs_is_not_masked(self):
-        off = [["  regs crc32 x00=0 pc=libz.so+0x12190"], ["  regs crc32 x00=0 pc=libz.so+0x12194"],
-               ["  regs crc32 x00=0 pc=libz.so+0x12190"]]
+        off = [[regs_record(pc=Named("libz.so", 0x12190))], [regs_record(pc=Named("libz.so", 0x12194))],
+               [regs_record(pc=Named("libz.so", 0x12190))]]
         with self.assertRaises(rows.DebugFailure):
-            rows.compare("ptrace", off, ["  regs crc32 x00=0 pc=libz.so+0x12190"])
+            rows.compare("ptrace", off, [regs_record(pc=Named("libz.so", 0x12190))])
 
-    def test_a_plain_line_must_be_equal_everywhere(self):
-        lines = ["step 3  pc=libz.so+0x1219c"]
-        rows.compare("ptrace", [lines] * 3, lines)
+    def test_a_record_that_is_not_one_of_the_varying_kinds_must_be_equal_everywhere(self):
+        steady = [step(3)]
+        rows.compare("ptrace", [steady] * 3, steady)
         with self.assertRaises(rows.DebugFailure):
-            rows.compare("ptrace", [lines] * 3, ["step 3  pc=libz.so+0x121a0"])
+            rows.compare("ptrace", [steady] * 3, [Record("step", (("n", 3), ("pc", Named("libz.so", 0x121a8))))])
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("ptrace", [[step(3)], [step(4)], [step(3)]], [step(3)])
+        self.assertIn("the engine's own runs differ", str(caught.exception))
+
+    def test_a_text_is_never_masked_even_in_a_kind_that_varies(self):
+        def process(name):
+            return [Record("tomb.process", (("pid", 1), ("ppid", 1), ("tid", 1), ("name", name), ("executable", "x")))]
+
+        with self.assertRaises(rows.DebugFailure):
+            rows.compare("crash-abort", [process("a"), process("b"), process("a")], process("a"))
+
+    def test_the_programs_register_records_are_judged_by_the_same_rule(self):
+        """The guest program's `x06`: a place counted among another number of
+        mappings fails, and a place that differs between the baselines is never
+        masked."""
+        def run(place):
+            return [regs_record(x06=place)]
+
+        alike = run(Unnamed(0x1000, "rw-", 0, 1, 0x10))
+        rows.compare("ptrace", [alike] * 3, alike)
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("ptrace", [alike] * 3, run(Unnamed(0x1000, "rw-", 0, 2, 0x10)))
+        self.assertIn("ambiguous identity", str(caught.exception))
+        self.assertIn("x06", str(caught.exception))
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("ptrace", [alike, run(Unnamed(0x1000, "rw-", 0, 1, 0x20)), alike], alike)
+        self.assertIn("never masked", str(caught.exception))
+
+    def test_a_field_that_is_an_unnamed_pointer_in_one_run_and_a_number_in_another_fails(self):
+        alike = [regs_record(x06=Unnamed(0x1000, "rw-", 0, 1, 0x10))]
+        number = [regs_record(x06=0x1010)]
+        for off, on in (([alike, number, alike], alike), ([alike] * 3, number), ([number] * 3, alike)):
+            with self.assertRaises(rows.DebugFailure) as caught:
+                rows.compare("ptrace", off, on)
+            self.assertIn("ambiguous identity", str(caught.exception))
+
+    def test_records_of_other_kinds_or_fields_are_not_compared_as_one_record(self):
+        with self.assertRaises(rows.DebugFailure):
+            rows.compare("ptrace", [[step(3)]] * 3, [Record("returns_to", (("location", Named("libz.so", 1)),))])
+        with self.assertRaises(rows.DebugFailure):
+            rows.compare("ptrace", [[step(3)]] * 3, [Record("step", (("pc", Named("libz.so", 0x12194 + 12)), ("n", 3)))])
 
 
 class RunTest(unittest.TestCase):
@@ -557,8 +703,9 @@ class RunTest(unittest.TestCase):
 
     def test_a_crash_is_judged_by_its_tombstone(self):
         log = "Fatal signal 11 (SIGSEGV), code 2 (SEGV_ACCERR), fault addr 0x7ff1b1f19000 in tid 2038 (toybox), pid 2038 (toybox)\npbtombstone x\n"
+        printed = Wire.text([randomization(), Record("warm", (("sum", 1),))], "rc=139\n")
         shell = self.shell([
-            ("AOT_DEBUG_MODE=crash-memcpy", "randomization: off\nwarm sum=0x1\nrc=139\n"),
+            ("AOT_DEBUG_MODE=crash-memcpy", printed),
             ("logcat -b crash -d", log),
             ("pidof", ""),
             ("grep -l", "/data/tombstones/tombstone_03\n"),
@@ -570,7 +717,7 @@ class RunTest(unittest.TestCase):
             record = rows.run_mode(shell, "crash-memcpy")
         finally:
             rows.time.sleep = original
-        self.assertTrue(any("SEGV_ACCERR" in line for line in record))
+        self.assertTrue(any(each.kind == "tomb.signal" and each.get("code_name") == "SEGV_ACCERR" for each in record))
         self.assertTrue(any("logcat -b crash -c" in call for call in shell.calls))
 
     def test_a_crash_with_the_wrong_status_fails(self):
@@ -578,54 +725,103 @@ class RunTest(unittest.TestCase):
         with self.assertRaises(rows.DebugFailure):
             rows.run_mode(shell, "crash-memcpy")
 
+    def sibling_output(self, recs=None, extra=""):
+        return self.shell([("AOT_DEBUG_MODE=sibling", Wire.text(recs or sibling_records(True), extra + "rc=0\n"))])
+
     def test_a_mode_that_reports_a_failure_fails(self):
-        shell = self.shell([("AOT_DEBUG_MODE=sibling", MARKER + SIBLING.replace("in_libz=yes code=1\n", "in_libz=NO code=1\n", 1) + "rc=0\n")])
+        recs = [sibling_hit("sibling_loop", "in loop", in_libz="NO") if each.kind == "sibling_loop" else each
+                for each in sibling_records(True)]
         with self.assertRaises(rows.DebugFailure):
-            rows.run_mode(shell, "sibling")
+            rows.run_mode(self.sibling_output(recs), "sibling")
 
     def test_a_good_debug_record_is_returned_without_its_status(self):
-        shell = self.shell([("AOT_DEBUG_MODE=sibling", MARKER + SIBLING + "rc=0\n")])
-        record = rows.run_mode(shell, "sibling")
-        self.assertEqual(record[0], "randomization: off")
-        self.assertEqual(record[-1], "done mode=sibling")
+        record = rows.run_mode(self.sibling_output(), "sibling")
+        self.assertEqual(record[0].kind, "randomization")
+        self.assertEqual(record[-1], done("sibling"))
 
-    def ptrace_output(self, text):
-        return rows.run_mode(self.shell([("AOT_DEBUG_MODE=ptrace", MARKER + text + "rc=0\n")]), "ptrace")
+    def test_a_run_whose_randomization_was_not_turned_off_is_no_run(self):
+        good = Wire.lines(sibling_records(True))
+        failure = "\nFAIL randomization is still on after the program ran again"
+        for lines in (good[1:], good[:1] * 2 + good, [failure] + good):
+            with self.subTest(lines=len(lines)):
+                with self.assertRaises(rows.DebugFailure):
+                    rows.run_mode(self.shell([("AOT_DEBUG_MODE=sibling", "\n".join(lines) + "\nrc=0\n")]), "sibling")
+
+    def ptrace(self, lines):
+        text = "\n".join(lines) + "\nrc=0\n"
+        return rows.run_mode(self.shell([("AOT_DEBUG_MODE=ptrace", text)]), "ptrace")
+
+    def ptrace_lines(self):
+        return Wire.lines(ptrace_records(True))
 
     def test_a_good_ptrace_output_is_a_record(self):
-        record = self.ptrace_output(PTRACE)
-        self.assertEqual(record[-1], "done mode=ptrace")
+        record = self.ptrace(self.ptrace_lines())
+        self.assertEqual(record[-1], done("ptrace"))
 
-    def test_a_register_line_with_fewer_fields_than_the_format_has_fails(self):
-        for fields in (20, 30):
-            with self.subTest(fields=fields):
+    def test_a_register_record_with_fewer_fields_than_the_format_has_fails(self):
+        lines = self.ptrace_lines()
+        regs = [n for n, line in enumerate(lines) if line.split("\t")[1] == "regs"]
+        self.assertEqual(len(regs), len(rec.SCHEMA["regs"]))
+        for kept in (20, 30, len(regs) - 1):
+            with self.subTest(kept=kept):
                 with self.assertRaises(rows.DebugFailure) as caught:
-                    self.ptrace_output(PTRACE.replace(regs_line(), regs_line(fields)))
-                self.assertIn("register line", str(caught.exception))
-        # cut short in the middle of the line, with nothing after the cut
+                    self.ptrace(lines[:regs[0] + kept] + lines[regs[-1] + 1:])
+                self.assertIn("regs", str(caught.exception))
+        # cut short in the middle of a line, with nothing after the cut
         with self.assertRaises(rows.DebugFailure):
-            self.ptrace_output(PTRACE.replace(regs_line(), regs_line()[:70]))
+            self.ptrace(lines[:regs[0] + 3] + [lines[regs[0] + 3][:20]])
 
     def test_a_failure_marker_inside_a_record_line_fails(self):
-        text = PTRACE.replace("step 5  pc=libz.so", "step 5 FAIL the name does not fit  pc=libz.so", 1)
-        self.assertNotEqual(text, PTRACE)
+        lines = self.ptrace_lines()
+        broken = [line.replace("deflate", "FAIL") for line in lines]
+        self.assertNotEqual(broken, lines)
         with self.assertRaises(rows.DebugFailure) as caught:
-            self.ptrace_output(text)
+            self.ptrace(broken)
         self.assertIn("FAIL", str(caught.exception))
 
     def test_a_line_that_is_no_record_line_fails(self):
-        for stray in (" x07=0 sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0", "stp 5  pc=libz.so+0x12198", "step 5  pc="):
+        lines = self.ptrace_lines()
+        at = next(n for n, line in enumerate(lines) if line.split("\t")[1] == "step")
+        for stray in ("x07=0 sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0", "step 5  pc=libz.so+0x12198",
+                      "AOT\tstep\tn\ti", "AOT step n i 5", "warning: linker: something"):
             with self.subTest(stray=stray):
                 with self.assertRaises(rows.DebugFailure) as caught:
-                    self.ptrace_output(PTRACE.replace("step 5  pc=libz.so+0x121a8", stray, 1))
-                self.assertIn("record line", str(caught.exception))
+                    self.ptrace(lines[:at] + [stray] + lines[at:])
+                self.assertIn("record", str(caught.exception))
 
-    def test_a_run_whose_randomization_was_not_turned_off_is_no_run(self):
-        for output in (SIBLING + "rc=0\n", MARKER * 2 + SIBLING + "rc=0\n",
-                       MARKER + "FAIL randomization is still on after the program ran again\n" + SIBLING + "rc=0\n"):
-            with self.subTest(output=output[:60]):
+    def test_malformed_values_are_failures(self):
+        lines = self.ptrace_lines()
+        regs = [n for n, line in enumerate(lines) if line.split("\t")[1] == "regs"]
+        x06 = next(n for n in regs if lines[n].split("\t")[2] == "x06")
+        pc = next(n for n in regs if lines[n].split("\t")[2] == "pc")
+        nzcv = next(n for n in regs if lines[n].split("\t")[2] == "nzcv")
+        cases = {
+            "x06 twice": lines[:x06 + 1] + [lines[x06]] + lines[x06 + 1:],
+            "pc without its offset": lines[:pc] + ["AOT\tregs\tpc\tm\tlibz.so"] + lines[pc + 1:],
+            "nzcv without digits": lines[:nzcv] + ["AOT\tregs\tnzcv\tn\t"] + lines[nzcv + 1:],
+            "nzcv 0x": lines[:nzcv] + ["AOT\tregs\tnzcv\tn\t0x"] + lines[nzcv + 1:],
+            "x06 dropped": lines[:x06] + lines[x06 + 1:],
+            "an unknown field": lines[:x06] + ["AOT\tregs\tx99\tn\t0"] + lines[x06 + 1:],
+            "a number with a leading zero": lines[:x06] + ["AOT\tregs\tx06\tn\t07"] + lines[x06 + 1:],
+            "text where a number is": lines[:nzcv] + ["AOT\tregs\tnzcv\tt\t0"] + lines[nzcv + 1:],
+        }
+        for label, broken in cases.items():
+            with self.subTest(label):
                 with self.assertRaises(rows.DebugFailure):
-                    rows.run_mode(self.shell([("AOT_DEBUG_MODE=sibling", output)]), "sibling")
+                    self.ptrace(broken)
+
+    def test_a_name_that_looks_like_a_field_is_one_name_end_to_end(self):
+        """x07 points into a mapping named like a field, with a space, `=` and
+        a line end in it: the record keeps x06 as the pointer it is, and the
+        name as the name."""
+        hostile = "[anon:space x06=0\nAOT\tregs\tx06\tn\t0]"
+        recs = ptrace_records(True)
+        recs[[each.kind for each in recs].index("regs")] = regs_record(
+            x06=Unnamed(0x100000, "rw-", 0, 1, 0x1234), x07=Named(hostile, 0x20))
+        regs = next(each for each in self.ptrace(Wire.lines(recs)) if each.kind == "regs")
+        self.assertEqual(regs.get("x07"), Named(hostile, 0x20))
+        self.assertEqual(regs.get("x06"), Unnamed(0x100000, "rw-", 0, 1, 0x1234))
+        self.assertTrue(all(len(line.split("\t")) >= 5 and line.startswith("AOT\t") for line in Wire.lines(recs)))
 
 
 if __name__ == "__main__":

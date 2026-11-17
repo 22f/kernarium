@@ -25,8 +25,9 @@ uml_add_tooling_test(
     TIMEOUT 180)
 
 # The debugger and crash-report rows of that runner on scripted records: a
-# tombstone's digest, what each mode must show, and the comparison that masks
-# only what two runs of one engine already differ in.
+# tombstone's digest into records, what each mode must show, and the
+# comparison, field by field, that masks only what two runs of one engine
+# already differ in.
 uml_add_tooling_test(
     NAME arm64-aot-debug-rows
     COMMAND ${Python3_EXECUTABLE} -B
@@ -34,14 +35,15 @@ uml_add_tooling_test(
     LABELS cpu
     TIMEOUT 60)
 
-# The guest debug program's naming of a mapping (the header it is built with,
-# on the host) against the tombstone digest's, on layouts of any number of
-# shapes.
+# The records the guest debug program prints: their encoding and the one
+# reader of it, and the program's emitter (the header it is built with, on the
+# host) against that reader, for names of any bytes and layouts of any number
+# of shapes.
 uml_add_tooling_test(
-    NAME arm64-aot-mapping-names
+    NAME arm64-aot-records
     COMMAND ${CMAKE_COMMAND} -E env UML_CXX=${CMAKE_CXX_COMPILER}
         ${Python3_EXECUTABLE} -B
-        ${PROJECT_SOURCE_DIR}/tests/tooling/arm64/test_aot_mapping_names.py
+        ${PROJECT_SOURCE_DIR}/tests/tooling/arm64/test_aot_records.py
     LABELS cpu
     TIMEOUT 120)
 

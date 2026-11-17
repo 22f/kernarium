@@ -33,6 +33,9 @@ sys.path.insert(0, str(RUNNER_DIRECTORY.parent / "support"))
 import run_aot_guest as runner  # noqa: E402
 import share_rows  # noqa: E402
 
+# A run of a debug mode is its records; these rows only count runs.
+ONE_RECORD = [runner.debug_rows.Record("done", (("mode", "x"),))]
+
 FAKE_LAUNCHER = """\
 import os, pathlib, signal, sys, time
 state = pathlib.Path(os.environ["FAKE_GUEST_STATE"])
@@ -599,7 +602,7 @@ class DebugBaselineTest(unittest.TestCase):
 
         def run_mode(shell, mode):
             calls[mode] += 1
-            return ["= a"]
+            return ONE_RECORD
         arm = types.SimpleNamespace(
             options=types.SimpleNamespace(debug_program=pathlib.Path("libaotdebug.so")),
             aot=False, label="off", debug={})
@@ -613,13 +616,13 @@ class DebugBaselineTest(unittest.TestCase):
 
     def test_the_judging_wants_the_same_numbers(self):
         def records(sibling_runs: int):
-            return {mode: [["= a"]] * (sibling_runs if mode == "crash-sibling" else 3)
+            return {mode: [ONE_RECORD] * (sibling_runs if mode == "crash-sibling" else 3)
                     for mode in runner.debug_rows.MODES}
         options = study_options(debug_program=pathlib.Path("libaotdebug.so"), share_program=None,
                                 study_eviction=False)
         on = types.SimpleNamespace(label="on", workloads={}, probe=[], report={}, resident=1 << 20,
                                    share={}, share_counts={}, share_rounds={},
-                                   debug={mode: [["= a"]] for mode in runner.debug_rows.MODES})
+                                   debug={mode: [ONE_RECORD] for mode in runner.debug_rows.MODES})
         short = types.SimpleNamespace(label="off", workloads={}, probe=[], report={}, resident=0,
                                       share={}, share_counts={}, share_rounds={}, debug=records(3))
         with self.assertRaises(runner.Failure) as caught:

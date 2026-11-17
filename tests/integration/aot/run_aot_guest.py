@@ -775,11 +775,12 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
                               f"without the component and {len(on.debug.get(mode, []))} with it, "
                               f"not {debug_rows.off_runs(mode)} and 1")
             try:
-                compared, masked = debug_rows.compare(mode, off.debug[mode], on.debug[mode][0])
+                result = debug_rows.compare_fields(mode, off.debug[mode], on.debug[mode][0])
             except debug_rows.DebugFailure as problem:
                 raise Failure(f"debug row {problem}")
-            print(f"debug row {mode}: {len(on.debug[mode][0])} lines, "
-                  f"{compared} fields compared, {masked} masked, identical")
+            mask = ", ".join(f"{kind}.{name}" for kind, name in sorted(result.mask)) or "none"
+            print(f"debug row {mode}: {len(on.debug[mode][0])} records, "
+                  f"{result.compared} fields compared, {result.masked} masked ({mask}), identical")
     if options.share_program:
         fork_shared = None
         for mode in share_rows.modes(options.study_eviction):
