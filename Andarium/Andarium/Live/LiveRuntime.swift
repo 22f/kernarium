@@ -1226,13 +1226,14 @@ final class LiveRuntime: RuntimeDriver {
     /// The guest's vibrator plays while a normal run is in front and holds
     /// the guest running; the connection is made from the run's start, because
     /// the guest's HAL starts early. Android's own settings decide what it
-    /// asks for, and the Haptics switch whether the device plays it: the guest
-    /// keeps its vibrator either way, and while the switch is off the session
-    /// holds no connection and the player no engine for the device. A game
-    /// controller's rumble is not governed by the switch.
+    /// asks for, and the Haptics switch (or a launch that silences them,
+    /// `HapticsLaunch`) whether the device plays it: the guest keeps its
+    /// vibrator either way, and while they are off the session holds no
+    /// connection and the player no engine for the device. A game controller's
+    /// rumble is not governed by either.
     private func updateHaptics() {
         haptics.update(
-            available: hapticsAvailable, enabled: model?.hapticsOn ?? true, running: normalRun,
+            available: hapticsAvailable, enabled: model?.hapticsPlays ?? true, running: normalRun,
             booted: reachedBootCompleted, foreground: active && !holdsGuestStill)
     }
 

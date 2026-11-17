@@ -81,7 +81,7 @@ struct SideKeysOverlay: View {
             keys(in: geo.size)
         }
         .ignoresSafeArea(.keyboard)
-        .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+        .interfaceFeedback(.impact(weight: .light), trigger: keyPresses)
     }
 
     @ViewBuilder
@@ -442,7 +442,7 @@ struct KeyRail: View {
         }
         .foregroundStyle(.primary)
         .environment(\.colorScheme, .dark)
-        .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+        .interfaceFeedback(.impact(weight: .light), trigger: keyPresses)
     }
 
     private func pressed(_ action: () -> Void) {
@@ -495,7 +495,7 @@ struct KeyDeck: View {
         }
         .foregroundStyle(.primary)
         .environment(\.colorScheme, .dark)
-        .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+        .interfaceFeedback(.impact(weight: .light), trigger: keyPresses)
     }
 
     private func pressed(_ action: () -> Void) {

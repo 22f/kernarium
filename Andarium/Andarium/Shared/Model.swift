@@ -1795,6 +1795,32 @@ final class AppModel {
     /// is on until the person turns it off.
     var hapticsOn: Bool { guest?.haptics ?? true }
 
+    #if !APP_STORE
+    /// The launch plays none of the guest's haptics on the device, whatever
+    /// the switch says (`HapticsLaunch`): the switch and the stored choice stay
+    /// the person's, and the guest keeps its vibrator.
+    var hapticsSilencedByLaunch = false
+    #endif
+
+    /// Whether the device plays what the guest's vibrator asks for: the
+    /// switch, unless the launch silences it.
+    var hapticsPlays: Bool {
+        #if !APP_STORE
+        if hapticsSilencedByLaunch { return false }
+        #endif
+        return hapticsOn
+    }
+
+    /// Whether the application's own touch feedback (the side keys' click, the
+    /// rulers' tick) plays. The Haptics switch does not govern it; only a
+    /// launch that silences haptics does.
+    var interfaceFeedbackPlays: Bool {
+        #if !APP_STORE
+        if hapticsSilencedByLaunch { return false }
+        #endif
+        return true
+    }
+
     /// The Haptics switch. It asks for nothing and applies at once, in a run
     /// too: the guest keeps its vibrator either way.
     func setHaptics(_ on: Bool) {

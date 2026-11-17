@@ -66,6 +66,17 @@ uml_add_tooling_test(
     LABELS andarium;package
     TIMEOUT 600)
 
+# The application's own touch feedback (the side keys, the rulers) plays through
+# one modifier that a launch silencing haptics reaches: no view calls SwiftUI's
+# or UIKit's feedback directly.
+uml_add_tooling_test(
+    NAME andarium-interface-feedback
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_interface_feedback.py
+        --root ${PROJECT_SOURCE_DIR}
+    LABELS andarium
+    TIMEOUT 60)
+
 # Buy me tokens' words are held to App Store Review Guideline 3.1.1: no donation,
 # plan, subscription, unlock, upgrade, premium, credit, balance or token amount
 # in any language of the table, and the English source says a tip is a voluntary
