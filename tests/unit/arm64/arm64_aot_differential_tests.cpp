@@ -1922,6 +1922,60 @@ void another_generations_change_reaches_native_code(
 			view_kind == View::unmapped ? " through a view nothing maps" :
 			" through a view that cannot execute");
 
+		/* A page that was refused and is retried. Its mapping lacked the
+		 * kernel's fact, so the binder refused it and backed off; the kernel
+		 * then gave the mapping the fact, which publishes no code change, and
+		 * a later find retries the verification on the slot it already has,
+		 * with no new binding of the page. The table answers it, which reads
+		 * no byte. The generation is registered already, by the binding's
+		 * own fetch and the engine's fetches of the refused page (a change
+		 * that makes the slot stale tells it again), so a change must reach
+		 * this retry however the verification itself registers. */
+		{
+			aot::clear_shared_verdicts();
+			SharedFrame frame{image, generation++};
+			auto warm = guest(frame);
+			auto retried = std::make_unique<SharedGuest>(generation++, image,
+				frame, false);
+			ForeignWriter writer{generation++, frame, page_offset,
+				view_kind};
+			require(same(want, run_shared(*warm, c).result, c));
+			const auto a = run_shared(*retried, c);
+			require(same(want, a.result, c) && a.stats.enters == 0 &&
+				a.stats.mutable_pages >= 1);
+			require(darwin_uml_static_vm_activate(retried->env.generation) == 0);
+			require(darwin_uml_static_vm_map_generation(
+				retried->env.generation, reinterpret_cast<void *>(bias),
+				frame.backing.descriptor(), 0, image.pages * page_bytes,
+				PROT_READ | PROT_EXEC, 3, 0) == 0);
+			/* Every run binds the stub's page again (it is no library's).
+			 * The run that enters verifies the pages it reaches, and binds
+			 * each of them but the one that was refused before: that page
+			 * keeps its slot and is only verified again. */
+			SharedRun b;
+			std::uint64_t refused_binds = 0;
+			int refused = 0;
+			for (int attempt = 0; attempt < 5000 && b.stats.enters == 0;
+			     ++attempt) {
+				refused_binds = b.stats.binds;
+				b = run_shared(*retried, c);
+				require(same(want, b.result, c));
+				refused += b.stats.enters == 0 ? 1 : 0;
+			}
+			require(b.stats.enters > 0 && b.stats.steps == 0 && refused > 1 &&
+				answered_by_the_table(b.stats) &&
+				b.stats.binds - refused_binds + 1 == b.stats.shared_hits);
+			writer.change(changed, route);
+			const auto d = run_shared(*retried, c);
+			if (!same(want_changed, d.result, c) || d.stats.enters != 0) {
+				std::fprintf(stderr, "  a page retried after a refusal ran "
+					"old code after a %s: enters %llu\n", name.c_str(),
+					static_cast<unsigned long long>(d.stats.enters));
+				require(false);
+			}
+			require(d.stats.poisoned >= 1);
+		}
+
 		/* The engine alone: it translated the function, and runs the new
 		 * bytes after the change. */
 		{
