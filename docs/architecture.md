@@ -386,14 +386,18 @@ that still misses completes in software with one host compare-and-swap of the
 recorded values. The JIT's semantic path keeps a software reservation (versions
 of 16-byte host granules), so a store to the reserved granule, including the
 kernel's futex and SWP emulation, fails the store-exclusive. The JIT runs an
-A64 or AArch32 pair it fuses on the host's own monitor, and a compare-retry
-sequence's mismatch exit rolls back to the guest state at the load-exclusive,
-which then executes on the software reservation; no exit clears the monitor and
-continues. The monitor ends at a store-exclusive, a CLREX, an exception and a
+A64 or AArch32 pair it fuses on the host's own monitor, and a side exit of a
+fused run rolls back to the guest state at the load-exclusive, which then
+executes on the software reservation; no exit clears the monitor and continues.
+Only a host interruption of a natively fused pair fails its store-exclusive,
+never systematically, so a loop that meets the architecture's progress
+conditions makes progress. The monitor ends at a store-exclusive, a CLREX, an exception and a
 store to the reserved granule; a store of the guest's own to another granule
 leaves it standing, as on hardware (`arm64-exclusive-progress`,
 `arm64-exclusive-events`, `arm64-jit-exclusive_completion`,
-`arm64-jit-reservation_alias`, `arm64-jit-a32-exclusive`,
+`arm64-jit-reservation_alias`, `arm64-jit-exclusive_run_fetch`,
+`arm64-jit-exclusive_run_runtime`, `arm64-jit-exclusive_run_contention`,
+`arm64-jit-a32-exclusive`,
 `guest-exclusive-progress-gadgets`/`-jit`).
 
 Both engines complete WFE and WFI at once and treat SEV and SEVL as no-ops, so
