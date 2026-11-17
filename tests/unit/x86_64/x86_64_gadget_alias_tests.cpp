@@ -1242,6 +1242,49 @@ void test_a_failed_registry_is_made_again()
 		"the registry of a generation that failed once was not made again");
 }
 
+/* The kernel stores into another process's page (ptrace, /proc/pid/mem,
+ * process_vm_writev) and names that process's generation: a translation of
+ * the frame in another generation runs the new bytes, whatever the target's
+ * own view of the frame is. The target maps it as data (a writable alias of
+ * a frame that another process executes), maps nothing at the page (the
+ * kernel fills the software table at faults, so it has not yet), or maps it
+ * as code (the control). */
+void test_a_remote_kernel_write_reaches_the_reader()
+{
+	const Clean clean;
+	darwin_uml_static_vm_require_coherent_kernel_code_writes();
+	constexpr std::uint64_t reading = 0x3a00'0000;
+	constexpr std::uint64_t writing = 0x3b00'0000;
+	enum class View { data, absent, code };
+	unsigned long generation = 9500;
+	/* Every view is run, so one run names each that fails. */
+	unsigned failed = 0;
+	for (const auto view : {View::data, View::absent, View::code}) {
+		const char *name = view == View::data ? "data view" :
+			view == View::absent ? "page the target does not map" :
+			"code view";
+		ScratchBacking frame{"uml-x86-alias-remote-XXXXXX", page};
+		load_return(frame, 1);
+		Space reader{generation++};
+		Space target{generation++};
+		reader.map(reading, frame, 0, rx, 1);
+		if (view == View::data)
+			target.map(writing, frame, 0, rw, 0);
+		else if (view == View::code)
+			target.map(writing, frame, 0, rx, 1);
+		require(reader.run_to_system_call(reading).rax == 1);
+		load_return(frame, 2);
+		require(darwin_uml_static_vm_invalidate_code_generation(
+			target.generation(), writing, page) == 0);
+		if (reader.run_to_system_call(reading).rax != 2) {
+			std::fprintf(stderr, "a remote write into a %s did not reach "
+				"a translation of the frame\n", name);
+			++failed;
+		}
+	}
+	require(failed == 0, "a remote kernel write left a translation running");
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -1317,6 +1360,10 @@ int main(int argc, char **argv)
 	if (selected("memo") || selected("memo-unknown")) {
 		test_the_unknown_writer_state_ends_the_memo();
 		std::puts("memo and unknown writers ok");
+	}
+	if (selected("remote")) {
+		test_a_remote_kernel_write_reaches_the_reader();
+		std::puts("remote kernel write ok");
 	}
 	const auto now = FrameAccounting::diagnostics();
 	require(now.holder_leaks == start.holder_leaks, "a holder leaked");
