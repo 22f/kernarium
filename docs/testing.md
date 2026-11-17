@@ -437,7 +437,9 @@ map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`,
-`SendFeedbackStartLogTests` (the sheet's tip and start log during a start) and
+`SendFeedbackStartLogTests` (the sheet's tip and start log during a start),
+`SendFeedbackAskScreenTests` (Send's question about a bug report and the
+pages of its row) and
 `SendFeedbackFilesScreenTests` (files from Files: in place, the copy of a file
 that cannot be used there, the access held and stopped once) exist only in a
 build with `FEEDBACK_ADDRESS=feedback@example.com` on the command line, as the
@@ -558,7 +560,11 @@ the Simulator Android runtime packaged and the system image staged
 ([Build](../Andarium/README.md#build)), and it takes about a minute to reach
 Android (the test allows ten minutes to create the machine and 25 for the
 boot). Its other test, in a build with Send feedback, reaches the Send feedback
-line from a probe session's Settings.
+line from a probe session's Settings. `FeedbackAskUITests` (the same build) adds
+`ANDARIUM_FEEDBACK_PROBE` to the probe session, which gives the sheet mail that can be
+sent, a composer stand-in and the preview's bug report, and walks Send's
+question, Create bug report, the pages of the report's row and Send without
+bug report.
 
 The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
 `andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.
