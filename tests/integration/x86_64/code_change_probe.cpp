@@ -24,9 +24,11 @@
  *			the store goes through another mapping of the same
  *			frame, in this process, from another vCPU, from another
  *			process (forked before or after the first call) or from
- *			the kernel (read(2)), with the executable mapping
- *			protected, unmapped and mapped again between the call
- *			and the store, and into the very unit that runs;
+ *			the kernel (read(2), or process_vm_writev(2) into
+ *			another process that maps the frame as data only),
+ *			with the executable mapping protected, unmapped and
+ *			mapped again between the call and the store, and into
+ *			the very unit that runs;
  *	two-patch	one block of one thread patches two instructions of a
  *			function with no link between the stores while three
  *			other vCPUs run the function, and after the thread
@@ -44,7 +46,7 @@ constexpr long nr_read = 0, nr_write = 1, nr_mmap = 9, nr_mprotect = 10,
 	nr_munmap = 11, nr_mremap = 25, nr_pipe = 22, nr_fork = 57, nr_wait4 = 61,
 	nr_futex = 202, nr_exit_group = 231, nr_getppid = 110, nr_clock_gettime = 228,
 	nr_open = 2, nr_close = 3, nr_unlink = 87, nr_ftruncate = 77,
-	nr_memfd_create = 319;
+	nr_memfd_create = 319, nr_process_vm_writev = 311;
 constexpr const char *abi = "x86-64";
 long raw_syscall(long number, long a0 = 0, long a1 = 0, long a2 = 0,
 	long a3 = 0, long a4 = 0, long a5 = 0)
@@ -65,7 +67,7 @@ constexpr long nr_read = 3, nr_write = 4, nr_mmap = 192, nr_mprotect = 125,
 	nr_munmap = 91, nr_mremap = 163, nr_pipe = 42, nr_fork = 2, nr_wait4 = 114,
 	nr_futex = 240, nr_exit_group = 252, nr_getppid = 64, nr_clock_gettime = 265,
 	nr_open = 5, nr_close = 6, nr_unlink = 10, nr_ftruncate = 93,
-	nr_memfd_create = 356;
+	nr_memfd_create = 356, nr_process_vm_writev = 348;
 constexpr const char *abi = "i386";
 long raw_syscall(long number, long a0 = 0, long a1 = 0, long a2 = 0,
 	long a3 = 0, long a4 = 0, long a5 = 0)
@@ -1149,6 +1151,99 @@ void case_alias_kernel_write(bool untouched_w)
 	}
 }
 
+/* process_vm_writev(2): the kernel stores into another process's memory,
+ * so no translated store sees it. A second process maps the file writable
+ * and not as code (the first maps it executable and runs it), and a third
+ * writes the second's page. The second's page is untouched when the first
+ * write reaches it, so its address space has no entry for it yet; the later
+ * writes find it present. */
+struct IoVec final {
+	word base;
+	word length;
+};
+
+void case_alias_remote_write()
+{
+	const char *name = "alias-remote-write";
+	auto alias = new_alias(false, 1, callee_near);
+	expect(name, 1, call_caller(alias.x));
+	int to_target[2];
+	int from_target[2];
+	int to_writer[2];
+	int from_writer[2];
+	raw_syscall(nr_pipe, reinterpret_cast<long>(to_target));
+	raw_syscall(nr_pipe, reinterpret_cast<long>(from_target));
+	raw_syscall(nr_pipe, reinterpret_cast<long>(to_writer));
+	raw_syscall(nr_pipe, reinterpret_cast<long>(from_writer));
+	const long target = raw_syscall(nr_fork);
+	if (target < 0) {
+		print("code-change: fork failed\n");
+		leave(4);
+	}
+	if (target == 0) {
+		/* Only a data view of the frame: the executable one goes, and the
+		 * writable one is a mapping nothing has touched. */
+		raw_syscall(nr_munmap, reinterpret_cast<long>(alias.x),
+			alias.pages * page);
+		auto *mapped = map_file(alias.fd, alias.pages, prot_read | prot_write);
+		/* Its own store puts the page in this process's address space, as
+		 * the process that a debugger writes into has touched it. */
+		volatile unsigned char *touch = mapped + callee_near + 8;
+		*touch = *touch;
+		const word view = reinterpret_cast<word>(mapped);
+		raw_syscall(nr_write, from_target[1], reinterpret_cast<long>(&view),
+			sizeof(view));
+		char token = 0;
+		raw_syscall(nr_read, to_target[0], reinterpret_cast<long>(&token), 1);
+		leave(0);
+	}
+	word view = 0;
+	raw_syscall(nr_read, from_target[0], reinterpret_cast<long>(&view),
+		sizeof(view));
+	const long writer = raw_syscall(nr_fork);
+	if (writer < 0) {
+		print("code-change: fork failed\n");
+		leave(4);
+	}
+	if (writer == 0) {
+		for (;;) {
+			unsigned char value = 0;
+			raw_syscall(nr_read, to_writer[0], reinterpret_cast<long>(&value), 1);
+			if (value == 0)
+				leave(0);
+			unsigned char immediate[4] = {value, 0, 0, 0};
+			IoVec local{reinterpret_cast<word>(immediate), 4};
+			IoVec remote{view + callee_near + 1, 4};
+			const long done = raw_syscall(nr_process_vm_writev, target,
+				reinterpret_cast<long>(&local), 1,
+				reinterpret_cast<long>(&remote), 1, 0);
+			char reply = done == 4 ? 1 : 0;
+			raw_syscall(nr_write, from_writer[1], reinterpret_cast<long>(&reply), 1);
+		}
+	}
+	/* The forks flushed this process's translations: run it again so that
+	 * each write below meets a warm one. */
+	expect(name, 1, call_caller(alias.x));
+	for (unsigned value = 2; value < 8; ++value) {
+		unsigned char command = static_cast<unsigned char>(value);
+		raw_syscall(nr_write, to_writer[1], reinterpret_cast<long>(&command), 1);
+		char reply = 0;
+		raw_syscall(nr_read, from_writer[0], reinterpret_cast<long>(&reply), 1);
+		expect("alias-remote-write-done", 1, reply);
+		expect(name, value, call_caller(alias.x));
+	}
+	unsigned char leave_command = 0;
+	raw_syscall(nr_write, to_writer[1], reinterpret_cast<long>(&leave_command), 1);
+	char token = 0;
+	raw_syscall(nr_write, to_target[1], reinterpret_cast<long>(&token), 1);
+	const long children[2] = {writer, target};
+	for (const long child : children) {
+		int status = 0;
+		raw_syscall(nr_wait4, child, reinterpret_cast<long>(&status), 0, 0);
+		expect("alias-remote-write-exit", 0, status);
+	}
+}
+
 /* The unit that runs stores into its own next instruction through W:
  *
  *	0:	88 4a 04		mov %cl, 4(%rdx)	(W)
@@ -1341,6 +1436,7 @@ int probe_main()
 	case_alias_unmap_remap();
 	case_alias_kernel_write(false);
 	case_alias_kernel_write(true);
+	case_alias_remote_write();
 	case_alias_running_block();
 	case_alias_two_exec_mappings();
 	case_alias_rwx_plus_rx();
