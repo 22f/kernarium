@@ -294,15 +294,22 @@
             illegal_runtime
             publication_gate
             reservation_alias
-            exclusive_completion)
+            exclusive_completion
+            exclusive_run_fetch
+            exclusive_run_runtime
+            exclusive_run_contention
+            shared_tier_off)
         set(_jit_test_objects ${UML_ARM64_RUNTIME_TEST_OBJECTS})
-        if(JIT_TEST STREQUAL "cache_validation")
+        if(JIT_TEST STREQUAL "cache_validation" OR
+           JIT_TEST STREQUAL "shared_tier_off")
             set(_jit_test_objects ${UML_ARM64_RUNTIME_DIAGNOSTIC_TEST_OBJECTS})
         endif()
         uml_add_arm64_unit_test(jit_${JIT_TEST} NAME arm64-jit-${JIT_TEST}
             WITHOUT_HARNESS OBJECTS ${_jit_test_objects})
     endforeach()
     target_compile_definitions(uml_arm64_jit_cache_validation_tests PRIVATE
+        UML_JIT_RUNTIME_DIAGNOSTICS=1)
+    target_compile_definitions(uml_arm64_jit_shared_tier_off_tests PRIVATE
         UML_JIT_RUNTIME_DIAGNOSTICS=1)
     target_link_libraries(uml_arm64_jit_cache_validation_tests PRIVATE
         uml_test_allocation_failure)
