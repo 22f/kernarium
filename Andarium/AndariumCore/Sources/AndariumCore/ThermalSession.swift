@@ -110,10 +110,9 @@ public final class ThermalSession: @unchecked Sendable {
         queue.async { [self] in
             let bootedNow = booted && !self.booted
             self.booted = booted
-            if bootedNow {
-                failedAttempts = 0
-                connectedThisBoot = false
-            }
+            // Boot completion is not a new boot: what the connection did
+            // before it is still true (`connectedThisBoot`).
+            if bootedNow { failedAttempts = 0 }
             if running {
                 if !inRun { beginRun() }
                 if stream == nil && !gaveUp { openStream() }

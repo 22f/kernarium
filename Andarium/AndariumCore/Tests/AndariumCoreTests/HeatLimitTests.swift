@@ -183,6 +183,32 @@ struct HeatLimitSessionTests {
         #expect(!rig.session.hasGivenUp)
     }
 
+    @Test(arguments: [false, true])
+    func aRecoveredServiceHearsTheNewChoiceWhenTheConnectionWasMadeBeforeBootCompleted(target: Bool) throws {
+        // The application's own order: the run begins and the HAL connects
+        // while Android is still booting; boot completion is reported later
+        // on the connection that stands. That is not a new boot, so what the
+        // connection did survives it.
+        let rig = rig()
+        rig.session.setLimit(!target)
+        rig.session.observe(.critical)
+        rig.session.update(running: true, booted: false)
+        #expect(thermalEventually { rig.session.isConnected })
+        #expect(rig.guest.record() == (try frame(target ? "none" : "critical")))
+        rig.session.update(running: true, booted: true)  // boot completed, the connection stands
+        rig.session.settle()
+        #expect(rig.session.isConnected)
+        rig.guest.accepting = false
+        rig.guest.dropLatest()
+        #expect(thermalEventually { rig.session.hasGivenUp }, "the attempts did not end")
+        rig.guest.accepting = true
+        rig.session.setLimit(target)
+        rig.session.update(running: true, booted: true)  // LiveRuntime.setHeatLimit's own call
+        #expect(thermalEventually { rig.session.isConnected }, "the choice never reached the recovered service")
+        #expect(rig.guest.record() == (try frame(target ? "critical" : "none")))
+        #expect(!rig.session.hasGivenUp)
+    }
+
     @Test func aChangeOfTheSeverityAfterAGiveUpStartsOneNewRound() throws {
         let rig = try givenUpAfterAConnection(limit: true, observing: .nominal)
         // Nothing changes: no timer keeps trying.
