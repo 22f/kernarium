@@ -40,7 +40,7 @@ register's offset and the taken target's link as its two words: it writes the
 compare's record, retires both and branches on the host condition, so the pair
 costs one dispatch. Those entries are written to a
 second file (--tail-output), a group behind the region's last, so no other
-entry moves.
+bank entry moves; the cold part after the bank moves by whole pages.
 
 Every entry keeps the ordinary family's semantics: the same lazy flag record,
 page-crossing test, translation, publication and overlap checks. Only the cold
