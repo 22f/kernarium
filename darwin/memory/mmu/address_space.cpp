@@ -1397,6 +1397,166 @@ public:
 		return 0;
 	}
 
+	/* Linux wrote [address, address + length), within one guest page, through
+	 * its own alias of the frame at `fd` and `offset`, which it still holds:
+	 * a ptrace, /proc/pid/mem or process_vm_writev() store into another
+	 * process's memory. That process may have mapped another frame at the
+	 * address since Linux found the page, so the change is published at the
+	 * holders of the frame written, whatever the generation maps there now,
+	 * and in the generation when its view of the page is that frame and code,
+	 * or it holds the frame. The frame mapped now is not written, and is
+	 * published only when it is the frame named.
+	 *
+	 * No generation maps a frame that has no backing here, so none holds it.
+	 * A negative `fd` names no frame: it takes the route of a page the
+	 * process has no entry for, whatever the process maps (invalidate_code()).
+	 * The x86-64 holders of a frame do not read the holder word; once x86
+	 * code may run (kernel_code_write_publishes()), the frame written is
+	 * published at all of them. */
+	int invalidate_code_frame(std::uint64_t generation, std::uint64_t address,
+				  std::uint64_t length, int fd,
+				  std::uint64_t offset)
+	{
+		if (length == 0)
+			return 0;
+		const auto in_page = address & (page_size - 1);
+		if (length > page_size - in_page)
+			return -1;
+		if (fd >= 0 && (offset & (page_size - 1)) != 0)
+			return -1;
+		const auto page = address & ~(page_size - 1);
+		if (AddressLayout::classify(page, page_size) == AddressDomain::invalid)
+			return -1;
+		const auto target = generation_for(page, generation);
+		auto state = state_for(target);
+		/* Before any generation lock: the descriptor table has its own. */
+		const auto backing = fd >= 0 ? existing_backing(fd) :
+			std::shared_ptr<MappedBacking>{};
+		code_holders::HolderList others;
+		bool publish_target = false;
+#if DARWIN_UML_X86_64_GUEST
+		const bool x86_holders = kernel_code_write_publishes();
+		bool unknown_frame = false;
+#else
+		constexpr bool x86_holders = false;
+#endif
+		/* The kernel's bytes are in the frame already; the holders are read
+		 * after them, as a code synchronization's fence orders it. */
+		std::atomic_thread_fence(std::memory_order_seq_cst);
+		{
+			std::shared_lock lock{state->mappings_mutex};
+			const auto mapping = find_page(*state, page);
+			if (fd < 0) {
+				others.add_every();
+				code_holders::count(&code_holders::detail::
+					CounterStore::absent_kernel_pages);
+#if DARWIN_UML_X86_64_GUEST
+				unknown_frame = true;
+#endif
+			}
+			if (mapping && (fd < 0 || (backing &&
+				    mapping->backing == backing.get() &&
+				    mapping->offset == offset))) {
+				/* The frame the generation maps, written or taken
+				 * for it: invalidate_code()'s page. */
+				if (mapping->guest_code)
+					MappedBacking::invalidate_code_page(
+						mapping->backing->code_page_handle(
+							mapping->offset));
+				const bool own = take_holders(*mapping, target,
+					others, holder_takes_in_flight_, true);
+#if DARWIN_UML_X86_64_GUEST
+				if (x86_holders)
+					FrameAccounting::publish_kernel_write(
+						*mapping->backing, mapping->offset, 0,
+						page_size);
+#endif
+				publish_target = mapping->guest_code || own;
+			} else if (backing) {
+				/* The generation maps no page, or another, where the
+				 * kernel wrote this one: the stamp of the frame moves
+				 * if a translator asked for it, and the frame's
+				 * readers hear of the change. */
+				retire_written_frame(*backing, offset, x86_holders);
+				publish_target = take_holders(*backing, offset, target,
+					others, holder_takes_in_flight_, true);
+			}
+			/* A list that goes to every generation leaves the target out
+			 * of it: the target is published here (invalidate_code()). */
+			if (others.every())
+				publish_target = true;
+		}
+		if (publish_target)
+			::uml::memory::publish_code_change(*state, page, page_size);
+#if DARWIN_UML_X86_64_GUEST
+		/* A frame that was not named may be any frame an x86 body holds
+		 * (invalidate_code()). */
+		if (unknown_frame && x86_holders) {
+			FrameAccounting::note_unresolved_kernel_write();
+			publish_all_generations();
+		}
+#endif
+		publish_to_holders(target, others);
+		return 0;
+	}
+
+	/* The frame at `offset` of `backing` was written through the kernel's
+	 * alias of it: its stamp moves, if a translator ever asked for one (no
+	 * record is made), and, once x86 code may hold it (`x86_holders`), the
+	 * frame accounting publishes at its x86 holders, a frame with no record
+	 * costing nothing. Allocates nothing. */
+	static void retire_written_frame(MappedBacking &backing,
+		std::uint64_t offset, [[maybe_unused]] bool x86_holders) noexcept
+	{
+		backing.retire_code_page(offset);
+#if DARWIN_UML_X86_64_GUEST
+		if (x86_holders)
+			FrameAccounting::publish_kernel_write(backing, offset, 0,
+				page_size);
+#endif
+	}
+
+	/* Linux wrote the bytes of the whole guest pages [offset, offset +
+	 * length) of the frame source at `fd` through its own alias, for no
+	 * process and at no user address: a write(2), splice(2), truncate or hole
+	 * punch into a page-cache or memfd frame. Only x86 can hold stale code
+	 * for it (an arm64 guest follows the architecture's cache maintenance),
+	 * so the call publishes at the frames' x86 holders, whichever address
+	 * spaces map them, and returns at once while no x86 code may hold a
+	 * frame (kernel_code_write_publishes()). A negative `fd` names no frame:
+	 * every generation reads every translation again. A frame no generation
+	 * maps has no backing here, so no holder can exist. */
+	int invalidate_code_frames(int fd, std::uint64_t offset,
+				   std::uint64_t length)
+	{
+		if (length == 0)
+			return 0;
+		if (((offset | length) & (page_size - 1)) != 0 ||
+		    offset + length < offset)
+			return -1;
+#if DARWIN_UML_X86_64_GUEST
+		if (!kernel_code_write_publishes())
+			return 0;
+		/* The kernel's bytes are in the frames already; the holders are
+		 * read after them (invalidate_code()). */
+		std::atomic_thread_fence(std::memory_order_seq_cst);
+		if (fd < 0) {
+			FrameAccounting::note_unresolved_kernel_write();
+			publish_all_generations();
+			return 0;
+		}
+		const auto backing = existing_backing(fd);
+		if (!backing)
+			return 0;
+		for (auto frame = offset; frame < offset + length;
+		     frame += page_size)
+			retire_written_frame(*backing, frame, true);
+#else
+		(void)fd;
+#endif
+		return 0;
+	}
+
 #if DARWIN_UML_X86_64_GUEST
 	/* The state an x86 translator's frame calls act on: the entered
 	 * context's, or the generation's. */
@@ -1537,7 +1697,6 @@ public:
 		descriptor_backings_.erase(fd);
 	}
 
-#if DARWIN_UML_X86_64_GUEST
 	/* The backing this address space made for the descriptor, if it still has
 	 * one. */
 	[[nodiscard]] std::shared_ptr<MappedBacking> existing_backing(int fd)
@@ -1548,7 +1707,6 @@ public:
 			return found->second.lock();
 		return {};
 	}
-#endif
 
 	int begin_batch(std::uint64_t generation)
 	{
@@ -2156,13 +2314,23 @@ private:
 		std::uint64_t generation, code_holders::HolderList &others,
 		std::atomic<std::uint64_t> &in_flight, bool kernel) noexcept
 	{
-		const auto *backing = mapping.backing;
-		if (backing->holders_unknown()) {
+		return take_holders(*mapping.backing, mapping.offset, generation,
+			others, in_flight, kernel);
+	}
+
+	/* The same for the frame at `offset` of `backing`, which a page of the
+	 * generation need not map. */
+	static bool take_holders(const MappedBacking &backing,
+		std::uint64_t offset, std::uint64_t generation,
+		code_holders::HolderList &others,
+		std::atomic<std::uint64_t> &in_flight, bool kernel) noexcept
+	{
+		if (backing.holders_unknown()) {
 			others.add_every();
 			return true;
 		}
 		bool own = false;
-		if (auto *word = backing->find_holder_word(mapping.offset)) {
+		if (auto *word = backing.find_holder_word(offset)) {
 			const auto slot = code_holders::slot_of(generation);
 			auto held = word->load(std::memory_order_acquire);
 			own = code_holders::holds(held, slot);
@@ -3104,6 +3272,24 @@ extern "C" int darwin_uml_static_vm_invalidate_code_generation(
 {
 	return with_address_space([&](auto &space) {
 		return space.invalidate_code(generation, address, length);
+	});
+}
+
+extern "C" int darwin_uml_static_vm_invalidate_code_frame(
+	unsigned long generation, unsigned long address, unsigned long length,
+	int fd, unsigned long long offset)
+{
+	return with_address_space([&](auto &space) {
+		return space.invalidate_code_frame(generation, address, length, fd,
+			offset);
+	});
+}
+
+extern "C" int darwin_uml_static_vm_invalidate_code_frames(
+	int fd, unsigned long long offset, unsigned long long length)
+{
+	return with_address_space([&](auto &space) {
+		return space.invalidate_code_frames(fd, offset, length);
 	});
 }
 

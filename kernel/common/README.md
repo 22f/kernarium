@@ -242,8 +242,9 @@ it. The bridge fields used below are defined by the comments in
   generic `arch/um` per-task ABI hooks and the arm64 port's `arch/arm64/um`
   support. The kuser helpers and signal-return pages are ordinary code pages the
   kernel installs, and `cacheflush()` reaches the engines through
-  `darwin_uml_vm_invalidate_code()`. Mainline and Android build it; the x86_64
-  slice turns `UML_ARM64_AARCH32` off.
+  `darwin_uml_vm_invalidate_code()`, which the x86_64 kernel does not import.
+  Mainline and Android build it; the x86_64 slice turns `UML_ARM64_AARCH32`
+  off.
 - Bridge ABI 22 carries the AArch32 task (see the comments on
   `struct darwin_uml_guest_registers`). `abi.cp15_barrier` (0 to 2, default 1)
   is passed as `DARWIN_UML_DISPATCH_A32_CP15BEN`. The engines raise the

@@ -170,9 +170,12 @@ The x86-family syscall dispatch is generated from the pinned Linux 6.18
 entry path provides syscall-user-dispatch so Wine can interpose its NT syscall
 range. The slice's topics (the dedicated slice, i386 tasks, `/proc/cpuinfo`
 for the emulated CPU, `modify_ldt()`, CS/SS through signals, `RFLAGS.TF`
-single-step, x86 ptrace layouts, and the page-fault P bit) live only in its
-overlay because only x86 tasks have an LDT, selectors, or those layouts; the
-arm64 kernels and Android build none of them.
+single-step, x86 ptrace layouts, the page-fault P bit, and the
+`flush_dcache_folio()` hook) live only in its overlay because only x86 tasks
+have an LDT, selectors, or those layouts, and only an x86 core runs the new
+bytes of a page-cache frame after a kernel write, where arm64 needs the
+program's own cache maintenance; the arm64 kernels and Android build none of
+them.
 
 ## Android product
 
