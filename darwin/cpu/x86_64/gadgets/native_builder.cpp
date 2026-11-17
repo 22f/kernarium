@@ -5913,12 +5913,96 @@ UML_X86_BAKED_CARRY_TABLES(decrement)
 	return true;
 }
 
+/* Whether the next instruction in the block replaces every arithmetic flag
+ * before anything can read the ones before it: a register-only ADD, SUB, AND,
+ * OR, XOR, CMP or TEST, which cannot fault or leave first and writes a whole
+ * record. (LOCK never takes a register destination.) A next instruction the
+ * block cannot hold ends it before that instruction, and the rebuild leaves
+ * this one last. */
+[[nodiscard]] bool flags_replaced_next(std::span<const Gadget> rest) noexcept
+{
+	if (rest.empty())
+		return false;
+	const auto &next = rest[0].instruction;
+	switch (next.operation) {
+	case Operation::add:
+	case Operation::subtract:
+	case Operation::bit_and:
+	case Operation::bit_or:
+	case Operation::bit_xor:
+	case Operation::compare:
+	case Operation::test:
+		break;
+	default:
+		return false;
+	}
+	return next.destination.kind == OperandKind::reg &&
+		(next.source.kind == OperandKind::reg ||
+		 next.source.kind == OperandKind::immediate);
+}
+
+/* A register-only ADD, SUB, AND, OR or XOR at 32 or 64 bits whose flags the
+ * next instruction replaces takes the twin that writes its register and
+ * neither the record nor host flags. No exit, budget or consumer comes
+ * between the two: neither can fault or leave, a budget stops only at a
+ * link, and a budget-limited replay builds the block cut at its budget, which
+ * leaves the first last and recorded. CMP and TEST do not take one: none was
+ * seen followed by a producer. */
+[[nodiscard]] bool append_unrecorded(StreamWords &stream,
+	const Gadget &gadget, std::span<const Gadget> rest, FlagState &produced)
+{
+	const auto &instruction = gadget.instruction;
+	const auto &destination = instruction.destination;
+	const auto &source = instruction.source;
+	if (destination.kind != OperandKind::reg ||
+		(destination.width != OperandWidth::dword &&
+		 destination.width != OperandWidth::qword) ||
+		(source.kind != OperandKind::reg &&
+		 source.kind != OperandKind::immediate) ||
+		!flags_replaced_next(rest))
+		return false;
+	const bool wide = destination.width == OperandWidth::qword;
+	const std::uintptr_t *rr{};
+	const std::uintptr_t *ri{};
+#define UML_X86_UNRECORDED(op) \
+	rr = wide ? baked::uml_x86_64_baked_##op##_64_rr_unrecorded : \
+		baked::uml_x86_64_baked_##op##_32_rr_unrecorded; \
+	ri = wide ? baked::uml_x86_64_baked_##op##_64_ri_unrecorded : \
+		baked::uml_x86_64_baked_##op##_32_ri_unrecorded; \
+	break;
+	switch (instruction.operation) {
+	case Operation::add: UML_X86_UNRECORDED(add)
+	case Operation::subtract: UML_X86_UNRECORDED(sub)
+	case Operation::bit_and: UML_X86_UNRECORDED(and)
+	case Operation::bit_or: UML_X86_UNRECORDED(or)
+	case Operation::bit_xor: UML_X86_UNRECORDED(xor)
+	default:
+		return false;
+	}
+#undef UML_X86_UNRECORDED
+	/* At 32 and 64 bits a register operand is one of the general registers,
+	 * whose baked slot is its index. The decoder names sixteen; the refusal
+	 * keeps a wider register file from indexing past a table. */
+	const unsigned d = destination.reg.index;
+	if (d >= baked::gpr_slots || (source.kind == OperandKind::reg &&
+		source.reg.index >= baked::gpr_slots))
+		return false;
+	if (source.kind == OperandKind::reg) {
+		stream.push_back(rr[d * baked::gpr_slots + source.reg.index]);
+	} else {
+		stream.push_back(ri[d]);
+		stream.push_back(source.immediate);
+	}
+	produced = {};
+	return true;
+}
+
 /* The bank's entry point: true when the instruction was emitted as baked
  * entries, false to take the ordinary family. Only 64-bit mode is enumerated;
  * the stack forms in particular assume a 64-bit stack pointer. */
 [[nodiscard]] bool append_baked(StreamWords &stream,
 	const Gadget &gadget, ExecutionMode mode, std::uint64_t program_begin,
-	const FlagState &state, FlagState &produced)
+	const FlagState &state, FlagState &produced, std::span<const Gadget> rest)
 {
 	produced = {};
 	if (!baked_bank_enabled() || mode != ExecutionMode::long64)
@@ -5937,6 +6021,8 @@ UML_X86_BAKED_CARRY_TABLES(decrement)
 	case Operation::bit_xor:
 	case Operation::compare:
 	case Operation::test: {
+		if (append_unrecorded(stream, gadget, rest, produced))
+			return true;
 		const auto tables = baked_arith_tables(
 			instruction.operation, instruction.destination.width);
 		return tables && append_baked_binary(stream, gadget,
@@ -6085,7 +6171,8 @@ UML_X86_BAKED_CARRY_TABLES(decrement)
 	}
 	if (append_compare_branch(stream, gadget, mode, links, rest, produced))
 		return true;
-	if (append_baked(stream, gadget, mode, program_begin, state, produced)) {
+	if (append_baked(stream, gadget, mode, program_begin, state, produced,
+		rest)) {
 		/* A baked entry that executes no flag-setting host instruction
 		 * leaves the producer's NZCV for a later consumer. The bank's
 		 * transfers are all such entries: their translation tests the TLB

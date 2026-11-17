@@ -116,6 +116,19 @@ extern const std::uintptr_t uml_x86_64_baked_cmp_32_rr_jcc[];
 extern const std::uintptr_t uml_x86_64_baked_cmp_64_rr_jcc[];
 extern const std::uintptr_t uml_x86_64_baked_test_32_rr_jcc[];
 extern const std::uintptr_t uml_x86_64_baked_test_64_rr_jcc[];
+/* ADD, SUB, AND, OR and XOR without the flag record, laid out as the rr and
+ * ri tables: for a producer whose flags the next instruction replaces. */
+#define UML_X86_BAKED_UNRECORDED(op) \
+	extern const std::uintptr_t uml_x86_64_baked_##op##_32_rr_unrecorded[]; \
+	extern const std::uintptr_t uml_x86_64_baked_##op##_32_ri_unrecorded[]; \
+	extern const std::uintptr_t uml_x86_64_baked_##op##_64_rr_unrecorded[]; \
+	extern const std::uintptr_t uml_x86_64_baked_##op##_64_ri_unrecorded[];
+UML_X86_BAKED_UNRECORDED(add)
+UML_X86_BAKED_UNRECORDED(sub)
+UML_X86_BAKED_UNRECORDED(and)
+UML_X86_BAKED_UNRECORDED(or)
+UML_X86_BAKED_UNRECORDED(xor)
+#undef UML_X86_BAKED_UNRECORDED
 
 } // extern "C"
 

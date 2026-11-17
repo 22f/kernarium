@@ -114,7 +114,11 @@ tail and resolves the same address.
 - The deferred-flag record (`DeferredFlagOperation`, `CpuState::carry_slot`) is
   read by assembly and C++ materializers that must agree. A producer that
   leaves host NZCV lets the next SETcc, CMOVcc or Jcc read it, and the deferred
-  record is always written as well.
+  record is written as well, but for one case: in long64 with the baked bank
+  on, a register-only ADD, SUB, AND, OR or XOR at 32 or 64 bits whose next
+  instruction in the block is a register-only ADD, SUB, AND, OR, XOR, CMP or
+  TEST writes neither, since that instruction writes the whole record before
+  anything can read it.
 
 ## Guest-visible model
 
