@@ -430,9 +430,9 @@ Lx86_call_cross\@:
 	 * return address it pushes is the address after it. */
 Lx86_call_fault\@:
 	.if \width == 64
-	sub x22, x24, #5
+	sub x8, x24, #5
 	.else
-	sub w22, w24, #5
+	sub w8, w24, #5
 	.endif
 	b Lx86_memory_fault_at
 	.endif

@@ -222,8 +222,8 @@ gadget privileged
 /* A faulting instruction does not retire; RIP names the instruction, which
  * the stream word in x23 locates. */
 Lx86_general_protection:
-	instruction_rip x22
-	str x22, [_vcpu, #UML_X86_64_CPU_RIP]
+	instruction_rip x8
+	str x8, [_vcpu, #UML_X86_64_CPU_RIP]
 	mov w0, #UML_X86_64_EVENT_GENERAL_PROTECTION
 	b uml_x86_64_gadget_leave
 
@@ -358,14 +358,15 @@ Lx86_mxcsr_store_cross:
 
 .p2align 4
 Lx86_memory_fault:
-	instruction_rip x22
-/* The fault of a gadget that has the instruction's address in x22. */
+	instruction_rip x8
+/* The fault of a gadget that has the instruction's address in x8, which is
+ * stored before the split lock's release can clobber it. */
 Lx86_memory_fault_at:
+	str x8, [_vcpu, #UML_X86_64_CPU_RIP]
 	ldrb w8, [_context, #UML_X86_64_CONTEXT_SPLIT_LOCK]
 	cbz w8, Lx86_memory_fault_unlocked
 	split_lock_leave
 Lx86_memory_fault_unlocked:
-	str x22, [_vcpu, #UML_X86_64_CPU_RIP]
 	mov w0, #UML_X86_64_EVENT_MEMORY_FAULT
 	b uml_x86_64_gadget_leave
 
@@ -383,8 +384,8 @@ Lx86_store_code_exit:
 /* A repeated string instruction spent its repeat budget and stops between
  * elements with RIP still naming it. */
 Lx86_repeat_yield:
-	instruction_rip x22
-	str x22, [_vcpu, #UML_X86_64_CPU_RIP]
+	instruction_rip x8
+	str x8, [_vcpu, #UML_X86_64_CPU_RIP]
 	mov w0, #UML_X86_64_EVENT_REPEAT_YIELD
 	b uml_x86_64_gadget_leave
 
@@ -393,12 +394,12 @@ Lx86_repeat_yield:
  * before anything committed, with the stream word in x23 naming it, for the
  * runtime's exact check (`prepare_segment_step`). */
 Lx86_segment_check:
-	instruction_rip x22
+	instruction_rip x8
+	str x8, [_vcpu, #UML_X86_64_CPU_RIP]
 	ldrb w8, [_context, #UML_X86_64_CONTEXT_SPLIT_LOCK]
 	cbz w8, Lx86_segment_check_unlocked
 	split_lock_leave
 Lx86_segment_check_unlocked:
-	str x22, [_vcpu, #UML_X86_64_CPU_RIP]
 	mov w0, #UML_X86_64_EVENT_SEGMENT_CHECK
 	b uml_x86_64_gadget_leave
 

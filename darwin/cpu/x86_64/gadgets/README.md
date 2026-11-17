@@ -159,6 +159,10 @@ tail and resolves the same address.
   translation compares the page of its access's last byte, and an index that
   never puts neighbouring pages in one entry is what makes every access that
   crosses a page miss and take its crossing path.
+- x22 (`_tlb` in `engine/common.inc`) holds the run's software-TLB base:
+  `uml_x86_64_gadget_enter` loads it from the context, the host frame gives
+  the caller its own back, and no gadget writes it
+  (`x86-64-gadget-tlb-register`).
 - A stack access first re-checks the entry that the run's last stack
   translation used (`stack_fast`): PUSH, POP, CALL and RET, and the stack twin
   that the baked tables name in place of every fused [rsp + displacement]

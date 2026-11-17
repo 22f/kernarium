@@ -189,8 +189,7 @@ def translate(o, write, size, record_stack=False, miss='Lx86_baked_miss', cross=
     else:
         o.emit('\tand x9, x7, #0xfffffffffffff000')
     o.emit('\tubfx x10, x7, #12, #UML_X86_64_TLB_INDEX_BITS')
-    o.emit('\tldr x11, [_context, #UML_X86_64_CONTEXT_TLB]')
-    o.emit('\tadd x11, x11, x10, lsl #5')
+    o.emit('\tadd x11, _tlb, x10, lsl #5')
     if record_stack:
         o.emit('\tstr x11, [_context, #UML_X86_64_CONTEXT_STACK_ENTRY]')
     o.emit(f'\tldp x12, x13, [x11, #{16 if write else 0}]')
@@ -361,12 +360,12 @@ def packed_immediate(o, register):
 def shared_tails(o):
     # Every tail belongs to a guest memory access, whichever gadget reaches it.
     o.emit('\tx86_marks_guest_memory')
-    # The ordinary fault exit reports the RIP from x22, which a baked access
+    # The ordinary fault exit reports the RIP from x8, which a baked access
     # rebuilds from its access word's position and the block's start, wrapped
     # at 4 GiB in compatibility mode.
     o.emit('\t.p2align 2')
     o.emit('Lx86_baked_memory_fault:')
-    o.emit('\tinstruction_rip x22, 0, 32')
+    o.emit('\tinstruction_rip x8, 0, 32')
     o.emit('\tb Lx86_memory_fault_at')
     for write in (0, 1):
         for size in (1, 2, 4, 8):
