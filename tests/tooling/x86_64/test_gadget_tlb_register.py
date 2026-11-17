@@ -12,8 +12,10 @@ its generated parts, and the shared host frame, which may only save and
 restore it. With --object, the assembled engine is read too, which also sees a
 register a macro or a generator builds from a number: the frame's one save and
 one restore, the entry's one load, which must follow the save in the entry so
-that the caller gets its own x22 back, and otherwise only translations that
-add an index to it may name x22.
+that the caller gets its own x22 back, and otherwise only the translations'
+`add x11, x22, x10, lsl #5` may name x22. A self-check feeds the object check
+listings that write x22 or index it from another register, and fails if it
+accepts any of them.
 
 usage: test_gadget_tlb_register.py SOURCE_ROOT
            [--objdump OBJDUMP --object TARGET OBJECT]
@@ -42,7 +44,7 @@ FRAME_LINE = re.compile(
 SYMBOL = re.compile(r"^[0-9a-f]+ <(?P<name>[^>]+)>:$")
 INSTRUCTION = re.compile(r"^\s*[0-9a-f]+:\s*(?P<text>.*)$")
 ENTRY = re.compile(r"^_?uml_x86_64_gadget_enter$")
-INDEX = re.compile(r"^add x\d+, x22, x\d+, lsl #5$")
+INDEX = "add x11, x22, x10, lsl #5"
 SAVE = "stp x21, x22, [sp, #0x20]"
 RESTORE = "ldp x21, x22, [sp, #0x20]"
 SHOWN = 20
@@ -58,14 +60,10 @@ def context_offset(root: Path) -> int:
     return int(found[1])
 
 
-def object_names(objdump: str, target: str, path: Path,
-                 offset: int) -> list[str]:
-    """Problems with the instructions of the engine object that name x22."""
-    if not path.is_file():
-        return [f"{target}: {path} does not exist"]
-    disassembly = subprocess.run(
-        [objdump, "-d", "--no-show-raw-insn", str(path)],
-        check=True, capture_output=True, text=True).stdout
+def disassembly_problems(disassembly: str, label: str,
+                         offset: int) -> tuple[list[str], int]:
+    """Problems with the instructions of a disassembly that name x22, and
+    how many translations index the table from it."""
     load = f"ldr x22, [x21, #{offset:#x}]"
     symbol = None
     indexes = saves = restores = loads = 0
@@ -91,22 +89,61 @@ def object_names(objdump: str, target: str, path: Path,
             if not saved_in_entry:
                 stray.append(f"{symbol}: {text} comes before the entry saves "
                              "the caller's x22")
-        elif INDEX.match(text):
+        elif text == INDEX:
             indexes += 1
         else:
             stray.append(f"{symbol}: {text}")
-    problems = [f"{target}: {path.name}: {entry}" for entry in stray[:SHOWN]]
+    problems = [f"{label}: {entry}" for entry in stray[:SHOWN]]
     if len(stray) > SHOWN:
-        problems.append(f"{target}: ... and {len(stray) - SHOWN} more")
+        problems.append(f"{label}: ... and {len(stray) - SHOWN} more")
     if indexes == 0:
-        problems.append(f"{target}: {path.name}: no translation indexes the "
-                        "table from x22; this check has nothing to guard")
+        problems.append(f"{label}: no translation indexes the table from "
+                        "x22; this check has nothing to guard")
     if loads != 1:
-        problems.append(f"{target}: {path.name}: expected the entry's one "
-                        f"load `{load}`, found {loads}")
+        problems.append(f"{label}: expected the entry's one load `{load}`, "
+                        f"found {loads}")
     if saves != 1 or restores != 1:
-        problems.append(f"{target}: {path.name}: expected one save and one "
-                        f"restore of x22, found {saves} and {restores}")
+        problems.append(f"{label}: expected one save and one restore of x22, "
+                        f"found {saves} and {restores}")
+    return problems, indexes
+
+
+def self_check(offset: int) -> list[str]:
+    """The object check rejects what it exists to reject."""
+    clean = [
+        "0000000000000000 <_uml_x86_64_gadget_enter>:",
+        f"       0: {SAVE}",
+        f"       4: ldr x22, [x21, #{offset:#x}]",
+        "0000000000000010 <uml_x86_64_gadget_leave>:",
+        f"      10: {RESTORE}",
+        "0000000000000020 <_uml_x86_64_gadget_load>:",
+        f"      20: {INDEX}",
+    ]
+    problems = []
+    if disassembly_problems("\n".join(clean), "self-check", offset)[0]:
+        problems.append("self-check: the object check rejects a clean listing")
+    for bad in ("add x22, x22, x10, lsl #5", "add x11, x22, x9, lsl #5",
+                "mov x22, x0", f"ldr x22, [x21, #{offset:#x}]"):
+        listing = "\n".join(clean + [f"      24: {bad}"])
+        if not disassembly_problems(listing, "self-check", offset)[0]:
+            problems.append(f"self-check: the object check accepts `{bad}`")
+    early = clean[:1] + [clean[2], clean[1]] + clean[3:]
+    if not disassembly_problems("\n".join(early), "self-check", offset)[0]:
+        problems.append("self-check: the object check accepts the entry's "
+                        "load before the frame's save")
+    return problems
+
+
+def object_names(objdump: str, target: str, path: Path,
+                 offset: int) -> list[str]:
+    """Problems with the instructions of the engine object that name x22."""
+    if not path.is_file():
+        return [f"{target}: {path} does not exist"]
+    disassembly = subprocess.run(
+        [objdump, "-d", "--no-show-raw-insn", str(path)],
+        check=True, capture_output=True, text=True).stdout
+    problems, indexes = disassembly_problems(
+        disassembly, f"{target}: {path.name}", offset)
     if not problems:
         print(f"{target}: {path.name}: x22 in the entry's load, {indexes} "
               "translations and the frame's save and restore")
@@ -165,6 +202,9 @@ def main() -> int:
     if saved != 2:
         print(f"{FRAME}: expected one save and one restore of x22, found "
               f"{saved}", file=sys.stderr)
+        failed = True
+    for problem in self_check(context_offset(root)):
+        print(problem, file=sys.stderr)
         failed = True
     if arguments.object is not None:
         target, name = arguments.object
