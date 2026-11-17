@@ -31,6 +31,16 @@
  *                a second synchronization of the frame meets an empty word
  *                (or a word of its own) and must still reach the first one's
  *                holders, with and without a holder that registered between.
+ *
+ * Not a row: the pairing between a publisher's stamp step and a verifier's
+ * registration (Binder::verify_page). The publisher steps the frame's stamp,
+ * fences, then reads the holder word; the verifier adds its generation to the
+ * word, fences, then reads the stamp. Store buffering: the word read sees the
+ * registration or the stamp read sees the step, never neither. The architecture
+ * allows neither without the publisher's fence (step_stamp in
+ * mmu/address_space.cpp), but no two-thread row can fail without it on Apple
+ * cores, so the pairing is held by that fence and by review, not by a row
+ * that cannot be red.
  */
 #include "uml_darwin_guest.h"
 #include "uml_darwin_static_mmu.h"

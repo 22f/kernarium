@@ -977,12 +977,28 @@ Binder::Verdict Binder::verify_page(
 	/* Registers this generation as a holder of the page's frame, before any
 	 * stamp is read and whichever way the page is then judged: a verdict of
 	 * the table reads no byte of the page, so the registration that the
-	 * fetch of a hash makes is not there for it. A publisher steps the
-	 * frame's epoch before it takes the frame's holders, so a stamp read
-	 * after this registration shows the epoch of every change this
-	 * generation was not told of, and the generation is told of any other
-	 * (memory/mmu/code_holders.hpp). The word is consumed by a publication,
-	 * so the registration is made at every verification, not once. */
+	 * fetch of a hash makes is not there for it. The word is consumed by a
+	 * publication, so the registration is made at every verification, not
+	 * once.
+	 *
+	 * The pairing: this registration is a compare-exchange on the frame's
+	 * word followed by a full fence (StaticGuestMemory::register_holder_slow),
+	 * and the stamp is read after both. A publisher steps the frame's stamp,
+	 * issues a full fence and then reads the word (AddressSpace::step_stamp,
+	 * before take_holders). Each side stores, fences and loads what the other
+	 * stored (the store-buffering shape), so either the publisher's read of
+	 * the word sees this registration and tells the generation, or the stamp
+	 * read below shows the step. Both fences are dmb ish, whatever the host's
+	 * code generation is for the loads and the exchanges around them
+	 * (memory/mmu/code_holders.hpp).
+	 *
+	 * resolve() and the engine's own fetches of the page register the
+	 * generation too, and a publication that makes a slot stale tells that
+	 * generation, so no known interleaving leaves this call the only
+	 * registration. It is kept so that the stamp read below never depends on
+	 * a registration made elsewhere. The one-byte fetch makes the page's TLB
+	 * slot a tagged holder word, so the stamp read that follows looks the
+	 * page up again: two slow lookups per verification, not one. */
 	{
 		std::byte registered;
 		if (!memory.fetch(address, std::span{&registered, 1}))

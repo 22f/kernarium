@@ -1486,16 +1486,7 @@ public:
 					code_holders::count(&code_holders::detail::
 						CounterStore::absent_kernel_pages);
 				} else {
-					/* The frame's stamp moves whatever the kernel's
-					 * view of it permits: the record exists where some
-					 * mapping executes the frame, and a verdict filed
-					 * for its bytes must not outlive the write. */
-					MappedBacking::invalidate_code_page(
-						mapping->guest_code ?
-							mapping->backing->code_page_handle(
-								mapping->offset) :
-							mapping->backing->find_code_page(
-								mapping->offset));
+					step_stamp(*mapping);
 					const bool own = take_holders(*mapping, target,
 						others, holder_takes_in_flight_, true);
 					if (!mapping->guest_code && !own)
@@ -2376,12 +2367,7 @@ private:
 		const auto mapping = find_page(state, page);
 		if (!mapping)
 			return !AddressLayout::is_guest(page);
-		/* The record exists where some mapping executes the frame; a view
-		 * that cannot execute moves it too, as a verdict filed for the
-		 * frame's bytes must not outlive the write. */
-		MappedBacking::invalidate_code_page(mapping->guest_code ?
-			mapping->backing->code_page_handle(mapping->offset) :
-			mapping->backing->find_code_page(mapping->offset));
+		step_stamp(*mapping);
 		if (AddressLayout::is_guest(page))
 			take_holders(*mapping, generation, others, in_flight, false);
 		return true;
@@ -2397,6 +2383,35 @@ private:
 			state, address & ~(page_size - 1), page_size);
 		publish_to_holders(generation, others);
 		return found;
+	}
+
+	/* Moves the stamp of the frame `mapping` names, whatever the publisher's
+	 * own view of it permits: the record exists where some mapping executes
+	 * the frame, and a verdict filed for the frame's bytes must not outlive
+	 * the write. The fence orders the step before the holder word is read
+	 * (take_holders), and pairs with the one a reader makes after it registers
+	 * in the word and before it reads the stamp (register_holder_slow;
+	 * Binder::verify_page): either the word read here sees the registration
+	 * and the reader is told, or the stamp it reads shows the step. Without
+	 * it the load of the word (acquire here, which the compiler may emit as
+	 * an RCpc load) can be satisfied before the step is visible, and a reader
+	 * that is neither told nor shown the step runs the old bytes. The fence is
+	 * a full barrier (dmb ish) whatever the host's code generation is for the
+	 * loads and the read-modify-writes either side of it. The bytes are
+	 * ordered before the word by the caller's own fence, which is all the
+	 * frame's holder protocol needs for the engines, which read no stamp. A
+	 * frame with no record has no stamp to step, and a record made later has
+	 * a new identity, so no verdict of that frame exists to outlive the
+	 * write. */
+	static void step_stamp(const PageMapping &mapping) noexcept
+	{
+		auto *record = mapping.guest_code ?
+			mapping.backing->code_page_handle(mapping.offset) :
+			mapping.backing->find_code_page(mapping.offset);
+		if (record == nullptr)
+			return;
+		MappedBacking::invalidate_code_page(record);
+		std::atomic_thread_fence(std::memory_order_seq_cst);
 	}
 
 	/* Takes the holder word of the frame `mapping` names and adds the

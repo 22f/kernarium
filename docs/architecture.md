@@ -573,7 +573,9 @@ a guest code synchronization or the kernel's `invalidate_code()` path takes the
 word and publishes a whole-space code change in every generation it named. Both
 also move the frame's code-page stamp (version and epoch) through the
 publisher's own view of the frame, whether or not that view can execute, where
-some mapping executes the frame. A
+some mapping executes the frame. The step is ordered before the publisher reads
+the word, and a verifier's registration before it reads the stamp, so a
+verifier is told of a publication or shown its step. A
 publication consumes the word, so a reader registers again at its next fetch;
 a publisher that has emptied a word stays counted until its publication
 finishes, and one that meets such a count publishes to every generation, so an
