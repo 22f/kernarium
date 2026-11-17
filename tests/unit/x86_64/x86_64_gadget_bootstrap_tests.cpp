@@ -4172,9 +4172,9 @@ void pages_sharing_an_entry_keep_their_own_bytes()
  * TLB entry (`stack_fast`, the entry of RSP's page at a run's start) before it
  * hashes, and the ordinary entry for anything else. These run each twin
  * against the same instruction through RBP, which takes the ordinary entry,
- * with the pages' entries planted to point at buffers of their own between
- * guard pages, so a twin that used another page's translation reads or writes
- * other bytes.
+ * with each page's read and write views planted to point at buffers of their
+ * own between guard pages, so a twin that used another page's translation,
+ * or the other view of its own, reads or writes other bytes.
  */
 
 /* A fused access form around a ModRM byte whose reg field is `reg`: DL, DX,
@@ -4243,7 +4243,7 @@ struct StackForm final {
 /* The data pages of the stack-twin runs follow the code page. */
 constexpr std::uint64_t stack_test_page = tlb_test_base + 2U * 4096U;
 
-/* A planted page's buffer: the page between two guard pages. */
+/* A planted view's buffer: the page between two guard pages. */
 constexpr std::size_t planted_span = 3U * 4096U;
 
 struct StackRun final {
@@ -4274,20 +4274,20 @@ struct StackRun final {
 		", misses " + std::to_string(run.atomic_pointers);
 }
 
-/* The planted buffers as a run starts: each page's bytes its own, the guard
- * pages 0xee. */
+/* The planted buffers as a run starts, a page's read view and then its
+ * write view: each view's bytes its own, the guard pages 0xee. */
 [[nodiscard]] std::vector<std::uint8_t> fresh_planted(std::size_t pages)
 {
-	std::vector<std::uint8_t> bytes(pages * planted_span, 0xee);
-	for (std::size_t page = 0; page < pages; ++page)
+	std::vector<std::uint8_t> bytes(2U * pages * planted_span, 0xee);
+	for (std::size_t view = 0; view < 2U * pages; ++view)
 		for (unsigned index = 0; index < 4096U; ++index)
-			bytes[page * planted_span + 4096U + index] =
-				static_cast<std::uint8_t>(0x80U + 0x10U * page + index * 7U);
+			bytes[view * planted_span + 4096U + index] =
+				static_cast<std::uint8_t>(0x80U + 0x10U * view + index * 7U);
 	return bytes;
 }
 
 /* Runs `form` at `address` with RSP and RBP at `base` and the form through
- * RSP or RBP, the entries of the pages in `planted` pointing into buffers of
+ * RSP or RBP, both views of each page in `planted` pointing into buffers of
  * their own, and reports what it did. */
 [[nodiscard]] StackRun run_stack_form(const StackForm &form, bool through_rsp,
 	std::uint64_t base, std::uint64_t address,
@@ -4317,14 +4317,17 @@ struct StackRun final {
 	auto buffers = fresh_planted(planted.size());
 	std::size_t index = 0;
 	for (const auto page : planted) {
-		const auto delta = reinterpret_cast<std::uintptr_t>(
-			buffers.data() + index++ * planted_span + 4096U) - page;
+		const auto view = [&](std::size_t which) {
+			return reinterpret_cast<std::uintptr_t>(buffers.data() +
+				(2U * index + which) * planted_span + 4096U) - page;
+		};
 		executor.tlb_entries()[native_tlb_index(page)] = {
 			.read_page = page,
-			.read_data_minus_address = delta,
+			.read_data_minus_address = view(0),
 			.write_page = page,
-			.write_data_minus_address = delta,
+			.write_data_minus_address = view(1),
 		};
+		++index;
 	}
 	CpuState cpu{};
 	cpu.rip = tlb_test_base;
@@ -4516,12 +4519,66 @@ void stack_twins_keep_pages_sharing_their_entry_apart()
 		"a stack store wrote another page that shares its entry");
 }
 
+/* The publications of a run that stores through RSP or RBP, then runs a
+ * CMPXCHG whose compare fails after its write translation of a page holding
+ * code, which leaves the run's publication pending, then stores again to the
+ * page without code whose entry the first store filled. */
+[[nodiscard]] std::size_t publications_after_a_failed_compare_exchange(
+	bool through_rsp)
+{
+	using namespace uml::cpu::x86_64;
+	TestMemory memory;
+	/* mov [base+8],rcx; cmpxchg [0x800],rcx (RIP-relative);
+	 * mov [base+16],rcx; SYSCALL. */
+	std::vector<std::uint8_t> code;
+	const auto store = [&](std::uint8_t displacement) {
+		if (through_rsp)
+			code.insert(code.end(), {0x48, 0x89, 0x4c, 0x24, displacement});
+		else
+			code.insert(code.end(), {0x48, 0x89, 0x4d, displacement});
+	};
+	store(0x08);
+	const auto next = code.size() + 7U;
+	const auto relative = static_cast<std::uint32_t>(0x800U - next);
+	code.insert(code.end(), {0x48, 0x0f, 0xb1, 0x0d});
+	for (unsigned byte = 0; byte < 4U; ++byte)
+		code.push_back(static_cast<std::uint8_t>(relative >> (8U * byte)));
+	store(0x10);
+	code.insert(code.end(), {0x0f, 0x05});
+	memory.fill(0, std::as_bytes(std::span{code}));
+	memory.set_executable_page(0);
+	gadgets::Executor executor;
+	executor.prepare(memory, 11, 1, 1);
+	const auto block = executor.select_program(
+		memory, 0, ExecutionMode::long64);
+	require(block.program != nullptr &&
+			is_stack_twin(block.program->native_stream()[0]) ==
+				through_rsp,
+		"the pending-publication sequence did not build");
+	CpuState cpu{};
+	cpu.gpr(Register::rsp) = 0x2800;
+	cpu.gpr(Register::rbp) = 0x2800;
+	cpu.gpr(Register::rax) = 1;
+	cpu.gpr(Register::rcx) = 0x1122'3344'5566'7788ULL;
+	const auto result = gadgets::execute(
+		*block.program, cpu, memory, executor, 64);
+	require(result.event == uml::cpu::EngineEvent::system_call &&
+			result.retired_instructions == 4 &&
+			cpu.gpr(Register::rax) == 0 && memory.qword(0x800) == 0 &&
+			memory.qword(0x2808) == 0x1122'3344'5566'7788ULL &&
+			memory.qword(0x2810) == 0x1122'3344'5566'7788ULL,
+		"the pending-publication sequence did not run");
+	return memory.invalidations();
+}
+
 /* A twin's store owes a publication exactly where the ordinary store does:
  * none to an executable page no executor holds code on, and one for every
  * store once an executor, another or its own, translates code on the
  * stack's page. Each run begins at that page's entry, whose read tag the
  * load before the store keeps the plain page and whose write tag then
- * carries a code bit, in a run that has not published yet. */
+ * carries a code bit, in a run that has not published yet. A store also
+ * settles the publication a failed CMPXCHG left pending, to a page without
+ * code. */
 void stack_twin_stores_publish_where_ordinary_stores_do()
 {
 	using namespace uml::cpu::x86_64;
@@ -4570,6 +4627,11 @@ void stack_twin_stores_publish_where_ordinary_stores_do()
 	run(6, 3, "a stack store to a page its own executor translated did not "
 		"publish");
 	run(7, 4, "a stack store whose entry holds its own code did not publish");
+	const auto ordinary = publications_after_a_failed_compare_exchange(false);
+	require(ordinary == 1,
+		"an ordinary store did not settle a failed CMPXCHG's publication");
+	require(publications_after_a_failed_compare_exchange(true) == ordinary,
+		"a stack store did not settle a failed CMPXCHG's publication");
 }
 
 /* TestMemory whose page `page` is backed by one of two pages of its span,
