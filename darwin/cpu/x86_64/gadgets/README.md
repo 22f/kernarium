@@ -165,9 +165,10 @@ tail and resolves the same address.
   entry. A run starts at the entry of RSP's page. A hit needs the entry's exact
   tag, so it is that page's own entry and retires with it, and a store hits
   only a page holding no code while the run's `write_code` is clear, so it
-  keeps the overlap test and skips the publication test. A crossing access or another
-  page takes the ordinary translation, and only the stack instructions' misses
-  move the entry.
+  keeps the overlap test and skips the publication test. A twin hits only an
+  access aligned to its size, which cannot cross a page. A crossing or
+  misaligned access or another page takes the ordinary translation, and only
+  the stack instructions' misses move the entry.
 
 ## Floating-point environment
 

@@ -50,11 +50,11 @@ in the same file.
 
 A fused [base + displacement] entry whose base is RSP has a stack twin, which
 its table names in its place: the same prologue, then the stack's own TLB
-entry (`stack_fast`) before any hashing, and on a hit the access and the
-entry's epilogue, a store's without its publication test. A crossing access or
-another page branches into the ordinary entry just past its prologue, so the
-ordinary path is the fallback byte for byte. The stack twins are the same
-file's third group.
+entry (`stack_fast`'s test, with the access's alignment folded in) before any
+hashing, and on a hit the access and the entry's epilogue, a store's without
+its publication test. A misaligned access or another page branches into the
+ordinary entry just past its prologue, so the ordinary path is the fallback
+byte for byte. The stack twins are the same file's third group.
 
 Every other entry keeps the ordinary family's semantics: the same lazy flag
 record, page-crossing test, translation, publication and overlap checks. Only
@@ -338,10 +338,26 @@ def stack_twin(o, entry, body, emit):
 
 
 def stack_translate(o, write, size, fall):
-    """The fast path's translation: the page-crossing test, then the stack's
-    own entry; anything else falls back. x7 is the host address after it."""
-    page_cross(o, size, fall)
-    o.emit(f'\tstack_fast {1 if write else 0}, {fall}')
+    """The fast path's translation: `stack_fast` with the access's alignment
+    in its compare, so only an aligned access hits, which cannot cross its
+    page; anything else falls back. The alignment bits go to the top of the
+    difference, where neither the page nor a tag's own low bits are. x7 is
+    the host address after it."""
+    # The fold tests the low log2(size) bits, which is alignment only for a
+    # power of two.
+    assert size > 0 and size & (size - 1) == 0, size
+    o.emit('\tx86_marks_guest_memory')
+    o.emit('\tldr x11, [_context, #UML_X86_64_CONTEXT_STACK_ENTRY]')
+    o.emit('\tand x9, x25, #0xfffffffffffff000')
+    o.emit(f'\tldp x12, x13, [x11, #{16 if write else 0}]')
+    o.emit('\teor x14, x9, x12')
+    if size > 1:
+        o.emit(f'\torr x14, x14, x25, lsl #{64 - (size.bit_length() - 1)}')
+    if write:
+        o.emit('\tldrb w15, [_context, #UML_X86_64_CONTEXT_WRITE_CODE]')
+        o.emit('\torr x14, x14, x15')
+    o.emit(f'\tcbnz x14, {fall}')
+    o.emit('\tadd x7, x25, x13')
 
 
 def memory_immediate(o, register, base):
