@@ -104,24 +104,25 @@ nonisolated struct SendFeedbackArchive: Sendable {
         let tailSize = Int(min(length, UInt64(endRecordBytes + 0xFFFF)))
         let tailStart = length - UInt64(tailSize)
         let tail = try read(source, at: tailStart, count: tailSize)
-        // The end record is the last signature whose comment reaches the end of the file and whose directory ends
-        // where it begins, which a record that a comment holds does not unless it was made so; failing that, the
-        // last signature whose comment reaches the end of the file.
-        var found: Int?
-        var fallback: Int?
+        // An end record is a signature whose comment reaches the end of the file, and it is one that fits when its
+        // counts agree and its directory lies in front of it. A comment can hold such a record of its own, which
+        // nothing in the archive tells from the real one: with two that fit, the archive is refused, not guessed at.
+        var fitting: [Int] = []
+        var first: Int?
         var index = tail.count - endRecordBytes
         while index >= 0 {
             if tail.u32(at: index) == endSignature, index + endRecordBytes + Int(tail.u16(at: index + 20)) == tail.count {
+                if first == nil { first = index }
                 let directoryEnd = UInt64(tail.u32(at: index + 12)) + UInt64(tail.u32(at: index + 16))
-                if directoryEnd == tailStart + UInt64(index) {
-                    found = index
-                    break
+                if tail.u16(at: index + 8) == tail.u16(at: index + 10), directoryEnd <= tailStart + UInt64(index) {
+                    fitting.append(index)
                 }
-                if fallback == nil { fallback = index }
             }
             index -= 1
         }
-        guard let end = found ?? fallback else { throw SendFeedbackArchiveError.notAnArchive }
+        if fitting.count > 1 { throw SendFeedbackArchiveError.damaged }
+        // With none that fits, the last record is read and says what is wrong with it.
+        guard let end = fitting.first ?? first else { throw SendFeedbackArchiveError.notAnArchive }
         let endOffset = tailStart + UInt64(end)
         let disk = tail.u16(at: end + 4), directoryDisk = tail.u16(at: end + 6)
         let diskEntries = Int(tail.u16(at: end + 8)), count = Int(tail.u16(at: end + 10))

@@ -87,20 +87,20 @@ struct SendFeedbackReaderNotesTests {
 
     // MARK: R2 an end record in the comment
 
-    @Test func anEndRecordInTheCommentDoesNotHideTheListing() throws {
+    // A comment that holds an end record of its own makes two records that both fit the file, and nothing in the
+    // archive says which is the real one: the archive is refused (C5), not guessed at.
+
+    @Test func anEndRecordInTheCommentMakesTheArchiveUnreadable() throws {
         let lookalike = Data([0x50, 0x4B, 0x05, 0x06]) + Data(count: 18)
         let zip = SyntheticZip([.stored("a.txt", Data("a".utf8))], comment: lookalike)
-        let archive = try SendFeedbackArchive.open(SendFeedbackMemoryBytes(zip.data()))
-        #expect(archive.listing.entries.map(\.name) == ["a.txt"])
+        #expect(throws: SendFeedbackArchiveError.damaged) { try SendFeedbackArchive.open(SendFeedbackMemoryBytes(zip.data())) }
     }
 
-    @Test func anEndRecordInTheCommentWithADirectoryOfItsOwnIsNotTakenForTheRealOne() throws {
-        // The record the comment holds says there is nothing; the real one, in front of it, says there is an entry.
-        // 1 entry, 46 bytes, at offset 0: what an end record would say that is not where its directory ends.
+    @Test func anEndRecordInTheCommentWithADirectoryOfItsOwnMakesTheArchiveUnreadable() throws {
+        // 1 entry, 46 bytes, at offset 0: what a second record that fits would say.
         let lookalike = Data([0x50, 0x4B, 0x05, 0x06, 0, 0, 0, 0, 1, 0, 1, 0, 46, 0, 0, 0, 0, 0, 0, 0, 0, 0])
         let zip = SyntheticZip([.stored("one.txt", Data("1".utf8)), .stored("two.txt", Data("2".utf8))], comment: lookalike)
-        let archive = try SendFeedbackArchive.open(SendFeedbackMemoryBytes(zip.data()))
-        #expect(archive.listing.declaredCount == 2)
+        #expect(throws: SendFeedbackArchiveError.damaged) { try SendFeedbackArchive.open(SendFeedbackMemoryBytes(zip.data())) }
     }
 
     // MARK: R3 a CRLF across a window

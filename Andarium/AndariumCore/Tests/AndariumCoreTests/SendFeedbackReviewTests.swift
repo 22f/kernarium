@@ -130,4 +130,26 @@ struct SendFeedbackReviewTests {
         // And what it leaves behind still reads right.
         #expect(try whole.read(at: 5 * 16_384, count: 4) == Data(repeating: 70, count: 4))
     }
+
+    // MARK: C5 two end records that both fit
+
+    @Test func anEmptyEndRecordInTheCommentThatPointsAtItselfMakesTheArchiveUnreadable() throws {
+        var fake = Data([0x50, 0x4B, 0x05, 0x06]) + Data(count: 18)
+        let entries = [SyntheticZip.Entry.stored("real.txt", Data("real".utf8))]
+        let position = SyntheticZip(entries, comment: fake).data().count - 22
+        for index in 0..<4 { fake[16 + index] = UInt8((position >> (index * 8)) & 255) }
+        let data = SyntheticZip(entries, comment: fake).data()
+        #expect(throws: SendFeedbackArchiveError.damaged) { try SendFeedbackArchive.open(SendFeedbackMemoryBytes(data)) }
+    }
+
+    @Test func anOrdinaryCommentStillOpensTheArchive() throws {
+        let entries = [SyntheticZip.Entry.stored("real.txt", Data("real".utf8))]
+        let plain = try SendFeedbackArchive.open(SendFeedbackMemoryBytes(
+            SyntheticZip(entries, comment: Data("made by a build server".utf8)).data()))
+        #expect(plain.listing.entries.map(\.name) == ["real.txt"])
+        // The four bytes of the signature in a comment, with no end record that reaches the end of the file.
+        let signature = Data([0x50, 0x4B, 0x05, 0x06]) + Data(repeating: 0x41, count: 24)
+        let odd = try SendFeedbackArchive.open(SendFeedbackMemoryBytes(SyntheticZip(entries, comment: signature).data()))
+        #expect(odd.listing.entries.map(\.name) == ["real.txt"])
+    }
 }
