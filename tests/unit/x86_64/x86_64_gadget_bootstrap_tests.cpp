@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +35,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -4940,6 +4942,221 @@ void stack_operands_without_a_twin_keep_their_addresses()
 					before & 0xffffffffU : before),
 				std::string{test.name} + " read another address");
 	}
+}
+
+/* An entry of `executor`'s table that sends `page` to `buffer`, for reads
+ * and for writes. */
+void plant_tlb_entry(uml::cpu::x86_64::gadgets::Executor &executor,
+	std::uint64_t page, std::span<std::byte> buffer)
+{
+	using namespace uml::cpu::x86_64;
+	const auto delta = reinterpret_cast<std::uintptr_t>(buffer.data()) - page;
+	executor.tlb_entries()[native_tlb_index(page)] = {
+		.read_page = page,
+		.read_data_minus_address = delta,
+		.write_page = page,
+		.write_data_minus_address = delta,
+	};
+}
+
+/* Baked, segment-override and element-masked loads and stores of the page
+ * at RBX, then SYSCALL: the accesses that `planted_accesses_hit` checks. */
+constexpr std::array<std::uint8_t, 31> planted_access_code{
+	0x48, 0x8b, 0x03,                   // mov rax,[rbx]
+	0x64, 0x48, 0x8b, 0x53, 0x08,       // mov rdx,fs:[rbx+8]
+	0xc4, 0xe2, 0x71, 0x8c, 0x53, 0x10, // vpmaskmovd xmm2,xmm1,[rbx+16]
+	0x48, 0x89, 0x43, 0x20,             // mov [rbx+32],rax
+	0x64, 0x48, 0x89, 0x53, 0x28,       // mov fs:[rbx+40],rdx
+	0xc4, 0xe2, 0x71, 0x8e, 0x53, 0x30, // vpmaskmovd [rbx+48],xmm1,xmm2
+	0x0f, 0x05,                         // syscall
+};
+
+/* The accesses of `planted_access_code` went through the entry planted for
+ * their page and nowhere else: their loads read `buffer`, whose first 32
+ * bytes count from `first` up, their stores wrote its next 32, and the
+ * page's own 64 bytes, counting from `real` up, are as they were. */
+[[nodiscard]] bool planted_accesses_hit(const uml::cpu::x86_64::CpuState &cpu,
+	std::span<const std::byte> buffer, std::uint8_t first,
+	TestMemory &memory, std::uint64_t page, std::uint8_t real)
+{
+	using namespace uml::cpu::x86_64;
+	const auto byte = [&](unsigned index) {
+		return static_cast<std::uint8_t>(buffer[index]);
+	};
+	bool ok = true;
+	for (unsigned index = 0; index < 32U; ++index)
+		ok = ok && byte(index) == static_cast<std::uint8_t>(first + index);
+	std::uint64_t loaded = 0;
+	std::uint64_t segment = 0;
+	std::memcpy(&loaded, buffer.data(), 8);
+	std::memcpy(&segment, buffer.data() + 8, 8);
+	std::uint64_t stored = 0;
+	std::uint64_t segment_stored = 0;
+	std::memcpy(&stored, buffer.data() + 32, 8);
+	std::memcpy(&segment_stored, buffer.data() + 40, 8);
+	ok = ok && cpu.gpr(Register::rax) == loaded &&
+		cpu.gpr(Register::rdx) == segment && stored == loaded &&
+		segment_stored == segment;
+	for (unsigned index = 0; index < 16U; ++index)
+		ok = ok && static_cast<std::uint8_t>(cpu.vectors[2][index]) ==
+				byte(16U + index) &&
+			byte(48U + index) == byte(16U + index);
+	for (unsigned index = 0; index < 64U; ++index)
+		ok = ok && memory.byte(page + index) ==
+			static_cast<std::uint8_t>(real + index);
+	return ok;
+}
+
+/* Each run translates through its own executor's table, which the run's
+ * entry puts in x22: two executors' entries for one page send it to two
+ * buffers, and runs alternating between them, one of which faults on its
+ * first instruction and is run again, each read and write their own. A
+ * baked load that misses, and so calls the miss helper, comes first. */
+void each_run_translates_through_its_executors_table()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t code = tlb_test_base;
+	const std::uint64_t page = tlb_test_base + 4096U;
+	const std::uint64_t other = tlb_test_base + 2U * 4096U;
+	TestMemory memory{tlb_test_base};
+	memory.load(code, {
+		0x50,             // push rax
+		0x4c, 0x8b, 0x06, // mov r8,[rsi]
+	});
+	memory.fill(code + 4, std::as_bytes(std::span{planted_access_code}));
+	for (unsigned index = 0; index < 64U; ++index) {
+		memory.load(page + index, {static_cast<std::uint8_t>(0x10U + index)});
+		memory.load(other + index, {static_cast<std::uint8_t>(0xc0U + index)});
+	}
+	const auto built = require_built(gadgets::build(memory, code),
+		"the planted-entry sequence did not build");
+	gadgets::Executor first;
+	gadgets::Executor second;
+	first.prepare(memory);
+	second.prepare(memory);
+	std::array<std::byte, 64> first_buffer{};
+	std::array<std::byte, 64> second_buffer{};
+	for (unsigned index = 0; index < 64U; ++index) {
+		first_buffer[index] = static_cast<std::byte>(0x40U + index);
+		second_buffer[index] = static_cast<std::byte>(0x90U + index);
+	}
+	plant_tlb_entry(first, page, first_buffer);
+	plant_tlb_entry(second, page, second_buffer);
+	const auto run = [&](gadgets::Executor &executor, std::uint64_t rsp) {
+		CpuState cpu{};
+		cpu.rip = code;
+		cpu.gpr(Register::rbx) = page;
+		cpu.gpr(Register::rsi) = other;
+		cpu.gpr(Register::rsp) = rsp;
+		std::fill(cpu.vectors[1].begin(), cpu.vectors[1].begin() + 16,
+			std::byte{0x80});
+		const auto result = gadgets::execute(built.program, cpu, memory,
+			executor, 16);
+		return std::pair{result, cpu};
+	};
+	const std::uint64_t stack = tlb_test_base + 4U * 4096U;
+	for (const auto [executor, buffer, from, name] : {
+			std::tuple{&first, std::span<std::byte>{first_buffer}, 0x40U,
+				"the first executor"},
+			std::tuple{&second, std::span<std::byte>{second_buffer}, 0x90U,
+				"the second executor"},
+			std::tuple{&first, std::span<std::byte>{first_buffer}, 0x40U,
+				"the first executor again"}}) {
+		const auto [result, cpu] = run(*executor, stack);
+		require(result.event == uml::cpu::EngineEvent::system_call &&
+				result.retired_instructions == 9 &&
+				cpu.gpr(Register::r8) == memory.qword(other),
+			std::string{name} + " did not reach SYSCALL");
+		require(planted_accesses_hit(cpu, buffer,
+				static_cast<std::uint8_t>(from), memory, page, 0x10U),
+			std::string{name} + " did not translate through its own table");
+	}
+	/* A push to a page outside the span faults before anything else runs;
+	 * the run is taken again with the stack inside it. */
+	const auto [fault, faulted] = run(second, tlb_test_base + 64U * 4096U);
+	require(fault.event == uml::cpu::EngineEvent::memory_fault &&
+			fault.retired_instructions == 0 && faulted.rip == code,
+		"a push off the span did not fault at the push");
+	const auto [again, resumed] = run(second, stack);
+	require(again.event == uml::cpu::EngineEvent::system_call &&
+			planted_accesses_hit(resumed, second_buffer, 0x90U, memory, page,
+				0x10U),
+		"the run after a fault did not translate through its own table");
+}
+
+[[nodiscard]] std::uint64_t parallel_extract(std::uint64_t value,
+	std::uint64_t mask) noexcept
+{
+	std::uint64_t result = 0;
+	for (unsigned bit = 0, out = 0; bit < 64U; ++bit)
+		if (((mask >> bit) & 1U) != 0U)
+			result |= ((value >> bit) & 1U) << out++;
+	return result;
+}
+
+/* BMI's register and memory forms kept their destination's offset in x22
+ * before it held the table base, and their run goes on: each runs before
+ * accesses through a planted entry, which find it only through the table.
+ * (The other gadgets that used x22 kept an address there for a fault or
+ * another exit, which ends the run.) */
+void bmi_gadgets_keep_the_table_base()
+{
+	using namespace uml::cpu::x86_64;
+	const std::uint64_t code = tlb_test_base;
+	const std::uint64_t page = tlb_test_base + 4096U;
+	const std::uint64_t operand = tlb_test_base + 2U * 4096U;
+	TestMemory memory{tlb_test_base};
+	const std::vector<std::uint8_t> before{
+		0xc4, 0xe2, 0xa8, 0xf3, 0xd9,       // blsi r10,rcx
+		0xc4, 0xe2, 0x98, 0xf3, 0x1e,       // blsi r12,[rsi]
+		0xc4, 0x62, 0xf2, 0xf5, 0xea,       // pext r13,rcx,rdx
+		0xc4, 0x62, 0xf2, 0xf5, 0x36,       // pext r14,rcx,[rsi]
+		0xc4, 0x62, 0xb3, 0xf6, 0xc1,       // mulx r8,r9,rcx
+		0xc4, 0x63, 0xfb, 0xf0, 0xf9, 0x05, // rorx r15,rcx,5
+	};
+	memory.fill(code, std::as_bytes(std::span{before}));
+	memory.fill(code + before.size(),
+		std::as_bytes(std::span{planted_access_code}));
+	for (unsigned index = 0; index < 64U; ++index)
+		memory.load(page + index, {static_cast<std::uint8_t>(0x10U + index)});
+	constexpr std::uint64_t source = 0x00f0'0000'0000'0f00ULL;
+	constexpr std::uint64_t mask = 0x0f0f'00ff'1234'8001ULL;
+	constexpr std::uint64_t in_memory = 0x0000'3c00'0000'0000ULL;
+	for (unsigned index = 0; index < 8U; ++index)
+		memory.load(operand + index,
+			{static_cast<std::uint8_t>(in_memory >> (8U * index))});
+	const auto built = require_built(gadgets::build(memory, code),
+		"the BMI sequence did not build");
+	gadgets::Executor executor;
+	executor.prepare(memory);
+	std::array<std::byte, 64> buffer{};
+	for (unsigned index = 0; index < 64U; ++index)
+		buffer[index] = static_cast<std::byte>(0x60U + index);
+	plant_tlb_entry(executor, page, buffer);
+	CpuState cpu{};
+	cpu.rip = code;
+	cpu.gpr(Register::rbx) = page;
+	cpu.gpr(Register::rcx) = source;
+	cpu.gpr(Register::rdx) = mask;
+	cpu.gpr(Register::rsi) = operand;
+	std::fill(cpu.vectors[1].begin(), cpu.vectors[1].begin() + 16,
+		std::byte{0x80});
+	const auto result = gadgets::execute(built.program, cpu, memory,
+		executor, 32);
+	require(result.event == uml::cpu::EngineEvent::system_call &&
+			result.retired_instructions == 13,
+		"the BMI sequence did not reach SYSCALL");
+	const auto product = static_cast<unsigned __int128>(mask) * source;
+	require(cpu.gpr(Register::r10) == (source & (0 - source)) &&
+			cpu.gpr(Register::r12) == (in_memory & (0 - in_memory)) &&
+			cpu.gpr(Register::r13) == parallel_extract(source, mask) &&
+			cpu.gpr(Register::r14) == parallel_extract(source, in_memory) &&
+			cpu.gpr(Register::r8) == static_cast<std::uint64_t>(product >> 64U) &&
+			cpu.gpr(Register::r9) == static_cast<std::uint64_t>(product) &&
+			cpu.gpr(Register::r15) == std::rotr(source, 5),
+		"a BMI gadget's result is wrong");
+	require(planted_accesses_hit(cpu, buffer, 0x60U, memory, page, 0x10U),
+		"an access after a BMI gadget missed the run's table");
 }
 
 /* PMOVMSKB collapses one sign bit per byte into a bit mask. The corpus carries
@@ -12735,6 +12952,8 @@ int main(int argc, char **argv)
 	each_translation_finds_the_entry_its_miss_filled();
 	a_page_crossing_access_matches_no_translation();
 	pages_sharing_an_entry_keep_their_own_bytes();
+	each_run_translates_through_its_executors_table();
+	bmi_gadgets_keep_the_table_base();
 	stack_twins_match_their_ordinary_entries();
 	stack_twins_refuse_an_access_across_a_page();
 	stack_twins_take_the_ordinary_path_off_their_page();
