@@ -164,8 +164,8 @@ tail and resolves the same address.
   that the baked tables name in place of every fused [rsp + displacement]
   entry. A run starts at the entry of RSP's page. A hit needs the entry's exact
   tag, so it is that page's own entry and retires with it, and a store hits
-  only a page holding no code while no publication is owed, so it keeps the
-  overlap test and skips the publication test. A crossing access or another
+  only a page holding no code while the run's `write_code` is clear, so it
+  keeps the overlap test and skips the publication test. A crossing access or another
   page takes the ordinary translation, and only the stack instructions' misses
   move the entry.
 
