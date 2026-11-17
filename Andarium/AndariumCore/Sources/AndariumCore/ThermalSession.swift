@@ -48,6 +48,7 @@ public final class ThermalSession: @unchecked Sendable {
     private let schedule: @Sendable (_ nanoseconds: UInt64, _ work: @escaping @Sendable () -> Void) -> Void
     private let hotChanged: @Sendable (Bool) -> Void
     private let capStarted: @Sendable () -> Void
+    private let present: @Sendable () -> HostThermalState?
     private let queue = DispatchQueue(label: "andarium-thermal-session")
 
     // Touched only on `queue`.
@@ -68,7 +69,10 @@ public final class ThermalSession: @unchecked Sendable {
     /// The last `hotChanged` said the device is hot.
     private var reportedHot = false
 
-    /// `capStarted` is called on the session's queue, once per run, when the
+    /// `present` reads iOS's thermal state as it is now, where the caller has
+    /// no reading to give before a run begins (the monitor starts after it
+    /// does): every run begins from it, and never from the state an earlier
+    /// run ended with. `capStarted` is called on the session's queue, once per run, when the
     /// frame rate cap starts. `hotChanged` is called on it each time the
     /// device becomes hot (serious or above, the hold included) or stops
     /// being, with the limit on or off, and with false when a run ends.
@@ -77,6 +81,7 @@ public final class ThermalSession: @unchecked Sendable {
         clock: @escaping @Sendable () -> UInt64 = ThermalSession.uptimeNanoseconds,
         schedule: @escaping @Sendable (UInt64, @escaping @Sendable () -> Void) -> Void = ThermalSession.dispatchAfter,
         hotChanged: @escaping @Sendable (Bool) -> Void = { _ in },
+        present: @escaping @Sendable () -> HostThermalState? = { nil },
         capStarted: @escaping @Sendable () -> Void
     ) {
         self.opener = opener
@@ -84,6 +89,7 @@ public final class ThermalSession: @unchecked Sendable {
         self.clock = clock
         self.schedule = schedule
         self.hotChanged = hotChanged
+        self.present = present
         self.capStarted = capStarted
     }
 
@@ -180,7 +186,10 @@ public final class ThermalSession: @unchecked Sendable {
         failedAttempts = 0
         gaveUp = false
         connectedThisBoot = false
-        // A reading from before the run is the state the run begins in.
+        // The run begins in the state iOS is in now. Where the caller cannot
+        // say, a reading from before the run is it (a run clears what the
+        // last one ended with, so that is never a stale one).
+        if let now = present() { observed = now }
         policy.observe(observed, at: clock())
         scheduleExpiry()
         publishHot()
@@ -191,6 +200,9 @@ public final class ThermalSession: @unchecked Sendable {
         timerEpoch &+= 1
         closeStream()
         policy = ThermalPolicy()
+        // The readings stop with the run: what the next one begins in is read
+        // again then.
+        observed = .nominal
         connectedThisBoot = false
         publishHot()
     }

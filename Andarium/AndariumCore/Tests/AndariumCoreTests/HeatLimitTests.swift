@@ -240,6 +240,71 @@ struct HeatLimitSessionTests {
         #expect(rig.session.hasGivenUp && !rig.session.isConnected)
     }
 
+    // MARK: A run begins from the present state
+
+    @Test func aSecondRunDoesNotInheritTheHeatTheLastOneEndedWith() throws {
+        let rig = rig()
+        rig.session.setLimit(false)
+        rig.session.observe(.critical)
+        rig.session.update(running: true, booted: true)
+        #expect(thermalEventually { rig.session.isConnected })
+        _ = rig.guest.record()
+        rig.session.update(running: false, booted: false)
+        rig.session.settle()
+        rig.clock.advance(seconds: 300)
+        // The device cooled while the run was away. The next run starts
+        // before the monitor gives its first reading, which says nominal.
+        rig.session.update(running: true, booted: false)
+        rig.session.observe(.nominal)
+        rig.session.settle()
+        #expect(thermalEventually { rig.session.isConnected })
+        _ = rig.guest.record()
+        rig.session.setLimit(true)
+        #expect(rig.guest.record() == (try frame("none")), "the new run started cool and was told something hot")
+        #expect(!rig.session.isHot, "the new run inherited a hold")
+        #expect(rig.log.hotChanges.last == false)
+    }
+
+    private final class Present: @unchecked Sendable {
+        private let lock = NSLock()
+        private var state = HostThermalState.nominal
+        var value: HostThermalState {
+            get { lock.withLock { state } }
+            set { lock.withLock { state = newValue } }
+        }
+    }
+
+    @Test func aRunBeginsInTheStateIOSIsInWhenItBeginsEvenWithAStaleReadingBefore() throws {
+        let guest = FakeThermalGuest()
+        let clock = ThermalTestClock()
+        let now = Present()
+        let session = ThermalSession(
+            opener: guest, retryDelay: .milliseconds(10), clock: { clock.read() },
+            schedule: { _, _ in }, present: { now.value }, capStarted: {})
+        now.value = .critical
+        session.update(running: true, booted: false)
+        #expect(thermalEventually { session.isConnected })
+        #expect(guest.record() == (try frame("critical")), "the opening record")
+        #expect(session.severity == .critical && session.isHot, "a run that begins hot is hot")
+        session.update(running: false, booted: false)
+        session.settle()
+        // A reading from the last run's monitor arrives late, and the device has cooled.
+        session.observe(.critical)
+        now.value = .nominal
+        clock.advance(seconds: 300)
+        session.update(running: true, booted: false)
+        session.settle()
+        #expect(thermalEventually { session.isConnected })
+        #expect(session.severity == .none && !session.isHot, "the run began in the last run's heat")
+        // And a run that begins hot is hot without a reading being given.
+        session.update(running: false, booted: false)
+        session.settle()
+        now.value = .serious
+        session.update(running: true, booted: false)
+        session.settle()
+        #expect(session.severity == .severe && session.isHot)
+    }
+
     // MARK: The notice
 
     @Test func noCapIsAnnouncedWhileOffAndTheRunAnnouncesItIfTheLimitComesOnWhileHot() throws {

@@ -121,6 +121,9 @@ final class LiveRuntime: RuntimeDriver {
             // In order, whatever the thread the session calls from.
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.model?.deviceHeatChanged(hot: hot) } }
         },
+        // A run begins in the state iOS is in then, never the last run's: the
+        // monitor's own first reading comes after the run has begun.
+        present: { ThermalSource.current() },
         capStarted: { [weak self] in
             Task { @MainActor [weak self] in self?.thermalCapStarted() }
         })
