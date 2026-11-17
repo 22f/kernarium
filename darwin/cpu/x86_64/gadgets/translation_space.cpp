@@ -433,8 +433,11 @@ Body *Space::publish(const Program &program, std::uint8_t instruction_limit,
 		free_bodies(never);
 		return adopted;
 	}
+	/* The builder holds each of these pages, and held them settled, or it
+	 * would not have stored the body: this count adds to the builder's, so
+	 * the call never gains a page and has nothing to wait for. */
 	for (std::size_t index = 0; index < gained.count; ++index)
-		registry_->add(gained.pages[index], self);
+		(void)registry_->add(gained.pages[index], self);
 	return body;
 }
 

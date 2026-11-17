@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <vector>
 
 namespace uml::memory {
 
@@ -112,6 +113,143 @@ void StaticGuestMemory::invalidate_code(
 	}
 	invalidate_code(address);
 }
+
+#if DARWIN_UML_X86_64_GUEST
+::uml::memory::FrameHold StaticGuestMemory::hold_code_frame(
+	std::uint64_t address, void *execution_context,
+	::uml::memory::FrameDebt *debts, std::size_t capacity,
+	bool global_ok) noexcept
+{
+	::uml::memory::FrameHold result{};
+	/* The bridge writes into locations of its own type. */
+	std::array<darwin_uml_static_frame_location, 16> small{};
+	std::vector<darwin_uml_static_frame_location> large;
+	darwin_uml_static_frame_location *owed = small.data();
+	if (capacity > small.size()) {
+		try {
+			large.resize(capacity);
+			owed = large.data();
+		} catch (...) {
+			/* No room for the locations: the debt is every write
+			 * translation, whatever its size. */
+			capacity = 0;
+			global_ok = true;
+		}
+	}
+	capacity = std::min(capacity, large.empty() ? small.size() : large.size());
+	darwin_uml_static_frame_hold hold{};
+	hold.global_ok = global_ok ? 1 : 0;
+	const auto status = darwin_uml_static_vm_hold_code_frame(
+		execution_context, generation_, static_cast<unsigned long>(address),
+		owed, capacity, &hold);
+	result.record_identity = hold.record_identity;
+	result.debt_sequence = hold.debt_sequence;
+	result.owed = hold.owed;
+	result.record = hold.record;
+	result.alias_changes = hold.alias_changes;
+	if (status == DARWIN_UML_STATIC_FRAME_OWED)
+		for (std::size_t index = 0; index < std::min(hold.owed, capacity); ++index)
+			debts[index] = {owed[index].generation, owed[index].page};
+	switch (status) {
+	case DARWIN_UML_STATIC_FRAME_SETTLED:
+		result.result = ::uml::memory::FrameHoldResult::settled;
+		break;
+	case DARWIN_UML_STATIC_FRAME_OWED:
+		result.result = ::uml::memory::FrameHoldResult::owed;
+		break;
+	case DARWIN_UML_STATIC_FRAME_REFUSED:
+		result.result = ::uml::memory::FrameHoldResult::refused;
+		break;
+	case DARWIN_UML_STATIC_FRAME_CROWDED:
+		result.result = ::uml::memory::FrameHoldResult::crowded;
+		break;
+	case DARWIN_UML_STATIC_FRAME_GLOBAL:
+		result.result = ::uml::memory::FrameHoldResult::global;
+		break;
+	default:
+		result.result = ::uml::memory::FrameHoldResult::failed;
+		break;
+	}
+	return result;
+}
+
+void StaticGuestMemory::clear_code_debt(std::uint64_t address,
+	void *execution_context, const ::uml::memory::FrameHold &hold) noexcept
+{
+	darwin_uml_static_vm_clear_code_debt(execution_context, generation_,
+		static_cast<unsigned long>(address), hold.record_identity,
+		hold.debt_sequence);
+}
+
+bool StaticGuestMemory::frame_hold_unchanged(
+	const ::uml::memory::FrameHold &hold) noexcept
+{
+	if (hold.record == nullptr)
+		return false;
+	const darwin_uml_static_frame_state state{nullptr, 0, hold.record,
+		hold.alias_changes, 0};
+	return darwin_uml_static_vm_frame_state_unchanged(&state) != 0;
+}
+
+bool StaticGuestMemory::frame_fill(std::uint64_t address,
+	void *execution_context, ::uml::memory::FrameFill &fill) noexcept
+{
+	if (execution_context == nullptr)
+		return false;
+	/* The handle the executable-page probe cached: the frame's record. A page
+	 * that cannot hold a translation has none, and its writers owe the
+	 * holders of its frame a publication all the same. */
+	const void *record = code_page_handle(address);
+	darwin_uml_static_frame_state state{};
+	if (darwin_uml_static_vm_execution_context_frame_fill(execution_context,
+		    record, static_cast<unsigned long>(address), &state) != 0)
+		return false;
+	fill = {state.backing, state.offset, state.record, state.alias_changes,
+		state.other_holder != 0};
+	return true;
+}
+
+bool StaticGuestMemory::frame_fill_unchanged(
+	const ::uml::memory::FrameFill &fill) noexcept
+{
+	const darwin_uml_static_frame_state state{fill.backing, fill.offset,
+		fill.record, fill.alias_changes, fill.other_holder ? 1 : 0};
+	return darwin_uml_static_vm_frame_state_unchanged(&state) != 0;
+}
+
+bool StaticGuestMemory::publish_frame_store(std::uint64_t address,
+	std::uint64_t length, void *execution_context, std::uint64_t *own,
+	std::size_t capacity,
+	::uml::memory::FramePublication &publication) noexcept
+{
+	darwin_uml_static_frame_publication done{};
+	const auto status = darwin_uml_static_vm_publish_frame_store(
+		execution_context, generation_, static_cast<unsigned long>(address),
+		static_cast<unsigned long>(length), own, capacity, &done);
+	publication = {done.overflow != 0, done.own_count, done.own_records};
+	return status > 0;
+}
+
+bool StaticGuestMemory::frame_own_holders(std::uint64_t address,
+	std::uint64_t length, void *execution_context, std::uint64_t *own,
+	std::size_t capacity,
+	::uml::memory::FramePublication &publication) noexcept
+{
+	darwin_uml_static_frame_publication done{};
+	const auto status = darwin_uml_static_vm_frame_own_holders(
+		execution_context, generation_, static_cast<unsigned long>(address),
+		static_cast<unsigned long>(length), own, capacity, &done);
+	publication = {done.overflow != 0, done.own_count, 0};
+	return status > 0;
+}
+
+std::uint64_t StaticGuestMemory::flush_serial(
+	void *execution_context) noexcept
+{
+	return darwin_uml_static_vm_execution_context_flush_serial(
+		execution_context);
+}
+#endif
 
 bool StaticGuestMemory::validate_access(
 	std::uint64_t address, std::size_t size, ::uml::memory::MemoryAccess access)

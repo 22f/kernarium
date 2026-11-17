@@ -9,6 +9,9 @@
 #if UML_MEMORY_HAS_NATIVE_VM
 #include "bridge_call.hpp"
 #include "native_address_space.hpp"
+#if DARWIN_UML_X86_64_GUEST
+#include "frame_accounting.hpp"
+#endif
 #endif
 
 #include <atomic>
@@ -20,6 +23,7 @@
 #include <utility>
 #if UML_MEMORY_HAS_NATIVE_VM
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -50,6 +54,21 @@ using uml::memory::ConfiguredAddressLayout;
 		space.contains_shadow(
 			reinterpret_cast<std::uintptr_t>(address), length);
 }
+
+#if DARWIN_UML_X86_64_GUEST
+/* A shadow holds whole host pages: where one is made, or a direct slot is
+ * converted to shadows, the table of the kernel's direct ranges must not go on
+ * naming the frame the direct mapping did, which a kernel write through the
+ * shadow would be published at instead of its own. */
+void forget_direct_pages(const void *address, std::uint64_t length) noexcept
+{
+	const auto mask = static_cast<std::uintptr_t>(getpagesize()) - 1U;
+	const auto begin = reinterpret_cast<std::uintptr_t>(address) & ~mask;
+	const auto end = (reinterpret_cast<std::uintptr_t>(address) + length + mask) & ~mask;
+	uml::memory::FrameAccounting::note_direct_unmap(
+		reinterpret_cast<const void *>(begin), end - begin);
+}
+#endif
 
 [[nodiscard]] int write_xor_execute(int protection) noexcept
 {
@@ -115,20 +134,38 @@ extern "C" int darwin_uml_vm_map(void *address, int fd, unsigned long long offse
 			space, address, offset, length);
 		const bool exact = !uml::memory::NativeAddressSpace::needs_shadow(
 			reinterpret_cast<std::uintptr_t>(address), offset, length);
-		if (shadow && !exact)
-			return space.map(
+		if (shadow && !exact) {
+			const auto mapped = space.map(
 				reinterpret_cast<std::uintptr_t>(address), fd, offset,
 				length, protection);
+#if DARWIN_UML_X86_64_GUEST
+			if (mapped >= 0)
+				forget_direct_pages(address, length);
+#endif
+			return mapped;
+		}
 		/* Whole host pages of one backing map shared, replacing any
 		 * shadow; one still executing this call keeps its shadow. */
 		const int direct_protection = write_xor_execute(protection);
 		const auto result = space.map_direct(
 			reinterpret_cast<std::uintptr_t>(address), fd, offset,
 			length, direct_protection);
-		if (result < 0 && shadow && errno == EBUSY)
-			return space.map(
+#if DARWIN_UML_X86_64_GUEST
+		/* A kernel write through this alias names its frame. */
+		if (result >= 0)
+			uml::memory::FrameAccounting::note_direct_map(
+				address, length, fd, offset);
+#endif
+		if (result < 0 && shadow && errno == EBUSY) {
+			const auto mapped = space.map(
 				reinterpret_cast<std::uintptr_t>(address), fd, offset,
 				length, protection);
+#if DARWIN_UML_X86_64_GUEST
+			if (mapped >= 0)
+				forget_direct_pages(address, length);
+#endif
+			return mapped;
+		}
 		return result;
 	});
 #else
@@ -175,10 +212,16 @@ extern "C" int darwin_uml_vm_protect(void *address, unsigned long length,
 		const bool shadow = space.contains_shadow(
 			reinterpret_cast<std::uintptr_t>(address), length);
 		if (shadow || uml::memory::NativeAddressSpace::needs_shadow(
-				reinterpret_cast<std::uintptr_t>(address), 0, length))
-			return space.protect(
+				reinterpret_cast<std::uintptr_t>(address), 0, length)) {
+			const auto result = space.protect(
 				reinterpret_cast<std::uintptr_t>(address), length,
 				protection);
+#if DARWIN_UML_X86_64_GUEST
+			if (result >= 0)
+				forget_direct_pages(address, length);
+#endif
+			return result;
+		}
 		return space.protect_direct(
 			reinterpret_cast<std::uintptr_t>(address), length,
 			write_xor_execute(protection));
@@ -206,9 +249,18 @@ extern "C" int darwin_uml_vm_unmap(void *address, unsigned long length)
 		const bool shadow = space.contains_shadow(
 			reinterpret_cast<std::uintptr_t>(address), length);
 		if (shadow || uml::memory::NativeAddressSpace::needs_shadow(
-				reinterpret_cast<std::uintptr_t>(address), 0, length))
-			return space.unmap(
+				reinterpret_cast<std::uintptr_t>(address), 0, length)) {
+			const auto result = space.unmap(
 				reinterpret_cast<std::uintptr_t>(address), length);
+#if DARWIN_UML_X86_64_GUEST
+			if (result >= 0)
+				forget_direct_pages(address, length);
+#endif
+			return result;
+		}
+#if DARWIN_UML_X86_64_GUEST
+		uml::memory::FrameAccounting::note_direct_unmap(address, length);
+#endif
 		return space.unmap_direct(
 			reinterpret_cast<std::uintptr_t>(address), length);
 	});
@@ -236,9 +288,18 @@ extern "C" int darwin_uml_vm_unmap_generation(unsigned long generation, void *ad
 		if (space.contains_shadow(
 				reinterpret_cast<std::uintptr_t>(address), length) ||
 		    uml::memory::NativeAddressSpace::needs_shadow(
-				reinterpret_cast<std::uintptr_t>(address), 0, length))
-			return space.unmap(
+				reinterpret_cast<std::uintptr_t>(address), 0, length)) {
+			const auto result = space.unmap(
 				reinterpret_cast<std::uintptr_t>(address), length);
+#if DARWIN_UML_X86_64_GUEST
+			if (result >= 0)
+				forget_direct_pages(address, length);
+#endif
+			return result;
+		}
+#if DARWIN_UML_X86_64_GUEST
+		uml::memory::FrameAccounting::note_direct_unmap(address, length);
+#endif
 		return space.unmap_direct(
 			reinterpret_cast<std::uintptr_t>(address), length);
 	});

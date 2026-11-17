@@ -205,7 +205,10 @@ def finish_store(o, size, check=None, overlap_tail=None):
     o.emit('\tldrb w8, [_context, #UML_X86_64_CONTEXT_WRITE_CODE]')
     o.emit(f'\tcbz w8, {check}')
     o.emit(f'\tadr x19, {check}')
-    o.emit(f'\tb Lx86_baked_publish_{size}')
+    # A push has no word of its own to name the instruction, so its
+    # publication leaves through the stack exit.
+    o.emit('\tb Lx86_baked_stack_publish' if overlap_tail is not None
+           else f'\tb Lx86_baked_publish_{size}')
     o.emit(f'{check}:')
     # Guest addresses and block bounds lie below 2^63, so the sign of a
     # difference is their unsigned order and NZCV stays untouched.
@@ -345,6 +348,9 @@ def shared_tails(o):
         o.emit('\thelper_call uml_x86_64_gadget_publish_code_write')
         o.emit('\tldr x9, [sp], #16')
         o.emit('\tmsr nzcv, x9')
+        # The helper reports a store that wrote, through another address of its
+        # frame, into the block that is running: leave as for an overlap.
+        o.emit(f'\tcbnz w0, Lx86_baked_store_overlap_exit_{size}')
         o.emit('\tbr x19')
         # The store landed inside the running block: leave through the store's
         # own exit as the ordinary epilogue does.
@@ -889,6 +895,21 @@ def stack_tails(o):
     o.emit('\tldr x9, [sp], #16')
     o.emit('\tmsr nzcv, x9')
     o.emit('\tcbz w0, Lx86_baked_stack_fault')
+    o.emit('\tbr x19')
+    # The publication of a push: a store through another address of its frame
+    # may have written into the running block, which then leaves as for an
+    # overlap at the push's own address.
+    o.emit('\t.p2align 2')
+    o.emit('Lx86_baked_stack_publish:')
+    o.emit('\tmrs x9, nzcv')
+    o.emit('\tstr x9, [sp, #-16]!')
+    o.emit('\tmov x0, _context')
+    o.emit('\tmov x1, x25')
+    o.emit('\tmov w2, #8')
+    o.emit('\thelper_call uml_x86_64_gadget_publish_code_write')
+    o.emit('\tldr x9, [sp], #16')
+    o.emit('\tmsr nzcv, x9')
+    o.emit('\tcbnz w0, Lx86_baked_stack_overlap_exit')
     o.emit('\tbr x19')
     # The store landed inside the running block: it retires and the run
     # leaves for the instruction after it, which the runtime names.
