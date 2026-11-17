@@ -270,11 +270,20 @@ nonisolated enum SendFeedbackArchiveNames {
     }
 
     /// The name as the tree builds from it: what was read of it (at most `maxNameBytes`), decoded, with what is not
-    /// text replaced. It is not shortened: the hierarchy is the archive's, and only what is drawn is made to fit.
+    /// text replaced, and then cut to `maxNameBytes` again at a character, since a replacement is three bytes for
+    /// one byte read. So a structural name is at most `maxNameBytes`, whatever the bytes were. It is not shortened
+    /// to what a row holds: the hierarchy is the archive's, and only what is drawn is made to fit.
     static func structural(_ raw: Data) -> String {
-        String(String.UnicodeScalarView(String(decoding: raw, as: UTF8.self).unicodeScalars.map { scalar in
-            SendFeedbackNames.isControl(scalar) ? "\u{FFFD}" : scalar
-        }))
+        var name = String.UnicodeScalarView()
+        var bytes = 0
+        for scalar in String(decoding: raw, as: UTF8.self).unicodeScalars {
+            let kept: Unicode.Scalar = SendFeedbackNames.isControl(scalar) ? "\u{FFFD}" : scalar
+            let width = UTF8.width(kept)
+            if bytes + width > SendFeedbackArchiveLimits.maxNameBytes { break }
+            name.append(kept)
+            bytes += width
+        }
+        return String(name)
     }
 
     /// A part of a name as a row draws it: cut to what a row holds, with an ellipsis where it was.

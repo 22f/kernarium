@@ -282,4 +282,43 @@ struct SendFeedbackReviewTests {
         let twice = try treeOf(names + names.map { $0.replacingOccurrences(of: "xxxxx", with: "yyyyy", options: .anchored) })
         #expect(twice.nodeCount == 1 + 16 * 2 * names.count)
     }
+
+    // MARK: R2 the bound holds for names that sanitizing makes longer
+
+    @Test func aNameIsClampedToTheBoundAfterWhatIsNotTextIsReplaced() {
+        let bound = SendFeedbackArchiveLimits.maxNameBytes
+        for byte in [UInt8(0x01), 0x7F, 0xFF, 0xC0] {
+            let name = SendFeedbackArchiveNames.structural(Data(repeating: byte, count: bound))
+            #expect(name.utf8.count <= bound, "\(byte): \(name.utf8.count) bytes")
+            #expect(!name.isEmpty && name.unicodeScalars.allSatisfy { $0 == "\u{FFFD}" })
+        }
+        #expect(SendFeedbackArchiveNames.structural(Data(repeating: 0x01, count: bound)) == String(repeating: "\u{FFFD}", count: 341), "a cut at a character: 1,023 bytes")
+        // A character is not cut in two: the last one that fits is the last one kept.
+        let tail = Data(repeating: 0x61, count: 1_022) + Data([0xF0, 0x9F, 0x98, 0x80])
+        #expect(SendFeedbackArchiveNames.structural(tail) == String(repeating: "a", count: 1_022))
+        #expect(SendFeedbackArchiveNames.structural(Data("FS/data/anr/anr_1".utf8)) == "FS/data/anr/anr_1", "a name that fits is whole")
+    }
+
+    @Test func theTreeBoundHoldsForNamesWithControlAndInvalidBytes() throws {
+        // 975 control bytes become 2,925 bytes of replacements; a name is clamped after that, so that the keys of
+        // the tree are at most sixteen prefixes of at most 1,024 bytes for each entry.
+        let ctl: String = String(repeating: "\u{01}", count: 975)
+        let controls: [String] = (0..<50).map { (index: Int) -> String in ctl + String(format: "%05d", index) + String(repeating: "/b", count: 15) + "/f.txt" }
+        #expect(controls.allSatisfy { $0.utf8.count <= SendFeedbackArchiveLimits.maxNameBytes })
+        let tree = try treeOf(controls)
+        #expect(tree.keyBytes <= controls.count * 16 * SendFeedbackArchiveLimits.maxNameBytes, "\(tree.keyBytes) bytes of paths")
+        let archive = try reader(SendFeedbackMemoryBytes(SyntheticZip(controls.map { .stored($0, Data([0x41])) }).data()))
+        #expect(archive.listing.entries.allSatisfy { $0.path.utf8.count <= SendFeedbackArchiveLimits.maxNameBytes })
+        // Spread over components, so that the names stay different inside the bound and the sixteen levels fill.
+        let component = "/" + String(repeating: "\u{02}", count: 20) + "q"
+        var spread: [String] = []
+        for index in 0..<50 {
+            let number: String = String(format: "%05d", index)
+            let middle: String = String(repeating: component, count: 15)
+            spread.append(number + middle + "/f.txt")
+        }
+        let wide = try treeOf(spread)
+        #expect(wide.nodeCount == 1 + 16 * spread.count, "sanitized, 15 components of 62 bytes: \(wide.nodeCount)")
+        #expect(wide.keyBytes <= spread.count * 16 * SendFeedbackArchiveLimits.maxNameBytes, "\(wide.keyBytes) bytes of paths")
+    }
 }
