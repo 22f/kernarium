@@ -5994,17 +5994,25 @@ void fused_conditional_jumps_take_the_same_edge()
 }
 
 /* The entry of a CMP or TEST of a 32- or 64-bit register against an
- * immediate that carries the conditional branch after it, or zero where the
- * pair has none (`condition` in x86's condition-code order). */
+ * immediate, or with `registers` against a register, that carries the
+ * conditional branch after it, or zero where the pair has none (`condition`
+ * in x86's condition-code order). */
 [[nodiscard]] std::uintptr_t compare_branch_entry(bool test, unsigned width,
-	unsigned condition, unsigned reg)
+	unsigned condition, unsigned reg, bool registers = false)
 {
 	namespace baked = uml::cpu::x86_64::gadgets::baked;
-	const auto *table = test ?
-		(width == 64U ? baked::uml_x86_64_baked_test_64_ri_jcc :
-			baked::uml_x86_64_baked_test_32_ri_jcc) :
-		(width == 64U ? baked::uml_x86_64_baked_cmp_64_ri_jcc :
-			baked::uml_x86_64_baked_cmp_32_ri_jcc);
+	const bool wide = width == 64U;
+	const auto *table = registers ?
+		(test ?
+			(wide ? baked::uml_x86_64_baked_test_64_rr_jcc :
+				baked::uml_x86_64_baked_test_32_rr_jcc) :
+			(wide ? baked::uml_x86_64_baked_cmp_64_rr_jcc :
+				baked::uml_x86_64_baked_cmp_32_rr_jcc)) :
+		(test ?
+			(wide ? baked::uml_x86_64_baked_test_64_ri_jcc :
+				baked::uml_x86_64_baked_test_32_ri_jcc) :
+			(wide ? baked::uml_x86_64_baked_cmp_64_ri_jcc :
+				baked::uml_x86_64_baked_cmp_32_ri_jcc));
 	return table[condition * baked::gpr_slots + reg];
 }
 
@@ -6022,13 +6030,27 @@ void push_compare_immediate(std::vector<std::uint8_t> &code, bool test,
 		code.push_back(static_cast<std::uint8_t>(immediate >> shift));
 }
 
-/* A CMP or TEST against an immediate and the conditional branch right after
- * it are one entry in a block with links, and they must be the two
- * instructions they stand for: the same edge, the same retired count and the
- * same flags afterwards as the pair with a NOP between, which runs the
- * compare's own entry and a branch that reads the record. The entry stands in
- * exactly where the host flags answer the condition: never for parity, and
- * not for TEST with a condition that reads the carry. */
+/* CMP reg, reg (39 /r) or TEST reg, reg (85 /r) at 32 or 64 bits. */
+void push_compare_register(std::vector<std::uint8_t> &code, bool test,
+	unsigned width, unsigned destination, unsigned source)
+{
+	if (width == 64U || destination >= 8U || source >= 8U)
+		code.push_back(static_cast<std::uint8_t>(0x40U |
+			(width == 64U ? 8U : 0U) | (source >> 3U) << 2U |
+			(destination >> 3U)));
+	code.push_back(test ? 0x85 : 0x39);
+	code.push_back(static_cast<std::uint8_t>(
+		0xc0U | (source & 7U) << 3U | (destination & 7U)));
+}
+
+/* A CMP or TEST against an immediate or a register and the conditional
+ * branch right after it are one entry in a block with links, and they must be
+ * the two instructions they stand for: the same edge, the same retired count
+ * and the same flags afterwards as the pair with a NOP between, which runs
+ * the compare's own entry and a branch that reads the record. The entry
+ * stands in exactly where the host flags answer the condition: never for
+ * parity, and not for TEST with a condition that reads the carry. A register
+ * source is another register or the destination itself. */
 void compare_branch_entries_run_both_instructions()
 {
 	using namespace uml::cpu::x86_64;
@@ -6045,12 +6067,14 @@ void compare_branch_entries_run_both_instructions()
 		std::uintptr_t first;
 	};
 	const auto run = [](const std::vector<std::uint8_t> &code,
-		unsigned reg, std::uint64_t value) {
+		unsigned reg, std::uint64_t value, unsigned source,
+		std::uint64_t source_value) {
 		TestMemory memory;
 		memory.fill(0, std::as_bytes(std::span{code}));
 		gadgets::Executor executor;
 		executor.prepare(memory, 1, 1, 1);
 		CpuState cpu{};
+		cpu.gpr(static_cast<Register>(source)) = source_value;
 		cpu.gpr(static_cast<Register>(reg)) = value;
 		Outcome outcome{};
 		for (unsigned step = 0; step < 8U; ++step) {
@@ -6081,20 +6105,40 @@ void compare_branch_entries_run_both_instructions()
 				const bool carry = condition == 2U || condition == 3U ||
 					condition == 6U || condition == 7U;
 				const bool answered = !parity && !(test && carry);
-				for (const auto reg : registers) {
-					const auto entry =
-						compare_branch_entry(test, width, condition, reg);
-					require((entry != 0U) == answered,
-						"a compare-and-branch entry exists for a condition "
-						"the host flags do not answer, or is missing");
-					for (const auto immediate : immediates) {
+				for (std::size_t index = 0; index < registers.size(); ++index) {
+					const auto reg = registers[index];
+					const auto other =
+						registers[(index + 1U) % registers.size()];
+					/* Each form: the compare's encoding, a source register
+					 * and the values it is run with. */
+					struct Form final {
+						bool registers;
+						std::uint32_t immediate;
+						unsigned source;
+					};
+					std::vector<Form> forms;
+					for (const auto immediate : immediates)
+						forms.push_back({false, immediate, other});
+					forms.push_back({true, 0, other});
+					forms.push_back({true, 0, reg});
+					for (const auto &form : forms) {
+						const auto entry = compare_branch_entry(test, width,
+							condition, reg, form.registers);
+						require((entry != 0U) == answered,
+							"a compare-and-branch entry exists for a "
+							"condition the host flags do not answer, or is "
+							"missing");
 						/* j<cc> over MOV EDX, 1, then SYSCALL, which leaves
 						 * RFLAGS in R11; the second has a NOP after the
 						 * compare. */
 						std::array<std::vector<std::uint8_t>, 2> code;
 						for (unsigned barrier = 0; barrier < 2U; ++barrier) {
-							push_compare_immediate(code[barrier], test,
-								width, reg, immediate);
+							if (form.registers)
+								push_compare_register(code[barrier], test,
+									width, reg, form.source);
+							else
+								push_compare_immediate(code[barrier], test,
+									width, reg, form.immediate);
 							if (barrier != 0U)
 								code[barrier].push_back(0x90);
 							code[barrier].insert(code[barrier].end(), {
@@ -6102,28 +6146,50 @@ void compare_branch_entries_run_both_instructions()
 								0x05, 0xba, 0x01, 0x00, 0x00, 0x00,
 								0x0f, 0x05});
 						}
-						for (const auto value : values) {
-							const auto joined = run(code[0], reg, value);
-							const auto separated = run(code[1], reg, value);
-							require((joined.first == entry) == answered &&
-									separated.first != entry,
-								"the builder joined a compare and branch "
-								"it should not have, or kept apart a pair "
-								"it should have joined");
-							if (joined.edge != separated.edge ||
-								joined.flags != separated.flags ||
-								joined.retired + 1U != separated.retired) {
-								char message[200];
-								std::snprintf(message, sizeof(message),
-									"a compare-and-branch entry ran "
-									"differently from its two instructions "
-									"(%s width %u condition %u register %u "
-									"value %#llx immediate %#x)",
-									test ? "TEST" : "CMP", width, condition,
-									reg,
-									static_cast<unsigned long long>(value),
-									immediate);
-								fail(message);
+						const bool two_values =
+							form.registers && form.source != reg;
+						for (std::size_t first = 0; first < values.size();
+							++first) {
+							for (std::size_t second = 0; second < values.size();
+								++second) {
+								/* An immediate or the register itself needs
+								 * one value; a second register four. */
+								if ((!two_values && second != 0U) ||
+									(two_values &&
+									 (first % 3U == 2U || second % 3U == 2U)))
+									continue;
+								const auto value = values[first];
+								const auto source_value = values[second];
+								const auto joined = run(code[0], reg, value,
+									form.source, source_value);
+								const auto separated = run(code[1], reg,
+									value, form.source, source_value);
+								require((joined.first == entry) == answered &&
+										separated.first != entry,
+									"the builder joined a compare and branch "
+									"it should not have, or kept apart a "
+									"pair it should have joined");
+								if (joined.edge != separated.edge ||
+									joined.flags != separated.flags ||
+									joined.retired + 1U != separated.retired) {
+									char message[224];
+									std::snprintf(message, sizeof(message),
+										"a compare-and-branch entry ran "
+										"differently from its two "
+										"instructions (%s width %u condition "
+										"%u register %u source %s%u value "
+										"%#llx source value %#llx immediate "
+										"%#x)",
+										test ? "TEST" : "CMP", width,
+										condition, reg,
+										form.registers ? "register " : "",
+										form.registers ? form.source : 0U,
+										static_cast<unsigned long long>(value),
+										static_cast<unsigned long long>(
+											source_value),
+										form.immediate);
+									fail(message);
+								}
 							}
 						}
 					}
@@ -6197,20 +6263,20 @@ void compare_branch_entries_keep_the_inline_contract()
 }
 
 /* A joined branch has no stream word, so the instruction behind a pair is
- * found past both: a baked PUSH that faults after two pairs reports itself
- * with four instructions retired. */
+ * found past both: a baked PUSH that faults after an immediate and a register
+ * pair reports itself with four instructions retired. */
 void a_stack_fault_behind_compare_branch_entries_finds_its_instruction()
 {
 	using namespace uml::cpu::x86_64;
 	TestMemory memory;
 	memory.load(0, {
-		0x83, 0xf8, 0x05,                   // cmp eax, 5
-		0x75, 0x0b,                         // jne 0x10
-		0xf7, 0xc1, 0x01, 0x00, 0x00, 0x00, // test ecx, 1
-		0x75, 0x03,                         // jne 0x10
-		0x53,                               // push rbx
-		0x0f, 0x05,                         // syscall
-		0x0f, 0x05,                         // syscall
+		0x83, 0xf8, 0x05, // cmp eax, 5
+		0x75, 0x07,       // jne 0x0c
+		0x85, 0xc9,       // test ecx, ecx
+		0x75, 0x03,       // jne 0x0c
+		0x53,             // push rbx
+		0x0f, 0x05,       // syscall
+		0x0f, 0x05,       // syscall
 	});
 	gadgets::Executor executor;
 	executor.prepare(memory, 1, 1, 1);
@@ -6220,16 +6286,15 @@ void a_stack_fault_behind_compare_branch_entries_finds_its_instruction()
 	const auto stream = block.program->native_stream();
 	require(stream.size() > 6U &&
 			stream[0] == compare_branch_entry(false, 32U, 5U, 0U) &&
-			stream[3] == compare_branch_entry(true, 32U, 5U, 1U),
+			stream[3] == compare_branch_entry(true, 32U, 5U, 1U, true),
 		"the pairs in front of the PUSH were not joined");
 	CpuState cpu{};
 	cpu.gpr(Register::rax) = 5;
-	cpu.gpr(Register::rcx) = 2;
 	cpu.gpr(Register::rsp) = 0x20008;
 	const auto result = gadgets::execute(
 		*block.program, cpu, memory, executor, 64);
 	require(result.event == uml::cpu::EngineEvent::memory_fault &&
-			result.retired_instructions == 4U && cpu.rip == 0x0d,
+			result.retired_instructions == 4U && cpu.rip == 0x09,
 		"a PUSH behind joined compares and branches faulted at the wrong "
 		"instruction");
 }
