@@ -10,6 +10,9 @@ _vcpu .req x20
 _context .req x21
 _stream .req x28
 _executed .req x29
+/* The run's software TLB, loaded as the run enters. A nested run enters
+ * with its own context, and the host frame gives this one back on return. */
+_tlb .req x22
 
 	.set Lx86_guest_memory_gadget, 0
 	.set Lx86_simd_status_gadget, 0
@@ -1108,8 +1111,7 @@ Lx86_segment_ready\@:
 	.endif
 	translation_key \size, \cross
 	ubfx x10, x7, #12, #UML_X86_64_TLB_INDEX_BITS
-	ldr x11, [_context, #UML_X86_64_CONTEXT_TLB]
-	add x11, x11, x10, lsl #5
+	add x11, _tlb, x10, lsl #5
 	.if \record_stack
 	str x11, [_context, #UML_X86_64_CONTEXT_STACK_ENTRY]
 	.endif
@@ -1187,8 +1189,7 @@ Lx86_tlb_write_code_owed\@:
 	x86_marks_guest_memory
 	translation_key \size, \cross
 	ubfx x10, x7, #12, #UML_X86_64_TLB_INDEX_BITS
-	ldr x11, [_context, #UML_X86_64_CONTEXT_TLB]
-	add x11, x11, x10, lsl #5
+	add x11, _tlb, x10, lsl #5
 	ldp x12, x13, [x11, #\entry_offset]
 	cmp x9, x12
 	b.eq Lx86_plain_tlb_hit\@
@@ -1529,6 +1530,7 @@ CSYM(uml_x86_64_gadget_enter):
 	mov _stream, x0
 	mov _vcpu, x1
 	mov _context, x2
+	ldr _tlb, [_context, #UML_X86_64_CONTEXT_TLB]
 	mov x9, sp
 	str x9, [_context, #UML_X86_64_CONTEXT_ENTRY_STACK]
 	/* Run the dispatch in the guest's rounding mode. */

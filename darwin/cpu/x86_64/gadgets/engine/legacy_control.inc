@@ -97,14 +97,15 @@ enter_gadget 64, ldr, x, str, x
  * faults. One that changed neither the mode nor the segment class and did
  * not transfer control continues in the stream; any other leaves, so the
  * runtime selects code for what it left. An IRET whose CS and SS stay as
- * they are takes its own gadget below and joins here otherwise, with x22
- * naming it. */
+ * they are takes its own gadget below and joins here otherwise. Either
+ * gadget's last stream word is the instruction's address. */
 gadget segment_instruction
-	ldr x22, [_stream], #8
+	add _stream, _stream, #8
 Lx86_segment_instruction:
 	x86_marks_guest_memory
 	bl uml_x86_64_gadget_materialize_flags
-	str x22, [_vcpu, #UML_X86_64_CPU_RIP]
+	ldur x8, [_stream, #-8]
+	str x8, [_vcpu, #UML_X86_64_CPU_RIP]
 	mov x0, _context
 	mov x1, _vcpu
 	helper_call uml_x86_64_gadget_run_segment_instruction
@@ -114,7 +115,7 @@ Lx86_segment_instruction:
 	cmp w0, #UML_X86_64_SEGMENT_TRAP
 	b.eq Lx86_segment_trap
 	cmp w0, #UML_X86_64_SEGMENT_MEMORY_FAULT
-	b.eq Lx86_memory_fault_at
+	b.eq Lx86_stream_word_fault
 	mov w0, #UML_X86_64_EVENT_SEGMENT_FAULT
 	b uml_x86_64_gadget_leave
 Lx86_segment_next:
@@ -124,6 +125,10 @@ Lx86_segment_leave:
 	x86_memory_order_boundary
 	mov w0, #UML_X86_64_EVENT_CONTINUED
 	b uml_x86_64_gadget_leave
+/* A fault of a gadget whose last stream word is its own address. */
+Lx86_stream_word_fault:
+	ldur x8, [_stream, #-8]
+	b Lx86_memory_fault_at
 Lx86_segment_trap:
 	add _executed, _executed, #1
 	x86_memory_order_boundary
@@ -133,7 +138,7 @@ Lx86_segment_trap:
 .macro iret_load width, load, host_register, destination, offset
 	ldr x7, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
 	add x7, x7, #((\width / 8) * \offset)
-	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8), 0, Lx86_memory_fault_at, cross=Lx86_iret_load_cross\@
+	translate 0, UML_X86_64_TLB_READ_PAGE, (\width / 8), 0, Lx86_stream_word_fault, cross=Lx86_iret_load_cross\@
 	\load \host_register\()\destination, [x7]
 	b Lx86_iret_load_done\@
 Lx86_iret_load_cross\@:
@@ -141,7 +146,7 @@ Lx86_iret_load_cross\@:
 	mov x1, x7
 	mov w2, #(\width / 8)
 	helper_call uml_x86_64_gadget_cross_page_load
-	cbz x1, Lx86_memory_fault_at
+	cbz x1, Lx86_stream_word_fault
 	mov x\destination, x0
 Lx86_iret_load_done\@:
 .endm
@@ -152,7 +157,7 @@ Lx86_iret_load_done\@:
  * popped only on a return to an outer privilege level. */
 .macro interrupt_return name, width, load, host_register, long_mode
 gadget interrupt_return_\name
-	ldr x22, [_stream], #8
+	add _stream, _stream, #8
 	ldr x23, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
 	iret_load \width, \load, \host_register, 19, 0
 	iret_load \width, \load, \host_register, 24, 1

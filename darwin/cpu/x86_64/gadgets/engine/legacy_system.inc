@@ -123,7 +123,7 @@ ascii_adjust aas, sub
 .purgem ascii_adjust
 
 gadget aam
-	ldp x23, x22, [_stream], #16
+	ldr x23, [_stream], #16
 	bl uml_x86_64_gadget_materialize_flags
 	and w23, w23, #0xff
 	cbz w23, Lx86_aam_divide_error
@@ -139,12 +139,13 @@ gadget aam
 	legacy_store_flags
 	retire_and_next
 Lx86_aam_divide_error:
-	str x22, [_vcpu, #UML_X86_64_CPU_RIP]
+	ldur x8, [_stream, #-8]
+	str x8, [_vcpu, #UML_X86_64_CPU_RIP]
 	mov w0, #UML_X86_64_EVENT_FLOATING_POINT_TRAP
 	b uml_x86_64_gadget_leave
 
 gadget aad
-	ldp x23, x22, [_stream], #16
+	ldr x23, [_stream], #16
 	bl uml_x86_64_gadget_materialize_flags
 	and w23, w23, #0xff
 	ldr x10, [_vcpu, #UML_X86_64_CPU_REGISTERS]
@@ -171,12 +172,13 @@ gadget salc
 	retire_and_next
 
 gadget into
-	ldr x22, [_stream], #8
+	add _stream, _stream, #8
 	bl uml_x86_64_gadget_materialize_flags
 	ldr x8, [_vcpu, #UML_X86_64_CPU_RFLAGS]
 	tbz x8, #11, Lx86_into_not_taken
 Lx86_into_taken:
-	str x22, [_vcpu, #UML_X86_64_CPU_RIP]
+	ldur x8, [_stream, #-8]
+	str x8, [_vcpu, #UML_X86_64_CPU_RIP]
 	add _executed, _executed, #1
 	x86_memory_order_boundary
 	mov w0, #UML_X86_64_EVENT_OVERFLOW
@@ -186,7 +188,7 @@ Lx86_into_not_taken:
 
 /* INT 4 raises the overflow trap whatever OF holds. */
 gadget int4
-	ldr x22, [_stream], #8
+	add _stream, _stream, #8
 	b Lx86_into_taken
 
 .purgem legacy_store_flags
@@ -234,8 +236,8 @@ Lx86_bound_loaded\@:
 bound_gadget 16
 bound_gadget 32
 Lx86_bound_range:
-	instruction_rip x22
-	str x22, [_vcpu, #UML_X86_64_CPU_RIP]
+	instruction_rip x8
+	str x8, [_vcpu, #UML_X86_64_CPU_RIP]
 	mov w0, #UML_X86_64_EVENT_BOUND_RANGE
 	b uml_x86_64_gadget_leave
 .purgem bound_gadget
