@@ -227,17 +227,44 @@ struct CameraTests {
         }
     }
 
-    @Test func theRowOffersACameraByTheLayoutsRuleAndTheIPadAppOnAMacNone() {
+    @Test func theRowOffersACameraByTheLayoutsRuleAndTheIPadAppOnAMacOrAVisionProNone() {
+        func offered(front: Bool, mac: Bool = false, vision: Bool = false) -> Bool {
+            CameraAvailability.isAvailable(hasFrontCamera: front, isiOSAppOnMac: mac, isiOSAppOnVision: vision)
+        }
         // Elsewhere: a built-in front camera, the rule the guest's layout follows.
-        #expect(CameraAvailability.isAvailable(hasFrontCamera: true, isiOSAppOnMac: false))
-        #expect(!CameraAvailability.isAvailable(hasFrontCamera: false, isiOSAppOnMac: false))
+        #expect(offered(front: true))
+        #expect(!offered(front: false))
         // The iPad app on a Mac is offered none, whatever the Mac reports. The
         // decision is one constant.
         #expect(!CameraAvailability.offeredToIOSAppOnMac)
-        #expect(!CameraAvailability.isAvailable(hasFrontCamera: true, isiOSAppOnMac: true))
-        #expect(!CameraAvailability.isAvailable(hasFrontCamera: false, isiOSAppOnMac: true))
+        #expect(!offered(front: true, mac: true))
+        #expect(!offered(front: false, mac: true))
+        // The iPad app on a Vision Pro is offered none either, by a constant of its own.
+        #expect(!CameraAvailability.offeredToIOSAppOnVision)
+        #expect(!offered(front: true, vision: true))
+        #expect(!offered(front: false, vision: true))
+        #expect(!offered(front: true, mac: true, vision: true))
         // An unavailable camera is not offered, and the person has no question to answer.
         #expect(!CameraAccess.unavailable.offered && !CameraAccess.unavailable.refuses)
+    }
+
+    @Test func theIPadAppOnAMacOrAVisionProLooksForNoCamera() {
+        var looks = 0
+        func front(_ found: Bool) -> Bool {
+            looks += 1
+            return found
+        }
+        func available(mac: Bool, vision: Bool) -> Bool {
+            CameraAvailability.isAvailable(hasFrontCamera: front(true), isiOSAppOnMac: mac, isiOSAppOnVision: vision)
+        }
+        // The calls are made outside `#expect`, which evaluates the arguments it quotes.
+        let onMac = available(mac: true, vision: false)
+        let onVision = available(mac: false, vision: true)
+        #expect(!onMac && !onVision)
+        #expect(looks == 0, "a host that is offered no camera has none discovered")
+        let elsewhere = available(mac: false, vision: false)
+        #expect(elsewhere)
+        #expect(looks == 1, "any other host looks once")
     }
 
     @Test func theGuestIsToldTheDeviceBodysTurnOnlyWhereTheHostOwnsTheRotation() {

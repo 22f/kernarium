@@ -29,6 +29,20 @@ final class FakeCamera: CameraAccessSource {
     }
 }
 
+/// The system's source with the question counted and never put: a test that
+/// plays another platform must not raise iOS's own prompt on the host it runs on.
+@MainActor
+final class AskCounting: CameraAccessSource {
+    private let source: SystemCameraSource
+    private(set) var asked = 0
+
+    init(_ source: SystemCameraSource) { self.source = source }
+
+    var access: CameraAccess { source.access }
+
+    func request(_ answered: @escaping @MainActor @Sendable (CameraAccess) -> Void) { asked += 1 }
+}
+
 /// Holds the Camera-is-off notice's stay after the guest closes its camera until
 /// a test ends it, and gives the model the clock a test moves by hand.
 @MainActor
@@ -713,15 +727,60 @@ struct CameraFlowTests {
         }
     }
 
-    @Test func theDeviceOffersACameraByTheLayoutsRuleAndTheIPadAppOnAMacNone() {
-        // The system's own answer for this process is a front camera and a Mac.
+    @Test func theDeviceOffersACameraByTheLayoutsRuleAndTheIPadAppOnAMacOrAVisionProNone() {
+        // The system's own answer for this process is a front camera, a Mac and a Vision Pro.
         let device = SystemCameraSource.hasCamera
-        let mac = ProcessInfo.processInfo.isiOSAppOnMac
-        #expect(device == CameraAvailability.isAvailable(hasFrontCamera: SystemCameraSource.hasFrontCamera, isiOSAppOnMac: mac))
-        if mac { #expect(!device) }
+        let info = ProcessInfo.processInfo
+        let mac = info.isiOSAppOnMac
+        let vision = info.isiOSAppOnVision
+        #expect(device == CameraAvailability.isAvailable(
+            hasFrontCamera: SystemCameraSource.hasFrontCamera, isiOSAppOnMac: mac, isiOSAppOnVision: vision))
+        if mac || vision { #expect(!device) }
         #expect(SystemCameraSource().access == (device ? SystemCameraSource.access(of: AVCaptureDevice.authorizationStatus(for: .video)) : .unavailable))
         // The preview's system mode asks the Simulator's own permission whatever it has.
         #expect(SystemCameraSource(requiresCamera: false).access != .unavailable)
+    }
+
+    @Test func theIPadAppOnAVisionProIsOfferedNoCameraAndNothingIsDiscoveredForIt() {
+        for (host, mac, vision) in [("Mac", true, false), ("Vision Pro", false, true)] {
+            var looks = 0
+            let platform = CameraPlatform(
+                isiOSAppOnMac: mac, isiOSAppOnVision: vision, hasFrontCamera: { looks += 1; return true })
+            #expect(SystemCameraSource(platform: platform).access == .unavailable, "\(host)")
+            #expect(!platform.hasCamera, "\(host)")
+            #expect(looks == 0, "\(host): no camera is looked for")
+        }
+        // Any other host with a front camera is offered it, after one look.
+        var looks = 0
+        let elsewhere = CameraPlatform(
+            isiOSAppOnMac: false, isiOSAppOnVision: false, hasFrontCamera: { looks += 1; return true })
+        #expect(elsewhere.hasCamera && looks == 1)
+        #expect(SystemCameraSource(platform: elsewhere).access != .unavailable)
+        let without = CameraPlatform(isiOSAppOnMac: false, isiOSAppOnVision: false, hasFrontCamera: { false })
+        #expect(SystemCameraSource(platform: without).access == .unavailable)
+    }
+
+    /// The row on a Vision Pro is the Mac's: off and disabled with the note, the
+    /// choice not turned on, no question put to iOS and no notice about turning it on.
+    @Test func theRowOfAnIPadAppOnAVisionProIsTheMacsAndAsksNothing() {
+        let note = [CameraWords.noCamera]
+        var rows: [String: [String]] = [:]
+        for (host, mac, vision) in [("Mac", true, false), ("Vision Pro", false, true)] {
+            let s = setup(controller: false)
+            let source = AskCounting(SystemCameraSource(platform: CameraPlatform(
+                isiOSAppOnMac: mac, isiOSAppOnVision: vision, hasFrontCamera: { true })))
+            s.model.camera = CameraController(model: s.model, source: source)
+            #expect(s.model.cameraAccess == .unavailable && !s.model.cameraAccess.offered, "\(host)")
+            #expect(CameraWords.notes(access: s.model.cameraAccess) == note, "\(host)")
+            s.model.setCamera(true)
+            s.model.camera?.refresh()
+            #expect(s.model.permissionPrompt == nil && source.asked == 0, "\(host): nothing is asked")
+            #expect(s.model.guest?.camera == false && !s.model.cameraShownOn && s.model.cameraMode == .blocked, "\(host)")
+            s.model.cameraCaptureChanged(.blockedInUse)
+            #expect(s.model.cameraNoticeKind == nil, "\(host): no row to turn on, so no notice")
+            rows[host] = CameraWords.notes(access: s.model.cameraAccess)
+        }
+        #expect(rows["Vision Pro"] == rows["Mac"])
     }
 
     @Test func theWordsAreThoseOfTheDesign() {
