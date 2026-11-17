@@ -59,7 +59,9 @@ rejects.
   `baked_tail.inc`. A group at the end moves no other bank group; the cold part
   starts on the first page after the bank's slots and moves by whole pages.
 - A call to a helper outside the engine is a `helper_call`, and a new helper
-  is appended to the island's list in `engine/common.inc`.
+  is appended to the island's list in `engine/common.inc`. The helper may
+  overwrite x0 to x17, so no gadget keeps a value in x2 to x17 across the call
+  (`x86-64-gadget-helper-clobbers`).
 
 ## Gadget banks
 
