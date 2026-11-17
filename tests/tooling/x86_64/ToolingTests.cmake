@@ -105,18 +105,16 @@ uml_add_tooling_test(
     LABELS cpu;x86-64
     TIMEOUT 60)
 
-# A helper call may clobber x0 to x17, so where the engine object is built, no
-# gadget reads one of x2 to x17 after a call before writing it again.
-set(_uml_x86_64_helper_clobbers_object)
+# A helper call may clobber x0 to x17, so no gadget reads one of x2 to x17 on
+# any path after a call before writing it again. The check reads the engine
+# object, so it exists where the object is built.
 if(TARGET uml_x86_64_gadgets AND CMAKE_OBJDUMP)
-    set(_uml_x86_64_helper_clobbers_object --objdump ${CMAKE_OBJDUMP} --object
-        uml_x86_64_gadgets
-        "$<FILTER:$<TARGET_OBJECTS:uml_x86_64_gadgets>,INCLUDE,/engine[.]S[.]o$>")
+    uml_add_tooling_test(
+        NAME x86-64-gadget-helper-clobbers
+        COMMAND ${Python3_EXECUTABLE} -B
+            ${PROJECT_SOURCE_DIR}/tests/tooling/x86_64/test_gadget_helper_clobbers.py
+            --objdump ${CMAKE_OBJDUMP} --object uml_x86_64_gadgets
+            "$<FILTER:$<TARGET_OBJECTS:uml_x86_64_gadgets>,INCLUDE,/engine[.]S[.]o$>"
+        LABELS cpu;x86-64
+        TIMEOUT 300)
 endif()
-uml_add_tooling_test(
-    NAME x86-64-gadget-helper-clobbers
-    COMMAND ${Python3_EXECUTABLE} -B
-        ${PROJECT_SOURCE_DIR}/tests/tooling/x86_64/test_gadget_helper_clobbers.py
-        ${_uml_x86_64_helper_clobbers_object}
-    LABELS cpu;x86-64
-    TIMEOUT 120)
