@@ -7,9 +7,9 @@ tombstone_pb.py reads a tombstone with it into the records the rows compare.
 These rows give the reader hand-built bytes of every kind of bad file, pin the
 field numbers the model uses (the table follows the tombstone.proto of the
 source tree the image is built from; the numbers here are written out by
-hand), and hold the model to the two false passes the text reader had: a
-mapping with the fault address in it that was dropped, and two mappings that
-differed by a trailing space and were one name.
+hand), and hold the model to the false passes found in it: a mapping with the
+fault address in it that was dropped, two mappings that differed by a trailing
+space and were one name, and the stacks of two threads that were one name.
 """
 
 __import__("sys").dont_write_bytecode = True
@@ -381,6 +381,78 @@ class ModelTest(unittest.TestCase):
             with self.subTest(name=name):
                 recs = digest(tombstone_of(load=load, stack_name=name))
                 self.assertEqual(field_of(recs, "tomb.regs", "x7").identity, shown or name)
+
+
+class StackTest(unittest.TestCase):
+    """A thread's stack is named by its thread id, which a run chooses: the
+    place is told from the other stacks by its position among them."""
+
+    LOADS = (0x700000000000, 0x710000000000, 0x720000000000)
+    NAMES = "[anon:stack_and_tls:{}]"
+
+    def run_of(self, load, first=7040, second=7041, at=(0x300000, 0x20), extra=(), swap=False):
+        """Two thread stacks, the lower named for thread `first` and the
+        higher for `second` (the other way round with `swap`), and x6 at the
+        offset `at[1]` into the mapping that starts `at[0]` above the load."""
+        low, high = (second, first) if swap else (first, second)
+        maps = [pb.mapping(load + 0x500000, load + 0x600000, self.NAMES.format(high))] + list(extra)
+        return digest(tombstone_of(load=load, stack_name=self.NAMES.format(low), extra_mappings=maps,
+                                   extra_threads=[pb.sibling_thread(first), pb.sibling_thread(second)],
+                                   registers={"x6": load + at[0] + at[1]}))
+
+    def test_a_stack_is_its_place_among_the_stacks_and_not_its_thread_id(self):
+        for first, second, swap in ((7040, 7041, False), (31, 9000, False), (7040, 7041, True)):
+            with self.subTest(first=first, second=second, swap=swap):
+                lower = field_of(self.run_of(self.LOADS[0], first, second, swap=swap), "tomb.regs", "x6")
+                upper = field_of(self.run_of(self.LOADS[1], first, second, at=(0x500000, 0x20), swap=swap),
+                                 "tomb.regs", "x6")
+                self.assertEqual(lower, Named(rec.STACK_IDENTITY, 0x20, 0, 2))
+                self.assertEqual(upper, Named(rec.STACK_IDENTITY, 0x20, 1, 2))
+
+    def test_the_only_stack_is_the_place_it_always_was(self):
+        recs = digest(tombstone_of(load=self.LOADS[0]))
+        self.assertEqual(field_of(recs, "tomb.regs", "x7"), Named(rec.STACK_IDENTITY, 0xf8c00))
+        self.assertEqual(field_of(recs, "tomb.regs", "x7"), Named(rec.STACK_IDENTITY, 0xf8c00, 0, 1))
+
+    def test_the_mappings_of_one_thread_id_are_one_stack_and_the_offset_is_from_the_lowest(self):
+        load = self.LOADS[0]
+        guard = pb.mapping(load + 0x500000, load + 0x501000, self.NAMES.format(7041), "---")
+        stack = pb.mapping(load + 0x501000, load + 0x600000, self.NAMES.format(7041))
+        recs = digest(tombstone_of(load=load, stack_name=self.NAMES.format(7040), extra_mappings=[guard, stack],
+                                   registers={"x6": load + 0x500010, "x7": load + 0x501010}))
+        self.assertEqual(field_of(recs, "tomb.regs", "x6"), Named(rec.STACK_IDENTITY, 0x10, 1, 2))
+        self.assertEqual(field_of(recs, "tomb.regs", "x7"), Named(rec.STACK_IDENTITY, 0x1010, 1, 2))
+
+    def test_the_main_threads_stack_and_other_names_are_not_thread_stacks(self):
+        load = self.LOADS[0]
+        for name in ("[anon:stack_and_tls:main]", "[anon:thread signal stack]", "[stack]"):
+            with self.subTest(name=name):
+                recs = digest(tombstone_of(load=load, stack_name=name))
+                self.assertEqual(field_of(recs, "tomb.regs", "x7"), Named(name, 0xf8c00))
+
+    def test_a_place_among_stacks_is_no_line_of_the_guest_program(self):
+        with self.assertRaises(rec.RecordError):
+            rec.encode_value("v", Named(rec.STACK_IDENTITY, 0x20, 1, 2))
+        self.assertEqual(rec.encode_value("v", Named("libc.so", 0x20)), ["m", "libc.so", "20"])
+
+    def test_the_two_stacks_of_the_reviewer_are_two_places(self):
+        """x6 is at +0x20 in the first of two thread stacks in the baselines
+        and at +0x20 in the second in the run with the component, the
+        mappings unchanged. Every stack was one name, so the move passed."""
+        off = [self.run_of(load, at=(0x300000, 0x20)) for load in self.LOADS]
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", off, self.run_of(self.LOADS[0], at=(0x500000, 0x20)))
+        self.assertIn("x6", str(caught.exception))
+        self.assertIn("#0/2", str(caught.exception))
+        self.assertIn("#1/2", str(caught.exception))
+        compared, masked = rows.compare("crash-memcpy", off, self.run_of(0x730000000000, at=(0x300000, 0x20)))
+        self.assertGreater(compared, 50)
+        self.assertEqual(masked, 0)
+
+    def test_the_thread_ids_a_run_chooses_do_not_matter(self):
+        off = [self.run_of(load, 7040 + n, 7041 + n) for n, load in enumerate(self.LOADS)]
+        compared, _ = rows.compare("crash-memcpy", off, self.run_of(0x730000000000, 100, 5000))
+        self.assertGreater(compared, 50)
 
 
 class ReviewTest(unittest.TestCase):

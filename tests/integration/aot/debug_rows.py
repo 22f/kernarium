@@ -30,7 +30,17 @@ the component) must record the field as such a pointer, into mappings of one
 shape, counted among the same number of them, and the baselines must record
 it alike. Equal counts are necessary, not sufficient, for the same set of
 mappings: a mapping that replaced another of its shape at the same place in
-the order is not told apart.
+the order is not told apart. A pointer into a thread's stack of a tombstone
+is the same kind of place (the stack's name holds its thread id, which the
+run chooses, so a stack is told from the others by its place among them): where
+more than one stack exists in any run it is judged by check_stack_field,
+which is as strict, and where a run has one stack only it is an ordinary
+place in a named mapping.
+
+A crash is judged by a tombstone that is new for its run: the guest's
+tombstone files are listed (name, size, modification time, SHA-256) before the
+program runs, and only a file that is not in that list as it was, whether it is
+a new name or a name whose file changed, can be the tombstone of the run.
 
 Every error the guest program can print is a line of its own that begins with
 FAIL; the runner rejects an output that holds FAIL anywhere, a line that is no
@@ -46,7 +56,7 @@ import hashlib
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import protowire
 import records
@@ -181,12 +191,56 @@ def transfer(shell: Callable[..., str], name: str) -> bytes:
     raise DebugFailure(f"{name}: the bytes that arrived are not the file the guest measured")
 
 
-def fetch_tombstone(shell: Callable[..., str], pid: int) -> bytes:
-    """The protobuf tombstone of the process `pid`, which has just died. The
-    reporter writes the other threads after the crashing one, so the file is
-    complete when its process is gone; the newest files are read until one is
-    whole and names the process, and a file that does not decode is retried
-    until the deadline and then reported."""
+class Listed(NamedTuple):
+    """One tombstone file as the guest lists it. Two listings of a name are
+    the same file only if all three are the same."""
+    size: int
+    mtime: int
+    sha256: str
+
+
+INVENTORY = ("for f in /data/tombstones/*.pb; do [ -e $f ] || continue; echo file=$f; echo size=$(wc -c < $f); "
+             "echo mtime=$(stat -c %Y $f); echo sha256=$(sha256sum $f); done; echo inventory-end")
+
+
+def inventory(shell: Callable[..., str]) -> dict[str, Listed]:
+    """The protobuf tombstones in the guest's tombstone directory, by name,
+    as the guest's own tools measure them. A listing that does not end, a
+    name that is no tombstone's, a number that is none or a name that is listed
+    twice is a failure."""
+    text = shell(INVENTORY, 90)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if lines.count("inventory-end") != 1 or lines[-1] != "inventory-end":
+        raise DebugFailure(f"the tombstone listing does not end once, and last:\n{text[:400]}")
+    lines = lines[:-1]
+    if len(lines) % 4:
+        raise DebugFailure(f"the tombstone listing is not whole files of four lines:\n{text[:400]}")
+    found: dict[str, Listed] = {}
+    for at in range(0, len(lines), 4):
+        name = re.fullmatch(r"file=(/data/tombstones/tombstone_[0-9]{2}\.pb)", lines[at])
+        size = re.fullmatch(r"size=([0-9]+)", lines[at + 1])
+        mtime = re.fullmatch(r"mtime=([0-9]+)", lines[at + 2])
+        digest = re.fullmatch(r"sha256=([0-9a-f]{64}) +/data/tombstones/tombstone_[0-9]{2}\.pb", lines[at + 3])
+        if not (name and size and mtime and digest) or name.group(1) in found:
+            raise DebugFailure("the tombstone listing has an entry that is none, or twice:\n"
+                               + "\n".join(lines[at:at + 4])[:400])
+        found[name.group(1)] = Listed(int(size.group(1)), int(mtime.group(1)), digest.group(1))
+    return found
+
+
+def fetch_tombstone(shell: Callable[..., str], pid: int, before: dict[str, Listed]) -> bytes:
+    """The protobuf tombstone of the process `pid`, which has just died, among
+    the files that are new since `before` (the listing taken before the
+    program ran). A tombstone of a process of the same number from before the
+    run is not the tombstone of this run: a file is a candidate only if its
+    name is not in `before` or its size, modification time or SHA-256 is not
+    what `before` has, and the row fails if no candidate is the process's. A
+    clock that stepped moves no file in or out of the candidates (a file is
+    compared with what it was, not with a time), and a name the reporter reuses
+    for a new file holds other bytes. The reporter writes the other threads
+    after the crashing one, so the file is whole when its process is gone; the
+    candidates are read until one is whole and names the process, and a file
+    that does not decode is retried until the deadline and then reported."""
     deadline = time.monotonic() + TOMBSTONE_SECONDS
     while time.monotonic() < deadline:
         if not shell("pidof crash_dump64 crash_dump32", 30).strip():
@@ -195,23 +249,37 @@ def fetch_tombstone(shell: Callable[..., str], pid: int) -> bytes:
     time.sleep(2)
     last = "no tombstone file"
     while time.monotonic() < deadline:
-        listing = shell("ls -t /data/tombstones/*.pb 2>/dev/null | head -8", 30)
-        for name in re.findall(r"^/data/tombstones/tombstone_[0-9]{2}\.pb$", listing, re.MULTILINE):
+        now = inventory(shell)
+        mine: list[tuple[str, bytes]] = []
+        for name in sorted(now):
+            if before.get(name) == now[name]:
+                last = f"{name} is the file that was there before the run"
+                continue
             data = transfer(shell, name)
+            if (len(data), hashlib.sha256(data).hexdigest()) != (now[name].size, now[name].sha256):
+                last = f"{name} changed while it was read"
+                continue
             try:
                 found = protowire.decode(data, "Tombstone", tombstone_pb.TABLES).values["pid"]
             except protowire.WireError as problem:
                 last = f"{name} does not decode: {problem}"
                 continue
             if found == pid:
-                return data
-            last = f"{name} is the tombstone of process {found}"
+                mine.append((name, data))
+            else:
+                last = f"{name} is the tombstone of process {found}"
+        if len(mine) > 1:
+            raise DebugFailure(f"{len(mine)} new tombstones name the process {pid}: " +
+                               ", ".join(name for name, _ in mine))
+        if mine:
+            return mine[0][1]
         time.sleep(2)
-    raise DebugFailure(f"no protobuf tombstone of process {pid} ({last})")
+    raise DebugFailure(f"no new protobuf tombstone of process {pid} ({last})")
 
 
 def run_mode(shell: Callable[..., str], mode: str) -> list[Record]:
     """One run of a mode; returns its records, checked for what it must show."""
+    before = inventory(shell) if mode in CRASH_STATUS else {}
     output = shell(command(mode), MODE_SECONDS[mode])
     lines = output.splitlines()
     status = [line for line in lines if line.startswith("rc=")]
@@ -244,7 +312,7 @@ def run_mode(shell: Callable[..., str], mode: str) -> list[Record]:
         raise DebugFailure(f"{mode}: the program did not run with address-space randomization off "
                            f"(it prints the record randomization once when it does):\n{output}")
     if mode in CRASH_STATUS:
-        record = digest_tombstone(fetch_tombstone(shell, int(pids[0][4:])))
+        record = digest_tombstone(fetch_tombstone(shell, int(pids[0][4:]), before))
         verify_tombstone(mode, record)
         return record
     verify_record(mode, printed)
@@ -326,6 +394,34 @@ def check_unnamed_field(mode: str, number: int, kind: str, name: str, values: li
                            f"mapping, whose place is never masked:\n{runs}")
 
 
+def check_stack_field(mode: str, number: int, kind: str, name: str, values: list[Value]) -> None:
+    """The rule for a pointer into one of several thread stacks of a
+    tombstone, as strict as check_unnamed_field: the stack's name holds its
+    thread id, so what tells it from the others is its place among them. The
+    runs compared must all record the field as a pointer into a thread stack,
+    among the same number of stacks, and the baselines must record it alike;
+    nothing is masked. Equal counts are necessary and not sufficient for the
+    same set of stacks. A field that points into the only stack of every run is
+    an ordinary place in a named mapping and does not come here."""
+    where = f"{mode} record {number} ({kind}) field {name}"
+    runs = "\n".join(f"  {'run with the component' if n == len(values) else f'run {n} without'}: "
+                     f"{records.describe(value)}" for n, value in enumerate(values, 1))
+    places = [value for value in values if isinstance(value, Named) and value.identity == records.STACK_IDENTITY]
+    if len(places) != len(values):
+        raise DebugFailure(f"{where}: ambiguous identity: {name} points into a thread stack in {len(places)} "
+                           f"of {len(values)} runs and is something else in the others, so no run is proved "
+                           f"the same place as another:\n{runs}")
+    counts = sorted({place.count for place in places})
+    if len(counts) > 1:
+        spelled = (f"{counts[0]} in one run and {counts[1]} in another" if len(counts) == 2 else
+                   f"{', '.join(map(str, counts[:-1]))} and {counts[-1]} in different runs")
+        raise DebugFailure(f"{where}: ambiguous identity: the thread stacks number {spelled}, so the place "
+                           f"{name} points to among them is not one place:\n{runs}")
+    if len(set(values[:-1])) > 1:
+        raise DebugFailure(f"{where}: the engine's own runs differ in {name}, a pointer into one of several "
+                           f"thread stacks, whose place is never masked:\n{runs}")
+
+
 def compare_fields(mode: str, off_runs: list[list[Record]], with_it: list[Record]) -> Comparison:
     """The records of the runs without the component and of the run with it,
     field by field and by name. A field is masked when two of the runs without
@@ -335,7 +431,7 @@ def compare_fields(mode: str, off_runs: list[list[Record]], with_it: list[Record
     differs and that the run with the component shows differently from every
     run without it, a text or any field of another kind that differs, a
     pointer into an unnamed mapping that cannot be proved the same place
-    (check_unnamed_field), or more than MAX_MASKED masked fields, fail the
+    (check_unnamed_field, check_stack_field), or more than MAX_MASKED masked fields, fail the
     row."""
     runs = off_runs + [with_it]
     if len({len(run) for run in runs}) != 1:
@@ -353,6 +449,9 @@ def compare_fields(mode: str, off_runs: list[list[Record]], with_it: list[Record
             where = f"{mode} record {number} ({first.kind}) field {name}"
             if any(isinstance(value, Unnamed) for value in values):
                 check_unnamed_field(mode, number, first.kind, name, values)
+            if any(isinstance(value, Named) and value.identity == records.STACK_IDENTITY and value.count > 1
+                   for value in values):
+                check_stack_field(mode, number, first.kind, name, values)
             if len(set(baselines)) == 1:
                 result.compared += 1
                 if baselines[0] != shown:

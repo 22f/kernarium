@@ -47,10 +47,16 @@ class RecordError(ValueError):
 
 @dataclass(frozen=True)
 class Named:
-    """A place in a named mapping: a file by its base name, or the mapping's
-    own name, and the offset in it."""
+    """A place in a named mapping: a file by its base name (a tombstone's by
+    its whole path), or the mapping's own name, and the offset in it. A
+    thread's stack in a tombstone is one of several mappings that carry one
+    name once its thread id is left out: which one it is among them (lowest
+    address first) and how many there are are part of the place (`ordinal` and
+    `count`); everything else is the only mapping of its name, 0 of 1."""
     identity: str
     offset: int
+    ordinal: int = 0
+    count: int = 1
 
 
 @dataclass(frozen=True)
@@ -83,7 +89,8 @@ def describe(value: Value) -> str:
     if isinstance(value, str):
         return repr(value)
     if isinstance(value, Named):
-        return f"{value.identity}+{value.offset:#x}"
+        among = f"#{value.ordinal}/{value.count}" if value.count != 1 else ""
+        return f"{value.identity}{among}+{value.offset:#x}"
     return str(value)
 
 
@@ -199,8 +206,8 @@ def encode_value(kind_type: str, value: Value) -> list[str]:
     if isinstance(value, Named):
         if kind_type != "v":
             raise RecordError(f"{value} is a place, not a {kind_type}")
-        if not 0 <= value.offset <= MASK64:
-            raise RecordError(f"{value} is no place")
+        if not 0 <= value.offset <= MASK64 or (value.ordinal, value.count) != (0, 1):
+            raise RecordError(f"{value} is no place the guest program prints")
         return ["m", escape(value.identity), f"{value.offset:x}"]
     if isinstance(value, Unnamed):
         if kind_type != "v":
@@ -333,6 +340,8 @@ Mapping = tuple[int, int, int, str, str]  # low, high, file offset, name, protec
 
 # A thread's stack is named by its thread id, which differs between runs.
 STACK_NAME = re.compile(r"\[anon:stack_and_tls:[0-9]+\]")
+# What a stack is called without its thread id.
+STACK_IDENTITY = "[anon:stack_and_tls:*]"
 
 
 def resolve(value: int, maps: list[Mapping], thread_stacks: bool = False, keep_paths: bool = False) -> Value:
@@ -343,12 +352,20 @@ def resolve(value: int, maps: list[Mapping], thread_stacks: bool = False, keep_p
     address order), how many there are, and the offset in it. The number
     itself where no mapping holds it. The place is the same place in two runs
     only if they agree on how many there are (compare checks that). With
-    `thread_stacks` a thread's stack (STACK_NAME) is named without its thread
-    id."""
+    `thread_stacks` a thread's stack (STACK_NAME) is called STACK_IDENTITY, not
+    by its thread id, and told from the other stacks by its place among them
+    (lowest address first; the mappings that carry one thread id are one
+    stack, and the offset is from the lowest of them) and how many there
+    are."""
     counts: dict[tuple[int, str], int] = {}
     for low, high, _, name, protection in maps:
         if not name:
             counts[(high - low, protection[:3])] = counts.get((high - low, protection[:3]), 0) + 1
+    stacks: dict[str, tuple[int, int]] = {}
+    if thread_stacks:
+        for low, _, _, name, _ in maps:
+            if STACK_NAME.fullmatch(name) and name not in stacks:
+                stacks[name] = (len(stacks), low)
     seen: dict[tuple[int, str], int] = {}
     for low, high, offset, name, protection in maps:
         shape = (high - low, protection[:3])
@@ -359,9 +376,10 @@ def resolve(value: int, maps: list[Mapping], thread_stacks: bool = False, keep_p
         if low <= value < high:
             if name.startswith("/"):
                 return Named(name if keep_paths else name.rsplit("/", 1)[1], offset + value - low)
+            if name in stacks:
+                place, lowest = stacks[name]
+                return Named(STACK_IDENTITY, value - lowest, place, len(stacks))
             if name:
-                if thread_stacks and STACK_NAME.fullmatch(name):
-                    name = "[anon:stack_and_tls:*]"
                 return Named(name, value - low)
             return Unnamed(high - low, protection[:3], ordinal, counts[shape], value - low)
     return value

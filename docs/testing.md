@@ -804,14 +804,16 @@ blocker in every one of them.
   that skipped scenarios or recorded no faults, a product arm without
   residency evidence) fails. `arm64-aot-debug-rows` does the same for the
   debug rows on scripted protobuf tombstones and records: a moved frame, a
-  register that changes only with the component and an incomplete mode fail,
-  and only a field that two runs of one engine already differ in is masked.
+  register that changes only with the component, an incomplete mode and a
+  tombstone that was there before the run fail, and only a field that two runs
+  of one engine already differ in is masked.
   `arm64-aot-tombstone-pb` holds the tombstone reader to the wire format
   (a truncated file, a length past its parent, an unknown wire type, a
   singular field twice, a field of the wrong wire type, trailing bytes: each
   fails), pins the field numbers the model reads, and holds the model to the
   crashing thread's registers, the mapping list (any order, no overlap, every
-  name by its exact bytes) and the pointer into the faulting mapping.
+  name by its exact bytes), the pointer into the faulting mapping and the
+  stacks of different threads.
   `arm64-aot-share-rows` does the same for the share rows' records and
   counter bounds. `arm64-aot-records` holds the records the guest debug
   program prints to their one reader: it decodes hand-written lines exactly
@@ -844,7 +846,9 @@ blocker in every one of them.
   its kind once, in order. A tombstone is read from the protobuf file the crash
   reporter writes beside the text one (`tombstone_NN.pb`, taken out of the
   guest in base64 with its size and SHA-256 checked, and chosen by the process
-  id the program's shell says first): a first-party strict reader of the wire
+  id the program's shell says first among the files that are new since a
+  listing of the tombstone directory taken before the program ran): a
+  first-party strict reader of the wire
   format (`protowire.py`) and a table of the field numbers the model reads
   (`tombstone_pb.py`; the table follows the `tombstone.proto` of the source tree
   the image is built from, and fields it does not list are skipped by wire type,
@@ -852,15 +856,30 @@ blocker in every one of them.
   register missing from the crashing thread, a mapping list that overlaps and a
   file that ends before its last field fail. A pointer is located against the
   file's own mapping list, put in address order, by the exact bytes of the
-  mapping's name. Nothing in the comparison reads text. Records are compared
+  mapping's name; a thread's stack, whose name holds its thread id, is told
+  from the other stacks by its place among them (lowest address first) and
+  how many there are. Nothing in the comparison reads text. Records are compared
   field by name, and the mask is a set of record kind and field pairs, never a
   position in text. A pointer into an unnamed
   mapping is proved over the whole record, field by name, or the row fails and
   the field is never masked: every run compared must record it as a pointer
   into mappings of one shape counted among the same number of them, and the
   baselines must record it alike (equal counts are necessary, not sufficient,
-  for the same set of mappings). Only a field that names nothing (a process id,
-  a random value) may differ between two runs of one engine, and few of them.
+  for the same set of mappings); a pointer into one of several thread stacks
+  is held to the same rule. Mappings that share a name otherwise (a signal
+  stack, a heap region) are told apart by the offset in the mapping only. Only
+  a field that names nothing (a process id, a random value) may differ between
+  two runs of one engine, and few of them. A listed file is new if its name was
+  not listed or its size, modification time or SHA-256 differs from the listing
+  before the run; files are compared with their earlier selves and not with
+  the clock, so a step of the guest's clock moves none in or out, a name the
+  reporter reuses holds other bytes, and a tombstone of an earlier process of
+  the same number never stands for this run (the row fails when no new file
+  names the process); a file written again with the same bytes in the same
+  second is not told from the old one. That a file is whole rests on the
+  reporter having exited, the guest's own size and SHA-256 of the file, and
+  its last field (which the reporter writes last) being there; a file written
+  in another order is not proved whole by it.
   Every error the program prints is a line of its own that begins with `FAIL`;
   the runner rejects an output with `FAIL` anywhere and a line that is not a
   whole record of the program's schema. The image is a user build, so

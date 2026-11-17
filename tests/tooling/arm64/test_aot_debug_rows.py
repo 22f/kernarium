@@ -447,6 +447,92 @@ class CompareTest(unittest.TestCase):
             extra_mappings=[pb.mapping(load + 0x700000, load + 0x701000, left)],
             registers={"x4": load + 0x700020, "x5": load + 0x200020}))
 
+    def stack_run(self, load, which=0, at=0x20, stacks=2, number=None):
+        """A run of two threads (ids 7040 and 7041) with `stacks` thread stacks
+        (named for ids 7040 on, one above the other) and x6 at +`at` in stack
+        `which`, or the number `number`. The process is the same in every
+        run, so that nothing of it is masked."""
+        extra = [pb.mapping(load + 0x500000 + 0x100000 * index, load + 0x600000 + 0x100000 * index,
+                            f"[anon:stack_and_tls:{7041 + index}]") for index in range(stacks - 1)]
+        threads = [pb.sibling_thread(7040), pb.sibling_thread(7041)]
+        base = (load + 0x300000, load + 0x500000, load + 0x600000)[which]
+        return rows.digest_tombstone(tombstone(
+            load=load, stack_name="[anon:stack_and_tls:7040]", extra_mappings=extra,
+            extra_threads=threads, registers={"x6": base + at if number is None else number}))
+
+    def stacks_off(self, **keywords):
+        return [self.stack_run(load, **keywords) for load in self.LOADS]
+
+    def test_a_pointer_moved_to_another_thread_stack_fails(self):
+        off = self.stacks_off()
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", off, self.stack_run(0x7ff1a8100000, which=1))
+        self.assertIn("x6", str(caught.exception))
+        compared, masked = rows.compare("crash-memcpy", off, self.stack_run(0x7ff1a8100000))
+        self.assertGreater(compared, 10)
+        self.assertEqual(masked, 0)
+
+    def test_a_pointer_moved_inside_a_thread_stack_fails(self):
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", self.stacks_off(), self.stack_run(0x7ff1a8100000, at=0x30))
+        self.assertIn("x6", str(caught.exception))
+
+    def test_a_pointer_into_one_of_several_stacks_is_never_masked(self):
+        off = [self.stack_run(self.LOADS[0], which=0), self.stack_run(self.LOADS[1], which=1),
+               self.stack_run(self.LOADS[2], which=0)]
+        for shown in (0, 1):
+            with self.subTest(shown=shown):
+                with self.assertRaises(rows.DebugFailure) as caught:
+                    rows.compare("crash-memcpy", off, self.stack_run(0x7ff1a8100000, which=shown))
+                self.assertIn("never masked", str(caught.exception))
+
+    def test_a_pointer_that_is_a_stack_in_some_runs_and_a_number_in_others_fails(self):
+        off = [self.stack_run(self.LOADS[0]), self.stack_run(self.LOADS[1], number=0),
+               self.stack_run(self.LOADS[2])]
+        for shown in (self.stack_run(0x7ff1a8100000), self.stack_run(0x7ff1a8100000, number=0)):
+            with self.assertRaises(rows.DebugFailure) as caught:
+                rows.compare("crash-memcpy", off, shown)
+            self.assertIn("ambiguous identity", str(caught.exception))
+
+    def test_stacks_that_number_otherwise_in_a_run_do_not_judge_a_pointer(self):
+        off = self.stacks_off()
+        for stacks in (1, 3):
+            with self.subTest(stacks=stacks):
+                with self.assertRaises(rows.DebugFailure) as caught:
+                    rows.compare("crash-memcpy", off, self.stack_run(0x7ff1a8100000, stacks=stacks))
+                self.assertIn("thread stacks number", str(caught.exception))
+
+    def test_baselines_that_disagree_on_the_number_of_stacks_do_not_judge_a_pointer(self):
+        off = [self.stack_run(self.LOADS[0]), self.stack_run(self.LOADS[1], stacks=3),
+               self.stack_run(self.LOADS[2])]
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", off, self.stack_run(0x7ff1a8100000))
+        self.assertIn("thread stacks number", str(caught.exception))
+
+    def test_a_register_that_is_sometimes_a_pointer_into_the_only_stack_is_judged_by_the_engines_values(self):
+        # crash-sibling's x4 to x6 are 0 in some runs of the engine and a
+        # pointer into the sibling's stack in others.
+        off = [self.stack_run(self.LOADS[0], stacks=1), self.stack_run(self.LOADS[1], stacks=1, number=0),
+               self.stack_run(self.LOADS[2], stacks=1)]
+        for shown in (self.stack_run(0x7ff1a8100000, stacks=1), self.stack_run(0x7ff1a8100000, stacks=1, number=0)):
+            compared, masked = rows.compare("crash-memcpy", off, shown)
+            self.assertEqual(masked, 1)
+            self.assertGreater(compared, 10)
+        with self.assertRaises(rows.DebugFailure):
+            rows.compare("crash-memcpy", off, self.stack_run(0x7ff1a8100000, stacks=1, at=0x30))
+
+    def test_the_thread_ids_of_two_runs_do_not_make_one_stack_another(self):
+        def run(load, ids):
+            extra = [pb.mapping(load + 0x500000, load + 0x600000, f"[anon:stack_and_tls:{ids[1]}]")]
+            return rows.digest_tombstone(tombstone(
+                load=load, stack_name=f"[anon:stack_and_tls:{ids[0]}]", extra_mappings=extra,
+                extra_threads=[pb.sibling_thread(ids[0]), pb.sibling_thread(ids[1])],
+                registers={"x6": load + 0x500020}))
+        off = [run(load, (7040 + n, 7041 + n)) for n, load in enumerate(self.LOADS)]
+        compared, masked = rows.compare("crash-memcpy", off, run(0x7ff1a8100000, (4000, 4001)))
+        self.assertGreater(compared, 10)
+        self.assertEqual(masked, 0)
+
     def test_names_that_hold_spaces_do_not_make_one_field_another(self):
         """The baselines' x4 and x7 names hold two spaces more or less: a
         name is bytes of one mapping and no field is told by its place among
@@ -638,13 +724,43 @@ class RunTest(unittest.TestCase):
         return (f"size={len(data)}\nsha256={hashlib.sha256(data).hexdigest()}  /data/tombstones/x\n"
                 f"b64={base64.b64encode(data).decode()}\n")
 
-    def crash_shell(self, files, pid=4242, mode="crash-memcpy", notice="Segmentation fault \n"):
-        """A guest whose newest tombstones are `files` (name -> bytes)."""
+    STAMP = 1700000000
+
+    def listing(self, files, times=None) -> str:
+        """What the guest prints for the tombstone listing: for each file of
+        `files` (name -> bytes) its name, size, modification time (`times`
+        by name, STAMP otherwise) and SHA-256 (the guest's `echo` of the
+        tool's output keeps one space between the digest and the name)."""
+        out = ""
+        for name, data in files.items():
+            path = f"/data/tombstones/{name}"
+            out += (f"file={path}\nsize={len(data)}\nmtime={(times or {}).get(name, self.STAMP)}\n"
+                    f"sha256={hashlib.sha256(data).hexdigest()} {path}\n")
+        return out + "inventory-end\n"
+
+    def crash_shell(self, files, pid=4242, mode="crash-memcpy", notice="Segmentation fault \n", before=None,
+                    times=None, before_times=None, served=None):
+        """A guest whose tombstone directory holds `before` (name -> bytes,
+        empty by default) when the listing is taken before the program runs
+        and `files` after it, with the modification times `before_times` and
+        `times`. `served` says what a transfer of a name returns, when that is
+        not the file itself."""
         printed = Wire.text([randomization(), Record("warm", (("sum", 1),))], notice + "rc=139\n", pid=pid)
-        listing = "".join(f"/data/tombstones/{name}\n" for name in files)
-        outputs = [(f"AOT_DEBUG_MODE={mode}", printed), ("pidof", ""), ("ls -t", listing)]
-        outputs += [(f"f=/data/tombstones/{name};", self.transfer_of(data)) for name, data in files.items()]
-        return self.shell(outputs)
+        outputs = [(f"AOT_DEBUG_MODE={mode}", printed), ("pidof", "")]
+        outputs += [(f"f=/data/tombstones/{name};", self.transfer_of((served or {}).get(name, data)))
+                    for name, data in files.items()]
+        base = self.shell(outputs)
+        listings = [self.listing(before or {}, before_times), self.listing(files, times)]
+        taken = []
+
+        def shell(command, timeout=60):
+            if "inventory-end" in command:
+                base.calls.append(command)
+                taken.append(command)
+                return listings[0] if len(taken) == 1 else listings[1]
+            return base(command, timeout)
+        shell.calls = base.calls
+        return shell
 
     def run_crash(self, shell, mode="crash-memcpy"):
         """run_mode with the waits made short: no sleeping, a deadline of a
@@ -673,6 +789,131 @@ class RunTest(unittest.TestCase):
             self.run_crash(shell)
         self.assertIn("process 4242", str(caught.exception))
 
+    def test_a_tombstone_of_an_earlier_process_of_the_same_number_is_not_this_runs(self):
+        # The process id comes round again: a report of an earlier process
+        # of that number is in the directory, and this crash left none.
+        old = tombstone(pid=4242, guard_page=True, registers={"x6": 0x7ff1ae500000 + 0x800020})
+        shell = self.crash_shell({"tombstone_03.pb": old}, before={"tombstone_03.pb": old})
+        with self.assertRaises(rows.DebugFailure) as caught:
+            self.run_crash(shell)
+        self.assertIn("no new protobuf tombstone of process 4242", str(caught.exception))
+        self.assertIn("was there before the run", str(caught.exception))
+
+    def test_the_new_file_is_chosen_beside_an_old_one_of_the_same_process_number(self):
+        old = tombstone(pid=4242, x13=1)
+        new = tombstone(pid=4242, x13=9)
+        shell = self.crash_shell({"tombstone_03.pb": old, "tombstone_04.pb": new}, before={"tombstone_03.pb": old})
+        record = self.run_crash(shell)
+        self.assertEqual(rows.digest_tombstone(new), record)
+        self.assertNotEqual(rows.digest_tombstone(old), record)
+
+    def test_a_name_the_reporter_reuses_holds_a_new_file(self):
+        old = tombstone(pid=4242, x13=1)
+        new = tombstone(pid=4242, x13=9)
+        self.assertEqual(len(old), len(new))
+        shell = self.crash_shell({"tombstone_03.pb": new}, before={"tombstone_03.pb": old})
+        self.assertEqual(rows.digest_tombstone(new), self.run_crash(shell))
+
+    def test_a_file_written_again_with_the_same_bytes_is_new_by_its_time(self):
+        data = tombstone(pid=4242)
+        shell = self.crash_shell({"tombstone_03.pb": data}, before={"tombstone_03.pb": data},
+                                 times={"tombstone_03.pb": self.STAMP + 1}, before_times={"tombstone_03.pb": self.STAMP})
+        self.assertEqual(rows.digest_tombstone(data), self.run_crash(shell))
+
+    def test_a_file_of_another_size_or_digest_is_a_changed_file_whatever_its_time(self):
+        old = tombstone(pid=4242, x13=1)
+        for label, new in (("another size", tombstone(pid=4242, extra=pb.text_field(1001, "more"))),
+                           ("the same size", tombstone(pid=4242, x13=9))):
+            with self.subTest(label):
+                shell = self.crash_shell({"tombstone_03.pb": new}, before={"tombstone_03.pb": old})
+                self.assertEqual(rows.digest_tombstone(new), self.run_crash(shell))
+
+    def test_a_name_listed_with_another_size_is_a_changed_file_whatever_its_digest_and_time(self):
+        # A digest that is the same makes a size that differs a listing no
+        # guest gives; the rule still says the file is not what it was.
+        data = tombstone(pid=4242)
+        shell = self.crash_shell({"tombstone_03.pb": data})
+        before = self.listing({"tombstone_03.pb": data}).replace(f"size={len(data)}", f"size={len(data) + 1}")
+        calls = []
+
+        def guest(command, timeout=60):
+            if "inventory-end" in command:
+                calls.append(command)
+                return before if len(calls) == 1 else self.listing({"tombstone_03.pb": data})
+            return shell(command, timeout)
+        self.assertEqual(rows.digest_tombstone(data), self.run_crash(guest))
+
+    def test_a_clock_that_steps_back_moves_no_file_in_or_out_of_the_new_ones(self):
+        old = tombstone(pid=4242, x13=1)
+        new = tombstone(pid=4242, x13=9)
+        # The new file is older by its time than the file that was there.
+        shell = self.crash_shell({"tombstone_03.pb": old, "tombstone_04.pb": new}, before={"tombstone_03.pb": old},
+                                 times={"tombstone_03.pb": self.STAMP, "tombstone_04.pb": 100},
+                                 before_times={"tombstone_03.pb": self.STAMP})
+        self.assertEqual(rows.digest_tombstone(new), self.run_crash(shell))
+        # An old file is not new because the clock says so: its listing is
+        # the one before.
+        shell = self.crash_shell({"tombstone_03.pb": old}, before={"tombstone_03.pb": old},
+                                 times={"tombstone_03.pb": self.STAMP}, before_times={"tombstone_03.pb": self.STAMP})
+        with self.assertRaises(rows.DebugFailure):
+            self.run_crash(shell)
+
+    def test_two_new_tombstones_of_the_process_are_no_one_tombstone(self):
+        shell = self.crash_shell({"tombstone_03.pb": tombstone(pid=4242, x13=1), "tombstone_04.pb": tombstone(pid=4242)})
+        with self.assertRaises(rows.DebugFailure) as caught:
+            self.run_crash(shell)
+        self.assertIn("2 new tombstones name the process 4242", str(caught.exception))
+
+    def test_a_file_that_is_not_the_one_listed_is_not_taken(self):
+        listed = tombstone(pid=4242, x13=1)
+        read = tombstone(pid=4242, x13=9)
+        shell = self.crash_shell({"tombstone_03.pb": listed}, served={"tombstone_03.pb": read})
+        with self.assertRaises(rows.DebugFailure) as caught:
+            self.run_crash(shell)
+        self.assertIn("changed while it was read", str(caught.exception))
+
+    def test_a_file_of_another_size_than_the_listing_says_is_not_taken(self):
+        data = tombstone(pid=4242)
+        shell = self.crash_shell({"tombstone_03.pb": data})
+        listing = self.listing({"tombstone_03.pb": data}).replace(f"size={len(data)}", f"size={len(data) + 1}")
+        calls = []
+
+        def lying(command, timeout=60):
+            if "inventory-end" in command:
+                calls.append(command)
+                return self.listing({}) if len(calls) == 1 else listing
+            return shell(command, timeout)
+        with self.assertRaises(rows.DebugFailure) as caught:
+            self.run_crash(lying)
+        self.assertIn("changed while it was read", str(caught.exception))
+
+    def test_the_listing_is_taken_before_the_program_runs_and_again_after_it(self):
+        shell = self.crash_shell({"tombstone_03.pb": tombstone(pid=4242)})
+        self.run_crash(shell)
+        order = ["listing" if "inventory-end" in call else "program" if "AOT_DEBUG_MODE=" in call else "other"
+                 for call in shell.calls]
+        self.assertEqual(order[:2], ["listing", "program"])
+        self.assertEqual(order.count("listing"), 2)
+        self.assertEqual(shell.calls[0], rows.INVENTORY)
+
+    def test_a_listing_that_is_not_whole_is_a_failure(self):
+        one = self.listing({"tombstone_03.pb": tombstone(pid=4242)})
+        lines = one.splitlines()
+        for label, text in (("nothing", ""), ("no end", "\n".join(lines[:-1]) + "\n"),
+                            ("a cut entry", "\n".join(lines[:2] + lines[-1:]) + "\n"),
+                            ("the same file twice", "\n".join(lines[:-1] * 2 + lines[-1:]) + "\n"),
+                            ("a name that is no tombstone's", one.replace("tombstone_03", "other")),
+                            ("a digest that is none", one.replace("sha256=", "sha256=0")),
+                            ("a time that is none", one.replace("mtime=", "mtime=x")),
+                            ("two ends", one + "inventory-end\n"),
+                            ("a line after the end", one + "file=/data/tombstones/tombstone_04.pb\n")):
+            with self.subTest(label):
+                with self.assertRaises(rows.DebugFailure):
+                    rows.inventory(self.shell([("inventory-end", text)]))
+
+    def test_an_empty_directory_is_an_empty_listing(self):
+        self.assertEqual(rows.inventory(self.shell([("inventory-end", "inventory-end\n")])), {})
+
     def test_a_tombstone_that_does_not_decode_is_reported_after_the_wait(self):
         shell = self.crash_shell({"tombstone_03.pb": tombstone(pid=4242)[:300]})
         with self.assertRaises(rows.DebugFailure) as caught:
@@ -685,31 +926,34 @@ class RunTest(unittest.TestCase):
         self.addCleanup(setattr, rows.time, "sleep", original)
         data = tombstone(pid=4242)
         bad = self.transfer_of(data).replace("size=", "size=1")
-        shell = self.shell([("pidof", ""), ("ls -t", "/data/tombstones/tombstone_03.pb\n"),
+        listed = self.listing({"tombstone_03.pb": data})
+        shell = self.shell([("pidof", ""), ("inventory-end", listed),
                             ("f=/data/tombstones/tombstone_03.pb;", bad)])
         with self.assertRaises(rows.DebugFailure) as caught:
-            rows.fetch_tombstone(shell, 4242)
+            rows.fetch_tombstone(shell, 4242, {})
         self.assertIn("not the file the guest measured", str(caught.exception))
         for broken in ("size=1\n", "", self.transfer_of(data).replace("sha256=", "sha256=00")):
-            shell = self.shell([("pidof", ""), ("ls -t", "/data/tombstones/tombstone_03.pb\n"),
+            shell = self.shell([("pidof", ""), ("inventory-end", listed),
                                 ("f=/data/tombstones/tombstone_03.pb;", broken)])
             with self.assertRaises(rows.DebugFailure):
-                rows.fetch_tombstone(shell, 4242)
+                rows.fetch_tombstone(shell, 4242, {})
 
     def test_the_shell_says_the_process_id_once_and_the_death_at_most_once(self):
         data = tombstone(pid=4242)
         base = Wire.text([randomization()], "Segmentation fault \nrc=139\n")
-        for label, text in (("no pid", base.replace("pid=4242\n", "")),
-                            ("two pids", "pid=1\n" + base),
-                            ("a pid that is no number", base.replace("pid=4242", "pid=x")),
-                            ("a death twice", base.replace("Segmentation fault \n", "Segmentation fault \n" * 2)),
-                            ("another notice", base.replace("Segmentation fault", "Killed"))):
+        for label, text, said in (("no pid", base.replace("pid=4242\n", ""), "process id once"),
+                                  ("two pids", "pid=1\n" + base, "process id once"),
+                                  ("a pid that is no number", base.replace("pid=4242", "pid=x"), "process id once"),
+                                  ("a death twice", base.replace("Segmentation fault \n", "Segmentation fault \n" * 2),
+                                   "death 2 times"),
+                                  ("another notice", base.replace("Segmentation fault", "Killed"), "not a whole record")):
             with self.subTest(label):
                 shell = self.shell([("AOT_DEBUG_MODE=crash-memcpy", text), ("pidof", ""),
-                                    ("ls -t", "/data/tombstones/tombstone_03.pb\n"),
+                                    ("inventory-end", self.listing({})),
                                     ("f=/data/tombstones/tombstone_03.pb;", self.transfer_of(data))])
-                with self.assertRaises(rows.DebugFailure):
+                with self.assertRaises(rows.DebugFailure) as caught:
                     self.run_crash(shell)
+                self.assertIn(said, str(caught.exception))
 
     def test_the_command_says_its_process_id_and_runs_the_program_in_place(self):
         command = rows.command("crash-abort")
