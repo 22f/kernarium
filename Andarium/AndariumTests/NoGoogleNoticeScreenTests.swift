@@ -10,9 +10,9 @@ import UIKit
 /// The notice that Android has no Google apps, on purpose, on the real
 /// screens in the application's window: the panel on the boot screen of a
 /// first start or the retry of one that did not finish, which the end of the
-/// boot takes away; the starts that never show it, whatever the installation
-/// has seen; and, where Send feedback is compiled in, the line at the top of
-/// its mail, which opens in place, closes, and is there again on the next sheet.
+/// boot takes away; the starts that never show it; and, where Send feedback is
+/// compiled in, the line at the top of its mail, which opens in place, closes,
+/// and is there again on the next sheet.
 /// A stub stands for the runtime, and the boot ends as the runtime ends it
 /// (`finishBoot`).
 ///
@@ -313,7 +313,8 @@ struct NoGoogleNoticeScreenTests {
         // Collapsed: the question, the first words and the Why, and the answer is not on the sheet.
         let label = try #require(open.accessibilityLabel)
         #expect(label.contains("That\u{2019}s on purpose.") && label.hasSuffix("Why"))
-        #expect(sheetView().flatMap { labelled(Self.reason, in: $0) } == nil)
+        #expect(sheetView().flatMap { labelled("Missing Google apps?", in: $0)?.accessibilityLabel?.contains(Self.reason) } != true,
+                "the answer was open before the tap")
         // The answer opens in place, and Send and the fields are still there.
         #expect(open.accessibilityActivate())
         let answer = await eventually { sheetView().flatMap { labelled("Missing Google apps?", in: $0)?.accessibilityLabel?.contains(Self.reason) } == true }
@@ -334,7 +335,8 @@ struct NoGoogleNoticeScreenTests {
         fixture.model.feedbackSheetOpen = true
         let back = await eventually { sheetView().flatMap { button("Missing Google apps?", in: $0) } != nil }
         #expect(back, "the line did not come back when the sheet opened again")
-        #expect(sheetView().flatMap { labelled(Self.reason, in: $0) } == nil, "the line came back open")
+        #expect(sheetView().flatMap { labelled("Missing Google apps?", in: $0)?.accessibilityLabel?.contains(Self.reason) } != true,
+                "the line came back open")
         fixture.model.feedbackSheetOpen = false
     }
 
