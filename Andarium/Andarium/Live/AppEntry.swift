@@ -173,6 +173,19 @@ struct AppEntry {
         let pointer = PointerPreference().launch(automated: !launch.isEmpty)
         model.pointerAsTouch = pointer.isOn
         model.pointerAsTouchDecidedByLaunch = !pointer.keepsChanges
+        // Settings' "When hot" is the person's last choice, unless the launch
+        // is a harness's and decides for its run alone (`HeatLimitPreference`);
+        // an App Store build has no launch environment and so keeps the
+        // person's own.
+        #if APP_STORE
+        let heat = HeatLimitPreference().launch(automated: false)
+        #else
+        let heat = HeatLimitPreference().launch(
+            automated: !launch.isEmpty || ThermalOverride.stated(in: environment) != nil,
+            stated: HeatLimitLaunch.stated(in: environment))
+        #endif
+        model.heatLimitOn = heat.isOn
+        model.heatLimitDecidedByLaunch = !heat.keepsChanges
         #if !APP_STORE
         model.printsStatistics = launch.statistics == true
         // The JIT row follows the person's last choice, unless the launch is a
@@ -292,20 +305,33 @@ struct AppEntry {
         // The launch decides the setting for its own run.
         model.pointerAsTouch = PointerPreference().launch(automated: true).isOn
         model.pointerAsTouchDecidedByLaunch = true
+        let heat = HeatLimitPreference().launch(automated: true, stated: HeatLimitLaunch.stated(in: environment))
+        model.heatLimitOn = heat.isOn
+        model.heatLimitDecidedByLaunch = true
         // The side keys play their feedback here too: a launch that keeps the
         // phone silent does so on this path as on the ordinary one.
         model.hapticsSilencedByLaunch = HapticsLaunch.silences(in: environment)
         let probe = InputProbe()
         model.inputProbe = probe
+        // A probe that states iOS's thermal state runs the thermal session
+        // against a stand-in for the guest's HAL, which says what Android
+        // would be told in the probe's log.
+        let thermalStated = ThermalOverride.stated(in: environment) != nil
+        let hal = thermalStated
+            ? ThermalProbeHal { [weak probe] severity in
+                DispatchQueue.main.async { MainActor.assumeIsolated { probe?.record("heat told \(severity)") } }
+            } : nil
         let runtime = LiveRuntime(
             model: model, storage: storage, marker: PauseMarker(url: directory.appendingPathComponent("pause.json")),
             keyboardMouse: KeyboardMouse.probe(
                 probe, supportsMouse: host.supportsPointer,
                 guestRegisters: InputProbeLaunch.guestRegisters(in: environment)
-            ) { [weak model] wanted in model?.pointerLockWanted = wanted })
+            ) { [weak model] wanted in model?.pointerLockWanted = wanted },
+            thermalOpener: hal)
         model.driver = runtime
         model.phase = .running(.normal)
         runtime.beginInputProbe()
+        if thermalStated { runtime.beginThermalProbe() }
         #if FEEDBACK_MAIL
         if FeedbackProbe.requested(in: environment) { FeedbackProbe.install(on: model) }
         #endif

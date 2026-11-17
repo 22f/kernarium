@@ -54,6 +54,9 @@ final class StubDriver: RuntimeDriver {
     /// The denials of the network the model told the driver, in order; nil is none.
     private(set) var networkNotices: [NetworkDenial?] = []
     func setNetworkNotice(_ denial: NetworkDenial?) { networkNotices.append(denial) }
+    /// What Settings' "When hot" told the driver, in order.
+    private(set) var heatLimits: [Bool] = []
+    func setHeatLimit(_ on: Bool) { heatLimits.append(on) }
     /// What the Haptics switch told the driver.
     var haptics = true
     func setHaptics(_ on: Bool) { haptics = on }

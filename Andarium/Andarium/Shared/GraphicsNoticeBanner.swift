@@ -54,6 +54,8 @@ struct GraphicsNoticeBanner: View {
 /// tappable.
 struct SessionNoticesOverlay: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.heatQuestionPatience) private var patience
+    @Environment(\.alertIsUp) private var alertIsUp
 
     /// The side padding every banner draws itself with.
     private static let bannerInset: CGFloat = 24
@@ -78,6 +80,30 @@ struct SessionNoticesOverlay: View {
         .animation(.easeInOut(duration: 0.2), value: model.graphicsNotice.isShowing)
         .animation(.easeInOut(duration: 0.2), value: model.thermalNotice.isShowing)
         .animation(.easeInOut(duration: 0.2), value: model.cameraNoticeKind)
+        // The thermal notice's words ask before the frame rate limit goes. The
+        // alert is the overlay's, not the notice's, so a notice that changes
+        // its layout does not take it down.
+        .alert(HeatLimitAlert.title, isPresented: Binding(
+            get: { model.askingToTurnOffHeatLimit },
+            set: { if !$0 { model.cancelTurnOffHeatLimit() } })
+        ) {
+            Button(HeatLimitAlert.turnOff, role: .destructive) { model.confirmTurnOffHeatLimit() }
+            Button("Cancel", role: .cancel) { model.cancelTurnOffHeatLimit() }
+        } message: {
+            Text(HeatLimitAlert.message.keepingTogether)
+        }
+        .task(id: model.askingToTurnOffHeatLimit) { await endQuestionWithoutAlert() }
+    }
+
+    /// UIKit can refuse an alert while a sheet is coming or going, and SwiftUI
+    /// does not ask again: a question whose alert has not come within
+    /// `patience` ends as Cancel does, so the notice goes back to its timer,
+    /// the guest has the keys again and the words ask again. The task is the
+    /// question's own: it ends with it.
+    private func endQuestionWithoutAlert() async {
+        guard model.askingToTurnOffHeatLimit else { return }
+        do { try await Task.sleep(for: patience) } catch { return }
+        if model.askingToTurnOffHeatLimit && !alertIsUp() { model.cancelTurnOffHeatLimit() }
     }
 
     private func column(denial: NetworkDenial?) -> some View {
@@ -94,8 +120,10 @@ struct SessionNoticesOverlay: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
             if model.thermalNotice.isShowing {
-                ThermalNoticeBanner { model.dismissThermalNotice() }
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                ThermalNoticeBanner(
+                    ask: { model.askToTurnOffHeatLimit() }, dismiss: { model.dismissThermalNotice() }
+                )
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
             if let notice = model.cameraNoticeKind {
                 CameraNoticeBanner(notice: notice) { model.dismissCameraNotice() }
@@ -103,4 +131,19 @@ struct SessionNoticesOverlay: View {
             }
         }
     }
+}
+
+/// The words of the alert that asks before the frame rate limit goes.
+enum HeatLimitAlert {
+    static let title = String(localized: "Turn off the frame rate limit?")
+    static let message = String(
+        localized: "This device gets hotter and the battery drains faster. iOS may dim the screen, slow everything down or close Andarium. You can turn it back on in Settings, under Performance.")
+    static let turnOff = String(localized: "Turn Off")
+}
+
+extension EnvironmentValues {
+    /// How long the heat question waits for its alert before it ends.
+    @Entry var heatQuestionPatience: Duration = .seconds(4)
+    /// Whether UIKit shows an alert now; a hosted test says what it needs.
+    @Entry var alertIsUp: @MainActor () -> Bool = { PresentedAlert.isUp }
 }
