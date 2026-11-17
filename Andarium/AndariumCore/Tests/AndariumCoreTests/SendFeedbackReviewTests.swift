@@ -152,4 +152,34 @@ struct SendFeedbackReviewTests {
         let odd = try SendFeedbackArchive.open(SendFeedbackMemoryBytes(SyntheticZip(entries, comment: signature).data()))
         #expect(odd.listing.entries.map(\.name) == ["real.txt"])
     }
+
+    // MARK: C4 the tree is built from the structural name
+
+    @Test func aLongFolderNameChangesNeitherTheHierarchyNorTheFile() throws {
+        let long = String(repeating: "x", count: 200)
+        let archive = try reader(SendFeedbackMemoryBytes(SyntheticZip([
+            .stored("folder/\(long)/real.txt", Data("private".utf8)),
+        ]).data()))
+        // "folder" holds one folder and nothing else, so the two are one row, as Files shows a chain.
+        let top = archive.tree.level(at: "")
+        let chain = try #require(top.folders.first)
+        #expect(top.folders.count == 1 && top.files.isEmpty)
+        #expect(chain.path == "folder/\(long)", "the hierarchy is the archive's")
+        #expect(chain.label == "folder/" + String(repeating: "x", count: SendFeedbackArchiveLimits.maxNameCharacters) + "\u{2026}",
+                "only what is drawn is shortened")
+        let inside = archive.tree.level(at: "folder")
+        #expect(inside.files.isEmpty && inside.folders.map(\.path) == ["folder/\(long)"])
+        let deepest = archive.tree.level(at: chain.path)
+        #expect(deepest.files.map(\.label) == ["real.txt"] && deepest.files[0].entry.id == 0)
+    }
+
+    // MARK: C6 the parser reads a name only up to the bound
+
+    @Test func theParserKeepsOfANameOnlyWhatTheBoundLetsBeRead() throws {
+        let long = String(repeating: "n", count: 5_000) + "/"
+        let archive = try SendFeedbackArchive.open(SendFeedbackMemoryBytes(SyntheticZip([.stored(long, Data())]).data()))
+        let entry = archive.listing.entries[0]
+        #expect(entry.path.utf8.count == SendFeedbackArchiveLimits.maxNameBytes, "the name was read to the bound and no further")
+        #expect(entry.isFolder, "a name that is cut is still told by its last byte")
+    }
 }

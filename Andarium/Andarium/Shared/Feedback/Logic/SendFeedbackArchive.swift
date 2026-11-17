@@ -65,6 +65,9 @@ nonisolated struct SendFeedbackArchiveEntry: Hashable, Sendable, Identifiable {
     let id: Int
     /// The name for the screen: decoded as UTF-8 with what is not text replaced, cut to a length, and never used as a path.
     let name: String
+    /// The name the tree is built from: the whole of what the bound lets be read of it (`maxNameBytes`), with what
+    /// is not text replaced, and not shortened to what a row can hold. Never a path of the file system.
+    let path: String
     let isFolder: Bool
     /// The size the directory declares, which the bytes are read against.
     let size: UInt64
@@ -202,7 +205,7 @@ nonisolated struct SendFeedbackArchive: Sendable {
             problem = .damaged
         }
         return SendFeedbackArchiveEntry(
-            id: id, name: name, isFolder: isFolder, size: size, compressedSize: compressed, method: method,
+            id: id, name: name, path: SendFeedbackArchiveNames.structural(rawName), isFolder: isFolder, size: size, compressedSize: compressed, method: method,
             headerOffset: headerOffset, problem: isFolder ? nil : problem)
     }
 
@@ -240,6 +243,21 @@ nonisolated enum SendFeedbackArchiveNames {
     /// How many bytes of a name that is `nameLength` bytes long are read: no more than the bound, whatever the record says.
     static func bytesRead(nameLength: Int) -> Int {
         min(max(0, nameLength), SendFeedbackArchiveLimits.maxNameBytes)
+    }
+
+    /// The name as the tree builds from it: what was read of it (at most `maxNameBytes`), decoded, with what is not
+    /// text replaced. It is not shortened: the hierarchy is the archive's, and only what is drawn is made to fit.
+    static func structural(_ raw: Data) -> String {
+        String(String.UnicodeScalarView(String(decoding: raw, as: UTF8.self).unicodeScalars.map { scalar in
+            SendFeedbackNames.isControl(scalar) ? "\u{FFFD}" : scalar
+        }))
+    }
+
+    /// A part of a name as a row draws it: cut to what a row holds, with an ellipsis where it was.
+    static func shortened(_ part: String) -> String {
+        let scalars = part.unicodeScalars
+        guard scalars.count > SendFeedbackArchiveLimits.maxNameCharacters else { return part }
+        return String(String.UnicodeScalarView(scalars.prefix(SendFeedbackArchiveLimits.maxNameCharacters))) + "\u{2026}"
     }
 
     static func display(_ raw: Data, cut: Bool) -> String {

@@ -45,7 +45,7 @@ nonisolated struct SendFeedbackArchiveTree: Sendable {
     init(entries: [SendFeedbackArchiveEntry]) {
         self.entries = entries
         for (index, entry) in entries.enumerated() {
-            let names = entry.name.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+            let names = entry.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
             if entry.isFolder {
                 _ = makeChain(names)
                 continue
@@ -81,10 +81,10 @@ nonisolated struct SendFeedbackArchiveTree: Sendable {
         guard let node = nodes[path] else { return Level(folders: [], files: []) }
         let folders = node.folders.map { name -> Folder in
             var at = path.isEmpty ? name : path + "/" + name
-            var label = name
+            var label = SendFeedbackArchiveNames.shortened(name)
             while let inner = nodes[at], inner.files.isEmpty, inner.folders.count == 1 {
                 at += "/" + inner.folders[0]
-                label += "/" + inner.folders[0]
+                label += "/" + SendFeedbackArchiveNames.shortened(inner.folders[0])
             }
             let found = nodes[at]!
             return Folder(path: at, label: label, items: found.items, bytes: found.bytes)
@@ -92,8 +92,8 @@ nonisolated struct SendFeedbackArchiveTree: Sendable {
         .sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
         let files = node.files.map { index -> File in
             let entry = entries[index]
-            let last = entry.name.split(separator: "/", omittingEmptySubsequences: true).last.map(String.init) ?? entry.name
-            return File(entry: entry, label: last)
+            let last = entry.path.split(separator: "/", omittingEmptySubsequences: true).last.map(String.init) ?? entry.path
+            return File(entry: entry, label: SendFeedbackArchiveNames.shortened(last))
         }
         .sorted {
             let order = $0.label.localizedStandardCompare($1.label)

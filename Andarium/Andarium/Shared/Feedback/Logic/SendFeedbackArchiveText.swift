@@ -250,7 +250,7 @@ actor SendFeedbackArchiveReader {
         let location = try archive.location(of: entry)
         let stream = SendFeedbackEntryStream(location)
         let head = try stream.read(at: 0, count: SendFeedbackArchiveLimits.sniffBytes)
-        if let format = SendFeedbackPicture.format(named: entry.name, head: head) {
+        if let format = SendFeedbackPicture.format(named: entry.path, head: head) {
             return entry.size <= UInt64(SendFeedbackArchiveLimits.maxWholeEntryBytes) ? .picture(format) : .notShown(.pictureRefused)
         }
         if SendFeedbackText.looksLikeArchive(head) {

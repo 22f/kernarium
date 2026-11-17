@@ -181,7 +181,7 @@ struct SendFeedbackFolderPage: View {
             try? await Task.sleep(for: .milliseconds(450))
             if let folder = level.folders.first(where: { target == $0.path || target.hasPrefix($0.path + "/") }) {
                 auto = .folder(folder)
-            } else if let file = level.files.first(where: { $0.entry.name == target }) {
+            } else if let file = level.files.first(where: { $0.entry.path == target }) {
                 auto = .entry(file)
             }
         }
