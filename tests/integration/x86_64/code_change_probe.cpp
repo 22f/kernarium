@@ -1154,17 +1154,20 @@ void case_alias_kernel_write(bool untouched_w)
 /* process_vm_writev(2): the kernel stores into another process's memory,
  * so no translated store sees it. A second process maps the file writable
  * and not as code (the first maps it executable and runs it), and a third
- * writes the second's page. The second's page is untouched when the first
- * write reaches it, so its address space has no entry for it yet; the later
- * writes find it present. */
+ * writes the second's page. The second has touched the page when `touched`,
+ * so its address space holds an entry for it and the write names the frame;
+ * otherwise the kernel fills the entry at a fault the host never sees, the
+ * write names no frame, and it is published to every address space as a
+ * change of the whole space. */
 struct IoVec final {
 	word base;
 	word length;
 };
 
-void case_alias_remote_write()
+void case_alias_remote_write(bool touched)
 {
-	const char *name = "alias-remote-write";
+	const char *name = touched ? "alias-remote-write" :
+		"alias-remote-write-untouched";
 	auto alias = new_alias(false, 1, callee_near);
 	expect(name, 1, call_caller(alias.x));
 	int to_target[2];
@@ -1181,15 +1184,17 @@ void case_alias_remote_write()
 		leave(4);
 	}
 	if (target == 0) {
-		/* Only a data view of the frame: the executable one goes, and the
-		 * writable one is a mapping nothing has touched. */
+		/* Only a data view of the frame: the executable one goes. */
 		raw_syscall(nr_munmap, reinterpret_cast<long>(alias.x),
 			alias.pages * page);
 		auto *mapped = map_file(alias.fd, alias.pages, prot_read | prot_write);
-		/* Its own store puts the page in this process's address space, as
-		 * the process that a debugger writes into has touched it. */
-		volatile unsigned char *touch = mapped + callee_near + 8;
-		*touch = *touch;
+		if (touched) {
+			/* Its own store puts the page in this process's address
+			 * space, as the process that a debugger writes into has
+			 * touched it. */
+			volatile unsigned char *touch = mapped + callee_near + 8;
+			*touch = *touch;
+		}
 		const word view = reinterpret_cast<word>(mapped);
 		raw_syscall(nr_write, from_target[1], reinterpret_cast<long>(&view),
 			sizeof(view));
@@ -1229,7 +1234,8 @@ void case_alias_remote_write()
 		raw_syscall(nr_write, to_writer[1], reinterpret_cast<long>(&command), 1);
 		char reply = 0;
 		raw_syscall(nr_read, from_writer[0], reinterpret_cast<long>(&reply), 1);
-		expect("alias-remote-write-done", 1, reply);
+		expect(touched ? "alias-remote-write-done" :
+			"alias-remote-write-untouched-done", 1, reply);
 		expect(name, value, call_caller(alias.x));
 	}
 	unsigned char leave_command = 0;
@@ -1240,7 +1246,8 @@ void case_alias_remote_write()
 	for (const long child : children) {
 		int status = 0;
 		raw_syscall(nr_wait4, child, reinterpret_cast<long>(&status), 0, 0);
-		expect("alias-remote-write-exit", 0, status);
+		expect(touched ? "alias-remote-write-exit" :
+			"alias-remote-write-untouched-exit", 0, status);
 	}
 }
 
@@ -1436,7 +1443,8 @@ int probe_main()
 	case_alias_unmap_remap();
 	case_alias_kernel_write(false);
 	case_alias_kernel_write(true);
-	case_alias_remote_write();
+	case_alias_remote_write(true);
+	case_alias_remote_write(false);
 	case_alias_running_block();
 	case_alias_two_exec_mappings();
 	case_alias_rwx_plus_rx();
