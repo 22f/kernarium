@@ -718,11 +718,18 @@ void test_a_publication_through_a_view_that_cannot_execute_moves_the_stamp()
 		after.epoch == before.epoch + 2);
 
 	/* The second page is mapped by nobody as code: publishing it moves no
-	 * stamp, the first page's included. */
+	 * stamp, the first page's included, and makes no record for it (the
+	 * lookup of a view that cannot execute allocates nothing). */
+	uml::memory::testing::reset_allocation_attempt_counts();
 	require(darwin_uml_static_vm_activate(writer) == 0);
 	require(darwin_uml_static_vm_synchronize_code(view + page) == 0);
 	require(darwin_uml_static_vm_invalidate_code_generation(writer,
 		view + page, page) == 0);
+	require(uml::memory::testing::allocation_attempt_count(
+		uml::memory::testing::AllocationSite::records) == 0 &&
+		uml::memory::testing::allocation_attempt_count(
+		uml::memory::testing::AllocationSite::code_record) == 0,
+		"publishing a frame no executable mapping holds made a record");
 	require(darwin_uml_static_vm_code_page_stamp(handle, &after) == 0);
 	require(after.version == before.version + 2 &&
 		after.epoch == before.epoch + 2);
