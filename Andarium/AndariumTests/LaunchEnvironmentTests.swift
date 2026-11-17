@@ -115,6 +115,28 @@ struct LaunchEnvironmentTests {
         }
     }
 
+    /// A UI test's input-probe launch builds its model on a path of its own.
+    /// It is an automated run too, and the side keys it opens must stay as
+    /// silent as the ordinary launch's: both flags together.
+    @MainActor
+    @Test func anInputProbeLaunchAppliesTheSilentPhoneToo() {
+        let entry = AppEntry.fromArguments()
+        let both = entry.makeModel(environment: ["ANDARIUM_INPUT_PROBE": "1", "ANDARIUM_HAPTICS": "0"])
+        #expect(both.inputProbe != nil, "the probe's model, not the ordinary launch's")
+        #expect(both.hapticsSilencedByLaunch)
+        #expect(!both.interfaceFeedbackPlays)
+        #expect(both.hapticsOn)
+        // The probe alone silences nothing.
+        for environment in [["ANDARIUM_INPUT_PROBE": "1"], ["ANDARIUM_INPUT_PROBE": "1", "ANDARIUM_HAPTICS": "1"]] {
+            let probe = entry.makeModel(environment: environment)
+            #expect(probe.inputProbe != nil)
+            #expect(!probe.hapticsSilencedByLaunch)
+            #expect(probe.interfaceFeedbackPlays)
+        }
+        // And the silent phone alone is not the probe.
+        #expect(entry.makeModel(environment: ["ANDARIUM_HAPTICS": "0"]).inputProbe == nil)
+    }
+
     @Test func kernariumsBootModeAsksForARecoveryStartOnly() {
         #expect(LaunchOverrides(environment: ["KERNARIUM_ANDROID_BOOT_MODE": "recovery"], processorCount: 4).start == .recovery)
         #expect(LaunchOverrides(environment: ["KERNARIUM_ANDROID_BOOT_MODE": "normal"], processorCount: 4).start == nil)
