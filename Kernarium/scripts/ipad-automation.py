@@ -27,7 +27,9 @@ the runner starts and leaves the prompt on screen. The host targets
 com.imxieyi.Kernarium unless --bundle names another application, such as
 com.apple.springboard. A `launch` of Andarium (com.imxieyi.andarium) keeps the
 phone silent by stating ANDARIUM_HAPTICS=0; `launch --haptics` leaves that out
-for a run that tests haptics.
+for a run that tests haptics. `activate` of an Andarium that is not running is
+refused, since the host starts it with no environment: use `launch`
+(`activate --haptics` starts it for a run that tests haptics).
 
 A coordinate tap or drag names points as offsets from the origin of that
 application's frame, which `tree` prints; springboard's frame is the whole
@@ -2742,12 +2744,41 @@ def bundle_process(bundle):
     return BUNDLE_PROCESSES.get(bundle) or bundle.rsplit(".", 1)[-1]
 
 
+# XCUIApplication.State of an application that is not running (unknown is 0).
+NOT_RUNNING_STATES = (0, 1)
+
+
+def activation_keeps_phone_silent(options):
+    """Whether `activate` may go to the host. The host's activation starts a
+    stopped application with no launch environment, so a stopped Andarium
+    would start with its haptics on (and a host that is running is never
+    rebuilt to carry one): it is refused, and `launch` is the way to start it,
+    unless the run tests haptics. A running application is only brought to the
+    front."""
+    if options.bundle != andarium.BUNDLE_ID or options.haptics:
+        return True
+    reply = send(options, {"op": "state"}, options.timeout)
+    if not reply.get("ok"):
+        log(f"cannot tell whether {options.bundle} is running: {reply.get('error', reply)}")
+        return False
+    state = reply.get("state")
+    if state is None or state in NOT_RUNNING_STATES:
+        log(f"refusing to activate {options.bundle}: it is not running, and an "
+            f"activation starts it without {andarium.HAPTICS_SETTING}="
+            f"{andarium.HAPTICS_OFF}, so its haptics would play; use `launch`, "
+            "or `activate --haptics` for a run that tests haptics")
+        return False
+    return True
+
+
 def run_op(options):
     op = options.command
     try:
         command = build_command(options)
     except ValueError as error:
         log(str(error))
+        return EXIT_FAILED
+    if op == "activate" and not activation_keeps_phone_silent(options):
         return EXIT_FAILED
     if op in STARTING_COMMANDS and not check_report_slots(
             options, [bundle_process(command.get("bundle") or options.bundle)]):
@@ -2865,6 +2896,12 @@ def parse(argv):
                        ("tree", "print the application's element tree")):
         sub = commands.add_parser(name, help=text)
         if name == "activate":
+            sub.add_argument(
+                "--haptics", action="store_true",
+                help="this run tests haptics: a stopped Andarium may then be "
+                "started by activation, with its own Haptics switch deciding "
+                "(without it activation of a stopped Andarium is refused: "
+                "use launch)")
             ios_device_reports.add_arguments(sub)
     for name, text in (("tap", "tap an element or a point in the application"),
                        ("wait", "wait for an element to appear or disappear"),
