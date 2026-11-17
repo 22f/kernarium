@@ -16,11 +16,18 @@
  *	protect		a page mprotect() made read-only before the fork must
  *			still refuse the parent's store, and a store the
  *			handler then permits must stay out of the child's copy;
- *	sibling		a second thread of the parent increments counters on a
- *			private anonymous page and a private file page while the
- *			main thread forks; a child must find its copies frozen
- *			from the moment fork returned, whatever the thread does
- *			next, and its own marks must stay out of the parent.
+ *	sibling		three more threads of the parent increment counters while
+ *			the main thread forks: on a private anonymous page, a
+ *			private file page, the original main stack (the
+ *			growable stack VMA the forking thread alone wrote
+ *			before), pages of a mapping mprotect() made writable
+ *			just before the loop (one never written, one written
+ *			and made read-only first) and a page of a writable and
+ *			executable mapping whose first page the main thread
+ *			runs after every fork; a child must find its copies
+ *			frozen from the moment fork returned, whatever the
+ *			threads do next, and its own marks must stay out of the
+ *			parent, and no increment may be lost.
  *
  * The other modes drive the x86-64 accounting row: "text N" forks N times and
  * calls 32 code pages of the probe's own text after each fork, "rwx N" does the
@@ -174,6 +181,25 @@ constexpr long prot_read = 1, prot_write = 2;
 [[maybe_unused]] constexpr long prot_exec = 4;
 constexpr long map_shared = 0x01, map_private = 0x02, map_anonymous = 0x20;
 constexpr long sigchld = 17, sigsegv = 11;
+
+/* A function that returns 42, and the writes and cache maintenance that
+ * make it run: the code the rows keep running in a writable and executable
+ * private page. */
+void write_stub(unsigned char *where)
+{
+#if defined(__aarch64__)
+	auto *words = reinterpret_cast<unsigned int *>(where);
+	words[0] = 0x52800540u; /* mov w0, #42 */
+	words[1] = 0xd65f03c0u; /* ret */
+	__asm__ volatile("dc cvau, %0\n\tdsb ish\n\tic ivau, %0\n\tdsb ish\n\tisb"
+		: : "r"(where) : "memory");
+#else
+	static const unsigned char bytes[] = {0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3};
+	for (int index = 0; index < 6; ++index)
+		where[index] = bytes[index];
+#endif
+}
+constexpr long stub_result = 42;
 /* CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
  * CLONE_SYSVSEM */
 constexpr word thread_flags = 0x00000100 | 0x00000200 | 0x00000400 |
@@ -475,9 +501,8 @@ void row_protect()
 	raw_syscall(nr_munmap, reinterpret_cast<long>(area), page);
 }
 
-/* Counters of the sibling threads: each thread owns a slot in a private
- * anonymous page and one in the page of a file mapping its first write
- * copied. */
+/* Counters of the sibling threads: each thread owns a slot in each of
+ * these places, and increments them all together. */
 constexpr int siblings = 3;
 
 struct alignas(64) Counters {
@@ -492,19 +517,29 @@ struct alignas(64) Tally {
 	volatile word count;
 };
 
+constexpr int places = 6;
+const char *const place_names[places] = {
+	"sibling-lost-anonymous", "sibling-lost-file", "sibling-lost-main-stack",
+	"sibling-lost-upgraded-never-written", "sibling-lost-upgraded-written",
+	"sibling-lost-writable-executable"};
+
 alignas(4096) Tally tallies[siblings];
 volatile int stop;
+volatile int go;
 volatile int finished;
-Counters *counters_anonymous;
-Counters *counters_file;
+/* Where each place's counters are, and what each held before the loop. */
+Counters *counters[places];
+word initial[places];
 
 void sibling(void *argument)
 {
 	const auto index = reinterpret_cast<word>(argument);
+	while (!go) {
+	}
 	while (!stop) {
 		for (int round = 0; round < 64; ++round) {
-			counters_anonymous[index].first = counters_anonymous[index].first + 1;
-			counters_file[index].second = counters_file[index].second + 1;
+			for (int place = 0; place < places; ++place)
+				counters[place][index].first = counters[place][index].first + 1;
 			tallies[index].count = tallies[index].count + 1;
 		}
 	}
@@ -513,17 +548,47 @@ void sibling(void *argument)
 
 void row_sibling()
 {
-	counters_anonymous = reinterpret_cast<Counters *>(
+	counters[0] = reinterpret_cast<Counters *>(
 		map(page, prot_read | prot_write, map_private | map_anonymous));
 	/* The file page the counters share is written first, so the siblings'
 	 * stores find an anonymous copy that fork write-protects. */
 	auto *file_page = reinterpret_cast<unsigned char *>(
 		map(page, prot_read | prot_write, map_private, file_descriptor));
-	counters_file = reinterpret_cast<Counters *>(file_page + 2048);
+	counters[1] = reinterpret_cast<Counters *>(file_page + 2048);
+	/* The original main stack: this frame lives in the VMA the kernel built
+	 * at exec, which only the forking thread has written so far. The
+	 * counters have a page of their own there, so the forking thread's own
+	 * frames never break its copy-on-write for them. */
+	alignas(4096) Counters on_stack[siblings];
+	counters[2] = on_stack;
+	/* Two pages made writable by mprotect() just before the loop: the first
+	 * was never written (its read mapped the zero page), the second was
+	 * written, made read-only and read again. */
+	auto *upgraded = reinterpret_cast<unsigned char *>(
+		map(2 * page, prot_read | prot_write, map_private | map_anonymous));
+	counters[3] = reinterpret_cast<Counters *>(upgraded);
+	counters[4] = reinterpret_cast<Counters *>(upgraded + page);
+	/* A writable and executable mapping: its first page runs code after
+	 * every fork, the counters are on its second. */
+	auto *executable = reinterpret_cast<unsigned char *>(
+		map(2 * page, prot_read | prot_write | prot_exec, map_private | map_anonymous));
+	write_stub(executable);
+	counters[5] = reinterpret_cast<Counters *>(executable + page);
+	expect("sibling-stub", stub_result, reinterpret_cast<long (*)()>(executable)());
+
+	for (int place = 0; place < places; ++place)
+		initial[place] = place == 3 ? 0 : 1;
 	for (int index = 0; index < siblings; ++index) {
-		counters_anonymous[index].first = 1;
-		counters_file[index].second = 1;
+		on_stack[index].first = 0;
+		on_stack[index].second = 0;
+		on_stack[index].mark = 0;
+		for (int place = 0; place < places; ++place) {
+			if (place != 3)
+				counters[place][index].first = 1;
+		}
 	}
+	raw_syscall(nr_mprotect, reinterpret_cast<long>(upgraded), static_cast<long>(2 * page), prot_read);
+	[[maybe_unused]] word sink = counters[3][0].first + counters[4][0].first;
 	for (int index = 0; index < siblings; ++index) {
 		const long stack = map(stack_size, prot_read | prot_write, map_private | map_anonymous);
 		if (spawn_thread(thread_flags, reinterpret_cast<void *>(stack + stack_size),
@@ -532,6 +597,10 @@ void row_sibling()
 			leave(4);
 		}
 	}
+	/* The upgrade comes right before the loop; the siblings wait for it. */
+	raw_syscall(nr_mprotect, reinterpret_cast<long>(upgraded), static_cast<long>(2 * page),
+		prot_read | prot_write);
+	go = 1;
 	long long forks = 0;
 	long long broken = 0;
 	const long long started = now();
@@ -544,26 +613,28 @@ void row_sibling()
 		if (child == 0) {
 			/* Fork returned: whatever the siblings store now belongs to the
 			 * parent's copy, and these hold still. */
-			word before_anonymous[siblings];
-			word before_file[siblings];
-			for (int index = 0; index < siblings; ++index) {
-				before_anonymous[index] = counters_anonymous[index].first;
-				before_file[index] = counters_file[index].second;
+			word before_count[places][siblings];
+			for (int place = 0; place < places; ++place) {
+				for (int index = 0; index < siblings; ++index)
+					before_count[place][index] = counters[place][index].first;
 			}
-			counters_anonymous[0].mark = child_mark;
+			counters[0][0].mark = child_mark;
 			for (volatile int spin = 0; spin < 3000; spin = spin + 1) {
 			}
-			long bad = counters_anonymous[0].mark != child_mark;
-			for (int index = 0; index < siblings; ++index) {
-				bad += counters_anonymous[index].first != before_anonymous[index];
-				bad += counters_file[index].second != before_file[index];
+			long bad = counters[0][0].mark != child_mark;
+			for (int place = 0; place < places; ++place) {
+				for (int index = 0; index < siblings; ++index)
+					bad += counters[place][index].first != before_count[place][index];
 			}
 			leave(bad > 100 ? 100 : bad);
 		}
 		++forks;
 		expect("sibling-child", 0, wait_for(child));
-		/* The child's mark stays in the child's copy. */
-		if (counters_anonymous[0].mark != 0)
+		/* The child's mark stays in the child's copy, and the code page
+		 * still runs. */
+		if (counters[0][0].mark != 0)
+			++broken;
+		if (reinterpret_cast<long (*)()>(executable)() != stub_result)
 			++broken;
 	}
 	expect("sibling-mark", 0, broken);
@@ -577,13 +648,13 @@ void row_sibling()
 		}
 		sleep_milliseconds(5);
 	}
-	/* Every counter started at 1 and its sibling added what it tallied, each
-	 * store in the parent's own pages. */
-	for (int index = 0; index < siblings; ++index) {
-		expect("sibling-lost-anonymous", static_cast<long>(tallies[index].count + 1),
-			static_cast<long>(counters_anonymous[index].first));
-		expect("sibling-lost-file", static_cast<long>(tallies[index].count + 1),
-			static_cast<long>(counters_file[index].second));
+	/* Every counter started at its initial value and its sibling added what
+	 * it tallied, each store in the parent's own pages. */
+	for (int place = 0; place < places; ++place) {
+		for (int index = 0; index < siblings; ++index) {
+			expect(place_names[place], static_cast<long>(tallies[index].count + initial[place]),
+				static_cast<long>(counters[place][index].first));
+		}
 	}
 	expect("sibling-counters", 1, tallies[0].count > 1 && tallies[siblings - 1].count > 1);
 }

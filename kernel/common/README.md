@@ -198,7 +198,9 @@ it. The bridge fields used below are defined by the comments in
 - A fork invalidates on the host only the parent's writable private VMAs, the
   entries it write-protects; every other VMA of the parent keeps its host
   mappings and code stamps, and any other flush of an `mm` covers all of it
-  (`guest-fork-flush-*`, `guest-mmu-stress`).
+  (`guest-fork-flush-*`, `guest-mmu-stress`). That rests on `dup_mmap()`
+  flushing the parent after `arch_dup_mmap()` on every path that changed one
+  of its entries; a kernel uprev rechecks it.
 - Because of that slot rule, a kernel alias outside the linear map shares
   memory with the frames' other views only in whole aligned groups of four
   pages, so the architecture reports a vmap group of four. vmalloc and `vmap()`

@@ -6,10 +6,12 @@ Boots the integration rootfs with several vCPUs on one engine and runs the
 freestanding guest_fork_flush.cpp probe, which forks over private anonymous
 pages, the stack, .data and a writable private file mapping (parent first and
 child first), over a shared page and a page mprotect() made read-only, and
-over private counters a sibling thread of the parent keeps writing while the
-main thread forks, and requires each side to see only its own bytes: the
-kernel leaves the parent's other mappings alone at a fork, so it must still
-invalidate every writable private one.
+over counters that sibling threads of the parent keep writing while the main
+thread forks (private anonymous and file pages, the original main stack,
+pages mprotect() made writable just before, and a writable and executable
+page), and requires each side to see only its own bytes: the kernel leaves
+the parent's other mappings alone at a fork, so it must still invalidate
+every writable private one.
 """
 
 from __future__ import annotations
