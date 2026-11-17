@@ -1762,21 +1762,27 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 }
 
 /* One page of a shared frame as another address space of the guest maps it,
- * writable: the guest's store through that view and the two ways the change
- * is published, by the guest's own code synchronization (IC IVAU) and by the
- * kernel when it writes the frame on a process's behalf. A generation that
- * ran code of the frame is told only if it was registered as a holder of the
- * frame when the change was published. */
+ * writable (and executable or not): the guest's store through that view and
+ * the two ways the change is published, by the guest's own code
+ * synchronization (IC IVAU) and by the kernel when it writes the frame on a
+ * process's behalf. A generation that ran code of the frame is told only if
+ * it was registered as a holder of the frame when the change was published,
+ * and a verdict filed for the frame is answered only under the stamp the
+ * publication left. */
 struct ForeignWriter final {
 	static constexpr std::uint64_t view = 0x4b00'0000ULL;
 
+	/* `executable`: the view is guest code too, as the view of a process
+	 * that runs the pages it writes; otherwise it cannot execute. */
 	ForeignWriter(unsigned long generation_, SharedFrame &frame_,
-		std::uint64_t page_offset_)
+		std::uint64_t page_offset_, bool executable)
 		: generation{generation_}, frame{frame_}, page_offset{page_offset_}
 	{
 		require(darwin_uml_static_vm_map_generation(generation,
 			reinterpret_cast<void *>(view), frame.backing.descriptor(),
-			page_offset, page_bytes, PROT_READ | PROT_WRITE, 0, 1) == 0);
+			page_offset, page_bytes, executable ?
+				PROT_READ | PROT_WRITE | PROT_EXEC : PROT_READ | PROT_WRITE,
+			executable ? 1 : 0, 1) == 0);
 	}
 	~ForeignWriter()
 	{
@@ -1892,23 +1898,28 @@ void another_generations_change_reaches_native_code(
 		return drive(g.env, g.arena, c, max_blocks);
 	};
 	std::fprintf(stderr, "foreign change: ");
-	for (const auto route : {Route::store_and_synchronize,
-	                         Route::kernel_write}) {
-		const char *name = route == Route::kernel_write ? "kernel write" :
-			"store and synchronization";
+	for (const auto arm : {0, 1, 2, 3}) {
+		const auto route = arm % 2 == 0 ? Route::store_and_synchronize :
+			Route::kernel_write;
+		const bool executable_view = arm >= 2;
+		const std::string name = std::string{route == Route::kernel_write ?
+			"kernel write" : "store and synchronization"} + (
+			executable_view ? " through an executable view" :
+			" through a view that cannot execute");
 
 		/* The engine alone: it translated the function, and runs the new
 		 * bytes after the change. */
 		{
 			SharedFrame frame{image, generation++};
 			auto first = guest(frame);
-			ForeignWriter writer{generation++, frame, page_offset};
+			ForeignWriter writer{generation++, frame, page_offset,
+				executable_view};
 			require(same(want, run_engine(*first), c));
 			require(same(want, run_engine(*first), c));
 			writer.change(changed, route);
 			if (!same(want_changed, run_engine(*first), c)) {
 				std::fprintf(stderr, "  the engine alone ran old code "
-					"after a %s\n", name);
+					"after a %s\n", name.c_str());
 				require(false);
 			}
 		}
@@ -1918,7 +1929,8 @@ void another_generations_change_reaches_native_code(
 			aot::clear_shared_verdicts();
 			SharedFrame frame{image, generation++};
 			auto first = guest(frame);
-			ForeignWriter writer{generation++, frame, page_offset};
+			ForeignWriter writer{generation++, frame, page_offset,
+				executable_view};
 			const auto a = run_shared(*first, c);
 			require(same(want, a.result, c));
 			require(a.stats.enters > 0 && a.stats.verifications >= 1);
@@ -1926,7 +1938,7 @@ void another_generations_change_reaches_native_code(
 			const auto d = run_shared(*first, c);
 			if (!same(want_changed, d.result, c) || d.stats.enters != 0) {
 				std::fprintf(stderr, "  rewritten code ran old code after "
-					"a %s: enters %llu\n", name,
+					"a %s: enters %llu\n", name.c_str(),
 					static_cast<unsigned long long>(d.stats.enters));
 				require(false);
 			}
@@ -1943,7 +1955,8 @@ void another_generations_change_reaches_native_code(
 			SharedFrame frame{image, generation++};
 			auto first = guest(frame);
 			auto second = guest(frame);
-			ForeignWriter writer{generation++, frame, page_offset};
+			ForeignWriter writer{generation++, frame, page_offset,
+				executable_view};
 			const auto w = run_shared(*first, c);
 			require(same(want, w.result, c) && w.stats.steps == 0);
 			require(same(want, run_shared(*second, c).result, c));
@@ -1960,7 +1973,7 @@ void another_generations_change_reaches_native_code(
 			const auto d = run_shared(*second, c);
 			if (!same(want_changed, d.result, c) || d.stats.enters != 0) {
 				std::fprintf(stderr, "  a generation told by the table ran "
-					"old code after a %s: enters %llu\n", name,
+					"old code after a %s: enters %llu\n", name.c_str(),
 					static_cast<unsigned long long>(d.stats.enters));
 				require(false);
 			}
@@ -1968,7 +1981,7 @@ void another_generations_change_reaches_native_code(
 			const auto e = run_shared(*first, c);
 			require(same(want_changed, e.result, c) && e.stats.enters == 0);
 		}
-		std::fprintf(stderr, "%s ok; ", name);
+		std::fprintf(stderr, "%s ok; ", name.c_str());
 	}
 	aot::set_enabled(false);
 	std::fprintf(stderr, "\n");
