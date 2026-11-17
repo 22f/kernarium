@@ -266,6 +266,65 @@ struct SessionNoticesTests {
         #expect(!model.askingToTurnOffHeatLimit)
     }
 
+    /// The notices with the heat question's patience and its way of telling
+    /// whether an alert is up in the hands of the test.
+    private func hostedWithQuestion(
+        _ model: AppModel, patience: Duration, alertIsUp: @escaping @MainActor () -> Bool, in lease: HostWindow.Lease
+    ) -> UIViewController {
+        let controller = UIHostingController(
+            rootView: SessionNoticesOverlay().environment(model).dynamicTypeSize(.large)
+                .environment(\.heatQuestionPatience, patience).environment(\.alertIsUp, alertIsUp)
+                .frame(width: 390, height: 600))
+        lease.window.rootViewController = controller
+        controller.view.layoutIfNeeded()
+        return controller
+    }
+
+    /// UIKit can refuse the alert while a sheet is coming or going, and SwiftUI
+    /// does not ask again. A question whose alert did not come ends as Cancel
+    /// does: the notice stays and goes back to its timer, the guest has the keys
+    /// again, and the limit is untouched.
+    @Test func aQuestionWhoseAlertDoesNotComeEndsAsCancelDoes() async throws {
+        let model = makeModel()
+        model.previewThermalNotice()
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        _ = hostedWithQuestion(model, patience: .milliseconds(300), alertIsUp: { false }, in: lease)
+        model.askToTurnOffHeatLimit()
+        #expect(model.askingToTurnOffHeatLimit && !model.guestHasKeys)
+        let deadline = ContinuousClock.now + .seconds(5)
+        while model.askingToTurnOffHeatLimit, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(!model.askingToTurnOffHeatLimit, "the question stood without its alert")
+        #expect(model.guestHasKeys, "the guest did not get the keys back")
+        #expect(model.thermalNotice.isShowing && model.heatLimitOn)
+        // The words ask again.
+        model.askToTurnOffHeatLimit()
+        #expect(model.askingToTurnOffHeatLimit)
+        model.cancelTurnOffHeatLimit()
+    }
+
+    /// A question whose alert is up stands as long as the alert does.
+    @Test func aQuestionWhoseAlertIsUpStandsUntilItIsAnswered() async throws {
+        let model = makeModel()
+        model.previewThermalNotice()
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        _ = hostedWithQuestion(model, patience: .milliseconds(400), alertIsUp: { PresentedAlert.isUp }, in: lease)
+        model.askToTurnOffHeatLimit()
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !alertIsUp, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(50)) }
+        #expect(alertIsUp, "no alert came up")
+        try await Task.sleep(for: .seconds(1))
+        #expect(model.askingToTurnOffHeatLimit, "the question ended under its alert")
+        #expect(alertIsUp)
+        model.cancelTurnOffHeatLimit()
+        let gone = ContinuousClock.now + .seconds(5)
+        while alertIsUp, ContinuousClock.now < gone { try await Task.sleep(for: .milliseconds(50)) }
+        #expect(!alertIsUp)
+    }
+
     // MARK: Coexistence
 
     /// The camera notice and the graphics notice in the column the session

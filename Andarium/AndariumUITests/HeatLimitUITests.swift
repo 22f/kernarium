@@ -46,14 +46,16 @@ final class HeatLimitUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 30), "Settings did not open")
     }
 
-    /// Scrolls Settings until `element` can be tapped.
+    /// Scrolls Settings until `element` can be tapped. The list builds a row
+    /// only near the screen: on an iPhone, where Settings opens at its medium
+    /// detent, the row does not exist until it is scrolled to.
     private func reveal(_ element: XCUIElement, in app: XCUIApplication) {
-        XCTAssertTrue(element.waitForExistence(timeout: 30), "\(element) is not in Settings")
         var swipes = 0
-        while !element.isHittable && swipes < 8 {
+        while !(element.exists && element.isHittable) && swipes < 12 {
             app.swipeUp()
             swipes += 1
         }
+        XCTAssertTrue(element.waitForExistence(timeout: 30), "\(element) is not in Settings")
         XCTAssertTrue(element.isHittable, "\(element) cannot be reached")
     }
 
@@ -172,6 +174,52 @@ final class HeatLimitUITests: XCTestCase {
         reveal(row, in: app)
         XCTAssertEqual(value(row), "Full frame rate", "the row did not follow Turn Off")
         XCTAssertTrue(text(app, containing: warning).waitForExistence(timeout: 20))
+    }
+
+    /// The alert is asked for while Settings is up, or going. Settings lets
+    /// touches through at its medium detent, so the notice's words can be
+    /// tapped with the sheet up and as it closes, and UIKit may refuse an alert
+    /// then. Either the alert comes, or the question ends and the words ask
+    /// again: it never stands unanswered with the notice stuck.
+    private func askAndCancel(_ app: XCUIApplication, _ words: XCUIElement, _ arm: String) {
+        let alert = app.alerts["Turn off the frame rate limit?"]
+        var came = false
+        for _ in 0..<3 where !came {
+            if words.exists { words.tap() }
+            came = alert.waitForExistence(timeout: 8)
+        }
+        XCTAssertTrue(came, "\(arm): the words opened no alert, and asking again did not help")
+        if came {
+            alert.buttons["Cancel"].tap()
+            XCTAssertTrue(alert.waitForNonExistence(timeout: 10), "\(arm): Cancel left the alert")
+        }
+    }
+
+    func testTheAlertComesOrTheQuestionEndsWhileSettingsIsUpAndGoing() {
+        let app = launch()
+        let words = app.buttons["thermal-notice-ask"]
+        XCTAssertTrue(words.waitForExistence(timeout: 60), "the notice did not come")
+        let bar = app.navigationBars["Settings"]
+
+        // Settings up at its medium detent, the notice above it.
+        openSettings(app)
+        askAndCancel(app, words, "Settings up")
+        XCTAssertTrue(words.exists, "Cancel took the notice away")
+
+        // Done closes the sheet and the words are tapped at once.
+        if !bar.exists { openSettings(app) }
+        app.buttons["Done"].tap()
+        askAndCancel(app, words, "Settings closing")
+        XCTAssertTrue(words.exists, "Cancel took the notice away")
+        XCTAssertTrue(bar.waitForNonExistence(timeout: 20), "Settings stayed")
+
+        // The words still ask, and Turn Off still turns the limit off.
+        words.tap()
+        let alert = app.alerts["Turn off the frame rate limit?"]
+        XCTAssertTrue(alert.waitForExistence(timeout: 20), "the words opened no alert at the end")
+        alert.buttons["Turn Off"].tap()
+        XCTAssertTrue(words.waitForNonExistence(timeout: 10), "Turn Off left the notice")
+        XCTAssertTrue(waitForLast("heat told none", in: app), "Android heard \(told(app))")
     }
 
     func testDismissOnlyDismissesTheNotice() {
