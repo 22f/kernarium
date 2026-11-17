@@ -27,17 +27,95 @@ configuration user space set first is kept, and an allocation failure
 leaves the old behaviour, with a warning. User space can still clear it
 with NL80211_CMD_SET_WOWLAN, which brings the old behaviour back.
 
+The leave also used to cancel a connection that was still pending, and
+that connection now survives the suspend. After a stay longer than the
+30 seconds cfg80211 keeps an entry it does not hold, the entry the
+result names is gone, and cfg80211 would warn and stay disconnected
+while user space was told it had joined. virt_wifi now informs the
+router again when the connection completes and reports that entry with
+the result, which makes cfg80211 hold it; if it cannot be added the
+connection fails, and the supplicant tries again.
+
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- drivers/net/wireless/virtual/virt_wifi.c | 50 ++++++++++++++++++++++++
- 1 file changed, 50 insertions(+)
+ drivers/net/wireless/virtual/virt_wifi.c | 90 +++++++++++++++++++++---
+ 1 file changed, 81 insertions(+), 9 deletions(-)
 
 diff --git a/drivers/net/wireless/virtual/virt_wifi.c b/drivers/net/wireless/virtual/virt_wifi.c
-index 03bab2641e579df48e4f80a07246b3b1e951aa1c..5804c42aa133c5232b32007c2ce08504637dcffb 100644
+index 03bab2641e579df48e4f80a07246b3b1e951aa1c..3e4673f3b590ed72b0dc642f736728f6b662945b 100644
 --- a/drivers/net/wireless/virtual/virt_wifi.c
 +++ b/drivers/net/wireless/virtual/virt_wifi.c
-@@ -641,6 +641,52 @@ virt_wifi_mgmt_stypes[NUM_NL80211_IFTYPES] = {
+@@ -177,7 +177,8 @@ static u8 fake_router_bssid[ETH_ALEN] __ro_after_init = {};
+ #define VIRT_WIFI_SSID "VirtWifi"
+ #define VIRT_WIFI_SSID_LEN 8
+ 
+-static void virt_wifi_inform_bss(struct wiphy *wiphy)
++/* Returns the entry with a reference, or NULL if cfg80211 could not add it. */
++static struct cfg80211_bss *virt_wifi_get_informed_bss(struct wiphy *wiphy)
+ {
+ 	u64 tsf = div_u64(ktime_get_boottime_ns(), 1000);
+ 	struct cfg80211_bss *informed_bss;
+@@ -197,7 +198,12 @@ static void virt_wifi_inform_bss(struct wiphy *wiphy)
+ 					   WLAN_CAPABILITY_ESS, 0,
+ 					   (void *)&ssid, sizeof(ssid),
+ 					   DBM_TO_MBM(-50), GFP_KERNEL);
+-	cfg80211_put_bss(wiphy, informed_bss);
++	return informed_bss;
++}
++
++static void virt_wifi_inform_bss(struct wiphy *wiphy)
++{
++	cfg80211_put_bss(wiphy, virt_wifi_get_informed_bss(wiphy));
+ }
+ 
+ /* Called with the rtnl lock held. */
+@@ -337,21 +343,37 @@ static void virt_wifi_connect_complete(struct work_struct *work)
+ 	bool right_ssid = priv->connect_requested_ssid_len == VIRT_WIFI_SSID_LEN &&
+ 			  !memcmp(priv->connect_requested_ssid, VIRT_WIFI_SSID,
+ 				  priv->connect_requested_ssid_len);
++	struct cfg80211_bss *bss = NULL;
+ 	u16 status = WLAN_STATUS_SUCCESS;
+ 
+ 	if (is_zero_ether_addr(requested_bss))
+ 		requested_bss = NULL;
+ 
+-	if (!priv->is_up || (requested_bss && !right_addr) || !right_ssid)
++	if (!priv->is_up || (requested_bss && !right_addr) || !right_ssid) {
+ 		status = WLAN_STATUS_UNSPECIFIED_FAILURE;
+-	else
+-		priv->is_connected = true;
++	} else {
++		struct wiphy *wiphy = priv->upperdev->ieee80211_ptr->wiphy;
++
++		/*
++		 * A system suspend lets this work outlive the scan that found
++		 * the router, and cfg80211 drops an entry it does not hold
++		 * 30 seconds after it was seen, the suspended time included.
++		 * Inform it again and report it with the result, so that
++		 * cfg80211 holds it from here on. If it cannot be added the
++		 * connection fails, and the supplicant tries again.
++		 */
++		bss = virt_wifi_get_informed_bss(wiphy);
++		if (bss)
++			priv->is_connected = true;
++		else
++			status = WLAN_STATUS_UNSPECIFIED_FAILURE;
++	}
+ 
+ 	/* Schedules an event that acquires the rtnl lock. */
+-	cfg80211_connect_result(priv->upperdev,
+-				priv->is_connected ? fake_router_bssid : NULL,
+-				NULL, 0, NULL, 0,
+-				status, GFP_KERNEL);
++	cfg80211_connect_bss(priv->upperdev,
++			     priv->is_connected ? fake_router_bssid : NULL,
++			     bss, NULL, 0, NULL, 0, status, GFP_KERNEL,
++			     NL80211_TIMEOUT_UNSPECIFIED);
+ 	netif_carrier_on(priv->upperdev);
+ }
+ 
+@@ -641,6 +663,52 @@ virt_wifi_mgmt_stypes[NUM_NL80211_IFTYPES] = {
  	},
  };
  
@@ -90,7 +168,7 @@ index 03bab2641e579df48e4f80a07246b3b1e951aa1c..5804c42aa133c5232b32007c2ce08504
  static const struct cfg80211_ops virt_wifi_cfg80211_ops = {
  	.scan = virt_wifi_scan,
  
-@@ -685,6 +731,9 @@ static struct wiphy *virt_wifi_make_wiphy(void)
+@@ -685,6 +753,9 @@ static struct wiphy *virt_wifi_make_wiphy(void)
  	wiphy->flags |= WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL | WIPHY_FLAG_OFFCHAN_TX;
  	wiphy->max_remain_on_channel_duration = VIRT_WIFI_MAX_ROC_MS;
  	wiphy->mgmt_stypes = virt_wifi_mgmt_stypes;
@@ -100,7 +178,7 @@ index 03bab2641e579df48e4f80a07246b3b1e951aa1c..5804c42aa133c5232b32007c2ce08504
  
  	priv = wiphy_priv(wiphy);
  	priv->being_deleted = false;
-@@ -697,6 +746,7 @@ static struct wiphy *virt_wifi_make_wiphy(void)
+@@ -697,6 +768,7 @@ static struct wiphy *virt_wifi_make_wiphy(void)
  		return NULL;
  	}
  
