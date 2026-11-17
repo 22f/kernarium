@@ -313,7 +313,8 @@ first (Create bug report, which stays in the sheet, or Send without bug report),
 and the bug report's row leads in to read-only pages inside the sheet's own
 navigation (Back, no Done): the file as the mail carries it, its top level as
 folders and files, a text as one page that scrolls on with a thumb on the edge,
-and the screenshot as a picture decoded as a bounded thumbnail. Nothing is
+and the screenshot (a PNG, rebuilt from its critical chunks before it is decoded
+as a bounded thumbnail; a JPEG is not shown). Nothing is
 extracted, and a file that is not text is dimmed and opens nothing. The start
 log's row shows its text the same way
 (`Shared/Feedback/Logic/SendFeedbackArchive*.swift`, `SendFeedbackReportPages.swift`). Once

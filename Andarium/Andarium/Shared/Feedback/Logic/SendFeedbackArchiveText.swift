@@ -143,7 +143,7 @@ actor SendFeedbackTextReader {
 nonisolated enum SendFeedbackEntryContent: Sendable {
     case text(SendFeedbackTextReader)
     case archive(SendFeedbackArchiveReader)
-    case picture(SendFeedbackPictureFormat)
+    case picture
     case empty
     case unavailable(Reason)
 
@@ -164,8 +164,8 @@ nonisolated enum SendFeedbackEntryContent: Sendable {
 /// What an entry is, told from its name and its first bytes, which is what a row says before it opens.
 nonisolated enum SendFeedbackEntryKind: Equatable, Sendable {
     case text
-    /// A PNG or a JPEG by its name and by its first bytes.
-    case picture(SendFeedbackPictureFormat)
+    /// A PNG by its name and by its first bytes.
+    case picture
     /// An archive stored inside, which opens like a folder.
     case archive
     case empty
@@ -287,8 +287,13 @@ actor SendFeedbackArchiveReader {
         let location = try archive.location(of: entry)
         let stream = SendFeedbackEntryStream(location)
         let head = try stream.read(at: 0, count: SendFeedbackArchiveLimits.sniffBytes)
-        if let format = SendFeedbackPicture.format(named: entry.path, head: head) {
-            return entry.size <= UInt64(SendFeedbackArchiveLimits.maxWholeEntryBytes) ? .picture(format) : .notShown(.pictureRefused)
+        switch SendFeedbackPicture.format(named: entry.path, head: head) {
+        case .png:
+            return entry.size <= UInt64(SendFeedbackArchiveLimits.maxWholeEntryBytes) ? .picture : .notShown(.pictureRefused)
+        case .jpeg:
+            return .notShown(.pictureRefused)
+        case nil:
+            break
         }
         if SendFeedbackText.looksLikeArchive(head) {
             if archive.depth >= 1 { return .notShown(.tooDeep) }
@@ -309,7 +314,7 @@ actor SendFeedbackArchiveReader {
             return .text(SendFeedbackTextReader(try archive.location(of: entry)))
         case .archive:
             return .archive(try nestedReader(entryID))
-        case .picture(let format): return .picture(format)
+        case .picture: return .picture
         case .empty: return .empty
         case .notShown(let reason): return .unavailable(reason)
         }
@@ -318,13 +323,13 @@ actor SendFeedbackArchiveReader {
     /// The picture of an entry, as a thumbnail: its bytes read through `bytes(of:limit:)` and decoded off this
     /// reader, so that the reader is free meanwhile. A refusal marks the entry as not shown.
     func picture(of entryID: Int) async throws -> SendFeedbackPicture.Thumbnail {
-        guard case .picture(let format) = try kind(of: entryID) else { throw SendFeedbackPicture.Refusal.notPicture }
+        guard case .picture = try kind(of: entryID) else { throw SendFeedbackPicture.Refusal.notPicture }
         try Task.checkCancellation()
         let data = try bytes(of: entryID, limit: SendFeedbackArchiveLimits.maxWholeEntryBytes)
         do {
             // A detached task does not inherit the cancellation of the one that waits for it: pass it on.
             let decoding = Task.detached(priority: .userInitiated) {
-                try SendFeedbackPicture.thumbnail(of: data, as: format)
+                try SendFeedbackPicture.thumbnail(of: data)
             }
             return try await withTaskCancellationHandler { try await decoding.value } onCancel: { decoding.cancel() }
         } catch let refusal as SendFeedbackPicture.Refusal {

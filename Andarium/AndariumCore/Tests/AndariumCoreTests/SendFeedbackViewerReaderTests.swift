@@ -128,8 +128,8 @@ struct SendFeedbackViewerReaderTests {
             .stored("FS/", Data()),
         ])
         #expect(try await archive.kind(of: 0) == .text)
-        #expect(try await archive.kind(of: 1) == .picture(.png))
-        #expect(try await archive.kind(of: 2) == .picture(.jpeg))
+        #expect(try await archive.kind(of: 1) == .picture)
+        #expect(try await archive.kind(of: 2) == .notShown(.pictureRefused), "a JPEG is a picture that is not shown")
         #expect(try await archive.kind(of: 3) == .archive)
         #expect(try await archive.kind(of: 4) == .empty)
         #expect(try await archive.kind(of: 5) == .notShown(.notText))
@@ -188,14 +188,12 @@ struct SendFeedbackViewerReaderTests {
 
     @Test func aPictureIsDecodedAsAThumbnailAndNeverAtItsFullSize() async throws {
         let data = png(width: 3_000, height: 2_000)
-        let thumbnail = try SendFeedbackPicture.thumbnail(of: data, as: .png)
+        let thumbnail = try SendFeedbackPicture.thumbnail(of: data)
         #expect(thumbnail.width == 3_000 && thumbnail.height == 2_000, "the size it declared")
         #expect(max(thumbnail.image.width, thumbnail.image.height) == SendFeedbackPicture.thumbnailPixels)
         #expect(thumbnail.image.height == 1_365 || thumbnail.image.height == 1_366)
-        let small = try SendFeedbackPicture.thumbnail(of: png(width: 40, height: 30), as: .png)
+        let small = try SendFeedbackPicture.thumbnail(of: png(width: 40, height: 30))
         #expect(small.image.width <= SendFeedbackPicture.thumbnailPixels, "a small picture is not enlarged past its size")
-        let jpeg = try SendFeedbackPicture.thumbnail(of: picture(width: 2_500, height: 2_500, type: "public.jpeg"), as: .jpeg)
-        #expect(jpeg.image.width == SendFeedbackPicture.thumbnailPixels)
     }
 
     /// A PNG that says it is `width` by `height`, with the CRC of its header made again so that it is a header.
@@ -218,58 +216,38 @@ struct SendFeedbackViewerReaderTests {
     @Test func theBoundsOnADeclaredSizeAreTheSidesAndTheTotal() {
         let side = SendFeedbackPicture.maxSide
         #expect(SendFeedbackPicture.withinBounds(width: 1_206, height: 2_622))
-        #expect(SendFeedbackPicture.withinBounds(width: side, height: 3_906), "63,995,904 pixels")
-        #expect(!SendFeedbackPicture.withinBounds(width: side, height: 3_907), "64,012,288 pixels")
+        #expect(SendFeedbackPicture.withinBounds(width: side, height: 1_953), "15,998,976 pixels")
+        #expect(!SendFeedbackPicture.withinBounds(width: side, height: 1_954), "16,007,168 pixels")
+        #expect(SendFeedbackPicture.withinBounds(width: 4_000, height: 4_000) && !SendFeedbackPicture.withinBounds(width: 4_001, height: 4_000))
         #expect(!SendFeedbackPicture.withinBounds(width: side + 1, height: 1))
         #expect(!SendFeedbackPicture.withinBounds(width: 1, height: side + 1))
         #expect(!SendFeedbackPicture.withinBounds(width: 0, height: 10) && !SendFeedbackPicture.withinBounds(width: 10, height: 0))
         #expect(!SendFeedbackPicture.withinBounds(width: -5, height: 10) && !SendFeedbackPicture.withinBounds(width: Int.max, height: Int.max))
-        #expect(SendFeedbackPicture.maxPixels == 64_000_000 && SendFeedbackPicture.maxSide == 16_384 && SendFeedbackPicture.thumbnailPixels == 2_048)
+        #expect(SendFeedbackPicture.maxPixels == 16_000_000 && SendFeedbackPicture.maxSide == 8_192 && SendFeedbackPicture.thumbnailPixels == 2_048)
     }
 
     @Test func aPictureThatDeclaresMoreThanTheBoundIsRefusedBeforeItIsDecoded() throws {
         let side = UInt32(SendFeedbackPicture.maxSide)
-        #expect(throws: SendFeedbackPicture.Refusal.tooLarge) {
-            try SendFeedbackPicture.thumbnail(of: pngClaiming(width: side + 1, height: 10), as: .png)
+        for (width, height) in [(side + 1, 10), (10, side + 1), (side, side), (0xFFFF_FFF0, 0xFFFF_FFF0)] {
+            #expect(throws: SendFeedbackPicture.Refusal.tooLarge) { try SendFeedbackPicture.thumbnail(of: pngClaiming(width: width, height: height)) }
         }
-        #expect(throws: SendFeedbackPicture.Refusal.tooLarge) {
-            try SendFeedbackPicture.thumbnail(of: pngClaiming(width: 10, height: side + 1), as: .png)
-        }
-        // A size ImageIO will not report at all (it takes one this large for a decompression bomb) is refused too,
-        // as a picture that is none, and nothing is decoded.
-        #expect(throws: SendFeedbackPicture.Refusal.self) {
-            try SendFeedbackPicture.thumbnail(of: pngClaiming(width: side, height: side), as: .png)
-        }
-        #expect(throws: SendFeedbackPicture.Refusal.self) {
-            try SendFeedbackPicture.thumbnail(of: pngClaiming(width: 0xFFFF_FFF0, height: 0xFFFF_FFF0), as: .png)
-        }
-    }
-
-    @Test func aJPEGThatDeclaresMoreThanTheBoundIsRefusedToo() throws {
-        var jpeg = picture(width: 16, height: 16, type: "public.jpeg")
-        let marker = try #require(jpeg.firstRange(of: Data([0xFF, 0xC0])) ?? jpeg.firstRange(of: Data([0xFF, 0xC2])))
-        let at = marker.lowerBound + 5  // marker, length, precision: then height and width
-        for (offset, value) in [(0, 0x00), (1, 0x10), (2, 0x40), (3, 0x01)] { jpeg[at + offset] = UInt8(value) }  // 16,385 by 16
-        #expect(throws: SendFeedbackPicture.Refusal.tooLarge) { try SendFeedbackPicture.thumbnail(of: jpeg, as: .jpeg) }
-        for (offset, value) in [(0, 0x75), (1, 0x30), (2, 0x75), (3, 0x30)] { jpeg[at + offset] = UInt8(value) }  // 30,000 square
-        #expect(throws: SendFeedbackPicture.Refusal.self) { try SendFeedbackPicture.thumbnail(of: jpeg, as: .jpeg) }
     }
 
     @Test func whatIsNotThePictureItSaysIsRefusedAndNeverDecoded() throws {
         #expect(throws: SendFeedbackPicture.Refusal.notPicture) {
-            try SendFeedbackPicture.thumbnail(of: picture(width: 8, height: 8, type: "public.jpeg"), as: .png)
+            try SendFeedbackPicture.thumbnail(of: picture(width: 8, height: 8, type: "public.jpeg"))
         }
         #expect(throws: SendFeedbackPicture.Refusal.notPicture) {
-            try SendFeedbackPicture.thumbnail(of: Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] + [UInt8](repeating: 0, count: 200)), as: .png)
+            try SendFeedbackPicture.thumbnail(of: Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] + [UInt8](repeating: 0, count: 200)))
         }
-        #expect(throws: SendFeedbackPicture.Refusal.notPicture) { try SendFeedbackPicture.thumbnail(of: Data(), as: .png) }
+        #expect(throws: SendFeedbackPicture.Refusal.notPicture) { try SendFeedbackPicture.thumbnail(of: Data()) }
     }
 
     @Test func aCancelledDecodeStopsBeforeItDecodes() async throws {
         let data = png(width: 3_000, height: 2_000)
         let task = Task.detached {
             while !Task.isCancelled { await Task.yield() }
-            return try SendFeedbackPicture.thumbnail(of: data, as: .png)
+            return try SendFeedbackPicture.thumbnail(of: data)
         }
         task.cancel()
         await #expect(throws: CancellationError.self) { try await task.value }
@@ -283,7 +261,7 @@ struct SendFeedbackViewerReaderTests {
         }
         task.cancel()
         await #expect(throws: CancellationError.self) { try await task.value }
-        #expect(try await archive.kind(of: 0) == .picture(.png), "a cancel is not a refusal")
+        #expect(try await archive.kind(of: 0) == .picture, "a cancel is not a refusal")
     }
 
     @Test func theReaderGivesAThumbnailAndMarksARefusedPictureAsNotShown() async throws {
@@ -292,7 +270,7 @@ struct SendFeedbackViewerReaderTests {
         ])
         let shown = try await archive.picture(of: 0)
         #expect(shown.width == 1_200 && shown.image.height == SendFeedbackPicture.thumbnailPixels)
-        #expect(try await archive.kind(of: 1) == .picture(.png), "told from its name and its first bytes")
+        #expect(try await archive.kind(of: 1) == .picture, "told from its name and its first bytes")
         await #expect(throws: SendFeedbackPicture.Refusal.self) { try await archive.picture(of: 1) }
         #expect(try await archive.kind(of: 1) == .notShown(.pictureRefused), "the row is not shown from then on")
     }
