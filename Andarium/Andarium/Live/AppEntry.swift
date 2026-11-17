@@ -306,6 +306,9 @@ struct AppEntry {
         model.driver = runtime
         model.phase = .running(.normal)
         runtime.beginInputProbe()
+        #if FEEDBACK_MAIL
+        if FeedbackProbe.requested(in: environment) { FeedbackProbe.install(on: model) }
+        #endif
         if let script = OldAppsProbeLaunch.script(in: environment) {
             let scripted = ScriptedOldApps(open: ["com.example.rally"])
             switch script {
