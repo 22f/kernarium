@@ -4047,19 +4047,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "フレームレートを維持"
+            "value" : "フレームレートを制限しない"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "完整帧速率"
+            "value" : "不限制帧速率"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "完整影格速率"
+            "value" : "不限制影格速率"
           }
         }
       }
@@ -9937,7 +9937,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "デバイスがさらに熱くなり、バッテリーの消耗も早くなります。iOSによって画面が暗くなったり、動作全体が遅くなったり、Andariumが終了されたりすることがあります。"
+            "value" : "デバイスがさらに熱くなり、バッテリーの消耗も早くなります。iOSによって画面が暗くなったり、動作全体が遅くなったり、Andariumが終了したりすることがあります。"
           }
         },
         "zh-Hans" : {
@@ -9960,7 +9960,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "デバイスがさらに熱くなり、バッテリーの消耗も早くなります。iOSによって画面が暗くなったり、動作全体が遅くなったり、Andariumが終了されたりすることがあります。“設定”の“パフォーマンス”でオンに戻せます。"
+            "value" : "デバイスがさらに熱くなり、バッテリーの消耗も早くなります。iOSによって画面が暗くなったり、動作全体が遅くなったり、Andariumが終了したりすることがあります。“設定”の“パフォーマンス”でオンに戻せます。"
           }
         },
         "zh-Hans" : {
@@ -10464,13 +10464,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "关闭"
+            "value" : "关闭限制"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "關閉"
+            "value" : "關閉限制"
           }
         }
       }
