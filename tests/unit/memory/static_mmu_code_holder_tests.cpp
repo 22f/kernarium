@@ -24,6 +24,9 @@
  *                (darwin_uml_vm_invalidate_code): a process whose table has no
  *                entry for the page publishes to every generation, and one
  *                that maps it without execute still tells the holders.
+ *   x86 beside   (x86-64 guest builds) one kernel write reaches an arm64 reader
+ *                named in the word and an x86 holder of the frame, each by its
+ *                own mechanism.
  *   overlap      a publisher has taken a frame's word and not yet published;
  *                a second synchronization of the frame meets an empty word
  *                (or a word of its own) and must still reach the first one's
@@ -38,6 +41,7 @@
 #include "require.hpp"
 #include "scratch_backing.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -510,6 +514,53 @@ void test_a_kernel_write_reaches_the_holders_whatever_the_target_maps()
 	kernel_write(true, 1091);
 }
 
+#if DARWIN_UML_X86_64_GUEST
+/* The kernel writes a frame that two translators hold, each in its own
+ * generation: an arm64 reader, named in the frame's holder word, and an x86
+ * translator, registered with the frame accounting (mmu/frame_accounting.hpp).
+ * The target maps the frame with execute and never translated it. One
+ * invalidate_code() carries both publications, so both holders hear of the
+ * write, each by its own mechanism: the word is taken (once, as the kernel's),
+ * and the frame's x86 holders are told through the accounting. Once the x86
+ * contract is on, for the life of the process, so this row runs last. */
+void test_a_kernel_write_reaches_an_arm64_reader_and_an_x86_holder()
+{
+	ScratchBacking backing{backing_name, page};
+	backing.put32(0, old_word);
+	constexpr unsigned long arm = 1101, x86 = 1102, target = 1103;
+	map_code(arm, backing);
+	map_code(x86, backing);
+	map_code(target, backing);
+	require(darwin_uml_static_vm_activate(target) == 0);
+	(void)fetch(arm);
+	std::array<darwin_uml_static_frame_location, 16> owed{};
+	darwin_uml_static_frame_hold hold{};
+	const auto held = darwin_uml_static_vm_hold_code_frame(nullptr, x86,
+		code_address, owed.data(), owed.size(), &hold);
+	require(held == DARWIN_UML_STATIC_FRAME_SETTLED ||
+		held == DARWIN_UML_STATIC_FRAME_OWED,
+		"the x86 translator's registration was refused");
+	darwin_uml_static_vm_require_coherent_kernel_code_writes();
+	const auto arm_before = code_changes(arm);
+	const auto x86_before = code_changes(x86);
+	const auto before = holders::counters();
+
+	backing.put32(0, new_word);
+	require(darwin_uml_static_vm_invalidate_code_generation(
+		target, code_address, 4) == 0);
+	require(code_changes(arm) > arm_before,
+		"the arm64 reader named in the word missed a kernel write");
+	require(code_changes(x86) > x86_before,
+		"the x86 holder of the frame missed a kernel write");
+	const auto delta = since(before);
+	require(delta.kernel_exchanges == 1 && delta.all_publications == 0,
+		"the kernel path's take widened because an x86 holder stood");
+	destroy(arm);
+	destroy(x86);
+	destroy(target);
+}
+#endif
+
 } // namespace
 
 int main()
@@ -523,6 +574,9 @@ int main()
 	test_a_backing_without_a_leaf_publishes_to_every_generation();
 	test_a_publication_that_overlaps_an_unfinished_one_reaches_its_holders();
 	test_a_kernel_write_reaches_the_holders_whatever_the_target_maps();
+#if DARWIN_UML_X86_64_GUEST
+	test_a_kernel_write_reaches_an_arm64_reader_and_an_x86_holder();
+#endif
 	std::puts("static-mmu-code-holder: ok");
 	return 0;
 }
