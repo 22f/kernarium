@@ -276,7 +276,7 @@ every generation read every translation again. Once the process runs x86 code,
 publishes the frame of every page the target maps, whatever the target's view
 of it permits and whatever the arm64 holder word names, and a page the target
 has no entry for yet is an unknown frame, which moves every generation's flush
-serial.
+serial and publishes a whole-space code change (the range {0, 0}) in each.
 When a run of the emulator ends it appends the process's counts so far, which
 nothing resets (unresolved kernel writes, dropped direct ranges, global holds,
 registrations that reached the address space and their failures, refusals and lost stamp hits), to the file

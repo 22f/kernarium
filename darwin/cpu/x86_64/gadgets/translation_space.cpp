@@ -797,8 +797,13 @@ void Space::observe(std::uint64_t changes, ProgramCacheCodeChangeReader reader,
 				const auto address = ranges[index].address;
 				const auto length =
 					static_cast<std::size_t>(ranges[index].length);
-				if (length == 0)
-					continue;
+				/* A range of length 0 is the whole space (the memory
+				 * layer publishes one for a write that named no frame):
+				 * what the ring cannot describe is reset whole. */
+				if (length == 0) {
+					described = false;
+					break;
+				}
 				const auto first = address & page_mask;
 				const auto last = (address + length - 1U) & page_mask;
 				for (auto page = first;;
