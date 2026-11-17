@@ -570,7 +570,10 @@ space's generation. So each frame of a mapped backing has a holder word
 (`darwin/memory/mmu/code_holders.hpp`): the arm64 instruction-fetch path
 registers the fetching generation in it before it reads the frame's bytes, and
 a guest code synchronization or the kernel's `invalidate_code()` path takes the
-word and publishes a whole-space code change in every generation it named. A
+word and publishes a whole-space code change in every generation it named. Both
+also move the frame's code-page stamp (version and epoch) through the
+publisher's own view of the frame, whether or not that view can execute, where
+some mapping executes the frame. A
 publication consumes the word, so a reader registers again at its next fetch;
 a publisher that has emptied a word stays counted until its publication
 finishes, and one that meets such a count publishes to every generation, so an
@@ -636,8 +639,8 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   being verified (bit 1 of the map call's `guest_code`) and the page's record
   counts its executable mappings (a record that ran out of count or of epoch
   answers none, for good). The epoch moves at every
-  publication of a change to the page's code and when its last executable
-  mapping departs, so a verdict is answered only while the page has stayed
+  publication of a change to the page's code, whichever view of the frame the
+  publisher has, and when its last executable mapping departs, so a verdict is answered only while the page has stayed
   executable in some address space since it was filed. A mapping that cannot
   execute or has no stamp is never answered, and one that is not immutable is
   not entered; the table (process-global, direct-mapped) is a hint that may

@@ -682,6 +682,54 @@ void test_a_stamp_carries_the_epoch_and_the_mapping_fact()
 	require(darwin_uml_static_vm_destroy(generation) == 0);
 }
 
+/* A publication moves the stamp of the frame whatever view of it the
+ * publisher has. Another generation maps the frame writable and not as guest
+ * code, as a process that writes a file does, and its code synchronization
+ * (IC IVAU) and the kernel's write through its address space each move the
+ * epoch and the version of the frame an executable mapping holds: a verdict
+ * filed for the frame's bytes is answered only under the epoch it was filed
+ * under. A frame that nothing maps executable has no record to move, and
+ * publishing it leaves the stamp of every other frame where it was. */
+void test_a_publication_through_a_view_that_cannot_execute_moves_the_stamp()
+{
+	constexpr unsigned long reader = 513, writer = 514;
+	constexpr unsigned long base = 0x1c0'0000, view = 0x1d0'0000;
+	ScratchBacking backing{backing_name, 2 * page};
+	map(reader, base, backing, 0, 1, rx, 3);
+	map(writer, view, backing, 0, 2, rw, 0);
+	require(darwin_uml_static_vm_activate(reader) == 0);
+	void *handle = nullptr;
+	darwin_uml_static_code_page_stamp before{};
+	require(darwin_uml_static_vm_code_page(reader, base, &handle, &before) ==
+		DARWIN_UML_STATIC_TRANSLATED);
+
+	require(darwin_uml_static_vm_activate(writer) == 0);
+	require(darwin_uml_static_vm_synchronize_code(view) == 0);
+	darwin_uml_static_code_page_stamp after{};
+	require(darwin_uml_static_vm_code_page_stamp(handle, &after) == 0);
+	require(after.identity == before.identity &&
+		after.version == before.version + 1 &&
+		after.epoch == before.epoch + 1);
+
+	require(darwin_uml_static_vm_invalidate_code_generation(writer, view,
+		page) == 0);
+	require(darwin_uml_static_vm_code_page_stamp(handle, &after) == 0);
+	require(after.version == before.version + 2 &&
+		after.epoch == before.epoch + 2);
+
+	/* The second page is mapped by nobody as code: publishing it moves no
+	 * stamp, the first page's included. */
+	require(darwin_uml_static_vm_activate(writer) == 0);
+	require(darwin_uml_static_vm_synchronize_code(view + page) == 0);
+	require(darwin_uml_static_vm_invalidate_code_generation(writer,
+		view + page, page) == 0);
+	require(darwin_uml_static_vm_code_page_stamp(handle, &after) == 0);
+	require(after.version == before.version + 2 &&
+		after.epoch == before.epoch + 2);
+	require(darwin_uml_static_vm_destroy(reader) == 0);
+	require(darwin_uml_static_vm_destroy(writer) == 0);
+}
+
 /* A kernel write into a guest-code page, the bytes a 4 KiB uaccess copies
  * back from the kernel's alias, lands either way. It publishes no code change
  * until code whose fetch is coherent with every store (x86) is about to run:
@@ -792,6 +840,7 @@ int main()
 	test_the_immutable_fact_replaces_a_mapping_without_a_code_change();
 	test_mappings_of_one_frame_that_disagree_share_its_record();
 	test_a_stamp_carries_the_epoch_and_the_mapping_fact();
+	test_a_publication_through_a_view_that_cannot_execute_moves_the_stamp();
 	test_a_kernel_write_publishes_once_x86_code_may_run();
 	/* Every generation of every row is gone: no record counts a mapping. */
 	require(uml::memory::testing::audit_executable_counts() == 0);

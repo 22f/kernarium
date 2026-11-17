@@ -1486,9 +1486,15 @@ public:
 					code_holders::count(&code_holders::detail::
 						CounterStore::absent_kernel_pages);
 				} else {
-					if (mapping->guest_code)
-						MappedBacking::invalidate_code_page(
+					/* The frame's stamp moves whatever the kernel's
+					 * view of it permits: the record exists where some
+					 * mapping executes the frame, and a verdict filed
+					 * for its bytes must not outlive the write. */
+					MappedBacking::invalidate_code_page(
+						mapping->guest_code ?
 							mapping->backing->code_page_handle(
+								mapping->offset) :
+							mapping->backing->find_code_page(
 								mapping->offset));
 					const bool own = take_holders(*mapping, target,
 						others, holder_takes_in_flight_, true);
@@ -2370,9 +2376,12 @@ private:
 		const auto mapping = find_page(state, page);
 		if (!mapping)
 			return !AddressLayout::is_guest(page);
-		if (mapping->guest_code)
-			MappedBacking::invalidate_code_page(
-				mapping->backing->code_page_handle(mapping->offset));
+		/* The record exists where some mapping executes the frame; a view
+		 * that cannot execute moves it too, as a verdict filed for the
+		 * frame's bytes must not outlive the write. */
+		MappedBacking::invalidate_code_page(mapping->guest_code ?
+			mapping->backing->code_page_handle(mapping->offset) :
+			mapping->backing->find_code_page(mapping->offset));
 		if (AddressLayout::is_guest(page))
 			take_holders(*mapping, generation, others, in_flight, false);
 		return true;
