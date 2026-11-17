@@ -413,8 +413,10 @@ void case_data()
 void case_marks()
 {
 	const long fd = memfd();
-	if (fd < 0)
+	if (fd < 0) {
+		fail("memfd_create failed");
 		return;
+	}
 	raw_syscall(nr_ftruncate, fd, 4 * page);
 	unsigned char ret = 0xc3;
 	for (long number = 0; number < 4; ++number)
@@ -422,18 +424,24 @@ void case_marks()
 	auto *anonymous = map(page, prot_read | prot_write, map_private | map_anonymous);
 	auto *data = map(4 * page, prot_read | prot_write, map_shared, fd);
 	auto *code = map(4 * page, prot_read | prot_exec, map_shared, fd);
-	if (anonymous == nullptr || data == nullptr || code == nullptr)
+	if (anonymous == nullptr || data == nullptr || code == nullptr) {
+		fail("mmap failed");
 		return;
+	}
 	/* A fresh file for the mapping mprotect() makes executable: its page is
 	 * present before it is. */
 	const long other = memfd();
-	if (other < 0)
+	if (other < 0) {
+		fail("memfd_create failed");
 		return;
+	}
 	raw_syscall(nr_ftruncate, other, page);
 	raw_syscall(nr_pwrite64, other, address_of(&ret), 1, 0);
 	auto *later = map(page, prot_read | prot_write, map_shared, other);
-	if (later == nullptr)
+	if (later == nullptr) {
+		fail("mmap failed");
 		return;
+	}
 	/* Written, so that the page is its own and not the shared zero page, which
 	 * every process maps and one of them may run. */
 	anonymous[0] = 1;
@@ -453,7 +461,7 @@ void case_marks()
 	/* A packet ring, which no one executes, however often it is read. */
 	long udp = -1;
 	int index = 0;
-	if (loopback(udp, index)) {
+	if (loopback(udp, index)) { /* fails the row itself when it cannot */
 		const long packet = raw_syscall(nr_socket, af_packet, sock_raw, eth_p_all_network_order);
 		int chosen = 1;
 		TpacketReq3 request{};
@@ -470,7 +478,11 @@ void case_marks()
 			if (ring != nullptr) {
 				touch(ring, ring_block * ring_blocks);
 				expect_marked("packet-ring", ring, 0);
+			} else {
+				fail("mmap of the packet ring failed");
 			}
+		} else {
+			fail("the packet ring could not be set up");
 		}
 	}
 	/* The AIO ring, which no one executes either. */
@@ -478,6 +490,8 @@ void case_marks()
 	if (raw_syscall(nr_io_setup, 8, address_of(&context)) == 0) {
 		touch(reinterpret_cast<const unsigned char *>(context), page);
 		expect_marked("aio-ring", reinterpret_cast<const void *>(context), 0);
+	} else {
+		fail("io_setup failed");
 	}
 }
 

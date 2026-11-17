@@ -13,7 +13,8 @@ the host cannot be called. The guest runs with panic_on_warn, and its console
 must show no warning, no BUG and no oops.
 
 marks: the kernel marks the frames of executable mappings, and no others, which
-the probe reads from /proc/kpageflags.
+the probe reads from /proc/kpageflags. Every mapping it checks (including the
+packet ring and the AIO ring) must be reported: a setup that fails fails the row.
 
 data, code: the emulator's count of frames named (kernel_frame_writes in the
 UML_X86_ACCOUNTING_LOG line it appends when it ends) is 0 after files mapped
@@ -50,7 +51,20 @@ VERDICT = re.compile(
     r"^page-cache-flush: mode=(\w+) failed=(\d+) verdict=(\w+)$", re.MULTILINE)
 KERNEL_FAILURE = re.compile(r"WARNING:|BUG:|Oops|Call Trace:|Kernel panic")
 FRAME_WRITES = re.compile(r"kernel_frame_writes=(\d+)")
+MARK = re.compile(r"^page-cache-flush: mark ([\w-]+)=(\d+)$", re.MULTILINE)
 RING_MODES = ("ring1", "ring2", "ring3")
+# What the marks mode reports for each mapping. A mapping that is missing from
+# its output fails the run, so that a setup that could not be made (an
+# io_setup() that failed, say) is no pass.
+EXPECTED_MARKS = {
+    "anonymous": 0,
+    "file-readable-writable": 0,
+    "file-executable": 1,
+    "file-executable-through-data-mapping": 1,
+    "file-after-mprotect-to-executable": 1,
+    "packet-ring": 0,
+    "aio-ring": 0,
+}
 CPUS = 4
 PROBE_TIMEOUT_SECONDS = 120
 
@@ -95,6 +109,13 @@ def run_mode(arguments, payloads, directory: pathlib.Path, mode: str) -> tuple[b
             if result.return_code != 0 or match is None or match.group(3) != "ok":
                 print(f"FAIL {mode}: exit {result.return_code}", flush=True)
                 held = False
+            if mode == "marks":
+                reported = {name: int(value) for name, value in MARK.findall(result.output)}
+                for name, expected in EXPECTED_MARKS.items():
+                    if reported.get(name) != expected:
+                        print(f"FAIL marks: {name} is {reported.get(name)}, expected {expected}",
+                              flush=True)
+                        held = False
         console = guest.output()
         failures = sorted({line.strip() for line in console.splitlines()
                            if KERNEL_FAILURE.search(line)})
