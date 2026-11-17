@@ -11,7 +11,7 @@ public struct WhatsNewRelease: Identifiable, Hashable, Decodable, Sendable {
     /// TestFlight builds share one marketing version, so the build orders
     /// releases; every archive's is above the one before.
     public let build: Int
-    /// The version as Info shows it: "1.0 (11)".
+    /// The version as Info shows it: "1.0 (12)".
     public let version: String
     /// The day the release came out, "2026-11-12"; left out where the day is
     /// not known when the notes are written.
@@ -191,8 +191,8 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
     /// requirement and is refused.
     public var compass: Bool?
     /// `true` is an entry for a device that has a camera to give the guest (an
-    /// iPhone, an iPad), which the iPad app on a Mac does not. `false` is no
-    /// requirement and is refused.
+    /// iPhone, an iPad), which the iPad app on a Mac or on an Apple Vision Pro
+    /// does not. `false` is no requirement and is refused.
     public var camera: Bool?
 
     public init(

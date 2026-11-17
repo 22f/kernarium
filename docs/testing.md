@@ -289,9 +289,14 @@ On a connected iOS device, Android runs go through Andarium
 (`tests/perf/run_ios_device_android.py`, [`Andarium/README.md`](../Andarium/README.md#automation))
 and Kernarium's device runners keep Linux; both share
 `tests/integration/support/ios_device.py`, and their tooling tests run against
-fakes, so no device is needed. A device run starts with at least five free
-slots of JetsamEvent reports and of each tested process's crash reports, since
-iOS drops the next report once a kind is full: otherwise the
+fakes, so no device is needed. A device run keeps the phone's haptics off
+(`ANDARIUM_HAPTICS=0`) unless it tests them: `--haptics`, on
+`run_ios_device_android.py`, `ipad-automation.py launch` and `activate` (which
+refuses to start a stopped Andarium without it) and `ios_jit_debugger.py`,
+leaves the switch to the person. Kernarium plays no haptics. A device run
+starts with at least five free slots of JetsamEvent reports and of each tested
+process's crash reports, since iOS drops the next report once a kind is full:
+otherwise the
 [preflight](../tests/integration/support/ios_device_reports.py) copies the
 reports listed at the start to a new directory on the Mac, outside every
 checkout, checks each copy by type and size (not byte for byte), and only then
@@ -418,11 +423,15 @@ TIP_LITE=com.example.andarium.tip.lite TIP_PRO=com.example.andarium.tip.pro
 TIP_MAX=com.example.andarium.tip.max TIP_ULTRA=com.example.andarium.tip.ultra
 SHEET_DEVELOPER_NAME=example SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle
 ICP_NUMBER=示例ICP备00000000号-0A`;
-the scheme without the filter also runs `AndariumUITests`). The scheme's Test
-action pins English, so the tests that read the application's words do not
-depend on the language of the device; `LocalizationTests` names a lost pin and
-looks each language up by name, and the language a `-testLanguage` run asks
-for fails only the tests that read the English words. `SnapshotFileApiTests`
+the scheme without the filter also runs `AndariumUITests`). A row that asserts
+what an iPad app on a Mac does not do (accessibility activation of an alert's
+buttons, text that scales with the content size category, a menu's items as
+UIKit elements) is disabled there with its reason and shows as skipped. The
+scheme's Test action pins English, so the tests that read the application's
+words do not depend on the language of the device; `LocalizationTests` names a
+lost pin and looks each language up by name, and the language a `-testLanguage`
+run asks for fails only the tests that read the English words.
+`SnapshotFileApiTests`
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
@@ -452,11 +461,11 @@ menu) exist with any of Send feedback, Review and Buy me tokens, and
 `AndariumCoreTests` holds the tip sheet's states and the rating rule, counter
 and record as pure logic, and the state of the no-Google-apps notice (the panel
 on a first start and on the retry of a first Android boot that did not finish,
-and nothing else; the Send feedback line until opened or closed).
+and nothing else).
 `NoGoogleNoticeScreenTests` host the real boot screen and Send feedback sheet
 for it (the panel reached on those starts and gone with the boot, the starts
-that show none, the line opening and closing in place, the words in each
-language), and `NoGoogleNoticeUITests` boot a real first start and reach the
+that show none, the line opening and closing in place and coming back with each
+sheet, the words in each language), and `NoGoogleNoticeUITests` boot a real first start and reach the
 line (see the UI-test target below).
 The Mail composer, the picker and the guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
@@ -477,11 +486,11 @@ bundle check refuses a build that does).
 `DeviceOrientationTests` checks UIKit's orientation numbers against the
 application's readings, the mapping to Android's rotation, the observer's begin
 and end of the device's notifications, the path from a turn to the record a
-fake guest reads on a device without sensors, and that the Simulator and a Mac,
-which have none, hold no connection for them. The Simulator cannot turn an
-iPhone's `UIDevice` under a portrait-only interface (XCUIDevice reaches the
-interface only), so the device is injected there; the real turns are checked on
-an iPhone.
+fake guest reads on a device without sensors, and that a device without them
+holds no connection for them (the Simulator has none; a Mac answers as Core
+Motion does). The Simulator cannot turn an iPhone's `UIDevice` under a
+portrait-only interface (XCUIDevice reaches the interface only), so the device
+is injected there; the real turns are checked on an iPhone.
 
 `SlowStartScreenTests` check the boot screen's slow-start notice by a clock
 the test moves, so no test waits three minutes: when the notice comes (also for
@@ -604,7 +613,10 @@ keys and artwork),
 document pickers' build conditions (`andarium-document-pickers`: the App Store
 configuration opens files in place, every other presents the copy-mode picker,
 and an in-place importer anywhere else is in an App Store branch or a named
-exception),
+exception), the application's own touch feedback
+(`andarium-interface-feedback`: no view plays it around the one modifier; that
+a launch silencing haptics silences it, on both model paths of a launch, is
+held by the hosted `LaunchEnvironmentTests` and `CapabilitiesFlowTests`),
 the Acknowledgements resource (`andarium-acknowledgements`) and the stand-in
 debugger that serves the JIT's request for executable memory on a device
 (`andarium-ios-jit-debugger`). The JIT's region route has host tests that run
@@ -942,10 +954,10 @@ blocker in every one of them.
   rewritten instructions ran. Speed is printed, not judged.
 - `arm64-instruction-corpus` runs the generated A64 corpus through both
   engines; the special records (native SME, absent features, the SM = 0 family,
-  top-byte ignore, indirect-branch targets, native floating-point traps) have
-  their own `arm64-instruction-corpus-*` and `arm64-absent-*` tests that
-  re-derive them from their generators, and records that need SME or
-  FEAT_AFP/BF16 run only on a host that has them.
+  top-byte ignore, indirect-branch targets, compare-retry exclusives, native
+  floating-point traps) have their own `arm64-instruction-corpus-*` and
+  `arm64-absent-*` tests that re-derive them from their generators, and records
+  that need SME or FEAT_AFP/BF16 run only on a host that has them.
   The runner also runs a case again, up to 16 attempts in all, when its
   program is a load, one store-exclusive that discards its status, CLREX and
   SVC in four straight-line words and the only difference from the pack is
@@ -972,14 +984,17 @@ blocker in every one of them.
   `arm64-a32-corpus` and `arm64-aarch32-semantics*` check the AArch32 decoder,
   generated tables, corpus and semantic library without an engine;
   `arm64-aarch32-corpus` also proves the store-exclusive ranges the retry
-  compares and what it refuses. The corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
+  compares and what it refuses, and which retirement excess it takes. The corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
   case that differs only by a spurious store-exclusive failure (its own bytes
-  unwritten, the case's other stores in the data), and the `-interrupted`
+  unwritten, the case's other stores in the data; in a recognized
+  `exclusive-retry` loop, whole extra iterations), and the `-interrupted`
   tests provoke that failure on purpose. Only the gadget one runs the spill
   suite, whose cases store between the pair: the JIT does not lose a
   reservation there. The `-injected` tests make an attempt end as a lost
   reservation with another register or a thread register wrong, and as other
-  faults, and require that only a plain loss is retried.
+  faults, and require that only a plain loss is retried; a retry loop's excess
+  that is not whole iterations fails, and one made on every attempt fails when
+  the attempts are used up.
 - `guest-aarch32-engine-gadgets` and `-jit` boot the freestanding engine probe
   in `tests/integration/aarch32/engine_probe/` and count every `SIGILL`.
 
@@ -1191,6 +1206,13 @@ the tool's lines is the tooling test `android17-vulkan-smoke-runner`.
 `screenrecord`'s encoder run across a suspend by the host's route (asked again
 while the guest is busy, as the host does) and by the guest's own on one stream
 each, and the host closes no stream by a reset.
+`android-vdso` (integration) registers when `UML_ANDROID_VDSO_RELEASE` names the
+release: the guest kernel's vDSO checks of `guest-vdso-gadgets` (with no C
+library; the mapping must be sealed there and refuse a move, where the Linux
+tests require it unsealed and movable) and the library probe of
+`guest-vdso-libc-gadgets` run as the shell user, so bionic's `clock_gettime`,
+`gettimeofday` and `time` are shown to call the `[vdso]` mapping. The probes are
+built with the host's `clang++` and `ld.lld`.
 `android-sync` (integration) registers when `UML_ANDROID_SYNC_RELEASE` names the
 release: with SysRq off, a file the guest holds dirty reaches the host's data
 image once the management console's `sync` replies, and survives a hard kill of
@@ -1418,6 +1440,39 @@ the camera service's log must hold no leaked stream, the line it prints at the
 close of a device whose requests the HAL ended without a request error. The
 release must carry the HAL topic that handles the host's end of a camera's
 video and the camera application topic that ends the recording.
+`android-camera-video-leave` (`--mode video-leave`) plays the application's
+leaving the foreground to the test-only launcher `uml-darwin-android17-edge-test`
+(which no product has; it is built where a release is named) through its edge
+pipe (`UML_BACKGROUND_EDGE_CONTROL`, read with the synthetic camera only)
+while the video mode records, `--leave-trials` times (ten by default), with the
+platform's notice first or twenty milliseconds after: the launcher ends the
+camera's running video, waits for the guest to stop its video streams (the same
+sequence as the applications', `holdAfterVideoEnds`) and holds the guest's GPU
+requests for three seconds through the launcher's own request gate. Every trial
+expects the camera to have answered and found a video to end, the HAL's report
+of the loss and the recorder's stop to come before the hold landed (the gate's
+closing, which the launcher times apart from the end of its wait for a request
+that runs; the guest's clock set against the launcher's by the shortest of seven
+round trips), the loss
+to be the HAL's first failed buffer, the camera device not to have given up on the
+guest's reading of the interrupted record, and the clip's audio not to run on
+past its video by more than a second. Whether the guest stopped its streams
+inside the wait's bound is told, not required. The runner keeps the guest's log
+of each trial in `--output-dir`.
+`kernarium-gpu-hold` (unit) runs the runtime's hold of the guest's GPU requests
+(`KernariumGpuHold.hpp`) over the real request gate, camera control and run loop,
+with clocks that start at the edge: the camera's wait within what a deadline
+leaves after the drain, the edge's bound meeting the hold that waits (the gate
+closes at the bound's time and the main path is back inside the edge, a drain
+waited for once), and a guest that restarts while the hold waits for the camera,
+or whose boot is being built when the hold arrives, which runs after the release
+and not behind the closed gate.
+`camera-background-video` (unit) is the ordering of the application's departure
+(video running: end, wait, hold; none: hold at once; a wait that runs out: hold
+and one log line; the wait inside the bound; a hold that lands first ends a
+pending wait, harmlessly; a call queued behind another keeps its own deadline)
+with a fake camera device and a fake GPU gate, and `camera-device` drives the device's side of it and the
+interrupted record that goes to the guest before a lost video's failed buffers.
 `android17-camera-runner` (tooling) runs its
 parsers and the expectations of every layout without a guest,
 `android17-camera-layouts` (tooling) the layout set, its fallback order and the

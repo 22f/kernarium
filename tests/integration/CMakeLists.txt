@@ -1031,6 +1031,41 @@ uml_add_guest_integration_test(
     TIMEOUT 420
     CPUS 2)
 
+# An arm64 task has the guest's vDSO (kernel/common/README.md): AT_SYSINFO_EHDR
+# names an ELF shared object that /proc/self/maps shows as [vdso], its three
+# entries resolve by name and version through the SysV and the GNU hash, its
+# unwind tables cover them, each agrees with the system call it stands for
+# (every clock, an invalid clock, a bad pointer, the resolution), a fork and an
+# exec keep it, and a task that moves, unmaps, covers or writes to its own gets
+# a working one from its next exec. The caller states that the mainline guest
+# kernel does not seal its system mappings (--seal=open). The probe uses no C
+# library. A second probe, built against
+# the guest's glibc, checks that glibc's clock_gettime, gettimeofday and time
+# reach the kernel from the [vdso] mapping (guest-vdso-libc-*). An AArch32 task
+# has no vDSO (guest-aarch32-kernel), and run_android_vdso.py runs both probes
+# on Android.
+foreach(_engine IN ITEMS gadgets jit)
+    uml_add_guest_integration_test(
+        NAME guest-vdso-${_engine}
+        SCRIPT support/run_guest_probe.py
+        ARGS --probe ${PROJECT_SOURCE_DIR}/tests/integration/kernel/vdso_probe.cpp
+            "--cxxflags=-Wall -Wextra -Werror -ffreestanding -nostdlib -static -no-pie -fno-stack-protector -fno-exceptions -fno-rtti"
+            --probe-argument=--seal=open
+            --engine ${_engine} --ncpus 2 --probe-timeout 150
+        LABELS guest;kernel;${_engine}
+        TIMEOUT 420
+        CPUS 2)
+    uml_add_guest_integration_test(
+        NAME guest-vdso-libc-${_engine}
+        SCRIPT support/run_guest_probe.py
+        ARGS --probe ${PROJECT_SOURCE_DIR}/tests/integration/kernel/vdso_libc_probe.cpp
+            "--cxxflags=-Wall -Wextra -Werror -fno-exceptions -fno-rtti"
+            --engine ${_engine} --ncpus 2 --probe-timeout 150
+        LABELS guest;kernel;${_engine}
+        TIMEOUT 420
+        CPUS 2)
+endforeach()
+
 # A TLB replay that sends neighbouring user PTEs as one host call maps each
 # page to its own frame and protection, across PMD and batch boundaries and
 # while another thread's invalidations make it walk batches again.

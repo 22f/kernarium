@@ -29,15 +29,24 @@ public enum CameraAccess: Equatable, Sendable {
 /// the host has a built-in front camera (the layout's rule), so the Camera row
 /// offers the same. The iPad app running on a Mac is offered none: the system
 /// reports the Mac's cameras (and a Continuity iPhone's) without a position, the
-/// layout does not count them, and a hidden window would keep one open.
+/// layout does not count them, and a hidden window would keep one open. The iPad
+/// app running on an Apple Vision Pro is offered none either.
 public enum CameraAvailability {
     /// Whether the iPad app on a Mac is offered the Mac's camera. This is the
     /// one place to turn it on once the Mac's cameras are checked.
     public static let offeredToIOSAppOnMac = false
+    /// Whether the iPad app on a Vision Pro is offered a camera: the Mac's rule,
+    /// and the one place to turn it on.
+    public static let offeredToIOSAppOnVision = false
 
-    public static func isAvailable(hasFrontCamera: Bool, isiOSAppOnMac: Bool) -> Bool {
+    /// A host that is offered no camera looks for none: `hasFrontCamera` is
+    /// asked only for any other.
+    public static func isAvailable(
+        hasFrontCamera: @autoclosure () -> Bool, isiOSAppOnMac: Bool, isiOSAppOnVision: Bool
+    ) -> Bool {
         if isiOSAppOnMac, !offeredToIOSAppOnMac { return false }
-        return hasFrontCamera
+        if isiOSAppOnVision, !offeredToIOSAppOnVision { return false }
+        return hasFrontCamera()
     }
 }
 

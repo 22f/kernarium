@@ -206,14 +206,23 @@ private final class FakeEffects: PauseEffects {
     var atSuspend: (@MainActor () -> Void)?
     /// Whether a resume finishes at once, as the runtime's queue does.
     var resumesAtOnce = false
+    /// How long the hold takes, as it does when it waits for the guest to stop
+    /// its camera video first.
+    var holdTakes: TimeInterval = 0
+    /// What the write-back was given to wait until, in turn.
+    var quiesceDeadlines: [DispatchTime?] = []
 
-    func holdGuestGPU() { calls.append("hold") }
+    func holdGuestGPU() {
+        if holdTakes > 0 { Thread.sleep(forTimeInterval: holdTakes) }
+        calls.append("hold")
+    }
     func releaseGuestGPU() { calls.append("release") }
     func flushGuest(until deadline: DispatchTime?) {
         calls.append(deadline == nil ? "flush" : "flush-wait")
     }
     func quiesceGuest(reason: String, until deadline: DispatchTime?) {
         calls.append("quiesce(\(reason),\(deadline == nil ? "nowait" : "wait"))")
+        quiesceDeadlines.append(deadline)
     }
     func resumeGuest(finished: @escaping @MainActor () -> Void) {
         calls.append("resume")
@@ -290,6 +299,33 @@ struct PauseControllerTests {
     /// edge's own work may take.
     @Test func theStopsWriteBackWaitsAsLongAsAnEdge() {
         #expect(StopSettle.bound == PauseController.edgeBudget)
+    }
+
+    /// The edge's budget starts with the edge. The hold may wait for the
+    /// guest's camera video to stop (`holdGuestGPU`), and that wait is taken out
+    /// of the budget the write-back is given, never added to it.
+    @Test func theHoldsWaitIsInsideTheEdgeBudget() throws {
+        let (controller, effects, _) = try makeController()
+        effects.holdTakes = 0.3
+        controller.guestDidStart()
+        let began = DispatchTime.now()
+        controller.didEnterBackground()
+        let deadline = try #require(effects.quiesceDeadlines.first ?? nil)
+        #expect(deadline <= began + PauseController.edgeBudget + .milliseconds(100))
+        #expect(deadline >= began + PauseController.edgeBudget)
+        #expect(effects.calls == ["hold", "quiesce(background,wait)"])
+    }
+
+    /// With nothing to wait for the hold is as quick as it was, and the
+    /// write-back is given the whole budget.
+    @Test func aHoldThatWaitsForNothingLeavesTheWholeBudget() throws {
+        let (controller, effects, _) = try makeController()
+        controller.guestDidStart()
+        let began = DispatchTime.now()
+        controller.didEnterBackground()
+        let deadline = try #require(effects.quiesceDeadlines.first ?? nil)
+        #expect(deadline >= began + PauseController.edgeBudget)
+        #expect(deadline <= began + PauseController.edgeBudget + .milliseconds(100))
     }
 
     @Test func aSecondBackgroundEdgeIsIgnored() throws {

@@ -231,12 +231,63 @@ one aligned run of a single backing (`arch_vmap_group_order()`).
 
 The default malloc zone returns what a restarted guest freed on its own
 schedule, so a guest's metadata (the MMU's indexes, the native address space's
-state, the engines' program and record tables, batch plans) stays out of it.
+state, the engines' program and record tables, batch plans) stays out of it,
+except for the holder words' roots and leaves of a mapped backing
+([Translation caches](#translation-caches-and-guest-debugging)).
 `memory/domain_heap.hpp` provides per-domain heaps carved from one reserved
 region and released whole when their owner retires, and thread-local scratch for
 one operation's temporaries. The GPU stack, Metal, system frameworks, devices and
 the process's own objects stay in the default zone, whose residue is what
 remains.
+
+### x86-64 frame accounting
+
+An x86 guest sees a store through any alias of a frame at once, so a code
+change must reach every address at which some executor holds a translation of
+the frame. The memory layer (`memory/mmu/frame_accounting.hpp`) keeps, for each
+4 KiB frame of a backing:
+
+- the writer locations: the {generation, page} pairs whose mapping is writable.
+  A location exists for as long as its writable mapping: the four mapping
+  primitives add it before the mapping is installed and take it back after the
+  mapping is gone, and a change that fails or is abandoned takes back only
+  what it added;
+- the holders: the locations at which an x86 translator registered the frame
+  before reading a byte of it, each with a translatable word (guest code with
+  execute) naming the frame. Registration also returns the writer locations
+  whose write translations may predate it; the translator retires them and
+  waits for the participants inside the engine before it caches anything. A
+  debt larger than the translator's buffer is asked for again with room for it;
+  when the room cannot be had, or the frame's writers are not known, the
+  translator retires every write translation of every participant instead; and
+- one flush serial per generation, which every walk of the generation moves
+  after removing its holders, so that a translation recorded before the walk
+  never stamp-hits after it.
+
+A write fill tags a store for publication when the frame has a holder other
+than the writer's own location, and a tagged store, a kernel write through the
+kernel's own alias of the frame, and `invalidate_code` publish at every holder.
+A kernel write publishes at the frame its user word names and at the frame the
+host's table of the kernel's direct ranges (32 of them, split on a partial unmap
+and counted when full) resolves its buffer to; a buffer the table does not
+resolve, or resolves to a descriptor with no backing alive, is counted and makes
+every generation read every translation again.
+When a run of the emulator ends it appends the process's counts so far, which
+nothing resets (unresolved kernel writes, dropped direct ranges, global holds,
+registrations that reached the address space and their failures, refusals and lost stamp hits), to the file
+`UML_X86_ACCOUNTING_LOG` names; the unresolved writes and global holds stay
+near zero in an ordinary guest.
+
+Every change of a frame's locations happens under that frame's stripe lock, and
+nothing under it allocates, makes a record or takes another lock: the index
+leaf, the frame's record and the room a list needs are made before the lock,
+and a lookup under it only finds. The alias ids that name a generation in a
+location resolve through a per-domain table that readers need no lock for. All
+of the accounting's metadata (the writer index, the records and their lists,
+the alias table, and a plan's entries in thread scratch) comes from the domain
+heap, so a guest's frames never grow the default zone: about 2 MiB per GiB of
+guest memory mapped writable, and about 230 bytes for each frame with two or
+more writers. The x86-64 guest alone compiles it.
 
 ### Executable code
 
@@ -378,18 +429,27 @@ inside one 16-byte block is single-copy atomic, one that crosses a block faults,
 and without host LSE2 every such access faults.
 
 **Exclusive monitor.** A load/store-exclusive loop makes progress whatever the
-TLB holds, and nothing an engine does between the pair without an exception
-fails the store. An exclusive load fills the write TLB entry and records the host
+TLB holds, and nothing an engine does between the pair without an exception fails
+the store. An exclusive load fills the write TLB entry and records the host
 address and loaded values in the `CpuState` exclusive fields
 (`engine/exclusive.inc`, reused by the AArch32 exclusives), and a store-exclusive
 that still misses completes in software with one host compare-and-swap of the
 recorded values. The JIT's semantic path keeps a software reservation (versions
 of 16-byte host granules), so a store to the reserved granule, including the
-kernel's futex and SWP emulation, fails the store-exclusive. The monitor ends at
-a store-exclusive, a CLREX, an exception and a store to the reserved granule; a
-store of the guest's own to another granule leaves it standing, as on hardware
-(`arm64-exclusive-progress`, `arm64-exclusive-events`,
-`arm64-jit-exclusive_completion`, `guest-exclusive-progress-gadgets`/`-jit`).
+kernel's futex and SWP emulation, fails the store-exclusive. The JIT runs an
+A64 or AArch32 pair it fuses on the host's own monitor, and a side exit of a
+fused run rolls back to the guest state at the load-exclusive, which then
+executes on the software reservation; no exit clears the monitor and continues.
+Only a host interruption of a natively fused pair fails its store-exclusive,
+never systematically, so a loop that meets the architecture's progress
+conditions makes progress. The monitor ends at a store-exclusive, a CLREX, an exception and a
+store to the reserved granule; a store of the guest's own to another granule
+leaves it standing, as on hardware (`arm64-exclusive-progress`,
+`arm64-exclusive-events`, `arm64-jit-exclusive_completion`,
+`arm64-jit-reservation_alias`, `arm64-jit-exclusive_run_fetch`,
+`arm64-jit-exclusive_run_runtime`, `arm64-jit-exclusive_run_contention`,
+`arm64-jit-a32-exclusive`,
+`guest-exclusive-progress-gadgets`/`-jit`).
 
 Both engines complete WFE and WFI at once and treat SEV and SEVL as no-ops, so
 no wait depends on an event. Completing WFI deliberately deviates from arm64
@@ -502,6 +562,32 @@ one instruction and reports a single-step exit, which Linux delivers as
 `process_vm_writev()`) through its own view of the frame, so no translated store
 publishes the change: those paths call `darwin_uml_vm_invalidate_code()` for the
 target mm's generation.
+
+An arm64 guest that rewrites code and synchronizes it (`IC IVAU`, broadcast on
+hardware and keyed by the physical address) changes what every process running
+the frame executes, but a store or a publication reaches only its own address
+space's generation. So each frame of a mapped backing has a holder word
+(`darwin/memory/mmu/code_holders.hpp`): the arm64 instruction-fetch path
+registers the fetching generation in it before it reads the frame's bytes, and
+a guest code synchronization or the kernel's `invalidate_code()` path takes the
+word and publishes a whole-space code change in every generation it named. A
+publication consumes the word, so a reader registers again at its next fetch;
+a publisher that has emptied a word stays counted until its publication
+finishes, and one that meets such a count publishes to every generation, so an
+empty word never hides a reader another publisher has yet to tell. The kernel
+path takes the word of every page the target maps, whatever its permission,
+and publishes to every generation, the target included, for a page the target
+has not mapped yet (its software page table fills at faults, so the frame is
+unknown) or when it meets an unfinished take. The words
+live in 4 KiB leaves made on a frame's first registration (a leaf per 512
+frames), and the leaves and their roots (4 KiB per GiB of backing, made with
+the backing in every build) come from the ordinary allocator, sized by the
+backing and freed with it, not from a domain heap. A backing whose leaf cannot
+be made, or a word that names more generations than it holds, publishes to
+every live generation instead.
+The x86 engines neither register nor consult it: they hold their frames in the
+[frame accounting](#x86-64-frame-accounting), which the arm64 engines never
+consult, and the kernel's `invalidate_code()` path runs both publications.
 
 ### Ahead-of-time code
 
@@ -1052,12 +1138,32 @@ is part of the loop: every restart reads the misc partition again (see the
 runs the same loop inside its one `run` call
 (`Kernarium/Runtime/KernariumRestartLoop.hpp`, `kernarium-restart-loop`): a stop
 that arrives as the guest restarts wins, the next boot waits while the guest is
-paused or the GPU request gate is held, and a restart is reported twice so the
-application can re-apply what belongs to a kernel. After Android powers off
-cleanly the runtime releases the guest through `uml_emulator_release_guest` and
-returns success only once another run can start. An application that can be
-backgrounded holds the guest's GPU requests (`set_gpu_hold`) before it quiesces
-and releases them before it resumes.
+paused or from the moment the application asks for its GPU requests to be held
+(`set_gpu_hold`, before the hold's camera wait, whether or not the gate has
+closed yet) until it gives them back (and again once the boot is built, so a hold
+that arrives meanwhile also keeps the guest from running), and a restart is
+reported twice so the application can re-apply what belongs to a kernel. After
+Android powers off cleanly the runtime releases the guest through
+`uml_emulator_release_guest` and returns success only once another run can
+start. An application that can be backgrounded holds the guest's GPU requests (`set_gpu_hold`) before it quiesces
+and releases them before it resumes. On an Android guest the hold is preceded by
+the camera's end of the guest's running video: the camera device ends it as the
+platform's notice of the departure would and the hold waits (two seconds at most,
+inside the edge's budget, never added to it) until the guest has stopped its
+video streams, so a recording that runs ends before the guest's GPU requests
+stop (`uml::camera::BackgroundVideo`, the camera device's README). A caller
+that has a deadline passes what it leaves (`set_gpu_hold` of 3 or more, the
+milliseconds): the camera wait then takes what is left after the hold's own wait
+of one second for a request that is running, and nothing when less is left. The
+deadline bounds the camera wait and not that second, which the drain always has.
+The hold of a caller with none (Andarium, at the edge) is held three
+seconds after the edge at the latest, the wait and then the drain; the main path
+of a kept-running job, which waits for the screen to go off first, gets what its
+four-second edge leaves. The bound that holds that job's GPU 1.5 s after the edge
+takes the plain hold without the camera's wait (`set_gpu_hold` with 2), so the gate
+is closed at 1.5 s after the edge and drained 2.5 s after it at the latest; a bound
+that fires while the other caller waits for the camera holds at once and ends that
+wait, and two holds that meet wait for a request that is running once.
 
 The kernel's whole-file disk locks pass through the host's guest-file registry
 (`platform/guest_files`). On iOS, iPadOS, the Simulator and in Designed for

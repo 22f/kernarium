@@ -396,6 +396,9 @@ void aStopBeforeTheFirstRunKeepsTheGuestFromRunning()
             "a stop before the first run still ran the guest");
 }
 
+/* The loop's side only: the machine's `held` is the test's own switch. What makes the real machine held (a hold asked for
+ * with the gate still open) is the Lifecycle's, in aHoldAskedForHoldsTheNextBootBeforeTheGateCloses, and the restart that
+ * meets a hold that waits for the guest's camera is kernarium-gpu-hold. */
 void theNextBootWaitsWhileTheApplicationHoldsIt()
 {
     FakeMachine machine;
@@ -428,6 +431,60 @@ void theFirstBootIsNeverHeld()
             "a hold kept the first boot back");
     require(machine.count("wait-held") == 0U,
             "the first boot waited for a hold");
+}
+
+/* A hold that arrives while the next boot is built: the loop's guard found none before it, and the guest must not be run
+ * behind the hold either. What remains by design is the hold that lands after the guest runs. */
+void aHoldThatArrivesWhileTheNextBootIsBuiltKeepsTheGuestFromRunningUntilItEnds()
+{
+    FakeMachine machine;
+    machine.script = {restarts(), powersOff()};
+    machine.onCall = [](FakeMachine& self, const std::string& call) {
+        if (call == "start 1")
+            self.held.store(true);
+        if (self.count("wait-held") == 3U)
+            self.held.store(false);
+    };
+    require(kernarium::restart::run(machine, quickly) == 0,
+            "a released hold did not let the guest run");
+    require((machine.calls() == Calls {"start 0", "enter", "end", "stop-services",
+                "reset-link", "began 1", "start 1", "wait-held", "wait-held",
+                "wait-held", "enter", "end"}),
+            "the hold that arrived while the boot was built did not keep the guest from running");
+    require(contains(machine.said(), "the restarted guest may boot"),
+            "the end of the hold was not logged");
+}
+
+void aStopEndsTheWaitForAHoldThatArrivedWhileTheNextBootWasBuilt()
+{
+    FakeMachine machine;
+    machine.script = {restarts(), powersOff()};
+    machine.onCall = [](FakeMachine& self, const std::string& call) {
+        if (call == "start 1")
+            self.held.store(true);
+        if (self.count("wait-held") == 2U)
+            self.stop.store(true);
+    };
+    require(kernarium::restart::run(machine, quickly) == 0,
+            "a stop during the hold did not end the launch");
+    require(machine.count("enter") == 1U,
+            "a stop during the hold still ran the restarted guest");
+}
+
+/* The first boot is run as it is asked for: a hold that arrives while it is built is applied to the GPU the guest has
+ * (the runtime's registration), and the guest runs, as it does when the hold was there before. */
+void aHoldThatArrivesWhileTheFirstBootIsBuiltDoesNotKeepItBack()
+{
+    FakeMachine machine;
+    machine.script = {powersOff()};
+    machine.onCall = [](FakeMachine& self, const std::string& call) {
+        if (call == "start 0")
+            self.held.store(true);
+    };
+    require(kernarium::restart::run(machine, quickly) == 0,
+            "a hold kept the first boot back");
+    require(machine.count("wait-held") == 0U && machine.count("enter") == 1U,
+            "the first boot waited for a hold that arrived while it was built");
 }
 
 void aStopEndsTheWaitForTheHold()
@@ -687,6 +744,33 @@ void aStoppedAndQuiescedLifecycleHoldsTheNextBoot()
     require(!lifecycle.held(), "an unregistered GPU still held the boot");
 }
 
+void aHoldAskedForHoldsTheNextBootBeforeTheGateCloses()
+{
+    Lifecycle lifecycle;
+    std::atomic_bool gate {};
+    lifecycle.setGpuHeld([&] { return gate.load(); });
+    require(!lifecycle.gpuHoldRequested(), "a fresh lifecycle had a hold asked for");
+
+    // The application has asked, and the gate is still open: it waits for the
+    // guest's camera first, and a guest that boots meanwhile would find the gate
+    // closed behind it.
+    lifecycle.setGpuHoldRequested(true);
+    require(lifecycle.gpuHoldRequested(), "the hold asked for was not kept");
+    require(lifecycle.held(), "a hold asked for with the gate open did not hold the boot");
+    require(!lifecycle.quiesced(), "a hold asked for is not a quiesced guest");
+
+    // It holds with no GPU service registered, between two boots.
+    lifecycle.setGpuHeld({});
+    require(lifecycle.held(), "a hold asked for was forgotten when the GPU service went away");
+
+    // The requests given back release the boot, whatever the gate does.
+    lifecycle.setGpuHoldRequested(false);
+    require(!lifecycle.held(), "a hold given back still held the boot");
+    gate.store(true);
+    lifecycle.setGpuHeld([&] { return gate.load(); });
+    require(lifecycle.held(), "a closed gate stopped holding the boot");
+}
+
 /* Calls `nudge` until `done`, so that a wake-up sent before the waiter began
  * to wait is sent again. */
 template<typename Nudge, typename Done>
@@ -766,6 +850,12 @@ const uml::testing::NamedTest tests[] {
     {"the-next-boot-waits-while-held", theNextBootWaitsWhileTheApplicationHoldsIt},
     {"the-first-boot-is-never-held", theFirstBootIsNeverHeld},
     {"a-stop-ends-the-wait-for-the-hold", aStopEndsTheWaitForTheHold},
+    {"a-hold-that-arrives-while-the-next-boot-is-built-keeps-the-guest-from-running",
+        aHoldThatArrivesWhileTheNextBootIsBuiltKeepsTheGuestFromRunningUntilItEnds},
+    {"a-stop-ends-the-wait-for-a-hold-that-arrived-while-the-next-boot-was-built",
+        aStopEndsTheWaitForAHoldThatArrivedWhileTheNextBootWasBuilt},
+    {"a-hold-that-arrives-while-the-first-boot-is-built-does-not-keep-it-back",
+        aHoldThatArrivesWhileTheFirstBootIsBuiltDoesNotKeepItBack},
     {"five-early-restarts-end-the-loop",
         fiveEarlyRestartsInARowEndTheLoopWithItsOwnResult},
     {"a-fifteen-second-boot-resets-the-count",
@@ -793,6 +883,8 @@ const uml::testing::NamedTest tests[] {
         noBootedEventIsSentWhenTheGuestEndsFirst},
     {"the-lifecycle-holds-the-next-boot",
         aStoppedAndQuiescedLifecycleHoldsTheNextBoot},
+    {"a-hold-asked-for-holds-the-next-boot-before-the-gate-closes",
+        aHoldAskedForHoldsTheNextBootBeforeTheGateCloses},
     {"a-waiting-boot-wakes-when-the-hold-ends", aWaitingBootWakesWhenTheHoldEnds},
     {"a-stop-wakes-a-waiting-boot",
         aStopWakesAWaitingBootAndIsNotInheritedByTheNextRun},

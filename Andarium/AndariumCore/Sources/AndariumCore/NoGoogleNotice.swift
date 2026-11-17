@@ -13,33 +13,12 @@ import Foundation
 /// A person who finished their first start before the notice existed meets it
 /// only as the line. A start that restarts the running guest, boots recovery
 /// or is any other normal or update start never shows the panel. The line in
-/// Send feedback shows until the person has opened or closed it once, which is
-/// one value in the defaults database; a launch that is not the person's (a
-/// harness) keeps nothing, and its feedback sheet always shows the line.
-public struct NoGoogleNotice {
-    /// The defaults key of the line: set once it has been opened or closed.
-    public static let feedbackKey = "andarium.noGoogleNotice.feedback"
-
-    /// The database the value is kept in; nil keeps nothing.
-    private let defaults: UserDefaults?
-
-    public init(defaults: UserDefaults? = nil) {
-        self.defaults = defaults
-    }
-
+/// Send feedback is there, closed, whenever the sheet opens; closing it takes
+/// it away from that sheet alone, and nothing about it is kept.
+public enum NoGoogleNotice {
     /// Whether the boot screen of a start of this kind carries the panel.
     /// `firstBootPending` is the guest's record when the start began.
     public static func showsOnBoot(_ kind: BootKind, firstBootPending: Bool) -> Bool {
         kind == .firstStart || (kind == .normal && firstBootPending)
-    }
-
-    /// Whether Send feedback opens with the line.
-    public var showsInFeedback: Bool {
-        defaults.map { !$0.bool(forKey: Self.feedbackKey) } ?? true
-    }
-
-    /// The person opened the line or closed it: the next sheet opens without it.
-    public func keepFeedbackAnswered() {
-        defaults?.set(true, forKey: Self.feedbackKey)
     }
 }

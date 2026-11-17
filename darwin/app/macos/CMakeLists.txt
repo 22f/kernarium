@@ -70,14 +70,20 @@ function(uml_stage_macos_gpu_frameworks)
 endfunction()
 
 # uml_add_macos_embedded_kernel_app(<target> <main source> <kernel artifact>
-#     [NETWORK_PROVIDER <target>] [TEST_ONLY])
+#     [NETWORK_PROVIDER <target>] [TEST_ONLY] [EDGE_TEST])
 #
 # NETWORK_PROVIDER names the user network the launcher links instead of the
 # product's. TEST_ONLY makes a launcher for the tests that is no product: it is
-# no macOS app target of the identity checks and has no dSYM.
+# no macOS app target of the identity checks and has no dSYM. EDGE_TEST (a
+# TEST_ONLY launcher only) compiles in the pipe that plays the application's
+# leaving the foreground to the synthetic camera's run
+# (edge_test/background_edge_control.hpp); no product launcher compiles it.
 function(uml_add_macos_embedded_kernel_app
         TARGET_NAME MAIN_SOURCE ARTIFACT_TARGET)
-    cmake_parse_arguments(_uml_app "TEST_ONLY" "NETWORK_PROVIDER" "" ${ARGN})
+    cmake_parse_arguments(_uml_app "TEST_ONLY;EDGE_TEST" "NETWORK_PROVIDER" "" ${ARGN})
+    if(_uml_app_EDGE_TEST AND NOT _uml_app_TEST_ONLY)
+        message(FATAL_ERROR "${TARGET_NAME}: EDGE_TEST needs TEST_ONLY")
+    endif()
     if(NOT TARGET "${ARTIFACT_TARGET}")
         message(FATAL_ERROR
             "${TARGET_NAME} requires the artifact target ${ARTIFACT_TARGET}")
@@ -107,6 +113,10 @@ function(uml_add_macos_embedded_kernel_app
         launcher.hpp
         main.cpp
         "${MAIN_SOURCE}")
+    if(_uml_app_EDGE_TEST)
+        target_sources("${TARGET_NAME}" PRIVATE
+            edge_test/background_edge_control.hpp)
+    endif()
     uml_declare_architecture_target("${TARGET_NAME}" app)
     target_include_directories("${TARGET_NAME}" PRIVATE
         ${PROJECT_SOURCE_DIR}/darwin/emulator/src
@@ -164,7 +174,8 @@ function(uml_add_macos_embedded_kernel_app
         target_link_libraries("${TARGET_NAME}" PRIVATE UML::NetworkProvider)
     endif()
     target_compile_definitions("${TARGET_NAME}" PRIVATE
-        UML_APP_HAS_SLIRP=$<BOOL:${UML_BUILD_NETWORK_PROVIDER}>)
+        UML_APP_HAS_SLIRP=$<BOOL:${UML_BUILD_NETWORK_PROVIDER}>
+        UML_APP_EDGE_TEST=$<BOOL:${_uml_app_EDGE_TEST}>)
     # The executable carries its property list in __TEXT,__info_plist, where
     # CoreFoundation reads the identifier of a process that is not an
     # application bundle.
@@ -269,4 +280,16 @@ if(UML_BUILD_ANDROID17_CLI)
         uml-darwin-android17 android17_main.cpp
         "${UML_ACTIVE_KERNEL_ARTIFACT_TARGET}")
     target_link_libraries(uml-darwin-android17 PRIVATE UML::AndroidBoot)
+    # The Android launcher with the edge pipe of android-camera-video-leave:
+    # the test plays the application's leaving the foreground through it. The
+    # product launcher above has neither the pipe nor the code that reads it,
+    # and nothing installs or packages this one. It is built for the
+    # integration tests and wherever a release is named for the camera rows.
+    if(UML_BUILD_INTEGRATION_TESTS OR UML_ANDROID_CAMERA_RELEASE)
+        uml_add_macos_embedded_kernel_app(
+            uml-darwin-android17-edge-test android17_main.cpp
+            "${UML_ACTIVE_KERNEL_ARTIFACT_TARGET}" TEST_ONLY EDGE_TEST)
+        target_link_libraries(uml-darwin-android17-edge-test PRIVATE
+            UML::AndroidBoot)
+    endif()
 endif()

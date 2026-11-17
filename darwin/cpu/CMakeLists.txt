@@ -425,6 +425,7 @@ set(_uml_cpu_jit_sources
     ${CMAKE_CURRENT_SOURCE_DIR}/arm64/jit/jit_arena.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/arm64/jit/jit_compiler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/arm64/jit/jit_compiler_decode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/arm64/jit/jit_compiler_exclusive_run.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/arm64/jit/jit_compiler_families.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/arm64/jit/jit_compiler_crypto.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/arm64/jit/jit_compiler_floating.cpp

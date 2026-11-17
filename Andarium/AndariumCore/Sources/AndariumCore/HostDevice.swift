@@ -29,7 +29,7 @@ public struct HostDevice: Equatable, Sendable {
     /// iPhone or an iPad, not a Mac or the Simulator.
     public var hasCompass: Bool
     /// Whether the device has a camera the guest can be given: a built-in one,
-    /// and not the iPad app on a Mac.
+    /// and not the iPad app on a Mac or on an Apple Vision Pro.
     public var hasCamera: Bool
 
     public enum Idiom: Equatable, Sendable { case phone, pad, mac }
