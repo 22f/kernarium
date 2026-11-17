@@ -14,24 +14,30 @@ network: requests fail as offline and every socket on the old one is
 destroyed.
 
 A phone's Wi-Fi stays associated while the system sleeps. Offer
-wake-on-WLAN for any activity and configure it when the wiphy is made,
-so that wiphy_suspend() keeps the connection. virt_wifi has no suspend
-operation and nothing that wakes the system; the lower device's frames
-already end a suspend the guest started itself. The configuration is
-allocated, because wiphy_unregister() frees it, and is freed by hand
-only when registration fails. User space can still clear it with
-NL80211_CMD_SET_WOWLAN, which brings the old behaviour back.
+wake-on-WLAN for any activity and configure it once the wiphy is
+registered, so that wiphy_suspend() keeps the connection. virt_wifi has
+no suspend operation and nothing that wakes the system; the lower
+device's frames already end a suspend the guest started itself.
+
+The configuration is allocated, because wiphy_unregister() frees it, and
+installed under the wiphy lock only after wiphy_register() succeeded:
+wiphy_register() unregisters the wiphy itself when it fails late, which
+frees the configuration, so no error path of the driver frees it. A
+configuration user space set first is kept, and an allocation failure
+leaves the old behaviour, with a warning. User space can still clear it
+with NL80211_CMD_SET_WOWLAN, which brings the old behaviour back.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- drivers/net/wireless/virtual/virt_wifi.c | 28 ++++++++++++++++++++++++
- 1 file changed, 28 insertions(+)
+ drivers/net/wireless/virtual/virt_wifi.c | 50 ++++++++++++++++++++++++
+ 1 file changed, 50 insertions(+)
 
 diff --git a/drivers/net/wireless/virtual/virt_wifi.c b/drivers/net/wireless/virtual/virt_wifi.c
-index 03bab2641e579df48e4f80a07246b3b1e951aa1c..d9a33c1a11d865cd1945d7c2bf51254c1e4d4ffe 100644
+index 03bab2641e579df48e4f80a07246b3b1e951aa1c..5804c42aa133c5232b32007c2ce08504637dcffb 100644
 --- a/drivers/net/wireless/virtual/virt_wifi.c
 +++ b/drivers/net/wireless/virtual/virt_wifi.c
-@@ -641,6 +641,20 @@ virt_wifi_mgmt_stypes[NUM_NL80211_IFTYPES] = {
+@@ -641,6 +641,52 @@ virt_wifi_mgmt_stypes[NUM_NL80211_IFTYPES] = {
  	},
  };
  
@@ -47,36 +53,58 @@ index 03bab2641e579df48e4f80a07246b3b1e951aa1c..d9a33c1a11d865cd1945d7c2bf51254c
 +static const struct wiphy_wowlan_support virt_wifi_wowlan_support = {
 +	.flags = WIPHY_WOWLAN_ANY,
 +};
++
++/*
++ * Turns the configuration on for a registered wiphy. wiphy_unregister() frees
++ * it, and wiphy_register() calls that itself when it fails late, so it is
++ * installed only once registration has succeeded and no error path of ours
++ * frees it. If the allocation fails the station leaves its network at a
++ * suspend, as it did before.
++ */
++static void virt_wifi_keep_station_joined(struct wiphy *wiphy)
++{
++	struct cfg80211_wowlan *wowlan;
++
++	wowlan = kzalloc(sizeof(*wowlan), GFP_KERNEL);
++	if (!wowlan) {
++		wiphy_warn(wiphy,
++			   "the station will not stay joined through a suspend\n");
++		return;
++	}
++	wowlan->any = true;
++
++	wiphy_lock(wiphy);
++	/* User space may have configured it already: keep what it chose. */
++	if (wiphy->wowlan_config)
++		kfree(wowlan);
++	else
++		wiphy->wowlan_config = wowlan;
++	wiphy_unlock(wiphy);
++}
++#else
++static inline void virt_wifi_keep_station_joined(struct wiphy *wiphy)
++{
++}
 +#endif
 +
  static const struct cfg80211_ops virt_wifi_cfg80211_ops = {
  	.scan = virt_wifi_scan,
  
-@@ -685,6 +699,16 @@ static struct wiphy *virt_wifi_make_wiphy(void)
+@@ -685,6 +731,9 @@ static struct wiphy *virt_wifi_make_wiphy(void)
  	wiphy->flags |= WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL | WIPHY_FLAG_OFFCHAN_TX;
  	wiphy->max_remain_on_channel_duration = VIRT_WIFI_MAX_ROC_MS;
  	wiphy->mgmt_stypes = virt_wifi_mgmt_stypes;
 +#ifdef CONFIG_PM
 +	wiphy->wowlan = &virt_wifi_wowlan_support;
-+	wiphy->wowlan_config = kzalloc(sizeof(*wiphy->wowlan_config),
-+				       GFP_KERNEL);
-+	if (!wiphy->wowlan_config) {
-+		wiphy_free(wiphy);
-+		return NULL;
-+	}
-+	wiphy->wowlan_config->any = true;
 +#endif
  
  	priv = wiphy_priv(wiphy);
  	priv->being_deleted = false;
-@@ -693,6 +717,10 @@ static struct wiphy *virt_wifi_make_wiphy(void)
- 
- 	err = wiphy_register(wiphy);
- 	if (err < 0) {
-+#ifdef CONFIG_PM
-+		/* Only wiphy_unregister() frees the configuration. */
-+		kfree(wiphy->wowlan_config);
-+#endif
- 		wiphy_free(wiphy);
+@@ -697,6 +746,7 @@ static struct wiphy *virt_wifi_make_wiphy(void)
  		return NULL;
  	}
+ 
++	virt_wifi_keep_station_joined(wiphy);
+ 	return wiphy;
+ }
+ 
