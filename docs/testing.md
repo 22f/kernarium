@@ -289,9 +289,13 @@ On a connected iOS device, Android runs go through Andarium
 (`tests/perf/run_ios_device_android.py`, [`Andarium/README.md`](../Andarium/README.md#automation))
 and Kernarium's device runners keep Linux; both share
 `tests/integration/support/ios_device.py`, and their tooling tests run against
-fakes, so no device is needed. A device run starts with at least five free
-slots of JetsamEvent reports and of each tested process's crash reports, since
-iOS drops the next report once a kind is full: otherwise the
+fakes, so no device is needed. A device run keeps the phone's haptics off
+(`ANDARIUM_HAPTICS=0`) unless it tests them: `--haptics`, on
+`run_ios_device_android.py`, `ipad-automation.py launch` and
+`ios_jit_debugger.py`, leaves the switch to the person. Kernarium plays no
+haptics. A device run starts with at least five free slots of JetsamEvent
+reports and of each tested process's crash reports, since iOS drops the next
+report once a kind is full: otherwise the
 [preflight](../tests/integration/support/ios_device_reports.py) copies the
 reports listed at the start to a new directory on the Mac, outside every
 checkout, checks each copy by type and size (not byte for byte), and only then

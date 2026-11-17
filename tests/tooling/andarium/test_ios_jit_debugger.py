@@ -196,6 +196,32 @@ class HostSideTests(unittest.TestCase):
         run.assert_not_called()
 
 
+class LaunchSettingsTests(unittest.TestCase):
+    def test_an_andarium_launch_keeps_the_phone_silent_by_default(self) -> None:
+        self.assertEqual(
+            debugger.launch_settings(andarium.BUNDLE_ID, ["ANDARIUM_JIT=1"]),
+            {"ANDARIUM_JIT": "1", "ANDARIUM_HAPTICS": "0"})
+
+    def test_a_run_that_tests_haptics_states_no_haptics_setting(self) -> None:
+        self.assertEqual(
+            debugger.launch_settings(andarium.BUNDLE_ID, ["ANDARIUM_JIT=1"], haptics=True),
+            {"ANDARIUM_JIT": "1"})
+
+    def test_another_application_is_launched_as_asked(self) -> None:
+        self.assertEqual(
+            debugger.launch_settings("com.example.Orchid", ["A=b", "C=d=e"]),
+            {"A": "b", "C": "d=e"})
+        self.assertEqual(
+            debugger.launch_settings("com.example.Orchid", [], haptics=True), {})
+
+    def test_the_haptics_setting_is_the_option_s_and_not_an_env_pair(self) -> None:
+        for haptics in (False, True):
+            with self.subTest(haptics=haptics):
+                with self.assertRaisesRegex(andarium.AndariumError, "--haptics"):
+                    debugger.launch_settings(
+                        andarium.BUNDLE_ID, ["ANDARIUM_HAPTICS=1"], haptics=haptics)
+
+
 class RunnerTests(unittest.TestCase):
     def test_a_jit_run_asks_for_the_application_s_jit_setting(self) -> None:
         settings = andarium.settings_for(

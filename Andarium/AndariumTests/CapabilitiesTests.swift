@@ -272,6 +272,34 @@ struct CapabilitiesFlowTests {
         #expect(s.model.guest?.location == false && s.model.guest?.microphone == false)
     }
 
+    #if !APP_STORE
+    /// A harness launch that silences haptics runs as if the switch were off:
+    /// the device plays nothing, and the person's choice, as shown and as
+    /// stored, is not touched, whether the switch is turned meanwhile or not.
+    @Test func aLaunchThatSilencesHapticsPlaysNoneAndKeepsTheChoice() {
+        let s = setup()
+        s.model.hapticsAvailable = true
+        #expect(s.model.hapticsPlays)
+        s.model.hapticsSilencedByLaunch = true
+        #expect(!s.model.hapticsPlays)
+        #expect(s.model.hapticsOn)
+        #expect(s.model.guest?.haptics == true)
+        // Turning the switch on changes nothing for this launch ...
+        s.model.setHaptics(true)
+        #expect(!s.model.hapticsPlays)
+        #expect(s.driver.savedGuest?.haptics == true)
+        // ... and off is kept as the person chose it.
+        s.model.setHaptics(false)
+        #expect(!s.model.hapticsOn && !s.model.hapticsPlays)
+        #expect(s.driver.savedGuest?.haptics == false)
+        // The guest still has its vibrator: the boot request is the device's.
+        #expect(LiveRuntime.hostFeatures(hapticsAvailable: true) == UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS))
+        s.model.hapticsSilencedByLaunch = false
+        s.model.setHaptics(true)
+        #expect(s.model.hapticsPlays)
+    }
+    #endif
+
     @Test func aGuestStoredBeforeTheSwitchReadsAsOn() throws {
         let old = Data(#"{"cores":2,"memoryMiB":1024,"capacityGiB":8,"microphone":false,"includeInBackups":false}"#.utf8)
         let guest = try JSONDecoder().decode(Guest.self, from: old)

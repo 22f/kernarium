@@ -25,7 +25,9 @@ device: never stop a working host without someone to approve its successor.
 Run `start` only while someone can approve, because XCTest gives up 60 s after
 the runner starts and leaves the prompt on screen. The host targets
 com.imxieyi.Kernarium unless --bundle names another application, such as
-com.apple.springboard.
+com.apple.springboard. A `launch` of Andarium (com.imxieyi.andarium) keeps the
+phone silent by stating ANDARIUM_HAPTICS=0; `launch --haptics` leaves that out
+for a run that tests haptics.
 
 A coordinate tap or drag names points as offsets from the origin of that
 application's frame, which `tree` prints; springboard's frame is the whole
@@ -331,6 +333,7 @@ RECORDING_SETTINGS = {
 SCRIPT = pathlib.Path(__file__).resolve()
 CHECKOUT = SCRIPT.parents[2]
 sys.path.insert(0, str(CHECKOUT / "tests" / "integration" / "support"))
+import andarium  # noqa: E402
 import ios_device_reports  # noqa: E402
 
 # The processes whose diagnostic reports a host session needs free slots for:
@@ -2701,7 +2704,11 @@ def build_command(options):
     op = options.command
     command = {"op": op}
     if op == "launch":
-        command["environment"] = dict(item.split("=", 1) for item in options.env)
+        environment = dict(item.split("=", 1) for item in options.env)
+        if options.bundle == andarium.BUNDLE_ID and not options.haptics:
+            # An automated launch keeps the phone silent unless it tests haptics.
+            environment[andarium.HAPTICS_SETTING] = andarium.HAPTICS_OFF
+        command["environment"] = environment
         command["arguments"] = options.arg
     elif op in ("tap", "wait", "exists"):
         command.update(element_fields(options))
@@ -2845,6 +2852,12 @@ def parse(argv):
     launch = commands.add_parser("launch", help="launch (or relaunch) the application")
     launch.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
     launch.add_argument("--arg", action="append", default=[])
+    launch.add_argument(
+        "--haptics", action="store_true",
+        help="this run tests haptics: an Andarium launch then states no haptics "
+        "setting, so the application's own Haptics switch decides (without it "
+        f"the launch states {andarium.HAPTICS_SETTING}={andarium.HAPTICS_OFF} "
+        "and the phone stays silent); Kernarium plays none, and ignores it")
     ios_device_reports.add_arguments(launch)
     for name, text in (("activate", "bring the application to the foreground"),
                        ("terminate", "terminate the application"),
@@ -2897,6 +2910,9 @@ def parse(argv):
         parser.error("name the device with --device or $KERNARIUM_AUTOMATION_DEVICE")
     if options.command == "tap" and (options.x is None) != (options.y is None):
         parser.error("tap needs both --x and --y")
+    if options.command == "launch" and any(
+            item.partition("=")[0] == andarium.HAPTICS_SETTING for item in options.env):
+        parser.error(f"{andarium.HAPTICS_SETTING} is the --haptics option's, not an --env pair")
     if options.command == "watch" and options.launchd_log and not options.print_launchd_job:
         parser.error("--launchd-log goes with --print-launchd-job")
     return options

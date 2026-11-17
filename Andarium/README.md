@@ -750,8 +750,10 @@ requires reopening Andarium.
   under Capabilities, a per-guest switch that is on until the person turns it
   off, decides whether this device plays it: off, the application holds no
   connection and no engine for the Taptic Engine and the guest keeps its
-  vibrator. A game controller's rumble is not governed by it. An iPad, a Mac or
-  the Simulator, which have no Taptic Engine, give the guest no vibrator and
+  vibrator. A harness launch can keep it off for its run
+  ([Automation](#automation)). A game controller's rumble is not governed by
+  it. An iPad, a Mac or the Simulator, which have no Taptic Engine, give the
+  guest no vibrator and
   Capabilities no Haptics row. The wire is `HapticsProtocol`, whose golden frames
   the HAL's test shares (`tests/unit/andarium/fixtures`); the
   [Android README](../android/lineage-24/README.md) owns the HAL.
@@ -1302,6 +1304,13 @@ prompt's counter and clear its record, in a build that has the prompt
 `ANDARIUM_FOLLOW_ORIENTATION` (`1` or `0`) states whether the guest follows the
 device's orientation, where the device's idiom (an iPhone follows) would
 otherwise decide.
+`ANDARIUM_HAPTICS=0` plays none of the guest's haptics on the device for that
+launch, as with the Haptics switch off, and leaves the stored switch alone; any
+other value states nothing. A launch that states only it is still the person's
+own. The device runners state it unless a run tests haptics (`--haptics`), and
+a hosted test on an iPhone gives it as `TEST_RUNNER_ANDARIUM_HAPTICS=0`. A game
+controller's rumble and the side keys' and rulers' own touch feedback are not
+governed by it.
 `ANDARIUM_INPUT_PROBE=1` is the UI tests' launch: the session opens at once
 with no guest behind it, and what the guest's keyboard and mouse would receive,
 and the touches that reach its touchscreen, go to one accessibility element

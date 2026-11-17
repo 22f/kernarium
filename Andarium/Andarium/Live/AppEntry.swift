@@ -72,7 +72,11 @@ struct AppEntry {
     @MainActor
     /// `freeSpace` is the space a run watches: the application's own reading
     /// (`freeStorageBytes`) unless a test supplies another.
-    func makeModel(freeSpace: @escaping @Sendable () -> UInt64 = { AppEntry.freeStorageBytes() }) -> AppModel {
+    /// `environment` is the launch's unless a test supplies another.
+    func makeModel(
+        freeSpace: @escaping @Sendable () -> UInt64 = { AppEntry.freeStorageBytes() },
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> AppModel {
         let launch = overrides
         let bundle = Bundle.main
         let version = Self.appVersion(bundle)
@@ -178,6 +182,9 @@ struct AppEntry {
             hasOtherSettings: !launch.isEmpty)
         model.jitOn = jit.isOn
         model.jitDecidedByLaunch = !jit.keepsChanges
+        // A harness launch can keep the device's haptics silent for its run
+        // (`HapticsLaunch`); the person's switch stays as stored.
+        model.hapticsSilencedByLaunch = HapticsLaunch.silences(in: environment)
         #endif
 
         #if APP_STORE
