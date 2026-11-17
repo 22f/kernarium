@@ -106,7 +106,8 @@
 	gadget_group vector_dot
 #include "engine/vector_dot.inc"
 /* The generator's families that follow the last group (the compare and
- * branch pairs), so they grow without moving any other bank entry. */
+ * branch pairs, the unrecorded twins and the stack twins), so they grow
+ * without moving any other bank entry. */
 #include "baked_tail.inc"
 .purgem follow_block_link
 	gadget_region_end
