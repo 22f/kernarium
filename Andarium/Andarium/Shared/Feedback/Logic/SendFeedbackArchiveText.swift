@@ -174,7 +174,7 @@ nonisolated enum SendFeedbackEntryKind: Equatable, Sendable {
 
 /// What the report is, from its directory: what the first page and the row say.
 nonisolated struct SendFeedbackArchiveFacts: Equatable, Sendable {
-    /// Entries that are files, the ones listed and the ones the bound left out.
+    /// Entries that are files and not folders, the ones listed and the ones the bound left out.
     var fileCount: Int
     /// What the listed entries make once unpacked.
     var unpackedBytes: UInt64
@@ -208,7 +208,7 @@ actor SendFeedbackArchiveReader {
     nonisolated var facts: SendFeedbackArchiveFacts {
         let files = archive.listing.entries.filter { !$0.isFolder }
         return SendFeedbackArchiveFacts(
-            fileCount: files.count + archive.listing.unlistedCount, unpackedBytes: archive.listing.totalBytes)
+            fileCount: files.count + archive.listing.unlistedFiles, unpackedBytes: archive.listing.totalBytes)
     }
 
     init(_ archive: SendFeedbackArchive) {

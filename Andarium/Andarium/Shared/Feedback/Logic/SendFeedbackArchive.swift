@@ -82,6 +82,10 @@ nonisolated struct SendFeedbackArchiveListing: Equatable, Sendable {
     /// The number of entries the archive says it holds.
     var declaredCount: Int
 
+    /// The files among the entries that are not listed: counted from their records where those were read, and
+    /// taken as files where they were not (a directory larger than what is read).
+    var unlistedFiles = 0
+
     /// Entries the archive has that are not listed (above the bound).
     var unlistedCount: Int { max(0, declaredCount - entries.count) }
     var totalBytes: UInt64 { entries.reduce(0) { $0 + $1.size } }
@@ -172,8 +176,28 @@ nonisolated struct SendFeedbackArchive: Sendable {
                 nameWasCut: nameLength > SendFeedbackArchiveLimits.maxNameBytes, sourceLength: length))
             position = recordEnd
         }
-        return SendFeedbackArchive(
-            source: source, listing: .init(entries: entries, declaredCount: count), depth: depth)
+        var listing = SendFeedbackArchiveListing(entries: entries, declaredCount: count)
+        listing.unlistedFiles = unlistedFiles(in: directory, from: position, seen: entries.count, declared: count)
+        return SendFeedbackArchive(source: source, listing: listing, depth: depth)
+    }
+
+    /// The files among the records after the ones that were listed: each record's header is read for its name's
+    /// last byte and its size, nothing is kept, and the walk stops at the first record that is not whole. What
+    /// the walk did not reach is taken as files.
+    private static func unlistedFiles(in directory: Data, from start: Int, seen: Int, declared: Int) -> Int {
+        var position = start
+        var seen = seen
+        var files = 0
+        while seen < declared, position + centralRecordBytes <= directory.count, directory.u32(at: position) == centralSignature {
+            let nameLength = Int(directory.u16(at: position + 28))
+            let recordEnd = position + centralRecordBytes + nameLength + Int(directory.u16(at: position + 30)) + Int(directory.u16(at: position + 32))
+            guard recordEnd <= directory.count else { break }
+            let last: UInt8? = nameLength > 0 ? directory[directory.startIndex + position + centralRecordBytes + nameLength - 1] : nil
+            if !(last == UInt8(ascii: "/") && directory.u32(at: position + 24) == 0) { files += 1 }
+            position = recordEnd
+            seen += 1
+        }
+        return files + (declared - seen)
     }
 
     private static func entry(

@@ -184,6 +184,16 @@ struct SendFeedbackViewerReaderTests {
         #expect(archive.facts.fileCount == SendFeedbackArchiveLimits.maxEntries + 30)
     }
 
+    @Test func theRowCountsFilesAndNotFoldersOnBothSidesOfTheBound() throws {
+        let bound = SendFeedbackArchiveLimits.maxEntries
+        // Every fourth entry is a folder: 1,024 of the 4,096 that are listed and 10 of the 40 that are not.
+        var many = (0..<bound).map { $0 % 4 == 0 ? SyntheticZip.stored("d/\($0)/", Data()) : entry("d/\($0)/f.txt", 1) }
+        many += (0..<40).map { $0 % 4 == 0 ? SyntheticZip.stored("e/\($0)/", Data()) : entry("e/\($0)/f.txt", 1) }
+        let archive = try reader(many)
+        #expect(archive.listing.entries.count == bound && archive.listing.unlistedCount == 40)
+        #expect(archive.facts.fileCount == 3_072 + 30, "files only: \(archive.facts.fileCount)")
+    }
+
     // MARK: The screenshot
 
     @Test func aPictureIsDecodedAsAThumbnailAndNeverAtItsFullSize() async throws {
