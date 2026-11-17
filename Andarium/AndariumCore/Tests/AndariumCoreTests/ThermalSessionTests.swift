@@ -307,6 +307,9 @@ struct ThermalSessionTests {
         rig.session.update(running: false, booted: false)
         rig.session.settle()
         #expect(rig.session.severity == .none, "a run's severity outlived it")
+        // The state iOS is in is read again for the new run, and not the last
+        // run's: a reading given before the run is the state it begins in.
+        rig.session.observe(.serious)
         rig.session.update(running: true, booted: false)
         #expect(thermalEventually { rig.guest.connections == 2 && rig.session.isConnected })
         #expect(rig.guest.record() == (try frame("severe")), "the state read before the run is the state it begins in")

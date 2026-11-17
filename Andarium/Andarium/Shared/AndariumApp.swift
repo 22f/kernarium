@@ -226,8 +226,15 @@ extension LegacyInstallAlert {
         }
     }
 
+    private static var topAlert: UIAlertController? { PresentedAlert.top }
+    private static var alertIsUp: Bool { PresentedAlert.isUp }
+}
+
+/// What UIKit shows of alerts now, for the questions that must not stand
+/// without one.
+enum PresentedAlert {
     /// The UIKit alert that is the topmost presentation of a window now, if one is.
-    private static var topAlert: UIAlertController? {
+    static var top: UIAlertController? {
         for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
             for window in scene.windows {
                 var top = window.rootViewController
@@ -239,7 +246,7 @@ extension LegacyInstallAlert {
     }
 
     /// Whether a UIKit alert is the topmost presentation of any window now.
-    private static var alertIsUp: Bool { topAlert != nil }
+    static var isUp: Bool { top != nil }
 }
 
 extension View {
