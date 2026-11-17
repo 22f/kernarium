@@ -291,11 +291,12 @@ and Kernarium's device runners keep Linux; both share
 `tests/integration/support/ios_device.py`, and their tooling tests run against
 fakes, so no device is needed. A device run keeps the phone's haptics off
 (`ANDARIUM_HAPTICS=0`) unless it tests them: `--haptics`, on
-`run_ios_device_android.py`, `ipad-automation.py launch` and
-`ios_jit_debugger.py`, leaves the switch to the person. Kernarium plays no
-haptics. A device run starts with at least five free slots of JetsamEvent
-reports and of each tested process's crash reports, since iOS drops the next
-report once a kind is full: otherwise the
+`run_ios_device_android.py`, `ipad-automation.py launch` and `activate` (which
+refuses to start a stopped Andarium without it) and `ios_jit_debugger.py`,
+leaves the switch to the person. Kernarium plays no haptics. A device run
+starts with at least five free slots of JetsamEvent reports and of each tested
+process's crash reports, since iOS drops the next report once a kind is full:
+otherwise the
 [preflight](../tests/integration/support/ios_device_reports.py) copies the
 reports listed at the start to a new directory on the Mac, outside every
 checkout, checks each copy by type and size (not byte for byte), and only then
@@ -613,8 +614,9 @@ document pickers' build conditions (`andarium-document-pickers`: the App Store
 configuration opens files in place, every other presents the copy-mode picker,
 and an in-place importer anywhere else is in an App Store branch or a named
 exception), the application's own touch feedback
-(`andarium-interface-feedback`: every view plays it through the modifier that a
-launch silencing haptics reaches),
+(`andarium-interface-feedback`: no view plays it around the one modifier; that
+a launch silencing haptics silences it, on both model paths of a launch, is
+held by the hosted `LaunchEnvironmentTests` and `CapabilitiesFlowTests`),
 the Acknowledgements resource (`andarium-acknowledgements`) and the stand-in
 debugger that serves the JIT's request for executable memory on a device
 (`andarium-ios-jit-debugger`). The JIT's region route has host tests that run

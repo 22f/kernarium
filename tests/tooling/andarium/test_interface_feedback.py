@@ -7,7 +7,10 @@ A launch that silences haptics (`ANDARIUM_HAPTICS=0`, Andarium/README.md
 and drags reach the side keys and the rulers. Those play their feedback
 through `interfaceFeedback`, which asks the model, so a site that calls
 SwiftUI's `sensoryFeedback`, or UIKit's feedback generators, directly would
-sidestep the launch. This reads the application's sources for each such call.
+sidestep the launch. This reads the application's sources for each such call:
+it guards that no site goes around the modifier, and does not show that the
+modifier is silent (the hosted LaunchEnvironmentTests and
+CapabilitiesFlowTests do).
 """
 
 from __future__ import annotations

@@ -418,6 +418,9 @@ def main(argv: list[str] | None = None) -> int:
     # What the device lists before the launch is not the launch's process.
     before = application_pids(options.device, options.process_name)
     environment = dict(os.environ)
+    # What the caller inherited is not the launch's statement of the haptics
+    # setting: the options state it or leave it out.
+    environment.pop(f"DEVICECTL_CHILD_{andarium.HAPTICS_SETTING}", None)
     for name, value in settings.items():
         environment[f"DEVICECTL_CHILD_{name}"] = value
     with console_log.open("wb") as console:
