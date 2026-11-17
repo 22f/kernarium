@@ -807,7 +807,10 @@ blocker in every one of them.
   that changes only with the component and an incomplete mode fail, and only
   a field that two runs of one engine already differ in is masked.
   `arm64-aot-share-rows` does the same for the share rows' records and
-  counter bounds.
+  counter bounds. `arm64-aot-mapping-names` builds, on the host, the header
+  the guest debug program names a register's mapping with and holds it to the
+  tombstone digest's naming on layouts of any number of shapes (the program
+  fails the row if a name or the maps text does not fit its buffers).
 - `aot-guest-workloads` (integration, opt-in like the other Android guest
   tests: it exists where `UML_AOT_IMAGE` and the Android launcher target do)
   boots the release twice, without and with `DARWIN_UML_AOT=1`, runs the

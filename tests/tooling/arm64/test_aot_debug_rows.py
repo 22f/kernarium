@@ -180,17 +180,24 @@ done mode=sibling
 
 
 class GuestProgramTest(unittest.TestCase):
-    """The program prints a register that points into a mapping the way the
-    tombstone's digest names it: the guest runs only in a guest, so the
-    naming is read from its source."""
+    """The program names a register that points into a mapping with the
+    header it shares with the host (mapping_names.hpp, which
+    test_aot_mapping_names.py holds to the digest's naming): the guest runs
+    only in a guest, so what it uses is read from its source."""
 
     SOURCE = (pathlib.Path(__file__).resolve().parents[2] / "integration" / "aot" / "aot_guest_debug.cpp")
 
-    def test_an_unnamed_mapping_keeps_its_shape_its_place_among_that_shape_and_its_offset(self):
+    def test_a_mapping_is_named_by_the_shared_formatter_and_not_by_a_table_of_its_own(self):
         text = self.SOURCE.read_text()
-        self.assertIn("=anon[%#llx,%.3s]#%u+%#llx", text)
-        self.assertNotIn("=anon+%#llx", text)
+        self.assertIn('#include "mapping_names.hpp"', text)
+        self.assertIn("aot_mapping_names::name(maps_text", text)
+        self.assertNotIn("shapes[", text)
         self.assertNotIn("value & 0xfff", text)
+
+    def test_a_maps_text_that_was_cut_short_fails_the_row(self):
+        text = self.SOURCE.read_text()
+        self.assertIn("FAIL the maps of process %d do not fit", text)
+        self.assertIn("does not fit %zu bytes", text)
 
 
 class RecordTest(unittest.TestCase):

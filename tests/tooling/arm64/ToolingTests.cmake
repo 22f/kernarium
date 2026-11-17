@@ -34,6 +34,17 @@ uml_add_tooling_test(
     LABELS cpu
     TIMEOUT 60)
 
+# The guest debug program's naming of a mapping (the header it is built with,
+# on the host) against the tombstone digest's, on layouts of any number of
+# shapes.
+uml_add_tooling_test(
+    NAME arm64-aot-mapping-names
+    COMMAND ${CMAKE_COMMAND} -E env UML_CXX=${CMAKE_CXX_COMPILER}
+        ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/arm64/test_aot_mapping_names.py
+    LABELS cpu
+    TIMEOUT 120)
+
 # The shared-verification rows of the guest runner: a run's record, the
 # comparison of the arm without the component with the arm with it, and the
 # counter bounds of a diagnostics build.

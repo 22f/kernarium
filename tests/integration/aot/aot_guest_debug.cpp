@@ -46,6 +46,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "mapping_names.hpp"
+
 extern "C" {
 struct SigInfo {
     int signo;
@@ -197,9 +199,9 @@ int range_count;
 
 // The tracee's mappings (/proc/<pid>/maps), read before its registers are
 // printed: a value that points into one is named by it, whatever address the
-// mapping has in this run. A mapping of a file by the file and the offset in
-// it, a named anonymous one by its name and the offset in the mapping, an
-// unnamed one by its size and protection and the offset in it.
+// mapping has in this run (mapping_names.hpp says how). A text that does not
+// fit the buffer is a failure of the row: a layout that is cut short names
+// nothing reliably.
 char maps_text[1 << 17];
 long maps_size;
 
@@ -233,107 +235,23 @@ void load_maps(int pid) {
     }
     close(fd);
     maps_text[maps_size] = 0;
-}
-
-uint64_t parse_hex(const char *&at) {
-    uint64_t value = 0;
-    for (;; ++at) {
-        const char c = *at;
-        if (c >= '0' && c <= '9') {
-            value = value * 16 + static_cast<uint64_t>(c - '0');
-        } else if (c >= 'a' && c <= 'f') {
-            value = value * 16 + static_cast<uint64_t>(c - 'a' + 10);
-        } else {
-            return value;
-        }
+    if (maps_size >= static_cast<long>(sizeof(maps_text)) - 1) {
+        dprintf(1, "FAIL the maps of process %d do not fit %zu bytes\n", pid, sizeof(maps_text));
     }
 }
 
 bool print_mapped(const char *label, uint64_t value) {
-    // The unnamed mappings seen so far, by size and protection: a mapping is
-    // named by its place among those of its shape, lowest address first.
-    struct Shape {
-        uint64_t size;
-        char protection[3];
-        unsigned seen;
-    } shapes[128];
-    int shape_count = 0;
-    const char *at = maps_text;
-    while (*at != 0) {
-        const char *line = at;
-        const uint64_t low = parse_hex(at);
-        ++at;
-        const uint64_t high = parse_hex(at);
-        while (*at == ' ') {
-            ++at;
-        }
-        const char *protection = at;
-        while (*at != ' ' && *at != 0) {  // permissions
-            ++at;
-        }
-        ++at;
-        const uint64_t file_offset = parse_hex(at);
-        for (int field = 0; field < 2 && *at != 0; ++field) {  // device, inode
-            while (*at == ' ') {
-                ++at;
-            }
-            while (*at != ' ' && *at != '\n' && *at != 0) {
-                ++at;
-            }
-        }
-        while (*at == ' ') {
-            ++at;
-        }
-        const char *name = at;
-        while (*at != '\n' && *at != 0) {
-            ++at;
-        }
-        const char *end = at;
-        if (*at == '\n') {
-            ++at;
-        }
-        (void)line;
-        unsigned ordinal = 0;
-        if (name == end) {
-            int shape = 0;
-            while (shape < shape_count &&
-                   !(shapes[shape].size == high - low && shapes[shape].protection[0] == protection[0] &&
-                     shapes[shape].protection[1] == protection[1] &&
-                     shapes[shape].protection[2] == protection[2])) {
-                ++shape;
-            }
-            if (shape == shape_count && shape_count < 128) {
-                shapes[shape_count++] = {high - low, {protection[0], protection[1], protection[2]}, 0};
-            }
-            if (shape < shape_count) {
-                ordinal = shapes[shape].seen++;
-            }
-        }
-        if (value < low || value >= high) {
-            continue;
-        }
-        if (name == end) {
-            // An unnamed mapping: which one (its size and protection, and
-            // its place among those of that shape) and where in it, not
-            // where the run put it.
-            dprintf(1, " %s=anon[%#llx,%.3s]#%u+%#llx", label, static_cast<unsigned long long>(high - low),
-                    protection, ordinal, static_cast<unsigned long long>(value - low));
-        } else if (*name == '/') {
-            const char *base = name;
-            for (const char *c = name; c < end; ++c) {
-                if (*c == '/') {
-                    base = c + 1;
-                }
-            }
-            dprintf(1, " %s=%.*s+%#llx", label, static_cast<int>(end - base), base,
-                    static_cast<unsigned long long>(file_offset + value - low));
-        } else {
-            dprintf(1, " %s=%.*s+%#llx", label, static_cast<int>(end - name), name,
-                    static_cast<unsigned long long>(value - low));
-        }
-        return true;
+    char name[512];
+    const size_t length = aot_mapping_names::name(maps_text, value, name, sizeof(name));
+    if (length == 0) {
+        return false;
     }
-    return false;
+    if (length == aot_mapping_names::kOverflow) {
+        dprintf(1, "FAIL the name of the mapping that holds %s does not fit %zu bytes\n", label, sizeof(name));
+    } else {
+        dprintf(1, " %s=%s", label, name);
+    }
+    return true;
 }
 
 void print_value(const char *label, uint64_t value) {
