@@ -5993,6 +5993,247 @@ void fused_conditional_jumps_take_the_same_edge()
 	}
 }
 
+/* The entry of a CMP or TEST of a 32- or 64-bit register against an
+ * immediate that carries the conditional branch after it, or zero where the
+ * pair has none (`condition` in x86's condition-code order). */
+[[nodiscard]] std::uintptr_t compare_branch_entry(bool test, unsigned width,
+	unsigned condition, unsigned reg)
+{
+	namespace baked = uml::cpu::x86_64::gadgets::baked;
+	const auto *table = test ?
+		(width == 64U ? baked::uml_x86_64_baked_test_64_ri_jcc :
+			baked::uml_x86_64_baked_test_32_ri_jcc) :
+		(width == 64U ? baked::uml_x86_64_baked_cmp_64_ri_jcc :
+			baked::uml_x86_64_baked_cmp_32_ri_jcc);
+	return table[condition * baked::gpr_slots + reg];
+}
+
+/* CMP reg, imm32 (81 /7) or TEST reg, imm32 (F7 /0) at 32 or 64 bits. */
+void push_compare_immediate(std::vector<std::uint8_t> &code, bool test,
+	unsigned width, unsigned reg, std::uint32_t immediate)
+{
+	if (width == 64U || reg >= 8U)
+		code.push_back(static_cast<std::uint8_t>(
+			0x40U | (width == 64U ? 8U : 0U) | (reg >> 3U)));
+	code.push_back(test ? 0xf7 : 0x81);
+	code.push_back(static_cast<std::uint8_t>(
+		0xc0U | (test ? 0U : 7U << 3U) | (reg & 7U)));
+	for (unsigned shift = 0; shift < 32U; shift += 8U)
+		code.push_back(static_cast<std::uint8_t>(immediate >> shift));
+}
+
+/* A CMP or TEST against an immediate and the conditional branch right after
+ * it are one entry in a block with links, and they must be the two
+ * instructions they stand for: the same edge, the same retired count and the
+ * same flags afterwards as the pair with a NOP between, which runs the
+ * compare's own entry and a branch that reads the record. The entry stands in
+ * exactly where the host flags answer the condition: never for parity, and
+ * not for TEST with a condition that reads the carry. */
+void compare_branch_entries_run_both_instructions()
+{
+	using namespace uml::cpu::x86_64;
+	static constexpr std::array<unsigned, 4> registers{0, 4, 9, 15};
+	static constexpr std::array<std::uint64_t, 6> values{
+		0U, 1U, 0x7fff'ffffULL, 0x8000'0000ULL, 0xffff'ffff'ffff'ff80ULL,
+		0x5555'5555'5555'5555ULL};
+	static constexpr std::array<std::uint32_t, 6> immediates{
+		0U, 1U, 0x7fff'ffffU, 0x8000'0000U, 0xffff'ff80U, 0x5555'5555U};
+	struct Outcome final {
+		std::uint64_t edge;
+		std::uint64_t flags;
+		std::size_t retired;
+		std::uintptr_t first;
+	};
+	const auto run = [](const std::vector<std::uint8_t> &code,
+		unsigned reg, std::uint64_t value) {
+		TestMemory memory;
+		memory.fill(0, std::as_bytes(std::span{code}));
+		gadgets::Executor executor;
+		executor.prepare(memory, 1, 1, 1);
+		CpuState cpu{};
+		cpu.gpr(static_cast<Register>(reg)) = value;
+		Outcome outcome{};
+		for (unsigned step = 0; step < 8U; ++step) {
+			const auto selected = executor.select_program(
+				memory, cpu.rip, ExecutionMode::long64);
+			require(selected.status == gadgets::BuildStatus::built &&
+					selected.program != nullptr,
+				"compare and branch program did not build");
+			if (step == 0U)
+				outcome.first = selected.program->native_stream().front();
+			const auto result = gadgets::execute(
+				*selected.program, cpu, memory, executor, 64);
+			outcome.retired += result.retired_instructions;
+			if (result.event == uml::cpu::EngineEvent::system_call) {
+				outcome.edge = cpu.gpr(Register::rdx);
+				outcome.flags = cpu.gpr(Register::r11);
+				return outcome;
+			}
+			require(result.event == uml::cpu::EngineEvent::continued,
+				"compare and branch program left unexpectedly");
+		}
+		fail("compare and branch program did not reach SYSCALL");
+	};
+	for (const bool test : {false, true}) {
+		for (const unsigned width : {32U, 64U}) {
+			for (unsigned condition = 0; condition < 16U; ++condition) {
+				const bool parity = condition == 10U || condition == 11U;
+				const bool carry = condition == 2U || condition == 3U ||
+					condition == 6U || condition == 7U;
+				const bool answered = !parity && !(test && carry);
+				for (const auto reg : registers) {
+					const auto entry =
+						compare_branch_entry(test, width, condition, reg);
+					require((entry != 0U) == answered,
+						"a compare-and-branch entry exists for a condition "
+						"the host flags do not answer, or is missing");
+					for (const auto immediate : immediates) {
+						/* j<cc> over MOV EDX, 1, then SYSCALL, which leaves
+						 * RFLAGS in R11; the second has a NOP after the
+						 * compare. */
+						std::array<std::vector<std::uint8_t>, 2> code;
+						for (unsigned barrier = 0; barrier < 2U; ++barrier) {
+							push_compare_immediate(code[barrier], test,
+								width, reg, immediate);
+							if (barrier != 0U)
+								code[barrier].push_back(0x90);
+							code[barrier].insert(code[barrier].end(), {
+								static_cast<std::uint8_t>(0x70U + condition),
+								0x05, 0xba, 0x01, 0x00, 0x00, 0x00,
+								0x0f, 0x05});
+						}
+						for (const auto value : values) {
+							const auto joined = run(code[0], reg, value);
+							const auto separated = run(code[1], reg, value);
+							require((joined.first == entry) == answered &&
+									separated.first != entry,
+								"the builder joined a compare and branch "
+								"it should not have, or kept apart a pair "
+								"it should have joined");
+							if (joined.edge != separated.edge ||
+								joined.flags != separated.flags ||
+								joined.retired + 1U != separated.retired) {
+								char message[200];
+								std::snprintf(message, sizeof(message),
+									"a compare-and-branch entry ran "
+									"differently from its two instructions "
+									"(%s width %u condition %u register %u "
+									"value %#llx immediate %#x)",
+									test ? "TEST" : "CMP", width, condition,
+									reg,
+									static_cast<unsigned long long>(value),
+									immediate);
+								fail(message);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+/* The joined entry is chosen only when the branch takes its inline form, and
+ * its taken edge follows the link under the same budget test. A build
+ * without links (a budget-limited replay) and a block that ends at the branch
+ * keep the two apart. A link is followed only when the target's two
+ * instructions fit the budget left after both of the pair's: from a budget of
+ * four, not three. */
+void compare_branch_entries_keep_the_inline_contract()
+{
+	using namespace uml::cpu::x86_64;
+	/* CMP EAX, 0; JE over MOV EDX, 1 and SYSCALL to MOV EDX, 2 and SYSCALL. */
+	std::vector<std::uint8_t> code;
+	push_compare_immediate(code, false, 32U, 0U, 0U);
+	code.insert(code.end(), {0x74, 0x07, 0xba, 0x01, 0x00, 0x00, 0x00,
+		0x0f, 0x05, 0xba, 0x02, 0x00, 0x00, 0x00, 0x0f, 0x05});
+	constexpr std::uint64_t target = 0x0f;
+	const auto joined = compare_branch_entry(false, 32U, 4U, 0U);
+	TestMemory memory;
+	memory.fill(0, std::as_bytes(std::span{code}));
+	const auto unlinked = require_built(gadgets::build(memory, 0),
+		"compare and branch without links did not build");
+	require(unlinked.program.native_stream().front() != joined,
+		"a build without links joined a compare and branch");
+	{
+		gadgets::Executor executor;
+		executor.prepare(memory, 1, 1, 1);
+		const auto cut = executor.select_program(
+			memory, 0, ExecutionMode::long64, 2);
+		require(cut.program != nullptr &&
+				cut.program->native_stream().front() != joined,
+			"a block that ends at its branch joined it to the compare");
+		CpuState cpu{};
+		const auto result = gadgets::execute(
+			*cut.program, cpu, memory, executor, 64);
+		require(result.event == uml::cpu::EngineEvent::continued &&
+				result.retired_instructions == 2U && cpu.rip == target,
+			"a block that ends at its branch took the wrong edge");
+	}
+	for (const std::size_t budget : {2U, 3U, 4U}) {
+		gadgets::Executor executor;
+		executor.prepare(memory, 1, 1, 1);
+		const auto landing = executor.select_program(
+			memory, target, ExecutionMode::long64);
+		const auto block = executor.select_program(
+			memory, 0, ExecutionMode::long64);
+		require(landing.program != nullptr && block.program != nullptr &&
+				block.program->native_stream().front() == joined,
+			"a linked block did not join its compare and branch");
+		CpuState cpu{};
+		const auto result = gadgets::execute(
+			*block.program, cpu, memory, executor, budget);
+		if (budget < 4U)
+			require(result.event == uml::cpu::EngineEvent::continued &&
+					result.retired_instructions == 2U &&
+					cpu.rip == target && cpu.gpr(Register::rdx) == 0U,
+				"a joined branch followed its link past the budget");
+		else
+			require(result.event == uml::cpu::EngineEvent::system_call &&
+					cpu.gpr(Register::rdx) == 2U,
+				"a joined branch did not follow its link within the "
+				"budget");
+	}
+}
+
+/* A joined branch has no stream word, so the instruction behind a pair is
+ * found past both: a baked PUSH that faults after two pairs reports itself
+ * with four instructions retired. */
+void a_stack_fault_behind_compare_branch_entries_finds_its_instruction()
+{
+	using namespace uml::cpu::x86_64;
+	TestMemory memory;
+	memory.load(0, {
+		0x83, 0xf8, 0x05,                   // cmp eax, 5
+		0x75, 0x0b,                         // jne 0x10
+		0xf7, 0xc1, 0x01, 0x00, 0x00, 0x00, // test ecx, 1
+		0x75, 0x03,                         // jne 0x10
+		0x53,                               // push rbx
+		0x0f, 0x05,                         // syscall
+		0x0f, 0x05,                         // syscall
+	});
+	gadgets::Executor executor;
+	executor.prepare(memory, 1, 1, 1);
+	const auto block = executor.select_program(
+		memory, 0, ExecutionMode::long64);
+	require(block.program != nullptr, "stack block behind pairs did not build");
+	const auto stream = block.program->native_stream();
+	require(stream.size() > 6U &&
+			stream[0] == compare_branch_entry(false, 32U, 5U, 0U) &&
+			stream[3] == compare_branch_entry(true, 32U, 5U, 1U),
+		"the pairs in front of the PUSH were not joined");
+	CpuState cpu{};
+	cpu.gpr(Register::rax) = 5;
+	cpu.gpr(Register::rcx) = 2;
+	cpu.gpr(Register::rsp) = 0x20008;
+	const auto result = gadgets::execute(
+		*block.program, cpu, memory, executor, 64);
+	require(result.event == uml::cpu::EngineEvent::memory_fault &&
+			result.retired_instructions == 4U && cpu.rip == 0x0d,
+		"a PUSH behind joined compares and branches faulted at the wrong "
+		"instruction");
+}
+
 /* The host reports the emulated CPU to the guest kernel from cpuid.hpp, and
  * the guest reads the same CPU by executing CPUID. Both answers must be the
  * same answer: whatever /proc/cpuinfo says a program may use, CPUID has to
@@ -11382,6 +11623,9 @@ int main(int argc, char **argv)
 	a_settled_carry_survives_an_increment();
 	conditional_moves_write_the_destination_either_way();
 	fused_conditional_jumps_take_the_same_edge();
+	compare_branch_entries_run_both_instructions();
+	compare_branch_entries_keep_the_inline_contract();
+	a_stack_fault_behind_compare_branch_entries_finds_its_instruction();
 	cpuid_table_matches_the_gadget();
 	x87_zero_results_keep_their_sign();
 	preserve_precise_memory_fault();
