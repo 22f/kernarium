@@ -93,17 +93,8 @@ uml_add_tooling_test(
     LABELS android;audit
     TIMEOUT 60)
 
-# The accessibility artifact is staged only when its files match its
-# description, as the filegroups the product imports.
-uml_add_tooling_test(
-    NAME lineage24-accessibility-artifact
-    COMMAND ${Python3_EXECUTABLE} -B
-        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_stage_accessibility_artifact.py
-    LABELS android
-    TIMEOUT 60)
-
-# The accessibility applications' licence modules name what each APK holds, for
-# the image's NOTICE, with the text of every copyleft kind they name.
+# The licence modules of the series that build TalkBack and eSpeak NG name what
+# each holds, for the image's NOTICE, with the text of every copyleft kind.
 uml_add_tooling_test(
     NAME lineage24-accessibility-licenses
     COMMAND ${Python3_EXECUTABLE} -B

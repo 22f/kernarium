@@ -10,17 +10,16 @@ ANDROID_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 METADATA="$ANDROID_ROOT/metadata/lineage.env"
 VERIFIER="$ANDROID_ROOT/tools/verify-aosp-patches.py"
 MESA_VENUS_VERIFIER="$ANDROID_ROOT/tools/verify-mesa-venus-source.py"
+ACCESSIBILITY_VERIFIER="$ANDROID_ROOT/tools/verify-accessibility-source.py"
 TARGET_FILES_VERIFIER="$ANDROID_ROOT/tools/verify-target-files.py"
 FIRST_BOOT_TOOL="$ANDROID_ROOT/tools/precompile-first-boot-apps.py"
 OUTER_ROOT=$(CDPATH= cd -- "$ANDROID_ROOT/../.." && pwd)
 KERNEL_COMMON_ROOT="$OUTER_ROOT/kernel/common"
 KERNEL_ARTIFACT_VERIFIER="$KERNEL_COMMON_ROOT/artifacts/verify-kernel-artifact.py"
-ACCESSIBILITY_STAGER="$ANDROID_ROOT/tools/stage-accessibility-artifact.py"
 
 AOSP_SOURCE=
 OUT_DIR=
 KERNEL_ARTIFACT=
-ACCESSIBILITY_ARTIFACT=
 JOBS=
 BUILD_NUMBER_VALUE=
 
@@ -33,15 +32,13 @@ usage()
 Usage: android/lineage-24/build/build-aosp.sh \
        --aosp-source ABSOLUTE_PATH \
        --out ABSOLUTE_PATH \
-       --kernel-artifact ABSOLUTE_PATH \
-       --accessibility-artifact ABSOLUTE_PATH [--jobs N] [--build-number N]
+       --kernel-artifact ABSOLUTE_PATH [--jobs N] [--build-number N]
 
 Run locally on the x86_64 Linux builder after applying the routed AOSP patch
 series. The kernel is a published Android kernel artifact of the tracked
-mainline source, whose vmlinux is the runtime image without DWARF. The
-accessibility artifact is the TalkBack and eSpeak NG APKs that
-dependencies/build-andarium-accessibility.sh writes on the Mac, accepted in
-metadata/accepted-accessibility.env and built from this tree's pins. The output
+mainline source, whose vmlinux is the runtime image without DWARF. TalkBack
+and eSpeak NG are built from the pinned sources that prepare-sources.sh
+materializes in the workspace. The output
 directory must be an ignored directory inside the AOSP Repo
 workspace; the pinned Android 17 Soong tree rejects generated host-tool paths
 from an external absolute OUT_DIR. Reusing the same output path lets the
@@ -103,11 +100,6 @@ while [[ $# -gt 0 ]]; do
 		KERNEL_ARTIFACT=$2
 		shift 2
 		;;
-	--accessibility-artifact)
-		[[ $# -ge 2 ]] || fail "--accessibility-artifact requires a path"
-		ACCESSIBILITY_ARTIFACT=$2
-		shift 2
-		;;
 	--jobs)
 		[[ $# -ge 2 ]] || fail "--jobs requires a positive integer"
 		JOBS=$2
@@ -129,11 +121,9 @@ done
 [[ -n "$AOSP_SOURCE" ]] || fail "--aosp-source is required"
 [[ -n "$OUT_DIR" ]] || fail "--out is required"
 [[ -n "$KERNEL_ARTIFACT" ]] || fail "--kernel-artifact is required"
-[[ -n "$ACCESSIBILITY_ARTIFACT" ]] || fail "--accessibility-artifact is required"
 absolute_path "AOSP source" "$AOSP_SOURCE"
 absolute_path "output directory" "$OUT_DIR"
 absolute_path "kernel artifact" "$KERNEL_ARTIFACT"
-absolute_path "accessibility artifact" "$ACCESSIBILITY_ARTIFACT"
 [[ "$(uname -s)" == Linux ]] || fail "builder host must be Linux"
 [[ "$(uname -m)" == x86_64 ]] || fail "builder host must be x86_64"
 command -v zip >/dev/null 2>&1 || fail "zip is not available on PATH"
@@ -159,14 +149,16 @@ fi
 [[ -f "$METADATA" ]] || fail "AOSP metadata is missing"
 [[ -x "$VERIFIER" ]] || fail "AOSP patch verifier is missing"
 [[ -x "$MESA_VENUS_VERIFIER" ]] || fail "Mesa Venus source verifier is missing"
+[[ -x "$ACCESSIBILITY_VERIFIER" ]] || fail "accessibility source verifier is missing"
 [[ -x "$TARGET_FILES_VERIFIER" ]] || fail "target-files verifier is missing"
 [[ -f "$FIRST_BOOT_TOOL" ]] || fail "first-boot precompile tool is missing"
 [[ -f "$KERNEL_ARTIFACT_VERIFIER" ]] || fail "kernel artifact verifier is missing"
-[[ -f "$ACCESSIBILITY_STAGER" ]] || fail "accessibility artifact stager is missing"
 # shellcheck disable=SC1090
 source "$METADATA"
 
 "$MESA_VENUS_VERIFIER" --android-root "$ANDROID_ROOT" \
+	--aosp-source "$AOSP_SOURCE"
+"$ACCESSIBILITY_VERIFIER" --android-root "$ANDROID_ROOT" \
 	--aosp-source "$AOSP_SOURCE"
 "$VERIFIER" --android-root "$ANDROID_ROOT" \
 	--aosp-source "$AOSP_SOURCE" --expect final
@@ -174,10 +166,6 @@ python3 -B "$KERNEL_ARTIFACT_VERIFIER" --artifact "$KERNEL_ARTIFACT" \
 	--common-root "$KERNEL_COMMON_ROOT" \
 	--kernel-metadata "$OUTER_ROOT/kernel/mainline-6.18/patches/metadata.env" \
 	--abi-metadata "$KERNEL_COMMON_ROOT/abi/identity.env"
-# TalkBack and eSpeak NG: the product imports the APKs from the directory this
-# writes (overlay/accessibility/Android.bp).
-python3 -B "$ACCESSIBILITY_STAGER" --artifact "$ACCESSIBILITY_ARTIFACT" \
-	--repo-root "$OUTER_ROOT" --aosp-source "$AOSP_SOURCE"
 SOONG_BUILD_GRAPH="$OUT_DIR/soong/build.${LINEAGE24_PRODUCT}.ninja"
 mkdir -p -- "$OUT_DIR"
 # One output directory per build variant: a switch between user and userdebug is

@@ -2788,7 +2788,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     archive.writestr("PRODUCT/app/EasterEgg/EasterEgg.apk", release_apk)
                 elif easter_egg_variant == "wrong-directory":
                     archive.writestr("SYSTEM/app/Egg/EasterEgg.apk", release_apk)
-                # TalkBack and eSpeak NG, the accessibility artifact's two APKs.
+                # TalkBack and eSpeak NG, the image build's two APKs.
                 if accessibility_variant not in ("missing-talkback", "talkback-in-system"):
                     archive.writestr("PRODUCT/app/TalkBack/TalkBack.apk", release_apk)
                 if accessibility_variant == "talkback-in-system":
@@ -4906,11 +4906,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "res/xml/default_workspace_4x5.xml names com.android.calculator2.Calculator: the home screen "
              "holds only the dock"),
             ("missing-talkback-cause", {"accessibility_variant": "missing-talkback"},
-             "TalkBack.apk is missing from the image: the accessibility artifact supplies TalkBack"),
+             "TalkBack.apk is missing from the image: the image build supplies TalkBack"),
             ("missing-espeak-ng-cause", {"accessibility_variant": "missing-espeak"},
-             "eSpeakNG.apk is missing from the image: the accessibility artifact supplies TalkBack"),
+             "eSpeakNG.apk is missing from the image: the image build supplies TalkBack"),
             ("talkback-in-the-system-partition-cause", {"accessibility_variant": "talkback-in-system"},
-             "TalkBack.apk is missing from the image: the accessibility artifact supplies TalkBack"),
+             "TalkBack.apk is missing from the image: the image build supplies TalkBack"),
             ("missing-easter-egg-cause", {"easter_egg_variant": "missing"},
              "EasterEgg.apk is missing from the image: the Android version row opens the logo screen"),
             ("easter-egg-in-a-directory-of-another-name-cause", {"easter_egg_variant": "wrong-directory"},

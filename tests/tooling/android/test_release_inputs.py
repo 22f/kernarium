@@ -167,9 +167,9 @@ class TrackedListTests(unittest.TestCase):
             "android/lineage-24/metadata/base-manifest.xml",
             "android/lineage-24/tools/publish-release.py",
             "android/lineage-24/build",
-            # The accessibility artifact and everything it is built from.
-            "android/lineage-24/metadata/accepted-accessibility.env",
-            "android/lineage-24/tools/stage-accessibility-artifact.py",
+            # TalkBack and eSpeak NG, which the image builds from source: their
+            # pins and the series that carry their Soong build.
+            "android/lineage-24/third_party",
             "dependencies/andarium-accessibility/archives.tsv",
             "dependencies/andarium-accessibility/identity.py",
             "dependencies/andarium-accessibility/toolchain.tsv",

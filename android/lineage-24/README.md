@@ -164,20 +164,23 @@ first page while it has room, then on the later pages in order (route `p0010`).
 ### Accessibility
 
 The image carries TalkBack, Android's screen reader, and eSpeak NG, a speech
-engine, as the prebuilt applications `TalkBack` and `eSpeakNG`
-(`overlay/accessibility/Android.bp`, in `/product/app`); the image turns
-nothing on by itself, and Andarium turns TalkBack on only at the person's
-request. Both are open source, built from source into the accessibility
-artifact: the release APKs, unsigned, and `artifact.json`
-(`dependencies/build-andarium-accessibility.sh`;
-[`../../dependencies/README.md`](../../dependencies/README.md)). The artifact
-the release carries is the one `metadata/accepted-accessibility.env` names:
-`build-aosp.sh` (`--accessibility-artifact`) and `publish-release.py` refuse
-one that `tools/stage-accessibility-artifact.py` does not accept as built from
-this tree's pins, patch series, archive list, builder and toolchain, and the
-signed system carries exactly its APKs. The stager stages it as
-`vendor/kernarium/accessibility`, outside the synchronized device tree, and
-the target-files verifier requires both applications.
+engine, as the applications `TalkBack` and `eSpeakNG` in `/product/app`; the
+image turns nothing on by itself, and Andarium turns TalkBack on only at the
+person's request. Both are open source and built from source by the image
+build, signed with the image's other applications. `third_party/accessibility/`
+pins the upstream commits of TalkBack, eSpeak NG and libsonic;
+`build/prepare-sources.sh` materializes them at `external/talkback`,
+`external/espeak-ng` and `external/espeak-ng/sonic`, TalkBack and eSpeak NG
+with the series of `dependencies/patches/talkback` and `espeak-ng`; and
+`tools/verify-accessibility-source.py` checks the pins against
+`dependencies/manifest.tsv`, the series and the checkouts, as the preflight,
+the patch step and the build run it. A series holds the changes to the project
+and ends with its Soong build, `Build with Soong`: the Soong modules, the
+manifests, and the licence modules the image's NOTICE reports. The TalkBack
+series also patches out the three libraries the tree lacks and leaves every
+Google Play services library out of the phone build, which recognises no text
+in images (OCR) as a result. The target-files verifier requires both
+applications.
 
 ### Motion sensors
 

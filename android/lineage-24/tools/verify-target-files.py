@@ -1885,9 +1885,9 @@ def check_easter_egg(infos: dict[str, zipfile.ZipInfo]) -> None:
         )
 
 
-# TalkBack and eSpeak NG, the accessibility artifact's APKs: Andarium's Settings
-# turns TalkBack on and off, and eSpeak NG is the only speech engine it can speak
-# with (overlay/accessibility/Android.bp).
+# TalkBack and eSpeak NG, which the image builds from source (external/talkback
+# and external/espeak-ng): Andarium's Settings turns TalkBack on and off, and
+# eSpeak NG is the only speech engine it can speak with.
 ACCESSIBILITY_APKS = {
     "TalkBack": re.compile(r"PRODUCT/app/TalkBack/TalkBack\.apk"),
     "eSpeakNG": re.compile(r"PRODUCT/app/eSpeakNG/eSpeakNG\.apk"),
@@ -1899,8 +1899,8 @@ def check_accessibility(infos: dict[str, zipfile.ZipInfo]) -> None:
     for module, pattern in ACCESSIBILITY_APKS.items():
         if not any(pattern.fullmatch(name) for name in infos):
             fail(
-                f"{module}.apk is missing from the image: the accessibility artifact supplies TalkBack "
-                "and eSpeak NG (build-aosp.sh --accessibility-artifact)"
+                f"{module}.apk is missing from the image: the image build supplies TalkBack "
+                "and eSpeak NG (external/talkback and external/espeak-ng)"
             )
 
 
