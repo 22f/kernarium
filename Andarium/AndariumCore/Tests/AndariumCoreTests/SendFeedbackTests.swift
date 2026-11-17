@@ -49,7 +49,7 @@ struct SendFeedbackTests {
     @Test func theBodyIsTheDetailsASeparatorAndTheInformation() {
         let body = SendFeedbackMail.body(details: "  It stops.\nEvery time.  \n", information: information())
         #expect(body.hasPrefix("It stops.\nEvery time.\n\n--\nApp: Andarium 1.0 (9), AppStore\n"))
-        #expect(body.hasSuffix("Thermal state: nominal\n"))
+        #expect(body.hasSuffix("Thermal state: nominal\nFrame rate limit when hot: on\n"))
     }
 
     @Test func withoutDetailsTheBodyLeavesRoomToType() {
@@ -100,7 +100,15 @@ struct SendFeedbackTests {
             "Running: yes, for 42 min",
             "Free space: 41.6 GiB",
             "Thermal state: nominal",
+            "Frame rate limit when hot: on",
         ])
+    }
+
+    @Test func theInformationBlockSaysInFixedEnglishWhetherTheFrameRateLimitIsOff() {
+        var off = information()
+        off.heatLimitOn = false
+        #expect(off.lines.suffix(2) == ["Thermal state: nominal", "Frame rate limit when hot: off"])
+        #expect(off.text.hasSuffix("Frame rate limit when hot: off"))
     }
 
     @Test func beforeAVirtualMachineExistsOrRunsTheBlockSaysSo() {

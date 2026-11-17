@@ -477,6 +477,7 @@ struct SendFeedbackScreenTests {
         }
         #expect(keys == [
             "App", "Device", "iOS", "Language", "Virtual machine", "Android", "Running", "Free space", "Thermal state",
+            "Frame rate limit when hot",
         ])
         #expect(!request.body.contains(NSHomeDirectory()))
         sheet.close()

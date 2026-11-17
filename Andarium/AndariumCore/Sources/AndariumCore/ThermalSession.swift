@@ -5,6 +5,14 @@ import Foundation
 /// Tells the guest's thermal HAL how hot the device is, and says when Android
 /// starts to lower the frame rate for it.
 ///
+/// Settings' "When hot" (`setLimit`) decides whether Android is told: with the
+/// limit off the HAL hears none at every state of iOS's, critical included, at
+/// once when the limit is turned off and with the policy's current severity at
+/// once when it is turned on, and the cap is never announced while it is off.
+/// The policy runs either way, so `isHot` (serious or above, its hold
+/// included) is known with the limit off too. The gate is here, where the
+/// severity is sent, so that the policy stays one pure rule.
+///
 /// The application reads iOS's thermal state and gives each reading to
 /// `observe`. A run (a normal start, from its first moment until it ends) has
 /// a `ThermalPolicy` of its own, which turns the readings into the severity
@@ -33,6 +41,7 @@ public final class ThermalSession: @unchecked Sendable {
     private let retryDelay: DispatchTimeInterval
     private let clock: @Sendable () -> UInt64
     private let schedule: @Sendable (_ nanoseconds: UInt64, _ work: @escaping @Sendable () -> Void) -> Void
+    private let hotChanged: @Sendable (Bool) -> Void
     private let capStarted: @Sendable () -> Void
     private let queue = DispatchQueue(label: "andarium-thermal-session")
 
@@ -47,19 +56,27 @@ public final class ThermalSession: @unchecked Sendable {
     private var failedAttempts = 0
     private var gaveUp = false
     private var timerEpoch: UInt64 = 0
+    /// Whether Android is told how hot the device is (Settings' "When hot").
+    private var limitsFrameRate = true
+    /// The last `hotChanged` said the device is hot.
+    private var reportedHot = false
 
     /// `capStarted` is called on the session's queue, once per run, when the
-    /// frame rate cap starts.
+    /// frame rate cap starts. `hotChanged` is called on it each time the
+    /// device becomes hot (serious or above, the hold included) or stops
+    /// being, with the limit on or off, and with false when a run ends.
     public init(
         opener: any GuestStreamOpener, retryDelay: DispatchTimeInterval = .seconds(1),
         clock: @escaping @Sendable () -> UInt64 = ThermalSession.uptimeNanoseconds,
         schedule: @escaping @Sendable (UInt64, @escaping @Sendable () -> Void) -> Void = ThermalSession.dispatchAfter,
+        hotChanged: @escaping @Sendable (Bool) -> Void = { _ in },
         capStarted: @escaping @Sendable () -> Void
     ) {
         self.opener = opener
         self.retryDelay = retryDelay
         self.clock = clock
         self.schedule = schedule
+        self.hotChanged = hotChanged
         self.capStarted = capStarted
     }
 
@@ -90,6 +107,20 @@ public final class ThermalSession: @unchecked Sendable {
         }
     }
 
+    /// Whether Android is told how hot the device is: Settings' "When hot".
+    /// Off, the HAL hears none at once and at every state after; on, it hears
+    /// the policy's severity at once. The first change that starts the cap
+    /// while the limit is on is announced, once in a run.
+    public func setLimit(_ on: Bool) {
+        queue.async { [self] in
+            guard on != limitsFrameRate else { return }
+            limitsFrameRate = on
+            guard inRun else { return }
+            stream?.send(told)
+            announceIfDue()
+        }
+    }
+
     /// iOS's thermal state as it is now: on a change, and on every return to
     /// the foreground, where the notification may have been missed.
     public func observe(_ state: HostThermalState) {
@@ -116,8 +147,13 @@ public final class ThermalSession: @unchecked Sendable {
         queue.sync {}
     }
 
-    /// The severity Android is told in this run; none outside a run.
-    public var severity: AndroidThermalSeverity { queue.sync { inRun ? policy.severity : .none } }
+    /// The severity Android is told in this run: none outside a run, and none
+    /// while the limit is off.
+    public var severity: AndroidThermalSeverity { queue.sync { inRun ? told : .none } }
+
+    /// Whether the policy holds the device hot (serious or above, its hold
+    /// included), in a run, whatever Android is told.
+    public var isHot: Bool { queue.sync { inRun && policy.severity >= ThermalPolicy.capSeverity } }
 
     /// Whether the guest's HAL is connected.
     public var isConnected: Bool { queue.sync { connected } }
@@ -135,6 +171,7 @@ public final class ThermalSession: @unchecked Sendable {
         // A reading from before the run is the state the run begins in.
         policy.observe(observed, at: clock())
         scheduleExpiry()
+        publishHot()
     }
 
     private func endRun() {
@@ -142,7 +179,12 @@ public final class ThermalSession: @unchecked Sendable {
         timerEpoch &+= 1
         closeStream()
         policy = ThermalPolicy()
+        publishHot()
     }
+
+    /// What Android is told: the policy's severity, or none while the limit is
+    /// off.
+    private var told: AndroidThermalSeverity { limitsFrameRate ? policy.severity : .none }
 
     private func openStream() {
         streamEpoch &+= 1
@@ -153,7 +195,7 @@ public final class ThermalSession: @unchecked Sendable {
                 handle(event)
             }
         }
-        stream.send(policy.severity)
+        stream.send(told)
         self.stream = stream
         stream.start()
     }
@@ -191,14 +233,26 @@ public final class ThermalSession: @unchecked Sendable {
     }
 
     private func apply(_ changed: Bool) {
-        if changed { stream?.send(policy.severity) }
+        // With the limit off the HAL was told none and stays told none.
+        if changed && limitsFrameRate { stream?.send(policy.severity) }
         scheduleExpiry()
         announceIfDue()
+        publishHot()
     }
 
+    /// The cap is announced only while Android is told of it: a limit that is
+    /// off consumes nothing, so the run still announces the cap if the limit
+    /// is turned on while the device is hot.
     private func announceIfDue() {
-        guard connected, policy.claimAnnouncement() else { return }
+        guard limitsFrameRate, connected, policy.claimAnnouncement() else { return }
         capStarted()
+    }
+
+    private func publishHot() {
+        let hot = inRun && policy.severity >= ThermalPolicy.capSeverity
+        guard hot != reportedHot else { return }
+        reportedHot = hot
+        hotChanged(hot)
     }
 
     /// Looks again when a state that ended stops counting.
