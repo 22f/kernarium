@@ -777,8 +777,8 @@ requires reopening Andarium.
   information says it in "Frame rate limit when hot"). Full frame rate tells
   Android none at every state of iOS's, critical included, at once when it is
   chosen, and shows no notice at any heat; Limit frame rate again tells it the
-  policy's severity at once. The policy runs either way (`ThermalSession.isHot`
-  says the device is held hot, for the section's footnote). The notice's
+  policy's severity at once. The policy runs either way (`deviceIsHot` says
+  the device is held hot, for the section's footnote). The notice's
   words are a button that opens an alert whose Turn Off chooses Full frame
   rate in one tap; Dismiss only dismisses. A harness launch runs with the
   default and keeps nothing; `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states it for
