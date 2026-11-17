@@ -730,7 +730,8 @@ void test_flush_serial()
 }
 
 /* M13: an allocation that fails at any of the points of a registration (the
- * frame's record, the holder list at its first use and at each growth)
+ * holder list at its first use and at each growth; the frame's record exists
+ * from its first executable mapping, so the records site has no point)
  * returns "failed" with the frame as it was, and the registration made again
  * succeeds. No allocation is made under a stripe lock. */
 void test_registration_allocation_failures()
