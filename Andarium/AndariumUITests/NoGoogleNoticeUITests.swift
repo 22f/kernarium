@@ -16,8 +16,8 @@ import XCTest
 /// Send feedback: the line at the top of its mail, reached from a session's
 /// Settings (the launch asks for the input probe, so a session opens with no
 /// guest behind it). It is in the mail before anything is written, answers in
-/// place and closes; what it keeps for the next sheet is the hosted
-/// `NoGoogleNoticeScreenTests`'s (a probe launch keeps nothing). It exists
+/// place and closes; that it is there again on the next sheet is the hosted
+/// `NoGoogleNoticeScreenTests`'s. It exists
 /// only in a build with Send feedback, as the build the command in
 /// docs/testing.md makes (`FEEDBACK_ADDRESS=feedback@example.com`).
 @MainActor
