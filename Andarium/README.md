@@ -815,11 +815,11 @@ requires reopening Andarium.
   it on then explains why and, for a refusal, offers Settings. A device with no
   camera shows the row off and disabled with a note and keeps the person's
   choice; a device has one when it has a built-in front camera, the rule the
-  guest's layout follows, and the iPad app running on a Mac has none
-  (`CameraAvailability`). On an iPad, a session that other apps
-  share the screen with pauses the camera (black frames) and shows a notice
-  that goes with the interruption. When a guest app opens a camera while the
-  session is blocked, the runtime reports it
+  guest's layout follows, and the iPad app running on a Mac or on an Apple
+  Vision Pro has none and looks for none (`CameraAvailability`). On an iPad, a
+  session that other apps share the screen with pauses the camera (black
+  frames) and shows a notice that goes with the interruption. When a guest app
+  opens a camera while the session is blocked, the runtime reports it
   (`KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE`, runtime API 39) and the
   session shows a notice that Camera is off and can be turned on only from
   Home, for the next start. A dismissal holds for the run; an undismissed
