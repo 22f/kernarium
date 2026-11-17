@@ -878,9 +878,9 @@ int change_across_a_destroy(unsigned long generation, Change change)
  * retired it takes the state's lock after: it must leave the state alone and
  * return what it would have returned. A map that wrote there would count its
  * words into a state that is no longer in the table, which no audit walks and
- * nothing flushes, and leave the frame's count high for good. (Protect and
- * unmap find the cleared state empty, so for them the row holds the same
- * result before the guard as after it.) */
+ * nothing flushes, and leave the frame's count high for good. The protect and
+ * unmap arms pass without their guards (destroy has already emptied the
+ * state): they are regression cover, not proof that those guards ran. */
 void test_an_immediate_change_cannot_write_into_a_destroyed_generation()
 {
 	/* A generation is never used again once destroyed: one for each change. */
