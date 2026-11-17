@@ -6586,6 +6586,217 @@ void unread_flag_records_keep_the_last_and_the_stopped()
 		"a producer a budget stopped after left no record of its flags");
 }
 
+/* A producer with a memory operand takes no twin, whatever follows: ADD, SUB,
+ * AND, OR and XOR at 32 and 64 bits with a memory source or destination before
+ * a register-only ALU instruction keep their own entry and fault there, as
+ * with a NOP between. */
+void unread_flag_records_need_a_register_producer()
+{
+	static constexpr std::array<std::array<std::uint64_t, 4>, 2> values{{
+		{5U, 7U, 12U, 0U}, {0xffff'ffff'ffff'ffffULL, 1U, 0U, 0U}}};
+	for (unsigned op = 0; op < 5U; ++op) {
+		for (const unsigned width : {32U, 64U}) {
+			for (const bool memory_source : {true, false}) {
+				/* op [e/r]ax, [rsi] or op [rsi], [e/r]ax; then ADD RAX, R9
+				 * and SYSCALL. */
+				const auto program = [&](bool nop) {
+					std::vector<std::uint8_t> code;
+					if (width == 64U)
+						code.push_back(0x48);
+					code.push_back(static_cast<std::uint8_t>(
+						alu_operations[op].register_opcode +
+						(memory_source ? 2U : 0U)));
+					code.push_back(0x06);
+					if (nop)
+						code.push_back(0x90);
+					push_alu(code, 0, 64U, 0, 9);
+					code.insert(code.end(), {0x0f, 0x05});
+					return code;
+				};
+				for (const auto &value : values) {
+					const auto a = run_register_program(program(false), value);
+					const auto b = run_register_program(program(true), value);
+					require(a.faulted && b.faulted && a.first == b.first &&
+							a.registers == b.registers && a.flags == b.flags,
+						std::string{alu_operations[op].name} + (memory_source ?
+							" with a memory source" : " with a memory destination") +
+						": a producer took a twin without its record, or ran "
+						"differently from the pair with a NOP between");
+				}
+			}
+		}
+	}
+}
+
+/* A twin and a joined compare-and-branch in one block, either way round:
+ *   ADD r, RBX; CMP r, R9 or TEST r, r; Jcc   (a twin in front of the pair)
+ *   CMP r, 5; Jcc; ADD r, RBX; SUB r, R9       (a twin pair behind it)
+ * each at 32 and 64 bits, against the same code with a NOP after every
+ * instruction that would join or skip a record. Both take the same edge with
+ * the same RAX and flags and retire the NOPs fewer, and a budget of the
+ * block's own count, which refuses the taken link into a five-instruction
+ * landing block, leaves at its start with the compare's flags recorded. */
+void unread_flag_records_beside_compare_branch_entries()
+{
+	using namespace uml::cpu::x86_64;
+	struct Outcome final {
+		std::uint64_t rax{};
+		std::uint64_t edge{};
+		std::uint64_t flags{};
+		std::size_t retired{};
+		std::vector<std::uintptr_t> stream;
+	};
+	const auto run = [](const std::vector<std::uint8_t> &code,
+		const std::array<std::uint64_t, 3> &values) {
+		TestMemory memory;
+		memory.fill(0, std::as_bytes(std::span{code}));
+		gadgets::Executor executor;
+		executor.prepare(memory, 1, 1, 1);
+		CpuState cpu{};
+		cpu.gpr(Register::rax) = values[0];
+		cpu.gpr(Register::rbx) = values[1];
+		cpu.gpr(Register::r9) = values[2];
+		Outcome outcome{};
+		for (unsigned step = 0; step < 8U; ++step) {
+			const auto selected = executor.select_program(
+				memory, cpu.rip, ExecutionMode::long64);
+			require(selected.status == gadgets::BuildStatus::built &&
+					selected.program != nullptr,
+				"twin and compare-and-branch program did not build");
+			if (step == 0U) {
+				const auto stream = selected.program->native_stream();
+				outcome.stream.assign(stream.begin(), stream.end());
+			}
+			const auto result = gadgets::execute(
+				*selected.program, cpu, memory, executor, 64);
+			outcome.retired += result.retired_instructions;
+			if (result.event == uml::cpu::EngineEvent::system_call) {
+				outcome.rax = cpu.gpr(Register::rax);
+				outcome.edge = cpu.gpr(Register::rdx) |
+					cpu.gpr(Register::rsi) << 8U;
+				outcome.flags = cpu.gpr(Register::r11) & 0x8d5U;
+				return outcome;
+			}
+			require(result.event == uml::cpu::EngineEvent::continued,
+				"twin and compare-and-branch program left unexpectedly");
+		}
+		fail("twin and compare-and-branch program did not reach SYSCALL");
+	};
+	/* The landing block: MOV ESI, 3; MOV EDI, 4; MOV R8D, 5; MOV R10D, 6;
+	 * SYSCALL. */
+	static constexpr std::array<std::uint8_t, 24> landing{
+		0xbe, 0x03, 0x00, 0x00, 0x00, 0xbf, 0x04, 0x00, 0x00, 0x00,
+		0x41, 0xb8, 0x05, 0x00, 0x00, 0x00, 0x41, 0xba, 0x06, 0x00, 0x00, 0x00,
+		0x0f, 0x05};
+	/* The fall-through: MOV EDX, 1; SYSCALL. */
+	static constexpr std::array<std::uint8_t, 7> fall_through{
+		0xba, 0x01, 0x00, 0x00, 0x00, 0x0f, 0x05};
+	static constexpr std::array<std::array<std::uint64_t, 3>, 5> values{{
+		{0U, 0U, 0U}, {1U, 0xffff'ffffU, 0U}, {0x7fff'ffffU, 1U, 0x8000'0000U},
+		{5U, 0U, 3U}, {0xffff'ffff'ffff'fff0ULL, 0x10U, 0U}}};
+	for (const unsigned width : {32U, 64U}) {
+		for (unsigned shape = 0; shape < 3U; ++shape) {
+			/* 0: ADD, CMP, Jcc; 1: ADD, TEST, Jcc; 2: CMP, Jcc, ADD, SUB. */
+			const bool test = shape == 1U;
+			for (const unsigned condition : {2U, 4U, 5U, 8U, 12U, 15U}) {
+				if (test && condition == 2U)
+					continue;
+				std::array<std::vector<std::uint8_t>, 2> code;
+				std::size_t target{};
+				for (unsigned nops = 0; nops < 2U; ++nops) {
+					auto &c = code[nops];
+					const auto nop = [&] {
+						if (nops != 0U)
+							c.push_back(0x90);
+					};
+					std::vector<std::uint8_t> body;
+					if (shape < 2U) {
+						push_alu(c, 0, width, 0, 3);
+						nop();
+						if (test)
+							push_compare_register(c, true, width, 0, 0);
+						else
+							push_compare_register(c, false, width, 0, 9);
+						nop();
+						body.assign(fall_through.begin(), fall_through.end());
+					} else {
+						push_compare_immediate(c, false, width, 0, 5U);
+						nop();
+						push_alu(body, 0, width, 0, 3);
+						if (nops != 0U)
+							body.push_back(0x90);
+						push_alu(body, 1, width, 0, 9);
+						body.insert(body.end(), fall_through.begin(),
+							fall_through.end());
+					}
+					c.push_back(static_cast<std::uint8_t>(0x70U + condition));
+					c.push_back(static_cast<std::uint8_t>(body.size()));
+					c.insert(c.end(), body.begin(), body.end());
+					if (nops == 0U)
+						target = c.size();
+					c.insert(c.end(), landing.begin(), landing.end());
+				}
+				const auto twin = unrecorded_entry(0, width, false, 0, 3);
+				const auto pair = compare_branch_entry(test, width, condition,
+					0, shape < 2U);
+				require(pair != 0U, "a compare-and-branch entry is missing");
+				for (const auto &value : values) {
+					const auto joined = run(code[0], value);
+					const auto separated = run(code[1], value);
+					const bool taken = (joined.edge >> 8U) == 3U;
+					const auto &s = joined.stream;
+					const bool built = shape < 2U ?
+						s.size() > 4U && s[0] == twin && s[1] == pair :
+						s.size() > 5U && s[0] == pair && s[3] == twin &&
+							s[4] != unrecorded_entry(1, width, false, 0, 9);
+					require(built && separated.stream.front() != s.front(),
+						"a twin beside a compare-and-branch entry was not "
+						"built as expected");
+					/* Both NOPs run in front of the branch but for the
+					 * second shape's second, on its fall-through only. */
+					require(joined.edge == separated.edge &&
+							joined.rax == separated.rax &&
+							joined.flags == separated.flags &&
+							separated.retired == joined.retired +
+								(shape < 2U || !taken ? 2U : 1U),
+						"a twin beside a compare-and-branch entry ran "
+						"differently from its instructions");
+					if (!taken)
+						continue;
+					/* The taken link refused at the block's own count. */
+					TestMemory memory;
+					memory.fill(0, std::as_bytes(std::span{code[0]}));
+					gadgets::Executor executor;
+					executor.prepare(memory, 1, 1, 1);
+					const auto land = executor.select_program(
+						memory, target, ExecutionMode::long64);
+					const auto block = executor.select_program(
+						memory, 0, ExecutionMode::long64);
+					require(land.program != nullptr && block.program != nullptr &&
+							land.program->instruction_count() == 5U,
+						"twin and compare-and-branch blocks did not build");
+					CpuState cpu{};
+					cpu.gpr(Register::rax) = value[0];
+					cpu.gpr(Register::rbx) = value[1];
+					cpu.gpr(Register::r9) = value[2];
+					const auto count = block.program->instruction_count();
+					const auto result = gadgets::execute(
+						*block.program, cpu, memory, executor, count);
+					materialize_flags(cpu);
+					require(result.event == uml::cpu::EngineEvent::continued &&
+							result.retired_instructions ==
+								(shape < 2U ? 3U : 2U) &&
+							cpu.rip == target && cpu.gpr(Register::rax) ==
+								separated.rax &&
+							(cpu.rflags & 0x8d5U) == separated.flags,
+						"a joined branch behind a twin left a refused link "
+						"without the compare's flags");
+				}
+			}
+		}
+	}
+}
+
 /* The host reports the emulated CPU to the guest kernel from cpuid.hpp, and
  * the guest reads the same CPU by executing CPUID. Both answers must be the
  * same answer: whatever /proc/cpuinfo says a program may use, CPUID has to
@@ -11980,6 +12191,8 @@ int main(int argc, char **argv)
 	a_stack_fault_behind_compare_branch_entries_finds_its_instruction();
 	unread_flag_records_are_not_written();
 	unread_flag_records_keep_the_last_and_the_stopped();
+	unread_flag_records_need_a_register_producer();
+	unread_flag_records_beside_compare_branch_entries();
 	cpuid_table_matches_the_gadget();
 	x87_zero_results_keep_their_sign();
 	preserve_precise_memory_fault();
