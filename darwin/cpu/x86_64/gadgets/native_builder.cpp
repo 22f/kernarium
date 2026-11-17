@@ -6010,11 +6010,15 @@ UML_X86_BAKED_CARRY_TABLES(decrement)
 	const auto width = instruction.destination.width;
 	if (width != OperandWidth::dword && width != OperandWidth::qword)
 		return false;
-	/* At 32 and 64 bits a register operand is one of the sixteen general
-	 * registers, whose baked slot is its index, and CMP and TEST give both
-	 * operands one width. */
+	/* At 32 and 64 bits a register operand is one of the general registers,
+	 * whose baked slot is its index, and CMP and TEST give both operands one
+	 * width. The decoder names sixteen; the refusal keeps a wider register
+	 * file from indexing past a table row or CpuState's registers. */
 	const unsigned d = instruction.destination.reg.index;
 	const bool immediate = source.kind == OperandKind::immediate;
+	if (d >= baked::gpr_slots ||
+		(!immediate && source.reg.index >= baked::gpr_slots))
+		return false;
 	const auto &branch = rest[0];
 	if (branch.instruction.operation != Operation::jump_conditional ||
 		!fused_condition(branch.instruction.condition,
