@@ -143,7 +143,11 @@ struct SendFeedbackTests {
             #expect(info.deviceText == "unknown")
             #expect(info.lines.contains("Device: unknown"))
         }
-        #expect(info.lines.count == 9 && !info.lines.contains("Device: "))
+        #expect(info.lines.count == 10 && !info.lines.contains("Device: "))
+        // The frame rate limit's line closes the block, in both states.
+        #expect(info.lines.last == "Frame rate limit when hot: on")
+        info.heatLimitOn = false
+        #expect(info.lines.count == 10 && info.lines.last == "Frame rate limit when hot: off")
     }
 
     @Test func aRunningTimeIsInTheLargestUnitThatFits() {
@@ -160,8 +164,11 @@ struct SendFeedbackTests {
         var info = information()
         info.language = "en\nUS"
         info.androidRelease = "r20\r\nextra"
-        #expect(info.lines.count == 9)
+        #expect(info.lines.count == 10)
         #expect(info.lines.allSatisfy { !$0.contains("\n") && !$0.contains("\r") })
+        #expect(info.lines.last == "Frame rate limit when hot: on")
+        info.heatLimitOn = false
+        #expect(info.lines.count == 10 && info.lines.last == "Frame rate limit when hot: off")
     }
 
     @Test func theBlockHoldsNothingThatSinglesOutTheDeviceOrThePerson() {
