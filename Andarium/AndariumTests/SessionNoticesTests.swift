@@ -210,6 +210,62 @@ struct SessionNoticesTests {
         #expect(scrollViews(under: controller.view).isEmpty)
     }
 
+    // MARK: The thermal notice's words
+
+    /// Whether a UIKit alert is the topmost presentation of any window now.
+    private var alertIsUp: Bool {
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            for window in scene.windows {
+                var top = window.rootViewController
+                while let next = top?.presentedViewController { top = next }
+                if top is UIAlertController { return true }
+            }
+        }
+        return false
+    }
+
+    /// The words of the thermal notice, with a chevron, are a button with a
+    /// hint of their own; Dismiss stays a button of its own that changes
+    /// nothing else. Activating the words puts the question to the model and
+    /// the system's alert up; Dismiss puts the notice away and leaves the
+    /// frame rate limit on.
+    @Test func theThermalNoticesWordsAreAButtonThatAsksAndDismissStaysItsOwn() async throws {
+        let model = makeModel()
+        model.previewThermalNotice()
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = hosted(model, width: 390, height: 600, in: lease)
+        guard let words = try await element(labelled: ThermalNotice.text, in: controller) else {
+            Issue.record("The notice was not found: is application accessibility on in this Simulator?")
+            return
+        }
+        #expect(words.accessibilityTraits.contains(.button), "the words are not a button")
+        #expect(words.accessibilityHint == "Asks to turn off the frame rate limit")
+        let dismiss = dismissButtons(in: controller)
+        #expect(dismiss.count == 1, "Dismiss is its own button")
+        #expect(dismiss.first?.accessibilityFrame.intersects(words.accessibilityFrame) == false)
+
+        #expect(words.accessibilityActivate())
+        #expect(model.askingToTurnOffHeatLimit)
+        #expect(model.thermalNotice.isShowing)
+        // The alert is the system's: UIKit has it on top of the window.
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !alertIsUp, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(50)) }
+        #expect(alertIsUp, "no alert came up")
+        model.cancelTurnOffHeatLimit()
+        let gone = ContinuousClock.now + .seconds(5)
+        while alertIsUp, ContinuousClock.now < gone { try await Task.sleep(for: .milliseconds(50)) }
+        #expect(!alertIsUp, "the alert stayed after Cancel")
+        #expect(model.thermalNotice.isShowing && model.heatLimitOn)
+
+        // Dismiss changes nothing but the notice.
+        let again = dismissButtons(in: controller)
+        #expect(again.first?.accessibilityActivate() == true)
+        #expect(!model.thermalNotice.isShowing)
+        #expect(model.heatLimitOn)
+        #expect(!model.askingToTurnOffHeatLimit)
+    }
+
     // MARK: Coexistence
 
     /// The camera notice and the graphics notice in the column the session

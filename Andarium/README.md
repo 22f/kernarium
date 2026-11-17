@@ -769,9 +769,20 @@ requires reopening Andarium.
   up Android lowers the guest's frame rate to 30, and the first time in a run
   that this starts the session screen says so once. The session and
   stall records, the statistics and the feedback information keep iOS's real
-  state. There is no switch. A system without the HAL hears nothing and shows
-  no notice; the
+  state. A system without the HAL hears nothing and shows no notice; the
   [Android README](../android/lineage-24/README.md) owns the HAL.
+  Settings' Performance section, after Stats in a normal session, has "When
+  hot": Limit frame rate, the default, or Full frame rate
+  (`HeatLimitPreference`, stored until it is turned back on; the feedback
+  information says it in "Frame rate limit when hot"). Full frame rate tells
+  Android none at every state of iOS's, critical included, at once when it is
+  chosen, and shows no notice at any heat; Limit frame rate again tells it the
+  policy's severity at once. The policy runs either way (`ThermalSession.isHot`
+  says the device is held hot, for the section's footnote). The notice's
+  words are a button that opens an alert whose Turn Off chooses Full frame
+  rate in one tap; Dismiss only dismisses. A harness launch runs with the
+  default and keeps nothing; `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states it for
+  the run ([Automation](#automation)).
 - **Game controllers.** Each game controller iOS has connected is a HID
   device in the guest, made through the guest's relay over vsock 5558
   (`GamepadSession`; the wire is `GamepadProtocol`, whose golden frames the
@@ -1297,7 +1308,11 @@ states the resolution; the earlier `KERNARIUM_RETINA_MODE` (`1` native, `0`
 one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation; `serious` and
-`critical` reach the guest as heat.
+`critical` reach the guest as heat. `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states
+Settings' "When hot" for the run: `0` tells the guest nothing of the heat. A
+UI test's probe session (`ANDARIUM_INPUT_PROBE`) that states the thermal state
+runs the thermal session against a stand-in for the guest's HAL, and its log
+says what the guest would be told (`heat told <severity>`).
 `ANDARIUM_REVIEW_ASK_SECONDS` and `ANDARIUM_REVIEW_ASK_RESET=1` set the rating
 prompt's counter and clear its record, in a build that has the prompt
 ([Rating prompt](#rating-prompt)).

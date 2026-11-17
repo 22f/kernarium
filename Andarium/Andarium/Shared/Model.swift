@@ -526,6 +526,7 @@ final class AppModel {
     /// goes with them.
     var guestHasKeys: Bool {
         !sessionSettingsOpen && sheet == nil && alert == nil && legacyInstallQuestion == nil && !shareSheetUp
+            && !askingToTurnOffHeatLimit
     }
     /// An Android application captured the pointer and the guest should have
     /// the pointer lock; the scene's root asks iOS for it.
@@ -679,6 +680,22 @@ final class AppModel {
         try? await Task.sleep(for: duration)
     }
     @ObservationIgnored private var thermalNoticeTask: Task<Void, Never>?
+    /// Settings' "When hot" under Performance: whether Android is told how hot
+    /// the device is, so that it limits the frame rate while the device is
+    /// hot. On is the default. Kept for the install (`HeatLimitPreference`).
+    var heatLimitOn = true
+    /// The launch decided it (automation): the value belongs to that run and
+    /// is not kept.
+    var heatLimitDecidedByLaunch = false
+    /// What is kept of the option across launches; nil where the launch
+    /// decided it.
+    var heatLimitToKeep: Bool? { heatLimitDecidedByLaunch ? nil : heatLimitOn }
+    /// The thermal policy holds the device hot (iOS's serious or critical
+    /// state, the policy's hold after it included), whether or not Android is
+    /// told. Settings' footnote reads it.
+    private(set) var deviceIsHot = false
+    /// The alert that asks to turn the limit off is up, over the notice.
+    private(set) var askingToTurnOffHeatLimit = false
 
     // MARK: Network notice state
 
@@ -1682,6 +1699,7 @@ final class AppModel {
         graphicsReclaim.reset()
         thermalCapWaiting = false
         dismissThermalNotice()
+        deviceIsHot = false
         cameraNoticeExpiry?.cancel()
         cameraNoticeExpiry = nil
         cameraNotice.runEnded()
@@ -2284,14 +2302,21 @@ final class AppModel {
     /// notice shows once the session screen is up, and the policy says this
     /// once in a run, so nothing here counts.
     func thermalCapStarted() {
+        // No notice while the limit is off, at any heat state: a cap announced
+        // just before the person turned the limit off is not shown.
+        guard heatLimitOn else { return }
         thermalCapWaiting = true
         showThermalNoticeIfWaiting()
     }
 
     fileprivate func showThermalNoticeIfWaiting() {
-        guard thermalCapWaiting, case .running(.normal) = phase else { return }
+        guard thermalCapWaiting, heatLimitOn, case .running(.normal) = phase else { return }
         thermalCapWaiting = false
         thermalNotice.show()
+        waitOutThermalNotice()
+    }
+
+    private func waitOutThermalNotice() {
         thermalNoticeTask?.cancel()
         thermalNoticeTask = Task { [weak self] in
             await self?.thermalNoticeSleep(ThermalNotice.visibleFor)
@@ -2300,11 +2325,56 @@ final class AppModel {
         }
     }
 
-    /// The person dismisses the notice, or it has run its time.
+    /// The person dismisses the notice, or it has run its time. It changes
+    /// nothing else, and ends a question about the limit that was open.
     func dismissThermalNotice() {
         thermalNoticeTask?.cancel()
         thermalNoticeTask = nil
         thermalNotice.dismiss()
+        askingToTurnOffHeatLimit = false
+    }
+
+    // MARK: Heat limit
+
+    /// The thermal policy says the device is hot now, or no longer.
+    func deviceHeatChanged(hot: Bool) {
+        deviceIsHot = hot
+    }
+
+    /// Settings' "When hot", and the alert's Turn Off. Off, the notice goes at
+    /// once and none comes, and the runtime tells Android nothing hot; on, the
+    /// runtime tells it the policy's severity at once.
+    func setHeatLimit(_ on: Bool) {
+        guard on != heatLimitOn else { return }
+        heatLimitOn = on
+        if !on {
+            thermalCapWaiting = false
+            dismissThermalNotice()
+        }
+        driver?.setHeatLimit(on)
+    }
+
+    /// The person taps the notice's words: the alert asks before the limit
+    /// goes. The notice waits meanwhile.
+    func askToTurnOffHeatLimit() {
+        guard thermalNotice.isShowing, heatLimitOn else { return }
+        thermalNoticeTask?.cancel()
+        thermalNoticeTask = nil
+        askingToTurnOffHeatLimit = true
+    }
+
+    /// The alert's Cancel, or an alert that could not be shown: the notice is
+    /// as it was.
+    func cancelTurnOffHeatLimit() {
+        guard askingToTurnOffHeatLimit else { return }
+        askingToTurnOffHeatLimit = false
+        if thermalNotice.isShowing { waitOutThermalNotice() }
+    }
+
+    /// The alert's Turn Off: the one tap.
+    func confirmTurnOffHeatLimit() {
+        askingToTurnOffHeatLimit = false
+        setHeatLimit(false)
     }
 
     #if !APP_STORE
