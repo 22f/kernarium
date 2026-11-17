@@ -197,7 +197,8 @@ struct HomeMenuTests {
 
     /// What VoiceOver finds in the navigation bar: buttons labelled Info (the bar's button and
     /// the control inside it), which are the menu's control (a hint on a toolbar menu never
-    /// reaches it, so the label carries the meaning).
+    /// reaches it, so the label carries the meaning). On a Mac the control inside the bar's
+    /// button is named for its symbol, in lower case: "info".
     @Test func voiceOverFindsTheMenuAsTheInfoButton() async throws {
         let model = model()
         let (controller, lease) = try await host(model)
@@ -209,7 +210,10 @@ struct HomeMenuTests {
         try await Task.sleep(for: .milliseconds(500))
         let top = ToolbarProbe.elements(in: lease.window)
         let buttons = top.filter { $0.traits.contains(.button) && $0.top < 100 }
-        #expect(!buttons.isEmpty && buttons.allSatisfy { $0.label == "Info" }, "the bar: \(top.map(\.description))")
+        let onMac = ProcessInfo.processInfo.isiOSAppOnMac
+        #expect(
+            !buttons.isEmpty && buttons.allSatisfy { onMac ? $0.label.lowercased() == "info" : $0.label == "Info" },
+            "the bar: \(top.map(\.description))")
     }
 
     /// What VoiceOver reads for an item of the menu, in English.
@@ -232,7 +236,8 @@ struct HomeMenuTests {
     /// holds them, which is what VoiceOver finds in it. The bar's own buttons are labelled Info
     /// too and the host window holds buttons of its own, so only what the opening adds to the
     /// scene is read.
-    @Test func theOpenMenuOffersEachItemToVoiceOver() async throws {
+    @Test(.disabled(if: ProcessInfo.processInfo.isiOSAppOnMac, "an iPad app on a Mac draws an open menu natively, with no UIKit element for its items"))
+    func theOpenMenuOffersEachItemToVoiceOver() async throws {
         let model = model()
         let (controller, lease) = try await host(model)
         defer { lease.give() }

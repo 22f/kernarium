@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "background_video.hpp"
 #include "calibration_store.hpp"
 #include "camera.hpp"
 #include "camera_description.hpp"
@@ -125,6 +126,10 @@ struct CameraDeviceOptions {
     std::function<void(bool)> onVideoMode;
     /* The clock frame ages are measured on; the platform's where empty. */
     std::function<std::uint64_t()> clock;
+    /* The application's way to end the guest's video from a thread of its own when it leaves the foreground, and to wait
+     * until the guest has stopped it (`BackgroundVideo`); the device attaches while it exists. Empty: the video ends only
+     * when the platform reports the departure. */
+    std::shared_ptr<BackgroundVideo> background;
 };
 
 /* The camera device. Every method runs on the transport worker, which is also

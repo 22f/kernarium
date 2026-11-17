@@ -12,6 +12,8 @@ guest, which keeps installed packages with their first-install times, processes,
 from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
+import contextlib
+import io
 import pathlib
 import re
 import shlex
@@ -1202,6 +1204,82 @@ class Steps(unittest.TestCase):
             runner.check_real(guest, pathlib.Path("real.apk"), "org.example.absent", "Real Game")
         # The application is uninstalled again, also after a failure.
         self.assertEqual(sum(1 for command in guest.commands if command.startswith("adb uninstall org.example.real")), 4)
+
+
+class LaunchedGuest:
+    """What the launcher's start_guest hands back: a handle with the adb serial, whose adb_run merges the two streams
+    and which has no run. The steps must not drive it."""
+
+    serial = "127.0.0.1:21101"
+
+    def adb_run(self, *arguments: str, timeout: float = 30):
+        raise AssertionError("a step drove the launcher's Guest: " + " ".join(arguments))
+
+
+class LaunchPaths(unittest.TestCase):
+    """main() gets its guest two ways, from a running one named by --serial and by launching one. Both give the steps
+    the same surface (status and the two streams apart), so a step that works on one works on the other. Here the whole of
+    main() runs against the scripted guest through each way."""
+
+    def setUp(self) -> None:
+        for module, name, value in ((runner, "AVC_SECONDS", 0), (runner, "PROBE_SECONDS", 1), (review, "REVIEW_SECONDS", 1)):
+            patcher = unittest.mock.patch.object(module, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        sleeper = unittest.mock.patch("time.sleep")
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
+
+    def main_with(self, arguments: list[str], guest: ScriptedGuest) -> tuple[int, str, list]:
+        """Runs main() with `arguments`; returns its status, its standard output and the launcher calls it made."""
+        launcher: list = []
+
+        def adb(command, **keywords):
+            self.assertEqual(command[:3], ["adb", "-s", LaunchedGuest.serial])
+            return guest.adb_run(*command[3:], timeout=keywords.get("timeout", 30))
+
+        def start_guest(settings, adb_client, directory, **keywords):
+            launcher.append(("start", settings.release, settings.emulator, keywords.get("provision")))
+            return LaunchedGuest()
+
+        patches = (
+            unittest.mock.patch.object(sys, "argv", ["run_android_oldapp_switch.py", *arguments]),
+            unittest.mock.patch.object(runner.orient.boot_android, "resolve_executable", return_value="adb"),
+            unittest.mock.patch.object(runner.probe, "build_apk", side_effect=lambda path, *rest, **keywords: pathlib.Path(path)),
+            unittest.mock.patch.object(runner.subprocess, "run", side_effect=adb),
+            unittest.mock.patch.object(runner.orient, "start_guest", side_effect=start_guest),
+            unittest.mock.patch.object(runner.orient, "stop_guest",
+                                       side_effect=lambda adb_client, launched: launcher.append(("stop", type(launched).__name__))),
+        )
+        out = io.StringIO()
+        with contextlib.ExitStack() as stack, contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            for patcher in patches:
+                stack.enter_context(patcher)
+            status = runner.main()
+        return status, out.getvalue(), launcher
+
+    @staticmethod
+    def rows(text: str) -> list[str]:
+        return [line.split(":")[0] for line in text.splitlines() if re.match(r"(PASS|FAIL|SKIP)\b", line)]
+
+    def test_the_two_ways_to_get_a_guest_run_the_same_rows(self) -> None:
+        serial_status, serial_out, serial_calls = self.main_with(["--serial", LaunchedGuest.serial, "--hook"], ScriptedGuest())
+        self.assertEqual(serial_status, 0, serial_out)
+        self.assertEqual(serial_calls, [], "a running guest is neither launched nor stopped")
+        own_status, own_out, own_calls = self.main_with(["--release", "/release", "--emulator", "/emulator", "--hook"], ScriptedGuest())
+        self.assertEqual(own_status, 0, own_out)
+        self.assertEqual(own_calls, [("start", pathlib.Path("/release"), pathlib.Path("/emulator"), True),
+                                     ("stop", "LaunchedGuest")])
+        self.assertEqual(self.rows(own_out), self.rows(serial_out))
+        self.assertGreater(len(self.rows(own_out)), 15)
+
+    def test_the_guest_this_runner_launched_is_stopped_after_a_failing_step(self) -> None:
+        guest = ScriptedGuest()
+        guest.shell_context = "u:r:su:s0"
+        status, out, calls = self.main_with(["--release", "/release", "--emulator", "/emulator"], guest)
+        self.assertEqual(status, 1, out)
+        self.assertIn("FAIL", out)
+        self.assertEqual([call[0] for call in calls], ["start", "stop"])
 
 
 if __name__ == "__main__":

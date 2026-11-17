@@ -39,6 +39,9 @@
 #if UML_APP_HAS_SLIRP
 #include "uml_slirp_net.h"
 #endif
+#if UML_APP_EDGE_TEST
+#include "edge_test/background_edge_control.hpp"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -1902,6 +1905,20 @@ private:
 		options.onRotateAndCrop = uml::camera::printRotateAndCrop;
 		options.onFlash = uml::camera::printFlash;
 		options.onCheckpoint = uml::camera::printCheckpoint;
+#if UML_APP_EDGE_TEST
+		/* The test launcher plays the application's leaving the foreground to
+		 * the synthetic camera's run (BackgroundEdgeControl). */
+		if (const char *const edge_pipe =
+			    prepared_.camera == CameraSource::synthetic && gpu_service_ ?
+				    std::getenv(uml::app::BackgroundEdgeControl::variable) :
+				    nullptr;
+		    edge_pipe != nullptr && *edge_pipe != '\0') {
+			options.background =
+				std::make_shared<uml::camera::BackgroundVideo>();
+			edge_control_ = std::make_unique<uml::app::BackgroundEdgeControl>(
+				edge_pipe, options.background, *gpu_service_);
+		}
+#endif
 		uml::camera::CameraSourceHandle source;
 		if (!make_camera_source(source))
 			return false;
@@ -2017,6 +2034,10 @@ private:
 	 * ends between them. */
 	std::unique_ptr<GuestWaker> waker_;
 	BootServices services_;
+#if UML_APP_EDGE_TEST
+	/* After the GPU service it works on, so it ends before it. */
+	std::unique_ptr<uml::app::BackgroundEdgeControl> edge_control_;
+#endif
 	/* What the camera has learned about the host's lenses; it outlives the
 	 * boots, so a restarted guest keeps it. */
 	std::shared_ptr<uml::camera::CalibrationStore> camera_calibration_;

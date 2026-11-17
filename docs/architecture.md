@@ -945,12 +945,32 @@ is part of the loop: every restart reads the misc partition again (see the
 runs the same loop inside its one `run` call
 (`Kernarium/Runtime/KernariumRestartLoop.hpp`, `kernarium-restart-loop`): a stop
 that arrives as the guest restarts wins, the next boot waits while the guest is
-paused or the GPU request gate is held, and a restart is reported twice so the
-application can re-apply what belongs to a kernel. After Android powers off
-cleanly the runtime releases the guest through `uml_emulator_release_guest` and
-returns success only once another run can start. An application that can be
-backgrounded holds the guest's GPU requests (`set_gpu_hold`) before it quiesces
-and releases them before it resumes.
+paused or from the moment the application asks for its GPU requests to be held
+(`set_gpu_hold`, before the hold's camera wait, whether or not the gate has
+closed yet) until it gives them back (and again once the boot is built, so a hold
+that arrives meanwhile also keeps the guest from running), and a restart is
+reported twice so the application can re-apply what belongs to a kernel. After
+Android powers off cleanly the runtime releases the guest through
+`uml_emulator_release_guest` and returns success only once another run can
+start. An application that can be backgrounded holds the guest's GPU requests (`set_gpu_hold`) before it quiesces
+and releases them before it resumes. On an Android guest the hold is preceded by
+the camera's end of the guest's running video: the camera device ends it as the
+platform's notice of the departure would and the hold waits (two seconds at most,
+inside the edge's budget, never added to it) until the guest has stopped its
+video streams, so a recording that runs ends before the guest's GPU requests
+stop (`uml::camera::BackgroundVideo`, the camera device's README). A caller
+that has a deadline passes what it leaves (`set_gpu_hold` of 3 or more, the
+milliseconds): the camera wait then takes what is left after the hold's own wait
+of one second for a request that is running, and nothing when less is left. The
+deadline bounds the camera wait and not that second, which the drain always has.
+The hold of a caller with none (Andarium, at the edge) is held three
+seconds after the edge at the latest, the wait and then the drain; the main path
+of a kept-running job, which waits for the screen to go off first, gets what its
+four-second edge leaves. The bound that holds that job's GPU 1.5 s after the edge
+takes the plain hold without the camera's wait (`set_gpu_hold` with 2), so the gate
+is closed at 1.5 s after the edge and drained 2.5 s after it at the latest; a bound
+that fires while the other caller waits for the camera holds at once and ends that
+wait, and two holds that meet wait for a request that is running once.
 
 The kernel's whole-file disk locks pass through the host's guest-file registry
 (`platform/guest_files`). On iOS, iPadOS, the Simulator and in Designed for

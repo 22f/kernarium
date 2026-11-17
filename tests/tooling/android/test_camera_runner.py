@@ -15,6 +15,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import contextlib
+import dataclasses
 import importlib.util
 import inspect
 import io
@@ -275,7 +276,8 @@ class LauncherTests(unittest.TestCase):
 
     def test_every_mode_has_a_camera_source_and_the_launcher_arguments_for_it(self) -> None:
         # The restart mode runs its guests as the live plan (main() maps it); every other mode makes its own plan.
-        sources = {"live": "synthetic", "restart": "synthetic", "video-lost": "synthetic", "blocked": "blocked", "none": "none"}
+        sources = {"live": "synthetic", "restart": "synthetic", "video-lost": "synthetic", "video-leave": "synthetic",
+                   "blocked": "blocked", "none": "none"}
         self.assertEqual(set(sources), set(runner.MODES), "a mode without an expected source is a mode this row does not walk")
         for mode, source in sources.items():
             with self.subTest(mode=mode):
@@ -557,6 +559,8 @@ HAL_LOG = """\
 11-12 12:38:32.200  2194  2204 W V4l2Stream: Wait: the camera did not deliver the buffer of slot 0; the stream starts over
 11-12 12:38:32.300  2194  2204 W V4l2FrameSource: QueueBuffer: the node refused the dma-buf; the 1x1 stream copies
 11-12 12:38:32.400  2194  2204 E SomeOtherTag: unrelated error
+11-12 12:38:32.500  2194  2204 E V4l2FrameSource: WaitFor: the camera did not deliver a buffer (-32)
+11-12 12:38:32.600  2194  2204 E V4l2FrameSource: WaitFor: the camera did not deliver a buffer (-110)
 """
 
 
@@ -828,8 +832,11 @@ class VideoAndFrontTests(unittest.TestCase):
 
     def test_the_hal_log_failures(self) -> None:
         failures = runner.hal_failures(HAL_LOG)
-        self.assertEqual(len(failures), 5)
+        self.assertEqual(len(failures), 6)
         self.assertTrue(all("SomeOtherTag" not in line and "dma-buf" not in line for line in failures))
+        # A wait the framework's flush interrupted is no failed buffer; one that timed out is.
+        self.assertTrue(all("(-32)" not in line for line in failures))
+        self.assertTrue(any("(-110)" in line for line in failures))
         self.assertEqual(runner.hal_failures(HAL_LOG.split("\n")[0] + "\n"), [])
         self.assertEqual(runner.hal_failures(""), [])
 
@@ -2045,7 +2052,7 @@ class VideoAndFrontFlowTests(unittest.TestCase):
         guest = FakeGuest(None)
         runner.check_hal_log(guest)
         guest.log = HAL_LOG
-        with self.assertRaisesRegex(runner.Failure, "5 failed buffer lines; the first: .*every buffer"):
+        with self.assertRaisesRegex(runner.Failure, "6 failed buffer lines; the first: .*every buffer"):
             runner.check_hal_log(guest)
 
     def test_the_new_steps_run_in_live_mode_only(self) -> None:
@@ -4162,6 +4169,127 @@ class VideoLostTests(unittest.TestCase):
                 self.assertEqual(os.read(reader, 100), b"interrupt background\n")
             finally:
                 os.close(reader)
+
+
+class VideoLeaveTests(unittest.TestCase):
+    """The video-leave mode's readers and its verdict on one leaving: what the launcher says of the edge, what the guest's
+    log says of the loss, and the reasons a leaving fails (the live row needs a guest and is run by CTest)."""
+
+    LEFT = "edge control: 1000.000 the application leaves the foreground\n"
+    CLOSED = "edge control: 1001.000 the GPU gate closed\n"
+    DRAINED = "edge control: 1001.250 GPU requests drained (1) after 1250 ms: video streams 2, stopped yes, answered yes\n"
+
+    def edge(self, **changes) -> runner.Edge:
+        edge = runner.Edge(left=1000.0, closed=1001.0, drained=1001.25, result=1, waited_ms=1250, streams=2, stopped=True,
+                           answered=True)
+        return dataclasses.replace(edge, **changes)
+
+    def trial(self, edge: runner.Edge | None = None, events: dict[str, float] | None = None, skew: float = 0.4,
+              video_end: float = 5.0, audio_end: float = 5.1, clock_error: float = 0.01,
+              record_bound_hit: bool = False) -> runner.LeaveTrial:
+        # The guest's clock is `skew` ahead: the loss at 1000 is 1000.4 on it, the gate's closing at 1001 is 1001.4.
+        found = {"hal_end": 1000.42, "rec_stopping": 1000.5, "venc_stopped": 1001.5, "finalize": 1001.7} if events is None else events
+        return runner.LeaveTrial(1, 0.0, edge or self.edge(), 1000.0, skew, clock_error, found, 5.2, video_end, audio_end,
+                                 record_bound_hit)
+
+    def test_the_leaving_is_read_from_the_launchers_log_after_a_point(self) -> None:
+        log = "before\n" + self.LEFT + "noise\n" + self.CLOSED + self.DRAINED
+        self.assertEqual(runner.parse_edge(log), self.edge())
+        self.assertIsNone(runner.parse_edge(log[:log.index(self.CLOSED)]), "no closing yet: no leaving to judge")
+        self.assertIsNone(runner.parse_edge(log[:log.index(self.DRAINED)]), "a closed gate whose wait has not ended is not done")
+        self.assertIsNone(runner.parse_edge(log, log.index(self.CLOSED)), "a hold alone is not a leaving")
+        self.assertIsNone(runner.parse_edge(log, len(log)), "nothing after the point")
+        second = log + "edge control: 2000.000 the application leaves the foreground\n" + \
+            self.CLOSED.replace("1001.000", "2000.500") + self.DRAINED.replace("1001.250", "2001.000").replace("stopped yes", "stopped no")
+        found = runner.parse_edge(second, len(log))
+        self.assertEqual((found.left, found.closed, found.drained, found.stopped), (2000.0, 2000.5, 2001.0, False),
+                         "the first leaving after the point")
+
+    def test_the_loss_is_read_from_the_guests_log(self) -> None:
+        log = ("--------- beginning of main\n"
+               "999.000 1 1 W V4l2FrameSource: the host ended the camera: its video buffers fail (before the point)\n"
+               "1000.420 1 1 W V4l2FrameSource: NoteFailedBuffer: the host ended the camera: its video buffers fail under "
+               "an interrupted record (flags 3)\n"
+               "1000.425 1 2 W EmulatedSensorHost: CaptureFromHost: frame 9 failed: the host ended the camera\n"
+               "1000.430 1 2 W EmulatedSensorHost: CaptureFromHost: frame 10 failed: none of its 2 outputs was produced\n"
+               "1000.500 2 2 D Recorder: Transitioning Recorder internal state: RECORDING --> STOPPING\n"
+               "1001.500 2 3 D VideoEncoder: Transitioning encoder internal state: STOPPING --> CONFIGURED\n"
+               "1001.700 2 2 D Recorder: Sending VideoRecordEvent VideoRecordEvent$Finalize\n"
+               "1001.800 2 2 D Recorder: Sending VideoRecordEvent VideoRecordEvent$Finalize\n")
+        self.assertEqual(runner.leave_events(log, 1000.0),
+                         {"hal_end": 1000.42, "hal_frame_failed": 1000.43, "rec_stopping": 1000.5, "venc_stopped": 1001.5,
+                          "finalize": 1001.7})
+
+    def test_a_leaving_that_ended_the_recording_before_the_hold_passes(self) -> None:
+        self.assertEqual(runner.leave_failures(self.trial()), [])
+        # The report may come a little before the gate's closing in the guest's clock and still within the margin after it.
+        self.assertEqual(runner.leave_failures(self.trial(events={"hal_end": 1001.5, "rec_stopping": 1001.5})), [])
+        # A busy host's round trips make the offset less certain: the margin follows them, never below the least.
+        late = {"hal_end": 1001.8, "rec_stopping": 1001.8}
+        self.assertNotEqual(runner.leave_failures(self.trial(events=late)), [])
+        self.assertEqual(runner.leave_failures(self.trial(events=late, clock_error=0.6)), [])
+
+    def test_a_stop_after_the_gate_closed_is_not_before_the_hold_when_the_wait_for_a_request_ended_later(self) -> None:
+        # The gate closed at 1001.0 and the launcher's call returned at 1002.0, a second later, after waiting for a request that
+        # was running. The HAL's report (1001.5) and the recorder's stop (1001.6) came after the gate closed: they did not
+        # beat the hold, though both are before the time the call returned.
+        trial = self.trial(edge=self.edge(closed=1001.0, drained=1002.0, result=0, waited_ms=2000), skew=0.0,
+                           events={"hal_end": 1001.5, "rec_stopping": 1001.6})
+        reasons = "; ".join(runner.leave_failures(trial))
+        self.assertIn("the camera HAL's report of the loss came", reasons)
+        self.assertIn("the recorder's stop came", reasons)
+        self.assertIn("after the gate closed", reasons)
+
+    def test_every_reason_a_leaving_fails_is_said(self) -> None:
+        def reasons(**changes) -> str:
+            return "; ".join(runner.leave_failures(self.trial(**changes)))
+        self.assertEqual(reasons(edge=self.edge(stopped=False, waited_ms=2000)), "",
+                         "a wait that ran out is told, and a recording that ended before the hold is a pass")
+        self.assertIn("NOT stopped", runner.describe_leave(self.trial(edge=self.edge(stopped=False, waited_ms=2000))))
+        self.assertIn("did not answer", reasons(edge=self.edge(answered=False, streams=0, stopped=False)))
+        self.assertIn("no video stream to end", reasons(edge=self.edge(streams=0)))
+        late = {"hal_end": 1004.0, "rec_stopping": 1004.1}
+        self.assertIn("the camera HAL's report of the loss came", reasons(events=late))
+        self.assertIn("the recorder's stop came", reasons(events=late))
+        self.assertIn("recorder's stop is not in the guest's log", reasons(events={"hal_end": 1000.42}))
+        self.assertIn("HAL's report of the loss is not in the guest's log", reasons(events={"rec_stopping": 1000.5}))
+        self.assertIn("ordinary failure", reasons(events={"hal_end": 1000.42, "rec_stopping": 1000.5, "hal_frame_failed": 1000.41}))
+        self.assertEqual(reasons(events={"hal_end": 1000.42, "rec_stopping": 1000.5, "hal_frame_failed": 1000.43}), "")
+        self.assertIn("did not read the interrupted record", reasons(record_bound_hit=True))
+        self.assertIn("recording went on in silence", reasons(video_end=2.9, audio_end=9.13))
+        self.assertEqual(reasons(video_end=2.9, audio_end=3.5), "", "a tail within a second is a clip ending, not a stall")
+
+    def test_the_mode_has_its_own_pipes_and_a_trial_count(self) -> None:
+        self.assertIn("video-leave", runner.MODES)
+        plan = runner.make_plan("bf-small-flash", "phone", "video-leave", leave_trials=3)
+        self.assertEqual(plan.leave_trials, 3)
+        self.assertEqual(runner.make_plan("bf-small-flash", "phone", "video-leave").leave_trials, runner.LEAVE_TRIALS)
+        with self.assertRaises(ValueError):
+            runner.make_plan("bf-small-flash", "phone", "video-leave", leave_trials=0)
+        self.assertEqual(runner.EDGE_VARIABLE, "UML_BACKGROUND_EDGE_CONTROL")
+
+    def test_the_edge_pipe_takes_one_line_and_is_waited_for(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pipe = Path(directory) / "edge"
+            process = mock.Mock(pid=4242)
+            process.poll.return_value = None
+            log = Path(directory) / "emulator.log"
+            log.write_text("")
+            guest = runner.Guest("adb", "127.0.0.1:1", process, log, Path(directory), edge=pipe)
+            self.assertRaises(runner.Failure, runner.Guest("adb", "127.0.0.1:1", process, log, Path(directory)).edge_control, "leave")
+            os.mkfifo(pipe)
+            reader = os.open(pipe, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                guest.edge_control("leave")
+                self.assertEqual(os.read(reader, 100), b"leave\n")
+            finally:
+                os.close(reader)
+
+    def test_a_trial_is_described_in_milliseconds_from_the_loss(self) -> None:
+        line = runner.describe_leave(self.trial())
+        for part in ("waited 1250 ms for 2 stream(s) (stopped)", "HAL report +20", "Recorder STOPPING +100", "Finalize +1300",
+                     "GPU gate closed +1000", "drained +1250", "audio ends 5.10 s (+0.10 s)"):
+            self.assertIn(part, line)
 
 
 def dng_bytes(width: int = 2016, height: int = 1512, bits: int = 16, version: bool = True, matrix: bool = True,

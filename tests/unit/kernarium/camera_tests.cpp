@@ -460,6 +460,11 @@ void theDeviceOptionsCarryTheSessionsStatements()
     options.onState(CameraState::interruptedByMultitasking);
     require(reports.states.back() == KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_MULTITASKING);
     require(deviceOptions(presentation, CameraMode::live, receiver, rotation).mode == CameraMode::live);
+
+    // The application's way to end the guest's video when it leaves the foreground is the device's, when the run has one.
+    require(options.background == nullptr, "none is stated unless the run has one");
+    const auto background = std::make_shared<uml::camera::BackgroundVideo>();
+    require(deviceOptions(presentation, CameraMode::live, receiver, rotation, background).background == background);
 }
 
 void aBootStatesTheOrientationAndALaterTurnIsADelta()

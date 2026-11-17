@@ -418,11 +418,15 @@ TIP_LITE=com.example.andarium.tip.lite TIP_PRO=com.example.andarium.tip.pro
 TIP_MAX=com.example.andarium.tip.max TIP_ULTRA=com.example.andarium.tip.ultra
 SHEET_DEVELOPER_NAME=example SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle
 ICP_NUMBER=示例ICP备00000000号-0A`;
-the scheme without the filter also runs `AndariumUITests`). The scheme's Test
-action pins English, so the tests that read the application's words do not
-depend on the language of the device; `LocalizationTests` names a lost pin and
-looks each language up by name, and the language a `-testLanguage` run asks
-for fails only the tests that read the English words. `SnapshotFileApiTests`
+the scheme without the filter also runs `AndariumUITests`). A row that asserts
+what an iPad app on a Mac does not do (accessibility activation of an alert's
+buttons, text that scales with the content size category, a menu's items as
+UIKit elements) is disabled there with its reason and shows as skipped. The
+scheme's Test action pins English, so the tests that read the application's
+words do not depend on the language of the device; `LocalizationTests` names a
+lost pin and looks each language up by name, and the language a `-testLanguage`
+run asks for fails only the tests that read the English words.
+`SnapshotFileApiTests`
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
@@ -477,11 +481,11 @@ bundle check refuses a build that does).
 `DeviceOrientationTests` checks UIKit's orientation numbers against the
 application's readings, the mapping to Android's rotation, the observer's begin
 and end of the device's notifications, the path from a turn to the record a
-fake guest reads on a device without sensors, and that the Simulator and a Mac,
-which have none, hold no connection for them. The Simulator cannot turn an
-iPhone's `UIDevice` under a portrait-only interface (XCUIDevice reaches the
-interface only), so the device is injected there; the real turns are checked on
-an iPhone.
+fake guest reads on a device without sensors, and that a device without them
+holds no connection for them (the Simulator has none; a Mac answers as Core
+Motion does). The Simulator cannot turn an iPhone's `UIDevice` under a
+portrait-only interface (XCUIDevice reaches the interface only), so the device
+is injected there; the real turns are checked on an iPhone.
 
 `SlowStartScreenTests` check the boot screen's slow-start notice by a clock
 the test moves, so no test waits three minutes: when the notice comes (also for
@@ -1218,6 +1222,39 @@ the camera service's log must hold no leaked stream, the line it prints at the
 close of a device whose requests the HAL ended without a request error. The
 release must carry the HAL topic that handles the host's end of a camera's
 video and the camera application topic that ends the recording.
+`android-camera-video-leave` (`--mode video-leave`) plays the application's
+leaving the foreground to the test-only launcher `uml-darwin-android17-edge-test`
+(which no product has; it is built where a release is named) through its edge
+pipe (`UML_BACKGROUND_EDGE_CONTROL`, read with the synthetic camera only)
+while the video mode records, `--leave-trials` times (ten by default), with the
+platform's notice first or twenty milliseconds after: the launcher ends the
+camera's running video, waits for the guest to stop its video streams (the same
+sequence as the applications', `holdAfterVideoEnds`) and holds the guest's GPU
+requests for three seconds through the launcher's own request gate. Every trial
+expects the camera to have answered and found a video to end, the HAL's report
+of the loss and the recorder's stop to come before the hold landed (the gate's
+closing, which the launcher times apart from the end of its wait for a request
+that runs; the guest's clock set against the launcher's by the shortest of seven
+round trips), the loss
+to be the HAL's first failed buffer, the camera device not to have given up on the
+guest's reading of the interrupted record, and the clip's audio not to run on
+past its video by more than a second. Whether the guest stopped its streams
+inside the wait's bound is told, not required. The runner keeps the guest's log
+of each trial in `--output-dir`.
+`kernarium-gpu-hold` (unit) runs the runtime's hold of the guest's GPU requests
+(`KernariumGpuHold.hpp`) over the real request gate, camera control and run loop,
+with clocks that start at the edge: the camera's wait within what a deadline
+leaves after the drain, the edge's bound meeting the hold that waits (the gate
+closes at the bound's time and the main path is back inside the edge, a drain
+waited for once), and a guest that restarts while the hold waits for the camera,
+or whose boot is being built when the hold arrives, which runs after the release
+and not behind the closed gate.
+`camera-background-video` (unit) is the ordering of the application's departure
+(video running: end, wait, hold; none: hold at once; a wait that runs out: hold
+and one log line; the wait inside the bound; a hold that lands first ends a
+pending wait, harmlessly; a call queued behind another keeps its own deadline)
+with a fake camera device and a fake GPU gate, and `camera-device` drives the device's side of it and the
+interrupted record that goes to the guest before a lost video's failed buffers.
 `android17-camera-runner` (tooling) runs its
 parsers and the expectations of every layout without a guest,
 `android17-camera-layouts` (tooling) the layout set, its fallback order and the

@@ -12,9 +12,7 @@ namespace {
 using namespace jni;
 
 constexpr int kMaxParams = 255;      // the JVM's limit on parameter slots
-constexpr int kInlineParams = 12;    // kinds kept in the registry entry; the rest go to a pool
-constexpr uint32_t kKindPoolBytes = 32768;
-constexpr uint32_t kMethodSlots = 8192;
+constexpr uint32_t kMethodBuckets = 8192;  // the heads of the method registry's chains (the registry itself has no limit)
 constexpr uint32_t kFieldSlots = 2048;
 constexpr unsigned kProbeLimit = 32;
 constexpr unsigned kMaxBlocks = 512;  // Dalvik's limit on local references; a thread has no more live references
@@ -68,9 +66,21 @@ static_assert(offsetof(DalvikArray, length) == 8, "Dalvik ArrayObject length off
 static_assert(offsetof(DalvikArray, data) == 16, "Dalvik ArrayObject contents offset");
 
 // The layer's own header in front of the Dalvik object.
+//
+// Which addresses are blocks, in which state, and how long each one is, is the block record's to say (below), and nothing in
+// the region has a say: no path reads a magic, a length, a link or a content byte of arena memory to decide that an address is
+// a block, what state it is in or how long it is (the header has no length: capacity_of reads it from the record). The memory of
+// a block that has been reclaimed can be made another block, or be merged and cut again, while an application's stale reference
+// to it is in use, and what lies at the old address then is whatever was written there (a chunk header, another block's header,
+// Dalvik words, contents the application chose). A header is read only where its block cannot be reclaimed: by the thread whose
+// entries hold it, by a wrapper that holds an access (a reference or a pin that keeps the array), or under the mutex after a
+// check of the record. `magic` is a diagnostic marker: stored (relaxed) at the transitions, so that a header in a memory dump
+// says what the block was, and read by nothing.
+// Every other field is read and written under the mutex (global, weak, bucket_next, list_next, list_prev), by the thread whose
+// entries hold the block (refs, next), or once at the publication (baseline, hash); `pins` is atomic.
 struct BlockHeader {
-    uint32_t magic;
-    uint32_t capacity;   // the length of the real array: the only length the layer trusts
+    uint32_t arena_links[2];  // not fields: the arena's link space while the block is free (Arena::kFreeLinkBytes); nothing reads a freed header
+    uint32_t magic;      // kBlockLive / kBlockEnded / kBlockDead: a marker, never read (see above)
     jobject global;      // a global reference to the real array (a live block; an ended block keeps it while it is pinned)
     BlockHeader* next;   // the queue of blocks that wait for an environment
     uint8_t* baseline;   // the bytes as of the last synchronization (outside the low arena)
@@ -81,17 +91,49 @@ struct BlockHeader {
     BlockHeader* bucket_next;  // the ended index: the chain of the hash's bucket, the newest first
     BlockHeader* list_next;    // the ended list, in the order the blocks ended (the collection sweeps)
     BlockHeader* list_prev;
-    Env* owner;          // a live block: the environment of the thread whose entries hold it (null: no thread does)
 };
 constexpr size_t kBlockHead = (sizeof(BlockHeader) + 15) & ~size_t{15};
+static_assert(sizeof(BlockHeader::arena_links) == Arena::kFreeLinkBytes && offsetof(BlockHeader, arena_links) == 0,
+              "the arena's links overwrite the first bytes of a freed block, and only the padding is there");
+static_assert(kBlockHead == (sizeof(void*) == 8 ? 96u : 64u), "the header in front of the Dalvik object is as shipped");
 
+// ---- the block record
+//
+// Where a block starts and what state it is in is kept here, outside the region, and nowhere else. An address is a block only
+// when this record says that a block starts exactly there; no byte of the region decides it, so the memory of a block that was
+// reclaimed, merged and cut again, or covered by another block's contents, never makes its old address a block.
+//
+// One 32-bit word for each 64-byte window of the region (kRecordWindow), written only by the layer:
+//   bits 0-1  the state: 0 no block starts in the window, 1 live, 2 ended
+//   bits 2-3  the 16-byte slot of the window the block starts at
+//   bits 4-31 the block's capacity, its length (below 2^28: the region is below kMaxShadowBytes)
+// A word is zero or names the one block that starts in its window. Two blocks that exist at once have disjoint arena chunks, and
+// a block's chunk is at least kRecordWindow bytes (the assert below), so their starts are further apart than a window: each word
+// has one writer at a time and is written by plain release stores, never a read-modify-write.
+//   - make_shadow publishes a block with the last store to it (the word, state live, with the length).
+//   - end_locked and take_ended turn it ended and live again, in the same hold of the mutex as the ended index changes.
+//   - reclaim_ended clears it, under the mutex, before the memory goes back to the arena. A block that starts in the same window
+//     later has a chunk that overlaps this one's, so it is allocated after the free, hence after the clear.
+// An unlocked reader answers from one acquire load of the word, which gives the state and the length together (fact_of), and
+// takes that one answer for the whole of what it does. A block whose array the collector has cleared is still an ended block of
+// its length here until the layer reclaims it (a sweep); only the clear removes it. The layer keeps the memory of the record
+// (Platform::map_record: zero-filled, never cleared by the layer): up to kMaxShadowBytes / 64 words, resident by page only where
+// block starts have been recorded, and a page stays resident after its blocks are gone.
+constexpr uint32_t kRecordWindow = 64;
+enum BlockState : uint32_t { kStateNone = 0, kStateLive = 1, kStateEnded = 2 };
+static_assert(kMaxShadowBytes < (size_t{1} << 28), "a capacity fits the 28 bits of a record word");
+static_assert(kRecordWindow % 16 == 0 && kBlockHead % 16 == 0, "block references are 16-byte aligned from the region");
+static_assert(kBlockHead + offsetof(DalvikArray, data) + kBlockTail + Arena::kChunkHeaderBytes >= kRecordWindow,
+              "a block's chunk is at least a record window, so a window holds at most one block's start");
+
+// What the layer knows of a method: the kinds of its parameters (Z B C S I J F D, or L for every reference), `nparams` bytes
+// that follow the struct in the same allocation. A node is published whole, by the store of its bucket's head, and is never
+// changed or freed, so a reader needs no lock. Nothing bounds the number of methods or of parameters (the JVM's 255 slots).
 struct MethodInfo {
+    MethodInfo* next;  // the next node of the chain
     void* id;
     uint8_t nparams;
-    uint8_t usable;  // false: the kinds are not known (pool exhausted, or the method could not be described)
     uint8_t returns_bytes;
-    char kinds[kInlineParams];
-    const char* more;  // kinds from kInlineParams on
 };
 
 // A frame of the thread's local references: the entries below `height` belong to outer frames.
@@ -135,6 +177,8 @@ struct Globals {
     Arena shadow_arena;
     const uint8_t* shadow_lo;
     const uint8_t* shadow_hi;
+    uint32_t* record;  // the block record's memory (Platform::map_record)
+    uint32_t exposed;  // set once, before the first block is published, never cleared (atomic): a shadow may have reached the application
     BlockHeader* pending;  // blocks of ended threads, waiting for an environment
     uint32_t declined_logged;  // the first declined shadow of the process has been logged
     uint32_t peak_logged;      // the highest block count that has been logged, and when
@@ -180,9 +224,7 @@ struct Globals {
     uint32_t records_lock;     // the table's own lock (a leaf: nothing is called and no other lock is taken under it)
     uint32_t records_full_logged;  // the first pointer that found the table full has been logged
     uint8_t scratch[kPullPiece];  // the bytes of the array that a pull or a merge reads; under the mutex (see "scratch")
-    uint32_t kind_pool_used;
-    char kind_pool[kKindPoolBytes];
-    MethodInfo methods[kMethodSlots];
+    MethodInfo* method_bucket[kMethodBuckets];  // the heads of the registry's chains; a head is stored with release, under `lock`
     void* byte_fields[kFieldSlots];
     Counters counters;
 };
@@ -208,9 +250,19 @@ inline bool is_shadow(const void* object) {
 }
 
 inline uint32_t live_shadows() { return __atomic_load_n(&g.counters.shadows_live, __ATOMIC_RELAXED); }
-inline uint32_t ended_shadows() { return __atomic_load_n(&g.counters.shadows_ended, __ATOMIC_RELAXED); }
-// Whether any reference to a block can exist: a live block, or an ended one whose reference the application may keep.
-inline bool blocks_exist() { return live_shadows() != 0 || ended_shadows() != 0; }
+
+// Whether the address of a block may be in the application's hands. The state is set once, by the first make_shadow that
+// publishes a block, before the block is published, and never cleared. It is not the number of blocks that exist: that is zero
+// while a block is being revived (counted live after its contents are synchronized) or built, and after the last one has been
+// reclaimed, and an application keeps the address of a block long after the block is gone. Until it is set no address of the
+// region has been handed out, so no call, release or recorded pointer has a shadow to find. A thread has an address only from
+// the thread that published the block, through a chain of synchronization that includes the store, so a relaxed load sees it.
+inline bool shadows_exposed() { return __atomic_load_n(&g.exposed, __ATOMIC_RELAXED) != 0; }
+inline void expose_shadows() {
+    if (!shadows_exposed()) {
+        __atomic_store_n(&g.exposed, 1u, __ATOMIC_RELEASE);
+    }
+}
 
 ThreadState* thread() { return static_cast<ThreadState*>(g.platform.thread_state(sizeof(ThreadState))); }
 
@@ -220,13 +272,69 @@ BlockHeader* header_of(const void* block) {
     return reinterpret_cast<BlockHeader*>(const_cast<uint8_t*>(static_cast<const uint8_t*>(block)) - kBlockHead);
 }
 
-// The header of a block that is live, otherwise null (a freed block, or an address that is not a block).
-BlockHeader* live_header(const void* object) {
-    if (!is_shadow(object)) {
-        return nullptr;
+// What the record says of the address `object`.
+struct BlockFact {
+    uint32_t state;     // BlockState; kStateNone: no block starts exactly there
+    uint32_t capacity;  // the block's length (0 for none)
+};
+// One acquire load of one word answers state and length together; no byte of the region is read. The range and the alignment
+// tests come first, so a reference of the runtime's costs two compares and never reaches the record.
+inline BlockFact fact_of(const void* object) {
+    const uint8_t* p = static_cast<const uint8_t*>(object);
+    if (p < g.shadow_lo || p >= g.shadow_hi) {
+        return {kStateNone, 0};
     }
-    BlockHeader* header = header_of(object);
-    return header->magic == kBlockLive ? header : nullptr;
+    const size_t offset = static_cast<size_t>(p - g.shadow_lo);
+    if ((offset & 15u) != 0) {
+        return {kStateNone, 0};
+    }
+    const uint32_t word = __atomic_load_n(&g.record[offset / kRecordWindow], __ATOMIC_ACQUIRE);  // read once
+    if ((word & 3u) == 0 || ((word >> 2) & 3u) != ((offset >> 4) & 3u)) {
+        return {kStateNone, 0};
+    }
+    return {word & 3u, word >> 4};
+}
+inline uint32_t state_of(const void* object) { return fact_of(object).state; }
+
+// The writers, under the rules of the record above. The word of a header is the one of its Dalvik object's reference.
+inline uint32_t* record_word(const BlockHeader* header, uint32_t* slot) {
+    const size_t offset = static_cast<size_t>(reinterpret_cast<const uint8_t*>(header) + kBlockHead - g.shadow_lo);
+    *slot = static_cast<uint32_t>((offset >> 4) & 3u);
+    return &g.record[offset / kRecordWindow];
+}
+// A new block, the last store to it.
+inline void record_publish(const BlockHeader* header, uint32_t capacity) {
+    uint32_t slot;
+    uint32_t* word = record_word(header, &slot);
+    __atomic_store_n(word, (capacity << 4) | (slot << 2) | kStateLive, __ATOMIC_RELEASE);
+}
+// The block ends or lives again (under the mutex, by the one writer of the word): the length and the slot stay.
+inline void record_turn(const BlockHeader* header, uint32_t state) {
+    uint32_t slot;
+    uint32_t* word = record_word(header, &slot);
+    __atomic_store_n(word, (__atomic_load_n(word, __ATOMIC_RELAXED) & ~3u) | state, __ATOMIC_RELEASE);
+}
+inline void record_clear(const BlockHeader* header) {
+    uint32_t slot;
+    __atomic_store_n(record_word(header, &slot), 0u, __ATOMIC_RELEASE);
+}
+// The diagnostic marker of a header (see BlockHeader): never read.
+inline void mark(BlockHeader* header, uint32_t magic) { __atomic_store_n(&header->magic, magic, __ATOMIC_RELAXED); }
+
+// The length of a block the caller holds (its entry, a reference or pin that keeps its array, the mutex after a check of the
+// record): decoded from the record, the one source of a length. 0 where no block starts there.
+inline uint32_t capacity_of(const BlockHeader* header) {
+    return fact_of(reinterpret_cast<const uint8_t*>(header) + kBlockHead).capacity;
+}
+
+// Under the mutex, or by a holder of the block: whether a block starts at `header`'s place.
+inline bool block_exists(const BlockHeader* header) {
+    return state_of(reinterpret_cast<const uint8_t*>(header) + kBlockHead) != kStateNone;
+}
+
+// The header of a block that is live, otherwise null (an ended block, or an address that is not a block).
+BlockHeader* live_header(const void* object) {
+    return state_of(object) == kStateLive ? header_of(object) : nullptr;
 }
 
 DalvikArray* array_of(BlockHeader* header) {
@@ -245,11 +353,20 @@ bool jni_usable(Env* env) { return !original<jboolean (*)(Env*)>(slot::Exception
 // Blocks that wait for an environment without a pending exception: a thread that ended, or an end with an exception
 // pending.
 void queue_pending(BlockHeader* header) {
-    header->owner = nullptr;  // no thread's entry holds it any more: every use of its reference goes through the mutex
     BlockHeader* head = __atomic_load_n(&g.pending, __ATOMIC_RELAXED);
     do {
         header->next = head;
     } while (!__atomic_compare_exchange_n(&g.pending, &head, header, true, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+}
+
+// Whether `header` is one of this thread's own entries (a live block this thread holds a reference to).
+bool has_entry(const ThreadState* state, const BlockHeader* header) {
+    for (unsigned i = 0; i < state->count; ++i) {
+        if (state->blocks[i] == header) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // A reference of the thread ended: the block ends with its last reference. A thread that has made entries has an
@@ -258,7 +375,7 @@ void release_entry(Env* env, ThreadState* state, BlockHeader* header) {
     if (--header->refs > 0) {
         return;
     }
-    state->bytes -= header->capacity;
+    state->bytes -= capacity_of(header);
     if (env != nullptr) {
         end_block(env, header);
         return;
@@ -313,30 +430,31 @@ inline void enter_any(Env* env) {
 // GetByteArrayRegion (the chunks of the range), before and after SetByteArrayRegion, and at a Release. A
 // committing release (mode 0 or COMMIT) applies the same rule; JNI_ABORT discards the working copy: the block takes
 // the array's bytes. A call that left an exception pending is not followed by a synchronization: almost no JNI
-// function may run then. Only the header's capacity is trusted, never the length word of the Dalvik object, which
-// the application can overwrite.
+// function may run then. Only the record's length is trusted (capacity_of), never the length word of the Dalvik object,
+// which the application can overwrite.
 inline unsigned chunk_count(size_t bytes) { return static_cast<unsigned>((bytes + kChunk - 1) / kChunk); }
 
 inline uint8_t* data_of(BlockHeader* header) { return array_of(header)->data; }
 inline uint32_t chunk_offset(unsigned chunk) { return chunk * kChunk; }
-inline uint32_t chunk_end(const BlockHeader* header, unsigned chunk) {
+inline uint32_t chunk_end(uint32_t capacity, unsigned chunk) {
     const uint64_t end = static_cast<uint64_t>(chunk + 1) * kChunk;
-    return end < header->capacity ? static_cast<uint32_t>(end) : header->capacity;
+    return end < capacity ? static_cast<uint32_t>(end) : capacity;
 }
 
 // Whether the application wrote the chunk through the raw pointer since the last synchronization.
-bool chunk_dirty(BlockHeader* header, unsigned chunk) {
+bool chunk_dirty(BlockHeader* header, uint32_t capacity, unsigned chunk) {
     const uint32_t offset = chunk_offset(chunk);
-    return __builtin_memcmp(data_of(header) + offset, header->baseline + offset, chunk_end(header, chunk) - offset) != 0;
+    return __builtin_memcmp(data_of(header) + offset, header->baseline + offset, chunk_end(capacity, chunk) - offset) != 0;
 }
 
 // Whether the application wrote any chunk that overlaps [start, end) through the raw pointer since the last synchronization.
 bool range_dirty(BlockHeader* header, uint32_t start, uint32_t end) {
-    if (end <= start || header->capacity == 0) {
+    const uint32_t capacity = capacity_of(header);
+    if (end <= start || capacity == 0) {
         return false;
     }
     for (unsigned chunk = start / kChunk, last = (end - 1) / kChunk; chunk <= last; ++chunk) {
-        if (chunk_dirty(header, chunk)) {
+        if (chunk_dirty(header, capacity, chunk)) {
             return true;
         }
     }
@@ -569,7 +687,7 @@ struct RunWriter {
 // bytes are the array's already, and never at a byte between two such runs. A run longer than the scratch buffer reads into
 // memory the platform gives; where there is none, the run is merged chunk by chunk.
 void merge_run(Env* env, BlockHeader* header, jobject array, unsigned first, unsigned last) {
-    const uint32_t from = chunk_offset(first), to = chunk_end(header, last), n = to - from;
+    const uint32_t from = chunk_offset(first), to = chunk_end(capacity_of(header), last), n = to - from;
     uint8_t* java = g.scratch;
     bool heap = false;
     if (n > kPullPiece) {
@@ -618,16 +736,17 @@ void pull_range(Env* env, BlockHeader* header, jobject array, uint32_t from, uin
 // bytes it wrote). This is the push of the one path that cannot go through the critical pair (drain_pending, below); every
 // other synchronization uses sync_range. Nothing is read back.
 void push_dirty_regions(Env* env, BlockHeader* header, jobject array) {
-    if (header->capacity == 0 || array == nullptr) {
+    const uint32_t capacity = capacity_of(header);
+    if (capacity == 0 || array == nullptr) {
         return;
     }
-    const unsigned last = chunk_count(header->capacity) - 1;
+    const unsigned last = chunk_count(capacity) - 1;
     for (unsigned chunk = 0; chunk <= last; ++chunk) {
-        if (!chunk_dirty(header, chunk)) {
+        if (!chunk_dirty(header, capacity, chunk)) {
             continue;
         }
         unsigned run_end = chunk;
-        while (run_end < last && chunk_dirty(header, run_end + 1)) {
+        while (run_end < last && chunk_dirty(header, capacity, run_end + 1)) {
             ++run_end;
         }
         merge_run(env, header, array, chunk, run_end);
@@ -637,12 +756,13 @@ void push_dirty_regions(Env* env, BlockHeader* header, jobject array) {
 
 // A JNI_ABORT: the block is given the array's bytes back, whatever the application wrote.
 void abort_block(Env* env, BlockHeader* header, jobject array) {
-    if (header->capacity == 0 || array == nullptr) {
+    const uint32_t capacity = capacity_of(header);
+    if (capacity == 0 || array == nullptr) {
         return;
     }
     original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(
-        env, array, 0, static_cast<jsize>(header->capacity), reinterpret_cast<jbyte*>(header->baseline));
-    adopt_baseline(header, 0, header->capacity);
+        env, array, 0, static_cast<jsize>(capacity), reinterpret_cast<jbyte*>(header->baseline));
+    adopt_baseline(header, 0, capacity);
 }
 
 // The same rules through the real array's critical pair, the only JNI calls that CheckJNI allows inside a critical
@@ -665,7 +785,7 @@ struct Pair {
 };
 uint64_t now_ns() { return g.platform.now_ns != nullptr ? g.platform.now_ns() : 0; }
 Pair first_critical(Env* env, const BlockHeader* header, jobject array) {
-    if (header->capacity == 0 || array == nullptr) {
+    if (capacity_of(header) == 0 || array == nullptr) {
         return Pair{nullptr, 0};
     }
     void* pointer = original<void* (*)(Env*, jarray, jboolean*)>(slot::GetPrimitiveArrayCritical)(env, array, nullptr);
@@ -682,17 +802,15 @@ void release_critical_pair(Env* env, jobject array, const Pair& pair, jint mode)
                                                         __ATOMIC_RELAXED)) {
     }
 }
-bool block_is_valid(const BlockHeader* header) {
-    const uint32_t magic = __atomic_load_n(&header->magic, __ATOMIC_ACQUIRE);
-    return magic == kBlockLive || magic == kBlockEnded;
-}
+bool block_is_valid(const BlockHeader* header) { return block_exists(header); }
 // [start, end) of the block synchronized with its array in place, through the critical pair: a chunk the application wrote
 // is merged into the array's own bytes, byte stores of exactly the bytes it wrote (a Java write to any other byte is never
 // touched, and no region copy is made); every other chunk in the range takes the array's bytes when `pull` is set. The
 // caller holds the mutex and has made the get (`pair`, from first_critical) before the hold, so that this makes no
 // critical get. Between the get and the release the layer makes no runtime call: the release is the only one.
 void sync_in_place(Env* env, BlockHeader* header, jobject array, const Pair& pair, uint32_t start, uint32_t end, bool pull) {
-    if (header->capacity == 0 || array == nullptr || end <= start) {
+    const uint32_t capacity = capacity_of(header);
+    if (capacity == 0 || array == nullptr || end <= start) {
         return;
     }
     if (pair.pointer == nullptr) {
@@ -705,8 +823,8 @@ void sync_in_place(Env* env, BlockHeader* header, jobject array, const Pair& pai
     }
     bool wrote = false;
     for (unsigned c = start / kChunk, last = (end - 1) / kChunk; c <= last; ++c) {
-        const uint32_t offset = chunk_offset(c), length = chunk_end(header, c) - offset;
-        if (chunk_dirty(header, c)) {
+        const uint32_t offset = chunk_offset(c), length = chunk_end(capacity, c) - offset;
+        if (chunk_dirty(header, capacity, c)) {
             uint8_t* java = static_cast<uint8_t*>(pinned) + offset;  // the array's bytes: the application's replace them
             const uint8_t* block = data_of(header) + offset;
             uint8_t* baseline = header->baseline + offset;
@@ -723,7 +841,8 @@ void sync_in_place(Env* env, BlockHeader* header, jobject array, const Pair& pai
     release_critical_pair(env, array, pair, wrote ? 0 : kReleaseAbort);
 }
 void abort_critical(Env* env, BlockHeader* header, jobject array, const Pair& pair) {
-    if (header->capacity == 0 || array == nullptr) {
+    const uint32_t capacity = capacity_of(header);
+    if (capacity == 0 || array == nullptr) {
         return;
     }
     if (pair.pointer == nullptr) {
@@ -731,8 +850,8 @@ void abort_critical(Env* env, BlockHeader* header, jobject array, const Pair& pa
     }
     if (block_is_valid(header)) {
         // One read of the array, into the baseline; the block takes the baseline, not a second read of the array.
-        __builtin_memcpy(header->baseline, pair.pointer, header->capacity);
-        adopt_baseline(header, 0, header->capacity);
+        __builtin_memcpy(header->baseline, pair.pointer, capacity);
+        adopt_baseline(header, 0, capacity);
     }
     release_critical_pair(env, array, pair, kReleaseAbort);
 }
@@ -790,7 +909,7 @@ struct EndedLock {
 //     thread has synchronized meanwhile is clean in the second, and costs a pair and nothing more.
 // Where the get returns nothing, the chunks stay as they are in the block for the next synchronization point.
 void sync_range(Env* env, BlockHeader* header, jobject array, uint32_t start, uint32_t end, bool pull) {
-    if (end <= start || header->capacity == 0 || array == nullptr) {
+    if (end <= start || capacity_of(header) == 0 || array == nullptr) {
         return;
     }
     {
@@ -825,7 +944,7 @@ void ended_add(BlockHeader* block) {
     block->bucket_next = *chain;  // the newest first
     *chain = block;
     ++g.ended_count;
-    g.ended_bytes += block->capacity;
+    g.ended_bytes += capacity_of(block);
     publish_ended();
 }
 void ended_remove(BlockHeader* block) {
@@ -840,7 +959,7 @@ void ended_remove(BlockHeader* block) {
     }
     *chain = block->bucket_next;
     --g.ended_count;
-    g.ended_bytes -= block->capacity;
+    g.ended_bytes -= capacity_of(block);
     publish_ended();
 }
 
@@ -850,7 +969,8 @@ void release_reservation() { __atomic_fetch_sub(&g.existing, 1u, __ATOMIC_ACQ_RE
 // The array of an ended block is gone: the block, its baseline and its weak reference go.
 void reclaim_ended(Env* env, BlockHeader* block) {
     ended_remove(block);
-    block->magic = kBlockDead;
+    record_clear(block);  // before the memory goes back to the arena: from here no address is this block
+    mark(block, kBlockDead);
     original<void (*)(Env*, jobject)>(slot::DeleteWeakGlobalRef)(env, block->weak);
     if (block->baseline != nullptr) {
         g.platform.free_baseline(block->baseline);
@@ -945,12 +1065,12 @@ void note_collection(Env* env, Spare& spare) {
 void renew_sentinel(Env* env, Spare& spare) {
     if (g.sentinel != nullptr) {
         original<void (*)(Env*, jobject)>(slot::DeleteWeakGlobalRef)(env, g.sentinel);
-        g.sentinel = nullptr;
+        __atomic_store_n(&g.sentinel, static_cast<jobject>(nullptr), __ATOMIC_RELAXED);  // read without the mutex: sentinel_missing
     }
     if (spare.array == nullptr) {
         return;
     }
-    g.sentinel = original<jobject (*)(Env*, jobject)>(slot::NewWeakGlobalRef)(env, spare.array);
+    __atomic_store_n(&g.sentinel, original<jobject (*)(Env*, jobject)>(slot::NewWeakGlobalRef)(env, spare.array), __ATOMIC_RELAXED);
     original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, spare.array);
     spare.array = nullptr;
 }
@@ -1103,8 +1223,8 @@ void end_locked(Env* env, BlockHeader* header, Spare& spare) {
             header->weak = weak;
         }
     }  // else a pointer from Get...Elements / Get...Critical was never released: the array stays reachable, the block valid
-    header->magic = kBlockEnded;
-    header->owner = nullptr;
+    mark(header, kBlockEnded);
+    record_turn(header, kStateEnded);  // after the references, and in the same hold of the mutex as the index
     ended_add(header);
     if (g.sentinel == nullptr) {
         renew_sentinel(env, spare);
@@ -1142,9 +1262,11 @@ void end_block(Env* env, BlockHeader* header) {
     // reference of its own, the first critical get is made with no lock held, and the second hold pushes, closes the pair and
     // ends the block (the end's weak reference and index entry come in one step with the push).
     jobject own = nullptr;
+    uint32_t capacity = 0;
     {
         EndedLock first_hold;
-        if (!range_dirty(header, 0, header->capacity)) {
+        capacity = capacity_of(header);
+        if (!range_dirty(header, 0, capacity)) {
             end_locked(env, header, spare);
             return;
         }
@@ -1154,7 +1276,7 @@ void end_block(Env* env, BlockHeader* header) {
     {
         EndedLock second_hold;
         if (pair.pointer != nullptr) {
-            sync_in_place(env, header, own, pair, 0, header->capacity, false);
+            sync_in_place(env, header, own, pair, 0, capacity, false);
         }  // else the chunks stay in the block, which ends as it is (the next synchronization of the array pushes them)
         end_locked(env, header, spare);
     }
@@ -1187,20 +1309,22 @@ void drain_pending(Env* env) {
     }
 }
 
-// The ended block for the array `local` (identity hash `hash`), turned live again with a new global reference; null if
-// there is none. Two ended blocks can exist for one array (it was live on two threads): the newest is found first.
-// `no_global` is set when the global reference could not be had.
+// The ended block for the array `local` (identity hash `hash`), turned live again with a new global reference for the thread of
+// `env`, which holds its one reference; null if there is none. Two ended blocks can exist for one array (it was live on two
+// threads): the newest is found first. `no_global` is set when the global reference could not be had. The record says live only
+// when the block's references and its count are set.
 BlockHeader* take_ended(Env* env, jobject local, uint32_t hash, size_t bytes, bool* no_global) {
-    // (the caller makes the block live on its thread: the owner is set there)
     for (BlockHeader* block = g.ended_bucket[hash % kEndedBuckets]; block != nullptr; block = block->bucket_next) {
-        if (block->hash != hash || block->capacity != bytes ||
+        if (block->hash != hash || capacity_of(block) != bytes ||
             original<jboolean (*)(Env*, jobject, jobject)>(slot::IsSameObject)(
                 env, local, block->global != nullptr ? block->global : block->weak) == 0) {
             continue;
         }
         if (block->global != nullptr) {  // kept by a pin: the strong reference is its own again
             ended_remove(block);
-            block->magic = kBlockLive;
+            block->refs = 1;
+            mark(block, kBlockLive);
+            record_turn(block, kStateLive);
             return block;
         }
         jobject global = original<jobject (*)(Env*, jobject)>(slot::NewGlobalRef)(env, local);
@@ -1212,7 +1336,9 @@ BlockHeader* take_ended(Env* env, jobject local, uint32_t hash, size_t bytes, bo
         original<void (*)(Env*, jobject)>(slot::DeleteWeakGlobalRef)(env, block->weak);
         block->weak = nullptr;
         block->global = global;
-        block->magic = kBlockLive;
+        block->refs = 1;
+        mark(block, kBlockLive);
+        record_turn(block, kStateLive);
         return block;
     }
     return nullptr;
@@ -1234,7 +1360,8 @@ bool ask_for_collection(Env* env) {
     __atomic_fetch_add(&g.counters.collections_asked, 1u, __ATOMIC_RELAXED);
     if (g.platform.log != nullptr && __atomic_exchange_n(&g.collect_logged, 1u, __ATOMIC_RELAXED) == 0) {
         g.platform.log("a byte[] block did not fit: the runtime was asked to collect; ended blocks and bytes waiting:",
-                       static_cast<long>(g.counters.shadows_ended), static_cast<long>(g.counters.ended_bytes));
+                       static_cast<long>(__atomic_load_n(&g.counters.shadows_ended, __ATOMIC_RELAXED)),
+                       static_cast<long>(__atomic_load_n(&g.counters.ended_bytes, __ATOMIC_RELAXED)));
     }
     jobject runtime = original<jobject (*)(Env*, jclass, jmethodID, const jvalue*)>(static_call_slot(kObject, kArray))(
         env, g.runtime_class, g.runtime_get, nullptr);
@@ -1255,14 +1382,15 @@ bool ask_for_collection(Env* env) {
 constexpr uint32_t kPeakLogMs = 30000;
 
 void note_declined(const ThreadState* state, const char* why) {
-    ++g.counters.shadows_declined;
+    __atomic_fetch_add(&g.counters.shadows_declined, 1u, __ATOMIC_RELAXED);
     if (g.platform.log != nullptr && __atomic_exchange_n(&g.declined_logged, 1u, __ATOMIC_RELAXED) == 0) {
         g.platform.log(why, state != nullptr ? static_cast<long>(state->count) : 0,
                        state != nullptr ? static_cast<long>(state->bytes) : 0);
         // The ended blocks that still wait for a collection are a reason a result may not fit.
         g.platform.log("ended byte[] blocks waiting for their arrays' collection when the first result was not made a "
                        "block; blocks and bytes:",
-                       static_cast<long>(g.counters.shadows_ended), static_cast<long>(g.counters.ended_bytes));
+                       static_cast<long>(__atomic_load_n(&g.counters.shadows_ended, __ATOMIC_RELAXED)),
+                       static_cast<long>(__atomic_load_n(&g.counters.ended_bytes, __ATOMIC_RELAXED)));
     }
 }
 
@@ -1368,12 +1496,12 @@ jobject make_shadow(Env* env, jobject local) {
     }
     for (unsigned i = 0; i < kReuseWindow && i < state->count; ++i) {
         BlockHeader* known = state->blocks[state->count - 1 - i];
-        if (known->capacity == bytes &&
+        if (capacity_of(known) == bytes &&
             original<jboolean (*)(Env*, jobject, jobject)>(slot::IsSameObject)(env, local, known->global) != 0) {
             ++known->refs;
             state->blocks[state->count++] = known;
             state->env = env;
-            sync_range(env, known, local, 0, known->capacity, true);  // what Java wrote meanwhile shows, and what the application wrote reaches the array
+            sync_range(env, known, local, 0, bytes, true);  // what Java wrote meanwhile shows, and what the application wrote reaches the array
             original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, local);
             return array_of(known);
         }
@@ -1399,10 +1527,6 @@ jobject make_shadow(Env* env, jobject local) {
                 want_array = collection_step(env, spare);
                 if (!want_array && g.ended_count != 0) {
                     again = take_ended(env, local, hash, bytes, &no_global);
-                    if (again != nullptr) {
-                        again->refs = 1;
-                        again->owner = env;
-                    }
                 }
             }
             if (want_array) {
@@ -1416,7 +1540,7 @@ jobject make_shadow(Env* env, jobject local) {
         if (again != nullptr) {
             // Java's writes since it ended and the application's raw writes since meet here. Any other thread that uses a
             // kept reference to the block synchronizes it on its own, so neither needs the other to have gone first.
-            sync_range(env, again, local, 0, again->capacity, true);
+            sync_range(env, again, local, 0, capacity_of(again), true);
             state->blocks[state->count++] = again;
             state->env = env;
             state->bytes += static_cast<uint32_t>(bytes);
@@ -1464,9 +1588,10 @@ jobject make_shadow(Env* env, jobject local) {
         note_declined(state, "the first byte[] result stayed a real reference (no global reference); blocks and bytes held:");
         return nullptr;
     }
+    // The block is built while no record says it is there and is published last, by the store of its record word (see "the
+    // block record"): every field, the Dalvik words, the contents, the baseline and the tail come first.
     BlockHeader* header = reinterpret_cast<BlockHeader*>(room.raw);
-    header->magic = kBlockLive;
-    header->capacity = static_cast<uint32_t>(bytes);
+    header->magic = kBlockDead;
     header->global = global;
     header->next = nullptr;
     header->baseline = room.baseline;
@@ -1477,7 +1602,6 @@ jobject make_shadow(Env* env, jobject local) {
     header->bucket_next = nullptr;
     header->list_next = nullptr;
     header->list_prev = nullptr;
-    header->owner = env;
     DalvikArray* block = array_of(header);
     block->clazz = kDalvikArrayClass;
     block->lock = 0;
@@ -1489,12 +1613,15 @@ jobject make_shadow(Env* env, jobject local) {
         __builtin_memcpy(room.baseline, block->data, bytes);
     }
     __builtin_memset(block->data + bytes, 0, kBlockTail);
+    expose_shadows();  // before the block can be found: from here a shadow may reach the application
+    mark(header, kBlockLive);
+    record_publish(header, static_cast<uint32_t>(bytes));  // the last store to the block
     state->blocks[state->count++] = header;
     state->env = env;
     state->bytes += static_cast<uint32_t>(bytes);
     original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, local);
     __atomic_fetch_add(&g.counters.shadows_live, 1u, __ATOMIC_RELAXED);
-    ++g.counters.shadows_created;
+    __atomic_fetch_add(&g.counters.shadows_created, 1u, __ATOMIC_RELAXED);
     note_peak(state->count);
     return block;
 }
@@ -1510,9 +1637,9 @@ jobject make_shadow(Env* env, jobject local) {
 //     own, since Java code that runs during a call (a callback that calls a native method that deletes the last reference)
 //     ends the block while the wrapper is still using it. The local reference keeps the array reachable meanwhile, so the
 //     block is ended at most, never freed, and a synchronization after the call still has an array to reach;
-//   - the use of a reference makes no entry and moves no block to the using thread: a block stays ended, or live on its
-//     owner. Only an array that arrives as a result revives into an entry (make_shadow). A thread with no native frame
-//     holds nothing afterwards, and a thread with 512 entries can still use a kept reference;
+//   - the use of a reference makes no entry and moves no block to the using thread: a block stays ended, or live in the
+//     entries of the thread that holds it. Only an array that arrives as a result revives into an entry (make_shadow). A
+//     thread with no native frame holds nothing afterwards, and a thread with 512 entries can still use a kept reference;
 //   - a pointer from Get...Elements or Get...Critical on such a reference pins the block (an ended block that only a
 //     weak reference held gets a global one for the pin) until the release; no entry is needed;
 //   - where no reference can be made (an exception is pending, or a runtime critical region is open and this is the
@@ -1520,11 +1647,13 @@ jobject make_shadow(Env* env, jobject local) {
 //     reference, which an end then leaves alone (end_locked); the pin is given back when the wrapper returns. A block
 //     that only a weak reference holds has no strong reference to use, and the wrapper finds no array;
 //   - DeleteLocalRef and GetArrayLength ask nothing of the array;
-//   - the reference of a block whose array was collected (the weak reference is cleared) or whose block was freed
-//     converts to nothing, as a reference to a freed block always did: the wrapper then does what it does for a null
-//     array (a length of 0, no elements, no copy). Dalvik's behaviour there was undefined; the layer does not touch the
-//     memory of a freed block beyond reading its state. A reference whose array was collected and whose address now
-//     holds another array's block reaches that array (as a dangling pointer could on Dalvik).
+//   - an address is a block only when the layer's record says a block starts exactly there (the block record above); no
+//     byte of the region decides it. The reference of a block whose array the collector has cleared (the weak reference
+//     is cleared) is still an ended block of its length until the layer reclaims it (a sweep clears its record word); the
+//     wrapper finds no array behind it and does what it does for a null array (no elements, no copy). The reference of a
+//     block that has been reclaimed is no block: it converts to nothing, its length is 0, however the memory it points into
+//     has been used since. Dalvik's behaviour there was undefined. A reference whose address a new block was made at exactly
+//     reaches that block (as a dangling pointer could on Dalvik), whole.
 // Every synchronization of a block with its array, whichever thread makes it, runs under the one process-wide mutex that
 // also guards the ended index. The mutex is never held across a call into Java: a call is synchronized before and after,
 // in two separate holds. It serializes the synchronizations of all blocks, not only of one: the layer has no per-block lock.
@@ -1560,14 +1689,11 @@ struct Access {
     bool pinned;         // the wrapper holds a pin of its own on the block: it is given back at the end
 };
 
-// The block a wrapper is handed the reference `object` of: live or ended, otherwise null (a freed block).
+// The block a wrapper is handed the reference `object` of: live or ended, otherwise null (no block starts there). Only a
+// candidate: the block can be reclaimed, and another made at the same place, before the wrapper takes the mutex, where
+// open_header asks the record again; what it finds then is the block that is there.
 BlockHeader* block_of(const void* object) {
-    if (!is_shadow(object)) {
-        return nullptr;
-    }
-    BlockHeader* header = header_of(object);
-    const uint32_t magic = __atomic_load_n(&header->magic, __ATOMIC_ACQUIRE);
-    return magic == kBlockLive || magic == kBlockEnded ? header : nullptr;
+    return state_of(object) != kStateNone ? header_of(object) : nullptr;
 }
 
 // A pin: see pin_block.
@@ -1581,8 +1707,7 @@ bool unpin(BlockHeader* header) {
 Access open_header(Env* env, BlockHeader* header, bool may_reference = true) {
     Access access{header, nullptr, false, false};
     EndedLock lock;
-    const uint32_t magic = header->magic;
-    if (magic != kBlockLive && magic != kBlockEnded) {
+    if (!block_exists(header)) {  // the record decides, under the mutex: only a publication can change it during this hold
         access.block = nullptr;
         return access;
     }
@@ -1590,7 +1715,7 @@ Access open_header(Env* env, BlockHeader* header, bool may_reference = true) {
         jobject local = original<jobject (*)(Env*, jobject)>(slot::NewLocalRef)(env, header->global != nullptr ? header->global
                                                                                                                 : header->weak);
         if (local == nullptr) {
-            access.block = nullptr;  // the array was collected: the next sweep frees the block
+            access.block = nullptr;  // the array was collected: no array to reach (the block is reclaimed by a later sweep)
             return access;
         }
         access.array = local;
@@ -1638,7 +1763,7 @@ bool pin_block(Env* env, const Access& access) {
     }
     EndedLock lock;
     BlockHeader* header = access.block;
-    if (header->magic != kBlockLive && header->magic != kBlockEnded) {
+    if (!block_exists(header)) {
         return false;
     }
     if (header->global == nullptr) {
@@ -1733,8 +1858,7 @@ R call_synced(Env* env, const HoldSet& receiver, const HoldSet& arguments, F&& c
     const auto each_in = [&](const HoldSet& set, auto&& step) {
         for (unsigned i = 0; i < set.count; ++i) {
             const Access& access = set.items[i];
-            const uint32_t magic = access.block != nullptr ? __atomic_load_n(&access.block->magic, __ATOMIC_ACQUIRE) : 0;
-            if (access.array != nullptr && (magic == kBlockLive || magic == kBlockEnded)) {
+            if (access.array != nullptr && access.block != nullptr) {  // held: open_header found the block under the mutex
                 step(access);  // sync_range takes the mutex itself
             }
         }
@@ -1744,11 +1868,11 @@ R call_synced(Env* env, const HoldSet& receiver, const HoldSet& arguments, F&& c
         each_in(arguments, step);
     };
     if (any && jni_usable(env)) {
-        each([&](const Access& access) { sync_range(env, access.block, access.array, 0, access.block->capacity, false); });
+        each([&](const Access& access) { sync_range(env, access.block, access.array, 0, capacity_of(access.block), false); });
     }
     const auto after = [&] {
         if (any && jni_usable(env)) {
-            each([&](const Access& access) { sync_range(env, access.block, access.array, 0, access.block->capacity, true); });
+            each([&](const Access& access) { sync_range(env, access.block, access.array, 0, capacity_of(access.block), true); });
         }
     };
     if constexpr (IsVoid<R>::value) {
@@ -1777,9 +1901,7 @@ unsigned hash_of(const void* id, unsigned modulus) {
                                  modulus);
 }
 
-char kind_at(const MethodInfo& info, unsigned index) {
-    return index < kInlineParams ? info.kinds[index] : info.more[index - kInlineParams];
-}
+char kind_at(const MethodInfo& info, unsigned index) { return reinterpret_cast<const char*>(&info + 1)[index]; }
 
 // The parameter kinds of a method signature into `kinds` (kMaxParams + 1 entries); false when it is malformed.
 bool parse_signature(const char* sig, char* kinds, unsigned* count, bool* returns_bytes) {
@@ -1836,47 +1958,44 @@ bool parse_signature(const char* sig, char* kinds, unsigned* count, bool* return
     return true;
 }
 
-// Stores an entry for `id`; false when the registry or the pool is full.
-bool store_method(void* id, const char* kinds, unsigned count, bool returns_bytes, bool usable = true) {
+const MethodInfo* find_method(const void* id);
+
+// Makes `id` known with its parameter kinds. False only when the node cannot be allocated; nothing else can refuse it, and a
+// method that is known already is left as it was.
+bool store_method(void* id, const char* kinds, unsigned count, bool returns_bytes) {
+    if (find_method(id) != nullptr) {
+        return true;
+    }
+    MethodInfo* node = static_cast<MethodInfo*>(g.platform.alloc_baseline(sizeof(MethodInfo) + count));
+    if (node == nullptr) {
+        return false;
+    }
+    node->next = nullptr;
+    node->id = id;
+    node->nparams = static_cast<uint8_t>(count);
+    node->returns_bytes = returns_bytes;
+    char* stored = reinterpret_cast<char*>(node + 1);
+    for (unsigned i = 0; i < count; ++i) {
+        stored[i] = kinds[i];
+    }
+    MethodInfo** head = &g.method_bucket[hash_of(id, kMethodBuckets)];
+    bool added = true;
     lock_registry();
-    MethodInfo parsed = {};
-    parsed.nparams = static_cast<uint8_t>(count);
-    parsed.returns_bytes = returns_bytes;
-    parsed.usable = usable;
-    for (unsigned i = 0; i < count && i < kInlineParams; ++i) {
-        parsed.kinds[i] = kinds[i];
-    }
-    if (count > kInlineParams) {
-        const unsigned extra = count - kInlineParams;
-        if (g.kind_pool_used + extra > kKindPoolBytes) {
-            parsed.usable = 0;  // the kinds are not kept: the call is forwarded unchanged
-        } else {
-            char* pool = g.kind_pool + g.kind_pool_used;
-            for (unsigned i = 0; i < extra; ++i) {
-                pool[i] = kinds[kInlineParams + i];
-            }
-            g.kind_pool_used += extra;
-            parsed.more = pool;
-        }
-    }
-    bool stored = false;
-    unsigned index = hash_of(id, kMethodSlots);
-    for (unsigned probe = 0; probe < kProbeLimit; ++probe, index = (index + 1) % kMethodSlots) {
-        MethodInfo& entry = g.methods[index];
-        if (entry.id == id) {
-            stored = true;  // already known
+    for (const MethodInfo* known = *head; known != nullptr; known = known->next) {
+        if (known->id == id) {
+            added = false;  // another thread stored it meanwhile
             break;
         }
-        if (entry.id == nullptr) {
-            entry = parsed;
-            entry.id = nullptr;
-            __atomic_store_n(&entry.id, id, __ATOMIC_RELEASE);
-            stored = true;
-            break;
-        }
+    }
+    if (added) {
+        node->next = *head;
+        __atomic_store_n(head, node, __ATOMIC_RELEASE);
     }
     unlock_registry();
-    return stored;
+    if (!added) {
+        g.platform.free_baseline(node);
+    }
+    return true;
 }
 
 void register_method(void* id, const char* sig) {
@@ -1887,7 +2006,7 @@ void register_method(void* id, const char* sig) {
     unsigned count = 0;
     bool returns_bytes = false;
     if (parse_signature(sig, kinds, &count, &returns_bytes)) {
-        store_method(id, kinds, count, returns_bytes);
+        store_method(id, kinds, count, returns_bytes);  // where it cannot be stored the first call learns it again
     }
 }
 
@@ -1895,51 +2014,60 @@ const MethodInfo* find_method(const void* id) {
     if (id == nullptr) {
         return nullptr;
     }
-    unsigned index = hash_of(id, kMethodSlots);
-    for (unsigned probe = 0; probe < kProbeLimit; ++probe, index = (index + 1) % kMethodSlots) {
-        const MethodInfo& entry = g.methods[index];
-        void* seen = __atomic_load_n(&entry.id, __ATOMIC_ACQUIRE);
-        if (seen == id) {
-            return &entry;
-        }
-        if (seen == nullptr) {
-            return nullptr;
+    for (const MethodInfo* node = __atomic_load_n(&g.method_bucket[hash_of(id, kMethodBuckets)], __ATOMIC_ACQUIRE); node != nullptr;
+         node = node->next) {
+        if (node->id == id) {
+            return node;
         }
     }
     return nullptr;
 }
 
-// A method ID the layer did not see being looked up (FromReflectedMethod, or one the registry dropped):
-// asks the platform, once, what its parameters are. `object_or_class` is the receiver (an instance call) or
-// the class (a static call or a constructor).
-const MethodInfo* learn_method(Env* env, void* id, bool is_static, jobject object_or_class) {
-    if (id == nullptr || object_or_class == nullptr || g.platform.describe_method == nullptr ||
-        original<jboolean (*)(Env*)>(slot::ExceptionCheck)(env) != 0) {
-        return nullptr;  // an exception is pending: no JNI function may be called
+// A method ID the layer did not see being looked up (FromReflectedMethod, or one whose node could not be allocated then):
+// asks the platform what its parameters are, from the ID alone (no receiver and no class). Null when they cannot be had now
+// (nothing is remembered about that: the next call asks again). A call made with an exception pending, which ART does not refuse,
+// is learned with the exception taken out for the time and put back.
+const MethodInfo* learn_method(Env* env, void* id, bool is_static) {
+    if (id == nullptr || g.platform.describe_method == nullptr) {
+        return nullptr;
     }
-    jobject hint = object_or_class;
-    jobject owned = nullptr;
-    if (!is_static) {
-        owned = original<jobject (*)(Env*, jobject)>(slot::GetObjectClass)(env, object_or_class);
-        hint = owned;
-        if (hint == nullptr) {
+    jobject pending = nullptr;
+    if (original<jboolean (*)(Env*)>(slot::ExceptionCheck)(env) != 0) {
+        pending = original<jobject (*)(Env*)>(slot::ExceptionOccurred)(env);
+        if (pending == nullptr) {
             return nullptr;
         }
+        original<void (*)(Env*)>(slot::ExceptionClear)(env);
     }
+    const MethodInfo* learned = nullptr;
     char kinds[kMaxParams + 1];
     unsigned count = 0;
-    const bool described = g.platform.describe_method(env, g.orig, id, is_static, hint, kinds, kMaxParams, &count);
-    if (owned != nullptr) {
-        original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, owned);
+    // From the ID alone: no receiver and no class are needed, so a static call with a null class (which the runtime accepts: it
+    // ignores the class of a CallStatic*) is learned like any other.
+    if (g.platform.describe_method(env, g.orig, id, is_static, kinds, kMaxParams, &count) && store_method(id, kinds, count, false)) {
+        learned = find_method(id);
     }
-    if (!described) {
-        store_method(id, kinds, 0, false, false);  // remember that it cannot be described: no new attempt
-        return nullptr;
+    if (pending != nullptr) {
+        original<jint (*)(Env*, jobject)>(slot::Throw)(env, pending);
+        original<void (*)(Env*, jobject)>(slot::DeleteLocalRef)(env, pending);
     }
-    if (!store_method(id, kinds, count, false)) {
-        return nullptr;
+    return learned;
+}
+
+// An application's call whose parameters the layer cannot learn (no method ID, an ID it cannot describe, no reflection to
+// describe it with, memory for its node gone): it cannot say which of the call's values are references, and a block's address
+// that reached the runtime would be taken for one. So the call does not reach the runtime: the process stops, with one line in
+// the log. A platform caller's call is not stopped: it can hold a block's address only through an application's type error,
+// which fails on stock too.
+[[noreturn]] void stop_for_unknown_parameters(const void* method) {
+    if (g.platform.log != nullptr) {
+        g.platform.log("a call's parameters cannot be learned and a block's address must not reach the runtime: the process stops; method:",
+                       static_cast<long>(reinterpret_cast<intptr_t>(method)), 0);
     }
-    return find_method(id);
+    if (g.platform.abort_process != nullptr) {
+        g.platform.abort_process();
+    }
+    __builtin_trap();
 }
 
 void register_byte_field(void* id, const char* sig) {
@@ -2064,12 +2192,14 @@ bool collect_array(const MethodInfo& info, const jvalue* in, jvalue* pack, HoldS
 
 // A call is passed blocks as its arguments and, for an instance or nonvirtual call, as its receiver (clone(), or any
 // method without parameters, reads the array through the receiver). The blocks are held for the call and synchronized
-// around it.
+// around it. Every call converts once a shadow may have reached the application (shadows_exposed), whatever blocks exist at
+// the moment: a reference that is a block becomes a reference the runtime holds, any other address of the region (a block
+// that is gone, one being built or revived) becomes null, and no address of the region reaches the runtime.
 template <class R, Kind K, int SlotV, int SlotA>
 R run_va(Env* e, jobject l0, jobject l1, jmethodID m, va_list ap, bool app) {
-    const bool blocks = blocks_exist();
-    const MethodInfo* info = ((IsObject<R>::value && app) || blocks) ? find_method(m) : nullptr;
-    if (blocks) {
+    const bool convert = shadows_exposed();
+    const MethodInfo* info = ((IsObject<R>::value && app) || convert) ? find_method(m) : nullptr;
+    if (convert) {
         constexpr bool kHasReceiver = K == Kind::kInstance || K == Kind::kNonvirtual;
         Access receiver_item[1];
         HoldSet receiver_set(e, receiver_item, 1);
@@ -2078,9 +2208,20 @@ R run_va(Env* e, jobject l0, jobject l1, jmethodID m, va_list ap, bool app) {
             receiver = receiver_set.hold(l0);
         }
         if (info == nullptr) {
-            info = learn_method(e, m, K == Kind::kStatic, receiver);
+            info = learn_method(e, m, K == Kind::kStatic);
+            if (info == nullptr) {
+                if (app) {
+                    stop_for_unknown_parameters(m);
+                }
+                // A platform caller: its arguments go as they are (the kinds cannot be had), its receiver converted.
+                HoldSet no_arguments(e, nullptr, 0, &receiver_set);
+                return complete<R>(e, nullptr, app, [&] {
+                    return call_synced<R>(e, receiver_set, no_arguments,
+                                          [&] { return call_original_v<R, K>(SlotV, e, receiver, l1, m, ap); });
+                });
+            }
         }
-        const unsigned params = info != nullptr && info->usable ? info->nparams : 0;
+        const unsigned params = info->nparams;
         Access* items = static_cast<Access*>(__builtin_alloca((params + 1) * sizeof(Access)));
         HoldSet argument_set(e, items, params, &receiver_set);
         if (params > 0) {
@@ -2105,9 +2246,9 @@ R run_va(Env* e, jobject l0, jobject l1, jmethodID m, va_list ap, bool app) {
 
 template <class R, Kind K, int SlotV, int SlotA>
 R run_array(Env* e, jobject l0, jobject l1, jmethodID m, const jvalue* args, bool app) {
-    const bool blocks = blocks_exist();
-    const MethodInfo* info = ((IsObject<R>::value && app) || blocks) ? find_method(m) : nullptr;
-    if (blocks) {
+    const bool convert = shadows_exposed();
+    const MethodInfo* info = ((IsObject<R>::value && app) || convert) ? find_method(m) : nullptr;
+    if (convert) {
         constexpr bool kHasReceiver = K == Kind::kInstance || K == Kind::kNonvirtual;
         Access receiver_item[1];
         HoldSet receiver_set(e, receiver_item, 1);
@@ -2116,9 +2257,20 @@ R run_array(Env* e, jobject l0, jobject l1, jmethodID m, const jvalue* args, boo
             receiver = receiver_set.hold(l0);
         }
         if (info == nullptr) {
-            info = learn_method(e, m, K == Kind::kStatic, receiver);
+            info = learn_method(e, m, K == Kind::kStatic);
+            if (info == nullptr) {
+                if (app) {
+                    stop_for_unknown_parameters(m);
+                }
+                // A platform caller: its arguments go as they are (the kinds cannot be had), its receiver converted.
+                HoldSet no_arguments(e, nullptr, 0, &receiver_set);
+                return complete<R>(e, nullptr, app, [&] {
+                    return call_synced<R>(e, receiver_set, no_arguments,
+                                          [&] { return call_original_a<R, K>(SlotA, e, receiver, l1, m, args); });
+                });
+            }
         }
-        const unsigned params = info != nullptr && info->usable ? info->nparams : 0;
+        const unsigned params = info->nparams;
         Access* items = static_cast<Access*>(__builtin_alloca((params + 1) * sizeof(Access)));
         HoldSet argument_set(e, items, params, &receiver_set);
         if (params > 0) {
@@ -2318,13 +2470,14 @@ jboolean w_IsSameObject(Env* e, jobject a, jobject b) {
 }
 jint w_GetObjectRefType(Env* e, jobject o) {
     enter_any(e);
+    // One look at the record answers: a block is a local reference (an ended block's reference is the one the application kept:
+    // it stays a local); an address of the region that no block starts at is the null reference to the runtime (invalid), and is
+    // not looked up again, since a block made there meanwhile is not what this reference was.
     if (is_shadow(o)) {
-        const uint32_t magic = header_of(o)->magic;
-        if (magic == kBlockLive || magic == kBlockEnded) {
-            return kRefTypeLocal;  // an ended block's reference is the one the application kept: it stays a local
-        }
+        return state_of(o) != kStateNone ? kRefTypeLocal
+                                         : original<jint (*)(Env*, jobject)>(slot::GetObjectRefType)(e, nullptr);
     }
-    return original<jint (*)(Env*, jobject)>(slot::GetObjectRefType)(e, Conv(e, o).get());
+    return original<jint (*)(Env*, jobject)>(slot::GetObjectRefType)(e, o);
 }
 // A block whose array is gone has no monitor to take: the runtime aborts on a null object, so the call is refused (JNI_ERR).
 jint w_MonitorEnter(Env* e, jobject o) {
@@ -2416,13 +2569,12 @@ jobject w_PopLocalFrame(Env* e, jobject result) {
     enter_any(e);
     const bool shadow_result = is_shadow(result);
     BlockHeader* known = shadow_result ? block_of(result) : nullptr;
-    // Only a block that is an entry of this thread moves to the outer frame; any other reference keeps its meaning.
-    BlockHeader* keep = known != nullptr && __atomic_load_n(&known->magic, __ATOMIC_ACQUIRE) == kBlockLive &&
-                                __atomic_load_n(&known->owner, __ATOMIC_RELAXED) == e
-                            ? known
-                            : nullptr;
-    jobject returned = original<jobject (*)(Env*, jobject)>(slot::PopLocalFrame)(e, shadow_result ? nullptr : result);
     ThreadState* state = thread();
+    // Only a block that is among this thread's own entries moves to the outer frame; any other reference keeps its meaning.
+    // The entries are the thread's alone and each holds its block (refs >= 1), so the search is exact: a block that another
+    // thread made at the address of a reclaimed one is not among them.
+    BlockHeader* keep = known != nullptr && state != nullptr && has_entry(state, known) ? known : nullptr;
+    jobject returned = original<jobject (*)(Env*, jobject)>(slot::PopLocalFrame)(e, shadow_result ? nullptr : result);
     if (state != nullptr) {
         if (state->frame_overflow > 0) {
             --state->frame_overflow;  // the pop of a frame no record was made for
@@ -2472,28 +2624,24 @@ jint w_RegisterNatives(Env* e, jclass c, const NativeMethod* methods, jint count
 }
 
 // The block whose data starts at `elements`, when the pointer is one the layer handed out: live or ended (a freed block's
-// pointer is nothing). The blocks are 16-byte aligned from the start of the region; a pointer that is not at the start of
-// a block's data is nobody's and is not read as a header.
+// pointer is nothing). The record says whether a block starts 16 bytes before it; a pointer that is not at the start of a
+// block's data is nobody's and is not read as a header.
 BlockHeader* block_at(const void* elements) {
     const uint8_t* p = static_cast<const uint8_t*>(elements);
-    if (p == nullptr || p < g.shadow_lo + offsetof(DalvikArray, data) || p >= g.shadow_hi ||
-        ((static_cast<size_t>(p - g.shadow_lo)) & 15u) != 0) {
+    if (p == nullptr || p < g.shadow_lo + offsetof(DalvikArray, data)) {
         return nullptr;
     }
-    BlockHeader* header = header_of(p - offsetof(DalvikArray, data));
-    const uint32_t magic = __atomic_load_n(&header->magic, __ATOMIC_ACQUIRE);
-    if ((magic != kBlockLive && magic != kBlockEnded) || data_of(header) != p) {
-        return nullptr;
-    }
-    return header;
+    return block_of(p - offsetof(DalvikArray, data));
 }
 
 jsize w_GetArrayLength(Env* e, jarray a) {
     enter_any(e);
     if (is_shadow(a)) {
-        // Live or ended, the block knows its array's length; a freed block has none.
-        const uint32_t magic = header_of(a)->magic;
-        return magic == kBlockLive || magic == kBlockEnded ? static_cast<jsize>(header_of(a)->capacity) : 0;
+        // The record knows a block's length: live or ended (an ended block whose array the collector has cleared is still an
+        // ended block, of its length, until a sweep reclaims it), the block that starts at this address has it exactly; any
+        // other address in the region (a block that was reclaimed, whatever lies in its memory now) has none, and gets 0. No
+        // mutex and no byte of the region: one acquire load of the record's word.
+        return static_cast<jsize>(fact_of(a).capacity);
     }
     return original<jsize (*)(Env*, jarray)>(slot::GetArrayLength)(e, a);
 }
@@ -2559,11 +2707,11 @@ void erase_record(unsigned i) {
         }
     }
     g.records[i] = PointerRecord{nullptr, kRecordFree, 0};
-    --g.records_in_use;
+    __atomic_fetch_sub(&g.records_in_use, 1u, __ATOMIC_RELAXED);
 }
 void record_runtime_pointer(const void* pointer, uint32_t kind) {
-    if (pointer == nullptr || __atomic_load_n(&g.counters.shadows_created, __ATOMIC_RELAXED) == 0) {
-        return;  // no block has been made yet: no block's reference can release it
+    if (pointer == nullptr) {
+        return;
     }
     {
         TableLock lock;
@@ -2571,13 +2719,13 @@ void record_runtime_pointer(const void* pointer, uint32_t kind) {
             ++record->count;
             return;
         }
-        if (g.records_in_use < kRecordSlots / 2) {
+        if (__atomic_load_n(&g.records_in_use, __ATOMIC_RELAXED) < kRecordSlots / 2) {
             unsigned i = record_slot(pointer);
             while (g.records[i].kind != kRecordFree) {
                 i = (i + 1) % kRecordSlots;
             }
             g.records[i] = PointerRecord{pointer, kind, 1};
-            ++g.records_in_use;
+            __atomic_fetch_add(&g.records_in_use, 1u, __ATOMIC_RELAXED);
             return;
         }
     }
@@ -2588,6 +2736,12 @@ void record_runtime_pointer(const void* pointer, uint32_t kind) {
                        static_cast<long>(kRecordSlots / 2), static_cast<long>(kRecordSlots));
     }
 }
+// The count of the records is changed under the table's lock and read, atomically (relaxed) everywhere, also without it: a count of
+// zero answers "not recorded" for a pointer without the lock, and that answer is exact. A caller asks about a pointer it holds. It
+// holds it because the runtime handed it out to this thread, which recorded it (a store under the lock) before it used the pointer,
+// or because another thread passed it on through the application's own synchronization, which orders that store before this load.
+// A load ordered after a store reads it or a later value of the count, and the count is lower than the store made it only by the
+// release of a record, which is then gone. So zero means that no record of the pointer exists; any other count takes the lock.
 bool is_recorded_pointer(const void* pointer, uint32_t kind) {
     if (pointer == nullptr || __atomic_load_n(&g.records_in_use, __ATOMIC_RELAXED) == 0) {
         return false;
@@ -2598,7 +2752,7 @@ bool is_recorded_pointer(const void* pointer, uint32_t kind) {
 // A release of the pointer (any reference): the record goes with the last Get unless the mode is JNI_COMMIT.
 void forget_runtime_pointer(const void* pointer, uint32_t kind, jint mode) {
     if (mode == kReleaseCommit || pointer == nullptr || __atomic_load_n(&g.records_in_use, __ATOMIC_RELAXED) == 0) {
-        return;
+        return;  // (no record exists: see is_recorded_pointer)
     }
     TableLock lock;
     PointerRecord* record = find_record(pointer, kind);
@@ -2622,10 +2776,10 @@ jbyte* w_GetByteArrayElements(Env* e, jarray a, jboolean* is_copy) {
             *is_copy = 1;
         }
         Access access = open_block(e, a);
-        if (access.block == nullptr) {
-            return nullptr;
+        if (access.block == nullptr || access.array == nullptr) {
+            return nullptr;  // the array is gone, or nothing holds the block now (see w_GetByteArrayRegion): no pin to take
         }
-        sync_range(e, access.block, access.array, 0, access.block->capacity, true);
+        sync_range(e, access.block, access.array, 0, capacity_of(access.block), true);
         jbyte* elements = pin_block(e, access) ? reinterpret_cast<jbyte*>(array_of(access.block)->data) : nullptr;
         close_access(e, access);
         return elements;
@@ -2649,9 +2803,10 @@ void release_block(Env* e, BlockHeader* header, const void* elements, jint mode,
     Access access = open_header(e, header, !in_region);
     const jobject array = access.array;
     if (access.block != nullptr && jni_usable(e) && array != nullptr) {
+        const uint32_t capacity = capacity_of(header);  // the block is held: its length, from the record
         // A buffer other than the block (a copy the application made of it) is its write into the block first.
         const bool foreign = mode != kReleaseAbort && elements != nullptr && elements != data_of(header) && !is_shadow(elements) &&
-                             header->capacity > 0;
+                             capacity > 0;
         if (critical) {
             // The critical pair, as the release of a pointer that the application may hold inside a region of its own: the
             // get is made before the mutex is taken, on a reference that is valid outside it (inside a region, the block's
@@ -2662,9 +2817,9 @@ void release_block(Env* e, BlockHeader* header, const void* elements, jint mode,
                 abort_critical(e, header, array, pair);
             } else {
                 if (foreign) {
-                    __builtin_memcpy(data_of(header), elements, header->capacity);
+                    __builtin_memcpy(data_of(header), elements, capacity);
                 }
-                sync_in_place(e, header, array, pair, 0, header->capacity, true);
+                sync_in_place(e, header, array, pair, 0, capacity, true);
             }
         } else if (mode == kReleaseAbort) {
             SyncScope scope;
@@ -2672,14 +2827,17 @@ void release_block(Env* e, BlockHeader* header, const void* elements, jint mode,
         } else {
             if (foreign) {
                 SyncScope scope;
-                __builtin_memcpy(data_of(header), elements, header->capacity);
+                __builtin_memcpy(data_of(header), elements, capacity);
             }
-            sync_range(e, header, array, 0, header->capacity, true);
+            sync_range(e, header, array, 0, capacity, true);
         }
     }
-    if (mode != kReleaseCommit && unpin(header) && !critical && jni_usable(e)) {
+    // A pin is given back only by a release that holds the block (a reference of its own, or a pin of its own): a block that
+    // nothing holds is freed by a sweep, and its memory is another block's by the time of the write. A release that finds
+    // no pin to give (a second release, a release without a Get) leaves the count as it is.
+    if (mode != kReleaseCommit && array != nullptr && unpin(header) && !critical && jni_usable(e)) {
         EndedLock lock;
-        if (header->magic == kBlockEnded && header->global != nullptr && __atomic_load_n(&header->pins, __ATOMIC_RELAXED) == 0) {
+        if (state_of(array_of(header)) == kStateEnded && header->global != nullptr && __atomic_load_n(&header->pins, __ATOMIC_RELAXED) == 0) {
             weaken(e, header);  // the last pin of an ended block: it waits for a collection from now on
         }
     }
@@ -2698,7 +2856,7 @@ void release_runtime_pointer(Env* e, BlockHeader* header, void* elements, jint m
     {
         SyncScope scope;
         jobject array = access.array;
-        if (array == nullptr && (header->magic == kBlockLive || header->magic == kBlockEnded)) {
+        if (array == nullptr && block_exists(header)) {
             array = header->global != nullptr ? header->global : header->weak;
         }
         if (array != nullptr) {
@@ -2774,7 +2932,7 @@ void* w_GetPrimitiveArrayCritical(Env* e, jarray a, jboolean* is_copy) {
         const Pair pair = first_critical(e, header, access.array);
         {
             SyncScope scope;
-            sync_in_place(e, header, access.array, pair, 0, header->capacity, true);
+            sync_in_place(e, header, access.array, pair, 0, capacity_of(header), true);
         }
         if (access.pinned) {
             access.pinned = false;  // the wrapper's pin becomes the pointer's
@@ -2827,15 +2985,18 @@ void w_GetByteArrayRegion(Env* e, jarray a, jsize start, jsize length, jbyte* bu
     enter_any(e);
     if (is_shadow(a)) {
         Access access = open_block(e, a);
-        if (access.block == nullptr) {
+        if (access.block == nullptr || access.array == nullptr) {
+            // The block is gone, or nothing holds it: only a weak reference does, and none can be made now (an exception is
+            // pending). No array, no copy, as for a null array: the block's bytes are not the array's, and a sweep may free
+            // a block that nothing holds while it is read.
             return;
         }
         BlockHeader* header = access.block;
-        if (start >= 0 && length >= 0 && static_cast<uint64_t>(start) + static_cast<uint64_t>(length) <= header->capacity) {
+        if (start >= 0 && length >= 0 && static_cast<uint64_t>(start) + static_cast<uint64_t>(length) <= capacity_of(header)) {
             sync_range(e, header, access.array, static_cast<uint32_t>(start),
                        static_cast<uint32_t>(start) + static_cast<uint32_t>(length), true);
             __builtin_memcpy(buffer, data_of(header) + start, static_cast<size_t>(length));
-        } else if (access.array != nullptr) {
+        } else {
             // A range the block does not have: the runtime raises its exception for the real array.
             original<void (*)(Env*, jarray, jsize, jsize, jbyte*)>(slot::GetByteArrayRegion)(e, access.array, start, length,
                                                                                              buffer);
@@ -2849,12 +3010,12 @@ void w_SetByteArrayRegion(Env* e, jarray a, jsize start, jsize length, const jby
     enter_any(e);
     if (is_shadow(a)) {
         Access access = open_block(e, a);
-        if (access.block == nullptr) {
-            return;
+        if (access.block == nullptr || access.array == nullptr) {
+            return;  // no array to reach, and no read of a block nothing holds (see w_GetByteArrayRegion)
         }
         BlockHeader* header = access.block;
-        if (start >= 0 && length >= 0 && static_cast<uint64_t>(start) + static_cast<uint64_t>(length) <= header->capacity) {
-            if (length > 0 && access.array != nullptr) {
+        if (start >= 0 && length >= 0 && static_cast<uint64_t>(start) + static_cast<uint64_t>(length) <= capacity_of(header)) {
+            if (length > 0) {
                 // What the application wrote through the pointer in these chunks reaches the array first; the range
                 // itself is about to be replaced, so nothing is read back.
                 sync_range(e, header, access.array, static_cast<uint32_t>(start),
@@ -2865,7 +3026,7 @@ void w_SetByteArrayRegion(Env* e, jarray a, jsize start, jsize length, const jby
                     e, access.array, start, length, buffer);
                 __builtin_memcpy(header->baseline + start, buffer, static_cast<size_t>(length));
             }
-        } else if (access.array != nullptr) {
+        } else {
             // A range the block does not have: the runtime raises its exception for the real array.
             original<void (*)(Env*, jarray, jsize, jsize, const jbyte*)>(slot::SetByteArrayRegion)(e, access.array, start,
                                                                                                    length, buffer);
@@ -2909,14 +3070,9 @@ jint vm_DetachCurrentThread(Vm* vm) {
 
 }  // namespace
 
-bool is_shadow_block(const void* object) { return live_header(object) != nullptr; }
+bool is_shadow_block(const void* object) { return state_of(object) == kStateLive; }
 
-bool is_ended_block(const void* object) {
-    if (!is_shadow(object)) {
-        return false;
-    }
-    return header_of(object)->magic == kBlockEnded;
-}
+bool is_ended_block(const void* object) { return state_of(object) == kStateEnded; }
 
 void release_thread_state(void* state_pointer) {
     ThreadState* state = static_cast<ThreadState*>(state_pointer);
@@ -2937,7 +3093,33 @@ void release_thread_state(void* state_pointer) {
     state->env = nullptr;
 }
 
-Counters counters() { return g.counters; }
+// A copy of the counters, each member one relaxed load by name: other threads keep counting, so the copy is a sample of each
+// counter and not one instant of all of them. A member added to Counters is added here too.
+Counters counters() {
+    const auto load = [](const auto& member) { return __atomic_load_n(&member, __ATOMIC_RELAXED); };
+    Counters copy{};
+    const Counters& now = g.counters;
+    copy.shadows_created = load(now.shadows_created);
+    copy.shadows_live = load(now.shadows_live);
+    copy.shadows_declined = load(now.shadows_declined);
+    copy.conversions = load(now.conversions);
+    copy.shadows_released = load(now.shadows_released);
+    copy.peak_thread_blocks = load(now.peak_thread_blocks);
+    copy.ended_by_return = load(now.ended_by_return);
+    copy.max_ended_by_return = load(now.max_ended_by_return);
+    copy.ended_by_pop = load(now.ended_by_pop);
+    copy.ended_by_detach = load(now.ended_by_detach);
+    copy.natives_wrapped = load(now.natives_wrapped);
+    copy.natives_unwrapped = load(now.natives_unwrapped);
+    copy.shadows_ended = load(now.shadows_ended);
+    copy.ended_bytes = load(now.ended_bytes);
+    copy.blocks_ended = load(now.blocks_ended);
+    copy.blocks_collected = load(now.blocks_collected);
+    copy.blocks_revived = load(now.blocks_revived);
+    copy.collections_asked = load(now.collections_asked);
+    copy.longest_region_us = load(now.longest_region_us);
+    return copy;
+}
 
 // ---- the end of a native method
 
@@ -3055,7 +3237,18 @@ void* thunk_leave(void* sp) {
     return record.lr;
 }
 
-void reset_for_test() { __builtin_memset(&g, 0, sizeof(g)); }
+void reset_for_test() {
+    if (g.platform.free_baseline != nullptr) {
+        for (MethodInfo* head : g.method_bucket) {
+            while (head != nullptr) {
+                MethodInfo* next = head->next;
+                g.platform.free_baseline(head);
+                head = next;
+            }
+        }
+    }
+    __builtin_memset(&g, 0, sizeof(g));
+}
 
 bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_region, size_t shadow_size, Env* env) {
     if (g.installed) {
@@ -3065,10 +3258,24 @@ bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_r
     for (int i = 0; i < kSlotCount; ++i) {
         g.orig[i] = table[i];
     }
-    g.shadows_on = shadow_region != nullptr && shadow_size >= 4096 && platform.alloc_baseline != nullptr &&
-                   platform.free_baseline != nullptr && g.shadow_arena.init(shadow_region, shadow_size);
+    // The record covers a region of at most kMaxShadowBytes whose base is 16-byte aligned (the references of blocks are aligned
+    // from it): any other region gets no shadows, and neither does one whose record memory cannot be had. The memory is
+    // zero-filled when the platform gives it, and the layer does not clear it.
+    g.shadows_on = shadow_region != nullptr && shadow_size >= 4096 && shadow_size <= kMaxShadowBytes &&
+                   (reinterpret_cast<uintptr_t>(shadow_region) & 15u) == 0 && platform.alloc_baseline != nullptr &&
+                   platform.free_baseline != nullptr && platform.map_record != nullptr &&
+                   g.shadow_arena.init(shadow_region, shadow_size);
+    if (g.shadows_on) {
+        g.record = static_cast<uint32_t*>(platform.map_record(shadow_record_bytes(shadow_size)));
+        g.shadows_on = g.record != nullptr;
+    }
     if (!g.shadows_on) {
-        return true;  // nothing to intercept
+        // Nothing to intercept. The query bounds of an earlier attempt that was refused later (the table could not be written)
+        // are cleared: the queries range-test an address first, and an address of the region must not reach a record that is not
+        // there.
+        g.shadow_lo = nullptr;
+        g.shadow_hi = nullptr;
+        return true;
     }
     g.ended_head.list_next = &g.ended_head;
     g.ended_head.list_prev = &g.ended_head;
@@ -3077,6 +3284,8 @@ bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_r
     g.shadow_hi = static_cast<const uint8_t*>(shadow_region) + shadow_size;
     if (!platform.make_writable(table, kSlotCount * sizeof(void*))) {
         g.shadows_on = false;
+        g.shadow_lo = nullptr;
+        g.shadow_hi = nullptr;
         return false;
     }
     g.installed = true;
