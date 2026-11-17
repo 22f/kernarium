@@ -6305,6 +6305,287 @@ void a_stack_fault_behind_compare_branch_entries_finds_its_instruction()
 		"instruction");
 }
 
+/* The two-operand ALU operations by their reg, reg opcode (r/m, reg form)
+ * and the /digit of their reg, imm32 form (81 /n; TEST is F7 /0). The first
+ * five write their destination. */
+struct AluOperation final {
+	const char *name;
+	std::uint8_t register_opcode;
+	std::uint8_t immediate_digit;
+};
+constexpr std::array<AluOperation, 7> alu_operations{{
+	{"ADD", 0x01, 0}, {"SUB", 0x29, 5}, {"AND", 0x21, 4}, {"OR", 0x09, 1},
+	{"XOR", 0x31, 6}, {"CMP", 0x39, 7}, {"TEST", 0x85, 0},
+}};
+
+/* `op` reg, reg (with `immediate` empty) or reg, imm32 at 32 or 64 bits. */
+void push_alu(std::vector<std::uint8_t> &code, unsigned op, unsigned width,
+	unsigned destination, unsigned source,
+	std::optional<std::uint32_t> immediate = std::nullopt)
+{
+	const auto &operation = alu_operations[op];
+	const unsigned reg_field = immediate ? operation.immediate_digit : source;
+	if (width == 64U || destination >= 8U || reg_field >= 8U)
+		code.push_back(static_cast<std::uint8_t>(0x40U |
+			(width == 64U ? 8U : 0U) | (reg_field >> 3U) << 2U |
+			(destination >> 3U)));
+	code.push_back(immediate ? (op == 6U ? 0xf7 : 0x81) :
+		operation.register_opcode);
+	code.push_back(static_cast<std::uint8_t>(
+		0xc0U | (reg_field & 7U) << 3U | (destination & 7U)));
+	if (immediate)
+		for (unsigned shift = 0; shift < 32U; shift += 8U)
+			code.push_back(static_cast<std::uint8_t>(*immediate >> shift));
+}
+
+/* The twin with no flag record of the writing operation `op` (0 to 4), or of
+ * its reg, imm form with `immediate`. */
+[[nodiscard]] std::uintptr_t unrecorded_entry(unsigned op, unsigned width,
+	bool immediate, unsigned destination, unsigned source)
+{
+	namespace baked = uml::cpu::x86_64::gadgets::baked;
+	const bool wide = width == 64U;
+#define UML_X86_TEST_UNRECORDED(name) \
+	(immediate ? (wide ? baked::uml_x86_64_baked_##name##_64_ri_unrecorded : \
+		baked::uml_x86_64_baked_##name##_32_ri_unrecorded)[destination] : \
+	(wide ? baked::uml_x86_64_baked_##name##_64_rr_unrecorded : \
+		baked::uml_x86_64_baked_##name##_32_rr_unrecorded)[ \
+		destination * baked::gpr_slots + source])
+	switch (op) {
+	case 0: return UML_X86_TEST_UNRECORDED(add);
+	case 1: return UML_X86_TEST_UNRECORDED(sub);
+	case 2: return UML_X86_TEST_UNRECORDED(and);
+	case 3: return UML_X86_TEST_UNRECORDED(or);
+	default: return UML_X86_TEST_UNRECORDED(xor);
+	}
+#undef UML_X86_TEST_UNRECORDED
+}
+
+/* What a program left: the registers it used and the flags SYSCALL saved. */
+struct RegisterOutcome final {
+	std::array<std::uint64_t, 4> registers{};
+	std::uint64_t flags{};
+	std::uintptr_t first{};
+	bool faulted{};
+};
+
+[[nodiscard]] RegisterOutcome run_register_program(
+	const std::vector<std::uint8_t> &code,
+	const std::array<std::uint64_t, 4> &values)
+{
+	using namespace uml::cpu::x86_64;
+	static constexpr std::array<Register, 4> used{
+		Register::rax, Register::rbx, Register::r9, Register::rdx};
+	TestMemory memory;
+	memory.fill(0, std::as_bytes(std::span{code}));
+	gadgets::Executor executor;
+	executor.prepare(memory, 1, 1, 1);
+	CpuState cpu{};
+	for (std::size_t index = 0; index < used.size(); ++index)
+		cpu.gpr(used[index]) = values[index];
+	/* A memory operand through RSI faults. */
+	cpu.gpr(Register::rsi) = 0x20000;
+	const auto selected = executor.select_program(
+		memory, 0, ExecutionMode::long64);
+	require(selected.status == gadgets::BuildStatus::built &&
+			selected.program != nullptr,
+		"flag-overwrite program did not build");
+	RegisterOutcome outcome{};
+	outcome.first = selected.program->native_stream().front();
+	const auto result = gadgets::execute(
+		*selected.program, cpu, memory, executor, 64);
+	outcome.faulted = result.event == uml::cpu::EngineEvent::memory_fault;
+	require(outcome.faulted ||
+			result.event == uml::cpu::EngineEvent::system_call,
+		"flag-overwrite program left unexpectedly");
+	for (std::size_t index = 0; index < used.size(); ++index)
+		outcome.registers[index] = cpu.gpr(used[index]);
+	if (outcome.faulted) {
+		materialize_flags(cpu);
+		outcome.flags = cpu.rflags;
+	} else {
+		outcome.flags = cpu.gpr(Register::r11);
+	}
+	outcome.flags &= 0x8d5U;
+	return outcome;
+}
+
+/* A register-only ADD, SUB, AND, OR or XOR at 32 or 64 bits followed at once
+ * by a register-only ALU instruction writes no flag record, and the pair must
+ * still be the two instructions: the same registers and flags as with a NOP
+ * between, which keeps the first one's record. Every other next instruction
+ * -- one that reads the flags (SETcc, ADC, INC's carry), one with a memory
+ * operand that can fault first -- keeps the record, as does a byte or word
+ * producer. */
+void unread_flag_records_are_not_written()
+{
+	using namespace uml::cpu::x86_64;
+	static constexpr std::array<std::array<std::uint64_t, 4>, 4> values{{
+		{0U, 0U, 0U, 0U},
+		{1U, 0xffff'ffff'ffff'ffffULL, 0x7fff'ffffULL, 5U},
+		{0x8000'0000'0000'0000ULL, 0x8000'0000ULL, 1U, 0x5555'5555'5555'5555ULL},
+		{0xffff'ffffULL, 1U, 0xffff'ffff'8000'0000ULL, 0U},
+	}};
+	static constexpr std::array<std::uint32_t, 2> immediates{1U, 0x8000'0000U};
+	const auto check = [](const std::vector<std::uint8_t> &joined,
+		const std::vector<std::uint8_t> &separated, std::uintptr_t twin,
+		bool expected, const char *what) {
+		for (const auto &value : values) {
+			const auto a = run_register_program(joined, value);
+			const auto b = run_register_program(separated, value);
+			require((a.first == twin) == expected && b.first != twin,
+				std::string{what} + ": the builder chose the twin with no "
+				"record where it should not have, or did not where it "
+				"should");
+			require(a.registers == b.registers && a.flags == b.flags &&
+					a.faulted == b.faulted,
+				std::string{what} + ": a producer without its record ran "
+				"differently from the pair with a NOP between");
+		}
+	};
+	/* RAX op= RBX (or an immediate); then the next instruction on RAX and
+	 * R9; then SYSCALL. */
+	for (unsigned op = 0; op < 5U; ++op) {
+		for (const unsigned width : {32U, 64U}) {
+			for (unsigned form = 0; form <= immediates.size(); ++form) {
+				const bool immediate = form != 0U;
+				const auto first_immediate = immediate ?
+					std::optional{immediates[form - 1U]} : std::nullopt;
+				const auto twin = unrecorded_entry(op, width, immediate, 0, 3);
+				const auto program = [&](bool nop,
+					const std::vector<std::uint8_t> &next) {
+					std::vector<std::uint8_t> code;
+					push_alu(code, op, width, 0, 3, first_immediate);
+					if (nop)
+						code.push_back(0x90);
+					code.insert(code.end(), next.begin(), next.end());
+					code.insert(code.end(), {0x0f, 0x05});
+					return code;
+				};
+				for (unsigned next_op = 0; next_op < alu_operations.size();
+					++next_op) {
+					for (const unsigned next_width : {32U, 64U}) {
+						for (const bool next_immediate : {false, true}) {
+							std::vector<std::uint8_t> next;
+							push_alu(next, next_op, next_width, 0, 9,
+								next_immediate ?
+									std::optional{std::uint32_t{0x80U}} :
+									std::nullopt);
+							check(program(false, next), program(true, next),
+								twin, true, alu_operations[next_op].name);
+						}
+					}
+				}
+				/* Next instructions that keep the record, and one that
+				 * does not. */
+				const std::array<std::pair<const char *,
+					std::vector<std::uint8_t>>, 7> keeps{{
+					{"SETZ DL", {0x0f, 0x94, 0xc2}},
+					{"ADC RAX, R9", {0x4c, 0x11, 0xc8}},
+					{"INC RAX", {0x48, 0xff, 0xc0}},
+					{"ADD RAX, [RSI] (faults)", {0x48, 0x03, 0x06}},
+					{"ADD [RSI], RAX (faults)", {0x48, 0x01, 0x06}},
+					{"ADD AX, R9W", {0x66, 0x44, 0x01, 0xc8}},
+					{"MOV RAX, R9", {0x4c, 0x89, 0xc8}},
+				}};
+				for (const auto &[what, next] : keeps) {
+					/* A word-sized ALU instruction replaces every flag
+					 * as well. */
+					const bool replaced = std::string_view{what} ==
+						"ADD AX, R9W";
+					check(program(false, next), program(true, next), twin,
+						replaced, what);
+				}
+			}
+		}
+	}
+	/* A byte or word producer keeps its record. */
+	for (const unsigned width : {8U, 16U}) {
+		std::vector<std::uint8_t> joined;
+		if (width == 16U)
+			joined.push_back(0x66);
+		joined.insert(joined.end(), {0x01, 0xd8}); // add [e]ax, [e]bx
+		if (width == 8U)
+			joined.back() = 0xd8, joined.front() = 0x00;
+		auto separated = joined;
+		separated.push_back(0x90);
+		for (auto *code : {&joined, &separated})
+			code->insert(code->end(), {0x48, 0x01, 0xc8, 0x0f, 0x05});
+		for (const auto &value : values) {
+			const auto a = run_register_program(joined, value);
+			const auto b = run_register_program(separated, value);
+			require(a.first == b.first && a.registers == b.registers &&
+					a.flags == b.flags,
+				"a byte or word producer took a twin without its record");
+		}
+	}
+}
+
+/* Through a run of producers each but the last skips its record; a block
+ * that ends after the producer, and a budget that stops after it (a replay of
+ * the block cut there), keep it. */
+void unread_flag_records_keep_the_last_and_the_stopped()
+{
+	using namespace uml::cpu::x86_64;
+	/* add rax, rbx; sub rax, r9; xor rbx, rax; and rax, 0x7f; syscall */
+	const std::vector<std::uint8_t> run{
+		0x48, 0x01, 0xd8, 0x4c, 0x29, 0xc8, 0x48, 0x31, 0xc3,
+		0x48, 0x83, 0xe0, 0x7f, 0x0f, 0x05};
+	std::vector<std::uint8_t> separated;
+	for (const auto &[from, to] : std::array<std::pair<std::size_t,
+		std::size_t>, 4>{{{0, 3}, {3, 6}, {6, 9}, {9, 13}}}) {
+		separated.insert(separated.end(), run.begin() +
+			static_cast<std::ptrdiff_t>(from), run.begin() +
+			static_cast<std::ptrdiff_t>(to));
+		separated.push_back(0x90);
+	}
+	separated.insert(separated.end(), {0x0f, 0x05});
+	TestMemory memory;
+	memory.fill(0, std::as_bytes(std::span{run}));
+	gadgets::Executor executor;
+	executor.prepare(memory, 1, 1, 1);
+	const auto block = executor.select_program(
+		memory, 0, ExecutionMode::long64);
+	require(block.program != nullptr, "producer run did not build");
+	const auto stream = block.program->native_stream();
+	require(stream.size() > 5U && stream[0] == unrecorded_entry(0, 64U,
+			false, 0, 3) && stream[1] == unrecorded_entry(1, 64U, false,
+			0, 9) && stream[2] == unrecorded_entry(4, 64U, false, 3, 0) &&
+			stream[3] != unrecorded_entry(2, 64U, true, 0, 0),
+		"a run of producers did not skip every record but the last");
+	for (const auto &value : std::array<std::array<std::uint64_t, 4>, 2>{{
+		{5U, 7U, 12U, 0U}, {0x8000'0000'0000'0000ULL, 1U, 0U, 0U}}}) {
+		const auto a = run_register_program(run, value);
+		const auto b = run_register_program(separated, value);
+		require(a.registers == b.registers && a.flags == b.flags,
+			"a run of producers without their records ran differently");
+	}
+	/* The block cut after the first producer keeps its record. */
+	{
+		gadgets::Executor cut_executor;
+		cut_executor.prepare(memory, 1, 1, 1);
+		const auto cut = cut_executor.select_program(
+			memory, 0, ExecutionMode::long64, 1);
+		require(cut.program != nullptr &&
+				cut.program->native_stream().front() !=
+					unrecorded_entry(0, 64U, false, 0, 3),
+			"a producer that ends its block skipped its record");
+	}
+	/* A budget of one replays the block cut after the first producer. */
+	CpuState cpu{};
+	cpu.gpr(Register::rax) = 0xffff'ffff'ffff'ffffULL;
+	cpu.gpr(Register::rbx) = 1U;
+	const auto result = gadgets::execute(
+		*block.program, cpu, memory, executor, 1);
+	require(result.event == uml::cpu::EngineEvent::continued &&
+			result.retired_instructions == 1U && cpu.rip == 3U,
+		"a budget of one did not stop after the first producer");
+	materialize_flags(cpu);
+	/* 0xffff...ff + 1: zero, carry, parity and adjust set. */
+	require((cpu.rflags & 0x8d5U) == 0x55U,
+		"a producer a budget stopped after left no record of its flags");
+}
+
 /* The host reports the emulated CPU to the guest kernel from cpuid.hpp, and
  * the guest reads the same CPU by executing CPUID. Both answers must be the
  * same answer: whatever /proc/cpuinfo says a program may use, CPUID has to
@@ -11697,6 +11978,8 @@ int main(int argc, char **argv)
 	compare_branch_entries_run_both_instructions();
 	compare_branch_entries_keep_the_inline_contract();
 	a_stack_fault_behind_compare_branch_entries_finds_its_instruction();
+	unread_flag_records_are_not_written();
+	unread_flag_records_keep_the_last_and_the_stopped();
 	cpuid_table_matches_the_gadget();
 	x87_zero_results_keep_their_sign();
 	preserve_precise_memory_fault();
