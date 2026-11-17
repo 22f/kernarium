@@ -2778,10 +2778,10 @@ def run_op(options):
     except ValueError as error:
         log(str(error))
         return EXIT_FAILED
-    if op == "activate" and not activation_keeps_phone_silent(options):
-        return EXIT_FAILED
     if op in STARTING_COMMANDS and not check_report_slots(
             options, [bundle_process(command.get("bundle") or options.bundle)]):
+        return EXIT_FAILED
+    if op == "activate" and not activation_keeps_phone_silent(options):
         return EXIT_FAILED
     reply = send(options, command, options.timeout)
     data = reply.pop("data", None)

@@ -140,7 +140,8 @@ class ActivationTests(unittest.TestCase):
                 status, sent, checked, errors = self.activate(state=state)
                 self.assertEqual(status, automation.EXIT_FAILED)
                 self.assertEqual(sent, ["state"])
-                self.assertEqual(checked, [], "no report was moved for a refusal")
+                # The report check comes first, as before any device action.
+                self.assertEqual(checked, ["Andarium"])
                 self.assertIn("launch", errors)
                 self.assertIn("--haptics", errors)
 
@@ -177,7 +178,7 @@ class ActivationTests(unittest.TestCase):
         status, sent, checked, _ = self.activate(state_ok=False)
         self.assertEqual(status, automation.EXIT_FAILED)
         self.assertEqual(sent, ["state"])
-        self.assertEqual(checked, [])
+        self.assertEqual(checked, ["Andarium"])
 
 
 if __name__ == "__main__":
