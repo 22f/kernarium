@@ -25,26 +25,28 @@ __access_remote_vm() holds the page it wrote, and process_vm_writev()
 passes the pages it pinned to a new flush_icache_remote_user_pages()
 hook, one call per page of the batch. An AArch32 cacheflush() writes
 nothing and is still told by address, through
-flush_icache_remote_user_range(). The bridge ABI goes to 27, which also
-declares darwin_uml_vm_invalidate_code_frames() for a kernel write into
-a page-cache frame (the x86_64 slice's flush_dcache_folio() calls it).
+flush_icache_remote_user_range(), which only a kernel that runs AArch32
+tasks builds, so the x86_64 slice no longer imports that entry. The
+bridge ABI goes to 27, which also declares
+darwin_uml_vm_invalidate_code_frames() for a kernel write into a
+page-cache frame (the x86_64 slice's flush_dcache_folio() calls it).
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- arch/um/include/asm/cacheflush.h            | 11 +++-
+ arch/um/include/asm/cacheflush.h            | 15 ++++--
  arch/um/include/shared/os.h                 |  7 +++
- arch/um/kernel/tlb.c                        | 56 ++++++++++++++++++---
+ arch/um/kernel/tlb.c                        | 59 ++++++++++++++++++---
  arch/um/os-Darwin/uml_darwin_abi_identity.h |  4 +-
  arch/um/os-Darwin/uml_darwin_memory.h       | 27 ++++++++++
- include/asm-generic/cacheflush.h            | 20 ++++++--
+ include/asm-generic/cacheflush.h            | 20 +++++--
  mm/process_vm_access.c                      |  3 +-
- 7 files changed, 114 insertions(+), 14 deletions(-)
+ 7 files changed, 120 insertions(+), 15 deletions(-)
 
 diff --git a/arch/um/include/asm/cacheflush.h b/arch/um/include/asm/cacheflush.h
-index 31deab0b5c24a55cd6baf6a253f418fc98db3ed0..e4a10304d226fccb4c415ac8c26524a4a43d9e9e 100644
+index 31deab0b5c24a55cd6baf6a253f418fc98db3ed0..a18b3a62e8bc588cfcd054cdc48b04d932431945 100644
 --- a/arch/um/include/asm/cacheflush.h
 +++ b/arch/um/include/asm/cacheflush.h
-@@ -14,16 +14,23 @@ struct page;
+@@ -14,17 +14,26 @@ struct page;
  /*
   * Darwin guests run translated code cached by address. A ptrace,
   * /proc/pid/mem or process_vm_writev() store reaches another process's
@@ -53,23 +55,27 @@ index 31deab0b5c24a55cd6baf6a253f418fc98db3ed0..e4a10304d226fccb4c415ac8c26524a4
 + * memory through the kernel's view of the frame, so name that frame to the
 + * host, which publishes the change at the frame's holders whatever the
 + * process maps at the address by now. An AArch32 cacheflush() changes no
-+ * frame and is told by address.
++ * frame and is told by address, in a kernel that runs AArch32 tasks.
   */
  extern void darwin_flush_icache_user_page(struct vm_area_struct *vma,
  					  struct page *page,
  					  unsigned long addr, int len);
+-extern void darwin_flush_icache_remote_user_range(struct mm_struct *mm,
 +extern void darwin_flush_icache_remote_user_pages(struct mm_struct *mm,
 +						  struct page **pages,
-+						  unsigned long start,
-+						  unsigned long len);
- extern void darwin_flush_icache_remote_user_range(struct mm_struct *mm,
  						  unsigned long start,
  						  unsigned long len);
  #define flush_icache_user_page darwin_flush_icache_user_page
 +#define flush_icache_remote_user_pages darwin_flush_icache_remote_user_pages
++#ifdef CONFIG_UML_ARM64_AARCH32
++extern void darwin_flush_icache_remote_user_range(struct mm_struct *mm,
++						  unsigned long start,
++						  unsigned long len);
  #define flush_icache_remote_user_range darwin_flush_icache_remote_user_range
++#endif
  
  /*
+  * With 4 KiB pages on a 16 KiB host, a kernel alias whose host page does not
 diff --git a/arch/um/include/shared/os.h b/arch/um/include/shared/os.h
 index baa005982001744d04629b405948124d2e100a95..7950c3f1a95380d0bd9820dfedd28f6c9d20c532 100644
 --- a/arch/um/include/shared/os.h
@@ -89,17 +95,19 @@ index baa005982001744d04629b405948124d2e100a95..7950c3f1a95380d0bd9820dfedd28f6c
  					  void *address,
  					  unsigned long length);
 diff --git a/arch/um/kernel/tlb.c b/arch/um/kernel/tlb.c
-index 7ce5ae0fe9820ab0e84bdfab11d201634b1bd0d5..ba0e31a27895d46186b0407170f6be24252b9f68 100644
+index 7ce5ae0fe9820ab0e84bdfab11d201634b1bd0d5..4b3b6019b6650d789f8f339311f3b874e799383c 100644
 --- a/arch/um/kernel/tlb.c
 +++ b/arch/um/kernel/tlb.c
-@@ -1267,28 +1267,72 @@ void darwin_tlb_flush_range(struct mm_struct *mm, unsigned long start,
+@@ -1267,28 +1267,75 @@ void darwin_tlb_flush_range(struct mm_struct *mm, unsigned long start,
  	darwin_tlb_flush_guest_range(mm, max(start, native_end), end);
  }
  
++#ifdef CONFIG_UML_ARM64_AARCH32
 +/*
 + * A flush by address, as an AArch32 cacheflush() makes it: no page is held
 + * and nothing was written, so the host publishes the frames the mm maps in
-+ * the range now.  A 32-bit address carries no tag.
++ * the range now.  A 32-bit address carries no tag.  Only a kernel that runs
++ * AArch32 tasks has it, and imports the host's entry for it.
 + */
  void darwin_flush_icache_remote_user_range(struct mm_struct *mm,
  					   unsigned long start,
@@ -115,6 +123,7 @@ index 7ce5ae0fe9820ab0e84bdfab11d201634b1bd0d5..ba0e31a27895d46186b0407170f6be24
  		panic("Darwin: unable to invalidate guest mm %lu code %#lx+%#lx",
  		      mm->context.id.darwin_generation, start, len);
  }
++#endif
  
 +/*
 + * The kernel wrote @len bytes at @addr, in one page of another process's mm,

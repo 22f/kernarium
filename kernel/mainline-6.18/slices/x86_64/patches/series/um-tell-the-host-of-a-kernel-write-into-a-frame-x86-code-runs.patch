@@ -35,12 +35,12 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  2 files changed, 93 insertions(+)
 
 diff --git a/arch/um/include/asm/cacheflush.h b/arch/um/include/asm/cacheflush.h
-index e4a10304d226fccb4c415ac8c26524a4a43d9e9e..a32dd92c46bf86fcaffb12a3fcb0349c3b1b0d74 100644
+index a18b3a62e8bc588cfcd054cdc48b04d932431945..af57a23a93094a2f4af4d9858a2b6c41f093e6af 100644
 --- a/arch/um/include/asm/cacheflush.h
 +++ b/arch/um/include/asm/cacheflush.h
-@@ -33,6 +33,21 @@ extern void darwin_flush_icache_remote_user_range(struct mm_struct *mm,
- #define flush_icache_remote_user_pages darwin_flush_icache_remote_user_pages
+@@ -35,6 +35,21 @@ extern void darwin_flush_icache_remote_user_range(struct mm_struct *mm,
  #define flush_icache_remote_user_range darwin_flush_icache_remote_user_range
+ #endif
  
 +/*
 + * x86 userspace runs translated code the host caches by frame, and an x86
@@ -61,7 +61,7 @@ index e4a10304d226fccb4c415ac8c26524a4a43d9e9e..a32dd92c46bf86fcaffb12a3fcb0349c
   * With 4 KiB pages on a 16 KiB host, a kernel alias whose host page does not
   * map one aligned group of four consecutive frames is a private copy, and
 diff --git a/arch/um/kernel/tlb.c b/arch/um/kernel/tlb.c
-index ba0e31a27895d46186b0407170f6be24252b9f68..6d3a1cfe562ad13ed055fbb17238aebe1a0397a6 100644
+index 4b3b6019b6650d789f8f339311f3b874e799383c..6ad79cf7bb05341094bd24e0c1247e86b5203099 100644
 --- a/arch/um/kernel/tlb.c
 +++ b/arch/um/kernel/tlb.c
 @@ -121,6 +121,27 @@ static inline int darwin_guest_protection(struct mm_struct *mm, int prot,
@@ -109,7 +109,7 @@ index ba0e31a27895d46186b0407170f6be24252b9f68..6d3a1cfe562ad13ed055fbb17238aebe
  		if (ops->mm == &init_mm)
  			spin_unlock(ptl);
  		else
-@@ -1304,6 +1335,53 @@ static void darwin_flush_icache_frame(struct mm_struct *mm, struct page *page,
+@@ -1307,6 +1338,53 @@ static void darwin_flush_icache_frame(struct mm_struct *mm, struct page *page,
  		      mm->context.id.darwin_generation, addr, len);
  }
  
