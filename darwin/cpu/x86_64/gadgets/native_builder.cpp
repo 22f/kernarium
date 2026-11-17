@@ -5987,7 +5987,9 @@ UML_X86_BAKED_CARRY_TABLES(decrement)
  * dispatch. Neither instruction can fault or leave, so no exit sees the
  * compare retired and the branch not. The branch is marked absorbed and
  * emits nothing; a build without links, a budget-limited replay, keeps the
- * two apart. */
+ * two apart. The branch needs no position check of its own: the instruction
+ * after it is further into the block and passes its own, or the block ends
+ * before it and the rebuild leaves the branch last, unjoined. */
 [[nodiscard]] bool append_compare_branch(StreamWords &stream,
 	const Gadget &gadget, ExecutionMode mode, ProgramLinkResolver links,
 	std::span<const Gadget> rest, FlagState &produced)
@@ -6005,12 +6007,11 @@ UML_X86_BAKED_CARRY_TABLES(decrement)
 	const auto width = instruction.destination.width;
 	if (width != OperandWidth::dword && width != OperandWidth::qword)
 		return false;
-	const auto d = baked_register_slot(instruction.destination);
-	if (!d || *d >= baked::gpr_slots)
-		return false;
+	/* At 32 and 64 bits a register operand is one of the sixteen general
+	 * registers, whose baked slot is its index. */
+	const unsigned d = instruction.destination.reg.index;
 	const auto &branch = rest[0];
 	if (branch.instruction.operation != Operation::jump_conditional ||
-		!stream.position(branch) ||
 		!fused_condition(branch.instruction.condition,
 			compare ? HostFlags::subtract : HostFlags::logical))
 		return false;
@@ -6024,7 +6025,7 @@ UML_X86_BAKED_CARRY_TABLES(decrement)
 		(width == OperandWidth::qword ? baked::uml_x86_64_baked_test_64_ri_jcc :
 			baked::uml_x86_64_baked_test_32_ri_jcc);
 	const auto entry = table[static_cast<unsigned>(branch.instruction.condition) *
-		baked::gpr_slots + *d];
+		baked::gpr_slots + d];
 	if (entry == 0)
 		return false;
 	stream.push_back(entry);
