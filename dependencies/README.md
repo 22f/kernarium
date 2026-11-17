@@ -25,7 +25,7 @@ script below; per-platform contracts are under [`platforms/`](platforms).
 | `ios-compression` | `build-ios-zstd.sh` |
 | `kernel-host-tools` | `build-kernel-host-tools.sh`, after `prepare.sh --archive-manifest kernel-host-tools/archives.tsv` |
 | `x86-conformance` | none: prepared only |
-| `andarium-accessibility` | `build-andarium-accessibility.sh` |
+| `andarium-accessibility` | none: prepared only |
 
 - `macos`: non-graphics static host libraries at
   `.build/dependencies/macos-arm64-27`. It also carries FEXCore for the
@@ -50,22 +50,14 @@ script below; per-platform contracts are under [`platforms/`](platforms).
 - `kernel-host-tools`: pahole and the static libelf the Darwin kernel build
   uses for BTF, at `.build/dependencies/kernel-host-tools`; patch-managed
   Darwin ports that run only on the build host.
-- `andarium-accessibility`: TalkBack and eSpeak NG, the screen reader and the
-  voice the LineageOS image carries, built on an Apple silicon Mac as the
-  accessibility artifact in `.build/andarium-accessibility`: both release APKs,
-  unsigned, and `artifact.json`
-  ([`../android/lineage-24/README.md`](../android/lineage-24/README.md#accessibility)).
-  Its sources are TalkBack, eSpeak NG and libsonic. The archives of
-  [`andarium-accessibility/archives.tsv`](andarium-accessibility/archives.tsv)
-  are both Gradle distributions and every Maven artifact the phone release
-  builds resolve, which `prepare.sh --archive-manifest` fetches and verifies;
-  `prepare.sh --product andarium-accessibility --pin-archives PATH` is what
-  regenerates that list. The JDK and Android SDK components are pinned in
-  [`andarium-accessibility/toolchain.tsv`](andarium-accessibility/toolchain.tsv)
-  and the builder refuses any other. The TalkBack series
-  ([`patches/talkback`](patches/talkback/series.tsv)) leaves every Google Play
-  services library out of the phone build, which recognises no text in images
-  (OCR) as a result.
+- `andarium-accessibility`: the sources of TalkBack, eSpeak NG and libsonic,
+  the screen reader and the voice the LineageOS image carries, as topic
+  checkouts for their series. The image build compiles them: the
+  [Android producer](../android/lineage-24/README.md#accessibility) pins the
+  same commits and materializes them with these series
+  ([`patches/talkback`](patches/talkback/series.tsv),
+  [`patches/espeak-ng`](patches/espeak-ng/series.tsv)), whose last patch is the
+  Soong build, and a pin moves in `manifest.tsv` and in its metadata together.
 - `x86-conformance`: the test-only FEX and K x86-64 corpora and their pinned
   producer inputs, used to generate the checked-in x86 unit corpus (see
   [`../tools/fex-tests/README.md`](../tools/fex-tests/README.md)).

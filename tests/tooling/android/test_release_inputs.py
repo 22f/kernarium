@@ -143,8 +143,8 @@ class TrackedListTests(unittest.TestCase):
             uncovered, [],
             "tracked files under android/lineage-24 that input-paths.tsv does not "
             "classify as input or excluded")
-        # A row may name a path outside android/lineage-24 (the accessibility
-        # artifact's inputs under dependencies/).
+        # A row may name a path outside android/lineage-24 (the series of
+        # TalkBack and eSpeak NG under dependencies/patches).
         tracked = set(git(ROOT, "ls-files", "--", *[path for _, path, _ in rows]).splitlines())
         for kind, path, _ in rows:
             with self.subTest(path):
@@ -170,10 +170,6 @@ class TrackedListTests(unittest.TestCase):
             # TalkBack and eSpeak NG, which the image builds from source: their
             # pins and the series that carry their Soong build.
             "android/lineage-24/third_party",
-            "dependencies/andarium-accessibility/archives.tsv",
-            "dependencies/andarium-accessibility/identity.py",
-            "dependencies/andarium-accessibility/toolchain.tsv",
-            "dependencies/build-andarium-accessibility.sh",
             "dependencies/patches/talkback",
             "dependencies/patches/espeak-ng",
         ):

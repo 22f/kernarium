@@ -35,11 +35,6 @@ excluded	android/lineage-24/support/release/input-paths.tsv	this list, compared 
 excluded	android/lineage-24/support/release/release-manifest.schema.json	describes the manifest and decides none of it
 input	android/lineage-24/third_party	the guest Mesa Venus port and its converter, whose tools/rootfs/vulkan series is pinned by tree here, and the pins of TalkBack, eSpeak NG and libsonic
 excluded	android/lineage-24/README.md	documentation
-input	dependencies/andarium-accessibility/archives.tsv	the downloads the accessibility artifact is built from
-input	dependencies/andarium-accessibility/identity.py	computes the identity the accessibility artifact is checked against
-input	dependencies/andarium-accessibility/toolchain.tsv	the JDK and SDK versions the accessibility artifact is built with
-excluded	dependencies/andarium-accessibility	regenerates the archive list, which is the input
-input	dependencies/build-andarium-accessibility.sh	builds the TalkBack and eSpeak NG APKs
 input	dependencies/patches/espeak-ng	the series applied to eSpeak NG, with its Soong build
 input	dependencies/patches/talkback	the series applied to TalkBack, with its Soong build
 input	android/lineage-24/tools/precompile-first-boot-apps.py	compiles the first-boot artifacts the image ships

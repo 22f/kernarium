@@ -93,6 +93,15 @@ uml_add_tooling_test(
     LABELS android;audit
     TIMEOUT 60)
 
+# The TalkBack the image builds is the package Andarium's screen-reader switch
+# names, installed where the target-files verifier requires it.
+uml_add_tooling_test(
+    NAME lineage24-accessibility-package
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_accessibility_package.py
+    LABELS android;audit
+    TIMEOUT 60)
+
 # The licence modules of the series that build TalkBack and eSpeak NG name what
 # each holds, for the image's NOTICE, with the text of every copyleft kind.
 uml_add_tooling_test(
