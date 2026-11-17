@@ -5159,6 +5159,60 @@ void bmi_gadgets_keep_the_table_base()
 		"an access after a BMI gadget missed the run's table");
 }
 
+/* RORX's memory form and the ternary memory forms compute their
+ * destination's offset after their last helper call: the translation's miss,
+ * or the crossing load of an operand that runs onto the next page. Each form
+ * runs here on a first touch of its page and across a page edge. */
+void bmi_memory_forms_cross_a_page()
+{
+	using namespace uml::cpu::x86_64;
+	constexpr std::uint64_t plain = 0x2000;
+	constexpr std::uint64_t crossing = 0x3000 - 3U;
+	constexpr std::uint64_t early = 0x1000 - 6U;
+	const std::vector<std::uint8_t> code{
+		0xc4, 0x63, 0xfb, 0xf0, 0x06, 0x0d, // rorx r8,[rsi],13
+		0xc4, 0x63, 0xfb, 0xf0, 0x0f, 0x0d, // rorx r9,[rdi],13
+		0xc4, 0x62, 0xf2, 0xf5, 0x17,       // pext r10,rcx,[rdi]
+		0xc4, 0x62, 0xf0, 0xf2, 0x22,       // andn r12,rcx,[rdx]
+		0x0f, 0x05,                         // syscall
+	};
+	TestMemory memory;
+	memory.fill(0, std::as_bytes(std::span{code}));
+	constexpr std::uint64_t source = 0x00f0'0000'0000'0f00ULL;
+	const auto plant = [&](std::uint64_t address, std::uint64_t value) {
+		for (unsigned index = 0; index < 8U; ++index)
+			memory.load(address + index,
+				{static_cast<std::uint8_t>(value >> (8U * index))});
+	};
+	constexpr std::uint64_t at_plain = 0x0123'4567'89ab'cdefULL;
+	constexpr std::uint64_t at_crossing = 0x0f0f'00ff'1234'8001ULL;
+	constexpr std::uint64_t at_early = 0xff00'f0f0'0ff0'5a5aULL;
+	plant(plain, at_plain);
+	plant(crossing, at_crossing);
+	plant(early, at_early);
+	const auto built = require_built(gadgets::build(memory, 0),
+		"the BMI memory forms did not build");
+	CpuState cpu{};
+	cpu.gpr(Register::rcx) = source;
+	cpu.gpr(Register::rsi) = plain;
+	cpu.gpr(Register::rdi) = crossing;
+	cpu.gpr(Register::rdx) = early;
+	const auto result = gadgets::execute(built.program, cpu, memory, 8);
+	require(result.event == uml::cpu::EngineEvent::system_call &&
+			result.retired_instructions == 5,
+		"the BMI memory forms did not reach SYSCALL");
+	require(cpu.gpr(Register::r8) == std::rotr(at_plain, 13) &&
+			cpu.gpr(Register::r9) == std::rotr(at_crossing, 13),
+		"RORX's memory form lost its destination");
+	require(cpu.gpr(Register::r10) == parallel_extract(source, at_crossing) &&
+			cpu.gpr(Register::r12) == (~source & at_early),
+		"a ternary memory form lost its destination across a page edge");
+	require(cpu.gpr(Register::rsi) == plain &&
+			cpu.gpr(Register::rdi) == crossing &&
+			cpu.gpr(Register::rdx) == early,
+		"a BMI memory form wrote its address register");
+}
+
 /* PMOVMSKB collapses one sign bit per byte into a bit mask. The corpus carries
  * only one or two cases per width, which a lane-ordering mistake can survive,
  * so walk a single set bit through every position instead.
@@ -7867,6 +7921,50 @@ void native_aam_raises_divide_error_precisely()
 		"AAM 0 retired or lost its precise RIP");
 	require(cpu.gpr(Register::rax) == 0x1234'0305,
 		"AAM 10 did not divide AL, or AAM 0 changed AX");
+}
+
+/* IRET pops its frame from RSP, and a pop that faults leaves before anything
+ * commits, with RIP naming the IRET, which the gadget reads back from its own
+ * stream word, and the fault at the slot's address: the first slot on an
+ * unmapped page, the first slot crossing into one, and a later slot on one.
+ * A NOP ahead of it keeps the IRET off both 0 and the block's start. */
+void native_iret_faults_report_the_iret()
+{
+	using namespace uml::cpu::x86_64;
+	constexpr std::uint64_t code = 0x1000;
+	constexpr std::uint64_t edge = 16384;
+	constexpr std::uint64_t unmapped = 0x20000;
+	TestMemory memory;
+	memory.load(code, {0x90, 0x48, 0xcf});
+	const auto built = require_built(gadgets::build(memory, code, 2),
+		"the IRETQ block did not build");
+	const struct {
+		std::uint64_t rsp;
+		std::uint64_t fault;
+		const char *name;
+	} cases[] = {
+		{unmapped, unmapped, "an IRETQ whose frame is unmapped"},
+		{edge - 4U, edge - 4U, "an IRETQ whose RIP slot runs onto an unmapped page"},
+		{edge - 8U, edge, "an IRETQ whose CS slot is unmapped"},
+	};
+	for (const auto &test : cases) {
+		CpuState cpu{};
+		cpu.rip = code;
+		cpu.gpr(Register::rsp) = test.rsp;
+		const auto result = gadgets::execute(built.program, cpu, memory, 2);
+		const std::string name{test.name};
+		require(result.event == uml::cpu::EngineEvent::memory_fault,
+			(name + " did not leave with a memory fault").c_str());
+		require(result.retired_instructions == 1 && cpu.rip == code + 1U,
+			(name + " reported RIP " + std::to_string(cpu.rip) +
+				" after retiring " +
+				std::to_string(result.retired_instructions)).c_str());
+		require(result.fault.address == test.fault &&
+				result.fault.access == uml::memory::MemoryAccess::read &&
+				cpu.gpr(Register::rsp) == test.rsp,
+			(name + " reported the fault at " +
+				std::to_string(result.fault.address)).c_str());
+	}
 }
 
 /* ICEBP (INT1) raises #DB as a trap in either mode: it retires, and RIP
@@ -12979,6 +13077,7 @@ int main(int argc, char **argv)
 	pages_sharing_an_entry_keep_their_own_bytes();
 	each_run_translates_through_its_executors_table();
 	bmi_gadgets_keep_the_table_base();
+	bmi_memory_forms_cross_a_page();
 	stack_twins_match_their_ordinary_entries();
 	stack_twins_refuse_an_access_across_a_page();
 	stack_twins_take_the_ordinary_path_off_their_page();
@@ -13029,6 +13128,7 @@ int main(int argc, char **argv)
 	native_divide_traps_precisely();
 	native_into_reports_overflow_precisely();
 	native_aam_raises_divide_error_precisely();
+	native_iret_faults_report_the_iret();
 	icebp_raises_a_debug_trap_after_itself();
 	bound_checks_a_signed_range();
 	privileged_instructions_raise_general_protection();
