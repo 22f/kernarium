@@ -25,7 +25,11 @@ device: never stop a working host without someone to approve its successor.
 Run `start` only while someone can approve, because XCTest gives up 60 s after
 the runner starts and leaves the prompt on screen. The host targets
 com.imxieyi.Kernarium unless --bundle names another application, such as
-com.apple.springboard.
+com.apple.springboard. A `launch` of Andarium (com.imxieyi.andarium) keeps the
+phone silent by stating ANDARIUM_HAPTICS=0; `launch --haptics` leaves that out
+for a run that tests haptics. `activate` of an Andarium that is not running is
+refused, since the host starts it with no environment: use `launch`
+(`activate --haptics` starts it for a run that tests haptics).
 
 A coordinate tap or drag names points as offsets from the origin of that
 application's frame, which `tree` prints; springboard's frame is the whole
@@ -331,6 +335,7 @@ RECORDING_SETTINGS = {
 SCRIPT = pathlib.Path(__file__).resolve()
 CHECKOUT = SCRIPT.parents[2]
 sys.path.insert(0, str(CHECKOUT / "tests" / "integration" / "support"))
+import andarium  # noqa: E402
 import ios_device_reports  # noqa: E402
 
 # The processes whose diagnostic reports a host session needs free slots for:
@@ -2701,7 +2706,11 @@ def build_command(options):
     op = options.command
     command = {"op": op}
     if op == "launch":
-        command["environment"] = dict(item.split("=", 1) for item in options.env)
+        environment = dict(item.split("=", 1) for item in options.env)
+        if options.bundle == andarium.BUNDLE_ID and not options.haptics:
+            # An automated launch keeps the phone silent unless it tests haptics.
+            environment[andarium.HAPTICS_SETTING] = andarium.HAPTICS_OFF
+        command["environment"] = environment
         command["arguments"] = options.arg
     elif op in ("tap", "wait", "exists"):
         command.update(element_fields(options))
@@ -2735,6 +2744,33 @@ def bundle_process(bundle):
     return BUNDLE_PROCESSES.get(bundle) or bundle.rsplit(".", 1)[-1]
 
 
+# XCUIApplication.State of an application that is not running (unknown is 0).
+NOT_RUNNING_STATES = (0, 1)
+
+
+def activation_keeps_phone_silent(options):
+    """Whether `activate` may go to the host. The host's activation starts a
+    stopped application with no launch environment, so a stopped Andarium
+    would start with its haptics on (and a host that is running is never
+    rebuilt to carry one): it is refused, and `launch` is the way to start it,
+    unless the run tests haptics. A running application is only brought to the
+    front."""
+    if options.bundle != andarium.BUNDLE_ID or options.haptics:
+        return True
+    reply = send(options, {"op": "state"}, options.timeout)
+    if not reply.get("ok"):
+        log(f"cannot tell whether {options.bundle} is running: {reply.get('error', reply)}")
+        return False
+    state = reply.get("state")
+    if state is None or state in NOT_RUNNING_STATES:
+        log(f"refusing to activate {options.bundle}: it is not running, and an "
+            f"activation starts it without {andarium.HAPTICS_SETTING}="
+            f"{andarium.HAPTICS_OFF}, so its haptics would play; use `launch`, "
+            "or `activate --haptics` for a run that tests haptics")
+        return False
+    return True
+
+
 def run_op(options):
     op = options.command
     try:
@@ -2744,6 +2780,8 @@ def run_op(options):
         return EXIT_FAILED
     if op in STARTING_COMMANDS and not check_report_slots(
             options, [bundle_process(command.get("bundle") or options.bundle)]):
+        return EXIT_FAILED
+    if op == "activate" and not activation_keeps_phone_silent(options):
         return EXIT_FAILED
     reply = send(options, command, options.timeout)
     data = reply.pop("data", None)
@@ -2845,6 +2883,12 @@ def parse(argv):
     launch = commands.add_parser("launch", help="launch (or relaunch) the application")
     launch.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
     launch.add_argument("--arg", action="append", default=[])
+    launch.add_argument(
+        "--haptics", action="store_true",
+        help="this run tests haptics: an Andarium launch then states no haptics "
+        "setting, so the application's own Haptics switch decides (without it "
+        f"the launch states {andarium.HAPTICS_SETTING}={andarium.HAPTICS_OFF} "
+        "and the phone stays silent); Kernarium plays none, and ignores it")
     ios_device_reports.add_arguments(launch)
     for name, text in (("activate", "bring the application to the foreground"),
                        ("terminate", "terminate the application"),
@@ -2852,6 +2896,12 @@ def parse(argv):
                        ("tree", "print the application's element tree")):
         sub = commands.add_parser(name, help=text)
         if name == "activate":
+            sub.add_argument(
+                "--haptics", action="store_true",
+                help="this run tests haptics: a stopped Andarium may then be "
+                "started by activation, with its own Haptics switch deciding "
+                "(without it activation of a stopped Andarium is refused: "
+                "use launch)")
             ios_device_reports.add_arguments(sub)
     for name, text in (("tap", "tap an element or a point in the application"),
                        ("wait", "wait for an element to appear or disappear"),
@@ -2897,6 +2947,9 @@ def parse(argv):
         parser.error("name the device with --device or $KERNARIUM_AUTOMATION_DEVICE")
     if options.command == "tap" and (options.x is None) != (options.y is None):
         parser.error("tap needs both --x and --y")
+    if options.command == "launch" and any(
+            item.partition("=")[0] == andarium.HAPTICS_SETTING for item in options.env):
+        parser.error(f"{andarium.HAPTICS_SETTING} is the --haptics option's, not an --env pair")
     if options.command == "watch" and options.launchd_log and not options.print_launchd_job:
         parser.error("--launchd-log goes with --print-launchd-job")
     return options

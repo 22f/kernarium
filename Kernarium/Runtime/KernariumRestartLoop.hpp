@@ -64,12 +64,15 @@ struct Timing final {
  * boot must wait. Any thread may call any member.
  *
  * The next boot waits while the guest is paused (quiesce until resume), and
- * while the GPU's request gate is held (set_gpu_hold). A guest that booted
- * behind a closed gate would find its GPU unanswered: the virtio_gpu probe
- * waits five seconds for each capset and, on a timeout, drops every capset for
- * the whole boot, so the guest would run without 3D after the application
- * returned. The first boot is not held: a hold asked for before the guest's
- * GPU exists is applied when it does.
+ * from the moment the application asks for the GPU's request gate to be held
+ * (set_gpu_hold) until it gives the requests back, whether the gate has closed
+ * yet or not: a hold on an Android guest first waits for the guest's camera,
+ * and a restarted guest that began meanwhile would find the gate closed
+ * behind it. A guest that booted behind a closed gate would find its GPU
+ * unanswered: the virtio_gpu probe waits five seconds for each capset and, on a
+ * timeout, drops every capset for the whole boot, so the guest would run
+ * without 3D after the application returned. The first boot is not held: a
+ * hold asked for before the guest's GPU exists is applied when it does.
  */
 class Lifecycle final {
 public:
@@ -82,6 +85,20 @@ public:
             gpuHeld_ = std::move(held);
         }
         changed_.notify_all();
+    }
+
+    /* The application asks for the GPU requests to be held (true), at the start of the hold, before anything it waits for,
+     * or gives them back (false). Any thread. */
+    void setGpuHoldRequested(bool requested) noexcept
+    {
+        gpuHoldRequested_.store(requested, std::memory_order_release);
+        changed();
+    }
+
+    /* Whether the application has asked for the hold and not given the requests back. */
+    [[nodiscard]] bool gpuHoldRequested() const noexcept
+    {
+        return gpuHoldRequested_.load(std::memory_order_acquire);
     }
 
     void quiesce() noexcept { quiesced_.store(true, std::memory_order_release); }
@@ -114,7 +131,7 @@ public:
 
     [[nodiscard]] bool held()
     {
-        if (quiesced_.load(std::memory_order_acquire))
+        if (quiesced_.load(std::memory_order_acquire) || gpuHoldRequested())
             return true;
         std::lock_guard lock(mutex_);
         return gpuHeld_ && gpuHeld_();
@@ -138,6 +155,7 @@ public:
 
 private:
     std::atomic_bool quiesced_ {};
+    std::atomic_bool gpuHoldRequested_ {};
     std::atomic_bool stop_ {};
     std::mutex mutex_;
     std::condition_variable changed_;
@@ -297,6 +315,16 @@ private:
             return 0;
         if (!machine.startBoot(restarts))
             return -UML_EMULATOR_RUNTIME_ERROR;
+        /* The application may have asked for the hold while the boot was
+         * built, after the look above: a restarted guest is not run behind a
+         * hold either. A stop ends this wait as it ends a stop right after
+         * startBoot: the loop returns, and the machine drops the boot it
+         * built. The first boot is run as asked: a hold that comes while it is
+         * built is applied to the GPU it has (the runtime's registration).
+         * What remains is a hold that lands as or after the guest runs, which
+         * is the ordinary held state of a running guest. */
+        if (restarts != 0 && !detail::waitForRelease(machine, timing))
+            return 0;
         guard.boot_started(machine.now());
         /* A stop that came between two boots was dropped by the handle: the
          * library does not inherit a request made while idle. */

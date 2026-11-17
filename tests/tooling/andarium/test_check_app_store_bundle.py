@@ -36,6 +36,11 @@ THERMAL_KNOB = (
     "#include <stdlib.h>\n"
     'const char *fixture(void) { return getenv("ANDARIUM_THERMAL_STATE"); }\n'
 )
+# The harness launch's silent phone, which keeps the device's haptics off.
+HAPTICS_KNOB = (
+    "#include <stdlib.h>\n"
+    'const char *fixture(void) { return getenv("ANDARIUM_HAPTICS"); }\n'
+)
 # The UI tests' launch, which opens the session with no guest.
 PROBE_KNOB = (
     "#include <stdlib.h>\n"
@@ -2025,6 +2030,7 @@ def main() -> int:
         knob = build(root, "knob", KNOB)
         launch = build(root, "launch", LAUNCH_KNOB)
         thermal = build(root, "thermal", THERMAL_KNOB)
+        haptics = build(root, "haptics", HAPTICS_KNOB)
         probe = build(root, "probe", PROBE_KNOB)
         old_apps_probe = build(root, "old-apps-probe", OLD_APPS_PROBE_KNOB)
         reports = {
@@ -2090,6 +2096,8 @@ def main() -> int:
               passes=False, expect="ANDARIUM_START")
         check(make_app(root, "thermal-knob", thermal, app_info()),
               passes=False, expect="ANDARIUM_THERMAL_STATE")
+        check(make_app(root, "haptics-knob", haptics, app_info()),
+              passes=False, expect="ANDARIUM_HAPTICS")
         check(make_app(root, "probe-knob", probe, app_info()),
               passes=False, expect="ANDARIUM_INPUT_PROBE")
         # The probe session's scripted list of old apps, for the App Store and for TestFlight.

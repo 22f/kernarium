@@ -670,11 +670,11 @@ requires reopening Andarium.
 
 - **No Google apps, on purpose.** The boot screen of a new installation's
   first Android boot (a first start, and the retry of one that ended before
-  Android booted) carries a panel saying that Android has no Google apps, and
-  Send feedback opens with a line that answers the same question in place
-  until it is opened or closed once (`NoGoogleNotice` keeps that one value);
-  their strings are the only ones that name Google, which
-  `scripts/localization.py` allows by key.
+  Android booted) carries a panel saying that Android has no Google apps.
+  Every presentation of Send feedback opens with a line that answers the same
+  question in place, closed; closing it takes it away from that presentation
+  alone, and nothing about it is kept. Their strings are the only ones that
+  name Google, which `scripts/localization.py` allows by key.
 - **Slow start.** A start still on the boot screen after three minutes
   (`SlowStart`; eight for a guest's first start and the first start after an
   update, which also get a title that does not say the start is slower than
@@ -750,8 +750,10 @@ requires reopening Andarium.
   under Capabilities, a per-guest switch that is on until the person turns it
   off, decides whether this device plays it: off, the application holds no
   connection and no engine for the Taptic Engine and the guest keeps its
-  vibrator. A game controller's rumble is not governed by it. An iPad, a Mac or
-  the Simulator, which have no Taptic Engine, give the guest no vibrator and
+  vibrator. A harness launch can keep it off for its run
+  ([Automation](#automation)). A game controller's rumble is not governed by
+  it. An iPad, a Mac or the Simulator, which have no Taptic Engine, give the
+  guest no vibrator and
   Capabilities no Haptics row. The wire is `HapticsProtocol`, whose golden frames
   the HAL's test shares (`tests/unit/andarium/fixtures`); the
   [Android README](../android/lineage-24/README.md) owns the HAL.
@@ -815,11 +817,11 @@ requires reopening Andarium.
   it on then explains why and, for a refusal, offers Settings. A device with no
   camera shows the row off and disabled with a note and keeps the person's
   choice; a device has one when it has a built-in front camera, the rule the
-  guest's layout follows, and the iPad app running on a Mac has none
-  (`CameraAvailability`). On an iPad, a session that other apps
-  share the screen with pauses the camera (black frames) and shows a notice
-  that goes with the interruption. When a guest app opens a camera while the
-  session is blocked, the runtime reports it
+  guest's layout follows, and the iPad app running on a Mac or on an Apple
+  Vision Pro has none and looks for none (`CameraAvailability`). On an iPad, a
+  session that other apps share the screen with pauses the camera (black
+  frames) and shows a notice that goes with the interruption. When a guest app
+  opens a camera while the session is blocked, the runtime reports it
   (`KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE`, runtime API 39) and the
   session shows a notice that Camera is off and can be turned on only from
   Home, for the next start. A dismissal holds for the run; an undismissed
@@ -1302,6 +1304,13 @@ prompt's counter and clear its record, in a build that has the prompt
 `ANDARIUM_FOLLOW_ORIENTATION` (`1` or `0`) states whether the guest follows the
 device's orientation, where the device's idiom (an iPhone follows) would
 otherwise decide.
+`ANDARIUM_HAPTICS=0` plays none of the guest's haptics on the device for that
+launch, as with the Haptics switch off, and leaves the stored switch alone; any
+other value states nothing. A launch that states only it is still the person's
+own. The device runners state it unless a run tests haptics (`--haptics`), and
+a hosted test on an iPhone gives it as `TEST_RUNNER_ANDARIUM_HAPTICS=0`. It
+silences the side keys' and rulers' own touch feedback too, which the Haptics
+switch does not govern; a game controller's rumble is governed by neither.
 `ANDARIUM_INPUT_PROBE=1` is the UI tests' launch: the session opens at once
 with no guest behind it, and what the guest's keyboard and mouse would receive,
 and the touches that reach its touchscreen, go to one accessibility element

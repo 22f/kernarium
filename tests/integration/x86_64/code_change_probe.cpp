@@ -20,6 +20,13 @@
  *	flood		another vCPU publishes more code changes than the
  *			address space remembers while this one is away, and
  *			the function is then translated again and patched;
+ *	alias		the code is a shared mapping of a memfd or tmpfs file and
+ *			the store goes through another mapping of the same
+ *			frame, in this process, from another vCPU, from another
+ *			process (forked before or after the first call) or from
+ *			the kernel (read(2)), with the executable mapping
+ *			protected, unmapped and mapped again between the call
+ *			and the store, and into the very unit that runs;
  *	two-patch	one block of one thread patches two instructions of a
  *			function with no link between the stores while three
  *			other vCPUs run the function, and after the thread
@@ -35,7 +42,9 @@ namespace {
 using word = unsigned long;
 constexpr long nr_read = 0, nr_write = 1, nr_mmap = 9, nr_mprotect = 10,
 	nr_munmap = 11, nr_mremap = 25, nr_pipe = 22, nr_fork = 57, nr_wait4 = 61,
-	nr_futex = 202, nr_exit_group = 231, nr_getppid = 110, nr_clock_gettime = 228;
+	nr_futex = 202, nr_exit_group = 231, nr_getppid = 110, nr_clock_gettime = 228,
+	nr_open = 2, nr_close = 3, nr_unlink = 87, nr_ftruncate = 77,
+	nr_memfd_create = 319;
 constexpr const char *abi = "x86-64";
 long raw_syscall(long number, long a0 = 0, long a1 = 0, long a2 = 0,
 	long a3 = 0, long a4 = 0, long a5 = 0)
@@ -54,13 +63,19 @@ long raw_syscall(long number, long a0 = 0, long a1 = 0, long a2 = 0,
 using word = unsigned int;
 constexpr long nr_read = 3, nr_write = 4, nr_mmap = 192, nr_mprotect = 125,
 	nr_munmap = 91, nr_mremap = 163, nr_pipe = 42, nr_fork = 2, nr_wait4 = 114,
-	nr_futex = 240, nr_exit_group = 252, nr_getppid = 64, nr_clock_gettime = 265;
+	nr_futex = 240, nr_exit_group = 252, nr_getppid = 64, nr_clock_gettime = 265,
+	nr_open = 5, nr_close = 6, nr_unlink = 10, nr_ftruncate = 93,
+	nr_memfd_create = 356;
 constexpr const char *abi = "i386";
 long raw_syscall(long number, long a0 = 0, long a1 = 0, long a2 = 0,
 	long a3 = 0, long a4 = 0, long a5 = 0)
 {
 	long result;
-	__asm__ volatile("push %%ebp\n\tmov %7, %%ebp\n\tint $0x80\n\tpop %%ebp"
+	/* The sixth argument goes in EBP, which an operand cannot name: pushed
+	 * first, from its slot while ESP is still the compiler's, then loaded
+	 * from the stack after EBP is saved. */
+	__asm__ volatile("push %7\n\tpush %%ebp\n\tmov 4(%%esp), %%ebp\n\tint $0x80\n\t"
+		"pop %%ebp\n\tadd $4, %%esp"
 		: "=a"(result)
 		: "a"(number), "b"(a0), "c"(a1), "d"(a2), "S"(a3), "D"(a4), "m"(a5)
 		: "memory", "cc");
@@ -69,8 +84,9 @@ long raw_syscall(long number, long a0 = 0, long a1 = 0, long a2 = 0,
 #endif
 
 constexpr long prot_none = 0, prot_read = 1, prot_write = 2, prot_exec = 4;
-constexpr long map_private = 0x02, map_fixed = 0x10,
+constexpr long map_shared = 0x01, map_private = 0x02, map_fixed = 0x10,
 	map_anonymous = 0x20;
+constexpr long o_rdwr = 2, o_creat = 0100, o_excl = 0200;
 constexpr long mremap_maymove = 1, mremap_fixed = 2;
 constexpr long futex_wait_private = 128, futex_wake_private = 129;
 /* CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
@@ -904,6 +920,328 @@ void case_two_patch(int barrier)
 	expect("two-patch", 0, first_only + neither + other);
 }
 
+
+/* Code in a file that two mappings of one process show, or that two
+ * processes share: the function is stored through the writable mapping (W)
+ * and called through the executable one (X). The store reaches the frame
+ * whatever its address. */
+struct Alias final {
+	unsigned char *x;
+	unsigned char *w;
+	long fd;
+	word pages;
+};
+
+long open_file(bool tmpfs)
+{
+	if (!tmpfs) {
+		const long fd = raw_syscall(nr_memfd_create,
+			reinterpret_cast<long>("code-change-alias"), 0);
+		if (fd < 0) {
+			print("code-change: memfd_create failed\n");
+			leave(4);
+		}
+		return fd;
+	}
+	const char *path = "/tmp/.code-change-alias";
+	raw_syscall(nr_unlink, reinterpret_cast<long>(path));
+	const long fd = raw_syscall(nr_open, reinterpret_cast<long>(path),
+		o_rdwr | o_creat | o_excl, 0700);
+	if (fd < 0) {
+		print("code-change: open failed\n");
+		leave(4);
+	}
+	raw_syscall(nr_unlink, reinterpret_cast<long>(path));
+	return fd;
+}
+
+unsigned char *map_file(long fd, word pages, long protection, unsigned char *at = nullptr)
+{
+	const long result = raw_syscall(nr_mmap, reinterpret_cast<long>(at), pages * page,
+		protection, map_shared | (at != nullptr ? map_fixed : 0), fd, 0);
+	if (result < 0 && result > -4096) {
+		print("code-change: file mapping failed\n");
+		leave(4);
+	}
+	return reinterpret_cast<unsigned char *>(result);
+}
+
+/* A file of `pages` pages holding the caller and the callee, mapped
+ * writable once and executable once. `touch_w` says whether the code goes
+ * in through W; without it a mapping of its own fills the file and goes
+ * away, so that W is never touched. */
+Alias new_alias(bool tmpfs, unsigned value, word callee_offset, word pages = 2,
+	bool touch_w = true)
+{
+	Alias alias{};
+	alias.fd = open_file(tmpfs);
+	alias.pages = pages;
+	raw_syscall(nr_ftruncate, alias.fd, pages * page);
+	if (touch_w) {
+		alias.w = map_file(alias.fd, pages, prot_read | prot_write);
+		emit_caller(alias.w, callee_offset);
+		emit_callee(alias.w + callee_offset, value);
+	} else {
+		auto *filler = map_file(alias.fd, pages, prot_read | prot_write);
+		emit_caller(filler, callee_offset);
+		emit_callee(filler + callee_offset, value);
+		raw_syscall(nr_munmap, reinterpret_cast<long>(filler), pages * page);
+		alias.w = map_file(alias.fd, pages, prot_read | prot_write);
+	}
+	alias.x = map_file(alias.fd, pages, prot_read | prot_exec);
+	return alias;
+}
+
+/* The function called through X, stored through W. */
+void case_alias(const char *name, bool tmpfs, word callee_offset)
+{
+	auto alias = new_alias(tmpfs, 1, callee_offset);
+	auto *callee = alias.w + callee_offset;
+	expect(name, 1, call_caller(alias.x));
+	for (unsigned value = 2; value <= 40; ++value) {
+		patch(callee, value * 0x01010101U % 100000U);
+		expect(name, value * 0x01010101U % 100000U, call_caller(alias.x));
+	}
+}
+
+/* Mapped after the stores, then stored to again, and a fresh address each
+ * round, which no translation has seen. */
+void case_alias_late_mapping()
+{
+	const char *name = "alias-store-before-exec-mapping";
+	auto alias = new_alias(false, 1, callee_near, 2);
+	auto *callee = alias.w + callee_near;
+	raw_syscall(nr_munmap, reinterpret_cast<long>(alias.x), alias.pages * page);
+	patch(callee, 5);
+	auto *x = map_file(alias.fd, alias.pages, prot_read | prot_exec);
+	expect(name, 5, call_caller(x));
+	patch(callee, 6);
+	expect(name, 6, call_caller(x));
+	for (unsigned value = 7; value < 14; ++value) {
+		patch(callee, value);
+		auto *fresh = map_file(alias.fd, alias.pages, prot_read | prot_exec);
+		expect("alias-fresh-address", value, call_caller(fresh));
+	}
+}
+
+/* A second process stores through its own mapping, forked before the first
+ * call (so each side has its own translation) or after it. */
+void case_alias_other_process(const char *name, bool fork_before_warm)
+{
+	auto alias = new_alias(false, 1, callee_near);
+	auto *callee = alias.w + callee_near;
+	int pipe_to_child[2];
+	int pipe_to_parent[2];
+	raw_syscall(nr_pipe, reinterpret_cast<long>(pipe_to_child));
+	raw_syscall(nr_pipe, reinterpret_cast<long>(pipe_to_parent));
+	if (!fork_before_warm)
+		expect(name, 1, call_caller(alias.x));
+	const long child = raw_syscall(nr_fork);
+	if (child < 0) {
+		print("code-change: fork failed\n");
+		leave(4);
+	}
+	char token = 0;
+	if (child == 0) {
+		raw_syscall(nr_read, pipe_to_child[0], reinterpret_cast<long>(&token), 1);
+		patch(callee, 7);
+		raw_syscall(nr_write, pipe_to_parent[1], reinterpret_cast<long>(&token), 1);
+		/* The parent stores next; the child runs what it stored. */
+		raw_syscall(nr_read, pipe_to_child[0], reinterpret_cast<long>(&token), 1);
+		const long seen = call_caller(alias.x);
+		leave(seen == 9 ? 0 : 1);
+	}
+	if (fork_before_warm)
+		expect(name, 1, call_caller(alias.x));
+	raw_syscall(nr_write, pipe_to_child[1], reinterpret_cast<long>(&token), 1);
+	raw_syscall(nr_read, pipe_to_parent[0], reinterpret_cast<long>(&token), 1);
+	expect(name, 7, call_caller(alias.x));
+	patch(callee, 9);
+	expect(name, 9, call_caller(alias.x));
+	raw_syscall(nr_write, pipe_to_child[1], reinterpret_cast<long>(&token), 1);
+	int status = 0;
+	raw_syscall(nr_wait4, child, reinterpret_cast<long>(&status), 0, 0);
+	expect(name, 0, status);
+}
+
+/* The parent warms X, forks, the child exits, the parent calls X again and
+ * then stores through W. */
+void case_alias_fork_rewarm()
+{
+	const char *name = "alias-fork-parent-rewarm-then-store";
+	auto alias = new_alias(false, 1, callee_near);
+	auto *callee = alias.w + callee_near;
+	expect(name, 1, call_caller(alias.x));
+	const long child = raw_syscall(nr_fork);
+	if (child < 0) {
+		print("code-change: fork failed\n");
+		leave(4);
+	}
+	if (child == 0)
+		leave(0);
+	int status = 0;
+	raw_syscall(nr_wait4, child, reinterpret_cast<long>(&status), 0, 0);
+	expect(name, 0, status);
+	expect(name, 1, call_caller(alias.x));
+	patch(callee, 4);
+	expect(name, 4, call_caller(alias.x));
+	patch(callee, 8);
+	expect(name, 8, call_caller(alias.x));
+}
+
+/* X made writable and executable-less again around an edit elsewhere on the
+ * page, then called, then stored to through W. */
+void case_alias_protect_cycle()
+{
+	const char *name = "alias-mprotect-cycle-rewarm-then-store";
+	auto alias = new_alias(false, 1, callee_near);
+	auto *callee = alias.w + callee_near;
+	expect(name, 1, call_caller(alias.x));
+	raw_syscall(nr_mprotect, reinterpret_cast<long>(alias.x), alias.pages * page,
+		prot_read | prot_write);
+	alias.x[0x800] = 0x90;
+	raw_syscall(nr_mprotect, reinterpret_cast<long>(alias.x), alias.pages * page,
+		prot_read | prot_exec);
+	expect(name, 1, call_caller(alias.x));
+	patch(callee, 3);
+	expect(name, 3, call_caller(alias.x));
+	patch(callee, 6);
+	expect(name, 6, call_caller(alias.x));
+}
+
+/* X unmapped and mapped again at the same address, called before the store. */
+void case_alias_unmap_remap()
+{
+	const char *name = "alias-unmap-remap-x";
+	auto alias = new_alias(false, 1, callee_near);
+	auto *callee = alias.w + callee_near;
+	expect(name, 1, call_caller(alias.x));
+	raw_syscall(nr_munmap, reinterpret_cast<long>(alias.x), alias.pages * page);
+	alias.x = map_file(alias.fd, alias.pages, prot_read | prot_exec, alias.x);
+	expect(name, 1, call_caller(alias.x));
+	patch(callee, 4);
+	expect(name, 4, call_caller(alias.x));
+	patch(callee, 8);
+	expect(name, 8, call_caller(alias.x));
+}
+
+/* The kernel stores: read(2) into W after X ran. With `untouched_w` the
+ * process never touched W before the read. Both rows fail, on both engines,
+ * when the kernel's write is not published at the frame its alias names. They
+ * do not tell that publication from the fallback a write takes when the host
+ * does not resolve the alias, which publishes everywhere; the memory layer's
+ * kernel-write rows count those writes. */
+void case_alias_kernel_write(bool untouched_w)
+{
+	const char *name = untouched_w ? "alias-kernel-write-untouched-w" : "alias-kernel-write";
+	auto alias = new_alias(false, 1, callee_near, 2, !untouched_w);
+	auto *callee = alias.w + callee_near;
+	expect(name, 1, call_caller(alias.x));
+	for (unsigned value = 2; value < 8; ++value) {
+		int channel[2];
+		raw_syscall(nr_pipe, reinterpret_cast<long>(channel));
+		unsigned char immediate[4] = {static_cast<unsigned char>(value), 0, 0, 0};
+		raw_syscall(nr_write, channel[1], reinterpret_cast<long>(immediate), 4);
+		raw_syscall(nr_read, channel[0], reinterpret_cast<long>(callee + 1), 4);
+		raw_syscall(nr_close, channel[0]);
+		raw_syscall(nr_close, channel[1]);
+		expect(name, value, call_caller(alias.x));
+	}
+}
+
+/* The unit that runs stores into its own next instruction through W:
+ *
+ *	0:	88 4a 04		mov %cl, 4(%rdx)	(W)
+ *	3:	b8 00 00 00 00		mov $0, %eax		(low byte patched)
+ *	8:	c3			ret
+ */
+void case_alias_running_block()
+{
+	const char *name = "alias-running-block";
+	auto alias = new_alias(false, 1, callee_near);
+	const unsigned char code[] = {
+		0x88, 0x4a, 0x04, 0xb8, 0x00, 0x00, 0x00, 0x00, 0xc3,
+	};
+	for (word index = 0; index < sizeof(code); ++index)
+		alias.w[index] = code[index];
+	for (unsigned value = 1; value <= 60; ++value) {
+		long result;
+#if defined(__x86_64__)
+		__asm__ volatile("call *%1"
+			: "=a"(result) : "r"(alias.x), "c"(value), "d"(alias.w)
+			: "rsi", "rdi", "r8", "r9", "r10", "r11", "memory", "cc");
+#else
+		__asm__ volatile("call *%1"
+			: "=a"(result) : "r"(alias.x), "c"(value), "d"(alias.w)
+			: "memory", "cc");
+#endif
+		expect(name, value, result);
+	}
+}
+
+/* Two executable mappings of the frame, and a writable one. */
+void case_alias_two_exec_mappings()
+{
+	const char *name = "alias-two-exec-mappings";
+	auto alias = new_alias(false, 1, callee_near);
+	auto *callee = alias.w + callee_near;
+	auto *second = map_file(alias.fd, alias.pages, prot_read | prot_exec);
+	expect(name, 1, call_caller(alias.x));
+	expect(name, 1, call_caller(second));
+	for (unsigned value = 2; value < 12; ++value) {
+		patch(callee, value);
+		expect(name, value, call_caller(alias.x));
+		expect(name, value, call_caller(second));
+	}
+}
+
+/* A mapping that is both writable and executable beside one that only
+ * executes: the store through the first reaches the second. */
+void case_alias_rwx_plus_rx()
+{
+	const char *name = "alias-rwx-plus-rx";
+	auto alias = new_alias(false, 1, callee_near);
+	auto *rwx = map_file(alias.fd, alias.pages, prot_read | prot_write | prot_exec);
+	expect(name, 1, call_caller(rwx));
+	expect(name, 1, call_caller(alias.x));
+	for (unsigned value = 2; value < 12; ++value) {
+		patch(rwx + callee_near, value);
+		expect(name, value, call_caller(rwx));
+		expect(name, value, call_caller(alias.x));
+	}
+}
+
+/* Another vCPU runs the function through X while this one stores through W. */
+void case_alias_vcpu()
+{
+	const char *name = "alias-vcpu";
+	auto alias = new_alias(false, 1, callee_near);
+	auto *callee = alias.w + callee_near;
+	worker_region = alias.x;
+	auto *stack = map_region(stack_size / page, prot_read | prot_write,
+		map_private | map_anonymous);
+	request = 0;
+	reply = 0;
+	worker_stop = 0;
+	if (spawn_thread(thread_flags, stack + stack_size, worker, nullptr) < 0) {
+		print("code-change: thread failed\n");
+		leave(4);
+	}
+	int round = 0;
+	expect(name, 1, ask_worker(++round));
+	for (unsigned value = 2; value < 30; ++value) {
+		patch(callee, value);
+		expect(name, value, call_caller(alias.x));
+		expect(name, value, ask_worker(++round));
+	}
+	worker_stop = 1;
+	__atomic_store_n(&request, ++round, __ATOMIC_RELEASE);
+	futex_wake(&request);
+	int answered;
+	while ((answered = __atomic_load_n(&reply, __ATOMIC_ACQUIRE)) != -1)
+		futex_wait(&reply, answered);
+}
+
 } // namespace
 
 extern "C" {
@@ -992,6 +1330,21 @@ int probe_main()
 	case_vcpu(false);
 	case_vcpu(true);
 	case_flood();
+	case_alias("alias-memfd", false, callee_near);
+	case_alias("alias-memfd-far", false, callee_far);
+	case_alias("alias-tmpfs", true, callee_near);
+	case_alias_late_mapping();
+	case_alias_other_process("alias-other-process-store", false);
+	case_alias_other_process("alias-other-process-early-store", true);
+	case_alias_fork_rewarm();
+	case_alias_protect_cycle();
+	case_alias_unmap_remap();
+	case_alias_kernel_write(false);
+	case_alias_kernel_write(true);
+	case_alias_running_block();
+	case_alias_two_exec_mappings();
+	case_alias_rwx_plus_rx();
+	case_alias_vcpu();
 	case_two_patch(barrier_system_call);
 	case_two_patch(barrier_cpuid);
 	case_two_patch(barrier_iret);

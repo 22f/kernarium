@@ -44,6 +44,24 @@ uml_add_unit_test(NAME kernarium-restart-loop
     COMMAND uml_kernarium_restart_loop_tests
     LABELS kernarium)
 
+# The application's hold of the guest's GPU requests as the runtime runs it, over
+# the real request gate, camera control and run loop: the camera's wait within
+# what the edge leaves, the edge's bound meeting the hold that waits, and a
+# guest that restarts while the hold is pending.
+if(TARGET UML::CameraDevice)
+    add_executable(uml_kernarium_gpu_hold_tests gpu_hold_tests.cpp)
+    target_include_directories(uml_kernarium_gpu_hold_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/Kernarium/Runtime
+        ${PROJECT_SOURCE_DIR}/darwin/api/include
+        ${PROJECT_SOURCE_DIR}/darwin/device
+        ${PROJECT_SOURCE_DIR}/darwin/emulator/src)
+    target_link_libraries(uml_kernarium_gpu_hold_tests PRIVATE
+        UML::CameraDevice)
+    uml_add_unit_test(NAME kernarium-gpu-hold
+        COMMAND uml_kernarium_gpu_hold_tests
+        LABELS "kernarium;camera")
+endif()
+
 # How an automation launch asks to start the background job with its guest.
 add_executable(uml_kernarium_automation_job_tests automation_job_tests.cpp)
 target_include_directories(uml_kernarium_automation_job_tests PRIVATE

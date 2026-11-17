@@ -47,6 +47,31 @@ public:
 	void invalidate_code(std::uint64_t address) override;
 	void invalidate_code(
 		std::uint64_t address, void *execution_context) override;
+#if DARWIN_UML_X86_64_GUEST
+	[[nodiscard]] ::uml::memory::FrameHold hold_code_frame(
+		std::uint64_t address, void *execution_context,
+		::uml::memory::FrameDebt *debts, std::size_t capacity,
+		bool global_ok) noexcept override;
+	void clear_code_debt(std::uint64_t address, void *execution_context,
+		const ::uml::memory::FrameHold &hold) noexcept override;
+	[[nodiscard]] bool frame_hold_unchanged(
+		const ::uml::memory::FrameHold &hold) noexcept override;
+	[[nodiscard]] bool frame_fill(std::uint64_t address,
+		void *execution_context,
+		::uml::memory::FrameFill &fill) noexcept override;
+	[[nodiscard]] bool frame_fill_unchanged(
+		const ::uml::memory::FrameFill &fill) noexcept override;
+	[[nodiscard]] bool publish_frame_store(std::uint64_t address,
+		std::uint64_t length, void *execution_context, std::uint64_t *own,
+		std::size_t capacity,
+		::uml::memory::FramePublication &publication) noexcept override;
+	[[nodiscard]] bool frame_own_holders(std::uint64_t address,
+		std::uint64_t length, void *execution_context, std::uint64_t *own,
+		std::size_t capacity,
+		::uml::memory::FramePublication &publication) noexcept override;
+	[[nodiscard]] std::uint64_t flush_serial(
+		void *execution_context) noexcept override;
+#endif
 	[[nodiscard]] ::uml::memory::MemoryFault last_fault() const noexcept override;
 	[[nodiscard]] bool has_fault() const noexcept override;
 
