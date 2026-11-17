@@ -4355,16 +4355,16 @@ struct StackRun final {
 }
 
 /* Each twin does what its ordinary entry does at the start of RSP's page,
- * inside it and ending on its last byte, from a displacement below RSP and
- * above it, and only a base of RSP takes it. RSP's page's entry is planted,
- * so every twin hits. */
+ * inside it, misaligned inside it, and ending on its last byte, from a
+ * displacement below RSP and above it, and only a base of RSP takes it.
+ * RSP's page's entry is planted, so every aligned twin hits. */
 void stack_twins_match_their_ordinary_entries()
 {
 	using namespace uml::cpu::x86_64;
 	const std::uint64_t page = stack_test_page;
 	for (const auto &form : stack_forms()) {
 		for (const std::uint64_t offset : {std::uint64_t{0}, std::uint64_t{8},
-			std::uint64_t{4096U - form.size}}) {
+			std::uint64_t{9}, std::uint64_t{4096U - form.size}}) {
 			const auto what = std::string{form.name} + " at page offset " +
 				std::to_string(offset);
 			const auto twin = run_stack_form(form, true, page + 64U,
@@ -4600,14 +4600,14 @@ void stack_twin_stores_publish_where_ordinary_stores_do()
 			is_stack_twin(block.program->native_stream()[2]),
 		"the stack load and store did not take their twins");
 	const auto run = [&](std::uint64_t value, std::size_t publications,
-		const char *message) {
+		const char *message, std::uint64_t stack = 0x1800) {
 		CpuState cpu{};
-		cpu.gpr(Register::rsp) = 0x1800;
+		cpu.gpr(Register::rsp) = stack;
 		cpu.gpr(Register::rcx) = value;
 		const auto result = gadgets::execute(
 			*block.program, cpu, memory, writer, 64);
 		require(result.event == uml::cpu::EngineEvent::system_call &&
-				memory.qword(0x1810) == value,
+				memory.qword(stack + 16U) == value,
 			"a stack store did not run");
 		require(memory.invalidations() == publications, message);
 	};
@@ -4629,6 +4629,9 @@ void stack_twin_stores_publish_where_ordinary_stores_do()
 	run(6, 3, "a stack store to a page its own executor translated did not "
 		"publish");
 	run(7, 4, "a stack store whose entry holds its own code did not publish");
+	/* Six bytes off, as the entry's two code bits are. */
+	run(8, 5, "a misaligned stack store whose entry holds code did not publish",
+		0x1806);
 	const auto ordinary = publications_after_a_failed_compare_exchange(false);
 	require(ordinary == 1,
 		"an ordinary store did not settle a failed CMPXCHG's publication");

@@ -1051,10 +1051,11 @@ Lx86_segment_ready\@:
 /* The stack's own entry, re-checked before any hashing: x25 holds the guest
  * address, and a tag equal to its page -- with no code bit set, which a
  * page holding a cached translation always has -- leaves the host address in
- * x7. Anything else takes \miss: for PUSH, POP, CALL and RET the full
- * translation with `record_stack`, so the next access finds the new entry
- * here; for a baked [rsp + displacement] twin its ordinary entry, which
- * records nothing, so an access off RSP's page leaves RSP's entry. A write also
+ * x7. Anything else takes \miss, the full translation with `record_stack`, so
+ * the next access finds the new entry here. The baked [rsp + displacement]
+ * twins make the same test with their access's alignment folded in
+ * (`generate_baked.py`) and miss to their ordinary entry, which records
+ * nothing, so an access off RSP's page leaves RSP's entry. A write also
  * requires that no earlier store left a publication pending, because the
  * ordinary translation would settle it here; with both conditions the store
  * owes no publication. It may still land in the block that is running, so a
