@@ -10,6 +10,7 @@
 #include <atomic>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <utility>
@@ -108,7 +109,7 @@ MappedBacking::MappedBacking(
 	const auto pages = size_ / page_size + 1U;
 	const auto roots = (pages + code_index_leaf_pages - 1U) /
 		code_index_leaf_pages;
-	/* One pointer per leaf, eight kilobytes for a gibibyte of backing. A
+	/* One pointer per leaf, four kilobytes for a gibibyte of backing. A
 	 * backing that cannot afford it keeps the locked lookup. */
 #if DARWIN_UML_X86_64_GUEST
 	/* The frame accounting needs the index: it refuses (prepare_writers) a
@@ -125,12 +126,90 @@ MappedBacking::MappedBacking(
 #endif
 	if (code_index_)
 		code_index_pages_ = roots * code_index_leaf_pages;
+	/* The same shape for the holder words: four kilobytes of roots for a
+	 * gibibyte, from the ordinary allocator in every build (not the domain
+	 * heap), sized by the backing and freed with it. A backing that cannot
+	 * afford them is unknown to its translators and publishers alike. */
+	const auto holder_roots = (pages + code_holders::leaf_frames - 1U) /
+		code_holders::leaf_frames;
+	holder_roots_.reset(new (std::nothrow)
+		std::atomic<code_holders::Leaf *>[holder_roots]{});
+	if (holder_roots_)
+		holder_frames_ = holder_roots * code_holders::leaf_frames;
+	else
+		mark_holders_unknown();
 }
 
 MappedBacking::~MappedBacking()
 {
+	for (std::size_t root = 0; root < holder_frames_ / code_holders::leaf_frames;
+	     ++root)
+		delete holder_roots_[root].load(std::memory_order_relaxed);
 	if (mapping_)
 		UML_MEMORY_BACKING_MAPPING_DESTROYED();
+}
+
+code_holders::Word *MappedBacking::holder_word(std::uint64_t offset) noexcept
+{
+	const auto frame = offset / page_size;
+	if (frame >= holder_frames_) {
+		/* No root, or a frame the backing does not have: nowhere to
+		 * register, so nothing can be told which translators hold it. */
+		mark_holders_unknown();
+		return nullptr;
+	}
+	auto &root = holder_roots_[frame / code_holders::leaf_frames];
+	auto *leaf = root.load(std::memory_order_acquire);
+	if (leaf == nullptr)
+		leaf = make_holder_leaf(root);
+	if (leaf == nullptr) {
+		mark_holders_unknown();
+		return nullptr;
+	}
+	return &(*leaf)[frame % code_holders::leaf_frames];
+}
+
+code_holders::Word *MappedBacking::find_holder_word(
+	std::uint64_t offset) const noexcept
+{
+	const auto frame = offset / page_size;
+	if (frame >= holder_frames_)
+		return nullptr;
+	auto *leaf = holder_roots_[frame / code_holders::leaf_frames].load(
+		std::memory_order_acquire);
+	return leaf != nullptr ? &(*leaf)[frame % code_holders::leaf_frames] :
+		nullptr;
+}
+
+code_holders::Leaf *MappedBacking::make_holder_leaf(
+	std::atomic<code_holders::Leaf *> &root) noexcept
+{
+	try {
+		const std::lock_guard lock{holder_mutex_};
+		if (auto *made = root.load(std::memory_order_relaxed))
+			return made;
+		UML_MEMORY_ALLOCATION_CHECKPOINT(
+			testing::AllocationSite::holder_leaf);
+		auto *leaf = new (std::nothrow) code_holders::Leaf{};
+		if (leaf == nullptr)
+			return nullptr;
+		root.store(leaf, std::memory_order_release);
+		code_holders::count(&code_holders::detail::CounterStore::leaves);
+		code_holders::report_counters_once();
+		return leaf;
+	} catch (...) {
+		return nullptr;
+	}
+}
+
+void MappedBacking::mark_holders_unknown() noexcept
+{
+	if (!holders_unknown_.exchange(true, std::memory_order_seq_cst))
+		code_holders::count(
+			&code_holders::detail::CounterStore::unknown_backings);
+	/* The raised flag is what a publisher reads after it stores the bytes,
+	 * so it goes out before this translator reads them. */
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
 std::byte *MappedBacking::at(std::uint64_t offset) const noexcept

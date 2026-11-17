@@ -231,7 +231,9 @@ one aligned run of a single backing (`arch_vmap_group_order()`).
 
 The default malloc zone returns what a restarted guest freed on its own
 schedule, so a guest's metadata (the MMU's indexes, the native address space's
-state, the engines' program and record tables, batch plans) stays out of it.
+state, the engines' program and record tables, batch plans) stays out of it,
+except for the holder words' roots and leaves of a mapped backing
+([Translation caches](#translation-caches-and-guest-debugging)).
 `memory/domain_heap.hpp` provides per-domain heaps carved from one reserved
 region and released whole when their owner retires, and thread-local scratch for
 one operation's temporaries. The GPU stack, Metal, system frameworks, devices and
@@ -560,6 +562,32 @@ one instruction and reports a single-step exit, which Linux delivers as
 `process_vm_writev()`) through its own view of the frame, so no translated store
 publishes the change: those paths call `darwin_uml_vm_invalidate_code()` for the
 target mm's generation.
+
+An arm64 guest that rewrites code and synchronizes it (`IC IVAU`, broadcast on
+hardware and keyed by the physical address) changes what every process running
+the frame executes, but a store or a publication reaches only its own address
+space's generation. So each frame of a mapped backing has a holder word
+(`darwin/memory/mmu/code_holders.hpp`): the arm64 instruction-fetch path
+registers the fetching generation in it before it reads the frame's bytes, and
+a guest code synchronization or the kernel's `invalidate_code()` path takes the
+word and publishes a whole-space code change in every generation it named. A
+publication consumes the word, so a reader registers again at its next fetch;
+a publisher that has emptied a word stays counted until its publication
+finishes, and one that meets such a count publishes to every generation, so an
+empty word never hides a reader another publisher has yet to tell. The kernel
+path takes the word of every page the target maps, whatever its permission,
+and publishes to every generation, the target included, for a page the target
+has not mapped yet (its software page table fills at faults, so the frame is
+unknown) or when it meets an unfinished take. The words
+live in 4 KiB leaves made on a frame's first registration (a leaf per 512
+frames), and the leaves and their roots (4 KiB per GiB of backing, made with
+the backing in every build) come from the ordinary allocator, sized by the
+backing and freed with it, not from a domain heap. A backing whose leaf cannot
+be made, or a word that names more generations than it holds, publishes to
+every live generation instead.
+The x86 engines neither register nor consult it: they hold their frames in the
+[frame accounting](#x86-64-frame-accounting), which the arm64 engines never
+consult, and the kernel's `invalidate_code()` path runs both publications.
 
 ## Kernel and Android ownership
 

@@ -108,6 +108,17 @@ int darwin_uml_static_vm_translate(unsigned long generation,
 				   unsigned long address,
 				   enum darwin_uml_static_access access,
 				   void **host_address);
+/* darwin_uml_static_vm_translate() for an execute access that also names the
+ * holder word of the frame it translated: an 8-byte atomic, 8-byte aligned,
+ * in which a translator registers its generation before it reads the frame's
+ * bytes, so that a code synchronization by another process reaches it
+ * (memory/mmu/code_holders.hpp has the word's layout). It lives as long as the
+ * mapping does. `*holder` is null when the frame's backing cannot make one;
+ * every publication on such a backing then goes to every generation, and
+ * there is nothing to register. */
+int darwin_uml_static_vm_translate_execute(unsigned long generation,
+					   unsigned long address,
+					   void **host_address, void **holder);
 /* darwin_uml_static_vm_translate() through an execution context of the same
  * generation: while the context is entered, a guest address is resolved from
  * the generation it holds; otherwise, or for a null context, this is
@@ -168,6 +179,14 @@ int darwin_uml_static_vm_execution_context_code_change_ranges(
 	struct darwin_uml_static_code_change *changes, size_t capacity,
 	uint64_t *current_sequence);
 void darwin_uml_static_vm_invalidate_code(unsigned long address);
+/* darwin_uml_static_vm_invalidate_code() for a guest's own code
+ * synchronization (IC IVAU) that must say whether it found the frame: 1 when
+ * the active generation maps nothing at `address`, a guest page whose page
+ * table entry the walker has not installed yet. Hardware faults such an
+ * instruction like a load; the caller reports that fault so the kernel maps
+ * the page, and runs the instruction again. Everything else publishes as
+ * darwin_uml_static_vm_invalidate_code() does and answers 0. */
+int darwin_uml_static_vm_synchronize_code(unsigned long address);
 int darwin_uml_static_vm_invalidate_code_generation(
 	unsigned long generation, unsigned long address, unsigned long length);
 

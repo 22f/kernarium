@@ -7,6 +7,7 @@
 #include "address_space_types.hpp"
 #include "allocation_fault.hpp"
 #include "bridge_call.hpp"
+#include "code_holders.hpp"
 #include "domain_registry_testing.hpp"
 #include "execution_gate.hpp"
 #include "frame_accounting.hpp"
@@ -190,8 +191,10 @@ std::atomic_bool &coherent_kernel_code_writes()
  * differ, which is another backing or another place in it; a change of
  * protection or of who may write that keeps execute and the bytes changes
  * none. A store into the page publishes for itself (a translation's page is
- * in the code-page registry), and the page's other writers publish with
- * their own stores. */
+ * in the code-page registry); a frame's other writers reach its other
+ * holders through the frame's holder word for arm64 holders
+ * (code_holders.hpp), and through the frame accounting for x86 holders, where
+ * a tagged store publishes at each (frame_accounting.hpp), not here. */
 [[nodiscard]] bool changes_translatable_code(
 	const std::optional<PageMapping> &before,
 	const std::optional<PageMapping> &after) noexcept
@@ -1044,7 +1047,8 @@ public:
 					MappedBacking::invalidate_code_page(
 						mapping->backing->code_page_handle(
 							mapping->offset));
-				publish_code_change(*reference.state, page);
+				::uml::memory::publish_code_change(
+					*reference.state, page, page_size);
 			}
 		}
 #if DARWIN_UML_X86_64_GUEST
@@ -1152,6 +1156,34 @@ public:
 		return DARWIN_UML_STATIC_TRANSLATED;
 	}
 
+	/* translate() for an execute access that also answers the holder word of
+	 * the frame it translated, in which the caller registers its generation
+	 * before it reads the frame's bytes (code_holders.hpp). A null word says
+	 * the frame's backing cannot make one: its publications go to every
+	 * generation, and there is nothing to register. */
+	int translate_execute(std::uint64_t generation, std::uint64_t address,
+		void **result, void **holder)
+	{
+		if (result == nullptr || holder == nullptr)
+			return DARWIN_UML_STATIC_HOST_ERROR;
+		*result = nullptr;
+		*holder = nullptr;
+		const auto page = address & ~(page_size - 1);
+		auto reference = reference_for(generation_for(page, generation));
+		auto &state = *reference.state;
+		std::shared_lock lock{state.mappings_mutex};
+		const auto word = state.fill_index.lookup(page);
+		if (word == 0)
+			return DARWIN_UML_STATIC_UNMAPPED;
+		if ((word & FillIndex::executable) == 0)
+			return DARWIN_UML_STATIC_PERMISSION;
+		if (const auto mapping = decode_page(state, page, word))
+			*holder = mapping->backing->holder_word(mapping->offset);
+		*result = reinterpret_cast<void *>(
+			(word & FillIndex::address_mask) + (address & (page_size - 1)));
+		return DARWIN_UML_STATIC_TRANSLATED;
+	}
+
 	int code_page(std::uint64_t generation, std::uint64_t address,
 		void **handle, darwin_uml_static_code_page_stamp *stamp)
 	{
@@ -1232,7 +1264,11 @@ public:
 		return static_cast<int>(count);
 	}
 
-	void invalidate_code(std::uint64_t address)
+	/* A guest code synchronization (IC IVAU) at `address`, in the thread's
+	 * active generation. False when the address names a guest page that the
+	 * generation maps nothing at: the instruction would have faulted on
+	 * hardware, and which frame it meant is unknown. */
+	bool invalidate_code(std::uint64_t address)
 	{
 		const auto &active = active_thread_generation();
 		/* Translated execution normally publishes through its cached context.
@@ -1242,26 +1278,29 @@ public:
 		if (AddressLayout::is_guest(address) &&
 		    active.address_space == this && active.state &&
 		    !active.state->retired.load(std::memory_order_acquire)) {
-			invalidate_code_page(*active.state, address);
-			publish_code_change(*active.state, address);
-			return;
+			return synchronize_code(
+				*active.state, active.generation, address);
 		}
 		const auto generation = generation_for(address,
 			active.address_space == this && active.state &&
 				!active.state->retired.load(std::memory_order_acquire) ?
 				active.generation : 0);
 		auto state = state_for(generation);
-		invalidate_code_page(*state, address);
-		publish_code_change(*state, address);
+		return synchronize_code(*state, generation, address);
 	}
 
 	/* Linux wrote a user page through its own mapping of the frame -- a
 	 * ptrace, /proc/pid/mem or process_vm_writev() store into another
 	 * process's memory -- so no translated store saw it. Move each code
 	 * page's stamp and publish the range in that process's generation, as a
-	 * guest code synchronization would. A page mapped without execute
-	 * permission holds no translation, which keeps the data transfers of
-	 * process_vm_writev() from publishing anything. */
+	 * guest code synchronization would, and in every other generation that
+	 * translated one of the frames: whatever the page's permissions in the
+	 * process written, since another process's view of the frame may be the
+	 * executable one. A page the process has no entry for yet (a software
+	 * table the kernel fills at faults) names no frame, so every generation
+	 * hears of the change. Data transfers publish nothing unless some
+	 * generation translated the frame, or the page is one the process never
+	 * touched. */
 	int invalidate_code(std::uint64_t generation, std::uint64_t address,
 			    std::uint64_t length)
 	{
@@ -1278,20 +1317,32 @@ public:
 		if (AddressLayout::classify(first, rounded_end - first) ==
 		    AddressDomain::invalid)
 			return -1;
-		auto state = state_for(generation_for(first, generation));
+		const auto target = generation_for(first, generation);
+		auto state = state_for(target);
 		std::uint64_t publish_first = rounded_end;
 		std::uint64_t publish_end = first;
+		code_holders::HolderList others;
+		/* The kernel's bytes are in the frame already; the holders are read
+		 * after them, as a code synchronization's fence orders it. */
+		std::atomic_thread_fence(std::memory_order_seq_cst);
 		{
 			std::shared_lock lock{state->mappings_mutex};
 			for (auto page = first; page < rounded_end;
 			     page += page_size) {
 				const auto mapping = find_page(*state, page);
-				if (mapping) {
-					if (!mapping->guest_code)
+				if (!mapping) {
+					others.add_every();
+					code_holders::count(&code_holders::detail::
+						CounterStore::absent_kernel_pages);
+				} else {
+					if (mapping->guest_code)
+						MappedBacking::invalidate_code_page(
+							mapping->backing->code_page_handle(
+								mapping->offset));
+					const bool own = take_holders(*mapping, target,
+						others, holder_takes_in_flight_, true);
+					if (!mapping->guest_code && !own)
 						continue;
-					MappedBacking::invalidate_code_page(
-						mapping->backing->code_page_handle(
-							mapping->offset));
 #if DARWIN_UML_X86_64_GUEST
 					/* The page's frame may be translated at other
 					 * addresses and in other generations. */
@@ -1303,10 +1354,20 @@ public:
 				publish_first = std::min(publish_first, page);
 				publish_end = page + page_size;
 			}
+			/* A list that goes to every generation, because an unfinished
+			 * publisher has consumed holders (take_holders) or for any other
+			 * reason, leaves the target out of it: the target is published
+			 * here, whole, whatever its pages map, as the holder an
+			 * unfinished publisher took may be the target itself. */
+			if (others.every()) {
+				publish_first = first;
+				publish_end = rounded_end;
+			}
 		}
 		if (publish_first < publish_end)
 			::uml::memory::publish_code_change(*state, publish_first,
 				publish_end - publish_first);
+		publish_to_holders(target, others);
 		return 0;
 	}
 
@@ -2010,23 +2071,145 @@ private:
 		return true;
 	}
 
-	static void invalidate_code_page(
-		GenerationState &state, std::uint64_t address)
+	/* A code synchronization at `address` in `generation`, whose state is
+	 * `state`: the frame's stamp moves, the generation publishes the page, and
+	 * every other generation that translated the frame since its last
+	 * publication hears of a code change. The frame is the one the writer's own
+	 * view maps, whatever that view permits: IC IVAU names the physical
+	 * address, so a writable alias that cannot execute reaches the frame the
+	 * executable aliases hold. The caller's fence (a code synchronization
+	 * issues one after the bytes land) orders the holder words after them. */
+	static bool synchronize_code_in(GenerationState &state,
+		std::uint64_t generation, std::uint64_t address,
+		code_holders::HolderList &others,
+		std::atomic<std::uint64_t> &in_flight)
 	{
 		const auto page = address & ~(page_size - 1);
 		std::shared_lock lock{state.mappings_mutex};
 		const auto mapping = find_page(state, page);
-		if (!mapping || !mapping->guest_code)
-			return;
-		MappedBacking::invalidate_code_page(
-			mapping->backing->code_page_handle(mapping->offset));
+		if (!mapping)
+			return !AddressLayout::is_guest(page);
+		if (mapping->guest_code)
+			MappedBacking::invalidate_code_page(
+				mapping->backing->code_page_handle(mapping->offset));
+		if (AddressLayout::is_guest(page))
+			take_holders(*mapping, generation, others, in_flight, false);
+		return true;
 	}
 
-	static void publish_code_change(
-		GenerationState &state, std::uint64_t address)
+	bool synchronize_code(GenerationState &state, std::uint64_t generation,
+		std::uint64_t address)
 	{
+		code_holders::HolderList others;
+		const bool found = synchronize_code_in(state, generation, address,
+			others, holder_takes_in_flight_);
 		::uml::memory::publish_code_change(
 			state, address & ~(page_size - 1), page_size);
+		publish_to_holders(generation, others);
+		return found;
+	}
+
+	/* Takes the holder word of the frame `mapping` names and adds the
+	 * generations it held, but `generation`'s own, to `others`. A word that
+	 * is empty or names only the writer's generation is left alone: the common
+	 * frame, held by its writer alone, costs one load and no exchange. For a
+	 * holder of the writer's mapping lock; nothing here waits. `kernel` says
+	 * the take is a kernel write's, which the counters keep apart. Answers
+	 * whether `generation` holds the frame itself: its backing's holders are
+	 * unknown, or the word read every generation or named it.
+	 *
+	 * An empty word says only that nobody has registered since a publisher
+	 * emptied it: that publisher may not have published yet. So whoever
+	 * empties a word is counted in `in_flight` until its list is destroyed
+	 * (after its publication), and a take that finds more than its own share
+	 * counted publishes to every generation: the readers the unfinished take
+	 * consumed are among them. The word is read before the counter, and its
+	 * emptying is ordered after the count, so a word read empty by a later
+	 * publisher comes with the count of the one that emptied it. */
+	static bool take_holders(const PageMapping &mapping,
+		std::uint64_t generation, code_holders::HolderList &others,
+		std::atomic<std::uint64_t> &in_flight, bool kernel) noexcept
+	{
+		const auto *backing = mapping.backing;
+		if (backing->holders_unknown()) {
+			others.add_every();
+			return true;
+		}
+		bool own = false;
+		if (auto *word = backing->find_holder_word(mapping.offset)) {
+			const auto slot = code_holders::slot_of(generation);
+			auto held = word->load(std::memory_order_acquire);
+			own = code_holders::holds(held, slot);
+			if (held != code_holders::none &&
+			    !code_holders::holds_only(held, slot)) {
+				others.begin_take(in_flight);
+				code_holders::count(
+					&code_holders::detail::CounterStore::exchanges);
+				if (kernel)
+					code_holders::count(&code_holders::detail::
+						CounterStore::kernel_exchanges);
+				held = word->exchange(code_holders::none,
+					std::memory_order_acq_rel);
+				own = code_holders::holds(held, slot);
+				others.add(held, slot);
+			}
+		}
+		if (!others.every() &&
+		    in_flight.load(std::memory_order_acquire) > others.own_take()) {
+			others.add_every();
+			code_holders::count(
+				&code_holders::detail::CounterStore::overlap_widenings);
+		}
+		return own;
+	}
+
+	/* A whole-space code change in each generation `holders` names, or in
+	 * every live generation but `except`, the writer's own, which its caller
+	 * published. The caller's list stays counted as in flight until this
+	 * returns (take_holders). A generation that is gone is skipped, and none is made: only
+	 * a find, so a dead holder does not come back. Never under a mapping lock;
+	 * it takes the table of generations shared, and everything it does there
+	 * is an atomic update. A whole-space change costs a reader no more than
+	 * a page's: any change in a generation makes every translation of it
+	 * revalidate its bytes at its next use. */
+	void publish_to_holders(std::uint64_t except,
+		const code_holders::HolderList &holders)
+	{
+		if (holders.empty())
+			return;
+		/* Test variant only: where a test holds a publisher that has taken
+		 * its words and not yet published. */
+		UML_MEMORY_ALLOCATION_CHECKPOINT(
+			testing::AllocationSite::holder_publication);
+		std::uint64_t published = 0;
+		{
+			std::shared_lock lock{states_mutex_};
+			if (holders.every()) {
+				for (const auto &[generation, state] : states_) {
+					if (generation == except ||
+					    state->retired.load(std::memory_order_acquire))
+						continue;
+					::uml::memory::publish_code_change(*state, 0, 0);
+					++published;
+				}
+			} else {
+				for (const auto generation : holders.generations()) {
+					const auto found = states_.find(generation);
+					if (found == states_.end() ||
+					    found->second->retired.load(
+						    std::memory_order_acquire))
+						continue;
+					::uml::memory::publish_code_change(
+						*found->second, 0, 0);
+					++published;
+				}
+			}
+		}
+		using code_holders::detail::CounterStore;
+		code_holders::count(&CounterStore::publications);
+		if (holders.every())
+			code_holders::count(&CounterStore::all_publications);
+		code_holders::count(&CounterStore::generations_published, published);
 	}
 
 	/* Shared with every generation: the last holder gives the pages back. */
@@ -2039,6 +2222,9 @@ private:
 #endif
 	mutable WordSharedMutex states_mutex_;
 	WordSharedMutex backing_mutex_;
+	/* Publishers that have emptied a holder word and not finished publishing
+	 * to the generations it named (code_holders::HolderList). */
+	std::atomic<std::uint64_t> holder_takes_in_flight_{0};
 	std::unordered_map<std::uint64_t, std::shared_ptr<GenerationState>> states_;
 	std::unordered_map<BackingKey, std::weak_ptr<MappedBacking>, BackingKeyHash>
 		backings_;
@@ -2738,6 +2924,16 @@ extern "C" int darwin_uml_static_vm_translate(
 	});
 }
 
+extern "C" int darwin_uml_static_vm_translate_execute(
+	unsigned long generation, unsigned long address, void **host_address,
+	void **holder)
+{
+	return with_address_space([&](auto &space) {
+		return space.translate_execute(
+			generation, address, host_address, holder);
+	});
+}
+
 extern "C" int darwin_uml_static_vm_execution_context_translate(
 	void *context, unsigned long generation, unsigned long address,
 	enum darwin_uml_static_access access, void **host_address)
@@ -2888,8 +3084,16 @@ extern "C" int darwin_uml_static_vm_invalidate_code_generation(
 extern "C" void darwin_uml_static_vm_invalidate_code(unsigned long address)
 {
 	(void)with_address_space([&](auto &space) {
-		space.invalidate_code(address);
+		(void)space.invalidate_code(address);
 		return 0;
+	});
+}
+
+extern "C" int darwin_uml_static_vm_synchronize_code(unsigned long address)
+{
+	/* A host that cannot say (no address space) has nothing to fault in. */
+	return with_address_space([&](auto &space) {
+		return space.invalidate_code(address) ? 0 : 1;
 	});
 }
 

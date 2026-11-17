@@ -2,6 +2,7 @@
 #pragma once
 
 #include "../shared_backing.hpp"
+#include "code_holders.hpp"
 #include "writer_location.hpp"
 #if DARWIN_UML_X86_64_GUEST
 #include "frame_domain.hpp"
@@ -66,6 +67,27 @@ public:
 	 * stamp could be stale, so it is not given a record here. */
 	void retire_code_page(std::uint64_t offset) noexcept;
 
+	/* The holder word of the 4 KiB frame at `offset`: which generations
+	 * translated the frame since it was last published (code_holders.hpp).
+	 * A table of them is 8 bytes per frame, in leaves of 512 made when a
+	 * frame of their region is first translated, so a backing whose code
+	 * lies in a few regions holds a few leaves.
+	 *
+	 * holder_word() makes the leaf; a leaf that cannot be made leaves
+	 * holders_unknown() raised for the backing's life and answers null, and
+	 * a publication on such a backing then goes to every generation, as it
+	 * does for a word that reads `all`. find_holder_word() makes nothing and
+	 * answers null for a frame no translator has asked about. Both words and
+	 * leaves live as long as the backing. */
+	[[nodiscard]] code_holders::Word *holder_word(
+		std::uint64_t offset) noexcept;
+	[[nodiscard]] code_holders::Word *find_holder_word(
+		std::uint64_t offset) const noexcept;
+	[[nodiscard]] bool holders_unknown() const noexcept
+	{
+		return holders_unknown_.load(std::memory_order_acquire);
+	}
+
 private:
 	struct CodePage;
 	/* One index leaf covers this many backing pages. A leaf is 4 KiB of
@@ -93,6 +115,11 @@ private:
 	MappedBacking(SharedBackingView mapping, std::size_t size) noexcept;
 #endif
 	[[nodiscard]] void *install_code_page(std::uint64_t page) noexcept;
+	[[nodiscard]] code_holders::Leaf *make_holder_leaf(
+		std::atomic<code_holders::Leaf *> &root) noexcept;
+	/* Raises holders_unknown() and orders the store before the translator
+	 * reads the bytes it could not register for. */
+	void mark_holders_unknown() noexcept;
 
 #if DARWIN_UML_X86_64_GUEST
 	/* Declared before everything it serves, so that it outlives it. */
@@ -109,6 +136,11 @@ private:
 	std::vector<LeafOwner, Allocator<LeafOwner>> code_index_leaves_;
 	RootOwner code_index_;
 	std::size_t code_index_pages_{};
+	/* One pointer per 512 frames, made with the backing. */
+	std::unique_ptr<std::atomic<code_holders::Leaf *>[]> holder_roots_;
+	std::size_t holder_frames_{};
+	std::mutex holder_mutex_;
+	std::atomic_bool holders_unknown_{};
 
 #if DARWIN_UML_X86_64_GUEST
 public:
