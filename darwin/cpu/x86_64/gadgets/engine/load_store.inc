@@ -366,7 +366,7 @@ pop_memory 64, ldr, x, str, x
 .macro invalidate_stack_write size, publish=1
 	mov w23, #0
 	.if \publish
-	publish_pending_code x25, \size
+	publish_pending_code x25, \size, , w23
 	.endif
 	ldr x8, [_context, #UML_X86_64_CONTEXT_PROGRAM_END]
 	cmp x25, x8

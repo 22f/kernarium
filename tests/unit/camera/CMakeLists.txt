@@ -8,6 +8,14 @@ target_include_directories(uml_camera_protocol_tests PRIVATE
 uml_add_unit_test(NAME camera-protocol COMMAND uml_camera_protocol_tests
     LABELS "device;camera")
 
+# What the application does with a running camera video when it leaves the
+# foreground: the call that ends it and waits for the guest, and the order
+# before the GPU hold.
+add_executable(uml_camera_background_video_tests camera_background_video_tests.cpp)
+target_link_libraries(uml_camera_background_video_tests PRIVATE UML::CameraDevice)
+uml_add_unit_test(NAME camera-background-video COMMAND uml_camera_background_video_tests
+    LABELS "device;camera")
+
 # The picture helpers of darwin/platform (camera.hpp's neighbours).
 add_executable(uml_camera_transform_tests camera_transform_tests.cpp)
 target_link_libraries(uml_camera_transform_tests PRIVATE UML::Nv12Transform)

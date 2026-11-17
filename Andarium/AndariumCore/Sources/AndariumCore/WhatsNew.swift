@@ -191,8 +191,8 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
     /// requirement and is refused.
     public var compass: Bool?
     /// `true` is an entry for a device that has a camera to give the guest (an
-    /// iPhone, an iPad), which the iPad app on a Mac does not. `false` is no
-    /// requirement and is refused.
+    /// iPhone, an iPad), which the iPad app on a Mac or on an Apple Vision Pro
+    /// does not. `false` is no requirement and is refused.
     public var camera: Bool?
 
     public init(

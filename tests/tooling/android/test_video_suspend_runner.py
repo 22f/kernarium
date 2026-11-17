@@ -10,6 +10,11 @@ the host's own reset line fails the step as a host GPU reset, any other GPU
 error as GPU errors whose cause is not established, whenever the line arrives
 (the first graphics work after the wake prints a refusal) and whichever way
 the suspend or the check ends.
+
+The runner's start_guest, which the other runners that share it use as well,
+owns the emulator it launched until it returns the guest: a failed or
+interrupted start stops that emulator rather than leaving it to the runner's
+cleanup, which only knows a guest once start_guest has returned one.
 """
 
 from __future__ import annotations
@@ -20,9 +25,11 @@ import contextlib
 import importlib.util
 import io
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -265,6 +272,104 @@ class SuspendTests(unittest.TestCase):
         guest = FakeGuest(self.directory, silent=True)
         with self.routes(guest, RESUMED), self.assertRaisesRegex(runner.Failure, "echo guest-answers' exited 255"):
             runner.suspend(guest, "host")
+
+
+class StartGuestTests(unittest.TestCase):
+    """start_guest against a bounded stand-in for the emulator: no guest boots and no adb is run."""
+
+    def setUp(self) -> None:
+        self.directory = Path(tempfile.mkdtemp(prefix="uml-avs-test-"))
+        self.addCleanup(shutil.rmtree, self.directory, ignore_errors=True)
+        output = contextlib.redirect_stdout(io.StringIO())
+        output.__enter__()
+        self.addCleanup(output.__exit__, None, None, None)
+        self.children: list[subprocess.Popen] = []
+        self.disconnected: list[str] = []
+        self.addCleanup(self.reap)
+        self.options = types.SimpleNamespace(
+            instance=None, release=None, emulator=None, adb_port=5599, cpus=1, memory="1G", boot_timeout=5)
+        real_popen = subprocess.Popen
+
+        def standin(_command: object, **keywords: object) -> subprocess.Popen:
+            # Bounded, and it ends on SIGINT as the emulator does.
+            child = real_popen([sys.executable, "-c",
+                                "import signal, time; signal.signal(signal.SIGINT, signal.SIG_DFL); time.sleep(20)"],
+                               **keywords)
+            self.children.append(child)
+            return child
+
+        boot = runner.boot_android
+        patches = [
+            mock.patch.object(boot, "parse_arguments", return_value=types.SimpleNamespace(
+                emulator="unused", release="unused")),
+            mock.patch.object(boot, "resolve_executable", return_value=Path("unused")),
+            mock.patch.object(boot, "release_path", return_value=Path("unused")),
+            mock.patch.object(boot.android_instance, "read_release", return_value={}),
+            mock.patch.object(boot, "plan_start", return_value={}),
+            mock.patch.object(boot.android_instance, "apply"),
+            mock.patch.object(boot.android_instance, "booted"),
+            mock.patch.object(boot, "data_capacity", return_value=0),
+            mock.patch.object(boot, "emulator_command", return_value=["unused"]),
+            mock.patch.object(boot, "provision_guest"),
+            mock.patch.object(boot, "disconnect_adb", side_effect=lambda _adb, serial: self.disconnected.append(serial)),
+            mock.patch.object(runner, "SETTLE_SECONDS", 0),
+            # Only the runner's own launch is replaced: what the helpers run (adb, getconf) stays real.
+            mock.patch.object(runner, "subprocess", types.SimpleNamespace(**{**vars(subprocess), "Popen": standin})),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def reap(self) -> None:
+        for child in self.children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=10)
+
+    def start(self) -> object:
+        return runner.start_guest(self.options, "adb", self.directory)
+
+    def assert_stopped(self) -> None:
+        self.assertEqual(len(self.children), 1)
+        self.assertIsNotNone(self.children[0].poll(), "the emulator was left running")
+        self.assertEqual(self.disconnected, ["127.0.0.1:5599"])
+
+    def test_an_adb_that_never_answers_stops_the_emulator(self) -> None:
+        with mock.patch.object(runner.boot_android, "wait_for_adb",
+                               side_effect=runner.boot_android.LauncherError("injected startup timeout")):
+            with self.assertRaisesRegex(runner.boot_android.LauncherError, "injected startup timeout"):
+                self.start()
+        self.assert_stopped()
+
+    def test_a_guest_that_does_not_finish_booting_stops_the_emulator(self) -> None:
+        with mock.patch.object(runner.boot_android, "wait_for_adb"), \
+                mock.patch.object(runner.boot_android, "wait_for_boot_completed", return_value=False):
+            with self.assertRaisesRegex(runner.Failure, "sys.boot_completed"):
+                self.start()
+        self.assert_stopped()
+
+    def test_an_interrupt_while_waiting_stops_the_emulator(self) -> None:
+        with mock.patch.object(runner.boot_android, "wait_for_adb", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.start()
+        self.assert_stopped()
+
+    def test_a_failure_after_boot_stops_the_emulator(self) -> None:
+        with mock.patch.object(runner.boot_android, "wait_for_adb"), \
+                mock.patch.object(runner.boot_android, "wait_for_boot_completed", return_value=True), \
+                mock.patch.object(runner.boot_android, "provision_guest", side_effect=OSError("injected")):
+            with self.assertRaisesRegex(OSError, "injected"):
+                self.start()
+        self.assert_stopped()
+
+    def test_a_guest_that_booted_is_returned_running_and_not_stopped(self) -> None:
+        with mock.patch.object(runner.boot_android, "wait_for_adb"), \
+                mock.patch.object(runner.boot_android, "wait_for_boot_completed", return_value=True):
+            guest = self.start()
+        self.assertEqual(len(self.children), 1)
+        self.assertIsNone(self.children[0].poll())
+        self.assertIs(guest.process, self.children[0])
+        self.assertEqual(self.disconnected, [])
 
 
 class SharedReaderTests(unittest.TestCase):

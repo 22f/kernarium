@@ -995,6 +995,13 @@ the tool's lines is the tooling test `android17-vulkan-smoke-runner`.
 `screenrecord`'s encoder run across a suspend by the host's route (asked again
 while the guest is busy, as the host does) and by the guest's own on one stream
 each, and the host closes no stream by a reset.
+`android-vdso` (integration) registers when `UML_ANDROID_VDSO_RELEASE` names the
+release: the guest kernel's vDSO checks of `guest-vdso-gadgets` (with no C
+library; the mapping must be sealed there and refuse a move, where the Linux
+tests require it unsealed and movable) and the library probe of
+`guest-vdso-libc-gadgets` run as the shell user, so bionic's `clock_gettime`,
+`gettimeofday` and `time` are shown to call the `[vdso]` mapping. The probes are
+built with the host's `clang++` and `ld.lld`.
 `android-sync` (integration) registers when `UML_ANDROID_SYNC_RELEASE` names the
 release: with SysRq off, a file the guest holds dirty reaches the host's data
 image once the management console's `sync` replies, and survives a hard kill of
@@ -1222,6 +1229,39 @@ the camera service's log must hold no leaked stream, the line it prints at the
 close of a device whose requests the HAL ended without a request error. The
 release must carry the HAL topic that handles the host's end of a camera's
 video and the camera application topic that ends the recording.
+`android-camera-video-leave` (`--mode video-leave`) plays the application's
+leaving the foreground to the test-only launcher `uml-darwin-android17-edge-test`
+(which no product has; it is built where a release is named) through its edge
+pipe (`UML_BACKGROUND_EDGE_CONTROL`, read with the synthetic camera only)
+while the video mode records, `--leave-trials` times (ten by default), with the
+platform's notice first or twenty milliseconds after: the launcher ends the
+camera's running video, waits for the guest to stop its video streams (the same
+sequence as the applications', `holdAfterVideoEnds`) and holds the guest's GPU
+requests for three seconds through the launcher's own request gate. Every trial
+expects the camera to have answered and found a video to end, the HAL's report
+of the loss and the recorder's stop to come before the hold landed (the gate's
+closing, which the launcher times apart from the end of its wait for a request
+that runs; the guest's clock set against the launcher's by the shortest of seven
+round trips), the loss
+to be the HAL's first failed buffer, the camera device not to have given up on the
+guest's reading of the interrupted record, and the clip's audio not to run on
+past its video by more than a second. Whether the guest stopped its streams
+inside the wait's bound is told, not required. The runner keeps the guest's log
+of each trial in `--output-dir`.
+`kernarium-gpu-hold` (unit) runs the runtime's hold of the guest's GPU requests
+(`KernariumGpuHold.hpp`) over the real request gate, camera control and run loop,
+with clocks that start at the edge: the camera's wait within what a deadline
+leaves after the drain, the edge's bound meeting the hold that waits (the gate
+closes at the bound's time and the main path is back inside the edge, a drain
+waited for once), and a guest that restarts while the hold waits for the camera,
+or whose boot is being built when the hold arrives, which runs after the release
+and not behind the closed gate.
+`camera-background-video` (unit) is the ordering of the application's departure
+(video running: end, wait, hold; none: hold at once; a wait that runs out: hold
+and one log line; the wait inside the bound; a hold that lands first ends a
+pending wait, harmlessly; a call queued behind another keeps its own deadline)
+with a fake camera device and a fake GPU gate, and `camera-device` drives the device's side of it and the
+interrupted record that goes to the guest before a lost video's failed buffers.
 `android17-camera-runner` (tooling) runs its
 parsers and the expectations of every layout without a guest,
 `android17-camera-layouts` (tooling) the layout set, its fallback order and the

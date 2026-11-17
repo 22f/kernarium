@@ -250,6 +250,11 @@ struct WhatsNewTests {
         #expect(
             told(by: host(maximumMiB: 4096, idiom: .mac, hasHaptics: false, hasCamera: false))
                 == withoutACamera(Self.buildTwelveIDs + withoutDeviceEntries))
+        // The iPad app on a Vision Pro has none either, whatever it finds.
+        let vision = CameraPlatform(isiOSAppOnMac: false, isiOSAppOnVision: true, hasFrontCamera: { true })
+        #expect(
+            told(by: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false, hasCamera: vision.hasCamera))
+                == withoutACamera(Self.buildTwelveIDs + Self.buildElevenIDsOnAnIPad))
     }
 
     /// A build without Send feedback (a sideload, a Debug build, an App Store
@@ -342,6 +347,16 @@ struct WhatsNewTests {
         }
         #expect(host.hasHaptics == CHHapticEngine.capabilitiesForHardware().supportsHaptics)
         #expect(host.hasCamera == SystemCameraSource.hasCamera)
+    }
+
+    /// The camera a host reports follows the platform it is given: an iPad app
+    /// on a Vision Pro has none, whatever cameras it finds, and a device that
+    /// finds a front camera has one.
+    @Test func aHostThatRunsTheIPadAppOnAVisionProHasNoCamera() {
+        let vision = CameraPlatform(isiOSAppOnMac: false, isiOSAppOnVision: true, hasFrontCamera: { true })
+        #expect(!AppEntry.hostDevice(camera: vision).hasCamera)
+        let elsewhere = CameraPlatform(isiOSAppOnMac: false, isiOSAppOnVision: false, hasFrontCamera: { true })
+        #expect(AppEntry.hostDevice(camera: elsewhere).hasCamera)
     }
 
     // MARK: The person's launch
