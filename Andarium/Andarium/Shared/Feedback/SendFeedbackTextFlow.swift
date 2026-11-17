@@ -273,6 +273,15 @@ struct SendFeedbackThumb: View {
 
     private let inset: CGFloat = 12
     private let length: CGFloat = 44
+    /// What the band that takes a touch at rest reaches above and below the thumb: 44 by 60 points in all.
+    private let grabMargin: CGFloat = 8
+
+    /// What takes a touch: the band, or the whole view when there is none.
+    private struct Grab: Shape {
+        let band: CGRect?
+
+        func path(in rect: CGRect) -> Path { Path(band ?? rect) }
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -311,11 +320,18 @@ struct SendFeedbackThumb: View {
                 if isHeld { label.offset(y: y + length / 2 - 28) }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-            .contentShape(.rect)
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { move(place($0.location.y, travel: travel)) }
-                    .onEnded { release(place($0.location.y, travel: travel)) })
+            .allowsHitTesting(false)
+            .overlay {
+                // At rest only a band around the thumb takes a touch, and the rest of the edge scrolls the text;
+                // held, the whole strip follows the finger.
+                Color.clear
+                    .contentShape(Grab(band: isHeld ? nil : CGRect(
+                        x: 0, y: y - grabMargin, width: geometry.size.width, height: length + 2 * grabMargin)))
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { move(place($0.location.y, travel: travel)) }
+                            .onEnded { release(place($0.location.y, travel: travel)) })
+            }
         }
         .frame(width: isHeld ? 260 : 44)
         .accessibilityElement()

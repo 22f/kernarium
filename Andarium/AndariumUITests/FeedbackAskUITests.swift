@@ -35,6 +35,11 @@ final class FeedbackAskUITests: XCTestCase {
             .firstMatch
     }
 
+    /// The place a text's thumb says it is at, in percent.
+    private func percent(_ thumb: XCUIElement) -> Int {
+        Int((thumb.value as? String)?.prefix { $0.isNumber } ?? "") ?? -1
+    }
+
     /// Back, from a page the sheet's navigation pushed.
     private func back(in app: XCUIApplication) {
         let back = app.navigationBars.buttons["BackButton"]
@@ -135,10 +140,44 @@ final class FeedbackAskUITests: XCTestCase {
         let thumb = any("feedback-viewer-thumb", in: app)
         XCTAssertTrue(thumb.waitForExistence(timeout: 30), "the long text has no thumb")
         XCTAssertTrue((thumb.value as? String)?.hasPrefix("0 %") == true, "the thumb reads \(String(describing: thumb.value))")
-        thumb.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05)).press(
-            forDuration: 0.2, thenDragTo: thumb.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)))
-        let place = Int((thumb.value as? String)?.prefix { $0.isNumber } ?? "") ?? -1
+        // At rest the thumb takes a band of its own, 44 by 60 points, and not the whole edge: the rest of the edge
+        // is the text's. A grip held takes the whole strip.
+        let rest = thumb.frame
+        XCTAssertEqual(rest.width, 44, accuracy: 1, "the thumb at rest is \(rest)")
+        XCTAssertEqual(rest.height, 60, accuracy: 1, "the thumb at rest takes more than a band: \(rest)")
+        let window = app.windows.firstMatch
+        let height = window.frame.height
+        func point(_ x: CGFloat, _ y: CGFloat) -> XCUICoordinate {
+            window.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: x, dy: y))
+        }
+        point(rest.midX, rest.midY).press(forDuration: 0.2, thenDragTo: point(rest.midX, height * 0.6))
+        let place = percent(thumb)
         XCTAssertTrue((40...75).contains(place), "the thumb did not go to about the middle: \(String(describing: thumb.value))")
+
+        // A tap and a swipe on the edge, far from the thumb, scroll or do nothing, and never take the thumb there.
+        let low = height - 70
+        point(rest.midX, low).tap()
+        XCTAssertEqual(percent(thumb), place, "a tap on the edge, away from the thumb, took the thumb there")
+        let reading = thumb.value as? String
+        point(rest.midX, low).press(
+            forDuration: 0.05, thenDragTo: point(rest.midX, low - 150), withVelocity: .slow, thenHoldForDuration: 0.3)
+        XCTAssertEqual(percent(thumb), place, "a swipe on the edge, away from the thumb, took the thumb there")
+        XCTAssertNotEqual(thumb.value as? String, reading, "a swipe on the edge, away from the thumb, did not scroll the text")
+
+        // Upward drags go on across windows of the text (about 16 KiB each, 252 KiB in all, so two windows are 13 %)
+        // without a blank page and without a jump back: the thumb never goes back, and the lines are on the page.
+        var last = place
+        for fling in 1...18 {
+            point(rest.minX - 150, height * 0.93).press(
+                forDuration: 0.02, thenDragTo: point(rest.minX - 150, height * 0.10), withVelocity: .fast, thenHoldForDuration: 0)
+            let now = percent(thumb)
+            XCTAssertGreaterThanOrEqual(now, last, "fling \(fling) went back from \(last) % to \(now) %")
+            last = now
+        }
+        XCTAssertGreaterThanOrEqual(last - place, 13, "eighteen drags crossed less than two windows (13 %): \(place) % to \(last) %")
+        XCTAssertTrue(
+            app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '11-17 15:'")).firstMatch.waitForExistence(timeout: 10),
+            "after the flings the page shows no line")
         back(in: app)
         XCTAssertTrue(summary.waitForExistence(timeout: 10), "Back did not return to the first page")
 
