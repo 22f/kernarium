@@ -75,6 +75,28 @@ struct PNGParts {
     /// chunk for a string and only a string that it can make is made at all.
     static func letters(_ count: Int) -> Data { zlibStream(of: Data(repeating: 0x41, count: count)) }
 
+    /// `raw` as a zlib stream of stored blocks of `block` bytes (five bytes of header for each): the largest a valid
+    /// stream of that much may be, and what an encoder that cannot make it smaller writes.
+    static func stored(_ raw: Data, block: Int = 16_384) -> Data {
+        var out = Data([0x78, 0x01])
+        var offset = 0
+        repeat {
+            let count = min(block, raw.count - offset)
+            let last = offset + count >= raw.count
+            out.append(contentsOf: [last ? 1 : 0, UInt8(count & 0xFF), UInt8(count >> 8), UInt8(~count & 0xFF), UInt8((~count >> 8) & 0xFF)])
+            out.append(raw[offset..<offset + count])
+            offset += count
+        } while offset < raw.count
+        var bytes = [UInt8](raw)
+        out.append(bigEndian(UInt32(truncatingIfNeeded: zlib.adler32(1, &bytes, UInt32(bytes.count)))))
+        return out
+    }
+
+    /// The header of a picture: `width` by `height`, `depth` bits, `colour` type, not interlaced.
+    static func header(width: UInt32, height: UInt32, depth: UInt8 = 8, colour: UInt8 = 2) -> Chunk {
+        Chunk("IHDR", bigEndian(width) + bigEndian(height) + Data([depth, colour, 0, 0, 0]))
+    }
+
     /// A compressed text chunk (`zTXt`, `iTXt`) or profile (`iCCP`) that holds `expanded` letters once
     /// it is inflated, in about two kilobytes per two megabytes.
     static func compressed(_ type: String, expanding expanded: Int, packed: Data? = nil) -> Chunk {

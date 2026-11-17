@@ -92,7 +92,7 @@ nonisolated enum SendFeedbackPicture {
     /// Walks the chunks of the PNG in `data`, within `maxChunks`, reads and checks its header, and gives back the
     /// stream of its critical chunks alone, with the size its header declared. Every chunk's length must fit what
     /// is left of the file; the header comes first and once, the palette and the transparency come once and
-    /// before the image data, the image data is one run of chunks (skipped chunks may follow it, and then only the end chunk), and the end chunk is present. What follows the
+    /// before the image data, the image data is one run of chunks (skipped chunks may follow it, and then only the end chunk), and the end chunk is present. The image data together is no more than `maxImageDataBytes` for the header. What follows the
     /// end chunk, and every chunk that is not critical, is left out.
     static func rebuilt(from data: Data) throws -> Rebuilt {
         try data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> Rebuilt in
@@ -106,7 +106,8 @@ nonisolated enum SendFeedbackPicture {
             var stage = Stage.start
             var sawPalette = false
             var sawTransparency = false
-            var size: (width: Int, height: Int) = (0, 0)
+            var size: (width: Int, height: Int, imageData: Int) = (0, 0, 0)
+            var imageData = 0
             var out = Data(signature)
             out.reserveCapacity(min(bytes.count, 1 << 20))
             var offset = signature.count
@@ -137,6 +138,8 @@ nonisolated enum SendFeedbackPicture {
                     keep = true
                 case Chunk.data:
                     guard stage == .beforeData || stage == .inData else { throw Refusal.notPicture }
+                    imageData += length
+                    guard imageData <= size.imageData else { throw Refusal.notPicture }
                     stage = .inData
                     keep = true
                 case Chunk.end:
@@ -157,7 +160,7 @@ nonisolated enum SendFeedbackPicture {
 
     /// The size of a header that may be decoded: sides and pixels within bounds, a bit depth that goes with its
     /// colour type, the one compression and filter method, and no interlace.
-    private static func header(width: Int, height: Int, fields: Slice<UnsafeRawBufferPointer>) throws -> (width: Int, height: Int) {
+    private static func header(width: Int, height: Int, fields: Slice<UnsafeRawBufferPointer>) throws -> (width: Int, height: Int, imageData: Int) {
         let fields = Array(fields)  // bit depth, colour type, compression, filter, interlace
         guard width > 0, height > 0 else { throw Refusal.notPicture }
         guard withinBounds(width: width, height: height) else { throw Refusal.tooLarge }
@@ -165,7 +168,17 @@ nonisolated enum SendFeedbackPicture {
         guard depths[fields[1]]?.contains(fields[0]) == true, fields[2] == 0, fields[3] == 0 else { throw Refusal.notPicture }
         guard fields[4] != 1 else { throw Refusal.interlaced }
         guard fields[4] == 0 else { throw Refusal.notPicture }
-        return (width, height)
+        return (width, height, maxImageDataBytes(width: width, height: height, bitDepth: Int(fields[0]), colourType: Int(fields[1])))
+    }
+
+    /// The most image data (the IDAT chunks together) that a valid stream for a header needs: the rows, each of a
+    /// filter byte and its pixels padded to a byte, as zlib stores them at worst (a two-byte header, five bytes for
+    /// each 16 KiB block and a four-byte checksum), and 1 KiB of slack. A stream is read at up to 1,032 times its
+    /// size, so what a 1 by 1 picture may carry is a kilobyte and not what the entry holds.
+    static func maxImageDataBytes(width: Int, height: Int, bitDepth: Int, colourType: Int) -> Int {
+        let channels = [0: 1, 2: 3, 3: 1, 4: 2, 6: 4][colourType] ?? 4
+        let rows = height * (1 + (width * channels * bitDepth + 7) / 8)
+        return 2 + 4 + rows + 5 * (rows / 16_384 + 1) + 1_024
     }
 
     /// The picture in `data` at no more than `thumbnailPixels` on a side. Walks the chunks and reads the header

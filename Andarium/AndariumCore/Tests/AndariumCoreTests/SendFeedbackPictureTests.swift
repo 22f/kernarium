@@ -244,6 +244,59 @@ struct SendFeedbackPictureTests {
         #expect(throws: SendFeedbackPicture.Refusal.notPicture) { try SendFeedbackPicture.rebuilt(from: parts.data()) }
     }
 
+    // MARK: What the image data may cost
+
+    @Test func imageDataThatInflatesToGigabytesBehindOnePixelIsRefusedBeforeImageIO() throws {
+        // 1 by 1, and an IDAT of 64 KiB that inflates to 64 MiB of zeros (the reviewer's was 33 MB for 34 GB).
+        var parts = PNGParts(PNGParts.real(width: 1, height: 1))
+        let index = try #require(parts.chunks.firstIndex { $0.type == "IDAT" })
+        parts.chunks[index].data = PNGParts.zlibStream(of: Data(count: 64 << 20))
+        let input = parts.data()
+        #expect(input.count > 10_000)
+        #expect(throws: SendFeedbackPicture.Refusal.notPicture) { try SendFeedbackPicture.rebuilt(from: input) }
+        #expect(throws: SendFeedbackPicture.Refusal.notPicture) { try SendFeedbackPicture.thumbnail(of: input) }
+    }
+
+    @Test func theMostImageDataAValidStreamNeedsIsTheRowsAndTheStoredBlocks() {
+        // Rows of a filter byte and the pixels padded to a byte, as zlib stores them at worst (a two-byte header,
+        // five bytes for each 16 KiB, a four-byte checksum), and 1 KiB of slack.
+        #expect(SendFeedbackPicture.maxImageDataBytes(width: 1, height: 1, bitDepth: 8, colourType: 6) == 6 + 5 + 5 + 1_024)
+        #expect(SendFeedbackPicture.maxImageDataBytes(width: 100, height: 100, bitDepth: 1, colourType: 0) == 6 + 1_400 + 5 + 1_024)
+        #expect(SendFeedbackPicture.maxImageDataBytes(width: 10, height: 10, bitDepth: 16, colourType: 6) == 6 + 810 + 5 + 1_024)
+        #expect(SendFeedbackPicture.maxImageDataBytes(width: 1_000, height: 1_000, bitDepth: 8, colourType: 2) == 6 + 3_001_000 + 5 * 184 + 1_024)
+    }
+
+    @Test func imageDataOfExactlyTheLimitIsKeptAndOneByteMoreIsRefused() throws {
+        for (width, height, depth, colour) in [(1, 1, 8, 6), (100, 100, 1, 0), (10, 10, 16, 6), (7, 5, 4, 3), (33, 9, 8, 4)] as [(UInt32, UInt32, UInt8, UInt8)] {
+            let limit = SendFeedbackPicture.maxImageDataBytes(width: Int(width), height: Int(height), bitDepth: Int(depth), colourType: Int(colour))
+            func png(idat: Int) -> Data {
+                PNGParts(chunks: [PNGParts.header(width: width, height: height, depth: depth, colour: colour), PNGParts.Chunk("IDAT", Data(count: idat)), PNGParts.Chunk("IEND")]).data()
+            }
+            #expect(try SendFeedbackPicture.rebuilt(from: png(idat: limit)).width == Int(width), "\(width) by \(height), \(depth) bits, colour \(colour)")
+            #expect(throws: SendFeedbackPicture.Refusal.notPicture, "\(width) by \(height), \(depth) bits, colour \(colour)") {
+                try SendFeedbackPicture.rebuilt(from: png(idat: limit + 1))
+            }
+        }
+        // The total of several chunks is what counts.
+        let limit = SendFeedbackPicture.maxImageDataBytes(width: 1, height: 1, bitDepth: 8, colourType: 6)
+        let chunks = [PNGParts.header(width: 1, height: 1, depth: 8, colour: 6)] + (0..<4).map { _ in PNGParts.Chunk("IDAT", Data(count: limit / 4 + 1)) } + [PNGParts.Chunk("IEND")]
+        #expect(throws: SendFeedbackPicture.Refusal.notPicture) { try SendFeedbackPicture.rebuilt(from: PNGParts(chunks: chunks).data()) }
+    }
+
+    @Test func aValidStreamOfStoredBlocksAtTheLimitStillOpens() throws {
+        // The worst a valid encoder writes: every row stored, in blocks of 16 KiB. A 1,000 by 1,000 RGB picture.
+        let rows = Data(count: 1_000 * (1 + 3_000))
+        let idat = PNGParts.stored(rows)
+        let limit = SendFeedbackPicture.maxImageDataBytes(width: 1_000, height: 1_000, bitDepth: 8, colourType: 2)
+        #expect(idat.count <= limit && limit - idat.count < 1_100, "the stream is \(idat.count) bytes of at most \(limit)")
+        let png = PNGParts(chunks: [PNGParts.header(width: 1_000, height: 1_000), PNGParts.Chunk("IDAT", idat), PNGParts.Chunk("IEND")]).data()
+        let thumbnail = try SendFeedbackPicture.thumbnail(of: png)
+        #expect(thumbnail.width == 1_000 && thumbnail.height == 1_000)
+        // Blocks of 4 KiB, as a smaller buffer writes them, still fit.
+        let small = PNGParts.stored(rows, block: 4_096)
+        #expect(small.count > limit, "five bytes for each 4 KiB is more than the limit allows: that encoder is not valid here")
+    }
+
     // MARK: What a row says
 
     @Test func onlyAPNGIsAPictureAndAJPEGIsOneThatIsNotShown() async throws {
