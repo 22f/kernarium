@@ -152,6 +152,94 @@ struct HeatLimitSessionTests {
         #expect(rig.guest.record() == (try frame("severe")))
     }
 
+    // MARK: A give-up after a connection that worked
+
+    /// A booted run whose HAL connected, then went and stayed away: the five
+    /// attempts end. The service comes back after that.
+    private func givenUpAfterAConnection(limit: Bool, observing state: HostThermalState) throws -> Rig {
+        let rig = rig()
+        rig.session.setLimit(limit)
+        rig.session.observe(state)
+        rig.session.update(running: true, booted: true)
+        #expect(thermalEventually { rig.session.isConnected })
+        _ = rig.guest.record()
+        rig.guest.accepting = false
+        rig.guest.dropLatest()
+        #expect(thermalEventually { rig.session.hasGivenUp }, "the attempts did not end")
+        rig.guest.accepting = true
+        return rig
+    }
+
+    @Test(arguments: [false, true])
+    func aRecoveredServiceHearsTheNewChoiceAfterAGiveUp(target: Bool) throws {
+        // Android holds the severity it was last told through the outage, so
+        // the new choice must reach it: turned off while it holds critical,
+        // and turned on while the HAL holds none.
+        let rig = try givenUpAfterAConnection(limit: !target, observing: .critical)
+        rig.session.setLimit(target)
+        rig.session.update(running: true, booted: true)  // LiveRuntime.setHeatLimit's own call
+        #expect(thermalEventually { rig.session.isConnected }, "the choice never reached the recovered service")
+        #expect(rig.guest.record() == (try frame(target ? "critical" : "none")))
+        #expect(!rig.session.hasGivenUp)
+    }
+
+    @Test func aChangeOfTheSeverityAfterAGiveUpStartsOneNewRound() throws {
+        let rig = try givenUpAfterAConnection(limit: true, observing: .nominal)
+        // Nothing changes: no timer keeps trying.
+        let before = rig.guest.attempts
+        rig.session.settle()
+        usleep(300_000)
+        #expect(rig.guest.attempts == before, "an attempt was made with nothing changed")
+        #expect(!rig.session.isConnected)
+        rig.session.observe(.critical)
+        #expect(thermalEventually { rig.session.isConnected }, "the changed severity did not start a new round")
+        #expect(rig.guest.record() == (try frame("critical")))
+    }
+
+    @Test func aChangeThatTellsNothingNewStartsNoRound() throws {
+        // The limit is off: the severity Android is told stays none whatever iOS says.
+        let rig = try givenUpAfterAConnection(limit: false, observing: .nominal)
+        let before = rig.guest.attempts
+        rig.session.observe(.critical)
+        rig.session.observe(.nominal)
+        rig.session.settle()
+        usleep(300_000)
+        #expect(rig.guest.attempts == before)
+        #expect(rig.session.hasGivenUp)
+    }
+
+    @Test func aNewRoundThatFailsEndsAgainAndOnlyAnotherEventStartsTheNext() throws {
+        let rig = try givenUpAfterAConnection(limit: true, observing: .nominal)
+        rig.guest.accepting = false
+        let first = rig.guest.attempts
+        rig.session.setLimit(false)
+        #expect(thermalEventually { rig.guest.attempts >= first + ThermalSession.attemptsAfterBoot })
+        #expect(thermalEventually { rig.session.hasGivenUp }, "the new round did not end")
+        let ended = rig.guest.attempts
+        usleep(300_000)
+        #expect(rig.guest.attempts == ended, "an attempt was made after the round ended")
+        rig.guest.accepting = true
+        rig.session.setLimit(true)
+        #expect(thermalEventually { rig.session.isConnected })
+    }
+
+    @Test func aHalThatNeverConnectedInThisBootStaysGivenUp() throws {
+        let rig = rig()
+        rig.guest.accepting = false
+        rig.session.update(running: true, booted: true)
+        #expect(thermalEventually { rig.session.hasGivenUp })
+        rig.guest.accepting = true
+        let before = rig.guest.attempts
+        rig.session.setLimit(false)
+        rig.session.observe(.critical)
+        rig.session.setLimit(true)
+        rig.session.update(running: true, booted: true)
+        rig.session.settle()
+        usleep(300_000)
+        #expect(rig.guest.attempts == before, "an absent HAL was tried again")
+        #expect(rig.session.hasGivenUp && !rig.session.isConnected)
+    }
+
     // MARK: The notice
 
     @Test func noCapIsAnnouncedWhileOffAndTheRunAnnouncesItIfTheLimitComesOnWhileHot() throws {

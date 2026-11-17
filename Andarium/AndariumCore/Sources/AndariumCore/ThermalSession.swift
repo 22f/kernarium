@@ -21,7 +21,12 @@ import Foundation
 /// starts early in boot. Once Android has booted, five attempts in a row that
 /// fail end the attempts for that boot, silently: an older image has no HAL,
 /// and then nothing lowers the frame rate and nothing is announced. A
-/// connection that was made and is lost is tried again the same way.
+/// connection that was made and is lost is tried again the same way. When it
+/// is a HAL that did connect in this boot that the attempts gave up on, the
+/// give-up is not final: a new choice of the limit, or a change of the
+/// severity Android is told, starts one new round of attempts. Nothing else
+/// does (no timer keeps trying while nothing changes), and a HAL that never
+/// connected in this boot stays given up.
 ///
 /// The cap is announced once in a run (`ThermalPolicy.claimAnnouncement`), at
 /// the first moment the severity is at the cap or above and the HAL is
@@ -55,6 +60,8 @@ public final class ThermalSession: @unchecked Sendable {
     private var connected = false
     private var failedAttempts = 0
     private var gaveUp = false
+    /// The HAL connected in this boot, so that a give-up can be revived.
+    private var connectedThisBoot = false
     private var timerEpoch: UInt64 = 0
     /// Whether Android is told how hot the device is (Settings' "When hot").
     private var limitsFrameRate = true
@@ -97,7 +104,10 @@ public final class ThermalSession: @unchecked Sendable {
         queue.async { [self] in
             let bootedNow = booted && !self.booted
             self.booted = booted
-            if bootedNow { failedAttempts = 0 }
+            if bootedNow {
+                failedAttempts = 0
+                connectedThisBoot = false
+            }
             if running {
                 if !inRun { beginRun() }
                 if stream == nil && !gaveUp { openStream() }
@@ -116,7 +126,7 @@ public final class ThermalSession: @unchecked Sendable {
             guard on != limitsFrameRate else { return }
             limitsFrameRate = on
             guard inRun else { return }
-            stream?.send(told)
+            if !reviveAfterGiveUp() { stream?.send(told) }
             announceIfDue()
         }
     }
@@ -139,6 +149,7 @@ public final class ThermalSession: @unchecked Sendable {
             closeStream()
             gaveUp = false
             failedAttempts = 0
+            connectedThisBoot = false
         }
     }
 
@@ -168,6 +179,7 @@ public final class ThermalSession: @unchecked Sendable {
         policy = ThermalPolicy()
         failedAttempts = 0
         gaveUp = false
+        connectedThisBoot = false
         // A reading from before the run is the state the run begins in.
         policy.observe(observed, at: clock())
         scheduleExpiry()
@@ -179,6 +191,7 @@ public final class ThermalSession: @unchecked Sendable {
         timerEpoch &+= 1
         closeStream()
         policy = ThermalPolicy()
+        connectedThisBoot = false
         publishHot()
     }
 
@@ -200,6 +213,18 @@ public final class ThermalSession: @unchecked Sendable {
         stream.start()
     }
 
+    /// A new round of attempts, for a HAL that connected in this boot and
+    /// whose attempts then gave up: the opening record carries what Android is
+    /// told now. The caller says what changed, so no timer is behind this.
+    /// Returns whether a round began.
+    private func reviveAfterGiveUp() -> Bool {
+        guard inRun, gaveUp, connectedThisBoot, stream == nil else { return false }
+        gaveUp = false
+        failedAttempts = 0
+        openStream()
+        return true
+    }
+
     private func closeStream() {
         streamEpoch &+= 1
         stream?.stop()
@@ -211,6 +236,7 @@ public final class ThermalSession: @unchecked Sendable {
         switch event {
         case .connected:
             connected = true
+            connectedThisBoot = true
             failedAttempts = 0
             announceIfDue()
         case .attemptFailed:
@@ -234,7 +260,7 @@ public final class ThermalSession: @unchecked Sendable {
 
     private func apply(_ changed: Bool) {
         // With the limit off the HAL was told none and stays told none.
-        if changed && limitsFrameRate { stream?.send(policy.severity) }
+        if changed && limitsFrameRate && !reviveAfterGiveUp() { stream?.send(policy.severity) }
         scheduleExpiry()
         announceIfDue()
         publishHot()
