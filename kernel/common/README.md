@@ -479,6 +479,9 @@ it. The bridge fields used below are defined by the comments in
   (`darwin_net_kern.guest_wake=0` turns this off). A suspend the host asked for
   ends only with the host's wake; a host that forwards a key also sends the
   wake, because Virtio input is not a wake source.
+- The virtual Wi-Fi station stays joined through every suspend: virt_wifi
+  offers wake-on-WLAN for any activity, so cfg80211 does not disconnect the
+  station as the guest sleeps.
 - A wake request that arrives while a suspend is being entered is answered at
   once and still ends that suspend. It ends every host-asked suspend that
   arrived before it, too, including one that waits behind another console

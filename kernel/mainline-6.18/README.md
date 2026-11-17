@@ -244,8 +244,9 @@ The cgroup, FUSE, `quota2`, `IDLETIMER`, and Incremental file system topics come
 from the Android common kernel. The shared series also carries topics only the
 Android product exercises, each inert in a Linux guest: the `XFRM_SPI_PER_DESTINATION`
 option, the per-device autoconf route table (`accept_ra_rt_table`), and
-virt_wifi's off-channel operation, address-list propagation and lockdep
-classes.
+virt_wifi's off-channel operation, address-list propagation, lockdep
+classes and wake-on-WLAN default, which keeps its station joined through a
+system suspend.
 
 The iOS runtime framework for this product is `KRuntime_Android_6_18_4K`;
 [Kernarium](../../Kernarium/README.md#runtimes-and-runs) owns its packaging.
