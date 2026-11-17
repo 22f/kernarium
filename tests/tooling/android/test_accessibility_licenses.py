@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """The licence metadata of the two accessibility applications.
 
-The image builds TalkBack and eSpeak NG from source, and their series end with
-the Soong build files that carry the licence modules the image's NOTICE reports.
+The image builds TalkBack and eSpeak NG from source, and their series carry
+the Soong build files with the licence modules the image's NOTICE reports.
 Each project names the kinds of what it builds, and every copyleft kind names
 the full text of its licence: a text the series adds, or one the pinned
 upstream tree holds.

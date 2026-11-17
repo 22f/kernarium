@@ -4,7 +4,7 @@
 
 The image builds TalkBack and eSpeak NG (with libsonic) from source. Each is a
 pinned upstream commit; TalkBack and eSpeak NG also carry a maintained series
-under `dependencies/patches/` whose last patch is their Soong build. The
+under `dependencies/patches/`, each with its Soong build. The
 metadata beside this tool pins the commits, the trees they hold and where each
 source is materialized, and `dependencies/manifest.tsv` pins the same commits
 for the topic checkouts that maintain the series. The two must agree, and the

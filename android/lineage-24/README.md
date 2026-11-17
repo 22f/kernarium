@@ -175,12 +175,13 @@ with the series of `dependencies/patches/talkback` and `espeak-ng`; and
 `tools/verify-accessibility-source.py` checks the pins against
 `dependencies/manifest.tsv`, the series and the checkouts, as the preflight,
 the patch step and the build run it. A series holds the changes to the project
-and ends with its Soong build, `Build with Soong`: the Soong modules, the
-manifests, and the licence modules the image's NOTICE reports. The TalkBack
-series also patches out the three libraries the tree lacks and leaves every
-Google Play services library out of the phone build, which recognises no text
-in images (OCR) as a result. The target-files verifier requires both
-applications.
+and its Soong build, `Build with Soong`: the Soong modules, the manifests, and
+the licence modules the image's NOTICE reports. The eSpeak NG series then
+installs the application's JNI library on the application's own partition, as
+the product's generic system rule requires. The TalkBack series also patches
+out the three libraries the tree lacks and leaves every Google Play services
+library out of the phone build, which recognises no text in images (OCR) as a
+result. The target-files verifier requires both applications.
 
 ### Motion sensors
 

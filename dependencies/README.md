@@ -56,8 +56,8 @@ script below; per-platform contracts are under [`platforms/`](platforms).
   [Android producer](../android/lineage-24/README.md#accessibility) pins the
   same commits and materializes them with these series
   ([`patches/talkback`](patches/talkback/series.tsv),
-  [`patches/espeak-ng`](patches/espeak-ng/series.tsv)), whose last patch is the
-  Soong build, and a pin moves in `manifest.tsv` and in its metadata together.
+  [`patches/espeak-ng`](patches/espeak-ng/series.tsv)), which carry the Soong
+  build, and a pin moves in `manifest.tsv` and in its metadata together.
 - `x86-conformance`: the test-only FEX and K x86-64 corpora and their pinned
   producer inputs, used to generate the checked-in x86 unit corpus (see
   [`../tools/fex-tests/README.md`](../tools/fex-tests/README.md)).
