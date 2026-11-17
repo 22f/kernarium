@@ -483,7 +483,7 @@ class GuestMapsTest(unittest.TestCase):
     def judged(self, extra: str):
         lines = fixture.Wire.lines(fixture.ptrace_records(True))
         at = next(n for n, line in enumerate(lines) if line.split(TAB)[1] == "regs") + 7
-        text = "\n".join(lines[:at]) + "\n" + extra + "\n".join(lines[at:]) + "\nrc=0\n"
+        text = "pid=4242\n" + "\n".join(lines[:at]) + "\n" + extra + "\n".join(lines[at:]) + "\nrc=0\n"
         return rows.run_mode(lambda *_args, **_kw: text, "ptrace")
 
     def test_a_maps_text_that_fits_is_no_failure(self):

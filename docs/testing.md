@@ -803,9 +803,15 @@ blocker in every one of them.
   incomplete one (an exit status, a missing or empty workload row, a probe
   that skipped scenarios or recorded no faults, a product arm without
   residency evidence) fails. `arm64-aot-debug-rows` does the same for the
-  debug rows on scripted tombstones and records: a moved frame, a register
-  that changes only with the component and an incomplete mode fail, and only
-  a field that two runs of one engine already differ in is masked.
+  debug rows on scripted protobuf tombstones and records: a moved frame, a
+  register that changes only with the component and an incomplete mode fail,
+  and only a field that two runs of one engine already differ in is masked.
+  `arm64-aot-tombstone-pb` holds the tombstone reader to the wire format
+  (a truncated file, a length past its parent, an unknown wire type, a
+  singular field twice, a field of the wrong wire type, trailing bytes: each
+  fails), pins the field numbers the model reads, and holds the model to the
+  crashing thread's registers, the mapping list (any order, no overlap, every
+  name by its exact bytes) and the pointer into the faulting mapping.
   `arm64-aot-share-rows` does the same for the share rows' records and
   counter bounds. `arm64-aot-records` holds the records the guest debug
   program prints to their one reader: it decodes hand-written lines exactly
@@ -825,7 +831,8 @@ blocker in every one of them.
   debugger and the crash reporter see: tombstones of crashes in rewritten
   libz and libc, and a tracer's registers, breakpoints and steps. The program
   runs under the `ADDR_NO_RANDOMIZE` personality, and a register that points
-  into a mapping is compared by the file or mapping and the offset in it (an
+  into a mapping is compared by the file (its base name in the program's own
+  records, its whole path in a tombstone) or mapping and the offset in it (an
   unnamed mapping by its size, its protection, its place among the unnamed
   mappings of that shape, lowest address first, and how many there are),
   because the image's userspace still places libraries and stacks at random.
@@ -834,10 +841,20 @@ blocker in every one of them.
   small safe set is written `%xx`, so a mapping name of any bytes is one
   value); `records.py` is the one reader, and accepts a line only if encoding
   what it read gives the line back and a record only if it has every field of
-  its kind once, in order. A tombstone is the one free text the runner reads:
-  its digest builds the same records and fails on a line or a value it cannot
-  read. Records are compared field by name, and the mask is a set of record
-  kind and field pairs, never a position in text. A pointer into an unnamed
+  its kind once, in order. A tombstone is read from the protobuf file the crash
+  reporter writes beside the text one (`tombstone_NN.pb`, taken out of the
+  guest in base64 with its size and SHA-256 checked, and chosen by the process
+  id the program's shell says first): a first-party strict reader of the wire
+  format (`protowire.py`) and a table of the field numbers the model reads
+  (`tombstone_pb.py`; the table follows the `tombstone.proto` of the source tree
+  the image is built from, and fields it does not list are skipped by wire type,
+  counted and reported on the row's line) build the same records, and a
+  register missing from the crashing thread, a mapping list that overlaps and a
+  file that ends before its last field fail. A pointer is located against the
+  file's own mapping list, put in address order, by the exact bytes of the
+  mapping's name. Nothing in the comparison reads text. Records are compared
+  field by name, and the mask is a set of record kind and field pairs, never a
+  position in text. A pointer into an unnamed
   mapping is proved over the whole record, field by name, or the row fails and
   the field is never masked: every run compared must record it as a pointer
   into mappings of one shape counted among the same number of them, and the

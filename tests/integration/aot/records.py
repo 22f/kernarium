@@ -331,15 +331,20 @@ def decode(lines: list[str], schema: dict[str, tuple[tuple[str, str], ...]] | No
 Mapping = tuple[int, int, int, str, str]  # low, high, file offset, name, protection
 
 
-def resolve(value: int, maps: list[Mapping], thread_stacks: bool = False) -> Value:
+# A thread's stack is named by its thread id, which differs between runs.
+STACK_NAME = re.compile(r"\[anon:stack_and_tls:[0-9]+\]")
+
+
+def resolve(value: int, maps: list[Mapping], thread_stacks: bool = False, keep_paths: bool = False) -> Value:
     """Where a value points as the run does not choose it: a file by its base
-    name and the offset in the file, a named mapping by its name and the
-    offset in it, an unnamed mapping by its shape, its place among that shape
-    (lowest address first; `maps` is in address order), how many there are,
-    and the offset in it. The number itself where no mapping holds it. The
-    place is the same place in two runs only if they agree on how many there
-    are (compare checks that). With `thread_stacks` a thread's stack is named
-    by its thread id, which differs between runs."""
+    name (its whole path with `keep_paths`) and the offset in the file, a
+    named mapping by its name and the offset in it, an unnamed mapping by its
+    shape, its place among that shape (lowest address first; `maps` is in
+    address order), how many there are, and the offset in it. The number
+    itself where no mapping holds it. The place is the same place in two runs
+    only if they agree on how many there are (compare checks that). With
+    `thread_stacks` a thread's stack (STACK_NAME) is named without its thread
+    id."""
     counts: dict[tuple[int, str], int] = {}
     for low, high, _, name, protection in maps:
         if not name:
@@ -353,10 +358,10 @@ def resolve(value: int, maps: list[Mapping], thread_stacks: bool = False) -> Val
             seen[shape] = ordinal + 1
         if low <= value < high:
             if name.startswith("/"):
-                return Named(name.rsplit("/", 1)[1], offset + value - low)
+                return Named(name if keep_paths else name.rsplit("/", 1)[1], offset + value - low)
             if name:
-                if thread_stacks:
-                    name = re.sub(r":[0-9]+]$", ":*]", name)
+                if thread_stacks and STACK_NAME.fullmatch(name):
+                    name = "[anon:stack_and_tls:*]"
                 return Named(name, value - low)
             return Unnamed(high - low, protection[:3], ordinal, counts[shape], value - low)
     return value

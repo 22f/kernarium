@@ -779,8 +779,11 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
             except debug_rows.DebugFailure as problem:
                 raise Failure(f"debug row {problem}")
             mask = ", ".join(f"{kind}.{name}" for kind, name in sorted(result.mask)) or "none"
+            unread = getattr(on.debug[mode][0], "unread", None)
             print(f"debug row {mode}: {len(on.debug[mode][0])} records, "
-                  f"{result.compared} fields compared, {result.masked} masked ({mask}), identical")
+                  f"{result.compared} fields compared, {result.masked} masked ({mask}), identical"
+                  + (f"; tombstone fields not read: {debug_rows.protowire.describe(unread)}"
+                     if unread is not None else ""))
     if options.share_program:
         fork_shared = None
         for mode in share_rows.modes(options.study_eviction):

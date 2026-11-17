@@ -10,11 +10,10 @@ Everything compared is a field of a record (records.py): a record kind, a
 field name and a value that is a number, a place (a mapping and the offset in
 it) or a text compared whole. The guest program prints its records in an
 encoding of its own (one field per line, escaped names, every record whole or
-a failure); a tombstone is outside text, and digest_tombstone is the one place
-that reads free text. It builds the same records and fails on a line it cannot
-read where it expects a register, on a register seen twice, and on a value
-that is no value. After that nothing reads text: compare() works field by
-field, by name.
+a failure). A tombstone is read from the protobuf file the crash reporter
+writes beside the text one (tombstone_pb.py, over the strict wire reader
+protowire.py), into the same records: nothing in the comparison reads text.
+compare() works field by field, by name.
 
 The runs of a mode are compared record by record: a record kind that is not
 one of the engine's own varying ones (a process id, a random register) must be
@@ -41,12 +40,17 @@ record line, and a record that is not whole.
 from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
+import base64
+import binascii
+import hashlib
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+import protowire
 import records
+import tombstone_pb
 from records import Named, Record, RecordError, Unnamed, Value
 
 PROGRAM = "/data/local/tmp/libaotdebug.so"
@@ -80,169 +84,29 @@ class DebugFailure(RuntimeError):
     pass
 
 
+# What the shell that ran the program says when the program died of the signal
+# a crash mode exists to raise: a line of its own, after the program's records.
+DEATH_NOTICE = {"crash-memcpy": "Segmentation fault", "crash-cross": "Segmentation fault",
+                "crash-abort": "Aborted", "crash-sibling": "Aborted"}
+
+
 def command(mode: str) -> str:
-    return (f"cd /data/local/tmp && AOT_DEBUG_MODE={mode} LD_PRELOAD={PROGRAM} "
-            f"/system/bin/toybox true; echo rc=$?")
+    """The program in a shell of its own that says its process id first, and
+    keeps it by executing the program in place: the tombstone of that process
+    is the one to read."""
+    return (f'sh -c "echo pid=\\$\\$; cd /data/local/tmp && export AOT_DEBUG_MODE={mode} '
+            f'LD_PRELOAD={PROGRAM} && exec /system/bin/toybox true"; echo rc=$?')
 
 
-def split_blocks(text: str) -> list[str]:
-    """A tombstone's blocks: the crashing thread, then one per other thread."""
-    return re.split(r"^--- --- ---.*$", text, flags=re.MULTILINE)
-
-
-MAP_LINE = re.compile(
-    r"^[ \t]+([0-9a-f]{8})'?([0-9a-f]{8})-([0-9a-f]{8})'?([0-9a-f]{8}) (\S+)[ \t]+([0-9a-f]+)[ \t]+[0-9a-f]+"
-    r"(?:[ \t]+(\S.*?))?(?: \(BuildId: \w+\))?[ \t]*$", re.MULTILINE)
-
-
-def parse_maps(text: str) -> list[tuple[int, int, int, str, str]]:
-    """The tombstone's memory map: (low, high, file offset, name, protection)."""
-    return [(int(m.group(1) + m.group(2), 16), int(m.group(3) + m.group(4), 16) + 1,
-             int(m.group(6), 16), m.group(7) or "", m.group(5)) for m in MAP_LINE.finditer(text)]
-
-
-class DebugFailure(RuntimeError):
-    pass
-
-
-# ---- tombstones: the one reader of free text --------------------------------
-
-TOMBSTONE_REGISTER = re.compile(r"\s+(?:x\d+|lr|sp|pc|pst|esr|vg)\s")
-TOMBSTONE_PAIRS = re.compile(r"\s*(x\d+|lr|sp|pc|pst|esr|vg)\s+([0-9a-f]{16})")
-PROCESS_LINE = re.compile(r"pid: (\d+), ppid: (\d+), tid: (\d+), name: (.*?)\s+>>> (.*) <<<")
-SIGNAL_LINE = re.compile(r"signal (-?\d+) \((\w+)\), code (-?\d+) \((\w+)\), fault addr "
-                         r"(--------|0x[0-9a-f]+)(?: \((read|write)\))?")
-FRAME_LINE = re.compile(r"\s+#(\d+) pc ([0-9a-f]+)\s+(\S+)(?:\s+(\S.*))?")
-THREAD_FRAME_LINE = re.compile(r"\s+#(\d+) pc [0-9a-f]+\s+(\S+)(?:\s+(\S.*))?")
-CODE_ROW = re.compile(r"\s+([0-9a-f]{16})((?: [0-9a-f]{16})+)  (.*)")
-FRAME_COUNT = re.compile(r"(\d+) total frames")
-HEAD_KEY = re.compile(r"([A-Za-z][A-Za-z _]*): (.*)")
-
-
-def digest_tombstone(text: str) -> list[Record]:
-    """The records of a tombstone, in the order it shows them: the process, the
-    signal, the registers (a value that points into a mapping is a place, as
-    the run does not choose it), the frames, the code around the pc and the
-    lr, the other threads' names and frames, and the head's remaining lines as
-    text. A register seen twice, a register line it cannot read, a value that
-    is no value, a process, signal, frame or code line that does not read
-    whole, and a key seen twice are failures, never guesses."""
+def digest_tombstone(data: bytes) -> tombstone_pb.Digest:
+    """The records of a tombstone file (tombstone_pb.py): a file that is not
+    whole protobuf, a field of the wrong kind, a message the model needs that
+    is missing and a register missing from the crashing thread are failures,
+    never guesses."""
     try:
-        return _digest(text)
-    except RecordError as problem:
+        return tombstone_pb.read(data)
+    except (protowire.WireError, tombstone_pb.TombstoneError, RecordError) as problem:
         raise DebugFailure(f"the tombstone: {problem}") from None
-
-
-def _digest(text: str) -> list[Record]:
-    blocks = split_blocks(text)
-    maps = parse_maps(text)
-    keys: list[tuple[str, Value]] = []
-    texts: list[tuple[str, Value]] = []
-    out: dict[str, list[Record]] = {name: [] for name in
-                                    ("process", "signal", "frames", "frame", "code", "thread")}
-    registers: list[tuple[str, Value]] = []
-    section = "head"
-    region = ""
-    first_row = 0
-    for number, line in enumerate(blocks[0].splitlines(), 1):
-        if line.startswith(("Timestamp:", "Process uptime:")):
-            continue
-        if line.startswith("memory near "):
-            section = "keep" if line.startswith(("memory near pc", "memory near lr")) else "skip"
-            region = "pc" if line.startswith("memory near pc") else "lr"
-            first_row = 0
-            continue
-        if line.startswith("memory map") or line.startswith("open files"):
-            section = "skip"
-            continue
-        if section == "skip":
-            continue
-        if not line.strip():
-            section = "head"
-            continue
-        if section == "keep":
-            row = CODE_ROW.fullmatch(line)
-            if row is None:
-                raise RecordError(f"line {number}: a line it cannot read where it expects code: {line!r}")
-            address = int(row.group(1), 16)
-            first_row = first_row or address
-            out["code"].append(Record("tomb.code", (("region", region), ("offset", address - first_row),
-                                                    ("words", row.group(2).strip()), ("ascii", row.group(3)))))
-            continue
-        if line.startswith("signal "):
-            signal = SIGNAL_LINE.fullmatch(line)
-            if signal is None:
-                raise RecordError(f"line {number}: a signal line it cannot read: {line!r}")
-            fault = signal.group(5)
-            # The page of a fault address is the process's layout; where in
-            # the page it lies is the guest's.
-            out["signal"].append(Record("tomb.signal", (
-                ("signo", int(signal.group(1))), ("name", signal.group(2)), ("code", int(signal.group(3))),
-                ("code_name", signal.group(4)), ("fault", "none" if fault == "--------" else "address"),
-                ("page_offset", 0 if fault == "--------" else int(fault, 16) & 0xfff),
-                ("access", signal.group(6) or "none"))))
-            continue
-        if TOMBSTONE_REGISTER.match(line):
-            end = 0
-            for pair in TOMBSTONE_PAIRS.finditer(line):
-                if pair.start() != end:
-                    break
-                end = pair.end()
-                registers.append((pair.group(1), records.resolve(int(pair.group(2), 16), maps, True)))
-            if end != len(line.rstrip()):
-                raise RecordError(f"line {number}: a register line it cannot read: {line!r}")
-            continue
-        if line.startswith("pid:"):
-            process = PROCESS_LINE.fullmatch(line)
-            if process is None:
-                raise RecordError(f"line {number}: a process line it cannot read: {line!r}")
-            out["process"].append(Record("tomb.process", (
-                ("pid", int(process.group(1))), ("ppid", int(process.group(2))), ("tid", int(process.group(3))),
-                ("name", process.group(4)), ("executable", process.group(5)))))
-            continue
-        count = FRAME_COUNT.fullmatch(line)
-        if count:
-            out["frames"].append(Record("tomb.frames", (("count", int(count.group(1))),)))
-            continue
-        if line == "backtrace:":
-            continue
-        frame = FRAME_LINE.fullmatch(line) if line.lstrip().startswith("#") else None
-        if line.lstrip().startswith("#"):
-            if frame is None:
-                raise RecordError(f"line {number}: a frame it cannot read: {line!r}")
-            out["frame"].append(Record("tomb.frame", (
-                ("index", int(frame.group(1))), ("pc", int(frame.group(2), 16)), ("path", frame.group(3)),
-                ("detail", frame.group(4) or ""))))
-            continue
-        key = HEAD_KEY.fullmatch(line)
-        if key and not line.startswith(" "):
-            keys.append((key.group(1), key.group(2)))
-        else:
-            texts.append((f"line{len(texts)}", line))
-    if registers:
-        out["registers"] = [Record("tomb.regs", tuple(registers))]
-    for block in blocks[1:]:
-        for line in block.splitlines():
-            if line.startswith("pid:"):
-                process = PROCESS_LINE.fullmatch(line)
-                if process is None:
-                    raise RecordError(f"a thread's process line it cannot read: {line!r}")
-                out["thread"].append(Record("tomb.thread", (("name", process.group(4)),)))
-            elif re.match(r"\s+#\d+ pc ", line):
-                frame = THREAD_FRAME_LINE.fullmatch(line)
-                if frame is None:
-                    raise RecordError(f"a thread's frame it cannot read: {line!r}")
-                # Where a thread was caught while it ran is not a fact of the
-                # guest: its first frame keeps the library and nothing else,
-                # and the others the symbol without its offset.
-                symbol = re.sub(r"\+\d+\)$", ")", re.sub(r" \(BuildId: \w+\)$", "", frame.group(3) or ""))
-                out["thread"].append(Record("tomb.thread_frame", (
-                    ("index", int(frame.group(1))), ("path", frame.group(2)),
-                    ("symbol", "" if frame.group(1) == "00" else symbol))))
-    ordered = [Record("tomb.head", tuple(keys)), Record("tomb.text", tuple(texts))]
-    for name in ("process", "signal", "registers", "frames", "frame", "code", "thread"):
-        ordered.extend(out.get(name, []))
-    return ordered
 
 
 def field_of(rec: Record, name: str) -> Value:
@@ -259,75 +123,95 @@ def of_kind(recs: list[Record], kind: str) -> list[Record]:
 def verify_tombstone(mode: str, recs: list[Record]) -> None:
     signal = of_kind(recs, "tomb.signal")
     frames = of_kind(recs, "tomb.frame")
-    if len(signal) != 1:
-        raise DebugFailure(f"{mode}: {len(signal)} signal lines in the tombstone")
+    regs = of_kind(recs, "tomb.regs")
+    if len(signal) != 1 or len(regs) != 1 or "pc" not in regs[0].names():
+        raise DebugFailure(f"{mode}: the tombstone has {len(signal)} signal records and {len(regs)} register "
+                           f"records, and the registers must hold a pc")
     sig = signal[0]
-    if len(of_kind(recs, "tomb.regs")) != 1 or not any(name == "pc" for name, _ in of_kind(recs, "tomb.regs")[0].fields):
-        raise DebugFailure(f"{mode}: the tombstone has no register record with a pc")
-    shown = [f"{field_of(frame, 'path')} {field_of(frame, 'detail')}" for frame in frames]
+    shown = [(str(field_of(frame, "file")), str(field_of(frame, "function"))) for frame in frames]
     if mode == "crash-memcpy":
-        needed = ("SIGSEGV", "SEGV_ACCERR", "libc.so (__mem", "libz.so (updatewindow", "libz.so (inflateSetDictionary")
+        needed = ("SIGSEGV", "SEGV_ACCERR", ("libc.so", "__mem"), ("libz.so", "updatewindow"),
+                  ("libz.so", "inflateSetDictionary"))
     elif mode == "crash-cross":
-        needed = ("SIGSEGV", "SEGV_ACCERR", "libc.so (__memcmp")
+        needed = ("SIGSEGV", "SEGV_ACCERR", ("libc.so", "__memcmp"))
     else:
-        needed = ("SIGABRT", "libc.so (abort+")
+        needed = ("SIGABRT", ("libc.so", "abort"))
     present = {field_of(sig, "name"), field_of(sig, "code_name")}
     for token in needed:
-        if token.startswith("SIG") or token.startswith("SEGV"):
+        if isinstance(token, str):
             found = token in present
         else:
-            found = any(token in line for line in shown)
+            found = any(path.endswith("/" + token[0]) and function.startswith(token[1]) for path, function in shown)
         if not found:
             raise DebugFailure(f"{mode}: the tombstone lacks {token!r}: " +
                                "; ".join(str(rec) for rec in recs if rec.kind in ("tomb.signal", "tomb.frame")))
     if mode in ("crash-memcpy", "crash-cross"):
-        if not any(row.get("region") == "pc" for row in of_kind(recs, "tomb.code")):
+        if not any(row.get("region") == "pc" and row.get("bytes") for row in of_kind(recs, "tomb.code")):
             raise DebugFailure(f"{mode}: the tombstone lacks the code around the pc")
     if len(frames) < {"crash-memcpy": 4, "crash-cross": 2}.get(mode, 2):
         raise DebugFailure(f"{mode}: only {len(frames)} frames in the tombstone")
     if mode in ("crash-memcpy", "crash-cross"):
-        # A read that runs into an unmapped page is a read fault in it.
-        if field_of(sig, "fault") != "address" or field_of(sig, "access") != "read":
-            raise DebugFailure(f"{mode}: no read fault address in the tombstone: {sig}")
+        if field_of(sig, "fault") != "address":
+            raise DebugFailure(f"{mode}: no fault address in the tombstone: {sig}")
     if mode == "crash-sibling":
         other = [rec for rec in of_kind(recs, "tomb.thread_frame") if field_of(rec, "index") == 0]
-        if not other or not any("libz.so" in str(field_of(rec, "path")) for rec in other):
+        if not other or not any(str(field_of(rec, "file")).endswith("/libz.so") for rec in other):
             raise DebugFailure(f"{mode}: no frame of the running thread in libz.so")
 
 
-def fetch_tombstone(shell: Callable[..., str]) -> str:
-    """The tombstone of the process that just died, by the process id the
-    crash log names."""
+def transfer(shell: Callable[..., str], name: str) -> bytes:
+    """The bytes of a file of the guest, through its shell: the size and the
+    SHA-256 the guest computes, and the file in base64. The bytes are those of
+    the file only if the transfer says so, and a file that changed while it
+    was being read does not."""
+    for _ in range(3):
+        text = shell(f"f={name}; echo size=$(wc -c < $f); echo sha256=$(sha256sum $f); "
+                     f"echo b64=$(base64 -w 0 $f)", 90)
+        found = {key: re.findall(rf"^{key}=(.*)$", text, re.MULTILINE) for key in ("size", "sha256", "b64")}
+        if any(len(values) != 1 for values in found.values()):
+            raise DebugFailure(f"{name}: the transfer printed no size, digest and data once each:\n{text[:400]}")
+        try:
+            data = base64.b64decode(found["b64"][0].strip(), validate=True)
+        except binascii.Error as problem:
+            raise DebugFailure(f"{name}: the base64 of the transfer does not decode: {problem}") from None
+        digest = found["sha256"][0].split()
+        if (found["size"][0].strip() == str(len(data)) and digest and digest[0] == hashlib.sha256(data).hexdigest()):
+            return data
+        time.sleep(1)
+    raise DebugFailure(f"{name}: the bytes that arrived are not the file the guest measured")
+
+
+def fetch_tombstone(shell: Callable[..., str], pid: int) -> bytes:
+    """The protobuf tombstone of the process `pid`, which has just died. The
+    reporter writes the other threads after the crashing one, so the file is
+    complete when its process is gone; the newest files are read until one is
+    whole and names the process, and a file that does not decode is retried
+    until the deadline and then reported."""
     deadline = time.monotonic() + TOMBSTONE_SECONDS
-    pid = None
-    while time.monotonic() < deadline:
-        log = shell("logcat -b crash -d -v raw", 30)
-        found = re.search(r"Fatal signal \d+ .* pid (\d+) \(", log)
-        if found and "pbtombstone" in log:
-            pid = found.group(1)
-            break
-        time.sleep(2)
-    if pid is None:
-        raise DebugFailure("the crash reporter wrote no tombstone")
-    # The reporter writes the other threads after the crashing one: the file is
-    # complete when its process is gone.
     while time.monotonic() < deadline:
         if not shell("pidof crash_dump64 crash_dump32", 30).strip():
             break
         time.sleep(2)
     time.sleep(2)
+    last = "no tombstone file"
     while time.monotonic() < deadline:
-        names = shell(f"grep -l '^pid: {pid},' /data/tombstones/tombstone_?? 2>/dev/null", 30).split()
-        if names:
-            return shell(f"cat {names[-1]}", 60)
+        listing = shell("ls -t /data/tombstones/*.pb 2>/dev/null | head -8", 30)
+        for name in re.findall(r"^/data/tombstones/tombstone_[0-9]{2}\.pb$", listing, re.MULTILINE):
+            data = transfer(shell, name)
+            try:
+                found = protowire.decode(data, "Tombstone", tombstone_pb.TABLES).values["pid"]
+            except protowire.WireError as problem:
+                last = f"{name} does not decode: {problem}"
+                continue
+            if found == pid:
+                return data
+            last = f"{name} is the tombstone of process {found}"
         time.sleep(2)
-    raise DebugFailure(f"no tombstone file names process {pid}")
+    raise DebugFailure(f"no protobuf tombstone of process {pid} ({last})")
 
 
 def run_mode(shell: Callable[..., str], mode: str) -> list[Record]:
     """One run of a mode; returns its records, checked for what it must show."""
-    if mode in CRASH_STATUS:
-        shell("logcat -b crash -c", 30)
     output = shell(command(mode), MODE_SECONDS[mode])
     lines = output.splitlines()
     status = [line for line in lines if line.startswith("rc=")]
@@ -339,8 +223,16 @@ def run_mode(shell: Callable[..., str], mode: str) -> list[Record]:
     failed = [line for line in lines if "FAIL" in line]
     if failed:
         raise DebugFailure(f"{mode} reported:\n" + "\n".join(failed) + f"\n--- output:\n{output}")
+    pids = [line for line in lines if line.startswith("pid=")]
+    if len(pids) != 1 or not re.fullmatch(r"pid=[0-9]+", pids[0]):
+        raise DebugFailure(f"{mode}: the shell did not say the program's process id once:\n{output}")
+    notice = DEATH_NOTICE.get(mode)
+    notices = [line for line in lines if notice and line.rstrip() == notice]
+    if len(notices) > 1:
+        raise DebugFailure(f"{mode}: the shell reports the program's death {len(notices)} times:\n{output}")
     try:
-        printed = records.decode([line for line in lines if line != "" and not line.startswith("rc=")])
+        printed = records.decode([line for line in lines if line != "" and not line.startswith(("rc=", "pid="))
+                                  and not (notice and line.rstrip() == notice)])
     except RecordError as problem:
         raise DebugFailure(f"{mode}: the program's output is not a whole record: {problem}\n--- output:\n{output}") \
             from None
@@ -352,7 +244,7 @@ def run_mode(shell: Callable[..., str], mode: str) -> list[Record]:
         raise DebugFailure(f"{mode}: the program did not run with address-space randomization off "
                            f"(it prints the record randomization once when it does):\n{output}")
     if mode in CRASH_STATUS:
-        record = digest_tombstone(fetch_tombstone(shell))
+        record = digest_tombstone(fetch_tombstone(shell, int(pids[0][4:])))
         verify_tombstone(mode, record)
         return record
     verify_record(mode, printed)

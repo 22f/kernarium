@@ -24,14 +24,24 @@ uml_add_tooling_test(
     LABELS cpu
     TIMEOUT 180)
 
-# The debugger and crash-report rows of that runner on scripted records: a
-# tombstone's digest into records, what each mode must show, and the
-# comparison, field by field, that masks only what two runs of one engine
-# already differ in.
+# The debugger and crash-report rows of that runner on scripted records and
+# scripted protobuf tombstones: what each mode must show, and the comparison,
+# field by field, that masks only what two runs of one engine already differ
+# in.
 uml_add_tooling_test(
     NAME arm64-aot-debug-rows
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/arm64/test_aot_debug_rows.py
+    LABELS cpu
+    TIMEOUT 60)
+
+# The protobuf reader of the debug rows (wire format, the table of field
+# numbers the tombstone model uses, and the model's strictness on bad files)
+# and the two false passes of the text reader it replaces.
+uml_add_tooling_test(
+    NAME arm64-aot-tombstone-pb
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/arm64/test_aot_tombstone_pb.py
     LABELS cpu
     TIMEOUT 60)
 

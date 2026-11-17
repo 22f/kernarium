@@ -3,112 +3,42 @@
 """The debugger and crash-report rows of the AOT guest runner, on scripted
 records.
 
-tests/integration/aot/debug_rows.py digests tombstones into records, checks
-that each mode showed what it exists to show, and compares the records of a
-mode with the component off and on, field by field. These rows give it a good
-record and every kind of bad one: a frame that moved, a register that changed
-only with the component, a record that is incomplete or does not decode, a
-crash that left no tombstone, a name that looks like a field, a value that is
-cut short.
+tests/integration/aot/debug_rows.py reads tombstones (the protobuf file the
+crash reporter writes) into records, checks that each mode showed what it
+exists to show, and compares the records of a mode with the component off and
+on, field by field. These rows give it a good record and every kind of bad
+one: a frame that moved, a register that changed only with the component, a
+record that is incomplete or does not decode, a crash that left no tombstone,
+a name that looks like a field, a value that is cut short. The tombstones are
+written by aot_pb_fixture.py; test_aot_tombstone_pb.py holds the decoder to
+the format.
 """
 
 __import__("sys").dont_write_bytecode = True
 
+import base64
+import hashlib
 import pathlib
 import re
 import sys
 import unittest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "integration" / "aot"))
+HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1] / "integration" / "aot"))
+sys.path.insert(0, str(HERE))
+import aot_pb_fixture as pb  # noqa: E402
 import debug_rows as rows  # noqa: E402
 import records as rec  # noqa: E402
 from records import Named, Record, Unnamed  # noqa: E402
 
 
-def quoted(address: int) -> str:
-    return f"{address >> 32:016x}"[8:] + "'" + f"{address & 0xffffffff:08x}"
+def tombstone(frame: str = "__memmove_aarch64_mops+16", **keywords) -> bytes:
+    """A scripted tombstone file (aot_pb_fixture.tombstone)."""
+    return pb.tombstone(function=frame, **keywords)
 
 
-def tombstone(address: int = 0x7ff1b1f19000, frame: str = "__memmove_aarch64_mops+16", x13: int = 1,
-              pid: int = 2038, extra_threads: str = "", load: int = 0x7ff1ae500000,
-              pointer: int = 0x2854d, stack_name: str = "[anon:stack_and_tls:2040]",
-              unnamed: int = 0x1234, unnamed_size: int = 0x100000, second_unnamed: bool = False,
-              unnamed_target: int = 0, lower_unnamed: bool = False, lower_size: int = 0,
-              x5_unnamed: bool = False) -> str:
-    """A tombstone of a crash in libc (loaded at `load`): x4 points `pointer`
-    bytes into libc's file, x5 into its .bss, x6 into an unnamed mapping, and
-    x7 into a thread stack. With `second_unnamed` a second unnamed mapping of
-    the same size and protection lies above the stack, and with
-    `lower_unnamed` a third lies below the first (of `lower_size` bytes if
-    that is given, which makes its shape another); `unnamed_target` says
-    which x6 points into: 0 the first, 1 the one above the stack, 2 the one
-    below the first. With `x5_unnamed` x5 points into a fourth unnamed mapping
-    of 4 KiB instead of the .bss."""
-    base = load + 0x70d50
-    unnamed_base = load + {0: 0x200000, 1: 0x500000, 2: 0xc0000}[unnamed_target]
-    below = lower_size or unnamed_size
-    lower_map = (f"""    {quoted(load + 0xc0000)}-{quoted(load + 0xc0000 + below - 1)} rw-         0    {below:x}
-                               VmFlags: rd wr mr mw me ac
-""" if lower_unnamed else "")
-    small_map = (f"""    {quoted(load + 0x1e0000)}-{quoted(load + 0x1e1000 - 1)} rw-         0      1000
-                               VmFlags: rd wr mr mw me ac
-""" if x5_unnamed else "")
-    x5_value = load + 0x1e0010 if x5_unnamed else load + 0xb0000 + 0x2070
-    extra_map = (f"""    {quoted(load + 0x500000)}-{quoted(load + 0x500000 + unnamed_size - 1)} rw-         0    {unnamed_size:x}
-                               VmFlags: rd wr mr mw me ac
-""" if second_unnamed else "")
-    return f"""*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***
-Build fingerprint: 'Android/test:17/ID/1:user/release-keys'
-Timestamp: 2026-11-16 05:48:50.054109184+0000
-Process uptime: 1s
-Executable: /system/bin/toybox
-pid: {pid}, ppid: 2036, tid: {pid}, name: toybox  >>> /system/bin/toybox <<<
-uid: 2000
-signal 11 (SIGSEGV), code 2 (SEGV_ACCERR), fault addr {address:#018x} (read)
-    x0  b4007ff19a825220  x1  {address:016x}  x2  0000000000000028  x3  b4007ff19a825238
-    x4  {load + pointer:016x}  x5  {x5_value:016x}  x6  {unnamed_base + unnamed:016x}  x7  {load + 0x300000 + 0xf8c00:016x}
-    x12 0000000000000001  x13 {x13:016x}  x14 0000000000000001  x15 0000000000001863
-    lr  {load + 0x25d0:016x}  sp  00007ffff7299dd0  pc  {base:016x}  pst 0000000020000000
-
-4 total frames
-backtrace:
-      #00 pc 0000000000070d50  /apex/com.android.runtime/lib64/bionic/libc.so ({frame}) (BuildId: f1804e2e)
-      #01 pc 00000000000195cc  /system/lib64/libz.so (updatewindow(z_stream_s*, unsigned char const*, unsigned int)+76) (BuildId: 014ea0f1)
-      #02 pc 00000000000197b4  /system/lib64/libz.so (inflateSetDictionary+148) (BuildId: 014ea0f1)
-      #03 pc 000000000000500c  /data/local/tmp/libaotdebug.so
-
-memory near x3 ([stack]):
-    00007fffd9634e10 0000000000000001 0000000000000002  ................
-
-memory near pc (/apex/com.android.runtime/lib64/bionic/libc.so):
-    {base:016x} b90017e093407e68 93407e81aa0803e0  h~@..........~@.
-    {base + 16:016x} 528000c2910003e3 d400000152801e08  .......R...R....
-
-memory map (6 entries):
-    {quoted(0x400000)}-{quoted(0x401000 - 1)} r-x         0      1000  /system/bin/toybox (BuildId: ef9a4dcc)
-                               VmFlags: rd ex mr mw me
-    {quoted(load)}-{quoted(load + 0xb0000 - 1)} r-x         0     b0000  /apex/com.android.runtime/lib64/bionic/libc.so (BuildId: f1804e2e)
-                               VmFlags: rd ex mr mw me
-    {quoted(load + 0xb0000)}-{quoted(load + 0xb3000 - 1)} rw-         0      3000  [anon:.bss]
-                               VmFlags: rd wr mr mw me ac
-{lower_map}{small_map}    {quoted(load + 0x200000)}-{quoted(load + 0x200000 + unnamed_size - 1)} rw-         0    {unnamed_size:x}
-                               VmFlags: rd wr mr mw me ac
-    {quoted(load + 0x300000)}-{quoted(load + 0x400000 - 1)} rw-         0    100000  {stack_name}
-                               VmFlags: rd wr mr mw me ac
-{extra_map}{extra_threads}"""
-
-
-def sibling_block(offset: int = 360, name: str = "crc32_z") -> str:
-    return f"""--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-pid: 2111, ppid: 2108, tid: 2112, name: toybox  >>> /system/bin/toybox <<<
-uid: 2000
-    x0  0000000068e70125  x1  43736f6c69757273
-backtrace:
-      #00 pc 00000000000123d8  /system/lib64/libz.so ({name}+{offset}) (BuildId: 014ea0f1)
-      #01 pc 0000000000005fec  /data/local/tmp/libaotdebug.so
-"""
-
-
+def sibling_thread(offset: int = 360, name: str = "crc32_z") -> list[tuple[int, bytes]]:
+    return [pb.sibling_thread(function=name, offset=offset)]
 
 
 class Wire:
@@ -119,8 +49,10 @@ class Wire:
         return [line for each in recs for line in rec.encode_record(each)]
 
     @staticmethod
-    def text(recs, extra=""):
-        return "\n".join(Wire.lines(recs)) + "\n" + extra
+    def text(recs, extra="", pid=4242):
+        """What the shell prints for a run: the process id it says first, the
+        records, what the shell says of a death, and the status in `extra`."""
+        return f"pid={pid}\n" + "\n".join(Wire.lines(recs)) + "\n" + extra
 
 
 def regs_record(tag: str = "crc32", **fields) -> Record:
@@ -194,25 +126,40 @@ def tombstone_field(records_of_run, kind, name):
 
 
 class DigestTest(unittest.TestCase):
-    def test_the_digest_keeps_the_crash_and_drops_the_rest(self):
+    def test_the_digest_keeps_the_crash_and_the_facts_of_the_guest(self):
         recs = rows.digest_tombstone(tombstone())
-        shown = "\n".join(str(each) for each in recs)
         self.assertEqual(tombstone_field(recs, "tomb.signal", "code_name"), "SEGV_ACCERR")
         frames = [each for each in recs if each.kind == "tomb.frame"]
         self.assertEqual(len(frames), 4)
-        self.assertIn("__memmove_aarch64_mops+16", frames[0].get("detail"))
-        self.assertTrue(frames[0].get("path").endswith("libc.so"))
-        self.assertEqual({each.get("region") for each in recs if each.kind == "tomb.code"}, {"pc"})
+        self.assertEqual(frames[0].get("function"), "__memmove_aarch64_mops")
+        self.assertEqual(frames[0].get("function_offset"), 16)
+        self.assertEqual(frames[0].get("file"), pb.LIBC)
+        self.assertEqual({each.get("region") for each in recs if each.kind == "tomb.code"}, {"pc", "lr"})
         self.assertEqual(sum(1 for each in recs if each.kind == "tomb.code"), 2)
-        for dropped in ("Timestamp", "memory map", "memory near x3"):
-            self.assertNotIn(dropped, shown)
+        self.assertEqual([each.kind for each in recs if each.kind in ("tomb.head", "tomb.process", "tomb.signal",
+                                                                     "tomb.regs", "tomb.frames")],
+                         ["tomb.head", "tomb.process", "tomb.signal", "tomb.regs", "tomb.frames"])
+
+    def test_the_digest_says_what_it_did_not_read(self):
+        recs = rows.digest_tombstone(tombstone())
+        self.assertEqual(dict(recs.unread), {("BacktraceFrame", 2): 4, ("BacktraceFrame", 3): 4})
+        extra = pb.number_field(999, 7) + pb.bytes_field(998, b"x")
+        recs = rows.digest_tombstone(tombstone(extra=extra))
+        self.assertEqual(recs.unread[("Tombstone", 999)], 1)
+        self.assertEqual(recs.unread[("Tombstone", 998)], 1)
 
     def test_another_thread_keeps_its_library_and_not_its_position(self):
-        one = rows.digest_tombstone(tombstone(extra_threads=sibling_block(360, "crc32_z")))
-        two = rows.digest_tombstone(tombstone(extra_threads=sibling_block(352, "crc32")))
+        one = rows.digest_tombstone(tombstone(extra_threads=sibling_thread(360, "crc32_z")))
+        two = rows.digest_tombstone(tombstone(extra_threads=sibling_thread(352, "crc32")))
         self.assertEqual(one[-3:], two[-3:])
         self.assertEqual([each.kind for each in one[-3:]], ["tomb.thread", "tomb.thread_frame", "tomb.thread_frame"])
-        self.assertEqual(one[-2].fields, (("index", 0), ("path", "/system/lib64/libz.so"), ("symbol", "")))
+        self.assertEqual(one[-2].fields, (("index", 0), ("file", pb.LIBZ), ("function", "")))
+
+    def test_the_other_threads_come_in_thread_id_order_whatever_the_file_has(self):
+        late, early = pb.sibling_thread(tid=2200, function="late"), pb.sibling_thread(tid=2100, function="early")
+        one = rows.digest_tombstone(tombstone(extra_threads=[late, early]))
+        two = rows.digest_tombstone(tombstone(extra_threads=[early, late]))
+        self.assertEqual(one, two)
 
     def test_registers_and_ids_vary_and_frames_do_not(self):
         recs = rows.digest_tombstone(tombstone())
@@ -221,44 +168,33 @@ class DigestTest(unittest.TestCase):
         self.assertIn("tomb.process", rows.MASKABLE)
         self.assertTrue({each.kind for each in recs if each.kind.startswith("tomb.frame")}.isdisjoint(rows.MASKABLE))
 
-    def test_a_register_seen_twice_is_a_failure(self):
-        with self.assertRaises(rows.DebugFailure) as caught:
-            rows.digest_tombstone(tombstone().replace("  x7  ", "  x4  ", 1))
-        self.assertIn("x4", str(caught.exception))
-
-    def test_a_register_line_it_cannot_read_is_a_failure(self):
-        base = tombstone()
-        for broken in (base.replace("  x5  ", "  x5  zzzz  x9  ", 1), base.replace("x5  0000", "x5  000", 1),
-                       base.replace("  x6  ", "  x6   ", 1).replace("x6   0", "x6   g", 1)):
-            with self.subTest(broken=broken[broken.index("x4 "):][:90]):
-                with self.assertRaises(rows.DebugFailure):
+    def test_a_file_that_is_not_a_tombstone_is_a_failure_that_names_the_problem(self):
+        good = tombstone()
+        for label, broken in (("cut", good[:len(good) // 2]), ("empty", b""), ("text", b"*** *** ***\npid: 1,\n"),
+                              ("a register twice", tombstone(extra=b"") + b"")):
+            if label == "a register twice":
+                continue
+            with self.subTest(label):
+                with self.assertRaises(rows.DebugFailure) as caught:
                     rows.digest_tombstone(broken)
-
-    def test_lines_it_cannot_read_are_failures_and_never_guesses(self):
-        base = tombstone()
-        for broken in (base.replace("ppid: 2036,", "ppid: ,", 1), base.replace("(SEGV_ACCERR)", "SEGV_ACCERR", 1),
-                       base.replace("#00 pc 0000000000070d50", "#00 pc zz", 1),
-                       base.replace("uid: 2000", "uid: 2000\nuid: 2001", 1)):
-            with self.subTest(broken=broken[:20]):
-                with self.assertRaises(rows.DebugFailure):
-                    rows.digest_tombstone(broken)
+                self.assertIn("the tombstone:", str(caught.exception))
 
     def test_text_in_a_mapping_name_is_never_read_as_a_field(self):
         """A name that looks like a register does not overwrite the register
-        it looks like: the digest never reads the names of the map as fields."""
+        it looks like: a mapping's name is bytes that stay one name."""
         recs = rows.digest_tombstone(tombstone(stack_name="[anon:space x6  0 x4  0]"))
         regs = next(each for each in recs if each.kind == "tomb.regs")
         self.assertEqual(regs.get("x7"), Named("[anon:space x6  0 x4  0]", 0xf8c00))
         self.assertEqual(regs.get("x6"), Unnamed(0x100000, "rw-", 0, 1, 0x1234))
-        self.assertEqual(regs.get("x4"), Named("libc.so", 0x2854d))
+        self.assertEqual(regs.get("x4"), Named(pb.LIBC, 0x2854d))
 
 
 class VerifyTest(unittest.TestCase):
     def test_a_good_memcpy_tombstone(self):
         rows.verify_tombstone("crash-memcpy", rows.digest_tombstone(tombstone()))
 
-    def test_the_fault_must_be_a_read(self):
-        text = tombstone().replace("(read)", "(write)")
+    def test_the_fault_must_have_an_address(self):
+        text = tombstone(signal_message=pb.signal(fault=None))
         with self.assertRaises(rows.DebugFailure):
             rows.verify_tombstone("crash-memcpy", rows.digest_tombstone(text))
 
@@ -277,10 +213,10 @@ class VerifyTest(unittest.TestCase):
             rows.verify_tombstone("crash-memcpy", rows.digest_tombstone(tombstone(frame="strlen+4")))
 
     def test_a_sibling_tombstone_needs_the_running_thread(self):
-        text = tombstone().replace("SIGSEGV", "SIGABRT").replace("(__memmove_aarch64_mops+16)", "(abort+160)")
+        abort = dict(signal_message=pb.signal(6, "SIGABRT", -6, "SI_TKILL", fault=None), frame="abort+160")
         with self.assertRaises(rows.DebugFailure):
-            rows.verify_tombstone("crash-sibling", rows.digest_tombstone(text))
-        rows.verify_tombstone("crash-sibling", rows.digest_tombstone(text + sibling_block()))
+            rows.verify_tombstone("crash-sibling", rows.digest_tombstone(tombstone(**abort)))
+        rows.verify_tombstone("crash-sibling", rows.digest_tombstone(tombstone(extra_threads=sibling_thread(), **abort)))
 
 
 class GuestProgramTest(unittest.TestCase):
@@ -370,13 +306,13 @@ class CompareTest(unittest.TestCase):
 
     def test_pointers_are_named_by_what_they_point_into(self):
         regs = next(each for each in rows.digest_tombstone(tombstone()) if each.kind == "tomb.regs")
-        self.assertEqual(regs.get("x4"), Named("libc.so", 0x2854d))
+        self.assertEqual(regs.get("x4"), Named(pb.LIBC, 0x2854d))
         self.assertEqual(regs.get("x5"), Named("[anon:.bss]", 0x2070))
         # An unnamed mapping is its shape, its place among the mappings of that
         # shape and how many there are, and the offset in the whole mapping.
         self.assertEqual(regs.get("x6"), Unnamed(0x100000, "rw-", 0, 1, 0x1234))
         self.assertEqual(regs.get("x7"), Named("[anon:stack_and_tls:*]", 0xf8c00))
-        self.assertEqual(regs.get("pc"), Named("libc.so", 0x70d50))
+        self.assertEqual(regs.get("pc"), Named(pb.LIBC, 0x70d50))
 
     def test_a_library_loaded_elsewhere_is_the_same_run(self):
         off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n, stack_name=f"[anon:stack_and_tls:{2040 + n}]"))
@@ -482,10 +418,9 @@ class CompareTest(unittest.TestCase):
         """x6 is zero in one baseline: the other runs' unnamed pointers have
         nothing to be proved equal to."""
         load = 0x700000000000
-        plain = tombstone(load=load)
-        zero = plain.replace(f"{load + 0x200000 + 0x1234:016x}", "0" * 16)
-        off = [rows.digest_tombstone(plain), rows.digest_tombstone(tombstone(load=load, second_unnamed=True)),
-               rows.digest_tombstone(zero)]
+        off = [rows.digest_tombstone(tombstone(load=load)),
+               rows.digest_tombstone(tombstone(load=load, second_unnamed=True)),
+               rows.digest_tombstone(tombstone(load=load, registers={"x6": 0}))]
         wrong = rows.digest_tombstone(tombstone(load=load, lower_unnamed=True, unnamed_target=2))
         with self.assertRaises(rows.DebugFailure) as caught:
             rows.compare("crash-memcpy", off, wrong)
@@ -505,21 +440,17 @@ class CompareTest(unittest.TestCase):
     def raw_shift(self, left, right, offset):
         """x4 points into a mapping named `left` and x7 into one named
         `right`; x5 and x6 point into the same unnamed mapping, x6 at
-        `offset`. A name with spaces in it shifts every field after it by as
-        many whitespace-separated tokens."""
+        `offset`."""
         load = 0x700000000000
-        text = tombstone(load=load, stack_name=right, unnamed=offset)
-        text = text.replace(f"{load + 0x2854d:016x}", f"{load + 0x700020:016x}")
-        text = text.replace(f"{load + 0xb2070:016x}", f"{load + 0x200020:016x}")
-        text += (f"    {quoted(load + 0x700000)}-{quoted(load + 0x701000 - 1)} rw-         0    1000  {left}\n"
-                 "                               VmFlags: rd wr mr mw me ac\n")
-        return rows.digest_tombstone(text)
+        return rows.digest_tombstone(tombstone(
+            load=load, stack_name=right, unnamed=offset,
+            extra_mappings=[pb.mapping(load + 0x700000, load + 0x701000, left)],
+            registers={"x4": load + 0x700020, "x5": load + 0x200020}))
 
-    def test_names_that_shift_the_whitespace_do_not_make_one_field_another(self):
-        """The baselines' x4 and x7 names hold two spaces more or less, so that
-        the whitespace-separated tokens of the two lines are as many and x6 of
-        one lines up with x5 of the other; the run with the component moves x6
-        to x5's place. Fields are compared by name: x6 is x6."""
+    def test_names_that_hold_spaces_do_not_make_one_field_another(self):
+        """The baselines' x4 and x7 names hold two spaces more or less: a
+        name is bytes of one mapping and no field is told by its place among
+        the words of a line. The run with the component moves x6; x6 is x6."""
         first = self.raw_shift("[anon:left]", "[anon:right one two]", 0x10)
         second = self.raw_shift("[anon:left one two]", "[anon:right]", 0x10)
         wrong = self.raw_shift("[anon:left]", "[anon:right one two]", 0x20)
@@ -528,7 +459,7 @@ class CompareTest(unittest.TestCase):
         with self.assertRaises(rows.DebugFailure) as caught:
             rows.compare("crash-memcpy", [first, second, first], wrong)
         self.assertIn("x6", str(caught.exception))
-        # the control: the same shift with x6 where it was passes
+        # the control: the same names with x6 where it was passes
         compared, _ = rows.compare("crash-memcpy", [first, second, first],
                                    self.raw_shift("[anon:left]", "[anon:right one two]", 0x10))
         self.assertGreater(compared, 10)
@@ -621,7 +552,7 @@ class CompareTest(unittest.TestCase):
     def test_the_runs_must_have_the_same_length(self):
         off = [rows.digest_tombstone(tombstone(pid=2038 + n)) for n in range(3)]
         with self.assertRaises(rows.DebugFailure):
-            rows.compare("crash-memcpy", off, rows.digest_tombstone(tombstone() + sibling_block()))
+            rows.compare("crash-memcpy", off, rows.digest_tombstone(tombstone(extra_threads=sibling_thread())))
 
     def test_register_records_mask_only_values(self):
         off = [[regs_record(x05=value)] for value in (1, 2, 3)]
@@ -701,24 +632,91 @@ class RunTest(unittest.TestCase):
         shell.calls = calls
         return shell
 
+    def transfer_of(self, data: bytes) -> str:
+        """What the guest's shell prints for a file: its size, the SHA-256
+        and the base64."""
+        return (f"size={len(data)}\nsha256={hashlib.sha256(data).hexdigest()}  /data/tombstones/x\n"
+                f"b64={base64.b64encode(data).decode()}\n")
+
+    def crash_shell(self, files, pid=4242, mode="crash-memcpy", notice="Segmentation fault \n"):
+        """A guest whose newest tombstones are `files` (name -> bytes)."""
+        printed = Wire.text([randomization(), Record("warm", (("sum", 1),))], notice + "rc=139\n", pid=pid)
+        listing = "".join(f"/data/tombstones/{name}\n" for name in files)
+        outputs = [(f"AOT_DEBUG_MODE={mode}", printed), ("pidof", ""), ("ls -t", listing)]
+        outputs += [(f"f=/data/tombstones/{name};", self.transfer_of(data)) for name, data in files.items()]
+        return self.shell(outputs)
+
+    def run_crash(self, shell, mode="crash-memcpy"):
+        """run_mode with the waits made short: no sleeping, a deadline of a
+        moment for a tombstone that is not there."""
+        original = rows.time.sleep, rows.TOMBSTONE_SECONDS
+        rows.time.sleep, rows.TOMBSTONE_SECONDS = (lambda _seconds: None), 0.3
+        try:
+            return rows.run_mode(shell, mode)
+        finally:
+            rows.time.sleep, rows.TOMBSTONE_SECONDS = original
+
     def test_a_crash_is_judged_by_its_tombstone(self):
-        log = "Fatal signal 11 (SIGSEGV), code 2 (SEGV_ACCERR), fault addr 0x7ff1b1f19000 in tid 2038 (toybox), pid 2038 (toybox)\npbtombstone x\n"
-        printed = Wire.text([randomization(), Record("warm", (("sum", 1),))], "rc=139\n")
-        shell = self.shell([
-            ("AOT_DEBUG_MODE=crash-memcpy", printed),
-            ("logcat -b crash -d", log),
-            ("pidof", ""),
-            ("grep -l", "/data/tombstones/tombstone_03\n"),
-            ("cat /data/tombstones/tombstone_03", tombstone()),
-        ])
+        shell = self.crash_shell({"tombstone_03.pb": tombstone(pid=4242)})
+        record = self.run_crash(shell)
+        self.assertTrue(any(each.kind == "tomb.signal" and each.get("code_name") == "SEGV_ACCERR" for each in record))
+        self.assertFalse(any("logcat" in call or "tombstone_03 " in call for call in shell.calls))
+
+    def test_the_tombstone_is_the_one_of_the_process_that_died(self):
+        other = tombstone(pid=4000)
+        mine = tombstone(pid=4242, x13=9)
+        shell = self.crash_shell({"tombstone_04.pb": other, "tombstone_03.pb": mine})
+        record = self.run_crash(shell)
+        self.assertEqual(tombstone_field(record, "tomb.process", "pid"), 4242)
+        shell = self.crash_shell({"tombstone_04.pb": other})
+        with self.assertRaises(rows.DebugFailure) as caught:
+            self.run_crash(shell)
+        self.assertIn("process 4242", str(caught.exception))
+
+    def test_a_tombstone_that_does_not_decode_is_reported_after_the_wait(self):
+        shell = self.crash_shell({"tombstone_03.pb": tombstone(pid=4242)[:300]})
+        with self.assertRaises(rows.DebugFailure) as caught:
+            self.run_crash(shell)
+        self.assertIn("does not decode", str(caught.exception))
+
+    def test_a_transfer_that_does_not_match_the_file_is_no_file(self):
         original = rows.time.sleep
         rows.time.sleep = lambda _seconds: None
-        try:
-            record = rows.run_mode(shell, "crash-memcpy")
-        finally:
-            rows.time.sleep = original
-        self.assertTrue(any(each.kind == "tomb.signal" and each.get("code_name") == "SEGV_ACCERR" for each in record))
-        self.assertTrue(any("logcat -b crash -c" in call for call in shell.calls))
+        self.addCleanup(setattr, rows.time, "sleep", original)
+        data = tombstone(pid=4242)
+        bad = self.transfer_of(data).replace("size=", "size=1")
+        shell = self.shell([("pidof", ""), ("ls -t", "/data/tombstones/tombstone_03.pb\n"),
+                            ("f=/data/tombstones/tombstone_03.pb;", bad)])
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.fetch_tombstone(shell, 4242)
+        self.assertIn("not the file the guest measured", str(caught.exception))
+        for broken in ("size=1\n", "", self.transfer_of(data).replace("sha256=", "sha256=00")):
+            shell = self.shell([("pidof", ""), ("ls -t", "/data/tombstones/tombstone_03.pb\n"),
+                                ("f=/data/tombstones/tombstone_03.pb;", broken)])
+            with self.assertRaises(rows.DebugFailure):
+                rows.fetch_tombstone(shell, 4242)
+
+    def test_the_shell_says_the_process_id_once_and_the_death_at_most_once(self):
+        data = tombstone(pid=4242)
+        base = Wire.text([randomization()], "Segmentation fault \nrc=139\n")
+        for label, text in (("no pid", base.replace("pid=4242\n", "")),
+                            ("two pids", "pid=1\n" + base),
+                            ("a pid that is no number", base.replace("pid=4242", "pid=x")),
+                            ("a death twice", base.replace("Segmentation fault \n", "Segmentation fault \n" * 2)),
+                            ("another notice", base.replace("Segmentation fault", "Killed"))):
+            with self.subTest(label):
+                shell = self.shell([("AOT_DEBUG_MODE=crash-memcpy", text), ("pidof", ""),
+                                    ("ls -t", "/data/tombstones/tombstone_03.pb\n"),
+                                    ("f=/data/tombstones/tombstone_03.pb;", self.transfer_of(data))])
+                with self.assertRaises(rows.DebugFailure):
+                    self.run_crash(shell)
+
+    def test_the_command_says_its_process_id_and_runs_the_program_in_place(self):
+        command = rows.command("crash-abort")
+        self.assertIn("echo pid=\\$\\$", command)
+        self.assertIn("exec /system/bin/toybox true", command)
+        self.assertIn("AOT_DEBUG_MODE=crash-abort", command)
+        self.assertTrue(command.endswith("echo rc=$?"))
 
     def test_a_crash_with_the_wrong_status_fails(self):
         shell = self.shell([("AOT_DEBUG_MODE=crash-memcpy", "rc=0\n")])
@@ -745,10 +743,11 @@ class RunTest(unittest.TestCase):
         for lines in (good[1:], good[:1] * 2 + good, [failure] + good):
             with self.subTest(lines=len(lines)):
                 with self.assertRaises(rows.DebugFailure):
-                    rows.run_mode(self.shell([("AOT_DEBUG_MODE=sibling", "\n".join(lines) + "\nrc=0\n")]), "sibling")
+                    rows.run_mode(self.shell([("AOT_DEBUG_MODE=sibling", "pid=4242\n" + "\n".join(lines) + "\nrc=0\n")]),
+                                  "sibling")
 
     def ptrace(self, lines):
-        text = "\n".join(lines) + "\nrc=0\n"
+        text = "pid=4242\n" + "\n".join(lines) + "\nrc=0\n"
         return rows.run_mode(self.shell([("AOT_DEBUG_MODE=ptrace", text)]), "ptrace")
 
     def ptrace_lines(self):
