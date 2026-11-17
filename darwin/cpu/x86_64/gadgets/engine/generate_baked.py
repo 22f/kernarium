@@ -33,9 +33,24 @@ and overlap exits read the position, and they rebuild the RIP from it.
 PUSH and POP of a register carry no word at all: their exits leave with the
 stream pointer, and the runtime finds the instruction from it (program.cpp).
 
-Every entry keeps the ordinary family's semantics: the same lazy flag record,
-page-crossing test, translation, publication and overlap checks. Only the cold
-tails -- a crossing access, a translation miss, a publication and an
+A CMP or TEST of a 32- or 64-bit register against an immediate or a register
+and the conditional branch right after it, whose fall-through the block
+translates behind it, are one entry with the immediate or the source
+register's offset and the taken target's link as its two words: it writes the
+compare's record, retires both and branches on the host condition, so the pair
+costs one dispatch. Those entries are written to a
+second file (--tail-output), a group behind the region's last, so no other
+bank entry moves; the cold part after the bank moves by whole pages.
+
+A register-only ADD, SUB, AND, OR or XOR at 32 or 64 bits whose next
+instruction is a register-only one of those, CMP or TEST takes a twin with
+neither the flag record nor host flags: the next instruction writes the whole
+record before anything can read the first one's. The twins are a second group
+in the same file.
+
+Every other entry keeps the ordinary family's semantics: the same lazy flag
+record, page-crossing test, translation, publication and overlap checks. Only
+the cold tails -- a crossing access, a translation miss, a publication and an
 overlapping store -- are shared, reached through x19 as the continuation, so
 the hot bytes of an entry stay dense.
 
@@ -92,7 +107,8 @@ class Out:
         self.emit(f'\t.globl CSYM(uml_x86_64_baked_{name})')
         self.emit(f'CSYM(uml_x86_64_baked_{name}):')
         for entry in entries:
-            self.emit(f'\t.quad CSYM(uml_x86_64_gadget_b_{entry})')
+            self.emit('\t.quad 0' if entry is None else
+                      f'\t.quad CSYM(uml_x86_64_gadget_b_{entry})')
         self.emit('\t.popsection')
 
 
@@ -976,9 +992,99 @@ def push_pop(o):
     stack_tails(o)
 
 
+# x86 condition code -> the host condition a subtraction's NZCV answers it with; parity has none.
+CONDITIONS = [('o', 'vs'), ('no', 'vc'), ('b', 'lo'), ('ae', 'hs'), ('e', 'eq'), ('ne', 'ne'),
+              ('be', 'ls'), ('a', 'hi'), ('s', 'mi'), ('ns', 'pl'), ('p', None), ('np', None),
+              ('l', 'lt'), ('ge', 'ge'), ('le', 'le'), ('g', 'gt')]
+# After a logical operation C is clear where x86's CF is clear, and ARM reads a clear C as a borrow.
+CARRY_CONDITIONS = ('b', 'ae', 'be', 'a')
+
+
+def compare_branch(o):
+    """CMP or TEST reg, imm or reg, reg and the inline conditional branch after
+    it. A table per operation, width and source, condition-major in x86's
+    condition-code order, then the destination register; a condition the pair
+    cannot answer from NZCV is a zero. The first stream word is the immediate,
+    or the source register's CpuState offset."""
+    for source in ('ri', 'rr'):
+        for op in ('cmp', 'test'):
+            for width in (32, 64):
+                compare_branch_table(o, source, op, width)
+
+
+def compare_branch_table(o, source, op, width):
+    host, flagop, _ = instr_for(op, width)
+    hr = 'x' if width == 64 else 'w'
+    entries = []
+    for condition, host_condition in CONDITIONS:
+        answered = host_condition is not None and not (
+            op == 'test' and condition in CARRY_CONDITIONS)
+        for d in GPR:
+            if not answered:
+                entries.append(None)
+                continue
+            name = f'{op}_{width}_{source}_j{condition}_{d}'
+            taken = o.label('taken')
+            o.gadget(name)
+            o.emit('\tldp x12, x16, [_stream], #16')
+            if source == 'rr':
+                o.emit(f'\tldr {hr}12, [_vcpu, x12]')
+            o.emit(f'\tldr {hr}11, [_vcpu, #{d}]')
+            o.emit(f'\t{host} {hr}13, {hr}11, {hr}12')
+            record(o, flagop, width)
+            o.emit('\tadd _executed, _executed, #2')
+            o.emit(f'\tb.{host_condition} {taken}')
+            o.emit('\tnext_gadget')
+            o.emit(f'{taken}:')
+            o.emit('\tfollow_block_link x16')
+            entries.append(name)
+    o.table(f'{op}_{width}_{source}_jcc', entries)
+
+
+# The producers that take a twin with no record when the next instruction replaces their flags.
+UNRECORDED = ('add', 'sub', 'and', 'or', 'xor')
+
+
+def unrecorded(o):
+    """ADD, SUB, AND, OR and XOR reg, reg and reg, imm at 32 and 64 bits
+    without the flag record or host flags, for a producer whose flags the next
+    instruction replaces before anything can read them. Tables as
+    arith_register's."""
+    for op in UNRECORDED:
+        host = ARITH[op][0]
+        for width in (32, 64):
+            ld, st, hr, sr = WIDTHS[width]
+            entries = []
+            for d in GPR:
+                for s in GPR:
+                    name = f'{op}_{width}_rr_unrecorded_{d}_{s}'
+                    o.gadget(name)
+                    o.emit(f'\t{ld} {hr}11, [_vcpu, #{d}]')
+                    o.emit(f'\t{ld} {hr}12, [_vcpu, #{s}]')
+                    o.emit(f'\t{host} {hr}13, {hr}11, {hr}12')
+                    normalize(o, width, f'{hr}13')
+                    o.emit(f'\t{st} {sr}13, [_vcpu, #{d}]')
+                    o.emit('\tretire_and_next')
+                    entries.append(name)
+            o.table(f'{op}_{width}_rr_unrecorded', entries)
+            entries = []
+            for d in GPR:
+                name = f'{op}_{width}_ri_unrecorded_{d}'
+                o.gadget(name)
+                o.emit('\tldr x12, [_stream], #8')
+                o.emit(f'\t{ld} {hr}11, [_vcpu, #{d}]')
+                o.emit(f'\t{host} {hr}13, {hr}11, {hr}12')
+                normalize(o, width, f'{hr}13')
+                o.emit(f'\t{st} {sr}13, [_vcpu, #{d}]')
+                o.emit('\tretire_and_next')
+                entries.append(name)
+            o.table(f'{op}_{width}_ri_unrecorded', entries)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--output', required=True)
+    parser.add_argument('--tail-output', required=True)
     options = parser.parse_args()
     o = Out()
     o.emit('/* SPDX-License-Identifier: GPL-2.0-or-later */')
@@ -992,6 +1098,16 @@ def main():
     o.emit(f'/* {o.count} baked entries */')
     with open(options.output, 'w') as output:
         output.write('\n'.join(o.lines) + '\n')
+    # The families behind the region's last group, which grow without moving it.
+    t = Out()
+    t.emit('/* SPDX-License-Identifier: GPL-2.0-or-later */')
+    t.emit('/* Generated by generate_baked.py; do not edit. */')
+    for family in (compare_branch, unrecorded):
+        t.emit(f'\tgadget_group baked_{family.__name__}')
+        family(t)
+    t.emit(f'/* {t.count} baked entries */')
+    with open(options.tail_output, 'w') as output:
+        output.write('\n'.join(t.lines) + '\n')
     return 0
 
 

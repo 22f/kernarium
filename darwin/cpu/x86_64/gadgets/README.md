@@ -11,7 +11,7 @@ both gadget engines is [`NOTICE.md`](../../arm64/gadgets/NOTICE.md).
 | Path | Role |
 | --- | --- |
 | `engine.S`, `engine/*.inc` | The gadgets. `engine/region.inc` places every group. |
-| `engine/generate_baked.py` | Writes the register-baked scalar bank (`baked_scalar.inc`) at build time. |
+| `engine/generate_baked.py` | Writes the register-baked scalar bank at build time: `baked_scalar.inc`, and `baked_tail.inc` for the families behind the last group. |
 | `engine/fit_slots.py` | Reports the groups that no longer fit their slot. |
 | `native_builder.cpp`, `native_baked.hpp`, `native_entry.hpp` | Turn decoded instructions into streams. |
 | `executor.cpp`, `program.cpp`, `translation_body.hpp`, `translation_space.*` | The translation cache, its sharing and its budget. |
@@ -53,9 +53,15 @@ rejects.
   128-byte line. Setting those rows' slots moves later groups by whole lines
   and keeps their phase, so the commit says which slots grew and needs no pad
   control ([optimization history](../../../../docs/optimization-history.md)).
-- A phase never changes. A new group takes a new row with phase 0: a new
-  `engine/*.inc` file's at the end of the table, a new baked family's after the
-  last baked one.
+- A phase never changes. A new group takes a new row with phase 0, in the
+  order `engine.S` emits it: a family the generator writes to
+  `baked_scalar.inc` after the last of those; a new `engine/*.inc` file's after
+  the last of those, in front of the tail families, which then move by whole
+  lines and keep their phase; and a family the generator writes to
+  `baked_tail.inc` after the last tail group, `baked_compare_branch` being the
+  first. The tail families end the table, so a new one moves no other bank
+  group; the cold part starts on the first page after the bank's slots and
+  moves by whole pages.
 - A call to a helper outside the engine is a `helper_call`, and a new helper
   is appended to the island's list in `engine/common.inc`.
 
@@ -89,6 +95,13 @@ tail and resolves the same address.
   guest bounds and the first entry (`link_header` in `program.hpp`): a body's
   own, or an unlinked record's, whose entry is `link_exit`.
   `x86-64-gadget-link-layout` holds the layout.
+- In long64 code with the baked bank on, a register CMP or TEST against an
+  immediate or a register at 32 or 64 bits and the conditional branch right
+  after it are one baked entry when the branch takes its inline form (its
+  fall-through follows it and its target has a link), for every condition but
+  parity and, after TEST, the four that read the carry (B, AE, BE, A). The
+  branch then has no stream word, and a stream built without links keeps the
+  two apart.
 - A dispatch's instruction budget bounds how long it runs, not where a block
   stops: the block that crosses it runs to its end. Only a single step and the
   instruction a POPF or IRET setting TF leaves before its trap ask for an exact
@@ -105,7 +118,11 @@ tail and resolves the same address.
 - The deferred-flag record (`DeferredFlagOperation`, `CpuState::carry_slot`) is
   read by assembly and C++ materializers that must agree. A producer that
   leaves host NZCV lets the next SETcc, CMOVcc or Jcc read it, and the deferred
-  record is always written as well.
+  record is written as well, but for one case: in long64 with the baked bank
+  on, a register-only ADD, SUB, AND, OR or XOR at 32 or 64 bits whose next
+  instruction in the block is a register-only ADD, SUB, AND, OR, XOR, CMP or
+  TEST writes neither, since that instruction writes the whole record before
+  anything can read it.
 
 ## Guest-visible model
 
