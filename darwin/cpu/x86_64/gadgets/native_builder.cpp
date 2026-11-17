@@ -4489,6 +4489,9 @@ struct FlagState final {
 	HostFlags condition{HostFlags::none};
 	CarrySource carry{CarrySource::unknown};
 	VectorResult vector{};
+	/* The gadget before this one carries this instruction too, which then
+	 * adds no word of its own (append_compare_branch). */
+	bool absorbed{};
 };
 
 [[nodiscard]] CarrySource carry_of(HostFlags flags) noexcept
@@ -5975,6 +5978,63 @@ UML_X86_BAKED_CARRY_TABLES(decrement)
 		instruction.source.kind != OperandKind::memory;
 }
 
+/* A CMP or TEST of a 32- or 64-bit register against an immediate and the
+ * conditional branch right after it become one baked entry, whose words are
+ * the immediate and the taken target's link, when the branch would take its
+ * inline form: its fall-through is translated behind it and its target has a
+ * link. The entry writes the compare's record, retires both instructions and
+ * branches on the host condition the compare left, so the pair is one
+ * dispatch. Neither instruction can fault or leave, so no exit sees the
+ * compare retired and the branch not. The branch is marked absorbed and
+ * emits nothing; a build without links, a budget-limited replay, keeps the
+ * two apart. */
+[[nodiscard]] bool append_compare_branch(StreamWords &stream,
+	const Gadget &gadget, ExecutionMode mode, ProgramLinkResolver links,
+	std::span<const Gadget> rest, FlagState &produced)
+{
+	const auto &instruction = gadget.instruction;
+	if (!baked_bank_enabled() || mode != ExecutionMode::long64 ||
+		rest.size() < 2U || links.resolve == nullptr)
+		return false;
+	const bool compare = instruction.operation == Operation::compare;
+	if ((!compare && instruction.operation != Operation::test) ||
+		instruction.locked ||
+		instruction.destination.kind != OperandKind::reg ||
+		instruction.source.kind != OperandKind::immediate)
+		return false;
+	const auto width = instruction.destination.width;
+	if (width != OperandWidth::dword && width != OperandWidth::qword)
+		return false;
+	const auto d = baked_register_slot(instruction.destination);
+	if (!d || *d >= baked::gpr_slots)
+		return false;
+	const auto &branch = rest[0];
+	if (branch.instruction.operation != Operation::jump_conditional ||
+		!stream.position(branch) ||
+		!fused_condition(branch.instruction.condition,
+			compare ? HostFlags::subtract : HostFlags::logical))
+		return false;
+	const auto *taken = links.resolve(links.context,
+		relative_target(branch, mode), mode);
+	if (taken == nullptr)
+		return false;
+	const auto *table = compare ?
+		(width == OperandWidth::qword ? baked::uml_x86_64_baked_cmp_64_ri_jcc :
+			baked::uml_x86_64_baked_cmp_32_ri_jcc) :
+		(width == OperandWidth::qword ? baked::uml_x86_64_baked_test_64_ri_jcc :
+			baked::uml_x86_64_baked_test_32_ri_jcc);
+	const auto entry = table[static_cast<unsigned>(branch.instruction.condition) *
+		baked::gpr_slots + *d];
+	if (entry == 0)
+		return false;
+	stream.push_back(entry);
+	stream.push_back(instruction.source.immediate);
+	stream.push_back(reinterpret_cast<std::uintptr_t>(taken));
+	produced = {};
+	produced.absorbed = true;
+	return true;
+}
+
 /* `state` is what the previous gadget left for a fused condition and for a
  * carry-preserving consumer; `produced` receives what this one leaves.
  * `has_following` says whether more of this block is translated behind this
@@ -5983,11 +6043,15 @@ UML_X86_BAKED_CARRY_TABLES(decrement)
 	StreamWords &stream, const Gadget &gadget,
 	ExecutionMode mode, std::uint64_t program_begin,
 	ProgramLinkResolver links, const FlagState &state,
-	bool has_following, FlagState &produced)
+	bool has_following, FlagState &produced, std::span<const Gadget> rest)
 {
 	/* The decoder admits LOCK only on memory-destination read-modify-write
 	 * operations (lock_allowed), and each of those has an atomic gadget. */
 	const auto &instruction = gadget.instruction;
+	if (state.absorbed) {
+		produced = {};
+		return true;
+	}
 	/* The words that locate an instruction reach 1024 bytes into its block.
 	 * A block of the default 64 instructions ends short of that; a longer
 	 * one ends before the first instruction beyond, as at any instruction
@@ -6002,6 +6066,8 @@ UML_X86_BAKED_CARRY_TABLES(decrement)
 			native::uml_x86_64_gadget_segment_guard));
 		stream.push_back(stream.locator(gadget));
 	}
+	if (append_compare_branch(stream, gadget, mode, links, rest, produced))
+		return true;
 	if (append_baked(stream, gadget, mode, program_begin, state, produced)) {
 		/* A baked entry that executes no flag-setting host instruction
 		 * leaves the producer's NZCV for a later consumer. The bank's
@@ -7033,7 +7099,8 @@ std::optional<std::size_t> append_native_stream(
 	for (std::size_t index = 0; index < gadgets.size(); ++index) {
 		FlagState produced{};
 		if (!append_native(words, gadgets[index], mode, program_begin,
-			links, state, index + 1U < gadgets.size(), produced))
+			links, state, index + 1U < gadgets.size(), produced,
+			gadgets.subspan(index + 1U)))
 			return index;
 		state = produced;
 	}
@@ -7086,8 +7153,14 @@ std::optional<std::size_t> instruction_at_word(
 			words.clear();
 			produced = {};
 			if (!append_native(builder, gadgets[index], mode, program_begin,
-				links, state, index + 1U < gadgets.size(), produced))
+				links, state, index + 1U < gadgets.size(), produced,
+				gadgets.subspan(index + 1U)))
 				return std::nullopt;
+			/* A branch its compare's entry carries has no word. */
+			if (words.empty() && state.absorbed) {
+				found = true;
+				break;
+			}
 			if (!words.empty() && position + words.size() <= stream.size() &&
 				words.front() == stream[position]) {
 				found = true;

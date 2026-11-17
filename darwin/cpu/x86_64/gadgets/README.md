@@ -89,6 +89,11 @@ tail and resolves the same address.
   guest bounds and the first entry (`link_header` in `program.hpp`): a body's
   own, or an unlinked record's, whose entry is `link_exit`.
   `x86-64-gadget-link-layout` holds the layout.
+- A register CMP or TEST against an immediate at 32 or 64 bits and the
+  conditional branch right after it are one baked entry when the branch takes
+  its inline form (its fall-through follows it and its target has a link). The
+  branch then has no stream word, and a stream built without links keeps the
+  two apart.
 - A dispatch's instruction budget bounds how long it runs, not where a block
   stops: the block that crosses it runs to its end. Only a single step and the
   instruction a POPF or IRET setting TF leaves before its trap ask for an exact
