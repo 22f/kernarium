@@ -1140,6 +1140,174 @@ void test_kernel_write_after_a_partial_unmap()
 	baseline.clean("R1");
 }
 
+/* What a generation that translated a frame sees of a change to it: its
+ * code page's stamp (the x86 executor compares it), the code changes it was
+ * told of, and the flush serial that makes its bodies compare their bytes
+ * though the stamp stands. Read when the reader is made, and again after. */
+class Reader final {
+public:
+	Reader(unsigned long generation, unsigned long address)
+		: generation_{generation}, address_{address},
+		  stamp_{stamp_of(generation, address)},
+		  sequence_{sequence_of(generation)},
+		  serial_{flush_serial_of(generation)}
+	{
+	}
+
+	[[nodiscard]] bool stamp_moved() const
+	{
+		return stamp_of(generation_, address_) > stamp_;
+	}
+
+	[[nodiscard]] bool serial_moved() const
+	{
+		return flush_serial_of(generation_) != serial_;
+	}
+
+	[[nodiscard]] Changes changes() const
+	{
+		return changes_since(generation_, sequence_);
+	}
+
+private:
+	unsigned long generation_;
+	unsigned long address_;
+	std::uint64_t stamp_;
+	std::uint64_t sequence_;
+	std::uint64_t serial_;
+};
+
+/* A translator's registration of the frame at `address` of `generation`. */
+void translate_frame(unsigned long generation, unsigned long address,
+	ScratchBacking &backing, unsigned long frame)
+{
+	require(map(generation, address, backing, frame, 1, rx) == 0);
+	require(hold_frame(generation, address).result !=
+		DARWIN_UML_STATIC_FRAME_FAILED);
+}
+
+/* K4 (remote): the kernel stored into another process's page and named that
+ * process's generation and range. The frame's holders hear of it whatever
+ * the target's own view of the frame is: one that is data and not code
+ * (the writable alias of a frame another process executes), one that is
+ * executable (the control), a page the target has no mapping of yet (the
+ * frame is unknown, so every generation reads every translation again and
+ * its flush serial moves, because a stamp does not), and a range of both. */
+void test_remote_kernel_write()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0xc00'0000;
+	ScratchBacking backing{"uml-frame-remote-XXXXXX", 16 * page};
+	Domain domain{73'011};
+	darwin_uml_static_vm_require_coherent_kernel_code_writes();
+	/* Every observation is reported, so one run names each case that fails;
+	 * the row fails at the end. */
+	unsigned failed = 0;
+	const auto check = [&failed](bool held, const char *what) {
+		if (held)
+			return;
+		++failed;
+		std::fprintf(stderr, "K4: %s\n", what);
+	};
+	domain.run([&] {
+		/* K4a: frame 2 is translated in 861; 862 maps it writable, and
+		 * not as code. */
+		translate_frame(861, base, backing, 2);
+		require(map(862, base + page, backing, 2, 1, rw, 0) == 0);
+		{
+			const Reader reader{861, base};
+			require(darwin_uml_static_vm_invalidate_code_generation(
+				862, base + page + 0x40, 8) == 0);
+			check(reader.stamp_moved(),
+				"a remote write into a data view left the stamp of a "
+				"translated frame");
+			check(precisely(reader.changes(), base, page),
+				"the translator of a frame was not told of a remote "
+				"write into a data view of it");
+		}
+
+		/* K4b: the control. 864 maps frame 3 as code, as 863 does. */
+		translate_frame(863, base + 2 * page, backing, 3);
+		translate_frame(864, base + 3 * page, backing, 3);
+		{
+			const Reader reader{863, base + 2 * page};
+			require(darwin_uml_static_vm_invalidate_code_generation(
+				864, base + 3 * page + 0x80, 4) == 0);
+			check(reader.stamp_moved(),
+				"a remote write into an executable view left the stamp");
+			check(precisely(reader.changes(), base + 2 * page, page),
+				"a remote write into an executable view was not "
+				"published at the other translator");
+		}
+
+		/* K4c: 866 maps another page and nothing at the one written: the
+		 * frame is not known, whoever holds it. */
+		translate_frame(865, base + 4 * page, backing, 4);
+		require(map(866, base + 9 * page, backing, 8, 1, rw, 0) == 0);
+		{
+			const Reader reader{865, base + 4 * page};
+			require(darwin_uml_static_vm_invalidate_code_generation(
+				866, base + 5 * page + 0x10, 8) == 0);
+			check(covers(reader.changes(), base + 4 * page, page),
+				"a remote write to an unmapped page was not published");
+			check(reader.serial_moved(),
+				"a remote write to an unmapped page did not move the "
+				"flush serial of a generation that translated");
+		}
+
+		/* K4d: two pages, the first a data view of frame 6 and the second
+		 * unmapped: the frame is published and so is every generation. */
+		translate_frame(867, base + 6 * page, backing, 6);
+		require(map(868, base + 10 * page, backing, 6, 1, rw, 0) == 0);
+		{
+			const Reader reader{867, base + 6 * page};
+			require(darwin_uml_static_vm_invalidate_code_generation(
+				868, base + 10 * page + page - 8, 16) == 0);
+			check(reader.stamp_moved(),
+				"the mapped page of a remote write was not published");
+			check(precisely(reader.changes(), base + 6 * page, page),
+				"the mapped page of a remote write was not published "
+				"at its translator");
+			check(reader.serial_moved(),
+				"the unmapped page of a remote write moved no flush serial");
+		}
+	});
+	domain.retire();
+	require(failed == 0, "a remote kernel write did not reach a holder");
+	baseline.clean("K4");
+}
+
+/* K5 (remote, before any x86 code runs): while no x86 translation can exist
+ * (nothing has asked for coherent kernel writes), a remote write into a data
+ * view or an unmapped page publishes no x86 frame change and moves no flush
+ * serial, so a process that runs nothing else pays nothing. This row must
+ * run before any other raises the request, which no row can take back. */
+void test_remote_kernel_write_before_x86_code()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0xd00'0000;
+	ScratchBacking backing{"uml-frame-remote-first-XXXXXX", 8 * page};
+	Domain domain{73'012};
+	domain.run([&] {
+		translate_frame(871, base, backing, 2);
+		require(map(872, base + page, backing, 2, 1, rw, 0) == 0);
+		require(map(873, base + 4 * page, backing, 5, 1, rw, 0) == 0);
+		const Reader reader{871, base};
+		require(darwin_uml_static_vm_invalidate_code_generation(
+			872, base + page, 8) == 0);
+		require(darwin_uml_static_vm_invalidate_code_generation(
+			873, base + 5 * page, 8) == 0);
+		require(!reader.stamp_moved(),
+			"a remote write published an x86 frame change before x86 code "
+			"could exist");
+		require(!reader.serial_moved(),
+			"a remote write moved a flush serial before x86 code could "
+			"exist");
+	});
+	domain.retire();
+	baseline.clean("K5");
+}
+
 /* E9: an address space is retired. Its states are walked after the table of
  * generations is unlocked, every holder is gone when the walk ends, a
  * registration and a reservation on a walked state are refused (counted, for
@@ -1239,12 +1407,15 @@ int main()
 	uml::memory::set_domain_provider(&provide_domain);
 	const auto stripe_before =
 		uml::memory::testing::allocations_under_stripe_lock();
+	/* First: no row after it may ask for coherent kernel code writes. */
+	test_remote_kernel_write_before_x86_code();
 	test_holders_follow_every_primitive();
 	test_debts();
 	test_publication();
 	test_direct_table();
 	test_kernel_write_frames();
 	test_kernel_write_after_a_partial_unmap();
+	test_remote_kernel_write();
 	test_a_retired_address_space();
 	test_unknown_frame();
 	test_a_debt_larger_than_the_buffer();

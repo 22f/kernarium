@@ -1242,6 +1242,110 @@ void test_a_failed_registry_is_made_again()
 		"the registry of a generation that failed once was not made again");
 }
 
+/* The kernel stores into another process's page (ptrace, /proc/pid/mem,
+ * process_vm_writev) and names that process's generation: a translation of
+ * the frame in another generation runs the new bytes, whatever the target's
+ * own view of the frame is. The target maps it as data (a writable alias of
+ * a frame that another process executes), maps nothing at the page (the
+ * kernel fills the software table at faults, so it has not yet), or maps it
+ * as code (the control). */
+void test_a_remote_kernel_write_reaches_the_reader()
+{
+	const Clean clean;
+	darwin_uml_static_vm_require_coherent_kernel_code_writes();
+	constexpr std::uint64_t reading = 0x3a00'0000;
+	constexpr std::uint64_t writing = 0x3b00'0000;
+	enum class View { data, absent, code };
+	unsigned long generation = 9500;
+	/* Every view is run, so one run names each that fails. */
+	unsigned failed = 0;
+	for (const auto view : {View::data, View::absent, View::code}) {
+		const char *name = view == View::data ? "data view" :
+			view == View::absent ? "page the target does not map" :
+			"code view";
+		ScratchBacking frame{"uml-x86-alias-remote-XXXXXX", page};
+		load_return(frame, 1);
+		Space reader{generation++};
+		Space target{generation++};
+		reader.map(reading, frame, 0, rx, 1);
+		if (view == View::data)
+			target.map(writing, frame, 0, rw, 0);
+		else if (view == View::code)
+			target.map(writing, frame, 0, rx, 1);
+		require(reader.run_to_system_call(reading).rax == 1);
+		load_return(frame, 2);
+		require(darwin_uml_static_vm_invalidate_code_generation(
+			target.generation(), writing, page) == 0);
+		if (reader.run_to_system_call(reading).rax != 2) {
+			std::fprintf(stderr, "a remote write into a %s did not reach "
+				"a translation of the frame\n", name);
+			++failed;
+		}
+	}
+	require(failed == 0, "a remote kernel write left a translation running");
+}
+
+/* A kernel write that names no frame is published to every generation as
+ * the whole space (a code change of length 0), and a unit that links to
+ * another keeps running the callee it was linked to unless the executor
+ * answers that publication by resetting every link record. The caller A
+ * jumps to the callee B, the pair is armed (one dispatch per call), then B's
+ * frame is written and the write is published: the next call to A must run
+ * the new callee. The routes are the remote hook for a page the target maps
+ * as data (a described range, the control) and for one it does not map, and
+ * the ordinary kernel write whose buffer the host table does not resolve. */
+void test_a_whole_space_publication_resets_the_links()
+{
+	const Clean clean;
+	darwin_uml_static_vm_require_coherent_kernel_code_writes();
+	constexpr std::uint64_t a = 0x3c00'0000;
+	constexpr std::uint64_t b = a + 0x1000;
+	constexpr std::uint64_t writing = 0x3d00'0000;
+	enum class Route { hook_data, hook_absent, kernel_write_unresolved };
+	unsigned long generation = 9600;
+	unsigned failed = 0;
+	for (const auto route : {Route::hook_data, Route::hook_absent,
+		Route::kernel_write_unresolved}) {
+		const char *name = route == Route::hook_data ?
+			"remote write into a data view" :
+			route == Route::hook_absent ?
+			"remote write into a page the target does not map" :
+			"kernel write through a buffer no frame is named by";
+		ScratchBacking frame_a{"uml-x86-alias-whole-a-XXXXXX", page};
+		ScratchBacking frame_b{"uml-x86-alias-whole-b-XXXXXX", page};
+		/* jmp B */
+		put(frame_a, 0, {0xe9, 0xfb, 0x0f, 0x00, 0x00});
+		load_return(frame_b, 1);
+		Space reader{generation++};
+		Space target{generation++};
+		reader.map(a, frame_a, 0, rx, 1);
+		reader.map(b, frame_b, 0, rx, 1);
+		if (route == Route::hook_data)
+			target.map(writing, frame_b, 0, rw, 0);
+		for (unsigned round = 0; round < 8; ++round)
+			require(reader.run_to_system_call(a).rax == 1);
+		require(reader.last_dispatches() == 1,
+			"the pair A -> B was not armed before the write");
+		load_return(frame_b, 2);
+		if (route == Route::kernel_write_unresolved) {
+			std::array<unsigned char, 8> loose{};
+			require(darwin_uml_static_vm_activate(target.generation()) == 0);
+			require(darwin_uml_static_vm_copy_kernel_write(
+				writing, loose.data(), loose.size()) == 0);
+		} else {
+			require(darwin_uml_static_vm_invalidate_code_generation(
+				target.generation(), writing, page) == 0);
+		}
+		if (reader.run_to_system_call(a).rax != 2) {
+			std::fprintf(stderr, "a %s left the caller running the old "
+				"callee\n", name);
+			++failed;
+		}
+		require(reader.diagnostics().unheld_runnable == 0);
+	}
+	require(failed == 0, "a whole-space publication left a link running");
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -1317,6 +1421,14 @@ int main(int argc, char **argv)
 	if (selected("memo") || selected("memo-unknown")) {
 		test_the_unknown_writer_state_ends_the_memo();
 		std::puts("memo and unknown writers ok");
+	}
+	if (selected("remote")) {
+		test_a_remote_kernel_write_reaches_the_reader();
+		std::puts("remote kernel write ok");
+	}
+	if (selected("remote") || selected("whole-space")) {
+		test_a_whole_space_publication_resets_the_links();
+		std::puts("whole-space publication and links ok");
 	}
 	const auto now = FrameAccounting::diagnostics();
 	require(now.holder_leaks == start.holder_leaks, "a holder leaked");

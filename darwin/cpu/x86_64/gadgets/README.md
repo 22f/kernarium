@@ -254,7 +254,10 @@ moves the page stamp, then moves the code-change sequence; a reader observes
 the sequence before it looks. A store still in flight reaches the vCPU at its
 next code-change checkpoint (a system call, CPUID or IRET), which leaves the
 native run so the runtime revalidates what it selects next. A moved mapping
-sequence or a raised execution interrupt abandons a validation.
+sequence or a raised execution interrupt abandons a validation. A code-change
+range of length 0 is the whole address space, and a change the ring cannot
+describe is treated alike: every body's link records are reset, since no stamp
+guards a link.
 
 ### Sharing and budget
 
