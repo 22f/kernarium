@@ -38,6 +38,7 @@ struct SendFeedbackSheet: View {
         static let onlyWhileRunning = LocalizedStringResource(
             "Only while the virtual machine is running", table: "Feedback")
         static let createBugReport = LocalizedStringResource("Create bug report", table: "Feedback")
+        static let sendWithoutBugReport = LocalizedStringResource("Send without bug report", table: "Feedback")
         static let cancel = LocalizedStringResource("Cancel", table: "Feedback")
         static let discard = LocalizedStringResource("Discard", table: "Feedback")
         static let keepEditing = LocalizedStringResource("Keep editing", table: "Feedback")
@@ -152,6 +153,29 @@ struct SendFeedbackSheet: View {
             Button(Words.ok, role: .cancel) { focus = missing.focusesProblem ? .problem : .details }
         } message: { missing in
             Text(missing.message.keepingTogether)
+        }
+        // Send, with both fields written and no bug report while one can be made: the question comes first, and
+        // the mail opens only from its second button. Create bug report makes the report as the bar's button
+        // does and leaves the person in the sheet, to read it and tap Send again.
+        .alert(
+            Text("Send without a bug report?", tableName: "Feedback"),
+            isPresented: $model.askingForBugReport
+        ) {
+            // First, so that it is the one at the top of the alert. It is not marked as the alert's preferred
+            // action: iOS 27 draws a default-style preferred action's label in red on the tint's fill.
+            Button(Words.createBugReport) { model.createBugReport() }
+            Button(Words.sendWithoutBugReport) { model.sendWithoutBugReport() }
+        } message: {
+            Text(String(
+                localized: "Without a bug report, a problem will most likely not get fixed. Send without one only if your message reports no problem, such as a suggestion or a question, or if you don\u{2019}t want to attach it.",
+                table: "Feedback").keepingTogether)
+        }
+        .sheet(item: $model.viewing) { attachment in
+            #if !APP_STORE
+            SendFeedbackReportViewer(attachment: attachment, startsAt: model.previewViewerEntry)
+            #else
+            SendFeedbackReportViewer(attachment: attachment)
+            #endif
         }
         .photosPicker(
             isPresented: $picking, selection: $picked, matching: .any(of: [.images, .videos]),
@@ -297,6 +321,44 @@ struct SendFeedbackSheet: View {
 
     private func row(_ attachment: SendFeedbackAttachment) -> some View {
         HStack(spacing: 12) {
+            if SendFeedbackModel.canView(attachment.kind) {
+                // The bug report and the start log open to what they hold, to read before the mail goes.
+                Button { model.view(attachment) } label: {
+                    HStack(spacing: 12) {
+                        rowContent(attachment)
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.forward")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                            .accessibilityHidden(true)
+                    }
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Self.spoken(attachment))
+                .accessibilityHint(Text(Self.viewHint(attachment.kind)))
+            } else {
+                rowContent(attachment)
+                Spacer(minLength: 8)
+            }
+            Button { withAnimation(.snappy) { model.remove(attachment) } } label: {
+                Image(systemName: "xmark")
+                    .font(.footnote.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Self.removeLabel(attachment.kind))
+        }
+        .padding(.leading, 8)
+        .background(Color(.secondarySystemBackground), in: .rect(cornerRadius: 14, style: .continuous))
+        .accessibilityIdentifier("feedback-attachment")
+    }
+
+    /// The tile and the two lines of a row.
+    private func rowContent(_ attachment: SendFeedbackAttachment) -> some View {
+        HStack(spacing: 12) {
             picture(attachment)
                 .frame(width: 44, height: 44)
                 .clipShape(.rect(cornerRadius: 9, style: .continuous))
@@ -316,20 +378,14 @@ struct SendFeedbackSheet: View {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Self.spoken(attachment))
-            Spacer(minLength: 8)
-            Button { withAnimation(.snappy) { model.remove(attachment) } } label: {
-                Image(systemName: "xmark")
-                    .font(.footnote.weight(.bold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 44, height: 44)
-                    .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(Self.removeLabel(attachment.kind))
         }
-        .padding(.leading, 8)
-        .background(Color(.secondarySystemBackground), in: .rect(cornerRadius: 14, style: .continuous))
-        .accessibilityIdentifier("feedback-attachment")
+    }
+
+    /// What VoiceOver says a tap on a row that opens does.
+    private static func viewHint(_ kind: SendFeedbackAttachment.Kind) -> LocalizedStringResource {
+        kind == .startLog
+            ? LocalizedStringResource("Shows the start log", table: "Feedback")
+            : LocalizedStringResource("Shows what the bug report holds", table: "Feedback")
     }
 
     @ViewBuilder
@@ -561,9 +617,9 @@ struct SendFeedbackSheet: View {
     /// bar cannot hold them; its accessibility name never does.
     private func sendButton(_ style: SendStyle) -> some View {
         Button {
-            // An alert that says what is missing would give the focus back to the field that had it
-            // when it closes, after the first empty field was asked for: let go of it first.
-            if state.missing != nil { focus = nil }
+            // An alert that says what is missing, or asks about the bug report, would give the focus back to the
+            // field that had it when it closes, after the first empty field was asked for: let go of it first.
+            if state.missing != nil || state.asksAboutBugReportOnSend { focus = nil }
             model.send()
         } label: {
             Group {
@@ -627,15 +683,13 @@ struct SendFeedbackSheet: View {
                     }
                     .accessibilityElement(children: .combine)
                 case .home:
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Reporting a bug?", tableName: "Feedback")
-                            .font(.subheadline.weight(.semibold))
-                        Text("A bug report and a screenshot need the virtual machine running.", tableName: "Feedback")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .accessibilityElement(children: .combine)
+                    // No virtual machine runs, so no bug report can be made here: the card says what one is worth,
+                    // and the way to one.
+                    Text(String(
+                        localized: "Without a bug report, a problem will most likely not get fixed.",
+                        table: "Feedback").keepingTogether)
+                        .font(.subheadline.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
                     SendFeedbackSteps(font: .footnote)
                 }
             }
@@ -657,7 +711,7 @@ struct SendFeedbackSheet: View {
 
 /// The way to a bug report from where no virtual machine runs (Home): start it,
 /// make the problem happen again, and open Send feedback from the session's
-/// Settings. VoiceOver reads them as one, numbers included.
+/// Settings with a bug report attached. VoiceOver reads them as one, numbers included.
 struct SendFeedbackSteps: View {
     @ScaledMetric(relativeTo: .subheadline) private var badge: CGFloat = 20
     var font: Font = .subheadline
@@ -666,7 +720,8 @@ struct SendFeedbackSteps: View {
         VStack(alignment: .leading, spacing: 8) {
             step(1, LocalizedStringResource("Start the virtual machine.", table: "Feedback"))
             step(2, LocalizedStringResource("Make the problem happen again.", table: "Feedback"))
-            step(3, LocalizedStringResource("Tap the side keys, then Settings \u{203A} Send feedback.", table: "Feedback"))
+            step(3, LocalizedStringResource(
+                "Tap the side keys, then Settings \u{203A} Send feedback, and attach a bug report.", table: "Feedback"))
         }
         .accessibilityElement(children: .combine)
     }

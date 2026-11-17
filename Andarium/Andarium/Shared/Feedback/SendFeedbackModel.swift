@@ -56,6 +56,15 @@ final class SendFeedbackModel {
     /// Send was tapped while the problem or the details were empty: the alert
     /// that says which, over the sheet. Nothing opens.
     var incomplete: SendFeedbackMissing?
+    /// Send was tapped with both fields written and no bug report attached while one can be made: the
+    /// alert that asks about it, over the sheet. Nothing opens until it is answered.
+    var askingForBugReport = false
+    /// The attachment whose contents are being read, in the viewer over the sheet. nil when none is.
+    var viewing: SendFeedbackAttachment?
+    #if !APP_STORE
+    /// The Simulator preview opens the viewer on the entry of this name (`FeedbackPreview`).
+    @ObservationIgnored var previewViewerEntry: String?
+    #endif
     /// Cancel asks before it discards.
     var confirmingDiscard = false
     /// The information block shows in full.
@@ -523,10 +532,24 @@ final class SendFeedbackModel {
 
     // MARK: Attachments
 
+    /// The attachments whose contents the viewer shows: the bug report, an archive, and the start log, a text.
+    /// What else is attached is shown by its row alone.
+    static func canView(_ kind: SendFeedbackAttachment.Kind) -> Bool {
+        kind == .bugReport || kind == .startLog
+    }
+
+    /// Opens the viewer on an attachment's contents, over the sheet. Reading only: nothing is changed, copied or shared.
+    func view(_ attachment: SendFeedbackAttachment) {
+        guard Self.canView(attachment.kind), !closed, !form.sent,
+              form.attachments.items.contains(where: { $0.id == attachment.id }) else { return }
+        viewing = attachment
+    }
+
     /// Takes a file out of the mail. A staged file is deleted; a file kept
     /// where the person has it is only let go.
     func remove(_ attachment: SendFeedbackAttachment) {
         guard let removed = form.attachments.remove(attachment.id) else { return }
+        if viewing?.id == removed.id { viewing = nil }
         if removed.inPlace {
             scopes.release(removed.id)
         } else {
@@ -541,9 +564,9 @@ final class SendFeedbackModel {
 
     // MARK: Mail
 
-    /// Hands the subject, the body and the files to the system's composer,
-    /// where the person reads and may change the mail; nothing is sent from
-    /// here.
+    /// The Send button. With both fields written and no bug report attached, while one can be made, it asks
+    /// first (`askingForBugReport`); in any other state it hands the mail to the composer, as `openMail` says.
+    /// A tap with a field empty says which. It asks on every such tap: nothing is remembered.
     func send() {
         guard state.canSend, !presentingMail else { return }
         // The mail needs a subject and a body: nothing opens, and an alert says which is empty.
@@ -551,6 +574,23 @@ final class SendFeedbackModel {
             incomplete = missing
             return
         }
+        if state.asksAboutBugReportOnSend {
+            askingForBugReport = true
+            return
+        }
+        openMail()
+    }
+
+    /// The alert's "Send without bug report": the mail opens as it does when nothing could be asked.
+    func sendWithoutBugReport() {
+        guard state.canSend, state.missing == nil, !presentingMail else { return }
+        openMail()
+    }
+
+    /// Hands the subject, the body and the files to the system's composer,
+    /// where the person reads and may change the mail; nothing is sent from
+    /// here.
+    private func openMail() {
         guard let address = app.feedbackAddress, attachmentsAreThere() else { return }
         // Every file is mapped here, before the composer opens: one that cannot
         // be (it went after the look above) is said, like any other that is gone,
@@ -662,6 +702,7 @@ final class SendFeedbackModel {
     func close() {
         guard !closed else { return }
         closed = true
+        viewing = nil
         fileCancellation?.cancel()
         app.busyOverSheet = false
         app.feedbackSheetOpen = false

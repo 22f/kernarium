@@ -128,6 +128,24 @@ enum FeedbackPreview {
             await attachAll(feedback, report: 8.6, photo: 21.4)
         case let screen where screen.hasPrefix("feedback-file"):
             await prepareFiles(screen: screen, feedback: feedback, words: words)
+        case "feedback-ask":
+            // Send tapped with both fields written, no bug report attached and the virtual machine running:
+            // the real question, and no composer.
+            feedback.form.problem = words.problem
+            feedback.form.details = words.details
+            try? await Task.sleep(for: .milliseconds(500))
+            feedback.send()
+        case "feedback-report", "feedback-viewer", "feedback-viewer-text", "feedback-viewer-nested":
+            // The bug report as the Create bug report button makes it in the preview, attached; the viewer
+            // over it opens the list, an entry's text or an archive inside.
+            feedback.form.problem = words.problem
+            feedback.form.details = words.details
+            attachSampleReport(feedback)
+            guard screen != "feedback-report", let report = feedback.form.attachments.bugReport else { break }
+            if screen == "feedback-viewer-text" { feedback.previewViewerEntry = "bugreport-lineage-2026-11-17-15-00-00.txt" }
+            if screen == "feedback-viewer-nested" { feedback.previewViewerEntry = "FS/data/anr/traces.zip" }
+            try? await Task.sleep(for: .milliseconds(500))
+            feedback.view(report)
         case "feedback-generating":
             feedback.form.problem = words.problem
             feedback.form.details = words.details
@@ -239,6 +257,19 @@ enum FeedbackPreview {
     private static func attachFile(_ feedback: SendFeedbackModel, named name: String, megabytes: Double) async {
         if let file = try? makeFile(named: name, head: emptyZip, megabytes: megabytes) {
             await feedback.addFiles([file])
+        }
+    }
+
+    /// The preview's report (`SendFeedbackSampleReport`), attached as a made bug report is.
+    @MainActor
+    private static func attachSampleReport(_ feedback: SendFeedbackModel) {
+        do {
+            try FileManager.default.createDirectory(at: BugReportStaging.directory, withIntermediateDirectories: true)
+            let file = BugReportStaging.directory.appendingPathComponent("bugreport-\(UUID().uuidString).zip")
+            try SendFeedbackSampleReport.write(to: file)
+            feedback.adoptBugReport(file)
+        } catch {
+            // The capture shows the sheet without it.
         }
     }
 

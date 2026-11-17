@@ -307,7 +307,12 @@ report's overlay text is the app's own.
 Send needs both a problem (the mail's subject) and details (its body); white
 space counts as empty, and a file or the start log is neither. Send stays
 enabled while one is empty: its tap opens no composer and shows one alert that
-names what is missing, and the first empty field takes the focus after OK. Once
+names what is missing, and the first empty field takes the focus after OK. With
+both written, no bug report attached and one that can be made now, Send asks
+first (Create bug report, which stays in the sheet, or Send without bug report),
+and the bug report's row opens a read-only viewer that reads its entries in
+bounded windows and extracts nothing, the start log's row showing its text the
+same way (`Shared/Feedback/Logic/SendFeedbackArchive*.swift`). Once
 the mail is sent, the Feedback sent notice stays over the sheet, which keeps what
 was sent and takes no touch; the notice's Done closes both and ends the draft,
 and a swipe down or the toolbar's close does nothing meanwhile.

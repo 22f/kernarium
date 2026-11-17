@@ -1286,8 +1286,8 @@ final class AppModel {
     /// What making a bug report does, whoever asks for it: Android's report,
     /// and the host's records and the guest's counters inside it.
     func bugReportWork() -> @MainActor (@escaping @Sendable (BusyUpdate) -> Void) async throws -> URL {
-        { [driver, diagnosticsDirectory, diagnosticsContainers] update in
-            let file = if let driver {
+        { [driver, diagnosticsDirectory, diagnosticsContainers, plays = playsBugReport] update in
+            let file = if let driver, !plays {
                 try await driver.createBugReport(update: update)
             } else {
                 try await Self.playBugReport(update)
@@ -1343,8 +1343,13 @@ final class AppModel {
         }
         try FileManager.default.createDirectory(at: BugReportStaging.directory, withIntermediateDirectories: true)
         let file = BugReportStaging.directory.appendingPathComponent("bugreport-preview.zip")
+        #if FEEDBACK_MAIL && !APP_STORE
+        // A small made-up report the Send feedback viewer can read.
+        try SendFeedbackSampleReport.write(to: file)
+        #else
         // An empty zip: its end-of-central-directory record.
         try Data([0x50, 0x4B, 0x05, 0x06] + [UInt8](repeating: 0, count: 18)).write(to: file)
+        #endif
         return file
     }
 
@@ -1561,7 +1566,12 @@ final class AppModel {
     /// configuration leaves this out.
     @ObservationIgnored
     var scriptedOldApps: (any OldAppsSource)?
+    /// A UI test's probe session makes the preview's bug report (`playBugReport`) though a runtime is
+    /// there: its guest is none. The App Store configuration leaves this out.
+    @ObservationIgnored
+    var playsBugReport = false
     #else
+    private var playsBugReport: Bool { false }
     private var previewInstallOutcome: ApkInstallOutcome { .installed }
     #endif
 
