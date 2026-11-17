@@ -772,12 +772,13 @@ struct CameraFlowTests {
             s.model.camera = CameraController(model: s.model, source: source)
             #expect(s.model.cameraAccess == .unavailable && !s.model.cameraAccess.offered, "\(host)")
             #expect(CameraWords.notes(access: s.model.cameraAccess) == note, "\(host)")
+            // The choice is still off: a row that could be turned on would have the guest's open of a camera say so.
+            s.model.cameraCaptureChanged(.blockedInUse)
+            #expect(s.model.cameraNoticeKind == nil, "\(host): no row to turn on, so no notice")
             s.model.setCamera(true)
             s.model.camera?.refresh()
             #expect(s.model.permissionPrompt == nil && source.asked == 0, "\(host): nothing is asked")
             #expect(s.model.guest?.camera == false && !s.model.cameraShownOn && s.model.cameraMode == .blocked, "\(host)")
-            s.model.cameraCaptureChanged(.blockedInUse)
-            #expect(s.model.cameraNoticeKind == nil, "\(host): no row to turn on, so no notice")
             rows[host] = CameraWords.notes(access: s.model.cameraAccess)
         }
         #expect(rows["Vision Pro"] == rows["Mac"])

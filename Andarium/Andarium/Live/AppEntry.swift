@@ -406,7 +406,7 @@ struct AppEntry {
     }
 
     @MainActor
-    static func hostDevice(camera: CameraPlatform = .system) -> HostDevice {
+    static func hostDevice(camera: CameraPlatform? = nil) -> HostDevice {
         let info = ProcessInfo.processInfo
         let name: String
         let idiom: HostDevice.Idiom
@@ -430,7 +430,7 @@ struct AppEntry {
             runsGuestGraphics: drawsGuestGraphics(),
             supportsPointer: UIDevice.current.userInterfaceIdiom != .phone,
             idiom: idiom, hasHaptics: DeviceHaptics.isAvailable,
-            hasCompass: MotionSensors().compassAvailable, hasCamera: camera.hasCamera
+            hasCompass: MotionSensors().compassAvailable, hasCamera: (camera ?? .system).hasCamera
         )
     }
 
