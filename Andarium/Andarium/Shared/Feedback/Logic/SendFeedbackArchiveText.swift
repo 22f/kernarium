@@ -67,8 +67,9 @@ nonisolated struct SendFeedbackTextWindow: Equatable, Sendable {
 }
 
 /// Reads the text of one entry (or of a plain file) in windows of `windowBytes`.
-/// A window ends at the first character boundary at or after its nominal end, and the next one starts
-/// after it, so no character is cut, and a window is the same whichever way it was reached.
+/// A window is the lines that begin in its 16 KiB, to the end of the line it ends in, so that the windows
+/// one after the other are the text with no line cut and no CR LF split, and a window is the same whichever
+/// way it was reached. Windows read one after the other go on from where the last one ended.
 actor SendFeedbackTextReader {
     private let stream: SendFeedbackEntryStream
     private var cached: [Int: SendFeedbackTextWindow] = [:]
@@ -97,18 +98,38 @@ actor SendFeedbackTextReader {
     func window(_ index: Int) throws -> SendFeedbackTextWindow {
         let index = min(max(0, index), windowCount - 1)
         if let hit = cached[index] { return hit }
-        let start = UInt64(index) * UInt64(windowBytes)
-        // Up to three bytes more: the end of a character that begins inside the window.
-        let data = try stream.read(at: start, count: windowBytes + 3)
-        var lower = 0
-        if index > 0 {
-            while lower < min(3, data.count), SendFeedbackText.isContinuation(data[data.startIndex + lower]) { lower += 1 }
+        let size = byteCount
+        let nominalStart = UInt64(index) * UInt64(windowBytes)
+        let nominalEnd = min(size, nominalStart + UInt64(windowBytes))
+        // From the byte before the start (a line may begin at the start) to a little past the end (the line the
+        // window ends in is whole): the bytes both ends of the window are told from.
+        let lookahead = SendFeedbackArchiveLimits.windowLookaheadBytes
+        let readStart = nominalStart == 0 ? 0 : nominalStart - 1
+        let readEnd = min(size, nominalEnd + UInt64(lookahead) + 4)
+        let data = try stream.read(at: readStart, count: Int(readEnd - readStart))
+        func byte(_ offset: UInt64) -> UInt8? {
+            guard offset >= readStart, offset - readStart < UInt64(data.count) else { return nil }
+            return data[data.startIndex + Int(offset - readStart)]
         }
-        var upper = min(windowBytes, data.count)
-        while upper < min(windowBytes + 3, data.count), SendFeedbackText.isContinuation(data[data.startIndex + upper]) {
-            upper += 1
+        // Where the window that begins at `boundary` begins: after the first line feed from the byte before the
+        // boundary on, so that the windows are whole lines and a CR LF is never split; and where there is none in
+        // reach (a line longer than that), at a character, and not between a CR and its LF.
+        func cut(_ boundary: UInt64) -> UInt64 {
+            if boundary == 0 { return 0 }
+            if boundary >= size { return size }
+            var offset = boundary - 1
+            while offset < boundary - 1 + UInt64(lookahead), offset < size, let next = byte(offset) {
+                if next == 0x0A { return offset + 1 }
+                offset += 1
+            }
+            var at = boundary
+            while at < size, at < boundary + 3, let next = byte(at), SendFeedbackText.isContinuation(next) { at += 1 }
+            if at < size, byte(at - 1) == 0x0D, byte(at) == 0x0A { at += 1 }
+            return at
         }
-        let slice = data.subdata(in: (data.startIndex + lower)..<(data.startIndex + max(lower, upper)))
+        let start = cut(nominalStart)
+        let end = max(start, cut(nominalEnd))
+        let slice = data.subdata(in: (data.startIndex + Int(start - readStart))..<(data.startIndex + Int(end - readStart)))
         let made = SendFeedbackTextWindow(
             index: index, count: windowCount, text: SendFeedbackText.sanitize(String(decoding: slice, as: UTF8.self)))
         cached[index] = made
@@ -122,6 +143,7 @@ actor SendFeedbackTextReader {
 nonisolated enum SendFeedbackEntryContent: Sendable {
     case text(SendFeedbackTextReader)
     case archive(SendFeedbackArchiveReader)
+    case picture(SendFeedbackPictureFormat)
     case empty
     case unavailable(Reason)
 
@@ -134,19 +156,51 @@ nonisolated enum SendFeedbackEntryContent: Sendable {
         case compressedArchive
         /// An archive inside an archive inside the report.
         case tooDeep
+        /// A picture the decoder was not given: refused, or beyond what is decoded.
+        case pictureRefused
     }
+}
+
+/// What an entry is, told from its name and its first bytes, which is what a row says before it opens.
+nonisolated enum SendFeedbackEntryKind: Equatable, Sendable {
+    case text
+    /// A PNG or a JPEG by its name and by its first bytes.
+    case picture(SendFeedbackPictureFormat)
+    /// An archive stored inside, which opens like a folder.
+    case archive
+    case empty
+    case notShown(SendFeedbackEntryContent.Reason)
+}
+
+/// What the report is, from its directory: what the first page and the row say.
+nonisolated struct SendFeedbackArchiveFacts: Equatable, Sendable {
+    /// Entries that are files, the ones listed and the ones the bound left out.
+    var fileCount: Int
+    /// What the listed entries make once unpacked.
+    var unpackedBytes: UInt64
 }
 
 /// An open archive: its listing, and the content of an entry on request. Reads happen on its own
 /// executor, never on the main thread.
 actor SendFeedbackArchiveReader {
     private let archive: SendFeedbackArchive
+    private var kinds: [Int: SendFeedbackEntryKind] = [:]
+    private var nested: [Int: SendFeedbackArchiveReader] = [:]
 
     nonisolated var listing: SendFeedbackArchiveListing { archive.listing }
     nonisolated var depth: Int { archive.depth }
+    /// The folders and files the names make.
+    nonisolated let tree: SendFeedbackArchiveTree
+
+    nonisolated var facts: SendFeedbackArchiveFacts {
+        let files = archive.listing.entries.filter { !$0.isFolder }
+        return SendFeedbackArchiveFacts(
+            fileCount: files.count + archive.listing.unlistedCount, unpackedBytes: archive.listing.totalBytes)
+    }
 
     init(_ archive: SendFeedbackArchive) {
         self.archive = archive
+        tree = SendFeedbackArchiveTree(entries: archive.listing.entries)
     }
 
     /// Opens the archive in `url`; throws what is wrong with it.
@@ -173,27 +227,74 @@ actor SendFeedbackArchiveReader {
         return try stream.read(at: 0, count: Int(entry.size))
     }
 
-    func content(of entryID: Int) throws -> SendFeedbackEntryContent {
+    /// What an entry is, from its name and its first bytes (a few KiB read, and inflated if it is deflated).
+    func kind(of entryID: Int) throws -> SendFeedbackEntryKind {
+        if let known = kinds[entryID] { return known }
+        let made = try classify(entryID)
+        kinds[entryID] = made
+        return made
+    }
+
+    /// A picture that was opened and refused is a row that is not shown from then on.
+    func refuse(_ entryID: Int) {
+        kinds[entryID] = .notShown(.pictureRefused)
+    }
+
+    private func classify(_ entryID: Int) throws -> SendFeedbackEntryKind {
         guard let entry = archive.listing.entries.first(where: { $0.id == entryID }) else {
             throw SendFeedbackArchiveError.damaged
         }
-        if entry.isFolder { return .unavailable(.folder) }
-        if let problem = entry.problem { return .unavailable(.problem(problem)) }
+        if entry.isFolder { return .notShown(.folder) }
+        if let problem = entry.problem { return .notShown(.problem(problem)) }
         if entry.size == 0 { return .empty }
         let location = try archive.location(of: entry)
         let stream = SendFeedbackEntryStream(location)
         let head = try stream.read(at: 0, count: SendFeedbackArchiveLimits.sniffBytes)
+        if let format = SendFeedbackPicture.format(named: entry.name, head: head) {
+            return entry.size <= UInt64(SendFeedbackArchiveLimits.maxWholeEntryBytes) ? .picture(format) : .notShown(.pictureRefused)
+        }
         if SendFeedbackText.looksLikeArchive(head) {
-            if archive.depth >= 1 { return .unavailable(.tooDeep) }
-            guard !location.deflated else { return .unavailable(.compressedArchive) }
+            if archive.depth >= 1 { return .notShown(.tooDeep) }
+            guard !location.deflated else { return .notShown(.compressedArchive) }
             if let inner = SendFeedbackRangeBytes(parent: archive.source, start: location.dataStart, length: location.size),
                let opened = try? SendFeedbackArchive.open(inner, depth: archive.depth + 1) {
-                return .archive(SendFeedbackArchiveReader(opened))
+                nested[entryID] = SendFeedbackArchiveReader(opened)
+                return .archive
             }
-            return .unavailable(.notText)
+            return .notShown(.notText)
         }
-        guard SendFeedbackText.looksLikeText(head) else { return .unavailable(.notText) }
-        return .text(SendFeedbackTextReader(location))
+        return SendFeedbackText.looksLikeText(head) ? .text : .notShown(.notText)
+    }
+
+    func content(of entryID: Int) throws -> SendFeedbackEntryContent {
+        switch try kind(of: entryID) {
+        case .text:
+            guard let entry = archive.listing.entries.first(where: { $0.id == entryID }) else {
+                throw SendFeedbackArchiveError.damaged
+            }
+            return .text(SendFeedbackTextReader(try archive.location(of: entry)))
+        case .archive:
+            guard let inner = nested[entryID] else { throw SendFeedbackArchiveError.damaged }
+            return .archive(inner)
+        case .picture(let format): return .picture(format)
+        case .empty: return .empty
+        case .notShown(let reason): return .unavailable(reason)
+        }
+    }
+
+    /// The picture of an entry, as a thumbnail: its bytes read through `bytes(of:limit:)` and decoded off this
+    /// reader, so that the reader is free meanwhile. A refusal marks the entry as not shown.
+    func picture(of entryID: Int) async throws -> SendFeedbackPicture.Thumbnail {
+        guard case .picture(let format) = try kind(of: entryID) else { throw SendFeedbackPicture.Refusal.notPicture }
+        let data = try bytes(of: entryID, limit: SendFeedbackArchiveLimits.maxWholeEntryBytes)
+        do {
+            return try await Task.detached(priority: .userInitiated) {
+                try SendFeedbackPicture.thumbnail(of: data, as: format)
+            }.value
+        } catch let refusal as SendFeedbackPicture.Refusal {
+            refuse(entryID)
+            throw refusal
+        }
     }
 }
 

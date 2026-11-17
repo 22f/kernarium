@@ -30,6 +30,8 @@ nonisolated enum SendFeedbackArchiveLimits {
     static let maxEntryBytes: UInt64 = 512 << 20
     /// The bytes of an entry that make a window of text.
     static let windowBytes = 16 << 10
+    /// How far past its nominal end a window reads to end at a line break.
+    static let windowLookaheadBytes = 8 << 10
     /// How much of an entry's start says what kind of content it is.
     static let sniffBytes = 4_096
     /// How much compressed input is read at a time while inflating.
@@ -102,17 +104,24 @@ nonisolated struct SendFeedbackArchive: Sendable {
         let tailSize = Int(min(length, UInt64(endRecordBytes + 0xFFFF)))
         let tailStart = length - UInt64(tailSize)
         let tail = try read(source, at: tailStart, count: tailSize)
-        // The end record is the last signature whose comment reaches the end of the file.
+        // The end record is the last signature whose comment reaches the end of the file and whose directory ends
+        // where it begins, which a record that a comment holds does not unless it was made so; failing that, the
+        // last signature whose comment reaches the end of the file.
         var found: Int?
+        var fallback: Int?
         var index = tail.count - endRecordBytes
         while index >= 0 {
             if tail.u32(at: index) == endSignature, index + endRecordBytes + Int(tail.u16(at: index + 20)) == tail.count {
-                found = index
-                break
+                let directoryEnd = UInt64(tail.u32(at: index + 12)) + UInt64(tail.u32(at: index + 16))
+                if directoryEnd == tailStart + UInt64(index) {
+                    found = index
+                    break
+                }
+                if fallback == nil { fallback = index }
             }
             index -= 1
         }
-        guard let end = found else { throw SendFeedbackArchiveError.notAnArchive }
+        guard let end = found ?? fallback else { throw SendFeedbackArchiveError.notAnArchive }
         let endOffset = tailStart + UInt64(end)
         let disk = tail.u16(at: end + 4), directoryDisk = tail.u16(at: end + 6)
         let diskEntries = Int(tail.u16(at: end + 8)), count = Int(tail.u16(at: end + 10))
@@ -149,11 +158,14 @@ nonisolated struct SendFeedbackArchive: Sendable {
                 throw SendFeedbackArchiveError.damaged
             }
             let nameStart = position + centralRecordBytes
+            let nameRead = SendFeedbackArchiveNames.bytesRead(nameLength: nameLength)
             let rawName = directory.subdata(
-                in: (directory.startIndex + nameStart)..<(directory.startIndex + nameStart + min(nameLength, SendFeedbackArchiveLimits.maxNameBytes)))
+                in: (directory.startIndex + nameStart)..<(directory.startIndex + nameStart + nameRead))
+            // A folder is told by the last byte of its whole name, which a name above the bound still has.
+            let lastNameByte: UInt8? = nameLength > 0 ? directory[directory.startIndex + nameStart + nameLength - 1] : nil
             entries.append(entry(
-                id: entries.count, record: directory, at: position, rawName: rawName, nameWasCut: nameLength > SendFeedbackArchiveLimits.maxNameBytes,
-                sourceLength: length))
+                id: entries.count, record: directory, at: position, rawName: rawName, lastNameByte: lastNameByte,
+                nameWasCut: nameLength > SendFeedbackArchiveLimits.maxNameBytes, sourceLength: length))
             position = recordEnd
         }
         return SendFeedbackArchive(
@@ -161,7 +173,7 @@ nonisolated struct SendFeedbackArchive: Sendable {
     }
 
     private static func entry(
-        id: Int, record: Data, at position: Int, rawName: Data, nameWasCut: Bool, sourceLength: UInt64
+        id: Int, record: Data, at position: Int, rawName: Data, lastNameByte: UInt8?, nameWasCut: Bool, sourceLength: UInt64
     ) -> SendFeedbackArchiveEntry {
         let flags = record.u16(at: position + 8)
         let method = record.u16(at: position + 10)
@@ -169,7 +181,7 @@ nonisolated struct SendFeedbackArchive: Sendable {
         let size = UInt64(record.u32(at: position + 24))
         let headerOffset = UInt64(record.u32(at: position + 42))
         let name = SendFeedbackArchiveNames.display(rawName, cut: nameWasCut)
-        let isFolder = rawName.last == UInt8(ascii: "/") && size == 0
+        let isFolder = lastNameByte == UInt8(ascii: "/") && size == 0
         var problem: SendFeedbackArchiveEntry.Problem?
         if compressed == 0xFFFF_FFFF || size == 0xFFFF_FFFF || headerOffset == 0xFFFF_FFFF {
             problem = .zip64
@@ -224,6 +236,11 @@ nonisolated struct SendFeedbackArchive: Sendable {
 
 /// How an entry's name reaches the screen. The name is data of the archive: it is shown, never joined to a path.
 nonisolated enum SendFeedbackArchiveNames {
+    /// How many bytes of a name that is `nameLength` bytes long are read: no more than the bound, whatever the record says.
+    static func bytesRead(nameLength: Int) -> Int {
+        min(max(0, nameLength), SendFeedbackArchiveLimits.maxNameBytes)
+    }
+
     static func display(_ raw: Data, cut: Bool) -> String {
         var scalars = String(decoding: raw, as: UTF8.self).unicodeScalars.map { scalar in
             SendFeedbackNames.isControl(scalar) ? "\u{FFFD}" : scalar
@@ -279,6 +296,10 @@ nonisolated final class SendFeedbackEntryStream {
     /// Bytes of the entry the inflater has produced so far, kept or not.
     private var emitted: UInt64 = 0
     private var finished = false
+    /// The last bytes produced (never much more than `tailBytes`), so that a read that begins just behind what the
+    /// inflater has produced goes on from here instead of starting the entry again.
+    private var tail = Data()
+    static let tailBytes = 32 << 10
 
     var size: UInt64 { location.size }
 
@@ -291,12 +312,32 @@ nonisolated final class SendFeedbackEntryStream {
         guard count > 0, offset < size else { return Data() }
         let wanted = Int(min(UInt64(count), size - offset))
         if !location.deflated { return try readStored(at: offset, count: wanted) }
-        if offset < emitted { restart() }
-        try skip(offset - emitted)
-        var out = Data(count: wanted)
-        let produced = try out.withUnsafeMutableBytes { try produce(into: $0) }
-        guard produced == wanted else { throw SendFeedbackArchiveError.damaged }
+        // Behind the inflater by no more than what is kept: the start is served from it and the rest goes on forward.
+        // Farther behind, the inflater starts again from the start of the entry, which a jump back costs: the time
+        // to inflate up to the place, a pass over the entry at most, and no more memory.
+        if offset < emitted, emitted - offset > UInt64(tail.count) { restart() }
+        var out = Data()
+        var position = offset
+        if position < emitted {
+            let behind = Int(emitted - position)
+            let taken = min(wanted, behind)
+            out.append(tail.suffix(behind).prefix(taken))
+            position += UInt64(taken)
+        }
+        if out.count < wanted {
+            try skip(position - emitted)
+            var rest = Data(count: wanted - out.count)
+            let produced = try rest.withUnsafeMutableBytes { try produce(into: $0) }
+            guard produced == rest.count else { throw SendFeedbackArchiveError.damaged }
+            remember(rest)
+            out.append(rest)
+        }
         return out
+    }
+
+    private func remember(_ bytes: Data) {
+        tail.append(bytes)
+        if tail.count > 2 * Self.tailBytes { tail = Data(tail.suffix(Self.tailBytes)) }
     }
 
     private func readStored(at offset: UInt64, count: Int) throws -> Data {
@@ -317,6 +358,7 @@ nonisolated final class SendFeedbackEntryStream {
         compressedRead = 0
         emitted = 0
         finished = false
+        tail = Data()
     }
 
     /// Runs the inflater forward over `count` bytes nobody asked for.
@@ -331,6 +373,7 @@ nonisolated final class SendFeedbackEntryStream {
                 try produce(into: UnsafeMutableRawBufferPointer(rebasing: buffer[0..<step]))
             }
             guard produced == step else { throw SendFeedbackArchiveError.damaged }
+            remember(Data(scratch[0..<produced]))
             remaining -= UInt64(produced)
         }
     }
@@ -342,6 +385,8 @@ nonisolated final class SendFeedbackEntryStream {
         var stalled = 0
         let inflater = try self.inflater ?? makeInflater()
         while produced < room {
+            // A stream can read a long way for one byte of output: look here, not only while skipping.
+            try Task.checkCancellation()
             if inputPosition == input.count, compressedRead < location.compressedSize {
                 let step = Int(min(UInt64(SendFeedbackArchiveLimits.inputChunkBytes), location.compressedSize - compressedRead))
                 do {

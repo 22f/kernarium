@@ -80,7 +80,11 @@ struct SendFeedbackArchiveTests {
         #expect(try await all(main) == big)
         let appended = try #require(try await text(archive.content(of: 5)))
         #expect(try await appended.window(0).text == "uml-session 7\n")
-        #expect(unavailable(try await archive.content(of: 4)) == .notText, "a picture is listed by name and size")
+        if case .picture(let format) = try await archive.content(of: 4) {
+            #expect(format == .png, "a picture is told by its name and its first bytes")
+        } else {
+            Issue.record("the picture is not told as one")
+        }
         #expect(unavailable(try await archive.content(of: 2)) == .folder)
     }
 
@@ -320,7 +324,8 @@ struct SendFeedbackArchiveTests {
         #expect(beginning.text.hasPrefix("line 0:"))
         #expect(try await reader.window(last / 2) == middle)
         #expect(try await reader.window(last) == end)
-        #expect(end.text.hasSuffix("lazy dog\n") && end.count == reader.windowCount)
+        // The last window may hold no line (the last line began in the one before): the text still ends as it does.
+        #expect(try await all(reader).hasSuffix("lazy dog\n") && end.count == reader.windowCount)
         // A window past the ends is the nearest one.
         #expect(try await reader.window(-4) == beginning)
         #expect(try await reader.window(last + 40) == end)
@@ -333,10 +338,11 @@ struct SendFeedbackArchiveTests {
         let reader = try #require(try await text(archive.content(of: 0)))
         counting.reset()
         _ = try await reader.window(reader.windowCount / 2)
-        #expect(counting.largestRead <= reader.windowBytes + 3, "one window and the end of its last character")
-        #expect(counting.totalRead <= reader.windowBytes + 3)
+        let most = reader.windowBytes + SendFeedbackArchiveLimits.windowLookaheadBytes + 5
+        #expect(counting.largestRead <= most, "one window and the rest of its last line, at most")
+        #expect(counting.totalRead <= most)
         _ = try await reader.window(3)
-        #expect(counting.totalRead <= 2 * (reader.windowBytes + 3))
+        #expect(counting.totalRead <= 2 * most)
     }
 
     @Test func aDeflatedEntryIsInflatedThroughOneChunkAtATime() async throws {

@@ -268,6 +268,7 @@ struct SendFeedbackEntryPage: View {
             case .text(let text): loaded = .text(text)
             case .archive(let nested): loaded = .archive(nested)
             case .empty: loaded = .message(LocalizedStringResource("This entry is empty.", table: "Feedback"))
+            case .picture: loaded = .message(Self.message(.notText))
             case .unavailable(let reason): loaded = .message(Self.message(reason))
             }
         } catch is CancellationError {
@@ -281,7 +282,7 @@ struct SendFeedbackEntryPage: View {
 
     private static func message(_ reason: SendFeedbackEntryContent.Reason) -> LocalizedStringResource {
         switch reason {
-        case .folder, .notText:
+        case .folder, .notText, .pictureRefused:
             LocalizedStringResource("This entry isn\u{2019}t text, so it can\u{2019}t be shown here.", table: "Feedback")
         case .compressedArchive:
             LocalizedStringResource(
