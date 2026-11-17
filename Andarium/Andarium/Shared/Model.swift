@@ -235,11 +235,6 @@ final class AppModel {
     /// The release notes: Info's history and the ribbon above Start after an
     /// update.
     var whatsNew = WhatsNewModel()
-    /// What is kept of the notice that the virtual machine's Android has no
-    /// Google apps, on purpose (Send feedback's line; the boot screen's panel
-    /// keeps nothing). It keeps nothing until the person's own launch gives it
-    /// the defaults (`AppEntry.makeModel`).
-    @ObservationIgnored var noGoogleNotice = NoGoogleNotice()
     /// The launch decided whether the statistics show (automation, see
     /// `StatsPreference.launch`): the value belongs to that run and is not kept.
     var statsDecidedByLaunch = false

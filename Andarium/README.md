@@ -670,11 +670,11 @@ requires reopening Andarium.
 
 - **No Google apps, on purpose.** The boot screen of a new installation's
   first Android boot (a first start, and the retry of one that ended before
-  Android booted) carries a panel saying that Android has no Google apps, and
-  Send feedback opens with a line that answers the same question in place
-  until it is opened or closed once (`NoGoogleNotice` keeps that one value);
-  their strings are the only ones that name Google, which
-  `scripts/localization.py` allows by key.
+  Android booted) carries a panel saying that Android has no Google apps.
+  Every presentation of Send feedback opens with a line that answers the same
+  question in place, closed; closing it takes it away from that presentation
+  alone, and nothing about it is kept. Their strings are the only ones that
+  name Google, which `scripts/localization.py` allows by key.
 - **Slow start.** A start still on the boot screen after three minutes
   (`SlowStart`; eight for a guest's first start and the first start after an
   update, which also get a title that does not say the start is slower than
