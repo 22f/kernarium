@@ -7844,6 +7844,31 @@ void native_into_reports_overflow_precisely()
 		"clear-overflow INTO did not retire normally");
 }
 
+/* AAM divides AL by its immediate base into AH and AL. A zero base raises
+ * #DE, a fault: that AAM does not retire, RIP names it and AX keeps its
+ * value. The gadget reads its address back from its stream word after the
+ * flags helper, so this names a block that does not start at 0. */
+void native_aam_raises_divide_error_precisely()
+{
+	using namespace uml::cpu::x86_64;
+	TestMemory memory;
+	memory.load(100, {0xd4, 0x0a, 0xd4, 0x00});
+	const auto built = require_built(
+		gadgets::build(memory, 100, ExecutionMode::compat32, 2),
+		"native AAM block did not build");
+	CpuState cpu{};
+	cpu.execution_mode = ExecutionMode::compat32;
+	cpu.rip = 100;
+	cpu.gpr(Register::rax) = 0x1234'0023;
+	const auto result = gadgets::execute(built.program, cpu, memory, 2);
+	require(result.event == uml::cpu::EngineEvent::floating_point_trap,
+		"AAM 0 did not raise the divide error");
+	require(result.retired_instructions == 1 && cpu.rip == 102,
+		"AAM 0 retired or lost its precise RIP");
+	require(cpu.gpr(Register::rax) == 0x1234'0305,
+		"AAM 10 did not divide AL, or AAM 0 changed AX");
+}
+
 /* ICEBP (INT1) raises #DB as a trap in either mode: it retires, and RIP
  * names the next instruction (audit NC-E10). */
 void icebp_raises_a_debug_trap_after_itself()
@@ -13003,6 +13028,7 @@ int main(int argc, char **argv)
 	migrated_gadgets_are_native_only();
 	native_divide_traps_precisely();
 	native_into_reports_overflow_precisely();
+	native_aam_raises_divide_error_precisely();
 	icebp_raises_a_debug_trap_after_itself();
 	bound_checks_a_signed_range();
 	privileged_instructions_raise_general_protection();

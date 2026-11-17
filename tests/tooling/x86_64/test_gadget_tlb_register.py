@@ -11,8 +11,9 @@ file under engine/, which holds the included assembly and the generators of
 its generated parts, and the shared host frame, which may only save and
 restore it. With --object, the assembled engine is read too, which also sees a
 register a macro or a generator builds from a number: the frame's one save and
-one restore, the entry's one load, and otherwise only translations that add an
-index to it may name x22.
+one restore, the entry's one load, which must follow the save in the entry so
+that the caller gets its own x22 back, and otherwise only translations that
+add an index to it may name x22.
 
 usage: test_gadget_tlb_register.py SOURCE_ROOT
            [--objdump OBJDUMP --object TARGET OBJECT]
@@ -68,6 +69,7 @@ def object_names(objdump: str, target: str, path: Path,
     load = f"ldr x22, [x21, #{offset:#x}]"
     symbol = None
     indexes = saves = restores = loads = 0
+    saved_in_entry = False
     stray: list[str] = []
     for line in disassembly.splitlines():
         found = SYMBOL.match(line)
@@ -78,12 +80,17 @@ def object_names(objdump: str, target: str, path: Path,
         if not found or not NAME.search(found["text"]):
             continue
         text = " ".join(found["text"].split())
+        in_entry = symbol is not None and ENTRY.match(symbol)
         if text == SAVE:
             saves += 1
+            saved_in_entry = saved_in_entry or bool(in_entry)
         elif text == RESTORE:
             restores += 1
-        elif text == load and symbol is not None and ENTRY.match(symbol):
+        elif text == load and in_entry:
             loads += 1
+            if not saved_in_entry:
+                stray.append(f"{symbol}: {text} comes before the entry saves "
+                             "the caller's x22")
         elif INDEX.match(text):
             indexes += 1
         else:
