@@ -97,10 +97,11 @@ class MappingNamesTest(unittest.TestCase):
         self.assertEqual(names[0], "toybox+0x0")
         self.assertEqual(names[3], "libc.so+0x6000")
         self.assertEqual(names[-2:], ["none", "none"])
-        # Three unnamed 1 MiB read-write mappings, told apart by their place.
+        # Three unnamed 1 MiB read-write mappings, told apart by their place
+        # among the three.
         place = dict(zip(values, names))
-        self.assertNotEqual(place[base + 0xc0000 + 0x10], place[base + 0x200000 + 0x10])
-        self.assertNotEqual(place[base + 0x200000 + 0x10], place[base + 0x440000 + 0x10])
+        self.assertEqual([place[base + low + 0x10] for low in (0xc0000, 0x200000, 0x440000)],
+                         [f"anon[0x100000,rw-]#{ordinal}/3+0x10" for ordinal in range(3)])
 
     def test_both_formatters_name_more_than_128_shapes_alike(self):
         """A layout of 129 distinct shapes, and then two mappings of the last:
@@ -116,7 +117,8 @@ class MappingNamesTest(unittest.TestCase):
         mappings.append((low, high, 0, "", "rw-"))
         names = self.agree(mappings, self.inside(mappings))
         first_last, second_last = (self.agree(mappings, [value])[0] for value in (mappings[128][0] + 0x10, low + 0x10))
-        self.assertNotEqual(first_last, second_last)
+        self.assertEqual(first_last, "anon[0x81000,rw-]#0/2+0x10")
+        self.assertEqual(second_last, "anon[0x81000,rw-]#1/2+0x10")
         self.assertEqual(len(set(names)), len(names))
 
     def test_a_name_that_does_not_fit_is_refused(self):

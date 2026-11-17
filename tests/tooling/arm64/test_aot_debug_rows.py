@@ -28,14 +28,21 @@ def tombstone(address: int = 0x7ff1b1f19000, frame: str = "__memmove_aarch64_mop
               pid: int = 2038, extra_threads: str = "", load: int = 0x7ff1ae500000,
               pointer: int = 0x2854d, stack_name: str = "[anon:stack_and_tls:2040]",
               unnamed: int = 0x1234, unnamed_size: int = 0x100000, second_unnamed: bool = False,
-              unnamed_target: int = 0) -> str:
+              unnamed_target: int = 0, lower_unnamed: bool = False, lower_size: int = 0) -> str:
     """A tombstone of a crash in libc (loaded at `load`): x4 points `pointer`
     bytes into libc's file, x5 into its .bss, x6 into an unnamed mapping, and
     x7 into a thread stack. With `second_unnamed` a second unnamed mapping of
-    the same size and protection lies above the stack, and `unnamed_target`
-    says which of the two x6 points into."""
+    the same size and protection lies above the stack, and with
+    `lower_unnamed` a third lies below the first (of `lower_size` bytes if
+    that is given, which makes its shape another); `unnamed_target` says
+    which x6 points into: 0 the first, 1 the one above the stack, 2 the one
+    below the first."""
     base = load + 0x70d50
-    unnamed_base = load + (0x500000 if unnamed_target else 0x200000)
+    unnamed_base = load + {0: 0x200000, 1: 0x500000, 2: 0xc0000}[unnamed_target]
+    below = lower_size or unnamed_size
+    lower_map = (f"""    {quoted(load + 0xc0000)}-{quoted(load + 0xc0000 + below - 1)} rw-         0    {below:x}
+                               VmFlags: rd wr mr mw me ac
+""" if lower_unnamed else "")
     extra_map = (f"""    {quoted(load + 0x500000)}-{quoted(load + 0x500000 + unnamed_size - 1)} rw-         0    {unnamed_size:x}
                                VmFlags: rd wr mr mw me ac
 """ if second_unnamed else "")
@@ -73,7 +80,7 @@ memory map (6 entries):
                                VmFlags: rd ex mr mw me
     {quoted(load + 0xb0000)}-{quoted(load + 0xb3000 - 1)} rw-         0      3000  [anon:.bss]
                                VmFlags: rd wr mr mw me ac
-    {quoted(load + 0x200000)}-{quoted(load + 0x200000 + unnamed_size - 1)} rw-         0    {unnamed_size:x}
+{lower_map}    {quoted(load + 0x200000)}-{quoted(load + 0x200000 + unnamed_size - 1)} rw-         0    {unnamed_size:x}
                                VmFlags: rd wr mr mw me ac
     {quoted(load + 0x300000)}-{quoted(load + 0x400000 - 1)} rw-         0    100000  {stack_name}
                                VmFlags: rd wr mr mw me ac
@@ -247,9 +254,10 @@ class CompareTest(unittest.TestCase):
         text = "\n".join(rows.digest_tombstone(tombstone()))
         self.assertIn("@libc.so+0x2854d", text)
         self.assertIn("@[anon:.bss]+0x2070", text)
-        # An unnamed mapping is named by its size and protection, and the
+        # An unnamed mapping is named by its size and protection, its place
+        # among the mappings of that shape and how many there are, and the
         # offset in the whole mapping is kept.
-        self.assertIn("@anon[0x100000,rw-]#0+0x1234", text)
+        self.assertIn("@anon[0x100000,rw-]#0/1+0x1234", text)
         self.assertIn("@[anon:stack_and_tls:*]+0xf8c00", text)
         self.assertIn("pc  @libc.so+0x70d50", text)
 
@@ -304,14 +312,70 @@ class CompareTest(unittest.TestCase):
         compared, _ = rows.compare("crash-memcpy", off, same)
         self.assertGreater(compared, 10)
 
+    LOADS = (0x7ff1ae500000, 0x7ff1a1a00000, 0x7ff1b2c00000)
+
+    def baselines(self, *layouts):
+        """One run per layout (keywords of tombstone), at three load addresses."""
+        return [rows.digest_tombstone(tombstone(load=load, pid=2038 + n, **layout))
+                for n, (load, layout) in enumerate(zip(self.LOADS, layouts))]
+
+    def ambiguity(self, off, **layout):
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", off, rows.digest_tombstone(
+                tombstone(load=0x7ff1a8100000, pid=3000, **layout)))
+        return str(caught.exception)
+
+    def assert_ambiguous(self, off, target):
+        message = self.ambiguity(off, lower_unnamed=True, unnamed_target=target)
+        self.assertIn("ambiguous identity", message)
+        self.assertIn("anon[0x100000,rw-]", message)
+        self.assertIn("1 in one run and 2 in another", message)
+        self.assertIn("x6", message)
+
+    # x6 points into the first of two mappings of one shape in the run that
+    # has two and into the only one in the runs that have one: the place among
+    # them is not one place in both, whether the pointer is the right one (the
+    # first mapping, `unnamed_target=0`) or a wrong one (the mapping that
+    # appeared, `unnamed_target=2`), and the row says so instead of judging it.
+    def test_a_correct_pointer_is_not_judged_by_a_place_among_a_changed_set(self):
+        self.assert_ambiguous(self.baselines({}, {}, {}), 0)
+
+    def test_a_wrong_pointer_into_a_mapping_that_appeared_is_not_accepted(self):
+        self.assert_ambiguous(self.baselines({}, {}, {}), 2)
+
+    # The runs without the component differ among themselves in the set: no
+    # run with it can be compared by a place in it.
+    def test_baselines_that_disagree_on_the_set_do_not_judge_a_correct_pointer(self):
+        self.assert_ambiguous(self.baselines({}, {"lower_unnamed": True}, {}), 0)
+
+    def test_baselines_that_disagree_on_the_set_do_not_let_a_wrong_pointer_pass(self):
+        self.assert_ambiguous(self.baselines({}, {"lower_unnamed": True}, {}), 2)
+
+    def test_runs_that_agree_on_the_set_are_compared_by_their_place_in_it(self):
+        both = {"lower_unnamed": True}
+        off = self.baselines(both, both, both)
+        same = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000, lower_unnamed=True))
+        compared, _ = rows.compare("crash-memcpy", off, same)
+        self.assertGreater(compared, 10)
+        message = self.ambiguity(off, lower_unnamed=True, unnamed_target=2)
+        self.assertIn("with it", message)
+        self.assertNotIn("ambiguous", message)
+
+    def test_a_mapping_of_another_shape_leaves_the_place_alone(self):
+        off = self.baselines({}, {}, {})
+        on = rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000, lower_unnamed=True,
+                                             lower_size=0x80000))
+        compared, _ = rows.compare("crash-memcpy", off, on)
+        self.assertGreater(compared, 10)
+
     def test_same_shaped_unnamed_mappings_are_numbered_in_address_order(self):
         names = lambda target: next(line for line in rows.digest_tombstone(
             tombstone(second_unnamed=True, unnamed_target=target)) if " x6 " in line)
-        self.assertIn("#0+0x1234", names(0))
-        self.assertIn("#1+0x1234", names(1))
-        # A mapping that is alone of its shape is the first of it.
+        self.assertIn("#0/2+0x1234", names(0))
+        self.assertIn("#1/2+0x1234", names(1))
+        # A mapping that is alone of its shape is the first of one.
         alone = next(line for line in rows.digest_tombstone(tombstone()) if " x6 " in line)
-        self.assertIn("#0+0x1234", alone)
+        self.assertIn("#0/1+0x1234", alone)
 
     def test_an_unnamed_mapping_at_another_address_is_the_same_pointer(self):
         off = [rows.digest_tombstone(tombstone(load=load, pid=2038 + n))

@@ -14,10 +14,15 @@ The program runs with address-space randomization off (the guest kernel's
 layout), but the image's userspace still places libraries and stacks at
 random: a register value that points into a mapping is therefore named by it
 (the file and the offset in it, the mapping's name and the offset in it, or
-an unnamed mapping's size, protection and place among the mappings of that
-shape, and the offset in it) before the runs are compared, and such a name that
-differs between two runs of the engine alone fails the row instead of being
-masked. Only values that name nothing can be masked, and only a few.
+an unnamed mapping's size, protection, place among the mappings of that
+shape and number of them, and the offset in it) before the runs are compared,
+and such a name that differs between two runs of the engine alone fails the
+row instead of being masked. Only values that name nothing can be masked, and
+only a few. A place among the unnamed mappings of a shape is one place only
+where the runs count the same number of them: where a field names such a place
+and the runs (the engine's own or the run with the component) disagree on that
+number, the row fails as an ambiguous identity and neither judges nor masks
+the field.
 """
 
 from __future__ import annotations
@@ -86,22 +91,28 @@ def name_value(value: int, maps: list[tuple[int, int, int, str, str]]) -> str | 
     a file's name and the offset in the file, a named anonymous mapping's name
     and the offset in it, or an unnamed mapping's size and protection, its
     place among the unnamed mappings of that size and protection (counted
-    from the lowest address; `maps` is in address order), and the offset in
-    it. Where the mapping lies is the run's choice and is not part of the
-    name; which mapping it is, and where in it, are the guest's."""
+    from the lowest address; `maps` is in address order), how many there are
+    of that shape, and the offset in it. Where the mapping lies is the run's
+    choice and is not part of the name; which mapping it is, and where in it,
+    are the guest's. The place is only the same place in two runs that agree
+    on how many mappings it is counted among (compare checks that)."""
     shapes: dict[tuple[int, str], int] = {}
+    for low, high, _, name, protection in maps:
+        if not name:
+            shapes[(high - low, protection)] = shapes.get((high - low, protection), 0) + 1
+    seen: dict[tuple[int, str], int] = {}
     for low, high, offset, name, protection in maps:
         ordinal = 0
         if not name:
-            ordinal = shapes.get((high - low, protection), 0)
-            shapes[(high - low, protection)] = ordinal + 1
+            ordinal = seen.get((high - low, protection), 0)
+            seen[(high - low, protection)] = ordinal + 1
         if low <= value < high:
             if name.startswith("/"):
                 return f"@{name.rsplit('/', 1)[1]}+{offset + value - low:#x}"
             if name:
                 # A thread's stack is named by its thread id.
                 return f"@{re.sub(r':[0-9]+]$', ':*]', name)}+{value - low:#x}"
-            return f"@anon[{high - low:#x},{protection}]#{ordinal}+{value - low:#x}"
+            return f"@anon[{high - low:#x},{protection}]#{ordinal}/{shapes[(high - low, protection)]}+{value - low:#x}"
     return None
 
 
@@ -290,6 +301,34 @@ def maskable(line: str) -> bool:
     return line.startswith("~ ") or line.startswith("  regs")
 
 
+# An unnamed mapping's name (name_value, and the guest program's own naming):
+# its shape, its place among the mappings of that shape and how many there are.
+ANONYMOUS = re.compile(r"anon\[(0x[0-9a-f]+),([-rwxps]{3})\]#(\d+)/(\d+)")
+
+
+def check_identities(mode: str, number: int, rows: tuple[str, ...]) -> None:
+    """A place among the unnamed mappings of a shape names one mapping only
+    where the runs agree on how many there are: with one more below it, the
+    same pointer has another place and a pointer into another mapping has
+    this one. Where a field names such a place in several runs (the runs
+    without the component and the run with it, in any combination) and the
+    runs count different numbers of mappings of its shape, no comparison of
+    its place is a comparison of the guest's pointer, and the row fails."""
+    names = [ANONYMOUS.findall(row) for row in rows]
+    for position in zip(*names):
+        counts: dict[tuple[str, str], set[int]] = {}
+        for size, protection, _, count in position:
+            counts.setdefault((size, protection), set()).add(int(count))
+        for (size, protection), seen in counts.items():
+            if len(seen) > 1:
+                numbers = sorted(seen)
+                spelled = (f"{numbers[0]} in one run and {numbers[1]} in another" if len(numbers) == 2 else
+                           f"{', '.join(map(str, numbers[:-1]))} and {numbers[-1]} in different runs")
+                raise DebugFailure(f"{mode} line {number}: ambiguous identity: the unnamed mappings of "
+                                   f"anon[{size},{protection}] number {spelled}, so a place among them "
+                                   f"is not one place:\n" + "\n".join(rows))
+
+
 def compare(mode: str, off_runs: list[list[str]], with_it: list[str]) -> tuple[int, int]:
     """The records of the runs without the component and of the run with it;
     returns (fields compared, fields masked). A field is masked when two of
@@ -302,6 +341,7 @@ def compare(mode: str, off_runs: list[list[str]], with_it: list[str]) -> tuple[i
                            f"{[len(run) for run in off_runs + [with_it]]} lines")
     compared = masked = 0
     for number, rows in enumerate(zip(*off_runs, with_it), 1):
+        check_identities(mode, number, rows)
         engine, third = rows[:-1], rows[-1]
         if maskable(engine[0]):
             columns = [row.split() for row in rows]

@@ -166,9 +166,9 @@ inline bool same_protection(const char *a, const char *b)
 // holds it (kOverflow if the name does not fit in `capacity`): a file's
 // name and the offset in the file, a named mapping's name and the offset in
 // it, an unnamed mapping's size and protection, its place among the unnamed
-// mappings of that size and protection (lowest address first) and the offset
-// in it. The place is found by counting, so no number of shapes can exhaust
-// the formatter.
+// mappings of that size and protection (lowest address first), how many
+// there are, and the offset in it. The place and the number are found by
+// counting, so no number of shapes can exhaust the formatter.
 inline size_t name(const char *maps, uint64_t value, char *out, size_t capacity)
 {
     const char *at = maps;
@@ -221,6 +221,8 @@ inline size_t name(const char *maps, uint64_t value, char *out, size_t capacity)
         }
         text.put("]#");
         text.decimal(ordinal);
+        text.put('/');
+        text.decimal(count);
         text.put('+');
         text.hex(value - line.low);
     }
