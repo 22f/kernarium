@@ -312,7 +312,8 @@ both written, no bug report attached and one that can be made now, Send asks
 first (Create bug report, which stays in the sheet, or Send without bug report),
 and the bug report's row leads in to read-only pages inside the sheet's own
 navigation (Back, no Done): the file as the mail carries it, its top level as
-folders and files, a text as one page that scrolls on with a thumb on the edge,
+folders and files, a text as one page that scrolls on with a thumb on the edge (only a band
+around it takes a touch, until it is held),
 and the screenshot (a PNG, rebuilt from its critical chunks before it is decoded
 as a bounded thumbnail; a JPEG is not shown). Nothing is
 extracted, and a file that is not text is dimmed and opens nothing. The start
