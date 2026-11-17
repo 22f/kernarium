@@ -995,6 +995,13 @@ the tool's lines is the tooling test `android17-vulkan-smoke-runner`.
 `screenrecord`'s encoder run across a suspend by the host's route (asked again
 while the guest is busy, as the host does) and by the guest's own on one stream
 each, and the host closes no stream by a reset.
+`android-vdso` (integration) registers when `UML_ANDROID_VDSO_RELEASE` names the
+release: the guest kernel's vDSO checks of `guest-vdso-gadgets` (with no C
+library; the mapping must be sealed there and refuse a move, where the Linux
+tests require it unsealed and movable) and the library probe of
+`guest-vdso-libc-gadgets` run as the shell user, so bionic's `clock_gettime`,
+`gettimeofday` and `time` are shown to call the `[vdso]` mapping. The probes are
+built with the host's `clang++` and `ld.lld`.
 `android-sync` (integration) registers when `UML_ANDROID_SYNC_RELEASE` names the
 release: with SysRq off, a file the guest holds dirty reaches the host's data
 image once the management console's `sync` replies, and survives a hard kill of
