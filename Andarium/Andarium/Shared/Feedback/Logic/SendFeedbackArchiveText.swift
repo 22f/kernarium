@@ -286,11 +286,14 @@ actor SendFeedbackArchiveReader {
     /// reader, so that the reader is free meanwhile. A refusal marks the entry as not shown.
     func picture(of entryID: Int) async throws -> SendFeedbackPicture.Thumbnail {
         guard case .picture(let format) = try kind(of: entryID) else { throw SendFeedbackPicture.Refusal.notPicture }
+        try Task.checkCancellation()
         let data = try bytes(of: entryID, limit: SendFeedbackArchiveLimits.maxWholeEntryBytes)
         do {
-            return try await Task.detached(priority: .userInitiated) {
+            // A detached task does not inherit the cancellation of the one that waits for it: pass it on.
+            let decoding = Task.detached(priority: .userInitiated) {
                 try SendFeedbackPicture.thumbnail(of: data, as: format)
-            }.value
+            }
+            return try await withTaskCancellationHandler { try await decoding.value } onCancel: { decoding.cancel() }
         } catch let refusal as SendFeedbackPicture.Refusal {
             refuse(entryID)
             throw refusal

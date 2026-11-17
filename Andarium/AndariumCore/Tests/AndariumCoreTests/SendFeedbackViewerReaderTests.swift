@@ -275,6 +275,17 @@ struct SendFeedbackViewerReaderTests {
         await #expect(throws: CancellationError.self) { try await task.value }
     }
 
+    @Test func aCancelledPictureOfTheReaderEndsAndIsNotMarkedAsRefused() async throws {
+        let archive = try reader([.stored("screenshot.png", png(width: 600, height: 900))])
+        let task = Task {
+            while !Task.isCancelled { await Task.yield() }
+            return try await archive.picture(of: 0)
+        }
+        task.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(try await archive.kind(of: 0) == .picture(.png), "a cancel is not a refusal")
+    }
+
     @Test func theReaderGivesAThumbnailAndMarksARefusedPictureAsNotShown() async throws {
         let archive = try reader([
             .stored("screenshot.png", png(width: 1_200, height: 2_600)), .deflated("big.png", pngClaiming(width: 20_000, height: 20_000)),
