@@ -263,6 +263,13 @@ struct SendFeedbackTextFlowPage: View {
     }
 }
 
+/// What takes a touch on the thumb's strip: a band, or the whole strip when there is none.
+nonisolated private struct SendFeedbackThumbGrab: Shape {
+    let band: CGRect?
+
+    func path(in rect: CGRect) -> Path { Path(band ?? rect) }
+}
+
 /// The thumb on the trailing edge: thin at rest, a grip with the place it points at while it is held.
 struct SendFeedbackThumb: View {
     let fraction: Double
@@ -275,13 +282,6 @@ struct SendFeedbackThumb: View {
     private let length: CGFloat = 44
     /// What the band that takes a touch at rest reaches above and below the thumb: 44 by 60 points in all.
     private let grabMargin: CGFloat = 8
-
-    /// What takes a touch: the band, or the whole view when there is none.
-    private struct Grab: Shape {
-        let band: CGRect?
-
-        func path(in rect: CGRect) -> Path { Path(band ?? rect) }
-    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -325,7 +325,7 @@ struct SendFeedbackThumb: View {
                 // At rest only a band around the thumb takes a touch, and the rest of the edge scrolls the text;
                 // held, the whole strip follows the finger.
                 Color.clear
-                    .contentShape(Grab(band: isHeld ? nil : CGRect(
+                    .contentShape(SendFeedbackThumbGrab(band: isHeld ? nil : CGRect(
                         x: 0, y: y - grabMargin, width: geometry.size.width, height: length + 2 * grabMargin)))
                     .gesture(
                         DragGesture(minimumDistance: 0)
