@@ -169,7 +169,7 @@ struct SendFeedbackTextFlowPage: View {
         Group {
             if flow.failed {
                 SendFeedbackViewerMessage(message: LocalizedStringResource(
-                    "This part can\u{2019}t be read. The bug report may be damaged or cut short.", table: "Feedback"))
+                    "This file can\u{2019}t be read. It may be damaged or cut short.", table: "Feedback"))
             } else if flow.lines.isEmpty {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

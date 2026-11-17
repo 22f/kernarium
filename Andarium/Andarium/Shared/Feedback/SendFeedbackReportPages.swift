@@ -28,10 +28,6 @@ enum SendFeedbackViewerWords {
         String(AttributedString(localized: "^[\(count) file](inflect: true)", table: "Feedback").characters)
     }
 
-    static func items(_ count: Int) -> String {
-        String(AttributedString(localized: "^[\(count) item](inflect: true)", table: "Feedback").characters)
-    }
-
     static func message(for error: SendFeedbackArchiveError) -> LocalizedStringResource {
         switch error {
         case .notAnArchive, .damaged:
@@ -167,7 +163,7 @@ struct SendFeedbackFolderPage: View {
         .overlay {
             if level.folders.isEmpty && level.files.isEmpty {
                 SendFeedbackViewerMessage(message: LocalizedStringResource(
-                    "This archive has no entries.", table: "Feedback"))
+                    "This archive has no files.", table: "Feedback"))
             }
         }
         .navigationTitle(Text(verbatim: title))
@@ -239,7 +235,7 @@ struct SendFeedbackFolderPage: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if reader.listing.unlistedCount > 0 {
                     Text(String(
-                        localized: "Only the first \(reader.listing.entries.count) are listed.", table: "Feedback")
+                        localized: "Only the first \(reader.listing.entries.count) files are listed.", table: "Feedback")
                         .keepingTogether)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -252,7 +248,7 @@ struct SendFeedbackFolderPage: View {
     }
 
     private func folderRow(_ folder: SendFeedbackArchiveTree.Folder) -> some View {
-        let items = SendFeedbackViewerWords.items(folder.items)
+        let files = SendFeedbackViewerWords.files(folder.files)
         let size = Formats.size(bytes: folder.bytes)
         return HStack(spacing: 12) {
             Image(systemName: "folder.fill")
@@ -265,7 +261,7 @@ struct SendFeedbackFolderPage: View {
                 Text(verbatim: folder.label)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(verbatim: "\(items) \u{00B7} \(size)")
+                Text(verbatim: "\(files) \u{00B7} \(size)")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -273,7 +269,7 @@ struct SendFeedbackFolderPage: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(verbatim: [
-            folder.label, String(localized: "Folder", table: "Feedback"), items, size,
+            folder.label, String(localized: "Folder", table: "Feedback"), files, size,
         ].joined(separator: ", ")))
     }
 }
@@ -288,7 +284,7 @@ struct SendFeedbackFileRow: View {
     @State private var kind: SendFeedbackEntryKind?
 
     static func name(of file: SendFeedbackArchiveTree.File) -> String {
-        file.label.isEmpty ? String(localized: "Unnamed entry", table: "Feedback") : file.label
+        file.label.isEmpty ? String(localized: "Unnamed file", table: "Feedback") : file.label
     }
 
     private var opens: Bool {
@@ -437,7 +433,7 @@ struct SendFeedbackEntryPage: View {
             case .archive(let inner): loaded = .archive(inner)
             case .picture: loaded = .picture
             case .empty, .unavailable:
-                loaded = .message(LocalizedStringResource("This entry can\u{2019}t be shown.", table: "Feedback"))
+                loaded = .message(LocalizedStringResource("This file can\u{2019}t be shown.", table: "Feedback"))
             }
         } catch is CancellationError {
             return
@@ -471,7 +467,7 @@ struct SendFeedbackPicturePage: View {
                 shown(picture)
             case .refused:
                 SendFeedbackViewerMessage(message: LocalizedStringResource(
-                    "This entry can\u{2019}t be shown.", table: "Feedback"))
+                    "This file can\u{2019}t be shown.", table: "Feedback"))
             }
         }
         .navigationTitle(Text(verbatim: label))

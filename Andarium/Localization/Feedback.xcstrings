@@ -163,7 +163,7 @@
       }
     },
     "^[%lld file](inflect: true)" : {
-      "comment" : "The count of the files of a bug report, in its row on the sheet and under its name on its first page, and its VoiceOver reading. English agrees the noun with the number; Chinese and Japanese have one form.",
+      "comment" : "The count of the files of a bug report, in its row on the sheet and under its name on its first page, and its VoiceOver reading, and the count of the files in one of its folders, under the folder's name. English agrees the noun with the number; Chinese and Japanese have one form.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -181,29 +181,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%lld個檔案"
-          }
-        }
-      }
-    },
-    "^[%lld item](inflect: true)" : {
-      "comment" : "The count of the files in a folder of the bug report, under the folder's name, and its VoiceOver reading. English agrees the noun with the number; Chinese and Japanese have one form.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld個の項目"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld个项目"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld個項目"
           }
         }
       }
@@ -1519,25 +1496,25 @@
         }
       }
     },
-    "Only the first %lld are listed." : {
-      "comment" : "Under the count, when an archive holds more entries than the viewer lists; the number is how many it lists.",
+    "Only the first %lld files are listed." : {
+      "comment" : "Under the count, when an archive holds more files than the viewer lists; the number is how many it lists.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "最初の%lld件のみ表示しています。"
+            "value" : "最初の%lld件のファイルのみ表示しています。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "仅列出前%lld项。"
+            "value" : "仅列出前%lld个文件。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "僅列出前%lld項。"
+            "value" : "僅列出前%lld個檔案。"
           }
         }
       }
@@ -2393,25 +2370,25 @@
         }
       }
     },
-    "This archive has no entries." : {
+    "This archive has no files." : {
       "comment" : "Said in the viewer when the archive lists nothing.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このアーカイブには項目がありません。"
+            "value" : "このアーカイブにはファイルがありません。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此压缩文件中没有项目。"
+            "value" : "此归档文件中没有文件。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此壓縮檔中沒有項目。"
+            "value" : "此封存檔中沒有檔案。"
           }
         }
       }
@@ -2462,25 +2439,48 @@
         }
       }
     },
-    "This entry can’t be shown." : {
-      "comment" : "Said on the page of an entry that was not opened for a reason the entry's row already gave.",
+    "This file can’t be read. It may be damaged or cut short." : {
+      "comment" : "Said in place of a window of text that could not be read, in the viewer and on the start log.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "この項目は表示できません。"
+            "value" : "このファイルを読み込めません。破損しているか、途中で切れている可能性があります。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "无法显示此项目。"
+            "value" : "无法读取此文件。它可能已损坏或不完整。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "無法顯示此項目。"
+            "value" : "無法讀取此檔案。它可能已損毀或不完整。"
+          }
+        }
+      }
+    },
+    "This file can’t be shown." : {
+      "comment" : "Said on the page of a file that was not opened for a reason the file's row already gave.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このファイルは表示できません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法显示此文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法顯示此檔案。"
           }
         }
       }
@@ -2508,29 +2508,6 @@
         }
       }
     },
-    "This part can’t be read. The bug report may be damaged or cut short." : {
-      "comment" : "Said in place of a window of text that could not be read, in the viewer.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "この部分を読み込めません。バグレポートが破損しているか、途中で切れている可能性があります。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "无法读取这一部分。错误报告可能已损坏或不完整。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "無法讀取這一部分。錯誤報告可能已損毀或不完整。"
-          }
-        }
-      }
-    },
     "Too large, not shown" : {
       "comment" : "What a file of the bug report is that is too large to be read here, under its name and size.",
       "localizations" : {
@@ -2554,25 +2531,25 @@
         }
       }
     },
-    "Unnamed entry" : {
-      "comment" : "The name of an entry of the archive that has none, in the viewer's list and as its page's title.",
+    "Unnamed file" : {
+      "comment" : "The name of a file of the archive that has none, in the viewer's list and as its page's title.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "名前のない項目"
+            "value" : "名前のないファイル"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "未命名的项目"
+            "value" : "未命名的文件"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "未命名的項目"
+            "value" : "未命名的檔案"
           }
         }
       }

@@ -44,11 +44,11 @@ struct SendFeedbackViewerReaderTests {
     @Test func aFolderCountsEveryFileUnderItAndTheirSize() throws {
         let tree = try reader(androidShape).tree
         let data = try #require(tree.level(at: "").folders.first { $0.path == "FS/data" })
-        #expect(data.items == 5)
+        #expect(data.files == 5)
         #expect(data.bytes == 600 + 700 + 300 + 90 + 310)
         let inside = tree.level(at: "FS/data")
         #expect(inside.folders.map(\.label) == ["anr", "tombstones"])
-        #expect(inside.folders.map(\.items) == [2, 3])
+        #expect(inside.folders.map(\.files) == [2, 3])
         #expect(inside.files.isEmpty)
         #expect(tree.level(at: "FS/data/tombstones").files.map(\.label) == ["tombstone_00", "tombstone_00.pb", "tombstone_01"])
     }
@@ -66,7 +66,7 @@ struct SendFeedbackViewerReaderTests {
         let tree = try reader([.stored("empty/", Data()), entry("full/f.txt")]).tree
         let top = tree.level(at: "")
         #expect(top.folders.map(\.label) == ["empty", "full"])
-        #expect(top.folders[0].items == 0)
+        #expect(top.folders[0].files == 0)
     }
 
     @Test func namesThatAreNotPathsAreGroupedAndNeverUsedAsOne() throws {

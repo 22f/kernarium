@@ -118,7 +118,7 @@ final class FeedbackAskUITests: XCTestCase {
         XCTAssertTrue(summary.label.contains("12 files"), "the first page says \(summary.label)")
         XCTAssertTrue(summary.label.contains("This file goes with your mail as it is."), "the first page says \(summary.label)")
         XCTAssertTrue(app.navigationBars.buttons["BackButton"].exists, "the first page has no Back")
-        XCTAssertTrue(labelled("FS/data, Folder, 4 items", in: app).waitForExistence(timeout: 30), "a chain of folders is not one row")
+        XCTAssertTrue(labelled("FS/data, Folder, 4 files", in: app).waitForExistence(timeout: 30), "a chain of folders is not one row")
         let notText = labelled("dumpstate_board.bin, 2 KiB, Not text, not shown", in: app)
         XCTAssertTrue(notText.waitForExistence(timeout: 30), "a file that is not text does not say so")
         XCTAssertFalse(

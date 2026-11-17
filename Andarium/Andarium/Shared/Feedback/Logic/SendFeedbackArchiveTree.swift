@@ -17,7 +17,7 @@ nonisolated struct SendFeedbackArchiveTree: Sendable {
         /// one folder in it is shown as one row with that one inside).
         let label: String
         /// The files in it and in every folder under it.
-        let items: Int
+        let files: Int
         let bytes: UInt64
     }
 
@@ -35,7 +35,8 @@ nonisolated struct SendFeedbackArchiveTree: Sendable {
     private struct Node {
         var folders: [String] = []
         var files: [Int] = []
-        var items = 0
+        /// The files in it and in every folder under it.
+        var fileCount = 0
         var bytes: UInt64 = 0
     }
 
@@ -54,7 +55,7 @@ nonisolated struct SendFeedbackArchiveTree: Sendable {
             nodes[parent.last!]!.files.append(index)
             // Every folder above it counts it.
             for path in parent {
-                nodes[path]!.items += 1
+                nodes[path]!.fileCount += 1
                 nodes[path]!.bytes += entry.size
             }
         }
@@ -87,7 +88,7 @@ nonisolated struct SendFeedbackArchiveTree: Sendable {
                 label += "/" + SendFeedbackArchiveNames.shortened(inner.folders[0])
             }
             let found = nodes[at]!
-            return Folder(path: at, label: label, items: found.items, bytes: found.bytes)
+            return Folder(path: at, label: label, files: found.fileCount, bytes: found.bytes)
         }
         .sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
         let files = node.files.map { index -> File in

@@ -423,6 +423,38 @@ struct SendFeedbackAskScreenTests {
             #expect(strings[1].hasPrefix(first), "\(language): the message and the card do not start alike")
         }
     }
+
+    private func said(_ key: String.LocalizationValue, in language: String) -> String {
+        String(localized: LocalizedStringResource(key, table: "Feedback", locale: Locale(identifier: language), bundle: .main))
+    }
+
+    /// The viewer calls what a report holds a file, and nothing else: not an item, not an entry, not a part.
+    @Test(arguments: ["ja", "zh-Hans", "zh-Hant"])
+    func theViewerNamesWhatItHoldsAFile(language: String) {
+        let noun = ["ja": "ファイル", "zh-Hans": "文件", "zh-Hant": "檔案"][language]!
+        let old = ["ja": "項目", "zh-Hans": "项目", "zh-Hant": "項目"][language]!
+        let strings = [
+            said("Unnamed file", in: language), said("This file can\u{2019}t be shown.", in: language),
+            said("This archive has no files.", in: language), said("Only the first \(12) files are listed.", in: language),
+            said("This file can\u{2019}t be read. It may be damaged or cut short.", in: language),
+        ]
+        for string in strings {
+            #expect(string.contains(noun), "\(language): \(string)")
+            #expect(!string.contains(old), "\(language): \(string)")
+            #expect(!string.unicodeScalars.allSatisfy { $0.isASCII }, "\(language) says it in English: \(string)")
+        }
+        #expect(strings[3].contains("12"), "\(language): the number is where it is said")
+    }
+
+    /// The archive is one term in each Chinese: the one the row says (Archive), in the row that is not shown too,
+    /// and in the page that lists nothing.
+    @Test(arguments: [("zh-Hans", "归档文件", "压缩文件"), ("zh-Hant", "封存檔", "壓縮檔")])
+    func theArchiveIsOneTermInChinese(language: String, term: String, other: String) {
+        for string in [said("Archive", in: language), said("Archive, not shown", in: language), said("This archive has no files.", in: language)] {
+            #expect(string.contains(term), "\(language): \(string)")
+            #expect(!string.contains(other), "\(language): \(string)")
+        }
+    }
 }
 
 #endif
