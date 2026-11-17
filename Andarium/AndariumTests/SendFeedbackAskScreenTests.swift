@@ -341,6 +341,43 @@ struct SendFeedbackAskScreenTests {
         sheet.close()
     }
 
+    @Test func theRowSaysHowManyFilesTheReportHoldsOnceItsDirectoryIsRead() async throws {
+        let fixture = fixture()
+        let sheet = fixture.sheet()
+        sheet.adoptBugReport(try makeReport())
+        let report = try #require(sheet.form.attachments.bugReport)
+        #expect(await eventually { sheet.reports[report.id]?.reader != nil }, "the directory is read as the report is attached")
+        let facts = try #require(sheet.reports[report.id]?.reader?.facts)
+        #expect(facts.fileCount == 3 && facts.unpackedBytes == 45_018)
+        #expect(SendFeedbackSheet.detail(report, files: facts.fileCount) == "\(report.size) \u{00B7} 3 files")
+        #expect(SendFeedbackSheet.spoken(report, files: facts.fileCount) == "Bug report, \(report.size), 3 files")
+        #expect(SendFeedbackSheet.detail(report) == report.size, "while the directory is not read there is no count")
+        // A second report replaces the first and its directory.
+        sheet.adoptBugReport(try makeReport())
+        let second = try #require(sheet.form.attachments.bugReport)
+        #expect(second.id != report.id && sheet.reports[report.id] == nil)
+        #expect(await eventually { sheet.reports[second.id]?.reader != nil })
+        sheet.remove(second)
+        #expect(sheet.reports[second.id] == nil, "a report taken out leaves no directory behind")
+        sheet.close()
+    }
+
+    @Test func aReportThatIsNotAnArchiveIsSaidOnItsPageAndHasNoCount() async throws {
+        let fixture = fixture()
+        let sheet = fixture.sheet()
+        try FileManager.default.createDirectory(at: BugReportStaging.directory, withIntermediateDirectories: true)
+        let url = BugReportStaging.directory.appendingPathComponent("bugreport-\(UUID().uuidString).zip")
+        try Data(repeating: 0x41, count: 4_096).write(to: url)
+        sheet.adoptBugReport(url)
+        let report = try #require(sheet.form.attachments.bugReport)
+        #expect(await eventually {
+            if case .failed = sheet.reports[report.id] { return true }
+            return false
+        }, "an archive that cannot be read says so instead of listing")
+        #expect(sheet.reports[report.id]?.reader == nil)
+        sheet.close()
+    }
+
     // MARK: Words
 
     /// Every string of the question, the card and the viewer is translated, and none says "guest" or names a
@@ -357,10 +394,13 @@ struct SendFeedbackAskScreenTests {
             text("Without a bug report, a problem will most likely not get fixed."),
             text("Start the virtual machine."), text("Make the problem happen again."),
             text("Tap the side keys, then Settings \u{203A} Send feedback, and attach a bug report."),
-            text("Close"), text("Shows what the bug report holds"), text("Shows the start log"),
+            text("Shows what the bug report holds"), text("Shows the start log"),
             text("This bug report can\u{2019}t be read. It may be damaged or cut short."),
-            text("This entry isn\u{2019}t text, so it can\u{2019}t be shown here."), text("Too large to show"),
-            text("First part"), text("Previous part"), text("Next part"), text("Last part"),
+            text("This file goes with your mail as it is."), text("Inside the bug report."),
+            text("Text"), text("Picture"), text("Archive"), text("Empty"), text("Not text, not shown"),
+            text("Picture, not shown"), text("Archive, not shown"), text("Encrypted, not shown"),
+            text("Not supported, not shown"), text("Too large, not shown"), text("Damaged, not shown"),
+            text("Position"),
         ]
         for string in strings {
             #expect(!string.isEmpty)
@@ -374,7 +414,7 @@ struct SendFeedbackAskScreenTests {
             #expect(strings[1].hasPrefix("Without a bug report, a problem will most likely not get fixed."))
             #expect(strings[4] == "Without a bug report, a problem will most likely not get fixed.")
         } else {
-            for index in [0, 1, 3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] {
+            for index in [0, 1, 3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23] {
                 let ascii = strings[index].unicodeScalars.allSatisfy { $0.isASCII }
                 #expect(!ascii, "\(language) says it in English: \(strings[index])")
             }

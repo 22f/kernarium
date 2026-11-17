@@ -15,8 +15,8 @@ import XCTest
 ///
 /// One path, through every step: Send with a problem and details written and no bug report asks, with two
 /// buttons, and no mail opens; Create bug report leaves the person in the sheet with the report attached and
-/// no composer; the report's row opens a viewer with its entries and the text of one; the report is removed
-/// and Send asks again, and Send without bug report goes on to the mail.
+/// no composer; the report's row leads in to its pages (the file, folders and files, a text with its thumb, the
+/// picture); the report is removed and Send asks again, and Send without bug report goes on to the mail.
 @MainActor
 final class FeedbackAskUITests: XCTestCase {
     private func any(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
@@ -33,6 +33,12 @@ final class FeedbackAskUITests: XCTestCase {
     private func reportRow(in app: XCUIApplication) -> XCUIElement {
         app.buttons.matching(NSPredicate(format: "identifier == 'feedback-attachment' AND label BEGINSWITH 'Bug report'"))
             .firstMatch
+    }
+
+    /// Back, from a page the sheet's navigation pushed.
+    private func back(in app: XCUIApplication) {
+        let back = app.navigationBars.buttons["BackButton"]
+        (back.exists ? back : app.navigationBars.buttons.firstMatch).tap()
     }
 
     /// Sends the keyboard away without a tap that could land on the sheet: Send is out of its reach while it is up.
@@ -98,21 +104,54 @@ final class FeedbackAskUITests: XCTestCase {
         XCTAssertFalse(any("feedback-probe-composer", in: app).exists, "Create bug report opened the mail")
         XCTAssertEqual(app.textFields["feedback-problem"].value as? String, "The game closes by itself", "the draft changed")
 
-        // The report's row opens the viewer: its entries, and the text of one.
+        // The report's row leads in: its pages are inside the sheet's own navigation (Back, no Done): the file as
+        // it goes with the mail, then its top level as folders and files.
+        XCTAssertTrue(report.label.hasSuffix("12 files"), "the row does not say how many files the report holds: \(report.label)")
         report.tap()
-        let viewer = any("feedback-viewer", in: app)
-        XCTAssertTrue(viewer.waitForExistence(timeout: 30), "the bug report did not open")
-        let version = labelled("version.txt", in: app)
-        XCTAssertTrue(version.waitForExistence(timeout: 30), "the viewer lists no entry of the report")
-        XCTAssertTrue(labelled("screenshot-2026-11-17.png", in: app).exists, "the viewer lists no picture")
+        let summary = any("feedback-viewer-summary", in: app)
+        XCTAssertTrue(summary.waitForExistence(timeout: 30), "the bug report did not open")
+        XCTAssertTrue(summary.label.contains("12 files"), "the first page says \(summary.label)")
+        XCTAssertTrue(summary.label.contains("This file goes with your mail as it is."), "the first page says \(summary.label)")
+        XCTAssertTrue(app.navigationBars.buttons["BackButton"].exists, "the first page has no Back")
+        XCTAssertTrue(labelled("FS/data, Folder, 4 items", in: app).waitForExistence(timeout: 30), "a chain of folders is not one row")
+        let notText = labelled("dumpstate_board.bin, 2 KiB, Not text, not shown", in: app)
+        XCTAssertTrue(notText.waitForExistence(timeout: 30), "a file that is not text does not say so")
+        XCTAssertFalse(
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'dumpstate_board.bin'")).firstMatch.exists,
+            "a file that is not text opens")
+
+        // A short text opens as a page of lines, then Back.
+        let version = labelled("version.txt, 4 B, Text", in: app)
+        XCTAssertTrue(version.waitForExistence(timeout: 30), "the first page lists no text")
         version.tap()
         let text = any("feedback-viewer-text", in: app)
         XCTAssertTrue(text.waitForExistence(timeout: 30), "the entry showed no text")
         XCTAssertTrue(text.label.contains("3.0"), "the entry's text is \(text.label)")
-        let close = app.buttons["feedback-viewer-close"]
-        XCTAssertTrue(close.exists, "the viewer has no Close")
-        close.tap()
-        XCTAssertTrue(viewer.waitForNonExistence(timeout: 10), "the viewer stayed")
+        back(in: app)
+        XCTAssertTrue(summary.waitForExistence(timeout: 10), "Back did not return to the first page")
+
+        // The long log scrolls on, and its thumb goes anywhere and says where while it is held.
+        labelled("bugreport-lineage-2026-11-17-15-00-00.txt, ", in: app).tap()
+        let thumb = any("feedback-viewer-thumb", in: app)
+        XCTAssertTrue(thumb.waitForExistence(timeout: 30), "the long text has no thumb")
+        XCTAssertTrue((thumb.value as? String)?.hasPrefix("0 %") == true, "the thumb reads \(String(describing: thumb.value))")
+        thumb.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05)).press(
+            forDuration: 0.2, thenDragTo: thumb.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)))
+        let place = Int((thumb.value as? String)?.prefix { $0.isNumber } ?? "") ?? -1
+        XCTAssertTrue((40...75).contains(place), "the thumb did not go to about the middle: \(String(describing: thumb.value))")
+        back(in: app)
+        XCTAssertTrue(summary.waitForExistence(timeout: 10), "Back did not return to the first page")
+
+        // The screenshot is a picture, and a folder opens like Files opens one.
+        labelled("screenshot.png, ", in: app).tap()
+        XCTAssertTrue(any("feedback-viewer-picture", in: app).waitForExistence(timeout: 30), "the screenshot showed no picture")
+        back(in: app)
+        labelled("FS/data, Folder", in: app).tap()
+        XCTAssertTrue(labelled("misc, Folder", in: app).waitForExistence(timeout: 30), "the folder lists no folder")
+        back(in: app)
+        XCTAssertTrue(summary.waitForExistence(timeout: 10), "Back did not return to the first page")
+        back(in: app)
+        XCTAssertTrue(summary.waitForNonExistence(timeout: 10), "the pages stayed")
         XCTAssertTrue(reportRow(in: app).waitForExistence(timeout: 10), "the sheet lost the report")
 
         // With the report attached, Send opens the mail at once.

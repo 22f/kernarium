@@ -439,7 +439,7 @@ fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`,
 `SendFeedbackStartLogTests` (the sheet's tip and start log during a start),
 `SendFeedbackAskScreenTests` (Send's question about a bug report and the
-viewer over the sheet) and
+pages of its row) and
 `SendFeedbackFilesScreenTests` (files from Files: in place, the copy of a file
 that cannot be used there, the access held and stopped once) exist only in a
 build with `FEEDBACK_ADDRESS=feedback@example.com` on the command line, as the
@@ -563,7 +563,8 @@ boot). Its other test, in a build with Send feedback, reaches the Send feedback
 line from a probe session's Settings. `FeedbackAskUITests` (the same build) adds
 `ANDARIUM_FEEDBACK_PROBE` to the probe session, which gives the sheet mail that can be
 sent, a composer stand-in and the preview's bug report, and walks Send's
-question, Create bug report, the viewer and Send without bug report.
+question, Create bug report, the pages of the report's row and Send without
+bug report.
 
 The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
 `andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.

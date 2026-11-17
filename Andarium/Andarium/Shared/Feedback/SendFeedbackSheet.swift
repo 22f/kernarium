@@ -104,6 +104,10 @@ struct SendFeedbackSheet: View {
                         .accessibilityIdentifier("feedback-cancel")
                 }
             }
+            // What a file holds opens inside the sheet, as Files opens a folder: Back returns to the mail.
+            .navigationDestination(item: $model.viewing) { attachment in
+                SendFeedbackViewerRoot(attachment: attachment, state: model.reports[attachment.id])
+            }
         }
         // Once the mail is sent the sheet stays as it was under the notice, and nothing in it acts: the notice's
         // own button closes the notice and the sheet together. The notice is outside this scope.
@@ -170,17 +174,14 @@ struct SendFeedbackSheet: View {
                 localized: "Without a bug report, a problem will most likely not get fixed. Send without one only if your message reports no problem, such as a suggestion or a question, or if you don\u{2019}t want to attach it.",
                 table: "Feedback").keepingTogether)
         }
-        .sheet(item: $model.viewing) { attachment in
-            #if !APP_STORE
-            SendFeedbackReportViewer(attachment: attachment, startsAt: model.previewViewerEntry)
-            #else
-            SendFeedbackReportViewer(attachment: attachment)
-            #endif
-        }
         .photosPicker(
             isPresented: $picking, selection: $picked, matching: .any(of: [.images, .videos]),
             preferredItemEncoding: .current
         )
+        // The page the row pushes comes up over the fields: the keyboard goes.
+        .onChange(of: model.viewing != nil) { _, viewing in
+            if viewing { focus = nil }
+        }
         .onChange(of: picked) { _, items in
             guard !items.isEmpty else { return }
             picked = []
@@ -320,25 +321,36 @@ struct SendFeedbackSheet: View {
     }
 
     private func row(_ attachment: SendFeedbackAttachment) -> some View {
-        HStack(spacing: 12) {
-            if SendFeedbackModel.canView(attachment.kind) {
-                // The bug report and the start log open to what they hold, to read before the mail goes.
+        let opens = SendFeedbackModel.canView(attachment.kind)
+        let files = model.reports[attachment.id]?.reader?.facts.fileCount
+        return HStack(spacing: opens ? 0 : 12) {
+            if opens {
+                // The bug report and the start log open to what they hold, to read before the mail goes: the
+                // whole row but its remove button leads in, and a hairline sets the button apart.
                 Button { model.view(attachment) } label: {
                     HStack(spacing: 12) {
-                        rowContent(attachment)
+                        rowContent(attachment, files: files)
                         Spacer(minLength: 8)
                         Image(systemName: "chevron.forward")
                             .font(.footnote.weight(.semibold))
                             .foregroundStyle(.tertiary)
+                            .padding(.trailing, 10)
                             .accessibilityHidden(true)
                     }
+                    .padding(.leading, 8)
+                    .frame(minHeight: 60)
                     .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(Self.spoken(attachment))
+                .accessibilityLabel(Self.spoken(attachment, files: files))
                 .accessibilityHint(Text(Self.viewHint(attachment.kind)))
+                .accessibilityIdentifier("feedback-attachment-open")
+                Rectangle()
+                    .fill(Color(.separator))
+                    .frame(width: 1, height: 28)
+                    .accessibilityHidden(true)
             } else {
-                rowContent(attachment)
+                rowContent(attachment, files: files)
                 Spacer(minLength: 8)
             }
             Button { withAnimation(.snappy) { model.remove(attachment) } } label: {
@@ -351,13 +363,13 @@ struct SendFeedbackSheet: View {
             .buttonStyle(.plain)
             .accessibilityLabel(Self.removeLabel(attachment.kind))
         }
-        .padding(.leading, 8)
+        .padding(.leading, opens ? 0 : 8)
         .background(Color(.secondarySystemBackground), in: .rect(cornerRadius: 14, style: .continuous))
         .accessibilityIdentifier("feedback-attachment")
     }
 
     /// The tile and the two lines of a row.
-    private func rowContent(_ attachment: SendFeedbackAttachment) -> some View {
+    private func rowContent(_ attachment: SendFeedbackAttachment, files: Int?) -> some View {
         HStack(spacing: 12) {
             picture(attachment)
                 .frame(width: 44, height: 44)
@@ -371,13 +383,13 @@ struct SendFeedbackSheet: View {
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(attachment.kind == .file ? 1 : nil)
                     .truncationMode(.middle)
-                Text(Self.detail(attachment))
+                Text(Self.detail(attachment, files: files))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Self.spoken(attachment))
+            .accessibilityLabel(Self.spoken(attachment, files: files))
         }
     }
 
@@ -448,17 +460,18 @@ struct SendFeedbackSheet: View {
 
     /// The line under the title: the picture's pixels or a video's length,
     /// then the size.
-    static func detail(_ attachment: SendFeedbackAttachment) -> String {
+    static func detail(_ attachment: SendFeedbackAttachment, files: Int? = nil) -> String {
         var parts: [String] = []
         if let pixels = attachment.pixels { parts.append("\(pixels.width) \u{00D7} \(pixels.height)") }
         if let seconds = attachment.durationSeconds { parts.append(Formats.elapsed(seconds)) }
         parts.append(attachment.size)
+        if let files { parts.append(SendFeedbackViewerWords.files(files)) }
         return parts.joined(separator: " \u{00B7} ")
     }
 
     /// What VoiceOver reads for a row: its kind, a file's name, a video's length
     /// ("1 second", "42 seconds") and its size.
-    static func spoken(_ attachment: SendFeedbackAttachment) -> String {
+    static func spoken(_ attachment: SendFeedbackAttachment, files: Int? = nil) -> String {
         var parts = [String(localized: title(attachment.kind))]
         if attachment.kind == .file { parts.append(attachment.displayName ?? attachment.fileName) }
         if let seconds = attachment.durationSeconds {
@@ -466,6 +479,7 @@ struct SendFeedbackSheet: View {
                 localized: "^[\(seconds) second](inflect: true)", table: "Feedback").characters))
         }
         parts.append(attachment.size)
+        if let files { parts.append(SendFeedbackViewerWords.files(files)) }
         return parts.joined(separator: ", ")
     }
 

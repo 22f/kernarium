@@ -59,12 +59,10 @@ final class SendFeedbackModel {
     /// Send was tapped with both fields written and no bug report attached while one can be made: the
     /// alert that asks about it, over the sheet. Nothing opens until it is answered.
     var askingForBugReport = false
-    /// The attachment whose contents are being read, in the viewer over the sheet. nil when none is.
+    /// The attachment whose contents are being read, in the pages the sheet's own navigation pushes. nil when none is.
     var viewing: SendFeedbackAttachment?
-    #if !APP_STORE
-    /// The Simulator preview opens the viewer on the entry of this name (`FeedbackPreview`).
-    @ObservationIgnored var previewViewerEntry: String?
-    #endif
+    /// What is known of each bug report attached: its directory, read once when it was attached.
+    private(set) var reports: [UUID: SendFeedbackReportState] = [:]
     /// Cancel asks before it discards.
     var confirmingDiscard = false
     /// The information block shows in full.
@@ -207,10 +205,13 @@ final class SendFeedbackModel {
         }
         do {
             let staged = try folder.adopt(file, named: file.lastPathComponent)
-            if let replaced = form.attachments.add(
-                SendFeedbackAttachment(kind: .bugReport, url: staged, bytes: Self.size(of: staged))) {
+            let attachment = SendFeedbackAttachment(kind: .bugReport, url: staged, bytes: Self.size(of: staged))
+            if let replaced = form.attachments.add(attachment) {
+                reports[replaced.id] = nil
+                if viewing?.id == replaced.id { viewing = nil }
                 folder.remove(replaced.url)
             }
+            readDirectory(of: attachment)
         } catch {
             try? FileManager.default.removeItem(at: file)
             fail(String(localized: "Bug report not attached", table: "Feedback"), error.localizedDescription)
@@ -545,11 +546,30 @@ final class SendFeedbackModel {
         viewing = attachment
     }
 
+    /// Reads the directory of a bug report once, as it is attached, off the main thread: the row says how many
+    /// files it holds, and the pages read from this reader. A report that cannot be read says so on its pages.
+    private func readDirectory(of attachment: SendFeedbackAttachment) {
+        reports[attachment.id] = .opening
+        let id = attachment.id
+        let url = attachment.url
+        Task { [weak self] in
+            let state: SendFeedbackReportState
+            do {
+                state = .ready(try await SendFeedbackArchiveReader.open(file: url))
+            } catch {
+                state = .failed(error as? SendFeedbackArchiveError ?? .unavailable)
+            }
+            guard let self, !self.closed, self.reports[id] != nil else { return }
+            self.reports[id] = state
+        }
+    }
+
     /// Takes a file out of the mail. A staged file is deleted; a file kept
     /// where the person has it is only let go.
     func remove(_ attachment: SendFeedbackAttachment) {
         guard let removed = form.attachments.remove(attachment.id) else { return }
         if viewing?.id == removed.id { viewing = nil }
+        reports[removed.id] = nil
         if removed.inPlace {
             scopes.release(removed.id)
         } else {
@@ -703,6 +723,7 @@ final class SendFeedbackModel {
         guard !closed else { return }
         closed = true
         viewing = nil
+        reports = [:]
         fileCancellation?.cancel()
         app.busyOverSheet = false
         app.feedbackSheetOpen = false
@@ -731,6 +752,18 @@ final class SendFeedbackModel {
 
     private func fail(_ title: String, _ message: String) {
         failure = SendFeedbackFailure(title: title, message: message)
+    }
+}
+
+/// A bug report's directory, as it is attached: being read, read, or not readable.
+enum SendFeedbackReportState: Sendable {
+    case opening
+    case ready(SendFeedbackArchiveReader)
+    case failed(SendFeedbackArchiveError)
+
+    var reader: SendFeedbackArchiveReader? {
+        if case .ready(let reader) = self { return reader }
+        return nil
     }
 }
 

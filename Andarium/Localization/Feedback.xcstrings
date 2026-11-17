@@ -1,6 +1,52 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "%@ of %@" : {
+      "comment" : "Where the thumb on the edge of a long text points, in bytes of the whole text, shown while it is held and read by VoiceOver: 126 KiB of 252 KiB. The placeholders are sizes.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$@中の%1$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@，共%2$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@，共%2$@"
+          }
+        }
+      }
+    },
+    "%@ unpacked" : {
+      "comment" : "What the files of a bug report make when they are unpacked, under its name on its first page: 653 KiB unpacked. The placeholder is a size.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "展開後%@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "解压后%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "解壓縮後%@"
+          }
+        }
+      }
+    },
     "%@ · %@" : {
       "comment" : "The count and the total size of the attachments (2 attachments · 3.4 MiB), and of the entries of a bug report in the viewer.",
       "localizations" : {
@@ -116,8 +162,31 @@
         }
       }
     },
-    "^[%lld entry](inflect: true)" : {
-      "comment" : "The count of the entries of a bug report, at the top of the viewer's list, and its VoiceOver reading. English agrees the noun with the number; Chinese and Japanese have one form.",
+    "^[%lld file](inflect: true)" : {
+      "comment" : "The count of the files of a bug report, in its row on the sheet and under its name on its first page, and its VoiceOver reading. English agrees the noun with the number; Chinese and Japanese have one form.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld個のファイル"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld个文件"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld個檔案"
+          }
+        }
+      }
+    },
+    "^[%lld item](inflect: true)" : {
+      "comment" : "The count of the files in a folder of the bug report, under the folder's name, and its VoiceOver reading. English agrees the noun with the number; Chinese and Japanese have one form.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -323,29 +392,6 @@
         }
       }
     },
-    "An archive inside this archive can’t be shown here." : {
-      "comment" : "Said on the page of an entry that is an archive inside an archive that the viewer already opened one level deep.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このアーカイブ内のアーカイブはここでは表示できません。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此压缩文件中的压缩文件无法在这里显示。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此壓縮檔中的壓縮檔無法在這裡顯示。"
-          }
-        }
-      }
-    },
     "An attachment is no longer available, so it was taken out of the list. Check the list, then send again." : {
       "comment" : "The message of the alert when Send finds that one attachment (a file, the bug report, the screenshot or a photo) added earlier is gone or can no longer be read, and takes it out of the list.",
       "localizations" : {
@@ -457,6 +503,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "APK檔案無法透過郵件傳送"
+          }
+        }
+      }
+    },
+    "Archive" : {
+      "comment" : "What a file of the bug report is, under its name and size, when it is an archive stored inside the report and opens like a folder.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アーカイブ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "归档文件"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "封存檔"
+          }
+        }
+      }
+    },
+    "Archive, not shown" : {
+      "comment" : "What an archive of the bug report is that cannot be opened here (it is compressed inside the report, or inside another archive), under its name and size.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アーカイブ、表示されません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "归档文件，不显示"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "封存檔，不顯示"
           }
         }
       }
@@ -622,29 +714,6 @@
         }
       }
     },
-    "Close" : {
-      "comment" : "The button that closes the viewer of a bug report.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "閉じる"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "关闭"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "關閉"
-          }
-        }
-      }
-    },
     "Copying file" : {
       "comment" : "The title of the card over the sheet while a file that cannot be used where it is kept (not yet downloaded from its cloud storage, say) is copied first.",
       "localizations" : {
@@ -691,25 +760,25 @@
         }
       }
     },
-    "Damaged, can’t be shown" : {
-      "comment" : "Under the name of an entry of the archive that contradicts the archive's own directory or runs past its end, in the viewer's list.",
+    "Damaged, not shown" : {
+      "comment" : "What a file of the bug report is that cannot be read from the archive (damaged or cut short), under its name and size.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "破損しているため表示できません"
+            "value" : "破損しています、表示されません"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "已损坏，无法显示"
+            "value" : "已损坏，不显示"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "已損毀，無法顯示"
+            "value" : "已損毀，不顯示"
           }
         }
       }
@@ -852,25 +921,48 @@
         }
       }
     },
-    "Encrypted, can’t be shown" : {
-      "comment" : "Under the name of an entry of the archive that is encrypted, in the viewer's list.",
+    "Empty" : {
+      "comment" : "What a file of the bug report with no content is, under its name and size. It opens nothing.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "暗号化されているため表示できません"
+            "value" : "空"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "已加密，无法显示"
+            "value" : "空"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "已加密，無法顯示"
+            "value" : "空"
+          }
+        }
+      }
+    },
+    "Encrypted, not shown" : {
+      "comment" : "What a file of the bug report that is encrypted is, under its name and size.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "暗号化されています、表示されません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已加密，不显示"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已加密，不顯示"
           }
         }
       }
@@ -990,29 +1082,6 @@
         }
       }
     },
-    "First part" : {
-      "comment" : "VoiceOver name of the button that goes to the first window of a long text in the viewer.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "最初の部分"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "第一部分"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "第一部分"
-          }
-        }
-      }
-    },
     "Folder" : {
       "comment" : "What the viewer says of an entry that is a folder of the archive, under its name.",
       "localizations" : {
@@ -1128,6 +1197,29 @@
         }
       }
     },
+    "Inside the bug report." : {
+      "comment" : "A sentence on the first page of an archive that is stored inside the bug report: where it is.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バグレポートの中にあります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位于错误报告内。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位於錯誤報告內。"
+          }
+        }
+      }
+    },
     "It couldn’t be copied. Check the free space on this %@, then try again." : {
       "comment" : "The text of that alert. The %@ is iPhone or iPad.",
       "localizations" : {
@@ -1170,29 +1262,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "繼續編輯"
-          }
-        }
-      }
-    },
-    "Last part" : {
-      "comment" : "VoiceOver name of the button that goes to the last window of a long text in the viewer.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "最後の部分"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "最后一部分"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "最後一部分"
           }
         }
       }
@@ -1358,48 +1427,48 @@
         }
       }
     },
-    "Next part" : {
-      "comment" : "VoiceOver name of the button that goes to the next window of a long text in the viewer.",
+    "Not supported, not shown" : {
+      "comment" : "What a file of the bug report is that is packed in a way this reader does not support, under its name and size.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "次の部分"
+            "value" : "非対応の形式です、表示されません"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "下一部分"
+            "value" : "不受支持，不显示"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "下一部分"
+            "value" : "不受支援，不顯示"
           }
         }
       }
     },
-    "Not supported, can’t be shown" : {
-      "comment" : "Under the name of an entry of the archive that is stored in a way the viewer does not read, in its list.",
+    "Not text, not shown" : {
+      "comment" : "What a file of the bug report that is not text is, under its name and size, and what VoiceOver says. The row is dimmed and opens nothing; the file goes with the mail as it is.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "非対応のため表示できません"
+            "value" : "テキストではありません、表示されません"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "不受支持，无法显示"
+            "value" : "不是文本，不显示"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "不支援，無法顯示"
+            "value" : "不是文字，不顯示"
           }
         }
       }
@@ -1496,29 +1565,6 @@
         }
       }
     },
-    "Part %lld of %lld" : {
-      "comment" : "Where the window on screen is in a long text, between the buttons of the viewer: Part 3 of 40.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パート%1$lld／%2$lld"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "第%1$lld部分，共%2$lld部分"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "第%1$lld部分，共%2$lld部分"
-          }
-        }
-      }
-    },
     "Photo" : {
       "comment" : "The title of an attached photo, a row of the mail.",
       "localizations" : {
@@ -1565,25 +1611,71 @@
         }
       }
     },
-    "Previous part" : {
-      "comment" : "VoiceOver name of the button that goes to the previous window of a long text in the viewer.",
+    "Picture" : {
+      "comment" : "What a file of the bug report is, under its name and size, when it is a picture (the screenshot); also what VoiceOver says of the picture on its page.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "前の部分"
+            "value" : "画像"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "上一部分"
+            "value" : "图片"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "上一部分"
+            "value" : "圖片"
+          }
+        }
+      }
+    },
+    "Picture, not shown" : {
+      "comment" : "What a picture of the bug report that was refused (too large, or not a picture it can decode) is, under its name and size. The row is dimmed and opens nothing.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "画像、表示されません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "图片，不显示"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "圖片，不顯示"
+          }
+        }
+      }
+    },
+    "Position" : {
+      "comment" : "What VoiceOver calls the thumb on the edge of a long text, which moves through the text; its value is the percentage and the place in bytes.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位置"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位置"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位置"
           }
         }
       }
@@ -2117,6 +2209,29 @@
         }
       }
     },
+    "Text" : {
+      "comment" : "What a file of the bug report is, under its name and size, when it is text and opens as text.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "テキスト"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文本"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文字"
+          }
+        }
+      }
+    },
     "Thank you for helping make Andarium better." : {
       "comment" : "The text of that confirmation.",
       "localizations" : {
@@ -2301,29 +2416,6 @@
         }
       }
     },
-    "This archive is compressed inside the bug report, so it can’t be shown here." : {
-      "comment" : "Said on the page of an entry that is itself an archive and is compressed inside the bug report; listing it would mean unpacking all of it.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このアーカイブはバグレポート内で圧縮されているため、ここでは表示できません。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此压缩文件在错误报告中被再次压缩，因此无法在这里显示。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此壓縮檔在錯誤報告中被再次壓縮，因此無法在這裡顯示。"
-          }
-        }
-      }
-    },
     "This bug report can’t be read. It may be damaged or cut short." : {
       "comment" : "Said in the viewer when the attached archive has no readable directory.",
       "localizations" : {
@@ -2393,48 +2485,25 @@
         }
       }
     },
-    "This entry is empty." : {
-      "comment" : "Said on the page of an entry of the archive that has no bytes.",
+    "This file goes with your mail as it is." : {
+      "comment" : "A sentence on the first page of the bug report: the file the mail carries is this one, whole, and nothing in it is changed or left out.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "この項目は空です。"
+            "value" : "このファイルはそのままメールに添付されます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此项目为空。"
+            "value" : "此文件将原样附在你的邮件中。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此項目是空的。"
-          }
-        }
-      }
-    },
-    "This entry isn’t text, so it can’t be shown here." : {
-      "comment" : "Said on the page of an entry of the archive that is not text (a picture, a binary file).",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "この項目はテキストではないため、ここでは表示できません。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此项目不是文本，因此无法在这里显示。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此項目不是文字，因此無法在這裡顯示。"
+            "value" : "此檔案會原樣附在你的郵件中。"
           }
         }
       }
@@ -2462,25 +2531,25 @@
         }
       }
     },
-    "Too large to show" : {
-      "comment" : "Under the name of an entry of the archive whose size is above what the viewer reads, in its list.",
+    "Too large, not shown" : {
+      "comment" : "What a file of the bug report is that is too large to be read here, under its name and size.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "大きすぎて表示できません"
+            "value" : "大きすぎます、表示されません"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "太大，无法显示"
+            "value" : "过大，不显示"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "太大，無法顯示"
+            "value" : "過大，不顯示"
           }
         }
       }
