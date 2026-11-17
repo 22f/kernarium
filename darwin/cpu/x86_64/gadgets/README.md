@@ -163,6 +163,16 @@ tail and resolves the same address.
   translation compares the page of its access's last byte, and an index that
   never puts neighbouring pages in one entry is what makes every access that
   crosses a page miss and take its crossing path.
+- A stack access first re-checks the entry that the run's last stack
+  translation used (`stack_fast`): PUSH, POP, CALL and RET, and the stack twin
+  that the baked tables name in place of every fused [rsp + displacement]
+  entry. A run starts at the entry of RSP's page. A hit needs the entry's exact
+  tag, so it is that page's own entry and retires with it, and a store hits
+  only a page holding no code while the run's `write_code` is clear, so it
+  keeps the overlap test and skips the publication test. A twin hits only an
+  access aligned to its size, which cannot cross a page. A crossing or
+  misaligned access or another page takes the ordinary translation, and only
+  the stack instructions' misses move the entry.
 
 ## Floating-point environment
 
