@@ -129,5 +129,113 @@ class MappingNamesTest(unittest.TestCase):
                          ["overflow", "[anon:short]+0x10"])
 
 
+GUEST_PROBE = r"""
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include "mapping_names.hpp"
+static std::string incoming;
+static size_t cursor;
+static int fake_open(const char *, int) { cursor = 0; return 1; }
+static int fake_close(int) { return 0; }
+static long fake_read(int, void *out, size_t capacity) {
+    const size_t amount = std::min(capacity, incoming.size() - cursor);
+    std::memcpy(out, incoming.data() + cursor, amount);
+    cursor += amount;
+    return static_cast<long>(amount);
+}
+#define open fake_open
+#define close fake_close
+#define read fake_read
+%(functions)s
+int main(int argc, char **argv) {
+    if (argc < 2) return 2;
+    const std::string which = argv[1];
+    uint64_t value = 0x100010;
+    if (which == "full") {
+        incoming.assign((1 << 17) - 1, 'x');
+    } else {
+        const std::string name = which == "short" ? "[anon:short]" : "[anon:" + std::string(600, 'x') + "]";
+        value = which == "second" ? 0x100020 : 0x100010;
+        incoming = "00100000-00101000 rw-p 00000000 00:00 0 " + name + "\n";
+    }
+    // What print_regs does with one register that points into a mapping.
+    load_maps(123);
+    dprintf(1, "  regs crc32");
+    for (int i = 0; i < 31; ++i) {
+        char label[8];
+        std::snprintf(label, sizeof(label), "x%%02d", i);
+        if (i != 6 || !print_mapped(label, value)) {
+            dprintf(1, " %%s=0", label);
+        }
+    }
+    dprintf(1, " sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0\n");
+    return 0;
+}
+"""
+
+
+class GuestOutputTest(unittest.TestCase):
+    """What the guest debug program prints when a name or the maps text does
+    not fit its buffers, through the runner's own judgement of a record
+    (debug_rows.run_mode): the functions are the program's own, taken from its
+    source and built on the host with the file reads replaced."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        compiler = os.environ.get("UML_CXX") or shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
+        if compiler is None:
+            raise unittest.SkipTest("no C++ compiler")
+        source = (AOT / "aot_guest_debug.cpp").read_text()
+        functions = source[source.index("char maps_text[1 << 17];"):source.index("void print_value(")]
+        cls.directory = tempfile.mkdtemp(prefix="aot-guest-output-")
+        program = pathlib.Path(cls.directory) / "probe.cpp"
+        program.write_text(GUEST_PROBE % {"functions": functions})
+        cls.probe = pathlib.Path(cls.directory) / "probe"
+        subprocess.run([compiler, "-std=c++20", "-Wall", "-Wextra", "-I", str(AOT), str(program), "-o", str(cls.probe)],
+                       check=True, capture_output=True, text=True)
+        sys.path.insert(0, str(HERE))
+        import test_aot_debug_rows as fixture  # noqa: E402
+        cls.fixture = fixture
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        shutil.rmtree(cls.directory, ignore_errors=True)
+
+    def output(self, which: str) -> str:
+        return subprocess.run([str(self.probe), which], check=True, capture_output=True, text=True,
+                              timeout=30).stdout
+
+    def judged(self, which: str) -> list[str]:
+        fixture = self.fixture
+        text = fixture.MARKER + fixture.PTRACE.replace(fixture.regs_line(), self.output(which).rstrip("\n")) + "rc=0\n"
+        return rows.run_mode(lambda *_args: text, "ptrace")
+
+    def test_a_name_that_fits_is_a_record(self):
+        self.assertEqual(self.judged("short")[-1], "done mode=ptrace")
+
+    def test_a_name_that_does_not_fit_fails_the_row(self):
+        for which in ("first", "second"):
+            with self.subTest(which=which):
+                with self.assertRaises(rows.DebugFailure) as caught:
+                    self.judged(which)
+                self.assertIn("FAIL", str(caught.exception))
+
+    def test_a_failure_is_a_line_of_its_own(self):
+        for which in ("first", "second", "full"):
+            with self.subTest(which=which):
+                output = self.output(which)
+                failures = [line for line in output.splitlines() if "FAIL" in line]
+                self.assertTrue(failures, output)
+                self.assertTrue(all(line.startswith("FAIL") for line in failures), output)
+
+    def test_a_maps_text_that_does_not_fit_fails_the_row(self):
+        with self.assertRaises(rows.DebugFailure) as caught:
+            self.judged("full")
+        self.assertIn("FAIL", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

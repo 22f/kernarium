@@ -236,7 +236,7 @@ void load_maps(int pid) {
     close(fd);
     maps_text[maps_size] = 0;
     if (maps_size >= static_cast<long>(sizeof(maps_text)) - 1) {
-        dprintf(1, "FAIL the maps of process %d do not fit %zu bytes\n", pid, sizeof(maps_text));
+        dprintf(1, "\nFAIL the maps of process %d do not fit %zu bytes\n", pid, sizeof(maps_text));
     }
 }
 
@@ -247,7 +247,7 @@ bool print_mapped(const char *label, uint64_t value) {
         return false;
     }
     if (length == aot_mapping_names::kOverflow) {
-        dprintf(1, "FAIL the name of the mapping that holds %s does not fit %zu bytes\n", label, sizeof(name));
+        dprintf(1, "\nFAIL the name of the mapping that holds %s does not fit %zu bytes\n", label, sizeof(name));
     } else {
         dprintf(1, " %s=%s", label, name);
     }
@@ -277,8 +277,12 @@ void print_value(const char *label, uint64_t value) {
     dprintf(1, " %s=%#llx", label, static_cast<unsigned long long>(value));
 }
 
+// An error is a line of its own that begins with FAIL, wherever the program
+// was in a line when it came: the newline before it ends the line it
+// interrupts (a record line that was cut short is no record), and the runner
+// rejects an output that holds FAIL anywhere.
 void fail(const char *what) {
-    dprintf(1, "FAIL %s\n", what);
+    dprintf(1, "\nFAIL %s\n", what);
 }
 
 // A pool for libz's own allocations: the library's calls to malloc would leave
@@ -387,7 +391,7 @@ void crash_cross() {
     dprintf(1, "warm sum=%d\n", sum);
     dprintf(1, "memcmp crosses the page\n");
     sum = memcmp(region + 2 * kPage - 6, region + 64, 12);
-    dprintf(1, "FAIL the compare did not fault (%d)\n", sum);
+    dprintf(1, "\nFAIL the compare did not fault (%d)\n", sum);
 }
 
 void crash_abort() {
@@ -485,7 +489,7 @@ bool resume_to(int pid, int request, int expected, Regs &regs) {
     }
     const int sig = wait_stop(pid);
     if (sig != expected) {
-        dprintf(1, "FAIL stop signal %d, expected %d\n", sig, expected);
+        dprintf(1, "\nFAIL stop signal %d, expected %d\n", sig, expected);
         return false;
     }
     return get_regs(pid, regs);
@@ -872,7 +876,7 @@ void sibling_round(const char *name, bool in_loop, int main_tid) {
     }
     int status = 0;
     if (waitpid(tracer, &status, 0) != tracer || status != 0) {
-        dprintf(1, "FAIL tracer status=%#x\n", status);
+        dprintf(1, "\nFAIL tracer status=%#x\n", status);
         return;
     }
     for (int i = 0; i < 10000 && g_hits == 0; ++i) {
@@ -979,17 +983,17 @@ bool without_randomization() {
         return true;
     }
     if (getenv("AOT_DEBUG_REEXEC") != nullptr) {
-        dprintf(1, "FAIL randomization is still on after the program ran again\n");
+        dprintf(1, "\nFAIL randomization is still on after the program ran again\n");
         return false;
     }
     const int current = personality(kQuery);
     if (current < 0 || personality(static_cast<unsigned long>(current) | kAddrNoRandomize) < 0) {
-        dprintf(1, "FAIL the personality cannot be set\n");
+        dprintf(1, "\nFAIL the personality cannot be set\n");
         return false;
     }
     setenv("AOT_DEBUG_REEXEC", "1", 1);
     execute_without_randomization();
-    dprintf(1, "FAIL the program cannot be run again\n");
+    dprintf(1, "\nFAIL the program cannot be run again\n");
     return false;
 }
 
@@ -1017,7 +1021,7 @@ __attribute__((constructor)) void run() {
     } else if (strcmp(mode, "sibling") == 0) {
         sibling_mode();
     } else {
-        dprintf(1, "FAIL unknown mode\n");
+        dprintf(1, "\nFAIL unknown mode\n");
     }
     dprintf(1, "done mode=%s\n", mode);
     _exit(0);

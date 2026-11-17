@@ -28,7 +28,8 @@ def tombstone(address: int = 0x7ff1b1f19000, frame: str = "__memmove_aarch64_mop
               pid: int = 2038, extra_threads: str = "", load: int = 0x7ff1ae500000,
               pointer: int = 0x2854d, stack_name: str = "[anon:stack_and_tls:2040]",
               unnamed: int = 0x1234, unnamed_size: int = 0x100000, second_unnamed: bool = False,
-              unnamed_target: int = 0, lower_unnamed: bool = False, lower_size: int = 0) -> str:
+              unnamed_target: int = 0, lower_unnamed: bool = False, lower_size: int = 0,
+              x5_unnamed: bool = False) -> str:
     """A tombstone of a crash in libc (loaded at `load`): x4 points `pointer`
     bytes into libc's file, x5 into its .bss, x6 into an unnamed mapping, and
     x7 into a thread stack. With `second_unnamed` a second unnamed mapping of
@@ -36,13 +37,18 @@ def tombstone(address: int = 0x7ff1b1f19000, frame: str = "__memmove_aarch64_mop
     `lower_unnamed` a third lies below the first (of `lower_size` bytes if
     that is given, which makes its shape another); `unnamed_target` says
     which x6 points into: 0 the first, 1 the one above the stack, 2 the one
-    below the first."""
+    below the first. With `x5_unnamed` x5 points into a fourth unnamed mapping
+    of 4 KiB instead of the .bss."""
     base = load + 0x70d50
     unnamed_base = load + {0: 0x200000, 1: 0x500000, 2: 0xc0000}[unnamed_target]
     below = lower_size or unnamed_size
     lower_map = (f"""    {quoted(load + 0xc0000)}-{quoted(load + 0xc0000 + below - 1)} rw-         0    {below:x}
                                VmFlags: rd wr mr mw me ac
 """ if lower_unnamed else "")
+    small_map = (f"""    {quoted(load + 0x1e0000)}-{quoted(load + 0x1e1000 - 1)} rw-         0      1000
+                               VmFlags: rd wr mr mw me ac
+""" if x5_unnamed else "")
+    x5_value = load + 0x1e0010 if x5_unnamed else load + 0xb0000 + 0x2070
     extra_map = (f"""    {quoted(load + 0x500000)}-{quoted(load + 0x500000 + unnamed_size - 1)} rw-         0    {unnamed_size:x}
                                VmFlags: rd wr mr mw me ac
 """ if second_unnamed else "")
@@ -55,7 +61,7 @@ pid: {pid}, ppid: 2036, tid: {pid}, name: toybox  >>> /system/bin/toybox <<<
 uid: 2000
 signal 11 (SIGSEGV), code 2 (SEGV_ACCERR), fault addr {address:#018x} (read)
     x0  b4007ff19a825220  x1  {address:016x}  x2  0000000000000028  x3  b4007ff19a825238
-    x4  {load + pointer:016x}  x5  {load + 0xb0000 + 0x2070:016x}  x6  {unnamed_base + unnamed:016x}  x7  {load + 0x300000 + 0xf8c00:016x}
+    x4  {load + pointer:016x}  x5  {x5_value:016x}  x6  {unnamed_base + unnamed:016x}  x7  {load + 0x300000 + 0xf8c00:016x}
     x12 0000000000000001  x13 {x13:016x}  x14 0000000000000001  x15 0000000000001863
     lr  {load + 0x25d0:016x}  sp  00007ffff7299dd0  pc  {base:016x}  pst 0000000020000000
 
@@ -80,7 +86,7 @@ memory map (6 entries):
                                VmFlags: rd ex mr mw me
     {quoted(load + 0xb0000)}-{quoted(load + 0xb3000 - 1)} rw-         0      3000  [anon:.bss]
                                VmFlags: rd wr mr mw me ac
-{lower_map}    {quoted(load + 0x200000)}-{quoted(load + 0x200000 + unnamed_size - 1)} rw-         0    {unnamed_size:x}
+{lower_map}{small_map}    {quoted(load + 0x200000)}-{quoted(load + 0x200000 + unnamed_size - 1)} rw-         0    {unnamed_size:x}
                                VmFlags: rd wr mr mw me ac
     {quoted(load + 0x300000)}-{quoted(load + 0x400000 - 1)} rw-         0    100000  {stack_name}
                                VmFlags: rd wr mr mw me ac
@@ -154,9 +160,17 @@ class VerifyTest(unittest.TestCase):
         rows.verify_tombstone("crash-sibling", rows.digest_tombstone(text + sibling_block()))
 
 
+def regs_line(fields: int = 31, tag: str = "crc32") -> str:
+    """A register line of the guest program: x00 to x30 (`fields` of them),
+    sp, pc and nzcv."""
+    values = ["0", "D+0", "0xc81", "S+0xff40", "linker64+0x1d5058", "0x7262006563617375"] + ["0"] * 25
+    return (f"  regs {tag} " + " ".join(f"x{n:02d}={values[n]}" for n in range(fields)) +
+            " sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0")
+
+
 PTRACE = """attached  pc=libc.so+0x97798
 breakpoint crc32  hit=libz.so+0x12190 at_breakpoint=yes
-  regs crc32 x00=0 x01=D+0 x02=0xc81 x03=S+0xff40 x04=linker64+0x1d5058 x05=0x7262006563617375 sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0
+""" + regs_line() + """
   returns_to=libaotdebug.so+0x5eb4
 """ + "".join(f"step {n}  pc=libz.so+{0x12194 + 4 * n:#x}\n" for n in range(40)) + """returned  pc=libaotdebug.so+0x5eb4 at_return=yes
 breakpoint crc32 on the data  hit=libz.so+0x12190 at_breakpoint=yes
@@ -200,6 +214,11 @@ class GuestProgramTest(unittest.TestCase):
         self.assertIn("aot_mapping_names::name(maps_text", text)
         self.assertNotIn("shapes[", text)
         self.assertNotIn("value & 0xfff", text)
+
+    def test_every_error_the_program_prints_is_a_line_of_its_own(self):
+        text = self.SOURCE.read_text()
+        self.assertNotRegex(text, r'"FAIL ')
+        self.assertGreaterEqual(text.count('"\\nFAIL '), 10)
 
     def test_a_maps_text_that_was_cut_short_fails_the_row(self):
         text = self.SOURCE.read_text()
@@ -368,6 +387,75 @@ class CompareTest(unittest.TestCase):
         compared, _ = rows.compare("crash-memcpy", off, on)
         self.assertGreater(compared, 10)
 
+    # An unnamed pointer's identity is proved over the whole row, field by
+    # name, or it has none: a field that is an unnamed pointer in one run and
+    # something else (another mapping, no mapping, nothing) in another fails,
+    # whatever the other fields hold and however many baselines there are.
+    def test_an_unnamed_pointer_is_judged_by_its_field_and_not_by_its_place_in_a_list_of_matches(self):
+        """x5 is an unnamed pointer in one baseline and the .bss in the other;
+        x6 points into the only mapping of its shape in the first and into one
+        of two in the second; the run with the component has a mapping below
+        and x6 into it. Pairing the matches of the lines in turn puts x5 of
+        one run against x6 of another and never looks at x6's count."""
+        load = 0x700000000000
+        first = rows.digest_tombstone(tombstone(load=load, x5_unnamed=True))
+        second = rows.digest_tombstone(tombstone(load=load, second_unnamed=True))
+        wrong = rows.digest_tombstone(tombstone(load=load, lower_unnamed=True, unnamed_target=2))
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", [first, second, first], wrong)
+        self.assertIn("ambiguous identity", str(caught.exception))
+        self.assertIn("x5", str(caught.exception))
+
+    def test_a_baseline_with_no_unnamed_pointer_on_the_line_is_no_proof(self):
+        """x6 is zero in one baseline: the other runs' unnamed pointers have
+        nothing to be proved equal to."""
+        load = 0x700000000000
+        plain = tombstone(load=load)
+        zero = plain.replace(f"{load + 0x200000 + 0x1234:016x}", "0" * 16)
+        off = [rows.digest_tombstone(plain), rows.digest_tombstone(tombstone(load=load, second_unnamed=True)),
+               rows.digest_tombstone(zero)]
+        wrong = rows.digest_tombstone(tombstone(load=load, lower_unnamed=True, unnamed_target=2))
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", off, wrong)
+        self.assertIn("ambiguous identity", str(caught.exception))
+        self.assertIn("x6", str(caught.exception))
+
+    def test_an_unnamed_pointer_that_varies_in_the_engine_is_never_masked(self):
+        """Two baselines place x6 at different offsets of the same mapping and
+        the run with the component at one of them: a named location would be
+        judged by the engine's own values, an unnamed mapping's place is not."""
+        off = self.baselines({"unnamed": 0x1234}, {"unnamed": 0x1238}, {"unnamed": 0x1234})
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("crash-memcpy", off, rows.digest_tombstone(tombstone(load=0x7ff1a8100000, pid=3000)))
+        self.assertIn("x6", str(caught.exception))
+        self.assertIn("never masked", str(caught.exception))
+
+    def test_the_programs_register_lines_are_judged_by_the_same_rule(self):
+        """The guest program prints `x06=value`: a place counted among
+        another number of mappings fails, and a place that differs between
+        the baselines is never masked."""
+        def line(value):
+            return [f"  regs crc32 x05=D+0x10 x06={value} x07=0x1 sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0"]
+
+        alike = line("anon[0x1000,rw-]#0/1+0x10")
+        rows.compare("ptrace", [alike] * 3, alike)
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("ptrace", [alike] * 3, line("anon[0x1000,rw-]#0/2+0x10"))
+        self.assertIn("ambiguous identity", str(caught.exception))
+        self.assertIn("x06", str(caught.exception))
+        with self.assertRaises(rows.DebugFailure) as caught:
+            rows.compare("ptrace", [alike, line("anon[0x1000,rw-]#0/1+0x20"), alike], alike)
+        self.assertIn("never masked", str(caught.exception))
+
+    def test_a_value_with_spaces_in_its_name_is_one_field(self):
+        value = "[anon:dalvik-main space (region space)]+0x10"
+        record = f"  regs crc32 x05=D+0x10 x06={value} x07=0x1 sp=S+0x0"
+        self.assertEqual(rows.fields(record)["x06"], value)
+        self.assertEqual(rows.fields(record)["x07"], "0x1")
+        digest = f"~     x4  @libc.so+0x2854d  x5  @{value}  x6  0x1"
+        self.assertEqual(rows.fields(digest)["x5"], "@" + value)
+        self.assertEqual(rows.fields(digest)["x6"], "0x1")
+
     def test_same_shaped_unnamed_mappings_are_numbered_in_address_order(self):
         names = lambda target: next(line for line in rows.digest_tombstone(
             tombstone(second_unnamed=True, unnamed_target=target)) if " x6 " in line)
@@ -500,6 +588,37 @@ class RunTest(unittest.TestCase):
         record = rows.run_mode(shell, "sibling")
         self.assertEqual(record[0], "randomization: off")
         self.assertEqual(record[-1], "done mode=sibling")
+
+    def ptrace_output(self, text):
+        return rows.run_mode(self.shell([("AOT_DEBUG_MODE=ptrace", MARKER + text + "rc=0\n")]), "ptrace")
+
+    def test_a_good_ptrace_output_is_a_record(self):
+        record = self.ptrace_output(PTRACE)
+        self.assertEqual(record[-1], "done mode=ptrace")
+
+    def test_a_register_line_with_fewer_fields_than_the_format_has_fails(self):
+        for fields in (20, 30):
+            with self.subTest(fields=fields):
+                with self.assertRaises(rows.DebugFailure) as caught:
+                    self.ptrace_output(PTRACE.replace(regs_line(), regs_line(fields)))
+                self.assertIn("register line", str(caught.exception))
+        # cut short in the middle of the line, with nothing after the cut
+        with self.assertRaises(rows.DebugFailure):
+            self.ptrace_output(PTRACE.replace(regs_line(), regs_line()[:70]))
+
+    def test_a_failure_marker_inside_a_record_line_fails(self):
+        text = PTRACE.replace("step 5  pc=libz.so", "step 5 FAIL the name does not fit  pc=libz.so", 1)
+        self.assertNotEqual(text, PTRACE)
+        with self.assertRaises(rows.DebugFailure) as caught:
+            self.ptrace_output(text)
+        self.assertIn("FAIL", str(caught.exception))
+
+    def test_a_line_that_is_no_record_line_fails(self):
+        for stray in (" x07=0 sp=S+0x0 pc=libz.so+0x12190 nzcv=0x0", "stp 5  pc=libz.so+0x12198", "step 5  pc="):
+            with self.subTest(stray=stray):
+                with self.assertRaises(rows.DebugFailure) as caught:
+                    self.ptrace_output(PTRACE.replace("step 5  pc=libz.so+0x121a8", stray, 1))
+                self.assertIn("record line", str(caught.exception))
 
     def test_a_run_whose_randomization_was_not_turned_off_is_no_run(self):
         for output in (SIBLING + "rc=0\n", MARKER * 2 + SIBLING + "rc=0\n",

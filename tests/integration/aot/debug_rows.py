@@ -18,11 +18,21 @@ an unnamed mapping's size, protection, place among the mappings of that
 shape and number of them, and the offset in it) before the runs are compared,
 and such a name that differs between two runs of the engine alone fails the
 row instead of being masked. Only values that name nothing can be masked, and
-only a few. A place among the unnamed mappings of a shape is one place only
-where the runs count the same number of them: where a field names such a place
-and the runs (the engine's own or the run with the component) disagree on that
-number, the row fails as an ambiguous identity and neither judges nor masks
-the field.
+only a few.
+
+One rule covers a pointer into an unnamed mapping (check_unnamed_fields): its
+identity is proved over the whole line, field by name, or the row fails and the
+field is never masked. Every run compared (the baselines and the run with the
+component) must record the field as such a pointer, into mappings of one
+shape, counted among the same number of them, and the baselines must record
+it alike. Equal counts are necessary, not sufficient, for the same set of
+mappings: a mapping that replaced another of its shape at the same place in
+the order is not told apart.
+
+Every error the guest program can print is a line of its own that begins with
+FAIL, and the runner rejects an output that holds FAIL anywhere, a line of a
+record that is not a whole line the program prints, and a register line
+without every field of its format.
 """
 
 from __future__ import annotations
@@ -95,7 +105,7 @@ def name_value(value: int, maps: list[tuple[int, int, int, str, str]]) -> str | 
     of that shape, and the offset in it. Where the mapping lies is the run's
     choice and is not part of the name; which mapping it is, and where in it,
     are the guest's. The place is only the same place in two runs that agree
-    on how many mappings it is counted among (compare checks that)."""
+    on how many mappings it is counted among (check_unnamed_fields checks that)."""
     shapes: dict[tuple[int, str], int] = {}
     for low, high, _, name, protection in maps:
         if not name:
@@ -227,7 +237,7 @@ def run_mode(shell: Callable[..., str], mode: str) -> list[str]:
     if status[-1] != f"rc={expected}":
         raise DebugFailure(f"{mode}: {status[-1]}, expected rc={expected}:\n{output}")
     failed = [line for line in lines
-              if line.startswith("FAIL") or re.search(r"(=|: )NO\b", line) or "IS NOT" in line]
+              if "FAIL" in line or re.search(r"(=|: )NO\b", line) or "IS NOT" in line]
     if failed:
         raise DebugFailure(f"{mode} reported:\n" + "\n".join(failed) + f"\n--- output:\n{output}")
     if lines.count(RANDOMIZATION_OFF) != 1:
@@ -266,7 +276,48 @@ def verify_tombstone(mode: str, record: list[str]) -> None:
             raise DebugFailure(f"{mode}: no frame of the running thread in libz.so:\n{text}")
 
 
+REGISTERS = tuple(f"x{n:02d}" for n in range(31)) + ("sp", "pc", "nzcv")
+REGISTER_LINE = re.compile(r"  regs (\S+)" + "".join(f" {name}=.+?" for name in REGISTERS[:-1]) + r" nzcv=\S+")
+# The lines of a ptrace or sibling record, as the program prints them.
+RECORD_LINES = tuple(re.compile(pattern) for pattern in (
+    r"randomization: off",
+    r"attached  pc=\S+",
+    r"breakpoint [a-z0-9 ]+  hit=\S+ at_breakpoint=(?:yes|NO)",
+    r"  returns_to=\S+",
+    r"step \d+  pc=\S+",
+    r"returned  pc=\S+ at_return=(?:yes|NO)",
+    r"  \(not the data: buffer is not in D, going on\)",
+    r"changed length: result (?:is|IS NOT) the library's answer",
+    r"changed pc: result (?:is|IS NOT) adler32's answer",
+    r"step \d+: \S+ -> \S+  pc=\S+",
+    r"after \d+ steps: \d+ library changes, \d+ instructions in libc",
+    r"tracee done sum=(?:0x)?[0-9a-f]+",
+    r"  tracee ended status=(?:0x)?[0-9a-f]+",
+    r"detached tracee status=(?:0x)?[0-9a-f]+",
+    r"(?:entry|in loop): breakpoint hit by the running thread: (?:yes|NO) by_sibling=(?:yes|NO) "
+    r"pc_at_breakpoint=(?:yes|NO) in_libz=(?:yes|NO) code=-?\d+(?:  pc=\S+)?",
+    r"(?:entry|in loop): the thread runs on after the restore: (?:yes|NO)",
+    r"done mode=\S+",
+))
+
+
+def check_record_lines(mode: str, record: list[str]) -> None:
+    """Every line of a record is a whole line the program prints, and a
+    register line has every field of its format: a line that is cut short, or
+    has another's text in it, is no record, whatever the runs compared hold."""
+    for number, line in enumerate(record, 1):
+        if line.startswith("  regs "):
+            if not REGISTER_LINE.fullmatch(line):
+                found = len(re.findall(r" (?:x\d\d|sp|pc|nzcv)=", line))
+                raise DebugFailure(f"{mode} record line {number}: the register line has {found} of the "
+                                   f"{len(REGISTERS)} fields of its format (x00 to x30, sp, pc, nzcv), "
+                                   f"or is cut short:\n{line}")
+        elif not any(form.fullmatch(line) for form in RECORD_LINES):
+            raise DebugFailure(f"{mode} record line {number} is not a whole line the program prints:\n{line}")
+
+
 def verify_record(mode: str, record: list[str]) -> None:
+    check_record_lines(mode, record)
     text = "\n".join(record)
     if f"done mode={mode}" not in record:
         raise DebugFailure(f"{mode}: no closing record:\n{text}")
@@ -304,29 +355,63 @@ def maskable(line: str) -> bool:
 # An unnamed mapping's name (name_value, and the guest program's own naming):
 # its shape, its place among the mappings of that shape and how many there are.
 ANONYMOUS = re.compile(r"anon\[(0x[0-9a-f]+),([-rwxps]{3})\]#(\d+)/(\d+)")
+FIELD_LABELS = r"(?:x\d+|lr|sp|pc|pst|esr|nzcv)"
 
 
-def check_identities(mode: str, number: int, rows: tuple[str, ...]) -> None:
-    """A place among the unnamed mappings of a shape names one mapping only
-    where the runs agree on how many there are: with one more below it, the
-    same pointer has another place and a pointer into another mapping has
-    this one. Where a field names such a place in several runs (the runs
-    without the component and the run with it, in any combination) and the
-    runs count different numbers of mappings of its shape, no comparison of
-    its place is a comparison of the guest's pointer, and the row fails."""
-    names = [ANONYMOUS.findall(row) for row in rows]
-    for position in zip(*names):
-        counts: dict[tuple[str, str], set[int]] = {}
-        for size, protection, _, count in position:
-            counts.setdefault((size, protection), set()).add(int(count))
-        for (size, protection), seen in counts.items():
-            if len(seen) > 1:
-                numbers = sorted(seen)
-                spelled = (f"{numbers[0]} in one run and {numbers[1]} in another" if len(numbers) == 2 else
-                           f"{', '.join(map(str, numbers[:-1]))} and {numbers[-1]} in different runs")
-                raise DebugFailure(f"{mode} line {number}: ambiguous identity: the unnamed mappings of "
-                                   f"anon[{size},{protection}] number {spelled}, so a place among them "
-                                   f"is not one place:\n" + "\n".join(rows))
+def fields(row: str) -> dict[str, str]:
+    """The named values of a register line, by name: `x6  value` in a
+    tombstone's, `x06=value` in the guest program's. A value may hold spaces
+    (a mapping's name does)."""
+    if row.startswith("  regs"):
+        pairs = re.finditer(r"(?:^|\s)([A-Za-z]\w*)=(.*?)(?=\s[A-Za-z]\w*=|$)", row)
+    else:
+        pairs = re.finditer(rf"(?:^|\s)({FIELD_LABELS})\s+(.*?)(?=\s+{FIELD_LABELS}\s|$)", row)
+    return {found.group(1): found.group(2).strip() for found in pairs}
+
+
+def check_unnamed_fields(mode: str, number: int, rows: tuple[str, ...]) -> None:
+    """The one rule for a pointer into an unnamed mapping: its identity is
+    proved over the whole line, field by name, or it has none and the row
+    fails. The runs compared (the baselines and the run with the component)
+    must all record the field as a pointer into an unnamed mapping, of one
+    shape, counted among the same number of mappings of that shape, and the
+    baselines must record it alike: a field that is such a pointer in one run
+    and anything else in another (a named mapping, no mapping, nothing) is not
+    provably the same place, and neither is a place counted among a different
+    number of mappings. Nothing here is masked; the fields that pass are
+    compared with the rest of the line. Equal counts are necessary and not
+    sufficient for the same set of mappings: the digest cannot tell a mapping
+    that replaced another of its shape at the same place in the order."""
+    named = [fields(row) for row in rows]
+    for name in dict.fromkeys(name for each in named for name in each):
+        values = [each.get(name) for each in named]
+        found = [ANONYMOUS.search(value) if value is not None else None for value in values]
+        if not any(found):
+            continue
+        runs = "\n".join(f"  {'run with the component' if n == len(values) else f'run {n} without'}: "
+                         f"{name} {'(not in the line)' if value is None else value}"
+                         for n, value in enumerate(values, 1))
+        if not all(found):
+            raise DebugFailure(
+                f"{mode} line {number}: ambiguous identity: {name} points into an unnamed mapping in "
+                f"{sum(1 for each in found if each)} of {len(values)} runs and into something else in the "
+                f"others, so no run is proved the same place as another:\n" + runs)
+        shapes = sorted({f"anon[{each.group(1)},{each.group(2)}]" for each in found})
+        if len(shapes) > 1:
+            raise DebugFailure(
+                f"{mode} line {number}: ambiguous identity: {name} points into unnamed mappings of "
+                f"different shapes ({' and '.join(shapes)}):\n" + runs)
+        counts = sorted({int(each.group(4)) for each in found})
+        if len(counts) > 1:
+            spelled = (f"{counts[0]} in one run and {counts[1]} in another" if len(counts) == 2 else
+                       f"{', '.join(map(str, counts[:-1]))} and {counts[-1]} in different runs")
+            raise DebugFailure(
+                f"{mode} line {number}: ambiguous identity: the unnamed mappings of {shapes[0]} number "
+                f"{spelled}, so the place {name} points to among them is not one place:\n" + runs)
+        if len(set(values[:-1])) > 1:
+            raise DebugFailure(
+                f"{mode} line {number}: the engine's own runs differ in {name}, a pointer into an "
+                f"unnamed mapping, whose place is never masked:\n" + runs)
 
 
 def compare(mode: str, off_runs: list[list[str]], with_it: list[str]) -> tuple[int, int]:
@@ -341,7 +426,7 @@ def compare(mode: str, off_runs: list[list[str]], with_it: list[str]) -> tuple[i
                            f"{[len(run) for run in off_runs + [with_it]]} lines")
     compared = masked = 0
     for number, rows in enumerate(zip(*off_runs, with_it), 1):
-        check_identities(mode, number, rows)
+        check_unnamed_fields(mode, number, rows)
         engine, third = rows[:-1], rows[-1]
         if maskable(engine[0]):
             columns = [row.split() for row in rows]

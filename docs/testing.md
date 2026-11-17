@@ -809,8 +809,9 @@ blocker in every one of them.
   `arm64-aot-share-rows` does the same for the share rows' records and
   counter bounds. `arm64-aot-mapping-names` builds, on the host, the header
   the guest debug program names a register's mapping with and holds it to the
-  tombstone digest's naming on layouts of any number of shapes (the program
-  fails the row if a name or the maps text does not fit its buffers).
+  tombstone digest's naming on layouts of any number of shapes, and runs the
+  program's own printing functions through the runner for a name or a maps
+  text that does not fit its buffers (the row fails).
 - `aot-guest-workloads` (integration, opt-in like the other Android guest
   tests: it exists where `UML_AOT_IMAGE` and the Android launcher target do)
   boots the release twice, without and with `DARWIN_UML_AOT=1`, runs the
@@ -825,11 +826,17 @@ blocker in every one of them.
   into a mapping is compared by the file or mapping and the offset in it (an
   unnamed mapping by its size, its protection, its place among the unnamed
   mappings of that shape, lowest address first, and how many there are),
-  because the image's userspace still places libraries and stacks at random;
-  runs that disagree on how many unnamed mappings of that shape there are fail
-  the field as an ambiguous identity, and only a field that names nothing (a
-  process id, a random value) may differ between two runs of one engine, and
-  few of them. The image is a user build,
+  because the image's userspace still places libraries and stacks at random.
+  A pointer into an unnamed mapping is proved over the whole line, field by
+  name, or the row fails and the field is never masked: every run compared
+  must record it as a pointer into mappings of one shape counted among the
+  same number of them, and the baselines must record it alike (equal counts
+  are necessary, not sufficient, for the same set of mappings). Only a field
+  that names nothing (a process id, a random value) may differ between two
+  runs of one engine, and few of them. Every error the program prints is a
+  line of its own that begins with `FAIL`; the runner rejects an output with
+  `FAIL` anywhere, a record line that is not a whole line the program
+  prints, and a register line without every field of its format. The image is a user build,
   so `debuggerd -b` and `kill -3` of a system process (which need root) are
   not run.
   The share rows (`aot_guest_share.cpp`, `share_rows.py`) run libz in many
