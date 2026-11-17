@@ -296,10 +296,14 @@ nonisolated final class SendFeedbackEntryStream {
     /// Bytes of the entry the inflater has produced so far, kept or not.
     private var emitted: UInt64 = 0
     private var finished = false
-    /// The last bytes produced (never much more than `tailBytes`), so that a read that begins just behind what the
+    /// The last bytes produced (never more than `tailBytes`), so that a read that begins just behind what the
     /// inflater has produced goes on from here instead of starting the entry again.
     private var tail = Data()
     static let tailBytes = 32 << 10
+    /// What the tail holds now (for the tests of its bound).
+    var tailCount: Int { tail.count }
+    /// How far the inflater has produced (for the tests of what a failed read leaves).
+    var emittedBytes: UInt64 { emitted }
 
     var size: UInt64 { location.size }
 
@@ -307,11 +311,23 @@ nonisolated final class SendFeedbackEntryStream {
         self.location = location
     }
 
-    /// Up to `count` bytes at `offset`; fewer only at the entry's end.
-    func read(at offset: UInt64, count: Int) throws -> Data {
+    /// Up to `count` bytes at `offset`; fewer only at the entry's end. A read that throws, for any reason (a damaged
+    /// stream, a cancel, a source that failed), leaves the stream as it was made: the next read starts the entry
+    /// again, because what the inflater has produced and what the tail holds no longer say the same thing.
+    /// `keepsTail` is false for a read of the whole entry, which is never followed by a read just behind it.
+    func read(at offset: UInt64, count: Int, keepsTail: Bool = true) throws -> Data {
         guard count > 0, offset < size else { return Data() }
         let wanted = Int(min(UInt64(count), size - offset))
         if !location.deflated { return try readStored(at: offset, count: wanted) }
+        do {
+            return try readDeflated(at: offset, count: wanted, keepsTail: keepsTail)
+        } catch {
+            restart()
+            throw error
+        }
+    }
+
+    private func readDeflated(at offset: UInt64, count wanted: Int, keepsTail: Bool) throws -> Data {
         // Behind the inflater by no more than what is kept: the start is served from it and the rest goes on forward.
         // Farther behind, the inflater starts again from the start of the entry, which a jump back costs: the time
         // to inflate up to the place, a pass over the entry at most, and no more memory.
@@ -325,19 +341,27 @@ nonisolated final class SendFeedbackEntryStream {
             position += UInt64(taken)
         }
         if out.count < wanted {
-            try skip(position - emitted)
+            // Not feeding the tail leaves it describing a place the inflater has left: it is let go.
+            if !keepsTail { tail = Data() }
+            try skip(position - emitted, keepsTail: keepsTail)
             var rest = Data(count: wanted - out.count)
             let produced = try rest.withUnsafeMutableBytes { try produce(into: $0) }
             guard produced == rest.count else { throw SendFeedbackArchiveError.damaged }
-            remember(rest)
+            if keepsTail { remember(rest) }
             out.append(rest)
         }
         return out
     }
 
+    /// Keeps the last `tailBytes` of what was produced, never more: it is cut as it is appended to.
     private func remember(_ bytes: Data) {
-        tail.append(bytes)
-        if tail.count > 2 * Self.tailBytes { tail = Data(tail.suffix(Self.tailBytes)) }
+        if bytes.count >= Self.tailBytes {
+            tail = Data(bytes.suffix(Self.tailBytes))
+        } else if tail.count + bytes.count > Self.tailBytes {
+            tail = Data(tail.suffix(Self.tailBytes - bytes.count)) + bytes
+        } else {
+            tail.append(bytes)
+        }
     }
 
     private func readStored(at offset: UInt64, count: Int) throws -> Data {
@@ -362,7 +386,7 @@ nonisolated final class SendFeedbackEntryStream {
     }
 
     /// Runs the inflater forward over `count` bytes nobody asked for.
-    private func skip(_ count: UInt64) throws {
+    private func skip(_ count: UInt64, keepsTail: Bool) throws {
         guard count > 0 else { return }
         var remaining = count
         var scratch = [UInt8](repeating: 0, count: SendFeedbackArchiveLimits.inputChunkBytes)
@@ -373,7 +397,7 @@ nonisolated final class SendFeedbackEntryStream {
                 try produce(into: UnsafeMutableRawBufferPointer(rebasing: buffer[0..<step]))
             }
             guard produced == step else { throw SendFeedbackArchiveError.damaged }
-            remember(Data(scratch[0..<produced]))
+            if keepsTail { remember(Data(scratch[0..<produced])) }
             remaining -= UInt64(produced)
         }
     }

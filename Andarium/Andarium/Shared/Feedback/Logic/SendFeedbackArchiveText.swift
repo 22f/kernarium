@@ -224,7 +224,7 @@ actor SendFeedbackArchiveReader {
         guard entry.size <= allowed else { throw SendFeedbackArchiveError.tooLarge }
         if entry.size == 0 { return Data() }
         let stream = SendFeedbackEntryStream(try archive.location(of: entry))
-        return try stream.read(at: 0, count: Int(entry.size))
+        return try stream.read(at: 0, count: Int(entry.size), keepsTail: false)
     }
 
     /// What an entry is, from its name and its first bytes (a few KiB read, and inflated if it is deflated).
