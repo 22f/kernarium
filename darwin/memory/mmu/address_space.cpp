@@ -1535,6 +1535,7 @@ public:
 		    offset + length < offset)
 			return -1;
 #if DARWIN_UML_X86_64_GUEST
+		FrameAccounting::note_kernel_frame_write();
 		if (!kernel_code_write_publishes())
 			return 0;
 		/* The kernel's bytes are in the frames already; the holders are

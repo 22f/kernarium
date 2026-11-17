@@ -13,26 +13,31 @@ new ones.
 
 flush_dcache_folio() and flush_dcache_page() now name the written frames
 with darwin_uml_vm_invalidate_code_frames(), and the host publishes the
-change at their holders. Only a folio a user PTE of guest-code
-permission was once queued for needs the call. update_pte_range() sets
-PG_arch_1 on the folio of an executable PTE under the page-table lock,
-which holds the frame, and a full barrier follows; the hook runs the
-same barrier before it tests the bit, so a writer that finds the bit
-clear precedes the mark and the host's later fetch reads its bytes.
-Linux clears PG_arch_1 when a folio is freed and enters the page cache,
-and no code of arch/um uses it. Other file I/O pays a barrier and a
-bit test.
+change at their holders. Only a folio that was queued for the host with
+guest-code permission needs the call, and the host gives that permission
+to a page of a VM_EXEC VMA alone (pte_exec() holds for every readable
+user PTE here, so it tests nothing). update_pte_range() reads the VMA's
+protection before it takes the page-table lock. Under the lock, which
+holds the frame, it sets PG_arch_1 on the folio of a present PTE of such
+a VMA, and a full barrier follows. The hook runs the same barrier before
+it tests the bit, so a writer that finds the bit clear precedes the mark
+and the host's later fetch reads its bytes. Linux clears PG_arch_1 when
+a folio is freed and enters the page cache, and no code of arch/um uses
+it. Other file I/O pays a barrier and a bit test, and a write into a
+file that is mapped without VM_EXEC makes no host call.
 
 The host cannot be entered from an interrupt, whose tick may arrive
 inside another bridge call that holds the host locks. Such a call for a
-marked folio warns instead; a read completion fills a folio that is not
-mapped yet, so its bit is clear.
+marked folio warns instead. The folios interrupt handlers write are not
+marked: a completed read fills a folio not yet mapped, and the AF_PACKET
+and AIO rings that softirqs and bio completions write for user space are
+mapped without VM_EXEC.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  arch/um/include/asm/cacheflush.h | 15 ++++++
- arch/um/kernel/tlb.c             | 78 ++++++++++++++++++++++++++++++++
- 2 files changed, 93 insertions(+)
+ arch/um/kernel/tlb.c             | 93 ++++++++++++++++++++++++++++++--
+ 2 files changed, 104 insertions(+), 4 deletions(-)
 
 diff --git a/arch/um/include/asm/cacheflush.h b/arch/um/include/asm/cacheflush.h
 index a18b3a62e8bc588cfcd054cdc48b04d932431945..af57a23a93094a2f4af4d9858a2b6c41f093e6af 100644
@@ -61,7 +66,7 @@ index a18b3a62e8bc588cfcd054cdc48b04d932431945..af57a23a93094a2f4af4d9858a2b6c41
   * With 4 KiB pages on a 16 KiB host, a kernel alias whose host page does not
   * map one aligned group of four consecutive frames is a private copy, and
 diff --git a/arch/um/kernel/tlb.c b/arch/um/kernel/tlb.c
-index 4b3b6019b6650d789f8f339311f3b874e799383c..6ad79cf7bb05341094bd24e0c1247e86b5203099 100644
+index 4b3b6019b6650d789f8f339311f3b874e799383c..8bbdc73cdb2d639839b71cf094676592ecb816b5 100644
 --- a/arch/um/kernel/tlb.c
 +++ b/arch/um/kernel/tlb.c
 @@ -121,6 +121,27 @@ static inline int darwin_guest_protection(struct mm_struct *mm, int prot,
@@ -92,24 +97,51 @@ index 4b3b6019b6650d789f8f339311f3b874e799383c..6ad79cf7bb05341094bd24e0c1247e86
  #endif
  
  static int kern_map(struct mm_id *mm_idp,
-@@ -581,6 +602,16 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
+@@ -550,6 +571,14 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
+ 	do {
+ #ifdef UML_HOST_DARWIN
+ 		pte_t pteval;
++		/*
++		 * The walk holds mmap_read_lock(), so the VMA is stable.  The
++		 * host's guest-code permission and the mark below both come
++		 * from this one read, as they must.  Read it before the PTE
++		 * lock: the lock covers only what the PTE pins.
++		 */
++		unsigned int vma_protection =
++			darwin_vma_protection(ops->mm, addr);
+ 
+ 		/*
+ 		 * UML's original shadow-TLB walker was uniprocessor-only.  Clearing
+@@ -581,6 +610,17 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
  				return -EAGAIN;
  		}
  		pteval = ptep_get(pte);
 +		/*
-+		 * The lock holds the frame of a present PTE, which a zap could
-+		 * otherwise free under the mark.  Every host mapping that a
-+		 * translation can exist for is executable, and takes its
-+		 * guest-code permission from the VMA, so an executable PTE is
-+		 * the superset to mark.
++		 * Mark the folio of a present PTE in an executable VMA, which is
++		 * where the host gives the page guest-code permission and so the
++		 * only place a translation of it can come from.  pte_exec() is no
++		 * test of this: here it holds for every readable user PTE.  The
++		 * lock holds the frame, which a zap could otherwise free under
++		 * the mark.
 +		 */
 +		if (ops->mm != &init_mm && pte_present(pteval) &&
-+		    pte_exec(pteval))
++		    (vma_protection & DARWIN_VMA_EXEC))
 +			darwin_mark_guest_code_folio(pte_pfn(pteval));
  		if (ops->mm == &init_mm)
  			spin_unlock(ptl);
  		else
-@@ -1307,6 +1338,53 @@ static void darwin_flush_icache_frame(struct mm_struct *mm, struct page *page,
+@@ -601,10 +641,6 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
+ 			unsigned long phys = pte_val(pteval) & PAGE_MASK;
+ 			int fd = phys_mapping(phys, &offset);
+ 			int r, w, x, prot;
+-#ifdef UML_HOST_DARWIN
+-			unsigned int vma_protection =
+-				darwin_vma_protection(ops->mm, addr);
+-#endif
+ 
+ 			r = pte_read(pteval);
+ 			w = pte_write(pteval);
+@@ -1307,6 +1343,55 @@ static void darwin_flush_icache_frame(struct mm_struct *mm, struct page *page,
  		      mm->context.id.darwin_generation, addr, len);
  }
  
@@ -121,10 +153,12 @@ index 4b3b6019b6650d789f8f339311f3b874e799383c..6ad79cf7bb05341094bd24e0c1247e86
 + * route.
 + *
 + * The host cannot be entered from an interrupt, as the tick may arrive inside
-+ * another bridge call that holds the host locks this one takes. An interrupt
-+ * handler that completes a read fills a folio that is not yet mapped, so its
-+ * bit is clear. Warn about any other interrupt-context write to a marked
-+ * folio, which is not published.
++ * another bridge call that holds the host locks this one takes. The folios
++ * that interrupt handlers write are not marked: a completed read fills a
++ * folio not yet mapped, and the rings that softirqs and bio completions
++ * write for user space (AF_PACKET, AIO) are mapped without VM_EXEC. Warn
++ * about any other interrupt-context write to a marked folio, which is not
++ * published.
 + */
 +static void darwin_flush_dcache_frames(struct folio *folio,
 +				       phys_addr_t phys, unsigned long length)

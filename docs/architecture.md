@@ -283,12 +283,14 @@ generation's flush serial and publishes a whole-space code change (the range
 pages the target does map, `invalidate_code` publishes their frames. A kernel
 write into a page-cache or memfd frame ends in the x86_64 kernel's
 `flush_dcache_folio()`, which names the folio's frames
-(`darwin_uml_vm_invalidate_code_frames()`, called only for a folio a
-guest-code mapping was queued for) and publishes at their holders, or returns
-without work when no x86 code has run or the frame has no record.
+(`darwin_uml_vm_invalidate_code_frames()`, called only for a folio queued for
+the host with guest-code permission, which is a page of a `VM_EXEC` mapping)
+and publishes at their holders, or returns without work when no x86 code has
+run or the frame has no record.
 When a run of the emulator ends it appends the process's counts so far, which
 nothing resets (unresolved kernel writes, dropped direct ranges, global holds,
-registrations that reached the address space and their failures, refusals and lost stamp hits), to the file
+registrations that reached the address space and their failures, refusals,
+lost stamp hits and the frames a kernel write named), to the file
 `UML_X86_ACCOUNTING_LOG` names; the unresolved writes and global holds stay
 near zero in an ordinary guest.
 

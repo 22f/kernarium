@@ -170,6 +170,11 @@ public:
 		/* Holds answered `global`: the writers were too many for the
 		 * buffer or not known by kind. */
 		std::uint64_t global_holds;
+		/* Kernel writes into page-cache or memfd frames that were named to
+		 * the host (darwin_uml_vm_invalidate_code_frames()), whatever came of
+		 * them. The kernel names only frames a guest-code mapping was
+		 * queued for, so a guest that never maps code executable shows 0. */
+		std::uint64_t kernel_frame_writes;
 	};
 	[[nodiscard]] static Diagnostics diagnostics() noexcept;
 	static void note_nonempty_state_destruction() noexcept;
@@ -294,6 +299,7 @@ public:
 	[[nodiscard]] static bool resolve_direct(const void *address, int &fd,
 		std::uint64_t &offset) noexcept;
 	static void note_unresolved_kernel_write() noexcept;
+	static void note_kernel_frame_write() noexcept;
 #if UML_MEMORY_ALLOCATION_TESTING
 	/* The locations of the frame at `offset`; false when its accounting is in
 	 * error. For a test that excludes every change. */
