@@ -1483,9 +1483,12 @@ void test_page_cache_write_before_x86_code()
 	domain.run([&] {
 		translate_frame(901, base, backing, 1);
 		const Reader reader{901, base};
+		const auto calls = FrameAccounting::diagnostics().kernel_frame_writes;
 		require(darwin_uml_static_vm_invalidate_code_frames(
 			backing.descriptor(), 1 * page, page) == 0);
 		require(darwin_uml_static_vm_invalidate_code_frames(-1, 0, page) == 0);
+		require(FrameAccounting::diagnostics().kernel_frame_writes == calls + 2,
+			"a page-cache write before x86 code was not counted");
 		require(!reader.stamp_moved() && reader.changes().ranges.empty(),
 			"a page-cache write published before x86 code could exist");
 		require(!reader.serial_moved(),
@@ -1518,6 +1521,7 @@ void test_page_cache_write_frames()
 		++failed;
 		std::fprintf(stderr, "K9: %s\n", what);
 	};
+	const auto calls = FrameAccounting::diagnostics().kernel_frame_writes;
 	domain.run([&] {
 		/* K9a: frame 2 is translated in 911 and mapped as data in 912. */
 		translate_frame(911, base, backing, 2);
@@ -1585,6 +1589,9 @@ void test_page_cache_write_frames()
 			backing.descriptor(), 0, 0) == 0);
 	});
 	domain.retire();
+	/* Four calls named a frame; the refused ones and the empty one did not. */
+	require(FrameAccounting::diagnostics().kernel_frame_writes == calls + 4,
+		"the page-cache writes were not counted");
 	require(failed == 0, "a page-cache write did not reach a holder");
 	baseline.clean("K9");
 }

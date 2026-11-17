@@ -77,6 +77,10 @@ RUNNERS = {
         options(compiler(ONE), f"{TIMEOUT}     boot timeout"),
         "timeout must be positive",
         ("guest_fork_flush.cpp", (("fork-flush-probe", X86_64),))),
+    "page_cache_flush": (
+        options(compiler(ONE), f"{TIMEOUT}     boot timeout"),
+        "timeout must be positive",
+        ("page_cache_flush_probe.cpp", (("page-cache-flush-probe", X86_64),))),
     "rflags": (
         options(compiler(BOTH), TIMEOUT), "timeout must be positive",
         ("rflags_probe.cpp",
