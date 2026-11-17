@@ -234,4 +234,52 @@ struct SendFeedbackReviewTests {
         await #expect(throws: CancellationError.self) { try await task.value }
         #expect(try await archive.kind(of: 0) == .text, "asked again, the kind is read")
     }
+
+    // MARK: C7 the tree has at most sixteen levels
+
+    private func treeOf(_ names: [String]) throws -> SendFeedbackArchiveTree {
+        try reader(SendFeedbackMemoryBytes(SyntheticZip(names.map { .stored($0, $0.hasSuffix("/") ? Data() : Data([0x41])) }).data())).tree
+    }
+
+    @Test func aPathOfFiveHundredComponentsMakesSixteenFoldersAndTheRestIsTheFilesName() throws {
+        let deep = (0..<100).map { "u\($0)" + String(repeating: "/a", count: 500) + "/f.txt" }
+        let tree = try treeOf(deep)
+        #expect(SendFeedbackArchiveTree.maxLevels == 16)
+        #expect(tree.nodeCount == 1 + 16 * deep.count, "the top, and sixteen folders for each path: \(tree.nodeCount)")
+        let top = tree.level(at: "")
+        #expect(top.folders.count == 100 && top.files.isEmpty)
+        let folder = try #require(top.folders.first { $0.label.hasPrefix("u7/a/") })
+        #expect(folder.path.split(separator: "/").count == 16 && folder.files == 1)
+        let inside = tree.level(at: folder.path)
+        #expect(inside.folders.isEmpty && inside.files.count == 1, "the seventeenth component is not a folder")
+        let file = try #require(inside.files.first)
+        #expect(file.entry.path == deep[7], "the whole name is kept")
+        #expect(file.label.hasPrefix("a/a/a/") && file.label.hasSuffix("\u{2026}"), "the rest of the path is the name, cut for drawing")
+        #expect(file.label.unicodeScalars.count == SendFeedbackArchiveLimits.maxNameCharacters + 1)
+    }
+
+    @Test func theSeventeenthComponentIsTheFilesNameAndNothingPastTheSixteenthIsAFolder() throws {
+        let sixteen = (1...16).map { "d\($0)" }.joined(separator: "/")
+        let deeper = (1...20).map { "e\($0)" }.joined(separator: "/")
+        let tree = try treeOf([sixteen + "/f.txt", sixteen + "/x/y.txt", sixteen + "/x/y/z/w.txt", deeper + "/"])
+        #expect(tree.nodeCount == 1 + 16 + 16, "one chain of sixteen for the files, one for the empty folder")
+        let inside = tree.level(at: sixteen)
+        #expect(inside.folders.isEmpty)
+        #expect(inside.files.map(\.label) == ["f.txt", "x/y.txt", "x/y/z/w.txt"])
+        let end = tree.level(at: "").folders.first { $0.label.hasPrefix("e1/") }
+        #expect(end?.path.split(separator: "/").count == 16 && end.map { tree.level(at: $0.path) } == SendFeedbackArchiveTree.Level(folders: [], files: []))
+    }
+
+    @Test func theBookkeepingIsAtMostSixteenPrefixesOfTheBoundPerEntry() throws {
+        // The worst shape: a first component that takes nearly the whole name, so that every one of the sixteen
+        // prefixes is as long as a name may be, and a different one for each entry.
+        let names = (0..<50).map { String(repeating: "x", count: 975) + String(format: "%05d", $0) + String(repeating: "/b", count: 15) + "/f.txt" }
+        #expect(names.allSatisfy { $0.utf8.count <= SendFeedbackArchiveLimits.maxNameBytes })
+        let tree = try treeOf(names)
+        #expect(tree.nodeCount == 1 + 16 * names.count)
+        #expect(tree.keyBytes <= names.count * 16 * SendFeedbackArchiveLimits.maxNameBytes, "\(tree.keyBytes) bytes of paths")
+        // Linear: twice the entries, twice the nodes.
+        let twice = try treeOf(names + names.map { $0.replacingOccurrences(of: "xxxxx", with: "yyyyy", options: .anchored) })
+        #expect(twice.nodeCount == 1 + 16 * 2 * names.count)
+    }
 }

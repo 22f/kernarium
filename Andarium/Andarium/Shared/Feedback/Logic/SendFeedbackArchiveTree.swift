@@ -46,12 +46,13 @@ nonisolated struct SendFeedbackArchiveTree: Sendable {
     init(entries: [SendFeedbackArchiveEntry]) {
         self.entries = entries
         for (index, entry) in entries.enumerated() {
-            let names = entry.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+            // One more than the levels, so that what is past them stays whole as the last element.
+            let parts = entry.path.split(separator: "/", maxSplits: Self.maxLevels, omittingEmptySubsequences: true)
             if entry.isFolder {
-                _ = makeChain(names)
+                _ = makeChain(parts.prefix(Self.maxLevels).map(String.init))
                 continue
             }
-            let parent = makeChain(names.dropLast())
+            let parent = makeChain((parts.count > Self.maxLevels ? parts.prefix(Self.maxLevels) : parts.dropLast()).map(String.init))
             nodes[parent.last!]!.files.append(index)
             // Every folder above it counts it.
             for path in parent {
@@ -60,6 +61,15 @@ nonisolated struct SendFeedbackArchiveTree: Sendable {
             }
         }
     }
+
+    /// How many folder levels a path makes: a path of more components keeps its first sixteen as folders, and the
+    /// rest of it, slashes included, is the file's name inside the sixteenth. What a path may cost the tree is then
+    /// at most sixteen prefixes, each as long as a name may be (`SendFeedbackArchiveLimits.maxNameBytes`).
+    static let maxLevels = 16
+
+    /// How many folders the tree holds (the top included) and the bytes of their paths: for the tests of the bound.
+    var nodeCount: Int { nodes.count }
+    var keyBytes: Int { nodes.keys.reduce(0) { $0 + $1.utf8.count } }
 
     /// The nodes from the top (the empty path) down to the folder the names make, made where they are not yet.
     private mutating func makeChain(_ names: some Collection<String>) -> [String] {
@@ -75,6 +85,13 @@ nonisolated struct SendFeedbackArchiveTree: Sendable {
             chain.append(path)
         }
         return chain
+    }
+
+    /// The name of a file inside its folders: the last component, or, when the path has more components than the
+    /// tree has levels, everything after the sixteenth (slashes included).
+    private static func fileName(of path: String) -> String {
+        let parts = path.split(separator: "/", maxSplits: maxLevels, omittingEmptySubsequences: true)
+        return (parts.count > maxLevels ? parts[maxLevels] : parts.last).map(String.init) ?? path
     }
 
     /// What is directly in the folder at `path` ("" is the top): the folders first, then the files, each by name.
@@ -93,8 +110,7 @@ nonisolated struct SendFeedbackArchiveTree: Sendable {
         .sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
         let files = node.files.map { index -> File in
             let entry = entries[index]
-            let last = entry.path.split(separator: "/", omittingEmptySubsequences: true).last.map(String.init) ?? entry.path
-            return File(entry: entry, label: SendFeedbackArchiveNames.shortened(last))
+            return File(entry: entry, label: SendFeedbackArchiveNames.shortened(Self.fileName(of: entry.path)))
         }
         .sorted {
             let order = $0.label.localizedStandardCompare($1.label)
