@@ -191,8 +191,10 @@ std::atomic_bool &coherent_kernel_code_writes()
  * differ, which is another backing or another place in it; a change of
  * protection or of who may write that keeps execute and the bytes changes
  * none. A store into the page publishes for itself (a translation's page is
- * in the code-page registry), and a frame's other writers reach its other
- * holders through the frame's holder word (code_holders.hpp), not here. */
+ * in the code-page registry); a frame's other writers reach its other
+ * holders through the frame's holder word for arm64 holders
+ * (code_holders.hpp), and through the frame accounting for x86 holders, where
+ * a tagged store publishes at each (frame_accounting.hpp), not here. */
 [[nodiscard]] bool changes_translatable_code(
 	const std::optional<PageMapping> &before,
 	const std::optional<PageMapping> &after) noexcept

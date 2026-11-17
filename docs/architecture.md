@@ -231,7 +231,9 @@ one aligned run of a single backing (`arch_vmap_group_order()`).
 
 The default malloc zone returns what a restarted guest freed on its own
 schedule, so a guest's metadata (the MMU's indexes, the native address space's
-state, the engines' program and record tables, batch plans) stays out of it.
+state, the engines' program and record tables, batch plans) stays out of it,
+except for the holder words' roots and leaves of a mapped backing
+([Translation caches](#translation-caches-and-guest-debugging)).
 `memory/domain_heap.hpp` provides per-domain heaps carved from one reserved
 region and released whole when their owner retires, and thread-local scratch for
 one operation's temporaries. The GPU stack, Metal, system frameworks, devices and
@@ -578,8 +580,11 @@ and publishes to every generation, the target included, for a page the target
 has not mapped yet (its software page table fills at faults, so the frame is
 unknown) or when it meets an unfinished take. The words
 live in 4 KiB leaves made on a frame's first registration (a leaf per 512
-frames). A backing whose leaf cannot be made, or a word that names
-more generations than it holds, publishes to every live generation instead.
+frames), and the leaves and their roots (4 KiB per GiB of backing, made with
+the backing in every build) come from the ordinary allocator, sized by the
+backing and freed with it, not from a domain heap. A backing whose leaf cannot
+be made, or a word that names more generations than it holds, publishes to
+every live generation instead.
 The x86 engines neither register nor consult it: they hold their frames in the
 [frame accounting](#x86-64-frame-accounting), which the arm64 engines never
 consult, and the kernel's `invalidate_code()` path runs both publications.

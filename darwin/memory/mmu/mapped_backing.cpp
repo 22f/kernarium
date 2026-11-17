@@ -109,7 +109,7 @@ MappedBacking::MappedBacking(
 	const auto pages = size_ / page_size + 1U;
 	const auto roots = (pages + code_index_leaf_pages - 1U) /
 		code_index_leaf_pages;
-	/* One pointer per leaf, eight kilobytes for a gibibyte of backing. A
+	/* One pointer per leaf, four kilobytes for a gibibyte of backing. A
 	 * backing that cannot afford it keeps the locked lookup. */
 #if DARWIN_UML_X86_64_GUEST
 	/* The frame accounting needs the index: it refuses (prepare_writers) a
@@ -126,9 +126,10 @@ MappedBacking::MappedBacking(
 #endif
 	if (code_index_)
 		code_index_pages_ = roots * code_index_leaf_pages;
-	/* The same shape for the holder words: eight kilobytes of roots for a
-	 * gibibyte, and a backing that cannot afford them is unknown to its
-	 * translators and publishers alike. */
+	/* The same shape for the holder words: four kilobytes of roots for a
+	 * gibibyte, from the ordinary allocator in every build (not the domain
+	 * heap), sized by the backing and freed with it. A backing that cannot
+	 * afford them is unknown to its translators and publishers alike. */
 	const auto holder_roots = (pages + code_holders::leaf_frames - 1U) /
 		code_holders::leaf_frames;
 	holder_roots_.reset(new (std::nothrow)
