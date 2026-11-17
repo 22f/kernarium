@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <span>
 
 #if UML_AOT_DIAGNOSTICS
 #include "cpu/arm64/aot/aot_diagnostics.hpp"
@@ -973,6 +974,20 @@ Binder::Verdict Binder::verify_page(
 				.mapping_changes;
 	};
 	const auto sequence_at_start = mapping_sequence();
+	/* Registers this generation as a holder of the page's frame, before any
+	 * stamp is read and whichever way the page is then judged: a verdict of
+	 * the table reads no byte of the page, so the registration that the
+	 * fetch of a hash makes is not there for it. A publisher steps the
+	 * frame's epoch before it takes the frame's holders, so a stamp read
+	 * after this registration shows the epoch of every change this
+	 * generation was not told of, and the generation is told of any other
+	 * (memory/mmu/code_holders.hpp). The word is consumed by a publication,
+	 * so the registration is made at every verification, not once. */
+	{
+		std::byte registered;
+		if (!memory.fetch(address, std::span{&registered, 1}))
+			return Verdict::unreadable;
+	}
 	/* Rewritten code runs only for a page whose mapping carries the kernel's
 	 * immutable fact. A page without it can be rewritten through another
 	 * mapping of the frame with no publication this address space sees, and

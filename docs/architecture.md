@@ -629,10 +629,16 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   engine runs the code. A page is entered only while its mapping carries the
   kernel's immutable fact (bit 1 of the map call's `guest_code`): without it
   another alias or process can change the bytes with no word to the address
-  space that compared them, since only its own code-change history reaches the
-  binder. A mapping without the fact is the engine's (counted as refused), and
-  one that loses it is published as a code change of the page, so the pages
-  compared on its strength are compared again or refused.
+  space that compared them, because a store that no code synchronization
+  follows reaches no holder. A mapping without the fact is the engine's
+  (counted as refused), and one that loses it is published as a code change of
+  the page, so the pages compared on its strength are compared again or
+  refused. Verifying a page registers the address space as a holder of its
+  frame (a fetch of one byte) before the first stamp is read, whether the page
+  is then judged by the shared table or by hashing, so another address space's
+  code synchronization or the kernel's write of the frame clears the compared
+  pages of every address space that compared the page, and a verdict is never
+  answered under a stamp that a publication has moved.
 - Shared verdicts: the SHA-256 comparison of a physical page is kept for
   every address space that maps the page, under the page's identity and
   epoch, only when the kernel reports the page immutable in the mapping

@@ -761,7 +761,10 @@ blocker in every one of them.
   verified, edges
   into such pages, more code changes than the history keeps, more libraries
   than the binder holds, tagged pointers, page crossings, forced refills and
-  a shootdown by another thread while rewritten code loops. The runs use the
+  a shootdown by another thread while rewritten code loops, and another
+  address space of the guest that changes the bytes of a frame whose page
+  rewritten code has run, by a store and code synchronization and by the
+  kernel's write. The runs use the
   product's code layout; `UML_AOT_COUNT_RETIRED=ON` rewrites the libraries to
   count each instruction an entry runs, which checks the budget's bound
   exactly (`arm64-aot-tools` builds that layout on the generated library in

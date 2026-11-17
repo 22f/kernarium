@@ -367,6 +367,10 @@ struct Environment final {
 			PROT_READ | PROT_EXEC, true}
 	{
 		backing.put(0, image_.bytes);
+		/* A run of the arm64 engines registers its generation as a holder
+		 * of every frame it fetches code from (run_translated_loop), and
+		 * the rewritten code's own reads of a page are fetches too. */
+		memory.set_code_holder_registration(true);
 		/* The stub: a system call, and after it `ldxr x0, [x1]; br x2`
 		 * for the case that opens an exclusive monitor in the engine and
 		 * then branches into the library. */
@@ -1755,6 +1759,219 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 		require(e.stats.verifications >= 1 && e.stats.poisoned >= 1);
 	}
 	std::fprintf(stderr, "ok\n");
+}
+
+/* One page of a shared frame as another address space of the guest maps it,
+ * writable: the guest's store through that view and the two ways the change
+ * is published, by the guest's own code synchronization (IC IVAU) and by the
+ * kernel when it writes the frame on a process's behalf. A generation that
+ * ran code of the frame is told only if it was registered as a holder of the
+ * frame when the change was published. */
+struct ForeignWriter final {
+	static constexpr std::uint64_t view = 0x4b00'0000ULL;
+
+	ForeignWriter(unsigned long generation_, SharedFrame &frame_,
+		std::uint64_t page_offset_)
+		: generation{generation_}, frame{frame_}, page_offset{page_offset_}
+	{
+		require(darwin_uml_static_vm_map_generation(generation,
+			reinterpret_cast<void *>(view), frame.backing.descriptor(),
+			page_offset, page_bytes, PROT_READ | PROT_WRITE, 0, 1) == 0);
+	}
+	~ForeignWriter()
+	{
+		require(darwin_uml_static_vm_unmap_generation(generation,
+			reinterpret_cast<void *>(view), page_bytes) == 0);
+	}
+	ForeignWriter(const ForeignWriter &) = delete;
+	ForeignWriter &operator=(const ForeignWriter &) = delete;
+
+	enum class Route { store_and_synchronize, kernel_write };
+
+	/* The page of `image` is stored, and the change published by `route`. */
+	void change(const LibraryImage &image, Route route)
+	{
+		frame.backing.put(page_offset, std::span{image.bytes}.subspan(
+			page_offset, page_bytes));
+		if (route == Route::store_and_synchronize) {
+			require(darwin_uml_static_vm_activate(generation) == 0);
+			std::atomic_thread_fence(std::memory_order_seq_cst);
+			require(darwin_uml_static_vm_synchronize_code(view) == 0);
+		} else {
+			require(darwin_uml_static_vm_invalidate_code_generation(
+				generation, view, page_bytes) == 0);
+		}
+	}
+
+	unsigned long generation;
+	SharedFrame &frame;
+	std::uint64_t page_offset;
+};
+
+/* Two generations map one frame; one runs a function of it, and the other
+ * changes the frame's bytes. The first must run what the engine runs on the
+ * new bytes, and never the native code of the old ones: the memory layer
+ * publishes the change to the generations that registered as holders of the
+ * frame (by their fetch of it), which is how a generation whose own history
+ * has nothing hears of it. This is the engine alone, a page the rewritten
+ * code compared by hashing it, and a page it was told by the table of
+ * verdicts is the same (which fetches nothing of its own beyond the
+ * registration), each for the guest's store with its code synchronization
+ * and for the kernel's write. */
+[[gnu::noinline]]
+void another_generations_change_reaches_native_code(
+	const LibraryImage &image, const std::vector<Function> &functions)
+{
+	using Route = ForeignWriter::Route;
+	const auto bias = Fixture::bias;
+	/* The function the row runs is one the rewritten code runs whole, with
+	 * no instruction left to the engine: the engine fetches nothing of the
+	 * page, so the registration of the generation as a holder of the frame
+	 * is the binder's own. Its first word is the one `changed` replaces, so
+	 * that the new bytes give another result. */
+	unsigned long probe_generation = 6400;
+	std::optional<Function> chosen;
+	for (std::size_t i = 0; i < functions.size() && i < 120 && !chosen; ++i) {
+		const auto &f = functions[i];
+		const auto fixup = f.start / page_bytes * page_bytes + page_bytes - 4;
+		if (f.start + 4 >= fixup)
+			continue;
+		SplitMix probe_rng{29};
+		auto k = make_case(probe_rng, bias, f.start, false, true,
+			arena_base(bias));
+		enterable(k);
+		aot::set_enabled(false);
+		auto ref = std::make_unique<Fixture>(probe_generation++, image);
+		const auto w = drive(ref->env, ref->arena, k, max_blocks);
+		ref.reset();
+		if (!w.done())
+			continue;
+		auto got = std::make_unique<Fixture>(probe_generation++, image);
+		aot::reset_stats();
+		aot::set_enabled(true);
+		const auto h = drive(got->env, got->arena, k, aot_max_blocks);
+		aot::set_enabled(false);
+		const auto st = aot::stats();
+		got.reset();
+		if (!identical(w, h) || st.enters == 0 || st.steps != 0)
+			continue;
+		const auto other = with_equal_digest(image, f.start);
+		auto ref_other = std::make_unique<Fixture>(probe_generation++, other);
+		const auto w_other = drive(ref_other->env, ref_other->arena, k,
+			max_blocks);
+		ref_other.reset();
+		if (!identical(w, w_other))
+			chosen = f;
+	}
+	require(chosen.has_value());
+	const auto fn = *chosen;
+	SplitMix rng{29};
+	auto c = make_case(rng, bias, fn.start, false, true, arena_base(bias));
+	enterable(c);
+	unsigned long generation = 6100;
+	const auto changed = with_equal_digest(image, fn.start);
+	const auto page_offset = fn.start & ~(page_bytes - 1);
+	aot::set_enabled(false);
+	auto ref = std::make_unique<Fixture>(generation++, image);
+	const auto want = drive(ref->env, ref->arena, c, max_blocks);
+	ref.reset();
+	auto ref_changed = std::make_unique<Fixture>(generation++, changed);
+	const auto want_changed = drive(ref_changed->env, ref_changed->arena, c,
+		max_blocks);
+	ref_changed.reset();
+	require(want.done());
+	require(!identical(want, want_changed));
+	std::fprintf(stderr, "function at %llx; ",
+		static_cast<unsigned long long>(fn.start));
+	const auto guest = [&](const SharedFrame &frame) {
+		return std::make_unique<SharedGuest>(generation++, image, frame,
+			true);
+	};
+	const auto run_engine = [&](SharedGuest &g) {
+		aot::set_enabled(false);
+		return drive(g.env, g.arena, c, max_blocks);
+	};
+	std::fprintf(stderr, "foreign change: ");
+	for (const auto route : {Route::store_and_synchronize,
+	                         Route::kernel_write}) {
+		const char *name = route == Route::kernel_write ? "kernel write" :
+			"store and synchronization";
+
+		/* The engine alone: it translated the function, and runs the new
+		 * bytes after the change. */
+		{
+			SharedFrame frame{image, generation++};
+			auto first = guest(frame);
+			ForeignWriter writer{generation++, frame, page_offset};
+			require(same(want, run_engine(*first), c));
+			require(same(want, run_engine(*first), c));
+			writer.change(changed, route);
+			if (!same(want_changed, run_engine(*first), c)) {
+				std::fprintf(stderr, "  the engine alone ran old code "
+					"after a %s\n", name);
+				require(false);
+			}
+		}
+
+		/* A page the rewritten code compared by hashing it. */
+		{
+			aot::clear_shared_verdicts();
+			SharedFrame frame{image, generation++};
+			auto first = guest(frame);
+			ForeignWriter writer{generation++, frame, page_offset};
+			const auto a = run_shared(*first, c);
+			require(same(want, a.result, c));
+			require(a.stats.enters > 0 && a.stats.verifications >= 1);
+			writer.change(changed, route);
+			const auto d = run_shared(*first, c);
+			if (!same(want_changed, d.result, c) || d.stats.enters != 0) {
+				std::fprintf(stderr, "  rewritten code ran old code after "
+					"a %s: enters %llu\n", name,
+					static_cast<unsigned long long>(d.stats.enters));
+				require(false);
+			}
+			require(d.stats.poisoned >= 1);
+		}
+
+		/* A page a generation was told of by the table. Both generations
+		 * ran the original; the frame changed and came back, so the
+		 * first compares the page and the second is answered by the table,
+		 * which fetches nothing of the page except for the registration;
+		 * then the frame changes again. */
+		{
+			aot::clear_shared_verdicts();
+			SharedFrame frame{image, generation++};
+			auto first = guest(frame);
+			auto second = guest(frame);
+			ForeignWriter writer{generation++, frame, page_offset};
+			const auto w = run_shared(*first, c);
+			require(same(want, w.result, c) && w.stats.steps == 0);
+			require(same(want, run_shared(*second, c).result, c));
+			writer.change(changed, route);
+			writer.change(image, route);
+			const auto a = run_shared(*first, c);
+			require(same(want, a.result, c));
+			require(a.stats.enters > 0 && a.stats.verifications >= 1);
+			const auto b = run_shared(*second, c);
+			require(same(want, b.result, c));
+			require(b.stats.enters > 0 && b.stats.steps == 0 &&
+				answered_by_the_table(b.stats));
+			writer.change(changed, route);
+			const auto d = run_shared(*second, c);
+			if (!same(want_changed, d.result, c) || d.stats.enters != 0) {
+				std::fprintf(stderr, "  a generation told by the table ran "
+					"old code after a %s: enters %llu\n", name,
+					static_cast<unsigned long long>(d.stats.enters));
+				require(false);
+			}
+			require(d.stats.poisoned >= 1);
+			const auto e = run_shared(*first, c);
+			require(same(want_changed, e.result, c) && e.stats.enters == 0);
+		}
+		std::fprintf(stderr, "%s ok; ", name);
+	}
+	aot::set_enabled(false);
+	std::fprintf(stderr, "\n");
 }
 
 /* A loop over a buffer takes the inline hit path: adler32_z over 40000 bytes
@@ -5179,6 +5396,7 @@ int main(int argc, char **argv)
 			other_bytes_fall_back(image, sample);
 			changed_text_falls_back(image, functions);
 			verdicts_are_shared_between_address_spaces(image, functions);
+			another_generations_change_reaches_native_code(image, functions);
 			refill_keeps_state(image, sample,
 				file.guest.ends_with("/libaotfixture.so"));
 			partially_mapped_library(image, functions);
