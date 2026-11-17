@@ -64,9 +64,10 @@ nonisolated enum ThermalOverride {
 /// A harness launch's silent phone (`ANDARIUM_HAPTICS=0`): for that launch the
 /// device plays none of the guest's haptics, as it does while the person's
 /// Haptics switch is off, and the stored switch stays as it is. Anything else
-/// is no setting, and the switch decides. It is not a setting that
-/// `LaunchOverrides` holds, so a launch that states only it is still the
-/// person's own.
+/// is no setting, and the switch decides. It silences the application's own
+/// touch feedback too (`InterfaceFeedback`), which the switch does not
+/// govern. It is not a setting that `LaunchOverrides` holds, so a launch that
+/// states only it is still the person's own.
 nonisolated enum HapticsLaunch {
     static let environmentName = "ANDARIUM_HAPTICS"
 

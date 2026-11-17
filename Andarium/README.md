@@ -1308,9 +1308,9 @@ otherwise decide.
 launch, as with the Haptics switch off, and leaves the stored switch alone; any
 other value states nothing. A launch that states only it is still the person's
 own. The device runners state it unless a run tests haptics (`--haptics`), and
-a hosted test on an iPhone gives it as `TEST_RUNNER_ANDARIUM_HAPTICS=0`. A game
-controller's rumble and the side keys' and rulers' own touch feedback are not
-governed by it.
+a hosted test on an iPhone gives it as `TEST_RUNNER_ANDARIUM_HAPTICS=0`. It
+silences the side keys' and rulers' own touch feedback too, which the Haptics
+switch does not govern; a game controller's rumble is governed by neither.
 `ANDARIUM_INPUT_PROBE=1` is the UI tests' launch: the session opens at once
 with no guest behind it, and what the guest's keyboard and mouse would receive,
 and the touches that reach its touchscreen, go to one accessibility element

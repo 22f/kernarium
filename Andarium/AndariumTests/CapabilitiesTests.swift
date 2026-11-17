@@ -2,6 +2,7 @@
 import AndariumCore
 import AndariumCoreTestSupport
 import Foundation
+import SwiftUI
 import Testing
 import UIKit
 @testable import Andarium
@@ -297,6 +298,29 @@ struct CapabilitiesFlowTests {
         s.model.hapticsSilencedByLaunch = false
         s.model.setHaptics(true)
         #expect(s.model.hapticsPlays)
+    }
+
+    /// The application's own touch feedback (the side keys' click, the rulers'
+    /// tick) is not the guest's vibrator's, so the Haptics switch does not
+    /// govern it; a launch that silences haptics does, because the taps and
+    /// drags of an automated run reach it.
+    @Test func aLaunchThatSilencesHapticsSilencesTheInterfaceFeedbackToo() {
+        let s = setup()
+        #expect(s.model.interfaceFeedbackPlays)
+        #expect(InterfaceFeedback.playing(.selection, in: s.model) == .selection)
+        s.model.setHaptics(false)
+        #expect(!s.model.hapticsOn)
+        #expect(s.model.interfaceFeedbackPlays)
+        #expect(InterfaceFeedback.playing(.impact(weight: .light), in: s.model) == .impact(weight: .light))
+        s.model.hapticsSilencedByLaunch = true
+        #expect(!s.model.interfaceFeedbackPlays)
+        #expect(InterfaceFeedback.playing(.selection, in: s.model) == nil)
+        #expect(InterfaceFeedback.playing(.impact(weight: .light), in: s.model) == nil)
+        // The person's choice is still the person's.
+        s.model.setHaptics(true)
+        #expect(s.model.hapticsOn && s.driver.savedGuest?.haptics == true)
+        // A view with no model (a preview) plays as it always did.
+        #expect(InterfaceFeedback.playing(.selection, in: nil) == .selection)
     }
     #endif
 

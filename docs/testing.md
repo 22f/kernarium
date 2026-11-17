@@ -612,7 +612,9 @@ keys and artwork),
 document pickers' build conditions (`andarium-document-pickers`: the App Store
 configuration opens files in place, every other presents the copy-mode picker,
 and an in-place importer anywhere else is in an App Store branch or a named
-exception),
+exception), the application's own touch feedback
+(`andarium-interface-feedback`: every view plays it through the modifier that a
+launch silencing haptics reaches),
 the Acknowledgements resource (`andarium-acknowledgements`) and the stand-in
 debugger that serves the JIT's request for executable memory on a device
 (`andarium-ios-jit-debugger`). The JIT's region route has host tests that run

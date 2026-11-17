@@ -1816,6 +1816,16 @@ final class AppModel {
         return hapticsOn
     }
 
+    /// Whether the application's own touch feedback (the side keys' click, the
+    /// rulers' tick) plays. The Haptics switch does not govern it; only a
+    /// launch that silences haptics does.
+    var interfaceFeedbackPlays: Bool {
+        #if !APP_STORE
+        if hapticsSilencedByLaunch { return false }
+        #endif
+        return true
+    }
+
     /// The Haptics switch. It asks for nothing and applies at once, in a run
     /// too: the guest keeps its vibrator either way.
     func setHaptics(_ on: Bool) {
