@@ -6202,17 +6202,21 @@ void compare_branch_entries_run_both_instructions()
 /* The joined entry is chosen only when the branch takes its inline form, and
  * its taken edge follows the link under the same budget test. A build
  * without links (a budget-limited replay) and a block that ends at the branch
- * keep the two apart. A link is followed only when the target's two
- * instructions fit the budget left after both of the pair's: from a budget of
- * four, not three. */
+ * keep the two apart. A budget below the block's four instructions replays it
+ * without links, so the joined entry runs from a budget of four, and its link
+ * is followed only when the target's three instructions fit what is left
+ * after both of the pair's: at five, not at four, where it leaves at the
+ * target with two retired. */
 void compare_branch_entries_keep_the_inline_contract()
 {
 	using namespace uml::cpu::x86_64;
-	/* CMP EAX, 0; JE over MOV EDX, 1 and SYSCALL to MOV EDX, 2 and SYSCALL. */
+	/* CMP EAX, 0; JE over MOV EDX, 1 and SYSCALL to MOV EDX, 2,
+	 * MOV ESI, 3 and SYSCALL. */
 	std::vector<std::uint8_t> code;
 	push_compare_immediate(code, false, 32U, 0U, 0U);
 	code.insert(code.end(), {0x74, 0x07, 0xba, 0x01, 0x00, 0x00, 0x00,
-		0x0f, 0x05, 0xba, 0x02, 0x00, 0x00, 0x00, 0x0f, 0x05});
+		0x0f, 0x05, 0xba, 0x02, 0x00, 0x00, 0x00, 0xbe, 0x03, 0x00, 0x00,
+		0x00, 0x0f, 0x05});
 	constexpr std::uint64_t target = 0x0f;
 	const auto joined = compare_branch_entry(false, 32U, 4U, 0U);
 	TestMemory memory;
@@ -6236,7 +6240,7 @@ void compare_branch_entries_keep_the_inline_contract()
 				result.retired_instructions == 2U && cpu.rip == target,
 			"a block that ends at its branch took the wrong edge");
 	}
-	for (const std::size_t budget : {2U, 3U, 4U}) {
+	for (const std::size_t budget : {4U, 5U}) {
 		gadgets::Executor executor;
 		executor.prepare(memory, 1, 1, 1);
 		const auto landing = executor.select_program(
@@ -6244,12 +6248,14 @@ void compare_branch_entries_keep_the_inline_contract()
 		const auto block = executor.select_program(
 			memory, 0, ExecutionMode::long64);
 		require(landing.program != nullptr && block.program != nullptr &&
+				landing.program->instruction_count() == 3U &&
+				block.program->instruction_count() == 4U &&
 				block.program->native_stream().front() == joined,
 			"a linked block did not join its compare and branch");
 		CpuState cpu{};
 		const auto result = gadgets::execute(
 			*block.program, cpu, memory, executor, budget);
-		if (budget < 4U)
+		if (budget < 5U)
 			require(result.event == uml::cpu::EngineEvent::continued &&
 					result.retired_instructions == 2U &&
 					cpu.rip == target && cpu.gpr(Register::rdx) == 0U,
