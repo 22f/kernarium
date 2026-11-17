@@ -1482,6 +1482,10 @@ public:
 			     page += page_size) {
 				const auto mapping = find_page(*state, page);
 				if (!mapping) {
+					/* No frame is named, so no stamp moves; a verdict
+					 * filed under any of them must not be answered
+					 * again. */
+					MappedBacking::note_unnamed_publication();
 					others.add_every();
 					code_holders::count(&code_holders::detail::
 						CounterStore::absent_kernel_pages);

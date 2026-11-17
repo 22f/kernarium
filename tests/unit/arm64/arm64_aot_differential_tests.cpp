@@ -1762,22 +1762,32 @@ void verdicts_are_shared_between_address_spaces(const LibraryImage &image,
 }
 
 /* One page of a shared frame as another address space of the guest maps it,
- * writable (and executable or not): the guest's store through that view and
- * the two ways the change is published, by the guest's own code
- * synchronization (IC IVAU) and by the kernel when it writes the frame on a
- * process's behalf. A generation that ran code of the frame is told only if
- * it was registered as a holder of the frame when the change was published,
- * and a verdict filed for the frame is answered only under the stamp the
- * publication left. */
+ * writable (and executable or not, or not mapped at all): the guest's store
+ * through that view and the ways the change is published, by the guest's own
+ * code synchronization (IC IVAU) and by the kernel when it writes the frame
+ * on a process's behalf. A generation that ran code of the frame is told
+ * only if it was registered as a holder of the frame when the change was
+ * published, and a verdict filed for the frame is answered only under the
+ * stamp the publication left. The kernel's write through an address space
+ * that does not map the page yet (its software page table fills at faults)
+ * names no frame: it tells every generation and moves every stamp at once. */
 struct ForeignWriter final {
 	static constexpr std::uint64_t view = 0x4b00'0000ULL;
 
 	/* `executable`: the view is guest code too, as the view of a process
-	 * that runs the pages it writes; otherwise it cannot execute. */
+	 * that runs the pages it writes; `cannot_execute`: as a process that
+	 * writes a file maps it; `unmapped`: the address space maps nothing there
+	 * when the kernel writes. */
+	enum class View { cannot_execute, executable, unmapped };
+
 	ForeignWriter(unsigned long generation_, SharedFrame &frame_,
-		std::uint64_t page_offset_, bool executable)
-		: generation{generation_}, frame{frame_}, page_offset{page_offset_}
+		std::uint64_t page_offset_, View kind)
+		: generation{generation_}, frame{frame_}, page_offset{page_offset_},
+		  mapped{kind != View::unmapped}
 	{
+		if (!mapped)
+			return;
+		const bool executable = kind == View::executable;
 		require(darwin_uml_static_vm_map_generation(generation,
 			reinterpret_cast<void *>(view), frame.backing.descriptor(),
 			page_offset, page_bytes, executable ?
@@ -1786,8 +1796,9 @@ struct ForeignWriter final {
 	}
 	~ForeignWriter()
 	{
-		require(darwin_uml_static_vm_unmap_generation(generation,
-			reinterpret_cast<void *>(view), page_bytes) == 0);
+		if (mapped)
+			require(darwin_uml_static_vm_unmap_generation(generation,
+				reinterpret_cast<void *>(view), page_bytes) == 0);
 	}
 	ForeignWriter(const ForeignWriter &) = delete;
 	ForeignWriter &operator=(const ForeignWriter &) = delete;
@@ -1812,6 +1823,7 @@ struct ForeignWriter final {
 	unsigned long generation;
 	SharedFrame &frame;
 	std::uint64_t page_offset;
+	bool mapped;
 };
 
 /* Two generations map one frame; one runs a function of it, and the other
@@ -1898,13 +1910,16 @@ void another_generations_change_reaches_native_code(
 		return drive(g.env, g.arena, c, max_blocks);
 	};
 	std::fprintf(stderr, "foreign change: ");
-	for (const auto arm : {0, 1, 2, 3}) {
-		const auto route = arm % 2 == 0 ? Route::store_and_synchronize :
-			Route::kernel_write;
-		const bool executable_view = arm >= 2;
+	using View = ForeignWriter::View;
+	for (const auto arm : {0, 1, 2, 3, 4}) {
+		const auto route = arm % 2 == 0 && arm < 4 ?
+			Route::store_and_synchronize : Route::kernel_write;
+		const auto view_kind = arm == 2 || arm == 3 ? View::executable :
+			arm == 4 ? View::unmapped : View::cannot_execute;
 		const std::string name = std::string{route == Route::kernel_write ?
 			"kernel write" : "store and synchronization"} + (
-			executable_view ? " through an executable view" :
+			view_kind == View::executable ? " through an executable view" :
+			view_kind == View::unmapped ? " through a view nothing maps" :
 			" through a view that cannot execute");
 
 		/* The engine alone: it translated the function, and runs the new
@@ -1913,7 +1928,7 @@ void another_generations_change_reaches_native_code(
 			SharedFrame frame{image, generation++};
 			auto first = guest(frame);
 			ForeignWriter writer{generation++, frame, page_offset,
-				executable_view};
+				view_kind};
 			require(same(want, run_engine(*first), c));
 			require(same(want, run_engine(*first), c));
 			writer.change(changed, route);
@@ -1930,7 +1945,7 @@ void another_generations_change_reaches_native_code(
 			SharedFrame frame{image, generation++};
 			auto first = guest(frame);
 			ForeignWriter writer{generation++, frame, page_offset,
-				executable_view};
+				view_kind};
 			const auto a = run_shared(*first, c);
 			require(same(want, a.result, c));
 			require(a.stats.enters > 0 && a.stats.verifications >= 1);
@@ -1956,7 +1971,7 @@ void another_generations_change_reaches_native_code(
 			auto first = guest(frame);
 			auto second = guest(frame);
 			ForeignWriter writer{generation++, frame, page_offset,
-				executable_view};
+				view_kind};
 			const auto w = run_shared(*first, c);
 			require(same(want, w.result, c) && w.stats.steps == 0);
 			require(same(want, run_shared(*second, c).result, c));

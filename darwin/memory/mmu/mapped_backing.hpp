@@ -65,9 +65,11 @@ public:
 	 * separate atomics, so a reader that needs them to agree reads twice).
 	 * `identity` is never reused. `version` moves at every publication and at
 	 * every departure of a mapping, which keeps its meaning for the engines
-	 * that retire translations by it. `epoch` moves at a publication and when
-	 * the last executable mapping of the page departs, and nowhere else; it
-	 * is what a verdict of the page's bytes is keyed by. `never_share` is
+	 * that retire translations by it. `epoch` moves at a publication that
+	 * names the page's frame, when the last executable mapping of the page
+	 * departs, and for every page at once at a publication that names no
+	 * frame (note_unnamed_publication), and nowhere else; it is what a
+	 * verdict of the page's bytes is keyed by. `never_share` is
 	 * set for good once the record cannot count exactly, and forbids every
 	 * verdict. */
 	struct RecordStamp final {
@@ -78,6 +80,10 @@ public:
 	};
 	[[nodiscard]] static bool load_code_page_stamp(
 		const void *handle, RecordStamp &stamp) noexcept;
+	/* A publication that names no frame, to every generation: a kernel
+	 * write whose target page its address space does not map. Moves the
+	 * epoch of every page at once, for good. */
+	static void note_unnamed_publication() noexcept;
 	/* A publication: the page's bytes were written through a path no
 	 * translated store saw. Moves the version and the epoch, except that a
 	 * record marked never-share keeps its epoch (and the mark): running out

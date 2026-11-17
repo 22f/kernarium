@@ -52,8 +52,10 @@ enum {
 
 /* What one physical page says about itself. `identity` is never reused.
  * `version` moves at every publication and at every departure of a mapping.
- * `epoch` moves at a publication and when the last executable mapping of the
- * page departs, and nowhere else. */
+ * `epoch` moves at a publication that names the page's frame and when the last
+ * executable mapping of the page departs, and, for every page at once, at a
+ * kernel write whose target page its address space does not map; nowhere
+ * else. */
 struct darwin_uml_static_code_page_stamp {
 	uint64_t identity;
 	uint64_t version;

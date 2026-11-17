@@ -575,7 +575,9 @@ also move the frame's code-page stamp (version and epoch) through the
 publisher's own view of the frame, whether or not that view can execute, where
 some mapping executes the frame. The step is ordered before the publisher reads
 the word, and a verifier's registration before it reads the stamp, so a
-verifier is told of a publication or shown its step. A
+verifier is told of a publication or shown its step. A kernel write whose
+target page the writing address space does not map names no frame and moves no
+stamp, so it moves the epoch of every page at once instead. A
 publication consumes the word, so a reader registers again at its next fetch;
 a publisher that has emptied a word stays counted until its publication
 finishes, and one that meets such a count publishes to every generation, so an
@@ -646,13 +648,16 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   epoch, only when the kernel reports the page immutable in the mapping
   being verified (bit 1 of the map call's `guest_code`) and the page's record
   counts its executable mappings (a record that ran out of count or of epoch
-  answers none, for good). The epoch moves at every
-  publication of a change to the page's code, whichever view of the frame the
-  publisher has, and when its last executable mapping departs, so a verdict is answered only while the page has stayed
-  executable in some address space since it was filed. A mapping that cannot
-  execute or has no stamp is never answered, and one that is not immutable is
-  not entered; the table (process-global, direct-mapped) is a hint that may
-  forget.
+  answers none, for good). The epoch moves at a publication that names the
+  page's frame, through any view of it the publisher has, and when its last
+  executable mapping departs; a kernel write whose target page the writing
+  address space does not map names no frame, so it moves the epoch of every
+  page at once (a process-wide count of such writes, which at its limit turns
+  sharing off for good). So a verdict is answered only while the page has
+  stayed executable in some address space since it was filed and no change has
+  reached it. A mapping that cannot execute or has no stamp is never answered,
+  and one that is not immutable is not entered; the table (process-global,
+  direct-mapped) is a hint that may forget.
   `UML_AOT_SHARED_VERDICTS=OFF` builds a runtime that never asks, to measure
   what sharing buys; the differential's shared rows expect a second hash
   there and pass in both settings.

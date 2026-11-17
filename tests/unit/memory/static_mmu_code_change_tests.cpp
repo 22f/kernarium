@@ -730,6 +730,47 @@ void test_a_publication_through_a_view_that_cannot_execute_moves_the_stamp()
 	require(darwin_uml_static_vm_destroy(writer) == 0);
 }
 
+/* A kernel write whose target page its address space does not map (the
+ * software page table fills at faults) tells every generation but names no
+ * frame, so no record is stepped. The epoch of every page moves at once
+ * instead, and no version does: a verdict filed under any page's epoch is no
+ * longer answered. */
+void test_a_kernel_write_to_a_page_nobody_maps_moves_every_epoch()
+{
+	constexpr unsigned long reader = 515, writer = 516;
+	constexpr unsigned long base = 0x1e0'0000, view = 0x1f0'0000;
+	ScratchBacking backing{backing_name, 2 * page};
+	map(reader, base, backing, 0, 2, rx, 3);
+	map(writer, view, backing, 0, 1, rw, 0);
+	unmap(writer, view, 1);
+	require(darwin_uml_static_vm_activate(reader) == 0);
+	std::array<void *, 2> handles{};
+	std::array<darwin_uml_static_code_page_stamp, 2> before{}, after{};
+	for (std::size_t index = 0; index < handles.size(); ++index)
+		require(darwin_uml_static_vm_code_page(reader, base + index * page,
+			&handles[index], &before[index]) == DARWIN_UML_STATIC_TRANSLATED);
+	Observer seen{reader};
+
+	for (unsigned round = 1; round <= 2; ++round) {
+		require(darwin_uml_static_vm_invalidate_code_generation(writer, view,
+			page) == 0);
+		seen.consume();
+		require(seen.code_untracked || !seen.code.empty());
+		for (std::size_t index = 0; index < handles.size(); ++index) {
+			require(darwin_uml_static_vm_code_page_stamp(handles[index],
+				&after[index]) == 0);
+			require(after[index].identity == before[index].identity &&
+				after[index].version == before[index].version &&
+				after[index].epoch != before[index].epoch &&
+				(after[index].flags & DARWIN_UML_STATIC_STAMP_NEVER_SHARE) == 0,
+				"a publication that names no frame left a stamp where it was");
+			before[index] = after[index];
+		}
+	}
+	require(darwin_uml_static_vm_destroy(reader) == 0);
+	require(darwin_uml_static_vm_destroy(writer) == 0);
+}
+
 /* A kernel write into a guest-code page, the bytes a 4 KiB uaccess copies
  * back from the kernel's alias, lands either way. It publishes no code change
  * until code whose fetch is coherent with every store (x86) is about to run:
@@ -841,6 +882,7 @@ int main()
 	test_mappings_of_one_frame_that_disagree_share_its_record();
 	test_a_stamp_carries_the_epoch_and_the_mapping_fact();
 	test_a_publication_through_a_view_that_cannot_execute_moves_the_stamp();
+	test_a_kernel_write_to_a_page_nobody_maps_moves_every_epoch();
 	test_a_kernel_write_publishes_once_x86_code_may_run();
 	/* Every generation of every row is gone: no record counts a mapping. */
 	require(uml::memory::testing::audit_executable_counts() == 0);

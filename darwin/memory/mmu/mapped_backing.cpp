@@ -34,6 +34,15 @@ constexpr std::uint64_t fresh_epoch_mask =
 	((std::uint64_t{1} << 39) - 1) << 24;
 constexpr std::uint64_t fresh_never_share = std::uint64_t{1} << 63;
 
+/* Publications that name no frame: a kernel write whose target page its
+ * address space does not map reaches every generation but moves no record.
+ * The count rides in the high bits of every page's reported epoch, which
+ * moves the epoch of every page at once; it fails closed (no verdict is
+ * shared again) before it can carry out of its field. */
+constexpr unsigned unnamed_shift = 39;
+constexpr std::uint64_t unnamed_limit = std::uint64_t{1} << 24;
+std::atomic_uint64_t unnamed_publications{};
+
 } // namespace
 
 struct MappedBacking::CodePage final
@@ -301,9 +310,18 @@ bool MappedBacking::load_code_page_stamp(
 	stamp.identity = page->identity;
 	stamp.version = page->version.load(std::memory_order_acquire);
 	const auto fresh = page->fresh.load(std::memory_order_acquire);
-	stamp.epoch = (fresh & fresh_epoch_mask) >> 24;
+	const auto unnamed = unnamed_publications.load(std::memory_order_acquire);
+	stamp.epoch = ((fresh & fresh_epoch_mask) >> 24) |
+		((unnamed & (unnamed_limit - 1)) << unnamed_shift);
 	stamp.never_share = (fresh & fresh_never_share) != 0;
 	return true;
+}
+
+void MappedBacking::note_unnamed_publication() noexcept
+{
+	if (unnamed_publications.fetch_add(1, std::memory_order_seq_cst) + 1 >=
+	    unnamed_limit)
+		latch_sharing_off();
 }
 
 void MappedBacking::invalidate_code_page(void *handle) noexcept

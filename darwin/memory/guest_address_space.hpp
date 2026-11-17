@@ -31,8 +31,9 @@ struct CodePageStamp final {
 
 /* What a code page says about itself, for a consumer that keeps verdicts
  * about the page's bytes across address spaces. `epoch` moves at a
- * publication and when the last executable mapping of the page departs, and
- * nowhere else. `immutable` is the kernel's fact for the mapping the stamp was
+ * publication that names the page's frame and when the last executable
+ * mapping of the page departs, and, for every page at once, at a kernel write
+ * whose target page its address space does not map; nowhere else. `immutable` is the kernel's fact for the mapping the stamp was
  * taken through: no one can change the page's bytes while it holds. A page
  * without it can be rewritten through another mapping of the frame with no
  * word to the address space that checked it, so a consumer that keeps a
