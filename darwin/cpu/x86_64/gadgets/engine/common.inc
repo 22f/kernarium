@@ -1356,7 +1356,11 @@ Lx86_vector_source_loaded\@:
 	.endif
 .endm
 
-.macro publish_pending_code address, size
+/* The helper returns 1 when the store wrote, through another address of its
+ * frame, into the block that is running. A caller that can leave there names
+ * the exit to take (`exit`), or the register that reports it (`flag`, set to
+ * 1); the others, whose instruction is not over, ignore it. */
+.macro publish_pending_code address, size, exit=, flag=
 	tbnz x23, #60, Lx86_code_published\@
 	ldrb w8, [_context, #UML_X86_64_CONTEXT_WRITE_CODE]
 	cbz w8, Lx86_code_published\@
@@ -1364,11 +1368,18 @@ Lx86_vector_source_loaded\@:
 	mov x1, \address
 	mov w2, #\size
 	helper_call uml_x86_64_gadget_publish_code_write
+	.ifnb \exit
+	cbnz w0, \exit
+	.endif
+	.ifnb \flag
+	cbz w0, Lx86_code_published\@
+	mov \flag, #1
+	.endif
 Lx86_code_published\@:
 .endm
 
 .macro finish_store size
-	publish_pending_code x25, \size
+	publish_pending_code x25, \size, Lx86_store_code_exit
 Lx86_store_check_overlap\@:
 	ldr x8, [_context, #UML_X86_64_CONTEXT_PROGRAM_END]
 	cmp x25, x8

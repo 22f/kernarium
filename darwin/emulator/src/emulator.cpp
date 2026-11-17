@@ -16,6 +16,7 @@
 #include "stall_watch.hpp"
 #include "thread_fence.hpp"
 #include "virtual_jetsam.hpp"
+#include "x86_runtime_support.hpp"
 #include "testing.hpp"
 #include "uml_darwin_abi.h"
 
@@ -1312,6 +1313,9 @@ private:
 				SessionEnd::restarted :
 			end.kind == UML_EMULATOR_RUN_END_POWER_OFF ?
 				SessionEnd::powered_off : SessionEnd::failed, 0);
+#if DARWIN_UML_X86_64_GUEST
+		::uml::runtime::report_x86_run_counters();
+#endif
 		std::lock_guard lock{run_end_mutex_};
 		run_end_ = end;
 	}
