@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "platform/host_network_path.hpp"
-#include "host_network_path_attempt.hpp"
 #include "host_network_path_status.hpp"
+#if UML_HOST_NETWORK_PATH_TESTING
+#include "host_network_path_attempt.hpp"
+#endif
 
 #import <Network/Network.h>
 
@@ -43,6 +45,25 @@ struct Shared final {
 	}
 };
 
+#if UML_HOST_NETWORK_PATH_TESTING
+/* The test variant asks a function before each call to the system's creation
+ * of a monitor, so that a test has the system give none; the product has no
+ * such function. */
+using Gate = HostNetworkPathAttempt;
+
+nw_path_monitor_t createMonitor(Gate gate)
+{
+	return (gate == nullptr || gate()) ? nw_path_monitor_create() : nil;
+}
+#else
+struct Gate {};
+
+nw_path_monitor_t createMonitor(Gate)
+{
+	return nw_path_monitor_create();
+}
+#endif
+
 /*
  * The first Network.framework monitor of a process starts the framework up,
  * and the thread that makes it keeps a Mach port of its own (a send and
@@ -55,12 +76,10 @@ struct Shared final {
  * When the system gives no monitor the thread says so and ends: nothing waits
  * for what will not come, and the owner makes another monitor at its next try.
  */
-void run(std::shared_ptr<Shared> shared,
-	 HostNetworkPathAttempt attempt) noexcept
+void run(std::shared_ptr<Shared> shared, Gate gate) noexcept
 {
 	(void)::pthread_setname_np("uml-network-path");
-	nw_path_monitor_t monitor =
-		(attempt == nullptr || attempt()) ? nw_path_monitor_create() : nil;
+	nw_path_monitor_t monitor = createMonitor(gate);
 	if (monitor == nil) {
 		shared->failed.store(true, std::memory_order_release);
 		return;
@@ -86,14 +105,13 @@ void run(std::shared_ptr<Shared> shared,
 
 class AppleHostNetworkPathMonitor final : public HostNetworkPathMonitor {
 public:
-	AppleHostNetworkPathMonitor(HostNetworkPathState &state,
-				    HostNetworkPathAttempt attempt)
+	AppleHostNetworkPathMonitor(HostNetworkPathState &state, Gate gate)
 	{
 		shared_->state = &state;
 		/* The thread holds the shared part alone: it may outlive this
 		 * object by the time it takes to cancel the monitor. */
 		const std::shared_ptr<Shared> shared = shared_;
-		std::thread{[shared, attempt] { run(shared, attempt); }}.detach();
+		std::thread{[shared, gate] { run(shared, gate); }}.detach();
 	}
 
 	~AppleHostNetworkPathMonitor() override
@@ -117,17 +135,19 @@ private:
 
 } // namespace
 
+#if UML_HOST_NETWORK_PATH_TESTING
 std::unique_ptr<HostNetworkPathMonitor>
 makeAppleHostNetworkPathMonitor(HostNetworkPathState &state,
 				HostNetworkPathAttempt attempt)
 {
 	return std::make_unique<AppleHostNetworkPathMonitor>(state, attempt);
 }
+#endif
 
 std::unique_ptr<HostNetworkPathMonitor>
 makeAppleHostNetworkPathMonitor(HostNetworkPathState &state)
 {
-	return makeAppleHostNetworkPathMonitor(state, nullptr);
+	return std::make_unique<AppleHostNetworkPathMonitor>(state, Gate{});
 }
 
 } // namespace uml::platform

@@ -396,10 +396,12 @@ void SlirpProvider::stop() noexcept
 	/* The resolver delivers into the receive ring from its own thread;
 	 * once it is joined nothing can refill the ring cleared below. */
 	resolver_.stop();
-	/* A monitor that lives keeps the state current across the stop. With
-	 * none (the test build's default) no one does, and an outage that was
-	 * reported is over: a reopen starts as a host with a path does. */
-	if (!path_monitor_)
+	/* A monitor that works keeps the state current across the stop. With
+	 * none (the test build's default), or one the system gave no monitor
+	 * (it never reports and the next open replaces it), no one does, and
+	 * an outage that was reported is over: a reopen starts as a host with
+	 * a path does. */
+	if (!path_monitor_ || path_monitor_->failed())
 		path_state_.report(true);
 #if UML_SLIRP_TESTING
 	notify_receive_cleanup_for_testing();

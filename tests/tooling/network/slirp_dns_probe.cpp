@@ -24,10 +24,12 @@
  * the state when the query came in. An outage that was reported ends with the
  * provider's stop. A last part starts the system's monitor and checks that the
  * provider hears a report of that open, whichever path this host has, and that
- * one monitor serves the provider's life, across a stop and a reopen, with the
- * state written by the probe itself as the system would write it. The system
- * giving no monitor is made here too: the provider then makes another at its
- * next open, and keeps the one that works.
+ * one monitor serves the provider's life, across a stop and a reopen. The
+ * system giving no monitor is made here too: the provider then makes another
+ * at its next open, and keeps the one that works. What the state does to an
+ * answer across a stop and a reopen is checked with a monitor that writes
+ * nothing, the state being the probe's own: a monitor that works keeps an
+ * outage across a stop, and one the system did not give does not.
  */
 #include "dns_message.hpp"
 #include "host_network_path_attempt.hpp"
@@ -49,6 +51,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -735,8 +738,11 @@ void drop_path_monitor(uml::network::SlirpProvider &provider, Guest &guest)
 	provider.stop();
 }
 
-/* The provider starts the system's monitor at open() and hears its report;
- * what a missing name gets then follows the host's real path. */
+/* The provider starts the system's monitor at open() and hears its report of
+ * that open, whichever path this host has, and the one monitor serves its life.
+ * What the report says is the host's own and may move at any moment, so only
+ * that it arrives and how many monitors were made are checked here; what the
+ * state does to an answer is checked with a monitor that writes nothing. */
 void check_path_monitor(uml::network::SlirpProvider &provider, Guest &guest)
 {
 	const char *label = "the system's path monitor";
@@ -757,36 +763,67 @@ void check_path_monitor(uml::network::SlirpProvider &provider, Guest &guest)
 	if (path.reports() == reports_before) {
 		fail(label, "the system did not report the path");
 	} else {
-		/* The host's real path, which a change may move at any moment:
-		 * the answer is held against the state on either side of it. */
-		const bool usable_before = path.usable();
-		const auto reply = ask(guest, "uml-dns-probe-monitor.invalid",
-				       0x7a10, 42100);
-		const bool usable_after = path.usable();
-		if (usable_before == usable_after &&
-		    (usable_after ? !is_negative(reply) : !is_servfail(reply)))
-			fail(label, usable_after ?
-				"a missing name was not a plain negative answer" :
-				"a missing name was not told to retry");
 		std::printf("%s: the host's path is %s\n", label,
-			    usable_after ? "usable" : "down");
-		/* A guest's restart stops and opens the provider again. The monitor
-		 * lives on and keeps the state current, so the stop does not end
-		 * an outage it reported: the probe writes one as the system would,
-		 * and a reopen still answers it, until a report says the path is
-		 * back. */
+			    path.usable() ? "usable" : "down");
+		/* A guest's restart stops and opens the provider again, and the
+		 * monitor lives on. */
+		provider.stop();
+		if (!open_provider(provider, guest))
+			fail(label, "the provider did not reopen");
+		else if (provider.path_monitors_made_for_testing() !=
+			 made_before + 1)
+			fail(label, "the monitor was made again at the reopen");
+	}
+	provider.stop();
+	drop_path_monitor(provider, guest);
+}
+
+/* A monitor that reports nothing, for a check that writes the state itself as
+ * the system would: the only writer is the probe. It says it failed when it was
+ * made to. */
+class ControlledMonitor final : public uml::platform::HostNetworkPathMonitor {
+public:
+	explicit ControlledMonitor(bool failed) : failed_(failed) {}
+	[[nodiscard]] bool failed() const noexcept override { return failed_; }
+
+private:
+	const bool failed_;
+};
+
+/* While a monitor that works lives, a stop does not end an outage it reported
+ * (a guest's restart stops and opens the provider again): a reopen still tells
+ * a guest to retry, until a report says the path is back. A monitor the system
+ * gave no monitor reports nothing, so a stop ends an outage as with no monitor
+ * at all. */
+void check_state_across_a_restart(uml::network::SlirpProvider &provider,
+				  Guest &guest)
+{
+	const char *label = "the state across a restart";
+	auto &path = provider.path_state_for_testing();
+	provider.set_path_monitor_for_testing(true);
+	provider.set_path_monitor_factory_for_testing(
+		[](uml::platform::HostNetworkPathState &) {
+			return std::make_unique<ControlledMonitor>(false);
+		});
+	const auto made_before = provider.path_monitors_made_for_testing();
+	if (!open_provider(provider, guest)) {
+		fail(label, "the provider did not open");
+	} else {
 		path.report(false);
+		if (!is_servfail(ask(guest, "uml-dns-probe-monitor.invalid",
+				     0x7a10, 42100)))
+			fail(label, "a missing name was not told to retry");
 		provider.stop();
 		if (path.usable())
 			fail(label, "the stop ended an outage that a monitor which "
-				    "lives on keeps");
+				    "works keeps");
 		if (!open_provider(provider, guest)) {
 			fail(label, "the provider did not reopen");
 		} else {
 			if (!is_servfail(ask(guest, "uml-dns-probe-monitor.invalid",
 					     0x7a11, 42101)))
-				fail(label, "a reopen during an outage did not tell a "
-					    "guest to retry");
+				fail(label, "a reopen during an outage did not tell "
+					    "a guest to retry");
 			path.report(true);
 			if (!is_negative(ask(guest, "uml-dns-probe-monitor.invalid",
 					     0x7a12, 42102)))
@@ -794,10 +831,29 @@ void check_path_monitor(uml::network::SlirpProvider &provider, Guest &guest)
 					    "outage");
 			if (provider.path_monitors_made_for_testing() !=
 			    made_before + 1)
-				fail(label, "the monitor was made again at the reopen");
+				fail(label, "the monitor was made again at the "
+					    "reopen");
 		}
 	}
 	provider.stop();
+	drop_path_monitor(provider, guest);
+
+	provider.set_path_monitor_for_testing(true);
+	provider.set_path_monitor_factory_for_testing(
+		[](uml::platform::HostNetworkPathState &) {
+			return std::make_unique<ControlledMonitor>(true);
+		});
+	if (!open_provider(provider, guest)) {
+		fail(label, "the provider did not open with a failed monitor");
+	} else {
+		path.report(false);
+		provider.stop();
+		if (!path.usable())
+			fail(label, "the stop kept an outage that a monitor the "
+				    "system did not give cannot end");
+	}
+	provider.stop();
+	provider.set_path_monitor_factory_for_testing({});
 	drop_path_monitor(provider, guest);
 }
 
@@ -1021,6 +1077,7 @@ int main()
 	provider.stop();
 	check_path_monitor(provider, guest);
 	check_a_monitor_the_system_did_not_give(provider, guest);
+	check_state_across_a_restart(provider, guest);
 
 	provider.set_dns_streams_unavailable_for_testing(true);
 	if (open_provider(provider, guest)) {

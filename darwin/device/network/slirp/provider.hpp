@@ -401,7 +401,8 @@ private:
 	 * thread and the resolver reads it when it answers. The first open()
 	 * makes the monitor, which then lives as long as the provider and keeps
 	 * the state current across a stop and reopen; the state outlives it. With
-	 * no monitor the state is usable again when the provider stops. */
+	 * no monitor, or one the system gave no monitor, the state is usable again
+	 * when the provider stops. */
 	uml::platform::HostNetworkPathState path_state_;
 	std::unique_ptr<uml::platform::HostNetworkPathMonitor> path_monitor_;
 	HostResolver resolver_;

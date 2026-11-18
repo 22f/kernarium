@@ -49,9 +49,7 @@ private:
  * process. It opens no connection. The monitor makes its own thread for the
  * system's start-up, so that no Mach port of the process is tied to the
  * thread that asked for it; its owner keeps it for as long as it wants the
- * state, which a guest's restart does not end (the restart ends the thread
- * that booted the guest, and a monitor made again after it would not leave the
- * process as the first one did). */
+ * state, which a guest's restart does not end. */
 class HostNetworkPathMonitor {
 public:
 	virtual ~HostNetworkPathMonitor() = default;

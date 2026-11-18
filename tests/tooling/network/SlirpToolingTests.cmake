@@ -74,10 +74,6 @@ if(UML_BUILD_NETWORK_PROVIDER)
             LABELS network
             TIMEOUT ${_uml_slirp_timeout})
     endforeach()
-    # The DNS probe makes the platform's path monitor with the system's creation
-    # failing, through the platform's private header.
-    target_include_directories(uml_slirp_dns_tests PRIVATE
-        ${PROJECT_SOURCE_DIR}/darwin/platform/apple)
     # The counters probe also reads a real session record.
     target_link_libraries(uml_slirp_counters_tests PRIVATE
         UML::RuntimeSessionRecord)

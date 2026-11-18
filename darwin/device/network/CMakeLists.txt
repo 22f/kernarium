@@ -46,7 +46,13 @@ function(_uml_add_network_provider TARGET TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/slirp)
     target_link_libraries(${TARGET} PUBLIC
         UML::BridgeAbi UML::Descriptor UML::DeviceSocketPaths
-        UML::HostNetworkPath UML::NetworkDnsRules)
+        UML::NetworkDnsRules)
+    if(TESTING)
+        target_link_libraries(${TARGET} PUBLIC
+            UML::HostNetworkPathTestVariant)
+    else()
+        target_link_libraries(${TARGET} PUBLIC UML::HostNetworkPath)
+    endif()
     target_link_libraries(${TARGET} PRIVATE
         UML::GuestTimerMask
         UML::ThirdPartySlirp)

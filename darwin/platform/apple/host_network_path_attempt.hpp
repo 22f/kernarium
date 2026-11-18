@@ -15,7 +15,8 @@ namespace uml::platform {
 using HostNetworkPathAttempt = bool (*)();
 
 /* makeAppleHostNetworkPathMonitor with each attempt asked first (none asks
- * nothing). */
+ * nothing). Only the platform library's test variant defines it; the product
+ * library has no such function. */
 [[nodiscard]] std::unique_ptr<HostNetworkPathMonitor>
 makeAppleHostNetworkPathMonitor(HostNetworkPathState &state,
 				HostNetworkPathAttempt attempt);
