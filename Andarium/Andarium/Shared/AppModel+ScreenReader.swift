@@ -277,8 +277,10 @@ extension AppModel {
         reader.runStartGeneration += 1
         let generation = reader.runStartGeneration
         reader.runStartAnnouncing = true
-        let release: @MainActor () -> Void = { [weak self] in
-            guard let self, current === self.session, !reader.ended,
+        // Weak, so that an announcement whose end never comes (VoiceOver turned
+        // off meanwhile) does not keep an ended session alive.
+        let release: @MainActor () -> Void = { [weak self, weak current, weak reader] in
+            guard let self, let current, let reader, current === self.session, !reader.ended,
                   reader.runStartAnnouncing, reader.runStartGeneration == generation else { return }
             reader.runStartAnnouncing = false
             evaluateScreenReaderCard()
