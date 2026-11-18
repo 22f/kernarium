@@ -460,6 +460,27 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
     # The platform's own rule for dumpstate, the vsock instance of its getattr rule for every socket class:
     # over the attribute domain it reaches the service's sockets, and every Android 17 platform policy has it.
     plat += "(allow dumpstate domain (vsock_socket (getattr)))\n"
+    # What the platform gives the application domains through groups of them: each group is the application
+    # domains but the isolated, sandboxed and ephemeral ones, as the compiler writes the platform's rules.
+    # The service is an application domain, so it inherits them, and they are accepted; a variant takes one
+    # ordinary application domain out of a group, or puts the same rule in the system_ext policy.
+    gap = {
+        "inherited-find-without-untrusted-app": ("base_typeattr_275", "untrusted_app"),
+        "inherited-find-without-platform-app": ("base_typeattr_275", "platform_app"),
+        "inherited-find-without-priv-app": ("base_typeattr_275", "priv_app"),
+        "inherited-find-without-system-app": ("base_typeattr_275", "system_app"),
+        "inherited-file-without-priv-app": ("base_typeattr_280", "priv_app"),
+        "inherited-vsock-without-platform-app": ("base_typeattr_285", "platform_app"),
+    }.get(variant or "", (None, None))
+    inherited = {
+        "base_typeattr_275": "(allow base_typeattr_275 keystore_service (service_manager (find)))\n",
+        "base_typeattr_280": "(allow base_typeattr_280 system_app_data_file (file (read write getattr map)))\n",
+        "base_typeattr_285": "(allow base_typeattr_285 virtualizationservice (vsock_socket (read write getattr)))\n",
+    }
+    for attribute, rule in inherited.items():
+        left_out = " ".join(["isolated_app", "ephemeral_app", "sdk_sandbox_34", "sdk_sandbox_audit", "sdk_sandbox_next"]
+                            + ([gap[1]] if gap[0] == attribute else []))
+        plat += f"(typeattributeset {attribute} (and (appdomain ) (not ({left_out} ))))\n{rule}"
     ext = (
         "(type kernarium_sms)\n(type kernarium_sms_data_file)\n"
         "(typeattributeset domain (kernarium_sms))\n"
@@ -517,6 +538,16 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         ext += "(allow dumpstate kernarium_sms (vsock_socket (getattr)))\n"
     elif variant == "dumpstate-getattr-repeated-outside-the-platform":
         ext += "(allow dumpstate domain (vsock_socket (getattr)))\n"
+    elif variant == "inherited-find-service-only":
+        plat += "(allow kernarium_sms credstore_service (service_manager (find)))\n"
+    elif variant == "inherited-find-split-over-two-rules":
+        plat += ("(typeattributeset base_typeattr_276 (kernarium_sms untrusted_app platform_app))\n"
+                 "(typeattributeset base_typeattr_277 (kernarium_sms priv_app system_app))\n"
+                 "(allow base_typeattr_276 credstore_service (service_manager (find)))\n"
+                 "(allow base_typeattr_277 credstore_service (service_manager (find)))\n")
+    elif variant in ("inherited-find-in-system-ext", "inherited-file-in-system-ext", "inherited-vsock-in-system-ext"):
+        ext += inherited[{"find": "base_typeattr_275", "file": "base_typeattr_280",
+                          "vsock": "base_typeattr_285"}[variant.split("-")[1]]]
     elif variant == "service-on-another-sockets":
         ext += "(allow kernarium_sms virtualizationservice (vsock_socket (read write)))\n"
     elif variant == "data-through-app-data-file-type":
@@ -5916,6 +5947,31 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("sms-dumpstate-getattr-repeated-outside-the-platform",
              {"sms_policy_variant": "dumpstate-getattr-repeated-outside-the-platform"},
              "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            # What the service inherits: the baseline has the platform's rules over groups of the application
+            # domains, which hold all four ordinary ones. A group without one of them, rules that split
+            # the four, the service alone, and the same rule in the system_ext policy are the service's own.
+            ("sms-find-service-only-in-the-platform-policy", {"sms_policy_variant": "inherited-find-service-only"},
+             "may find \\['credstore_service'\\]"),
+            ("sms-find-split-over-two-rules", {"sms_policy_variant": "inherited-find-split-over-two-rules"},
+             "may find \\['credstore_service'\\]"),
+            ("sms-find-group-without-untrusted-app", {"sms_policy_variant": "inherited-find-without-untrusted-app"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-find-group-without-platform-app", {"sms_policy_variant": "inherited-find-without-platform-app"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-find-group-without-priv-app", {"sms_policy_variant": "inherited-find-without-priv-app"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-find-group-without-system-app", {"sms_policy_variant": "inherited-find-without-system-app"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-file-group-without-priv-app", {"sms_policy_variant": "inherited-file-without-priv-app"},
+             "has a rule on system_app_data_file"),
+            ("sms-vsock-group-without-platform-app", {"sms_policy_variant": "inherited-vsock-without-platform-app"},
+             "kernarium_sms holds .* on the vsock sockets of"),
+            ("sms-find-in-system-ext", {"sms_policy_variant": "inherited-find-in-system-ext"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-file-in-system-ext", {"sms_policy_variant": "inherited-file-in-system-ext"},
+             "has a rule on system_app_data_file"),
+            ("sms-vsock-in-system-ext", {"sms_policy_variant": "inherited-vsock-in-system-ext"},
+             "kernarium_sms holds .* on the vsock sockets of"),
             ("sms-service-on-other-sockets", {"sms_policy_variant": "service-on-another-sockets"},
              "kernarium_sms holds .* on the vsock sockets of"),
             ("sms-data-through-app-data-file-type", {"sms_policy_variant": "data-through-app-data-file-type"},

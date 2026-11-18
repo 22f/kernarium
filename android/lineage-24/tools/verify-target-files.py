@@ -5260,6 +5260,9 @@ VSOCK_TYPES_WITHOUT_LISTEN = frozenset({
 # to stat a socket and to read its local and peer address from a descriptor already held: no read, write,
 # connect, bind, listen or accept, and no data. Only that rule is accepted, only from the platform's policy.
 SMS_PLATFORM_VSOCK_GRANT = ("dumpstate", "domain", frozenset({b"getattr"}))
+# The ordinary application domains: what the service holds beyond the reviewed list is only what every one of
+# them holds.
+SMS_ORDINARY_APP_DOMAINS = frozenset({"untrusted_app", "platform_app", "priv_app", "system_app"})
 # The domains that manage every application's data directories, and so reach the service's: the platform's own
 # rules through the attributes of an application data type. The first image build with the service shows the
 # set; a holder that is not named here fails the check until someone has looked at it.
@@ -5408,7 +5411,8 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
     """Only the host can cause a text message to be delivered: of the types that may create, bind or listen
     on a vsock socket exactly the reviewed ones and the service's may, whatever attribute grants it; nothing
     else holds the service's sockets or its data, except the platform's own getattr for dumpstate
-    (SMS_PLATFORM_VSOCK_GRANT); the service finds only the services it needs; its
+    (SMS_PLATFORM_VSOCK_GRANT); the service holds nothing beyond what every ordinary application domain holds
+    (SMS_ORDINARY_APP_DOMAINS) and the reviewed list (it finds only the services it needs); its
     package selects its domain and no other package does; and the shell cannot move adbd's own listener.
     Every grant counts, through attributes and set expressions. The first policy is the platform's."""
     sets = CilSets(policies)
@@ -5442,17 +5446,23 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
     if creators & shut_out:
         fail(f"{sorted(creators & shut_out)} may create, bind or listen on a vsock socket")
 
-    everything = (sets.members("appdomain"), sets.members("coredomain"), sets.universe)
+    def rules_of(object_class: str) -> list[tuple[frozenset[str], frozenset[str] | None, frozenset[str], bool]]:
+        """The allow rules of a class, each with whether it stands in the platform's policy (the first)."""
+        return [(*rule, True) for rule in cil_domain_rules(policies[:1], sets, object_class)] + [
+            (*rule, False) for rule in cil_domain_rules(policies[1:], sets, object_class)
+        ]
 
-    def specific(sources: frozenset[str]) -> bool:
-        """A rule for the service alone, or for a group of its own: not one that every application or
-        core domain has."""
-        return SMS_DOMAIN in sources and not any(sources >= group for group in everything)
+    def specific(sources: frozenset[str], from_platform: bool) -> bool:
+        """The service's own rule, not one it inherits. The service inherits a rule when the platform's policy
+        gives it to every ordinary application domain through that one rule, one source set holding all four
+        and the service; a rule that names the service without all four, and every such rule of another
+        policy file (ours), is its own and must be on the reviewed list."""
+        return SMS_DOMAIN in sources and not (from_platform and sources >= SMS_ORDINARY_APP_DOMAINS)
 
     # The service's sockets: nothing but the service holds a permission on them (the platform's grant to
     # dumpstate apart: cil_domain_rules keeps the policies' order, so the platform's rules are the first of
     # vsock, and platform_grants are their indexes), and what the service holds on the sockets of other types
-    # is only what every application domain holds.
+    # is only what every ordinary application domain holds.
     platform_rules = [rule for rule in cil_rules(policies[0], CIL_ALLOW_RULE) if rule[2] == b"vsock_socket"]
     platform_grants = {
         index
@@ -5464,23 +5474,23 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
             continue
         if targets is not None and SMS_DOMAIN in targets and sources - {SMS_DOMAIN}:
             fail(f"{sorted(sources - {SMS_DOMAIN})} hold {sorted(permissions)} on a vsock socket of {SMS_DOMAIN}")
-        if targets is not None and SMS_DOMAIN not in targets and specific(sources):
+        if targets is not None and SMS_DOMAIN not in targets and specific(sources, index < len(platform_rules)):
             fail(f"{SMS_DOMAIN} holds {sorted(permissions)} on the vsock sockets of {sorted(targets)}: only what "
-                 "every application domain holds is allowed")
+                 "every ordinary application domain holds is allowed")
 
     attributes = cil_types_and_attributes(policies, SMS_DOMAIN)
     for attribute in ("coredomain", "appdomain", "unconstrained_vsock_violators"):
         if attribute not in attributes:
             fail(f"{SMS_DOMAIN} is not in {attribute}")
     found: set[str] = set()
-    for sources, targets, permissions in cil_domain_rules(policies, sets, "service_manager"):
-        if targets is not None and "find" in permissions and specific(sources):
+    for sources, targets, permissions, from_platform in rules_of("service_manager"):
+        if targets is not None and "find" in permissions and specific(sources, from_platform):
             found |= targets
     if found - SMS_SERVICES:
         fail(f"{SMS_DOMAIN} may find {sorted(found - SMS_SERVICES)}; it needs only {sorted(SMS_SERVICES)}")
     for object_class in ("file", "dir", "lnk_file", "sock_file", "fifo_file", "chr_file", "blk_file"):
-        for sources, targets, permissions in cil_domain_rules(policies, sets, object_class):
-            if targets is not None and "system_app_data_file" in targets and specific(sources):
+        for sources, targets, permissions, from_platform in rules_of(object_class):
+            if targets is not None and "system_app_data_file" in targets and specific(sources, from_platform):
                 fail(f"{SMS_DOMAIN} has a rule on system_app_data_file ({sorted(permissions)}): "
                      "its data has a type of its own")
 
