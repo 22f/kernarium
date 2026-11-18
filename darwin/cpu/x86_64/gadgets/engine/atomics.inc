@@ -80,8 +80,7 @@ Lx86_cmpxchg_split\@:
 	cmp \host_register\()27, \host_register\()24
 	b.ne Lx86_cmpxchg_memory_unequal\@
 	mov x7, x25
-	page_cross_check (\width / 8), Lx86_cmpxchg_write_cross\@
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, (\width / 8)
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, (\width / 8), cross=Lx86_cmpxchg_write_cross\@
 	\store \host_register\()26, [x7]
 	b Lx86_cmpxchg_memory_written\@
 Lx86_cmpxchg_write_cross\@:
@@ -166,8 +165,7 @@ Lx86_xadd_split\@:
 	add \host_register\()27, \host_register\()24, \host_register\()26
 	normalize_result \width, \host_register\()27
 	mov x7, x25
-	page_cross_check (\width / 8), Lx86_xadd_write_cross\@
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, (\width / 8)
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, (\width / 8), cross=Lx86_xadd_write_cross\@
 	\store \host_register\()27, [x7]
 	b Lx86_xadd_written\@
 Lx86_xadd_write_cross\@:
@@ -255,8 +253,7 @@ Lx86_cmpxchg_pair_8_split:
 	ldr w16, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 1 * 8)]
 	orr x27, x27, x16, lsl #32
 	mov x7, x25
-	page_cross_check 8, Lx86_cmpxchg_pair_8_write_cross
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, 8
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, 8, cross=Lx86_cmpxchg_pair_8_write_cross
 	str x27, [x7]
 	b Lx86_cmpxchg_pair_8_written
 Lx86_cmpxchg_pair_8_write_cross:
