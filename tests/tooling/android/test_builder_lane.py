@@ -232,17 +232,20 @@ def synthetic_arm_elf(
 def synthetic_compiled_manifest(
     target_sdk: int | None, *, string_value: bool = False, debuggable: bool | str | None = None,
     permissions: tuple[str, ...] = (), declared: tuple[str, ...] = (), utf8: bool = False,
+    sdk23: tuple[str, ...] = (),
 ) -> bytes:
     """A compiled manifest with <uses-sdk>, which carries targetSdkVersion when given, and, when
     debuggable is not None, an <application> that carries android:debuggable: a literal boolean,
     or a resource reference when debuggable is "reference". It requests each of `permissions` with
-    <uses-permission> and declares each of `declared` with <permission>; the string pool is UTF-8
+    <uses-permission> (and each of `sdk23` with <uses-permission-sdk-23>) and declares each of
+    `declared` with <permission>; the string pool is UTF-8
     when `utf8` is set, UTF-16 as the platform's own compiled manifests are otherwise.
 
     It has the chunks the verifier reads and no more: a string pool, the resource map that gives
     the attribute names their framework IDs, and the elements."""
     strings = ["targetSdkVersion", "debuggable", "uses-sdk", "application", "28", "name",
-               "uses-permission", "permission", *permissions, *declared]
+               "uses-permission", "permission", *permissions, *declared, *sdk23,
+               "uses-permission-sdk-23"]
     pool_strings = b""
     offsets = []
     for text in strings:
@@ -279,6 +282,11 @@ def synthetic_compiled_manifest(
         permission = 8 + index
         elements += element(element_name, struct.pack(
             "<IIIHBBI", 0xFFFFFFFF, 5, permission, 8, 0, 0x03, permission))
+    sdk23_element = 8 + len(permissions) + len(declared) + len(sdk23)
+    for index in range(len(sdk23)):
+        permission = 8 + len(permissions) + len(declared) + index
+        elements += element(sdk23_element, struct.pack(
+            "<IIIHBBI", 0xFFFFFFFF, 5, permission, 8, 0, 0x03, permission))
     if debuggable is not None:
         value = (0x01, 0x7F010000) if debuggable == "reference" else (
             0x12, 0xFFFFFFFF if debuggable else 0)
@@ -289,12 +297,12 @@ def synthetic_compiled_manifest(
 
 
 def synthetic_apk(debuggable: bool | str | None = None, permissions: tuple[str, ...] = (),
-                  declared: tuple[str, ...] = ()) -> bytes:
+                  declared: tuple[str, ...] = (), sdk23: tuple[str, ...] = ()) -> bytes:
     """An application archive whose compiled manifest is the one synthetic_compiled_manifest builds."""
     package = io.BytesIO()
     with zipfile.ZipFile(package, "w") as apk:
         apk.writestr("AndroidManifest.xml", synthetic_compiled_manifest(
-            None, debuggable=debuggable, permissions=permissions, declared=declared))
+            None, debuggable=debuggable, permissions=permissions, declared=declared, sdk23=sdk23))
     return package.getvalue()
 
 
@@ -3585,6 +3593,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                                  "android.permission.BLUETOOTH_CONNECT",
                                  "com.google.android.marvin.talkback."
                                  "DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"),
+                    sdk23=("android.permission.WAKE_LOCK",),
                     declared=("android.permission.INTERNET",))},
             )
             result = run_tool(
@@ -4178,6 +4187,15 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("espeak-that-requests-the-local-network",
              {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
                           synthetic_apk(permissions=("android.permission.ACCESS_LOCAL_NETWORK",))}}),
+            ("talkback-that-requests-a-play-store-permission",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("com.android.vending.BILLING",))}}),
+            ("talkback-that-requests-the-network-as-an-sdk-23-permission",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(sdk23=("android.permission.INTERNET",))}}),
+            ("talkback-that-requests-another-permission-of-its-own-package",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("com.google.android.marvin.talkback.OTHER",))}}),
             ("device-diagnostics-in-the-image",
              {"extra_entry": "SYSTEM/priv-app/DeviceDiagnostics/DeviceDiagnostics.apk"}),
             ("application-without-a-manifest",
@@ -4899,6 +4917,21 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           synthetic_apk(permissions=("android.permission.ACCESS_LOCAL_NETWORK",))}},
              "PRODUCT/app/eSpeakNG/eSpeakNG.apk requests android.permission.ACCESS_LOCAL_NETWORK: "
              "TalkBack and eSpeak NG hold no network access and no Google service permission"),
+            ("talkback-that-requests-a-play-store-permission-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("com.android.vending.BILLING",))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests com.android.vending.BILLING: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-the-network-as-an-sdk-23-permission-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(sdk23=("android.permission.INTERNET",))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests android.permission.INTERNET: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-another-permission-of-its-own-package-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("com.google.android.marvin.talkback.OTHER",))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests com.google.android.marvin.talkback.OTHER: "
+             "TalkBack and eSpeak NG hold no network access"),
             ("device-diagnostics-in-the-image-cause",
              {"extra_entry": "SYSTEM/priv-app/DeviceDiagnostics/DeviceDiagnostics.apk"},
              "unneeded built-in application payload is forbidden: "

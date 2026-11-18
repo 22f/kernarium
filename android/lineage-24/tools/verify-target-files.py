@@ -1900,7 +1900,8 @@ ACCESSIBILITY_APKS = {
 # too. A Google service permission is any under Google's namespace: the Analytics and Primes
 # permission READ_GSERVICES, AICore's BIND_SERVICE, and those of Google Play services and the
 # Play Store. TalkBack's own package name is under that namespace, and the braille keyboard's
-# manifest requests the signature permission that guards the application's own receivers there.
+# manifest requests, by that exact name, the signature permission that guards the application's
+# own receivers: it is the one exemption.
 ACCESSIBILITY_REFUSED_PERMISSIONS = frozenset(
     f"android.permission.{name}"
     for name in (
@@ -1915,7 +1916,9 @@ ACCESSIBILITY_REFUSED_PERMISSIONS = frozenset(
     )
 )
 GOOGLE_PERMISSION_PREFIXES = ("com.google.", "com.android.vending.")
-ACCESSIBILITY_OWN_PERMISSION_PREFIX = "com.google.android.marvin.talkback."
+ACCESSIBILITY_OWN_PERMISSION = (
+    "com.google.android.marvin.talkback.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+)
 
 
 def check_accessibility(infos: dict[str, zipfile.ZipInfo]) -> None:
@@ -2681,7 +2684,7 @@ def check_application_manifests(
                 if permission in ACCESSIBILITY_REFUSED_PERMISSIONS
                 or (
                     permission.startswith(GOOGLE_PERMISSION_PREFIXES)
-                    and not permission.startswith(ACCESSIBILITY_OWN_PERMISSION_PREFIX)
+                    and permission != ACCESSIBILITY_OWN_PERMISSION
                 )
             )
             if refused:
