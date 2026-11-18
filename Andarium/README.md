@@ -242,9 +242,11 @@ block.
   phase runs [`scripts/check-embedded-artifacts.py`](../scripts/check-embedded-artifacts.py),
   which compares the accepted Android release and kernel descriptors with the
   commit's inputs, and the staged and packaged system and runtime with the
-  descriptors, and fails naming the changed paths and commits. It also refuses
-  a packaged kernel whose Linux banner names a build user or host other than
-  the neutral `kernarium@kernarium`. A release that records no input trees, a
+  descriptors, and fails naming the changed paths and commits. The staged and
+  packaged system disk must be the one of the accepted release installed below
+  `.build/android/releases`, not only the one their own layout names. It also
+  refuses a packaged kernel whose Linux banner names a build user or host other
+  than the neutral `kernarium@kernarium`. A release that records no input trees, a
   dirty input, or a staged or packaged artifact that is not the accepted one
   (an unsigned proof image included) stops the build; only the user decides to
   ship pending changes, by naming the release ID in `PENDING_INPUTS_DECISION`.

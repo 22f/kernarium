@@ -6,7 +6,9 @@ Each case builds a synthetic Git repository that holds the files the check
 reads (the input list, the descriptors, the kernel metadata and fragments), a
 staged system and a built application with a runtime framework whose Mach-O
 carries a kernel banner and configuration, then changes one thing and runs the
-script on it. An unsigned proof image, which a developer build may embed, is
+script on it. The staged and the packaged system disk are tied to the accepted
+release as installed below .build/android/releases, not to a digest their own
+layout names, and a repeated JSON key is refused. An unsigned proof image, which a developer build may embed, is
 refused in the staged and the packaged system, and the Xcode build phase that
 runs the check does so for the AppStore and TestFlight configurations only.
 """
@@ -37,6 +39,7 @@ import release_inputs  # noqa: E402
 RELEASE_ID = "20261201-los24-r99"
 KERNEL_ID = "20261201-6.18.99-ks99"
 KERNEL_RELEASE = "6.18.99-gfeedface0000"
+DISK = b"disk-bytes" * 100
 TREE = "a" * 40
 OTHER_TREE = "b" * 40
 FRAMEWORK = "KRuntime_Android_6_18_4K"
@@ -149,6 +152,7 @@ class Fixture:
         lines = [
             f"LINEAGE24_ACCEPTED_SCHEMA={schema}",
             f"LINEAGE24_ACCEPTED_RELEASE_ID='{release_id}'",
+            f"LINEAGE24_ACCEPTED_DIRECTORY_NAME='lineage24-mainline6.18-4k-{release_id}'",
         ]
         if schema >= 7:
             lines.append(f"LINEAGE24_ACCEPTED_INPUT_TREES='{release_inputs.render_trees(trees)}'")
@@ -159,6 +163,21 @@ class Fixture:
             f"UML_KERNEL_ARTIFACT_RELEASE='{KERNEL_RELEASE}'\n"
             f"UML_KERNEL_ARTIFACT_FINAL_TREE='{kernel_tree}'\n")
         commit(self.repo, "accept the artifacts")
+        self.install(release_id)
+
+    def install(self, release_id: str = RELEASE_ID, disk: bytes = DISK) -> Path:
+        """The accepted release as install-release.py leaves it below .build/android/releases."""
+        installed = self.repo / ".build/android/releases" / f"lineage24-mainline6.18-4k-{release_id}"
+        shutil.rmtree(installed, ignore_errors=True)
+        write(installed, "release-manifest.json", json.dumps(self.manifest(release_id)))
+        write(installed, "guest/partition-layout.json", json.dumps(self.layout(disk)))
+        return installed
+
+    @staticmethod
+    def layout(disk: bytes) -> dict:
+        import hashlib
+
+        return {"schema_version": 2, "system_disk": {"size_bytes": len(disk), "sha256": hashlib.sha256(disk).hexdigest()}}
 
     def manifest(self, release_id: str = RELEASE_ID, trees=None) -> dict:
         trees = self.trees if trees is None else trees
@@ -175,17 +194,13 @@ class Fixture:
             "outer": {"revision": "c" * 40, "dirty": False},
         }
 
-    def stage(self, release_id: str = RELEASE_ID, trees=None) -> Path:
+    def stage(self, release_id: str = RELEASE_ID, trees=None, disk: bytes = DISK) -> Path:
         staged = self.repo / ".build/andarium-system"
         shutil.rmtree(staged, ignore_errors=True)
         (staged / "guest").mkdir(parents=True)
         (staged / "boot").mkdir()
-        disk = b"disk-bytes" * 100
         (staged / "guest/system.img").write_bytes(disk)
-        import hashlib
-
-        write(staged, "guest/partition-layout.json", json.dumps(
-            {"schema_version": 2, "system_disk": {"size_bytes": len(disk), "sha256": hashlib.sha256(disk).hexdigest()}}))
+        write(staged, "guest/partition-layout.json", json.dumps(self.layout(disk)))
         write(staged, "boot/kernel-command-line.txt", "init=/init\n")
         write(staged, "release-manifest.json", json.dumps(self.manifest(release_id, trees)))
         return staged
@@ -330,6 +345,83 @@ class CheckTests(unittest.TestCase):
                 (self.repo / ".build/andarium-system/release-manifest.json").write_text(json.dumps(manifest))
                 self.fails(self.fixture.run(app=False, decision=RELEASE_ID),
                            "not an accepted release", f"acceptance {acceptance!r}")
+
+    def test_an_accepted_manifest_over_another_disk_fails_staged_and_packaged(self) -> None:
+        # A mixed staging directory: the accepted release's manifest and input
+        # trees, another system disk (a proof's) and a layout that names it.
+        proof_disk = b"another system disk" * 100
+        self.fixture.stage(disk=proof_disk)
+        for app in (False, True):
+            if app:
+                self.fixture.app = self.fixture.package()
+            result = self.fixture.run(app=app, decision=RELEASE_ID)
+            self.fails(result, "the system disk of the staged system", "not the accepted release's")
+        # The staged system is the accepted one and the packaged one is not.
+        self.fixture.stage()
+        self.fixture.app = self.fixture.package()
+        (self.fixture.app / "andarium-system/guest/system.img").write_bytes(proof_disk)
+        (self.fixture.app / "andarium-system/guest/partition-layout.json").write_text(
+            json.dumps(self.fixture.layout(proof_disk)))
+        self.fails(self.fixture.run(decision=RELEASE_ID), "guest/partition-layout.json is not the staged one")
+        # Both, with a layout that agrees with its disk, as a repackaging would leave them.
+        self.fixture.stage(disk=proof_disk)
+        self.fixture.app = self.fixture.package()
+        self.fails(self.fixture.run(decision=RELEASE_ID), "the system disk of the staged system")
+        self.fixture.stage()
+        self.fixture.app = self.fixture.package()
+        self.passes(self.fixture.run())
+
+    def test_the_accepted_release_must_be_installed_to_tie_the_disk_to_it(self) -> None:
+        shutil.rmtree(self.repo / ".build/android/releases")
+        for app in (False, True):
+            result = self.fixture.run(app=app, decision=RELEASE_ID)
+            self.fails(result, "is not installed here", "install-release.py")
+        # What is installed under the accepted directory name must be the accepted release.
+        installed = self.fixture.install()
+        write(installed, "release-manifest.json", json.dumps(self.fixture.manifest("20260101-los24-r1")))
+        self.fails(self.fixture.run(app=False), "is not the accepted " + RELEASE_ID)
+        manifest = self.fixture.manifest()
+        manifest["acceptance"] = "unsigned-proof"
+        write(installed, "release-manifest.json", json.dumps(manifest))
+        self.fails(self.fixture.run(app=False), "not marked accepted")
+        self.fixture.install()
+        self.passes(self.fixture.run())
+
+    def test_a_descriptor_without_a_directory_name_fails(self) -> None:
+        text = (self.repo / DESCRIPTOR).read_text()
+        write(self.repo, DESCRIPTOR, "".join(line for line in text.splitlines(True) if "DIRECTORY_NAME" not in line))
+        commit(self.repo, "drop the directory name")
+        self.fails(self.fixture.run(app=False), "names no release directory")
+
+    def test_a_repeated_json_key_in_a_manifest_or_a_layout_is_refused(self) -> None:
+        staged = self.repo / ".build/andarium-system"
+        manifest = (staged / "release-manifest.json").read_text()
+        layout = (staged / "guest/partition-layout.json").read_text()
+        installed = self.repo / ".build/android/releases" / f"lineage24-mainline6.18-4k-{RELEASE_ID}"
+        cases = (
+            (staged / "release-manifest.json", manifest, manifest[:-1] + ', "acceptance": "unsigned-proof"}',
+             "repeats the key acceptance"),
+            (staged / "guest/partition-layout.json", layout, layout[:-1] + ', "schema_version": 1}',
+             "repeats the key schema_version"),
+            (installed / "release-manifest.json", manifest, manifest[:-1] + ', "release_id": "x"}',
+             "repeats the key release_id"),
+        )
+        for path, original, doubled, message in cases:
+            with self.subTest(path.name):
+                path.write_text(doubled)
+                result = self.fixture.run(app=False, decision=RELEASE_ID)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(message, result.stderr)
+                path.write_text(original)
+        # The packaged copies too, which must also equal the staged ones.
+        self.fixture.app = self.fixture.package()
+        packaged = self.fixture.app / "andarium-system/guest/partition-layout.json"
+        (staged / "guest/partition-layout.json").write_text(layout[:-1] + ', "schema_version": 2}')
+        packaged.write_text(layout[:-1] + ', "schema_version": 2}')
+        self.fails(self.fixture.run(decision=RELEASE_ID), "repeats the key schema_version")
+        (staged / "guest/partition-layout.json").write_text(layout)
+        packaged.write_text(layout)
+        self.passes(self.fixture.run())
 
     def test_a_missing_staged_system_fails(self) -> None:
         shutil.rmtree(self.repo / ".build/andarium-system")
