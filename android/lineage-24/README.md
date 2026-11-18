@@ -1034,15 +1034,21 @@ devices (Virtio video, [`darwin/device/video`](../../darwin/device/video/README.
 and the product exposes them through Codec2. The vendor service
 `android.hardware.media.c2-service-v4l2` of `external/v4l2_codec2` (route
 `p0018`, which also adds the HEVC component) serves AVC and HEVC encoders and
-decoders beside the software `c2.android.*` components; MediaCodec chooses the
-hardware decoders first. Encoder parameters come from the device, and a
+AVC, HEVC and VP9 decoders beside the software `c2.android.*` components;
+MediaCodec chooses the hardware decoders first. The VP9 decoder is Profile 0
+(8-bit) and the component lists no other profile, so a player that asks
+MediaCodec for a VP9 decoder with the stream's profile gets the software
+decoder for Profile 2 (10-bit), as it does for AV1, which the host does not
+decode. A player that picks the first VP9 decoder without stating the profile
+(Media3, for a WebM or MP4 file) gets the hardware decoder, which refuses a
+Profile 2 stream. Encoder parameters come from the device, and a
 capability the device does not list is not advertised. HDR content is shown as
 SDR because the host has no P010 sampler.
 
 `overlay/config/media_codecs_c2.xml` is the product's one vendor codec list. Its
 performance points, the encoder floors, the instance limits and pixel rates, and
 the service's SELinux and seccomp additions are required by the target-files
-verifier, which also refuses a hardware decoder beyond the two. Qualification is
+verifier, which also refuses a hardware decoder beyond the three. Qualification is
 opt-in
 ([`../../docs/testing.md`](../../docs/testing.md#android)).
 

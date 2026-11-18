@@ -52,7 +52,7 @@ MESA_GALLIUM_DRIVER = "venus_gallium_dri.so"
 # check_mesa_gles_stack requires.
 MESA_ABI_DIRECTORIES = {"lib64": android_image.EM_AARCH64, "lib": android_image.EM_ARM}
 # The hardware video codecs: the vendor Codec2 service of external/v4l2_codec2
-# and the components it serves, two encoders and two decoders. The codec list
+# and the components it serves, two encoders and three decoders. The codec list
 # names exactly those, beside the updates to the software decoders' limits. The
 # properties enable those components, admit one instance per stream the host
 # serves, and state the pixel rate the host sustains, which the service reports
@@ -71,11 +71,13 @@ VIDEO_ENCODER_PROPERTIES = {
 VIDEO_DECODER_CODECS = {
     "c2.v4l2.avc.decoder": "video/avc",
     "c2.v4l2.hevc.decoder": "video/hevc",
+    "c2.v4l2.vp9.decoder": "video/x-vnd.on2.vp9",
 }
 VIDEO_DECODER_PROPERTY_PREFIX = "ro.vendor.v4l2_codec2.decoder.supported."
 VIDEO_DECODER_PROPERTIES = {
     "ro.vendor.v4l2_codec2.decoder.supported.h264": "true",
     "ro.vendor.v4l2_codec2.decoder.supported.hevc": "true",
+    "ro.vendor.v4l2_codec2.decoder.supported.vp9": "true",
     "ro.vendor.v4l2_codec2.decode_concurrent_instances": "4",
     "ro.vendor.v4l2_codec2.video_decode_pixel_rate": "456192000",
 }

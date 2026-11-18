@@ -606,7 +606,7 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += system/bin/kernarium_egl_confi
 # software one. The service brings the vendor variants of the libraries it
 # links, the plugin store among them; naming one of those here would install its
 # core variant under /system, which the generic system artifact path
-# requirement refuses. The XML lists the encoders and the HEVC and H.264
+# requirement refuses. The XML lists the encoders and the HEVC, H.264 and VP9
 # decoders, and the properties enable exactly those components; it also updates
 # the limits of the software HEVC and VP9 decoders, which advertise less than
 # they decode, to 3840x2160. The store
@@ -633,6 +633,7 @@ PRODUCT_VENDOR_PROPERTIES += \
     ro.vendor.v4l2_codec2.video_pixel_rate=108000000 \
     ro.vendor.v4l2_codec2.decoder.supported.h264=true \
     ro.vendor.v4l2_codec2.decoder.supported.hevc=true \
+    ro.vendor.v4l2_codec2.decoder.supported.vp9=true \
     ro.vendor.v4l2_codec2.decode_concurrent_instances=4 \
     ro.vendor.v4l2_codec2.video_decode_pixel_rate=456192000
 
