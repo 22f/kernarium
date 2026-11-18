@@ -102,11 +102,23 @@ public:
 			uml::memory::MemoryAccess::execute, true);
 	}
 
+	/* A mapped range that reads and fetches but refuses a write, as a
+	 * read-only page does. A write that reaches one changes nothing, whatever
+	 * lies before it. */
+	void protect_read_only(std::uint64_t begin, std::uint64_t end)
+	{
+		read_only_.push_back({begin, end});
+	}
+
 	[[nodiscard]] bool write(std::uint64_t address,
 		std::span<const std::byte> source) override
 	{
 		if (!mapped(address, source.size())) {
 			set_fault(address, uml::memory::MemoryAccess::write);
+			return false;
+		}
+		if (const auto refused = first_read_only(address, source.size())) {
+			set_fault(*refused, uml::memory::MemoryAccess::write);
 			return false;
 		}
 		std::size_t offset{};
@@ -134,6 +146,12 @@ public:
 			!mapped(address, size)) {
 			set_fault(address, access);
 			return nullptr;
+		}
+		if (access == uml::memory::MemoryAccess::write) {
+			if (const auto refused = first_read_only(address, size)) {
+				set_fault(*refused, access);
+				return nullptr;
+			}
 		}
 		const auto page_number = address / page_size;
 		auto [iterator, inserted] = pages_.try_emplace(page_number);
@@ -236,6 +254,22 @@ private:
 			});
 	}
 
+	/* The first address in [address, address + size) that is read-only. */
+	[[nodiscard]] std::optional<std::uint64_t> first_read_only(
+		std::uint64_t address, std::size_t size) const noexcept
+	{
+		std::optional<std::uint64_t> first;
+		for (const auto &region : read_only_) {
+			if (size == 0 || address + size <= region.begin ||
+				address >= region.end)
+				continue;
+			const auto hit = std::max(address, region.begin);
+			if (!first || hit < *first)
+				first = hit;
+		}
+		return first;
+	}
+
 	[[nodiscard]] bool transfer_read(std::uint64_t address,
 		std::span<std::byte> destination, uml::memory::MemoryAccess access,
 		bool record_fault)
@@ -272,6 +306,7 @@ private:
 	}
 
 	std::vector<Region> regions_;
+	std::vector<Region> read_only_;
 	std::map<std::uint64_t, Page> pages_;
 	std::map<std::uint64_t, std::uint64_t> code_versions_;
 	std::uint64_t *code_changes_{};
@@ -318,6 +353,8 @@ struct MemoryData final {
 
 struct Configuration final {
 	std::vector<Region> memory_regions;
+	/* Ranges of memory_regions that refuse a write (repository cases only). */
+	std::vector<Region> read_only_regions;
 	std::vector<RegisterExpectation> registers;
 	std::vector<MemoryData> memory_data;
 	uml::cpu::x86_64::ExecutionMode mode{
@@ -533,9 +570,24 @@ struct ReportedResult final {
 	std::uint64_t address{};
 	/* RAX where a fault or other stop left it. */
 	std::uint64_t rax{};
+	/* RFLAGS, the x87 status word and MXCSR there, as the runtime saves
+	 * them into the guest's signal frame. */
+	std::uint64_t flags{};
+	std::uint16_t x87_status{};
+	std::uint32_t mxcsr{};
 };
 ReportedResult reported;
 bool capture_results = false;
+
+/* What a stop left in the guest state, as the runtime saves it. */
+void report_stop_state(uml::cpu::x86_64::CpuState &cpu) noexcept
+{
+	uml::cpu::x86_64::materialize_flags(cpu);
+	reported.rax = cpu.gpr(uml::cpu::x86_64::Register::rax);
+	reported.flags = cpu.rflags;
+	reported.x87_status = cpu.x87_status;
+	reported.mxcsr = cpu.mxcsr;
+}
 
 void print_result(std::string_view status, std::size_t retired,
 	std::uint64_t address, std::span<const std::byte> opcode,
@@ -1034,6 +1086,8 @@ private:
 			return 2;
 		}
 	}
+	for (const auto &region : configuration.read_only_regions)
+		memory.protect_read_only(region.begin, region.end);
 
 	uml::cpu::x86_64::CpuState cpu{};
 #if UML_FEX_ASM_JIT
@@ -1096,7 +1150,7 @@ private:
 			detail += " vector " + std::to_string(result.syndrome);
 		print_result(status, retired, cpu.rip,
 			memory.snapshot(cpu.rip, 15), detail, test);
-		reported.rax = cpu.gpr(uml::cpu::x86_64::Register::rax);
+		report_stop_state(cpu);
 		return 1;
 	}
 #else
@@ -1178,7 +1232,7 @@ private:
 				"memory_fault" : "unexpected_event";
 			print_result(status, retired, cpu.rip,
 				memory.snapshot(cpu.rip, 15), event_name(result.event), test);
-			reported.rax = cpu.gpr(uml::cpu::x86_64::Register::rax);
+			report_stop_state(cpu);
 			return 1;
 		}
 		if (result.instruction_budget_exhausted)
@@ -1807,6 +1861,30 @@ using Exclusions = std::map<std::string, std::string, std::less<>>;
 	return failures == 0 ? 0 : 1;
 }
 
+/* A masked comparison. */
+struct MaskedValue final {
+	std::uint64_t mask{};
+	std::uint64_t value{};
+};
+
+/* What a stop must leave in the flag state the runtime hands the guest: a
+ * faulting instruction changes none of it. */
+struct StopState final {
+	std::optional<MaskedValue> flags;
+	std::optional<MaskedValue> x87_status;
+	std::optional<MaskedValue> mxcsr;
+
+	[[nodiscard]] bool matches(const ReportedResult &stop) const noexcept
+	{
+		const auto holds = [](const std::optional<MaskedValue> &expected,
+			std::uint64_t actual) {
+			return !expected || (actual & expected->mask) == expected->value;
+		};
+		return holds(flags, stop.flags) &&
+			holds(x87_status, stop.x87_status) && holds(mxcsr, stop.mxcsr);
+	}
+};
+
 /* --retirement: the instructions a run retires before each kind of stop.
  * ExecutionResult.retired_instructions feeds the runtime's budget and timer
  * accounting, so it counts only instructions that completed. Both engines
@@ -1817,8 +1895,11 @@ using Exclusions = std::map<std::string, std::string, std::less<>>;
  * store into the code of the block running it stops that block too, and a
  * case that names RAX checks that the run went on with the new code. A case
  * that names RAX at its stop checks the register a faulting instruction runs
- * again with, as the instructions before it left it. The compat32 cases
- * hold 32-bit code to the same rules. */
+ * again with, as the instructions before it left it. A case that names the
+ * flags, the x87 status word or MXCSR checks that the stop left them as the
+ * instructions before it did, which a store that faults after its operand was
+ * read, into a read-only range, must. The compat32 cases hold 32-bit code to
+ * the same rules. */
 struct RetirementCase final {
 	std::string_view name;
 	std::vector<std::uint8_t> code;
@@ -1832,6 +1913,14 @@ struct RetirementCase final {
 	/* RAX at a stop short of the end: what the instructions before a
 	 * faulting one wrote to it, which the instruction runs again with. */
 	std::optional<std::uint64_t> stop_rax{};
+	/* Ranges of `regions` that refuse a write. */
+	std::vector<Region> read_only{};
+	StopState stop_state{};
+	/* A class of stop state the JIT does not yet hold: the JIT runners expect
+	 * it to differ, as they expect a corpus record of an exclusion class to
+	 * fail, and a case that starts matching fails the run until its row
+	 * loses the mark. The gadget engine always holds it. */
+	std::string_view jit_gap{};
 };
 
 [[nodiscard]] std::vector<RetirementCase> retirement_cases()
@@ -1861,6 +1950,19 @@ struct RetirementCase final {
 	std::fill(crossing.begin() + 7, crossing.begin() + 0xf, 0x90);
 	constexpr auto compat32 = uml::cpu::x86_64::ExecutionMode::compat32;
 	constexpr auto long64 = uml::cpu::x86_64::ExecutionMode::long64;
+	using uml::cpu::x86_64::rflags_parity;
+	using uml::cpu::x86_64::rflags_zero;
+	constexpr std::uint64_t flags_arithmetic = uml::cpu::x86_64::rflags_carry |
+		rflags_parity | uml::cpu::x86_64::rflags_auxiliary | rflags_zero |
+		uml::cpu::x86_64::rflags_sign | uml::cpu::x86_64::rflags_overflow;
+	const auto flags_are = [](std::uint64_t mask, std::uint64_t value) {
+		StopState state;
+		state.flags = MaskedValue{mask, value};
+		return state;
+	};
+	/* The JIT reports flags, status bits and MXCSR flags that the faulting
+	 * instruction has already changed. */
+	constexpr std::string_view fault_state_gap = "fault-flags";
 	const auto le32 = [](std::uint64_t value) {
 		return std::array<std::uint8_t, 4>{
 			static_cast<std::uint8_t>(value),
@@ -1894,6 +1996,29 @@ struct RetirementCase final {
 			0x12, 0x00, 0x00, 0xb8, 0x05, 0x00, 0x00, 0x00, 0x48, 0x89, 0xc8,
 			0x48, 0x87, 0x03, 0xf4}, {}, "memory_fault", 4, code_address + 18,
 			{}, long64, 0x1234},
+		/* A faulting instruction changes nothing a signal frame shows: no
+		 * flag, no status word, no accumulator.
+		 *
+		 * mov $data+0xffe, %esp; cmp %eax, %eax; addl $1, (%rsp), whose
+		 * operand runs from a writable page into a read-only one; hlt: the
+		 * store faults after the operand was read, and ZF and PF still hold
+		 * from the compare. */
+		{"add-cross-store-fault-flags", {0xbc, 0xfe, 0x0f, 0x00, 0x20, 0x39,
+			0xc0, 0x83, 0x04, 0x24, 0x01, 0xf4},
+			{{data, data + 0x2000}}, "memory_fault", 2, code_address + 7, {},
+			long64, {}, {{data + 0x1000, data + 0x2000}},
+			flags_are(flags_arithmetic, rflags_parity | rflags_zero),
+			fault_state_gap},
+		/* mov $data+0xffc, %esp; mov $1, %ecx; cmp %eax, %eax;
+		 * addq %rcx, (%rsp,%rdx,1); hlt: the same through an indexed
+		 * address and a register source. */
+		{"add-register-cross-store-fault-flags", {0xbc, 0xfc, 0x0f, 0x00,
+			0x20, 0xb9, 0x01, 0x00, 0x00, 0x00, 0x39, 0xc0, 0x48, 0x01, 0x0c,
+			0x14, 0xf4}, {{data, data + 0x2000}}, "memory_fault", 3,
+			code_address + 12, {}, long64, {},
+			{{data + 0x1000, data + 0x2000}},
+			flags_are(flags_arithmetic, rflags_parity | rflags_zero),
+			fault_state_gap},
 		/* nop; xor %ecx, %ecx; xor %edx, %edx; div %ecx; nop; hlt */
 		{"divide-error", {0x90, 0x31, 0xc9, 0x31, 0xd2, 0xf7, 0xf1, 0x90,
 			0xf4}, {}, "unexpected_event", 3, code_address + 5},
@@ -2069,6 +2194,21 @@ struct RetirementCase final {
 	};
 }
 
+/* Whether the case stopped where and as it must, and left the state a
+ * faulting instruction must leave. */
+[[nodiscard]] bool stopped_as_expected(const RetirementCase &test)
+{
+	const bool stopped = reported.status == test.status &&
+		reported.retired == test.retired &&
+		reported.address == test.address &&
+		(!test.stop_rax || reported.rax == *test.stop_rax);
+#if UML_FEX_ASM_JIT
+	if (!test.jit_gap.empty())
+		return stopped && !test.stop_state.matches(reported);
+#endif
+	return stopped && test.stop_state.matches(reported);
+}
+
 [[nodiscard]] int run_retirement_cases()
 {
 	std::uint32_t failures{};
@@ -2079,6 +2219,7 @@ struct RetirementCase final {
 			[](std::uint8_t byte) { return std::byte{byte}; });
 		Configuration configuration;
 		configuration.memory_regions = test.regions;
+		configuration.read_only_regions = test.read_only;
 		configuration.mode = test.mode;
 		if (test.rax) {
 			/* Expectation keys: bit 0 names RIP, bit 1 RAX. */
@@ -2089,14 +2230,11 @@ struct RetirementCase final {
 		(void)run_configured_case(code, configuration, test.name, false,
 			Dispatch::cached);
 		capture_results = false;
-		bool passed = reported.status == test.status &&
-			reported.retired == test.retired &&
-			reported.address == test.address &&
-			(!test.stop_rax || reported.rax == *test.stop_rax);
+		bool passed = stopped_as_expected(test);
 #if UML_FEX_ASM_SWITCH
 		/* The same stop, after the same count, from every handover. */
 		for (switch_after = 1; switch_sweep && passed &&
-			switch_after <= instruction_limit;
+			test.jit_gap.empty() && switch_after <= instruction_limit;
 			switch_after = next_switch_point(switch_after)) {
 			switch_taken = false;
 			capture_results = true;
@@ -2104,10 +2242,7 @@ struct RetirementCase final {
 			(void)run_configured_case(code, configuration, test.name, false,
 				Dispatch::cached);
 			capture_results = false;
-			passed = reported.status == test.status &&
-				reported.retired == test.retired &&
-				reported.address == test.address &&
-				(!test.stop_rax || reported.rax == *test.stop_rax);
+			passed = stopped_as_expected(test);
 			if (!passed)
 				std::cout << "status=failed\ttest=" << test.name <<
 					"\tswitch=" << switch_after << "\tstop=" <<
@@ -2128,12 +2263,35 @@ struct RetirementCase final {
 		if (test.stop_rax)
 			std::cout << '\t' << "rax=0x" << std::hex << reported.rax <<
 				std::dec;
+#if UML_FEX_ASM_JIT
+		if (!test.jit_gap.empty())
+			std::cout << '\t' << "jit-gap=" << test.jit_gap;
+#endif
+		if (test.stop_state.flags)
+			std::cout << '\t' << "flags=0x" << std::hex <<
+				(reported.flags & test.stop_state.flags->mask) << std::dec;
+		if (test.stop_state.x87_status)
+			std::cout << '\t' << "x87_status=0x" << std::hex <<
+				(reported.x87_status & test.stop_state.x87_status->mask) <<
+				std::dec;
+		if (test.stop_state.mxcsr)
+			std::cout << '\t' << "mxcsr=0x" << std::hex <<
+				(reported.mxcsr & test.stop_state.mxcsr->mask) << std::dec;
 		if (!passed) {
 			std::cout << '\t' << "expected=" << test.status << ',' <<
 				test.retired << ",0x" << std::hex << test.address << std::dec;
 			if (test.stop_rax)
 				std::cout << ",rax=0x" << std::hex << *test.stop_rax <<
 					std::dec;
+			if (test.stop_state.flags)
+				std::cout << ",flags=0x" << std::hex <<
+					test.stop_state.flags->value << std::dec;
+			if (test.stop_state.x87_status)
+				std::cout << ",x87_status=0x" << std::hex <<
+					test.stop_state.x87_status->value << std::dec;
+			if (test.stop_state.mxcsr)
+				std::cout << ",mxcsr=0x" << std::hex <<
+					test.stop_state.mxcsr->value << std::dec;
 		}
 		std::cout << '\n';
 	}

@@ -191,7 +191,9 @@ uml_add_unit_test(
     LABELS cpu;x86-64
     TIMEOUT 900)
 # The instructions a run retires before each kind of stop, which the JIT
-# runner checks against the same counts.
+# runner checks against the same counts. The rows that name the flags, x87
+# status or MXCSR a faulting store must leave hold the gadget engine to them
+# and pin the JIT's known gap.
 uml_add_unit_test(
     NAME x86-64-retirement
     COMMAND uml_x86_64_fex_asm_runner --retirement
