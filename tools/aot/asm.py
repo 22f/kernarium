@@ -200,6 +200,16 @@ def ldr_reg_w(rt: int, rn: int, rm: int) -> int:
     return 0xb8606800 | (rm << 16) | (rn << 5) | rt
 
 
+def ldrh_reg(rt: int, rn: int, rm: int) -> int:
+    """LDRH Wt, [Xn, Xm, LSL #1]."""
+    return 0x78607800 | (rm << 16) | (rn << 5) | rt
+
+
+def ldrsw_reg(rt: int, rn: int, rm: int) -> int:
+    """LDRSW Xt, [Xn, Xm, LSL #2]."""
+    return 0xb8a07800 | (rm << 16) | (rn << 5) | rt
+
+
 def ldp_x(rt: int, rt2: int, rn: int, imm: int, *, load: bool = True) -> int:
     return ((0b10 << 30) | (0b101 << 27) | (0b010 << 23) |
             (int(load) << 22) | (_s(imm >> 3, 7) << 15) | (rt2 << 10) |

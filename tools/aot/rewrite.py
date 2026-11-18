@@ -77,6 +77,8 @@ ABSOLUTE = 0x100
 
 PAGE = 4096
 ENTRY_MAGIC = b"UMLAOTB2"
+# The magic of a blob whose entry tables are 16-bit (--entry-table16).
+ENTRY_MAGIC16 = b"UMLAOT16"
 # The version of the layout the magic names (see the runtime's blob_version).
 BLOB_VERSION = 1
 HEADER_SIZE = 256
@@ -312,7 +314,8 @@ class Library:
                  memory_call: str = "inline",
                  hot_starts: frozenset | None = None,
                  shared_exits: bool = False,
-                 run_limit: int = RUN_LIMIT) -> None:
+                 run_limit: int = RUN_LIMIT,
+                 entry16: bool = False) -> None:
         if memory_call not in MEMORY_CALLS:
             raise ValueError(f"unknown memory_call {memory_call!r}")
         if not 1 <= run_limit <= 4094:
@@ -323,6 +326,8 @@ class Library:
         # and the longest run of instructions one charge pays for.
         self.shared_exits = shared_exits
         self.run_limit = run_limit
+        # The entry table in 16-bit words (see entry16_layout).
+        self.entry16 = entry16
         self.exit_chunks: set[tuple[str, int]] = set()
         # The shape the library's cold code uses; a function in hot_starts
         # keeps the inline probe, and with no hot list every function uses
@@ -563,7 +568,7 @@ class Library:
         self.tag("stub.xc", before)
         asm.label("TAB")
         before = len(asm._w)
-        asm.data(bytes(4 * self.table_words))
+        asm.data(bytes(self.table_region_bytes()))
         self.tag("table", before)
         asm.label("SRC")
         before = len(asm._w)
@@ -582,14 +587,59 @@ class Library:
                 f"{self.name}: {self.stats.census['other']} bytes of the "
                 "unit have no census kind")
         table_at = asm.label_address("TAB")
-        view = memoryview(unit)[table_at:table_at + 4 * self.table_words
-                                ].cast("I")
-        for offset in self.entry_labels:
-            view[(offset - self.table_base) // 4] = asm.label_address(
-                self.lab("G" if offset in self.charge else "E", offset))
-        view.release()
+        entries = {offset: asm.label_address(
+            self.lab("G" if offset in self.charge else "E", offset))
+            for offset in self.entry_labels}
+        if self.entry16:
+            self.fill_entry16(unit, table_at, entries)
+        else:
+            view = memoryview(unit)[table_at:table_at + 4 * self.table_words
+                                    ].cast("I")
+            for offset, address in entries.items():
+                view[(offset - self.table_base) // 4] = address
+            view.release()
         return {"unit": bytes(unit), "table_at": table_at,
+                "table_region": self.table_region_bytes(),
+                "entry16": self.entry16,
                 "hashes_at": asm.label_address("SRC")}
+
+    # ---- the 16-bit entry table (a measurement variant) -------------------
+    #
+    # The product's table holds one 32-bit entry per source word: the unit
+    # offset of the word's native code, 0 for a word without. The variant
+    # holds 16 bits per word, followed (from the next 4 KiB, so that the
+    # array is one add away) by one signed 32-bit anchor per text page,
+    # relative to that array: a word's entry is the anchor of its page plus
+    # four bytes for each unit of its 16 bits, and 0 still means none. The
+    # anchor is the page's lowest entry less one word, so the page's entries
+    # must lie within 256 KiB of code.
+
+    def table_len16(self) -> int:
+        return (2 * self.table_words + PAGE - 1) & ~(PAGE - 1)
+
+    def table_region_bytes(self) -> int:
+        if not self.entry16:
+            return 4 * self.table_words
+        return self.table_len16() + 4 * ((self.table_words + 1023) // 1024)
+
+    def fill_entry16(self, unit: bytearray, table_at: int,
+                     entries: dict[int, int]) -> None:
+        pb_at = table_at + self.table_len16()
+        pages: dict[int, list[tuple[int, int]]] = collections.defaultdict(
+            list)
+        for offset, address in entries.items():
+            word = (offset - self.table_base) // 4
+            pages[word // 1024].append((word, address))
+        for page, items in pages.items():
+            anchor = min(address for _, address in items) - 4
+            if max(address for _, address in items) - anchor > 4 * 65535:
+                raise RuntimeError(
+                    f"{self.name}: the entries of text page {page} span "
+                    "more than 256 KiB of code")
+            struct.pack_into("<i", unit, pb_at + 4 * page, anchor - pb_at)
+            for word, address in items:
+                struct.pack_into("<H", unit, table_at + 2 * word,
+                                 (address - anchor) // 4)
 
     def _emit_function(self, function: elf64.Function) -> None:
         asm = self.asm
@@ -1599,6 +1649,30 @@ class Library:
 
 # ---- the entry and exit routines -----------------------------------------
 
+def _entry16_jump(asm: A.Assembler, library: "Library", off: int, table: int,
+                  page: int, none: str | None = None) -> None:
+    """Branch to the native code of the source word at byte offset `off`
+    (register `off`, clobbered) through the 16-bit entry table; `table` and
+    `page` are scratch. With `none`, a word without an entry branches
+    there (with the registers clobbered); without, it is a word the caller
+    knows has one."""
+    len16 = library.table_len16()
+    if len16 >> 12 >= 4096:
+        raise A.AsmError(f"{library.name}: the 16-bit entry table of "
+                         f"{len16} bytes is too large for one add")
+    asm.adrp_add(table, "TAB")
+    asm.word(A.lsr_imm(page, off, 12))
+    asm.word(A.lsr_imm(off, off, 2))
+    asm.word(A.ldrh_reg(off, table, off))
+    if none is not None:
+        asm.cbz(off, none, sf=0, nz=False)
+    asm.word(A.add_imm(table, table, len16 >> 12, shift12=True))
+    asm.word(A.ldrsw_reg(page, table, page))
+    asm.word(A.add_reg(page, page, off, shift=0, amount=2))
+    asm.word(A.add_reg(page, page, table))
+    asm.word(A.br(page))
+
+
 def emit_enter(asm: A.Assembler, layout: dict[str, int],
                count_retired: bool = False) -> None:
     L = layout
@@ -1785,11 +1859,16 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     asm.word(A.mov_reg(T2, 0))
     restore()
     asm.cbz(T2, "REFILL_FAIL", sf=1, nz=False)
-    asm.adrp_add(T2, "TAB")
-    asm.word(A.ldr_reg_w(T1, T2, T1))
-    asm.adrp_add(T2, "UNIT")
-    asm.word(A.add_reg(T2, T2, T1))
-    asm.word(A.br(T2))
+    if library.entry16:
+        # T1 = the slot's byte offset; T0 and T2 are free here, the
+        # instruction recomputes what it needs from its entry.
+        _entry16_jump(asm, library, T1, T0, T2)
+    else:
+        asm.adrp_add(T2, "TAB")
+        asm.word(A.ldr_reg_w(T1, T2, T1))
+        asm.adrp_add(T2, "UNIT")
+        asm.word(A.add_reg(T2, T2, T1))
+        asm.word(A.br(T2))
     asm.label("REFILL_FAIL")
     base_pages = library.table_base >> 12
     if library.table_base & 0xfff or library.table_base >= 1 << 32:
@@ -1833,12 +1912,22 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     asm.word(A.add_reg(T2, T2, T1, shift=1, amount=12))
     asm.word(A.ldrb_w(T2, T2, 0))
     asm.cbz(T2, "EXIT_BRANCH_ABS", sf=0, nz=False)
-    asm.adrp_add(T2, "TAB")
-    asm.word(A.ldr_reg_w(T1, T2, T1))
-    asm.cbz(T1, "EXIT_BRANCH_ABS", sf=0, nz=False)
-    asm.adrp_add(T2, "UNIT")
-    asm.word(A.add_reg(T2, T2, T1))
-    asm.word(A.br(T2))
+    if library.entry16:
+        # T0, the guest target, is the register the lookup needs most: it
+        # waits in the frame's link slot (free: no memory-access call is
+        # in flight at an indirect branch).
+        asm.word(A.str_x(T0, 31, SLOT_LR))
+        _entry16_jump(asm, library, T1, T0, T2, none="IND_NOENTRY")
+        asm.label("IND_NOENTRY")
+        asm.word(A.ldr_x(T0, 31, SLOT_LR))
+        asm.b("EXIT_BRANCH_ABS")
+    else:
+        asm.adrp_add(T2, "TAB")
+        asm.word(A.ldr_reg_w(T1, T2, T1))
+        asm.cbz(T1, "EXIT_BRANCH_ABS", sf=0, nz=False)
+        asm.adrp_add(T2, "UNIT")
+        asm.word(A.add_reg(T2, T2, T1))
+        asm.word(A.br(T2))
 
     # An indirect branch to an address outside this library: T0 = the target.
     # When the host knows a verified library instance that holds it, the
@@ -2152,7 +2241,9 @@ def resolve_library(root: pathlib.Path, mounts: dict[str, pathlib.Path],
     return root / path.lstrip("/")
 
 
-LINK_LIMIT = 16
+# The bound the guest's own path walk has (Linux: 40 links, parent
+# directories included).
+LINK_LIMIT = 40
 
 
 def resolve_in_image(root: pathlib.Path, mounts: dict[str, pathlib.Path],
@@ -2366,7 +2457,9 @@ def build_blob(units: list[dict], layout: dict[str, int],
             struct.pack_into("<QII", blob, hash_at + 16 * slot, digest,
                              unit["index"], page_index)
     record_at = HEADER_SIZE
-    struct.pack_into("<8sIIIIIII", blob, 0, ENTRY_MAGIC, BLOB_VERSION, HEADER_SIZE,
+    struct.pack_into("<8sIIIIIII", blob, 0,
+                     ENTRY_MAGIC16 if any(unit.get("entry16") for unit in units)
+                     else ENTRY_MAGIC, BLOB_VERSION, HEADER_SIZE,
                      len(units), record_at, enter_at, hash_at, slots)
     struct.pack_into("96s", blob, 0x30, release_id.encode()[:96])
     for unit, base in zip(units, bases):
@@ -2404,7 +2497,7 @@ def build_blob(units: list[dict], layout: dict[str, int],
             "executable_segment": {"vaddr": unit["vaddr"],
                                    "filesz": unit["filesz"]},
             "unit_bytes": len(unit["unit"]),
-            "table_bytes": 4 * unit["table_words"],
+            "table_bytes": unit.get("table_region", 4 * unit["table_words"]),
             "functions": unit["stats"]["functions"],
             "hot_functions": unit["hot_functions"],
             "instructions": unit["stats"]["instructions"],
@@ -2470,6 +2563,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="the longest run of instructions one budget "
                         f"charge pays for (default {RUN_LIMIT}; another "
                         "value is a measurement variant)")
+    parser.add_argument("--entry-table16", action="store_true",
+                        help="hold the entry table in 16-bit words and one "
+                        "anchor per text page (a measurement variant, "
+                        "tools/aot/README.md)")
     parser.add_argument("--jobs", type=int, default=0,
                         help="worker processes (default: about half the CPUs)")
     arguments = parser.parse_args(argv)
@@ -2492,6 +2589,8 @@ def main(argv: list[str] | None = None) -> int:
         tuning["shared_exits"] = True
     if arguments.run_limit != RUN_LIMIT:
         tuning["run_limit"] = arguments.run_limit
+    if arguments.entry_table16:
+        tuning["entry16"] = True
     jobs = [(index, path, str(resolve_library(arguments.root, mounts, path)),
              count, call, hot, tuning)
             for index, path in enumerate(arguments.library)]

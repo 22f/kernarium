@@ -950,6 +950,25 @@ class ImageLinkTests(unittest.TestCase):
             rewrite.expand_libraries(self.root, {},
                                      ["/system/lib64/libloop.so"])
 
+    def test_the_link_bound_is_the_guests(self) -> None:
+        # A chain of exactly LINK_LIMIT links resolves; one more is refused.
+        self.assertEqual(rewrite.LINK_LIMIT, 40)
+        for count, found in ((rewrite.LINK_LIMIT, True),
+                             (rewrite.LINK_LIMIT + 1, False)):
+            with self.subTest(links=count):
+                folder = self.root / f"chain{count}"
+                folder.mkdir()
+                for index in range(count):
+                    target = "libin.so" if index == count - 1 else \
+                        f"l{index + 1}"
+                    (folder / f"l{index}").symlink_to(
+                        f"/system/lib64/{target}" if index == count - 1
+                        else target)
+                guest = f"/chain{count}/l0"
+                self.assertEqual(
+                    rewrite.follow_in_image(self.root, {}, guest),
+                    "/system/lib64/libin.so" if found else None)
+
 
 class SimdRegisterFieldTests(unittest.TestCase):
     """A vector field must never be treated as a general register (the
@@ -1192,6 +1211,88 @@ class SizeVariantTests(unittest.TestCase):
         for limit in (0, 4095):
             with self.assertRaises(ValueError):
                 library_of([RET], [(0, 4)], run_limit=limit)
+
+
+class EntryTable16Tests(unittest.TestCase):
+    """The 16-bit entry table (UML_AOT_ENTRY_TABLE16): the same words have
+    entries, they are reachable from their page's anchor, and the blob says
+    which table it holds."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import tempfile
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.path = pathlib.Path(cls.directory.name) / "libaotfixture.so"
+        cls.path.write_bytes(fixture.build())
+        cls.layout = rewrite.read_layout(rewrite.LAYOUT_HEADER)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.directory.cleanup()
+
+    def unit(self, entry16: bool) -> dict:
+        return rewrite.build_unit(
+            (0, "/aot-test/libaotfixture.so", str(self.path), False,
+             "inline", None, {"entry16": True} if entry16 else {}))
+
+    @staticmethod
+    def entries32(unit: dict) -> dict[int, int]:
+        at, words = unit["table_at"], unit["table_words"]
+        data = unit["unit"][at:at + 4 * words]
+        values = struct.unpack(f"<{words}I", data)
+        return {word: value for word, value in enumerate(values) if value}
+
+    @staticmethod
+    def entries16(unit: dict) -> dict[int, int]:
+        at, words = unit["table_at"], unit["table_words"]
+        len16 = (2 * words + 4095) & ~4095
+        data = unit["unit"]
+        out = {}
+        for word in range(words):
+            (entry,) = struct.unpack_from("<H", data, at + 2 * word)
+            if entry:
+                (anchor,) = struct.unpack_from(
+                    "<i", data, at + len16 + 4 * (word // 1024))
+                out[word] = at + len16 + anchor + 4 * entry
+        return out
+
+    def test_the_same_words_have_entries_inside_the_unit(self) -> None:
+        wide, narrow = self.unit(False), self.unit(True)
+        self.assertGreater(len(self.entries32(wide)), 100)
+        self.assertEqual(set(self.entries16(narrow)),
+                         set(self.entries32(wide)))
+        for address in self.entries16(narrow).values():
+            self.assertEqual(address % 4, 0)
+            self.assertLess(address, narrow["table_at"])
+        # The table is the 16-bit words, padded to 4 KiB, and the anchors.
+        words = narrow["table_words"]
+        self.assertEqual(narrow["table_region"],
+                         ((2 * words + 4095) & ~4095) +
+                         4 * ((words + 1023) // 1024))
+        self.assertLess(narrow["table_region"], 4 * words)
+
+    def test_the_census_and_the_magic_follow(self) -> None:
+        narrow = self.unit(True)
+        census = narrow["stats"]["census"]
+        self.assertEqual(sum(census.values()), len(narrow["unit"]))
+        self.assertEqual(census["other"], 0)
+        self.assertEqual(census["table"], narrow["table_region"])
+        for entry16, magic in ((False, rewrite.ENTRY_MAGIC),
+                               (True, rewrite.ENTRY_MAGIC16)):
+            blob, manifest = rewrite.build_blob(
+                [self.unit(entry16)], self.layout, "entry16-row", False)
+            self.assertEqual(blob[:8], magic)
+
+    def test_a_page_whose_entries_are_too_far_apart_is_refused(self) -> None:
+        library = library_of([NOP, RET], [(0, 8)], entry16=True)
+        unit = bytearray(1 << 20)
+        with self.assertRaises(RuntimeError):
+            library.fill_entry16(unit, 0, {0x1000: 4, 0x1004: 4 + 4 * 65536})
+        library.fill_entry16(unit, 0, {0x1000: 4, 0x1004: 4 + 4 * 65534})
+
+    def test_the_new_instructions_encode_as_the_assembler_does(self) -> None:
+        self.assertEqual(A.ldrh_reg(1, 2, 3), 0x78637841)
+        self.assertEqual(A.ldrsw_reg(4, 5, 6), 0xb8a678a4)
 
 
 class CountingLayoutTests(unittest.TestCase):

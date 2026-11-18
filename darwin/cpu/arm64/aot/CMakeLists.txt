@@ -189,6 +189,9 @@ endif()
 if(UML_AOT_SHARED_EXITS)
     list(APPEND _uml_aot_generated_args --shared-exits)
 endif()
+if(UML_AOT_ENTRY_TABLE16)
+    list(APPEND _uml_aot_generated_args --entry-table16)
+endif()
 if(NOT UML_AOT_RUN_LIMIT EQUAL 32)
     list(APPEND _uml_aot_generated_args --run-limit ${UML_AOT_RUN_LIMIT})
 endif()
@@ -280,6 +283,7 @@ function(_uml_aot_add_runtime TARGET DIAGNOSTICS)
         UML_MEMORY_COUNT_AUDIT=${DIAGNOSTICS}
         UML_AOT_KERNEL_STACK_BYTES=${_uml_aot_kernel_stack_bytes}
         UML_AOT_INSTANCE_CAPACITY=${UML_AOT_INSTANCE_CAPACITY}
+        UML_AOT_ENTRY16=$<BOOL:${UML_AOT_ENTRY_TABLE16}>
         UML_AOT_SHARED_VERDICTS=$<BOOL:${UML_AOT_SHARED_VERDICTS}>)
 endfunction()
 

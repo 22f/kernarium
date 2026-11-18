@@ -40,7 +40,14 @@ constexpr std::uint64_t page_size = 4096;
  * A verdict names a physical-page record that is never reused, so an entry
  * can outlive the address space that filed it and never be answered wrongly. */
 VerdictTable g_verdicts;
+#ifndef UML_AOT_ENTRY16
+#define UML_AOT_ENTRY16 0
+#endif
+#if UML_AOT_ENTRY16
+constexpr char blob_magic[8] = {'U', 'M', 'L', 'A', 'O', 'T', '1', '6'};
+#else
 constexpr char blob_magic[8] = {'U', 'M', 'L', 'A', 'O', 'T', 'B', '2'};
+#endif
 /* The magic names the layout, and the word after it the version of that
  * layout: a change an older runtime would misread changes the magic, and an
  * addition it can ignore raises the version, which a runtime accepts at or
@@ -84,6 +91,30 @@ struct Library final {
 	/* The SHA-256 of each text page the library was built from. */
 	std::size_t page_hashes;
 };
+
+/* The unit offset of the native code of the source word `word` of a
+ * library, or 0 for a word without. The product's table holds it in 32 bits
+ * per word; a blob built with --entry-table16 holds 16 bits per word and, from
+ * the next 4 KiB, one signed 32-bit anchor per page, relative to that array
+ * (tools/aot/rewrite.py: Library.fill_entry16). */
+[[nodiscard]] std::uint32_t native_entry(const Library &library,
+	std::uint64_t word) noexcept
+{
+#if UML_AOT_ENTRY16
+	const auto entry =
+		read<std::uint16_t>(library.table_offset + 2 * word);
+	if (entry == 0)
+		return 0;
+	const std::size_t anchors = library.table_offset +
+		((2 * library.table_words + page_size - 1) & ~(page_size - 1));
+	const auto relative = read<std::int32_t>(anchors + 4 * (word / 1024));
+	return static_cast<std::uint32_t>(
+		static_cast<std::int64_t>(anchors) + relative + 4 * entry -
+		static_cast<std::int64_t>(library.unit_offset));
+#else
+	return read<std::uint32_t>(library.table_offset + 4 * word);
+#endif
+}
 
 struct Directory final {
 	bool valid{};
@@ -813,8 +844,8 @@ Target lookup(const CrossTable *table, std::uint64_t address) noexcept
 		 * host verifies it before the next one. */
 		if (entry.pages[(offset - library.table_base) / page_size] == 0)
 			break;
-		const auto native = read<std::uint32_t>(library.table_offset +
-			4 * ((offset - library.table_base) / 4));
+		const auto native =
+			native_entry(library, (offset - library.table_base) / 4);
 		if (native == 0)
 			break;
 		UML_AOT_COUNT(cross_hits, 1);
@@ -1477,8 +1508,7 @@ Hit Binder::entry(std::uint32_t instance_index,
 	    (offset & 3U) != 0)
 		return {};
 	const auto word = (offset - library.table_base) / 4;
-	const auto native =
-		read<std::uint32_t>(library.table_offset + 4 * word);
+	const auto native = native_entry(library, word);
 	if (native == 0)
 		return {};
 	return {uml_aot_blob + library.unit_offset + native, instance.bias,
