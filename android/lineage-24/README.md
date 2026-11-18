@@ -181,7 +181,11 @@ installs the application's JNI library on the application's own partition, as
 the product's generic system rule requires. The TalkBack series also patches
 out the three libraries the tree lacks and leaves every Google Play services
 library out of the phone build, which recognises no text in images (OCR) as a
-result. The target-files verifier requires both applications.
+result. It leaves every network and Google service permission out as well:
+TalkBack requests none, and its settings offer no web page, store page or image
+description. eSpeak NG requests none either. The target-files verifier requires
+both applications and refuses a request by either for a network or Google
+service permission.
 
 ### Motion sensors
 

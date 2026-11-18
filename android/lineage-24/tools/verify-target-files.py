@@ -1894,6 +1894,30 @@ ACCESSIBILITY_APKS = {
 }
 
 
+# TalkBack and eSpeak NG hold no network access and no Google service permission, so the built
+# APKs request none of these. ACCESS_LOCAL_NETWORK is in no source manifest (the platform adds it
+# to an application that holds INTERNET); it is named so that a manifest asking for it is refused
+# too. A Google service permission is any under Google's namespace: the Analytics and Primes
+# permission READ_GSERVICES, AICore's BIND_SERVICE, and those of Google Play services and the
+# Play Store. TalkBack's own package name is under that namespace, and the braille keyboard's
+# manifest requests the signature permission that guards the application's own receivers there.
+ACCESSIBILITY_REFUSED_PERMISSIONS = frozenset(
+    f"android.permission.{name}"
+    for name in (
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "ACCESS_WIFI_STATE",
+        "CHANGE_NETWORK_STATE",
+        "CHANGE_WIFI_STATE",
+        "CHANGE_WIFI_MULTICAST_STATE",
+        "ACCESS_LOCAL_NETWORK",
+        "NEARBY_WIFI_DEVICES",
+    )
+)
+GOOGLE_PERMISSION_PREFIXES = ("com.google.", "com.android.vending.")
+ACCESSIBILITY_OWN_PERMISSION_PREFIX = "com.google.android.marvin.talkback."
+
+
 def check_accessibility(infos: dict[str, zipfile.ZipInfo]) -> None:
     """TalkBack and the voice it speaks with are in the image."""
     for module, pattern in ACCESSIBILITY_APKS.items():
@@ -2619,9 +2643,10 @@ def check_application_manifests(
     for an application that requests ENTER_TRADE_IN_MODE, and the privapp allowlist's entry for
     a package that is not installed grants nothing, so the request is what the check looks for,
     in every variant (a userdebug build never enters it, but the product list is one list), in
-    every APK but the shell's (TRADE_IN_MODE_REQUESTERS). The
-    check reads every APK of the image partitions; APKs inside an APEX payload are compressed
-    EROFS and out of its reach.
+    every APK but the shell's (TRADE_IN_MODE_REQUESTERS). TalkBack and eSpeak NG request no
+    network permission and no Google service permission (ACCESSIBILITY_REFUSED_PERMISSIONS), in
+    every variant. The check reads every APK of the image partitions; APKs inside an APEX payload
+    are compressed EROFS and out of its reach.
     """
     for entry in sorted(infos):
         info = infos[entry]
@@ -2649,6 +2674,22 @@ def check_application_manifests(
                 "unprovisioned first boot and restart adbd twice; the product must not carry "
                 "an application that can start it (DeviceDiagnostics is excluded)"
             )
+        if any(pattern.fullmatch(entry) for pattern in ACCESSIBILITY_APKS.values()):
+            refused = sorted(
+                permission
+                for permission in requested
+                if permission in ACCESSIBILITY_REFUSED_PERMISSIONS
+                or (
+                    permission.startswith(GOOGLE_PERMISSION_PREFIXES)
+                    and not permission.startswith(ACCESSIBILITY_OWN_PERMISSION_PREFIX)
+                )
+            )
+            if refused:
+                fail(
+                    f"{entry} requests {', '.join(refused)}: TalkBack and eSpeak NG hold no "
+                    "network access and no Google service permission (the TalkBack series, "
+                    "dependencies/patches/talkback, leaves them out of the manifests)"
+                )
 
 
 # The AOSP example HALs the product keeps, each packaged as the vendor APEX that Cuttlefish

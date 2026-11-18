@@ -3568,6 +3568,31 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         f"{result.returncode} {result.stdout}"
                     )
 
+        # TalkBack keeps the permissions of its other features, among them the signature
+        # permission under its own package name that guards its receivers, and an application
+        # that declares the network permission does not request it: every variant accepts both.
+        for variant in BUILD_VARIANTS:
+            fixture = root / f"{variant}-with-talkback-permissions-it-keeps.zip"
+            write_fixture(
+                fixture, build_variant=variant,
+                entries={"PRODUCT/app/TalkBack/TalkBack.apk": synthetic_apk(
+                    permissions=("android.permission.RECORD_AUDIO", "android.permission.VIBRATE",
+                                 "android.permission.WAKE_LOCK",
+                                 "android.permission.BLUETOOTH_CONNECT",
+                                 "com.google.android.marvin.talkback."
+                                 "DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"),
+                    declared=("android.permission.INTERNET",))},
+            )
+            result = run_tool(
+                verifier, "--target-files", fixture,
+                "--build-variant", variant, *kernel_options,
+            )
+            if result.returncode != 0:
+                fail(
+                    f"a {variant} build with TalkBack requesting only its other permissions "
+                    f"verified wrongly: {result.returncode} {result.stdout}"
+                )
+
         # A rejection fixture is built and verified once however many tables
         # state it: the cases whose options are the same share one run, which
         # must satisfy every assertion of every case (the status and the
@@ -4136,6 +4161,19 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("application-that-starts-trade-in-mode",
              {"entries": {"SYSTEM/priv-app/Fixture/Fixture.apk":
                           synthetic_apk(permissions=("android.permission.ENTER_TRADE_IN_MODE",))}}),
+            ("talkback-that-requests-the-network",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("android.permission.RECORD_AUDIO",
+                                                     "android.permission.INTERNET",
+                                                     "android.permission.ACCESS_NETWORK_STATE"))}}),
+            ("talkback-that-requests-a-google-service-permission",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=(
+                              "com.google.android.providers.gsf.permission.READ_GSERVICES",
+                              "com.google.android.apps.aicore.service.BIND_SERVICE"))}}),
+            ("espeak-that-requests-the-local-network",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=("android.permission.ACCESS_LOCAL_NETWORK",))}}),
             ("device-diagnostics-in-the-image",
              {"extra_entry": "SYSTEM/priv-app/DeviceDiagnostics/DeviceDiagnostics.apk"}),
             ("application-without-a-manifest",
@@ -4837,6 +4875,26 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           synthetic_apk(permissions=("android.permission.ENTER_TRADE_IN_MODE",))}},
              "SYSTEM/priv-app/Fixture/Fixture.apk requests android.permission.ENTER_TRADE_IN_MODE: "
              "trade-in mode would start on an unprovisioned first boot"),
+            ("talkback-that-requests-the-network-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("android.permission.RECORD_AUDIO",
+                                                     "android.permission.INTERNET",
+                                                     "android.permission.ACCESS_NETWORK_STATE"))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests android.permission.ACCESS_NETWORK_STATE, "
+             "android.permission.INTERNET: TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-a-google-service-permission-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=(
+                              "com.google.android.providers.gsf.permission.READ_GSERVICES",
+                              "com.google.android.apps.aicore.service.BIND_SERVICE"))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests "
+             "com.google.android.apps.aicore.service.BIND_SERVICE, "
+             "com.google.android.providers.gsf.permission.READ_GSERVICES: TalkBack and eSpeak NG"),
+            ("espeak-that-requests-the-local-network-cause",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=("android.permission.ACCESS_LOCAL_NETWORK",))}},
+             "PRODUCT/app/eSpeakNG/eSpeakNG.apk requests android.permission.ACCESS_LOCAL_NETWORK: "
+             "TalkBack and eSpeak NG hold no network access and no Google service permission"),
             ("device-diagnostics-in-the-image-cause",
              {"extra_entry": "SYSTEM/priv-app/DeviceDiagnostics/DeviceDiagnostics.apk"},
              "unneeded built-in application payload is forbidden: "

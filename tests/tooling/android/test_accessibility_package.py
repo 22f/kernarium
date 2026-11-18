@@ -8,7 +8,8 @@ package that component names, and the target-files verifier requires the
 application at the path the product installs it to. A library an application
 does not embed installs as a file of its own, which the product's generic
 system rule keeps off the system partition, so it names the application's
-partition too.
+partition too. Neither application requests a network or Google service
+permission.
 """
 
 from __future__ import annotations
@@ -56,7 +57,44 @@ def build_files(project: str) -> dict[str, str]:
         return {path: (Path(directory) / path).read_text(encoding="utf-8") for path in files}
 
 
+# The permissions the TalkBack series takes out of its manifests, and the manifests they leave.
+NETWORK_PERMISSIONS = (
+    "android.permission.INTERNET",
+    "android.permission.ACCESS_NETWORK_STATE",
+    "com.google.android.providers.gsf.permission.READ_GSERVICES",
+    "com.google.android.apps.aicore.service.BIND_SERVICE",
+)
+TALKBACK_MANIFEST = "talkback/src/main/AndroidManifest.xml"
+BRAILLE_DISPLAY_MANIFEST = "braille/brailledisplay/src/phone/AndroidManifest.xml"
+PERMISSION_REQUEST = re.compile(r'<uses-permission[^>]*android:name="([^"]+)"')
+
+
+def requests_changed(project: str) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """(path, permission) of every <uses-permission> a project's series adds and removes."""
+    added: set[tuple[str, str]] = set()
+    removed: set[tuple[str, str]] = set()
+    for line in (PATCHES / project / "series.tsv").read_text(encoding="utf-8").splitlines():
+        if not line.startswith("patch\t"):
+            continue
+        path = ""
+        for text in (PATCHES / project / line.split("\t")[1]).read_text(encoding="utf-8").splitlines():
+            if text.startswith("+++ b/"):
+                path = text[len("+++ b/"):]
+            request = PERMISSION_REQUEST.search(text[1:])
+            if request and text[0] in "+-" and path.endswith("AndroidManifest.xml"):
+                (added if text[0] == "+" else removed).add((path, request.group(1)))
+    return added, removed
+
+
 class AccessibilityPackageTests(unittest.TestCase):
+    def test_the_series_leave_the_network_and_google_service_permissions_out(self) -> None:
+        added, removed = requests_changed("talkback")
+        for permission in NETWORK_PERMISSIONS:
+            self.assertIn((TALKBACK_MANIFEST, permission), removed)
+        self.assertIn((BRAILLE_DISPLAY_MANIFEST, "android.permission.INTERNET"), removed)
+        self.assertEqual({permission for _, permission in added} & set(NETWORK_PERMISSIONS), set())
+        self.assertEqual(requests_changed("espeak-ng")[0], set())
+
     def test_the_built_app_has_the_package_the_switch_recognises(self) -> None:
         patch = BUILD_PATCH.read_text(encoding="utf-8")
         manifest = patch[patch.index("+++ b/src/soong/AndroidManifest.xml"):]
