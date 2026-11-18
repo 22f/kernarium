@@ -480,7 +480,11 @@ bool has_loopback(const std::optional<Reply> &reply)
 
 /* A CNAME in the system resolver's local-only registry, which stays while the
  * object lives. Its target has no record, so a query for an address of the
- * alias gets the alias, then "no such record". */
+ * alias gets the alias, then "no such record". The registry takes a record
+ * only in the mDNS domain: a name under .invalid, .test, .example,
+ * .localhost, .home.arpa, .lan, .internal or a real domain is refused as a
+ * bad parameter, which is why the name is the one environment-portability
+ * allowlist entry of this file. */
 class LocalAlias final {
 public:
 	static constexpr const char *name = "uml-dns-probe-alias.local";
