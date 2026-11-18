@@ -12,6 +12,7 @@ pair of arms and fail every incomplete or failed one.
 __import__("sys").dont_write_bytecode = True
 
 import collections
+import contextlib
 import hashlib
 import io
 import json
@@ -253,8 +254,8 @@ class RunnerTest(unittest.TestCase):
         result = self.passes(good_scenario())
         self.assertIn("registers compared, identical", result.stdout)
 
-    def test_script_has_seven_workloads_and_three_repetitions(self):
-        self.assertEqual(len(runner.WORKLOAD_NAMES), 7)
+    def test_script_has_eight_workloads_and_three_repetitions(self):
+        self.assertEqual(len(runner.WORKLOAD_NAMES), 8)
         self.assertEqual(runner.REPETITIONS, (1, 2, 3))
 
     def test_empty_output_digest_fails(self):
@@ -705,6 +706,50 @@ class StudyEvictionTest(unittest.TestCase):
                 with self.assertRaises(SystemExit) as caught:
                     runner.main()
             self.assertEqual(caught.exception.code, 2)
+
+
+class ExpectEnteredTest(unittest.TestCase):
+    """--expect-entered names a library by its file name or the tail of its
+    path. Two copies of one file in different places are two libraries: a
+    bare name that fits both is refused, never judged by whichever came last,
+    and a copy the guest never entered is not covered by its twin."""
+
+    NAMES = ["/system/lib64/libc.so", "/system/lib64/libcrypto.so",
+             "/apex/com.android.conscrypt/lib64/libcrypto.so",
+             "/apex/com.android.art/lib64/liblzma.so"]
+
+    def judge(self, expect, entered):
+        with tempfile.TemporaryDirectory() as scratch:
+            manifest = pathlib.Path(scratch) / "manifest.json"
+            manifest.write_text(json.dumps(
+                {"libraries": [{"path": name} for name in self.NAMES]}))
+            report = {f"library.{index}.enters": 1 for index in entered}
+            options = types.SimpleNamespace(
+                manifest=manifest, expect_entered=expect)
+            with contextlib.redirect_stdout(io.StringIO()):
+                runner.report_libraries(report, options)
+
+    def test_a_file_name_that_is_one_library_is_judged(self):
+        self.judge(["libc.so", "liblzma.so"], [0, 3])
+        with self.assertRaisesRegex(runner.Failure, "never entered"):
+            self.judge(["liblzma.so"], [0])
+
+    def test_a_tail_tells_two_copies_apart(self):
+        self.judge(["com.android.conscrypt/lib64/libcrypto.so"], [2])
+        with self.assertRaisesRegex(runner.Failure, "never entered .*conscrypt"):
+            self.judge(["com.android.conscrypt/lib64/libcrypto.so"], [1])
+        with self.assertRaisesRegex(runner.Failure, "never entered /system"):
+            self.judge(["system/lib64/libcrypto.so"], [2])
+
+    def test_a_name_that_fits_two_libraries_is_refused(self):
+        with self.assertRaisesRegex(runner.Failure, "2 libraries.*tail"):
+            self.judge(["libcrypto.so"], [1, 2])
+
+    def test_a_library_the_framework_lacks_is_refused(self):
+        with self.assertRaisesRegex(runner.Failure, "does not cover"):
+            self.judge(["libnope.so"], [0])
+        with self.assertRaisesRegex(runner.Failure, "does not cover"):
+            self.judge(["lib64/libcrypto.so.1"], [1])
 
 
 if __name__ == "__main__":

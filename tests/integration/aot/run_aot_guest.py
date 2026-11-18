@@ -42,8 +42,10 @@ Checked:
   the report named by DARWIN_UML_AOT_REPORT): the AOT arm entered rewritten
   code, and the arm with the component off did not. With --manifest the
   report is printed per library, and every library named by --expect-entered
-  was entered at all: a library the guest runs but the component never
-  enters is a result, not a quiet zero.
+  (a file name, or the tail of a path where one file is carried in several
+  places) was entered at all: a library the guest runs but the component
+  never enters is a result, not a quiet zero. The instance table's counts
+  (instances made, evictions, remakes) are printed with it.
 
 The seconds each workload took in each arm are printed, not judged: speed is
 measured by the campaign that owns it, on a quiet host.
@@ -835,6 +837,11 @@ def check(off: Arm, on: Arm, options: argparse.Namespace) -> None:
         print("report: enters {enters}, steps {steps}, poisoned {poisoned}, "
               "refills {refills}".format(**{k: on.report.get(k, 0) for k in (
                   "enters", "steps", "poisoned", "refills")}))
+        print("instances: made {instances_created}, took a live one's place "
+              "{instance_evictions}, made again {instance_rebinds}".format(
+                  **{k: on.report.get(k, 0) for k in (
+                      "instances_created", "instance_evictions",
+                      "instance_rebinds")}))
         print(judge_count_audit(on.report))
         print(judge_stack(on.report))
         report_libraries(on.report, options)
@@ -853,20 +860,34 @@ def report_libraries(report: dict[str, int],
     print("cross-library misses: " + ", ".join(
         f"{key[11:]} {value}" for key, value in sorted(report.items())
         if key.startswith("cross_miss.")))
-    entered = {}
     for index, name in enumerate(names):
         row = {key.split(".", 2)[2]: value for key, value in report.items()
                if key.startswith(f"library.{index}.")}
-        entered[pathlib.PurePosixPath(name).name] = row.get("enters", 0)
         if row:
             print(f"library {index} {name}: " + ", ".join(
                 f"{key} {value}" for key, value in row.items() if value))
     for wanted in options.expect_entered:
-        if wanted not in entered:
+        units = units_named(names, wanted)
+        if not units:
             raise Failure(f"--expect-entered names {wanted}, which the "
                           "framework does not cover")
-        if entered[wanted] == 0:
-            raise Failure(f"the AOT arm never entered {wanted}")
+        if len(units) > 1:
+            raise Failure(f"--expect-entered names {wanted}, which "
+                          f"{len(units)} libraries of the framework carry "
+                          f"({', '.join(names[unit] for unit in units)}): "
+                          "name the tail of a path that tells them apart")
+        if report.get(f"library.{units[0]}.enters", 0) == 0:
+            raise Failure(f"the AOT arm never entered {names[units[0]]}")
+
+
+def units_named(names: list[str], wanted: str) -> list[int]:
+    """The report indices of the libraries `wanted` names: a file name, or the
+    tail of a path (`com.android.conscrypt/lib64/libcrypto.so`), compared by
+    whole components from the right. Copies of one file in several places
+    (libcrypto.so of the system and of conscrypt) are different libraries."""
+    tail = wanted.strip("/").split("/")
+    return [index for index, name in enumerate(names)
+            if name.strip("/").split("/")[-len(tail):] == tail]
 
 
 def build_parser() -> argparse.ArgumentParser:
