@@ -7,7 +7,7 @@ Run a real Linux kernel natively on iOS, through the magic of [User-mode Linux](
 
 ### Andarium
 
-![](docs/Download_on_the_App_Store_Badge_US-UK_RGB_blk_092917.svg)
+![https://apps.apple.com/us/app/andarium/id6827505184](docs/Download_on_the_App_Store_Badge_US-UK_RGB_blk_092917.svg)
 
 An Android emulator app built on the Kernarium runtime is available for download in App Store. Source code is available under [`Andarium/`](/Andarium/).
 
