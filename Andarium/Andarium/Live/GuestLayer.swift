@@ -87,7 +87,7 @@ struct GuestLayer: View {
         let reader = model.session.reader
         return GuestDisplayAccessibility(
             label: ScreenReaderWords.displayLabel,
-            value: model.offersScreenReader ? ScreenReaderWords.displayValue(reader) : nil,
+            value: model.offersScreenReader && !reader.displayWaitsForRead ? ScreenReaderWords.displayValue(reader) : nil,
             hint: model.offersScreenReader ? ScreenReaderWords.displayHint(reader, edge: model.session.keysEdge) : nil,
             directTouch: reader.isOn,
             takesFocus: reader.isOn && model.displayMayTakeFocus)

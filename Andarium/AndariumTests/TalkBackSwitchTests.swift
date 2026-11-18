@@ -633,6 +633,29 @@ struct TalkBackSwitchTests {
     /// The card that asks waits for the run-start sentence's end: its focus
     /// would cut the sentence off. Where the sentence ends, the card rises at
     /// once.
+    /// The display says nothing of the screen reader's state while the run's
+    /// sentence is spoken and Android has not been read: VoiceOver composes
+    /// what it says on landing there now and speaks it after the sentence, so
+    /// "checking" would be stale. The value comes with the read.
+    @Test func theDisplayHasNoValueWhileTheSentenceIsSpokenAndTheStateIsUnread() async throws {
+        let (model, _) = started(voiceOver: true, interval: .milliseconds(20))
+        let spoken = RunStartSpeech()
+        model.runStartAnnouncer = { text, finished in
+            spoken.lines.append(text)
+            spoken.finish = finished
+        }
+        model.announceRunStart(.running(.normal))
+        #expect(model.session.reader.state == nil)
+        #expect(GuestLayer.accessibility(of: model)?.value == nil)
+        #expect(GuestLayer.accessibility(of: model)?.label == ScreenReaderWords.displayLabel)
+        // Once Android has been read the value is no longer stale, though the
+        // sentence is still being spoken.
+        try await settle { model.session.reader.state != nil }
+        #expect(GuestLayer.accessibility(of: model)?.value != nil)
+        spoken.finish?(true)
+        #expect(GuestLayer.accessibility(of: model)?.value != nil)
+    }
+
     @Test func theCardWaitsForTheRunStartSentenceAndRisesAtItsEnd() async throws {
         let (model, _) = started(voiceOver: true, interval: .milliseconds(20))
         let spoken = RunStartSpeech()

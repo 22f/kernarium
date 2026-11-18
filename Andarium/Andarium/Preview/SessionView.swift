@@ -268,7 +268,7 @@ private extension View {
                         .contentShape(Rectangle())
                         .accessibilityElement()
                         .accessibilityLabel(ScreenReaderWords.displayLabel)
-                        .accessibilityValue(offered ? ScreenReaderWords.displayValue(reader) : "")
+                        .accessibilityValue(offered && !reader.displayWaitsForRead ? ScreenReaderWords.displayValue(reader) : "")
                         .accessibilityHint(offered ? ScreenReaderWords.displayHint(reader, edge: edge) ?? "" : "")
                         .accessibilityDirectTouch(true, options: .silentOnTouch)
                         .accessibilityAction(.default) {}
@@ -278,7 +278,7 @@ private extension View {
         } else {
             accessibilityElement(children: .ignore)
                 .accessibilityLabel(ScreenReaderWords.displayLabel)
-                .accessibilityValue(offered ? ScreenReaderWords.displayValue(reader) : "")
+                .accessibilityValue(offered && !reader.displayWaitsForRead ? ScreenReaderWords.displayValue(reader) : "")
                 .accessibilityHint(offered ? ScreenReaderWords.displayHint(reader, edge: edge) ?? "" : "")
                 .accessibilityAction(.default) {}
                 .accessibilityIdentifier("guest-display")

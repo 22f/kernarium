@@ -108,6 +108,11 @@ final class ScreenReaderSession {
     /// display's direct-touch element takes VoiceOver's focus until it has
     /// been.
     var runStartAnnouncing = false
+    /// The sentence of the run's start is being spoken and Android's state is
+    /// still unread: what VoiceOver says of the display on landing there is
+    /// composed now and spoken after the sentence, so a value that says
+    /// "checking" would be stale by then. The display carries none yet.
+    var displayWaitsForRead: Bool { runStartAnnouncing && state == nil }
     /// Which announcement of the run's start `runStartAnnouncing` is for: the
     /// end of an earlier one does not release a later one.
     @ObservationIgnored var runStartGeneration = 0
