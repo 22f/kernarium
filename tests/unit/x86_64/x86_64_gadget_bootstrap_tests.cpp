@@ -4242,6 +4242,53 @@ void execute_compat32_legacy_segment_stack()
 		"long64 mode accepted a legacy segment-stack opcode");
 }
 
+/* POP to memory computes its address after it advances ESP, so an address
+ * that names ESP sees the popped stack. A compat32 access through FS that the
+ * engines' inline limit check cannot pass leaves for the runtime's exact
+ * check and runs again, so it must leave ESP as it found it. FS here is a
+ * writable byte-granular segment that ends at 0x2003, so the four bytes at
+ * 0x2000 pass the exact check but not the inline one.
+ */
+void a_compat32_pop_through_fs_leaves_esp_for_the_exact_check()
+{
+	using namespace uml::cpu::x86_64;
+	for (const bool mapped : {true, false}) {
+		TestMemory memory{0, mapped ? 16384U : 0x2000U};
+		memory.load(0, {0x64, 0x8f, 0x03}); // pop dword ptr fs:[ebx]
+		memory.load(0x1000, {0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22});
+		CpuState cpu{};
+		linux_user_segments(cpu, ExecutionMode::compat32);
+		cpu.segment_selectors[4] = 0x63;
+		cpu.tls_descriptors[0] = 0x0040'f300'0000'2003ULL;
+		require(!enter_segments(cpu),
+			"the compat32 FS segment did not load");
+		cpu.gpr(Register::rsp) = 0x1000;
+		cpu.gpr(Register::rbx) = 0x2000;
+		const auto built = require_built(
+			gadgets::build(memory, 0, ExecutionMode::compat32, 1),
+			"compat32 POP through FS did not build");
+		const auto result = gadgets::execute(built.program, cpu, memory, 1);
+		if (mapped) {
+			require(result.event == uml::cpu::EngineEvent::continued &&
+					result.retired_instructions == 1,
+				"compat32 POP through FS did not retire once");
+			require(memory.dword(0x2000) == 0x1111'1111U &&
+					cpu.gpr(Register::rsp) == 0x1004,
+				"compat32 POP through FS popped twice after the exact "
+				"segment check");
+		} else {
+			require(result.event == uml::cpu::EngineEvent::memory_fault &&
+					result.retired_instructions == 0 &&
+					result.fault.address == 0x2000 &&
+					result.fault.access ==
+						uml::memory::MemoryAccess::write,
+				"compat32 POP through FS did not fault on its store");
+			require(cpu.gpr(Register::rsp) == 0x1000 && cpu.rip == 0,
+				"a faulting compat32 POP through FS changed ESP");
+		}
+	}
+}
+
 void execute_long64_interrupt_return_stack_switch()
 {
 	using namespace uml::cpu::x86_64;
@@ -11055,6 +11102,7 @@ int main(int argc, char **argv)
 	execute_compat32_pushfd_popfd();
 	execute_compat32_enter_frames();
 	execute_compat32_legacy_segment_stack();
+	a_compat32_pop_through_fs_leaves_esp_for_the_exact_check();
 	execute_long64_interrupt_return_stack_switch();
 	execute_long64_interrupt_return_operand_sizes();
 	interrupt_return_masks_user_flags();
