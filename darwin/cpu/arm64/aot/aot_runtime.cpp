@@ -220,7 +220,8 @@ std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
 	refill_failures{0}, cross_hits{0}, cross_misses{0}, max_retired{0},
 	verify_nanos{0}, step_nanos{0}, steps_run{0}, code_bumps{0},
 	history_queries{0}, mops_slow{0}, mops_fault{0}, mops_illegal{0},
-	shared_hits{0}, mutable_pages{0}, epoch_rehashes{0}, stamp_queries{0};
+	shared_hits{0}, mutable_pages{0}, epoch_rehashes{0}, stamp_queries{0},
+	instances_created{0}, instance_evictions{0}, instance_rebinds{0};
 std::array<std::atomic<std::uint64_t>, 5> refusals{};
 /* The guest addresses AOT code stepped at most: library << 40 | offset. */
 constexpr std::size_t step_slots = 32768;
@@ -237,6 +238,13 @@ std::array<std::atomic<std::uint64_t>, 64> library_mutable_pages{};
 /* Page verifications that the epoch of a frame's record forced (see
  * Stats::epoch_rehashes). */
 std::array<std::atomic<std::uint64_t>, 64> library_epoch_rehashes{};
+/* Instances made of a library, and the ones made again (see
+ * Stats::instance_rebinds); `instance_seen` holds a hash of every
+ * (binder, address space, library, bias) that was made. */
+std::array<std::atomic<std::uint64_t>, 64> library_instances{};
+std::array<std::atomic<std::uint64_t>, 64> library_rebinds{};
+constexpr std::size_t instance_seen_slots = 16384;
+std::array<std::atomic<std::uint64_t>, instance_seen_slots> instance_seen{};
 /* What find() answered: an entry, or why not (FindResult), in all and per
  * library where the answer names one; and what a cross-library lookup that
  * found no entry looked at (CrossMiss). */
@@ -397,6 +405,42 @@ void note_find(FindResult result, std::uint32_t library) noexcept
 			.fetch_add(1, std::memory_order_relaxed);
 }
 
+/* A binder made an instance, in the place of a live one or not. Whether it
+ * had made this one before is told by a table of hashes that never
+ * allocates (the report thread and the vCPU threads share it): a full table
+ * stops telling, and the count of rebinds is then a lower bound. */
+void note_instance(const void *binder, unsigned long generation,
+	std::uint32_t library, std::uint64_t bias, bool evicted) noexcept
+{
+	UML_AOT_COUNT(instances_created, 1);
+	if (evicted)
+		UML_AOT_COUNT(instance_evictions, 1);
+	UML_AOT_COUNT_LIBRARY(library_instances, library);
+	std::uint64_t key = reinterpret_cast<std::uintptr_t>(binder);
+	for (const std::uint64_t part :
+	     {static_cast<std::uint64_t>(generation), std::uint64_t{library}, bias}) {
+		key ^= part + 0x9e3779b97f4a7c15ULL + (key << 6) + (key >> 2);
+		key *= 0xff51afd7ed558ccdULL;
+		key ^= key >> 33;
+	}
+	key |= 1;
+	std::size_t slot = key >> 20;
+	for (std::size_t probe = 0; probe < 64; ++probe) {
+		const auto at = (slot + probe) % counters::instance_seen_slots;
+		auto stored =
+			counters::instance_seen[at].load(std::memory_order_relaxed);
+		if (stored == 0 &&
+		    counters::instance_seen[at].compare_exchange_strong(
+			    stored, key, std::memory_order_relaxed))
+			return;
+		if (stored == key) {
+			UML_AOT_COUNT(instance_rebinds, 1);
+			UML_AOT_COUNT_LIBRARY(library_rebinds, library);
+			return;
+		}
+	}
+}
+
 /* The binder whose table the running vCPU thread's rewritten code uses. */
 thread_local const Binder *g_cross_owner = nullptr;
 thread_local unsigned long g_cross_generation = 0;
@@ -536,14 +580,16 @@ void write_report() noexcept
 		"max_retired %llu verify_nanos %llu step_nanos %llu steps_run %llu "
 		"code_bumps %llu history_queries %llu mops_slow %llu mops_fault %llu "
 		"mops_illegal %llu shared_hits %llu mutable_pages %llu "
-		"epoch_rehashes %llu stamp_queries %llu\n",
+		"epoch_rehashes %llu stamp_queries %llu instances_created %llu "
+		"instance_evictions %llu instance_rebinds %llu\n",
 		get(counters::max_retired), get(counters::verify_nanos),
 		get(counters::step_nanos), get(counters::steps_run),
 		get(counters::code_bumps), get(counters::history_queries),
 		get(counters::mops_slow), get(counters::mops_fault),
 		get(counters::mops_illegal), get(counters::shared_hits),
 		get(counters::mutable_pages), get(counters::epoch_rehashes),
-		get(counters::stamp_queries));
+		get(counters::stamp_queries), get(counters::instances_created),
+		get(counters::instance_evictions), get(counters::instance_rebinds));
 	std::fprintf(file, "stack_free %llu stack_size %llu stack_kind %llu "
 		"stack_task_bytes %llu stack_engine_free %llu stack_growth %llu\n",
 		get(counters::stack_min_free), get(counters::stack_size_at_min),
@@ -594,13 +640,16 @@ void write_report() noexcept
 		const auto shared = get(counters::library_shared_hits[library]);
 		const auto refused = get(counters::library_mutable_pages[library]);
 		const auto forced = get(counters::library_epoch_rehashes[library]);
+		const auto made = get(counters::library_instances[library]);
+		const auto again = get(counters::library_rebinds[library]);
 		if (enters == 0 && finds == 0 && cross == 0 && hashed == 0 &&
-		    shared == 0 && refused == 0 && forced == 0)
+		    shared == 0 && refused == 0 && forced == 0 && made == 0)
 			continue;
 		std::fprintf(file, "library %zu enters %llu steps %llu cross_misses "
-			"%llu verified %llu shared %llu mutable %llu rehash %llu",
+			"%llu verified %llu shared %llu mutable %llu rehash %llu "
+			"instances %llu rebound %llu",
 			library, enters, get(counters::library_steps[library]), cross,
-			hashed, shared, refused, forced);
+			hashed, shared, refused, forced, made, again);
 		for (std::size_t kind = 0;
 		     kind < counters::library_finds[library].size(); ++kind)
 			std::fprintf(file, " %s %llu", find_result_name(kind),
@@ -641,6 +690,8 @@ void start_reporter() noexcept
 #else
 #define UML_AOT_COUNT(name, amount) ((void)0)
 inline void note_find(FindResult, std::uint32_t) noexcept {}
+inline void note_instance(const void *, unsigned long, std::uint32_t,
+	std::uint64_t, bool) noexcept {}
 #define UML_AOT_COUNT_LIBRARY(name, library) ((void)0)
 #define UML_AOT_SAMPLE_STACK() ((void)0)
 #define UML_AOT_SAMPLE_STACK_AT(lowest) ((void)0)
@@ -882,6 +933,9 @@ Stats stats() noexcept
 	result.mutable_pages = get(counters::mutable_pages);
 	result.epoch_rehashes = get(counters::epoch_rehashes);
 	result.stamp_queries = get(counters::stamp_queries);
+	result.instances_created = get(counters::instances_created);
+	result.instance_evictions = get(counters::instance_evictions);
+	result.instance_rebinds = get(counters::instance_rebinds);
 	result.stack_min_free = get(counters::stack_min_free);
 	result.stack_size_at_min = get(counters::stack_size_at_min);
 	result.stack_kind_at_min = get(counters::stack_kind_at_min);
@@ -904,8 +958,16 @@ void reset_stats() noexcept
 		     &counters::history_queries, &counters::mops_slow,
 		     &counters::mops_fault, &counters::mops_illegal,
 		     &counters::shared_hits, &counters::mutable_pages,
-		     &counters::epoch_rehashes, &counters::stamp_queries})
+		     &counters::epoch_rehashes, &counters::stamp_queries,
+		     &counters::instances_created, &counters::instance_evictions,
+		     &counters::instance_rebinds})
 		counter->store(0, std::memory_order_relaxed);
+	for (auto &counter : counters::library_instances)
+		counter.store(0, std::memory_order_relaxed);
+	for (auto &counter : counters::library_rebinds)
+		counter.store(0, std::memory_order_relaxed);
+	for (auto &counter : counters::instance_seen)
+		counter.store(0, std::memory_order_relaxed);
 	for (auto *counter : {&counters::stack_min_free, &counters::stack_engine_free})
 		counter->store(~std::uint64_t{0}, std::memory_order_relaxed);
 	for (auto *counter : {&counters::stack_size_at_min,
@@ -1185,6 +1247,8 @@ std::int32_t Binder::resolve(::uml::memory::StaticGuestMemory &memory,
 	if (found == nullptr) {
 		const auto victim = next_instance_;
 		next_instance_ = (next_instance_ + 1) % instance_capacity;
+		note_instance(this, generation, library_index, bias,
+			instances_[victim].used);
 		/* No page slot may name the instance that takes this place. */
 		for (auto &slot_entry : pages_)
 			if (slot_entry.instance == static_cast<std::int32_t>(victim))
@@ -1352,6 +1416,12 @@ const CrossTable &Binder::cross(unsigned long generation,
 		    instance.generation != generation ||
 		    instance.state_changes != code_changes)
 			continue;
+		/* The table holds as many entries as the binder has instances
+		 * (static_assert above), so it is never full here; a table that
+		 * stopped being so would leave the instances it has no room for to
+		 * the engine, never write past its entries. */
+		if (cross_.count >= CrossTable::capacity)
+			break;
 		const auto library = directory().library(instance.library);
 		cross_.entries[cross_.count++] = {
 			instance.bias + library.table_base,

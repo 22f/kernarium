@@ -208,6 +208,8 @@ private:
 		std::uint64_t &current) noexcept;
 
 	static constexpr std::size_t instance_capacity = CrossTable::capacity;
+	/* The cross table is built from the instances: it must hold them all. */
+	static_assert(instance_capacity <= CrossTable::capacity);
 	static constexpr std::size_t page_slots = 2048;
 	std::array<Instance, instance_capacity> instances_{};
 	std::array<PageSlot, page_slots> pages_{};

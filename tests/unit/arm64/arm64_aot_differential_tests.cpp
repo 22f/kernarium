@@ -3418,14 +3418,25 @@ void more_instances_than_the_binder_holds(const LibraryImage &image)
 		}
 	aot::set_enabled(false);
 	const auto st = aot::stats();
-	std::fprintf(stderr, "%zu instances: binds %llu enters %llu\n", copies,
+	std::fprintf(stderr, "%zu instances: binds %llu enters %llu; made %llu, "
+		"took a live one's place %llu, made again %llu\n", copies,
 		static_cast<unsigned long long>(st.binds),
-		static_cast<unsigned long long>(st.enters));
+		static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.instances_created),
+		static_cast<unsigned long long>(st.instance_evictions),
+		static_cast<unsigned long long>(st.instance_rebinds));
 	/* Each copy is bound the first time, and the ones the 64 slots dropped
 	 * again in the second round. */
 	require(st.binds >= copies + (copies - 64));
 	require(st.enters >= 2 * copies);
 	require(st.poisoned == 0);
+	/* The slots are first in, first out, and 70 copies visited in turn over
+	 * 64 slots miss every time after the first fill: one instance made per
+	 * run, all but the first 64 in the place of a live one, and every one of
+	 * the second round made again. */
+	require(st.instances_created >= 2 * copies);
+	require(st.instance_evictions >= 2 * copies - 64);
+	require(st.instance_rebinds >= copies);
 }
 
 /* A shootdown (a mapping change by another thread) arrives while rewritten
@@ -5533,6 +5544,11 @@ int main(int argc, char **argv)
 	const uml::testing::RuntimeTestRoute runtime_route;
 	const auto cfg = config(argc, argv);
 	const auto libraries = load_libraries(cfg.libraries);
+	/* The diagnostics report keeps its per-library counters in tables of 64:
+	 * a 65th unit would run uncounted, and a library the guest runs but the
+	 * report shows as never entered is the result this build exists to
+	 * catch. */
+	require(libraries.size() <= 64);
 	require(!aot_runtime::enabled());
 	if (!cfg.only.empty()) {
 		/* One case from a failure report, under the diagnosis. */
