@@ -2559,7 +2559,10 @@ void loop_through_another_range(const LibraryImage &image,
  * framework made with UML_AOT_COUNT_RETIRED counts each one it starts; the
  * product's layout reports the budget the entry spent, which the same bound
  * covers. */
-constexpr std::uint64_t entry_bound = 4096 + 32 + 2; /* RUN_LIMIT, rewrite.py */
+#ifndef AOT_TEST_RUN_LIMIT
+#define AOT_TEST_RUN_LIMIT 32 /* RUN_LIMIT, rewrite.py */
+#endif
+constexpr std::uint64_t entry_bound = 4096 + AOT_TEST_RUN_LIMIT + 2;
 
 /* A state rewritten code may be entered with: SP aligned and none of the
  * FPCR controls the entry refuses. */

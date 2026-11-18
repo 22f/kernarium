@@ -65,6 +65,15 @@ entry-table slot in a marker word). The call saves the guest's x30 in the
 frame's last slot. The two calls are measurement variants of the same
 contract; the differential and the guest runs hold each of them.
 
+`UML_AOT_SHARED_EXITS` (`--shared-exits`) forms the high 16-bit chunks of an
+exit target once per exit routine and chunk of a library, where the product
+puts a `movk` in each exit stub; a stub then costs two words and the exit one
+more branch. `UML_AOT_RUN_LIMIT` (`--run-limit`, 32 in the product) is the
+longest run of instructions between charge points: a larger value inserts fewer
+charge points and makes an indirect branch pay more, and the differential test's
+bound on an entry follows it. Both are measurement variants with the same
+contract.
+
 `UML_AOT_INSTANCE_CAPACITY` is the number of library instances each executor
 thread's binder holds (64 in the product; above 64 it finds an instance by hash
 instead of a scan). It is a runtime option: the blob does not change.

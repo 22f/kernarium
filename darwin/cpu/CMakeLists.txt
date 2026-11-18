@@ -90,6 +90,14 @@ set_property(CACHE UML_AOT_MEMORY_CALL PROPERTY STRINGS
     inline probe probe-miss)
 set(UML_AOT_HOT_LIST "" CACHE FILEPATH
     "With a call UML_AOT_MEMORY_CALL, the hot list (tools/aot/hot_list.py) naming the functions that keep the inline probe")
+option(UML_AOT_SHARED_EXITS
+    "Emit each exit routine's high offset chunk once as a shared stub instead of a movk in every exit stub (a measurement variant)" OFF)
+set(UML_AOT_RUN_LIMIT 32 CACHE STRING
+    "The longest run of translated instructions between two charge points (32 is the product; another value is a measurement variant)")
+if(NOT UML_AOT_RUN_LIMIT MATCHES "^[0-9]+$" OR
+   UML_AOT_RUN_LIMIT LESS 1 OR UML_AOT_RUN_LIMIT GREATER 4094)
+    message(FATAL_ERROR "UML_AOT_RUN_LIMIT must be an integer from 1 to 4094")
+endif()
 set(UML_AOT_INSTANCE_CAPACITY 64 CACHE STRING
     "How many library instances each executor thread's AOT binder holds before it replaces the oldest (64 is the product; another value is a measurement variant)")
 if(NOT UML_AOT_INSTANCE_CAPACITY MATCHES "^[0-9]+$" OR
