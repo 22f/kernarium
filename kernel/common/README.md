@@ -321,6 +321,11 @@ it. The bridge fields used below are defined by the comments in
   page some process runs, pinned before the read (`O_DIRECT`, an io_uring fixed
   buffer), is named to the host so that its translation is not stale; an arm64
   program maintains its own caches (`run_guest_x86_64_pinned_code_write.py`).
+- A copy into a buffer-vector destination (a loop device's or an io_uring
+  fixed buffer's read of a file; nbd, nfsd and sunrpc reads) ends each page it
+  wrote with `flush_dcache_page()` in `iterate_bvec()`, so a page some process
+  runs is named to the host as a UBD read names it, and an arm64 kernel's call is
+  empty (`fixed-file` and `loop-fixed` of the same runner).
 - While the guest runs, a full host volume holds a direct UBD disk's I/O and
   the file system does not see a failure. A write, a flush or a write of zeroes
   that the host refuses with `ENOSPC` is redone, after a back-off that doubles

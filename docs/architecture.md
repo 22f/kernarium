@@ -281,13 +281,20 @@ generation's flush serial and publishes a whole-space code change (the range
 {0, 0}) in each, and so does a page `invalidate_code` (an AArch32
 `cacheflush()`, by address) meets that the target has no entry for yet; for the
 pages the target does map, `invalidate_code` publishes their frames. A kernel
-write into a page-cache, memfd or anonymous frame (a write(2), or a UBD read
-into a page a process pinned and runs) ends in the x86_64 kernel's
-`flush_dcache_folio()` or `flush_dcache_page()`, which names the frames
-(`darwin_uml_vm_invalidate_code_frames()`, called only for a folio queued for
-the host with guest-code permission, which is a page of a `VM_EXEC` mapping)
+write into a page-cache, memfd or anonymous frame (a write(2), a UBD read, or a
+copy into a buffer-vector destination such as a loop device's read or an io_uring
+fixed-buffer read of a file, into a page a process pinned and runs) ends in the
+x86_64 kernel's `flush_dcache_folio()` or `flush_dcache_page()`, which names the
+frames (`darwin_uml_vm_invalidate_code_frames()`, called only for a folio queued
+for the host with guest-code permission, which is a page of a `VM_EXEC` mapping)
 and publishes at their holders, or returns without work when no x86 code has
-run or the frame has no record.
+run or the frame has no record. Three limits remain. The kernel's stores into
+an executed io_uring ring whose pages the program supplied itself
+(`IORING_SETUP_NO_MMAP`) are not announced. A loop device's zero fill of a read
+past the end of its file is announced by `memzero_page()` when the completion
+runs in a task, and only warned about, once, from an interrupt. The
+announcement follows the write, so a second vCPU may finish instructions it had
+already begun after the bytes changed.
 When a run of the emulator ends it appends the process's counts so far, which
 nothing resets (unresolved kernel writes, dropped direct ranges, global holds,
 registrations that reached the address space and their failures, refusals,
