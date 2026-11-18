@@ -265,6 +265,7 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     private var windowObserver: NSObjectProtocol?
     #if !APP_STORE
     private var directTouchChild: DirectTouchChild?
+    private var lastDirectTouchLine = ""
     #endif
 
     /// The hardware keyboard and mouse this view hands the system's events
@@ -413,6 +414,13 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
         let label = experiment.empty ? "" : accessibility.label
         let value = experiment.empty ? nil : accessibility.value
         let hint = experiment.empty ? nil : accessibility.hint
+        let line = "a11y-variant \(ProcessInfo.processInfo.environment[DirectTouchExperiment.environmentName] ?? "") "
+            + "placement=\(experiment.placement) trait=\(experiment.trait) options=\(experiment.options.rawValue) "
+            + "empty=\(experiment.empty) systemActivate=\(experiment.systemActivate)"
+        if line != lastDirectTouchLine {
+            lastDirectTouchLine = line
+            FileHandle.standardError.write(Data((line + "\n").utf8))
+        }
         func configure(_ target: NSObject) {
             target.accessibilityLabel = label
             target.accessibilityValue = value
