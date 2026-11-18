@@ -1899,8 +1899,11 @@ ACCESSIBILITY_APKS = {
 # in all three request spellings (the verifier does not enumerate what to refuse: a permission that
 # a library manifest adds or a platform release introduces is a finding). TalkBack's list is its
 # manifests' requests after the series left the network and Google ones out
-# (dependencies/patches/talkback); eSpeak NG requests none. A name that is a resource reference
-# cannot be read here, so it is refused as well.
+# (dependencies/patches/talkback) and the one request that androidx core's manifest adds to every
+# application that embeds it: the signature permission that guards its unexported receivers, named
+# after the installed package (the installed TalkBack declares it too, as the image's package dump
+# shows). eSpeak NG requests none. A name that is a resource reference cannot be read here, so it
+# is refused as well.
 ACCESSIBILITY_PERMISSIONS = {
     "TalkBack": {
         "android.permission.USE_FINGERPRINT": "fingerprint-sensor gestures",
@@ -1915,10 +1918,13 @@ ACCESSIBILITY_PERMISSIONS = {
         "android.permission.POST_NOTIFICATIONS": "its notifications on Android 13 and later",
         "android.permission.BLUETOOTH_CONNECT": "connects to a Bluetooth braille display",
         "android.permission.BLUETOOTH_SCAN": "finds a Bluetooth braille display",
-        "android.permission.BLUETOOTH": "braille display on Android 11 and earlier (maxSdkVersion 30)",
-        "android.permission.BLUETOOTH_ADMIN": "braille display on Android 11 and earlier (maxSdkVersion 30)",
-        "android.permission.ACCESS_COARSE_LOCATION": "Bluetooth scan on Android 11 and earlier (maxSdkVersion 30)",
-        "android.permission.ACCESS_FINE_LOCATION": "Bluetooth scan on Android 11 and earlier (maxSdkVersion 30)",
+        "android.permission.BLUETOOTH": "braille display up to Android 11 (maxSdkVersion 30)",
+        "android.permission.BLUETOOTH_ADMIN": "braille display up to Android 11 (maxSdkVersion 30)",
+        "android.permission.ACCESS_COARSE_LOCATION": "Bluetooth scan up to Android 11 (maxSdkVersion 30)",
+        "android.permission.ACCESS_FINE_LOCATION": "Bluetooth scan up to Android 11 (maxSdkVersion 30)",
+        "com.android.talkback.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION": (
+            "androidx core's guard for its unexported receivers, named after the package"
+        ),
     },
     "eSpeakNG": {},
 }

@@ -128,17 +128,22 @@ class AccessibilityPackageTests(unittest.TestCase):
         verifier = load_verifier()
         refused = verifier.accessibility_refused_permissions
         allowed = verifier.ACCESSIBILITY_PERMISSIONS
-        # TalkBack's list is the 16 requests its manifests keep, each with a reason; eSpeak NG's
-        # is empty.
+        # TalkBack's list is the 16 requests its manifests keep and the guard of its unexported
+        # receivers, which androidx core adds and which is named after the installed package,
+        # each with a reason; eSpeak NG's is empty.
         kept = {f"android.permission.{name}" for name in (
             "USE_FINGERPRINT", "READ_PHONE_STATE", "VIBRATE", "WAKE_LOCK", "MODIFY_AUDIO_SETTINGS",
             "RECORD_AUDIO", "QUERY_ALL_PACKAGES", "RECEIVE_BOOT_COMPLETED", "FOREGROUND_SERVICE",
             "POST_NOTIFICATIONS", "ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION", "BLUETOOTH",
             "BLUETOOTH_ADMIN", "BLUETOOTH_CONNECT", "BLUETOOTH_SCAN")}
-        self.assertEqual(set(allowed["TalkBack"]), kept)
+        patch = BUILD_PATCH.read_text(encoding="utf-8")
+        manifest = patch[patch.index("+++ b/src/soong/AndroidManifest.xml"):]
+        package = re.search(r'^\+\s+package="([^"]+)"', manifest, re.M).group(1)
+        guard = f"{package}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+        self.assertEqual(set(allowed["TalkBack"]), kept | {guard})
         self.assertTrue(all(allowed["TalkBack"].values()))
         self.assertEqual(allowed["eSpeakNG"], {})
-        self.assertEqual(refused("TalkBack", set(kept)), [])
+        self.assertEqual(refused("TalkBack", kept | {guard}), [])
         # Everything else is refused, the way its name reads or not: a network permission no
         # name rule would catch, the ordinary permissions outside the list, Google's namespace
         # with no exemption for the package TalkBack is built from, and an unreadable name.
@@ -156,7 +161,7 @@ class AccessibilityPackageTests(unittest.TestCase):
         ):
             self.assertEqual(refused("TalkBack", {permission}), [permission])
             self.assertEqual(refused("eSpeakNG", {permission}), [permission])
-        for permission in kept:
+        for permission in kept | {guard}:
             self.assertEqual(refused("eSpeakNG", {permission}), [permission])
         self.assertEqual(
             refused("TalkBack", {"android.permission.VIBRATE", "android.permission.CAMERA",
