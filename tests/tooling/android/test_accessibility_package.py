@@ -9,7 +9,8 @@ application at the path the product installs it to. A library an application
 does not embed installs as a file of its own, which the product's generic
 system rule keeps off the system partition, so it names the application's
 partition too. Neither application requests a network or Google service
-permission.
+permission, and the braille keyboard's gesture screen reads only colours its
+theme defines.
 """
 
 from __future__ import annotations
@@ -102,6 +103,25 @@ def requests_changed(project: str) -> tuple[set[tuple[str, str]], set[tuple[str,
     return added, removed
 
 
+BRAILLE_KEYBOARD_STYLES = "braille/brailleime/src/phone/res/values/styles.xml"
+
+
+def last_style_parent(project: str, path: str, style: str) -> str | None:
+    """The parent a project's series last gives a style in one resource file, None if none does."""
+    parent = None
+    current = ""
+    for line in (PATCHES / project / "series.tsv").read_text(encoding="utf-8").splitlines():
+        if not line.startswith("patch\t"):
+            continue
+        for text in (PATCHES / project / line.split("\t")[1]).read_text(encoding="utf-8").splitlines():
+            if text.startswith("+++ b/"):
+                current = text[len("+++ b/"):]
+            elif current == path and text.startswith("+") and not text.startswith("+++"):
+                found = re.search(rf'<style name="{style}" parent="([^"]+)"', text)
+                parent = found.group(1) if found else parent
+    return parent
+
+
 def load_verifier():
     """Import the target-files verifier, whose hyphenated file name is not a module name."""
     spec = importlib.util.spec_from_file_location("verify_target_files", VERIFIER)
@@ -123,6 +143,15 @@ class AccessibilityPackageTests(unittest.TestCase):
         self.assertIn((BRAILLE_KEYBOARD_MANIFEST, UNDECLARED_GUARD_PERMISSION), removed)
         self.assertEqual({permission for _, permission in added} & set(NETWORK_PERMISSIONS), set())
         self.assertEqual(requests_changed("espeak-ng")[0], set())
+
+    def test_the_braille_gesture_hint_reads_its_colours_from_a_theme_that_defines_them(self) -> None:
+        # CustomGestureView.getTextColor reads colorTertiaryFixed and colorErrorContainer through a
+        # context wrapped in this style, and the lookup throws when the theme defines neither. Only
+        # the Material 3 themes define them; Theme.MaterialComponents.Light, the pinned source's
+        # parent, does not.
+        self.assertEqual(
+            last_style_parent("talkback", BRAILLE_KEYBOARD_STYLES, "CustomGestureView"),
+            "@style/Theme.Material3.Light")
 
     def test_the_verifier_accepts_only_the_permissions_the_build_is_known_to_need(self) -> None:
         verifier = load_verifier()
