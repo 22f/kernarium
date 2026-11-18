@@ -1315,6 +1315,13 @@ void test_remote_kernel_write_before_x86_code()
 		const Reader reader{871, base};
 		require(darwin_uml_static_vm_invalidate_code_generation(
 			872, base + page, 8) == 0);
+		/* The reader was told of nothing: the one step of the stamp is the
+		 * ordinary publication's, and an x86 holder range reaching it (the
+		 * x86 publisher in its place) would show here. The unnamed write
+		 * below tells every generation, so it is read before that. */
+		require(reader.changes().count == 0,
+			"a remote write into a data view told a generation that holds "
+			"nothing of the arm64 kind of a change");
 		require(darwin_uml_static_vm_invalidate_code_generation(
 			873, base + 5 * page, 8) == 0);
 		require(reader.stamp_steps() == 1,
