@@ -21,10 +21,11 @@ set_source_files_properties(arm64_jit_chain_abi_probe.S arm64-neon-inventory.s
 # composed with the static MMU and gadget engine objects (or OBJECTS instead,
 # or none for NO_OBJECTS) and linked to the engine test harness unless
 # WITHOUT_HARNESS, then registers it as arm64-<stem with dashes>, or as NAME,
-# with any ARGS as its command-line arguments.
+# with any ARGS as its command-line arguments and the TIMEOUT it needs where
+# the default bound is too short.
 function(uml_add_arm64_unit_test STEM)
     cmake_parse_arguments(PARSE_ARGV 1 _arm64_test "WITHOUT_HARNESS;NO_OBJECTS"
-        "NAME" "SOURCES;OBJECTS;LABELS;ARGS")
+        "NAME;TIMEOUT" "SOURCES;OBJECTS;LABELS;ARGS")
     set(_target uml_arm64_${STEM}_tests)
     if(NOT DEFINED _arm64_test_OBJECTS AND NOT _arm64_test_NO_OBJECTS)
         get_property(_uml_static_mmu GLOBAL PROPERTY UML_STATIC_MMU_TARGET)
@@ -56,8 +57,12 @@ function(uml_add_arm64_unit_test STEM)
     if(DEFINED _arm64_test_LABELS)
         set(_labels LABELS ${_arm64_test_LABELS})
     endif()
+    set(_timeout)
+    if(DEFINED _arm64_test_TIMEOUT)
+        set(_timeout TIMEOUT ${_arm64_test_TIMEOUT})
+    endif()
     uml_add_unit_test(NAME ${_arm64_test_NAME}
-        COMMAND ${_target} ${_arm64_test_ARGS} ${_labels})
+        COMMAND ${_target} ${_arm64_test_ARGS} ${_labels} ${_timeout})
 endfunction()
 
 include("${CMAKE_CURRENT_LIST_DIR}/engine.cmake")

@@ -489,11 +489,14 @@ get_property(_uml_static_mmu GLOBAL PROPERTY UML_STATIC_MMU_TARGET)
             OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS})
     endforeach()
     # The differential harness drives the executor with the AOT component on
-    # and off and reads the diagnostics build's counters.
+    # and off and reads the diagnostics build's counters. It runs every
+    # function sample of every rewritten library, so its time grows with the
+    # set (a loaded host takes several times an idle one's).
     if(TARGET uml_arm64_aot_framework AND UML_AOT_DIAGNOSTICS)
         # The engine adapter is in it for the rows that drive the production
         # entry (an interrupt token flipped during a native loop).
         uml_add_arm64_unit_test(aot_differential WITHOUT_HARNESS
+            TIMEOUT 1800
             OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS}
                 $<TARGET_OBJECTS:uml_arm64_gadget_engine>)
         # The diagnostics runtime's reporter thread, and a process that ends
