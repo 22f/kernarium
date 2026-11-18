@@ -444,6 +444,8 @@ struct IconTile: View {
         glyphView
             .frame(width: 30, height: 30)
             .background(color.gradient, in: .rect(cornerRadius: 8, style: .continuous))
+            // It marks a row whose words say it all.
+            .accessibilityHidden(true)
     }
 
     @ViewBuilder private var glyphView: some View {
@@ -482,6 +484,7 @@ struct WelcomeView: View {
                 .padding(.bottom, 34)
             Text("No virtual machine yet")
                 .font(.title2.weight(.bold))
+                .accessibilityAddTraits(.isHeader)
             if !model.host.runsGuestGraphics {
                 NoticeCard(
                     symbol: "cpu", color: .orange,
@@ -536,6 +539,7 @@ struct NoticeCard: View {
                 .font(.title3)
                 .foregroundStyle(color)
                 .frame(width: 28)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title.keepingTogether).font(.subheadline.weight(.semibold))
                 Text(text.keepingTogether)
@@ -551,20 +555,26 @@ struct NoticeCard: View {
                         .accessibilityIdentifier(action.identifier ?? "")
                 }
             }
+            // The title and its words are read as one.
+            .accessibilityElement(children: .combine)
             Spacer(minLength: 0)
             if let onClose {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
+                        // A 44-point target, drawn as the 28-point mark.
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .padding(-8)
                 .accessibilityLabel(closeLabel)
             }
         }
         .padding(14)
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -583,6 +593,7 @@ struct UnfinishedUpdateCard: View {
                     .font(.title3)
                     .foregroundStyle(Color.orange)
                     .frame(width: 28)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Andarium’s update didn’t finish").font(.subheadline.weight(.semibold))
                     Text(text)
@@ -590,6 +601,7 @@ struct UnfinishedUpdateCard: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                .accessibilityElement(children: .combine)
             }
             if canRestore {
                 Button("Restore") { Task { await model.restoreUpdate() } }

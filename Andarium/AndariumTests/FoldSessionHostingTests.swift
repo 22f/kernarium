@@ -231,6 +231,15 @@ struct FoldSessionHostingTests {
             FoldSessionHostingTests.labelled(in: controller.view, relativeTo: holder)
         }
 
+        /// `labelled()` for the application's own elements, and the guest display's own element apart: the
+        /// display view, found by identity and not by its label or its size. The guest's picture spans the fold by
+        /// design, and the element that stands for it is that picture, not one of the application's controls.
+        func labelledApartFromDisplay() -> (
+            controls: [(label: String, frame: CGRect)], display: [(node: NSObject, label: String, frame: CGRect)]
+        ) {
+            FoldSessionHostingTests.labelled(in: controller.view, relativeTo: holder, apartFrom: guest)
+        }
+
         func reachesGuest(_ point: CGPoint) -> Bool {
             guard let view = hit(point) else { return false }
             return view === guest || view.isDescendant(of: guest)
@@ -266,6 +275,42 @@ struct FoldSessionHostingTests {
         }
         walkViews(root)
         return found
+    }
+
+    /// `labelled(in:relativeTo:)` with `apart` taken out of the list by identity and returned beside it, with
+    /// its frame. The walk and what is left of it are that one's.
+    static func labelled(in root: UIView, relativeTo holder: UIView, apartFrom apart: NSObject) -> (
+        controls: [(label: String, frame: CGRect)], display: [(node: NSObject, label: String, frame: CGRect)]
+    ) {
+        var controls: [(String, CGRect)] = []
+        var display: [(NSObject, String, CGRect)] = []
+        var seen: Set<String> = []
+        func add(_ node: NSObject) {
+            guard let label = node.accessibilityLabel, !label.isEmpty, node !== root,
+                let screen = holder.window?.screen else { return }
+            let frame = holder.convert(node.accessibilityFrame, from: screen.coordinateSpace)
+            if node === apart {
+                if !display.contains(where: { $0.0 === node }) { display.append((node, label, frame)) }
+            } else if seen.insert("\(label)|\(Int(frame.minX))|\(Int(frame.minY))").inserted {
+                controls.append((label, frame))
+            }
+        }
+        func walk(_ node: NSObject, depth: Int) {
+            guard depth < 10 else { return }
+            let count = node.accessibilityElementCount()
+            if count != NSNotFound, count > 0 {
+                for index in 0..<count {
+                    if let child = node.accessibilityElement(at: index) as? NSObject { walk(child, depth: depth + 1) }
+                }
+            }
+            add(node)
+        }
+        func walkViews(_ view: UIView) {
+            walk(view, depth: 0)
+            for subview in view.subviews { walkViews(subview) }
+        }
+        walkViews(root)
+        return (controls, display)
     }
 
     /// Every label a view tree carries: its accessibility elements, and the
@@ -347,8 +392,20 @@ struct FoldSessionHostingTests {
             for point in points {
                 #expect(rig.reachesGuest(point), "\(pose), keys open \(open): \(point) is on the fold")
             }
-            // And no element of the screen's accessibility tree is there.
-            for element in rig.labelled() {
+            // And none of the application's own elements is there. The guest's picture spans the fold by design,
+            // and the element that stands for it is the picture, not a control: it alone is left out, by identity,
+            // and it has to be the display's, as big as the guest. A second element that spans the fold, or a
+            // control that takes the display's label, is still found.
+            let elements = rig.labelledApartFromDisplay()
+            #expect(
+                elements.display.count == 1 && elements.display.first?.node === rig.guest,
+                "\(pose), keys open \(open): the display's own element is \(elements.display.map(\.label))")
+            if let display = elements.display.first {
+                #expect(
+                    near(display.frame, rig.guestFrame),
+                    "\(pose), keys open \(open): \(display.label) is at \(display.frame), the guest at \(rig.guestFrame)")
+            }
+            for element in elements.controls {
                 #expect(!element.frame.intersects(band), "\(pose), keys open \(open): \(element.label) at \(element.frame)")
             }
             // Open, a touch on a key stays with the key: the keys take their

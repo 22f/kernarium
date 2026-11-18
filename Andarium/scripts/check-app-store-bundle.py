@@ -665,6 +665,10 @@ DEBUG_SYMBOLS = (
     # AppModel.scriptedOldApps and the probe's launch setting
     # OldAppsProbeLaunch): the application asks the image.
     ("old apps preview", (b"15ScriptedOldApps", b"15scriptedOldApps", b"18OldAppsProbeLaunch")),
+    # The launch setting that shows the held-back text messages
+    # (TextMessagesLaunch): the application offers them only once an accepted
+    # image carries the service.
+    ("text messages launch", (b"18TextMessagesLaunch",)),
     # The Simulator preview's hooks into the Send feedback sheet
     # (SendFeedbackServices.previewOpensAtLaunch and previewPrepare): the
     # preview opens the sheet and fills a draft; the application never does.

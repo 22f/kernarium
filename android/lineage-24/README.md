@@ -15,7 +15,8 @@ outside this repository.
 ## Producer boundary
 
 `build/prepare-sources.sh` is the only producer command allowed to use the
-network; it pins the Android source and the guest Mesa source. Patching, builds,
+network; it pins the Android source, the guest Mesa source and the sources of
+TalkBack and eSpeak NG. Patching, builds,
 verification, image assembly, and publication are offline (a `build/make` topic,
 route `p0002`, keeps `lunch` from calling LineageOS's network-reading
 `roomservice.py`).
@@ -46,6 +47,11 @@ guest bundle.
   synchronized as one verified unit.
 - `third_party/mesa-venus/` and `third_party/meson2hermetic/` pin the guest
   Mesa source and the Soong-port converter, each with its own series.
+  `third_party/accessibility/` pins the upstream commits of TalkBack, eSpeak NG
+  and libsonic, which `build/prepare-sources.sh` materializes at
+  `external/talkback`, `external/espeak-ng` and `external/espeak-ng/sonic`
+  with the series of `dependencies/patches/` (see
+  [Accessibility](#accessibility)).
 - `tools/` holds the regenerators, verifiers and release tools; `support/`
   holds the tracked disk, release and instance policies.
 
@@ -72,12 +78,16 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   are 4 KiB aligned. ABI support does not lower the minimum installable target
   SDK; test an older APK with `adb install --bypass-low-target-sdk-block`.
 - **Applications.** Settings, Trebuchet, Files, Package Installer, the LineageOS
-  WebView, LatinIME, ThemePicker and a curated set (camera, gallery, music, calendar,
-  calculator, PDF viewer, backup). There is no browser, app store, install
-  restriction, Google or microG. Applications that need absent hardware or
+  WebView, LatinIME, ThemePicker, Messaging for the host's
+  [text messages](#text-messages), TalkBack and eSpeak NG
+  ([Accessibility](#accessibility)) and a curated set (camera, gallery, music, calendar,
+  calculator, PDF viewer, backup). There is no browser, app store or install
+  restriction, and no Google apps, services or closed-source Google code;
+  open-source components built from source are allowed and are the ones listed
+  here. Applications that need absent hardware or
   LineageOS cloud services are excluded by name in the product makefile, and the
   build and the verifier assert that list.
-- **Signature spoofing.** The image ships no Google or microG software, and
+- **Signature spoofing.** The image ships no microG, and
   no guest interface names Google's services; Andarium names them only to say
   that they are left out on purpose ([No Google
   apps](../../Andarium/README.md#runtime)). LineageOS's restricted
@@ -91,7 +101,8 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   entry, the Bluetooth developer option, the media output switcher, and the
   hearing, Bluetooth pairing, telephony, biometric and USB pages) and hides the
   Wi-Fi hotspot, wireless display and System update pages.
-- **Hardware not advertised.** Telephony, NFC, UWB, Thread,
+- **Hardware not advertised.** Telephony (apart from receiving text
+  messages), NFC, UWB, Thread,
   biometric, secure element, USB, Bluetooth and Trusty; the vibrator only on a
   device with haptics ([Haptics](#haptics)) and the cameras only as the host
   has them ([Camera](#camera)). The host's position is declared on
@@ -149,6 +160,32 @@ overlay owns the layouts and the verifier requires them. The launcher reads its
 layout once, so a guest created earlier keeps its home screen. An item the
 launcher adds by itself, such as a newly installed application, goes on the
 first page while it has room, then on the later pages in order (route `p0010`).
+
+### Accessibility
+
+The image carries TalkBack, Android's screen reader, and eSpeak NG, a speech
+engine, as the applications `TalkBack` and `eSpeakNG` in `/product/app`; the
+image turns nothing on by itself, and Andarium turns TalkBack on only at the
+person's request. Both are open source and built from source by the image
+build, signed with the image's other applications. `third_party/accessibility/`
+pins the upstream commits of TalkBack, eSpeak NG and libsonic;
+`build/prepare-sources.sh` materializes them at `external/talkback`,
+`external/espeak-ng` and `external/espeak-ng/sonic`, TalkBack and eSpeak NG
+with the series of `dependencies/patches/talkback` and `espeak-ng`; and
+`tools/verify-accessibility-source.py` checks the pins against
+`dependencies/manifest.tsv`, the series and the checkouts, as the preflight,
+the patch step and the build run it. A series holds the changes to the project
+and its Soong build, `Build with Soong`: the Soong modules, the manifests, and
+the licence modules the image's NOTICE reports. The eSpeak NG series then
+installs the application's JNI library on the application's own partition, as
+the product's generic system rule requires. The TalkBack series also patches
+out the three libraries the tree lacks and leaves every Google Play services
+library out of the phone build, which recognises no text in images (OCR) as a
+result. It leaves every network and Google service permission out as well:
+TalkBack requests none, and its settings offer no web page, store page or image
+description. eSpeak NG requests none either. The target-files verifier requires
+both applications and refuses a request by either for a network or Google
+service permission.
 
 ### Motion sensors
 
@@ -473,6 +510,49 @@ candidate's smoke test is
 restart mode, `android-camera-restart`, boots again over a lens's colour data
 and expects the same cameras).
 
+### Text messages
+
+The guest receives text messages from the host and sends none. `KernariumSms`
+(`overlay/sms/`) is a persistent system application in an SELinux domain of its
+own that listens on vsock port 5560 and takes a request only from host CID 2.
+It has no other entry point, so neither an adb shell, adb over the network
+included, nor an application can deliver a message. `HostFrame.java` and
+`Andarium/AndariumCore/Sources/AndariumCore/GuestSmsChannel.swift` own the
+frame. A message is a sender (a number or a short name), a text of limited
+length and an identifier the host chooses for it. `Message.java` and
+`Andarium/AndariumCore/Sources/AndariumCore/Adb/GuestSms.swift` own what is
+accepted and refused, each limit stated once.
+
+The target-files verifier holds that boundary. Only the reviewed types may
+create, bind or listen on a vsock socket, and no domain but the service holds a
+permission on its vsock sockets, except the platform's own `getattr` for
+`dumpstate`, which stats a socket and carries no data. Of the data, only the
+platform's managers of application data reach it. For the services it may find,
+`system_app_data_file` and the vsock sockets of other types, the service holds
+only what every ordinary application domain holds through one platform rule,
+plus the activity, package and role services.
+
+The service hands Android the message as SMS-DELIVER PDUs, concatenated when
+the text needs more than one part: an `SMS_DELIVER` broadcast to the SMS role
+holder, then `SMS_RECEIVED` to the applications that may receive SMS, so
+Messaging stores and notifies and applications holding `RECEIVE_SMS` get it.
+With no SMS role holder and no Messaging installed, the message is stored in
+the inbox, and with no SMS provider either it goes only to the `SMS_RECEIVED`
+receivers. The broadcasts are sent, not awaited, so a handed-over answer says
+only that Android took the message. Each message carries an identifier the host
+chooses, and the host marks a repeated send of a message whose answer it did not
+get as a retry. The service records the message in its device-protected storage
+before handing it over, answers a retry from that record without handing
+anything over, and closes an identifier that a retry finds unrecorded, so no
+message is handed over twice. When the record cannot say whether a message was
+handed over, the answer is uncertain, and that identifier is never handed over
+afterwards.
+
+The product carries Messaging and TelephonyProvider and declares
+`android.hardware.telephony.messaging` and `config_sms_capable` (the SMS role
+needs both), but not `android.hardware.telephony`: there is no radio, SIM or
+SMS sending.
+
 ### Networking
 
 The guest's one network device, `eth0`, is the host's user-mode network (SLiRP,
@@ -626,7 +706,9 @@ channel: route `p0007` records the setting in `persist.sys.usb.config` and
 restarts adbd instead of stopping it, and route `p0011` refuses every key but the
 host's, with no prompt, while USB and wireless debugging are both off. `adb root`
 is refused at once on a `user` build whatever the authorization policy, with
-AOSP's answer for a production build (route `p0011`). SELinux stays enforcing in
+AOSP's answer for a production build (route `p0011`). Route `p0011` also makes adbd
+refuse an `adb reverse` whose device side is a vsock socket, the socket family of the
+host-to-guest channels, or a descriptor adbd already holds. SELinux stays enforcing in
 both variants. `tests/integration/android/run_android_adb_debugging.py`
 qualifies this contract.
 
@@ -1251,6 +1333,15 @@ implementation, `BuildNumber.legacyRange` in AndariumCore, and
 | same build, another release or system disk, or a `data.img` without `instance.json` | refuse |
 | an unfinished update, same build | retry with its snapshot kept, restore, or reset |
 | an unfinished update, newer build | restore the pre-update snapshot, then update directly to the newer build |
+
+The Andarium app adds one rule that the reference implementation and the
+vectors do not carry: an unsigned proof image (a manifest whose `acceptance` is
+`unsigned-proof`) never updates an instance that has data, and an instance a
+proof created never updates to another system. Both are refused as a mismatch,
+also when a proof and a signed release share a release ID, and Erase is the way
+out; Set up does not replace such files either. The record
+of an instance a proof created is schema 2 with `unsigned_proof` true, which a
+reader of schema 1 refuses, and a signed release's record stays schema 1.
 
 An update is finished when the host first sees the guest reach
 `sys.boot_completed`: the pending update is cleared and the snapshot deleted. A

@@ -10,6 +10,7 @@ ANDROID_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 METADATA="$ANDROID_ROOT/metadata/lineage.env"
 VERIFIER="$ANDROID_ROOT/tools/verify-aosp-patches.py"
 MESA_VENUS_VERIFIER="$ANDROID_ROOT/tools/verify-mesa-venus-source.py"
+ACCESSIBILITY_VERIFIER="$ANDROID_ROOT/tools/verify-accessibility-source.py"
 TARGET_FILES_VERIFIER="$ANDROID_ROOT/tools/verify-target-files.py"
 FIRST_BOOT_TOOL="$ANDROID_ROOT/tools/precompile-first-boot-apps.py"
 OUTER_ROOT=$(CDPATH= cd -- "$ANDROID_ROOT/../.." && pwd)
@@ -37,7 +38,9 @@ Usage: android/lineage-24/build/build-aosp.sh \
 
 Run locally on the x86_64 Linux builder after applying the routed AOSP patch
 series. The kernel is a published Android kernel artifact of the tracked
-mainline source, whose vmlinux is the runtime image without DWARF. The output
+mainline source, whose vmlinux is the runtime image without DWARF. TalkBack
+and eSpeak NG are built from the pinned sources that prepare-sources.sh
+materializes in the workspace. The output
 directory must be an ignored directory inside the AOSP Repo
 workspace; the pinned Android 17 Soong tree rejects generated host-tool paths
 from an external absolute OUT_DIR. Reusing the same output path lets the
@@ -150,6 +153,7 @@ fi
 [[ -f "$METADATA" ]] || fail "AOSP metadata is missing"
 [[ -x "$VERIFIER" ]] || fail "AOSP patch verifier is missing"
 [[ -x "$MESA_VENUS_VERIFIER" ]] || fail "Mesa Venus source verifier is missing"
+[[ -x "$ACCESSIBILITY_VERIFIER" ]] || fail "accessibility source verifier is missing"
 [[ -x "$TARGET_FILES_VERIFIER" ]] || fail "target-files verifier is missing"
 [[ -f "$FIRST_BOOT_TOOL" ]] || fail "first-boot precompile tool is missing"
 [[ -f "$KERNEL_ARTIFACT_VERIFIER" ]] || fail "kernel artifact verifier is missing"
@@ -157,6 +161,8 @@ fi
 source "$METADATA"
 
 "$MESA_VENUS_VERIFIER" --android-root "$ANDROID_ROOT" \
+	--aosp-source "$AOSP_SOURCE"
+"$ACCESSIBILITY_VERIFIER" --android-root "$ANDROID_ROOT" \
 	--aosp-source "$AOSP_SOURCE"
 "$VERIFIER" --android-root "$ANDROID_ROOT" \
 	--aosp-source "$AOSP_SOURCE" --expect final
@@ -481,6 +487,12 @@ fi
 	fail "the Wi-Fi overlay that turns MAC randomization off is absent"
 [[ "$PRODUCT_PACKAGES" == *" KernariumPinnerOverlay "* ]] ||
 	fail "the overlay that releases the home app's memory pin is absent"
+[[ "$PRODUCT_PACKAGES" == *" KernariumSms "* ]] ||
+	fail "the service that delivers the host's text messages is absent"
+[[ "$PRODUCT_PACKAGES" == *" messaging "* ]] ||
+	fail "the SMS application that shows the host's text messages is absent"
+[[ "$PRODUCT_PACKAGES" == *" TelephonyProvider "* ]] ||
+	fail "the provider that stores text messages is absent"
 [[ "$PRODUCT_PACKAGES" == *" SecureElement "* ]] ||
 	fail "the OMAPI service that SEService clients bind on demand is absent"
 for package in \
@@ -516,7 +528,6 @@ for package in \
 	QuickSearchBox \
 	TeleService \
 	Telecom \
-	TelephonyProvider \
 	com.android.compos \
 	com.android.hardware.authsecret \
 	com.android.hardware.graphics.composer.ranchu \
@@ -551,7 +562,6 @@ for package in \
 	CuttlefishWifiOverlay \
 	gsi_tool \
 	gsid \
-	messaging \
 	pmg_daemon \
 	snapshotctl \
 	snapuserd \

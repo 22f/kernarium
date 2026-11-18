@@ -18,6 +18,7 @@ import zipfile
 import zlib
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -315,6 +316,8 @@ REQUIRED_ENTRIES = {
     "VENDOR/overlay/KernariumWifiOverlay.apk",
     # The overlay that releases PinnerService's home app pin.
     "VENDOR/overlay/KernariumPinnerOverlay.apk",
+    # The service that delivers the host's text messages (overlay/sms).
+    "SYSTEM_EXT/app/KernariumSms/KernariumSms.apk",
     *ABI_LIST_PROPERTY_FILES,
     *MESA_ELF_ENTRIES,
     *MESA_HAL_ENTRIES,
@@ -502,13 +505,14 @@ FORBIDDEN_APP_DIRECTORIES = {
     "F-DroidPrivilegedExtension",
     "Gallery2",
     "Jelly",
-    # In-tree test applications (tests/integration/android/{gamepad,keymouse,location,motion,webgl,storage}):
+    # In-tree test applications (tests/integration/android/{gamepad,keymouse,location,motion,sms,webgl,storage}):
     # `m <module>` leaves them in the shared product output, and none belongs
     # in an image, whichever partition or DATA/app path it would reach.
     "AndariumGamepadProbe",
     "AndariumKeyMouseProbe",
     "AndariumLocationProbe",
     "AndariumMotionProbe",
+    "AndariumSmsProbe",
     "AndariumStorageTests",
     "AndariumWebGLProbe",
     "Profiles",
@@ -519,9 +523,7 @@ FORBIDDEN_APP_DIRECTORIES = {
     "Recorder",
     "TeleService",
     "Telecom",
-    "TelephonyProvider",
     "Updater",
-    "messaging",
 }
 FORBIDDEN_FEATURE_DECLARATIONS = {
     "android.hardware.bluetooth.xml",
@@ -571,6 +573,7 @@ REQUIRED_FEATURE_NAMES = {
     "android.hardware.sensor.gyroscope",
     "android.hardware.microphone",
     "android.hardware.wifi",
+    "android.hardware.telephony.messaging",
     "android.software.companion_device_setup",
     "android.software.midi",
     "android.hardware.opengles.aep",
@@ -1884,6 +1887,66 @@ def check_easter_egg(infos: dict[str, zipfile.ZipInfo]) -> None:
         )
 
 
+# TalkBack and eSpeak NG, which the image builds from source (external/talkback
+# and external/espeak-ng): Andarium's Settings turns TalkBack on and off, and
+# eSpeak NG is the only speech engine it can speak with.
+ACCESSIBILITY_APKS = {
+    "TalkBack": re.compile(r"PRODUCT/app/TalkBack/TalkBack\.apk"),
+    "eSpeakNG": re.compile(r"PRODUCT/app/eSpeakNG/eSpeakNG\.apk"),
+}
+
+
+# TalkBack and eSpeak NG hold no network access and no Google service permission, so the built
+# APKs request only the permissions the build is known to need and every other request is refused,
+# in all three request spellings (the verifier does not enumerate what to refuse: a permission that
+# a library manifest adds or a platform release introduces is a finding). TalkBack's list is its
+# manifests' requests after the series left the network and Google ones out
+# (dependencies/patches/talkback) and the one request that androidx core's manifest adds to every
+# application that embeds it: the signature permission that guards its unexported receivers, named
+# after the installed package (the installed TalkBack declares it too, as the image's package dump
+# shows). eSpeak NG requests none. A name that is a resource reference cannot be read here, so it
+# is refused as well.
+ACCESSIBILITY_PERMISSIONS = {
+    "TalkBack": {
+        "android.permission.USE_FINGERPRINT": "fingerprint-sensor gestures",
+        "android.permission.READ_PHONE_STATE": "call state, which pauses speech during a call",
+        "android.permission.VIBRATE": "haptic feedback (the screen reader and the braille keyboard)",
+        "android.permission.WAKE_LOCK": "keeps the screen on while reading continuously",
+        "android.permission.MODIFY_AUDIO_SETTINGS": "audio levels while it speaks",
+        "android.permission.RECORD_AUDIO": "voice commands and voice input",
+        "android.permission.QUERY_ALL_PACKAGES": "the names of the installed applications",
+        "android.permission.RECEIVE_BOOT_COMPLETED": "starts with the system",
+        "android.permission.FOREGROUND_SERVICE": "its foreground notification",
+        "android.permission.POST_NOTIFICATIONS": "its notifications on Android 13 and later",
+        "android.permission.BLUETOOTH_CONNECT": "connects to a Bluetooth braille display",
+        "android.permission.BLUETOOTH_SCAN": "finds a Bluetooth braille display",
+        "android.permission.BLUETOOTH": "braille display up to Android 11 (maxSdkVersion 30)",
+        "android.permission.BLUETOOTH_ADMIN": "braille display up to Android 11 (maxSdkVersion 30)",
+        "android.permission.ACCESS_COARSE_LOCATION": "Bluetooth scan up to Android 11 (maxSdkVersion 30)",
+        "android.permission.ACCESS_FINE_LOCATION": "Bluetooth scan up to Android 11 (maxSdkVersion 30)",
+        "com.android.talkback.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION": (
+            "androidx core's guard for its unexported receivers, named after the package"
+        ),
+    },
+    "eSpeakNG": {},
+}
+
+
+def accessibility_refused_permissions(module: str, requested: set[str]) -> list[str]:
+    """The requested permissions that TalkBack or eSpeak NG ("TalkBack", "eSpeakNG") may not hold."""
+    return sorted(requested - ACCESSIBILITY_PERMISSIONS[module].keys())
+
+
+def check_accessibility(infos: dict[str, zipfile.ZipInfo]) -> None:
+    """TalkBack and the voice it speaks with are in the image."""
+    for module, pattern in ACCESSIBILITY_APKS.items():
+        if not any(pattern.fullmatch(name) for name in infos):
+            fail(
+                f"{module}.apk is missing from the image: the image build supplies TalkBack "
+                "and eSpeak NG (external/talkback and external/espeak-ng)"
+            )
+
+
 def check_navigation_mode(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
     """The wizard leaves the navigation mode alone, and both modes stay available."""
     info = infos.get(SETUP_WIZARD_APK)
@@ -2424,6 +2487,7 @@ ATTR_NAME = 0x01010003
 AXML_STRING_POOL = 0x0001
 AXML_START_ELEMENT = 0x0102
 AXML_RESOURCE_MAP = 0x0180
+AXML_REFERENCE_TYPE = 0x01
 AXML_STRING_TYPE = 0x03
 AXML_UTF8_POOL = 0x100
 AXML_INTEGER_TYPES = (0x10, 0x11)
@@ -2519,10 +2583,15 @@ def manifest_requested_permissions(manifest: bytes) -> set[str]:
                 for index in range(count):
                     position = body + attribute_start + index * attribute_size
                     name, raw, _, data_type, data = struct.unpack_from("<IIHxBI", manifest, position + 4)
-                    if name < len(resource_ids) and resource_ids[name] == ATTR_NAME and data_type == AXML_STRING_TYPE:
-                        if data >= len(strings):
-                            raise ValueError("a permission name outside the string pool")
-                        requested.add(strings[data])
+                    if name < len(resource_ids) and resource_ids[name] == ATTR_NAME:
+                        if data_type == AXML_STRING_TYPE:
+                            if data >= len(strings):
+                                raise ValueError("a permission name outside the string pool")
+                            requested.add(strings[data])
+                        elif data_type == AXML_REFERENCE_TYPE:
+                            # The name is a resource, which this tool does not resolve: listed
+                            # by its id, so that a check against a list of permissions refuses it.
+                            requested.add(f"@resource 0x{data:08x}")
         offset += size
     return requested
 
@@ -2599,9 +2668,10 @@ def check_application_manifests(
     for an application that requests ENTER_TRADE_IN_MODE, and the privapp allowlist's entry for
     a package that is not installed grants nothing, so the request is what the check looks for,
     in every variant (a userdebug build never enters it, but the product list is one list), in
-    every APK but the shell's (TRADE_IN_MODE_REQUESTERS). The
-    check reads every APK of the image partitions; APKs inside an APEX payload are compressed
-    EROFS and out of its reach.
+    every APK but the shell's (TRADE_IN_MODE_REQUESTERS). TalkBack and eSpeak NG request no
+    permission beyond the ones the build is known to need (ACCESSIBILITY_PERMISSIONS), in
+    every variant. The check reads every APK of the image partitions; APKs inside an APEX payload
+    are compressed EROFS and out of its reach.
     """
     for entry in sorted(infos):
         info = infos[entry]
@@ -2629,6 +2699,16 @@ def check_application_manifests(
                 "unprovisioned first boot and restart adbd twice; the product must not carry "
                 "an application that can start it (DeviceDiagnostics is excluded)"
             )
+        for module, pattern in ACCESSIBILITY_APKS.items():
+            refused = accessibility_refused_permissions(module, requested) if pattern.fullmatch(entry) else []
+            if refused:
+                fail(
+                    f"{entry} requests {', '.join(refused)}: TalkBack and eSpeak NG hold no "
+                    "network access and no Google service permission, and request only the "
+                    "permissions the build is known to need (ACCESSIBILITY_PERMISSIONS; the "
+                    "TalkBack series, dependencies/patches/talkback, leaves the others out of "
+                    "the manifests)"
+                )
 
 
 # The AOSP example HALs the product keeps, each packaged as the vendor APEX that Cuttlefish
@@ -4189,6 +4269,16 @@ def check_kernel_policy(
     check_lmkd_gpu_policy(contexts, (platform_policy, vendor_policy, system_ext_policy), vendor_policy)
     check_venus_option_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
     check_audio_ring_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
+    check_sms_policy(
+        contexts,
+        (platform_policy, vendor_policy, system_ext_policy)
+        + tuple(read_small(archive, infos[name]) for name in APP_POLICY_CIL if name in infos),
+        "\n".join(
+            read_small(archive, infos[name], PLATFORM_POLICY_LIMIT).decode("utf-8", errors="strict")
+            for name in SEAPP_CONTEXT_FILES
+            if name in infos
+        ),
+    )
 
 
 def media_codec_limit(codec: ET.Element, name: str) -> ET.Element:
@@ -5020,12 +5110,13 @@ def property_label(name: str, contexts: list[str]) -> str | None:
     return best[1] if best else None
 
 
-@functools.lru_cache(maxsize=8)
+@functools.lru_cache(maxsize=16)
 def cil_attribute_sets(
-    policy: bytes,
+    policy: bytes, exact: bool = False
 ) -> tuple[tuple[tuple[str, frozenset[str]], ...], tuple[tuple[str, list[object]], ...]]:
-    """The attributes a policy defines, without version suffixes: those whose set is a list of
-    names, with the names, and those whose set is an expression, as nested lists of names."""
+    """The attributes a policy defines, without version suffixes unless |exact|: those whose set is a list
+    of names, with the names, and those whose set is an expression, as nested lists of names."""
+    version = (lambda name: name) if exact else (lambda name: CIL_PLATFORM_VERSION_SUFFIX.sub("", name))
     lists = []
     expressions = []
     for match in CIL_TYPE_ATTRIBUTE_SET.finditer(policy):
@@ -5034,13 +5125,13 @@ def cil_attribute_sets(
             if token == "(":
                 stack.append([])
             elif token != ")":
-                stack[-1].append(CIL_PLATFORM_VERSION_SUFFIX.sub("", token))
+                stack[-1].append(version(token))
             elif len(stack) > 1:
                 closed = stack.pop()
                 stack[-1].append(closed)
         if len(stack) != 1 or len(stack[0]) != 1 or not isinstance(stack[0][0], list):
             continue
-        attribute = CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode())
+        attribute = version(match.group(1).decode())
         members = stack[0][0]
         if all(isinstance(member, str) for member in members) and not (
             members and members[0] in CIL_SET_OPERATORS
@@ -5135,6 +5226,341 @@ def cil_allows_file_read(policies: tuple[bytes, ...], domain: str, label: str) -
         for policy in policies
         for source, target, _object_class, permissions in cil_rules(policy, CIL_FILE_ALLOW_RULE)
     )
+
+
+# The text message service listens on a vsock port itself, in a domain of its own: KernariumSms
+# (overlay/sms) in kernarium_sms with its data in kernarium_sms_data_file (overlay/sepolicy/system_ext/
+# private/kernarium_sms.te and seapp_contexts). It reads a request only from the host's CID, so what
+# keeps an adb shell or an installed application from causing a delivery is that none of them can
+# make a vsock socket or listen on one, and that none can reach the service's record or sockets.
+SMS_DOMAIN = "kernarium_sms"
+SMS_DATA_TYPE = "kernarium_sms_data_file"
+SMS_PACKAGE = "android.kernarium.sms"
+SMS_SERVICES = frozenset({"activity_service", "package_service", "role_service"})
+# The types the platform's policy lets create, bind or listen on a vsock socket, platform version suffixes
+# removed (adbd and its compatibility type adbd_<version> are one). A platform update that adds a
+# listener fails the image build here until someone has looked at it.
+VSOCK_SOCKET_TYPES = frozenset({
+    "adbd", "adbd_tradeinmode", "aisealhostservice", "aisealhostservice_virtualizationmanager", "compos_fd_server",
+    "compos_verify_virtualizationmanager", "composd_virtualizationmanager", "early_virtmgr_vendor",
+    "hal_camera_default", "hal_graphics_composer_default", "hal_light_cuttlefish", "hal_sensors_default",
+    "hal_thermal_default", "hal_vibrator_default", "kernarium_gamepad", "libcuttlefish_rild",
+    "platform_app_all_virtualizationmanager", "priv_app_all_virtualizationmanager", "shell_virtualizationmanager",
+    "socket_vsock_proxy", "storageproxyd_system", "tombstone_transmit", "traced",
+    "trusty_security_vm_launcher_early_virtmgr", "untrusted_app_all_virtualizationmanager",
+    "virtualizationmanager_vendor", "virtualizationservice", "virtualizationservice_virtualizationmanager",
+    "vmlauncher_app",
+})
+# Of those, the ones whose rules have no listen: they connect.
+VSOCK_TYPES_WITHOUT_LISTEN = frozenset({
+    "aisealhostservice", "hal_graphics_composer_default", "libcuttlefish_rild", "storageproxyd_system",
+    "tombstone_transmit",
+})
+# The one grant on the service's sockets that is not the service's: the platform's own rule
+# (allow dumpstate domain (vsock_socket (getattr))), the vsock instance of its getattr rule for every socket
+# class. Over the attribute domain it reaches the service as it reaches every domain. getattr is the permission
+# to stat a socket and to read its local and peer address from a descriptor already held: no read, write,
+# connect, bind, listen or accept, and no data. Only that rule is accepted, as the policy writes it (the source
+# and target tokens, not the types a version suffix maps them to), and only from the platform's policy.
+SMS_PLATFORM_VSOCK_GRANT = (b"dumpstate", b"domain", frozenset({"getattr"}))
+# The ordinary application domains: what the service holds beyond the reviewed list is only what every one of
+# them holds.
+SMS_ORDINARY_APP_DOMAINS = frozenset({"untrusted_app", "platform_app", "priv_app", "system_app"})
+# The domains that manage every application's data directories, and so reach the service's: the platform's own
+# rules through the attributes of an application data type. The first image build with the service shows the
+# set; a holder that is not named here fails the check until someone has looked at it.
+SMS_DATA_MANAGERS = frozenset({
+    "artd", "dex2oat", "dexopt_chroot_setup", "dumpstate", "init", "installd", "otapreopt_chroot", "otapreopt_slot",
+    "system_server", "vold", "vold_prepare_subdirs", "zygote",
+})
+# service.adb.listen_addrs moves adbd's own listener: only init and these domains set it, and no adb shell or
+# installed application does.
+ADB_LISTEN_ADDRS_PROPERTY = "service.adb.listen_addrs"
+ADB_LISTEN_ADDRS_SETTERS = frozenset({"charger", "init", "surfaceflinger", "system_app", "system_server"})
+SEAPP_CONTEXT_FILES = (
+    "SYSTEM/etc/selinux/plat_seapp_contexts",
+    "SYSTEM_EXT/etc/selinux/system_ext_seapp_contexts",
+    "PRODUCT/etc/selinux/product_seapp_contexts",
+    "VENDOR/etc/selinux/vendor_seapp_contexts",
+)
+
+
+class CilSets:
+    """The members of the types and attributes of a set of policies, with every set expression expanded.
+    The names have their platform version suffixes removed, except with |exact|: then a type that carries
+    one is its own type, and a compatibility mapping gives membership only where a set lists it."""
+
+    def __init__(self, policies: tuple[bytes, ...], exact: bool = False) -> None:
+        self.definitions: dict[str, list[object]] = {}
+        for policy in policies:
+            lists, expressions = cil_attribute_sets(policy, exact)
+            for attribute, members in lists:
+                self.definitions.setdefault(attribute, []).append(sorted(members))
+            for attribute, members in expressions:
+                self.definitions.setdefault(attribute, []).append(members)
+        self._members: dict[str, frozenset[str]] = {}
+        self._universe: frozenset[str] | None = None
+
+    @property
+    def universe(self) -> frozenset[str]:
+        """Every type the policies name: the leaves of the attribute sets and the declared types."""
+        if self._universe is None:
+            names: set[str] = set()
+            for definition in self.definitions.values():
+                for members in definition:
+                    names |= self._leaves(members)
+            self._universe = frozenset(n for n in names if n not in self.definitions)
+        return self._universe
+
+    def _leaves(self, expression: object) -> set[str]:
+        if isinstance(expression, str):
+            return set() if expression in CIL_SET_OPERATORS else {expression}
+        assert isinstance(expression, list)
+        return {leaf for member in expression for leaf in self._leaves(member)}
+
+    def members(self, name: str) -> frozenset[str]:
+        """The types a name stands for: itself for a type, the expanded set for an attribute."""
+        known = self._members.get(name)
+        if known is not None:
+            return known
+        if name not in self.definitions:
+            self._members[name] = frozenset({name})
+            return self._members[name]
+        self._members[name] = frozenset()  # a cycle adds nothing
+        found: set[str] = set()
+        for definition in self.definitions[name]:
+            found |= self.expand(definition)
+        self._members[name] = frozenset(found)
+        return self._members[name]
+
+    def expand(self, expression: object) -> frozenset[str]:
+        if isinstance(expression, str):
+            return self.members(expression)
+        assert isinstance(expression, list)
+        operator = expression[0] if expression and isinstance(expression[0], str) else None
+        if operator not in CIL_SET_OPERATORS:
+            return frozenset().union(*(self.expand(member) for member in expression))
+        operands = [self.expand(operand) for operand in expression[1:]]
+        if operator == "all":
+            return self.universe
+        if operator == "not":
+            return self.universe - frozenset().union(*operands)
+        if operator == "and":
+            return frozenset.intersection(*operands) if operands else frozenset()
+        if operator == "or":
+            return frozenset().union(*operands)
+        return frozenset(member for member in frozenset().union(*operands)
+                         if sum(member in operand for operand in operands) == 1)
+
+
+def cil_domain_rules(
+    policies: tuple[bytes, ...], sets: CilSets, object_class: str
+) -> list[tuple[frozenset[str], frozenset[str] | None, frozenset[str]]]:
+    """The allow rules of an object class as (source types, target types, permissions); a target of
+    None is the rule's own domain (self)."""
+    wanted = object_class.encode()
+    return [
+        (
+            sets.members(cil_type_name(source)),
+            None if target == b"self" else sets.members(cil_type_name(target)),
+            frozenset(permission.decode() for permission in permissions),
+        )
+        for policy in policies
+        for source, target, rule_class, permissions in cil_rules(policy, CIL_ALLOW_RULE)
+        if rule_class == wanted
+    ]
+
+
+def parse_seapp_contexts(text: str) -> list[dict[str, str]]:
+    """The entries of seapp_contexts files, in the order they stand: key=value fields."""
+    entries = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        entry = dict(field.split("=", 1) for field in line.split() if "=" in field)
+        if entry:
+            entries.append(entry)
+    return entries
+
+
+def seapp_context_for(entries: list[dict[str, str]], user: str, seinfo: str, name: str) -> dict[str, str] | None:
+    """The entry the platform picks for a system-uid application that is neither privileged nor
+    ephemeral: those that match, the most specific first (an exact user before a prefix, a seinfo, an exact
+    name before a prefix before none), the earlier one of equals."""
+    def rank(value: str | None, wanted: str) -> int | None:
+        if value is None:
+            return 0
+        if value.endswith("*"):
+            return 1 if wanted.startswith(value[:-1]) else None
+        return 2 if value == wanted else None
+
+    best: tuple[tuple[int, ...], int, dict[str, str]] | None = None
+    for index, entry in enumerate(entries):
+        if any(entry.get(key) not in (None, "false") for key in
+               ("isSystemServer", "isEphemeralApp", "isPrivApp", "fromRunAs")):
+            continue
+        if any(key in entry for key in ("minTargetSdkVersion", "maxTargetSdkVersion", "isIsolatedComputeApp")):
+            continue
+        scores = (rank(entry.get("user"), user), 1 if entry.get("seinfo") == seinfo else (0 if "seinfo" not in entry else None),
+                  rank(entry.get("name"), name))
+        if None in scores:
+            continue
+        key = tuple(score for score in scores if score is not None)
+        if best is None or key > best[0]:
+            best = (key, index, entry)
+    return best[2] if best else None
+
+
+class SmsRule(NamedTuple):
+    """An allow rule as the text-message check reads it: the types its source and target stand for (a target of
+    None is the rule's own domain), its permissions, the source and target as the policy writes them, and
+    whether it stands in the platform's policy."""
+
+    sources: frozenset[str]
+    targets: frozenset[str] | None
+    permissions: frozenset[str]
+    source: bytes
+    target: bytes
+    from_platform: bool
+
+
+def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_contexts: str) -> None:
+    """Only the host can cause a text message to be delivered: of the types that may create, bind or listen
+    on a vsock socket exactly the reviewed ones and the service's may, whatever attribute grants it; nothing
+    else holds the service's sockets or its data, except the platform's own getattr for dumpstate
+    (SMS_PLATFORM_VSOCK_GRANT); the service holds nothing beyond what every ordinary application domain holds
+    (SMS_ORDINARY_APP_DOMAINS) and the reviewed list (it finds only the services it needs); its
+    package selects its domain and no other package does; and the shell cannot move adbd's own listener.
+    Every grant counts, through attributes and set expressions. The first policy is the platform's."""
+    sets = CilSets(policies)
+    if not sets.members("appdomain") or not sets.members("coredomain"):
+        fail("the policy lists no type for appdomain or coredomain: the check could not tell who runs applications")
+
+    def rules_of(object_class: str) -> list[SmsRule]:
+        """The allow rules of a class, in the order of the policies, the platform's first."""
+        wanted = object_class.encode()
+        return [
+            SmsRule(
+                sets.members(cil_type_name(source)),
+                None if target == b"self" else sets.members(cil_type_name(target)),
+                frozenset(permission.decode() for permission in permissions),
+                source,
+                target,
+                index == 0,
+            )
+            for index, policy in enumerate(policies)
+            for source, target, rule_class, permissions in cil_rules(policy, CIL_ALLOW_RULE)
+            if rule_class == wanted
+        ]
+
+    vsock = rules_of("vsock_socket")
+
+    def holders(wanted: set[str]) -> set[str]:
+        found: set[str] = set()
+        for rule in vsock:
+            if wanted & rule.permissions:
+                found |= rule.sources if rule.targets is None else rule.sources & rule.targets
+        return found
+
+    creators = holders({"create", "bind", "listen"})
+    reviewed = VSOCK_SOCKET_TYPES | {SMS_DOMAIN}
+    if creators != reviewed:
+        fail(
+            "the types that may create, bind or listen on a vsock socket are not the reviewed ones "
+            f"(unreviewed: {sorted(creators - reviewed)}; reviewed and missing: {sorted(reviewed - creators)})"
+        )
+    listeners = holders({"listen"})
+    reviewed_listeners = (VSOCK_SOCKET_TYPES - VSOCK_TYPES_WITHOUT_LISTEN) | {SMS_DOMAIN}
+    if listeners != reviewed_listeners:
+        fail(
+            "the types that may listen on a vsock socket are not the reviewed ones "
+            f"(unreviewed: {sorted(listeners - reviewed_listeners)}; "
+            f"reviewed and missing: {sorted(reviewed_listeners - listeners)})"
+        )
+    shut_out = {"shell", "system_app", "platform_app", "priv_app"} | set(sets.members("untrusted_app_all"))
+    if creators & shut_out:
+        fail(f"{sorted(creators & shut_out)} may create, bind or listen on a vsock socket")
+
+    exact = CilSets(policies, exact=True)
+
+    def specific(rule: SmsRule) -> bool:
+        """The service's own rule, not one it inherits. The service inherits a rule when the platform's policy
+        gives it to every ordinary application domain through that one rule, one source set holding all four
+        and the service, each by its own name (a type that differs from one of them by a version suffix is
+        another type); a rule that names the service without all four, and every such rule of another
+        policy file (ours), is its own and must be on the reviewed list."""
+        return SMS_DOMAIN in rule.sources and not (
+            rule.from_platform and exact.members(rule.source.decode()) >= SMS_ORDINARY_APP_DOMAINS | {SMS_DOMAIN}
+        )
+
+    # The service's sockets: nothing but the service holds a permission on them (the platform's grant to
+    # dumpstate apart), and what the service holds on the sockets of other types is only what every ordinary
+    # application domain holds.
+    for rule in vsock:
+        if rule.from_platform and (rule.source, rule.target, rule.permissions) == SMS_PLATFORM_VSOCK_GRANT:
+            continue
+        if rule.targets is not None and SMS_DOMAIN in rule.targets and rule.sources - {SMS_DOMAIN}:
+            fail(f"{sorted(rule.sources - {SMS_DOMAIN})} hold {sorted(rule.permissions)} on a vsock socket of "
+                 f"{SMS_DOMAIN}")
+        if rule.targets is not None and rule.targets - {SMS_DOMAIN} and specific(rule):
+            fail(f"{SMS_DOMAIN} holds {sorted(rule.permissions)} on the vsock sockets of "
+                 f"{sorted(rule.targets - {SMS_DOMAIN})}: only what every ordinary application domain holds is allowed")
+
+    attributes = cil_types_and_attributes(policies, SMS_DOMAIN)
+    for attribute in ("coredomain", "appdomain", "unconstrained_vsock_violators"):
+        if attribute not in attributes:
+            fail(f"{SMS_DOMAIN} is not in {attribute}")
+    found: set[str] = set()
+    for rule in rules_of("service_manager"):
+        if rule.targets is not None and "find" in rule.permissions and specific(rule):
+            found |= rule.targets
+    if found - SMS_SERVICES:
+        fail(f"{SMS_DOMAIN} may find {sorted(found - SMS_SERVICES)}; it needs only {sorted(SMS_SERVICES)}")
+    for object_class in ("file", "dir", "lnk_file", "sock_file", "fifo_file", "chr_file", "blk_file"):
+        for rule in rules_of(object_class):
+            if rule.targets is not None and "system_app_data_file" in rule.targets and specific(rule):
+                fail(f"{SMS_DOMAIN} has a rule on system_app_data_file ({sorted(rule.permissions)}): "
+                     "its data has a type of its own")
+
+    # Who may touch the service's data, through any attribute it carries.
+    data_holders: set[str] = set()
+    touching = {"read", "write", "open", "create", "rename", "unlink"}
+    for object_class in ("file", "dir", "lnk_file", "sock_file", "fifo_file", "chr_file", "blk_file"):
+        for sources, targets, permissions in cil_domain_rules(policies, sets, object_class):
+            if targets is None or SMS_DATA_TYPE not in targets:
+                continue
+            data_holders |= sources
+            if sources & shut_out and permissions & touching:
+                fail(f"{sorted(sources & shut_out)} may {sorted(permissions & touching)} {SMS_DATA_TYPE}")
+    if data_holders - {SMS_DOMAIN} - SMS_DATA_MANAGERS:
+        fail(f"{sorted(data_holders - {SMS_DOMAIN} - SMS_DATA_MANAGERS)} hold rights on {SMS_DATA_TYPE}: only "
+             f"{SMS_DOMAIN} and the managers of application data may")
+
+    # service.adb.listen_addrs: who may set it.
+    label = property_label(ADB_LISTEN_ADDRS_PROPERTY, contexts)
+    if label is None:
+        fail(f"the property contexts do not label {ADB_LISTEN_ADDRS_PROPERTY}")
+    setters: set[str] = set()
+    for policy in policies:
+        for source, target, _object_class, permissions in cil_rules(policy, CIL_PROPERTY_SET_RULE):
+            if b"set" in permissions and label in sets.members(cil_type_name(target)):
+                setters |= sets.members(cil_type_name(source))
+    if setters - ADB_LISTEN_ADDRS_SETTERS:
+        fail(f"{sorted(setters - ADB_LISTEN_ADDRS_SETTERS)} may set {ADB_LISTEN_ADDRS_PROPERTY}, labelled {label}: "
+             "that moves adbd's own listener")
+    if setters & ((set(sets.members("appdomain")) | {"shell"}) - {"system_app"}):
+        fail(f"an adb shell or an application may set {ADB_LISTEN_ADDRS_PROPERTY}")
+
+    # Which package selects which domain.
+    entries = parse_seapp_contexts(seapp_contexts)
+    selected = seapp_context_for(entries, "system", "platform", SMS_PACKAGE)
+    if selected is None or (selected.get("domain"), selected.get("type")) != (SMS_DOMAIN, SMS_DATA_TYPE):
+        fail(f"seapp_contexts do not select {SMS_DOMAIN} and {SMS_DATA_TYPE} for {SMS_PACKAGE}: {selected}")
+    for package in ("com.android.settings", "com.android.systemui", "android.kernarium.other"):
+        other = seapp_context_for(entries, "system", "platform", package)
+        if other is None or other.get("domain") != "system_app":
+            fail(f"seapp_contexts select {other} for {package}: it stays in system_app")
 
 
 def check_adbd_launch_policy(contexts: list[str], policies: tuple[bytes, ...]) -> None:
@@ -6068,6 +6494,7 @@ def main() -> None:
         check_setup_wizard_branding(archive, infos)
         check_navigation_mode(archive, infos)
         check_easter_egg(infos)
+        check_accessibility(infos)
         check_launcher_workspace(archive, infos)
         check_network_time(archive, infos)
         check_flip_to_screen_off(archive, infos)

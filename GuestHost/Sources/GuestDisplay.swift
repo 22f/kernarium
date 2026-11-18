@@ -12,6 +12,20 @@ struct GuestDisplayGeometry {
     let dotsPerInch: UInt32
 }
 
+/// What VoiceOver makes of the guest's display, in the application's words.
+/// With `directTouch`, the display is a direct-touch area: a touch on it
+/// reaches the guest as it does with VoiceOver off, so a screen reader in the
+/// guest takes it. Without it, VoiceOver's own gestures work over the
+/// display, which reads as one element. Activating the element, a VoiceOver
+/// double-tap, sends the guest no touch.
+struct GuestDisplayAccessibility: Equatable {
+    var label: String
+    /// What the display says of the guest, as its value.
+    var value: String?
+    var hint: String?
+    var directTouch = false
+}
+
 struct GuestDisplayView: UIViewControllerRepresentable {
     /// Kernarium's on-screen text: the guest's view then takes characters
     /// (`TextGuestMetalView`) and this says whether the system keyboard shows.
@@ -22,6 +36,9 @@ struct GuestDisplayView: UIViewControllerRepresentable {
     /// screen's own pixels (`GuestDisplayScale`). The density the guest is told
     /// follows it, so the guest's interface keeps its size.
     let scale: GuestDisplayScale
+    /// What VoiceOver makes of the display; nil leaves it out of VoiceOver,
+    /// as while another screen covers it.
+    var accessibility: GuestDisplayAccessibility?
     /// Told each time touches begin on the display, after their contacts have
     /// gone to the guest. An application that draws controls over the display
     /// uses it to put them away when a touch lands on the guest instead.
@@ -56,6 +73,7 @@ struct GuestDisplayView: UIViewControllerRepresentable {
         view.autoResizeDrawable = false
         view.isMultipleTouchEnabled = true
         view.hardwareInput = hardwareInput
+        view.applyAccessibility(accessibility)
         return GuestDisplayViewController(metalView: view)
     }
 
@@ -68,6 +86,7 @@ struct GuestDisplayView: UIViewControllerRepresentable {
         view.contactDidChange = contactDidChange
         view.scale = scale
         view.hardwareInput = hardwareInput
+        view.applyAccessibility(accessibility)
         if let keyboardVisible {
             view.setKeyboardVisible(keyboardVisible.wrappedValue)
         } else {
@@ -288,6 +307,20 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
             width: CGFloat(width),
             height: CGFloat(height)
         )
+    }
+
+    func applyAccessibility(_ accessibility: GuestDisplayAccessibility?) {
+        isAccessibilityElement = accessibility != nil
+        accessibilityLabel = accessibility?.label
+        accessibilityValue = accessibility?.value
+        accessibilityHint = accessibility?.hint
+        accessibilityTraits = accessibility?.directTouch == true ? .allowsDirectInteraction : .none
+    }
+
+    /// A VoiceOver activation of the display is no touch: the default would tap
+    /// the guest at the element's activation point.
+    override func accessibilityActivate() -> Bool {
+        isAccessibilityElement ? true : super.accessibilityActivate()
     }
 
     func setKeyboardVisible(_ visible: Bool) {

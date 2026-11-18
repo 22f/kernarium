@@ -229,20 +229,31 @@ def synthetic_arm_elf(
     return with_imports(bytes(payload), False, imports) if imports is not None else bytes(payload)
 
 
+# The permission the braille keyboard used to request for a receiver guard nobody declared: it is
+# on neither application's list of permissions.
+OLD_GUARD_PERMISSION = "com.google.android.marvin.talkback.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+# The guard that androidx core adds to TalkBack's manifest, named after the installed package.
+TALKBACK_GUARD_PERMISSION = "com.android.talkback.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+
+
 def synthetic_compiled_manifest(
     target_sdk: int | None, *, string_value: bool = False, debuggable: bool | str | None = None,
     permissions: tuple[str, ...] = (), declared: tuple[str, ...] = (), utf8: bool = False,
+    sdk23: tuple[str, ...] = (),
 ) -> bytes:
     """A compiled manifest with <uses-sdk>, which carries targetSdkVersion when given, and, when
     debuggable is not None, an <application> that carries android:debuggable: a literal boolean,
     or a resource reference when debuggable is "reference". It requests each of `permissions` with
-    <uses-permission> and declares each of `declared` with <permission>; the string pool is UTF-8
+    <uses-permission> (and each of `sdk23` with <uses-permission-sdk-23>) and declares each of
+    `declared` with <permission>; a name that starts with "@" is a resource reference, "@" and the
+    hexadecimal id; the string pool is UTF-8
     when `utf8` is set, UTF-16 as the platform's own compiled manifests are otherwise.
 
     It has the chunks the verifier reads and no more: a string pool, the resource map that gives
     the attribute names their framework IDs, and the elements."""
     strings = ["targetSdkVersion", "debuggable", "uses-sdk", "application", "28", "name",
-               "uses-permission", "permission", *permissions, *declared]
+               "uses-permission", "permission", *permissions, *declared, *sdk23,
+               "uses-permission-sdk-23"]
     pool_strings = b""
     offsets = []
     for text in strings:
@@ -277,7 +288,18 @@ def synthetic_compiled_manifest(
     elements = element(2, sdk_attributes)
     for index, element_name in enumerate([6] * len(permissions) + [7] * len(declared)):
         permission = 8 + index
-        elements += element(element_name, struct.pack(
+        text = strings[permission]
+        if text.startswith("@"):
+            # A name given as a resource reference ("@0x7f0a0001"): not a string.
+            elements += element(element_name, struct.pack(
+                "<IIIHBBI", 0xFFFFFFFF, 5, 0xFFFFFFFF, 8, 0, 0x01, int(text[1:], 16)))
+        else:
+            elements += element(element_name, struct.pack(
+                "<IIIHBBI", 0xFFFFFFFF, 5, permission, 8, 0, 0x03, permission))
+    sdk23_element = 8 + len(permissions) + len(declared) + len(sdk23)
+    for index in range(len(sdk23)):
+        permission = 8 + len(permissions) + len(declared) + index
+        elements += element(sdk23_element, struct.pack(
             "<IIIHBBI", 0xFFFFFFFF, 5, permission, 8, 0, 0x03, permission))
     if debuggable is not None:
         value = (0x01, 0x7F010000) if debuggable == "reference" else (
@@ -289,12 +311,12 @@ def synthetic_compiled_manifest(
 
 
 def synthetic_apk(debuggable: bool | str | None = None, permissions: tuple[str, ...] = (),
-                  declared: tuple[str, ...] = ()) -> bytes:
+                  declared: tuple[str, ...] = (), sdk23: tuple[str, ...] = ()) -> bytes:
     """An application archive whose compiled manifest is the one synthetic_compiled_manifest builds."""
     package = io.BytesIO()
     with zipfile.ZipFile(package, "w") as apk:
         apk.writestr("AndroidManifest.xml", synthetic_compiled_manifest(
-            None, debuggable=debuggable, permissions=permissions, declared=declared))
+            None, debuggable=debuggable, permissions=permissions, declared=declared, sdk23=sdk23))
     return package.getvalue()
 
 
@@ -410,6 +432,158 @@ def load_tool(path: Path):
     finally:
         sys.path.remove(str(path.parent))
     return module
+
+
+_SMS_TOOL = None
+
+
+def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
+    """The text message service's part of the policy a target-files fixture carries: the platform's vsock
+    and property rules as the reviewed lists give them, the service's own domain, data type and rules (as
+    overlay/sepolicy/system_ext/private/kernarium_sms.te makes them), the seapp_contexts lines and the property
+    label. A variant breaks one thing, in the way the verifier's check must catch. The lists come from the
+    verifier, so that the fixture is the baseline the check accepts and the variants differ from it by one
+    defect."""
+    global _SMS_TOOL
+    if _SMS_TOOL is None:
+        _SMS_TOOL = load_tool(verifier)
+    tool = _SMS_TOOL
+    plat = ""
+    for name in sorted(tool.VSOCK_SOCKET_TYPES):
+        permissions = "create bind connect read write getattr getopt shutdown"
+        if name not in tool.VSOCK_TYPES_WITHOUT_LISTEN:
+            permissions += " listen accept"
+        # adbd has its compatibility type of the platform version, which the verifier counts as adbd.
+        plat += f"(allow {name}{'_202604' if name == 'adbd' else ''} self (vsock_socket ({permissions})))\n"
+    for setter in sorted(tool.ADB_LISTEN_ADDRS_SETTERS):
+        plat += f"(allow {setter} system_prop (property_service (set)))\n"
+    # The platform's own rule for dumpstate, the vsock instance of its getattr rule for every socket class:
+    # over the attribute domain it reaches the service's sockets, and every Android 17 platform policy has it.
+    plat += "(allow dumpstate domain (vsock_socket (getattr)))\n"
+    # What the platform gives the application domains through groups of them: each group is the application
+    # domains but the isolated, sandboxed and ephemeral ones, as the compiler writes the platform's rules.
+    # The service is an application domain, so it inherits them, and they are accepted; a variant takes one
+    # ordinary application domain out of a group, or puts the same rule in the system_ext policy.
+    gap = {
+        "inherited-find-without-untrusted-app": ("base_typeattr_275", "untrusted_app"),
+        "inherited-find-without-platform-app": ("base_typeattr_275", "platform_app"),
+        "inherited-find-without-priv-app": ("base_typeattr_275", "priv_app"),
+        "inherited-find-without-system-app": ("base_typeattr_275", "system_app"),
+        "inherited-file-without-priv-app": ("base_typeattr_280", "priv_app"),
+        "inherited-vsock-without-platform-app": ("base_typeattr_285", "platform_app"),
+    }.get(variant or "", (None, None))
+    inherited = {
+        "base_typeattr_275": "(allow base_typeattr_275 keystore_service (service_manager (find)))\n",
+        "base_typeattr_280": "(allow base_typeattr_280 system_app_data_file (file (read write getattr map)))\n",
+        "base_typeattr_285": "(allow base_typeattr_285 virtualizationservice (vsock_socket (read write getattr)))\n",
+    }
+    # A group that lists the four ordinary application domains by name, with the service: the control for a
+    # variant that lists a type of a version suffix in place of one of them.
+    stand_in = "priv_app_299999" if variant == "inherited-find-with-a-lookalike" else "priv_app"
+    plat += (f"(typeattributeset base_typeattr_290 (kernarium_sms untrusted_app platform_app {stand_in} system_app))\n"
+             "(allow base_typeattr_290 window_service (service_manager (find)))\n")
+    for attribute, rule in inherited.items():
+        left_out = " ".join(["isolated_app", "ephemeral_app", "sdk_sandbox_34", "sdk_sandbox_audit", "sdk_sandbox_next"]
+                            + ([gap[1]] if gap[0] == attribute else []))
+        plat += f"(typeattributeset {attribute} (and (appdomain ) (not ({left_out} ))))\n{rule}"
+    ext = (
+        "(type kernarium_sms)\n(type kernarium_sms_data_file)\n"
+        "(typeattributeset domain (kernarium_sms))\n"
+        "(typeattributeset data_file_type (kernarium_sms_data_file))\n"
+        "(typeattributeset core_data_file_type (kernarium_sms_data_file))\n"
+        "(typeattributeset app_data_file_type (kernarium_sms_data_file))\n"
+        "(allow kernarium_sms kernarium_sms_data_file (dir (create getattr open read search write add_name remove_name "
+        "rename reparent rmdir setattr lock)))\n"
+        "(allow kernarium_sms kernarium_sms_data_file (file (create getattr open read write append rename setattr "
+        "unlink lock map)))\n"
+        "(allow kernarium_sms activity_service (service_manager (find)))\n"
+        "(allow kernarium_sms package_service (service_manager (find)))\n"
+        "(allow kernarium_sms role_service (service_manager (find)))\n"
+        "(allow kernarium_sms self (vsock_socket (create bind listen accept read write shutdown getattr getopt)))\n"
+        # Its own type named as the target is its own socket, as self is.
+        "(allow kernarium_sms kernarium_sms (vsock_socket (getattr)))\n"
+        "(allow installd app_data_file_type (dir (create getattr open read search write)))\n"
+        "(allow installd app_data_file_type (file (create getattr open read write unlink)))\n"
+    )
+    if variant != "no-vsock-attribute":
+        ext += "(typeattributeset unconstrained_vsock_violators (kernarium_sms))\n"
+    if variant != "no-core-domain":
+        ext += "(typeattributeset coredomain (kernarium_sms))\n"
+    if variant != "no-app-domain":
+        ext += "(typeattributeset appdomain (kernarium_sms))\n"
+    seapp_plat = (
+        "user=system seinfo=platform domain=system_app type=system_app_data_file\n"
+        "user=_app seinfo=platform domain=platform_app type=app_data_file levelFrom=user\n"
+        "isSystemServer=true domain=system_server_app\n"
+    )
+    seapp_ext = (
+        "" if variant == "no-seapp-line" else
+        "user=system seinfo=platform name=android.kernarium.sms domain=kernarium_sms type=kernarium_sms_data_file\n"
+    )
+    property_context = "" if variant == "no-property-label" else (
+        "service.adb.listen_addrs  u:object_r:system_prop:s0 exact string\n")
+    # What each variant adds: one defect.
+    if variant == "listener-through-attribute":
+        ext += ("(typeattributeset base_typeattr_77 (untrusted_app))\n"
+                "(allow base_typeattr_77 self (vsock_socket (create bind listen accept)))\n")
+    elif variant == "creator-by-name":
+        plat += "(allow hal_audio_default self (vsock_socket (create bind connect)))\n"
+    elif variant == "listener-without-the-service":
+        ext = ext.replace("(allow kernarium_sms self (vsock_socket (create bind listen accept read write shutdown "
+                          "getattr getopt)))\n", "")
+    elif variant == "sockets-through-domain":
+        ext += "(allow domain kernarium_sms (vsock_socket (read write)))\n"
+    elif variant == "dumpstate-reads":
+        plat = plat.replace("(allow dumpstate domain (vsock_socket (getattr)))",
+                            "(allow dumpstate domain (vsock_socket (getattr read)))")
+    elif variant == "another-domain-getattr":
+        plat += "(allow system_server domain (vsock_socket (getattr)))\n"
+    elif variant == "dumpstate-getattr-over-a-smaller-group":
+        plat = plat.replace("(allow dumpstate domain (vsock_socket (getattr)))",
+                            "(allow dumpstate coredomain (vsock_socket (getattr)))")
+    elif variant == "dumpstate-lookalike-source":
+        plat = plat.replace("(allow dumpstate domain (vsock_socket (getattr)))",
+                            "(allow dumpstate_299999 domain (vsock_socket (getattr)))")
+    elif variant == "dumpstate-lookalike-target":
+        plat = plat.replace("(allow dumpstate domain (vsock_socket (getattr)))",
+                            "(typeattributeset domain_299999 (kernarium_sms))\n"
+                            "(allow dumpstate domain_299999 (vsock_socket (getattr)))")
+    elif variant == "dumpstate-getattr-of-ours":
+        ext += "(allow dumpstate kernarium_sms (vsock_socket (getattr)))\n"
+    elif variant == "dumpstate-getattr-repeated-outside-the-platform":
+        ext += "(allow dumpstate domain (vsock_socket (getattr)))\n"
+    elif variant == "outbound-to-a-group-with-the-service":
+        ext += ("(typeattributeset base_typeattr_95 (kernarium_sms virtualizationservice))\n"
+                "(allow kernarium_sms base_typeattr_95 (vsock_socket (getattr)))\n")
+    elif variant == "inherited-find-service-only":
+        plat += "(allow kernarium_sms credstore_service (service_manager (find)))\n"
+    elif variant == "inherited-find-split-over-two-rules":
+        plat += ("(typeattributeset base_typeattr_276 (kernarium_sms untrusted_app platform_app))\n"
+                 "(typeattributeset base_typeattr_277 (kernarium_sms priv_app system_app))\n"
+                 "(allow base_typeattr_276 credstore_service (service_manager (find)))\n"
+                 "(allow base_typeattr_277 credstore_service (service_manager (find)))\n")
+    elif variant in ("inherited-find-in-system-ext", "inherited-file-in-system-ext", "inherited-vsock-in-system-ext"):
+        ext += inherited[{"find": "base_typeattr_275", "file": "base_typeattr_280",
+                          "vsock": "base_typeattr_285"}[variant.split("-")[1]]]
+    elif variant == "service-on-another-sockets":
+        ext += "(allow kernarium_sms virtualizationservice (vsock_socket (read write)))\n"
+    elif variant == "data-through-app-data-file-type":
+        ext += "(allow untrusted_app app_data_file_type (file (read write open create)))\n"
+    elif variant == "data-by-another-domain":
+        ext += "(allow hal_audio_default kernarium_sms_data_file (file (getattr)))\n"
+    elif variant == "property-through-attribute":
+        plat += ("(typeattributeset base_typeattr_88 (shell))\n"
+                 "(allow base_typeattr_88 system_prop (property_service (set)))\n")
+    elif variant == "property-by-another-domain":
+        plat += "(allow vendor_init system_prop (property_service (set)))\n"
+    elif variant == "extra-service":
+        ext += "(allow kernarium_sms window_service (service_manager (find)))\n"
+    elif variant == "system-app-data":
+        ext += "(allow kernarium_sms system_app_data_file (file (read)))\n"
+    elif variant == "settings-in-the-domain":
+        seapp_ext += "user=system seinfo=platform name=com.android.settings domain=kernarium_sms type=kernarium_sms_data_file\n"
+    return {"plat": plat, "ext": ext, "seapp_plat": seapp_plat, "seapp_ext": seapp_ext,
+            "property_context": property_context}
 
 
 def tracked_fstab(android_root: Path) -> str:
@@ -1151,6 +1325,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           missing_net_library: bool = False,
                           net_policy_variant: str | None = None,
                           gamepad_policy_variant: str | None = None,
+                          sms_policy_variant: str | None = None,
                           wifi_network_variant: str | None = None,
                           wifi_hal_variant: str | None = None,
                           wifi_dirs_variant: str | None = None,
@@ -1207,6 +1382,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           navigation_variant: str | None = None,
                           launcher_variant: str | None = None,
                           easter_egg_variant: str | None = None,
+                          accessibility_variant: str | None = None,
                           network_time_variant: str | None = None,
                           flip_variant: str | None = None,
                           reclaim_variant: str | None = None,
@@ -1976,6 +2152,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         "u:object_r:kernarium_keyboard_default_exec:s0\n"
                     ),
                 )
+                sms_policy = sms_policy_fixture(verifier, sms_policy_variant)
+                archive.writestr("SYSTEM/etc/selinux/plat_seapp_contexts", sms_policy["seapp_plat"])
+                archive.writestr("SYSTEM_EXT/etc/selinux/system_ext_seapp_contexts", sms_policy["seapp_ext"])
                 # Platform, vendor and system_ext policy as the builder emits them: the
                 # platform's core domains, a vendor-owned property that only
                 # vendor_init sets, and the system-owned property adbd reports its host in.
@@ -2028,6 +2207,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     + "))\n"
                     + ("(typepermissive su)\n"
                        if build_variant != "user" or user_permissive_su else "")
+                    + sms_policy["plat"]
                     + "; padding to the size of a real platform policy\n" * (
                         (17 << 20 if oversize_platform_policy else 3_441_569) // 48
                     ),
@@ -2045,6 +2225,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "debug.  u:object_r:debug_prop:s0\n"
                     "ro.hardware.  u:object_r:vendor_default_prop:s0\n"
                     "ro.hardware.audio.primary  u:object_r:exported_default_prop:s0 exact string\n"
+                    + sms_policy["property_context"]
                     + ("ro.lmk.low  u:object_r:lmkd_config_prop:s0 exact int\n"
                        if lmkd_variant == "no-property-label" else
                        "ro.lmk.gpu_reclaim  u:object_r:lmkd_config_prop:s0 exact bool\n"),
@@ -2102,7 +2283,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 )
                 archive.writestr(
                     "SYSTEM_EXT/etc/selinux/system_ext_sepolicy.cil",
-                    "(typeattributeset vendor_property_type (vendor_aware_available_prop ))\n"
+                    sms_policy["ext"]
+                    + "(typeattributeset vendor_property_type (vendor_aware_available_prop ))\n"
                     # The report file's type (sysfs_gpu_memory.te) and what lmkd may do with it and
                     # with the directories of the virtio-gpu device that lead to it.
                     + ("" if lmkd_variant == "type-not-sysfs"
@@ -2307,7 +2489,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                                 "untrusted_app_29", "untrusted_app_25", "gmscore_app", "mediaprovider_app",
                                 "platform_app", "platform_app_36", "priv_app", "priv_app_36", "isolated_app",
                                 "ephemeral_app", "system_app", "sdk_sandbox_34", "sdk_sandbox_audit",
-                                "sdk_sandbox_next",
+                                "sdk_sandbox_next", "kernarium_sms",
                             )
                         )
                         if oldswitch_variant == "per-domain-reads"
@@ -2791,6 +2973,13 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     archive.writestr("PRODUCT/app/EasterEgg/EasterEgg.apk", release_apk)
                 elif easter_egg_variant == "wrong-directory":
                     archive.writestr("SYSTEM/app/Egg/EasterEgg.apk", release_apk)
+                # TalkBack and eSpeak NG, the image build's two APKs.
+                if accessibility_variant not in ("missing-talkback", "talkback-in-system"):
+                    archive.writestr("PRODUCT/app/TalkBack/TalkBack.apk", release_apk)
+                if accessibility_variant == "talkback-in-system":
+                    archive.writestr("SYSTEM/app/TalkBack/TalkBack.apk", release_apk)
+                if accessibility_variant != "missing-espeak":
+                    archive.writestr("PRODUCT/app/eSpeakNG/eSpeakNG.apk", release_apk)
                 if launcher_variant != "no-overlay":
                     layout_strings = [name for pair in launcher_dock for name in pair]
                     if launcher_variant == "six-application-layout":
@@ -3020,7 +3209,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 archive.writestr("SYSTEM/etc/gps_debug.conf", "# SUPL_HOST=supl.example\n# NTP_SERVER=ntp.example\n\n")
                 advertised_features = ["android.hardware.touchscreen",
                                        "android.hardware.sensor.accelerometer",
-                                       "android.hardware.sensor.gyroscope"]
+                                       "android.hardware.sensor.gyroscope",
+                                       "android.hardware.telephony.messaging"]
                 advertised_features.extend(
                     feature for feature in (
                         "android.hardware.touchscreen.multitouch",
@@ -3563,6 +3753,35 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         f"{result.returncode} {result.stdout}"
                     )
 
+        # TalkBack keeps the permissions of its other features, Bluetooth and location among them,
+        # and the guard of its unexported receivers, and an application that declares the network
+        # permission does not request it: every variant accepts both. None of the kept
+        # permissions is a network permission.
+        for variant in BUILD_VARIANTS:
+            fixture = root / f"{variant}-with-talkback-permissions-it-keeps.zip"
+            write_fixture(
+                fixture, build_variant=variant,
+                entries={"PRODUCT/app/TalkBack/TalkBack.apk": synthetic_apk(
+                    permissions=tuple(f"android.permission.{name}" for name in (
+                        "USE_FINGERPRINT", "READ_PHONE_STATE", "VIBRATE", "WAKE_LOCK",
+                        "MODIFY_AUDIO_SETTINGS", "RECORD_AUDIO", "QUERY_ALL_PACKAGES",
+                        "RECEIVE_BOOT_COMPLETED", "FOREGROUND_SERVICE", "POST_NOTIFICATIONS",
+                        "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "BLUETOOTH",
+                        "BLUETOOTH_ADMIN", "BLUETOOTH_CONNECT", "BLUETOOTH_SCAN"))
+                    + (TALKBACK_GUARD_PERMISSION,),
+                    sdk23=("android.permission.WAKE_LOCK",),
+                    declared=("android.permission.INTERNET",))},
+            )
+            result = run_tool(
+                verifier, "--target-files", fixture,
+                "--build-variant", variant, *kernel_options,
+            )
+            if result.returncode != 0:
+                fail(
+                    f"a {variant} build with TalkBack requesting only its other permissions "
+                    f"verified wrongly: {result.returncode} {result.stdout}"
+                )
+
         # A rejection fixture is built and verified once however many tables
         # state it: the cases whose options are the same share one run, which
         # must satisfy every assertion of every case (the status and the
@@ -4003,6 +4222,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("launcher-overlay-with-the-six-application-layout", {"launcher_variant": "six-application-layout"}),
             ("launcher-layout-names-an-application-the-image-lacks", {"launcher_variant": "no-documentsui"}),
             ("missing-easter-egg", {"easter_egg_variant": "missing"}),
+            ("missing-talkback", {"accessibility_variant": "missing-talkback"}),
+            ("missing-espeak-ng", {"accessibility_variant": "missing-espeak"}),
+            ("talkback-in-the-system-partition", {"accessibility_variant": "talkback-in-system"}),
             ("easter-egg-in-a-directory-of-another-name", {"easter_egg_variant": "wrong-directory"}),
             ("ntp-server-left", {"network_time_variant": "ntp-server"}),
             ("ntp-server-left-in-a-qualified-definition",
@@ -4128,6 +4350,52 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("application-that-starts-trade-in-mode",
              {"entries": {"SYSTEM/priv-app/Fixture/Fixture.apk":
                           synthetic_apk(permissions=("android.permission.ENTER_TRADE_IN_MODE",))}}),
+            ("talkback-that-requests-the-network",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("android.permission.RECORD_AUDIO",
+                                                     "android.permission.INTERNET",
+                                                     "android.permission.ACCESS_NETWORK_STATE"))}}),
+            ("talkback-that-requests-a-google-service-permission",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=(
+                              "com.google.android.providers.gsf.permission.READ_GSERVICES",
+                              "com.google.android.apps.aicore.service.BIND_SERVICE"))}}),
+            ("espeak-that-requests-the-local-network",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=("android.permission.ACCESS_LOCAL_NETWORK",))}}),
+            ("talkback-that-requests-a-play-store-permission",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("com.android.vending.BILLING",))}}),
+            ("talkback-that-requests-the-network-as-an-sdk-23-permission",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(sdk23=("android.permission.INTERNET",))}}),
+            ("talkback-that-requests-the-old-guard-permission",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=(OLD_GUARD_PERMISSION,))}}),
+            ("espeak-that-requests-the-old-guard-permission",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=(OLD_GUARD_PERMISSION,))}}),
+            ("talkback-that-requests-the-network-settings-permission",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("android.permission.NETWORK_SETTINGS",))}}),
+            ("talkback-that-requests-a-network-permission-no-name-rule-catches",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk": synthetic_apk(permissions=(
+                 "android.permission.MANAGE_IPSEC_TUNNELS", "android.permission.ACCESS_LOWPAN_STATE",
+                 "android.permission.PACKET_KEEPALIVE_OFFLOAD",
+                 "android.permission.REQUEST_COMPANION_USE_DATA_IN_BACKGROUND"))}}),
+            ("talkback-that-requests-an-ordinary-permission-outside-its-list",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("android.permission.VIBRATE",
+                                                     "android.permission.CAMERA"))}}),
+            ("espeak-that-requests-a-permission-at-all",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=("android.permission.VIBRATE",))}}),
+            ("espeak-that-requests-the-guard-permission-of-talkbacks-package",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=(TALKBACK_GUARD_PERMISSION,))}}),
+            ("talkback-that-requests-a-permission-by-resource-reference",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("@0x7f0a0001",))}}),
             ("device-diagnostics-in-the-image",
              {"extra_entry": "SYSTEM/priv-app/DeviceDiagnostics/DeviceDiagnostics.apk"}),
             ("application-without-a-manifest",
@@ -4829,6 +5097,82 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           synthetic_apk(permissions=("android.permission.ENTER_TRADE_IN_MODE",))}},
              "SYSTEM/priv-app/Fixture/Fixture.apk requests android.permission.ENTER_TRADE_IN_MODE: "
              "trade-in mode would start on an unprovisioned first boot"),
+            ("talkback-that-requests-the-network-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("android.permission.RECORD_AUDIO",
+                                                     "android.permission.INTERNET",
+                                                     "android.permission.ACCESS_NETWORK_STATE"))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests android.permission.ACCESS_NETWORK_STATE, "
+             "android.permission.INTERNET: TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-a-google-service-permission-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=(
+                              "com.google.android.providers.gsf.permission.READ_GSERVICES",
+                              "com.google.android.apps.aicore.service.BIND_SERVICE"))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests "
+             "com.google.android.apps.aicore.service.BIND_SERVICE, "
+             "com.google.android.providers.gsf.permission.READ_GSERVICES: TalkBack and eSpeak NG"),
+            ("espeak-that-requests-the-local-network-cause",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=("android.permission.ACCESS_LOCAL_NETWORK",))}},
+             "PRODUCT/app/eSpeakNG/eSpeakNG.apk requests android.permission.ACCESS_LOCAL_NETWORK: "
+             "TalkBack and eSpeak NG hold no network access and no Google service permission"),
+            ("talkback-that-requests-a-play-store-permission-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("com.android.vending.BILLING",))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests com.android.vending.BILLING: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-the-network-as-an-sdk-23-permission-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(sdk23=("android.permission.INTERNET",))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests android.permission.INTERNET: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-the-old-guard-permission-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=(OLD_GUARD_PERMISSION,))}},
+             f"PRODUCT/app/TalkBack/TalkBack.apk requests {OLD_GUARD_PERMISSION}: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("espeak-that-requests-the-old-guard-permission-cause",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=(OLD_GUARD_PERMISSION,))}},
+             f"PRODUCT/app/eSpeakNG/eSpeakNG.apk requests {OLD_GUARD_PERMISSION}: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-the-network-settings-permission-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("android.permission.NETWORK_SETTINGS",))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests android.permission.NETWORK_SETTINGS: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-a-network-permission-no-name-rule-catches-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk": synthetic_apk(permissions=(
+                 "android.permission.MANAGE_IPSEC_TUNNELS", "android.permission.ACCESS_LOWPAN_STATE",
+                 "android.permission.PACKET_KEEPALIVE_OFFLOAD",
+                 "android.permission.REQUEST_COMPANION_USE_DATA_IN_BACKGROUND"))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests android.permission.ACCESS_LOWPAN_STATE, "
+             "android.permission.MANAGE_IPSEC_TUNNELS, android.permission.PACKET_KEEPALIVE_OFFLOAD, "
+             "android.permission.REQUEST_COMPANION_USE_DATA_IN_BACKGROUND: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-an-ordinary-permission-outside-its-list-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("android.permission.VIBRATE",
+                                                     "android.permission.CAMERA"))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests android.permission.CAMERA: "
+             "TalkBack and eSpeak NG hold no network access and no Google service permission, "
+             "and request only the permissions the build is known to need"),
+            ("espeak-that-requests-a-permission-at-all-cause",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=("android.permission.VIBRATE",))}},
+             "PRODUCT/app/eSpeakNG/eSpeakNG.apk requests android.permission.VIBRATE: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("espeak-that-requests-the-guard-permission-of-talkbacks-package-cause",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=(TALKBACK_GUARD_PERMISSION,))}},
+             f"PRODUCT/app/eSpeakNG/eSpeakNG.apk requests {TALKBACK_GUARD_PERMISSION}: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-a-permission-by-resource-reference-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("@0x7f0a0001",))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests @resource 0x7f0a0001: "
+             "TalkBack and eSpeak NG hold no network access"),
             ("device-diagnostics-in-the-image-cause",
              {"extra_entry": "SYSTEM/priv-app/DeviceDiagnostics/DeviceDiagnostics.apk"},
              "unneeded built-in application payload is forbidden: "
@@ -4897,6 +5241,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("launcher-overlay-with-the-six-application-layout-cause", {"launcher_variant": "six-application-layout"},
              "res/xml/default_workspace_4x5.xml names com.android.calculator2.Calculator: the home screen "
              "holds only the dock"),
+            ("missing-talkback-cause", {"accessibility_variant": "missing-talkback"},
+             "TalkBack.apk is missing from the image: the image build supplies TalkBack"),
+            ("missing-espeak-ng-cause", {"accessibility_variant": "missing-espeak"},
+             "eSpeakNG.apk is missing from the image: the image build supplies TalkBack"),
+            ("talkback-in-the-system-partition-cause", {"accessibility_variant": "talkback-in-system"},
+             "TalkBack.apk is missing from the image: the image build supplies TalkBack"),
             ("missing-easter-egg-cause", {"easter_egg_variant": "missing"},
              "EasterEgg.apk is missing from the image: the Android version row opens the logo screen"),
             ("easter-egg-in-a-directory-of-another-name-cause", {"easter_egg_variant": "wrong-directory"},
@@ -5590,6 +5940,94 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "does not give the gamepad relay vsock sockets to listen on"),
             ("gamepad-policy-without-the-vsock-attribute", {"gamepad_policy_variant": "no-attribute"},
              "does not classify the gamepad relay as an unconstrained vsock user"),
+            # The text message service: only the host can cause a delivery. Each row is one defect
+            # of the policy that the baseline fixture does not have.
+            ("sms-listener-through-an-attribute", {"sms_policy_variant": "listener-through-attribute"},
+             "vsock socket are not the reviewed ones \\(unreviewed: \\['untrusted_app"),
+            ("sms-vsock-creator-by-name", {"sms_policy_variant": "creator-by-name"},
+             "unreviewed: \\['hal_audio_default'\\]"),
+            ("sms-service-without-its-vsock-rule", {"sms_policy_variant": "listener-without-the-service"},
+             "reviewed and missing: \\['kernarium_sms'\\]"),
+            ("sms-sockets-through-domain", {"sms_policy_variant": "sockets-through-domain"},
+             "hold \\['read', 'write'\\] on a vsock socket of kernarium_sms"),
+            # The platform's grant of getattr to dumpstate over domain is accepted by the baseline; each of
+            # these differs from it by one thing and is refused.
+            ("sms-dumpstate-reads", {"sms_policy_variant": "dumpstate-reads"},
+             "\\['dumpstate'\\] hold \\['getattr', 'read'\\] on a vsock socket of kernarium_sms"),
+            ("sms-another-domain-getattr", {"sms_policy_variant": "another-domain-getattr"},
+             "\\['system_server'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            ("sms-dumpstate-getattr-over-a-smaller-group",
+             {"sms_policy_variant": "dumpstate-getattr-over-a-smaller-group"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            # A type or attribute whose name differs from dumpstate or domain by a platform version suffix is
+            # another type: the rule must be the platform's own, token for token.
+            ("sms-dumpstate-lookalike-source", {"sms_policy_variant": "dumpstate-lookalike-source"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            ("sms-dumpstate-lookalike-target", {"sms_policy_variant": "dumpstate-lookalike-target"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            ("sms-dumpstate-getattr-of-ours", {"sms_policy_variant": "dumpstate-getattr-of-ours"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            ("sms-dumpstate-getattr-repeated-outside-the-platform",
+             {"sms_policy_variant": "dumpstate-getattr-repeated-outside-the-platform"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            # What the service inherits: the baseline has the platform's rules over groups of the application
+            # domains, which hold all four ordinary ones. A group without one of them, rules that split
+            # the four, the service alone, and the same rule in the system_ext policy are the service's own.
+            ("sms-find-service-only-in-the-platform-policy", {"sms_policy_variant": "inherited-find-service-only"},
+             "may find \\['credstore_service'\\]"),
+            ("sms-find-split-over-two-rules", {"sms_policy_variant": "inherited-find-split-over-two-rules"},
+             "may find \\['credstore_service'\\]"),
+            # A type that differs from one of the four by a platform version suffix is another type.
+            ("sms-find-group-with-a-lookalike-of-priv-app", {"sms_policy_variant": "inherited-find-with-a-lookalike"},
+             "may find \\['window_service'\\]"),
+            ("sms-find-group-without-untrusted-app", {"sms_policy_variant": "inherited-find-without-untrusted-app"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-find-group-without-platform-app", {"sms_policy_variant": "inherited-find-without-platform-app"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-find-group-without-priv-app", {"sms_policy_variant": "inherited-find-without-priv-app"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-find-group-without-system-app", {"sms_policy_variant": "inherited-find-without-system-app"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-file-group-without-priv-app", {"sms_policy_variant": "inherited-file-without-priv-app"},
+             "has a rule on system_app_data_file"),
+            ("sms-vsock-group-without-platform-app", {"sms_policy_variant": "inherited-vsock-without-platform-app"},
+             "kernarium_sms holds .* on the vsock sockets of"),
+            ("sms-find-in-system-ext", {"sms_policy_variant": "inherited-find-in-system-ext"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-file-in-system-ext", {"sms_policy_variant": "inherited-file-in-system-ext"},
+             "has a rule on system_app_data_file"),
+            ("sms-vsock-in-system-ext", {"sms_policy_variant": "inherited-vsock-in-system-ext"},
+             "kernarium_sms holds .* on the vsock sockets of"),
+            # A target group that holds the service and another type is the other type's socket too.
+            ("sms-vsock-outbound-to-a-group-with-the-service",
+             {"sms_policy_variant": "outbound-to-a-group-with-the-service"},
+             "kernarium_sms holds .* on the vsock sockets of \\['virtualizationservice'\\]"),
+            ("sms-service-on-other-sockets", {"sms_policy_variant": "service-on-another-sockets"},
+             "kernarium_sms holds .* on the vsock sockets of"),
+            ("sms-data-through-app-data-file-type", {"sms_policy_variant": "data-through-app-data-file-type"},
+             "may .* kernarium_sms_data_file"),
+            ("sms-data-by-another-domain", {"sms_policy_variant": "data-by-another-domain"},
+             "hold rights on kernarium_sms_data_file"),
+            ("sms-property-through-attribute", {"sms_policy_variant": "property-through-attribute"},
+             "may set service.adb.listen_addrs"),
+            ("sms-property-by-another-domain", {"sms_policy_variant": "property-by-another-domain"},
+             "\\['vendor_init'\\] may set service.adb.listen_addrs"),
+            ("sms-property-without-a-label", {"sms_policy_variant": "no-property-label"},
+             "do not label service.adb.listen_addrs"),
+            ("sms-service-finds-another-service", {"sms_policy_variant": "extra-service"},
+             "may find \\['window_service'\\]"),
+            ("sms-service-on-system-app-data", {"sms_policy_variant": "system-app-data"},
+             "has a rule on system_app_data_file"),
+            ("sms-service-not-a-core-domain", {"sms_policy_variant": "no-core-domain"},
+             "kernarium_sms is not in coredomain"),
+            ("sms-service-not-an-app-domain", {"sms_policy_variant": "no-app-domain"},
+             "kernarium_sms is not in appdomain"),
+            ("sms-service-without-the-vsock-attribute", {"sms_policy_variant": "no-vsock-attribute"},
+             "kernarium_sms is not in unconstrained_vsock_violators"),
+            ("sms-package-selects-no-domain", {"sms_policy_variant": "no-seapp-line"},
+             "seapp_contexts do not select kernarium_sms"),
+            ("sms-domain-for-another-package", {"sms_policy_variant": "settings-in-the-domain"},
+             "seapp_contexts select .* for com.android.settings"),
             ("missing-location-feature", {"missing_location_feature": "android.hardware.location"},
              "feature is not declared: android.hardware.location(?!\\.gps)"),
             ("missing-gps-feature", {"missing_location_feature": "android.hardware.location.gps"},
@@ -5600,6 +6038,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("keymouse-probe-left-in-the-image", {"entries": {
                 "SYSTEM/app/AndariumKeyMouseProbe/AndariumKeyMouseProbe.apk": synthetic_apk(debuggable=False)}},
              "unneeded built-in application payload is forbidden: SYSTEM/app/AndariumKeyMouseProbe"),
+            ("sms-probe-left-in-the-image", {"entries": {
+                "SYSTEM/app/AndariumSmsProbe/AndariumSmsProbe.apk": synthetic_apk(debuggable=False)}},
+             "unneeded built-in application payload is forbidden: SYSTEM/app/AndariumSmsProbe"),
             ("bugreport-keychord", {"init_variant": "bugreport-keychord"},
              "starts bugreport on a keychord \\('keycodes 30 48'\\)"),
             ("keyboard-default-missing-script", {"keyboard_default_variant": "missing-script"},
@@ -8481,6 +8922,9 @@ def verify_package_assertions(android_root: Path) -> None:
         "com.google.cf.wpa_supplicant",
         "KernariumWifiOverlay",
         "KernariumPinnerOverlay",
+        "KernariumSms",
+        "messaging",
+        "TelephonyProvider",
         "SecureElement",
         "EasterEgg",
         "kernarium_net_setup",

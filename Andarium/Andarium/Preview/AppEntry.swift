@@ -56,6 +56,19 @@ struct AppEntry {
     /// default resolution follows ("2867" is an iPad mini 6's); absent, no
     /// limit, as on a Mac.
     var memoryLimitMiB: Int?
+    /// The model takes VoiceOver as running, which the Simulator never has,
+    /// so a run shows the card that asks about Android's screen reader.
+    var voiceOver: Bool
+    /// The mock guest's screen reader: "on", "missing" for a system without
+    /// one, "unreadable" for a guest whose answer never comes, "fails" for one
+    /// that refuses a change, "slow" for a change that takes long and
+    /// "transfer" for a file transfer that holds the channel; absent, the
+    /// system carries it and it is off.
+    var talkBack: String?
+    /// What the preview does of its own once the mock guest has been read:
+    /// "change" turns the screen reader on from Settings' switch, "card" from
+    /// the card's Turn On, so a capture shows a change under way or failed.
+    var talkBackAct: String?
 
     static func fromArguments() -> AppEntry {
         let defaults = UserDefaults.standard
@@ -76,7 +89,10 @@ struct AppEntry {
             displayScale: defaults.string(forKey: "displayScale"),
             displayNative: defaults.string(forKey: "displayNative"),
             displayPoints: defaults.string(forKey: "displayPoints"),
-            memoryLimitMiB: defaults.string(forKey: "memoryLimitMiB").flatMap { Int($0) }
+            memoryLimitMiB: defaults.string(forKey: "memoryLimitMiB").flatMap { Int($0) },
+            voiceOver: defaults.bool(forKey: "voiceOver"),
+            talkBack: defaults.string(forKey: "talkBack"),
+            talkBackAct: defaults.string(forKey: "talkBackAct")
         )
     }
 
@@ -104,6 +120,9 @@ struct AppEntry {
     private static let settingsScrolls: [String: String] = [
         "settings-stats": "stats",
         "settings-feedback": "diagnostics",
+        "settings-text-message": "developer",
+        "settings-accessibility": "accessibility",
+        "settings-accessibility-left": "accessibility",
         "settings-performance": "stats", "settings-performance-menu": "stats", "settings-performance-off": "stats",
         "settings-performance-hot": "stats", "settings-performance-hot-off": "stats",
     ]
@@ -133,7 +152,7 @@ struct AppEntry {
             Tips.showAllTipsForTesting()
         } else if screen.hasPrefix("session") || screen.hasPrefix("settings") || screen.hasPrefix("files")
             || screen.hasPrefix("recovery") || screen.hasPrefix("boot")
-            || screen.hasPrefix("space-pause") || Self.operationScreens.contains(screen) {
+            || screen.hasPrefix("space-pause") || screen.hasPrefix("sms-") || Self.operationScreens.contains(screen) {
             Tips.hideAllTipsForTesting()
         }
         try? Tips.configure([.displayFrequency(.immediate)])
@@ -166,6 +185,22 @@ struct AppEntry {
         // screen states another access (and `-systemCamera` reads the
         // Simulator's own).
         model.cameraAccess = .notDetermined
+        if voiceOver { model.voiceOverRunning = { true } }
+        let mockReader = PreviewScreenReader()
+        model.screenReaderStandIn = mockReader
+        switch talkBack {
+        case "on":
+            mockReader.state.enabledServices = [ScreenReader.services[0]]
+        case "missing":
+            mockReader.state = ScreenReaderState(installedService: nil, enabledServices: [])
+        case "unreadable": mockReader.fault = .unreadable
+        case "fails": mockReader.fault = .refusesChange
+        case "slow": mockReader.fault = .slow
+        case "transfer": mockReader.fault = .transfer
+        case "checking": mockReader.fault = .pending
+        default:
+            break
+        }
 
         func boot(_ kind: BootKind, stage: Int, seconds: Int) {
             model.frozenBootStage = freeze ? (bootStage ?? stage) : nil
@@ -335,7 +370,7 @@ struct AppEntry {
             model.jitOn = true
             model.jitLastStart = .noDebugger
             boot(.normal, stage: 1, seconds: 4)
-        case "session", "session-tip", "session-tip-left", "session-open", "session-keyboard", "session-stats",
+        case "session", "session-closed-left", "session-tip", "session-tip-left", "session-open", "session-keyboard", "session-stats",
              "session-power", "session-setup", "session-off", "session-left", "session-volume",
              "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi",
              "session-camera-notice", "session-camera-off-notice", "session-thermal-alert", "session-thermal-off":
@@ -344,7 +379,7 @@ struct AppEntry {
             model.sessionPreset = SessionPreset(
                 volumePanel: screen == "session-volume",
                 powerMenu: screen == "session-power",
-                leftEdge: ["session-left", "session-volume", "session-tip-left"].contains(screen),
+                leftEdge: ["session-left", "session-closed-left", "session-volume", "session-tip-left"].contains(screen),
                 guestScreen: {
                     switch screen {
                     case "session-setup": .setup
@@ -361,8 +396,19 @@ struct AppEntry {
             if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
             if screen == "session-camera-notice" { model.previewCameraNotice() }
             if screen == "session-camera-off-notice" { model.previewCameraNotice(.blockedInUse) }
+        case "sms-bar", "sms-bar-typing", "sms-bar-near-limit", "sms-bar-sending", "sms-bar-sent",
+             "sms-bar-not-confirmed", "sms-bar-delivered-earlier", "sms-bar-not-sent", "sms-bar-uncertain",
+             "sms-bar-cut-off", "sms-bar-waiting", "sms-bar-bad-sender", "sms-bar-long-sender",
+             "sms-bar-no-sender", "sms-bar-too-long", "sms-bar-unsendable", "sms-bar-paused":
+            model.phase = .running(.normal)
+            // `-androidScreen light` puts the bar over a light Android screen (the launcher's search).
+            if UserDefaults.standard.string(forKey: "androidScreen") == "light" {
+                model.sessionPreset = SessionPreset(guestScreen: .search)
+            }
+            model.previewTextMessage(screen)
         case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
-             "settings-feedback", "settings-performance", "settings-performance-menu", "settings-performance-off",
+             "settings-feedback", "settings-text-message", "settings-accessibility", "settings-accessibility-left",
+             "settings-performance", "settings-performance-menu", "settings-performance-off",
              "settings-performance-hot", "settings-performance-hot-off", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
              "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container",
              "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split",
@@ -390,7 +436,8 @@ struct AppEntry {
                 settings: !operation,
                 settingsLarge: Self.settingsScrolls.keys.contains(screen) || screen == "settings",
                 settingsScroll: Self.settingsScrolls[screen],
-                oldAppsPage: screen.hasPrefix("settings-old-apps-")
+                oldAppsPage: screen.hasPrefix("settings-old-apps-"),
+                leftEdge: screen == "settings-accessibility-left"
             )
             model.phase = .running(.normal)
             // The real operation lasts a few seconds, too short for a
@@ -448,6 +495,9 @@ struct AppEntry {
         if systemLocation { useSystemLocation(in: model) }
         if systemCamera { useSystemCamera(in: model) }
         SnapshotPreview.apply(screen: screen, to: model)
+        // A run in the preview reads the mock guest's screen reader as a run
+        // does; under VoiceOver the card follows.
+        if case .running = model.phase { model.screenReaderBootFinished() }
         return model
     }
 
@@ -669,6 +719,16 @@ struct AppEntry {
     @MainActor
     func applyDeferred(to model: AppModel) async {
         try? await Task.sleep(for: .milliseconds(450))
+        if let talkBackAct {
+            for _ in 0..<40 where model.session.reader.state == nil {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            switch talkBackAct {
+            case "change": model.setScreenReader(true)
+            case "card": model.turnOnScreenReaderFromCard()
+            default: break
+            }
+        }
         switch screen {
         case "create", "create-low-space":
             model.sheet = .create

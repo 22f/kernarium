@@ -40,6 +40,17 @@ uml_add_tooling_test(
     LABELS android;audit
     TIMEOUT 300)
 
+# TalkBack, eSpeak NG and libsonic are pinned in the metadata and in the
+# dependency manifest alike, and a checkout is accepted only at its pin and
+# its series' tree.
+uml_add_tooling_test(
+    NAME lineage24-accessibility-source-contract
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_accessibility_source_contract.py
+        --source-root ${PROJECT_SOURCE_DIR}
+    LABELS android;audit
+    TIMEOUT 120)
+
 uml_add_tooling_test(
     NAME lineage24-mesa-venus-port-generator
     COMMAND ${Python3_EXECUTABLE} -B
@@ -79,6 +90,24 @@ uml_add_tooling_test(
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_camera_app_contract.py
         --source-root ${PROJECT_SOURCE_DIR}
+    LABELS android;audit
+    TIMEOUT 60)
+
+# The TalkBack the image builds is the package Andarium's screen-reader switch
+# names, installed where the target-files verifier requires it.
+uml_add_tooling_test(
+    NAME lineage24-accessibility-package
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_accessibility_package.py
+    LABELS android;audit
+    TIMEOUT 60)
+
+# The licence modules of the series that build TalkBack and eSpeak NG name what
+# each holds, for the image's NOTICE, with the text of every copyleft kind.
+uml_add_tooling_test(
+    NAME lineage24-accessibility-licenses
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_accessibility_licenses.py
     LABELS android;audit
     TIMEOUT 60)
 
@@ -211,6 +240,20 @@ uml_add_tooling_test(
 set_tests_properties(android17-oldapp-switch-command PROPERTIES
     SKIP_RETURN_CODE 77)
 
+# The text message service's logic on a plain JVM: the PDUs it builds, read back
+# with the platform's own UTF-16 decoder, the request's parsing and the answers,
+# the delivery record (never twice, at every point a request can end at), and the
+# host channel's server, frame and admission over stand-ins for the platform's
+# socket classes. It skips (77) where the host has no JDK.
+uml_add_tooling_test(
+    NAME android17-sms-service
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_sms_service.py
+    LABELS android
+    TIMEOUT 300)
+set_tests_properties(android17-sms-service PROPERTIES
+    SKIP_RETURN_CODE 77)
+
 # The old-application runner without a guest: the probe application's two
 # packages (manifest, DEX file, libraries built for armv7 when the host has the
 # tools), the verdicts, the permission review and the commands it sends.
@@ -288,6 +331,18 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_gamepad_runner.py
     LABELS android
     TIMEOUT 60)
+
+# The text-message runner without a guest: its frames and requests against the
+# golden file, the record file it writes, its readers of the guest's logs and
+# dumps, its judgements of a round of rows, its host and adb-server client
+# against fakes on loopback, the catalogue of rows, and a parse of the probe's
+# sources and build script.
+uml_add_tooling_test(
+    NAME android17-sms-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_sms_runner.py
+    LABELS android
+    TIMEOUT 120)
 
 # The keyboard and mouse runner's reading of the guest's input dump and of the
 # probe's log, its VNC client's wire, and its key table against the launcher's.
