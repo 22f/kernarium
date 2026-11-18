@@ -590,6 +590,24 @@ class BuildPhaseTests(unittest.TestCase):
         staged = fixture.stage()
         (staged / "release-manifest.json").write_text(json.dumps(fixture.proof_manifest()))
         fixture.app = fixture.package()
+        self.assert_only_release_builds_refuse(fixture)
+
+    def test_a_proof_the_staging_script_stages_stops_the_same_builds(self) -> None:
+        # The staging script's own output, not a manifest written to look like it.
+        import test_stage_system_image as staging
+
+        fixture = Fixture(self.root)
+        shutil.rmtree(fixture.repo / ".build/andarium-system")
+        (self.root / "line").mkdir()
+        proof = staging.make_proof(self.root / "proofs")
+        result = staging.run(
+            "--release", str(proof), "--unsigned-proof", "--output", str(fixture.repo / ".build/andarium-system"),
+            *staging.make_line(self.root / "line"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fixture.app = fixture.package()
+        self.assert_only_release_builds_refuse(fixture)
+
+    def assert_only_release_builds_refuse(self, fixture: Fixture) -> None:
         for configuration in self.CONFIGURATIONS:
             with self.subTest(configuration):
                 result = self.run_phase(configuration, fixture)

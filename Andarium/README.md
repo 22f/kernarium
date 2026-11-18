@@ -166,6 +166,12 @@ so package the runtime a build needs just before it. The staging script checks
 the accepted release against its manifest and layout and stages the system
 disk, partition layout, kernel command line and manifest into
 `.build/andarium-system`, which the application bundles as it stands.
+A developer build can stage an unsigned proof image instead
+(`stage-system-image.py --release DIR --unsigned-proof`), whose manifest stays
+a proof's, completed from the tracked image line and the accepted Android
+kernel, and which the AppStore and TestFlight configurations refuse. Run it on
+a fresh or isolated guest instance (`ANDARIUM_GUEST_INSTANCE`): an existing
+guest is updated to it.
 
 The `AndariumTests` bundle runs hosted in the application on an iPad, in the
 iOS Simulator or, as an iPad app, on an Apple silicon Mac (whose derived data

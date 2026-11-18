@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+# The staging script stages the accepted release, and with --unsigned-proof a
+# developer build's proof image, whose staged manifest (a golden file that
+# AndariumCore's SystemInfo reads too) says it is a proof.
 uml_add_tooling_test(
     NAME andarium-stage-system-image
     COMMAND ${Python3_EXECUTABLE} -B
