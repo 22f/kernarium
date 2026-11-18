@@ -231,6 +231,18 @@ target_link_libraries(uml_host_thermal PRIVATE
 target_include_directories(uml_host_thermal PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})
 
+# The system's network path: whether the host has one, and the event-driven
+# monitor that keeps it current (no polling; the system calls back on a change).
+add_library(uml_host_network_path STATIC apple/host_network_path.mm)
+add_library(UML::HostNetworkPath ALIAS uml_host_network_path)
+uml_declare_architecture_target(uml_host_network_path platform)
+target_include_directories(uml_host_network_path PUBLIC
+    ${PROJECT_SOURCE_DIR}/darwin)
+target_link_libraries(uml_host_network_path PRIVATE
+    UML::PlatformContract
+    "-framework Foundation"
+    "-framework Network")
+
 add_library(uml_guest_files OBJECT guest_files.cpp)
 add_library(UML::GuestFiles ALIAS uml_guest_files)
 uml_declare_architecture_target(uml_guest_files platform)

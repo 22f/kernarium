@@ -12,6 +12,15 @@
  * name, the refusals (a non-DNS TCP port is reset, a non-DNS datagram is
  * dropped), guest multicast, and a stop and reopen. The wire rules themselves
  * are the unit test network-dns-rules.
+ *
+ * While the host has no network path the system resolver says "no such
+ * record" at once, and the guest must be told to try again instead. The
+ * probe stands in for the path with the provider's state: a missing name is
+ * answered as before while the path is usable, with SERVFAIL (and counted as
+ * failed) while it is not, over UDP and TCP, a name with records is answered
+ * in both states, and the state at the moment of the answer decides, not the
+ * state when the query came in. A last part starts the system's monitor and
+ * checks that the provider hears it, whichever path this host has.
  */
 #include "dns_message.hpp"
 #include "provider.hpp"
@@ -431,6 +440,127 @@ void check_tcp(uml::network::SlirpProvider &provider, Guest &guest)
 		fail("TCP", "the guest's DNS made SLiRP open a host Internet socket");
 }
 
+/* A UDP query to the name server; the reply. */
+std::optional<Reply> ask(Guest &guest, const char *name, std::uint16_t id,
+			 std::uint16_t port)
+{
+	if (!guest.send(udp_frame(name_server, port, 53,
+				  query_message(id, name, 1))))
+		return std::nullopt;
+	std::optional<Reply> reply;
+	(void)guest.receive([&](const std::vector<std::uint8_t> &frame) {
+		reply = udp_reply(frame, name_server, port);
+		return reply.has_value() && reply->id == id;
+	});
+	return reply;
+}
+
+/* "No such record" or "no such name", the answer for a missing name. */
+bool is_negative(const std::optional<Reply> &reply)
+{
+	return reply && reply->answers == 0 &&
+		(reply->rcode == dns::rcode_noerror ||
+		 reply->rcode == dns::rcode_nxdomain);
+}
+
+bool is_servfail(const std::optional<Reply> &reply)
+{
+	return reply && reply->answers == 0 &&
+		reply->rcode == dns::rcode_servfail;
+}
+
+bool has_loopback(const std::optional<Reply> &reply)
+{
+	return reply && reply->rcode == dns::rcode_noerror &&
+		has_loopback_answer(*reply);
+}
+
+/* Changes the path from the resolver's thread, after the system has
+ * answered and before the guest is. */
+struct PathChange final {
+	uml::platform::HostNetworkPathState *path{};
+	bool usable{};
+};
+
+void change_path(void *context)
+{
+	const auto *change = static_cast<const PathChange *>(context);
+	change->path->report(change->usable);
+}
+
+/* A missing name asks for a retry while the host has no network path, and is
+ * a plain "no such record" while it has one; a name with records is answered
+ * either way; and the state when the answer is made decides. */
+void check_outage(uml::network::SlirpProvider &provider, Guest &guest)
+{
+	auto &path = provider.path_state_for_testing();
+	const char *const missing = "uml-dns-probe-outage.invalid";
+	std::uint16_t port = 42000;
+	const auto before = provider.counters();
+	const int failures_before = failures;
+	if (!path.usable())
+		fail("the path state", "it does not start usable");
+
+	const char *label = "a missing name with a path";
+	if (!is_negative(ask(guest, missing, 0x7a01, ++port)))
+		fail(label, "no plain negative answer");
+
+	path.report(false);
+	label = "a missing name with no path";
+	if (!is_servfail(ask(guest, missing, 0x7a02, ++port)))
+		fail(label, "the guest was not told to try again");
+	label = "a name with records and no path";
+	if (!has_loopback(ask(guest, "localhost", 0x7a03, ++port)))
+		fail(label, "localhost has no 127.0.0.1 answer");
+	label = "a missing name over TCP with no path";
+	if (!is_servfail(tcp_exchange(guest, name_server, ++port,
+				      query_message(0x7a04, missing, 1))))
+		fail(label, "the guest was not told to try again");
+	label = "a name with records over TCP and no path";
+	if (!has_loopback(tcp_exchange(guest, name_server, ++port,
+				       query_message(0x7a05, "localhost", 1))))
+		fail(label, "localhost has no 127.0.0.1 answer");
+
+	path.report(true);
+	label = "a missing name once the path is back";
+	if (!is_negative(ask(guest, missing, 0x7a06, ++port)))
+		fail(label, "no plain negative answer");
+	label = "a missing name over TCP once the path is back";
+	if (!is_negative(tcp_exchange(guest, name_server, ++port,
+				      query_message(0x7a07, missing, 1))))
+		fail(label, "no plain negative answer");
+
+	/* The state at the answer decides: the system answers while the path is
+	 * as it was, and the path changes before the guest is told. */
+	PathChange change{&path, false};
+	provider.set_dns_before_answer_for_testing(&change_path, &change);
+	label = "a path lost as the answer is made";
+	if (!is_servfail(ask(guest, missing, 0x7a08, ++port)))
+		fail(label, "the state when the query came in decided");
+	change.usable = true;
+	label = "a path back as the answer is made";
+	if (!is_negative(ask(guest, missing, 0x7a09, ++port)))
+		fail(label, "the state when the query came in decided");
+	provider.set_dns_before_answer_for_testing(nullptr, nullptr);
+	if (!path.usable())
+		fail("the path state", "it was left in an outage");
+
+	/* Each query is one outcome: an answer, or a failure the guest retries.
+	 * Six were answered (two names with records, four missing names with a
+	 * path) and three missing names met the outage. */
+	const auto counts = provider.counters();
+	const auto answered = counts.dns_answered - before.dns_answered;
+	const auto failed = counts.dns_failed - before.dns_failed;
+	if (answered != 6 || failed != 3 ||
+	    counts.dns_policy_denied != before.dns_policy_denied ||
+	    counts.dns_timed_out != before.dns_timed_out)
+		fail("the counts", "answered " + std::to_string(answered) +
+			", failed " + std::to_string(failed) +
+			" for six answers and three outages");
+	if (failures == failures_before)
+		std::puts("the guest is told to retry while the host has no path");
+}
+
 /* Without a socket path for DNS over TCP, a connection to port 53 is reset
  * like one to any other port: SLiRP, with its own proxy off, would connect to
  * the literal address on the host's network. */
@@ -476,6 +606,40 @@ bool open_provider(uml::network::SlirpProvider &provider, Guest &guest)
 		return frame.size() >= 14 && get16(frame, 12) == 0x0806;
 	});
 	return true;
+}
+
+/* The provider starts the system's monitor at open() and hears its report;
+ * what a missing name gets then follows the host's real path. */
+void check_path_monitor(uml::network::SlirpProvider &provider, Guest &guest)
+{
+	const char *label = "the system's path monitor";
+	provider.set_path_monitor_for_testing(true);
+	if (!open_provider(provider, guest)) {
+		fail(label, "the provider did not open");
+		provider.set_path_monitor_for_testing(false);
+		return;
+	}
+	auto &path = provider.path_state_for_testing();
+	const auto deadline = Clock::now() + std::chrono::seconds{10};
+	while (path.reports() == 0 && Clock::now() < deadline)
+		std::this_thread::sleep_for(std::chrono::milliseconds{5});
+	if (path.reports() == 0) {
+		fail(label, "the system did not report the path");
+	} else {
+		const bool usable = path.usable();
+		const auto reply = ask(guest, "uml-dns-probe-monitor.invalid",
+				       0x7a10, 42100);
+		if (usable ? !is_negative(reply) : !is_servfail(reply))
+			fail(label, usable ?
+				"a missing name was not a plain negative answer" :
+				"a missing name was not told to retry");
+		std::printf("%s: the host's path is %s\n", label,
+			    usable ? "usable" : "down");
+	}
+	provider.stop();
+	provider.set_path_monitor_for_testing(false);
+	/* What the host's real path was is not the state of the checks after. */
+	provider.path_state_for_testing().report(true);
 }
 
 /* Where the resolver bound its DNS-over-TCP socket, for the log of a run on a
@@ -618,6 +782,7 @@ int main()
 			      "default $TMPDIR", provider);
 	check_udp(provider, guest);
 	check_tcp(provider, guest);
+	check_outage(provider, guest);
 
 	/* A guest restart: the resolver comes back with the link. */
 	provider.stop();
@@ -627,6 +792,7 @@ int main()
 	}
 	check_udp(provider, guest);
 	provider.stop();
+	check_path_monitor(provider, guest);
 
 	provider.set_dns_streams_unavailable_for_testing(true);
 	if (open_provider(provider, guest)) {

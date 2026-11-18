@@ -180,7 +180,11 @@ patches provide the behaviors the `slirp-network-*` tests check.
   resolver, and SLiRP's own DNS proxy is off: the proxy would send queries from
   the application to a local-network router, which needs the Local Network
   permission, and the guest follows the device's own resolver configuration.
-  The wire rules are `network-dns-rules`.
+  The wire rules are `network-dns-rules`. While the host has no network path
+  (the platform's path monitor, which the provider runs from open to stop), a
+  name the system cannot find is answered SERVFAIL, which a guest retries, and
+  counted as failed; answers that carry records stand, and the next report of
+  a path ends it (`slirp-network-dns`, `platform-host-network-path`).
 - The provider counts what became of the guest's DNS queries (answered, policy
   denied, timed out, failed), its DHCP exchange and its TCP connection attempts,
   as numbers only, and the runtime writes them into the session record

@@ -205,6 +205,7 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 			const auto stream_paths = dns_stream_paths();
 #endif
 			resolver_.set_counters(&counters_);
+			resolver_.set_network_path(&path_state_);
 			if (resolver_.start(
 				    [this](std::span<const std::uint8_t> frame) {
 					    try {
@@ -250,10 +251,18 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 			observer_.serve_dns_streams(
 				name_server_stream_ ? ipv4_value(nameserver_ipv4) : 0,
 				gateway_stream_ ? ipv4_value(host_alias_ipv4) : 0);
+			/* The system reports the current path at once and each change
+			 * after, and nothing else wakes the provider. */
+#if UML_SLIRP_TESTING
+			if (path_monitor_for_testing_)
+#endif
+				path_monitor_ = uml::platform::
+					makeAppleHostNetworkPathMonitor(path_state_);
 			worker_ = std::jthread{[this](std::stop_token stop_token) {
 				event_loop(stop_token);
 			}};
 		} catch (const std::system_error &) {
+			path_monitor_.reset();
 			resolver_.stop();
 			slirp_.reset();
 			return -EIO;
@@ -350,6 +359,7 @@ void SlirpProvider::stop() noexcept
 	/* The resolver delivers into the receive ring from its own thread;
 	 * once it is joined nothing can refill the ring cleared below. */
 	resolver_.stop();
+	path_monitor_.reset();
 #if UML_SLIRP_TESTING
 	notify_receive_cleanup_for_testing();
 #endif

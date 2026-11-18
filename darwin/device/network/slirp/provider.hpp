@@ -6,6 +6,7 @@
 #include "host_addresses.hpp"
 #include "network_counters.hpp"
 #include "platform/descriptor.hpp"
+#include "platform/host_network_path.hpp"
 
 #include <libslirp.h>
 #include <poll.h>
@@ -262,6 +263,25 @@ public:
 	{
 		dns_streams_unavailable_for_testing_ = unavailable;
 	}
+	void set_dns_before_answer_for_testing(void (*hook)(void *),
+					       void *context) noexcept
+	{
+		resolver_.set_before_answer_for_testing(hook, context);
+	}
+	/* The host's network path, which the resolver reads when it answers.
+	 * The product starts the system's monitor at open(); the test build does
+	 * not unless asked, so a machine with no network behaves as one with
+	 * (the probes need none), and a test sets the state itself. Applies to
+	 * the next open(). */
+	void set_path_monitor_for_testing(bool enabled) noexcept
+	{
+		path_monitor_for_testing_ = enabled;
+	}
+	[[nodiscard]] uml::platform::HostNetworkPathState &
+	path_state_for_testing() noexcept
+	{
+		return path_state_;
+	}
 	[[nodiscard]] HostResolver &resolver_for_testing() noexcept
 	{
 		return resolver_;
@@ -353,6 +373,12 @@ private:
 	/* Declared before what counts into them. */
 	NetworkCounters counters_;
 	TrafficObserver observer_{counters_};
+	/* The host's network path: the monitor writes it from the system's
+	 * thread and the resolver reads it when it answers. The monitor lives
+	 * from open() to stop(); the state, which keeps the last report across a
+	 * reopen, outlives both. */
+	uml::platform::HostNetworkPathState path_state_;
+	std::unique_ptr<uml::platform::HostNetworkPathMonitor> path_monitor_;
 	HostResolver resolver_;
 	std::uint16_t next_identification_{1};
 	/* Where SLiRP's guest forward carries DNS over TCP to the resolver;
@@ -379,6 +405,7 @@ private:
 	std::atomic_size_t internet_sockets_for_testing_{};
 	std::uint32_t dns_interface_for_testing_{};
 	bool dns_streams_unavailable_for_testing_{};
+	bool path_monitor_for_testing_{};
 	bool write_pause_requested_for_testing_{};
 	bool write_pause_reached_for_testing_{};
 	bool release_write_for_testing_{};
