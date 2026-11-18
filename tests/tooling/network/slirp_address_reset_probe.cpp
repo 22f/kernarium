@@ -1099,6 +1099,9 @@ void a_hold_does_not_outlive_its_instance()
 		fail(scenario, "the guest could not open its connection");
 		return;
 	}
+	/* An old hold that outlived its instance would end with no table to
+	 * judge by and start a hold of its own: look past that one too. */
+	rig.advance(std::chrono::seconds{60});
 	rig.advance(std::chrono::seconds{60});
 	check(scenario, no_reset_among(rig.watch(2 * quiet_ms)),
 	      "the old instance's hold reset a flow of the new one");
