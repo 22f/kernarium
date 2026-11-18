@@ -214,6 +214,8 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     /// and whether the focus was last allowed to go to it.
     private var directTouchElement: GuestDisplayElement?
     private var focusWasAllowed = false
+    /// What the display last described itself as, for `didMoveToWindow`.
+    private var appliedAccessibility: GuestDisplayAccessibility?
 
     /// The hardware keyboard and mouse this view hands the system's events
     /// to. Without one the view leaves presses, hover and scroll to UIKit, and
@@ -327,6 +329,7 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     }
 
     func applyAccessibility(_ accessibility: GuestDisplayAccessibility?) {
+        appliedAccessibility = accessibility
         guard let accessibility, accessibility.directTouch else {
             directTouchElement = nil
             focusWasAllowed = false
@@ -356,11 +359,13 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
         accessibilityElements = [element]
         // VoiceOver's focus is on the element before the first touch, as the
         // element appears or as nothing covers it any more, so that touch is
-        // not spent moving the focus there.
-        if accessibility.takesFocus, appeared || !focusWasAllowed, UIAccessibility.isVoiceOverRunning {
+        // not spent moving the focus there. A post before the view is in a
+        // window is lost: it waits for `didMoveToWindow`.
+        let mayPost = accessibility.takesFocus && window != nil
+        if mayPost, appeared || !focusWasAllowed, UIAccessibility.isVoiceOverRunning {
             UIAccessibility.post(notification: .screenChanged, argument: element)
         }
-        focusWasAllowed = accessibility.takesFocus
+        focusWasAllowed = mayPost
     }
 
     /// A VoiceOver activation of the display is no touch: the default would tap
@@ -543,6 +548,9 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
             hardwareInput?.releaseAll()
         } else if hardwareFocusWanted {
             claimHardwareFocus()
+        }
+        if window != nil, appliedAccessibility?.takesFocus == true, !focusWasAllowed {
+            applyAccessibility(appliedAccessibility)
         }
     }
 
