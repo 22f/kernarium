@@ -721,7 +721,22 @@ patches ART's one JNI function table in place and gives the application:
   and gives the runtime only that, never the block's own reference (Java code that
   runs during a call can end the block), so identity
   (`IsSameObject`, `NewGlobalRef`, monitors) and writes (`SetByteArrayRegion`,
-  `Release*Elements`, `ReleasePrimitiveArrayCritical`) keep their meaning. The layer reads the
+  `Release*Elements`, `ReleasePrimitiveArrayCritical`) keep their meaning. From the
+  first block on, the runtime is never handed an address of the region: every call
+  form (`Call*`, `CallStatic*`, `CallNonvirtual*`, `NewObject*`, the variadic, `V` and
+  `A` entries) gives it the array for a reference that is a block, and null for any
+  other address of the region (a block that was reclaimed, or one that is being built
+  or revived), whatever blocks exist at that moment. For that the layer knows the
+  parameters of every method a call names: from the signature at the lookup
+  (`GetMethodID`, `GetStaticMethodID`), else by reflection at the first call, from the
+  method ID alone (an ID from `FromReflectedMethod`; an exception pending then is taken
+  out for the time and put back). That needs neither a receiver nor a class, so a static
+  call with a null class, which the runtime runs, runs here too. The registry has no
+  limit, and a failure to learn is not remembered. Where the
+  parameters cannot be had at a call (no reflection, no method ID, no memory for the
+  method's record), the application's call does not reach the runtime: the process
+  stops after one line in the log. A platform caller's call goes on with its receiver
+  converted and its arguments as they are. The layer reads the
   length from its own record, never from the length word, which the application
   can overwrite. The block and its array behave as one memory at the points
   where the application meets Java: before and after a call that is passed the
@@ -772,8 +787,20 @@ patches ART's one JNI function table in place and gives the application:
   the length of the call, and the use makes no reference of the calling thread and
   moves no block, so a thread outside any native method, or one at the limit, can
   use it. Only an array that arrives as a result makes a reference again, and
-  `DeleteLocalRef` and the releases do not. A reference whose array was collected
-  means nothing, as a reference to a freed block did (a length of 0, no elements).
+  `DeleteLocalRef` and the releases do not. The layer keeps its own record of
+  where each block starts, and an address is a block only when that record says a
+  block starts exactly there; no byte of the region decides it. A block whose
+  array the collector has cleared is still an ended block of its length until the
+  layer reclaims it, and a wrapper that finds no array behind it acts as for a null
+  reference (no elements, no copy). The reference of a reclaimed block is no
+  block, however the memory it points into has been used since: its length is 0,
+  and it is a block again only if a new block starts at exactly that address. A
+  block is complete before the record names it, so a thread that looks without the
+  lock at the reference of a live or ended block (its kind, its length) finds it
+  whole. The record is a mapping of its own, one 32-bit word for each 64 bytes of the
+  region (2 MiB of address space for the product's 32 MiB region), resident
+  by page only where block starts have been recorded; a page stays resident after
+  its blocks are gone.
   A pointer from `Get...Elements` or `Get...Critical` pins its block as Dalvik
   pinned the array: the block keeps its place, and a strong reference to the
   array, until the pointer is released (mode 0 or `JNI_ABORT`; `JNI_COMMIT`
@@ -802,9 +829,8 @@ patches ART's one JNI function table in place and gives the application:
   not at a block's start is not read as a header, copies nothing, and counts as
   the release of the block of the reference that comes with it. A pointer the
   runtime itself handed out for a real reference to the array (the layer records
-  those from `Get...Elements` and `Get...Critical` once the process has had a
-  block, under a lock of their own, until their release with mode 0 or
-  `JNI_ABORT`) goes to the runtime's
+  those from `Get...Elements` and `Get...Critical`, from the first one on, under a
+  lock of their own, until their release with mode 0 or `JNI_ABORT`) goes to the runtime's
   own Release when it comes with a block's reference, with the block's array,
   and closes its critical region; any other pointer that comes with a block's
   reference is the application's own buffer, and is copied into the block. At

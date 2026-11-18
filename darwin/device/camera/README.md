@@ -231,6 +231,35 @@ application's statements (the sensor orientation, the rotation that
   session whose frames are dark and interrupted and whose stills fail until the
   application is back, not a loss for each reopening. A blocked session hears of
   none. The report line names the camera and says the video ended.
+  The interrupted record goes to the guest first: the device queues it on the
+  meta stream when the loss begins, and the video buffers fail only once the guest
+  has queued the meta buffer that carried it again (100 ms at most, then the
+  buffers fail and one line says so), so the first failure a guest meets is the
+  loss and not an ordinary failed buffer.
+- **The application's departure.** The application holds the guest's GPU requests
+  as it enters the background, and a guest whose camera layer has not acted on
+  the lost video by then stalls in its next GPU request until the application is
+  back: a recording runs on, in silence, until the return. A
+  `BackgroundVideo` (`CameraDeviceOptions::background`, one for the process, safe
+  from any thread) lets the application end the guest's video first:
+  `end(deadline)` has the device handle every running video as the platform's
+  notice does, and waits until the guest has stopped the video streams of the
+  cameras it ended (and of those whose video ended a moment ago and is still being
+  acted on), or until the deadline, which covers the device's answer as well.
+  With no video running nothing is waited for; with no device attached nothing is
+  ended. `holdAfterVideoEnds` is the application's sequence (end, wait at most
+  `bound`, which a caller with a deadline sets to what the deadline leaves after
+  the hold's own budget and the application's `backgroundVideoBound` caps, then
+  hold whatever the wait found, and say once on a wait that ran out); the hold's
+  own budget and this bound together stay inside the application's edge budget
+  (three seconds from the edge to the held gate at the latest with no deadline;
+  a deadline that leaves less than the hold's own budget leaves the wait nothing,
+  and the hold keeps its budget).
+  A caller that holds without the wait, as the application's bound does when the
+  edge is late, ends a wait that is pending with `abandon()`: the call returns
+  at once with `abandoned` set and says nothing, since the held gate makes the
+  wait of no use. The calls serialize under their deadlines: a call still queued
+  behind another at its own returns unanswered.
 - **Video mode.** The device tells its owner (`onVideoMode`) whether the guest
   is in video mode: a live camera's video runs, uninterrupted, and the guest
   asks for the picture stabilized, which Android's record template does and its

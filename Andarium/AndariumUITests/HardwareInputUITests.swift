@@ -169,6 +169,18 @@ final class HardwareInputUITests: XCTestCase {
         return field
     }
 
+    /// The pointer row of the open Settings. The list makes no row it does not
+    /// show, and the Performance section above the row pushes it below what an
+    /// iPad's sheet builds at first, so the sheet is drawn up until the row is
+    /// there (as `probeField` does for the field).
+    private func pointerSwitch() -> XCUIElement {
+        let toggle = app.switches["pointerAsTouch"]
+        for _ in 0..<5 where !(toggle.waitForExistence(timeout: 3) && toggle.isHittable) {
+            app.collectionViews.firstMatch.swipeUp()
+        }
+        return toggle
+    }
+
     private func closeSettings() {
         // A tap can be lost while the host is loaded: tap Done again if the
         // sheet is still there.
@@ -341,7 +353,7 @@ final class HardwareInputUITests: XCTestCase {
     func testUsingThePointerAsTouchKeepsTheMouseOffTheGuest() throws {
         try XCTSkipUnless(isPad, "XCUITest has no pointer on an iPhone")
         openSettings()
-        let toggle = app.switches["pointerAsTouch"]
+        let toggle = pointerSwitch()
         XCTAssertTrue(toggle.waitForExistence(timeout: 10), "Settings has no pointer row")
         XCTAssertEqual(toggle.value as? String, "0", "the setting starts off")
         // The switch is at the row's trailing end.
@@ -361,7 +373,8 @@ final class HardwareInputUITests: XCTestCase {
         XCTAssertFalse(lines.contains { $0.hasPrefix("connect mouse") || $0.hasPrefix("pointer ") }, "log: \(lines)")
 
         openSettings()
-        let again = app.switches["pointerAsTouch"]
+        let again = pointerSwitch()
+        XCTAssertTrue(again.exists, "Settings has no pointer row the second time")
         again.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.5)).tap()
         XCTAssertTrue(waitForValue(of: again, "0"), "the setting did not turn off: \(String(describing: again.value))")
         closeSettings()

@@ -202,6 +202,41 @@ Known deviations from x86 that remain:
   retires its own entry for a page. A page enters the set before any
   translation built from it is handed out, and every participating executor's
   write-side TLB entry for it is retired before the registration returns.
+  A registration waits at most one second for a participant that is still
+  inside the engine, and says so once; the page then stays unsettled for as
+  long as that participant stays inside, and the gadget engine builds the
+  translation of an unsettled page again at every dispatch instead of
+  caching it.
+- The memory layer accounts the writer locations and the holders of each frame
+  ([`docs/architecture.md`](../../../../docs/architecture.md#x86-64-frame-accounting)).
+  A translator that registers a frame retires the write translations of the
+  writer locations the registration names.
+- A translation is built and validated only from a frame its generation holds:
+  the executor registers the frame at the page's location before it reads a
+  byte, and runs nothing from a page whose registration did not settle: an
+  unsettled, failed or refused one gives a transient program, one instruction
+  when no holder stands, never cached and rebuilt at the next dispatch (a
+  refused first page, one that is not a code page or whose generation is
+  gone, runs that one instruction and no more). Every body records the generation's
+  flush serial with its page stamps, so a flush of the generation makes a
+  body compare its source and register again though no stamp moved.
+  The executor remembers the last settled registration of a page and skips
+  the address-space call while the generation's mappings are unchanged, its
+  flush serial is the one it was taken at, and the frame's change count has
+  not moved. A holder added to the frame, and its writers becoming unknown,
+  move the count; an unsettled, failed, refused or global registration is
+  never remembered ([`../registration_memo.hpp`](../registration_memo.hpp)).
+- A write fill is tagged when its frame has a holder at another location,
+  whether or not the page it fills is executable, and a store through that
+  entry publishes at every holder: the holders in this generation cool their
+  blocks, those in another generation are published in theirs. A store that
+  writes, through such an alias, into the block that is running leaves the
+  block after the store, as a store at the block's own address does, whatever
+  instruction stored: an ordinary or baked store, PUSH and CALL, a store across
+  a page, a vector, x87 or bulk store, a string store, ENTER, an extended-state
+  save and the segment model's SLDT and STR. A helper that stores and
+  publishes itself records the store's reach in the run, and the instruction's
+  epilogue leaves on it.
 - Every store to a page that holds cached code owes a publication of its own,
   and the program performs it before its next store: another vCPU may
   revalidate the page between two stores, so a program that patches a page
@@ -219,7 +254,10 @@ moves the page stamp, then moves the code-change sequence; a reader observes
 the sequence before it looks. A store still in flight reaches the vCPU at its
 next code-change checkpoint (a system call, CPUID or IRET), which leaves the
 native run so the runtime revalidates what it selects next. A moved mapping
-sequence or a raised execution interrupt abandons a validation.
+sequence or a raised execution interrupt abandons a validation. A code-change
+range of length 0 is the whole address space, and a change the ring cannot
+describe is treated alike: every body's link records are reset, since no stamp
+guards a link.
 
 ### Sharing and budget
 

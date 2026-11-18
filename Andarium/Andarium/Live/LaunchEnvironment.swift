@@ -61,6 +61,38 @@ nonisolated enum ThermalOverride {
     }
 }
 
+/// The state of Settings' "When hot" a harness launch states for its run
+/// (`ANDARIUM_HEAT_LIMIT`): "1" limits the frame rate while the device is hot
+/// and "0" tells Android nothing hot, whatever the person chose; anything else
+/// is no setting. The stored choice stays as it is
+/// (`HeatLimitPreference.launch`).
+nonisolated enum HeatLimitLaunch {
+    static let environmentName = "ANDARIUM_HEAT_LIMIT"
+
+    static func stated(in environment: [String: String]) -> Bool? {
+        switch environment[environmentName] {
+        case "1"?: true
+        case "0"?: false
+        default: nil
+        }
+    }
+}
+
+/// A harness launch's silent phone (`ANDARIUM_HAPTICS=0`): for that launch the
+/// device plays none of the guest's haptics, as it does while the person's
+/// Haptics switch is off, and the stored switch stays as it is. Anything else
+/// is no setting, and the switch decides. It silences the application's own
+/// touch feedback too (`InterfaceFeedback`), which the switch does not
+/// govern. It is not a setting that `LaunchOverrides` holds, so a launch that
+/// states only it is still the person's own.
+nonisolated enum HapticsLaunch {
+    static let environmentName = "ANDARIUM_HAPTICS"
+
+    static func silences(in environment: [String: String]) -> Bool {
+        environment[environmentName] == "0"
+    }
+}
+
 /// A UI test's launch (`ANDARIUM_INPUT_PROBE=1`): the session opens at once
 /// with no guest behind it, and the guest's keyboard and mouse send to a log
 /// the session shows (`InputProbe`). The UI tests of the hardware keyboard and
@@ -140,10 +172,12 @@ nonisolated enum CompassReadoutLaunch {
 extension AppEntry {
     /// Whether the launch is the person's own, which announces the release
     /// notes (`announceWhatsNew`). A launch that states any setting, the JIT
-    /// or the thermal state included, or runs under XCTest is a harness's.
+    /// or the thermal state or the heat limit included, or runs under XCTest is a
+    /// harness's.
     static func isPersonsLaunch(overrides: LaunchOverrides, environment: [String: String]) -> Bool {
         overrides.isEmpty && JitPreference.stated(in: environment) == nil
             && ThermalOverride.stated(in: environment) == nil
+            && HeatLimitLaunch.stated(in: environment) == nil
             && !InputProbeLaunch.requested(in: environment)
             && !CompassReadoutLaunch.requested(in: environment)
             && environment[OldAppsProbeLaunch.environmentName] == nil

@@ -309,12 +309,21 @@ add_dependencies(integration-test-binaries uml_audio_hold)
 # mode records, and expects the recording to end by itself with the clip saved, the
 # application still in front and the camera to open again, and the video mode's
 # viewfinder with no recording to be live again after the return (the release
-# carries the last topics of route p0030). It boots Android with the macOS launcher, so it is
-# opt-in: name the release under test.
+# carries the last topics of route p0030). Its video-leave mode plays the application's
+# leaving the foreground through the edge pipe of the test-only launcher
+# (uml-darwin-android17-edge-test, which no product has) while the video mode records: the
+# launcher ends the camera's running video, waits for the guest to stop its video streams
+# and then holds the guest's GPU requests for a few seconds, and the recording must have
+# ended before the hold landed. It boots Android with the macOS launcher, so it is opt-in:
+# name the release under test.
 set(UML_ANDROID_CAMERA_RELEASE "" CACHE PATH
     "Installed Android release directory that the android-camera tests boot")
 if(UML_ANDROID_CAMERA_RELEASE AND TARGET uml-darwin-android17)
-    foreach(mode live blocked restart video-lost)
+    foreach(mode live blocked restart video-lost video-leave)
+        set(camera_launcher uml-darwin-android17)
+        if(mode STREQUAL "video-leave")
+            set(camera_launcher uml-darwin-android17-edge-test)
+        endif()
         if(mode STREQUAL "live")
             set(camera_test_name android-camera)
         else()
@@ -325,7 +334,7 @@ if(UML_ANDROID_CAMERA_RELEASE AND TARGET uml-darwin-android17)
             COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/run_android_camera.py
                 --release ${UML_ANDROID_CAMERA_RELEASE}
-                --emulator $<TARGET_FILE:uml-darwin-android17>
+                --emulator $<TARGET_FILE:${camera_launcher}>
                 --audio-hold-library $<TARGET_FILE:uml_audio_hold>
                 --mode ${mode}
             LABELS guest;boot;android
@@ -510,6 +519,26 @@ if(UML_ANDROID_OLDAPP_RELEASE AND TARGET uml-darwin-android17)
         COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/run_android_oldapp.py
             --release ${UML_ANDROID_OLDAPP_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
+# The guest kernel's vDSO (kernel/common/README.md, arm64 task interface) on
+# Android: the probes of guest-vdso-* run as the shell user, and bionic's own
+# clock_gettime, gettimeofday and time are checked to call the vDSO. The probes
+# are built with the host's clang++ and ld.lld (PATH), and the test boots Android
+# with the macOS launcher, so it is opt-in: name the release under test.
+set(UML_ANDROID_VDSO_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-vdso test boots")
+if(UML_ANDROID_VDSO_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-vdso
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_vdso.py
+            --release ${UML_ANDROID_VDSO_RELEASE}
             --emulator $<TARGET_FILE:uml-darwin-android17>
         LABELS guest;boot;android
         TIMEOUT 3600

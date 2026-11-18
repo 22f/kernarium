@@ -311,7 +311,19 @@ report's overlay text is the app's own.
 Send needs both a problem (the mail's subject) and details (its body); white
 space counts as empty, and a file or the start log is neither. Send stays
 enabled while one is empty: its tap opens no composer and shows one alert that
-names what is missing, and the first empty field takes the focus after OK. Once
+names what is missing, and the first empty field takes the focus after OK. With
+both written, no bug report attached and one that can be made now, Send asks
+first (Create bug report, which stays in the sheet, or Send without bug report),
+and the bug report's row leads in to read-only pages inside the sheet's own
+navigation (Back, no Done): the file as the mail carries it, its top level as
+folders and files (at most sixteen levels of folders: what a deeper path has
+beyond them is the file's name), a text as one page that scrolls on with a thumb on the edge (only a band
+around it takes a touch, until it is held),
+and the screenshot (a PNG, rebuilt from its critical chunks before it is decoded
+as a bounded thumbnail; a JPEG is not shown). Nothing is
+extracted, and a file that is not text is dimmed and opens nothing. The start
+log's row shows its text the same way
+(`Shared/Feedback/Logic/SendFeedbackArchive*.swift`, `SendFeedbackReportPages.swift`). Once
 the mail is sent, the Feedback sent notice stays over the sheet, which keeps what
 was sent and takes no touch; the notice's Done closes both and ends the draft,
 and a swipe down or the toolbar's close does nothing meanwhile.
@@ -676,11 +688,11 @@ requires reopening Andarium.
 
 - **No Google apps, on purpose.** The boot screen of a new installation's
   first Android boot (a first start, and the retry of one that ended before
-  Android booted) carries a panel saying that Android has no Google apps, and
-  Send feedback opens with a line that answers the same question in place
-  until it is opened or closed once (`NoGoogleNotice` keeps that one value);
-  their strings are the only ones that name Google, which
-  `scripts/localization.py` allows by key.
+  Android booted) carries a panel saying that Android has no Google apps.
+  Every presentation of Send feedback opens with a line that answers the same
+  question in place, closed; closing it takes it away from that presentation
+  alone, and nothing about it is kept. Their strings are the only ones that
+  name Google, which `scripts/localization.py` allows by key.
 - **Slow start.** A start still on the boot screen after three minutes
   (`SlowStart`; eight for a guest's first start and the first start after an
   update, which also get a title that does not say the start is slower than
@@ -756,8 +768,10 @@ requires reopening Andarium.
   under Capabilities, a per-guest switch that is on until the person turns it
   off, decides whether this device plays it: off, the application holds no
   connection and no engine for the Taptic Engine and the guest keeps its
-  vibrator. A game controller's rumble is not governed by it. An iPad, a Mac or
-  the Simulator, which have no Taptic Engine, give the guest no vibrator and
+  vibrator. A harness launch can keep it off for its run
+  ([Automation](#automation)). A game controller's rumble is not governed by
+  it. An iPad, a Mac or the Simulator, which have no Taptic Engine, give the
+  guest no vibrator and
   Capabilities no Haptics row. The wire is `HapticsProtocol`, whose golden frames
   the HAL's test shares (`tests/unit/andarium/fixtures`); the
   [Android README](../android/lineage-24/README.md) owns the HAL.
@@ -773,9 +787,20 @@ requires reopening Andarium.
   up Android lowers the guest's frame rate to 30, and the first time in a run
   that this starts the session screen says so once. The session and
   stall records, the statistics and the feedback information keep iOS's real
-  state. There is no switch. A system without the HAL hears nothing and shows
-  no notice; the
+  state. A system without the HAL hears nothing and shows no notice; the
   [Android README](../android/lineage-24/README.md) owns the HAL.
+  Settings' Performance section, after Stats in a normal session, has "When
+  hot": Limit frame rate, the default, or Full frame rate
+  (`HeatLimitPreference`, stored until it is turned back on; the feedback
+  information says it in "Frame rate limit when hot"). Full frame rate tells
+  Android none at every state of iOS's, critical included, at once when it is
+  chosen, and shows no notice at any heat; Limit frame rate again tells it the
+  policy's severity at once. The policy runs either way (`deviceIsHot` says
+  the device is held hot, for the section's footnote). The notice's
+  words are a button that opens an alert whose Turn Off chooses Full frame
+  rate in one tap; Dismiss only dismisses. A harness launch runs with the
+  default and keeps nothing; `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states it for
+  the run ([Automation](#automation)).
 - **Game controllers.** Each game controller iOS has connected is a HID
   device in the guest, made through the guest's relay over vsock 5558
   (`GamepadSession`; the wire is `GamepadProtocol`, whose golden frames the
@@ -821,11 +846,11 @@ requires reopening Andarium.
   it on then explains why and, for a refusal, offers Settings. A device with no
   camera shows the row off and disabled with a note and keeps the person's
   choice; a device has one when it has a built-in front camera, the rule the
-  guest's layout follows, and the iPad app running on a Mac has none
-  (`CameraAvailability`). On an iPad, a session that other apps
-  share the screen with pauses the camera (black frames) and shows a notice
-  that goes with the interruption. When a guest app opens a camera while the
-  session is blocked, the runtime reports it
+  guest's layout follows, and the iPad app running on a Mac or on an Apple
+  Vision Pro has none and looks for none (`CameraAvailability`). On an iPad, a
+  session that other apps share the screen with pauses the camera (black
+  frames) and shows a notice that goes with the interruption. When a guest app
+  opens a camera while the session is blocked, the runtime reports it
   (`KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE`, runtime API 39) and the
   session shows a notice that Camera is off and can be turned on only from
   Home, for the next start. A dismissal holds for the run; an undismissed
@@ -1368,13 +1393,24 @@ states the resolution; the earlier `KERNARIUM_RETINA_MODE` (`1` native, `0`
 one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation; `serious` and
-`critical` reach the guest as heat.
+`critical` reach the guest as heat. `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states
+Settings' "When hot" for the run: `0` tells the guest nothing of the heat. A
+UI test's probe session (`ANDARIUM_INPUT_PROBE`) that states the thermal state
+runs the thermal session against a stand-in for the guest's HAL, and its log
+says what the guest would be told (`heat told <severity>`).
 `ANDARIUM_REVIEW_ASK_SECONDS` and `ANDARIUM_REVIEW_ASK_RESET=1` set the rating
 prompt's counter and clear its record, in a build that has the prompt
 ([Rating prompt](#rating-prompt)).
 `ANDARIUM_FOLLOW_ORIENTATION` (`1` or `0`) states whether the guest follows the
 device's orientation, where the device's idiom (an iPhone follows) would
 otherwise decide.
+`ANDARIUM_HAPTICS=0` plays none of the guest's haptics on the device for that
+launch, as with the Haptics switch off, and leaves the stored switch alone; any
+other value states nothing. A launch that states only it is still the person's
+own. The device runners state it unless a run tests haptics (`--haptics`), and
+a hosted test on an iPhone gives it as `TEST_RUNNER_ANDARIUM_HAPTICS=0`. It
+silences the side keys' and rulers' own touch feedback too, which the Haptics
+switch does not govern; a game controller's rumble is governed by neither.
 `ANDARIUM_INPUT_PROBE=1` is the UI tests' launch: the session opens at once
 with no guest behind it, and what the guest's keyboard and mouse would receive,
 and the touches that reach its touchscreen, go to one accessibility element

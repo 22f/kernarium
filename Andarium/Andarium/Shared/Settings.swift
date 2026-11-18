@@ -35,6 +35,8 @@ struct SessionSettingsSheet: View {
                     if offersInstall { apps }
                     if normalSession, model.capabilities.guestFiles, model.fileBrowser != nil { files }
                     if model.capabilities.statistics { stats(session) }
+                    // The thermal session runs in a normal run; Recovery has no HAL.
+                    if normalSession { PerformanceSection() }
                     if model.host.supportsPointer { pointer }
                     #if !APP_STORE
                     if let probe = model.inputProbe { inputProbe(probe) }

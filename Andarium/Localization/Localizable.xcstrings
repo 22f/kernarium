@@ -2751,6 +2751,29 @@
         }
       }
     },
+    "Asks to turn off the frame rate limit" : {
+      "comment" : "VoiceOver hint of the heat notice's words, which are a button that opens the alert.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "フレームレートの制限をオフにするか確認します"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "询问是否关闭帧速率限制"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "詢問是否關閉影格速率限制"
+          }
+        }
+      }
+    },
     "At least %@" : {
       "comment" : "A size that is only a lower bound, at the start of a sentence or label.",
       "localizations" : {
@@ -4882,6 +4905,29 @@
         }
       }
     },
+    "Full frame rate" : {
+      "comment" : "A choice of the When hot menu, and the row's value while it is chosen: Android is told nothing of the heat, so games keep their full frame rate while the device is hot.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "フレームレートを制限しない"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不限制帧速率"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不限制影格速率"
+          }
+        }
+      }
+    },
     "Getting the file…" : {
       "localizations" : {
         "ja" : {
@@ -5102,6 +5148,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "主畫面"
+          }
+        }
+      }
+    },
+    "Hotter, and the battery drains faster" : {
+      "comment" : "The line under the choice Full frame rate in the When hot menu: what it costs.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "高温になり、バッテリーの消耗が早くなります"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设备更热，耗电更快"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "裝置更熱，耗電更快"
           }
         }
       }
@@ -5706,6 +5775,29 @@
         }
       }
     },
+    "Lets this device cool down" : {
+      "comment" : "The line under the choice Limit frame rate in the When hot menu.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "デバイスを冷ませます"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "让设备降温"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "讓裝置降溫"
+          }
+        }
+      }
+    },
     "Libraries" : {
       "comment" : "Heading of the group of Acknowledgements with the software libraries Andarium uses.",
       "localizations" : {
@@ -5747,6 +5839,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "授權"
+          }
+        }
+      }
+    },
+    "Limit frame rate" : {
+      "comment" : "A choice of the When hot menu, and the row's value while it is chosen: while the device is hot, Android runs games at a lower frame rate so the device can cool down. The default.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "フレームレートを制限"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "限制帧速率"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "限制影格速率"
           }
         }
       }
@@ -7150,6 +7265,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在暫停…"
+          }
+        }
+      }
+    },
+    "Performance" : {
+      "comment" : "The header of the section of a running session's Settings after Stats. It holds one row, When hot, which decides whether Android is told that the device is hot and so limits the frame rate.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パフォーマンス"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "性能"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "效能"
           }
         }
       }
@@ -11207,6 +11345,52 @@
         }
       }
     },
+    "This device gets hotter and the battery drains faster. iOS may dim the screen, slow everything down or close Andarium." : {
+      "comment" : "The warning of what turning the frame rate limit off costs, in the footnote of the Performance section while the choice is Full frame rate. The alert from the notice says it too, followed by the way back (its own string).",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "デバイスがさらに熱くなり、バッテリーの消耗も早くなります。iOSによって画面が暗くなったり、動作全体が遅くなったり、Andariumが終了したりすることがあります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设备会更热，电池耗电也会更快。iOS可能会调暗屏幕、让一切变慢或关闭Andarium。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "裝置會變得更熱，電池耗電也會更快。iOS可能會調暗螢幕、讓一切變慢或關閉Andarium。"
+          }
+        }
+      }
+    },
+    "This device gets hotter and the battery drains faster. iOS may dim the screen, slow everything down or close Andarium. You can turn it back on in Settings, under Performance." : {
+      "comment" : "The message of that alert: the warning, then where to turn the limit back on (Settings, Performance, as the names read in the interface).",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "デバイスがさらに熱くなり、バッテリーの消耗も早くなります。iOSによって画面が暗くなったり、動作全体が遅くなったり、Andariumが終了したりすることがあります。“設定”の“パフォーマンス”でオンに戻せます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设备会更热，电池耗电也会更快。iOS可能会调暗屏幕、让一切变慢或关闭Andarium。你可以在“设置”的“性能”中重新打开。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "裝置會變得更熱，電池耗電也會更快。iOS可能會調暗螢幕、讓一切變慢或關閉Andarium。你可以在「設定」的「效能」中重新開啟。"
+          }
+        }
+      }
+    },
     "This device has %@ of free space left and %@ could not be paused. Shut it down before the space runs out, or free up space and check again." : {
       "localizations" : {
         "ja" : {
@@ -11313,6 +11497,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此裝置沒有Wi-Fi位址。請連接Wi-Fi以透過網路使用ADB。"
+          }
+        }
+      }
+    },
+    "This device is hot. The frame rate is limited until it cools." : {
+      "comment" : "The first line of the Performance footnote while the device is held hot and the choice is Limit frame rate; it has a thermometer before it.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "デバイスが高温です。冷えるまでフレームレートを制限します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设备温度较高。在降温前会限制帧速率。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "裝置溫度較高。降溫前會限制影格速率。"
+          }
+        }
+      }
+    },
+    "This device is hot. The frame rate is not limited." : {
+      "comment" : "The first line of the Performance footnote while the device is held hot and the choice is Full frame rate; the warning follows it.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "デバイスが高温です。フレームレートは制限されていません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设备温度较高。帧速率未受限制。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "裝置溫度較高。影格速率未受限制。"
           }
         }
       }
@@ -11768,6 +11998,29 @@
         }
       }
     },
+    "Turn Off" : {
+      "comment" : "The destructive button of the alert that turns the frame rate limit off, which takes effect at once.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オフにする"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭限制"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "關閉限制"
+          }
+        }
+      }
+    },
     "Turn off for “%@”?" : {
       "comment" : "The title of the alert that asks before Old app compatibility is turned off for an app that is open; the app's own name is quoted.",
       "localizations" : {
@@ -11787,6 +12040,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "要為「%@」關閉舊版應用程式相容性嗎？"
+          }
+        }
+      }
+    },
+    "Turn off the frame rate limit?" : {
+      "comment" : "The title of the alert that the heat notice's words open. Its message is the warning and the way back; its buttons are Turn Off and Cancel.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "フレームレートの制限をオフにしますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要关闭帧速率限制吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要關閉影格速率限制嗎？"
           }
         }
       }
@@ -12409,6 +12685,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "新功能"
+          }
+        }
+      }
+    },
+    "When hot" : {
+      "comment" : "The row in Settings under Performance, with its current choice beside it and a menu of two choices: Limit frame rate and Full frame rate. Read as 'when this device is hot'.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "高温時"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "高温时"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "高溫時"
+          }
+        }
+      }
+    },
+    "While this device is hot, games run at a lower frame rate so it can cool down." : {
+      "comment" : "The footnote of the Performance section while the choice is Limit frame rate and the device is not hot.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "デバイスが高温の間はゲームのフレームレートを下げて、デバイスを冷ませるようにします。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设备温度较高时，游戏会以较低的帧速率运行，让设备降温。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "裝置溫度較高時，遊戲會以較低的影格速率執行，讓裝置降溫。"
           }
         }
       }

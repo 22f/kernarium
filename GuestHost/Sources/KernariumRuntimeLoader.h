@@ -74,7 +74,7 @@ int kernarium_runtime_loader_quiesce(kernarium_runtime_settle* _Nullable settle)
  * kernarium_runtime_loader_resume. */
 int kernarium_runtime_loader_quiesce_resident(kernarium_runtime_settle* _Nullable settle);
 void kernarium_runtime_loader_resume(void);
-/* Holds (nonzero) or releases (zero) the guest's GPU requests; see
+/* Holds (1, or 2 to hold at once) or releases (zero) the guest's GPU requests; see
  * kernarium_runtime_set_gpu_hold_function. Returns the runtime's answer, or -1
  * when no runtime is loaded. */
 int kernarium_runtime_loader_set_gpu_hold(int held);

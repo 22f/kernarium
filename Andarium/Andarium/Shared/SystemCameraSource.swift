@@ -4,6 +4,29 @@ import AndariumCore
 import AVFoundation
 import Foundation
 
+/// What the Camera row's availability asks of the system: the two platforms
+/// that run the application as an iPad app, and the built-in front camera. A
+/// test plays another host by giving its own.
+struct CameraPlatform {
+    var isiOSAppOnMac: Bool
+    var isiOSAppOnVision: Bool
+    /// Looking for a camera, which `hasCamera` does only where one can be offered.
+    var hasFrontCamera: () -> Bool
+
+    /// This process, as the system reports it.
+    static var system: CameraPlatform {
+        let info = ProcessInfo.processInfo
+        return CameraPlatform(
+            isiOSAppOnMac: info.isiOSAppOnMac, isiOSAppOnVision: info.isiOSAppOnVision,
+            hasFrontCamera: { SystemCameraSource.hasFrontCamera })
+    }
+
+    var hasCamera: Bool {
+        CameraAvailability.isAvailable(
+            hasFrontCamera: hasFrontCamera(), isiOSAppOnMac: isiOSAppOnMac, isiOSAppOnVision: isiOSAppOnVision)
+    }
+}
+
 /// What iOS says about Andarium's cameras. Reading the access and looking for
 /// cameras never shows a prompt, never opens a camera and never lights iOS's
 /// camera indicator; only `request` can show iOS's question, and the person's
@@ -13,13 +36,15 @@ struct SystemCameraSource: CameraAccessSource {
     /// preview's system mode has none and still runs the permission
     /// conversation against the Simulator's own, so it sets this off.
     let requiresCamera: Bool
+    private let platform: CameraPlatform
 
-    init(requiresCamera: Bool = true) {
+    init(requiresCamera: Bool = true, platform: CameraPlatform = .system) {
         self.requiresCamera = requiresCamera
+        self.platform = platform
     }
 
     var access: CameraAccess {
-        if requiresCamera, !Self.hasCamera { return .unavailable }
+        if requiresCamera, !platform.hasCamera { return .unavailable }
         return Self.access(of: AVCaptureDevice.authorizationStatus(for: .video))
     }
 
@@ -31,11 +56,8 @@ struct SystemCameraSource: CameraAccessSource {
 
     /// The device has a camera the guest could be given: the same rule the
     /// guest's layout follows (a built-in front camera), and none for the iPad
-    /// app on a Mac (`CameraAvailability`).
-    static var hasCamera: Bool {
-        CameraAvailability.isAvailable(
-            hasFrontCamera: hasFrontCamera, isiOSAppOnMac: ProcessInfo.processInfo.isiOSAppOnMac)
-    }
+    /// app on a Mac or on an Apple Vision Pro (`CameraAvailability`).
+    static var hasCamera: Bool { CameraPlatform.system.hasCamera }
 
     /// A built-in camera faces the person: among the cameras the runtime
     /// discovers, one in the front position. An external camera has none. The

@@ -5,6 +5,7 @@
 # device's guest-buffer writer and links no capture backend: the launcher hands
 # it the platform camera to serve.
 add_library(uml_camera_device STATIC
+    background_video.cpp
     calibration_store.cpp
     camera_controls.cpp
     camera_description.cpp

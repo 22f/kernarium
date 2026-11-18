@@ -94,7 +94,7 @@ struct SideKeysOverlay: View {
             keys(in: geo.size)
         }
         .ignoresSafeArea(.keyboard)
-        .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+        .interfaceFeedback(.impact(weight: .light), trigger: keyPresses)
         .onAppear { publishEdge() }
         .onChange(of: leading) { publishEdge() }
         .onChange(of: open) { _, isOpen in
@@ -497,7 +497,7 @@ struct KeyRail: View {
         }
         .foregroundStyle(.primary)
         .environment(\.colorScheme, .dark)
-        .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+        .interfaceFeedback(.impact(weight: .light), trigger: keyPresses)
         // The rail is not on an edge: the way back names none.
         .onAppear { model?.session.keysEdge = nil }
     }
@@ -552,7 +552,7 @@ struct KeyDeck: View {
         }
         .foregroundStyle(.primary)
         .environment(\.colorScheme, .dark)
-        .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+        .interfaceFeedback(.impact(weight: .light), trigger: keyPresses)
     }
 
     private func pressed(_ action: () -> Void) {

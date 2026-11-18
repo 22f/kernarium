@@ -60,6 +60,13 @@ constexpr std::uint64_t captureTimeoutNanoseconds = 10'000'000'000;
 constexpr std::uint64_t abandonedCaptureNanoseconds = 30'000'000'000;
 /* How long a session that failed to open waits before it is tried again. */
 constexpr std::uint64_t sessionRetryNanoseconds = 1'000'000'000;
+/* A lost camera's first failed video buffer waits this long for the guest to have read the camera's interrupted record
+ * (`lossRecordDelivered`); the buffers fail after it whether the guest has read it or not. */
+constexpr std::uint64_t lossRecordReadNanoseconds = 100'000'000;
+/* The guest is still acting on a camera's lost video this long after the loss: the application that leaves the foreground
+ * then waits for the guest to stop the streams of that video (`BackgroundVideo`). A loss older than this was not acted on,
+ * and a later departure does not wait for it. */
+constexpr std::uint64_t lossBeingActedOnNanoseconds = 5'000'000'000;
 constexpr std::uint32_t userIdent = 0;
 constexpr std::uint32_t groupTimerIdent = 0xffffff00u;
 constexpr std::uint32_t reservedStreamIds = 0xffff0000u;
@@ -214,6 +221,16 @@ public:
          * guest has closed its last video stream of the camera: the guest's camera layer decides what to do with that news.
          * It is not a state the platform's recovery ends. */
         bool lost {};
+        /* When the video was lost, on the device's clock. */
+        std::uint64_t lostAt {};
+        /* The camera's interrupted record goes to the guest ahead of the first failed video buffer of the loss (the guest's
+         * camera layer reads the camera's records, and reports the loss only when the record that came with the failed
+         * buffer says it): its sequence (none until it is made), when it was made, the meta buffers (stream and resource)
+         * that carried it, and whether the guest has queued one of them again, which is how the device knows it was read. */
+        std::uint64_t lossRecord {};
+        std::uint64_t lossRecordAt {};
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> lossRecordCarriers;
+        bool lossRecordRead {};
         /* The guest has been told the camera is interrupted (or gone) and not
          * yet that it is back; it is told once each way. */
         bool told {};
@@ -296,6 +313,9 @@ public:
     bool sessionFailed {};
     /* The format each platform camera runs in, which a session is told when it opens. */
     std::vector<std::optional<std::size_t>> anchors;
+    /* The video streams the guest has yet to stop after the application's departure ended their camera's video, which the
+     * application waits for (`options.background`); on the worker. */
+    std::set<std::uint32_t> pendingStops;
 
     // The platform's side: any thread, under the mutex.
     std::mutex inboxMutex;
@@ -341,10 +361,12 @@ public:
         struct kevent change {};
         EV_SET(&change, userIdent, EVFILT_USER, EV_ADD | EV_ENABLE | EV_CLEAR, 0, 0, nullptr);
         if (::kevent(queue.get(), &change, 1, nullptr, 0, nullptr) < 0) throw std::runtime_error("Virtio camera wake-up failed");
+        if (options.background) options.background->attach([this] { wake(); });
     }
 
     ~Implementation() override
     {
+        if (options.background) options.background->detach();
         closeSession();
         reportVideoMode(false);
     }
@@ -494,6 +516,14 @@ public:
     [[nodiscard]] bool endsVideoWhenAppLeaves(const Runtime& runtime) const
     {
         return !blocked() && !runtime.lost && hasVideoStream(runtime);
+    }
+
+    /* Whether the guest runs a video stream on a camera (a stream it has started and not stopped). */
+    [[nodiscard]] bool runsVideo(const Runtime& runtime) const
+    {
+        return std::any_of(streams.begin(), streams.end(), [&](const auto& entry) {
+            return entry.second.camera == runtime.description.index && startedVideo(entry.second);
+        });
     }
 
     /* The guest closed its last video stream of a camera: the loss ends with it, and the camera, if it was told it is down
@@ -914,7 +944,46 @@ public:
             const auto age = entry.timestamp != 0 && time > entry.timestamp ? time - entry.timestamp : 0;
             complete(id, held, age, ok ? 0 : VIRTIO_VIDEO_DEQUEUE_FLAG_ERR, ok ? std::uint32_t(bytes.size()) : 0,
                      entry.meta.sequence);
+            if (auto* runtime = runtimeOf(stream.camera); runtime && runtime->lossRecord != 0 && entry.meta.sequence == runtime->lossRecord)
+                runtime->lossRecordCarriers.emplace_back(id, held.resource);
         }
+    }
+
+    /* Whether a started meta stream of the camera is there to carry its records. */
+    [[nodiscard]] bool hasStartedMeta(const Runtime& runtime) const
+    {
+        return std::any_of(streams.begin(), streams.end(), [&](const auto& entry) {
+            return entry.second.camera == runtime.description.index && entry.second.kind == VIRTIO_VIDEO_CAMERA_STREAM_META &&
+                entry.second.started;
+        });
+    }
+
+    /* Whether the buffers of a lost camera's video may fail now. The camera's interrupted record goes to the guest first,
+     * and they fail once the guest has queued again the meta buffer that carried it (it has read it) or
+     * `lossRecordReadNanoseconds` have passed, so that the first failure the guest meets is the loss: a buffer that fails
+     * before the guest has read the record is taken for an ordinary failure, and the loss is found only a request later.
+     * A camera with no meta stream running has no reader to wait for. */
+    [[nodiscard]] bool lossRecordDelivered(Runtime& runtime)
+    {
+        if (runtime.lossRecordRead) return true;
+        if (runtime.lossRecord == 0) {
+            if (!hasStartedMeta(runtime)) {
+                runtime.lossRecordRead = true;
+                return true;
+            }
+            const auto sequence = ++runtime.sequence;
+            CameraExposure record;
+            record.activeCamera = std::uint32_t(runtime.description.platformIndex);
+            runtime.lossRecord = sequence;
+            runtime.lossRecordAt = now();
+            pushMeta(runtime, metaOf(runtime, sequence, record, blackMetaFlags(runtime)), now());
+            return false;
+        }
+        if (now() - runtime.lossRecordAt < lossRecordReadNanoseconds) return false;
+        runtime.lossRecordRead = true;
+        std::fprintf(stderr, "camera %u: the guest did not read the interrupted record of the lost video in %llu ms\n",
+                     unsigned(runtime.description.index), static_cast<unsigned long long>(lossRecordReadNanoseconds / 1'000'000));
+        return true;
     }
 
     // ------------------------------------------------------------------------
@@ -1057,6 +1126,7 @@ public:
             return;
         }
         if (stream.queued.empty()) return;
+        if (runtime->lost && !lossRecordDelivered(*runtime)) return;
         const auto held = stream.queued.front();
         stream.queued.pop_front();
         auto& resource = stream.resources.at(held.resource);
@@ -1740,6 +1810,10 @@ public:
                                                                                           : Interruption::interrupted;
                 if (ends) {
                     runtime.lost = ended = true;
+                    runtime.lostAt = now();
+                    runtime.lossRecord = 0;
+                    runtime.lossRecordCarriers.clear();
+                    runtime.lossRecordRead = false;
                     std::fprintf(stderr, "camera %u: the video ended: the application left the foreground\n",
                                  unsigned(runtime.description.index));
                 }
@@ -1790,9 +1864,52 @@ public:
         reportState();
     }
 
+    /* The application leaves the foreground and asks for the guest's running video to end now (`options.background`): the
+     * video of every camera the guest runs a video stream on ends as the platform's notice of the departure ends it, which
+     * finds those cameras lost when it comes. The streams the guest has yet to stop (those of the cameras ended here, and of
+     * one whose video ended a moment ago, when the notice came first) are what the application waits for. A blocked session
+     * runs no video, and a camera with no running stream is left as it is: the departure is not its news, and no notice
+     * of it is made up. */
+    void endVideoForBackground(std::uint64_t request)
+    {
+        pendingStops.clear();
+        if (!blocked()) {
+            for (auto& runtime : runtimes) {
+                if (!runsVideo(runtime) || !endsVideoWhenAppLeaves(runtime)) continue;
+                std::uint64_t serial;
+                {
+                    std::lock_guard lock(inboxMutex);
+                    serial = ++inboxSerial;
+                }
+                handlePlatformEvent({CameraEvent {runtime.description.platformIndex, CameraEventKind::interruptedInBackground}, serial});
+            }
+            const auto time = now();
+            for (const auto& [id, stream] : streams) {
+                const auto* runtime = runtimeOf(stream.camera);
+                if (runtime && startedVideo(stream) && runtime->lost && time - runtime->lostAt <= lossBeingActedOnNanoseconds)
+                    pendingStops.insert(id);
+            }
+        }
+        if (!pendingStops.empty())
+            std::fprintf(stderr, "camera: the application left the foreground: %zu video stream(s) of the guest to stop\n",
+                         pendingStops.size());
+        options.background->ended(request, std::uint32_t(pendingStops.size()));
+    }
+
+    /* The guest stopped a video stream: the application no longer waits for it. */
+    void videoStreamStopped(std::uint32_t id)
+    {
+        if (pendingStops.erase(id) == 0 || !options.background) return;
+        std::fprintf(stderr, "camera: the guest stopped video stream %u after the application left the foreground (%zu left)\n", id,
+                     pendingStops.size());
+        options.background->remaining(std::uint32_t(pendingStops.size()));
+    }
+
     /* Takes what the platform produced since the last pass. */
     void pump()
     {
+        std::uint64_t request;
+        if (options.background && options.background->take(request)) endVideoForBackground(request);
         std::vector<InboxFrame> newest;
         std::deque<InboxStill> stills;
         std::deque<InboxEvent> platformEvents;
@@ -2102,6 +2219,7 @@ public:
                 reconfigure(*runtime);
                 updateBlackTimers(*runtime);
             }
+            videoStreamStopped(stream.id);
         }
         releaseSessionIfIdle();
         reportState();
@@ -2237,6 +2355,11 @@ public:
                 break;
             case VIRTIO_VIDEO_CAMERA_STREAM_STILL: queueStill(stream, runtime, held); break;
             default:
+                // The guest queues a meta buffer that carried the loss's record again: it has read the record.
+                if (runtime.lost && !runtime.lossRecordRead &&
+                    std::find(runtime.lossRecordCarriers.begin(), runtime.lossRecordCarriers.end(),
+                              std::pair<std::uint32_t, std::uint32_t> {id, q.resource_id}) != runtime.lossRecordCarriers.end())
+                    runtime.lossRecordRead = true;
                 stream.queued.push_back(held);
                 stream.started = true;
                 serveMeta(id, stream);
@@ -2290,6 +2413,8 @@ public:
         }
         closeSession();
         streams.clear();
+        pendingStops.clear();
+        if (options.background) options.background->remaining(0);
         groups.clear();
         events.clear();
         completions.clear();
@@ -2304,6 +2429,9 @@ public:
             runtime.resuming = false;
             runtime.failed = false;
             runtime.lost = false;
+            runtime.lossRecord = 0;
+            runtime.lossRecordCarriers.clear();
+            runtime.lossRecordRead = false;
             runtime.told = false;
             runtime.toldUnavailable = false;
             runtime.videoRetry = 0;

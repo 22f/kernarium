@@ -1030,6 +1030,41 @@ uml_add_guest_integration_test(
     TIMEOUT 420
     CPUS 2)
 
+# An arm64 task has the guest's vDSO (kernel/common/README.md): AT_SYSINFO_EHDR
+# names an ELF shared object that /proc/self/maps shows as [vdso], its three
+# entries resolve by name and version through the SysV and the GNU hash, its
+# unwind tables cover them, each agrees with the system call it stands for
+# (every clock, an invalid clock, a bad pointer, the resolution), a fork and an
+# exec keep it, and a task that moves, unmaps, covers or writes to its own gets
+# a working one from its next exec. The caller states that the mainline guest
+# kernel does not seal its system mappings (--seal=open). The probe uses no C
+# library. A second probe, built against
+# the guest's glibc, checks that glibc's clock_gettime, gettimeofday and time
+# reach the kernel from the [vdso] mapping (guest-vdso-libc-*). An AArch32 task
+# has no vDSO (guest-aarch32-kernel), and run_android_vdso.py runs both probes
+# on Android.
+foreach(_engine IN ITEMS gadgets jit)
+    uml_add_guest_integration_test(
+        NAME guest-vdso-${_engine}
+        SCRIPT support/run_guest_probe.py
+        ARGS --probe ${PROJECT_SOURCE_DIR}/tests/integration/kernel/vdso_probe.cpp
+            "--cxxflags=-Wall -Wextra -Werror -ffreestanding -nostdlib -static -no-pie -fno-stack-protector -fno-exceptions -fno-rtti"
+            --probe-argument=--seal=open
+            --engine ${_engine} --ncpus 2 --probe-timeout 150
+        LABELS guest;kernel;${_engine}
+        TIMEOUT 420
+        CPUS 2)
+    uml_add_guest_integration_test(
+        NAME guest-vdso-libc-${_engine}
+        SCRIPT support/run_guest_probe.py
+        ARGS --probe ${PROJECT_SOURCE_DIR}/tests/integration/kernel/vdso_libc_probe.cpp
+            "--cxxflags=-Wall -Wextra -Werror -fno-exceptions -fno-rtti"
+            --engine ${_engine} --ncpus 2 --probe-timeout 150
+        LABELS guest;kernel;${_engine}
+        TIMEOUT 420
+        CPUS 2)
+endforeach()
+
 # A TLB replay that sends neighbouring user PTEs as one host call maps each
 # page to its own frame and protection, across PMD and batch boundaries and
 # while another thread's invalidations make it walk batches again.
@@ -1427,6 +1462,26 @@ foreach(_code_change_engine IN ITEMS gadgets jit)
         ARGS --probe ${UML_GUEST_CODE_CHANGE} --cpus 4
             --engine ${_code_change_engine}
         LABELS guest;smp;dynamic-code;${_code_change_engine}
+        TIMEOUT 600
+        CPUS 4)
+endforeach()
+
+uml_add_freestanding_cxx_payload(UML_GUEST_FORK_FLUSH guest-fork-flush
+    smp/guest_fork_flush.cpp
+    COMMENT "Building the freestanding arm64 fork-flush guest probe"
+    ARCH_OPTIONS -march=armv8.1-a -mno-outline-atomics)
+
+# What a fork leaves of the parent's address space: the kernel invalidates on
+# the host only the writable private mappings fork write-protects, so each side
+# of a fork over every kind of memory must see only its own bytes, with a
+# sibling thread of the parent writing during the fork.
+foreach(_fork_flush_engine IN ITEMS gadgets jit)
+    uml_add_guest_integration_test(
+        NAME guest-fork-flush-${_fork_flush_engine}
+        SCRIPT smp/run_guest_fork_flush.py
+        ARGS --probe ${UML_GUEST_FORK_FLUSH} --cpus 4
+            --engine ${_fork_flush_engine}
+        LABELS guest;smp;memory;mmu;${_fork_flush_engine}
         TIMEOUT 600
         CPUS 4)
 endforeach()

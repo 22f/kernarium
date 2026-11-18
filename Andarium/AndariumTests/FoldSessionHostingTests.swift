@@ -664,7 +664,12 @@ struct FoldSessionHostingTests {
         }
         let column = try #require(shown.map(\.frame).reduce(nil as CGRect?) { $0?.union($1) ?? $1 }, "no Welcome")
         let footer = try #require(elements.first { $0.label.contains("free on this") }?.frame, "no footer")
-        return (column, footer, elements.contains { $0.label.hasPrefix("Vertical scroll bar") })
+        // An iPad app on a Mac has no accessibility element for a scroll indicator: there Welcome scrolls when a
+        // scroll view holds it.
+        func holdsScrollView(_ view: UIView) -> Bool { view is UIScrollView || view.subviews.contains(where: holdsScrollView) }
+        let scrolls = ProcessInfo.processInfo.isiOSAppOnMac
+            ? holdsScrollView(host.view) : elements.contains { $0.label.hasPrefix("Vertical scroll bar") }
+        return (column, footer, scrolls)
     }
 
     /// Flat, Welcome is where it is on a display that does not fold, as on an

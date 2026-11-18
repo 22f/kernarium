@@ -121,6 +121,19 @@ it. The bridge fields used below are defined by the comments in
 
 ## arm64 task interface
 
+- An arm64 task has a `[vdso]` in addition to the `[sigpage]`, which
+  `AT_SYSINFO_EHDR` names. It is an ELF shared object shaped like native
+  arm64's vDSO (a `LINUX_2.6.39` version node, both hash tables, unwind
+  tables) with three of native's entries, `__kernel_clock_gettime`,
+  `__kernel_gettimeofday` and `__kernel_clock_getres`, each a plain system
+  call: the guest has no counter a task could read, so every clock and its
+  resolution come from the kernel. Signal return stays on the `[sigpage]`, so
+  `__kernel_rt_sigreturn` is not exported. The mapping is sealed where
+  `CONFIG_MSEAL_SYSTEM_MAPPINGS` is set, as Android's configuration does. An
+  AArch32 task and the x86_64 slice's tasks have no vDSO. `guest-vdso-gadgets`
+  and `-jit` check the object, its entries and what a task can do to its own
+  mapping with no C library, `guest-vdso-libc-gadgets` and `-jit` that glibc
+  calls them, and `android-vdso` that bionic does and the mapping is sealed.
 - A signal handler installed without `SA_RESTORER` returns to a trampoline in
   the read-only `[sigpage]` above `STACK_TOP`, where the host runs
   `rt_sigreturn`, and a frame record lets unwinders cross a signal frame as on
@@ -182,6 +195,12 @@ it. The bridge fields used below are defined by the comments in
   present, name consecutive frames from a 16 KiB-aligned offset of one backing,
   and agree in protection; any other slot is a host-private copy coherent with
   the frames only at a synchronization point (`guest-tlb-replay-runs`).
+- A fork invalidates on the host only the parent's writable private VMAs, the
+  entries it write-protects; every other VMA of the parent keeps its host
+  mappings and code stamps, and any other flush of an `mm` covers all of it
+  (`guest-fork-flush-*`, `guest-mmu-stress`). That rests on `dup_mmap()`
+  flushing the parent after `arch_dup_mmap()` on every path that changed one
+  of its entries; a kernel uprev rechecks it.
 - Because of that slot rule, a kernel alias outside the linear map shares
   memory with the frames' other views only in whole aligned groups of four
   pages, so the architecture reports a vmap group of four. vmalloc and `vmap()`

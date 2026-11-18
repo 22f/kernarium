@@ -9,6 +9,7 @@
 #include "cpu/arm64/jit/jit_test_api.hpp"
 #include "platform/apple/host_features.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <barrier>
@@ -220,10 +221,12 @@ void compare_lookahead_preserves_fetch_faults(bool matches) {
 /*
  * Four vCPUs raise one counter with a compare-and-swap loop. The loop at the
  * page's start is the fused sequence the JIT lowers to the host's own
- * monitor. With `mixed_semantic`, vCPU 0 runs a copy that begins one NOP
- * earlier and retries to it: a load-exclusive that does not begin a block is
- * left to the checked semantic helpers and their software reservation, so
- * the two kinds of vCPU meet on one location.
+ * monitor. With `mixed_semantic`, vCPU 0 runs a copy with a `csel` between
+ * its load and its store, which no fused run admits: its load-exclusive and
+ * store-exclusive take the checked semantic helpers and their software
+ * reservation, so the two kinds of vCPU meet on one location. Each fused
+ * worker must retire a whole pass in one block at least once, and the
+ * semantic one never does.
  */
 void concurrent_compare_retry_case(bool mixed_semantic) {
   constexpr auto page = DARWIN_UML_GUEST_PAGE_SIZE;
@@ -233,7 +236,7 @@ void concurrent_compare_retry_case(bool mixed_semantic) {
   constexpr std::uint64_t semantic_entry = base + 0x100U;
   constexpr std::size_t workers = 4;
   constexpr unsigned iterations = 1000;
-  constexpr std::uint32_t nop = 0xd503'201fU;
+  constexpr std::uint32_t csel_eq = 0x9a86'00c6U; // csel x6, x6, x6, eq
   JitBacking backing{2};
   backing.put32(0, load_exclusive);
   backing.put32(4, 0xeb04'007fU); // cmp x3, x4
@@ -241,12 +244,12 @@ void concurrent_compare_retry_case(bool mixed_semantic) {
   backing.put32(12, 0xc805'7c22U); // stxr w5, x2, [x1]
   backing.put32(16, 0x35ff'ff85U); // cbnz w5, start
   backing.put32(20, system_call);
-  backing.put32(0x100, nop);
-  backing.put32(0x104, load_exclusive);
-  backing.put32(0x108, 0xeb04'007fU); // cmp x3, x4
-  backing.put32(0x10c, 0x5400'0061U); // b.ne end
+  backing.put32(0x100, load_exclusive);
+  backing.put32(0x104, 0xeb04'007fU); // cmp x3, x4
+  backing.put32(0x108, 0x5400'0081U); // b.ne end
+  backing.put32(0x10c, csel_eq);
   backing.put32(0x110, 0xc805'7c22U); // stxr w5, x2, [x1]
-  backing.put32(0x114, 0x35ff'ff65U); // cbnz w5, the NOP
+  backing.put32(0x114, 0x35ff'ff65U); // cbnz w5, the load
   backing.put32(0x118, system_call);
   backing.put64(page, 0);
   JitMapping mapping{generation, base, backing, 2};
@@ -256,6 +259,7 @@ void concurrent_compare_retry_case(bool mixed_semantic) {
       std::make_unique<std::array<uml::memory::StaticGuestMemory, workers>>();
   auto cpus = std::make_unique<
       std::array<uml::cpu::arm64::CpuState, workers>>();
+  std::array<std::size_t, workers> widest{};
   std::barrier start{workers};
   std::vector<std::thread> threads;
   for (std::size_t index = 0; index < workers; ++index) {
@@ -284,6 +288,7 @@ void concurrent_compare_retry_case(bool mixed_semantic) {
           std::size_t executed = 0;
           event = executor.run_block(cpu, (*memories)[index],
                                      generation, executed);
+          widest[index] = std::max(widest[index], executed);
           retired += executed;
         }
         require(event == ::uml::cpu::EngineEvent::system_call);
@@ -300,7 +305,8 @@ void concurrent_compare_retry_case(bool mixed_semantic) {
           require(cpu.registers[5] == 1 || cpu.registers[5] == 7);
           require(cpu.registers[3] > expected);
           require((cpu.nzcv & 0x4000'0000U) == 0);
-          require(retired >= pass - 1 && (retired - (pass - 1)) % pass == 0);
+          // Load, compare, the taken branch and the call: four words.
+          require(retired >= 4U && (retired - 4U) % pass == 0);
           expected = cpu.registers[3];
         }
       }
@@ -310,6 +316,14 @@ void concurrent_compare_retry_case(bool mixed_semantic) {
   for (auto &thread : threads)
     thread.join();
   require(backing.get64(page) == workers * iterations);
+  /* Fused workers retired a whole pass (five words) in one block; the
+   * semantic worker never retired more than its last three. */
+  for (std::size_t index = 0; index < workers; ++index) {
+    if (mixed_semantic && index == 0)
+      require(widest[index] <= 3U);
+    else
+      require(widest[index] >= 5U);
+  }
 }
 
 /*
@@ -525,8 +539,11 @@ void rollback_block_retires_nothing() {
 }
 
 /* A compare-retry whose load is the last three words of a page and whose
- * store is on the next mapped page still fuses. */
-void compare_retry_across_a_page_boundary_fuses() {
+ * store is on the next mapped page is not fused: a span reads the words of
+ * the load's page alone, so every executor reads the same words for the same
+ * code. The load is a one-instruction semantic block, and the loop completes
+ * through the semantic store-exclusive its reservation arms. */
+void compare_retry_across_a_page_boundary_declines() {
   constexpr auto page = DARWIN_UML_GUEST_PAGE_SIZE;
   constexpr unsigned long generation = 10'124U;
   constexpr std::uint64_t base = 0x145'0000U;
@@ -551,7 +568,15 @@ void compare_retry_across_a_page_boundary_fuses() {
   std::size_t executed = 0;
   require(executor.run_block(cpu, memory, generation, executed) ==
           ::uml::cpu::EngineEvent::continued);
-  require(executed >= 5U && (executed - 5U) % 5U == 0U);
+  /* The declined load retires alone and leaves its reservation armed. */
+  require(executed == 1U && cpu.pc == start + 4U &&
+          cpu.exclusive_size == 8U);
+  auto event = ::uml::cpu::EngineEvent::continued;
+  for (unsigned attempt = 0;
+       attempt < 10U && event == ::uml::cpu::EngineEvent::continued;
+       ++attempt)
+    event = executor.run_block(cpu, memory, generation, executed);
+  require(event == ::uml::cpu::EngineEvent::system_call);
   require(cpu.exclusive_size == 0U && cpu.registers[5] == 0U);
   require(backing.get64(2U * page) == 43U);
   executor.end_execution();
@@ -711,16 +736,34 @@ void native_store_invalidates_semantic_reservation_case() {
   require(semantic_cpu.exclusive_size == 8U);
 
   require(native_executor.begin_execution(generation, native_cpu.pc));
+  /* The reservation of the semantic vCPU makes the native block run in its
+   * tracked variant, which fuses the pair too. As on hardware, a store-
+   * exclusive may fail on the host (the first write to a page its mapping has
+   * not written is such a case) with memory untouched: the guest's retry is
+   * this loop. The pair is fused when one block retires the load, the add and
+   * the store. */
   auto native_event = ::uml::cpu::EngineEvent::continued;
-  for (unsigned attempt = 0;
-       attempt < 4U &&
-       native_event == ::uml::cpu::EngineEvent::continued;
-       ++attempt)
-    native_event = native_executor.run_block(
-        native_cpu, memory, generation, executed);
-  require(native_event ==
-          ::uml::cpu::EngineEvent::system_call);
-  require(native_cpu.registers[5] == 0U);
+  bool fused = false;
+  native_cpu.registers[5] = 7U;
+  for (unsigned pass = 0; pass < 16U && native_cpu.registers[5] != 0U;
+       ++pass) {
+    native_cpu.pc = base + 8U;
+    native_cpu.registers[5] = 7U;
+    native_event = ::uml::cpu::EngineEvent::continued;
+    for (unsigned attempt = 0;
+         attempt < 4U &&
+         native_event == ::uml::cpu::EngineEvent::continued;
+         ++attempt) {
+      native_event = native_executor.run_block(
+          native_cpu, memory, generation, executed);
+      fused = fused || executed >= 3U;
+    }
+    require(native_event == ::uml::cpu::EngineEvent::system_call);
+    require(native_cpu.registers[5] == 0U ||
+            (native_cpu.registers[5] == 1U &&
+             backing.get64(page) == initial));
+  }
+  require(fused && native_cpu.registers[5] == 0U);
   require(backing.get64(page) == initial + 1U);
   native_executor.end_execution();
 
@@ -1203,6 +1246,157 @@ void own_store_keeps_reservation_case(OwnStore path, bool same_granule,
   executor.end_execution();
 }
 
+/*
+ * A fused store runs the block's tracked variant while another vCPU holds a
+ * software reservation, and records the range it wrote only if the host store
+ * succeeded. The holder's store-exclusive then fails if, and only if, the
+ * native vCPU stored to its granule (or to one that shares its version slot):
+ * a rolled-back attempt writes nothing and bumps nothing, a store to another
+ * granule leaves the reservation standing, and two stores that restore the
+ * value still fail it.
+ */
+enum class TrackedStore { same_granule, other_granule, rolled_back, restored };
+
+/* Runs the block at `pc` until its pair stores (a host store-exclusive may
+ * fail, as on hardware, with memory untouched; the guest's retry is this
+ * loop) and says whether one block retired the whole fused pair. */
+[[nodiscard]] bool run_pair_until_it_stores(
+    uml::cpu::arm64::JitExecutor &executor,
+    uml::memory::StaticGuestMemory &memory, uml::cpu::arm64::CpuState &cpu,
+    unsigned long generation, std::uint64_t pc) {
+  bool fused = false;
+  cpu.registers[5] = 7U;
+  for (unsigned pass = 0; pass < 16U && cpu.registers[5] != 0U; ++pass) {
+    cpu.pc = pc;
+    cpu.registers[5] = 7U;
+    auto event = ::uml::cpu::EngineEvent::continued;
+    for (unsigned attempt = 0;
+         attempt < 4U && event == ::uml::cpu::EngineEvent::continued;
+         ++attempt) {
+      std::size_t executed = 0;
+      event = executor.run_block(cpu, memory, generation, executed);
+      fused = fused || executed >= 3U;
+    }
+    require(event == ::uml::cpu::EngineEvent::system_call);
+  }
+  require(cpu.registers[5] == 0U);
+  return fused;
+}
+
+void tracked_native_store_case(TrackedStore which) {
+  constexpr auto page = DARWIN_UML_GUEST_PAGE_SIZE;
+  const unsigned long generation =
+      10'170U + static_cast<unsigned>(which);
+  constexpr std::uint64_t base = 0x4c0'0000U;
+  constexpr std::size_t pages = 400;
+  const auto data = base + page;
+  constexpr std::uint64_t initial = 41U;
+  constexpr std::uint32_t add_one = 0x9100'0463U;       // add x3, x3, #1
+  constexpr std::uint32_t sub_one = 0xd100'0463U;       // sub x3, x3, #1
+  constexpr std::uint32_t pair_store = 0xc805'7c23U;    // stxr w5, x3, [x1]
+  constexpr std::uint32_t holder_store = 0xc809'7c28U;  // stxr w9, x8, [x1]
+
+  JitBacking backing{pages};
+  backing.put32(0, load_exclusive);
+  backing.put32(4, system_call);
+  backing.put32(8, 0xc85f'7cc3U);  // ldxr x3, [x6]
+  backing.put32(12, add_one);
+  backing.put32(16, 0xc805'7cc3U); // stxr w5, x3, [x6]
+  backing.put32(20, system_call);
+  backing.put32(24, 0xc85f'7cc3U);
+  backing.put32(28, sub_one);
+  backing.put32(32, 0xc805'7cc3U);
+  backing.put32(36, system_call);
+  backing.put32(40, 0xc85f'7cc3U); // ldxr x3, [x6]
+  backing.put32(44, 0xeb04'007fU); // cmp x3, x4
+  backing.put32(48, 0x5400'0181U); // b.ne pc + 48 (the svc)
+  backing.put32(52, 0xc805'7cc2U); // stxr w5, x2, [x6]
+  backing.put32(56, 0x35ff'ff85U); // cbnz w5, pc - 16
+  backing.put32(96, system_call);
+  backing.put32(64, holder_store);
+  backing.put32(68, system_call);
+  backing.put64(page, initial);
+  (void)pair_store;
+  JitMapping mapping{generation, base, backing, pages};
+
+  uml::memory::Tlb tlb;
+  tlb.prepare(generation, darwin_uml_static_vm_changes(generation));
+  const auto slot = [&](std::uint64_t address) {
+    auto *pointer = tlb.translate(address, ::uml::memory::Access::write);
+    require(pointer != nullptr);
+    return uml::cpu::arm64::jit::testing::reservation_slot_for_testing(
+        static_cast<std::byte *>(pointer));
+  };
+  std::uint64_t target = data;
+  if (which == TrackedStore::other_granule) {
+    target = 0;
+    for (std::uint64_t offset = 2U * page;
+         target == 0 && offset < pages * page; offset += 16U) {
+      if (slot(base + offset) != slot(data))
+        target = base + offset;
+    }
+    require(target != 0);
+    backing.put64(target - base, initial);
+  }
+
+  uml::cpu::arm64::JitExecutor holder;
+  uml::cpu::arm64::JitExecutor native;
+  uml::memory::StaticGuestMemory memory;
+  uml::cpu::arm64::CpuState holder_cpu{};
+  uml::cpu::arm64::CpuState native_cpu{};
+  holder_cpu.pc = base;
+  holder_cpu.registers[1] = data;
+  holder_cpu.registers[8] = 99U;
+  native_cpu.registers[6] = target;
+  native_cpu.registers[2] = 7U;
+  native_cpu.registers[4] = initial + 100U; // never equal: the rollback case
+  require(holder.begin_execution(generation, holder_cpu.pc));
+  std::size_t executed = 0;
+  require(holder.run_block(holder_cpu, memory, generation, executed) ==
+          ::uml::cpu::EngineEvent::continued);
+  require(executed == 1U && holder_cpu.exclusive_size == 8U);
+
+  require(native.begin_execution(generation, base + 8U));
+  if (which == TrackedStore::rolled_back) {
+    /* The mismatch discards the fused attempt: the load re-executes alone,
+     * semantically, and the run leaves without a store. */
+    native_cpu.pc = base + 40U;
+    require(native.run_block(native_cpu, memory, generation, executed) ==
+            ::uml::cpu::EngineEvent::continued);
+    require(executed == 1U && native_cpu.exclusive_size == 8U &&
+            native_cpu.pc == base + 44U);
+    auto event = ::uml::cpu::EngineEvent::continued;
+    for (unsigned attempt = 0;
+         attempt < 8U && event == ::uml::cpu::EngineEvent::continued;
+         ++attempt)
+      event = native.run_block(native_cpu, memory, generation, executed);
+    require(event == ::uml::cpu::EngineEvent::system_call);
+    require(backing.get64(page) == initial);
+  } else {
+    require(run_pair_until_it_stores(native, memory, native_cpu, generation,
+                                     base + 8U));
+    require(backing.get64(target - base) == initial + 1U);
+    if (which == TrackedStore::restored) {
+      require(run_pair_until_it_stores(native, memory, native_cpu,
+                                       generation, base + 24U));
+      require(backing.get64(target - base) == initial);
+    }
+  }
+  native.end_execution();
+
+  /* The holder's store-exclusive: failed by a store to its granule, standing
+   * after every other outcome. */
+  holder_cpu.pc = base + 64U;
+  require(holder.run_block(holder_cpu, memory, generation, executed) ==
+          ::uml::cpu::EngineEvent::continued);
+  const bool beaten = which == TrackedStore::same_granule ||
+                      which == TrackedStore::restored;
+  require(holder_cpu.registers[9] == (beaten ? 1U : 0U));
+  require(backing.get64(page) == (beaten ? initial + (which ==
+              TrackedStore::same_granule ? 1U : 0U) : 99U));
+  holder.end_execution();
+}
+
 } // namespace
 
 int main() {
@@ -1225,7 +1419,7 @@ int main() {
   mismatch_path_store_exclusive_makes_progress();
   mismatch_rolls_back_to_a_semantic_load();
   rollback_block_retires_nothing();
-  compare_retry_across_a_page_boundary_fuses();
+  compare_retry_across_a_page_boundary_declines();
   same_backing_alias_case(true);
   same_backing_alias_case(false);
   same_backing_alias_case(true, true);
@@ -1233,6 +1427,9 @@ int main() {
   same_backing_alias_case(true, false, AliasStore::release);
   same_backing_alias_case(false, false, AliasStore::release);
   native_store_invalidates_semantic_reservation_case();
+  for (const auto which : {TrackedStore::same_granule, TrackedStore::other_granule,
+                           TrackedStore::rolled_back, TrackedStore::restored})
+    tracked_native_store_case(which);
   slow_store_invalidates_semantic_reservation_case(false);
   slow_store_invalidates_semantic_reservation_case(true);
   concurrent_native_cold_paths_leave_publication_before_helper();

@@ -138,3 +138,5 @@ patch	um-add-an-mconsole-sync-command.patch
 patch	PM-suspend-say-whether-the-suspend-s-own-sync-returned.patch
 patch	um-say-in-a-suspend-s-reply-whether-it-synced-file-systems.patch
 patch	um-wait-for-idle-with-one-kevent-per-virtual-CPU.patch
+patch	arm64-um-map-a-vDSO-whose-entries-are-plain-system-calls.patch
+patch	um-leave-the-VMAs-a-fork-cannot-change-alone-at-its-flush.patch

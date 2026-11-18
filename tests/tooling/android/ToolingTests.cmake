@@ -288,7 +288,9 @@ uml_add_tooling_test(
 
 # The video-suspend runner's suspend step against a fake guest: a host GPU reset
 # across the wake fails it by that name, and the shared reader of the launcher's
-# log that the Wi-Fi network runner uses as well.
+# log that the Wi-Fi network runner uses as well; and its start_guest, which the
+# sync and vDSO runners share, against a stand-in emulator: a start that fails
+# or is interrupted stops the emulator it launched.
 uml_add_tooling_test(
     NAME android17-video-suspend-runner
     COMMAND ${Python3_EXECUTABLE} -B
