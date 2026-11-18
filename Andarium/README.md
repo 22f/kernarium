@@ -772,16 +772,16 @@ requires reopening Andarium.
 - **Heat.** The application tells the guest's thermal HAL how hot the device is
   over vsock 5559 (`ThermalSession`; the wire is `ThermalProtocol`, whose
   golden frames the HAL's test shares in `tests/unit/andarium/fixtures`).
-  Android hears of heat from iOS's serious state: nominal and fair are none
-  (fair is not reported because it would not change the frame rate), serious
-  is Android's severe, critical is its critical, and the host never sends a
-  level that shuts the guest down. The severity is the hottest reported state
-  of the last 120 s: it rises at once and falls 120 s after the hotter state
-  ended, so a state that flickers around serious is one steady cap. From severe
-  up Android lowers the guest's frame rate to 30, and the first time in a run
-  that this starts the session screen says so once. The session and
-  stall records, the statistics and the feedback information keep iOS's real
-  state. A system without the HAL hears nothing and shows no notice; the
+  Android hears of heat only from iOS's critical state: nominal, fair and
+  serious are none, critical is Android's critical, and the host never sends
+  any other level. The severity is the hottest reported state of the last
+  120 s: it rises at once and falls 120 s after critical ended, so a state
+  that flickers around critical is one steady cap. A state Android is told
+  nothing of, serious included, has no hold. While critical is told Android
+  lowers the guest's frame rate to 30, and the first time in a run that this
+  starts the session screen says so once. The session and stall records, the
+  statistics and the feedback information keep iOS's real state, serious
+  included. A system without the HAL hears nothing and shows no notice; the
   [Android README](../android/lineage-24/README.md) owns the HAL.
   Settings' Performance section, after Stats in a normal session, has "When
   hot": Limit frame rate, the default, or Full frame rate
@@ -790,7 +790,7 @@ requires reopening Andarium.
   Android none at every state of iOS's, critical included, at once when it is
   chosen, and shows no notice at any heat; Limit frame rate again tells it the
   policy's severity at once. The policy runs either way (`deviceIsHot` says
-  the device is held hot, for the section's footnote). The notice's
+  the device is held at critical, for the section's footnote). The notice's
   words are a button that opens an alert whose Turn Off chooses Full frame
   rate in one tap; Dismiss only dismisses. A harness launch runs with the
   default and keeps nothing; `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states it for
@@ -1319,8 +1319,8 @@ additionally reads `KERNARIUM_ANDROID_ADB_AUTH`
 states the resolution; the earlier `KERNARIUM_RETINA_MODE` (`1` native, `0`
 one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
-for iOS's thermal state in the Simulator and in automation; `serious` and
-`critical` reach the guest as heat. `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states
+for iOS's thermal state in the Simulator and in automation; only `critical`
+reaches the guest as heat. `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states
 Settings' "When hot" for the run: `0` tells the guest nothing of the heat. A
 UI test's probe session (`ANDARIUM_INPUT_PROBE`) that states the thermal state
 runs the thermal session against a stand-in for the guest's HAL, and its log

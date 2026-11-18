@@ -9,9 +9,9 @@ import Foundation
 /// limit off the HAL hears none at every state of iOS's, critical included, at
 /// once when the limit is turned off and with the policy's current severity at
 /// once when it is turned on, and the cap is never announced while it is off.
-/// The policy runs either way, so `isHot` (serious or above, its hold
-/// included) is known with the limit off too. The gate is here, where the
-/// severity is sent, so that the policy stays one pure rule.
+/// The policy runs either way, so `isHot` (critical, its hold included) is
+/// known with the limit off too. The gate is here, where the severity is
+/// sent, so that the policy stays one pure rule.
 ///
 /// The application reads iOS's thermal state and gives each reading to
 /// `observe`. A run (a normal start, from its first moment until it ends) has
@@ -74,8 +74,8 @@ public final class ThermalSession: @unchecked Sendable {
     /// does): every run begins from it, and never from the state an earlier
     /// run ended with. `capStarted` is called on the session's queue, once per run, when the
     /// frame rate cap starts. `hotChanged` is called on it each time the
-    /// device becomes hot (serious or above, the hold included) or stops
-    /// being, with the limit on or off, and with false when a run ends.
+    /// device becomes hot (critical, the hold included) or stops being, with
+    /// the limit on or off, and with false when a run ends.
     public init(
         opener: any GuestStreamOpener, retryDelay: DispatchTimeInterval = .seconds(1),
         clock: @escaping @Sendable () -> UInt64 = ThermalSession.uptimeNanoseconds,
@@ -167,8 +167,8 @@ public final class ThermalSession: @unchecked Sendable {
     /// while the limit is off.
     public var severity: AndroidThermalSeverity { queue.sync { inRun ? told : .none } }
 
-    /// Whether the policy holds the device hot (serious or above, its hold
-    /// included), in a run, whatever Android is told.
+    /// Whether the policy holds the device hot (critical, its hold included),
+    /// in a run, whatever Android is told.
     public var isHot: Bool { queue.sync { inRun && policy.severity >= ThermalPolicy.capSeverity } }
 
     /// Whether the guest's HAL is connected.
