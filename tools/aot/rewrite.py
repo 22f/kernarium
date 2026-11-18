@@ -2129,14 +2129,38 @@ def resolve_library(root: pathlib.Path, mounts: dict[str, pathlib.Path],
     return root / path.lstrip("/")
 
 
+def follow_in_image(root: pathlib.Path, mounts: dict[str, pathlib.Path],
+                    path: str) -> str | None:
+    """The guest path of the regular file `path` names inside the image: a
+    link is followed as the guest's own file system would (an absolute link
+    from the image's root, a relative one from its directory), never against
+    the host. None for a name that is no regular file there, or whose chain
+    of links leaves the image or never ends."""
+    for _ in range(16):
+        host = resolve_library(root, mounts, path)
+        if host.is_symlink():
+            link = os.readlink(host)
+            path = os.path.normpath(
+                link if link.startswith("/") else
+                os.path.join(os.path.dirname(path), link))
+        elif host.is_file():
+            return path
+        else:
+            return None
+    return None
+
+
 def expand_libraries(root: pathlib.Path, mounts: dict[str, pathlib.Path],
                      entries: list[str]) -> tuple[list[str], list[str]]:
     """The libraries an entry list names, and the files a pattern matched
-    that have no executable code. An entry whose last component has a `*`
-    names every file of that directory the pattern matches, in name order
-    (the boot image's OAT files: some hold only a header, because their
-    jar has no compiled method); one without names that file, which must
-    exist and hold code."""
+    that have no executable code or that no regular file of the image
+    backs. An entry whose last component has a `*` names every file of that
+    directory the pattern matches, in name order (the boot image's OAT
+    files: some hold only a header, because their jar has no compiled
+    method); one without names that file, which must exist and hold code.
+    A match that is a link is the file it names inside the image. A path
+    named twice is refused: each of its page digests would then be shared by
+    two units and leave the digest hash, so the library would never bind."""
     libraries: list[str] = []
     skipped: list[str] = []
     for entry in entries:
@@ -2148,14 +2172,24 @@ def expand_libraries(root: pathlib.Path, mounts: dict[str, pathlib.Path],
             libraries.append(entry)
             continue
         folder = resolve_library(root, mounts, directory)
-        found = sorted(path.name for path in folder.glob(pattern)
-                       if path.is_file())
-        if not found:
+        names = sorted(path.name for path in folder.glob(pattern)
+                       if path.is_symlink() or path.is_file())
+        if not names:
             raise SystemExit(f"rewrite.py: {entry} matches no file")
-        for name in found:
-            elf = elf64.Elf((folder / name).read_bytes())
+        for name in names:
+            named = f"{directory}/{name}"
+            guest = follow_in_image(root, mounts, named)
+            if guest is None:
+                skipped.append(named)
+                continue
+            elf = elf64.Elf(resolve_library(root, mounts, guest).read_bytes())
             (libraries if elf.has_executable_segment() else skipped).append(
-                f"{directory}/{name}")
+                guest)
+    seen: set[str] = set()
+    for path in libraries:
+        if path in seen:
+            raise SystemExit(f"rewrite.py: {path} is listed twice")
+        seen.add(path)
     return libraries, skipped
 
 
@@ -2243,6 +2277,17 @@ def build_blob(units: list[dict], layout: dict[str, int],
     for unit, base in zip(units, bases):
         blob[base:base + len(unit["unit"])] = unit["unit"]
     # the global page-digest hash: digests that identify one page only
+    same: dict[str, str] = {}
+    for unit in units:
+        # The unit binds by the content of its pages, not by its path: a
+        # second copy of the same file (a library an APEX ships in several
+        # places) would take every digest out of the hash, and neither would
+        # ever bind. One path names the file; the guest finds every copy by
+        # its pages.
+        if unit["sha256"] in same:
+            raise ValueError(f"{unit['path']} is the same file as "
+                             f"{same[unit['sha256']]}: list it once")
+        same[unit["sha256"]] = unit["path"]
     occupancy: dict[int, int] = collections.Counter()
     for unit in units:
         occupancy.update(unit["digests"])
@@ -2305,6 +2350,11 @@ def build_blob(units: list[dict], layout: dict[str, int],
             "words": unit["stats"]["words"],
             "census": unit["stats"]["census"],
             "source_bytes": unit["table_end"] - unit["table_base"],
+            # The pages the digest hash can name: one that two units share
+            # (zero padding, a common stub) is left out of it.
+            "pages": len(unit["digests"]),
+            "bindable_pages": sum(1 for digest in unit["digests"]
+                                  if occupancy[digest] == 1),
         } for unit in units],
     }
     return bytes(blob), manifest

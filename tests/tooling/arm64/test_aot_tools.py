@@ -490,6 +490,7 @@ class PcRelativeWidthTests(unittest.TestCase):
         built = self.constants(unit_words(library))
         self.assertNotIn(0xfffffffffffff000, built)
 
+
     # An LDR (literal) at 0x1000 whose literal is at 0x1000 + 4 * imm19.
     LITERAL_FORMS = {"ldr w": 0x18000000, "ldr x": 0x58000000,
                      "ldrsw": 0x98000000, "ldr s": 0x1c000000,
@@ -741,6 +742,63 @@ class LibraryPatternTests(unittest.TestCase):
             rewrite.expand_libraries(self.root, {},
                                      ["/system/framework/*/boot.oat"])
 
+    def test_a_path_named_twice_is_refused(self) -> None:
+        # By an explicit entry and a pattern, by two patterns, and by the
+        # same entry twice: each page digest would then be shared by two
+        # units and leave the digest hash, and the library would never bind.
+        for entries in (
+                ["/system/framework/arm64/boot-a.oat",
+                 "/system/framework/arm64/boot*.oat"],
+                ["/system/framework/arm64/boot*.oat",
+                 "/system/framework/arm64/boot-*.oat"],
+                ["/system/lib64/libz.so", "/system/lib64/libz.so"]):
+            with self.subTest(entries):
+                with self.assertRaises(SystemExit) as raised:
+                    rewrite.expand_libraries(self.root, {}, entries)
+                self.assertIn("listed twice", str(raised.exception))
+
+    def test_a_link_is_the_file_it_names_inside_the_image(self) -> None:
+        folder = self.root / "system" / "framework" / "arm64"
+        (folder / "boot-link.oat").symlink_to("boot-a.oat")
+        # The link is boot-a.oat again, which the pattern names itself.
+        with self.assertRaises(SystemExit) as raised:
+            rewrite.expand_libraries(
+                self.root, {}, ["/system/framework/arm64/boot-*.oat"])
+        self.assertIn("/system/framework/arm64/boot-a.oat is listed twice",
+                      str(raised.exception))
+        libraries, _ = rewrite.expand_libraries(
+            self.root, {}, ["/system/framework/arm64/boot-l*.oat"])
+        self.assertEqual(libraries, ["/system/framework/arm64/boot-a.oat"])
+
+    def test_a_link_chain_is_followed_by_the_guest_s_rules(self) -> None:
+        folder = self.root / "system" / "framework" / "arm64"
+        (folder / "boot-abs.oat").symlink_to(
+            "/system/framework/arm64/other.oat")
+        libraries, skipped = rewrite.expand_libraries(
+            self.root, {}, ["/system/framework/arm64/boot-abs*"])
+        self.assertEqual(libraries, ["/system/framework/arm64/other.oat"])
+        self.assertEqual(skipped, [])
+
+    def test_a_link_that_leaves_the_image_is_skipped_not_dropped(self) -> None:
+        folder = self.root / "system" / "framework" / "arm64"
+        # The host has this file, the image does not: the link is followed
+        # from the image's root, where nothing is.
+        host_only = self.root.parent / "host-only.oat"
+        host_only.write_bytes(fixture.build_oat())
+        self.addCleanup(host_only.unlink)
+        (folder / "boot-away.oat").symlink_to(host_only)
+        (folder / "boot-loop.oat").symlink_to("boot-loop.oat")
+        (folder / "boot-dangling.oat").symlink_to("/system/nothing.oat")
+        libraries, skipped = rewrite.expand_libraries(
+            self.root, {}, ["/system/framework/arm64/boot-*.oat"])
+        self.assertEqual(libraries, ["/system/framework/arm64/boot-a.oat",
+                                     "/system/framework/arm64/boot-b.oat"])
+        self.assertEqual(skipped, [
+            "/system/framework/arm64/boot-away.oat",
+            "/system/framework/arm64/boot-c.oat",
+            "/system/framework/arm64/boot-dangling.oat",
+            "/system/framework/arm64/boot-loop.oat"])
+
     def test_a_named_file_is_not_looked_at(self) -> None:
         # Naming a file asks for it: a missing or empty one is the build's
         # own error later, as before.
@@ -986,6 +1044,46 @@ class CountingLayoutTests(unittest.TestCase):
         self.assertEqual(int(match.group(1)), rewrite.RUN_LIMIT)
         # The charge point's own word and the entry's last instruction.
         self.assertGreaterEqual(int(match.group(2)), 2)
+
+
+class SameFileTwiceTests(unittest.TestCase):
+    """A unit binds by the content of its pages, not by its path. A file
+    shipped in several places (an APEX copy) is one unit: listed under two
+    paths, every digest of its pages would be shared by two units and leave
+    the digest hash, and neither unit would ever bind."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import tempfile
+        cls.directory = tempfile.TemporaryDirectory()
+        base = pathlib.Path(cls.directory.name)
+        (base / "a.so").write_bytes(fixture.build())
+        (base / "b.so").write_bytes(fixture.build())
+        cls.paths = {"a": base / "a.so", "b": base / "b.so"}
+        cls.layout = rewrite.read_layout(rewrite.LAYOUT_HEADER)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.directory.cleanup()
+
+    def unit(self, index: int, name: str, which: str) -> dict:
+        return rewrite.build_unit(
+            (index, name, str(self.paths[which]), False, "inline", None))
+
+    def test_the_same_file_under_two_paths_is_refused(self) -> None:
+        units = [self.unit(0, "/apex/a/lib64/libx.so", "a"),
+                 self.unit(1, "/apex/b/lib64/libx.so", "b")]
+        with self.assertRaises(ValueError) as raised:
+            rewrite.build_blob(units, self.layout, "same-twice")
+        self.assertIn("list it once", str(raised.exception))
+
+    def test_a_unit_names_every_page_it_can_bind(self) -> None:
+        blob, manifest = rewrite.build_blob(
+            [self.unit(0, "/apex/a/lib64/libx.so", "a")], self.layout,
+            "once")
+        library = manifest["libraries"][0]
+        self.assertGreater(library["pages"], 0)
+        self.assertEqual(library["bindable_pages"], library["pages"])
 
 
 class StackAlignmentTests(unittest.TestCase):
