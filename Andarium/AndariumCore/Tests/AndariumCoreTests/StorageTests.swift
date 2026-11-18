@@ -101,6 +101,49 @@ struct UnsignedProofSetUpTests {
         }
     }
 
+    /// A signed update to a release did not finish, and a proof carries that
+    /// release's ID: starting, Try Again and the restore all leave the files
+    /// as they are, and the plan is the mismatch Home words.
+    @Test func aProofOfTheIDOfAnUnfinishedSignedUpdateStartsNothingAndRestoresNothing() async throws {
+        let id = "20261102-los24-r5"
+        let (before, root) = try makeStorage(release: releaseIdentity("20261031-los24-r4", build: 100))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let guest = try await before.create(Guest.fresh(on: host))
+        try await before.prepareStart(guest)
+        try Data("android data".utf8).write(to: before.locations.data)
+        try before.completeRun()
+        let signed = TwoDiskStorage(
+            locations: before.locations, release: releaseIdentity(id, build: 200, sha: String(repeating: "b", count: 64)),
+            releaseDirectory: before.releaseDirectory
+        )
+        try await signed.prepareStart(guest)
+        let files = InstanceFiles(directory: before.locations.directory)
+        let record = try Data(contentsOf: files.state)
+        let snapshot = files.snapshot(for: id)
+        #expect(try files.readState()?.pendingUpdate?.toReleaseID == id)
+        #expect(try Data(contentsOf: snapshot) == Data("android data".utf8))
+
+        let proof = TwoDiskStorage(
+            locations: before.locations,
+            release: releaseIdentity(id, build: 200, sha: String(repeating: "c", count: 64), proof: true),
+            releaseDirectory: before.releaseDirectory
+        )
+        #expect(proof.startPlan() == .blocked(.mismatch))
+        await #expect(throws: InstanceError.refused(StartBlock.mismatch.explanation)) { try await proof.prepareStart(guest) }
+        #expect(throws: InstanceError.refused(StartBlock.mismatch.explanation)) { try proof.restoreUpdate() }
+        await #expect(throws: InstanceError.refused(StartBlock.mismatch.explanation)) {
+            try await proof.create(Guest.fresh(on: host))
+        }
+        #expect(try Data(contentsOf: files.state) == record)
+        #expect(try Data(contentsOf: before.locations.data) == Data("android data".utf8))
+        #expect(try Data(contentsOf: snapshot) == Data("android data".utf8))
+
+        // The signed release keeps Try Again, which changes the record's last start only.
+        try await signed.prepareStart(guest)
+        #expect(try files.readState()?.pendingUpdate?.toReleaseID == id)
+        #expect(FileManager.default.fileExists(atPath: snapshot.path))
+    }
+
     @Test func aRecordNobodyCanReadIsNotReplacedByAProof() async throws {
         let proof = releaseIdentity(Self.proof, build: 300, proof: true)
         let (storage, root) = try makeStorage(release: proof)

@@ -344,8 +344,12 @@ public enum InstanceRules {
         // over data another system wrote, and the data it wrote never goes to
         // another system. The instance is erased instead (the way out of every
         // refusal), which Home offers as for any other mismatch, in its words.
-        if release.releaseID != state.releaseID, dataDiskExists || snapshotExists,
-           release.isUnsignedProof || state.isUnsignedProof {
+        // Two systems that share a release ID are two systems when only one is
+        // a proof: the markers are compared as well as the IDs, and before a
+        // retry or a restore of a pending update is looked at.
+        if release.isUnsignedProof || state.isUnsignedProof,
+           release.isUnsignedProof != state.isUnsignedProof || release.releaseID != state.releaseID,
+           dataDiskExists || snapshotExists {
             return InstanceDecision(.refuseConflict, StartBlock.mismatch.explanation)
         }
         if let pending = state.pendingUpdate {

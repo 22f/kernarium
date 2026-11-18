@@ -619,6 +619,104 @@ struct UnsignedProofInstanceTests {
         #expect(decide(named, release("rel-b", build: 200, sha: sha)) == .update)
     }
 
+    // A signed release and a proof may carry one release ID: the markers are
+    // two systems, and the retry and the restore of a pending update never
+    // reach the one that is not the system the data belongs to.
+
+    private let sharedID = "20261102-los24-r5"
+
+    @Test func aProofIsRefusedOverASignedUpdateThatSharesItsID() {
+        // A signed update to sharedID that did not finish: state and pending name it.
+        let unfinished = state(sharedID, build: 200, sha: sha, pending: sharedID)
+        let proof = release(sharedID, build: 200, sha: otherSHA, proof: true)
+        for snapshot in [true, false] {
+            for flags in [InstanceFlags(), InstanceFlags(retry: true), InstanceFlags(restoreSnapshot: true)] {
+                #expect(decide(unfinished, snapshot: snapshot, proof, flags: flags) == .refuseConflict, "\(snapshot) \(flags)")
+            }
+            #expect(
+                InstanceRules.plan(state: unfinished, dataDiskExists: true, snapshotExists: snapshot, release: proof)
+                    == .blocked(.mismatch))
+        }
+        // The same ID and the same disk is no different: the marker says it.
+        let sameDisk = release(sharedID, build: 200, sha: sha, proof: true)
+        #expect(decide(unfinished, sameDisk) == .refuseConflict)
+        #expect(decide(unfinished, sameDisk, flags: InstanceFlags(retry: true)) == .refuseConflict)
+        // A snapshot with no data disk behind it is data too.
+        #expect(decide(unfinished, data: false, snapshot: true, proof, flags: InstanceFlags(retry: true)) == .refuseConflict)
+        // A settled signed instance of that ID, too.
+        #expect(decide(state(sharedID, build: 200, sha: sha), proof) == .refuseConflict)
+        #expect(decide(state(sharedID, build: 200, sha: sha), sameDisk) == .refuseConflict)
+        // Erase stays the way out.
+        #expect(decide(unfinished, proof, flags: InstanceFlags(reset: true)) == .reset)
+    }
+
+    @Test func aSignedReleaseIsRefusedOverTheInstanceOfAProofThatSharesItsID() {
+        let created = state(sharedID, build: 200, sha: sha, proof: true)
+        for signed in [release(sharedID, build: 200, sha: otherSHA), release(sharedID, build: 200, sha: sha)] {
+            #expect(decide(created, signed) == .refuseConflict)
+            #expect(
+                InstanceRules.plan(state: created, dataDiskExists: true, snapshotExists: false, release: signed)
+                    == .blocked(.mismatch))
+            #expect(decide(created, signed, flags: InstanceFlags(retry: true)) == .refuseConflict)
+            #expect(decide(created, signed, flags: InstanceFlags(restoreSnapshot: true)) == .refuseConflict)
+            #expect(decide(created, signed, flags: InstanceFlags(reset: true)) == .reset)
+            // The data is gone: a record alone holds nothing to keep.
+            #expect(decide(created, data: false, signed) == .create)
+        }
+    }
+
+    @Test func oneIDWithOneMarkerKeepsEveryRetryAndRestoreDecision() {
+        for proofMarker in [false, true] {
+            let same = release(sharedID, build: 200, sha: sha, proof: proofMarker)
+            let otherDisk = release(sharedID, build: 200, sha: otherSHA, proof: proofMarker)
+            let unfinished = state(sharedID, build: 200, sha: sha, pending: sharedID, proof: proofMarker)
+            let settled = state(sharedID, build: 200, sha: sha, proof: proofMarker)
+            let word: Comment = "marker \(proofMarker)"
+            // The update that did not finish: Try Again, restore, and the refusal that offers both.
+            #expect(decide(unfinished, snapshot: true, same) == .refusePending, word)
+            #expect(decide(unfinished, snapshot: true, same, flags: InstanceFlags(retry: true)) == .retry, word)
+            #expect(decide(unfinished, snapshot: true, same, flags: InstanceFlags(restoreSnapshot: true)) == .restore, word)
+            #expect(decide(unfinished, snapshot: false, same, flags: InstanceFlags(restoreSnapshot: true)) == .refuseConflict, word)
+            #expect(decide(unfinished, snapshot: false, same, flags: InstanceFlags(retry: true)) == .retry, word)
+            #expect(decide(unfinished, data: false, same, flags: InstanceFlags(retry: true)) == .refuseConflict, word)
+            // A settled instance of that ID: boot, and the two-disks refusal.
+            #expect(decide(settled, same) == .boot, word)
+            #expect(decide(settled, otherDisk) == .refuseConflict, word)
+            #expect(decide(settled, same, flags: InstanceFlags(retry: true)) == .refuseConflict, word)
+            #expect(decide(settled, data: false, same) == .create, word)
+        }
+    }
+
+    @Test func aSharedIDWithTwoMarkersChangesNothingOnTheFiles() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = InstanceFiles(directory: root.appendingPathComponent("Guest"))
+        let first = release("rel-a", build: 100, sha: otherSHA)
+        let second = release(sharedID, build: 200, sha: sha)
+        try files.apply(try files.decide(for: first), release: first)
+        try Data("android data".utf8).write(to: files.data)
+        try files.complete(release: first)
+        try files.apply(try files.decide(for: second), release: second)
+        let snapshot = files.snapshot(for: sharedID)
+        #expect(FileManager.default.fileExists(atPath: snapshot.path))
+        let record = try Data(contentsOf: files.state)
+
+        // The unfinished signed update, a proof of the same ID, and every way a start goes on.
+        let proof = release(sharedID, build: 200, sha: otherSHA, proof: true)
+        for flags in [InstanceFlags(), InstanceFlags(retry: true), InstanceFlags(restoreSnapshot: true)] {
+            let refused = try files.decide(for: proof, flags: flags)
+            #expect(refused.action == .refuseConflict)
+            #expect(throws: InstanceError.self) { try files.apply(refused, release: proof) }
+        }
+        #expect(files.startPlan(for: proof) == .blocked(.mismatch))
+        #expect(try Data(contentsOf: files.state) == record)
+        #expect(try Data(contentsOf: files.data) == Data("android data".utf8))
+        #expect(try Data(contentsOf: snapshot) == Data("android data".utf8))
+        // The signed release keeps Try Again and the restore of its own update.
+        #expect(try files.decide(for: second, flags: InstanceFlags(retry: true)).action == .retry)
+        #expect(try files.decide(for: second, flags: InstanceFlags(restoreSnapshot: true)).action == .restore)
+    }
+
     @Test func aRefusedProofChangesNothingAndEraseStartsItFresh() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
