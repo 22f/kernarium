@@ -2036,6 +2036,11 @@ struct RetirementCase final {
 	std::optional<FaultSite> fault{};
 	/* A store another vCPU makes while the case runs. */
 	std::optional<RaceStore> race{};
+	/* The instruction, counted from one, that settles the state `jit_gap`
+	 * names for the rest of the case: when the gadgets executed it, a
+	 * handover after it holds the state although the JIT ran the stop. Zero
+	 * names none. */
+	std::size_t gadgets_settle{};
 };
 
 [[nodiscard]] std::vector<RetirementCase> retirement_cases()
@@ -2236,7 +2241,7 @@ struct RetirementCase final {
 			{{data, data + 0x2000}}, "memory_fault", 5, code_address + 21, {},
 			long64, {}, {}, rax_is(1), split_store_back_gap,
 			FaultSite{0x3000'0000, uml::memory::MemoryAccess::read},
-			RaceStore{data + 0xffe, data + 0xffe, 1}},
+			RaceStore{data + 0xffe, data + 0xffe, 1}, 3},
 		/* mov $data+0xffc, %ebx; mov $1, %eax; cmpxchg8b (%rbx); movzbl
 		 * (%rbx), %eax; mov $0x30000000, %esi; mov (%rsi), %edx: the same
 		 * for the 8-byte pair. */
@@ -2246,7 +2251,7 @@ struct RetirementCase final {
 			{{data, data + 0x2000}}, "memory_fault", 5, code_address + 21, {},
 			long64, {}, {}, rax_is(1), split_store_back_gap,
 			FaultSite{0x3000'0000, uml::memory::MemoryAccess::read},
-			RaceStore{data + 0xffc, data + 0xffc, 1}},
+			RaceStore{data + 0xffc, data + 0xffc, 1}, 3},
 		/* nop; xor %ecx, %ecx; xor %edx, %edx; div %ecx; nop; hlt */
 		{"divide-error", {0x90, 0x31, 0xc9, 0x31, 0xd2, 0xf7, 0xf1, 0x90,
 			0xf4}, {}, "unexpected_event", 3, code_address + 5},
@@ -2430,8 +2435,10 @@ enum class Tier {
 };
 
 /* Whether the case stopped where and as it must, and left the state a
- * faulting instruction must leave. */
-[[nodiscard]] bool stopped_as_expected(const RetirementCase &test, Tier tier)
+ * faulting instruction must leave. `gadget_instructions` is how many
+ * instructions the gadgets ran before a handover, zero for a JIT alone. */
+[[nodiscard]] bool stopped_as_expected(const RetirementCase &test, Tier tier,
+	std::size_t gadget_instructions)
 {
 	const bool stopped = reported.status == test.status &&
 		reported.retired == test.retired &&
@@ -2440,8 +2447,11 @@ enum class Tier {
 		(!test.fault || (reported.fault_address == test.fault->address &&
 			reported.fault_access == test.fault->access));
 	if (tier != Tier::gadgets && !test.jit_gap.empty()) {
-		if (tier == Tier::jit_after_handover)
-			return stopped;
+		if (tier == Tier::jit_after_handover) {
+			const bool settled = test.gadgets_settle != 0 &&
+				gadget_instructions >= test.gadgets_settle;
+			return stopped && (!settled || test.stop_state.matches(reported));
+		}
 		return stopped && !test.stop_state.matches(reported);
 	}
 	return stopped && test.stop_state.matches(reported);
@@ -2475,7 +2485,7 @@ constexpr Tier first_run_tier = Tier::gadgets;
 		(void)run_configured_case(code, configuration, test.name, false,
 			Dispatch::cached);
 		capture_results = false;
-		bool passed = stopped_as_expected(test, first_run_tier);
+		bool passed = stopped_as_expected(test, first_run_tier, 0);
 #if UML_FEX_ASM_SWITCH
 		/* The same stop, after the same count, from every handover. The
 		 * instruction that stops the case is the one after the `retired`
@@ -2491,7 +2501,7 @@ constexpr Tier first_run_tier = Tier::gadgets;
 				Dispatch::cached);
 			capture_results = false;
 			passed = stopped_as_expected(test, switch_after <= test.retired ?
-				Tier::jit_after_handover : Tier::gadgets);
+				Tier::jit_after_handover : Tier::gadgets, switch_after);
 			if (!passed)
 				std::cout << "status=failed\ttest=" << test.name <<
 					"\tswitch=" << switch_after << "\tstop=" <<
