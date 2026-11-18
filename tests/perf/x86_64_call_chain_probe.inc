@@ -26,6 +26,7 @@
 	mov	r12d, BENCH_ITERATIONS
 	xor	r8d, r8d
 	mov	ebp, 0x5555
+	jmp	.Lloop
 
 .Lloop:
 	.set chain_index, 0
@@ -35,7 +36,9 @@
 	.endr
 	sub	r12, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	mov	eax, BENCH_ITERATIONS * CHAIN_FUNCTIONS
 	cmp	r8, rax
 	jne	.Lfailure

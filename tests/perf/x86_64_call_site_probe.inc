@@ -21,6 +21,7 @@
 	probe_start
 	mov	r12d, BENCH_ITERATIONS
 	xor	r8d, r8d
+	jmp	.Lloop
 
 	.p2align 5
 .Lloop:
@@ -32,7 +33,9 @@
 .Lback:
 	sub	r12, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	cmp	r8, BENCH_ITERATIONS
 	jne	.Lfailure
 	probe_finish

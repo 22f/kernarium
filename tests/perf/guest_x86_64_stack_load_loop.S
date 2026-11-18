@@ -14,15 +14,9 @@
 
 	probe_start
 	lea	rsp, [rip + .Lstack + 2048]
-	xor	eax, eax
-.Lfill:
-	lea	rcx, [rax + 1]
-	mov	qword ptr [rsp + rax * 8], rcx
-	add	eax, 1
-	cmp	eax, 16
-	jb	.Lfill
 
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	mov	rax, qword ptr [rsp]
 	mov	rcx, qword ptr [rsp + 8]
@@ -42,7 +36,9 @@
 	mov	rsi, qword ptr [rsp + 120]
 	sub	r8, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	cmp	rax, 13
 	jne	.Lfailure
 	cmp	rcx, 14
@@ -56,9 +52,11 @@
 
 	probe_end
 
-	.bss
+	.data
 	.p2align 12
 .Lstack:
-	.space	4096
+	.space	2048
+	.quad	1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+	.space	2048 - 128
 
 	.section .note.GNU-stack, "", @progbits

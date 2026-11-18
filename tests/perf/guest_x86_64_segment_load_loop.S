@@ -19,13 +19,6 @@
 
 	probe_start
 	lea	rbx, [rip + .Lbuffer]
-	xor	eax, eax
-.Lfill:
-	lea	rcx, [rax + 1]
-	mov	qword ptr [rbx + rax * 8], rcx
-	add	eax, 1
-	cmp	eax, 16
-	jb	.Lfill
 	mov	eax, SEGMENT_NR_ARCH_PRCTL
 	mov	edi, SEGMENT_ARCH_SET_FS
 	mov	rsi, rbx
@@ -40,6 +33,7 @@
 	jne	.Lfailure
 
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	mov	rax, qword ptr fs:[0]
 	mov	rcx, qword ptr fs:[8]
@@ -59,7 +53,9 @@
 	mov	rsi, qword ptr gs:[56]
 	sub	r8, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	cmp	rax, 13
 	jne	.Lfailure
 	cmp	rcx, 14
@@ -73,9 +69,9 @@
 
 	probe_end
 
-	.bss
+	.data
 	.p2align 12
 .Lbuffer:
-	.space	128
+	.quad	1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
 
 	.section .note.GNU-stack, "", @progbits

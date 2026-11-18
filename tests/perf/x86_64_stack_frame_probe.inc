@@ -29,6 +29,7 @@
 	xor	r10d, r10d
 
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	push	rbp
 	push	rbx
@@ -50,7 +51,9 @@
 	pop	rbp
 	sub	r8, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	mov	r11d, BENCH_ITERATIONS
 	lea	rdx, [r11 + 1]
 	cmp	rdi, rdx

@@ -30,6 +30,7 @@
 	xor	r14d, r14d
 	xor	r15d, r15d
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	add	rax, 1
 	sub	rbx, 1
@@ -57,6 +58,8 @@
 	mov	r15, r13
 	sub	r8, 1
 	jnz	.Lloop
+	jmp	.Lresult
+.Lresult:
 	mov	r8d, BENCH_ITERATIONS
 	lea	r12, [r8 + r8]
 	cmp	rax, r12

@@ -22,15 +22,9 @@
 
 	probe_start
 	lea	SPAN_BASE, [rip + .Lpages + 4096 - SPAN_BELOW]
-	xor	eax, eax
-.Lfill:
-	lea	rcx, [rax + 1]
-	mov	qword ptr [SPAN_BASE + rax * 8 + 8], rcx
-	add	eax, 1
-	cmp	eax, 16
-	jb	.Lfill
 
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	mov	rax, qword ptr [SPAN_BASE + 8]
 	mov	rcx, qword ptr [SPAN_BASE + 16]
@@ -50,7 +44,9 @@
 	mov	rsi, qword ptr [SPAN_BASE + 128]
 	sub	r8, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	cmp	rax, 13
 	jne	.Lfailure
 	cmp	rcx, 14
@@ -64,9 +60,11 @@
 
 	probe_end
 
-	.bss
+	.data
 	.p2align 12
 .Lpages:
-	.space	8192
+	.space	4096 - SPAN_BELOW + 8
+	.quad	1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+	.space	4096 + SPAN_BELOW - 8 - 128
 
 	.section .note.GNU-stack, "", @progbits
