@@ -33,9 +33,12 @@ framework is generated and never committed.
 Boot code: every `boot*.oat` of the release that has an executable segment is
 translated whole, with no profile (an OAT file with no compiled method has no
 code and is listed in the manifest's `skipped`). A `--library` path may end in
-a pattern, which names every file it matches in name order. A match that is a link
-is followed inside the image as the guest would follow it, and one that leaves
-the image is listed in `skipped`. The OAT files of
+a pattern, which names every file it matches in name order. Every component of
+a `--library` path, a directory before the last one as well, is resolved inside
+the image as the guest would resolve it (an absolute link from the image's root,
+`..` stopping there); a link never reaches a host file outside the unpacked
+image. A named file that is not a regular file of the image is refused, and a
+match that is not is listed in `skipped`. The OAT files of
 one boot image are mapped next to each other and call each other by direct
 branches, so a branch from a later file into an earlier one reaches below the
 library's own first byte: its target is formed as a full address and leaves by

@@ -113,8 +113,11 @@ def load_libraries(root: pathlib.Path, mounts: dict[str, pathlib.Path],
     libraries: list[dict] = []
     seen: set[str] = set()
     for guest in guests:
-        path = rewrite.resolve_library(root, mounts, guest)
-        data = path.read_bytes()
+        named = rewrite.follow_in_image(root, mounts, guest)
+        if named is None:
+            raise SystemExit(f"hot_list.py: {guest} is not a regular file "
+                             "of the image")
+        data = rewrite.resolve_library(root, mounts, named).read_bytes()
         digest = hashlib.sha256(data).hexdigest()
         if digest in seen:
             continue

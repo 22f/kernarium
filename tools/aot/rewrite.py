@@ -2152,24 +2152,53 @@ def resolve_library(root: pathlib.Path, mounts: dict[str, pathlib.Path],
     return root / path.lstrip("/")
 
 
+LINK_LIMIT = 16
+
+
+def resolve_in_image(root: pathlib.Path, mounts: dict[str, pathlib.Path],
+                     path: str) -> str | None:
+    """The guest path `path` names once every link on the way is followed as
+    the guest's own file system would: an absolute link from the image's
+    root, a relative one from its directory, `..` stopping at the root. Every
+    component is looked at, the last one and each directory before it, and the
+    result has no link in it. A link is read from the unpacked image only, so
+    one that points outside the image names a path inside it that is not
+    there. None when the chain of links never ends (LINK_LIMIT)."""
+    pending = [part for part in path.split("/") if part][::-1]
+    done: list[str] = []
+    followed = 0
+    while pending:
+        part = pending.pop()
+        if part == ".":
+            continue
+        if part == "..":
+            if done:
+                done.pop()
+            continue
+        here = "/" + "/".join(done + [part])
+        # A mount's own directory is the build's, not the image's.
+        host = None if here in mounts else resolve_library(root, mounts, here)
+        if host is not None and host.is_symlink():
+            followed += 1
+            if followed > LINK_LIMIT:
+                return None
+            link = os.readlink(host)
+            if link.startswith("/"):
+                done = []
+            pending.extend([name for name in link.split("/") if name][::-1])
+            continue
+        done.append(part)
+    return "/" + "/".join(done)
+
+
 def follow_in_image(root: pathlib.Path, mounts: dict[str, pathlib.Path],
                     path: str) -> str | None:
-    """The guest path of the regular file `path` names inside the image: a
-    link is followed as the guest's own file system would (an absolute link
-    from the image's root, a relative one from its directory), never against
-    the host. None for a name that is no regular file there, or whose chain
-    of links leaves the image or never ends."""
-    for _ in range(16):
-        host = resolve_library(root, mounts, path)
-        if host.is_symlink():
-            link = os.readlink(host)
-            path = os.path.normpath(
-                link if link.startswith("/") else
-                os.path.join(os.path.dirname(path), link))
-        elif host.is_file():
-            return path
-        else:
-            return None
+    """The guest path of the regular file `path` names inside the image (see
+    resolve_in_image), or None for a name that is no regular file there."""
+    resolved = resolve_in_image(root, mounts, path)
+    if resolved is not None and \
+            resolve_library(root, mounts, resolved).is_file():
+        return resolved
     return None
 
 
@@ -2180,10 +2209,15 @@ def expand_libraries(root: pathlib.Path, mounts: dict[str, pathlib.Path],
     backs. An entry whose last component has a `*` names every file of that
     directory the pattern matches, in name order (the boot image's OAT
     files: some hold only a header, because their jar has no compiled
-    method); one without names that file, which must exist and hold code.
-    A match that is a link is the file it names inside the image. A path
-    named twice is refused: each of its page digests would then be shared by
-    two units and leave the digest hash, so the library would never bind."""
+    method); one without names that file, which must be a regular file of
+    the image. Every component of a path, the directories before the last
+    one as well, is resolved by the guest's rules (resolve_in_image) before
+    the host is asked anything, so a link never reaches a file outside the
+    image: an explicit entry that is not a regular file there is refused and
+    a match that is not is listed in `skipped`. A link is the file it names
+    inside the image. A path named twice is refused: each of its page digests
+    would then be shared by two units and leave the digest hash, so the
+    library would never bind."""
     libraries: list[str] = []
     skipped: list[str] = []
     for entry in entries:
@@ -2192,16 +2226,23 @@ def expand_libraries(root: pathlib.Path, mounts: dict[str, pathlib.Path],
             raise SystemExit(f"rewrite.py: {entry}: only the last component "
                              "of a library path may hold a pattern")
         if "*" not in pattern:
-            libraries.append(entry)
+            guest = follow_in_image(root, mounts, entry)
+            if guest is None:
+                raise SystemExit(f"rewrite.py: {entry} is not a regular file "
+                                 "of the image")
+            libraries.append(guest)
             continue
-        folder = resolve_library(root, mounts, directory)
-        names = sorted(path.name for path in folder.glob(pattern)
-                       if path.is_symlink() or path.is_file())
+        where = resolve_in_image(root, mounts, directory)
+        folder = None if where is None else \
+            resolve_library(root, mounts, where)
+        names = [] if folder is None or not folder.is_dir() else sorted(
+            path.name for path in folder.glob(pattern)
+            if path.is_symlink() or path.is_file())
         if not names:
             raise SystemExit(f"rewrite.py: {entry} matches no file")
         for name in names:
             named = f"{directory}/{name}"
-            guest = follow_in_image(root, mounts, named)
+            guest = follow_in_image(root, mounts, f"{where}/{name}")
             if guest is None:
                 skipped.append(named)
                 continue

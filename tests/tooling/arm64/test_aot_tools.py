@@ -11,6 +11,7 @@ __import__("sys").dont_write_bytecode = True
 
 import collections
 import hashlib
+import os
 import pathlib
 import re
 import struct
@@ -723,6 +724,10 @@ class LibraryPatternTests(unittest.TestCase):
         (folder / "boot-c.oat").write_bytes(fixture.build_oat(code=False))
         (folder / "boot.vdex").write_bytes(b"not an oat")
         (folder / "other.oat").write_bytes(fixture.build_oat())
+        # A named library must be a regular file of the image.
+        library = self.root / "system" / "lib64"
+        library.mkdir(parents=True)
+        (library / "libz.so").write_bytes(fixture.build())
 
     def test_a_pattern_is_every_match_in_name_order_without_the_empty_ones(
             self) -> None:
@@ -801,13 +806,149 @@ class LibraryPatternTests(unittest.TestCase):
             "/system/framework/arm64/boot-dangling.oat",
             "/system/framework/arm64/boot-loop.oat"])
 
-    def test_a_named_file_is_not_looked_at(self) -> None:
-        # Naming a file asks for it: a missing or empty one is the build's
-        # own error later, as before.
+    def test_a_named_file_is_not_looked_at_for_code(self) -> None:
+        # Naming a file asks for it: an empty one is the build's own error
+        # later, as before.
         libraries, skipped = rewrite.expand_libraries(
             self.root, {}, ["/system/framework/arm64/boot-c.oat"])
         self.assertEqual(libraries, ["/system/framework/arm64/boot-c.oat"])
         self.assertEqual(skipped, [])
+
+    def test_a_named_file_that_is_not_in_the_image_is_refused(self) -> None:
+        with self.assertRaises(SystemExit) as raised:
+            rewrite.expand_libraries(self.root, {},
+                                     ["/system/lib64/libnothing.so"])
+        self.assertIn("not a regular file of the image", str(raised.exception))
+
+
+class ImageLinkTests(unittest.TestCase):
+    """Every component of a library path is resolved by the guest image's
+    rules before the host is asked anything: a link, whether it is the last
+    component, a directory on the way or a directory inside another link's
+    target, never reaches a file outside the unpacked image."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        base = pathlib.Path(self.directory.name)
+        self.root = base / "image"
+        self.outside = base / "outside"
+        self.outside.mkdir()
+        (self.outside / "libout.so").write_bytes(fixture.build())
+        (self.outside / "boot-out.oat").write_bytes(fixture.build_oat())
+        for folder in ("system/lib64", "system/etc", "system/framework"):
+            (self.root / folder).mkdir(parents=True)
+        (self.root / "system/lib64/libin.so").write_bytes(fixture.build())
+        (self.root / "system/etc/boot-in.oat").write_bytes(
+            fixture.build_oat())
+
+    def link(self, name: str, target: "str | pathlib.Path") -> None:
+        (self.root / name).symlink_to(target)
+
+    def toward_outside(self, name: str) -> str:
+        """A relative link from `name` that reaches the outside directory on
+        the host: it climbs out of the image, which the guest's `..` cannot."""
+        start = (self.root / name).parent
+        return os.path.relpath(self.outside, start)
+
+    def test_a_named_link_to_a_file_outside_is_refused(self) -> None:
+        self.link("system/lib64/libaway.so", self.outside / "libout.so")
+        self.link("system/lib64/libclimb.so",
+                  self.toward_outside("system/lib64/libclimb.so") +
+                  "/libout.so")
+        for name in ("libaway.so", "libclimb.so"):
+            with self.subTest(name):
+                with self.assertRaises(SystemExit) as raised:
+                    rewrite.expand_libraries(
+                        self.root, {}, [f"/system/lib64/{name}"])
+                self.assertIn("not a regular file of the image",
+                              str(raised.exception))
+
+    def test_a_matched_link_to_a_file_outside_is_skipped(self) -> None:
+        # The final link alone, absolute and climbing out of the image: the
+        # guest's `..` stops at the root, so it names a path that is not
+        # there. The pre-existing rule; the row keeps it.
+        self.link("system/framework/boot-away.oat",
+                  self.outside / "boot-out.oat")
+        self.link("system/framework/boot-climb.oat",
+                  self.toward_outside("system/framework/boot-climb.oat") +
+                  "/boot-out.oat")
+        (self.root / "system/framework/boot-real.oat").write_bytes(
+            fixture.build_oat())
+        libraries, skipped = rewrite.expand_libraries(
+            self.root, {}, ["/system/framework/boot-*.oat"])
+        self.assertEqual(libraries, ["/system/framework/boot-real.oat"])
+        self.assertEqual(skipped, ["/system/framework/boot-away.oat",
+                                   "/system/framework/boot-climb.oat"])
+
+    def test_a_final_link_through_a_directory_link_outside_is_skipped(
+            self) -> None:
+        # The final link is inside the image and its target runs through a
+        # directory link whose own target is outside.
+        self.link("system/framework/outdir", self.outside)
+        self.link("system/framework/boot-through.oat", "outdir/boot-out.oat")
+        (self.root / "system/framework/boot-real.oat").write_bytes(
+            fixture.build_oat())
+        libraries, skipped = rewrite.expand_libraries(
+            self.root, {}, ["/system/framework/boot-*.oat"])
+        self.assertEqual(libraries, ["/system/framework/boot-real.oat"])
+        self.assertEqual(skipped, ["/system/framework/boot-through.oat"])
+
+    def test_a_directory_link_to_the_outside_finds_nothing(self) -> None:
+        # Both the enumeration of a pattern and the file a name reaches
+        # through the link: absolute, and relative past the image's root.
+        self.link("lib", self.outside)
+        self.link("up", self.toward_outside("up"))
+        for directory in ("lib", "up"):
+            with self.subTest(directory, entry="pattern"):
+                with self.assertRaises(SystemExit) as raised:
+                    rewrite.expand_libraries(
+                        self.root, {}, [f"/{directory}/boot*.oat"])
+                self.assertIn("matches no file", str(raised.exception))
+            with self.subTest(directory, entry="name"):
+                with self.assertRaises(SystemExit) as raised:
+                    rewrite.expand_libraries(
+                        self.root, {}, [f"/{directory}/libout.so"])
+                self.assertIn("not a regular file of the image",
+                              str(raised.exception))
+
+    def test_a_directory_link_inside_the_image_still_finds_its_unit(
+            self) -> None:
+        # As /etc is /system/etc: an absolute link, and a relative one.
+        self.link("etc", "/system/etc")
+        self.link("system/framework/etc2", "../etc")
+        for entry in ("/etc/boot*.oat", "/system/framework/etc2/b*-in*",
+                      "/etc/boot-in.oat"):
+            with self.subTest(entry):
+                libraries, skipped = rewrite.expand_libraries(
+                    self.root, {}, [entry])
+                self.assertEqual(libraries, ["/system/etc/boot-in.oat"])
+                self.assertEqual(skipped, [])
+        self.assertEqual(rewrite.follow_in_image(
+            self.root, {}, "/etc/boot-in.oat"), "/system/etc/boot-in.oat")
+        self.assertEqual(rewrite.follow_in_image(
+            self.root, {}, "/system/framework/etc2/../lib64/libin.so"),
+            "/system/lib64/libin.so")
+        # `..` stops at the image's root.
+        self.assertEqual(rewrite.follow_in_image(
+            self.root, {}, "/../../system/lib64/libin.so"),
+            "/system/lib64/libin.so")
+
+    def test_a_mount_is_the_builds_not_the_images(self) -> None:
+        mount = self.outside / "mounted"
+        mount.mkdir()
+        (mount / "libm.so").write_bytes(fixture.build())
+        mounts = {"/apex/m": mount}
+        self.link("system/lib64/libm.so", "/apex/m/libm.so")
+        libraries, _ = rewrite.expand_libraries(
+            self.root, mounts, ["/system/lib64/libm.so"])
+        self.assertEqual(libraries, ["/apex/m/libm.so"])
+
+    def test_a_chain_of_links_that_never_ends_is_refused(self) -> None:
+        self.link("system/lib64/libloop.so", "libloop.so")
+        with self.assertRaises(SystemExit):
+            rewrite.expand_libraries(self.root, {},
+                                     ["/system/lib64/libloop.so"])
 
 
 class SimdRegisterFieldTests(unittest.TestCase):
