@@ -17,6 +17,11 @@ bool hostNetworkPathIsOutage(nw_path_status_t status,
 		reason != nw_path_unsatisfied_reason_local_network_denied;
 }
 
+bool hostNetworkPathIsCarried(nw_path_status_t status) noexcept
+{
+	return status == nw_path_status_satisfied;
+}
+
 namespace {
 
 /* What an update writes into. It outlives the monitor that made it, so that
@@ -26,11 +31,11 @@ struct Sink final {
 	std::mutex lock;
 	HostNetworkPathState *state{};
 
-	void deliver(bool usable) noexcept
+	void deliver(bool usable, bool carried) noexcept
 	{
 		std::lock_guard guard{lock};
 		if (state != nullptr)
-			state->report(usable);
+			state->report(usable, carried);
 	}
 };
 
@@ -51,8 +56,10 @@ public:
 		const std::shared_ptr<Sink> sink = sink_;
 		nw_path_monitor_set_update_handler(monitor_, ^(nw_path_t path) {
 			sink->deliver(!hostNetworkPathIsOutage(
-				nw_path_get_status(path),
-				nw_path_get_unsatisfied_reason(path)));
+					      nw_path_get_status(path),
+					      nw_path_get_unsatisfied_reason(path)),
+				      hostNetworkPathIsCarried(
+					      nw_path_get_status(path)));
 		});
 		nw_path_monitor_start(monitor_);
 	}
