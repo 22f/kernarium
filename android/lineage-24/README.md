@@ -1325,6 +1325,12 @@ implementation, `BuildNumber.legacyRange` in AndariumCore, and
 | an unfinished update, same build | retry with its snapshot kept, restore, or reset |
 | an unfinished update, newer build | restore the pre-update snapshot, then update directly to the newer build |
 
+The Andarium app adds one rule that the reference implementation and the
+vectors do not carry: an unsigned proof image (`acceptance` `unsigned-proof`,
+a release ID that starts with `unsigned-proof-`) never updates an instance that
+has data, and an instance a proof created never updates to another system. Both
+are refused as a mismatch, and Erase is the way out.
+
 An update is finished when the host first sees the guest reach
 `sys.boot_completed`: the pending update is cleared and the snapshot deleted. A
 newer release after that updates from the data as it is, with a snapshot of its

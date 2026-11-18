@@ -52,10 +52,21 @@ public struct ReleaseIdentity: Equatable, Sendable {
     public var minimumGiB: Int
     public var defaultGiB: Int
     public var maximumGiB: Int
+    /// Whether the manifest says the system is an unsigned proof image
+    /// (`acceptance` "unsigned-proof", staged by `Andarium/scripts/
+    /// stage-system-image.py --unsigned-proof` for a developer build). Such a
+    /// system never updates an instance that has data, and an instance it
+    /// created never updates to another system (`InstanceRules.decide`).
+    public var isUnsignedProof: Bool
+
+    /// A proof's release ID starts with this, which is how an instance's
+    /// record (`release_id`) says it was created from a proof.
+    public static let unsignedProofIDPrefix = "unsigned-proof-"
 
     public init(
         releaseID: String, buildFingerprint: String, buildNumber: Int, securityPatch: String,
-        systemDiskSHA256: String, dataLayout: Int, minimumGiB: Int, defaultGiB: Int, maximumGiB: Int
+        systemDiskSHA256: String, dataLayout: Int, minimumGiB: Int, defaultGiB: Int, maximumGiB: Int,
+        isUnsignedProof: Bool = false
     ) {
         self.releaseID = releaseID
         self.buildFingerprint = buildFingerprint
@@ -66,6 +77,7 @@ public struct ReleaseIdentity: Equatable, Sendable {
         self.minimumGiB = minimumGiB
         self.defaultGiB = defaultGiB
         self.maximumGiB = maximumGiB
+        self.isUnsignedProof = isUnsignedProof
     }
 
     /// The identity from a release's `release-manifest.json` and
@@ -98,14 +110,16 @@ public struct ReleaseIdentity: Equatable, Sendable {
             let capacity = data["capacity_gib"] as? [String: Any],
             let minimum = integer(capacity["minimum"]),
             let standard = integer(capacity["default"]),
-            let maximum = integer(capacity["maximum"])
+            let maximum = integer(capacity["maximum"]),
+            // A proof is named as one, so that a record of its ID says so.
+            (manifest["acceptance"] as? String == "unsigned-proof") == id.hasPrefix(Self.unsignedProofIDPrefix)
         else {
             throw InstanceError.release("This copy of Andarium carries a system release without a usable identity.")
         }
         self.init(
             releaseID: id, buildFingerprint: fingerprint, buildNumber: buildNumber, securityPatch: patch,
             systemDiskSHA256: sha, dataLayout: dataLayout, minimumGiB: minimum, defaultGiB: standard,
-            maximumGiB: maximum
+            maximumGiB: maximum, isUnsignedProof: manifest["acceptance"] as? String == "unsigned-proof"
         )
     }
 
@@ -297,7 +311,8 @@ public struct InstanceDecision: Equatable, Sendable {
 
 public enum InstanceRules {
     /// What to do before starting `release` on an instance. Pure: it looks at
-    /// nothing else, so every implementation reproduces it from the vectors.
+    /// nothing else, so every implementation reproduces it from the vectors
+    /// (the rule for an unsigned proof, below, is the application's own).
     public static func decide(
         state: InstanceState?, dataDiskExists: Bool, snapshotExists: Bool,
         release: ReleaseIdentity, flags: InstanceFlags = InstanceFlags()
@@ -313,6 +328,16 @@ public enum InstanceRules {
                 return InstanceDecision(.refuseConflict, "The virtual machine's data has no record of which system wrote it.")
             }
             return InstanceDecision(.create, "A new guest.")
+        }
+        // An unsigned proof is for a fresh or isolated instance: it never takes
+        // over data another system wrote, and the data it wrote never goes to
+        // another system. The instance is erased instead (the way out of every
+        // refusal), which Home offers as for any other mismatch.
+        if release.releaseID != state.releaseID, dataDiskExists || snapshotExists,
+           release.isUnsignedProof || state.releaseID.hasPrefix(ReleaseIdentity.unsignedProofIDPrefix) {
+            return InstanceDecision(
+                .refuseConflict, "An unsigned proof system and the data of another system do not mix: erase the virtual machine."
+            )
         }
         if let pending = state.pendingUpdate {
             if flags.restoreSnapshot {

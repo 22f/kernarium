@@ -251,6 +251,7 @@ struct SystemInfoTests {
         #expect(identity.buildNumber == 29)
         #expect(identity.buildFingerprint.hasSuffix(":user/test-keys"))
         #expect(identity.securityPatch == "2026-10-01")
+        #expect(identity.isUnsignedProof)
     }
 
     @Test func aMissingFieldNamesItself() {

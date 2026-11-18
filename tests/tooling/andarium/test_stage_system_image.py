@@ -330,8 +330,9 @@ class UnsignedProofTests(unittest.TestCase):
         for needle in (
             f"staged UNSIGNED PROOF {FAMILY} {PROOF_ID}",
             "developer build only", "AppStore or TestFlight build refuses it",
-            "fresh install or with ANDARIUM_GUEST_INSTANCE=<name>", "data kept, build 29",
-            "Erase virtual machine",
+            "only on a fresh or isolated guest instance (ANDARIUM_GUEST_INSTANCE=<name>)",
+            "a guest with data of another system cannot start until Erase virtual machine",
+            "a guest made from this proof cannot start another system",
             "built from revision cccccccccccc, which is unknown to this checkout",
             "android.major, kernel.page_size, kernel.release",
             "not checked: the signature",

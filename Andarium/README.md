@@ -169,9 +169,10 @@ disk, partition layout, kernel command line and manifest into
 A developer build can stage an unsigned proof image instead
 (`stage-system-image.py --release DIR --unsigned-proof`), whose manifest stays
 a proof's, completed from the tracked image line and the accepted Android
-kernel, and which the AppStore and TestFlight configurations refuse. Run it on
-a fresh or isolated guest instance (`ANDARIUM_GUEST_INSTANCE`): an existing
-guest is updated to it.
+kernel, and which the AppStore and TestFlight configurations refuse. The
+application starts it only on a fresh or isolated guest instance
+(`ANDARIUM_GUEST_INSTANCE`): a guest with data of another system cannot start
+until it is erased, and nor can a guest made from a proof start another system.
 
 The `AndariumTests` bundle runs hosted in the application on an iPad, in the
 iOS Simulator or, as an iPad app, on an Apple silicon Mac (whose derived data

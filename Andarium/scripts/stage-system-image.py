@@ -306,11 +306,11 @@ def proof_notes(manifest: dict, staged: dict) -> list[str]:
     notes = [
         "for a developer build only: an AppStore or TestFlight build refuses it",
         revision_note(manifest),
-        # InstanceRules.decide: another release ID with a newer build number is an
-        # update that keeps the data; an older or equal number is refused.
-        "run it on a fresh install or with ANDARIUM_GUEST_INSTANCE=<name> only: a guest started "
-        f"with another release is updated to it (data kept, build {staged['android']['build_number']}) "
-        "and returns to an older release only through Erase virtual machine",
+        # InstanceRules.decide: a proof starts only a fresh instance (or one with no
+        # data), and an instance it created starts only it; any other is a mismatch.
+        "the application starts it only on a fresh or isolated guest instance "
+        "(ANDARIUM_GUEST_INSTANCE=<name>): a guest with data of another system cannot start "
+        "until Erase virtual machine, and a guest made from this proof cannot start another system",
     ]
     if derived:
         notes.append("taken from this checkout's tracked metadata, not from the proof: " + ", ".join(derived))

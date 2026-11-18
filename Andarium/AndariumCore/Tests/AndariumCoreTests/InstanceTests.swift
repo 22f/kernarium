@@ -5,11 +5,13 @@ import Testing
 @testable import AndariumCore
 
 private func release(
-    _ id: String = "rel-b", build: Int = 200, layout: Int = 1, sha: String = String(repeating: "b", count: 64)
+    _ id: String = "rel-b", build: Int = 200, layout: Int = 1, sha: String = String(repeating: "b", count: 64),
+    proof: Bool = false
 ) -> ReleaseIdentity {
     ReleaseIdentity(
         releaseID: id, buildFingerprint: "fp-\(id)", buildNumber: build, securityPatch: "2026-10-01",
-        systemDiskSHA256: sha, dataLayout: layout, minimumGiB: 4, defaultGiB: 8, maximumGiB: 64
+        systemDiskSHA256: sha, dataLayout: layout, minimumGiB: 4, defaultGiB: 8, maximumGiB: 64,
+        isUnsignedProof: proof
     )
 }
 
@@ -493,6 +495,172 @@ struct InstanceFileTests {
         // A manifest of an earlier schema has no build number.
         let old = #"{"release_id": "20261031-los24-r4", "android": {"fingerprint": "f"}}"#
         #expect(throws: InstanceError.self) { try ReleaseIdentity(manifest: Data(old.utf8), layout: Data(layout.utf8)) }
+    }
+}
+
+/// An unsigned proof image (a developer build's system, `acceptance`
+/// "unsigned-proof") starts only a fresh instance, and an instance it created
+/// starts only that proof: a proof never updates data another system wrote, and
+/// its data never goes to another system. The refusal is the ordinary
+/// mismatch of `StartPlan`; signed releases decide as the vectors say.
+struct UnsignedProofInstanceTests {
+    private static let proof = "unsigned-proof-p1"
+
+    private func state(_ id: String, build: Int, sha: String, pending: String? = nil) -> InstanceState {
+        var state = InstanceState(
+            dataLayout: 1, releaseID: id, buildFingerprint: "fp", buildIncremental: String(build),
+            systemDiskSHA256: sha, createdWith: id, lastBooted: "2026-10-01T00:00:00Z"
+        )
+        if let pending {
+            state.pendingUpdate = InstanceState.Pending(
+                toReleaseID: pending, snapshot: "data.img.pre-\(pending)",
+                from: InstanceState.Origin(
+                    releaseID: "rel-0", buildFingerprint: "fp", buildIncremental: "50",
+                    systemDiskSHA256: String(repeating: "0", count: 64), dataLayout: 1, lastBooted: "2026-09-01T00:00:00Z"
+                )
+            )
+        }
+        return state
+    }
+
+    private let sha = String(repeating: "b", count: 64)
+    private let otherSHA = String(repeating: "c", count: 64)
+
+    private func decide(
+        _ state: InstanceState?, data: Bool = true, snapshot: Bool = false, _ release: ReleaseIdentity,
+        flags: InstanceFlags = InstanceFlags()
+    ) -> InstanceAction {
+        InstanceRules.decide(
+            state: state, dataDiskExists: data, snapshotExists: snapshot, release: release, flags: flags
+        ).action
+    }
+
+    @Test func aFreshInstanceStartsTheProof() {
+        let proof = release(Self.proof, build: 300, sha: sha, proof: true)
+        #expect(decide(nil, data: false, proof) == .create)
+        #expect(InstanceRules.plan(state: nil, dataDiskExists: false, snapshotExists: false, release: proof) == .firstStart)
+        // A record with no data behind it holds nothing to keep, whichever system wrote it.
+        #expect(decide(state("rel-a", build: 100, sha: otherSHA), data: false, proof) == .create)
+        #expect(decide(state("unsigned-proof-p0", build: 250, sha: otherSHA), data: false, proof) == .create)
+        // Data nothing recorded is refused as for every system.
+        #expect(decide(nil, data: true, proof) == .refuseConflict)
+    }
+
+    @Test func theInstanceTheProofCreatedStartsTheSameProofAgain() {
+        let proof = release(Self.proof, build: 300, sha: sha, proof: true)
+        let created = state(Self.proof, build: 300, sha: sha)
+        #expect(decide(created, proof) == .boot)
+        #expect(InstanceRules.plan(state: created, dataDiskExists: true, snapshotExists: false, release: proof) == .normal)
+        // One proof ID, two disks is the same conflict as for a release.
+        #expect(decide(created, release(Self.proof, build: 300, sha: otherSHA, proof: true)) == .refuseConflict)
+    }
+
+    @Test func anInstanceOfAnotherSystemIsRefusedNeverUpdatedToTheProof() {
+        let real = state("rel-a", build: 100, sha: otherSHA)
+        // Newer, older and equal builds, a newer data layout, and a layout the instance has.
+        for (build, layout) in [(300, 1), (50, 1), (100, 1), (300, 2), (100, 2)] {
+            let proof = release(Self.proof, build: build, layout: layout, sha: sha, proof: true)
+            #expect(decide(real, proof) == .refuseConflict, "build \(build) layout \(layout)")
+            #expect(
+                InstanceRules.plan(state: real, dataDiskExists: true, snapshotExists: false, release: proof)
+                    == .blocked(.mismatch), "build \(build) layout \(layout)")
+        }
+        // An update that did not finish, with or without its snapshot, and the ways out of it.
+        let unfinished = state("rel-b", build: 200, sha: sha, pending: "rel-b")
+        let proof = release(Self.proof, build: 300, sha: sha, proof: true)
+        for snapshot in [true, false] {
+            for flags in [
+                InstanceFlags(), InstanceFlags(retry: true), InstanceFlags(restoreSnapshot: true),
+            ] {
+                #expect(decide(unfinished, snapshot: snapshot, proof, flags: flags) == .refuseConflict)
+            }
+        }
+    }
+
+    @Test func aProofInstanceIsRefusedByEveryOtherSystem() {
+        let created = state(Self.proof, build: 300, sha: sha)
+        let candidates = [
+            release("unsigned-proof-p2", build: 400, sha: otherSHA, proof: true),
+            release("unsigned-proof-p2", build: 200, sha: otherSHA, proof: true),
+            release("rel-c", build: 400, sha: otherSHA),
+            release("rel-c", build: 200, sha: otherSHA),
+            release("rel-c", build: 300, sha: otherSHA),
+            release("rel-c", build: 400, layout: 2, sha: otherSHA),
+        ]
+        for candidate in candidates {
+            #expect(decide(created, candidate) == .refuseConflict, "\(candidate.releaseID) \(candidate.buildNumber)")
+            #expect(
+                InstanceRules.plan(state: created, dataDiskExists: true, snapshotExists: false, release: candidate)
+                    == .blocked(.mismatch))
+        }
+        // The data is gone: a real release starts a new instance.
+        #expect(decide(created, data: false, candidates[2]) == .create)
+    }
+
+    @Test func eraseIsTheWayOut() {
+        let real = state("rel-a", build: 100, sha: otherSHA)
+        let proof = release(Self.proof, build: 300, sha: sha, proof: true)
+        #expect(decide(real, proof, flags: InstanceFlags(reset: true)) == .reset)
+        let created = state(Self.proof, build: 300, sha: sha)
+        #expect(decide(created, release("rel-c", build: 400, sha: otherSHA), flags: InstanceFlags(reset: true)) == .reset)
+    }
+
+    @Test func aSignedReleaseDecidesAsBefore() {
+        // No proof in the instance's record and none in the system: the rules of the vectors.
+        let real = state("rel-a", build: 100, sha: otherSHA)
+        #expect(decide(real, release("rel-b", build: 200, sha: sha)) == .update)
+        #expect(decide(real, release("rel-b", build: 50, sha: sha)) == .refuseDowngrade)
+        #expect(decide(real, release("rel-b", build: 100, sha: sha)) == .refuseConflict)
+        #expect(decide(real, release("rel-b", build: 200, layout: 2, sha: sha)) == .migrate)
+        // A release ID that only contains the words is no proof.
+        let named = state("rel-unsigned-proof-a", build: 100, sha: otherSHA)
+        #expect(decide(named, release("rel-b", build: 200, sha: sha)) == .update)
+    }
+
+    @Test func aRefusedProofChangesNothingAndEraseStartsItFresh() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = InstanceFiles(directory: root.appendingPathComponent("Guest"))
+        let first = release("rel-a", build: 100, sha: otherSHA)
+        try files.apply(try files.decide(for: first), release: first)
+        try Data("android data".utf8).write(to: files.data)
+
+        let proof = release(Self.proof, build: 300, sha: sha, proof: true)
+        let refused = try files.decide(for: proof)
+        #expect(refused.action == .refuseConflict)
+        let before = try Data(contentsOf: files.state)
+        #expect(throws: InstanceError.self) { try files.apply(refused, release: proof) }
+        #expect(try Data(contentsOf: files.state) == before)
+        #expect(try Data(contentsOf: files.data) == Data("android data".utf8))
+        #expect(files.startPlan(for: proof) == .blocked(.mismatch))
+
+        // Erase, then the proof starts a fresh instance, and starts it again.
+        try files.removeAll()
+        try files.apply(try files.decide(for: proof), release: proof)
+        try Data("proof data".utf8).write(to: files.data)
+        #expect(try files.readState()?.releaseID == Self.proof)
+        #expect(try files.decide(for: proof).action == .boot)
+        // And a real release is refused by it, the data kept.
+        let next = release("rel-c", build: 400, sha: otherSHA)
+        #expect(try files.decide(for: next).action == .refuseConflict)
+        #expect(try Data(contentsOf: files.data) == Data("proof data".utf8))
+    }
+
+    @Test func aReleaseIdentityKnowsAProofFromItsManifest() throws {
+        let layout = #"{"system_disk": {"sha256": "\#(String(repeating: "c", count: 64))"}, "data_disk": {"layout_version": 1, "capacity_gib": {"minimum": 4, "default": 8, "maximum": 64}}}"#
+        func identity(_ id: String, acceptance: String?) throws -> ReleaseIdentity {
+            let field = acceptance.map { #""acceptance": "\#($0)", "# } ?? ""
+            let manifest = #"{\#(field)"release_id": "\#(id)", "android": {"fingerprint": "f", "build_number": 29, "security_patch": "2026-10-01"}}"#
+            return try ReleaseIdentity(manifest: Data(manifest.utf8), layout: Data(layout.utf8))
+        }
+        #expect(try identity(Self.proof, acceptance: "unsigned-proof").isUnsignedProof)
+        #expect(try !identity("20261102-los24-r5", acceptance: "accepted").isUnsignedProof)
+        // A manifest of an earlier schema, or a release with no word on it, is no proof.
+        #expect(try !identity("20261102-los24-r5", acceptance: nil).isUnsignedProof)
+        // A proof not named as one, or a release named as one, has no usable identity.
+        #expect(throws: InstanceError.self) { try identity("20261102-los24-r5", acceptance: "unsigned-proof") }
+        #expect(throws: InstanceError.self) { try identity(Self.proof, acceptance: "accepted") }
+        #expect(throws: InstanceError.self) { try identity(Self.proof, acceptance: nil) }
     }
 }
 
