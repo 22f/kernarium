@@ -170,7 +170,11 @@ public struct TwoDiskStorage: GuestStorage {
         do {
             recorded = try files.readState()
         } catch {
-            // A record nobody can read is the rules' to refuse for a proof.
+            // A record nobody can read is the rules' to refuse for a proof. Under
+            // a signed build, Set up with an unreadable record goes on as it
+            // always did, also when that damaged record once belonged to a proof:
+            // it cannot be trusted to say what made it, and refusing would leave
+            // a signed release's user with no way to set up again.
             if release.isUnsignedProof { throw error }
             return
         }
