@@ -67,9 +67,9 @@ without asking each other.
   no capture buffer to decode into.
 - **Guest input.** The platform decoder reads the headers of every VP9 frame of
   a packet, not only the first, and refuses before the hardware sees it a
-  packet that is truncated, has no valid superframe index, states a profile
-  other than 0, or states a picture size past the range, as it refuses an
-  oversized H.264 or HEVC picture. Whatever follows a valid header is the
+  packet with a truncated or reserved header, a superframe index that does not
+  fit the packet, a profile other than 0, or a picture size past the range, as
+  it refuses an oversized H.264 or HEVC picture. Whatever follows a valid header is the
   hardware's to decode, and its failure ends the stream's pictures with an
   error until the client seeks.
 
