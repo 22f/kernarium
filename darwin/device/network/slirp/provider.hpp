@@ -318,11 +318,28 @@ public:
 			std::memory_order_acquire);
 	}
 	/* Monitors this provider has made: one for its life, however often it is
-	 * stopped and opened. */
+	 * stopped and opened, unless the system gave none (then the next open
+	 * makes another). */
 	[[nodiscard]] std::uint64_t path_monitors_made_for_testing() const noexcept
 	{
 		return path_monitors_made_for_testing_.load(
 			std::memory_order_relaxed);
+	}
+	/* The monitor the provider holds now, for a test that waits for what
+	 * its thread says of it. */
+	[[nodiscard]] const uml::platform::HostNetworkPathMonitor *
+	path_monitor_for_testing() const noexcept
+	{
+		return path_monitor_.get();
+	}
+	/* Makes each monitor in place of the platform's own, so that a test has
+	 * the system give none. Applies to the next monitor made. */
+	using PathMonitorFactory = std::function<
+		std::unique_ptr<uml::platform::HostNetworkPathMonitor>(
+			uml::platform::HostNetworkPathState &)>;
+	void set_path_monitor_factory_for_testing(PathMonitorFactory factory)
+	{
+		path_monitor_factory_for_testing_ = std::move(factory);
 	}
 	[[nodiscard]] HostResolver &resolver_for_testing() noexcept
 	{
@@ -438,7 +455,8 @@ private:
 	 * thread and the resolver reads it when it answers. The first open()
 	 * makes the monitor, which then lives as long as the provider and keeps
 	 * the state current across a stop and reopen; the state outlives it. With
-	 * no monitor the state is usable again when the provider stops. */
+	 * no monitor, or one the system gave no monitor, the state is usable again
+	 * when the provider stops. */
 	uml::platform::HostNetworkPathState path_state_;
 	std::unique_ptr<uml::platform::HostNetworkPathMonitor> path_monitor_;
 	/* The hold and the table it was last judged against, and the reports
@@ -477,6 +495,7 @@ private:
 	bool dns_streams_unavailable_for_testing_{};
 	bool path_monitor_for_testing_{};
 	std::atomic_uint64_t path_monitors_made_for_testing_{};
+	PathMonitorFactory path_monitor_factory_for_testing_;
 	bool write_pause_requested_for_testing_{};
 	bool write_pause_reached_for_testing_{};
 	bool release_write_for_testing_{};

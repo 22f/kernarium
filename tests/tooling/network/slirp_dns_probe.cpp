@@ -24,9 +24,15 @@
  * the state when the query came in. An outage that was reported ends with the
  * provider's stop. A last part starts the system's monitor and checks that the
  * provider hears a report of that open, whichever path this host has, and that
- * one monitor serves the provider's life, across a stop and a reopen.
+ * one monitor serves the provider's life, across a stop and a reopen. The
+ * system giving no monitor is made here too: the provider then makes another
+ * at its next open, and keeps the one that works. What the state does to an
+ * answer across a stop and a reopen is checked with a monitor that writes
+ * nothing, the state being the probe's own: a monitor that works keeps an
+ * outage across a stop, and one the system did not give does not.
  */
 #include "dns_message.hpp"
+#include "host_network_path_attempt.hpp"
 #include "provider.hpp"
 #include "slirp_tcp_harness.hpp"
 #include "uml_slirp_net.h"
@@ -39,11 +45,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -709,12 +717,37 @@ void check_reopen_after_outage(uml::network::SlirpProvider &provider,
 		fail(label, "a missing name was not a plain negative answer");
 }
 
-/* The provider starts the system's monitor at open() and hears its report;
- * what a missing name gets then follows the host's real path. */
+/* Ends the provider's monitor: an open that no monitor is asked for drops the
+ * one it holds, and the state is the one of a host with a path again. */
+void drop_path_monitor(uml::network::SlirpProvider &provider, Guest &guest)
+{
+	const char *label = "a dropped path monitor";
+	auto &path = provider.path_state_for_testing();
+	/* What the monitor reported last, written here as the system would. */
+	path.report(false);
+	provider.set_path_monitor_for_testing(false);
+	if (!open_provider(provider, guest)) {
+		fail(label, "the provider did not open");
+		return;
+	}
+	if (provider.path_monitor_for_testing() != nullptr)
+		fail(label, "the provider kept a monitor that was no longer asked "
+			    "for");
+	if (!path.usable())
+		fail(label, "the last report of a dropped monitor stayed the state");
+	provider.stop();
+}
+
+/* The provider starts the system's monitor at open() and hears its report of
+ * that open, whichever path this host has, and the one monitor serves its life.
+ * What the report says is the host's own and may move at any moment, so only
+ * that it arrives and how many monitors were made are checked here; what the
+ * state does to an answer is checked with a monitor that writes nothing. */
 void check_path_monitor(uml::network::SlirpProvider &provider, Guest &guest)
 {
 	const char *label = "the system's path monitor";
 	provider.set_path_monitor_for_testing(true);
+	const auto made_before = provider.path_monitors_made_for_testing();
 	/* A report that counts is one of this open: the earlier reports here
 	 * were made by the probe itself. */
 	const auto reports_before = provider.path_state_for_testing().reports();
@@ -730,36 +763,165 @@ void check_path_monitor(uml::network::SlirpProvider &provider, Guest &guest)
 	if (path.reports() == reports_before) {
 		fail(label, "the system did not report the path");
 	} else {
-		const bool usable = path.usable();
-		const auto reply = ask(guest, "uml-dns-probe-monitor.invalid",
-				       0x7a10, 42100);
-		if (usable ? !is_negative(reply) : !is_servfail(reply))
-			fail(label, usable ?
-				"a missing name was not a plain negative answer" :
-				"a missing name was not told to retry");
 		std::printf("%s: the host's path is %s\n", label,
-			    usable ? "usable" : "down");
-		/* A guest's restart stops and opens the provider again. The monitor
-		 * lives on, so that the process holds what it held at the first
-		 * boot (guest-restart): one monitor for the provider's life, and
-		 * the state it keeps current is not reset by the stop. */
+			    path.usable() ? "usable" : "down");
+		/* A guest's restart stops and opens the provider again, and the
+		 * monitor lives on. */
 		provider.stop();
-		if (path.usable() != usable)
-			fail(label, "the stop changed the state of a monitor that "
-				    "lives on");
+		if (!open_provider(provider, guest))
+			fail(label, "the provider did not reopen");
+		else if (provider.path_monitors_made_for_testing() !=
+			 made_before + 1)
+			fail(label, "the monitor was made again at the reopen");
+	}
+	provider.stop();
+	drop_path_monitor(provider, guest);
+}
+
+/* A monitor that reports nothing, for a check that writes the state itself as
+ * the system would: the only writer is the probe. It says it failed when it was
+ * made to. */
+class ControlledMonitor final : public uml::platform::HostNetworkPathMonitor {
+public:
+	explicit ControlledMonitor(bool failed) : failed_(failed) {}
+	[[nodiscard]] bool failed() const noexcept override { return failed_; }
+
+private:
+	const bool failed_;
+};
+
+/* While a monitor that works lives, a stop does not end an outage it reported
+ * (a guest's restart stops and opens the provider again): a reopen still tells
+ * a guest to retry, until a report says the path is back. A monitor the system
+ * gave no monitor reports nothing, so a stop ends an outage as with no monitor
+ * at all. */
+void check_state_across_a_restart(uml::network::SlirpProvider &provider,
+				  Guest &guest)
+{
+	const char *label = "the state across a restart";
+	auto &path = provider.path_state_for_testing();
+	provider.set_path_monitor_for_testing(true);
+	provider.set_path_monitor_factory_for_testing(
+		[](uml::platform::HostNetworkPathState &) {
+			return std::make_unique<ControlledMonitor>(false);
+		});
+	const auto made_before = provider.path_monitors_made_for_testing();
+	if (!open_provider(provider, guest)) {
+		fail(label, "the provider did not open");
+	} else {
+		path.report(false);
+		if (!is_servfail(ask(guest, "uml-dns-probe-monitor.invalid",
+				     0x7a10, 42100)))
+			fail(label, "a missing name was not told to retry");
+		provider.stop();
+		if (path.usable())
+			fail(label, "the stop ended an outage that a monitor which "
+				    "works keeps");
 		if (!open_provider(provider, guest)) {
 			fail(label, "the provider did not reopen");
 		} else {
-			if (provider.path_monitors_made_for_testing() != 1)
-				fail(label, "the monitor was made again at the reopen");
-			if (path.usable() != usable)
-				fail(label, "the reopen changed the state");
+			if (!is_servfail(ask(guest, "uml-dns-probe-monitor.invalid",
+					     0x7a11, 42101)))
+				fail(label, "a reopen during an outage did not tell "
+					    "a guest to retry");
+			path.report(true);
+			if (!is_negative(ask(guest, "uml-dns-probe-monitor.invalid",
+					     0x7a12, 42102)))
+				fail(label, "a path that is back did not end the "
+					    "outage");
+			if (provider.path_monitors_made_for_testing() !=
+			    made_before + 1)
+				fail(label, "the monitor was made again at the "
+					    "reopen");
 		}
 	}
 	provider.stop();
-	provider.set_path_monitor_for_testing(false);
-	/* What the host's real path was is not the state of the checks after. */
-	provider.path_state_for_testing().report(true);
+	drop_path_monitor(provider, guest);
+
+	provider.set_path_monitor_for_testing(true);
+	provider.set_path_monitor_factory_for_testing(
+		[](uml::platform::HostNetworkPathState &) {
+			return std::make_unique<ControlledMonitor>(true);
+		});
+	if (!open_provider(provider, guest)) {
+		fail(label, "the provider did not open with a failed monitor");
+	} else {
+		path.report(false);
+		provider.stop();
+		if (!path.usable())
+			fail(label, "the stop kept an outage that a monitor the "
+				    "system did not give cannot end");
+	}
+	provider.stop();
+	provider.set_path_monitor_factory_for_testing({});
+	drop_path_monitor(provider, guest);
+}
+
+/* The system's creation fails for the first monitor only. */
+std::atomic<int> system_creations;
+
+bool only_the_first_system_creation_fails()
+{
+	return system_creations.fetch_add(1) != 0;
+}
+
+/* The system gives the provider no path monitor at its first open: the monitor
+ * says so (nothing waits for its report), the next open makes another, whose
+ * report arrives, and that one, which works, is kept however often the provider
+ * stops and opens. */
+void check_a_monitor_the_system_did_not_give(
+	uml::network::SlirpProvider &provider, Guest &guest)
+{
+	const char *label = "a path monitor the system did not give";
+	auto &path = provider.path_state_for_testing();
+	system_creations = 0;
+	provider.set_path_monitor_factory_for_testing(
+		[](uml::platform::HostNetworkPathState &state) {
+			return uml::platform::makeAppleHostNetworkPathMonitor(
+				state, only_the_first_system_creation_fails);
+		});
+	provider.set_path_monitor_for_testing(true);
+	const auto made_before = provider.path_monitors_made_for_testing();
+	const auto reports_before = path.reports();
+	if (!open_provider(provider, guest)) {
+		fail(label, "the provider did not open");
+		provider.set_path_monitor_factory_for_testing({});
+		provider.set_path_monitor_for_testing(false);
+		return;
+	}
+	const auto *first = provider.path_monitor_for_testing();
+	const auto deadline = Clock::now() + std::chrono::seconds{10};
+	while (first != nullptr && !first->failed() && Clock::now() < deadline)
+		std::this_thread::sleep_for(std::chrono::milliseconds{5});
+	if (first == nullptr || !first->failed())
+		fail(label, "a monitor the system did not give did not say so");
+	provider.stop();
+	if (!open_provider(provider, guest)) {
+		fail(label, "the provider did not reopen");
+	} else {
+		const auto report_deadline = Clock::now() + std::chrono::seconds{10};
+		while (path.reports() == reports_before &&
+		       Clock::now() < report_deadline)
+			std::this_thread::sleep_for(std::chrono::milliseconds{5});
+		if (path.reports() == reports_before)
+			fail(label, "the reopen did not make another monitor");
+		if (system_creations.load() != 2)
+			fail(label, "the system was not asked a second time");
+		const auto *second = provider.path_monitor_for_testing();
+		if (second == nullptr || second->failed())
+			fail(label, "the reopen did not hold a monitor that works");
+		/* A monitor that works stays, as at every stop and reopen. */
+		provider.stop();
+		if (!open_provider(provider, guest))
+			fail(label, "the provider did not reopen again");
+		else if (provider.path_monitors_made_for_testing() !=
+				 made_before + 2 ||
+			 system_creations.load() != 2)
+			fail(label, "a monitor that works was made again");
+	}
+	provider.stop();
+	provider.set_path_monitor_factory_for_testing({});
+	drop_path_monitor(provider, guest);
 }
 
 /* Where the resolver bound its DNS-over-TCP socket, for the log of a run on a
@@ -914,6 +1076,8 @@ int main()
 	check_udp(provider, guest);
 	provider.stop();
 	check_path_monitor(provider, guest);
+	check_a_monitor_the_system_did_not_give(provider, guest);
+	check_state_across_a_restart(provider, guest);
 
 	provider.set_dns_streams_unavailable_for_testing(true);
 	if (open_provider(provider, guest)) {

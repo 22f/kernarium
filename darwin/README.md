@@ -130,11 +130,14 @@ share:
   synchronization point, including through a shared frame under another
   address space: a per-frame holder word on the mapped backing names the
   address spaces that fetched the frame, and the synchronization (or a
-  `ptrace` and `process_vm_writev()` write) publishes to them
+  `ptrace` or `process_vm_writev()` write, which names the frame it wrote)
+  publishes to them
   ([architecture](../docs/architecture.md#translation-caches-and-guest-debugging)).
   A kernel write into a guest-code page by `uaccess` reaches arm64 code only
   through the guest's own `IC IVAU` or `cacheflush()`, as on hardware that
-  advertises neither DIC nor IDC. `DARWIN_UML_CODE_HOLDER_COUNTERS=<path>`
+  advertises neither DIC nor IDC; x86 code sees such a write into a page-cache
+  frame, which the x86_64 kernel names to the host
+  (`flush_dcache_folio()`). `DARWIN_UML_CODE_HOLDER_COUNTERS=<path>`
   writes the mechanism's counters once a second.
 - **Forwarding and diagnostics.** Scalar and vector result forwarding are
   template-owned and can be disabled per program through `BuildOptions`.
@@ -181,11 +184,12 @@ patches provide the behaviors the `slirp-network-*` tests check.
   the application to a local-network router, which needs the Local Network
   permission, and the guest follows the device's own resolver configuration.
   The wire rules are `network-dns-rules`. While the host has no network path
-  (the platform's path monitor, which the provider makes at its first open and
-  keeps for its life), a
+  (the platform's path monitor, which the provider makes at its first open,
+  keeps for its life and makes again at an open if the system gave it none), a
   name the system cannot find is answered SERVFAIL, which a guest retries, and
   counted as failed; answers that carry a record of the asked type stand, and
-  the next report of a path ends it (`slirp-network-dns`, `platform-host-network-path`).
+  the next report of a path ends it (`slirp-network-dns`,
+  `platform-host-network-path`).
 - When the path monitor reports that an interface carries the path and the
   host no longer has the address a guest TCP connection's host socket is bound
   to (Wi-Fi gone, the path on cellular), the guest gets a reset on exactly
