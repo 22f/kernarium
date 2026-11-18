@@ -387,6 +387,34 @@ class CheckTests(unittest.TestCase):
         self.fixture.install()
         self.passes(self.fixture.run())
 
+    def test_an_installed_layout_without_a_usable_digest_is_an_error_not_a_skipped_check(self) -> None:
+        installed = self.fixture.install()
+        layout = installed / "guest/partition-layout.json"
+        digest = json.loads(layout.read_text())["system_disk"]["sha256"]
+        self.assertNotEqual(digest, digest.upper())
+        unusable = "names no usable system disk digest"
+        cases = {
+            "null": ({"system_disk": {"sha256": None}}, unusable),
+            "empty": ({"system_disk": {"sha256": ""}}, unusable),
+            "short": ({"system_disk": {"sha256": digest[:63]}}, unusable),
+            "long": ({"system_disk": {"sha256": digest + "0"}}, unusable),
+            "uppercase": ({"system_disk": {"sha256": digest.upper()}}, unusable),
+            "not hexadecimal": ({"system_disk": {"sha256": "g" * 64}}, unusable),
+            "number": ({"system_disk": {"sha256": 12}}, unusable),
+            "list": ({"system_disk": {"sha256": [digest]}}, unusable),
+            "no digest": ({"system_disk": {}}, "is not installed here"),
+            "no system disk": ({"schema_version": 2}, "is not installed here"),
+            "system disk null": ({"system_disk": None}, "is not installed here"),
+        }
+        for label, (content, needle) in cases.items():
+            layout.write_text(json.dumps(content))
+            for app in (False, True):
+                with self.subTest(label, app=app):
+                    self.fails(self.fixture.run(app=app, decision=RELEASE_ID), needle)
+        # A usable digest checks again, whatever the staged disk says.
+        self.fixture.install()
+        self.passes(self.fixture.run())
+
     def test_a_descriptor_without_a_directory_name_fails(self) -> None:
         text = (self.repo / DESCRIPTOR).read_text()
         write(self.repo, DESCRIPTOR, "".join(line for line in text.splitlines(True) if "DIRECTORY_NAME" not in line))

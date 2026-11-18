@@ -373,6 +373,14 @@ def installed_disk_digest(repo, report, descriptor, release_id):
             f"{installed / MANIFEST} names another release or is not marked accepted",
         )
         return None
+    # Without a digest to tie to, both disk checks would be skipped.
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        report.error(
+            f"the accepted Android release {release_id} installed as {name} names no usable "
+            "system disk digest",
+            f"{installed / LAYOUT}: system_disk.sha256 must be 64 lowercase hexadecimal digits",
+        )
+        return None
     return digest
 
 
