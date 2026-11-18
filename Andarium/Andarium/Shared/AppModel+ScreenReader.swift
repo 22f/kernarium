@@ -258,14 +258,15 @@ extension AppModel {
         if reader.state == nil { refreshScreenReaderSoon(in: session) }
     }
 
-    /// What VoiceOver hears as a run begins, in this order: the screen change
-    /// puts its cursor on the display (the direct-touch element, once Android's
-    /// screen reader is found on); then the sentence that says what the run is
-    /// and where the side keys are; then, where Android's screen reader was on
-    /// at the start, the news that it is on (`evaluateScreenReaderCard`), queued
-    /// behind it, or the card that asks, which waits for the sentence's end and
-    /// then takes the focus. The wait ends at the sentence's end, or after
-    /// `runStartBound` where VoiceOver reports none. The screen change's
+    /// What VoiceOver hears as a run begins, in this order: the sentence that
+    /// says what the run is and where the side keys are, announced at high
+    /// priority (VoiceOver's own speech of the element its cursor lands on a
+    /// moment after the screen change would cut a queued or default
+    /// announcement off after a second); then, where Android's screen reader
+    /// was on at the start, the news that it is on (`evaluateScreenReaderCard`),
+    /// queued behind it, or the card that asks, which waits for the sentence's
+    /// end and then takes the focus. The wait ends at the sentence's end, or
+    /// after `runStartBound` where VoiceOver reports none. The screen change's
     /// argument is no place for the sentence: VoiceOver does not speak it.
     func announceRunStart(_ phase: Phase) {
         VoiceOver.screenChanged()

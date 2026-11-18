@@ -607,11 +607,11 @@ struct TalkBackSwitchTests {
     }
 
     /// What a run's start tells VoiceOver: the sentence that says what the run
-    /// is and where the side keys are goes as an announcement queued behind the
-    /// screen change (as the argument of the screen change it is not spoken), and
-    /// the display's direct-touch element takes VoiceOver's focus only once it
-    /// has been spoken.
-    @Test func theRunStartSentenceIsAnnouncedQueuedAndTheDisplayWaitsForItsEnd() throws {
+    /// is and where the side keys are goes as an announcement of its own (as the
+    /// argument of the screen change it is not spoken; its priority is the
+    /// model's `runStartAnnouncer`, which a test replaces), and the display's
+    /// direct-touch element takes VoiceOver's focus only once it has been spoken.
+    @Test func theRunStartSentenceIsAnnouncedAndTheDisplayWaitsForItsEnd() throws {
         let (model, _) = started(voiceOver: true, guestState: reading([talkBack]))
         let spoken = RunStartSpeech()
         model.runStartAnnouncer = { text, finished in

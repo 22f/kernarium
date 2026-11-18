@@ -586,7 +586,7 @@ so these tests drive the interface and read no speech. The hosted
 (and fail after a partial write): overlapping reads and changes, an operation
 that the session's end cancels, or that answers after it, the card, the
 display's direct touch, the loop that reads, and what VoiceOver is told (once
-per event, with the way back, and the run start's sentence queued with the
+per event, with the way back, and the run start's sentence announced with the
 card and the display's focus waiting for its end, or for the bound); a wait in them fails where what it waited
 for did not happen. `GuestDisplayAccessibilityTests` read the display's
 accessibility structure: one element with the screen reader off, and with it

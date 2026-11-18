@@ -910,10 +910,12 @@ requires reopening Andarium.
   on the display is a container of one direct-touch element, so touches reach
   Android and it speaks instead of VoiceOver, with no rotor setting needed
   ([Android's screen reader](#android-operations)). The sentence of a run's
-  start is queued behind the screen change; the display's element takes
-  VoiceOver's focus once it has been spoken, with nothing over the display, and
-  the card that asks waits for it too (at most 15 seconds, where VoiceOver
-  reports no end) and then takes the focus on its own title. Each option row on
+  start is announced at high priority, which VoiceOver's own speech of the
+  element its cursor lands on after the screen change does not cut off; the
+  display's element takes VoiceOver's focus once it has been spoken, with
+  nothing over the display, and the card that asks waits for it too (at most
+  15 seconds, where VoiceOver reports no end) and then takes the focus on its
+  own title. Each option row on
   Home reads as one element, its control, which carries the row's title as its
   label (the title is no second stop), followed by the line under it.
 - **Keyboard and mouse.** The guest has a hardware keyboard and a mouse
