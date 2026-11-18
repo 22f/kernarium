@@ -78,11 +78,11 @@
 
 	probe_end
 
-	.bss
+	/* The order table follows the buffer in its page. */
+	.data
 	.p2align 12
 .Lbuffer:
 	.space	64
-	.data
 	.p2align 4
 .Lorder:
 	walk_order_table WALK_ORDER, WALK_BLOCKS, WALK_RANDOM
