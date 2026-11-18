@@ -75,7 +75,7 @@ struct HeatLimitSessionTests {
     }
 
     @Test func aRunThatBeginsHotWithTheLimitOffStartsWithNone() throws {
-        for state in [HostThermalState.serious, .critical] {
+        for (state, hot) in [(HostThermalState.serious, false), (.critical, true)] {
             let rig = rig()
             rig.session.setLimit(false)
             rig.session.observe(state)
@@ -84,7 +84,7 @@ struct HeatLimitSessionTests {
             rig.session.settle()
             #expect(!rig.guest.hasPending())
             #expect(rig.log.capCount == 0)
-            #expect(rig.session.isHot, "\(state) is not hot")
+            #expect(rig.session.isHot == hot, "\(state) hot is not \(hot)")
         }
     }
 
@@ -123,7 +123,21 @@ struct HeatLimitSessionTests {
         #expect(!rig.guest.hasPending(), "the fall to serious was sent at once")
         rig.clock.advance(seconds: 120)
         rig.timer.fireLatest()
-        #expect(rig.guest.record() == (try frame("severe")))
+        #expect(rig.guest.record() == (try frame("none")))
+    }
+
+    @Test func turningTheLimitOnAtSeriousSendsNoneAndAnnouncesNothing() throws {
+        let rig = try connected(limit: false)
+        rig.session.observe(.serious)
+        rig.session.setLimit(true)
+        // Turned on at serious: the HAL is told none again, which it already knew.
+        #expect(rig.guest.record() == (try frame("none")))
+        rig.session.settle()
+        #expect(!rig.guest.hasPending())
+        #expect(rig.session.severity == .none)
+        #expect(!rig.session.isHot)
+        #expect(rig.log.capCount == 0)
+        #expect(rig.log.hotChanges.isEmpty)
     }
 
     @Test func turningTheLimitOnWhileNotHotSendsNothingAndASecondChangeSendsNothingNew() throws {
@@ -139,17 +153,17 @@ struct HeatLimitSessionTests {
 
     @Test func aReconnectionWhileOffStartsWithNoneAndWhileOnWithTheSeverity() throws {
         let rig = try connected(limit: false)
-        rig.session.observe(.serious)
+        rig.session.observe(.critical)
         rig.session.restart()
         rig.session.update(running: true, booted: true)
         #expect(thermalEventually { rig.guest.connections == 2 })
         #expect(rig.guest.record() == (try frame("none")))
         rig.session.setLimit(true)
-        #expect(rig.guest.record() == (try frame("severe")))
+        #expect(rig.guest.record() == (try frame("critical")))
         rig.session.restart()
         rig.session.update(running: true, booted: true)
         #expect(thermalEventually { rig.guest.connections == 3 })
-        #expect(rig.guest.record() == (try frame("severe")))
+        #expect(rig.guest.record() == (try frame("critical")))
     }
 
     // MARK: A give-up after a connection that worked
@@ -325,17 +339,24 @@ struct HeatLimitSessionTests {
         // And a run that begins hot is hot without a reading being given.
         session.update(running: false, booted: false)
         session.settle()
+        now.value = .critical
+        session.update(running: true, booted: false)
+        session.settle()
+        #expect(session.severity == .critical && session.isHot)
+        // A run that begins at serious is told nothing and is not hot.
+        session.update(running: false, booted: false)
+        session.settle()
         now.value = .serious
         session.update(running: true, booted: false)
         session.settle()
-        #expect(session.severity == .severe && session.isHot)
+        #expect(session.severity == .none && !session.isHot)
     }
 
     // MARK: The notice
 
     @Test func noCapIsAnnouncedWhileOffAndTheRunAnnouncesItIfTheLimitComesOnWhileHot() throws {
         let rig = try connected(limit: false)
-        rig.session.observe(.serious)
+        rig.session.observe(.critical)
         rig.session.settle()
         #expect(rig.log.capCount == 0)
         rig.session.setLimit(true)
@@ -349,7 +370,7 @@ struct HeatLimitSessionTests {
 
     @Test func aCapAnnouncedBeforeTheLimitWentOffIsNotAnnouncedAgainWhenItComesOn() throws {
         let rig = try connected()
-        rig.session.observe(.serious)
+        rig.session.observe(.critical)
         #expect(thermalEventually { rig.log.capCount == 1 })
         rig.session.setLimit(false)
         rig.session.setLimit(true)
@@ -368,7 +389,10 @@ struct HeatLimitSessionTests {
             #expect(!rig.session.isHot, "fair is not hot (limit \(limit))")
             rig.session.observe(.serious)
             rig.session.settle()
-            #expect(rig.session.isHot, "serious (limit \(limit))")
+            #expect(!rig.session.isHot, "serious is not hot (limit \(limit))")
+            rig.session.observe(.critical)
+            rig.session.settle()
+            #expect(rig.session.isHot, "critical (limit \(limit))")
             rig.clock.advance(seconds: 40)
             rig.session.observe(.fair)
             rig.session.settle()
@@ -384,6 +408,8 @@ struct HeatLimitSessionTests {
     @Test func theHotChangeIsToldOnceEachWayAndNotAfterTheRunEnds() throws {
         let rig = try connected(limit: false)
         rig.session.observe(.serious)
+        rig.session.settle()
+        #expect(rig.log.hotChanges.isEmpty, "serious said the device is held hot")
         rig.session.observe(.critical)
         rig.session.observe(.serious)
         rig.session.settle()

@@ -261,7 +261,7 @@ struct HeatLimitFlowTests {
     }
 
     @Test func aRunThatBeginsHotWithTheLimitOffTellsAndroidNothingAndShowsNoNotice() async throws {
-        for state in ["serious", "critical"] {
+        for (state, hot) in [("serious", false), ("critical", true)] {
             try await stating(state) {
                 let model = model()
                 model.heatLimitOn = false
@@ -270,11 +270,27 @@ struct HeatLimitFlowTests {
                 model.driver = runtime
                 runtime.beginThermalProbe()
                 #expect(await until { !heard.all.isEmpty }, "\(state): Android heard nothing at all")
-                #expect(await until { model.deviceIsHot }, "\(state)")
+                if hot { #expect(await until { model.deviceIsHot }, "\(state)") }
                 try? await Task.sleep(for: .milliseconds(200))
+                #expect(model.deviceIsHot == hot, "\(state): hot now is \(model.deviceIsHot)")
                 #expect(heard.all.allSatisfy { $0 == .none }, "\(state): Android heard \(heard.all)")
                 #expect(!model.thermalNotice.isShowing, "\(state): a notice came with the limit off")
             }
+        }
+    }
+
+    @Test func aRunThatBeginsAtSeriousWithTheLimitOnTellsAndroidNothingShowsNoNoticeAndIsNotHot() async throws {
+        try await stating("serious") {
+            let model = model()
+            let heard = Heard()
+            let runtime = try runtime(for: model, hal: ThermalProbeHal { heard.add($0) })
+            model.driver = runtime
+            runtime.beginThermalProbe()
+            #expect(await until { !heard.all.isEmpty }, "Android heard nothing at all")
+            try? await Task.sleep(for: .milliseconds(200))
+            #expect(heard.all.allSatisfy { $0 == .none }, "Android heard \(heard.all)")
+            #expect(!model.thermalNotice.isShowing, "a notice came at serious")
+            #expect(!model.deviceIsHot, "serious is held hot")
         }
     }
 }
