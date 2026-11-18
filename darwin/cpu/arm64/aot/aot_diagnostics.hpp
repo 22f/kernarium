@@ -2,6 +2,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -15,6 +16,11 @@
  * report is written by a thread of its own to DARWIN_UML_AOT_REPORT
  * (a few times a second), so no vCPU thread does file I/O or allocates. */
 namespace uml::cpu::arm64::aot::diagnostics {
+
+/* The number of library instances a binder (one per executor thread) holds
+ * before it replaces the oldest, as the runtime was built: tests that need
+ * more instances than that ask it. */
+[[nodiscard]] std::size_t instance_capacity() noexcept;
 
 struct Stats final {
 	std::uint64_t binds{};
@@ -81,8 +87,8 @@ struct Stats final {
 	std::uint64_t instance_evictions{};
 	std::uint64_t instance_rebinds{};
 	/* The most page-state bytes the live instances of all binders held at
-	 * once, and the size of one binder (its fixed tables: instances, index,
-	 * page slots, cross table). */
+	 * once, and the size of one Binder object (its tables are mapped apart:
+	 * the report's binder_tables_bytes). */
 	std::uint64_t instance_page_bytes_peak{};
 	std::uint64_t binder_bytes{};
 	/* The page-state bytes the live instances of all binders hold now. */

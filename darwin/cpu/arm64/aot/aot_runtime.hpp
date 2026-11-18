@@ -8,7 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <vector>
+#include <type_traits>
 
 /* Ahead-of-time native code for the Android image's own arm64 libraries
  * (docs/architecture.md, "Ahead-of-time code"). The framework holds one
@@ -17,24 +17,11 @@
  * header is the whole boundary the gadget executor sees. Counters, reports
  * and test switches are in aot_diagnostics.hpp and exist only in builds that
  * set UML_AOT_DIAGNOSTICS. */
-/* How many library instances (a library of an address space at a load bias)
- * one executor thread's binder holds before it replaces the oldest: 2048
- * unless UML_AOT_INSTANCE_CAPACITY in CMake says otherwise, the same in
- * every compilation of this header the binary links, the executor's
- * included. */
-#ifndef UML_AOT_INSTANCE_CAPACITY
-#define UML_AOT_INSTANCE_CAPACITY 2048
-#endif
-
 namespace uml::cpu::arm64::aot {
 
 /* Whether AOT code may be entered: DARWIN_UML_AOT=1 at start-up. Off by
  * default. */
 [[nodiscard]] bool enabled() noexcept;
-
-/* The instance capacity the runtime library was built with (tests that need
- * more instances than a binder holds ask it, not the macro). */
-[[nodiscard]] std::size_t instance_capacity() noexcept;
 
 /* Why an entry was refused, for the diagnostics build's counters. */
 enum class Refusal : unsigned {
@@ -175,21 +162,25 @@ public:
 	[[nodiscard]] std::size_t tables_resident_bytes() const noexcept;
 
 private:
+	/* A library of an address space at a load bias. A place that has never
+	 * held one is all zero bytes. */
 	struct Instance final {
-		unsigned long generation{};
-		std::uint32_t library{};
-		std::uint64_t bias{};
-		bool poisoned{};
-		bool used{};
-		/* One byte per text page: 1 = its mapping carried the kernel's
-		 * immutable fact, it matched its stored hash and no code change
-		 * names it since (a mapping that loses the fact is one); as of
-		 * `state_changes`. */
-		std::vector<std::uint8_t> pages{};
-		std::uint64_t state_changes{};
-		/* The next instance of the same hash bucket. */
-		std::int16_t chain{-1};
+		unsigned long generation;
+		std::uint64_t bias;
+		std::uint64_t state_changes;
+		/* `page_count` bytes, one per text page: 1 = its mapping carried
+		 * the kernel's immutable fact, it matched its stored hash and no
+		 * code change names it since (a mapping that loses the fact is
+		 * one); as of `state_changes`. Rewritten code reads them. */
+		std::uint8_t *pages;
+		std::uint32_t library;
+		std::uint32_t page_count;
+		/* The next instance of the same hash bucket, plus one (0: none). */
+		std::uint16_t chain;
+		bool poisoned;
+		bool used;
 	};
+	static_assert(std::is_trivial_v<Instance> && sizeof(Instance) == 48);
 	/* What is known of a text page of an address space: the instance it is
 	 * in and the code-change sequence that was current when it was bound. A
 	 * slot of all zero bytes is empty. */
@@ -240,26 +231,28 @@ private:
 		std::uint64_t sequence, std::uint64_t low, std::uint64_t high,
 		std::uint64_t &current) noexcept;
 
-	static constexpr std::size_t instance_capacity = UML_AOT_INSTANCE_CAPACITY;
-	static_assert(instance_capacity >= 1 && instance_capacity <= 16384);
-	/* The cross table holds the instances of one address space (at most a
-	 * library each, a few more where a library is mapped twice): one the
-	 * table has no room for is left to the engine, never written past it. */
-	/* Instances are found by hash chains over this many buckets. */
-	static constexpr std::size_t index_buckets = 2 * instance_capacity;
-	/* The page states cached by (page, address space): 16384, or 8 per
-	 * instance where the capacity is above 2048. */
-	static constexpr std::size_t page_slots =
-		instance_capacity * 8 > 16384 ? instance_capacity * 8 : 16384;
 	[[nodiscard]] static std::size_t bucket_of(unsigned long generation,
 		std::uint32_t library, std::uint64_t bias) noexcept;
 	[[nodiscard]] Instance *find_instance(unsigned long generation,
 		std::uint32_t library, std::uint64_t bias) noexcept;
 	void unlink_instance(std::size_t index) noexcept;
 	void link_instance(std::size_t index) noexcept;
-	std::array<Instance, instance_capacity> instances_{};
-	std::array<std::int16_t, index_buckets> heads_{};
-	std::array<PageSlot, page_slots> pages_{};
+	/* The tables are one mapping of fresh pages: the instances, the heads of
+	 * the index's hash chains (an instance's place plus one; 0: none) and
+	 * the page slots, each from pages of its own. All zero bytes is the
+	 * empty state of each, so the host backs the pages a binder has used
+	 * and no more, and the capacity costs memory only as it is reached. A
+	 * mapping the host refuses leaves the binder without tables: it finds
+	 * nothing and the engine runs everything. */
+	void *tables_{};
+	std::size_t tables_size_{};
+	Instance *instances_{};
+	std::uint16_t *heads_{};
+	PageSlot *pages_{};
+	/* Places [0, used_) of `instances_` have held an instance: the ones
+	 * that are searched. */
+	std::size_t used_{};
+	/* The place the next instance takes, first in, first out. */
 	std::size_t next_instance_{};
 	std::uint64_t ticks_{};
 	/* The last (generation, sequence) sync() brought the instances to. */
@@ -271,6 +264,9 @@ private:
 	[[maybe_unused]] std::uint64_t last_changes_{};
 	/* Moves whenever the set of usable instances changes. */
 	std::uint64_t epoch_{1};
+	/* The instances of one address space (at most a library each, a few more
+	 * where a library is mapped twice): one the table has no room for is
+	 * left to the engine, never written past it. */
 	CrossTable cross_{};
 	unsigned long cross_generation_{};
 	std::uint64_t cross_epoch_{};

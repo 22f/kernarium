@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <span>
+#include <sys/mman.h>
 
 #if UML_AOT_DIAGNOSTICS
 #include "cpu/arm64/aot/aot_diagnostics.hpp"
@@ -25,7 +26,6 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string>
-#include <sys/mman.h>
 #include <thread>
 #include <time.h>
 #include <unistd.h>
@@ -39,6 +39,22 @@ namespace uml::cpu::arm64::aot {
 namespace {
 
 constexpr std::uint64_t page_size = 4096;
+/* How many library instances (a library of an address space at a load bias)
+ * one executor thread's binder holds before it replaces the oldest: 2048
+ * unless UML_AOT_INSTANCE_CAPACITY in CMake says otherwise. */
+#ifndef UML_AOT_INSTANCE_CAPACITY
+#define UML_AOT_INSTANCE_CAPACITY 2048
+#endif
+constexpr std::size_t max_instances = UML_AOT_INSTANCE_CAPACITY;
+static_assert(max_instances >= 1 && max_instances <= 16384);
+/* Instances are found by hash chains over this many buckets. */
+constexpr std::size_t index_buckets = 2 * max_instances;
+/* The page states cached by (page, address space): 16384, or 8 per instance
+ * where the capacity is above 2048. */
+constexpr std::size_t page_slots =
+	max_instances * 8 > 16384 ? max_instances * 8 : 16384;
+/* The host's page: each table of a binder starts on one. */
+constexpr std::size_t host_page = 16384;
 /* The verdicts of every address space of the process (shared_verdicts.hpp).
  * A verdict names a physical-page record that is never reused, so an entry
  * can outlive the address space that filed it and never be answered wrongly. */
@@ -895,11 +911,6 @@ Target lookup(const CrossTable *table, std::uint64_t address) noexcept
 
 } // namespace
 
-std::size_t instance_capacity() noexcept
-{
-	return UML_AOT_INSTANCE_CAPACITY;
-}
-
 bool enabled() noexcept
 {
 	auto state = g_state.load(std::memory_order_relaxed);
@@ -988,6 +999,11 @@ void set_run_hook(void (*hook)(void *), void *context) noexcept
 void clear_shared_verdicts() noexcept
 {
 	g_verdicts.clear();
+}
+
+std::size_t instance_capacity() noexcept
+{
+	return max_instances;
 }
 
 Stats stats() noexcept
@@ -1083,7 +1099,24 @@ Binder::Binder() noexcept
 	cross_.refill = &refill;
 	cross_.lookup = &lookup;
 	cross_.mops = &mops;
-	heads_.fill(-1);
+	const auto whole = [](std::size_t bytes) {
+		return (bytes + host_page - 1) & ~(host_page - 1);
+	};
+	const auto instances_bytes = whole(max_instances * sizeof(Instance));
+	const auto heads_bytes = whole(index_buckets * sizeof(std::uint16_t));
+	const auto size = instances_bytes + heads_bytes +
+		whole(page_slots * sizeof(PageSlot));
+	void *const mapping = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+		MAP_ANON | MAP_PRIVATE, -1, 0);
+	if (mapping != MAP_FAILED) {
+		auto *const base = static_cast<std::byte *>(mapping);
+		tables_ = mapping;
+		tables_size_ = size;
+		instances_ = reinterpret_cast<Instance *>(base);
+		heads_ = reinterpret_cast<std::uint16_t *>(base + instances_bytes);
+		pages_ = reinterpret_cast<PageSlot *>(
+			base + instances_bytes + heads_bytes);
+	}
 #if UML_AOT_DIAGNOSTICS
 	counters::binder_bytes.store(sizeof(Binder), std::memory_order_relaxed);
 	const std::lock_guard guard{binders_lock()};
@@ -1096,36 +1129,36 @@ Binder::~Binder()
 #if UML_AOT_DIAGNOSTICS
 	/* The page states the live instances held leave the count with them. */
 	std::size_t held = 0;
-	for (const auto &instance : instances_)
-		held += instance.pages.size();
+	for (std::size_t at = 0; at < used_; ++at)
+		held += instances_[at].page_count;
 	counters::instance_page_bytes.fetch_sub(held, std::memory_order_relaxed);
 	const std::lock_guard guard{binders_lock()};
 	std::erase(binders(), this);
 #endif
+	for (std::size_t at = 0; at < used_; ++at)
+		std::free(instances_[at].pages);
+	if (tables_ != nullptr)
+		munmap(tables_, tables_size_);
 }
 
 #if UML_AOT_DIAGNOSTICS
 std::size_t Binder::tables_bytes() const noexcept
 {
-	return sizeof(instances_) + sizeof(heads_) + sizeof(pages_);
+	return tables_size_;
 }
 
 std::size_t Binder::tables_resident_bytes() const noexcept
 {
-	const auto host = static_cast<std::uintptr_t>(getpagesize());
-	const auto first = reinterpret_cast<std::uintptr_t>(&instances_) &
-		~(host - 1);
-	const auto last = (reinterpret_cast<std::uintptr_t>(&pages_) +
-		sizeof(pages_) + host - 1) & ~(host - 1);
-	std::vector<char> in_core((last - first) / host);
-	if (mincore(reinterpret_cast<void *>(first), last - first,
-		    in_core.data()) != 0)
+	if (tables_ == nullptr)
+		return 0;
+	std::vector<char> in_core(tables_size_ / host_page);
+	if (mincore(tables_, tables_size_, in_core.data()) != 0)
 		return 0;
 	std::size_t count = 0;
 	for (const char page : in_core)
 		if ((page & MINCORE_INCORE) != 0)
 			++count;
-	return count * host;
+	return count * host_page;
 }
 #endif
 
@@ -1144,9 +1177,9 @@ std::size_t Binder::bucket_of(unsigned long generation, std::uint32_t library,
 Binder::Instance *Binder::find_instance(unsigned long generation,
 	std::uint32_t library, std::uint64_t bias) noexcept
 {
-	for (auto at = heads_[bucket_of(generation, library, bias)]; at >= 0;
-	     at = instances_[static_cast<std::size_t>(at)].chain) {
-		auto &candidate = instances_[static_cast<std::size_t>(at)];
+	for (auto at = heads_[bucket_of(generation, library, bias)]; at != 0;
+	     at = instances_[at - 1].chain) {
+		auto &candidate = instances_[at - 1];
 		if (candidate.generation == generation &&
 		    candidate.library == library && candidate.bias == bias)
 			return &candidate;
@@ -1159,11 +1192,11 @@ void Binder::unlink_instance(std::size_t index) noexcept
 	auto &victim = instances_[index];
 	auto *at = &heads_[bucket_of(victim.generation, victim.library,
 		victim.bias)];
-	while (*at >= 0 && static_cast<std::size_t>(*at) != index)
-		at = &instances_[static_cast<std::size_t>(*at)].chain;
-	if (*at >= 0)
+	while (*at != 0 && static_cast<std::size_t>(*at - 1) != index)
+		at = &instances_[*at - 1].chain;
+	if (*at != 0)
 		*at = victim.chain;
-	victim.chain = -1;
+	victim.chain = 0;
 }
 
 void Binder::link_instance(std::size_t index) noexcept
@@ -1172,7 +1205,7 @@ void Binder::link_instance(std::size_t index) noexcept
 	auto &head = heads_[bucket_of(added.generation, added.library,
 		added.bias)];
 	added.chain = head;
-	head = static_cast<std::int16_t>(index);
+	head = static_cast<std::uint16_t>(index + 1);
 }
 
 bool Binder::changed_since(void *context, std::uint64_t sequence,
@@ -1341,7 +1374,8 @@ void Binder::sync(void *context, unsigned long generation,
 	std::uint64_t ranges_from = 0;
 	int count = 0;
 	bool have = false;
-	for (auto &instance : instances_) {
+	for (std::size_t at = 0; at < used_; ++at) {
+		auto &instance = instances_[at];
 		if (!instance.used || instance.generation != generation ||
 		    instance.poisoned || instance.state_changes == code_changes)
 			continue;
@@ -1363,7 +1397,7 @@ void Binder::sync(void *context, unsigned long generation,
 		const std::uint64_t low = instance.bias + library.table_base;
 		const std::uint64_t high = instance.bias + library.table_end;
 		if (count < 0) {
-			std::fill(instance.pages.begin(), instance.pages.end(), 0);
+			std::fill_n(instance.pages, instance.page_count, 0);
 		} else {
 			for (int index = 0; index < count; ++index) {
 				std::uint64_t first = ranges[index].address;
@@ -1418,43 +1452,53 @@ std::int32_t Binder::resolve(::uml::memory::StaticGuestMemory &memory,
 		page_va - (library.table_base + page_index * page_size);
 	Instance *found = find_instance(generation, library_index, bias);
 	if (found == nullptr) {
+		/* The page states first: with none, nothing changes. */
+		auto *const states = static_cast<std::uint8_t *>(
+			std::calloc(library.pages != 0 ? library.pages : 1, 1));
+		if (states == nullptr)
+			return not_ready;
 		const auto victim = next_instance_;
-		next_instance_ = (next_instance_ + 1) % instance_capacity;
+		next_instance_ = (next_instance_ + 1) % max_instances;
 		note_instance(this, generation, library_index, bias,
-			instances_[victim].used, instances_[victim].pages.size(),
+			instances_[victim].used, instances_[victim].page_count,
 			library.pages);
-		if (instances_[victim].used)
+		if (instances_[victim].used) {
 			unlink_instance(victim);
-		/* No page slot may name the instance that takes this place. */
-		for (auto &slot_entry : pages_)
-			if (slot_entry.page != 0 &&
-			    slot_entry.instance == static_cast<std::int16_t>(victim)) {
-				slot_entry = PageSlot{};
+			/* No page slot may name the instance that takes this place;
+			 * a place that never held one is named by none. */
+			for (std::size_t at = 0; at < page_slots; ++at)
+				if (pages_[at].page != 0 &&
+				    pages_[at].instance == static_cast<std::int16_t>(victim)) {
+					pages_[at] = PageSlot{};
 #if UML_AOT_DIAGNOSTICS
-				counters::page_slots_filled.fetch_sub(1,
-					std::memory_order_relaxed);
+					counters::page_slots_filled.fetch_sub(1,
+						std::memory_order_relaxed);
 #endif
-			}
+				}
+			std::free(instances_[victim].pages);
+		}
+		used_ = std::max(used_, victim + 1);
 		found = &instances_[victim];
 		*found = Instance{};
 		found->generation = generation;
 		found->library = library_index;
 		found->bias = bias;
 		found->used = true;
-		found->pages.assign(library.pages, 0);
+		found->pages = states;
+		found->page_count = library.pages;
 		found->state_changes = code_changes;
 		link_instance(victim);
 		++epoch_;
 	}
 	return found->poisoned ? none :
-		static_cast<std::int32_t>(found - instances_.data());
+		static_cast<std::int32_t>(found - instances_);
 }
 
 Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 	unsigned long generation, std::uint64_t code_changes,
 	std::uint64_t pc) noexcept
 {
-	if (!directory().valid || (pc & 3U) != 0)
+	if (!directory().valid || (pc & 3U) != 0 || tables_ == nullptr)
 		return {};
 	++ticks_;
 	UML_AOT_COUNT(page_lookups, 1);
@@ -1521,7 +1565,7 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 	const std::uint64_t page_index =
 		(pc - instance.bias - record.table_base) / page_size;
 	if (pc - instance.bias < record.table_base ||
-	    page_index >= instance.pages.size()) {
+	    page_index >= instance.page_count) {
 		note_find(FindResult::no_entry, instance.library);
 		return {};
 	}
@@ -1591,7 +1635,7 @@ Hit Binder::entry(std::uint32_t instance_index,
 	if (native == 0)
 		return {};
 	return {uml_aot_blob + library.unit_offset + native, instance.bias,
-		instance_index, instance.library, instance.pages.data()};
+		instance_index, instance.library, instance.pages};
 }
 
 const CrossTable &Binder::cross(unsigned long generation,
@@ -1605,7 +1649,8 @@ const CrossTable &Binder::cross(unsigned long generation,
 	    cross_changes_ == code_changes)
 		return cross_;
 	cross_.count = 0;
-	for (const auto &instance : instances_) {
+	for (std::size_t at = 0; at < used_; ++at) {
+		const auto &instance = instances_[at];
 		if (!instance.used || instance.poisoned ||
 		    instance.generation != generation ||
 		    instance.state_changes != code_changes)
@@ -1619,7 +1664,7 @@ const CrossTable &Binder::cross(unsigned long generation,
 		cross_.entries[cross_.count++] = {
 			instance.bias + library.table_base,
 			instance.bias + library.table_end, instance.bias,
-			instance.pages.data(), instance.library, 0};
+			instance.pages, instance.library, 0};
 	}
 	std::sort(cross_.entries.begin(), cross_.entries.begin() +
 		static_cast<std::ptrdiff_t>(cross_.count),
@@ -1635,7 +1680,8 @@ const CrossTable &Binder::cross(unsigned long generation,
 bool Binder::locate(unsigned long generation, std::uint64_t address,
 	std::uint32_t &library, std::uint64_t &offset) const noexcept
 {
-	for (const auto &instance : instances_) {
+	for (std::size_t at = 0; at < used_; ++at) {
+		const auto &instance = instances_[at];
 		if (!instance.used || instance.generation != generation)
 			continue;
 		const auto record = directory().library(instance.library);

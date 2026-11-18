@@ -3384,7 +3384,7 @@ void misaligned_cas_follows_the_profile(const LibraryImage &image)
 [[gnu::noinline]]
 void more_instances_than_the_binder_holds(const LibraryImage &image)
 {
-	const std::size_t capacity = aot_runtime::instance_capacity();
+	const std::size_t capacity = aot::instance_capacity();
 	const std::size_t copies = capacity + 6;
 	constexpr unsigned long generation = 4540;
 	const auto first_bias = 0x7300'0000'0000ULL;
