@@ -459,20 +459,22 @@ class PcRelativeWidthTests(unittest.TestCase):
 
     @staticmethod
     def constants(words: list[int]) -> list[int]:
-        """The values the movz and movk runs of `words` build, in order."""
+        """The values the movz and movk runs of `words` build, in order: a run
+        ends where another movz writes its register again."""
         values: dict[int, int] = {}
         built: list[int] = []
         for word in words:
             rd = word & 31
             move = (word >> 23) & 0x1ff
             if move == 0b110100101:  # movz x, #imm16, lsl #(16 * hw)
+                if rd in values:
+                    built.append(values[rd])
                 values[rd] = ((word >> 5) & 0xffff) << (16 * ((word >> 21) & 3))
-                built.append(rd)
             elif move == 0b111100101 and rd in values:  # movk
                 shift = 16 * ((word >> 21) & 3)
                 values[rd] = (values[rd] & ~(0xffff << shift)) | \
                     (((word >> 5) & 0xffff) << shift)
-        return [values[rd] for rd in built if rd in values]
+        return built + list(values.values())
 
     def test_an_adrp_below_zero_keeps_all_64_bits(self) -> None:
         # adrp x0, #-2 pages from page 1: the target is -0x1000.
@@ -487,6 +489,35 @@ class PcRelativeWidthTests(unittest.TestCase):
         library = library_of([adrp, RET], [(0, 8)])
         built = self.constants(unit_words(library))
         self.assertNotIn(0xfffffffffffff000, built)
+
+    # An LDR (literal) at 0x1000 whose literal is at 0x1000 + 4 * imm19.
+    LITERAL_FORMS = {"ldr w": 0x18000000, "ldr x": 0x58000000,
+                     "ldrsw": 0x98000000, "ldr s": 0x1c000000,
+                     "ldr d": 0x5c000000, "ldr q": 0x9c000000}
+
+    @staticmethod
+    def literal_load(form: int, words_away: int) -> int:
+        return form | ((words_away & 0x7ffff) << 5)
+
+    def test_a_literal_load_below_zero_keeps_all_64_bits(self) -> None:
+        # The literal lies at 0x1000 - 0x3000 = -0x2000 (the unit's base is
+        # zero, another mapping lies below it): the address is the bias less
+        # 0x2000, not the bias plus the low 24 bits of -0x2000.
+        for name, form in self.LITERAL_FORMS.items():
+            with self.subTest(name):
+                library = library_of(
+                    [self.literal_load(form, -0xc00), RET], [(0, 8)])
+                built = self.constants(unit_words(library))
+                self.assertIn(0xffffffffffffe000, built)
+
+    def test_a_literal_load_inside_the_library_is_unchanged(self) -> None:
+        for name, form in self.LITERAL_FORMS.items():
+            with self.subTest(name):
+                library = library_of(
+                    [self.literal_load(form, 0xc00), RET], [(0, 8)])
+                built = self.constants(unit_words(library))
+                self.assertNotIn(0xffffffffffffe000, built)
+                self.assertNotIn(0xffffe000, built)
 
 
 class ExitBelowTheLibraryTests(unittest.TestCase):

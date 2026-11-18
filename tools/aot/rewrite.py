@@ -802,7 +802,10 @@ class Library:
         self.asm.word(A.str_x(host, 31, slot_of(guest)))
 
     def _materialize(self, host: int, vaddr: int) -> None:
-        """host = BIAS + vaddr (a guest virtual address)."""
+        """host = BIAS + vaddr (a guest virtual address). A target below the
+        unit's zero is the 64-bit wrap of a negative number, never its low
+        24 bits."""
+        vaddr &= (1 << 64) - 1
         asm = self.asm
         asm.word(A.ldr_x(host, 31, SLOT_BIAS))
         low = vaddr & 0xfff
