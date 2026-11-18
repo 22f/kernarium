@@ -65,6 +65,46 @@ struct Region final {
 	std::uint64_t end{};
 };
 
+/* --clobber-calls: every call the gadget engine makes into the address space
+ * leaves what a C++ function may leave in the registers it does not preserve
+ * (x0 to x15, v0 to v7, v16 to v31 and the flags), so a gadget that keeps a
+ * value in one across a translation that misses, or across a page-crossing
+ * copy, reads garbage. The corpus's first access to each page is such a
+ * call. */
+bool clobber_calls = false;
+
+void clobber_caller_saved_registers() noexcept
+{
+	if (!clobber_calls)
+		return;
+#if defined(__aarch64__)
+	asm volatile(
+		"movi v0.16b, #0xaa\n\t" "movi v1.16b, #0xaa\n\t"
+		"movi v2.16b, #0xaa\n\t" "movi v3.16b, #0xaa\n\t"
+		"movi v4.16b, #0xaa\n\t" "movi v5.16b, #0xaa\n\t"
+		"movi v6.16b, #0xaa\n\t" "movi v7.16b, #0xaa\n\t"
+		"movi v16.16b, #0xaa\n\t" "movi v17.16b, #0xaa\n\t"
+		"movi v18.16b, #0xaa\n\t" "movi v19.16b, #0xaa\n\t"
+		"movi v20.16b, #0xaa\n\t" "movi v21.16b, #0xaa\n\t"
+		"movi v22.16b, #0xaa\n\t" "movi v23.16b, #0xaa\n\t"
+		"movi v24.16b, #0xaa\n\t" "movi v25.16b, #0xaa\n\t"
+		"movi v26.16b, #0xaa\n\t" "movi v27.16b, #0xaa\n\t"
+		"movi v28.16b, #0xaa\n\t" "movi v29.16b, #0xaa\n\t"
+		"movi v30.16b, #0xaa\n\t" "movi v31.16b, #0xaa\n\t"
+		"mov x0, #0xaaaa\n\t" "mov x1, #0xaaaa\n\t" "mov x2, #0xaaaa\n\t"
+		"mov x3, #0xaaaa\n\t" "mov x4, #0xaaaa\n\t" "mov x5, #0xaaaa\n\t"
+		"mov x6, #0xaaaa\n\t" "mov x7, #0xaaaa\n\t" "mov x8, #0xaaaa\n\t"
+		"mov x9, #0xaaaa\n\t" "mov x10, #0xaaaa\n\t" "mov x11, #0xaaaa\n\t"
+		"mov x12, #0xaaaa\n\t" "mov x13, #0xaaaa\n\t" "mov x14, #0xaaaa\n\t"
+		"mov x15, #0xaaaa\n\t"
+		"mov x0, #0xa0000000\n\t" "msr nzcv, x0"
+		::: "cc", "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9",
+		"x10", "x11", "x12", "x13", "x14", "x15", "v0", "v1", "v2", "v3",
+		"v4", "v5", "v6", "v7", "v16", "v17", "v18", "v19", "v20", "v21",
+		"v22", "v23", "v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31");
+#endif
+}
+
 /* A store another vCPU makes at a chosen moment: once the first read that
  * covers `trigger` has completed, `value` is stored at `address`, ahead of
  * whatever the reading instruction does next. */
@@ -100,6 +140,7 @@ public:
 	[[nodiscard]] bool read(std::uint64_t address,
 		std::span<std::byte> destination) override
 	{
+		clobber_caller_saved_registers();
 		const bool done = transfer_read(address, destination,
 			uml::memory::MemoryAccess::read, true);
 		if (done && race_ && race_->trigger >= address &&
@@ -156,6 +197,7 @@ public:
 	[[nodiscard]] bool write(std::uint64_t address,
 		std::span<const std::byte> source) override
 	{
+		clobber_caller_saved_registers();
 		if (!mapped(address, source.size())) {
 			set_fault(address, uml::memory::MemoryAccess::write);
 			return false;
@@ -185,6 +227,7 @@ public:
 	[[nodiscard]] std::byte *atomic_pointer(std::uint64_t address,
 		std::size_t size, uml::memory::MemoryAccess access) override
 	{
+		clobber_caller_saved_registers();
 		if (size == 0 || size > page_size - (address % page_size) ||
 			!mapped(address, size)) {
 			set_fault(address, access);
@@ -2541,7 +2584,10 @@ int main(int argc, char **argv)
 	int index = 1;
 	while (index < argc - 1) {
 		const std::string_view option{argv[index]};
-		if (option == "--exclusions") {
+		if (option == "--clobber-calls") {
+			clobber_calls = true;
+			++index;
+		} else if (option == "--exclusions") {
 			exclusion_list = argv[index + 1];
 			index += 2;
 #if UML_FEX_ASM_JIT
@@ -2600,10 +2646,11 @@ int main(int argc, char **argv)
 	}
 	print_result("malformed_input", 0, 0, {},
 #if UML_FEX_ASM_JIT
-		"usage: runner [--exclusions LIST] [--code-size-per-node BYTES] "
-		"[--require-growth] [--emitted-registers] [--switch-sweep] CORPUS | "
+		"usage: runner [--exclusions LIST] [--clobber-calls] "
+		"[--code-size-per-node BYTES] [--require-growth] "
+		"[--emitted-registers] [--switch-sweep] CORPUS | "
 #else
-		"usage: runner [--exclusions LIST] CORPUS | "
+		"usage: runner [--exclusions LIST] [--clobber-calls] CORPUS | "
 #endif
 		"runner [--repository] BINARY CONFIG | runner --retirement");
 	return 2;

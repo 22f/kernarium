@@ -190,6 +190,14 @@ uml_add_unit_test(
     COMMAND uml_x86_64_fex_asm_runner "${_corpus}"
     LABELS cpu;x86-64
     TIMEOUT 900)
+# The same corpus with every call into the address space leaving garbage in the
+# registers a C++ function does not preserve, which holds each gadget to
+# keeping its values across a translation that misses.
+uml_add_unit_test(
+    NAME x86-64-instruction-corpus-clobbered-calls
+    COMMAND uml_x86_64_fex_asm_runner --clobber-calls "${_corpus}"
+    LABELS cpu;x86-64
+    TIMEOUT 900)
 # The instructions a run retires before each kind of stop, which the JIT
 # runner checks against the same counts. The rows that name the flags, x87
 # status or MXCSR a faulting store must leave hold the gadget engine to them
