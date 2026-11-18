@@ -78,11 +78,14 @@ without asking each other.
   picture. Decoding starts at a packet's last key frame, which replaces what
   the frames before it refer to; frames before it are validated by header only,
   so damaged data in one of them goes unnoticed. A packet shows what its last
-  frame shows: nothing when that frame is not shown, as libvpx shows none. An
-  intra-only frame that changes the picture size is not supported, because the
-  size comes from the key frame. Whatever follows a valid header is the
-  hardware's to decode, and its failure ends the stream's pictures with an
-  error until the client seeks.
+  frame shows: nothing when that frame is not shown, as libvpx shows none. A
+  packet that ends in a hidden key frame of another size changes the stream's
+  size with no picture, and its coded buffer comes back once a later picture
+  of that size has been announced and the client has set it, or when the
+  client seeks or drains. An intra-only frame that changes the picture size is
+  not supported, because the size comes from the key frame. Whatever follows a
+  valid header is the hardware's to decode, and its failure ends the stream's
+  pictures with an error until the client seeks.
 
 `UML_VIDEO_ACTIVITY_LOG` names a file in which the device appends the profiles
 it advertised and each stream's codec and totals, since a guest that falls back

@@ -716,8 +716,30 @@ void vp9FinalFrame(const std::vector<uml::platform::VideoDecodeCapability>& capa
             require(shown.size() == 1 && shown[0].timestamp == 60 && hashOf(shown[0]) == expected[0],
                     "a show-existing frame at the end of a packet did not show the slot's picture");
         }
+        /* The clip's first alternate-reference frame is hidden and refreshes
+         * slot 2. Show-existing of that slot shows the frame, whether the
+         * hidden frame came in an earlier packet or in the same one. */
+        constexpr unsigned arfSlot = 2;
+        const std::uint32_t arfHash = tenBit ? 0xdc260adau : 0xd4aeb5afu;
+        for (const bool samePacket : {false, true}) {
+            auto decoder = primed();
+            const auto entry = frames::showExisting(profileBits, arfSlot);
+            if (samePacket) {
+                decoder->submit(frames::superframe({std::vector<std::uint8_t>(arf.begin(), arf.end()), entry}), 70);
+            } else {
+                decoder->submit(arf, 70);
+                decoder->drain();
+                require(decoder->takeFrames().empty(), "a hidden alternate-reference frame showed a picture");
+                decoder->submit(entry, 71);
+            }
+            decoder->drain();
+            const auto shown = decoder->takeFrames();
+            require(shown.size() == 1 && shown[0].timestamp == (samePacket ? 70u : 71u) && hashOf(shown[0]) == arfHash,
+                    "show-existing of a slot a hidden alternate-reference frame refreshed differs from the reference decoder's");
+        }
     }
-    std::printf("vp9-final-frame (%s): a hidden last key frame shows nothing, a show-existing one shows its slot\n",
+    std::printf("vp9-final-frame (%s): a hidden last key frame shows nothing, show-existing shows its slot, "
+                "also one a hidden alternate-reference frame refreshed\n",
                 tenBit ? "profile 2" : "profile 0");
 }
 
