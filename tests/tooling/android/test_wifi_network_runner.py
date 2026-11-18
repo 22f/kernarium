@@ -3586,8 +3586,9 @@ class LoopbackGuest:
     closes. A close would not do: a close with a line of the host unread, or a line of the host that reaches a closed
     socket, is answered with a reset, and whether the host reads the end or the reset first is the kernel's timing,
     which a slow scheduler changes. `resets` ends the connection with that reset on purpose. `end_with_line_pending`
-    holds the end until a line of the host has reached the guest, and `ended` is set once the guest has made its end:
-    they put the end and the host's next line in either order, for the rows that force it."""
+    holds the end until a line of the host has reached the guest (`line_pending` records whether it did, or the wait
+    ran out first), and `ended` is set once the guest has made its end: they put the end and the host's next line in
+    either order, for the rows that force it."""
 
     def __init__(self, ends_after: int | None = None, ends_on: str | None = None, resets: bool = False,
                  end_with_line_pending: bool = False) -> None:
@@ -3600,6 +3601,7 @@ class LoopbackGuest:
         self.seen: list[str] = []
         self.closed = threading.Event()
         self.ended = threading.Event()
+        self.line_pending: bool | None = None
         threading.Thread(target=self.accept, daemon=True).start()
 
     def accept(self) -> None:
@@ -3638,7 +3640,7 @@ class LoopbackGuest:
 
     def end(self, connection: socket.socket) -> None:
         if self.end_with_line_pending:
-            select.select([connection], [], [], 5)
+            self.line_pending = bool(select.select([connection], [], [], 5)[0])
         if self.resets:
             connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
             connection.close()
@@ -3710,6 +3712,8 @@ class EchoConnectionTests(unittest.TestCase):
         connection = self.connect()
         self.assertIsNone(connection.exchange("one"))
         self.assertEqual(connection.exchange("two", 5), "the guest ended the connection")
+        self.assertTrue(self.server.line_pending, "the guest ended before the host's line reached it: "
+                                                  "the ordering that the row forces did not happen")
 
     def test_the_end_is_read_when_the_host_reads_long_after_it_wrote_to_the_ended_connection(self) -> None:
         # A host thread that the scheduler held between its write and its read: whatever the guest's socket
