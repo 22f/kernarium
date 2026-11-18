@@ -372,6 +372,9 @@ public:
         if (!session_.get()) throw std::runtime_error("video picture precedes its parameter sets");
         Picture picture {timestamp, {}, layout_ == VideoPixelLayout::planar8Bit, {}};
         if (!decodeOrLose(packet, picture)) return;
+        /* A VP9 packet that ends in a frame that is not shown shows nothing, as
+         * libvpx shows none: it is decoded for the references it refreshes. */
+        if (hiddenFinal_) return;
         for (auto& frame : picture.frames) emit(std::move(frame));
     }
 
@@ -468,6 +471,7 @@ private:
     std::vector<std::uint8_t> prepare(std::span<const std::uint8_t> bytes)
     {
         checkPacketSize(bytes);
+        hiddenFinal_ = false;
         std::vector<std::uint8_t> packet;
         bool changed = false;
         // A point where restarting the session loses nothing, because the
@@ -516,6 +520,7 @@ private:
                 if (header.size->width < kVp9DecodeMinimumSide || header.size->height < kVp9DecodeMinimumSide)
                     throw std::runtime_error("video dimensions are below decoder capabilities");
             }
+            hiddenFinal_ = !parsed->frames.back().showFrame;
             if (keyAt) {
                 const auto& key = parsed->frames[*keyAt];
                 const VideoFormat next {key.size->width, key.size->height, key.bitDepth};
@@ -1026,6 +1031,8 @@ private:
     unsigned vp9Profile_ {};
     unsigned vp9ColorSpace_ {};
     bool vp9FullRange_ {};
+    // The packet `prepare` last read ends in a frame that shows nothing.
+    bool hiddenFinal_ {};
     // H.264: the stream's parameter sets, the SPS in use, and the order its
     // frames are shown in.
     h264::ParameterSets h264Sets_;

@@ -657,6 +657,70 @@ void vp9ResizeInSuperframe(const std::vector<uml::platform::VideoDecodeCapabilit
                 tenBit ? "profile 2" : "profile 0");
 }
 
+/* A packet shows what its last frame shows, as libvpx shows it: nothing when
+ * that frame is not shown, even a key frame of another size, which is still
+ * decoded for the references it refreshes, and the picture of a slot when it
+ * is a show-existing frame. The hidden key frame here is the clip's 96 x 80 one
+ * with show_frame cleared, behind a shown 64 x 64 key frame, and the inter
+ * frame after it is predicted from it. */
+void vp9FinalFrame(const std::vector<uml::platform::VideoDecodeCapability>& capabilities,
+                   uml::platform::VideoProfile profile, const char* clipName, const std::uint32_t* expected)
+{
+    using namespace uml::platform;
+    namespace frames = uml::testing::vp9;
+    if (std::none_of(capabilities.begin(), capabilities.end(), [profile](const auto& c) { return c.profile == profile; }))
+        return;
+    const bool tenBit = profile == VideoProfile::vp9Profile2;
+    const unsigned profileBits = tenBit ? 2 : 0;
+    const auto packets = ivfPackets(read(clipName));
+    require(packets.size() == 40, "the VP9 clip is not 40 packets");
+    auto hiddenKey = packets[30];
+    hiddenKey[0] &= 0xfd;                                   // show_frame
+    const auto hiddenKeyHeader = vp9::parseFrameHeader(hiddenKey);
+    require(hiddenKeyHeader && hiddenKeyHeader->key && !hiddenKeyHeader->showFrame, "the hidden key frame is not one");
+    std::size_t superframe = 0;
+    while (vp9::splitSuperframe(packets[superframe])->size() < 2) ++superframe;
+    const auto arf = (*vp9::splitSuperframe(packets[superframe]))[0];
+    for (const bool narrow : {false, true}) {
+        if (!tenBit && narrow) continue;
+        const auto hashOf = [&](const DecodedVideoFrame& frame) { return tenBit && !narrow ? narrowedHash(frame) : frameHash(frame); };
+        const auto primed = [&] {
+            auto decoder = makeVideoDecoder(VideoCodec::vp9);
+            if (narrow) decoder->requestOutputLayout(VideoPixelLayout::planar8Bit);
+            decoder->submit(packets[0], 1);
+            require(decoder->takeFrames().size() == 1, "the stream's key frame did not show a picture");
+            return decoder;
+        };
+        {
+            auto decoder = primed();
+            decoder->submit(frames::superframe({packets[0], hiddenKey}), 50);
+            decoder->drain();
+            require(decoder->takeFrames().empty(), "a packet that ends in a hidden key frame showed a picture");
+            require(decoder->format() == VideoFormat {96, 80, tenBit ? 10u : 8u},
+                    "a hidden key frame did not change the stream size");
+            decoder->submit(packets[31], 51);
+            decoder->drain();
+            const auto next = decoder->takeFrames();
+            require(next.size() == 1 && next[0].timestamp == 51 && next[0].format.width == 96 &&
+                    hashOf(next[0]) == expected[31],
+                    "the picture after a hidden key frame is not predicted from it");
+        }
+        // A show-existing frame as the whole packet, and as the last of two entries behind a hidden frame.
+        for (const bool behindHidden : {false, true}) {
+            auto decoder = primed();
+            const auto entry = frames::showExisting(profileBits, behindHidden ? 0 : 3);
+            decoder->submit(behindHidden ? frames::superframe({std::vector<std::uint8_t>(arf.begin(), arf.end()), entry})
+                                         : entry, 60);
+            decoder->drain();
+            const auto shown = decoder->takeFrames();
+            require(shown.size() == 1 && shown[0].timestamp == 60 && hashOf(shown[0]) == expected[0],
+                    "a show-existing frame at the end of a packet did not show the slot's picture");
+        }
+    }
+    std::printf("vp9-final-frame (%s): a hidden last key frame shows nothing, a show-existing one shows its slot\n",
+                tenBit ? "profile 2" : "profile 0");
+}
+
 /* One decoder carries a stream through a change of profile at a key frame, as a
  * player does between two clips: the session is rebuilt for the new profile and
  * depth, and the pictures are the right ones. */
@@ -1113,12 +1177,14 @@ int main(int argc, char** argv)
         vp9Limits(capabilities);
         vp9Clip(capabilities);
         vp9ResizeInSuperframe(capabilities, VideoProfile::vp9Profile0, "vp9-superframes.ivf", vp9ClipHashes);
+        vp9FinalFrame(capabilities, VideoProfile::vp9Profile0, "vp9-superframes.ivf", vp9ClipHashes);
         vp9Hostile(capabilities);
         vp9Mutations(capabilities, VideoProfile::vp9Profile0, "vp9-superframes.ivf", false);
         vp9Profile2Limits(capabilities);
         vp9Profile2Clip(capabilities);
         vp9ResizeInSuperframe(capabilities, VideoProfile::vp9Profile2, "vp9-profile2-superframes.ivf",
                               vp9Profile2ClipHashes);
+        vp9FinalFrame(capabilities, VideoProfile::vp9Profile2, "vp9-profile2-superframes.ivf", vp9Profile2ClipHashes);
         vp9ProfileSwitch(capabilities);
         vp9Mutations(capabilities, VideoProfile::vp9Profile2, "vp9-profile2-superframes.ivf", true);
         auto decoder = makeVideoDecoder(capabilities.front().codec);

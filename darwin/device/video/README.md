@@ -75,10 +75,14 @@ without asking each other.
   marker without an index that fits the packet, a profile other than 0 or 2, a
   12-bit or non-4:2:0 stream, frames of more than one profile in one packet, or
   a picture size outside the range, as it refuses an oversized H.264 or HEVC
-  picture. A packet with a key frame after other frames is decoded from its
-  last key frame, which replaces what the frames before it refer to. Whatever
-  follows a valid header is the hardware's to decode, and its failure ends the
-  stream's pictures with an error until the client seeks.
+  picture. Decoding starts at a packet's last key frame, which replaces what
+  the frames before it refer to; frames before it are validated by header only,
+  so damaged data in one of them goes unnoticed. A packet shows what its last
+  frame shows: nothing when that frame is not shown, as libvpx shows none. An
+  intra-only frame that changes the picture size is not supported, because the
+  size comes from the key frame. Whatever follows a valid header is the
+  hardware's to decode, and its failure ends the stream's pictures with an
+  error until the client seeks.
 
 `UML_VIDEO_ACTIVITY_LOG` names a file in which the device appends the profiles
 it advertised and each stream's codec and totals, since a guest that falls back
