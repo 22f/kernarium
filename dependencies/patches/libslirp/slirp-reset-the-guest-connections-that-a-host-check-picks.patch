@@ -15,17 +15,19 @@ each one the callback picks the way a failed host socket is dropped:
 the guest is sent a reset and the socket is closed. A host forward's
 listener and the connections accepted from it, and a connection without
 a descriptor, are not asked. The application calls it from the thread
-that drives the instance, as it calls slirp_input().
+that drives the instance, as it calls slirp_input(). The callback only
+answers about the descriptor it is given: it does not call into the
+instance, change its connections or close that descriptor.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- src/libslirp.h   | 14 ++++++++++++++
+ src/libslirp.h   | 18 ++++++++++++++++++
  src/libslirp.map |  1 +
  src/slirp.c      | 38 ++++++++++++++++++++++++++++++++++++++
- 3 files changed, 53 insertions(+)
+ 3 files changed, 57 insertions(+)
 
 diff --git a/src/libslirp.h b/src/libslirp.h
-index 240dfe8bc525507944319603308b54822acebda5..b17c4698ea64db8b3c1956cec3026a00da7d3bf7 100644
+index 240dfe8bc525507944319603308b54822acebda5..4b0d465fc07b7d8e4d64bad669c4b038cc9c0a27 100644
 --- a/src/libslirp.h
 +++ b/src/libslirp.h
 @@ -97,6 +97,8 @@ typedef int (*SlirpAddPollCb)(int fd, int events, void *opaque);
@@ -37,7 +39,7 @@ index 240dfe8bc525507944319603308b54822acebda5..b17c4698ea64db8b3c1956cec3026a00
  
  /* For now libslirp creates only a timer for the IPv6 RA */
  typedef enum SlirpTimerId {
-@@ -294,6 +296,18 @@ SLIRP_EXPORT
+@@ -294,6 +296,22 @@ SLIRP_EXPORT
  void slirp_pollfds_poll(Slirp *slirp, int select_error,
                          SlirpGetREventsCb get_revents, void *opaque);
  
@@ -48,7 +50,11 @@ index 240dfe8bc525507944319603308b54822acebda5..b17c4698ea64db8b3c1956cec3026a00
 + * and that is connecting or connected; a host forward's listener and the
 + * connections accepted from it are not asked. Each connection it returns
 + * true for is dropped as a failed host connection is: the guest is sent a
-+ * reset and the host socket is closed. Returns the number dropped. */
++ * reset and the host socket is closed. Returns the number dropped.
++ *
++ * should_reset only answers about the descriptor it is given: it must not
++ * call into this instance, add, change or close its connections, or close
++ * that descriptor, because the walk holds the connections that follow. */
 +SLIRP_EXPORT
 +int slirp_reset_tcp_flows(Slirp *slirp, SlirpSelectSocketCb should_reset,
 +                          void *opaque);
