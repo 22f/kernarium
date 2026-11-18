@@ -488,6 +488,77 @@ class PcRelativeWidthTests(unittest.TestCase):
         self.assertNotIn(0xfffffffffffff000, built)
 
 
+class ReservedWordTests(unittest.TestCase):
+    """A word the instruction tables hold but the architecture leaves
+    unallocated is left to the engine, which raises the illegal instruction
+    itself: copied, the host would raise it and end the emulator. Data inside
+    a method's code (ART's literal pools) is full of such words, and code is
+    entered at any word."""
+
+    # Valid words, from the system assembler.
+    VALID = [
+        ("ubfx w0, w1, #4, #8", 0x53042c20),
+        ("sbfx x0, x1, #4, #8", 0x93442c20),
+        ("and x0, x1, #0xff", 0x92401c20),
+        ("and w0, w1, #0xff", 0x12001c20),
+        ("movz w0, #1, lsl #16", 0x52a00020),
+        ("movz x0, #1, lsl #48", 0xd2e00020),
+        ("add w0, w1, w2, lsl #3", 0x0b020c20),
+        ("add x0, x1, x2, asr #60", 0x8b82f020),
+        ("extr w0, w1, w2, #3", 0x13820c20),
+        ("extr x0, x1, x2, #40", 0x93c2a020),
+        ("add x0, x1, w2, uxtw #4", 0x8b225020),
+        ("orr w0, w1, w2, lsl #31", 0x2a027c20),
+    ]
+    # The same forms with a field the architecture does not allow.
+    RESERVED = [
+        ("32-bit bitfield, immr of 32 or more", 0x53242c20),
+        ("64-bit bitfield with N clear", 0x93042c20),
+        ("32-bit bitfield with the unallocated opc", 0x73042c20 | 0x20000000),
+        ("32-bit movz, hw 2", 0x52c00020),
+        ("32-bit add, shift of 32", 0x0b028020),
+        ("add with the shift type ror", 0x0bc20c20),
+        ("32-bit orr, shift of 32", 0x2a028020),
+        ("32-bit extr, lsb of 32 or more", 0x13828c20),
+        ("add extended, shift of 5", 0x8b225420),
+        ("32-bit logical immediate with N set", 0x12401c20),
+        ("logical immediate of all ones", 0x12007c20),
+        ("logical immediate with no element", 0x1200fc20),
+    ]
+    # Words the tables list as unallocated by name, in a class the rewriter
+    # otherwise copies (found as the data of a literal pool).
+    UNALLOCATED = [0x3bcccccd, 0x3a83126f]
+
+    def classify(self, word: int) -> tuple[str, list[tuple[int, str]]]:
+        decoder = a64decode.Decoder(a64decode.DEFAULT_TABLE)
+        encoding = decoder.decode(word)
+        library = library_of([word, RET], [(0, 8)])
+        unit_words(library)
+        return encoding.decode_class, library.step_list
+
+    def test_valid_words_are_copied(self) -> None:
+        for text, word in self.VALID:
+            with self.subTest(text):
+                cls, steps = self.classify(word)
+                self.assertFalse(rewrite.reserved_corner(cls, word))
+                self.assertEqual(steps, [])
+
+    def test_reserved_words_are_left_to_the_engine(self) -> None:
+        for text, word in self.RESERVED:
+            with self.subTest(text):
+                _, steps = self.classify(word)
+                self.assertEqual(len(steps), 1, text)
+                self.assertIn(steps[0][1], ("unallocated", "reserved"))
+
+    def test_words_the_tables_name_unallocated_are_left_to_the_engine(self
+                                                                      ) -> None:
+        for word in self.UNALLOCATED:
+            with self.subTest(hex(word)):
+                _, steps = self.classify(word)
+                self.assertEqual([cause for _, cause in steps],
+                                 ["unallocated"])
+
+
 class SimdRegisterFieldTests(unittest.TestCase):
     """A vector field must never be treated as a general register (the
     register substitution applies only to x18, x24-x28 and sp)."""

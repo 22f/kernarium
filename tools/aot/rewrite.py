@@ -166,6 +166,44 @@ BASE_COPY_CLASSES = {
     "log_shift", "movewide", "bitfield", "extract", "condsel", "condcmp_reg",
     "condcmp_imm", "dp_3src",
 }
+def reserved_corner(cls: str, word: int) -> bool:
+    """Whether `word`, an encoding of the data-processing class `cls`, is one
+    the architecture leaves unallocated by a rule on its fields that the
+    instruction tables do not express (a 32-bit operation naming a bit
+    position of 32 or more, a bitmask no value has). The engine raises an
+    illegal instruction at such a word: copied, the host would raise it
+    instead and end the emulator. A word like it is found as data inside the
+    code of a method (a literal pool), where code can still be entered."""
+    sf = word >> 31
+    if cls == "bitfield":
+        n = (word >> 22) & 1
+        immr, imms = (word >> 16) & 63, (word >> 10) & 63
+        return ((word >> 29) & 3) == 3 or n != sf or \
+            (not sf and (immr | imms) & 32 != 0)
+    if cls == "extract":
+        return ((word >> 22) & 1) != sf or \
+            (not sf and (word >> 10) & 32 != 0)
+    if cls == "movewide":
+        return ((word >> 29) & 3) == 1 or (not sf and (word >> 22) & 1 != 0)
+    if cls == "addsub_shift":
+        return ((word >> 22) & 3) == 3 or (not sf and (word >> 10) & 32 != 0)
+    if cls == "log_shift":
+        return not sf and (word >> 10) & 32 != 0
+    if cls == "addsub_ext":
+        return ((word >> 22) & 3) != 0 or ((word >> 10) & 7) > 4
+    if cls == "log_imm":
+        n = (word >> 22) & 1
+        imms = (word >> 10) & 63
+        if not sf and n:
+            return True
+        length = ((n << 6) | (~imms & 63)).bit_length() - 1
+        if length < 1:
+            return True
+        levels = (1 << length) - 1
+        return imms & levels == levels
+    return False
+
+
 DP1_ALLOWED = {"RBIT", "REV16", "REV", "REV32", "CLZ", "CLS"}
 DP2_ALLOWED = {"UDIV", "SDIV", "LSLV", "LSRV", "ASRV", "RORV", "CRC32B",
                "CRC32H", "CRC32W", "CRC32X", "CRC32CB", "CRC32CH",
@@ -609,6 +647,10 @@ class Library:
         cls, mnemonic, feature = (encoding.decode_class, encoding.mnemonic,
                                   encoding.feature)
         self._site_key = f"{cls}:{mnemonic}"
+        if mnemonic == "UNALLOCATED":
+            return self._step(offset, "unallocated")
+        if cls in BASE_COPY_CLASSES and reserved_corner(cls, word):
+            return self._step(offset, "reserved")
         if cls == "branch_imm":
             return self._branch_imm(offset, word, mnemonic == "BL")
         if cls == "condbranch" and mnemonic == "B":

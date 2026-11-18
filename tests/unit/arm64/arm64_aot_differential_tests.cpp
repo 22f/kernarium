@@ -39,6 +39,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <memory>
+#include <set>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -224,6 +225,24 @@ struct Site final {
 	while (in >> index >> offset >> kind)
 		if (index == library)
 			out.push_back({std::strtoull(offset.c_str(), nullptr, 16), kind});
+	return out;
+}
+
+[[nodiscard]] std::set<std::uint64_t> load_steps(const std::string &path,
+	std::size_t library)
+{
+	std::ifstream in{path};
+	require(in.good());
+	std::set<std::uint64_t> out;
+	/* The cause may hold spaces: the line's first two fields only. */
+	std::string line;
+	while (std::getline(in, line)) {
+		std::istringstream fields{line};
+		std::size_t index;
+		std::string offset;
+		if (fields >> index >> offset && index == library)
+			out.insert(std::strtoull(offset.c_str(), nullptr, 16));
+	}
 	return out;
 }
 
@@ -1066,13 +1085,15 @@ struct Totals final {
 };
 
 struct Config final {
-	std::string libraries, functions, sites;
+	std::string libraries, functions, sites, steps;
 	/* Run only the library with this index (-1: all). */
 	long library{-1};
 	/* At most this many functions of a library are sampled. */
 	std::size_t sample{400};
 	/* seed:pc_offset:faulting:tbi of one case to run alone. */
 	std::string only;
+	/* Run only the scan of the words the engine rejects. */
+	bool words_only{};
 	std::size_t starts{12}, interior{8}, sp_sites{6}, site_cases{4};
 	/* Cases the stepped-trace row follows, and the longest stepped run it
 	 * records (a case that takes more is left out). */
@@ -1086,6 +1107,7 @@ struct Config final {
 	c.libraries = AOT_TEST_LIBRARIES;
 	c.functions = AOT_TEST_FUNCTIONS;
 	c.sites = AOT_TEST_SITES;
+	c.steps = AOT_TEST_STEPS;
 	for (int i = 1; i + 1 < argc; i += 2) {
 		const std::string key{argv[i]};
 		if (key == "--starts")
@@ -1104,6 +1126,8 @@ struct Config final {
 			c.master = std::strtoull(argv[i + 1], nullptr, 0);
 		else if (key == "--case")
 			c.only = argv[i + 1];
+		else if (key == "--words-only")
+			c.words_only = std::strtoul(argv[i + 1], nullptr, 0) != 0;
 		else if (key == "--library")
 			c.library = std::strtol(argv[i + 1], nullptr, 0);
 		else if (key == "--sample")
@@ -2367,6 +2391,80 @@ void cross_library_branches(const LibraryImage &image,
 	require(compared > 20);
 	require(st.cross_hits > 0);
 	require(st.poisoned == 0);
+}
+
+/* What the engine does with each word of a library's functions. A word it
+ * rejects as an illegal instruction must be one the rewriter leaves to it:
+ * copied natively, the host raises the fault itself and ends the emulator
+ * where the guest's task should get its signal. Code is entered at any word
+ * (an indirect branch, a wild one), and data sits inside the code of a method
+ * (the literal pool and jump tables of ART's compiled Java), where a word
+ * may be a reserved encoding the instruction tables cannot tell from an
+ * instruction. */
+[[gnu::noinline]]
+void words_the_engine_rejects_are_left_to_it(const LibraryImage &image,
+	const std::vector<Function> &functions,
+	const std::set<std::uint64_t> &steps)
+{
+	constexpr std::uint64_t bias = 0x7123'0000'0000ULL;
+	/* The engine keeps what it translated: a fresh environment now and
+	 * then holds that to a bounded size. */
+	constexpr std::size_t per_environment = 1U << 14;
+	unsigned long generation = 6001;
+	std::unique_ptr<Environment> env;
+	SplitMix rng{61};
+	auto c = make_case(rng, bias, 0, false, true, arena_base(bias));
+	enterable(c);
+	aot::set_enabled(false);
+	std::size_t words = 0, rejected = 0, defects = 0;
+	for (const auto &f : functions)
+		for (auto at = f.start; at < f.end; at += 4) {
+			if (words++ % per_environment == 0) {
+				env = std::make_unique<Environment>(generation++, bias, image);
+			}
+			const auto illegal = [&](const Case &state) {
+				auto cpu = state.cpu;
+				cpu.pc = bias + at;
+				const auto out = run_selected(env->executor, env->memory,
+					env->generation, cpu);
+				return out.event == EngineEvent::illegal_instruction &&
+					cpu.pc == bias + at;
+			};
+			/* A memory copy or set stage is rejected unless the registers
+			 * hold what the stage before it leaves, whatever its
+			 * encoding: the rewriter steps the encodings that are
+			 * invalid (mops-invalid), and the rows of its own hold the
+			 * rest against the engine. */
+			std::uint32_t word;
+			std::memcpy(&word, &image.bytes[at], 4);
+			if ((word & 0x3f200c00U) == 0x19000400U ||
+			    (word & 0x3f200c00U) == 0x1d000400U ||
+			    (word & 0x3fe00c00U) == 0x19c00400U ||
+			    !illegal(c))
+				continue;
+			/* Another word the registers decide is no reserved encoding
+			 * either: the word has to be rejected in every state. */
+			bool always = true;
+			for (unsigned again = 0; again < 7 && always; ++again) {
+				auto other = make_case(rng, bias, 0, false, true,
+					arena_base(bias));
+				enterable(other);
+				always = illegal(other);
+			}
+			if (!always)
+				continue;
+			++rejected;
+			if (steps.contains(at))
+				continue;
+			if (++defects <= 60) {
+				std::fprintf(stderr, "  rejected by the engine, not left to "
+					"it: %llx: %08x\n", static_cast<unsigned long long>(at),
+					word);
+			}
+		}
+	std::fprintf(stderr, "words: %zu, rejected by the engine %zu, rewritten "
+		"anyway %zu\n", words, rejected, defects);
+	require(defects == 0);
 }
 
 /* A loop whose backward branch lands inside another unwind range
@@ -5361,6 +5459,11 @@ int main(int argc, char **argv)
 			1, functions.size() / cfg.sample);
 		for (std::size_t i = 0; i < functions.size(); i += stride)
 			sample.push_back(functions[i]);
+		if (cfg.words_only) {
+			words_the_engine_rejects_are_left_to_it(image, functions,
+				load_steps(cfg.steps, file.index));
+			continue;
+		}
 		if (!scenarios_done) {
 			default_off_and_single_step(image, sample);
 			scenarios_done = true;
@@ -5461,6 +5564,8 @@ int main(int argc, char **argv)
 			a_page_without_the_immutable_fact_is_not_run_natively(image);
 			the_dispatch_choice_is_made_when_the_executor_is_made(image);
 		}
+		words_the_engine_rejects_are_left_to_it(image, functions,
+			load_steps(cfg.steps, file.index));
 		/* The scenarios are about the mechanism, not about the code:
 		 * they run on one library, whatever order the build lists. */
 		if (file.index == scenario_index) {

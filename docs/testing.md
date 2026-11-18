@@ -807,6 +807,11 @@ blocker in every one of them.
   and sets also run from directed states, including the epilogue started
   alone in states a signal handler can leave; and structure accesses run over
   a page boundary with one page cached and the other not.
+  A scan runs the engine from every word of every rewritten function and
+  requires that a word it rejects as an illegal instruction in every state is
+  one the rewriter leaves to it (the data a method's code holds, such as the
+  literal pools of compiled Java, is full of reserved encodings, and code is
+  entered at any word); `--words-only 1` runs the scan alone.
   Admission and retry decisions are performance hints: rows warm them and
   then change the text, restore it, and move the executor to another address
   space, and the result must stay the engine's. Entering rewritten code must

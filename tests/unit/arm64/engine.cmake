@@ -505,6 +505,7 @@ get_property(_uml_static_mmu GLOBAL PROPERTY UML_STATIC_MMU_TARGET)
         get_property(_uml_aot_stack_bytes GLOBAL PROPERTY UML_AOT_KERNEL_STACK_BYTES)
         get_property(_uml_aot_functions GLOBAL PROPERTY UML_AOT_FUNCTIONS)
         get_property(_uml_aot_sites GLOBAL PROPERTY UML_AOT_SITES)
+        get_property(_uml_aot_steps GLOBAL PROPERTY UML_AOT_STEPS)
         target_compile_definitions(uml_arm64_aot_differential_tests PRIVATE
             UML_AOT_DIAGNOSTICS=1
             UML_MEMORY_COUNT_AUDIT=1
@@ -513,7 +514,8 @@ get_property(_uml_static_mmu GLOBAL PROPERTY UML_STATIC_MMU_TARGET)
             AOT_TEST_SHARED_VERDICTS=$<BOOL:${UML_AOT_SHARED_VERDICTS}>
             AOT_TEST_LIBRARIES="${_uml_aot_libraries}"
             AOT_TEST_FUNCTIONS="${_uml_aot_functions}"
-            AOT_TEST_SITES="${_uml_aot_sites}")
+            AOT_TEST_SITES="${_uml_aot_sites}"
+            AOT_TEST_STEPS="${_uml_aot_steps}")
     endif()
     # The AArch32 gadget tests read the library-exit counters, which only the
     # semantic library's counting variant has.
