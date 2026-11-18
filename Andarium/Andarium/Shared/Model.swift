@@ -690,9 +690,9 @@ final class AppModel {
     /// What is kept of the option across launches; nil where the launch
     /// decided it.
     var heatLimitToKeep: Bool? { heatLimitDecidedByLaunch ? nil : heatLimitOn }
-    /// The thermal policy holds the device hot (iOS's serious or critical
-    /// state, the policy's hold after it included), whether or not Android is
-    /// told. Settings' footnote reads it.
+    /// The thermal policy holds the device hot (iOS's critical state, the
+    /// policy's hold after it included), whether or not Android is told.
+    /// Settings' footnote reads it.
     private(set) var deviceIsHot = false
     /// The alert that asks to turn the limit off is up, over the notice.
     private(set) var askingToTurnOffHeatLimit = false
