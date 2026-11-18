@@ -18,6 +18,7 @@ import zipfile
 import zlib
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -5109,12 +5110,13 @@ def property_label(name: str, contexts: list[str]) -> str | None:
     return best[1] if best else None
 
 
-@functools.lru_cache(maxsize=8)
+@functools.lru_cache(maxsize=16)
 def cil_attribute_sets(
-    policy: bytes,
+    policy: bytes, exact: bool = False
 ) -> tuple[tuple[tuple[str, frozenset[str]], ...], tuple[tuple[str, list[object]], ...]]:
-    """The attributes a policy defines, without version suffixes: those whose set is a list of
-    names, with the names, and those whose set is an expression, as nested lists of names."""
+    """The attributes a policy defines, without version suffixes unless |exact|: those whose set is a list
+    of names, with the names, and those whose set is an expression, as nested lists of names."""
+    version = (lambda name: name) if exact else (lambda name: CIL_PLATFORM_VERSION_SUFFIX.sub("", name))
     lists = []
     expressions = []
     for match in CIL_TYPE_ATTRIBUTE_SET.finditer(policy):
@@ -5123,13 +5125,13 @@ def cil_attribute_sets(
             if token == "(":
                 stack.append([])
             elif token != ")":
-                stack[-1].append(CIL_PLATFORM_VERSION_SUFFIX.sub("", token))
+                stack[-1].append(version(token))
             elif len(stack) > 1:
                 closed = stack.pop()
                 stack[-1].append(closed)
         if len(stack) != 1 or len(stack[0]) != 1 or not isinstance(stack[0][0], list):
             continue
-        attribute = CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode())
+        attribute = version(match.group(1).decode())
         members = stack[0][0]
         if all(isinstance(member, str) for member in members) and not (
             members and members[0] in CIL_SET_OPERATORS
@@ -5254,6 +5256,16 @@ VSOCK_TYPES_WITHOUT_LISTEN = frozenset({
     "aisealhostservice", "hal_graphics_composer_default", "libcuttlefish_rild", "storageproxyd_system",
     "tombstone_transmit",
 })
+# The one grant on the service's sockets that is not the service's: the platform's own rule
+# (allow dumpstate domain (vsock_socket (getattr))), the vsock instance of its getattr rule for every socket
+# class. Over the attribute domain it reaches the service as it reaches every domain. getattr is the permission
+# to stat a socket and to read its local and peer address from a descriptor already held: no read, write,
+# connect, bind, listen or accept, and no data. Only that rule is accepted, as the policy writes it (the source
+# and target tokens, not the types a version suffix maps them to), and only from the platform's policy.
+SMS_PLATFORM_VSOCK_GRANT = (b"dumpstate", b"domain", frozenset({"getattr"}))
+# The ordinary application domains: what the service holds beyond the reviewed list is only what every one of
+# them holds.
+SMS_ORDINARY_APP_DOMAINS = frozenset({"untrusted_app", "platform_app", "priv_app", "system_app"})
 # The domains that manage every application's data directories, and so reach the service's: the platform's own
 # rules through the attributes of an application data type. The first image build with the service shows the
 # set; a holder that is not named here fails the check until someone has looked at it.
@@ -5274,12 +5286,14 @@ SEAPP_CONTEXT_FILES = (
 
 
 class CilSets:
-    """The members of the types and attributes of a set of policies, with every set expression expanded."""
+    """The members of the types and attributes of a set of policies, with every set expression expanded.
+    The names have their platform version suffixes removed, except with |exact|: then a type that carries
+    one is its own type, and a compatibility mapping gives membership only where a set lists it."""
 
-    def __init__(self, policies: tuple[bytes, ...]) -> None:
+    def __init__(self, policies: tuple[bytes, ...], exact: bool = False) -> None:
         self.definitions: dict[str, list[object]] = {}
         for policy in policies:
-            lists, expressions = cil_attribute_sets(policy)
+            lists, expressions = cil_attribute_sets(policy, exact)
             for attribute, members in lists:
                 self.definitions.setdefault(attribute, []).append(sorted(members))
             for attribute, members in expressions:
@@ -5398,22 +5412,55 @@ def seapp_context_for(entries: list[dict[str, str]], user: str, seinfo: str, nam
     return best[2] if best else None
 
 
+class SmsRule(NamedTuple):
+    """An allow rule as the text-message check reads it: the types its source and target stand for (a target of
+    None is the rule's own domain), its permissions, the source and target as the policy writes them, and
+    whether it stands in the platform's policy."""
+
+    sources: frozenset[str]
+    targets: frozenset[str] | None
+    permissions: frozenset[str]
+    source: bytes
+    target: bytes
+    from_platform: bool
+
+
 def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_contexts: str) -> None:
     """Only the host can cause a text message to be delivered: of the types that may create, bind or listen
     on a vsock socket exactly the reviewed ones and the service's may, whatever attribute grants it; nothing
-    else holds the service's sockets or its data; the service finds only the services it needs; its
+    else holds the service's sockets or its data, except the platform's own getattr for dumpstate
+    (SMS_PLATFORM_VSOCK_GRANT); the service holds nothing beyond what every ordinary application domain holds
+    (SMS_ORDINARY_APP_DOMAINS) and the reviewed list (it finds only the services it needs); its
     package selects its domain and no other package does; and the shell cannot move adbd's own listener.
-    Every grant counts, through attributes and set expressions."""
+    Every grant counts, through attributes and set expressions. The first policy is the platform's."""
     sets = CilSets(policies)
     if not sets.members("appdomain") or not sets.members("coredomain"):
         fail("the policy lists no type for appdomain or coredomain: the check could not tell who runs applications")
-    vsock = cil_domain_rules(policies, sets, "vsock_socket")
+
+    def rules_of(object_class: str) -> list[SmsRule]:
+        """The allow rules of a class, in the order of the policies, the platform's first."""
+        wanted = object_class.encode()
+        return [
+            SmsRule(
+                sets.members(cil_type_name(source)),
+                None if target == b"self" else sets.members(cil_type_name(target)),
+                frozenset(permission.decode() for permission in permissions),
+                source,
+                target,
+                index == 0,
+            )
+            for index, policy in enumerate(policies)
+            for source, target, rule_class, permissions in cil_rules(policy, CIL_ALLOW_RULE)
+            if rule_class == wanted
+        ]
+
+    vsock = rules_of("vsock_socket")
 
     def holders(wanted: set[str]) -> set[str]:
         found: set[str] = set()
-        for sources, targets, permissions in vsock:
-            if wanted & permissions:
-                found |= sources if targets is None else sources & targets
+        for rule in vsock:
+            if wanted & rule.permissions:
+                found |= rule.sources if rule.targets is None else rule.sources & rule.targets
         return found
 
     creators = holders({"create", "bind", "listen"})
@@ -5435,36 +5482,45 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
     if creators & shut_out:
         fail(f"{sorted(creators & shut_out)} may create, bind or listen on a vsock socket")
 
-    everything = (sets.members("appdomain"), sets.members("coredomain"), sets.universe)
+    exact = CilSets(policies, exact=True)
 
-    def specific(sources: frozenset[str]) -> bool:
-        """A rule for the service alone, or for a group of its own: not one that every application or
-        core domain has."""
-        return SMS_DOMAIN in sources and not any(sources >= group for group in everything)
+    def specific(rule: SmsRule) -> bool:
+        """The service's own rule, not one it inherits. The service inherits a rule when the platform's policy
+        gives it to every ordinary application domain through that one rule, one source set holding all four
+        and the service, each by its own name (a type that differs from one of them by a version suffix is
+        another type); a rule that names the service without all four, and every such rule of another
+        policy file (ours), is its own and must be on the reviewed list."""
+        return SMS_DOMAIN in rule.sources and not (
+            rule.from_platform and exact.members(rule.source.decode()) >= SMS_ORDINARY_APP_DOMAINS | {SMS_DOMAIN}
+        )
 
-    # The service's sockets: nothing but the service holds a permission on them, and what the service holds
-    # on the sockets of other types is only what every application domain holds.
-    for sources, targets, permissions in vsock:
-        if targets is not None and SMS_DOMAIN in targets and sources - {SMS_DOMAIN}:
-            fail(f"{sorted(sources - {SMS_DOMAIN})} hold {sorted(permissions)} on a vsock socket of {SMS_DOMAIN}")
-        if targets is not None and SMS_DOMAIN not in targets and specific(sources):
-            fail(f"{SMS_DOMAIN} holds {sorted(permissions)} on the vsock sockets of {sorted(targets)}: only what "
-                 "every application domain holds is allowed")
+    # The service's sockets: nothing but the service holds a permission on them (the platform's grant to
+    # dumpstate apart), and what the service holds on the sockets of other types is only what every ordinary
+    # application domain holds.
+    for rule in vsock:
+        if rule.from_platform and (rule.source, rule.target, rule.permissions) == SMS_PLATFORM_VSOCK_GRANT:
+            continue
+        if rule.targets is not None and SMS_DOMAIN in rule.targets and rule.sources - {SMS_DOMAIN}:
+            fail(f"{sorted(rule.sources - {SMS_DOMAIN})} hold {sorted(rule.permissions)} on a vsock socket of "
+                 f"{SMS_DOMAIN}")
+        if rule.targets is not None and rule.targets - {SMS_DOMAIN} and specific(rule):
+            fail(f"{SMS_DOMAIN} holds {sorted(rule.permissions)} on the vsock sockets of "
+                 f"{sorted(rule.targets - {SMS_DOMAIN})}: only what every ordinary application domain holds is allowed")
 
     attributes = cil_types_and_attributes(policies, SMS_DOMAIN)
     for attribute in ("coredomain", "appdomain", "unconstrained_vsock_violators"):
         if attribute not in attributes:
             fail(f"{SMS_DOMAIN} is not in {attribute}")
     found: set[str] = set()
-    for sources, targets, permissions in cil_domain_rules(policies, sets, "service_manager"):
-        if targets is not None and "find" in permissions and specific(sources):
-            found |= targets
+    for rule in rules_of("service_manager"):
+        if rule.targets is not None and "find" in rule.permissions and specific(rule):
+            found |= rule.targets
     if found - SMS_SERVICES:
         fail(f"{SMS_DOMAIN} may find {sorted(found - SMS_SERVICES)}; it needs only {sorted(SMS_SERVICES)}")
     for object_class in ("file", "dir", "lnk_file", "sock_file", "fifo_file", "chr_file", "blk_file"):
-        for sources, targets, permissions in cil_domain_rules(policies, sets, object_class):
-            if targets is not None and "system_app_data_file" in targets and specific(sources):
-                fail(f"{SMS_DOMAIN} has a rule on system_app_data_file ({sorted(permissions)}): "
+        for rule in rules_of(object_class):
+            if rule.targets is not None and "system_app_data_file" in rule.targets and specific(rule):
+                fail(f"{SMS_DOMAIN} has a rule on system_app_data_file ({sorted(rule.permissions)}): "
                      "its data has a type of its own")
 
     # Who may touch the service's data, through any attribute it carries.

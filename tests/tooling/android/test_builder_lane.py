@@ -457,6 +457,35 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         plat += f"(allow {name}{'_202604' if name == 'adbd' else ''} self (vsock_socket ({permissions})))\n"
     for setter in sorted(tool.ADB_LISTEN_ADDRS_SETTERS):
         plat += f"(allow {setter} system_prop (property_service (set)))\n"
+    # The platform's own rule for dumpstate, the vsock instance of its getattr rule for every socket class:
+    # over the attribute domain it reaches the service's sockets, and every Android 17 platform policy has it.
+    plat += "(allow dumpstate domain (vsock_socket (getattr)))\n"
+    # What the platform gives the application domains through groups of them: each group is the application
+    # domains but the isolated, sandboxed and ephemeral ones, as the compiler writes the platform's rules.
+    # The service is an application domain, so it inherits them, and they are accepted; a variant takes one
+    # ordinary application domain out of a group, or puts the same rule in the system_ext policy.
+    gap = {
+        "inherited-find-without-untrusted-app": ("base_typeattr_275", "untrusted_app"),
+        "inherited-find-without-platform-app": ("base_typeattr_275", "platform_app"),
+        "inherited-find-without-priv-app": ("base_typeattr_275", "priv_app"),
+        "inherited-find-without-system-app": ("base_typeattr_275", "system_app"),
+        "inherited-file-without-priv-app": ("base_typeattr_280", "priv_app"),
+        "inherited-vsock-without-platform-app": ("base_typeattr_285", "platform_app"),
+    }.get(variant or "", (None, None))
+    inherited = {
+        "base_typeattr_275": "(allow base_typeattr_275 keystore_service (service_manager (find)))\n",
+        "base_typeattr_280": "(allow base_typeattr_280 system_app_data_file (file (read write getattr map)))\n",
+        "base_typeattr_285": "(allow base_typeattr_285 virtualizationservice (vsock_socket (read write getattr)))\n",
+    }
+    # A group that lists the four ordinary application domains by name, with the service: the control for a
+    # variant that lists a type of a version suffix in place of one of them.
+    stand_in = "priv_app_299999" if variant == "inherited-find-with-a-lookalike" else "priv_app"
+    plat += (f"(typeattributeset base_typeattr_290 (kernarium_sms untrusted_app platform_app {stand_in} system_app))\n"
+             "(allow base_typeattr_290 window_service (service_manager (find)))\n")
+    for attribute, rule in inherited.items():
+        left_out = " ".join(["isolated_app", "ephemeral_app", "sdk_sandbox_34", "sdk_sandbox_audit", "sdk_sandbox_next"]
+                            + ([gap[1]] if gap[0] == attribute else []))
+        plat += f"(typeattributeset {attribute} (and (appdomain ) (not ({left_out} ))))\n{rule}"
     ext = (
         "(type kernarium_sms)\n(type kernarium_sms_data_file)\n"
         "(typeattributeset domain (kernarium_sms))\n"
@@ -471,6 +500,8 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         "(allow kernarium_sms package_service (service_manager (find)))\n"
         "(allow kernarium_sms role_service (service_manager (find)))\n"
         "(allow kernarium_sms self (vsock_socket (create bind listen accept read write shutdown getattr getopt)))\n"
+        # Its own type named as the target is its own socket, as self is.
+        "(allow kernarium_sms kernarium_sms (vsock_socket (getattr)))\n"
         "(allow installd app_data_file_type (dir (create getattr open read search write)))\n"
         "(allow installd app_data_file_type (file (create getattr open read write unlink)))\n"
     )
@@ -502,6 +533,38 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
                           "getattr getopt)))\n", "")
     elif variant == "sockets-through-domain":
         ext += "(allow domain kernarium_sms (vsock_socket (read write)))\n"
+    elif variant == "dumpstate-reads":
+        plat = plat.replace("(allow dumpstate domain (vsock_socket (getattr)))",
+                            "(allow dumpstate domain (vsock_socket (getattr read)))")
+    elif variant == "another-domain-getattr":
+        plat += "(allow system_server domain (vsock_socket (getattr)))\n"
+    elif variant == "dumpstate-getattr-over-a-smaller-group":
+        plat = plat.replace("(allow dumpstate domain (vsock_socket (getattr)))",
+                            "(allow dumpstate coredomain (vsock_socket (getattr)))")
+    elif variant == "dumpstate-lookalike-source":
+        plat = plat.replace("(allow dumpstate domain (vsock_socket (getattr)))",
+                            "(allow dumpstate_299999 domain (vsock_socket (getattr)))")
+    elif variant == "dumpstate-lookalike-target":
+        plat = plat.replace("(allow dumpstate domain (vsock_socket (getattr)))",
+                            "(typeattributeset domain_299999 (kernarium_sms))\n"
+                            "(allow dumpstate domain_299999 (vsock_socket (getattr)))")
+    elif variant == "dumpstate-getattr-of-ours":
+        ext += "(allow dumpstate kernarium_sms (vsock_socket (getattr)))\n"
+    elif variant == "dumpstate-getattr-repeated-outside-the-platform":
+        ext += "(allow dumpstate domain (vsock_socket (getattr)))\n"
+    elif variant == "outbound-to-a-group-with-the-service":
+        ext += ("(typeattributeset base_typeattr_95 (kernarium_sms virtualizationservice))\n"
+                "(allow kernarium_sms base_typeattr_95 (vsock_socket (getattr)))\n")
+    elif variant == "inherited-find-service-only":
+        plat += "(allow kernarium_sms credstore_service (service_manager (find)))\n"
+    elif variant == "inherited-find-split-over-two-rules":
+        plat += ("(typeattributeset base_typeattr_276 (kernarium_sms untrusted_app platform_app))\n"
+                 "(typeattributeset base_typeattr_277 (kernarium_sms priv_app system_app))\n"
+                 "(allow base_typeattr_276 credstore_service (service_manager (find)))\n"
+                 "(allow base_typeattr_277 credstore_service (service_manager (find)))\n")
+    elif variant in ("inherited-find-in-system-ext", "inherited-file-in-system-ext", "inherited-vsock-in-system-ext"):
+        ext += inherited[{"find": "base_typeattr_275", "file": "base_typeattr_280",
+                          "vsock": "base_typeattr_285"}[variant.split("-")[1]]]
     elif variant == "service-on-another-sockets":
         ext += "(allow kernarium_sms virtualizationservice (vsock_socket (read write)))\n"
     elif variant == "data-through-app-data-file-type":
@@ -5887,6 +5950,58 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "reviewed and missing: \\['kernarium_sms'\\]"),
             ("sms-sockets-through-domain", {"sms_policy_variant": "sockets-through-domain"},
              "hold \\['read', 'write'\\] on a vsock socket of kernarium_sms"),
+            # The platform's grant of getattr to dumpstate over domain is accepted by the baseline; each of
+            # these differs from it by one thing and is refused.
+            ("sms-dumpstate-reads", {"sms_policy_variant": "dumpstate-reads"},
+             "\\['dumpstate'\\] hold \\['getattr', 'read'\\] on a vsock socket of kernarium_sms"),
+            ("sms-another-domain-getattr", {"sms_policy_variant": "another-domain-getattr"},
+             "\\['system_server'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            ("sms-dumpstate-getattr-over-a-smaller-group",
+             {"sms_policy_variant": "dumpstate-getattr-over-a-smaller-group"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            # A type or attribute whose name differs from dumpstate or domain by a platform version suffix is
+            # another type: the rule must be the platform's own, token for token.
+            ("sms-dumpstate-lookalike-source", {"sms_policy_variant": "dumpstate-lookalike-source"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            ("sms-dumpstate-lookalike-target", {"sms_policy_variant": "dumpstate-lookalike-target"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            ("sms-dumpstate-getattr-of-ours", {"sms_policy_variant": "dumpstate-getattr-of-ours"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            ("sms-dumpstate-getattr-repeated-outside-the-platform",
+             {"sms_policy_variant": "dumpstate-getattr-repeated-outside-the-platform"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            # What the service inherits: the baseline has the platform's rules over groups of the application
+            # domains, which hold all four ordinary ones. A group without one of them, rules that split
+            # the four, the service alone, and the same rule in the system_ext policy are the service's own.
+            ("sms-find-service-only-in-the-platform-policy", {"sms_policy_variant": "inherited-find-service-only"},
+             "may find \\['credstore_service'\\]"),
+            ("sms-find-split-over-two-rules", {"sms_policy_variant": "inherited-find-split-over-two-rules"},
+             "may find \\['credstore_service'\\]"),
+            # A type that differs from one of the four by a platform version suffix is another type.
+            ("sms-find-group-with-a-lookalike-of-priv-app", {"sms_policy_variant": "inherited-find-with-a-lookalike"},
+             "may find \\['window_service'\\]"),
+            ("sms-find-group-without-untrusted-app", {"sms_policy_variant": "inherited-find-without-untrusted-app"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-find-group-without-platform-app", {"sms_policy_variant": "inherited-find-without-platform-app"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-find-group-without-priv-app", {"sms_policy_variant": "inherited-find-without-priv-app"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-find-group-without-system-app", {"sms_policy_variant": "inherited-find-without-system-app"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-file-group-without-priv-app", {"sms_policy_variant": "inherited-file-without-priv-app"},
+             "has a rule on system_app_data_file"),
+            ("sms-vsock-group-without-platform-app", {"sms_policy_variant": "inherited-vsock-without-platform-app"},
+             "kernarium_sms holds .* on the vsock sockets of"),
+            ("sms-find-in-system-ext", {"sms_policy_variant": "inherited-find-in-system-ext"},
+             "may find \\['keystore_service'\\]"),
+            ("sms-file-in-system-ext", {"sms_policy_variant": "inherited-file-in-system-ext"},
+             "has a rule on system_app_data_file"),
+            ("sms-vsock-in-system-ext", {"sms_policy_variant": "inherited-vsock-in-system-ext"},
+             "kernarium_sms holds .* on the vsock sockets of"),
+            # A target group that holds the service and another type is the other type's socket too.
+            ("sms-vsock-outbound-to-a-group-with-the-service",
+             {"sms_policy_variant": "outbound-to-a-group-with-the-service"},
+             "kernarium_sms holds .* on the vsock sockets of \\['virtualizationservice'\\]"),
             ("sms-service-on-other-sockets", {"sms_policy_variant": "service-on-another-sockets"},
              "kernarium_sms holds .* on the vsock sockets of"),
             ("sms-data-through-app-data-file-type", {"sms_policy_variant": "data-through-app-data-file-type"},
