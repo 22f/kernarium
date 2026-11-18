@@ -4,6 +4,7 @@
 #include "runtime_test_route.hpp"
 
 #include "cpu/arm64/gadgets/executor.hpp"
+#include "cpu/arm64/sme_profile.hpp"
 #include "cpu/gadget_cache_budget.hpp"
 #include "cpu/gadget_cache_geometry.hpp"
 #include "static_mmu_test_support.hpp"
@@ -1023,7 +1024,7 @@ void put_block(JitBacking &backing, std::uint64_t offset, std::uint32_t value)
 	return pc;
 }
 
-/* The five rows below stay out of line: an executor is large, and rows
+/* The rows below stay out of line: an executor is large, and rows
  * inlined into run_all() would add their frames to its, past the main thread's
  * stack under the sanitizers. */
 
@@ -1177,9 +1178,9 @@ void put_block(JitBacking &backing, std::uint64_t offset, std::uint32_t value)
  * store. A direct exit and an indirect one each leave the block with its PC and
  * its one instruction retired, and a thousand distinct entries leave the
  * address space's charged bytes as they were. */
-[[gnu::noinline]] void uncacheable_blocks_leave_no_link_state()
+[[gnu::noinline]] void uncacheable_blocks_leave_no_link_state(bool za)
 {
-	constexpr unsigned long generation = 994;
+	const unsigned long generation = za ? 995 : 994;
 	constexpr std::size_t entries = 1024;
 	constexpr std::uint32_t nop = 0xd503'201fU;
 	const std::uint64_t exits = uncacheable_pc;
@@ -1200,31 +1201,55 @@ void put_block(JitBacking &backing, std::uint64_t offset, std::uint32_t value)
 	const uml::emulator::tests::GenerationMapping nop_mapping{generation,
 		run_base, nops, 1, PROT_READ | PROT_EXEC, true};
 
+	/* ZA mode runs the same code through the ZA-mode cache, whose blocks are
+	 * built by their own path; any host runs it through an injected SME
+	 * profile. */
+	auto options = sharing_options();
+	if (za) {
+		for (const auto feature : {uml::cpu::ArmFeature::sme,
+			     uml::cpu::ArmFeature::sme_f64f64,
+			     uml::cpu::ArmFeature::sme_i16i64})
+			options.host_capabilities.supported.set(
+				static_cast<std::size_t>(feature));
+		options.host_capabilities.sme_svl_bytes = 64;
+		options.host_capabilities.sme_hardware = false;
+	}
+	const auto file = arm64::SmeRegisterFile::for_host(
+		options.host_capabilities);
+	std::vector<std::byte> task(za ? arm64::sme_storage_size(file.svl()) : 0);
+	require(!za || file.data() != nullptr);
 	StaticGuestMemory memory;
-	gadgets::GadgetExecutor executor{sharing_options()};
-	require(run_block_at(executor, memory, generation, target) == 5);
+	gadgets::GadgetExecutor executor{options};
+	const auto cpu = std::make_unique<arm64::CpuState>();
+	const auto enter = [&](std::uint64_t pc, std::uint64_t x1 = 0) {
+		*cpu = {};
+		if (za) {
+			cpu->bind_sme_registers(file);
+			cpu->defer_sme_load(task.data(), arm64::svcr_za, 0);
+		}
+		cpu->pc = pc;
+		cpu->registers[1] = x1;
+		return run_once(executor, memory, generation, *cpu);
+	};
+
+	require(enter(target).event == ::uml::cpu::EngineEvent::system_call);
+	require(cpu->registers[0] == 5);
+	require(cpu->svcr == (za ? arm64::svcr_za : 0));
 	const auto charged = ::uml::cpu::gadget_cache::ledger_state().total;
 
-	arm64::CpuState jump{};
-	jump.pc = direct;
-	const auto direct_exit = run_once(executor, memory, generation, jump);
+	const auto direct_exit = enter(direct);
 	require(direct_exit.event == ::uml::cpu::EngineEvent::continued);
 	require(direct_exit.executed == 1);
-	require(jump.pc == target);
+	require(cpu->pc == target);
 
-	arm64::CpuState computed{};
-	computed.pc = indirect;
-	computed.registers[1] = target;
-	const auto indirect_exit = run_once(executor, memory, generation, computed);
+	const auto indirect_exit = enter(indirect, target);
 	require(indirect_exit.event == ::uml::cpu::EngineEvent::continued);
 	require(indirect_exit.executed == 1);
-	require(computed.pc == target);
+	require(cpu->pc == target);
 
-	for (std::size_t index = 0; index < entries; ++index) {
-		arm64::CpuState cpu{};
-		cpu.pc = run_base + index * sizeof(std::uint32_t);
-		require(run_once(executor, memory, generation, cpu).executed != 0);
-	}
+	for (std::size_t index = 0; index < entries; ++index)
+		require(enter(run_base + index * sizeof(std::uint32_t)).executed !=
+			0);
 	require(::uml::cpu::gadget_cache::ledger_state().total == charged);
 }
 
@@ -1248,7 +1273,8 @@ void run_all()
 	a_peer_executor_does_not_adopt_an_uncacheable_block();
 	an_uncacheable_block_takes_no_way_from_its_set();
 	a_cache_that_ran_an_uncacheable_block_tears_down();
-	uncacheable_blocks_leave_no_link_state();
+	uncacheable_blocks_leave_no_link_state(false);
+	uncacheable_blocks_leave_no_link_state(true);
 }
 
 } // namespace
