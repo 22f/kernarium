@@ -557,7 +557,8 @@ fork or a sideload holds no card, row, address or text. The address is the
 page's, with no write-review action, and `REVIEW_ID` stays AppStore's alone.
 The card's close mark dismisses it for the installation, whatever the build
 number, and Info keeps its row. The card is the first of Home's notices and never
-covers Start. Its words are the `StoreLink` string table, built
+covers Start, and Welcome's column scrolls while the card is up, so that a short
+display still reaches Set up virtual machine. Its words are the `StoreLink` string table, built
 only where the notice is.
 
 The bundle check says for every configuration whether it is compiled in, allows

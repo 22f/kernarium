@@ -478,11 +478,20 @@ struct WelcomeView: View {
 
     var body: some View {
         // While the device is bent a half can be shorter than the column: it
-        // scrolls only then.
+        // scrolls only then, and while the App Store notice is up, which makes
+        // the column taller than a short display.
         column
-            .scrollsWhenTall()
+            .scrollsWhenTall(also: noticeIsUp)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onCardHalf(.welcome)
+    }
+
+    private var noticeIsUp: Bool {
+        #if TESTFLIGHT_STORE_LINK
+        model.storeNoticeShown
+        #else
+        false
+        #endif
     }
 
     private var column: some View {
