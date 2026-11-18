@@ -22,5 +22,6 @@ R3	Kernarium/Kernarium.xcodeproj/project.pbxproj	PRODUCT_BUNDLE_IDENTIFIER = com
 R3	Kernarium/Runtime/CMakeLists.txt	MACOSX_FRAMEWORK_IDENTIFIER	project signing identity
 R3	dependencies/apple-static-framework/Info.plist.in	CFBundleIdentifier	project signing identity
 R3	Andarium/Andarium.xcodeproj/project.xcproj	"PRODUCT_BUNDLE_IDENTIFIER": "com.imxieyi.(?:andarium|Andarium(?:Preview(?:UITests)?|(?:UI)?Tests|Automation))"	project signing identity
+R2	tests/tooling/network/slirp_dns_probe.cpp	uml-dns-probe-alias\.local	fixture for a parser or validator
 R7	dependencies/patches/talkback/*.patch	^From:	outside contributor's own patch
 R7	dependencies/patches/espeak-ng/*.patch	^From:	outside contributor's own patch

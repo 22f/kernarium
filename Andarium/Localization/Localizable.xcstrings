@@ -5781,7 +5781,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "デバイスを冷ませます"
+            "value" : "デバイスの温度を下げます"
           }
         },
         "zh-Hans" : {
@@ -5793,7 +5793,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "讓裝置降溫"
+            "value" : "讓裝置冷卻"
           }
         }
       }
@@ -11507,19 +11507,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "デバイスが高温です。冷えるまでフレームレートを制限します。"
+            "value" : "デバイスが高温です。温度が下がるまでフレームレートを制限します。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "设备温度较高。在降温前会限制帧速率。"
+            "value" : "设备温度较高。温度降下来前会限制帧速率。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "裝置溫度較高。降溫前會限制影格速率。"
+            "value" : "裝置溫度較高。冷卻前會限制影格速率。"
           }
         }
       }
@@ -12718,7 +12718,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "デバイスが高温の間はゲームのフレームレートを下げて、デバイスを冷ませるようにします。"
+            "value" : "デバイスが高温の間はゲームのフレームレートを下げて、温度が下がるようにします。"
           }
         },
         "zh-Hans" : {
@@ -12730,7 +12730,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "裝置溫度較高時，遊戲會以較低的影格速率執行，讓裝置降溫。"
+            "value" : "裝置溫度較高時，遊戲會以較低的影格速率執行，讓裝置冷卻。"
           }
         }
       }
