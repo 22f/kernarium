@@ -16,6 +16,7 @@
 	lea	rbx, [rip + .Lbuffer]
 
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	mov	rax, qword ptr [rbx]
 	mov	rcx, qword ptr [rbx + 8]
@@ -35,7 +36,9 @@
 	mov	rsi, qword ptr [rbx + 120]
 	sub	r8, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	cmp	rax, 13
 	jne	.Lfailure
 	cmp	rcx, 14

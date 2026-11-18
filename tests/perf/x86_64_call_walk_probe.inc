@@ -37,6 +37,7 @@
 	mov	ebx, 0x2424
 	mov	r12d, BENCH_ITERATIONS
 	xor	ecx, ecx
+	jmp	.Lloop
 .Lloop:
 	movzx	eax, word ptr [r14 + rcx * 2]
 	add	ecx, 1

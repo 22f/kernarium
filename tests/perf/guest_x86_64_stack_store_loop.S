@@ -20,6 +20,7 @@
 	mov	esi, 4
 
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	mov	qword ptr [rsp], rax
 	mov	qword ptr [rsp + 8], rcx
@@ -39,7 +40,9 @@
 	mov	qword ptr [rsp + 120], rsi
 	sub	r8, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	/* Slot k holds (k mod 4) + 1. */
 	xor	eax, eax
 .Lcheck:

@@ -33,6 +33,7 @@
 	jne	.Lfailure
 
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	mov	rax, qword ptr fs:[0]
 	mov	rcx, qword ptr fs:[8]
@@ -52,7 +53,9 @@
 	mov	rsi, qword ptr gs:[56]
 	sub	r8, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	cmp	rax, 13
 	jne	.Lfailure
 	cmp	rcx, 14

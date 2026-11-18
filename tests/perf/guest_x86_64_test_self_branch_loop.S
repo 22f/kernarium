@@ -30,6 +30,7 @@
 	mov	r14d, 14
 	mov	r15d, 15
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	mov	r10, r11
 	test	esi, esi
@@ -58,6 +59,8 @@
 	add	rax, 1
 	sub	r8, 1
 	jnz	.Lloop
+	jmp	.Lresult
+.Lresult:
 	mov	r8d, BENCH_ITERATIONS
 	cmp	rax, r8
 	jne	.Lfailure

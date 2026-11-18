@@ -78,6 +78,7 @@
 	mov	r15, qword ptr [rbx + 56]
 
 	mov	ebp, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	mov	rax, qword ptr [r8]
 	mov	rcx, qword ptr [r9]
@@ -97,7 +98,9 @@
 	mov	rsi, qword ptr [r15 + 8]
 	sub	rbp, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	cmp	rax, 13
 	jne	.Lfailure
 	cmp	rcx, 14

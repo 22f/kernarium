@@ -18,6 +18,7 @@
 	lea	rbx, [rip + .Lpages + 4096]
 
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	mov	rax, qword ptr [rbx - 7]
 	mov	rcx, qword ptr [rbx - 6]
@@ -37,7 +38,9 @@
 	mov	qword ptr [rbx - 3], rsi
 	sub	r8, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	/* Bytes 1 to 16 lie at rbx - 8 to rbx + 7. */
 	movabs	rdi, 0x0c0b0a0908070605
 	cmp	rax, rdi

@@ -16,6 +16,7 @@
 	lea	rsp, [rip + .Lstack + 2048]
 
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	mov	rax, qword ptr [rsp]
 	mov	rcx, qword ptr [rsp + 8]
@@ -35,7 +36,9 @@
 	mov	rsi, qword ptr [rsp + 120]
 	sub	r8, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	cmp	rax, 13
 	jne	.Lfailure
 	cmp	rcx, 14

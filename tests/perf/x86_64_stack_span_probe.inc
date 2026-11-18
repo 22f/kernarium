@@ -24,6 +24,7 @@
 	lea	SPAN_BASE, [rip + .Lpages + 4096 - SPAN_BELOW]
 
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	mov	rax, qword ptr [SPAN_BASE + 8]
 	mov	rcx, qword ptr [SPAN_BASE + 16]
@@ -43,7 +44,9 @@
 	mov	rsi, qword ptr [SPAN_BASE + 128]
 	sub	r8, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	cmp	rax, 13
 	jne	.Lfailure
 	cmp	rcx, 14
