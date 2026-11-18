@@ -8,10 +8,11 @@ requests of the contract over the forward, in frames. The contract is android/li
 messages"); the bytes are tests/unit/andarium/fixtures/sms-golden-frames.txt, which this runner reads, and the
 service is android/lineage-24/overlay/sms. The runner has four modes, each one boot:
 
-- ``delivery`` (an image of any build type, no root, no probe): D1 a plain message from the host is handed over,
-  answered and stored in the inbox; D2 a message with a one-time code is too, and com.android.phone keeps its
-  pid. It is the smallest check of a built image's text-message path, and the one for an unsigned proof image
-  (``--proof-image``): a service that drops every connection fails it at the first answer.
+- ``delivery`` (an image of any build type with the SMS provider, no root, no probe): D1 a plain message from
+  the host is handed over, answered and stored as exactly one new inbox row; D2 messages with a one-time code
+  are too, and com.android.phone, waited for, keeps its pid. D1 runs first. It is the smallest check of a built
+  image's text-message path, and the one for an unsigned proof image (``--proof-image``): a service that drops
+  every connection fails it at the first answer.
 
 - ``channel`` (a release image, no root): the channel's rows. G1 a host's request is taken, handed over,
   and answered; G2a-d the provider is gone and a guest-local or adb-made connection is refused or ends at once;
@@ -97,6 +98,9 @@ VM_SECONDS = 60
 SWEEP_PORT_SECONDS = 2
 PHONE = "com.android.phone"
 PHONE_SETTLE_SECONDS = 5
+PHONE_WAIT_SECONDS = 30
+# A second delivery of one message lands soon after the first: the rows look again after this.
+INBOX_SETTLE_SECONDS = 3
 SWEEP_SECONDS = 1800
 SWEEP_WIDTH = 16
 # The shared adb server's port: the sweep speaks its protocol to ask adbd for a connection.
@@ -347,6 +351,34 @@ def phone_problem(before: str, after: str, crashes_before: int, crashes_after: i
         return f"{PHONE} was pid {before.strip()} before the message and is {after.strip() or 'gone'} after it"
     if crashes_after != crashes_before:
         return f"the crash buffer gained {crashes_after - crashes_before} line(s) naming {PHONE}"
+    return None
+
+
+def inbox_ids_command(sender: str, text: str) -> str:
+    """The shell command that lists the ids of the inbox rows from the sender with exactly this text. It selects
+    the id alone, so no message body is in its output."""
+    where = "address='{}' AND body='{}'".format(sender.replace("'", "''"), text.replace("'", "''"))
+    return f"content query --uri content://sms/inbox --projection _id --where {shlex.quote(where)}"
+
+
+def parse_inbox_ids(output: str) -> set[int]:
+    return {int(found) for found in re.findall(r"\b_id=(\d+)", output)}
+
+
+def new_row_problem(before: set[int], after: set[int]) -> str | None:
+    """None when exactly one matching row is new: rows that were there before do not count, a message that was
+    stored twice fails, and so does one that was not stored."""
+    new = len(after - before)
+    return None if new == 1 else f"{new} new inbox rows for the message, expected exactly 1"
+
+
+def option_problem(options: argparse.Namespace) -> str | None:
+    """What is wrong with the combination of options, or None."""
+    if options.proof_image and (options.release is None or options.instance is not None):
+        return "--proof-image names its image with --release and boots a fresh instance (no --instance)"
+    if options.mode == "delivery" and options.variant == "no-provider":
+        return ("--mode delivery checks that each message is stored: it needs the SMS provider, "
+                "so not --variant no-provider")
     return None
 
 
@@ -784,6 +816,9 @@ class Guest:
     def inbox(self) -> str:
         return self.shell("content query --uri content://sms/inbox --projection address:body", check=False)
 
+    def inbox_ids(self, sender: str, text: str) -> set[int]:
+        return parse_inbox_ids(self.shell(inbox_ids_command(sender, text), check=False))
+
     def forward(self, spec: str) -> int:
         result = self.adb_run("forward", "tcp:0", spec, timeout=30)
         text = result.stdout.strip()
@@ -881,6 +916,24 @@ class Run:
             time.sleep(1)
         return rows
 
+    def send_and_expect_one_stored_row(self, sender: str, text: str, what: str) -> None:
+        """Sends the message as a first attempt: it must be handed over and answered, and exactly one new inbox
+        row for it must appear, whatever matching rows the inbox held before. The wait for it is bounded, and
+        the inbox is looked at again after a settle, so that a message stored twice fails."""
+        before = self.guest.inbox_ids(sender, text)
+        identifier = new_identifier()
+        self.expect(self.first(identifier, sender, text), "handed-over", identifier, "1")
+        deadline = time.monotonic() + INBOX_SECONDS
+        while time.monotonic() < deadline:
+            self.guest.alive()
+            if self.guest.inbox_ids(sender, text) - before:
+                break
+            time.sleep(1)
+        time.sleep(INBOX_SETTLE_SECONDS)
+        problem = new_row_problem(before, self.guest.inbox_ids(sender, text))
+        if problem:
+            raise Failure(f"{what}: {problem}")
+
     @property
     def has_inbox(self) -> bool:
         return self.options.variant != "no-provider"
@@ -899,12 +952,7 @@ def refused(run: Run, port: int, label: str) -> None:
 
 def row_d1(run: Run) -> None:
     sender, text = run.sender_and_text("plain")
-    identifier = new_identifier()
-    run.expect(run.first(identifier, sender, text), "handed-over", identifier, "1")
-    if run.has_inbox:
-        rows = run.inbox_rows_within(sender, text)
-        if rows != 1:
-            raise Failure(f"the inbox holds {rows} rows for the message, expected 1")
+    run.send_and_expect_one_stored_row(sender, text, "the plain message")
 
 
 def phone_state(run: Run) -> tuple[str, int]:
@@ -913,16 +961,17 @@ def phone_state(run: Run) -> tuple[str, int]:
 
 
 def row_d2(run: Run) -> None:
+    # D1 runs first in the mode, and the process may be started only by a message: it is waited for, within a
+    # bound, and its absence is the row's failure, never a pass.
+    def running() -> str | None:
+        pid = run.guest.shell(f"pidof {PHONE}", check=False).strip()
+        return None if pid.isdigit() else f"pidof says {pid!r}"
+    wait_until(f"{PHONE} running", PHONE_WAIT_SECONDS, running, run.guest)
     before = phone_state(run)
     sender = "+15550100"
     for form in ("Your verification code is {}", "{} is your login code. Never share it with anyone."):
         text = form.format(int.from_bytes(os.urandom(3), "big") % 900000 + 100000)
-        identifier = new_identifier()
-        run.expect(run.first(identifier, sender, text), "handed-over", identifier, "1")
-        if run.has_inbox:
-            rows = run.inbox_rows_within(sender, text)
-            if rows != 1:
-                raise Failure(f"the inbox holds {rows} rows for a message with a one-time code, expected 1")
+        run.send_and_expect_one_stored_row(sender, text, "a message with a one-time code")
     time.sleep(PHONE_SETTLE_SECONDS)
     after = phone_state(run)
     problem = phone_problem(before[0], after[0], before[1], after[1])
@@ -1543,9 +1592,9 @@ def main() -> int:
     if options.cpus <= 0 or options.boot_timeout <= 0:
         print("counts and timeouts must be positive", file=sys.stderr)
         return 2
-    if options.proof_image and (options.release is None or options.instance is not None):
-        print("--proof-image names its image with --release and boots a fresh instance (no --instance)",
-              file=sys.stderr)
+    problem = option_problem(options)
+    if problem:
+        print(problem, file=sys.stderr)
         return 2
     if options.mode == "channel" and not all(
             path is not None and path.is_file() for path in (options.probe_apk, options.vsockprobe_dex)):

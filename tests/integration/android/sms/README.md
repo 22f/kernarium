@@ -11,5 +11,6 @@ output directory only. The APK is also an explicit Soong module (`Android.bp`). 
 is never installed in a release image: the target-files verifier rejects a release that holds it.
 
 `run_android_sms.py --mode delivery --release DIR [--proof-image]` needs neither file: it is the check of a
-built image's text-message path (a plain message and one with a one-time code are delivered and stored, and
-`com.android.phone` keeps its pid), and `--proof-image` takes an unsigned proof image.
+built image's text-message path (a plain message and one with a one-time code are delivered and stored as one new
+inbox row each, and `com.android.phone` keeps its pid; it needs the SMS provider), and `--proof-image` takes an
+unsigned proof image.

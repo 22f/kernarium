@@ -715,6 +715,20 @@ public final class ChannelTest {
                 "an address the library cannot convert is closed unread");
         same(1, handling.payloads.size(), "and the next connection, the host's, is served");
 
+        // The host and then a connection whose address accept leaves alone: each accept gets an address of its own,
+        // so the host's CID is not carried over to it.
+        final int callsBeforeUntouched = world.calls.size();
+        final World.Sock untouched = new World.Sock();
+        untouched.incoming = request;
+        untouched.ends = false; // a request that was admitted would be dispatched
+        world.queued.add(untouched);
+        handling.payloads.clear();
+        server.serveOne();
+        final List<String> untouchedCalls = new ArrayList<>(world.calls.subList(callsBeforeUntouched, world.calls.size()));
+        check(!untouchedCalls.contains("read") && !untouchedCalls.contains("write") && untouched.closed
+                && untouched.shutdown, "an untouched address after the host is closed unread: " + untouchedCalls);
+        check(handling.payloads.isEmpty(), "and not dispatched, as if it were the host's");
+
         // A deadline that has nearly passed, and a peer that says nothing: dropped.
         final World.Sock quiet = new World.Sock();
         quiet.cid = OsConstants.VMADDR_CID_HOST;

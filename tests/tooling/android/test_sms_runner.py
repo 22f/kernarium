@@ -14,11 +14,13 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import base64
 import contextlib
 import importlib.util
 import io
 from pathlib import Path
 import re
+import shlex
 import shutil
 import socket
 import struct
@@ -565,12 +567,14 @@ class StartFailureTests(unittest.TestCase):
 
     MARKER = "sms-start-failure-test"
 
-    def start_and_fail(self, forward: object = 12345, proof_image: bool = False,
+    def start_and_fail(self, forward: object = 12345, proof_image: bool = False, succeed: bool = False,
                        **patched: object) -> list[subprocess.Popen]:
         """Runs start_guest with the launcher's steps replaced; returns the spawned children left running.
-        A proof image has no installed-release identity: nothing of it may be read, planned or recorded."""
+        A proof image has no installed-release identity: nothing of it may be read, planned or recorded. With
+        ``succeed`` the boot completes, start_guest returns a Guest, and ``self.mocks`` holds what it called."""
         boot = runner.boot_android
         children: list[subprocess.Popen] = []
+        self.mocks: dict[str, mock.Mock] = {}
         real_popen = subprocess.Popen
 
         def spawn(command, *args, **kwargs):
@@ -598,13 +602,14 @@ class StartFailureTests(unittest.TestCase):
                                 ("apply", boot.android_instance), ("booted", boot.android_instance),
                                 ("data_capacity", boot)):
                 if proof_image:
-                    stack.enter_context(mock.patch.object(owner, name, side_effect=unread))
+                    self.mocks[name] = stack.enter_context(mock.patch.object(owner, name, side_effect=unread))
                 else:
-                    stack.enter_context(mock.patch.object(
+                    self.mocks[name] = stack.enter_context(mock.patch.object(
                         owner, name, return_value=1 if name == "data_capacity" else object()))
             stack.enter_context(mock.patch.object(boot, "disconnect_adb"))
-            stack.enter_context(mock.patch.object(boot, "emulator_command", return_value=[
-                sys.executable, "-c", f"import time; time.sleep(120)  # {self.MARKER}"]))
+            self.mocks["emulator_command"] = stack.enter_context(mock.patch.object(
+                boot, "emulator_command", return_value=[
+                    sys.executable, "-c", f"import time; time.sleep(120)  # {self.MARKER}"]))
             if isinstance(forward, BaseException):
                 stack.enter_context(mock.patch.object(runner, "vsock_forward_port", side_effect=forward))
             else:
@@ -618,11 +623,19 @@ class StartFailureTests(unittest.TestCase):
                     stack.enter_context(mock.patch.object(boot, name, return_value=effect))
             stack.enter_context(mock.patch.object(runner.subprocess, "Popen", side_effect=spawn))
             try:
-                runner.start_guest(options, "adb", directory)
+                if succeed:
+                    with mock.patch.object(runner.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+                        # (the settle after the boot is not waited for)
+                        self.assertIsInstance(runner.start_guest(options, "adb", directory), runner.Guest)
+                    self.instance_made = (directory / "instance").is_dir()
+                else:
+                    runner.start_guest(options, "adb", directory)
             except (runner.Failure, runner.boot_android.LauncherError):
-                pass
+                if succeed:
+                    raise
             else:
-                self.fail("start_guest returned although the step failed")
+                if not succeed:
+                    self.fail("start_guest returned although the step failed")
             finally:
                 alive = [child for child in children if child.poll() is None]
                 for child in alive:
@@ -638,6 +651,20 @@ class StartFailureTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual([], self.start_and_fail(proof_image=True, **patched))
 
+    def test_a_successful_proof_boot_records_nothing_of_an_installation(self) -> None:
+        """The control is the installed release, which reads its identity, asks for its capacity and records the
+        boot: the same boot of a proof image does none of it, and still makes the instance directory."""
+        # The guest that start_guest returns owns the emulator it started: the caller stops it, here the harness.
+        self.assertEqual(1, len(self.start_and_fail(succeed=True)))
+        for name in ("read_release", "plan_start", "apply", "booted", "data_capacity"):
+            self.assertTrue(self.mocks[name].called, f"the installed release does not call {name}")
+        self.assertEqual(self.mocks["emulator_command"].call_args.args[4], 1)
+        self.assertEqual(1, len(self.start_and_fail(proof_image=True, succeed=True)))
+        for name in ("read_release", "plan_start", "apply", "booted", "data_capacity"):
+            self.assertFalse(self.mocks[name].called, f"a proof image called {name}")
+        self.assertIsNone(self.mocks["emulator_command"].call_args.args[4])
+        self.assertTrue(self.instance_made, "the fresh instance's directory must exist for the emulator")
+
     def test_a_failure_after_the_spawn_leaves_no_emulator(self) -> None:
         boot = runner.boot_android
         cases = {
@@ -650,6 +677,128 @@ class StartFailureTests(unittest.TestCase):
             with self.subTest(name):
                 alive = self.start_and_fail(**patched)
                 self.assertEqual([], alive, "the emulator it spawned was left running")
+
+
+class DeliveryRowTests(unittest.TestCase):
+    """D1 and D2 over a fake guest whose inbox and phone process the test scripts, and a fake host that stores
+    what it is sent: what the rows accept and what they fail, without a guest."""
+
+    SENDER = "+15550100"
+    PLAIN = "sms-check plain 000102"
+
+    class Guest:
+        forward_port = 0
+
+        def __init__(self, pids: list[str], crash_buffer: str = "") -> None:
+            self.rows: list[tuple[int, str, str]] = []
+            self.pids, self.crash_buffer = list(pids), crash_buffer
+            self.commands: list[str] = []
+
+        def alive(self) -> None:
+            pass
+
+        def inbox_ids(self, sender: str, text: str) -> set[int]:
+            return {number for number, who, what in self.rows if (who, what) == (sender, text)}
+
+        def shell(self, command: str, timeout: float = 0, check: bool = True) -> str:
+            self.commands.append(command)
+            return self.pids.pop(0) if len(self.pids) > 1 else self.pids[0]
+
+        def logcat(self, *arguments: str) -> str:
+            return self.crash_buffer
+
+    class Host:
+        """Answers handed-over and stores ``copies`` rows for each message, as a service that stores it."""
+
+        def __init__(self, guest: "DeliveryRowTests.Guest", copies: int = 1) -> None:
+            self.guest, self.copies = guest, copies
+
+        def answer(self, payload: bytes, seconds: float = 0) -> object:
+            fields = payload.decode().split(".")
+            sender, text = base64.b64decode(fields[3]).decode(), base64.b64decode(fields[4]).decode()
+            for _ in range(self.copies):
+                number = max((row[0] for row in self.guest.rows), default=0) + 1
+                self.guest.rows.append((number, sender, text))
+            return runner.Answer("handed-over", fields[2], "1")
+
+    def run_row(self, row, guest: "DeliveryRowTests.Guest", copies: int = 1) -> None:
+        run = runner.Run(SimpleNamespace(variant="messaging"), guest, {})
+        run.host = self.Host(guest, copies)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(runner.time, "sleep"))
+            stack.enter_context(mock.patch.object(runner.os, "urandom", side_effect=lambda count: bytes(range(count))))
+            stack.enter_context(mock.patch.object(runner, "INBOX_SECONDS", 0.05))
+            stack.enter_context(mock.patch.object(runner, "PHONE_WAIT_SECONDS", 0.05))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            row(run)
+
+    def test_the_inbox_query_selects_ids_and_names_no_body_in_its_output(self) -> None:
+        command = runner.inbox_ids_command("+1555", "it's 123")
+        self.assertIn("--projection _id ", command)
+        self.assertNotIn("body:", command)
+        self.assertNotIn("--projection _id:", command)
+        self.assertEqual(shlex.split(command)[-1], "address='+1555' AND body='it''s 123'")
+        self.assertEqual(runner.parse_inbox_ids("Row: 0 _id=12\nRow: 1 _id=7\n"), {12, 7})
+        self.assertEqual(runner.parse_inbox_ids("No result found.\n"), set())
+
+    def test_exactly_one_new_row(self) -> None:
+        self.assertIsNone(runner.new_row_problem(set(), {4}))
+        self.assertIsNone(runner.new_row_problem({1, 2}, {1, 2, 3}))
+        self.assertIn("0 new", runner.new_row_problem({1, 2}, {1, 2}))
+        self.assertIn("0 new", runner.new_row_problem(set(), set()))
+        self.assertIn("2 new", runner.new_row_problem({1}, {1, 2, 3}))
+
+    def test_the_options_that_cannot_qualify_are_refused(self) -> None:
+        parse = runner.build_parser().parse_args
+        self.assertIn("SMS provider", runner.option_problem(parse(["--mode", "delivery", "--variant", "no-provider"])))
+        self.assertIsNone(runner.option_problem(parse(["--mode", "delivery"])))
+        self.assertIsNone(runner.option_problem(parse(["--mode", "delivery", "--variant", "no-messaging"])))
+        self.assertIsNone(runner.option_problem(parse(["--mode", "record", "--variant", "no-provider"])))
+        self.assertIn("--proof-image", runner.option_problem(parse(["--proof-image"])))
+        self.assertIn("--proof-image", runner.option_problem(
+            parse(["--proof-image", "--release", "x", "--instance", "y"])))
+        self.assertIsNone(runner.option_problem(parse(["--proof-image", "--release", "x"])))
+        with mock.patch.object(sys, "argv", ["run_android_sms.py", "--mode", "delivery", "--variant", "no-provider"]), \
+                contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(runner.main(), 2)
+        self.assertIn("SMS provider", error.getvalue())
+
+    def test_d1_needs_one_new_row(self) -> None:
+        self.run_row(runner.row_d1, self.Guest(["100"]))
+        old = self.Guest(["100"])
+        old.rows = [(1, self.SENDER, self.PLAIN), (2, self.SENDER, self.PLAIN)]
+        self.run_row(runner.row_d1, old)  # old matching rows are not a delivery, and a new one is
+        self.assertEqual(len(old.rows), 3)
+        old = self.Guest(["100"])
+        old.rows = [(1, self.SENDER, self.PLAIN)]
+        with self.assertRaisesRegex(runner.Failure, "0 new inbox rows"):
+            self.run_row(runner.row_d1, old, copies=0)
+        with self.assertRaisesRegex(runner.Failure, "2 new inbox rows"):
+            self.run_row(runner.row_d1, self.Guest(["100"]), copies=2)
+        with self.assertRaisesRegex(runner.Failure, "0 new inbox rows"):
+            self.run_row(runner.row_d1, self.Guest(["100"]), copies=0)
+
+    def test_d2_waits_for_the_phone_process_and_fails_plainly_without_it(self) -> None:
+        self.run_row(runner.row_d2, self.Guest(["", "", "100", "100\n"]))
+        with self.assertRaisesRegex(runner.Failure, r"com.android.phone running: pidof says '' \(after"):
+            self.run_row(runner.row_d2, self.Guest([""]))
+        with self.assertRaisesRegex(runner.Failure, "was pid 100 before the message and is 200 after it"):
+            self.run_row(runner.row_d2, self.Guest(["100", "100", "200"]))
+        guest = self.Guest(["100"])
+        buffers = ["", "E AndroidRuntime: Process: com.android.phone, PID: 100\n"]
+        guest.logcat = lambda *arguments: buffers.pop(0) if len(buffers) > 1 else buffers[0]  # type: ignore
+        with self.assertRaisesRegex(runner.Failure, "gained 1 line"):
+            self.run_row(runner.row_d2, guest)
+
+    def test_d2_checks_each_message_for_one_new_row(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "a message with a one-time code: 2 new inbox rows"):
+            self.run_row(runner.row_d2, self.Guest(["100"]), copies=2)
+        with self.assertRaisesRegex(runner.Failure, "a message with a one-time code: 0 new inbox rows"):
+            self.run_row(runner.row_d2, self.Guest(["100"]), copies=0)
+
+    def test_delivery_runs_d1_before_d2(self) -> None:
+        rows, _ = runner.plan_rows("delivery", set())
+        self.assertEqual([row.name for row in rows], ["D1", "D2"])
 
 
 class ProbeSourceTests(unittest.TestCase):
