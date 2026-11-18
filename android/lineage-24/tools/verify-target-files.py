@@ -5254,6 +5254,12 @@ VSOCK_TYPES_WITHOUT_LISTEN = frozenset({
     "aisealhostservice", "hal_graphics_composer_default", "libcuttlefish_rild", "storageproxyd_system",
     "tombstone_transmit",
 })
+# The one grant on the service's sockets that is not the service's: the platform's own rule
+# (allow dumpstate domain (vsock_socket (getattr))), the vsock instance of its getattr rule for every socket
+# class. Over the attribute domain it reaches the service as it reaches every domain. getattr is the permission
+# to stat a socket and to read its local and peer address from a descriptor already held: no read, write,
+# connect, bind, listen or accept, and no data. Only that rule is accepted, only from the platform's policy.
+SMS_PLATFORM_VSOCK_GRANT = ("dumpstate", "domain", frozenset({b"getattr"}))
 # The domains that manage every application's data directories, and so reach the service's: the platform's own
 # rules through the attributes of an application data type. The first image build with the service shows the
 # set; a holder that is not named here fails the check until someone has looked at it.
@@ -5401,9 +5407,10 @@ def seapp_context_for(entries: list[dict[str, str]], user: str, seinfo: str, nam
 def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_contexts: str) -> None:
     """Only the host can cause a text message to be delivered: of the types that may create, bind or listen
     on a vsock socket exactly the reviewed ones and the service's may, whatever attribute grants it; nothing
-    else holds the service's sockets or its data; the service finds only the services it needs; its
+    else holds the service's sockets or its data, except the platform's own getattr for dumpstate
+    (SMS_PLATFORM_VSOCK_GRANT); the service finds only the services it needs; its
     package selects its domain and no other package does; and the shell cannot move adbd's own listener.
-    Every grant counts, through attributes and set expressions."""
+    Every grant counts, through attributes and set expressions. The first policy is the platform's."""
     sets = CilSets(policies)
     if not sets.members("appdomain") or not sets.members("coredomain"):
         fail("the policy lists no type for appdomain or coredomain: the check could not tell who runs applications")
@@ -5442,9 +5449,19 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
         core domain has."""
         return SMS_DOMAIN in sources and not any(sources >= group for group in everything)
 
-    # The service's sockets: nothing but the service holds a permission on them, and what the service holds
-    # on the sockets of other types is only what every application domain holds.
-    for sources, targets, permissions in vsock:
+    # The service's sockets: nothing but the service holds a permission on them (the platform's grant to
+    # dumpstate apart: cil_domain_rules keeps the policies' order, so the platform's rules are the first of
+    # vsock, and platform_grants are their indexes), and what the service holds on the sockets of other types
+    # is only what every application domain holds.
+    platform_rules = [rule for rule in cil_rules(policies[0], CIL_ALLOW_RULE) if rule[2] == b"vsock_socket"]
+    platform_grants = {
+        index
+        for index, (source, target, _object_class, permissions) in enumerate(platform_rules)
+        if (cil_type_name(source), cil_type_name(target), frozenset(permissions)) == SMS_PLATFORM_VSOCK_GRANT
+    }
+    for index, (sources, targets, permissions) in enumerate(vsock):
+        if index in platform_grants:
+            continue
         if targets is not None and SMS_DOMAIN in targets and sources - {SMS_DOMAIN}:
             fail(f"{sorted(sources - {SMS_DOMAIN})} hold {sorted(permissions)} on a vsock socket of {SMS_DOMAIN}")
         if targets is not None and SMS_DOMAIN not in targets and specific(sources):

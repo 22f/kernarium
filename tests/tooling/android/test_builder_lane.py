@@ -457,6 +457,9 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         plat += f"(allow {name}{'_202604' if name == 'adbd' else ''} self (vsock_socket ({permissions})))\n"
     for setter in sorted(tool.ADB_LISTEN_ADDRS_SETTERS):
         plat += f"(allow {setter} system_prop (property_service (set)))\n"
+    # The platform's own rule for dumpstate, the vsock instance of its getattr rule for every socket class:
+    # over the attribute domain it reaches the service's sockets, and every Android 17 platform policy has it.
+    plat += "(allow dumpstate domain (vsock_socket (getattr)))\n"
     ext = (
         "(type kernarium_sms)\n(type kernarium_sms_data_file)\n"
         "(typeattributeset domain (kernarium_sms))\n"
@@ -502,6 +505,18 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
                           "getattr getopt)))\n", "")
     elif variant == "sockets-through-domain":
         ext += "(allow domain kernarium_sms (vsock_socket (read write)))\n"
+    elif variant == "dumpstate-reads":
+        plat = plat.replace("(allow dumpstate domain (vsock_socket (getattr)))",
+                            "(allow dumpstate domain (vsock_socket (getattr read)))")
+    elif variant == "another-domain-getattr":
+        plat += "(allow system_server domain (vsock_socket (getattr)))\n"
+    elif variant == "dumpstate-getattr-over-a-smaller-group":
+        plat = plat.replace("(allow dumpstate domain (vsock_socket (getattr)))",
+                            "(allow dumpstate coredomain (vsock_socket (getattr)))")
+    elif variant == "dumpstate-getattr-of-ours":
+        ext += "(allow dumpstate kernarium_sms (vsock_socket (getattr)))\n"
+    elif variant == "dumpstate-getattr-repeated-outside-the-platform":
+        ext += "(allow dumpstate domain (vsock_socket (getattr)))\n"
     elif variant == "service-on-another-sockets":
         ext += "(allow kernarium_sms virtualizationservice (vsock_socket (read write)))\n"
     elif variant == "data-through-app-data-file-type":
@@ -5887,6 +5902,20 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "reviewed and missing: \\['kernarium_sms'\\]"),
             ("sms-sockets-through-domain", {"sms_policy_variant": "sockets-through-domain"},
              "hold \\['read', 'write'\\] on a vsock socket of kernarium_sms"),
+            # The platform's grant of getattr to dumpstate over domain is accepted by the baseline; each of
+            # these differs from it by one thing and is refused.
+            ("sms-dumpstate-reads", {"sms_policy_variant": "dumpstate-reads"},
+             "\\['dumpstate'\\] hold \\['getattr', 'read'\\] on a vsock socket of kernarium_sms"),
+            ("sms-another-domain-getattr", {"sms_policy_variant": "another-domain-getattr"},
+             "\\['system_server'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            ("sms-dumpstate-getattr-over-a-smaller-group",
+             {"sms_policy_variant": "dumpstate-getattr-over-a-smaller-group"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            ("sms-dumpstate-getattr-of-ours", {"sms_policy_variant": "dumpstate-getattr-of-ours"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            ("sms-dumpstate-getattr-repeated-outside-the-platform",
+             {"sms_policy_variant": "dumpstate-getattr-repeated-outside-the-platform"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
             ("sms-service-on-other-sockets", {"sms_policy_variant": "service-on-another-sockets"},
              "kernarium_sms holds .* on the vsock sockets of"),
             ("sms-data-through-app-data-file-type", {"sms_policy_variant": "data-through-app-data-file-type"},

@@ -523,6 +523,12 @@ length and an identifier the host chooses for it. `Message.java` and
 `Andarium/AndariumCore/Sources/AndariumCore/Adb/GuestSms.swift` own what is
 accepted and refused, each limit stated once.
 
+The target-files verifier holds that boundary: it refuses a policy in which a
+type outside the reviewed set can create, bind or listen on a vsock socket, or
+in which a domain other than the service holds a permission on the service's
+vsock sockets. The one exception is the platform's own rule giving `dumpstate`
+`getattr` over the attribute `domain`, which stats a socket and carries no data.
+
 The service hands Android the message as SMS-DELIVER PDUs, concatenated when
 the text needs more than one part: an `SMS_DELIVER` broadcast to the SMS role
 holder, then `SMS_RECEIVED` to the applications that may receive SMS, so
