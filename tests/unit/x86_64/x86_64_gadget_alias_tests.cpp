@@ -268,6 +268,14 @@ public:
 		return held & write_tag_mask;
 	}
 
+	/* Whether the table holds the page at `address`'s write entry with the
+	 * code bit set: an entry of another page, or an empty one, is not one. */
+	[[nodiscard]] bool write_tagged(std::uint64_t address)
+	{
+		const auto tags = write_tags(address);
+		return tags != ~std::uint64_t{0} && (tags & write_code_tag) != 0;
+	}
+
 	[[nodiscard]] const gadgets::ProgramCacheDiagnostics &diagnostics() const
 		noexcept
 	{
@@ -356,10 +364,14 @@ struct Clean final {
 void test_store()
 {
 	const Clean clean;
+	/* W and the writer are a page and two pages past a multiple of 256 MiB
+	 * from X, which the table's direct index gives entries of their own: at
+	 * an exact multiple, X's own retires would clear W's entry whether or
+	 * not the registration retires the writer's. */
 	constexpr std::uint64_t executable = 0x1000'0000;
-	constexpr std::uint64_t alias = 0x2000'0000;
+	constexpr std::uint64_t alias = 0x2000'1000;
 	constexpr std::uint64_t unheld = 0x2000'4000;
-	constexpr std::uint64_t writer = 0x3000'0000;
+	constexpr std::uint64_t writer = 0x3000'2000;
 	ScratchBacking frame{"uml-x86-alias-store-XXXXXX", page};
 	ScratchBacking other{"uml-x86-alias-other-XXXXXX", page};
 	ScratchBacking code{"uml-x86-alias-code-XXXXXX", page};
@@ -389,7 +401,7 @@ void test_store()
 
 	/* The store through W refills the entry tagged, and X sees the byte. */
 	require(space.run(writer, 2, alias + 1).event == EngineEvent::system_call);
-	require((space.write_tags(alias) & write_code_tag) != 0,
+	require(space.write_tagged(alias),
 		"a write entry for a frame with a holder was not tagged");
 	require(space.run(executable).rax == 2,
 		"a store through another address did not reach the translation");
@@ -407,7 +419,7 @@ void test_running_block()
 {
 	const Clean clean;
 	constexpr std::uint64_t executable = 0x1100'0000;
-	constexpr std::uint64_t alias = 0x2100'0000;
+	constexpr std::uint64_t alias = 0x2100'1000;
 	ScratchBacking frame{"uml-x86-alias-running-XXXXXX", page};
 	/* mov [rdx], bl ; mov eax, imm32 ; syscall: the store names the
 	 * immediate's low byte. */
@@ -427,7 +439,7 @@ void test_running_push()
 {
 	const Clean clean;
 	constexpr std::uint64_t executable = 0x1400'0000;
-	constexpr std::uint64_t alias = 0x2400'0000;
+	constexpr std::uint64_t alias = 0x2400'1000;
 	ScratchBacking frame{"uml-x86-alias-push-XXXXXX", page};
 	/* push rbx ; mov eax, imm32 ; syscall */
 	put(frame, 0, {0x53, 0xb8, 0x01, 0x00, 0x00, 0x00, 0x0f, 0x05});
@@ -560,7 +572,7 @@ void test_stack_twins_over_an_alias()
 			"the registration did not retire the stack's write entry");
 		for (const std::uint64_t value : {2U, 3U}) {
 			require(store(value).event == EngineEvent::system_call);
-			require((space.write_tags(alias) & write_code_tag) != 0,
+			require(space.write_tagged(alias),
 				"a write entry for a frame with a holder was not tagged");
 			require(space.run(executable).rax == value,
 				"a stack twin's store did not reach the translation");
@@ -721,7 +733,7 @@ void test_a_revalidation_uses_the_memo()
 	const Clean clean;
 	namespace testing = uml::memory::testing;
 	constexpr std::uint64_t executable = 0x1900'0000;
-	constexpr std::uint64_t alias = 0x2900'0000;
+	constexpr std::uint64_t alias = 0x2900'2000;
 	/* Not in the memo's slot of the executable page. */
 	constexpr std::uint64_t writer = 0x3900'1000;
 	ScratchBacking frame{"uml-x86-alias-memo-v-XXXXXX", page};
@@ -762,7 +774,7 @@ void test_newly_written_bytes_run_after_a_memo_hit()
 	const Clean clean;
 	namespace testing = uml::memory::testing;
 	constexpr std::uint64_t executable = 0x1a00'0000;
-	constexpr std::uint64_t alias = 0x2a00'0000;
+	constexpr std::uint64_t alias = 0x2a00'2000;
 	/* Not in the memo's slot of the executable page. */
 	constexpr std::uint64_t writer = 0x3a00'1000;
 	ScratchBacking frame{"uml-x86-alias-memo-n-XXXXXX", page};
@@ -802,7 +814,7 @@ void test_the_unknown_writer_state_ends_the_memo()
 	namespace testing = uml::memory::testing;
 	const auto start = FrameAccounting::diagnostics();
 	constexpr std::uint64_t x = 0x1b00'0000;
-	constexpr std::uint64_t alias = 0x2b00'0000;
+	constexpr std::uint64_t alias = 0x2b00'1000;
 	ScratchBacking frame{"uml-x86-alias-memo-u-XXXXXX", page};
 	for (std::uint8_t block = 0; block < 5; ++block)
 		put(frame, block * 0x100,
@@ -1320,8 +1332,8 @@ void test_a_writer_without_a_registry()
 {
 	const Clean clean;
 	constexpr std::uint64_t executable = 0x1d00'0000;
-	constexpr std::uint64_t alias = 0x2d00'0000;
-	constexpr std::uint64_t writer = 0x3d00'0000;
+	constexpr std::uint64_t alias = 0x2d00'1000;
+	constexpr std::uint64_t writer = 0x3d00'2000;
 	ScratchBacking frame{"uml-x86-alias-bare-XXXXXX", page};
 	ScratchBacking code{"uml-x86-alias-bare-code-XXXXXX", page};
 	load_return(frame, 1);
@@ -1343,7 +1355,7 @@ void test_a_writer_without_a_registry()
 	require((x.run_to_system_call(executable).rax & 0xff) == 2,
 		"a store of an executor with no registry did not reach a block "
 		"translated after its first store");
-	require((w.write_tags(alias) & write_code_tag) != 0,
+	require(w.write_tagged(alias),
 		"a write entry of an executor with no registry was not tagged");
 	require(x.diagnostics().unheld_runnable == 0);
 }
