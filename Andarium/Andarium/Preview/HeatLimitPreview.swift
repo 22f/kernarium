@@ -6,7 +6,7 @@ import UIKit
 
 /// The preview's states of Settings' Performance section and of the heat
 /// notice's alert. The heat is stated here (the model is told the device is
-/// held hot), so no device is heated and no runtime runs.
+/// held at critical), so no device is heated and no runtime runs.
 @MainActor
 enum HeatLimitPreview {
     /// Settings' screens, which scroll to Stats and show Performance below it.
