@@ -681,7 +681,7 @@ struct TalkBackSwitchTests {
     /// display go on after the bound.
     @Test func theCardAndTheDisplayGoOnAfterTheBoundWhereNoEndComes() async throws {
         let (model, _) = started(voiceOver: true, interval: .milliseconds(20))
-        model.runStartBound = .milliseconds(200)
+        model.runStartBound = .seconds(1)
         let spoken = RunStartSpeech()
         model.runStartAnnouncer = { text, finished in
             spoken.lines.append(text)
