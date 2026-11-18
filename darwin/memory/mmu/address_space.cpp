@@ -1480,6 +1480,11 @@ public:
 		auto state = state_for(target);
 		std::uint64_t publish_first = rounded_end;
 		std::uint64_t publish_end = first;
+		/* Whether the target must hear of the change at every address: it
+		 * holds a frame written (its translations and verified pages may
+		 * stand at another address than the one written), or the frame is
+		 * unknown. */
+		bool whole_space = false;
 		code_holders::HolderList others;
 #if DARWIN_UML_X86_64_GUEST
 		/* Whether x86 code may hold the frames written, and whether some
@@ -1510,6 +1515,7 @@ public:
 					step_stamp(*mapping);
 					const bool own = take_holders(*mapping, target,
 						others, holder_takes_in_flight_, true);
+					whole_space = whole_space || own;
 #if DARWIN_UML_X86_64_GUEST
 					/* The page's frame may be translated at other
 					 * addresses and in other generations, whether or not
@@ -1530,12 +1536,19 @@ public:
 			 * reason, leaves the target out of it: the target is published
 			 * here, whole, whatever its pages map, as the holder an
 			 * unfinished publisher took may be the target itself. */
-			if (others.every()) {
-				publish_first = first;
-				publish_end = rounded_end;
-			}
+			if (others.every())
+				whole_space = true;
 		}
-		if (publish_first < publish_end)
+		/* The target's own view of the frame is not the only one it may
+		 * run or have verified: another mapping of the frame (an
+		 * executable alias, or the one the write reached through the
+		 * kernel's page table) is at an address the written range does not
+		 * name. A generation that holds the frame, or any frame, hears of
+		 * a change at every address, like the generations that hold it; a
+		 * generation that holds none hears of the range it wrote. */
+		if (whole_space)
+			::uml::memory::publish_code_change(*state, 0, 0);
+		else if (publish_first < publish_end)
 			::uml::memory::publish_code_change(*state, publish_first,
 				publish_end - publish_first);
 #if DARWIN_UML_X86_64_GUEST
@@ -2391,7 +2404,7 @@ private:
 	static bool synchronize_code_in(GenerationState &state,
 		std::uint64_t generation, std::uint64_t address,
 		code_holders::HolderList &others,
-		std::atomic<std::uint64_t> &in_flight)
+		std::atomic<std::uint64_t> &in_flight, bool &holds)
 	{
 		const auto page = address & ~(page_size - 1);
 		std::shared_lock lock{state.mappings_mutex};
@@ -2400,7 +2413,8 @@ private:
 			return !AddressLayout::is_guest(page);
 		step_stamp(*mapping);
 		if (AddressLayout::is_guest(page))
-			take_holders(*mapping, generation, others, in_flight, false);
+			holds = take_holders(*mapping, generation, others, in_flight,
+				false);
 		return true;
 	}
 
@@ -2408,10 +2422,20 @@ private:
 		std::uint64_t address)
 	{
 		code_holders::HolderList others;
+		bool holds = false;
 		const bool found = synchronize_code_in(state, generation, address,
-			others, holder_takes_in_flight_);
-		::uml::memory::publish_code_change(
-			state, address & ~(page_size - 1), page_size);
+			others, holder_takes_in_flight_, holds);
+		/* The synchronizing view is not the only one the generation may
+		 * hold: a code synchronization names the physical address, so the
+		 * write may have gone through a view that cannot execute while the
+		 * frame runs, or was verified, at another address. A generation that
+		 * holds the frame (or whose list goes to every generation) hears of
+		 * the change at every address. */
+		if (holds || others.every())
+			::uml::memory::publish_code_change(state, 0, 0);
+		else
+			::uml::memory::publish_code_change(
+				state, address & ~(page_size - 1), page_size);
 		publish_to_holders(generation, others);
 		return found;
 	}

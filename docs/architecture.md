@@ -590,7 +590,12 @@ empty word never hides a reader another publisher has yet to tell. The kernel
 path takes the word of every page the target maps, whatever its permission,
 and publishes to every generation, the target included, for a page the target
 has not mapped yet (its software page table fills at faults, so the frame is
-unknown) or when it meets an unfinished take. The words
+unknown) or when it meets an unfinished take. The target
+itself hears of a change at every address (a whole-space change) when it holds
+the frame or the list goes to every generation, because it may run or have
+verified the frame at an address other than the view written, one that cannot
+execute or none at all; a target that holds nothing hears of the range
+written. The words
 live in 4 KiB leaves made on a frame's first registration (a leaf per 512
 frames), and the leaves and their roots (4 KiB per GiB of backing, made with
 the backing in every build) come from the ordinary allocator, sized by the

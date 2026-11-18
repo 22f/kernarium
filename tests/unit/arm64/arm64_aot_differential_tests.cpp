@@ -1859,7 +1859,14 @@ struct ForeignWriter final {
  * code compared by hashing it, and a page it was told by the table of
  * verdicts is the same (which fetches nothing of its own beyond the
  * registration), each for the guest's store with its code synchronization
- * and for the kernel's write. */
+ * and for the kernel's write.
+ *
+ * The same rows run with the writer's view in the executing generation
+ * itself: a generation that holds the frame is told of a change made
+ * through another of its own views of it (a mapping that cannot execute, an
+ * executable alias, or no mapping at all when the kernel writes) at every
+ * address, as the entry it verified or warmed stands at the library's, not
+ * at the view's. The foreign generation is the control. */
 [[gnu::noinline]]
 void another_generations_change_reaches_native_code(
 	const LibraryImage &image, const std::vector<Function> &functions)
@@ -1933,14 +1940,22 @@ void another_generations_change_reaches_native_code(
 		aot::set_enabled(false);
 		return drive(g.env, g.arena, c, max_blocks);
 	};
-	std::fprintf(stderr, "foreign change: ");
 	using View = ForeignWriter::View;
-	for (const auto arm : {0, 1, 2, 3, 4}) {
+	std::fprintf(stderr, "foreign and own-generation changes: ");
+	/* The first five arms write through a view of another generation, the
+	 * last five through a view of the executing guest's own. */
+	for (const auto arm_of_ten : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}) {
+		const bool own_generation = arm_of_ten >= 5;
+		const auto arm = arm_of_ten % 5;
+		const auto writer_generation = [&](const SharedGuest &g) {
+			return own_generation ? g.env.generation : generation++;
+		};
 		const auto route = arm % 2 == 0 && arm < 4 ?
 			Route::store_and_synchronize : Route::kernel_write;
 		const auto view_kind = arm == 2 || arm == 3 ? View::executable :
 			arm == 4 ? View::unmapped : View::cannot_execute;
-		const std::string name = std::string{route == Route::kernel_write ?
+		const std::string name = std::string{own_generation ? "own " : ""} +
+			std::string{route == Route::kernel_write ?
 			"kernel write" : "store and synchronization"} + (
 			view_kind == View::executable ? " through an executable view" :
 			view_kind == View::unmapped ? " through a view nothing maps" :
@@ -1961,8 +1976,8 @@ void another_generations_change_reaches_native_code(
 			auto warm = guest(frame);
 			auto retried = std::make_unique<SharedGuest>(generation++, image,
 				frame, false);
-			ForeignWriter writer{generation++, frame, page_offset,
-				view_kind};
+			ForeignWriter writer{writer_generation(*retried), frame,
+				page_offset, view_kind};
 			require(same(want, run_shared(*warm, c).result, c));
 			const auto a = run_shared(*retried, c);
 			require(same(want, a.result, c) && a.stats.enters == 0 &&
@@ -2009,8 +2024,8 @@ void another_generations_change_reaches_native_code(
 		{
 			SharedFrame frame{image, generation++};
 			auto first = guest(frame);
-			ForeignWriter writer{generation++, frame, page_offset,
-				view_kind};
+			ForeignWriter writer{writer_generation(*first), frame,
+				page_offset, view_kind};
 			require(same(want, run_engine(*first), c));
 			require(same(want, run_engine(*first), c));
 			writer.change(changed, route);
@@ -2026,8 +2041,8 @@ void another_generations_change_reaches_native_code(
 			aot::clear_shared_verdicts();
 			SharedFrame frame{image, generation++};
 			auto first = guest(frame);
-			ForeignWriter writer{generation++, frame, page_offset,
-				view_kind};
+			ForeignWriter writer{writer_generation(*first), frame,
+				page_offset, view_kind};
 			const auto a = run_shared(*first, c);
 			require(same(want, a.result, c));
 			require(a.stats.enters > 0 && a.stats.verifications >= 1);
@@ -2052,8 +2067,8 @@ void another_generations_change_reaches_native_code(
 			SharedFrame frame{image, generation++};
 			auto first = guest(frame);
 			auto second = guest(frame);
-			ForeignWriter writer{generation++, frame, page_offset,
-				view_kind};
+			ForeignWriter writer{writer_generation(*second), frame,
+				page_offset, view_kind};
 			const auto w = run_shared(*first, c);
 			require(same(want, w.result, c) && w.stats.steps == 0);
 			require(same(want, run_shared(*second, c).result, c));
