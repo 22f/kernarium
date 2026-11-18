@@ -653,9 +653,21 @@ final class AppModel {
     /// Whether VoiceOver is running; a test answers for it.
     @ObservationIgnored var voiceOverRunning: @MainActor () -> Bool = { UIAccessibility.isVoiceOverRunning }
     /// What VoiceOver is told of its own accord; a test collects it.
-    @ObservationIgnored var announcer: @MainActor (_ text: String, _ queued: Bool) -> Void = {
-        VoiceOver.announce($0, queued: $1)
+    @ObservationIgnored var announcer: @MainActor (_ text: String, _ queued: Bool, _ highPriority: Bool) -> Void = {
+        VoiceOver.announce($0, queued: $1, priority: $2 ? .high : nil)
     }
+    /// Says what a run is as it begins, at high priority (VoiceOver's own
+    /// speech of the element it lands on after the screen change would cut a
+    /// queued or default announcement off), and tells whether the sentence was
+    /// spoken to its end; a test collects the words and reports the end itself.
+    @ObservationIgnored var runStartAnnouncer: @MainActor (String, @escaping @MainActor @Sendable (Bool) -> Void) -> Void = {
+        VoiceOver.announce($0, priority: .high, finished: $1)
+    }
+    /// How long the card and the display wait for that sentence's end before
+    /// they go on without it, where VoiceOver never reports one. The sentence
+    /// takes about seven seconds at VoiceOver's default rate; the bound leaves
+    /// room for slower speech and longer languages.
+    @ObservationIgnored var runStartBound: Duration = .seconds(15)
     /// The preview's mock guest screen reader, where no runtime is behind the
     /// screens; nil in the application.
     @ObservationIgnored var screenReaderStandIn: (any ScreenReaderStandIn)?

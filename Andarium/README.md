@@ -907,10 +907,17 @@ requires reopening Andarium.
   closed side keys carry actions that move them. Android's display is one
   element (`GuestDisplayAccessibility`) whose value is Android's screen reader's
   state and whose activation sends Android no touch; while the screen reader is
-  on it is a direct-touch area, so touches reach Android and it speaks instead of
-  VoiceOver ([Android's screen reader](#android-operations)). Each option row on
-  Home reads as one element, its control, which carries the row's title as its
-  label (the title is no second stop), followed by the line under it.
+  on the display is a container of one direct-touch element, so touches reach
+  Android and it speaks instead of VoiceOver, with no rotor setting needed
+  ([Android's screen reader](#android-operations)). The sentence of a run's
+  start is announced at high priority, which VoiceOver's own speech of the
+  element its cursor lands on after the screen change does not cut off; the
+  display's element takes VoiceOver's focus once it has been spoken, with
+  nothing over the display, and the card that asks waits for it too (at most 15
+  seconds, where VoiceOver reports no end); the card then takes the focus on its
+  own title. Each option row on Home
+  reads as one element, its control, which carries the row's title as its label
+  (the title is no second stop), followed by the line under it.
 - **Keyboard and mouse.** The guest has a hardware keyboard and a mouse
   (virtio-input devices, plugged and unplugged at run time) while iOS has the
   hardware. Every key goes to Android as its position (the usage on the HID
@@ -1186,12 +1193,13 @@ is on. `AndariumCore/Adb` speaks the protocol.
   asks; nothing turns the screen reader on but the person's own action, and
   turning it off, in Settings or in Android, ends the asking for the run.
   Turning it on says so with the way back, and so does the first read of a run
-  that finds it on already; the display's hint ends with the way back too. The
-  card that says a system has no screen reader shows once per run, not once per
-  virtual machine. The system image carries TalkBack and eSpeak NG
-  ([Android README](../android/lineage-24/README.md#accessibility)); a virtual
-  machine whose system has none shows the switch as unavailable and the card says
-  so.
+  that finds it on already while something covers the display; where the
+  display takes VoiceOver's focus its own words carry it, and its hint ends with
+  the way back. The card that says a system has no screen reader shows once per
+  run, not once per virtual machine. The system image carries TalkBack and
+  eSpeak NG ([Android README](../android/lineage-24/README.md#accessibility)); a
+  virtual machine whose system has none shows the switch as unavailable and the
+  card says so.
 - **Create bug report and Install APK** are in every build, in a normal
   session. Settings lists Install APK and the file browser first, above the
   statistics, and the side keys' tip adds a line saying where Install APK is
