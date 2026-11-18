@@ -23,7 +23,8 @@
  * alone are no address), and the state at the moment of the answer decides, not
  * the state when the query came in. An outage that was reported ends with the
  * provider's stop. A last part starts the system's monitor and checks that the
- * provider hears a report of that open, whichever path this host has.
+ * provider hears a report of that open, whichever path this host has, and that
+ * one monitor serves the provider's life, across a stop and a reopen.
  */
 #include "dns_message.hpp"
 #include "provider.hpp"
@@ -738,6 +739,22 @@ void check_path_monitor(uml::network::SlirpProvider &provider, Guest &guest)
 				"a missing name was not told to retry");
 		std::printf("%s: the host's path is %s\n", label,
 			    usable ? "usable" : "down");
+		/* A guest's restart stops and opens the provider again. The monitor
+		 * lives on, so that the process holds what it held at the first
+		 * boot (guest-restart): one monitor for the provider's life, and
+		 * the state it keeps current is not reset by the stop. */
+		provider.stop();
+		if (path.usable() != usable)
+			fail(label, "the stop changed the state of a monitor that "
+				    "lives on");
+		if (!open_provider(provider, guest)) {
+			fail(label, "the provider did not reopen");
+		} else {
+			if (provider.path_monitors_made_for_testing() != 1)
+				fail(label, "the monitor was made again at the reopen");
+			if (path.usable() != usable)
+				fail(label, "the reopen changed the state");
+		}
 	}
 	provider.stop();
 	provider.set_path_monitor_for_testing(false);

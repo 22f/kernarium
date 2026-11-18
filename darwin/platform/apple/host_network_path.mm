@@ -4,9 +4,13 @@
 
 #import <Network/Network.h>
 
+#include <pthread.h>
+
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <new>
+#include <thread>
 
 namespace uml::platform {
 
@@ -24,12 +28,14 @@ bool hostNetworkPathIsCarried(nw_path_status_t status) noexcept
 
 namespace {
 
-/* What an update writes into. It outlives the monitor that made it, so that
- * an update in flight when the monitor ends finds a lock and no state, not
- * freed memory. */
-struct Sink final {
+/* What the monitor's thread and its updates share. It outlives the monitor
+ * that made it, so that an update in flight when the monitor ends, and the
+ * thread on its way out, find a lock and no state, not freed memory. */
+struct Shared final {
 	std::mutex lock;
+	std::condition_variable wake;
 	HostNetworkPathState *state{};
+	bool ended{};
 
 	void deliver(bool usable, bool carried) noexcept
 	{
@@ -39,44 +45,66 @@ struct Sink final {
 	}
 };
 
-class AppleHostNetworkPathMonitor final : public HostNetworkPathMonitor {
-public:
-	explicit AppleHostNetworkPathMonitor(HostNetworkPathState &state)
-	{
-		sink_->state = &state;
-		monitor_ = nw_path_monitor_create();
-		if (monitor_ == nil)
-			return;
-		nw_path_monitor_set_queue(monitor_, dispatch_queue_create(
+/*
+ * The first Network.framework monitor of a process starts the framework up,
+ * and the thread that makes it keeps a Mach port of its own (a send and
+ * receive right) until that thread ends. A guest's restart ends the thread
+ * that booted it, so a monitor made on that thread leaves the process one port
+ * short of its first boot's, which the restart audit (guest-restart) reports.
+ * The monitor is therefore made on a thread of its own, which lives as long as
+ * the monitor does and waits without waking for anything.
+ */
+void run(std::shared_ptr<Shared> shared) noexcept
+{
+	(void)::pthread_setname_np("uml-network-path");
+	nw_path_monitor_t monitor = nw_path_monitor_create();
+	if (monitor != nil) {
+		nw_path_monitor_set_queue(monitor, dispatch_queue_create(
 			"uml.network-path",
 			dispatch_queue_attr_make_with_qos_class(
 				DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)));
 		/* On the system's queue: a block that does no more than write the
 		 * state and run its observer, which only wakes a reader. */
-		const std::shared_ptr<Sink> sink = sink_;
-		nw_path_monitor_set_update_handler(monitor_, ^(nw_path_t path) {
-			sink->deliver(!hostNetworkPathIsOutage(
-					      nw_path_get_status(path),
-					      nw_path_get_unsatisfied_reason(path)),
-				      hostNetworkPathIsCarried(
-					      nw_path_get_status(path)));
+		nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
+			shared->deliver(!hostNetworkPathIsOutage(
+						nw_path_get_status(path),
+						nw_path_get_unsatisfied_reason(path)),
+					hostNetworkPathIsCarried(
+						nw_path_get_status(path)));
 		});
-		nw_path_monitor_start(monitor_);
+		nw_path_monitor_start(monitor);
+	}
+	{
+		std::unique_lock guard{shared->lock};
+		shared->wake.wait(guard, [&] { return shared->ended; });
+	}
+	if (monitor != nil)
+		nw_path_monitor_cancel(monitor);
+}
+
+class AppleHostNetworkPathMonitor final : public HostNetworkPathMonitor {
+public:
+	explicit AppleHostNetworkPathMonitor(HostNetworkPathState &state)
+	{
+		shared_->state = &state;
+		/* The thread holds the shared part alone: it may outlive this
+		 * object by the time it takes to cancel the monitor. */
+		const std::shared_ptr<Shared> shared = shared_;
+		std::thread{[shared] { run(shared); }}.detach();
 	}
 
 	~AppleHostNetworkPathMonitor() override
 	{
 		{
-			std::lock_guard guard{sink_->lock};
-			sink_->state = nullptr;
+			std::lock_guard guard{shared_->lock};
+			shared_->state = nullptr;
+			shared_->ended = true;
 		}
-		if (monitor_ != nil)
-			nw_path_monitor_cancel(monitor_);
+		shared_->wake.notify_all();
 	}
 
 private:
-	std::shared_ptr<Sink> sink_{std::make_shared<Sink>()};
-	nw_path_monitor_t monitor_{};
+	std::shared_ptr<Shared> shared_{std::make_shared<Shared>()};
 };
 
 } // namespace

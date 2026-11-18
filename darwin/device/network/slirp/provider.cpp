@@ -264,13 +264,29 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 			/* The system reports the current path at once and each change
 			 * after, and nothing else wakes the provider; a report wakes
 			 * the event loop, which decides what it means for the guest's
-			 * connections. */
+			 * connections, so every open registers that wake. The first
+			 * open makes the monitor and it lives as long as the provider,
+			 * across every stop and reopen (a guest's restart). It runs on a
+			 * thread of its own whose Mach port the system's start-up ties
+			 * to it: a monitor made again at each boot would let that
+			 * thread's port go and leave the process one short of its first
+			 * boot's, which the restart audit (guest-restart) reports. */
 			path_state_.set_observer(notify_callback, this);
 #if UML_SLIRP_TESTING
-			if (path_monitor_for_testing_)
+			if (!path_monitor_for_testing_)
+				path_monitor_.reset();
+			const bool monitored = path_monitor_for_testing_;
+#else
+			constexpr bool monitored = true;
 #endif
+			if (monitored && !path_monitor_) {
 				path_monitor_ = uml::platform::
 					makeAppleHostNetworkPathMonitor(path_state_);
+#if UML_SLIRP_TESTING
+				path_monitors_made_for_testing_.fetch_add(
+					1, std::memory_order_relaxed);
+#endif
+			}
 			worker_ = std::jthread{[this](std::stop_token stop_token) {
 				event_loop(stop_token);
 			}};
@@ -279,8 +295,6 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 			 * system is out of memory): nothing of this open may stay, so
 			 * that a later open() starts the resolver again. */
 			path_state_.set_observer(nullptr, nullptr);
-			path_monitor_.reset();
-			path_state_.report(true);
 			resolver_.stop();
 			slirp_.reset();
 			return -EIO;
@@ -377,13 +391,15 @@ void SlirpProvider::stop() noexcept
 	/* The resolver delivers into the receive ring from its own thread;
 	 * once it is joined nothing can refill the ring cleared below. */
 	resolver_.stop();
-	/* No report wakes a loop that is gone; the one in flight finishes first. */
+	/* No report wakes a loop that is gone; the one in flight finishes first.
+	 * A monitor that lives goes on reporting into the state, and the next
+	 * open reads from where it stands. */
 	path_state_.set_observer(nullptr, nullptr);
-	path_monitor_.reset();
-	/* An outage that was reported is over with the monitor: the next open's
-	 * monitor decides what the path is, and until it has reported the host
-	 * has one. */
-	path_state_.report(true);
+	/* A monitor that lives keeps the state current across the stop. With
+	 * none (the test build's default) no one does, and an outage that was
+	 * reported is over: a reopen starts as a host with a path does. */
+	if (!path_monitor_)
+		path_state_.report(true);
 #if UML_SLIRP_TESTING
 	notify_receive_cleanup_for_testing();
 #endif
