@@ -509,48 +509,150 @@ void vp9Clip(const std::vector<uml::platform::VideoDecodeCapability>& capabiliti
     std::puts("vp9-superframes: 40 pictures bit-exact, 3 superframes, one resolution change");
 }
 
-/* What a guest can send that no encoder writes, each of which the decoder must
- * refuse before the hardware sees it, with the stream it had left as it was. */
-void vp9Hostile(const std::vector<uml::platform::VideoDecodeCapability>& capabilities)
+/* The hash of a 10-bit frame as the 8-bit NV12 it narrows to. The rule is the
+ * one the host applies to every 10-bit picture an 8-bit client takes: a sample
+ * rounds to (sample + 2) >> 2, limited to 255. It is written here from the
+ * 10-bit value, where the decoder works on the 16-bit word that holds it. */
+std::uint32_t narrowedHash(const uml::platform::DecodedVideoFrame& frame)
+{
+    std::uint32_t hash = 0x811c9dc5u;
+    for (const auto* plane : {&frame.luma, &frame.chroma})
+        for (std::size_t i = 0; i + 1 < plane->size(); i += 2) {
+            const unsigned sample = (unsigned((*plane)[i]) | (unsigned((*plane)[i + 1]) << 8)) >> 6;
+            hash = (hash ^ std::min(255u, (sample + 2) >> 2)) * 0x01000193u;
+        }
+    return hash;
+}
+
+/* VP9 Profile 2 is 10-bit 4:2:0. It is advertised at the size range of Profile
+ * 0, and an 8-bit client takes it narrowed as it takes HEVC Main 10. */
+void vp9Profile2Limits(const std::vector<uml::platform::VideoDecodeCapability>& capabilities)
 {
     using namespace uml::platform;
-    namespace frames = uml::testing::vp9;
+    const auto cap = std::find_if(capabilities.begin(), capabilities.end(),
+                                  [](const auto& c) { return c.profile == VideoProfile::vp9Profile2; });
+    if (cap == capabilities.end()) return;
+    require(cap->codec == VideoCodec::vp9 && cap->maximumWidth == 4096 && cap->maximumHeight == 4096 &&
+                cap->bitDepth == 10 && cap->maximumLevel == 0,
+            "the advertised VP9 Profile 2 range is not the 4096 x 4096 square of Profile 0, in 10 bits");
+    for (const bool narrow : {false, true}) {
+        auto decoder = makeVideoDecoder(VideoCodec::vp9);
+        if (narrow) decoder->requestOutputLayout(VideoPixelLayout::planar8Bit);
+        decoder->submit(read("vp9-profile2-square-4096x4096.bin"), 5);
+        require(decoder->format() == VideoFormat {4096, 4096, 10}, "the 10-bit stream size was not reported");
+        decoder->drain();
+        const auto frames = decoder->takeFrames();
+        const auto depth = narrow ? 8u : 10u;
+        require(frames.size() == 1 && frames[0].format == VideoFormat {4096, 4096, depth},
+                "a VP9 Profile 2 picture within the advertised range did not decode");
+        require(std::abs(meanLuma(frames[0]) - 127.0) <= 3.0, "a VP9 Profile 2 picture within the range decoded wrongly");
+        std::printf("vp9-profile2-square-4096x4096: decoded in hardware, %s\n", narrow ? "narrowed to 8 bits" : "10-bit");
+    }
+    auto decoder = makeVideoDecoder(VideoCodec::vp9);
+    bool refused = false;
+    try { decoder->submit(uml::testing::vp9::keyFrame(2, 4112, 2304), 5); } catch (const std::runtime_error&) { refused = true; }
+    require(refused, "a VP9 Profile 2 picture beyond the advertised range was accepted");
+    require(decoder->format() == VideoFormat {}, "a refused VP9 Profile 2 picture changed the stream size");
+}
+
+/* A clip of 40 packets of Profile 2, built as the Profile 0 one is: four
+ * superframes that carry a hidden alternate-reference frame, and a key frame at
+ * the 31st that changes the size from 64 x 64 to 96 x 80. The expected hashes
+ * are libvpx's 10-bit output narrowed by (sample + 2) >> 2, limited to 255, with
+ * no tolerance: the hardware's 10-bit pictures equal libvpx's, and the
+ * narrowing is exact integer arithmetic. They are checked both as the narrowed
+ * NV12 an 8-bit client takes and as the 10-bit pictures narrowed here. */
+void vp9Profile2Clip(const std::vector<uml::platform::VideoDecodeCapability>& capabilities)
+{
+    using namespace uml::platform;
     if (std::none_of(capabilities.begin(), capabilities.end(),
-                     [](const auto& c) { return c.profile == VideoProfile::vp9Profile0; }))
+                     [](const auto& c) { return c.profile == VideoProfile::vp9Profile2; }))
         return;
-    const auto real = read("vp9-profile0.bin");
-    const auto clip = ivfPackets(read("vp9-superframes.ivf"));
-    struct Case { const char* what; Bytes packet; };
-    auto truncated = real;
-    truncated.resize(6);
-    auto badMarker = real;
-    badMarker[0] &= 0x3f;
-    auto badSync = real;
-    badSync[2] ^= 0x10;
-    auto tooLong = frames::superframe({real, real});
-    tooLong[tooLong.size() - 5] = 0xff;      // the first frame's size, 65535 bytes
-    tooLong[tooLong.size() - 4] = 0xff;
-    const Case refused[] = {
-        {"a packet of zeros", Bytes(64, 0)},
-        {"a truncated key frame header", truncated},
-        {"a frame marker that is not 2", badMarker},
-        {"a wrong synchronization code", badSync},
-        {"a key frame 4097 wide", frames::key(4097, 16)},
-        {"a key frame 8192 x 8192", frames::key(8192, 8192)},
-        {"a key frame 65536 x 65536", frames::key(65536, 65536)},
-        {"a profile 2 stream", frames::keyFrame(2, 64, 64)},
-        {"a profile 1 stream", frames::keyFrame(1, 64, 64, {.subsamplingX = 1, .subsamplingY = 0})},
-        {"a profile 3 stream", frames::keyFrame(3, 64, 64, {.subsamplingX = 1, .subsamplingY = 0})},
-        {"a reserved profile", Bytes {0xb8, 0, 0, 0, 0, 0, 0, 0}},
-        {"a superframe whose frame is too long", tooLong},
-        {"a superframe that names an empty frame", frames::superframe({real, Bytes {}})},
-        // The sizes a later frame states count as much as the first one's.
-        {"a hidden frame past the range in a superframe", frames::superframe({real, frames::inter(false, 4112, 2304)})},
-        {"an intra-only frame past the range in a superframe",
-            frames::superframe({real, frames::intraOnly(0, 4097, 64)})},
-        {"a key frame past the range after a shown frame", frames::superframe({real, frames::key(8192, 4320)})},
-        {"a profile 2 frame after a profile 0 one", frames::superframe({real, frames::keyFrame(2, 64, 64)})},
+    static const std::uint32_t expected[] = {
+        0xae5a53b4, 0xc3ce3063, 0xf4897d3b, 0x32ac1857, 0xfe99c050, 0xcac607f8, 0xe03fb722, 0xa00eb758,
+        0x83afd197, 0x275106a1, 0x84afa6da, 0x8e9f7b34, 0xdc260ada, 0xbc697744, 0x4080cf19, 0x3db77c5a,
+        0x30c01b41, 0xf64a9489, 0xaa5f4b52, 0xc9ca0514, 0x577c0ee1, 0x1a2e7a27, 0xceafc4f7, 0x3a014f66,
+        0xa3164370, 0xbe498402, 0xb5339302, 0xb0b29424, 0x3ec23bab, 0x4041b52c, 0xd1d82011, 0x3b44a9d4,
+        0x42c519c2, 0x7ca235c3, 0xc2aadcb0, 0xaff21620, 0x51fd0062, 0x88b0994f, 0x1ecc7b61, 0xc7bd600b};
+    const auto packets = ivfPackets(read("vp9-profile2-superframes.ivf"));
+    require(packets.size() == 40, "the VP9 Profile 2 clip is not 40 packets");
+    for (const bool narrow : {true, false}) {
+        auto decoder = makeVideoDecoder(VideoCodec::vp9);
+        if (narrow) decoder->requestOutputLayout(VideoPixelLayout::planar8Bit);
+        unsigned superframes = 0;
+        for (std::size_t i = 0; i < packets.size(); ++i) {
+            const auto split = vp9::splitSuperframe(packets[i]);
+            require(split.has_value(), "a packet of the Profile 2 clip is not one the readers accept");
+            if (split->size() > 1) ++superframes;
+            decoder->submit(packets[i], (i + 1) * 1000);
+            auto frames = decoder->takeFrames();
+            require(frames.size() == 1, "a VP9 Profile 2 packet did not show exactly one picture");
+            const VideoFormat size = i < 30 ? VideoFormat {64, 64, narrow ? 8u : 10u} : VideoFormat {96, 80, narrow ? 8u : 10u};
+            require(frames[0].format == size, "a VP9 Profile 2 picture has the wrong size or depth");
+            require(decoder->format().bitDepth == 10, "a VP9 Profile 2 stream is not reported as 10-bit");
+            require(frames[0].timestamp == (i + 1) * 1000, "a VP9 Profile 2 picture lost its timestamp");
+            require((narrow ? frameHash(frames[0]) : narrowedHash(frames[0])) == expected[i],
+                    "a VP9 Profile 2 picture differs from libvpx's, narrowed");
+        }
+        decoder->drain();
+        require(decoder->takeFrames().empty(), "a VP9 Profile 2 clip left a picture behind");
+        require(superframes == 4, "the VP9 Profile 2 clip does not hold its four superframes");
+        std::printf("vp9-profile2-superframes (%s): 40 pictures bit-exact against libvpx narrowed, 4 superframes, one "
+                    "resolution change\n", narrow ? "NV12" : "P010 narrowed here");
+    }
+}
+
+/* One decoder carries a stream through a change of profile at a key frame, as a
+ * player does between two clips: the session is rebuilt for the new profile and
+ * depth, and the pictures are the right ones. */
+void vp9ProfileSwitch(const std::vector<uml::platform::VideoDecodeCapability>& capabilities)
+{
+    using namespace uml::platform;
+    const auto has = [&](VideoProfile profile) {
+        return std::any_of(capabilities.begin(), capabilities.end(),
+                           [profile](const auto& c) { return c.profile == profile; });
     };
+    if (!has(VideoProfile::vp9Profile0) || !has(VideoProfile::vp9Profile2)) return;
+    const auto eight = read("vp9-profile0.bin");
+    const auto ten = read("vp9-profile2.bin");
+    const auto reference = read("vp9-profile2.raw");
+    for (const bool narrow : {false, true}) {
+        auto decoder = makeVideoDecoder(VideoCodec::vp9);
+        if (narrow) decoder->requestOutputLayout(VideoPixelLayout::planar8Bit);
+        std::uint64_t timestamp = 0;
+        for (const auto* packet : {&eight, &ten, &ten, &eight, &ten}) {
+            const bool tenBit = packet == &ten;
+            decoder->submit(*packet, ++timestamp);
+            decoder->drain();
+            const auto frames = decoder->takeFrames();
+            require(frames.size() == 1 && frames[0].timestamp == timestamp,
+                    "a key frame after a change of VP9 profile did not decode");
+            require(frames[0].format == VideoFormat {128, 96, tenBit && !narrow ? 10u : 8u},
+                    "a key frame after a change of VP9 profile has the wrong depth");
+            require(decoder->format().bitDepth == (tenBit ? 10u : 8u), "the stream depth did not follow the profile");
+            if (!tenBit) continue;
+            // The picture is the reference's own, narrowed: exactly.
+            std::uint32_t wanted = 0x811c9dc5u;
+            for (std::size_t i = 0; i < reference.size(); i += 2) {
+                const unsigned sample = (unsigned(reference[i]) | (unsigned(reference[i + 1]) << 8)) >> 6;
+                wanted = (wanted ^ std::min(255u, (sample + 2) >> 2)) * 0x01000193u;
+            }
+            require((narrow ? frameHash(frames[0]) : narrowedHash(frames[0])) == wanted,
+                    "a Profile 2 key frame after a change of profile differs from the reference");
+        }
+    }
+    std::puts("vp9-profile-switch: profiles 0 and 2 alternate at key frames, native and narrowed");
+}
+
+/* What a guest can send that no encoder writes, each of which the decoder must
+ * refuse before the hardware sees it, with the stream it had left as it was.
+ * `real` is a decodable key frame of the profile the stream is primed with, and
+ * `shown` what the decoder reports once it has decoded it. */
+struct VP9Refusal { const char* what; Bytes packet; };
+void vp9Refusals(const std::vector<VP9Refusal>& refused, const Bytes& real, const uml::platform::VideoFormat& shown,
+                 const char* stream)
+{
+    using namespace uml::platform;
     for (const auto& item : refused) {
         // Both a fresh stream and one that has decoded a picture refuse it.
         for (const bool primed : {false, true}) {
@@ -562,7 +664,7 @@ void vp9Hostile(const std::vector<uml::platform::VideoDecodeCapability>& capabil
             const auto before = decoder->format();
             bool threw = false;
             try { decoder->submit(item.packet, 2); } catch (const std::runtime_error&) { threw = true; }
-            if (!threw) std::fprintf(stderr, "accepted: %s (%s)\n", item.what, primed ? "primed" : "fresh");
+            if (!threw) std::fprintf(stderr, "accepted: %s (%s, %s)\n", item.what, stream, primed ? "primed" : "fresh");
             require(threw, "a VP9 packet the decoder must refuse was accepted");
             require(decoder->format() == before, "a refused VP9 packet changed the stream size");
             require(decoder->takeFrames().empty(), "a refused VP9 packet produced a picture");
@@ -570,11 +672,84 @@ void vp9Hostile(const std::vector<uml::platform::VideoDecodeCapability>& capabil
             decoder->submit(real, 3);
             decoder->drain();
             const auto after = decoder->takeFrames();
-            require(after.size() == 1 && after[0].timestamp == 3 && after[0].format == VideoFormat {128, 96, 8},
+            require(after.size() == 1 && after[0].timestamp == 3 && after[0].format == shown,
                     "a refused VP9 packet left the decoder unusable");
         }
     }
-    std::printf("vp9-hostile: %zu packets refused, fresh and mid-stream\n", sizeof(refused) / sizeof(refused[0]));
+    std::printf("vp9-hostile (%s): %zu packets refused, fresh and mid-stream\n", stream, refused.size());
+}
+
+void vp9Hostile(const std::vector<uml::platform::VideoDecodeCapability>& capabilities)
+{
+    using namespace uml::platform;
+    namespace frames = uml::testing::vp9;
+    const auto has = [&](VideoProfile profile) {
+        return std::any_of(capabilities.begin(), capabilities.end(),
+                           [profile](const auto& c) { return c.profile == profile; });
+    };
+    if (!has(VideoProfile::vp9Profile0)) return;
+    const auto real = read("vp9-profile0.bin");
+    const auto real2 = read("vp9-profile2.bin");
+    const auto clip = ivfPackets(read("vp9-superframes.ivf"));
+    auto truncated = real;
+    truncated.resize(6);
+    auto badMarker = real;
+    badMarker[0] &= 0x3f;
+    auto badSync = real;
+    badSync[2] ^= 0x10;
+    auto tooLong = frames::superframe({real, real});
+    tooLong[tooLong.size() - 5] = 0xff;      // the first frame's size, 65535 bytes
+    tooLong[tooLong.size() - 4] = 0xff;
+    // Refused whatever the stream is primed with.
+    std::vector<VP9Refusal> common = {
+        {"a packet of zeros", Bytes(64, 0)},
+        {"a truncated key frame header", truncated},
+        {"a frame marker that is not 2", badMarker},
+        {"a wrong synchronization code", badSync},
+        {"a key frame 4097 wide", frames::key(4097, 16)},
+        {"a key frame 8192 x 8192", frames::key(8192, 8192)},
+        {"a key frame 65536 x 65536", frames::key(65536, 65536)},
+        {"a profile 2 key frame 4097 wide", frames::keyFrame(2, 4097, 16)},
+        {"a profile 2 key frame 8192 x 8192", frames::keyFrame(2, 8192, 8192)},
+        // The profiles and depths the hardware path does not carry.
+        {"a 12-bit profile 2 key frame", frames::keyFrame(2, 64, 64, {.twelveBit = true})},
+        {"a profile 2 key frame of RGB", frames::keyFrame(2, 64, 64, {.colorSpace = 7})},
+        {"a profile 1 stream", frames::keyFrame(1, 64, 64, {.subsamplingX = 1, .subsamplingY = 0})},
+        {"a profile 3 stream", frames::keyFrame(3, 64, 64, {.subsamplingX = 1, .subsamplingY = 0})},
+        {"a reserved profile", Bytes {0xb8, 0, 0, 0, 0, 0, 0, 0}},
+        {"a real 12-bit profile 2 stream", read("vp9-profile2-12bit.bin")},
+        {"a real 4:4:4 profile 1 stream", read("vp9-profile1-444.bin")},
+        {"a real 4:2:2 profile 1 stream", read("vp9-profile1-422.bin")},
+        {"a real 10-bit 4:4:4 profile 3 stream", read("vp9-profile3-444-10bit.bin")},
+        {"a superframe whose frame is too long", tooLong},
+        {"a superframe that names an empty frame", frames::superframe({real, Bytes {}})},
+        // The sizes a later frame states count as much as the first one's.
+        {"a hidden frame past the range in a superframe", frames::superframe({real, frames::inter(false, 4112, 2304)})},
+        {"an intra-only frame past the range in a superframe",
+            frames::superframe({real, frames::intraOnly(0, 4097, 64)})},
+        {"a key frame past the range after a shown frame", frames::superframe({real, frames::key(8192, 4320)})},
+        {"a profile 2 intra-only frame of 12 bits", frames::intraOnly(2, 64, 64, {.twelveBit = true})},
+        // One packet is one profile: a stream's frames do not change it between them.
+        {"a profile 2 frame after a profile 0 one", frames::superframe({real, frames::keyFrame(2, 64, 64)})},
+        {"a profile 0 frame after a profile 2 one", frames::superframe({real2, real})},
+        {"a profile 0 frame after a hidden profile 2 one", frames::superframe({frames::keyFrame(2, 64, 64), real})},
+        {"a 12-bit profile 2 frame after a profile 0 one",
+            frames::superframe({real, frames::keyFrame(2, 64, 64, {.twelveBit = true})})},
+        {"a 12-bit profile 2 frame after a profile 2 one",
+            frames::superframe({real2, frames::keyFrame(2, 64, 64, {.twelveBit = true})})},
+        {"a profile 1 frame after a profile 2 one",
+            frames::superframe({real2, frames::keyFrame(1, 64, 64, {.subsamplingX = 1, .subsamplingY = 0})})},
+    };
+    {
+        auto refused = common;
+        refused.push_back({"an inter frame of profile 2 on a profile 0 stream", frames::inter(true, 0, 0, 2)});
+        vp9Refusals(refused, real, VideoFormat {128, 96, 8}, "profile 0 stream");
+    }
+    if (has(VideoProfile::vp9Profile2)) {
+        auto refused = common;
+        refused.push_back({"an inter frame of profile 0 on a profile 2 stream", frames::inter(true, 0, 0, 0)});
+        vp9Refusals(refused, real2, VideoFormat {128, 96, 10}, "profile 2 stream");
+    }
     /* A stream that does not begin with a key frame is refused whole; one that
      * does and then continues from frames it never decoded is the hardware's to
      * refuse, which it does with an error the decoder reports until a seek. */
@@ -612,19 +787,20 @@ void vp9Hostile(const std::vector<uml::platform::VideoDecodeCapability>& capabil
  * decoder does with them, it answers with an error of its own or with pictures
  * inside the advertised rectangle, and a seek leaves it able to decode the
  * next key frame. The seed is fixed so a failure repeats. */
-void vp9Mutations(const std::vector<uml::platform::VideoDecodeCapability>& capabilities)
+void vp9Mutations(const std::vector<uml::platform::VideoDecodeCapability>& capabilities,
+                  uml::platform::VideoProfile profile, const char* clipName, bool narrow)
 {
     using namespace uml::platform;
-    if (std::none_of(capabilities.begin(), capabilities.end(),
-                     [](const auto& c) { return c.profile == VideoProfile::vp9Profile0; }))
+    if (std::none_of(capabilities.begin(), capabilities.end(), [profile](const auto& c) { return c.profile == profile; }))
         return;
-    const auto clip = ivfPackets(read("vp9-superframes.ivf"));
+    const auto clip = ivfPackets(read(clipName));
     std::uint32_t state = 0x9e3779b9u;
     const auto next = [&state](std::uint32_t bound) {
         state = state * 1664525u + 1013904223u;
         return (state >> 8) % bound;
     };
     auto decoder = makeVideoDecoder(VideoCodec::vp9);
+    if (narrow) decoder->requestOutputLayout(VideoPixelLayout::planar8Bit);
     unsigned refused = 0, decoded = 0;
     const unsigned rounds = 240;
     for (unsigned round = 0; round < rounds; ++round) {
@@ -663,7 +839,7 @@ void vp9Mutations(const std::vector<uml::platform::VideoDecodeCapability>& capab
     decoder->submit(clip[0], 3);
     decoder->drain();
     require(decoder->takeFrames().size() == 1, "the decoder did not recover from corrupted VP9 packets");
-    std::printf("vp9-mutations: %u packets, %u refused, %u pictures\n", rounds, refused, decoded);
+    std::printf("vp9-mutations (%s): %u packets, %u refused, %u pictures\n", clipName, rounds, refused, decoded);
 }
 }
 
@@ -684,7 +860,7 @@ int main(int argc, char** argv)
         VideoColorimetry colorimetry[16] {};
         const char* names[] = {"h264-baseline", "h264-constrained-baseline", "h264-main",
             "h264-high", "h264-constrained-high", "h264-high10", "hevc-main", "hevc-main10", "jpeg",
-            "vp9-profile0"};
+            "vp9-profile0", "vp9-profile2"};
         for (const auto& cap : capabilities) {
             const char* name = names[unsigned(cap.profile)];
             std::printf("Decoding %s\n", name);
@@ -872,7 +1048,11 @@ int main(int argc, char** argv)
         vp9Limits(capabilities);
         vp9Clip(capabilities);
         vp9Hostile(capabilities);
-        vp9Mutations(capabilities);
+        vp9Mutations(capabilities, VideoProfile::vp9Profile0, "vp9-superframes.ivf", false);
+        vp9Profile2Limits(capabilities);
+        vp9Profile2Clip(capabilities);
+        vp9ProfileSwitch(capabilities);
+        vp9Mutations(capabilities, VideoProfile::vp9Profile2, "vp9-profile2-superframes.ivf", true);
         auto decoder = makeVideoDecoder(capabilities.front().codec);
         bool rejected = false;
         try { decoder->submit({}, 0); } catch (const std::runtime_error&) { rejected = true; }

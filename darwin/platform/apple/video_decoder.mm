@@ -490,19 +490,27 @@ private:
             const auto parsed = vp9::parsePacket(bytes, &fault);
             if (!parsed) throw std::runtime_error(fault);
             const auto limit = decodeSizeLimit(VideoCodec::vp9);
+            /* The hardware decodes Profile 0 (8-bit) and Profile 2 (10-bit),
+             * both 4:2:0. A stream keeps its profile until a key frame, and a
+             * packet is one profile: a frame of another is a stream the
+             * description the session was made from does not describe. */
+            const auto& first = parsed->frames.front();
+            const unsigned profile = first.key ? first.profile : vp9Profile_;
             for (const auto& header : parsed->frames) {
-                if (header.profile != 0) throw std::runtime_error("unsupported VP9 profile");
+                if (header.profile != profile || (profile != 0 && profile != 2) ||
+                    header.bitDepth != (profile == 2 ? 10u : 8u))
+                    throw std::runtime_error("unsupported VP9 profile");
                 if (header.size && (header.size->width > limit.width || header.size->height > limit.height))
                     throw std::runtime_error("video dimensions exceed decoder capabilities");
             }
             // A superframe reaches the decoder whole; its first frame's header
             // is the one that can resize the stream.
-            const auto& first = parsed->frames.front();
             if (first.key) {
                 const VideoFormat next {first.size->width, first.size->height, first.bitDepth};
-                changed = next != format_ || first.colorSpace != vp9ColorSpace_ ||
+                changed = next != format_ || first.profile != vp9Profile_ || first.colorSpace != vp9ColorSpace_ ||
                           first.fullRange != vp9FullRange_;
                 format_ = next;
+                vp9Profile_ = first.profile;
                 vp9ColorSpace_ = first.colorSpace;
                 vp9FullRange_ = first.fullRange;
                 randomAccess = true;
@@ -873,7 +881,7 @@ private:
         } else if (codec_ == VideoCodec::vp9) {
             NSDictionary* extensions = @{
                 (__bridge NSString*)kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms:
-                    @{@"vpcC": vp9Configuration(0, format_.bitDepth, vp9ColorSpace_, vp9FullRange_)},
+                    @{@"vpcC": vp9Configuration(vp9Profile_, format_.bitDepth, vp9ColorSpace_, vp9FullRange_)},
                 (__bridge NSString*)kCMFormatDescriptionExtension_FullRangeVideo: @(vp9FullRange_),
             };
             checked(CMVideoFormatDescriptionCreate(kCFAllocatorDefault, kCMVideoCodecType_VP9,
@@ -999,6 +1007,7 @@ private:
     VideoFormat format_;
     VideoPixelLayout layout_ {VideoPixelLayout::planarYuv};
     VideoPixelLayout sessionLayout_ {VideoPixelLayout::planarYuv};
+    unsigned vp9Profile_ {};
     unsigned vp9ColorSpace_ {};
     bool vp9FullRange_ {};
     // H.264: the stream's parameter sets, the SPS in use, and the order its
@@ -1040,6 +1049,30 @@ private:
 
 } // namespace
 
+/* Whether the hardware decodes VP9 Profile 2. Creating a session says no more
+ * than the codec does, so the probe decodes a 64 x 64 key frame of it and
+ * wants the 10-bit picture back. Done once, and only where VP9 itself is
+ * decoded in hardware. */
+static bool vp9Profile2Available()
+{
+    static const bool available = [] {
+        if (!vp9Available()) return false;
+        static const std::uint8_t keyFrame[] = {
+            0x92, 0x49, 0x83, 0x42, 0x00, 0x01, 0xf8, 0x01, 0xfb, 0x00, 0x1c, 0x12, 0x0e, 0x0c, 0x29,
+            0x00, 0x00, 0x18, 0x60, 0x00, 0x00, 0x69, 0x01, 0x76, 0x4d, 0xda, 0x99, 0xe4, 0x00};
+        try {
+            AppleVideoDecoder decoder(VideoCodec::vp9);
+            decoder.submit(keyFrame, 0);
+            decoder.drain();
+            const auto frames = decoder.takeFrames();
+            return frames.size() == 1 && frames[0].format == VideoFormat {64, 64, 10};
+        } catch (...) {
+            return false;
+        }
+    }();
+    return available;
+}
+
 std::vector<VideoDecodeCapability> videoDecodeCapabilities()
 {
     std::vector<VideoDecodeCapability> result;
@@ -1066,9 +1099,13 @@ std::vector<VideoDecodeCapability> videoDecodeCapabilities()
     if (VTIsHardwareDecodeSupported(kCMVideoCodecType_JPEG))
         result.push_back({VideoCodec::jpeg, VideoProfile::jpegBaseline,
                           decodeSizeLimit(VideoCodec::jpeg).width, decodeSizeLimit(VideoCodec::jpeg).height, 0, 8});
-    if (vp9Available())
-        result.push_back({VideoCodec::vp9, VideoProfile::vp9Profile0,
-                          decodeSizeLimit(VideoCodec::vp9).width, decodeSizeLimit(VideoCodec::vp9).height, 0, 8});
+    if (vp9Available()) {
+        const auto vp9 = decodeSizeLimit(VideoCodec::vp9);
+        result.push_back({VideoCodec::vp9, VideoProfile::vp9Profile0, vp9.width, vp9.height, 0, 8});
+        // 10-bit pictures reach an 8-bit client narrowed, as HEVC Main 10 does.
+        if (vp9Profile2Available())
+            result.push_back({VideoCodec::vp9, VideoProfile::vp9Profile2, vp9.width, vp9.height, 0, 10});
+    }
     return result;
 }
 

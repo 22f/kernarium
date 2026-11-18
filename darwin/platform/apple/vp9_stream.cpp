@@ -92,6 +92,8 @@ std::optional<FrameHeader> parseFrameHeader(Bytes frame)
     const unsigned high = reader.bits(1);
     header.profile = (high << 1) | low;
     if (header.profile == 3 && reader.bits(1) != 0) return std::nullopt;   // profile 4 and above
+    // What the profile implies, until a color_config() states otherwise.
+    header.bitDepth = header.profile >= 2 ? 10 : 8;
     if (reader.bits(1)) {                                                    // show_existing_frame
         reader.bits(3);
         if (!reader.ok()) return std::nullopt;

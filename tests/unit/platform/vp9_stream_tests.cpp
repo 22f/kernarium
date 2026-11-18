@@ -125,6 +125,16 @@ void headerKinds()
         require(two && two->intraOnly && two->bitDepth == 10 && *two->size == FrameSize {320, 200},
                 "an intra-only frame of profile 2 was misread");
     }
+    // A frame that states no colour carries the depth its profile implies, which
+    // is what the decoder checks it against the stream's.
+    {
+        const auto zero = header(test::inter(true, 0, 0, 0));
+        const auto two = header(test::inter(true, 0, 0, 2));
+        const auto existing = header(test::showExisting(2));
+        require(zero && zero->profile == 0 && zero->bitDepth == 8 && two && two->profile == 2 && two->bitDepth == 10 &&
+                    existing && existing->profile == 2 && existing->bitDepth == 10,
+                "the depth a profile implies was misread");
+    }
     // An inter frame states a size only when none of its references supplies it.
     {
         const auto referenced = header(test::inter(true));

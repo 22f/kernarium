@@ -38,8 +38,8 @@ struct FrameHeader {
     bool showFrame {};
     // The bit depth, colour space (CS_* as the header states it) and range of a
     // key frame, or of an intra-only frame of a profile above 0. Other frames
-    // keep what the stream's key frame said, which these leave at the profile 0
-    // default.
+    // keep what the stream's key frame said, which these leave at what the
+    // profile implies: 8 bits for profile 0 and 1, 10 for profile 2 and 3.
     unsigned bitDepth {8};
     unsigned colorSpace {};
     bool fullRange {};

@@ -171,6 +171,7 @@ const char* profileName(uml::platform::VideoProfile profile) noexcept
     case uml::platform::VideoProfile::hevcMain10: return "hevc-main10";
     case uml::platform::VideoProfile::jpegBaseline: return "jpeg-baseline";
     case uml::platform::VideoProfile::vp9Profile0: return "vp9-profile0";
+    case uml::platform::VideoProfile::vp9Profile2: return "vp9-profile2";
     }
     return "unknown";
 }

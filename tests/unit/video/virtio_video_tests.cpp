@@ -248,6 +248,8 @@ struct VideoFixture final {
     }
     VideoFixture(const VideoFixture&) = delete;
     VideoFixture& operator=(const VideoFixture&) = delete;
+    // The coded format createStream() opens the stream with.
+    std::uint32_t codedFormat {VIRTIO_VIDEO_FORMAT_H264};
 
     template<class T> VhostUserQueueResult command(const T& value)
     {
@@ -264,7 +266,7 @@ struct VideoFixture final {
     {
         virtio_video_stream_create create {};
         create.hdr = {VIRTIO_VIDEO_CMD_STREAM_CREATE, stream};
-        create.coded_format = VIRTIO_VIDEO_FORMAT_H264;
+        create.coded_format = codedFormat;
         ok(create, location);
     }
     VhostUserQueueResult attach(unsigned queue, unsigned id, const Planes& planes)
@@ -444,6 +446,48 @@ void h264ProfileControls()
     for (std::size_t i = 0; i < wanted.size(); ++i)
         require(load<std::uint32_t>(bytes.subspan(sizeof(virtio_video_query_control_resp_profile) + 4 * i)) == wanted[i],
                 "an H.264 profile is missing from the wire list");
+}
+
+/* The profile menu a guest driver publishes for VP9 is the list of capabilities
+ * the host decodes: Profile 0, and Profile 2 only where the hardware decodes it.
+ * The stream's current profile is the first of them. */
+void vp9ProfileControls()
+{
+    for (const bool ten : {false, true}) {
+        std::vector<VideoDecodeCapability> capabilities {{VideoCodec::vp9, VideoProfile::vp9Profile0, 4096, 4096, 0, 8}};
+        if (ten) capabilities.push_back({VideoCodec::vp9, VideoProfile::vp9Profile2, 4096, 4096, 0, 10});
+        VirtioVideoDevice device(capabilities, [](auto) { return std::make_unique<Decoder>(false); });
+        std::vector<std::uint8_t> request;
+        append(request, virtio_video_query_control{{VIRTIO_VIDEO_CMD_QUERY_CONTROL, 0}, VIRTIO_VIDEO_CONTROL_PROFILE, {}});
+        append(request, virtio_video_query_control_profile{VIRTIO_VIDEO_FORMAT_VP9, {}});
+        const auto result = device.processQueue(0, 3, request, 256);
+        const auto header = load<virtio_video_cmd_hdr>(result.response);
+        require(header.type == VIRTIO_VIDEO_RESP_OK_QUERY_CONTROL, "the VP9 profile query failed");
+        const auto bytes = std::span(result.response).subspan(sizeof(header));
+        std::vector<std::uint32_t> wanted {VIRTIO_VIDEO_PROFILE_VP9_PROFILE0};
+        if (ten) wanted.push_back(VIRTIO_VIDEO_PROFILE_VP9_PROFILE2);
+        require(load<virtio_video_query_control_resp_profile>(bytes).num == wanted.size(),
+                "the VP9 profile list has the wrong length");
+        for (std::size_t i = 0; i < wanted.size(); ++i)
+            require(load<std::uint32_t>(bytes.subspan(sizeof(virtio_video_query_control_resp_profile) + 4 * i)) == wanted[i],
+                    "a VP9 profile is missing from the wire list");
+        // A stream of it starts at the first profile.
+        virtio_video_stream_create create {};
+        create.hdr = {VIRTIO_VIDEO_CMD_STREAM_CREATE, 1};
+        create.coded_format = VIRTIO_VIDEO_FORMAT_VP9;
+        request.clear();
+        append(request, create);
+        require(load<virtio_video_cmd_hdr>(device.processQueue(0, 4, request, 128).response).type ==
+                VIRTIO_VIDEO_RESP_OK_NODATA, "the VP9 stream was not created");
+        request.clear();
+        append(request, virtio_video_get_control{{VIRTIO_VIDEO_CMD_GET_CONTROL, 1}, VIRTIO_VIDEO_CONTROL_PROFILE, {}});
+        const auto current = device.processQueue(0, 5, request, 128);
+        require(load<virtio_video_cmd_hdr>(current.response).type == VIRTIO_VIDEO_RESP_OK_GET_CONTROL,
+                "the VP9 profile control failed");
+        require(load<virtio_video_control_val_profile>(std::span(current.response).subspan(sizeof(header))).profile ==
+                    VIRTIO_VIDEO_PROFILE_VP9_PROFILE0,
+                "the VP9 stream does not start at Profile 0");
+    }
 }
 
 /* The levels a stream may carry are the ones the capability states. The
@@ -1758,12 +1802,18 @@ void seekKeepsTheFormat()
 /* A 10-bit stream is offered 8-bit planar capture, which Android asks for by
  * default, and still P010. A client that wants P010 from an 8-bit stream is
  * refused: the samples would be a lie. */
-void tenBitStreamToNv12(unsigned format)
+void tenBitStreamToNv12(unsigned format, bool vp9 = false)
 {
-    VideoFixture video(11, 8 * page, [](auto) { return std::make_unique<Decoder>(true); },
-        {{VideoCodec::h264, VideoProfile::h264High10, 4096, 2304, 51, 10}});
+    /* VP9 Profile 2 is advertised beside Profile 0, as the host does, and its
+     * pictures reach the client by the same narrowing as H.264 High 10. */
+    std::vector<VideoDecodeCapability> capabilities = vp9
+        ? std::vector<VideoDecodeCapability> {{VideoCodec::vp9, VideoProfile::vp9Profile0, 4096, 4096, 0, 8},
+                                              {VideoCodec::vp9, VideoProfile::vp9Profile2, 4096, 4096, 0, 10}}
+        : std::vector<VideoDecodeCapability> {{VideoCodec::h264, VideoProfile::h264High10, 4096, 2304, 51, 10}};
+    VideoFixture video(11, 8 * page, [](auto) { return std::make_unique<Decoder>(true); }, std::move(capabilities));
     const auto input = VIRTIO_VIDEO_QUEUE_TYPE_INPUT;
     const auto output = VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT;
+    if (vp9) video.codedFormat = VIRTIO_VIDEO_FORMAT_VP9;
     video.createStream();
     video.setOutputFormat(format);
     video.attachEncodedInput();
@@ -1815,13 +1865,15 @@ void tenBitStreamToNv12(unsigned format)
  * offers its client exactly the formats the bits select. This checks both
  * directions against the lists actually sent, so a raw format added in the
  * middle of the list cannot silently stop being reachable. */
-void capabilityMasks()
+void capabilityMasks(bool vp9Ten)
 {
     std::vector<VideoDecodeCapability> caps {
         {VideoCodec::vp9, VideoProfile::vp9Profile0, 4096, 4096, 0, 8},
         {VideoCodec::hevc, VideoProfile::hevcMain, 8192, 4320, 0, 8},
         {VideoCodec::hevc, VideoProfile::hevcMain10, 8192, 4320, 0, 10},
     };
+    // VP9 Profile 2 is a second capability of the same coded format, 10-bit.
+    if (vp9Ten) caps.push_back({VideoCodec::vp9, VideoProfile::vp9Profile2, 4096, 4096, 0, 10});
     VirtioVideoDevice device(caps, [](auto) { return std::make_unique<Decoder>(false); });
     std::uint64_t next = 1;
     auto formats = [&](std::uint32_t queue) {
@@ -1891,8 +1943,8 @@ void capabilityMasks()
     };
 
     for (const auto& [format, mask] : coded) {
-        // VP9 is 8-bit here, HEVC has both an 8-bit and a 10-bit capability.
-        const auto expected = format == VIRTIO_VIDEO_FORMAT_VP9
+        // VP9 is 8-bit unless Profile 2 is listed; HEVC has both an 8-bit and a 10-bit capability.
+        const auto expected = format == VIRTIO_VIDEO_FORMAT_VP9 && !vp9Ten
             ? sorted({VIRTIO_VIDEO_FORMAT_NV12, VIRTIO_VIDEO_FORMAT_YUV420,
                       VIRTIO_VIDEO_FORMAT_BGRA8888})
             : sorted({VIRTIO_VIDEO_FORMAT_NV12, VIRTIO_VIDEO_FORMAT_YUV420,
@@ -1901,7 +1953,7 @@ void capabilityMasks()
     }
     for (const auto& [format, mask] : raw) {
         const auto expected = format == VIRTIO_VIDEO_FORMAT_P010
-            ? sorted({VIRTIO_VIDEO_FORMAT_HEVC})
+            ? (vp9Ten ? sorted({VIRTIO_VIDEO_FORMAT_VP9, VIRTIO_VIDEO_FORMAT_HEVC}) : sorted({VIRTIO_VIDEO_FORMAT_HEVC}))
             : sorted({VIRTIO_VIDEO_FORMAT_VP9, VIRTIO_VIDEO_FORMAT_HEVC});
         require(selected(coded, mask) == expected, "a capture format names the wrong codecs");
     }
@@ -2177,10 +2229,12 @@ int main()
         eventsWaitForABuffer();
         gapInThePictures();
         h264ProfileControls();
+        vp9ProfileControls();
         codecLevelControls();
         decoderRejectsEncoderCommands();
         vp9Stream();
-        capabilityMasks();
+        capabilityMasks(false);
+        capabilityMasks(true);
         sharedMemoryCapture();
         for (const bool decoderPacks : {true, false})
             packedCapture(decoderPacks);
@@ -2210,7 +2264,7 @@ int main()
         for (const bool markerFirst : {false, true}) changeInsideDrain(markerFirst);
         seekKeepsTheFormat();
         for (const auto format : {VIRTIO_VIDEO_FORMAT_NV12, VIRTIO_VIDEO_FORMAT_P010})
-            tenBitStreamToNv12(format);
+            for (const bool vp9 : {false, true}) tenBitStreamToNv12(format, vp9);
         provisionalCaptureFormat(false);
         provisionalCaptureFormat(true);
         provisionalCaptureBuffers(false);

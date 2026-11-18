@@ -11,7 +11,7 @@ namespace uml::platform {
 enum class VideoCodec { h264, hevc, jpeg, vp9 };
 enum class VideoProfile {
     h264Baseline, h264ConstrainedBaseline, h264Main, h264High, h264ConstrainedHigh,
-    h264High10, hevcMain, hevcMain10, jpegBaseline, vp9Profile0,
+    h264High10, hevcMain, hevcMain10, jpegBaseline, vp9Profile0, vp9Profile2,
 };
 
 // maximumLevel is the highest level the hardware decodes, as the stream states
