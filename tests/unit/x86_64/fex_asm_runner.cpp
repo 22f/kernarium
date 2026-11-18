@@ -1965,10 +1965,17 @@ struct RetirementCase final {
 		state.x87_status = MaskedValue{mask, value};
 		return state;
 	};
+	const auto mxcsr_is = [](std::uint64_t mask, std::uint64_t value) {
+		StopState state;
+		state.mxcsr = MaskedValue{mask, value};
+		return state;
+	};
 	/* The x87 status word's exception flags, summary and C1, which a
 	 * conversion or a stack underflow sets; TOP and the other condition codes
 	 * are not the instruction's to change before its store. */
 	constexpr std::uint64_t x87_flags = 0x02ff;
+	/* MXCSR's six exception flags. */
+	constexpr std::uint64_t mxcsr_flags = 0x3f;
 	/* The JIT reports flags, status bits and MXCSR flags that the faulting
 	 * instruction has already changed. */
 	constexpr std::string_view fault_state_gap = "fault-flags";
@@ -2047,6 +2054,22 @@ struct RetirementCase final {
 			0x20, 0xdf, 0x33, 0xf4}, {{data, data + 0x2000}}, "memory_fault",
 			2, code_address + 7, {}, long64, {},
 			{{data + 0x1000, data + 0x2000}}, x87_status_is(x87_flags, 0),
+			fault_state_gap},
+		/* mov $data+0x1000, %ebx; mov $0x3dcccccd, %eax; vmovd %eax, %xmm0;
+		 * vcvtps2ph $0, %xmm0, (%rbx), into a read-only page; hlt: the
+		 * narrowing is inexact, and its precision flag is not raised. */
+		{"vcvtps2ph-store-fault-mxcsr", {0xbb, 0x00, 0x10, 0x00, 0x20, 0xb8,
+			0xcd, 0xcc, 0xcc, 0x3d, 0xc5, 0xf9, 0x6e, 0xc0, 0xc4, 0xe3, 0x79,
+			0x1d, 0x03, 0x00, 0xf4}, {{data, data + 0x2000}}, "memory_fault",
+			3, code_address + 14, {}, long64, {},
+			{{data + 0x1000, data + 0x2000}}, mxcsr_is(mxcsr_flags, 0),
+			fault_state_gap},
+		/* The same with the 8-byte store across the page boundary. */
+		{"vcvtps2ph-cross-store-fault-mxcsr", {0xbb, 0xfc, 0x0f, 0x00, 0x20,
+			0xb8, 0xcd, 0xcc, 0xcc, 0x3d, 0xc5, 0xf9, 0x6e, 0xc0, 0xc4, 0xe3,
+			0x79, 0x1d, 0x03, 0x00, 0xf4}, {{data, data + 0x2000}},
+			"memory_fault", 3, code_address + 14, {}, long64, {},
+			{{data + 0x1000, data + 0x2000}}, mxcsr_is(mxcsr_flags, 0),
 			fault_state_gap},
 		/* nop; xor %ecx, %ecx; xor %edx, %edx; div %ecx; nop; hlt */
 		{"divide-error", {0x90, 0x31, 0xc9, 0x31, 0xd2, 0xf7, 0xf1, 0x90,
