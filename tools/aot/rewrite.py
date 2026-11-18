@@ -77,6 +77,9 @@ ABSOLUTE = 0x100
 
 PAGE = 4096
 ENTRY_MAGIC = b"UMLAOTB2"
+# A function this long or longer makes the page that holds its end a row of
+# branches in the 16-bit entry table (Library.entry16_wide_pages).
+WIDE16_FUNCTION = 32768
 # The magic of a blob whose entry tables are 16-bit (--entry-table16).
 ENTRY_MAGIC16 = b"UMLAOT16"
 # The version of the layout the magic names (see the runtime's blob_version).
@@ -566,6 +569,21 @@ class Library:
             asm.word(A.movk(T0, chunk, 1))
             asm.b(routine)
         self.tag("stub.xc", before)
+        before = len(asm._w)
+        self.wide16 = self.entry16_wide_pages() if self.entry16 else ()
+        have = set(self.entry_labels)
+        for page in self.wide16:
+            # One `b` per word of the page, to the word's native code: the
+            # page's 16-bit entries index it (see fill_entry16).
+            asm.label(f"TR{page:x}")
+            for word in range(page * 1024, (page + 1) * 1024):
+                offset = self.table_base + 4 * word
+                if offset in have:
+                    asm.b(self.lab("G" if offset in self.charge else "E",
+                                   offset))
+                else:
+                    asm.word(0)
+        self.tag("table", before)
         asm.label("TAB")
         before = len(asm._w)
         asm.data(bytes(self.table_region_bytes()))
@@ -591,7 +609,9 @@ class Library:
             self.lab("G" if offset in self.charge else "E", offset))
             for offset in self.entry_labels}
         if self.entry16:
-            self.fill_entry16(unit, table_at, entries)
+            self.fill_entry16(unit, table_at, entries, {
+                page: asm.label_address(f"TR{page:x}")
+                for page in self.wide16})
         else:
             view = memoryview(unit)[table_at:table_at + 4 * self.table_words
                                     ].cast("I")
@@ -612,7 +632,20 @@ class Library:
     # relative to that array: a word's entry is the anchor of its page plus
     # four bytes for each unit of its 16 bits, and 0 still means none. The
     # anchor is the page's lowest entry less one word, so the page's entries
-    # must lie within 256 KiB of code.
+    # must lie within 256 KiB of code. A function's out-of-line stubs follow
+    # it, so a page that holds the end of a function of WIDE16_FUNCTION bytes
+    # or more (and the start of the next) can be wider than that: it gets a
+    # row of 1024 branches instead, one to each word's native code, and its
+    # entries index the row.
+
+    def entry16_wide_pages(self) -> tuple[int, ...]:
+        """The pages whose entries are reached through a row of branches."""
+        pages = set()
+        for function in self.functions:
+            if function.end - function.start >= WIDE16_FUNCTION and \
+                    function.end % PAGE:
+                pages.add((function.end - 4 - self.table_base) // PAGE)
+        return tuple(sorted(pages))
 
     def table_len16(self) -> int:
         return (2 * self.table_words + PAGE - 1) & ~(PAGE - 1)
@@ -623,7 +656,9 @@ class Library:
         return self.table_len16() + 4 * ((self.table_words + 1023) // 1024)
 
     def fill_entry16(self, unit: bytearray, table_at: int,
-                     entries: dict[int, int]) -> None:
+                     entries: dict[int, int],
+                     rows: dict[int, int] | None = None) -> None:
+        rows = rows or {}
         pb_at = table_at + self.table_len16()
         pages: dict[int, list[tuple[int, int]]] = collections.defaultdict(
             list)
@@ -631,6 +666,13 @@ class Library:
             word = (offset - self.table_base) // 4
             pages[word // 1024].append((word, address))
         for page, items in pages.items():
+            if page in rows:
+                struct.pack_into("<i", unit, pb_at + 4 * page,
+                                 rows[page] - 4 - pb_at)
+                for word, _ in items:
+                    struct.pack_into("<H", unit, table_at + 2 * word,
+                                     word % 1024 + 1)
+                continue
             anchor = min(address for _, address in items) - 4
             if max(address for _, address in items) - anchor > 4 * 65535:
                 raise RuntimeError(

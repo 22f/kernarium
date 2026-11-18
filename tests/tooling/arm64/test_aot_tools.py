@@ -1283,6 +1283,45 @@ class EntryTable16Tests(unittest.TestCase):
                 [self.unit(entry16)], self.layout, "entry16-row", False)
             self.assertEqual(blob[:8], magic)
 
+    def test_a_page_that_holds_a_long_function_s_end_is_a_row_of_branches(
+            self) -> None:
+        # A function of WIDE16_FUNCTION bytes and a short one behind it in
+        # the same page: the first one's out-of-line stubs lie between their
+        # entries, so the page's entries go through a row of branches.
+        n = rewrite.WIDE16_FUNCTION // 4 + 5
+        words = [NOP] * (n - 1) + [RET, NOP, RET]
+        functions = [(0, 4 * n), (4 * n, 4 * n + 8)]
+        digests = [1] * ((4 * len(words) + 4095) // 4096)
+        wide = library_of(words, functions, entry16=True)
+        built = wide.build(digests)
+        page = (4 * n - 4) // 4096
+        self.assertEqual(wide.wide16, (page,))
+        unit = {"unit": built["unit"], "table_at": built["table_at"],
+                "table_words": wide.table_words}
+        found = self.entries16(unit)
+        narrow = library_of(words, functions)
+        plain = narrow.build(digests)
+        self.assertEqual(sorted(found), sorted(self.entries32(
+            {"unit": plain["unit"], "table_at": plain["table_at"],
+             "table_words": narrow.table_words})))
+        row_start = built["table_at"] - 4096
+        final = {}
+        for word, address in found.items():
+            if address >= row_start:
+                (value,) = struct.unpack_from("<I", built["unit"], address)
+                self.assertEqual(value >> 26, 0b000101)
+                delta = value & 0x3ffffff
+                delta -= (1 << 26) if delta >> 25 else 0
+                address += 4 * delta
+            self.assertLess(address, row_start)
+            self.assertEqual(address % 4, 0)
+            final[word] = address
+        # The words are in address order, so their native code is too.
+        ordered = [final[word] for word in sorted(final)]
+        self.assertEqual(ordered, sorted(ordered))
+        self.assertEqual(wide.stats.census["other"], 0)
+        self.assertEqual(sum(wide.stats.census.values()), len(built["unit"]))
+
     def test_a_page_whose_entries_are_too_far_apart_is_refused(self) -> None:
         library = library_of([NOP, RET], [(0, 8)], entry16=True)
         unit = bytearray(1 << 20)
