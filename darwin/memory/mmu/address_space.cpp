@@ -1147,7 +1147,10 @@ public:
 	}
 
 	/* A kernel write (`kernel_write`) publishes a code change only when
-	 * kernel_code_write_publishes() says x86 code may hold the page. */
+	 * kernel_code_write_publishes() says x86 code may hold the page. The
+	 * plain copy publishes only the range of its own mapping, so it is not
+	 * for a runtime client's write to a code page that another mapping of
+	 * the frame may hold. */
 	int copy_from_buffer(std::uint64_t address, const void *buffer,
 			     std::uint64_t length, bool kernel_write)
 	{
