@@ -6,7 +6,9 @@ Each case builds a synthetic Git repository that holds the files the check
 reads (the input list, the descriptors, the kernel metadata and fragments), a
 staged system and a built application with a runtime framework whose Mach-O
 carries a kernel banner and configuration, then changes one thing and runs the
-script on it.
+script on it. An unsigned proof image, which a developer build may embed, is
+refused in the staged and the packaged system, and the Xcode build phase that
+runs the check does so for the AppStore and TestFlight configurations only.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import gzip
 import importlib.util
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -159,7 +162,18 @@ class Fixture:
 
     def manifest(self, release_id: str = RELEASE_ID, trees=None) -> dict:
         trees = self.trees if trees is None else trees
-        return {"release_id": release_id, "outer": {"revision": "c" * 40, "dirty": False, "input_trees": trees}}
+        return {
+            "acceptance": "accepted", "release_id": release_id,
+            "outer": {"revision": "c" * 40, "dirty": False, "input_trees": trees},
+        }
+
+    def proof_manifest(self, release_id: str = "unsigned-proof-ff1") -> dict:
+        """What Andarium/scripts/stage-system-image.py --unsigned-proof stages."""
+        return {
+            "acceptance": "unsigned-proof", "release_id": release_id,
+            "android": {"build_number": 29, "signed": False},
+            "outer": {"revision": "c" * 40, "dirty": False},
+        }
 
     def stage(self, release_id: str = RELEASE_ID, trees=None) -> Path:
         staged = self.repo / ".build/andarium-system"
@@ -275,6 +289,47 @@ class CheckTests(unittest.TestCase):
         self.fixture.stage()
         self.fixture.stage(trees={**self.fixture.trees, "android/lineage-24/overlay": "d" * 40})
         self.fails(self.fixture.run(app=False), "input trees that differ")
+
+    def test_a_staged_unsigned_proof_fails_by_name_and_no_decision_covers_it(self) -> None:
+        # The proof's own release ID, and the accepted one with the accepted
+        # input trees (a proof that took everything but its acceptance).
+        for release_id in ("unsigned-proof-ff1", RELEASE_ID):
+            with self.subTest(release_id):
+                staged = self.fixture.stage()
+                manifest = self.fixture.proof_manifest(release_id)
+                if release_id == RELEASE_ID:
+                    manifest["outer"]["input_trees"] = self.fixture.trees
+                (staged / "release-manifest.json").write_text(json.dumps(manifest))
+                for decision in (None, RELEASE_ID, f"{release_id},{KERNEL_ID}"):
+                    for app in (False, True):
+                        if app:
+                            self.fixture.app = self.fixture.package()
+                        result = self.fixture.run(app=app, decision=decision)
+                        self.fails(result, "the staged system", "an unsigned proof image",
+                                   "without --unsigned-proof")
+        # Staging the accepted release again passes.
+        self.fixture.stage()
+        self.fixture.app = self.fixture.package()
+        self.passes(self.fixture.run())
+
+    def test_a_packaged_unsigned_proof_fails_though_the_staged_system_is_accepted(self) -> None:
+        (self.fixture.app / "andarium-system/release-manifest.json").write_text(
+            json.dumps(self.fixture.proof_manifest()))
+        result = self.fixture.run(decision=RELEASE_ID)
+        self.fails(result, "the packaged system", "an unsigned proof image")
+        self.assertNotIn("the staged system", result.stderr)
+
+    def test_a_manifest_that_is_not_marked_accepted_fails(self) -> None:
+        for acceptance in ("candidate", None):
+            with self.subTest(acceptance):
+                manifest = self.fixture.manifest()
+                if acceptance is None:
+                    del manifest["acceptance"]
+                else:
+                    manifest["acceptance"] = acceptance
+                (self.repo / ".build/andarium-system/release-manifest.json").write_text(json.dumps(manifest))
+                self.fails(self.fixture.run(app=False, decision=RELEASE_ID),
+                           "not an accepted release", f"acceptance {acceptance!r}")
 
     def test_a_missing_staged_system_fails(self) -> None:
         shutil.rmtree(self.repo / ".build/andarium-system")
@@ -473,6 +528,84 @@ class ConfigParityTests(unittest.TestCase):
                     capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL)
                 problems = checker.config_mismatches(root, {"fragments": names}, config)
                 self.assertEqual(shell.returncode == 0, not problems, (shell.stderr, problems))
+
+
+PROJECT = REPOSITORY / "Andarium/Andarium.xcodeproj/project.xcproj"
+
+
+def build_phase(name: str) -> dict:
+    """The named script phase of the Andarium project (the format is JSON with trailing commas)."""
+    project = json.loads(re.sub(r",(\s*[}\]])", r"\1", PROJECT.read_text(encoding="utf-8")))
+    found = []
+
+    def walk(value) -> None:
+        if isinstance(value, dict):
+            if value.get("kind") == "script" and value.get("name") == name:
+                found.append(value)
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(project)
+    if len(found) != 1:
+        raise AssertionError(f"expected one build phase named {name}, found {len(found)}")
+    return found[0]
+
+
+class BuildPhaseTests(unittest.TestCase):
+    """The AppStore and TestFlight configurations run the check; the others do not."""
+
+    CONFIGURATIONS = ("Debug", "Release", "AppStore", "TestFlight")
+
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        script = build_phase("Check embedded artifacts")["script"]
+        self.script = script if isinstance(script, str) else "\n".join(script)
+
+    def run_phase(self, configuration: str, fixture: Fixture):
+        # The phase's own text, with the checker named by path and the
+        # repository the fixture's, as an archive's work tree is.
+        command = self.script.replace(
+            '"$SRCROOT/../scripts/check-embedded-artifacts.py"',
+            f'"{SCRIPT}" --repository "{fixture.repo}"')
+        self.assertIn(str(SCRIPT), command)
+        environment = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "CONFIGURATION": configuration,
+            "SRCROOT": str(REPOSITORY / "Andarium"), "TARGET_BUILD_DIR": str(fixture.app.parent),
+            "WRAPPER_NAME": fixture.app.name,
+        }
+        return subprocess.run(
+            ["/bin/sh", "-c", command], env=environment, check=False, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=120)
+
+    def test_the_phase_checks_the_app_for_the_accepted_release_and_kernel(self) -> None:
+        self.assertIn("--app", self.script)
+        self.assertIn("--android-release", self.script)
+        self.assertIn("--kernel android", self.script)
+
+    def test_a_staged_unsigned_proof_stops_an_appstore_and_a_testflight_build_only(self) -> None:
+        fixture = Fixture(self.root)
+        staged = fixture.stage()
+        (staged / "release-manifest.json").write_text(json.dumps(fixture.proof_manifest()))
+        fixture.app = fixture.package()
+        for configuration in self.CONFIGURATIONS:
+            with self.subTest(configuration):
+                result = self.run_phase(configuration, fixture)
+                if configuration in ("AppStore", "TestFlight"):
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("an unsigned proof image", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stderr, "")
+
+    def test_the_accepted_release_passes_the_phase_in_every_configuration(self) -> None:
+        fixture = Fixture(self.root)
+        for configuration in self.CONFIGURATIONS:
+            with self.subTest(configuration):
+                result = self.run_phase(configuration, fixture)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

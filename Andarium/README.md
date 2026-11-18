@@ -239,8 +239,8 @@ block.
   a packaged kernel whose Linux banner names a build user or host other than
   the neutral `kernarium@kernarium`. A release that records no input trees, a
   dirty input, or a staged or packaged artifact that is not the accepted one
-  stops the build; only the user decides to ship pending changes, by naming the
-  release ID in `PENDING_INPUTS_DECISION`.
+  (an unsigned proof image included) stops the build; only the user decides to
+  ship pending changes, by naming the release ID in `PENDING_INPUTS_DECISION`.
 - Its last build phase runs `scripts/check-app-store-bundle.py`, which fails the
   build on a missing Info.plist key, an environment knob, a symbol or log text
   of the debugging and automation support, the JIT (its symbols and text and

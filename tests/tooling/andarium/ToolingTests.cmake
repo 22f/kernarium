@@ -122,6 +122,8 @@ uml_add_tooling_test(
 # The release build refuses an embedded artifact that is behind the commit it
 # archives; the fixtures build a repository, a staged system and an application
 # with a kernel carrying a banner and a configuration, and change one thing each.
+# An unsigned proof image, in the staged or the packaged system, stops the
+# AppStore and TestFlight build phase and no other configuration's.
 uml_add_tooling_test(
     NAME andarium-embedded-artifacts
     COMMAND ${Python3_EXECUTABLE} -B

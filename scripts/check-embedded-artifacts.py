@@ -11,7 +11,10 @@ what is staged and packaged; it reads no kernel checkout and runs no build.
 Android release (--android-release):
   - the staged system (.build/andarium-system) and, with --app, the packaged
     one are the release android/lineage-24/metadata/accepted-release.env
-    selects, and the packaged system disk matches its partition layout;
+    selects, and the packaged system disk matches its partition layout. A
+    manifest that is not marked accepted fails, an unsigned proof image
+    (Andarium/scripts/stage-system-image.py --unsigned-proof, for developer
+    builds) by name, whatever release ID it carries;
   - the Git object ID of every input path of the release
     (android/lineage-24/support/release/input-paths.tsv) equals the one the
     descriptor records. A changed input fails, naming the path and the commits
@@ -69,6 +72,7 @@ import release_inputs  # noqa: E402
 DECISION_ENV = "PENDING_INPUTS_DECISION"
 ANDROID_DESCRIPTOR = "android/lineage-24/metadata/accepted-release.env"
 INPUT_TREES_KEY = "LINEAGE24_ACCEPTED_INPUT_TREES"
+UNSIGNED_PROOF = "unsigned-proof"
 STAGED_SYSTEM = ".build/andarium-system"
 PACKAGED_SYSTEM = "andarium-system"
 MANIFEST = "release-manifest.json"
@@ -282,6 +286,22 @@ def check_staged_system(report, release_id, descriptor, system, label):
     except ValueError as error:
         report.error(f"{label} has an unreadable manifest", str(error))
         return None
+    acceptance = manifest.get("acceptance")
+    if acceptance != "accepted":
+        # An accepted release's manifest says so; the proof image of a
+        # developer build says it is a proof. Neither the release ID nor any
+        # other field a proof shares with the release can stand in for it.
+        what = (
+            "an unsigned proof image, which only a developer build embeds"
+            if acceptance == UNSIGNED_PROOF
+            else f"not an accepted release (acceptance {acceptance!r})"
+        )
+        report.error(
+            f"{label} is {what}",
+            f"{system}: stage the accepted release with Andarium/scripts/stage-system-image.py, "
+            "without --unsigned-proof",
+        )
+        return manifest
     if manifest.get("release_id") != release_id:
         report.error(
             f"{label} is release {manifest.get('release_id')}, not the accepted {release_id}",
