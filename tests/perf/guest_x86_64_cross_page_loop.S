@@ -4,7 +4,8 @@
  * eight 64-bit loads an iteration, each starting one to seven bytes below the
  * boundary, and eight stores of what four of them read back to the same
  * crossing addresses, so every access takes the engine's crossing path. The
- * stores keep the bytes as the fill left them, which the final loads check.
+ * stores keep the bytes as the data section holds them, which the final loads
+ * check.
  */
 
 #include "x86_64_probe_harness.inc"
@@ -15,13 +16,6 @@
 
 	probe_start
 	lea	rbx, [rip + .Lpages + 4096]
-	xor	eax, eax
-.Lfill:
-	lea	ecx, [rax + 1]
-	mov	byte ptr [rbx + rax - 8], cl
-	add	eax, 1
-	cmp	eax, 16
-	jb	.Lfill
 
 	mov	r8d, BENCH_ITERATIONS
 .Lloop:
@@ -62,9 +56,11 @@
 
 	probe_end
 
-	.bss
+	.data
 	.p2align 12
 .Lpages:
-	.space	8192
+	.space	4096 - 8
+	.byte	1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+	.space	4096 - 8
 
 	.section .note.GNU-stack, "", @progbits
