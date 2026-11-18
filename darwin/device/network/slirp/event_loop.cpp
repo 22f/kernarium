@@ -237,12 +237,16 @@ void SlirpProvider::check_address_reset() noexcept
 			address_reset_hold_.clear();
 		}
 		/* The table is read at a report and when its hold ends, never in
-		 * between; a failed read leaves the last one standing. */
+		 * between. A failed read leaves a running hold the sample it
+		 * started with; a hold that starts now has none, and a table of
+		 * an earlier hold is not its first sample. */
 		bool changed = false;
 		if (auto table = read_address_table()) {
 			changed = !address_reset_table_ ||
 				*table != *address_reset_table_;
 			address_reset_table_ = std::move(table);
+		} else if (!address_reset_hold_.pending()) {
+			address_reset_table_.reset();
 		}
 		address_reset_hold_.reported(path_state_.carried(), changed,
 					     host_clock_now());

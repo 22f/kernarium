@@ -189,10 +189,10 @@ patches provide the behaviors the `slirp-network-*` tests check.
 - When the path monitor reports that an interface carries the path and the
   host no longer has the address a guest TCP connection's host socket is bound
   to (Wi-Fi gone, the path on cellular), the guest gets a reset on exactly
-  those connections once the address has been gone for 8 s with an interface
-  carrying the path throughout; otherwise a connection the guest writes on
-  hangs until the host stack gives up, and one only the peer writes on never
-  ends. An outage no interface carries resets nothing and starts the 8 s over
+  those connections once an interface has carried the path for 8 s and the
+  address was missing at both ends of that time; otherwise a connection the
+  guest writes on hangs until the host stack gives up, and one only the peer
+  writes on never ends. An outage no interface carries resets nothing and starts the 8 s over
   once the path is back; an address first found missing when they end gets 8 s
   of its own. An address that returns, host forwards, UDP, DNS and ICMP are
   left alone, and the hold of a pending report is the only timer

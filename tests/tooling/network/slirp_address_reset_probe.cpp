@@ -361,6 +361,10 @@ public:
 					std::lock_guard guard{lock_};
 					action = std::move(on_read_);
 					on_read_ = nullptr;
+					if (fail_next_read_) {
+						fail_next_read_ = false;
+						return std::nullopt;
+					}
 					if (next_read_) {
 						table = std::move(next_read_);
 						next_read_.reset();
@@ -394,6 +398,14 @@ public:
 	{
 		std::lock_guard guard{lock_};
 		on_read_ = std::move(action);
+	}
+
+	/* The next read of the host's addresses fails, as a system that cannot
+	 * list them does. */
+	void fail_next_read()
+	{
+		std::lock_guard guard{lock_};
+		fail_next_read_ = true;
 	}
 
 	/* The next read of the host's addresses returns `table`, moved out. */
@@ -680,6 +692,7 @@ private:
 	std::vector<std::uint32_t> addresses_;
 	std::function<void()> on_read_;
 	std::optional<HostAddresses> next_read_;
+	bool fail_next_read_{};
 	std::map<std::string, Address> bound_;
 	std::vector<std::pair<std::uint16_t, std::uint16_t>> datagrams_;
 	std::uint16_t next_port_{40000};
@@ -970,6 +983,41 @@ void an_address_that_goes_missing_at_the_end_of_the_hold_gets_a_hold_of_its_own(
 	      "the address's own hold did not end once");
 }
 
+void a_failed_read_at_the_start_of_a_hold_leaves_it_no_first_sample()
+{
+	/* The sample an outage's report read lacks the lost address, the address
+	 * returns, and the read at the report that brings the path back fails:
+	 * the hold that starts has no first sample, and the outage's is not its
+	 * own. The address goes again, with no report, 50 ms before the hold
+	 * ends. */
+	const char *scenario = "failed read at the start of the hold";
+	Rig rig;
+	Pair pair;
+	if (!make_pair(scenario, rig, pair))
+		return;
+	rig.set_addresses({kept_address});
+	rig.report_outage();
+	rig.set_addresses({lost_address, kept_address});
+	rig.fail_next_read();
+	rig.report_carried();
+	rig.advance(std::chrono::milliseconds{7950});
+	rig.set_addresses({kept_address});
+	rig.advance(std::chrono::milliseconds{100});
+	check(scenario, no_reset_among(rig.watch(quiet_ms)),
+	      "an address missing for 50 ms was reset on the strength of an "
+	      "older hold's sample");
+	check(scenario, rig.provider.address_reset_calls_for_testing() == 0,
+	      "libslirp was asked with no first sample");
+	rig.advance(std::chrono::milliseconds{7800});
+	check(scenario, no_reset_among(rig.watch(quiet_ms)),
+	      "the address was reset before it had been gone for a hold");
+	rig.advance(std::chrono::milliseconds{300});
+	check(scenario, rig.reset_of(*pair.lost, prompt_ms).has_value(),
+	      "an address gone for a whole hold was not reset");
+	check(scenario, rig.provider.address_reset_calls_for_testing() == 1,
+	      "the address's own hold did not end once");
+}
+
 /* Waits for the event loop to finish a pass, then lets half a second go by:
  * the next periodic pass is half a second away. */
 void off_the_beat_of_the_loop(Rig &rig)
@@ -1019,6 +1067,10 @@ void the_loop_needs_no_wake_but_the_reports_and_the_deadline()
 	bool ended_on_time = false;
 	for (int attempt = 0; attempt < 2 && !ended_on_time; ++attempt) {
 		const auto asked = rig.provider.address_reset_calls_for_testing();
+		/* The hold ends no sooner than a hold after this reading of the
+		 * clock, which the report follows: a test thread that is late
+		 * later on cannot make the end look early. */
+		const auto published = Clock::now();
 		state.report(true, true);
 		rig.settle_reports();
 		const auto started = Clock::now();
@@ -1029,11 +1081,12 @@ void the_loop_needs_no_wake_but_the_reports_and_the_deadline()
 		while (rig.provider.address_reset_calls_for_testing() == asked &&
 		       Clock::now() < limit)
 			std::this_thread::sleep_for(std::chrono::milliseconds{2});
-		const auto late = Clock::now() - (started + hold);
+		const auto seen = Clock::now();
+		const auto late = seen - (started + hold);
 		check(scenario,
 		      rig.provider.address_reset_calls_for_testing() > asked,
 		      "the end of the hold was never looked at");
-		check(scenario, late > std::chrono::milliseconds{-100},
+		check(scenario, seen >= published + hold,
 		      "the hold ended before its time");
 		ended_on_time = late < std::chrono::milliseconds{300};
 	}
@@ -1350,6 +1403,7 @@ int main()
 	an_outage_between_two_passes_starts_the_hold_again();
 	an_outage_during_the_read_that_ends_the_hold_resets_nothing();
 	an_address_that_goes_missing_at_the_end_of_the_hold_gets_a_hold_of_its_own();
+	a_failed_read_at_the_start_of_a_hold_leaves_it_no_first_sample();
 	the_loop_needs_no_wake_but_the_reports_and_the_deadline();
 	the_table_read_at_the_end_of_the_hold_is_kept_without_allocating();
 	a_hold_does_not_outlive_its_instance();
