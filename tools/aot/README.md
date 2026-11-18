@@ -33,11 +33,18 @@ framework is generated and never committed.
 Boot code: every `boot*.oat` of the release that has an executable segment is
 translated whole, with no profile (an OAT file with no compiled method has no
 code and is listed in the manifest's `skipped`). A `--library` path may end in
-a pattern, which names every file it matches in name order. The OAT files of
+a pattern, which names every file it matches in name order. A match that is a link
+is followed inside the image as the guest would follow it, and one that leaves
+the image is listed in `skipped`. The OAT files of
 one boot image are mapped next to each other and call each other by direct
 branches, so a branch from a later file into an earlier one reaches below the
 library's own first byte: its target is formed as a full address and leaves by
 the absolute branch exit.
+
+One path names one distinct file. A unit binds by the content of its pages,
+so it serves every identical copy that another APEX or partition ships; the
+build refuses a path listed twice, and two paths whose files are the same
+bytes.
 
 Tools: the build needs a Python 3 and an `fsck.erofs` that decodes
 Zstandard (`UML_AOT_FSCK_EROFS`), as the Android build produces; the

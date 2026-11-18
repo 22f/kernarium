@@ -56,6 +56,23 @@ set(UML_AOT_LIBRARIES
     "/system/lib64/libandroid_runtime.so"
     "/system/lib64/libsqlite.so"
     "/system/lib64/libft2.so"
+    # One path per distinct file: a unit binds by the content of its pages, so
+    # it serves every identical copy another APEX ships too.
+    "/apex/com.android.media.swcodec/lib64/libcodec2_soft_av1dec_gav1.so"
+    "/apex/com.android.conscrypt/lib64/libcrypto.so"
+    "/apex/com.android.media.swcodec/lib64/libFraunhoferAAC.so"
+    "/apex/com.android.art/bin/dex2oat64"
+    "/vendor/lib64/hw/vulkan.virtio.so"
+    "/apex/com.android.media.swcodec/lib64/libcodec2_soft_av1dec_dav1d.so"
+    "/apex/com.android.media.swcodec/lib64/libopus.so"
+    "/apex/com.android.conscrypt/lib64/libssl.so"
+    "/apex/com.android.art/lib64/liblzma.so"
+    "/system/lib64/liblzma.so"
+    "/apex/com.android.conscrypt/lib64/libjavacrypto.so"
+    "/apex/com.android.art/lib64/liblz4.so"
+    "/system/lib64/liblz4.so"
+    "/apex/com.android.media.swcodec/lib64/libvpx.so"
+    "/apex/com.android.media.swcodec/lib64/libcodec2_soft_avcdec.so"
     CACHE STRING
     "Libraries of the release to rewrite, as absolute guest paths")
 # The boot image's compiled Java: every OAT file of the release that holds
