@@ -181,7 +181,8 @@ patches provide the behaviors the `slirp-network-*` tests check.
   the application to a local-network router, which needs the Local Network
   permission, and the guest follows the device's own resolver configuration.
   The wire rules are `network-dns-rules`. While the host has no network path
-  (the platform's path monitor, which the provider runs from open to stop), a
+  (the platform's path monitor, which the provider makes at its first open and
+  keeps for its life), a
   name the system cannot find is answered SERVFAIL, which a guest retries, and
   counted as failed; answers that carry a record of the asked type stand, and
   the next report of a path ends it (`slirp-network-dns`, `platform-host-network-path`).

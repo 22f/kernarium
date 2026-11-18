@@ -272,7 +272,7 @@ public:
 	 * The product starts the system's monitor at open(); the test build does
 	 * not unless asked, so a machine with no network behaves as one with
 	 * (the probes need none), and a test sets the state itself. Applies to
-	 * the next open(). */
+	 * the next open(), which drops a monitor that is no longer asked for. */
 	void set_path_monitor_for_testing(bool enabled) noexcept
 	{
 		path_monitor_for_testing_ = enabled;
@@ -281,6 +281,13 @@ public:
 	path_state_for_testing() noexcept
 	{
 		return path_state_;
+	}
+	/* Monitors this provider has made: one for its life, however often it is
+	 * stopped and opened. */
+	[[nodiscard]] std::uint64_t path_monitors_made_for_testing() const noexcept
+	{
+		return path_monitors_made_for_testing_.load(
+			std::memory_order_relaxed);
 	}
 	[[nodiscard]] HostResolver &resolver_for_testing() noexcept
 	{
@@ -374,10 +381,10 @@ private:
 	NetworkCounters counters_;
 	TrafficObserver observer_{counters_};
 	/* The host's network path: the monitor writes it from the system's
-	 * thread and the resolver reads it when it answers. The monitor lives
-	 * from open() to stop(), and the state, which outlives both, is usable
-	 * again when the provider stops: a reopen starts without an outage until
-	 * its own monitor reports one. */
+	 * thread and the resolver reads it when it answers. The first open()
+	 * makes the monitor, which then lives as long as the provider and keeps
+	 * the state current across a stop and reopen; the state outlives it. With
+	 * no monitor the state is usable again when the provider stops. */
 	uml::platform::HostNetworkPathState path_state_;
 	std::unique_ptr<uml::platform::HostNetworkPathMonitor> path_monitor_;
 	HostResolver resolver_;
@@ -407,6 +414,7 @@ private:
 	std::uint32_t dns_interface_for_testing_{};
 	bool dns_streams_unavailable_for_testing_{};
 	bool path_monitor_for_testing_{};
+	std::atomic_uint64_t path_monitors_made_for_testing_{};
 	bool write_pause_requested_for_testing_{};
 	bool write_pause_reached_for_testing_{};
 	bool release_write_for_testing_{};

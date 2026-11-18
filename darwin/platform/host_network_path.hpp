@@ -46,7 +46,12 @@ private:
 /* The system's path monitor, reporting into a state while it lives. It is
  * event driven: the system reports the current path once at the start and
  * then each change, from a thread of its own, and nothing else wakes the
- * process. It opens no connection. */
+ * process. It opens no connection. The monitor makes its own thread for the
+ * system's start-up, so that no Mach port of the process is tied to the
+ * thread that asked for it; and it is meant to live as long as the process
+ * that wants the state does (a guest's restart ends the thread that booted
+ * it, and a monitor made again after it would not leave the process as the
+ * first one did). */
 class HostNetworkPathMonitor {
 public:
 	virtual ~HostNetworkPathMonitor() = default;
