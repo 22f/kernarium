@@ -171,6 +171,9 @@ protocol RuntimeDriver: AnyObject, OldAppsSource {
     /// Lets the guest play its haptics on the device, or not: the Haptics
     /// switch, which applies at once.
     func setHaptics(_ on: Bool)
+    /// Settings' "When hot" changed (`AppModel.heatLimitOn`): Android is told
+    /// how hot the device is, or nothing, at once.
+    func setHeatLimit(_ on: Bool)
     /// Settings' "Use the pointer as touch" changed: the guest has no mouse
     /// while it is on.
     func setPointerAsTouch(_ on: Bool)
@@ -276,6 +279,8 @@ extension RuntimeDriver {
     func guestStallFiles() async -> [BugReportArchive.Entry] { [] }
     /// A driver with no session record has nothing to tell.
     func setNetworkNotice(_ denial: NetworkDenial?) {}
+    /// A driver with no thermal session tells Android nothing either way.
+    func setHeatLimit(_ on: Bool) {}
     /// A driver with no guest has no values that tell an installation apart.
     func guestIdentifiers() -> GuestIdentifiers { .none }
     #if FEEDBACK_MAIL

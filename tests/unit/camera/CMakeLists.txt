@@ -8,6 +8,14 @@ target_include_directories(uml_camera_protocol_tests PRIVATE
 uml_add_unit_test(NAME camera-protocol COMMAND uml_camera_protocol_tests
     LABELS "device;camera")
 
+# What the application does with a running camera video when it leaves the
+# foreground: the call that ends it and waits for the guest, and the order
+# before the GPU hold.
+add_executable(uml_camera_background_video_tests camera_background_video_tests.cpp)
+target_link_libraries(uml_camera_background_video_tests PRIVATE UML::CameraDevice)
+uml_add_unit_test(NAME camera-background-video COMMAND uml_camera_background_video_tests
+    LABELS "device;camera")
+
 # The picture helpers of darwin/platform (camera.hpp's neighbours).
 add_executable(uml_camera_transform_tests camera_transform_tests.cpp)
 target_link_libraries(uml_camera_transform_tests PRIVATE UML::Nv12Transform)
@@ -24,6 +32,18 @@ uml_add_unit_test(NAME camera-dng-color COMMAND uml_camera_dng_tests
 add_executable(uml_camera_apple_discovery_tests camera_apple_discovery_tests.cpp)
 target_link_libraries(uml_camera_apple_discovery_tests PRIVATE UML::AppleCamera UML::CameraDevice)
 uml_add_unit_test(NAME camera-apple-discovery COMMAND uml_camera_apple_discovery_tests
+    LABELS "device;camera")
+
+# A platform call a host lacks, in camera discovery (an iPad app on a Mac or on a Vision Pro meets one): an
+# object that does not take it is not sent it, and a discovery that raises anyway presents no cameras with one
+# log line and a live process. The raise is stood in by a replaced method of the discovery session; no camera
+# is opened.
+add_executable(uml_camera_discovery_unavailable_call_tests camera_discovery_unavailable_call_tests.mm)
+target_link_libraries(uml_camera_discovery_unavailable_call_tests PRIVATE UML::AppleCamera
+    "-framework Foundation" "-framework AVFoundation")
+target_include_directories(uml_camera_discovery_unavailable_call_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/platform/apple)
+uml_add_unit_test(NAME camera-discovery-unavailable-call COMMAND uml_camera_discovery_unavailable_call_tests
     LABELS "device;camera")
 
 # What a still reports of its exposure, from a literal photo-metadata dictionary

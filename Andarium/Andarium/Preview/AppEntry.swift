@@ -113,6 +113,8 @@ struct AppEntry {
         "settings-stats": "stats",
         "settings-feedback": "diagnostics",
         "settings-text-message": "developer",
+        "settings-performance": "stats", "settings-performance-menu": "stats", "settings-performance-off": "stats",
+        "settings-performance-hot": "stats", "settings-performance-hot-off": "stats",
     ]
 
     /// The page of Info a screen opens on.
@@ -354,7 +356,7 @@ struct AppEntry {
         case "session", "session-tip", "session-tip-left", "session-open", "session-keyboard", "session-stats",
              "session-power", "session-setup", "session-off", "session-left", "session-volume",
              "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi",
-             "session-camera-notice", "session-camera-off-notice":
+             "session-camera-notice", "session-camera-off-notice", "session-thermal-alert", "session-thermal-off":
             model.session.showStats = screen == "session-stats"
             model.session.sideKeysOpen = ["session-open", "session-off", "session-left", "session-volume"].contains(screen)
             model.sessionPreset = SessionPreset(
@@ -372,7 +374,7 @@ struct AppEntry {
             )
             model.phase = .running(.normal)
             if screen == "session-graphics-notice" { model.previewGraphicsNotice() }
-            if screen == "session-thermal-notice" { model.previewThermalNotice() }
+            if screen == "session-thermal-notice" || screen == "session-thermal-alert" { model.previewThermalNotice() }
             if screen == "session-network-cellular" { model.previewNetworkNotice(.cellular) }
             if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
             if screen == "session-camera-notice" { model.previewCameraNotice() }
@@ -383,7 +385,8 @@ struct AppEntry {
             model.phase = .running(.normal)
             model.previewTextMessage(screen)
         case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
-             "settings-feedback", "settings-text-message", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
+             "settings-feedback", "settings-text-message", "settings-performance", "settings-performance-menu", "settings-performance-off",
+             "settings-performance-hot", "settings-performance-hot-off", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
              "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container",
              "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split",
              "install-part-too-large", "install-legacy-hint", "install-legacy-hint-data",
@@ -447,6 +450,7 @@ struct AppEntry {
         default:
             break
         }
+        HeatLimitPreview.apply(screen: screen, to: model)
         WhatsNewPreview.apply(screen: screen, to: model)
         #if FEEDBACK_MAIL
         FeedbackPreview.configure(screen: screen, model: model)

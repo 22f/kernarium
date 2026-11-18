@@ -746,22 +746,27 @@ def check_real(guest, apk: pathlib.Path, package: str, label: str) -> str:
         guest.adb_run("uninstall", package, timeout=60)
 
 
+def open_guest(options: argparse.Namespace, adb: str, private: pathlib.Path):
+    """The guest the steps drive, and what stops it. The steps read a command's status and its two streams apart, which
+    only a Serial gives, so the guest this runner launches is driven through one too (the launcher's own Guest merges the
+    streams and has no run): both ways of getting a guest give the steps the same thing."""
+    if options.serial:
+        return Serial(adb, options.serial), lambda: None
+    settings = argparse.Namespace(
+        release=options.release, emulator=options.emulator, instance=None, adb_port=options.adb_port,
+        cpus=options.cpus, memory=options.memory, boot_timeout=options.boot_timeout, no_argument=True,
+        extra_arguments=[])
+    launched = orient.start_guest(settings, adb, private / "guest", early=None, holder={}, provision=True)
+    return Serial(adb, launched.serial), lambda: orient.stop_guest(adb, launched)
+
+
 def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report) -> None:
     private.mkdir(parents=True, exist_ok=True)
     built = [*probe.VARIANTS, *probe.SUCCESSORS, *(probe.RUNNING if options.hook else ())]
     # "old" and its update "raised" are signed with one key, so that the second installs over the first in place.
     keystore = private / "old-family.p12"
     apks = {variant: probe.build_apk(private / f"{variant}.apk", variant, keystore=keystore) for variant in built}
-    if options.serial:
-        guest = Serial(adb, options.serial)
-        stop = lambda: None  # noqa: E731
-    else:
-        settings = argparse.Namespace(
-            release=options.release, emulator=options.emulator, instance=None, adb_port=options.adb_port,
-            cpus=options.cpus, memory=options.memory, boot_timeout=options.boot_timeout, no_argument=True,
-            extra_arguments=[])
-        guest = orient.start_guest(settings, adb, private / "guest", early=None, holder={}, provision=True)
-        stop = lambda: orient.stop_guest(adb, guest)  # noqa: E731
+    guest, stop = open_guest(options, adb, private)
     try:
         report.run("the command is in the image", lambda: command_present(guest))
         installed_at = guest_time(guest)

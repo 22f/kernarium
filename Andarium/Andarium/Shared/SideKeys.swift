@@ -88,7 +88,7 @@ struct SideKeysOverlay: View {
             keys(in: geo.size)
         }
         .ignoresSafeArea(.keyboard)
-        .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+        .interfaceFeedback(.impact(weight: .light), trigger: keyPresses)
         .onChange(of: open) { _, isOpen in
             guard isOpen else { return }
             // VoiceOver goes to the first key once the keys have swollen.
@@ -482,7 +482,7 @@ struct KeyRail: View {
         }
         .foregroundStyle(.primary)
         .environment(\.colorScheme, .dark)
-        .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+        .interfaceFeedback(.impact(weight: .light), trigger: keyPresses)
     }
 
     private func pressed(_ action: () -> Void) {
@@ -535,7 +535,7 @@ struct KeyDeck: View {
         }
         .foregroundStyle(.primary)
         .environment(\.colorScheme, .dark)
-        .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+        .interfaceFeedback(.impact(weight: .light), trigger: keyPresses)
     }
 
     private func pressed(_ action: () -> Void) {

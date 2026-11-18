@@ -112,10 +112,29 @@ final class LiveRuntime: RuntimeDriver {
     /// not the device has a Taptic Engine.
     private lazy var gameControllers = GameControllers(player: hapticPlayer, engines: controllerEngines)
     /// Tells the guest's thermal HAL how hot the device is; Android lowers
-    /// its frame rate for it, and the session says so once.
-    private lazy var thermal = ThermalSession(opener: ThermalConnector()) { [weak self] in
-        Task { @MainActor [weak self] in self?.thermalCapStarted() }
-    }
+    /// its frame rate for it, and the session says so once. Settings' "When
+    /// hot" decides whether Android is told (`setHeatLimit`); the session
+    /// tells the model when the device is held hot either way.
+    private lazy var thermal = ThermalSession(
+        opener: thermalOpener ?? ThermalConnector(),
+        hotChanged: { [weak self] hot in
+            // In order, whatever the thread the session calls from.
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.model?.deviceHeatChanged(hot: hot) } }
+        },
+        // A run begins in the state iOS is in then, never the last run's: the
+        // monitor's own first reading comes after the run has begun.
+        present: { ThermalSource.current() },
+        capStarted: { [weak self] in
+            Task { @MainActor [weak self] in self?.thermalCapStarted() }
+        })
+    /// The guest's end of the thermal connection where a UI test's probe
+    /// stands in for it; nil is the real one, over vsock.
+    private let thermalOpener: (any GuestStreamOpener)?
+    #if !APP_STORE
+    /// A UI test's probe session runs the thermal session as a normal run
+    /// does (`beginThermalProbe`).
+    private var thermalProbe = false
+    #endif
     private lazy var thermalMonitor = ThermalMonitor { [weak self] state in self?.thermal.observe(state) }
     /// The device's position for the guest's GNSS receiver, read from Core
     /// Location only while the person's Location switch, iOS, the foreground,
@@ -232,8 +251,9 @@ final class LiveRuntime: RuntimeDriver {
         model: AppModel, storage: TwoDiskStorage, marker: PauseMarker, keyStore: AdbKeyStore = AdbKeyStore(),
         sessionRecord: URL? = nil, cameraDirectory: URL? = nil,
         freeSpace: @escaping @Sendable () -> UInt64 = { AppEntry.freeStorageBytes() },
-        keyboardMouse: KeyboardMouse? = nil
+        keyboardMouse: KeyboardMouse? = nil, thermalOpener: (any GuestStreamOpener)? = nil
     ) {
+        self.thermalOpener = thermalOpener
         self.model = model
         self.keyboardMouse = keyboardMouse ?? KeyboardMouse.live(supportsMouse: model.host.supportsPointer) {
             [weak model] wanted in model?.pointerLockWanted = wanted
@@ -1233,6 +1253,17 @@ final class LiveRuntime: RuntimeDriver {
         inputRunReady = true
         updateKeyboardMouse()
     }
+
+    /// A probe launch that states iOS's thermal state (`ThermalOverride`)
+    /// runs the thermal session as a normal run does, against the probe's own
+    /// stand-in for the guest's HAL (`ThermalProbeHal`): the policy, the
+    /// notice, Settings' choice and what Android would be told all work.
+    func beginThermalProbe() {
+        runActive = true
+        thermalProbe = true
+        updateThermal()
+        thermalMonitor.start()
+    }
     #endif
 
     func pointerLockDidChange(_ locked: Bool) {
@@ -1244,13 +1275,14 @@ final class LiveRuntime: RuntimeDriver {
     /// The guest's vibrator plays while a normal run is in front and holds
     /// the guest running; the connection is made from the run's start, because
     /// the guest's HAL starts early. Android's own settings decide what it
-    /// asks for, and the Haptics switch whether the device plays it: the guest
-    /// keeps its vibrator either way, and while the switch is off the session
-    /// holds no connection and the player no engine for the device. A game
-    /// controller's rumble is not governed by the switch.
+    /// asks for, and the Haptics switch (or a launch that silences them,
+    /// `HapticsLaunch`) whether the device plays it: the guest keeps its
+    /// vibrator either way, and while they are off the session holds no
+    /// connection and the player no engine for the device. A game controller's
+    /// rumble is not governed by either.
     private func updateHaptics() {
         haptics.update(
-            available: hapticsAvailable, enabled: model?.hapticsOn ?? true, running: normalRun,
+            available: hapticsAvailable, enabled: model?.hapticsPlays ?? true, running: normalRun,
             booted: reachedBootCompleted, foreground: active && !holdsGuestStill)
     }
 
@@ -1390,13 +1422,30 @@ final class LiveRuntime: RuntimeDriver {
     /// The guest's thermal HAL is told while a normal run goes on; Recovery
     /// has none.
     private func updateThermal() {
+        thermal.setLimit(model?.heatLimitOn ?? true)
+        #if !APP_STORE
+        if thermalProbe {
+            thermal.update(running: true, booted: true)
+            return
+        }
+        #endif
         thermal.update(running: normalRun, booted: reachedBootCompleted)
+    }
+
+    /// Settings' "When hot" changed: Android is told nothing hot at once, or
+    /// the policy's severity at once.
+    func setHeatLimit(_ on: Bool) {
+        updateThermal()
     }
 
     /// Android starts to lower its frame rate: the first time in the run that
     /// the device is hot enough and the HAL has heard of it.
     private func thermalCapStarted() {
+        #if !APP_STORE
+        guard runActive, normalRun || thermalProbe else { return }
+        #else
         guard runActive, normalRun else { return }
+        #endif
         model?.thermalCapStarted()
     }
 
@@ -1404,7 +1453,7 @@ final class LiveRuntime: RuntimeDriver {
     private func reportThermalState(_ phase: ConsoleReport.ThermalPhase) {
         print(ConsoleReport.thermal(
             phase: phase, state: ProcessInfo.processInfo.thermalState,
-            uptime: ProcessInfo.processInfo.systemUptime
+            uptime: ProcessInfo.processInfo.systemUptime, heatLimitOn: model?.heatLimitOn ?? true
         ))
     }
     #endif

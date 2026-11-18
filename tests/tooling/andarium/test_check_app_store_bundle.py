@@ -36,6 +36,11 @@ THERMAL_KNOB = (
     "#include <stdlib.h>\n"
     'const char *fixture(void) { return getenv("ANDARIUM_THERMAL_STATE"); }\n'
 )
+# The harness launch's silent phone, which keeps the device's haptics off.
+HAPTICS_KNOB = (
+    "#include <stdlib.h>\n"
+    'const char *fixture(void) { return getenv("ANDARIUM_HAPTICS"); }\n'
+)
 # The UI tests' launch, which opens the session with no guest.
 PROBE_KNOB = (
     "#include <stdlib.h>\n"
@@ -111,6 +116,12 @@ DEBUG_SUPPORT = (
     ("input probe", "int _s8Andarium8AppModelC10inputProbeAA0cD0CSgvg(void) { return 1; }\n"),
     ("input probe", 'const char *fixture(void) { return "inputProbeLog"; }\n'),
     ("input probe", 'const char *fixture(void) { return "inputProbeField"; }\n'),
+    # The UI tests' stand-in for the guest's thermal HAL, the harness's statement
+    # of Settings' "When hot" and the probe's start of the thermal session.
+    ("heat limit probe", "int _s8Andarium15ThermalProbeHalC10openStreams5Int32VyKF(void) { return 1; }\n"),
+    ("heat limit probe", "int _s8Andarium15HeatLimitLaunchO6stated2inSbSgSDyS2SG_tFZ(void) { return 1; }\n"),
+    ("heat limit probe", "int _s8Andarium10LiveRuntimeC17beginThermalProbeyyF(void) { return 1; }\n"),
+    ("heat limit probe", 'const char *fixture(void) { return "heat told severe"; }\n'),
     # The development build's compass check: its class, its launch setting and its line.
     ("compass readout", "int _s8Andarium14CompassReadoutC4line3forSSSgSo14CMDeviceMotionC_tF(void) { return 1; }\n"),
     ("compass readout", "int _s8Andarium20CompassReadoutLaunchO9requested2inSbSDyS2SG_tFZ(void) { return 1; }\n"),
@@ -639,7 +650,7 @@ def write_notes(app: Path, entries: list[dict] | None, strings: dict[str, str],
     and the compiled table of their translations in each language, which both tracks share."""
     if entries is not None:
         (app / track).write_text(
-            json.dumps([{"build": 11, "version": "1.0 (11)", "entries": entries}] if entries else []),
+            json.dumps([{"build": 12, "version": "1.0 (12)", "entries": entries}] if entries else []),
             encoding="utf-8")
     for language in languages:
         lproj = app / f"{language}.lproj"
@@ -2026,6 +2037,7 @@ def main() -> int:
         knob = build(root, "knob", KNOB)
         launch = build(root, "launch", LAUNCH_KNOB)
         thermal = build(root, "thermal", THERMAL_KNOB)
+        haptics = build(root, "haptics", HAPTICS_KNOB)
         probe = build(root, "probe", PROBE_KNOB)
         old_apps_probe = build(root, "old-apps-probe", OLD_APPS_PROBE_KNOB)
         reports = {
@@ -2091,6 +2103,8 @@ def main() -> int:
               passes=False, expect="ANDARIUM_START")
         check(make_app(root, "thermal-knob", thermal, app_info()),
               passes=False, expect="ANDARIUM_THERMAL_STATE")
+        check(make_app(root, "haptics-knob", haptics, app_info()),
+              passes=False, expect="ANDARIUM_HAPTICS")
         check(make_app(root, "probe-knob", probe, app_info()),
               passes=False, expect="ANDARIUM_INPUT_PROBE")
         # The probe session's scripted list of old apps, for the App Store and for TestFlight.
@@ -2405,7 +2419,7 @@ def main() -> int:
         # it does not name, they are Send feedback text in a product that has none.
         beta_source = root / "beta-source" / BETA_NOTES
         beta_source.parent.mkdir()
-        beta_source.write_text(json.dumps([{"build": 11, "version": "1.0 (11)", "entries": hidden}]),
+        beta_source.write_text(json.dumps([{"build": 12, "version": "1.0 (12)", "entries": hidden}]),
                                encoding="utf-8")
         carried = make_app(root, "notes-beta-strings", clean, app_info())
         write_notes(carried, [], NOTES_STRINGS, track=APP_STORE_NOTES)

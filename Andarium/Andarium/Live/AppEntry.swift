@@ -72,7 +72,11 @@ struct AppEntry {
     @MainActor
     /// `freeSpace` is the space a run watches: the application's own reading
     /// (`freeStorageBytes`) unless a test supplies another.
-    func makeModel(freeSpace: @escaping @Sendable () -> UInt64 = { AppEntry.freeStorageBytes() }) -> AppModel {
+    /// `environment` is the launch's unless a test supplies another.
+    func makeModel(
+        freeSpace: @escaping @Sendable () -> UInt64 = { AppEntry.freeStorageBytes() },
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> AppModel {
         let launch = overrides
         let bundle = Bundle.main
         let version = Self.appVersion(bundle)
@@ -81,8 +85,8 @@ struct AppEntry {
         #if !APP_STORE
         // A UI test of the hardware keyboard and mouse opens the session with
         // no guest behind it.
-        if InputProbeLaunch.requested(in: ProcessInfo.processInfo.environment) {
-            return Self.makeInputProbeModel(host: host, version: version)
+        if InputProbeLaunch.requested(in: environment) {
+            return Self.makeInputProbeModel(host: host, version: version, environment: environment)
         }
         #endif
 
@@ -169,6 +173,19 @@ struct AppEntry {
         let pointer = PointerPreference().launch(automated: !launch.isEmpty)
         model.pointerAsTouch = pointer.isOn
         model.pointerAsTouchDecidedByLaunch = !pointer.keepsChanges
+        // Settings' "When hot" is the person's last choice, unless the launch
+        // is a harness's and decides for its run alone (`HeatLimitPreference`);
+        // an App Store build has no launch environment and so keeps the
+        // person's own.
+        #if APP_STORE
+        let heat = HeatLimitPreference().launch(automated: false)
+        #else
+        let heat = HeatLimitPreference().launch(
+            automated: !launch.isEmpty || ThermalOverride.stated(in: environment) != nil,
+            stated: HeatLimitLaunch.stated(in: environment))
+        #endif
+        model.heatLimitOn = heat.isOn
+        model.heatLimitDecidedByLaunch = !heat.keepsChanges
         #if !APP_STORE
         model.printsStatistics = launch.statistics == true
         // The JIT row follows the person's last choice, unless the launch is a
@@ -178,6 +195,9 @@ struct AppEntry {
             hasOtherSettings: !launch.isEmpty)
         model.jitOn = jit.isOn
         model.jitDecidedByLaunch = !jit.keepsChanges
+        // A harness launch can keep the device's haptics silent for its run
+        // (`HapticsLaunch`); the person's switch stays as stored.
+        model.hapticsSilencedByLaunch = HapticsLaunch.silences(in: environment)
         #endif
 
         #if APP_STORE
@@ -246,8 +266,6 @@ struct AppEntry {
         }
         announceWhatsNew(
             on: model, hasGuest: guest != nil, vCPUs: guest?.cores ?? host.processorCount)
-        // Only the person's own launch keeps what the notice has shown, as it does the release notes' record.
-        model.noGoogleNotice = NoGoogleNotice(defaults: announcesWhatsNew ? defaults : nil)
         model.alert = problem.map { AppAlert(title: String(localized: "Andarium is incomplete"), message: $0) }
         #if APP_REVIEW
         // Last: the ribbon and the alert above are part of what Home shows.
@@ -264,7 +282,9 @@ struct AppEntry {
     /// instead of the runtime, and nothing is read from or written to the
     /// application's own guest or settings.
     @MainActor
-    private static func makeInputProbeModel(host: HostDevice, version: String) -> AppModel {
+    private static func makeInputProbeModel(
+        host: HostDevice, version: String, environment: [String: String]
+    ) -> AppModel {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("InputProbe", isDirectory: true)
         let locations = GuestLocations(directory: directory)
         let storage = TwoDiskStorage(
@@ -285,18 +305,37 @@ struct AppEntry {
         // The launch decides the setting for its own run.
         model.pointerAsTouch = PointerPreference().launch(automated: true).isOn
         model.pointerAsTouchDecidedByLaunch = true
+        let heat = HeatLimitPreference().launch(automated: true, stated: HeatLimitLaunch.stated(in: environment))
+        model.heatLimitOn = heat.isOn
+        model.heatLimitDecidedByLaunch = true
+        // The side keys play their feedback here too: a launch that keeps the
+        // phone silent does so on this path as on the ordinary one.
+        model.hapticsSilencedByLaunch = HapticsLaunch.silences(in: environment)
         let probe = InputProbe()
         model.inputProbe = probe
+        // A probe that states iOS's thermal state runs the thermal session
+        // against a stand-in for the guest's HAL, which says what Android
+        // would be told in the probe's log.
+        let thermalStated = ThermalOverride.stated(in: environment) != nil
+        let hal = thermalStated
+            ? ThermalProbeHal { [weak probe] severity in
+                DispatchQueue.main.async { MainActor.assumeIsolated { probe?.record("heat told \(severity)") } }
+            } : nil
         let runtime = LiveRuntime(
             model: model, storage: storage, marker: PauseMarker(url: directory.appendingPathComponent("pause.json")),
             keyboardMouse: KeyboardMouse.probe(
                 probe, supportsMouse: host.supportsPointer,
-                guestRegisters: InputProbeLaunch.guestRegisters(in: ProcessInfo.processInfo.environment)
-            ) { [weak model] wanted in model?.pointerLockWanted = wanted })
+                guestRegisters: InputProbeLaunch.guestRegisters(in: environment)
+            ) { [weak model] wanted in model?.pointerLockWanted = wanted },
+            thermalOpener: hal)
         model.driver = runtime
         model.phase = .running(.normal)
         runtime.beginInputProbe()
-        if let script = OldAppsProbeLaunch.script(in: ProcessInfo.processInfo.environment) {
+        if thermalStated { runtime.beginThermalProbe() }
+        #if FEEDBACK_MAIL
+        if FeedbackProbe.requested(in: environment) { FeedbackProbe.install(on: model) }
+        #endif
+        if let script = OldAppsProbeLaunch.script(in: environment) {
             let scripted = ScriptedOldApps(open: ["com.example.rally"])
             switch script {
             case .apps: break
@@ -418,7 +457,7 @@ struct AppEntry {
     }
 
     @MainActor
-    static func hostDevice() -> HostDevice {
+    static func hostDevice(camera: CameraPlatform? = nil) -> HostDevice {
         let info = ProcessInfo.processInfo
         let name: String
         let idiom: HostDevice.Idiom
@@ -442,7 +481,7 @@ struct AppEntry {
             runsGuestGraphics: drawsGuestGraphics(),
             supportsPointer: UIDevice.current.userInterfaceIdiom != .phone,
             idiom: idiom, hasHaptics: DeviceHaptics.isAvailable,
-            hasCompass: MotionSensors().compassAvailable, hasCamera: SystemCameraSource.hasCamera
+            hasCompass: MotionSensors().compassAvailable, hasCamera: (camera ?? .system).hasCamera
         )
     }
 

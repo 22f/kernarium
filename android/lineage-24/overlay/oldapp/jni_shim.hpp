@@ -36,10 +36,12 @@ struct Platform {
     bool (*make_writable)(void* address, size_t length);
     bool (*make_read_only)(void* address, size_t length);
     // The kinds of the parameters of a method the layer did not see being looked up
-    // (Z B C S I J F D, or L for every reference), by reflection on the original table.
-    // `hint` is a class the method can be asked about. Returns false when it cannot say.
-    bool (*describe_method)(jni::Env* env, void* const* original_table, void* method_id, bool is_static,
-                            jni::jobject hint, char* kinds, unsigned capacity, unsigned* count);
+    // (Z B C S I J F D, or L for every reference), by reflection on the original table, from the
+    // method ID alone: the runtime's ToReflectedMethod takes the ID and ignores its class and
+    // static-flag arguments, so the platform passes a class of its own (CheckJNI refuses a null one).
+    // Returns false when it cannot say.
+    bool (*describe_method)(jni::Env* env, void* const* original_table, void* method_id, bool is_static, char* kinds,
+                            unsigned capacity, unsigned* count);
     // A monotonic clock in milliseconds (it may wrap): the rate limit of the diagnosis lines. Null: no limit.
     uint32_t (*now_ms)();
     // The memory of a block's baseline (the bytes as of its last synchronization): outside the low arena, any
@@ -64,7 +66,19 @@ struct Platform {
     // Gives the calling thread's processor up for a moment: a waiter of the pointer table's spin lock calls it after a short
     // spin. Null: it spins on.
     void (*yield_thread)();
+    // The memory of the block record (see jni_shim.cpp): `bytes` of zero-filled memory (shadow_record_bytes of the shadow
+    // region), kept for the life of the process. The layer never clears it. A fresh anonymous mapping is the memory wanted: it
+    // is resident only where block starts have been recorded. Null, or a null result: nothing is intercepted.
+    void* (*map_record)(size_t bytes);
+    // Stops the process (abort): called, after a line in the log, for a call whose parameters the layer cannot learn, which it
+    // will not hand to the runtime unconverted. Null: the layer traps.
+    void (*abort_process)();
 };
+
+// The block record covers a shadow region below 2^28 bytes (a block's length fits 28 bits of its word): one 32-bit word for
+// each 64 bytes of the region, up to 2 MiB for the 32 MiB region of the old-application layer.
+constexpr size_t kMaxShadowBytes = (size_t{1} << 28) - 1;
+constexpr size_t shadow_record_bytes(size_t shadow_size) { return ((shadow_size + 63) / 64) * sizeof(uint32_t); }
 
 struct Counters {
     uint32_t shadows_created;
@@ -90,8 +104,10 @@ struct Counters {
 
 // `table` is the shared function table (kSlotCount entries), `shadow_region` the memory of the byte[]
 // blocks (null: nothing to intercept). Returns false, changing nothing, when the table cannot be
-// written. `env` (the environment of the loading thread, when there is one) resolves the classes and methods the layer calls
-// itself (System.identityHashCode, Runtime.gc) before the table is patched, so that no block can exist without them.
+// written. A region larger than kMaxShadowBytes, or not 16-byte aligned, gets no shadows, nor does one whose record
+// (Platform::map_record) cannot be had. `env` (the environment of the loading thread, when there is one) resolves the
+// classes and methods the layer calls itself (System.identityHashCode, Runtime.gc) before the table is patched, so that no
+// block can exist without them.
 bool install_jni_wrappers(void** table, const Platform& platform, void* shadow_region, size_t shadow_size,
                           jni::Env* env = nullptr);
 

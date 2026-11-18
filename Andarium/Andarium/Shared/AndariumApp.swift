@@ -231,19 +231,43 @@ extension LegacyInstallAlert {
             do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
             withdrawn = false
         }
+        await takeDownAlertOfGoneQuestion()
     }
 
-    /// Whether a UIKit alert is the topmost presentation of any window now.
-    private static var alertIsUp: Bool {
+    /// The question is gone and its alert goes with it. SwiftUI takes the alert down when its
+    /// binding turns false, but one that was offered again (above) can stay up with nothing to
+    /// answer, over the screens. After a moment, in which SwiftUI's own take-down ends, the alert
+    /// still up under the question's title is taken down here, until a question stands again.
+    private func takeDownAlertOfGoneQuestion() async {
+        do { try await Task.sleep(for: .seconds(1)) } catch { return }
+        for _ in 0..<50 {
+            guard model.legacyInstallQuestion == nil, let alert = Self.topAlert, alert.title == LegacyInstallWords.title else { return }
+            if !alert.isBeingDismissed { alert.dismiss(animated: true) }
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+        }
+    }
+
+    private static var topAlert: UIAlertController? { PresentedAlert.top }
+    private static var alertIsUp: Bool { PresentedAlert.isUp }
+}
+
+/// What UIKit shows of alerts now, for the questions that must not stand
+/// without one.
+enum PresentedAlert {
+    /// The UIKit alert that is the topmost presentation of a window now, if one is.
+    static var top: UIAlertController? {
         for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
             for window in scene.windows {
                 var top = window.rootViewController
                 while let next = top?.presentedViewController { top = next }
-                if top is UIAlertController { return true }
+                if let alert = top as? UIAlertController { return alert }
             }
         }
-        return false
+        return nil
     }
+
+    /// Whether a UIKit alert is the topmost presentation of any window now.
+    static var isUp: Bool { top != nil }
 }
 
 extension View {

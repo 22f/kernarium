@@ -20,6 +20,10 @@ namespace uml::cpu::x86_64::gadgets {
  * compares them. */
 struct ProgramCodeStamps final {
 	std::array<::uml::memory::CodePageStamp, 2> pages{};
+	/* The generation's flush serial when the stamps were taken: a walk of the
+	 * generation moves it, so no stamp recorded before the walk is current
+	 * (frame_accounting.hpp). 0 where the memory has none. */
+	std::uint64_t flush_serial{};
 	std::uint8_t count{};
 	bool complete{};
 
@@ -87,6 +91,9 @@ struct alignas(16) Body final {
 				std::memory_order_relaxed);
 		result.count = state & (stamps_complete_bit - 1U);
 		result.complete = (state & stamps_complete_bit) != 0U;
+		result.flush_serial = std::atomic_ref<std::uint64_t>{
+			const_cast<std::uint64_t &>(flush_serial)}.load(
+				std::memory_order_relaxed);
 		return result;
 	}
 	void set_stamps(const ProgramCodeStamps &stamps) noexcept
@@ -99,6 +106,8 @@ struct alignas(16) Body final {
 			static_cast<std::uint8_t>(stamps.count |
 				(stamps.complete ? stamps_complete_bit : 0U)),
 			std::memory_order_relaxed);
+		std::atomic_ref<std::uint64_t>{flush_serial}.store(
+			stamps.flush_serial, std::memory_order_relaxed);
 	}
 
 	Program program;
@@ -126,6 +135,13 @@ struct alignas(16) Body final {
 	/* How many of `code_pages` are stamps, in two bits, and above them
 	 * whether they cover the whole block; zero while there are none. */
 	std::uint8_t stamp_state{};
+	/* The flush serial the stamps were taken under, one word beside the
+	 * pairs: a torn mix of two validations' stamps and serial can only
+	 * reproduce a hit that some completed registration justifies, because
+	 * every recorded field comes from a capture taken before one. */
+	alignas(8) std::uint64_t flush_serial{};
+	/* The count that follows is the body's last word but four bytes. */
+	std::uint32_t reserved[2]{};
 	/* program.instruction_count(), where follow_block_link reads it for the
 	 * budget test. */
 	std::uint32_t link_count;
@@ -134,7 +150,7 @@ struct alignas(16) Body final {
 };
 static_assert(sizeof(Body) % 16 == 0 && alignof(Body) == 16,
 	"the guest bounds that follow a body start on a sixteen-byte boundary");
-static_assert(sizeof(Body) == 128);
+static_assert(sizeof(Body) == 144);
 static_assert(static_cast<std::ptrdiff_t>(offsetof(Body, link_count)) ==
 		static_cast<std::ptrdiff_t>(sizeof(Body) +
 			stream_header_words * sizeof(std::uintptr_t) +

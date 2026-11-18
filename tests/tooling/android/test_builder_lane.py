@@ -7906,6 +7906,240 @@ def verify_camerax_denylist_assertion(android_root: Path) -> None:
                  f"{denylist!r}, not {'0' if accepted else '1'}: {result.stdout}{result.stderr}")
 
 
+def snapshot_tree(root: Path) -> dict[str, tuple[str, object]]:
+    """Every entry under root: a file's bytes, a symlink's target, or a directory."""
+    state: dict[str, tuple[str, object]] = {}
+    for path in sorted(root.rglob("*")):
+        key = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            state[key] = ("link", os.readlink(path))
+        elif path.is_file():
+            state[key] = ("file", path.read_bytes())
+        else:
+            state[key] = ("directory", None)
+    return state
+
+
+def verify_stale_build_properties(android_root: Path) -> None:
+    """build-aosp.sh removes the property files an earlier build number left in the output directory
+    and refuses a build that leaves one.
+
+    The step is build/build-number-properties.sh, which the script sources. It runs here against a
+    stand-in output tree, with stand-ins for GNU timeout (absent on a macOS host) and for find, which
+    refuses to run outside the timeout so that no listing is unbounded."""
+    build = android_root / "build"
+    number = "26"
+    product_path = "target/product/andarium"
+
+    def prop(key: str, value: str) -> bytes:
+        return f"ro.build.id=CP2A\n{key}={value}\nro.build.version.sdk=37\n".encode()
+
+    stale_files = {
+        f"{product_path}/vendor/build.prop": prop("ro.vendor.build.version.incremental", "25"),
+        f"{product_path}/system/build.prop": prop("ro.build.version.incremental", "25"),
+        f"{product_path}/product/build.prop": prop("ro.product.build.version.incremental", "2"),
+        f"{product_path}/system_ext/build.prop": prop("ro.system_ext.build.version.incremental", "260"),
+        f"{product_path}/ramdisk/prop.default": prop("ro.build.version.incremental", "eng.builder"),
+        "soong/.intermediates/build/soong/system-build.prop/android_common/build.prop":
+            prop("ro.build.version.incremental", "25"),
+        "soong/.intermediates/build/soong/ramdisk-prop.default/android_common/prop.default":
+            prop("ro.build.version.incremental", "25"),
+    }
+    kept_files = {
+        f"{product_path}/odm/build.prop": prop("ro.odm.build.version.incremental", number),
+        f"{product_path}/vendor/etc/prop.default": prop("ro.build.version.incremental", number),
+        # A file that names no build number, or a property of another name, is not stale.
+        f"{product_path}/vendor/etc/build.prop":
+            b"ro.vendor.build.id=CP2A\nro.vendor.build.version.incrementalx=25\nro.incremental.enable=1\n",
+        # Neither is a file of another name, nor anything in obj/, whose packaging intermediates
+        # the target-files rule rebuilds whole.
+        f"{product_path}/vendor/build.prop.bak": prop("ro.build.version.incremental", "25"),
+        f"{product_path}/obj/PACKAGING/target_files_intermediates/x/SYSTEM/build.prop":
+            prop("ro.build.version.incremental", "25"),
+        f"{product_path}/obj/ETC/vendor_intermediates/build.prop": prop("ro.build.version.incremental", "25"),
+        "soong/.intermediates/build/soong/odm-build.prop/android_common/build.prop":
+            prop("ro.odm.build.version.incremental", number),
+        # Outside the product's installed tree and Soong's intermediates.
+        "host/linux-x86/build.prop": prop("ro.build.version.incremental", "25"),
+    }
+    sibling = "aosp/out-other/target/product/andarium/vendor/build.prop"
+    linked = "outside/linked/build.prop"
+
+    real_find = shutil.which("find")
+    if real_find is None:
+        fail("the host has no find")
+    shims = {
+        "timeout": '#!/bin/bash\n'
+                   'printf "%s\\n" "$*" >>"$SHIM_LOG"\n'
+                   'if [[ "${1:-}" == -k ]]; then shift 2; fi\n'
+                   '[[ "${1:-}" =~ ^[1-9][0-9]*$ ]] || exit 125\n'
+                   'shift\n'
+                   '[[ -z "${SHIM_TIMEOUT_STATUS:-}" ]] || exit "$SHIM_TIMEOUT_STATUS"\n'
+                   'UNDER_TIMEOUT=1 exec "$@"\n',
+        "find": '#!/bin/bash\n'
+                '[[ -n "${UNDER_TIMEOUT:-}" ]] || { echo "find ran without a timeout" >&2; exit 97; }\n'
+                'unset UNDER_TIMEOUT\n'
+                f'exec {real_find} "$@"\n',
+    }
+    failing_rm = '#!/bin/bash\n' \
+                 'for argument in "$@"; do [[ "$argument" != "$SHIM_RM_FAILS" ]] || exit 1; done\n' \
+                 'exec /bin/rm "$@"\n'
+
+    with tempfile.TemporaryDirectory(prefix="stale-build-properties-") as temporary:
+        base = Path(temporary)
+        shim_dir = base / "shims"
+        shim_dir.mkdir()
+        for name, text in shims.items():
+            (shim_dir / name).write_text(text)
+            (shim_dir / name).chmod(0o755)
+        rm_dir = base / "failing-rm"
+        rm_dir.mkdir()
+        (rm_dir / "rm").write_text(failing_rm)
+        (rm_dir / "rm").chmod(0o755)
+        log = base / "timeout.log"
+
+        def build_tree(name: str) -> tuple[Path, Path, Path]:
+            root = base / name
+            out = root / "aosp/out-user"
+            for relative, content in {**stale_files, **kept_files}.items():
+                path = out / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            for relative in (sibling, linked):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(prop("ro.build.version.incremental", "25"))
+            link = out / product_path / "odm/prop.default"
+            link.symlink_to(root / linked)
+            return root, out, out / product_path
+
+        def run(function: str, out: Path, product: Path, build_number: str = number,
+                **environment: str) -> subprocess.CompletedProcess[str]:
+            log.write_text("")
+            return subprocess.run(
+                ["bash", "-c",
+                 f'set -euo pipefail\nsource "$1"\nsource "$2"\n{function} "$3" "$4" "$5"',
+                 "build-aosp.sh", str(build / "common.sh"), str(build / "build-number-properties.sh"),
+                 str(out), str(product), build_number],
+                env={**os.environ, "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
+                     "SHIM_LOG": str(log), **environment},
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+
+        def bounded_listings() -> int:
+            lines = log.read_text().splitlines()
+            if any(not re.fullmatch(r"-k [1-9][0-9]* [1-9][0-9]* find .*", line) for line in lines):
+                fail(f"a listing of the output directory is not bounded by timeout: {lines}")
+            return len(lines)
+
+        # Before the build: the stale files go by their found paths, and nothing else changes.
+        root, out, product = build_tree("remove")
+        before = snapshot_tree(root)
+        removed = {key: before.pop(f"aosp/out-user/{key}") for key in stale_files}
+        result = run("remove_stale_build_properties", out, product)
+        if result.returncode != 0:
+            fail(f"removing the stale property files failed: {result.stdout}{result.stderr}")
+        if snapshot_tree(root) != before:
+            fail("the removal left a stale file, or touched a file that is current, in obj/, outside "
+                 "the product's installed tree and Soong's intermediates, a link or another output directory")
+        for relative in stale_files:
+            if str(out / relative) not in result.stdout:
+                fail(f"the removal does not name {relative}: {result.stdout}")
+        if f"removed {len(stale_files)} property files that name another build number than {number}" \
+                not in result.stdout:
+            fail(f"the removal does not count its files: {result.stdout}")
+        if bounded_listings() != 1:
+            fail("the removal does not list the output directory exactly once")
+        again = run("remove_stale_build_properties", out, product)
+        if (again.returncode, again.stdout, again.stderr) != (0, "", ""):
+            fail(f"a second removal is not a no-op: {again.returncode} {again.stdout}{again.stderr}")
+
+        # With no output directory, or one the build has not filled, it does nothing.
+        missing = base / "missing/out-user"
+        result = run("remove_stale_build_properties", missing, missing / product_path)
+        if (result.returncode, result.stdout, result.stderr) != (0, "", "") or missing.exists() \
+                or bounded_listings() != 0:
+            fail(f"an absent output directory is not left alone: {result.returncode} {result.stdout}{result.stderr}")
+        empty = base / "empty/out-user"
+        empty.mkdir(parents=True)
+        result = run("remove_stale_build_properties", empty, empty / product_path)
+        if (result.returncode, result.stdout, result.stderr) != (0, "", "") or any(empty.iterdir()):
+            fail(f"an empty output directory is not left alone: {result.returncode} {result.stdout}{result.stderr}")
+        # The product's output must lie inside the output directory.
+        result = run("remove_stale_build_properties", out, root / "outside" / "product")
+        if result.returncode == 0 or "not inside the output directory" not in result.stderr:
+            fail(f"a product output outside the output directory is accepted: {result.stdout}{result.stderr}")
+
+        # A removal that fails fails the script, naming the file, and leaves no scratch file.
+        root, out, product = build_tree("remove-fails")
+        before = snapshot_tree(root)
+        victim = out / f"{product_path}/vendor/build.prop"
+        result = run("remove_stale_build_properties", out, product,
+                     PATH=f"{rm_dir}{os.pathsep}{shim_dir}{os.pathsep}{os.environ['PATH']}",
+                     SHIM_RM_FAILS=str(victim))
+        if result.returncode == 0 or f"cannot remove the property file that names another build number: {victim}" \
+                not in result.stderr or not result.stderr.startswith("android/lineage-24/build/build-aosp.sh: "):
+            fail(f"a failed removal does not fail the script: {result.returncode} {result.stdout}{result.stderr}")
+        if not victim.exists() or (out / ".build-number-properties.list").exists():
+            fail("a failed removal leaves its file removed or its scratch file behind")
+        if any(key not in before for key in snapshot_tree(root)):
+            fail("a failed removal created a file")
+
+        # A listing that fails or times out is an error, and removes nothing.
+        root, out, product = build_tree("listing-fails")
+        before = snapshot_tree(root)
+        for function in ("remove_stale_build_properties", "verify_build_number_properties"):
+            result = run(function, out, product, SHIM_TIMEOUT_STATUS="124")
+            if result.returncode == 0 or "cannot list the property files" not in result.stderr \
+                    or "exit status 124" not in result.stderr:
+                fail(f"{function} accepts a listing that timed out: {result.returncode} {result.stdout}{result.stderr}")
+            if snapshot_tree(root) != before:
+                fail(f"{function} changed the tree after a listing that timed out")
+
+        # After the build: an installed file that names another number refuses the build, and only the
+        # installed tree is scanned.
+        root, out, product = build_tree("verify")
+        before = snapshot_tree(root)
+        result = run("verify_build_number_properties", out, product)
+        installed = sorted(str(out / relative) for relative in stale_files if relative.startswith(product_path))
+        named = sorted(line.strip() for line in result.stderr.splitlines() if line.startswith("\t"))
+        if result.returncode == 0 or named != installed:
+            fail(f"the scan does not refuse exactly the stale installed files: {result.returncode} "
+                 f"{named} {result.stdout}{result.stderr}")
+        if snapshot_tree(root) != before or bounded_listings() != 1:
+            fail("the scan changes the tree or does not list the output directory exactly once")
+        if run("verify_build_number_properties", out, product, "27").returncode == 0:
+            fail("the scan accepts a tree whose files name another build number than the one built")
+        if run("remove_stale_build_properties", out, product).returncode != 0:
+            fail("the removal failed on the scan's tree")
+        result = run("verify_build_number_properties", out, product)
+        if (result.returncode, result.stdout, result.stderr) != (0, "", ""):
+            fail(f"the scan refuses a tree whose stale files were removed: {result.stdout}{result.stderr}")
+        stray = out / product_path / "system/build.prop"
+        stray.write_bytes(prop("ro.build.version.incremental", "25"))
+        result = run("verify_build_number_properties", out, product)
+        named = [line.strip() for line in result.stderr.splitlines() if line.startswith("\t")]
+        if result.returncode == 0 or named != [str(stray)]:
+            fail(f"the scan does not name exactly the stale file left by the build: {result.stderr}")
+
+    # build-aosp.sh sources the helper, and its steps keep their order: removal after the number is
+    # exported and before the first build, the scan after the last one, and neither without a number.
+    script = (build / "build-aosp.sh").read_text()
+    guard = 'if [[ -n "$BUILD_NUMBER_VALUE" ]]; then\n\t'
+    positions = [
+        script.find('source "$SCRIPT_DIR/build-number-properties.sh"'),
+        script.find("export BUILD_NUMBER=$BUILD_NUMBER_VALUE"),
+        script.find(guard + 'remove_stale_build_properties "$OUT_DIR_ABSOLUTE" "$PRODUCT_OUT_ABSOLUTE" '
+                    '"$BUILD_NUMBER_VALUE"\nfi\n'),
+        script.find('m -j"$JOBS" target-files-package check_target_files_vintf'),
+        script.rfind('m -j"$JOBS" target-files-package\n'),
+        script.find(guard + 'verify_build_number_properties "$OUT_DIR_ABSOLUTE" "$PRODUCT_OUT_ABSOLUTE" '
+                    '"$BUILD_NUMBER_VALUE"\nfi\n'),
+        script.find('DEXPREOPT_CONFIG="'),
+    ]
+    if -1 in positions or positions != sorted(positions) or len(set(positions)) != len(positions):
+        fail(f"build-aosp.sh does not remove the stale property files before its build and scan after it: {positions}")
+
+
 def verify_network_stack_topic(android_root: Path) -> None:
     """The routed NetworkMonitor topic and the verifier agree on the Wi-Fi check.
 
@@ -9504,6 +9738,7 @@ def main() -> None:
     verify_network_stack_topic(android_root)
     verify_wifi_tracker_topic(android_root)
     verify_camerax_denylist_assertion(android_root)
+    verify_stale_build_properties(android_root)
     verify_media_codecs_overlay(android_root)
     verify_package_assertions(android_root)
     verify_debugging_defaults(android_root)

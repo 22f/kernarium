@@ -25,6 +25,8 @@ BUILD_NUMBER_VALUE=
 
 # shellcheck disable=SC1090
 source "$SCRIPT_DIR/common.sh"
+# shellcheck disable=SC1090
+source "$SCRIPT_DIR/build-number-properties.sh"
 
 usage()
 {
@@ -49,7 +51,9 @@ missing output path is initialized automatically.
 ro.build.version.incremental and the number of its fingerprint. A release
 carries its own number: it is how a data partition tells a newer system from
 an older one, so numbers rise from release to release. A build without one
-keeps AOSP's eng.<user> and cannot be published.
+keeps AOSP's eng.<user> and cannot be published. Before the build, the output
+directory's build.prop and prop.default files that name another number are
+removed, and a build that leaves one is refused.
 EOF
 }
 
@@ -657,6 +661,13 @@ if ! cmp -s -- "$KERNEL_ELF" "$PRODUCT_OUT/kernel"; then
 	install -m 0755 -- "$KERNEL_ELF" "$PRODUCT_OUT/kernel"
 fi
 
+# The build reads the build number without depending on it: a property file
+# whose other inputs did not change would keep an earlier release's number.
+PRODUCT_OUT_ABSOLUTE=$AOSP_SOURCE/$PRODUCT_OUT
+if [[ -n "$BUILD_NUMBER_VALUE" ]]; then
+	remove_stale_build_properties "$OUT_DIR_ABSOLUTE" "$PRODUCT_OUT_ABSOLUTE" "$BUILD_NUMBER_VALUE"
+fi
+
 # publish-release.py consumes the packaged VINTF checker from this output, and
 # signs with sign_target_files_apks and the tools it runs, so a fresh output
 # builds those host tools.
@@ -683,6 +694,9 @@ else
 	mv -- "$FIRST_BOOT_OAT.new" "$FIRST_BOOT_OAT"
 	export LINEAGE24_FIRST_BOOT_OAT_MK=$FIRST_BOOT_OAT/first-boot-oat.mk
 	m -j"$JOBS" target-files-package
+fi
+if [[ -n "$BUILD_NUMBER_VALUE" ]]; then
+	verify_build_number_properties "$OUT_DIR_ABSOLUTE" "$PRODUCT_OUT_ABSOLUTE" "$BUILD_NUMBER_VALUE"
 fi
 DEXPREOPT_CONFIG="$OUT_DIR_ABSOLUTE/soong/dexpreopt-${LINEAGE24_PRODUCT}.config"
 verify_dexpreopt_config "$DEXPREOPT_CONFIG"

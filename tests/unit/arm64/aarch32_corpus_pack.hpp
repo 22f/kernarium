@@ -510,7 +510,7 @@ struct ExclusiveStore final {
  * at each case of one shape, to prove that its handling of a lost reservation
  * refuses what is not one. A plan whose `retried` is set must be taken for a
  * lost reservation, retried and pass; any other must fail on that attempt. */
-enum class Fault { lost, lost_and_register, lost_and_tpidruro, unwritten_and_register, failed_and_register };
+enum class Fault { lost, lost_and_register, lost_and_tpidruro, unwritten_and_register, failed_and_register, excess };
 
 struct FaultPlan final {
 	Fault fault;
@@ -518,6 +518,8 @@ struct FaultPlan final {
 	const char *record;
 	std::string_view shape; /* the end of the names of the cases it applies to */
 	bool retried;
+	std::uint32_t excess = 0; /* Fault::excess: instructions the engine retires beyond the pack's */
+	bool persistent = false;  /* the fault is made on every attempt, not only the first */
 };
 
 inline constexpr FaultPlan kFaultPlans[] = {
@@ -533,6 +535,21 @@ inline constexpr FaultPlan kFaultPlans[] = {
 	{Fault::unwritten_and_register, "unwritten+register", "exclusive-spill-qemu", "/spill_pair.a", false},
 	/* A store-exclusive the pack has fail, with another register wrong. */
 	{Fault::failed_and_register, "failed+register", "exclusive-qemu", "/lone.a", false},
+	/* More instructions retired than the pack has, in the loops of the exclusive-retry record
+	 * (retry_loop_length() names their lengths). Whole passes of the loop are a retried loss:
+	 * one, two, and the five of the CBNZ loop and the seven of the IT one. */
+	{Fault::excess, "excess+loop", "exclusive-retry-qemu", "/side_exit_match.a", true, 6},
+	{Fault::excess, "excess+2loops", "exclusive-retry-qemu", "/side_exit_match.a", true, 12},
+	{Fault::excess, "excess+cbnz-loop", "exclusive-retry-qemu", "/side_exit_cbnz.t", true, 5},
+	{Fault::excess, "excess+it-loop", "exclusive-retry-qemu", "/it_ite.t", true, 7},
+	/* Anything else fails on the first attempt: one instruction, the length of another loop,
+	 * and an excess in a case that is no retry loop. */
+	{Fault::excess, "excess+1", "exclusive-retry-qemu", "/side_exit_match.a", false, 1},
+	{Fault::excess, "excess+cbnz-wrong", "exclusive-retry-qemu", "/side_exit_cbnz.t", false, 6},
+	{Fault::excess, "excess+it-wrong", "exclusive-retry-qemu", "/it_eq.t", false, 6},
+	{Fault::excess, "excess-no-loop", "exclusive-qemu", "/pair.a", false, 6},
+	/* A whole pass on every attempt is retried to the attempt bound and then fails. */
+	{Fault::excess, "excess+every-attempt", "exclusive-retry-qemu", "/side_exit_match.a", false, 6, true},
 };
 
 /* What a fault changes beyond the registers. */
@@ -546,6 +563,8 @@ struct FaultEffect final {
  * of an attempt with `fault`; nothing when the fault does not fit the case. */
 [[nodiscard]] inline std::optional<FaultEffect> inject_fault(Fault fault, const Case &test, std::uint64_t *registers)
 {
+	if (fault == Fault::excess) /* the engine's count changes, nothing else */
+		return FaultEffect{false, 0, 0, 0};
 	const auto store = exclusive_store(test);
 	if (!store || store->instruction.operands.d < 0 ||
 	    static_cast<unsigned>(store->instruction.operands.d) >= kRegisters)
@@ -574,6 +593,30 @@ struct FaultEffect final {
 	if (fault == Fault::lost_and_tpidruro)
 		effect.tpidruro_xor = 0x100;
 	return effect;
+}
+
+/* The loops of the exclusive-retry record, whose exit reaches a store-exclusive that has no
+ * load-exclusive of its own. A store-exclusive that loses its reservation sends such a loop
+ * round again, so an engine that did lose it retires whole passes of the loop more than the
+ * pack, which is one pass and the tail branch. A pass is six instructions, five in the CBNZ
+ * loop and seven in the IT and ITE loops; 0 for any other case, and for one whose count
+ * is not a pass and the tail. */
+[[nodiscard]] inline std::uint32_t retry_loop_length(std::string_view record, const Case &test)
+{
+	if (record != "exclusive-retry-qemu" || test.event != 0)
+		return 0;
+	const std::string_view name = test.name;
+	const std::uint32_t length = name.ends_with("/side_exit_cbnz.t") ? 5
+		: name.ends_with("/it_eq.t") || name.ends_with("/it_ite.t") ? 7 : 6;
+	return test.retired == length + 1 ? length : 0;
+}
+
+/* Whether `excess` instructions retired beyond the pack's are whole passes of a recognized
+ * retry loop, which a lane takes for a lost reservation and runs again. */
+[[nodiscard]] inline bool retry_excess_accepted(std::string_view record, const Case &test, std::size_t excess)
+{
+	const auto length = retry_loop_length(record, test);
+	return length != 0 && excess != 0 && excess % length == 0;
 }
 
 /* Whether a plan applies to this case of this record. */

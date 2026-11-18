@@ -2,6 +2,7 @@
 #pragma once
 
 #include "KernariumRuntime.h"
+#include "camera/background_video.hpp"
 #include "camera/calibration_store.hpp"
 #include "camera/camera_device.hpp"
 #include "camera/camera_diagnostics.hpp"
@@ -300,17 +301,20 @@ private:
 };
 
 /* The device's options for a boot of a session of `mode`. The receiver and the
- * rotation outlive every device. The turn the application has stated now is the
+ * rotation outlive every device, and so does `background`, the application's way
+ * to end the guest's video when it leaves the foreground. The turn the application has stated now is the
  * boot's: the guest's SENSOR_ORIENTATIONs follow it, and the picture turns by
  * the change since. */
 [[nodiscard]] inline uml::camera::CameraDeviceOptions deviceOptions(
     const Presentation& presentation,
     uml::camera::CameraMode mode,
     StateReceiver& receiver,
-    const Rotation& rotation)
+    const Rotation& rotation,
+    std::shared_ptr<uml::camera::BackgroundVideo> background = {})
 {
     uml::camera::CameraDeviceOptions options;
     options.mode = mode;
+    options.background = std::move(background);
     options.tier = presentation.tier;
     options.use = presentation.use;
     options.calibration = presentation.calibration;

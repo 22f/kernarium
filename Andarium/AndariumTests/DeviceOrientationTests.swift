@@ -237,17 +237,16 @@ struct DeviceOrientationTests {
         #expect(!device.generating)
     }
 
-    /// The Simulator and an iPad app on a Mac have no accelerometer or gyroscope, and a device that
-    /// has them is offered them to the guest without being asked: the session connects to the
-    /// guest's service for the sensors alone, and a device that has none holds no connection for
-    /// them (a connection for the orientation is the other test's).
+    /// The Simulator has no accelerometer or gyroscope, and a device that has them is offered them
+    /// to the guest without being asked: the session connects to the guest's service for the sensors
+    /// alone, and a device that has none holds no connection for them (a connection for the
+    /// orientation is the other test's). An iPad app on a Mac has what Core Motion reports there,
+    /// which is a sensor on some Macs, so only the connection is held to the device's answer.
     @Test func theSensorsAreOfferedWhereTheDeviceHasThemAndNowhereElse() async throws {
         let guest = Guest()
         let sensors = MotionSensors(opener: guest)
         #if targetEnvironment(simulator)
         #expect(!sensors.available, "The Simulator has no motion sensors")
-        #else
-        if ProcessInfo.processInfo.isiOSAppOnMac { #expect(!sensors.available, "A Mac has no motion sensors") }
         #endif
         sensors.update(foreground: true, axes: .portrait)
         if sensors.available {

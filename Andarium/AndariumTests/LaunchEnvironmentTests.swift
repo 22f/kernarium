@@ -97,6 +97,63 @@ struct LaunchEnvironmentTests {
         #expect(!AppEntry.isPersonsLaunch(overrides: none, environment: ["ANDARIUM_THERMAL_STATE": "serious"]))
     }
 
+    @Test func theHapticsSettingSilencesALaunchOnlyWhenItIsZero() {
+        #expect(HapticsLaunch.environmentName == "ANDARIUM_HAPTICS")
+        #expect(HapticsLaunch.silences(in: ["ANDARIUM_HAPTICS": "0"]))
+        // Anything else is no setting, and the person's switch decides.
+        for word in ["", "1", "off", "false", "00", "0 "] {
+            #expect(!HapticsLaunch.silences(in: ["ANDARIUM_HAPTICS": word]), "\(word)")
+        }
+        #expect(!HapticsLaunch.silences(in: [:]))
+    }
+
+    @Test func aLaunchThatOnlySilencesHapticsIsStillThePersonsLaunch() {
+        // A silent phone makes no other difference to the launch: it stays one
+        // that announces the release notes, and no setting `LaunchOverrides`
+        // holds, so the pointer, statistics and JIT keep the person's choices.
+        let environment = ["ANDARIUM_HAPTICS": "0"]
+        let overrides = LaunchOverrides(environment: environment, processorCount: 4)
+        #expect(overrides.isEmpty)
+        #expect(AppEntry.isPersonsLaunch(overrides: overrides, environment: environment))
+    }
+
+    @MainActor
+    @Test func theModelOfASilencedLaunchPlaysNoHapticsAndKeepsTheChoice() {
+        let entry = AppEntry.fromArguments()
+        let silenced = entry.makeModel(environment: ["ANDARIUM_HAPTICS": "0"])
+        #expect(silenced.hapticsSilencedByLaunch)
+        #expect(!silenced.hapticsPlays)
+        // The switch is the person's and reads as stored.
+        #expect(silenced.hapticsOn)
+        for environment in [[:], ["ANDARIUM_HAPTICS": "1"]] as [[String: String]] {
+            let model = entry.makeModel(environment: environment)
+            #expect(!model.hapticsSilencedByLaunch)
+            #expect(model.hapticsPlays == model.hapticsOn)
+        }
+    }
+
+    /// A UI test's input-probe launch builds its model on a path of its own.
+    /// It is an automated run too, and the side keys it opens must stay as
+    /// silent as the ordinary launch's: both flags together.
+    @MainActor
+    @Test func anInputProbeLaunchAppliesTheSilentPhoneToo() {
+        let entry = AppEntry.fromArguments()
+        let both = entry.makeModel(environment: ["ANDARIUM_INPUT_PROBE": "1", "ANDARIUM_HAPTICS": "0"])
+        #expect(both.inputProbe != nil, "the probe's model, not the ordinary launch's")
+        #expect(both.hapticsSilencedByLaunch)
+        #expect(!both.interfaceFeedbackPlays)
+        #expect(both.hapticsOn)
+        // The probe alone silences nothing.
+        for environment in [["ANDARIUM_INPUT_PROBE": "1"], ["ANDARIUM_INPUT_PROBE": "1", "ANDARIUM_HAPTICS": "1"]] {
+            let probe = entry.makeModel(environment: environment)
+            #expect(probe.inputProbe != nil)
+            #expect(!probe.hapticsSilencedByLaunch)
+            #expect(probe.interfaceFeedbackPlays)
+        }
+        // And the silent phone alone is not the probe.
+        #expect(entry.makeModel(environment: ["ANDARIUM_HAPTICS": "0"]).inputProbe == nil)
+    }
+
     @Test func kernariumsBootModeAsksForARecoveryStartOnly() {
         #expect(LaunchOverrides(environment: ["KERNARIUM_ANDROID_BOOT_MODE": "recovery"], processorCount: 4).start == .recovery)
         #expect(LaunchOverrides(environment: ["KERNARIUM_ANDROID_BOOT_MODE": "normal"], processorCount: 4).start == nil)

@@ -73,6 +73,10 @@ RUNNERS = {
         "timeout must be positive",
         ("fork_cow_probe.cpp",
          (("fork-cow-probe", X86_64), ("fork-cow-probe32", I386)))),
+    "fork_flush": (
+        options(compiler(ONE), f"{TIMEOUT}     boot timeout"),
+        "timeout must be positive",
+        ("guest_fork_flush.cpp", (("fork-flush-probe", X86_64),))),
     "rflags": (
         options(compiler(BOTH), TIMEOUT), "timeout must be positive",
         ("rflags_probe.cpp",

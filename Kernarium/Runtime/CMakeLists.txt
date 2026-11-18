@@ -63,6 +63,7 @@ add_library(KernariumRuntime SHARED
     KernariumCamera.hpp
     KernariumConsoleInput.hpp
     KernariumConsoleOutput.hpp
+    KernariumGpuHold.hpp
     KernariumGuestTimeZone.hpp
     KernariumHostFeatures.hpp
     KernariumIdentity.hpp

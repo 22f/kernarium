@@ -7,9 +7,9 @@ import SwiftUI
 
 /// The line at the top of Send feedback's mail, before anything is written:
 /// the question a person asks when Android has no Google apps ("Missing Google
-/// apps?") and the answer one tap away, opened in place. It shows until it has
-/// been opened or closed once (`NoGoogleNotice`), and it never stands in the
-/// way of the mail. Its words are in the `Feedback` table, and the Google name
+/// apps?") and the answer one tap away, opened in place. It is there, closed,
+/// whenever the sheet opens, goes from that sheet when the person closes it, and
+/// never stands in the way of the mail. Its words are in the `Feedback` table, and the Google name
 /// is the notice's own (`NoGoogleBootNote`).
 struct NoGoogleFeedbackLine: View {
     /// The sheet's model, which holds whether the line is open (`SendFeedbackModel.noGoogleAnswerOpen`).
