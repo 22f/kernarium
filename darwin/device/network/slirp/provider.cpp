@@ -261,8 +261,12 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 			worker_ = std::jthread{[this](std::stop_token stop_token) {
 				event_loop(stop_token);
 			}};
-		} catch (const std::system_error &) {
+		} catch (...) {
+			/* A thread or the path monitor that could not be made (the
+			 * system is out of memory): nothing of this open may stay, so
+			 * that a later open() starts the resolver again. */
 			path_monitor_.reset();
+			path_state_.report(true);
 			resolver_.stop();
 			slirp_.reset();
 			return -EIO;
@@ -360,6 +364,10 @@ void SlirpProvider::stop() noexcept
 	 * once it is joined nothing can refill the ring cleared below. */
 	resolver_.stop();
 	path_monitor_.reset();
+	/* An outage that was reported is over with the monitor: the next open's
+	 * monitor decides what the path is, and until it has reported the host
+	 * has one. */
+	path_state_.report(true);
 #if UML_SLIRP_TESTING
 	notify_receive_cleanup_for_testing();
 #endif

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "platform/host_network_path.hpp"
+#include "host_network_path_status.hpp"
 
 #import <Network/Network.h>
 
@@ -8,17 +9,15 @@
 #include <new>
 
 namespace uml::platform {
-namespace {
 
-/* A path with nothing to use. One that needs a connection first is not one:
- * the attempt itself brings it up. A denial of the local network alone leaves
- * every other address reachable. */
-bool outage(nw_path_t path) noexcept
+bool hostNetworkPathIsOutage(nw_path_status_t status,
+			     nw_path_unsatisfied_reason_t reason) noexcept
 {
-	return nw_path_get_status(path) == nw_path_status_unsatisfied &&
-		nw_path_get_unsatisfied_reason(path) !=
-			nw_path_unsatisfied_reason_local_network_denied;
+	return status == nw_path_status_unsatisfied &&
+		reason != nw_path_unsatisfied_reason_local_network_denied;
 }
+
+namespace {
 
 /* What an update writes into. It outlives the monitor that made it, so that
  * an update in flight when the monitor ends finds a lock and no state, not
@@ -51,7 +50,9 @@ public:
 		 * state. */
 		const std::shared_ptr<Sink> sink = sink_;
 		nw_path_monitor_set_update_handler(monitor_, ^(nw_path_t path) {
-			sink->deliver(!outage(path));
+			sink->deliver(!hostNetworkPathIsOutage(
+				nw_path_get_status(path),
+				nw_path_get_unsatisfied_reason(path)));
 		});
 		nw_path_monitor_start(monitor_);
 	}

@@ -18,9 +18,12 @@
  * probe stands in for the path with the provider's state: a missing name is
  * answered as before while the path is usable, with SERVFAIL (and counted as
  * failed) while it is not, over UDP and TCP, a name with records is answered
- * in both states, and the state at the moment of the answer decides, not the
- * state when the query came in. A last part starts the system's monitor and
- * checks that the provider hears it, whichever path this host has.
+ * in both states, an alias whose target has no record is one answer while the
+ * path is usable and SERVFAIL without records while it is not (the aliases
+ * alone are no address), and the state at the moment of the answer decides, not
+ * the state when the query came in. An outage that was reported ends with the
+ * provider's stop. A last part starts the system's monitor and checks that the
+ * provider hears a report of that open, whichever path this host has.
  */
 #include "dns_message.hpp"
 #include "provider.hpp"
@@ -475,6 +478,64 @@ bool has_loopback(const std::optional<Reply> &reply)
 		has_loopback_answer(*reply);
 }
 
+/* A CNAME in the system resolver's local-only registry, which stays while the
+ * object lives. Its target has no record, so a query for an address of the
+ * alias gets the alias, then "no such record". */
+class LocalAlias final {
+public:
+	static constexpr const char *name = "uml-dns-probe-alias.local";
+
+	LocalAlias()
+	{
+		const auto target = wire("uml-dns-probe-target.invalid");
+		if (DNSServiceCreateConnection(&connection_) !=
+		    kDNSServiceErr_NoError)
+			return;
+		if (DNSServiceRegisterRecord(
+			    connection_, &record_, kDNSServiceFlagsUnique,
+			    kDNSServiceInterfaceIndexLocalOnly, name,
+			    kDNSServiceType_CNAME, kDNSServiceClass_IN,
+			    static_cast<std::uint16_t>(target.size()),
+			    target.data(), 120, &registered, this) !=
+		    kDNSServiceErr_NoError)
+			return;
+		/* The daemon says so when the record is in. */
+		const int descriptor = DNSServiceRefSockFD(connection_);
+		const auto deadline = Clock::now() + std::chrono::seconds{5};
+		while (!done_ && Clock::now() < deadline) {
+			pollfd waiting{descriptor, POLLIN, 0};
+			if (::poll(&waiting, 1, 100) > 0 &&
+			    DNSServiceProcessResult(connection_) !=
+				    kDNSServiceErr_NoError)
+				break;
+		}
+	}
+	LocalAlias(const LocalAlias &) = delete;
+	LocalAlias &operator=(const LocalAlias &) = delete;
+	~LocalAlias()
+	{
+		if (connection_ != nullptr)
+			DNSServiceRefDeallocate(connection_);
+	}
+	[[nodiscard]] bool ok() const noexcept { return ok_; }
+
+private:
+	static void DNSSD_API registered(DNSServiceRef, DNSRecordRef,
+					 DNSServiceFlags,
+					 DNSServiceErrorType error,
+					 void *context)
+	{
+		auto *self = static_cast<LocalAlias *>(context);
+		self->ok_ = error == kDNSServiceErr_NoError;
+		self->done_ = true;
+	}
+
+	DNSServiceRef connection_{};
+	DNSRecordRef record_{};
+	bool done_{};
+	bool ok_{};
+};
+
 /* Changes the path from the resolver's thread, after the system has
  * answered and before the guest is. */
 struct PathChange final {
@@ -500,12 +561,25 @@ void check_outage(uml::network::SlirpProvider &provider, Guest &guest)
 	const int failures_before = failures;
 	if (!path.usable())
 		fail("the path state", "it does not start usable");
+	const LocalAlias alias;
+	if (!alias.ok())
+		fail("the alias record", "the system did not take it");
 
 	const char *label = "a missing name with a path";
 	if (!is_negative(ask(guest, missing, 0x7a01, ++port)))
 		fail(label, "no plain negative answer");
 
+	label = "an alias with no address, with a path";
+	const auto aliased = ask(guest, LocalAlias::name, 0x7a0a, ++port);
+	if (!aliased || aliased->rcode != dns::rcode_noerror ||
+	    aliased->answers != 1)
+		fail(label, "no answer that carries the alias");
+
 	path.report(false);
+	label = "an alias with no address, with no path";
+	if (!is_servfail(ask(guest, LocalAlias::name, 0x7a0b, ++port)))
+		fail(label, "the alias was passed on, or the guest was not told "
+			    "to try again");
 	label = "a missing name with no path";
 	if (!is_servfail(ask(guest, missing, 0x7a02, ++port)))
 		fail(label, "the guest was not told to try again");
@@ -546,17 +620,18 @@ void check_outage(uml::network::SlirpProvider &provider, Guest &guest)
 		fail("the path state", "it was left in an outage");
 
 	/* Each query is one outcome: an answer, or a failure the guest retries.
-	 * Six were answered (two names with records, four missing names with a
-	 * path) and three missing names met the outage. */
+	 * Seven were answered (two names with records, an alias with a path, four
+	 * missing names with a path) and four met the outage (an alias and three
+	 * missing names). */
 	const auto counts = provider.counters();
 	const auto answered = counts.dns_answered - before.dns_answered;
 	const auto failed = counts.dns_failed - before.dns_failed;
-	if (answered != 6 || failed != 3 ||
+	if (answered != 7 || failed != 4 ||
 	    counts.dns_policy_denied != before.dns_policy_denied ||
 	    counts.dns_timed_out != before.dns_timed_out)
 		fail("the counts", "answered " + std::to_string(answered) +
 			", failed " + std::to_string(failed) +
-			" for six answers and three outages");
+			" for seven answers and four outages");
 	if (failures == failures_before)
 		std::puts("the guest is told to retry while the host has no path");
 }
@@ -608,12 +683,36 @@ bool open_provider(uml::network::SlirpProvider &provider, Guest &guest)
 	return true;
 }
 
+/* An outage that was reported is over when the provider stops: a reopen whose
+ * monitor has not reported yet (none runs here) is answered as a host with a
+ * path is. */
+void check_reopen_after_outage(uml::network::SlirpProvider &provider,
+			       Guest &guest)
+{
+	const char *label = "a reopen after an outage";
+	auto &path = provider.path_state_for_testing();
+	path.report(false);
+	provider.stop();
+	if (!open_provider(provider, guest)) {
+		fail(label, "the provider did not reopen");
+		return;
+	}
+	if (!path.usable())
+		fail(label, "the reopened provider starts in the old outage");
+	if (!is_negative(ask(guest, "uml-dns-probe-reopen.invalid", 0x7a0c,
+			     42200)))
+		fail(label, "a missing name was not a plain negative answer");
+}
+
 /* The provider starts the system's monitor at open() and hears its report;
  * what a missing name gets then follows the host's real path. */
 void check_path_monitor(uml::network::SlirpProvider &provider, Guest &guest)
 {
 	const char *label = "the system's path monitor";
 	provider.set_path_monitor_for_testing(true);
+	/* A report that counts is one of this open: the earlier reports here
+	 * were made by the probe itself. */
+	const auto reports_before = provider.path_state_for_testing().reports();
 	if (!open_provider(provider, guest)) {
 		fail(label, "the provider did not open");
 		provider.set_path_monitor_for_testing(false);
@@ -621,9 +720,9 @@ void check_path_monitor(uml::network::SlirpProvider &provider, Guest &guest)
 	}
 	auto &path = provider.path_state_for_testing();
 	const auto deadline = Clock::now() + std::chrono::seconds{10};
-	while (path.reports() == 0 && Clock::now() < deadline)
+	while (path.reports() == reports_before && Clock::now() < deadline)
 		std::this_thread::sleep_for(std::chrono::milliseconds{5});
-	if (path.reports() == 0) {
+	if (path.reports() == reports_before) {
 		fail(label, "the system did not report the path");
 	} else {
 		const bool usable = path.usable();
@@ -783,6 +882,7 @@ int main()
 	check_udp(provider, guest);
 	check_tcp(provider, guest);
 	check_outage(provider, guest);
+	check_reopen_after_outage(provider, guest);
 
 	/* A guest restart: the resolver comes back with the link. */
 	provider.stop();

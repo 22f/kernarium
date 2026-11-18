@@ -601,8 +601,11 @@ void HostResolver::finish(Pending &pending) noexcept
 	/* The state at the moment of the answer decides. With no network path
 	 * the system resolver has nothing to look a name up on and says "no such
 	 * record" at once, which is not a fact about the name: the guest is told
-	 * to try again, and the count says the query failed. A query that had
-	 * records, or had already failed or timed out, is as it was. */
+	 * to try again, and the count says the query failed. The rule is "no
+	 * record of the asked type": a chain of aliases that ends in a negative
+	 * answer is one too, and passing its aliases on would let the guest
+	 * conclude "no address" as it did before. A query that had a record of
+	 * the asked type, or had already failed or timed out, is as it was. */
 	if (pending.negative && pending.outcome == DnsOutcome::answered &&
 	    path_ != nullptr && !path_->usable()) {
 		pending.rcode = dns::rcode_servfail;

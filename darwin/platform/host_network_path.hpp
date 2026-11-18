@@ -54,7 +54,9 @@ public:
 
 /* Starts a monitor that reports into `state`, which must outlive it. Once the
  * monitor's destructor returns, no report is running or will start. A system
- * that gives no monitor leaves the state as it is. */
+ * that gives no monitor leaves the state as it is. Throws std::bad_alloc when
+ * the monitor's own storage cannot be had; the caller cleans up as for any
+ * other resource it could not get. */
 [[nodiscard]] std::unique_ptr<HostNetworkPathMonitor>
 makeAppleHostNetworkPathMonitor(HostNetworkPathState &state);
 

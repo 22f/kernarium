@@ -375,8 +375,9 @@ private:
 	TrafficObserver observer_{counters_};
 	/* The host's network path: the monitor writes it from the system's
 	 * thread and the resolver reads it when it answers. The monitor lives
-	 * from open() to stop(); the state, which keeps the last report across a
-	 * reopen, outlives both. */
+	 * from open() to stop(), and the state, which outlives both, is usable
+	 * again when the provider stops: a reopen starts without an outage until
+	 * its own monitor reports one. */
 	uml::platform::HostNetworkPathState path_state_;
 	std::unique_ptr<uml::platform::HostNetworkPathMonitor> path_monitor_;
 	HostResolver resolver_;

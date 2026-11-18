@@ -150,10 +150,12 @@ uml_add_unit_test(
     NAME platform-host-thermal
     COMMAND uml_host_thermal_tests)
 
-# The host's network path: the state every report replaces and the system
-# monitor's report at each start, until it ends.
+# The host's network path: the state every report replaces, which statuses are
+# an outage, and the system monitor's report at each start, until it ends.
 add_executable(uml_host_network_path_tests host_network_path_tests.cpp)
 target_link_libraries(uml_host_network_path_tests PRIVATE UML::HostNetworkPath)
+target_include_directories(uml_host_network_path_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/platform/apple)
 uml_add_unit_test(
     NAME platform-host-network-path
     COMMAND uml_host_network_path_tests)

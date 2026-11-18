@@ -15,7 +15,8 @@
  * cannot look up with "no such record" at once, which a guest takes for a
  * fact: apps report a missing host and nothing retries. A negative answer
  * given in that state is turned into SERVFAIL, which a stub resolver retries.
- * Answers that carry records, and failures, stand as they are.
+ * That includes a chain of aliases that ends in one. Answers that carry a
+ * record of the asked type, and failures, stand as they are.
  *
  * One thread owns every dns_sd reference, the DNS-over-TCP listener and its
  * connections. SLiRP's worker hands it UDP queries; replies go to the guest

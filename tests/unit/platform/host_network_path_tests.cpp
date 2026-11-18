@@ -5,10 +5,13 @@
  * outage. The system's monitor reports the current path once as it starts,
  * whatever the path is, and again at each start; a path change itself cannot
  * be made here, so the report is checked as an event and the stand-in state
- * of the resolver's tests carries the two directions. A monitor that has
- * ended leaves nothing behind that writes to the state.
+ * of the resolver's tests carries the two directions. What the system's
+ * status and reason mean as an outage is a function of the two values, checked
+ * for each of them. A monitor that has ended leaves nothing behind that writes
+ * to the state.
  */
 #include "platform/host_network_path.hpp"
+#include "host_network_path_status.hpp"
 #include "require.hpp"
 #include "wait_until.hpp"
 
@@ -40,6 +43,37 @@ void a_state_nobody_reported_to_is_usable_and_each_report_replaces_it()
 	state.report(true);
 	require(state.usable() && state.reports() == 5,
 		"the transitions were not each counted");
+}
+
+void only_an_unsatisfied_path_is_an_outage_and_a_local_network_denial_is_not()
+{
+	using uml::platform::hostNetworkPathIsOutage;
+	const nw_path_unsatisfied_reason_t reasons[] = {
+		nw_path_unsatisfied_reason_not_available,
+		nw_path_unsatisfied_reason_cellular_denied,
+		nw_path_unsatisfied_reason_wifi_denied,
+		nw_path_unsatisfied_reason_local_network_denied,
+		nw_path_unsatisfied_reason_vpn_inactive};
+	for (const auto reason : reasons) {
+		/* The reason means something only for an unsatisfied path. */
+		require(!hostNetworkPathIsOutage(nw_path_status_satisfied, reason),
+			"a satisfied path is an outage");
+		require(!hostNetworkPathIsOutage(nw_path_status_satisfiable, reason),
+			"a path that needs a connection first is an outage");
+		require(!hostNetworkPathIsOutage(nw_path_status_invalid, reason),
+			"an invalid path is an outage");
+		require(hostNetworkPathIsOutage(nw_path_status_unsatisfied, reason) ==
+				(reason != nw_path_unsatisfied_reason_local_network_denied),
+			"an unsatisfied path is not an outage, or a local network "
+			"denial alone is one");
+	}
+	require(hostNetworkPathIsOutage(nw_path_status_unsatisfied,
+					nw_path_unsatisfied_reason_not_available),
+		"no network is not an outage");
+	require(!hostNetworkPathIsOutage(
+			nw_path_status_unsatisfied,
+			nw_path_unsatisfied_reason_local_network_denied),
+		"a local network denial alone is an outage");
 }
 
 void the_monitor_reports_the_path_at_each_start()
@@ -90,6 +124,7 @@ void a_monitor_that_ended_writes_nothing()
 int main()
 {
 	a_state_nobody_reported_to_is_usable_and_each_report_replaces_it();
+	only_an_unsatisfied_path_is_an_outage_and_a_local_network_denial_is_not();
 	the_monitor_reports_the_path_at_each_start();
 	a_monitor_that_ended_writes_nothing();
 	std::puts("host network path tests passed");
