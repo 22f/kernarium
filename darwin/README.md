@@ -90,7 +90,8 @@ share:
   address space's arena, tagged by the id the cache gives each resident address
   space, so retiring an address space drops its state as a unit. Slot geometry
   is one build-time setting for both ISAs
-  (`cpu/gadget_cache_geometry.hpp`).
+  (`cpu/gadget_cache_geometry.hpp`). A key with no compact tag form (an address
+  at or above the guest address limit) is run once and never stored.
 - **Shared bodies.** Executors running one address space share its bodies, link
   records and indirect sites unless `DARWIN_UML_GADGET_SHARED_BODIES=0`; a code
   change one vCPU publishes reaches the others at their next block transition.
