@@ -272,14 +272,33 @@ host's table of the kernel's direct ranges (32 of them, split on a partial unmap
 and counted when full) resolves its buffer to; a buffer the table does not
 resolve, or resolves to a descriptor with no backing alive, is counted and makes
 every generation read every translation again. Once the process runs x86 code,
-`invalidate_code` (the kernel's call after it wrote another process's page)
-publishes the frame of every page the target maps, whatever the target's view
-of it permits and whatever the arm64 holder word names, and a page the target
-has no entry for yet is an unknown frame, which moves every generation's flush
-serial and publishes a whole-space code change (the range {0, 0}) in each.
+the kernel's call after it wrote another process's page
+(`darwin_uml_vm_invalidate_code_frame()`, which names the frame written)
+publishes at that frame's holders, whatever the target maps at the address now,
+whatever its view of the frame permits and whatever the arm64 holder word
+names. A write that names no frame is an unknown frame, which moves every
+generation's flush serial and publishes a whole-space code change (the range
+{0, 0}) in each, and so does a page `invalidate_code` (an AArch32
+`cacheflush()`, by address) meets that the target has no entry for yet; for the
+pages the target does map, `invalidate_code` publishes their frames. A kernel
+write into a page-cache, memfd or anonymous frame (a write(2), a UBD read, or a
+copy into a buffer-vector destination such as a loop device's read or an io_uring
+fixed-buffer read of a file, into a page a process pinned and runs) ends in the
+x86_64 kernel's `flush_dcache_folio()` or `flush_dcache_page()`, which names the
+frames (`darwin_uml_vm_invalidate_code_frames()`, called only for a folio queued
+for the host with guest-code permission, which is a page of a `VM_EXEC` mapping)
+and publishes at their holders, or returns without work when no x86 code has
+run or the frame has no record. Three limits remain. The kernel's stores into
+an executed io_uring ring whose pages the program supplied itself
+(`IORING_SETUP_NO_MMAP`) are not announced. A loop device's zero fill of a read
+past the end of its file is warned about once and not announced when its
+completion runs in a softirq, as it does on a guest with more than one vCPU. The
+announcement follows the write, so a second vCPU may finish instructions it had
+already begun after the bytes changed.
 When a run of the emulator ends it appends the process's counts so far, which
 nothing resets (unresolved kernel writes, dropped direct ranges, global holds,
-registrations that reached the address space and their failures, refusals and lost stamp hits), to the file
+registrations that reached the address space and their failures, refusals,
+lost stamp hits and the frames a kernel write named), to the file
 `UML_X86_ACCOUNTING_LOG` names; the unresolved writes and global holds stay
 near zero in an ordinary guest.
 
@@ -565,8 +584,12 @@ registers (arm64 PSTATE.SS, x86 RFLAGS.TF); every engine then retires exactly
 one instruction and reports a single-step exit, which Linux delivers as
 `SIGTRAP`. Linux writes another process's memory (ptrace, `/proc/pid/mem`,
 `process_vm_writev()`) through its own view of the frame, so no translated store
-publishes the change: those paths call `darwin_uml_vm_invalidate_code()` for the
-target mm's generation.
+publishes the change: those paths call `darwin_uml_vm_invalidate_code_frame()`
+for the target mm's generation and the page written, naming the frame (`(fd,
+offset)`, as for a mapping) they hold, so the change reaches that frame's
+holders even when the target maps another frame at the address by then. An
+AArch32 `cacheflush()` writes nothing and calls
+`darwin_uml_vm_invalidate_code()`, which names an address.
 
 An arm64 guest that rewrites code and synchronizes it (`IC IVAU`, broadcast on
 hardware and keyed by the physical address) changes what every process running
@@ -574,16 +597,18 @@ the frame executes, but a store or a publication reaches only its own address
 space's generation. So each frame of a mapped backing has a holder word
 (`darwin/memory/mmu/code_holders.hpp`): the arm64 instruction-fetch path
 registers the fetching generation in it before it reads the frame's bytes, and
-a guest code synchronization or the kernel's `invalidate_code()` path takes the
-word and publishes a whole-space code change in every generation it named. A
+a guest code synchronization or the kernel's remote-write paths take the
+word and publish a whole-space code change in every generation it named. A
 publication consumes the word, so a reader registers again at its next fetch;
 a publisher that has emptied a word stays counted until its publication
 finishes, and one that meets such a count publishes to every generation, so an
-empty word never hides a reader another publisher has yet to tell. The kernel
-path takes the word of every page the target maps, whatever its permission,
-and publishes to every generation, the target included, for a page the target
-has not mapped yet (its software page table fills at faults, so the frame is
-unknown) or when it meets an unfinished take. The words
+empty word never hides a reader another publisher has yet to tell. A remote
+write takes the word of the frame it names, whatever the target maps at the
+address, and publishes to every generation, the target included, for a frame it
+cannot name or when it meets an unfinished take. `invalidate_code()` takes the
+word of every page the target maps, whatever its permission, and does the same
+for a page the target has not mapped yet (its software page table fills at
+faults, so the frame is unknown). The words
 live in 4 KiB leaves made on a frame's first registration (a leaf per 512
 frames), and the leaves and their roots (4 KiB per GiB of backing, made with
 the backing in every build) come from the ordinary allocator, sized by the
@@ -592,8 +617,8 @@ be made, or a word that names more generations than it holds, publishes to
 every live generation instead.
 The x86 engines neither register nor consult it: they hold their frames in the
 [frame accounting](#x86-64-frame-accounting), which the arm64 engines never
-consult, and the kernel's `invalidate_code()` path runs both publications, each
-on its own condition.
+consult, and the kernel's remote-write and flush paths run both publications,
+each on its own condition.
 
 ## Kernel and Android ownership
 
