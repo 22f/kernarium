@@ -6,11 +6,12 @@ import Testing
 import AndariumCoreTestSupport
 
 private func releaseIdentity(
-    _ id: String = "20261031-los24-r4", build: Int = 100, sha: String = String(repeating: "a", count: 64)
+    _ id: String = "20261031-los24-r4", build: Int = 100, sha: String = String(repeating: "a", count: 64),
+    proof: Bool = false
 ) -> ReleaseIdentity {
     ReleaseIdentity(
         releaseID: id, buildFingerprint: "fp-\(id)", buildNumber: build, securityPatch: "2026-10-01",
-        systemDiskSHA256: sha, dataLayout: 1, minimumGiB: 4, defaultGiB: 8, maximumGiB: 64
+        systemDiskSHA256: sha, dataLayout: 1, minimumGiB: 4, defaultGiB: 8, maximumGiB: 64, isUnsignedProof: proof
     )
 }
 
@@ -28,6 +29,91 @@ private func makeStorage(release: ReleaseIdentity = releaseIdentity()) throws ->
 private let host = HostDevice(
     name: "iPad", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 40_000_000_000
 )
+
+/// Set up never replaces files the rules would not let a new guest replace
+/// when an unsigned proof is involved: a guest whose settings file is missing
+/// but whose data and record are intact is not erased by Set up. Erase is the
+/// way out, and stays with the explicit Erase action.
+struct UnsignedProofSetUpTests {
+    private static let proof = "unsigned-proof-p1"
+    private let host = HostDevice(
+        name: "iPad", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 40_000_000_000
+    )
+
+    /// A guest `release` set up, its data written, and its settings file lost.
+    private func guestWithoutSettings(
+        _ release: ReleaseIdentity
+    ) async throws -> (TwoDiskStorage, URL, Data, Data) {
+        let (storage, root) = try makeStorage(release: release)
+        _ = try await storage.create(Guest.fresh(on: host))
+        try Data("android data".utf8).write(to: storage.locations.data)
+        try FileManager.default.removeItem(at: storage.locations.settings)
+        #expect(try storage.load() == nil)
+        return (storage, root, try Data(contentsOf: storage.locations.data), try Data(contentsOf: storage.locations.directory.appendingPathComponent("instance.json")))
+    }
+
+    private func untouched(_ storage: TwoDiskStorage, data: Data, record: Data) throws {
+        #expect(try Data(contentsOf: storage.locations.data) == data)
+        #expect(try Data(contentsOf: storage.locations.directory.appendingPathComponent("instance.json")) == record)
+        #expect(!FileManager.default.fileExists(atPath: storage.locations.settings.path))
+    }
+
+    @Test func aProofDoesNotSetUpOverTheDataOfASignedGuest() async throws {
+        let (signed, root, data, record) = try await guestWithoutSettings(releaseIdentity())
+        defer { try? FileManager.default.removeItem(at: root) }
+        let proof = TwoDiskStorage(
+            locations: signed.locations, release: releaseIdentity(Self.proof, build: 300, proof: true),
+            releaseDirectory: signed.releaseDirectory
+        )
+        await #expect(throws: InstanceError.refused(StartBlock.mismatch.explanation)) {
+            try await proof.create(Guest.fresh(on: host))
+        }
+        try untouched(proof, data: data, record: record)
+    }
+
+    @Test func aSignedReleaseDoesNotSetUpOverTheDataOfAProofsGuest() async throws {
+        let (made, root, data, record) = try await guestWithoutSettings(releaseIdentity(Self.proof, build: 300, proof: true))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let signed = TwoDiskStorage(locations: made.locations, release: releaseIdentity(build: 400), releaseDirectory: made.releaseDirectory)
+        await #expect(throws: InstanceError.self) { try await signed.create(Guest.fresh(on: host)) }
+        try untouched(signed, data: data, record: record)
+        // Nor does the same proof set itself up again over its own data.
+        await #expect(throws: InstanceError.self) { try await made.create(Guest.fresh(on: host)) }
+        try untouched(made, data: data, record: record)
+    }
+
+    @Test func aProofSetsUpWhereTheRulesCreate() async throws {
+        let proof = releaseIdentity(Self.proof, build: 300, proof: true)
+        let (storage, root) = try makeStorage(release: proof)
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try await storage.create(Guest.fresh(on: host))
+        let state = try #require(try InstanceFiles(directory: storage.locations.directory).readState())
+        #expect(state.releaseID == Self.proof && state.isUnsignedProof)
+
+        // A record with no data behind it holds nothing to keep: a signed guest's, and a proof's.
+        for earlier in [releaseIdentity(), releaseIdentity("unsigned-proof-p0", build: 250, proof: true)] {
+            let (first, otherRoot) = try makeStorage(release: earlier)
+            defer { try? FileManager.default.removeItem(at: otherRoot) }
+            _ = try await first.create(Guest.fresh(on: host))
+            let second = TwoDiskStorage(locations: first.locations, release: proof, releaseDirectory: first.releaseDirectory)
+            _ = try await second.create(Guest.fresh(on: host))
+            #expect(try InstanceFiles(directory: first.locations.directory).readState()?.releaseID == Self.proof)
+        }
+    }
+
+    @Test func aRecordNobodyCanReadIsNotReplacedByAProof() async throws {
+        let proof = releaseIdentity(Self.proof, build: 300, proof: true)
+        let (storage, root) = try makeStorage(release: proof)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: storage.locations.directory, withIntermediateDirectories: true)
+        let record = storage.locations.directory.appendingPathComponent("instance.json")
+        try Data("not json".utf8).write(to: record)
+        try Data("android data".utf8).write(to: storage.locations.data)
+        await #expect(throws: (any Error).self) { try await storage.create(Guest.fresh(on: host)) }
+        #expect(try Data(contentsOf: record) == Data("not json".utf8))
+        #expect(try Data(contentsOf: storage.locations.data) == Data("android data".utf8))
+    }
+}
 
 struct StorageTests {
     @Test func aStorageWithNothingInItHasNoGuest() throws {

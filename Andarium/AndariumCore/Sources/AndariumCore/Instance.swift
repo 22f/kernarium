@@ -56,12 +56,10 @@ public struct ReleaseIdentity: Equatable, Sendable {
     /// (`acceptance` "unsigned-proof", staged by `Andarium/scripts/
     /// stage-system-image.py --unsigned-proof` for a developer build). Such a
     /// system never updates an instance that has data, and an instance it
-    /// created never updates to another system (`InstanceRules.decide`).
+    /// created, which records so (`InstanceState.isUnsignedProof`), never
+    /// updates to another system (`InstanceRules.decide`). Nothing else
+    /// decides it: not the release ID.
     public var isUnsignedProof: Bool
-
-    /// A proof's release ID starts with this, which is how an instance's
-    /// record (`release_id`) says it was created from a proof.
-    public static let unsignedProofIDPrefix = "unsigned-proof-"
 
     public init(
         releaseID: String, buildFingerprint: String, buildNumber: Int, securityPatch: String,
@@ -110,9 +108,7 @@ public struct ReleaseIdentity: Equatable, Sendable {
             let capacity = data["capacity_gib"] as? [String: Any],
             let minimum = integer(capacity["minimum"]),
             let standard = integer(capacity["default"]),
-            let maximum = integer(capacity["maximum"]),
-            // A proof is named as one, so that a record of its ID says so.
-            (manifest["acceptance"] as? String == "unsigned-proof") == id.hasPrefix(Self.unsignedProofIDPrefix)
+            let maximum = integer(capacity["maximum"])
         else {
             throw InstanceError.release("This copy of Andarium carries a system release without a usable identity.")
         }
@@ -132,7 +128,10 @@ public struct ReleaseIdentity: Equatable, Sendable {
     }
 }
 
-/// `instance.json`, schema 1.
+/// `instance.json`: schema 1, or schema 2 for an instance an unsigned proof
+/// created, which also says so (`unsigned_proof`). A reader of schema 1 alone
+/// refuses a schema 2 record, so an app version before the proof rule cannot
+/// update a proof's instance to a signed release.
 public struct InstanceState: Equatable, Sendable {
     public struct Completed: Equatable, Sendable, Codable {
         public var releaseID: String
@@ -187,11 +186,14 @@ public struct InstanceState: Equatable, Sendable {
     public var lastBooted: String
     public var lastCompleted: Completed?
     public var pendingUpdate: Pending?
+    /// Whether an unsigned proof created the instance: the record says so
+    /// itself, whatever the release ID looks like.
+    public var isUnsignedProof: Bool
 
     public init(
         dataLayout: Int, releaseID: String, buildFingerprint: String, buildIncremental: String,
         systemDiskSHA256: String, createdWith: String, lastBooted: String,
-        lastCompleted: Completed? = nil, pendingUpdate: Pending? = nil
+        lastCompleted: Completed? = nil, pendingUpdate: Pending? = nil, isUnsignedProof: Bool = false
     ) {
         self.dataLayout = dataLayout
         self.releaseID = releaseID
@@ -202,6 +204,7 @@ public struct InstanceState: Equatable, Sendable {
         self.lastBooted = lastBooted
         self.lastCompleted = lastCompleted
         self.pendingUpdate = pendingUpdate
+        self.isUnsignedProof = isUnsignedProof
     }
 
     public var buildNumber: Int { Int(buildIncremental) ?? 0 }
@@ -211,10 +214,11 @@ public struct InstanceState: Equatable, Sendable {
         self.init(
             dataLayout: release.dataLayout, releaseID: release.releaseID, buildFingerprint: release.buildFingerprint,
             buildIncremental: String(release.buildNumber), systemDiskSHA256: release.systemDiskSHA256,
-            createdWith: release.releaseID, lastBooted: when
+            createdWith: release.releaseID, lastBooted: when, isUnsignedProof: release.isUnsignedProof
         )
     }
 
+    /// The keys of a schema 1 record; a schema 2 record has `unsigned_proof` too.
     static let keys: Set<String> = [
         "schema", "data_layout", "release_id", "build_fingerprint", "build_incremental", "system_disk_sha256",
         "created_with", "last_booted", "last_completed", "pending_update",
@@ -233,11 +237,16 @@ extension InstanceState: Codable {
         case lastBooted = "last_booted"
         case lastCompleted = "last_completed"
         case pendingUpdate = "pending_update"
+        case unsignedProof = "unsigned_proof"
     }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        guard try values.decode(Int.self, forKey: .schema) == 1 else {
+        // Schema 1 is every signed release's record; schema 2 is a proof's, and
+        // says `unsigned_proof` true.
+        let schema = try values.decode(Int.self, forKey: .schema)
+        let proof = schema == 2 ? try values.decodeIfPresent(Bool.self, forKey: .unsignedProof) : nil
+        guard schema == 1 || proof == true else {
             throw InstanceError.state("This virtual machine's instance.json is of a schema Andarium does not know.")
         }
         let build = try values.decode(String.self, forKey: .buildIncremental)
@@ -253,14 +262,15 @@ extension InstanceState: Codable {
             createdWith: try values.decode(String.self, forKey: .createdWith),
             lastBooted: try values.decode(String.self, forKey: .lastBooted),
             lastCompleted: try values.decodeIfPresent(Completed.self, forKey: .lastCompleted),
-            pendingUpdate: try values.decodeIfPresent(Pending.self, forKey: .pendingUpdate)
+            pendingUpdate: try values.decodeIfPresent(Pending.self, forKey: .pendingUpdate),
+            isUnsignedProof: proof == true
         )
     }
 
     /// The two optional fields are written as `null`, as the schema has them.
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
-        try values.encode(1, forKey: .schema)
+        try values.encode(isUnsignedProof ? 2 : 1, forKey: .schema)
         try values.encode(dataLayout, forKey: .dataLayout)
         try values.encode(releaseID, forKey: .releaseID)
         try values.encode(buildFingerprint, forKey: .buildFingerprint)
@@ -270,6 +280,7 @@ extension InstanceState: Codable {
         try values.encode(lastBooted, forKey: .lastBooted)
         if let lastCompleted { try values.encode(lastCompleted, forKey: .lastCompleted) } else { try values.encodeNil(forKey: .lastCompleted) }
         if let pendingUpdate { try values.encode(pendingUpdate, forKey: .pendingUpdate) } else { try values.encodeNil(forKey: .pendingUpdate) }
+        if isUnsignedProof { try values.encode(true, forKey: .unsignedProof) }
     }
 }
 
@@ -332,12 +343,10 @@ public enum InstanceRules {
         // An unsigned proof is for a fresh or isolated instance: it never takes
         // over data another system wrote, and the data it wrote never goes to
         // another system. The instance is erased instead (the way out of every
-        // refusal), which Home offers as for any other mismatch.
+        // refusal), which Home offers as for any other mismatch, in its words.
         if release.releaseID != state.releaseID, dataDiskExists || snapshotExists,
-           release.isUnsignedProof || state.releaseID.hasPrefix(ReleaseIdentity.unsignedProofIDPrefix) {
-            return InstanceDecision(
-                .refuseConflict, "An unsigned proof system and the data of another system do not mix: erase the virtual machine."
-            )
+           release.isUnsignedProof || state.isUnsignedProof {
+            return InstanceDecision(.refuseConflict, StartBlock.mismatch.explanation)
         }
         if let pending = state.pendingUpdate {
             if flags.restoreSnapshot {

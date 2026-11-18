@@ -506,10 +506,12 @@ struct InstanceFileTests {
 struct UnsignedProofInstanceTests {
     private static let proof = "unsigned-proof-p1"
 
-    private func state(_ id: String, build: Int, sha: String, pending: String? = nil) -> InstanceState {
+    private func state(
+        _ id: String, build: Int, sha: String, pending: String? = nil, proof: Bool = false
+    ) -> InstanceState {
         var state = InstanceState(
             dataLayout: 1, releaseID: id, buildFingerprint: "fp", buildIncremental: String(build),
-            systemDiskSHA256: sha, createdWith: id, lastBooted: "2026-10-01T00:00:00Z"
+            systemDiskSHA256: sha, createdWith: id, lastBooted: "2026-10-01T00:00:00Z", isUnsignedProof: proof
         )
         if let pending {
             state.pendingUpdate = InstanceState.Pending(
@@ -541,14 +543,14 @@ struct UnsignedProofInstanceTests {
         #expect(InstanceRules.plan(state: nil, dataDiskExists: false, snapshotExists: false, release: proof) == .firstStart)
         // A record with no data behind it holds nothing to keep, whichever system wrote it.
         #expect(decide(state("rel-a", build: 100, sha: otherSHA), data: false, proof) == .create)
-        #expect(decide(state("unsigned-proof-p0", build: 250, sha: otherSHA), data: false, proof) == .create)
+        #expect(decide(state("unsigned-proof-p0", build: 250, sha: otherSHA, proof: true), data: false, proof) == .create)
         // Data nothing recorded is refused as for every system.
         #expect(decide(nil, data: true, proof) == .refuseConflict)
     }
 
     @Test func theInstanceTheProofCreatedStartsTheSameProofAgain() {
         let proof = release(Self.proof, build: 300, sha: sha, proof: true)
-        let created = state(Self.proof, build: 300, sha: sha)
+        let created = state(Self.proof, build: 300, sha: sha, proof: true)
         #expect(decide(created, proof) == .boot)
         #expect(InstanceRules.plan(state: created, dataDiskExists: true, snapshotExists: false, release: proof) == .normal)
         // One proof ID, two disks is the same conflict as for a release.
@@ -578,7 +580,7 @@ struct UnsignedProofInstanceTests {
     }
 
     @Test func aProofInstanceIsRefusedByEveryOtherSystem() {
-        let created = state(Self.proof, build: 300, sha: sha)
+        let created = state(Self.proof, build: 300, sha: sha, proof: true)
         let candidates = [
             release("unsigned-proof-p2", build: 400, sha: otherSHA, proof: true),
             release("unsigned-proof-p2", build: 200, sha: otherSHA, proof: true),
@@ -601,7 +603,7 @@ struct UnsignedProofInstanceTests {
         let real = state("rel-a", build: 100, sha: otherSHA)
         let proof = release(Self.proof, build: 300, sha: sha, proof: true)
         #expect(decide(real, proof, flags: InstanceFlags(reset: true)) == .reset)
-        let created = state(Self.proof, build: 300, sha: sha)
+        let created = state(Self.proof, build: 300, sha: sha, proof: true)
         #expect(decide(created, release("rel-c", build: 400, sha: otherSHA), flags: InstanceFlags(reset: true)) == .reset)
     }
 
@@ -646,7 +648,7 @@ struct UnsignedProofInstanceTests {
         #expect(try Data(contentsOf: files.data) == Data("proof data".utf8))
     }
 
-    @Test func aReleaseIdentityKnowsAProofFromItsManifest() throws {
+    @Test func aReleaseIdentityKnowsAProofFromItsManifestsAcceptanceAlone() throws {
         let layout = #"{"system_disk": {"sha256": "\#(String(repeating: "c", count: 64))"}, "data_disk": {"layout_version": 1, "capacity_gib": {"minimum": 4, "default": 8, "maximum": 64}}}"#
         func identity(_ id: String, acceptance: String?) throws -> ReleaseIdentity {
             let field = acceptance.map { #""acceptance": "\#($0)", "# } ?? ""
@@ -654,13 +656,148 @@ struct UnsignedProofInstanceTests {
             return try ReleaseIdentity(manifest: Data(manifest.utf8), layout: Data(layout.utf8))
         }
         #expect(try identity(Self.proof, acceptance: "unsigned-proof").isUnsignedProof)
+        #expect(try identity("20261102-los24-r5", acceptance: "unsigned-proof").isUnsignedProof)
         #expect(try !identity("20261102-los24-r5", acceptance: "accepted").isUnsignedProof)
         // A manifest of an earlier schema, or a release with no word on it, is no proof.
         #expect(try !identity("20261102-los24-r5", acceptance: nil).isUnsignedProof)
-        // A proof not named as one, or a release named as one, has no usable identity.
-        #expect(throws: InstanceError.self) { try identity("20261102-los24-r5", acceptance: "unsigned-proof") }
-        #expect(throws: InstanceError.self) { try identity(Self.proof, acceptance: "accepted") }
-        #expect(throws: InstanceError.self) { try identity(Self.proof, acceptance: nil) }
+        // The release ID decides nothing: a signed release whose ID starts like a proof's stays usable.
+        #expect(try !identity(Self.proof, acceptance: "accepted").isUnsignedProof)
+        #expect(try !identity(Self.proof, acceptance: nil).isUnsignedProof)
+    }
+
+    @Test func aSignedReleaseNamedLikeAProofDecidesAndRecordsAsASignedOne() throws {
+        let named = release("unsigned-proof-demo", build: 100, sha: otherSHA)
+        #expect(!named.isUnsignedProof)
+        let record = InstanceState(creating: named, at: "2026-10-01T00:00:00Z")
+        #expect(!record.isUnsignedProof)
+        #expect(decide(record, release("rel-b", build: 200, sha: sha)) == .update)
+        #expect(decide(state("rel-a", build: 100, sha: sha), release("unsigned-proof-demo", build: 200, sha: otherSHA)) == .update)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(record)) as? [String: Any])
+        #expect(object["schema"] as? Int == 1 && Set(object.keys) == InstanceState.keys)
+    }
+
+    // The record of an instance a proof created: schema 2 with `unsigned_proof`.
+
+    private func encoded(_ state: InstanceState) throws -> [String: Any] {
+        try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) as? [String: Any])
+    }
+
+    @Test func aProofsRecordSaysSoInASchemaPreviousVersionsRefuse() throws {
+        let record = InstanceState(creating: release(Self.proof, build: 300, sha: sha, proof: true), at: "2026-10-01T00:00:00Z")
+        #expect(record.isUnsignedProof)
+        let object = try encoded(record)
+        #expect(object["schema"] as? Int == 2 && object["unsigned_proof"] as? Bool == true)
+        #expect(Set(object.keys) == InstanceState.keys.union(["unsigned_proof"]))
+        // It reads back as a proof, with everything else it holds.
+        let again = try JSONDecoder().decode(InstanceState.self, from: JSONEncoder().encode(record))
+        #expect(again == record && again.isUnsignedProof)
+        // A schema 2 record without the word, with it false, or another schema is no record.
+        for bad in [#"{"schema": 2}"#, #"{"schema": 2, "unsigned_proof": false}"#, #"{"schema": 3, "unsigned_proof": true}"#] {
+            var broken = object
+            let patch = try #require(try JSONSerialization.jsonObject(with: Data(bad.utf8)) as? [String: Any])
+            for (key, value) in patch { broken[key] = value }
+            if bad == #"{"schema": 2}"# { broken["unsigned_proof"] = nil }
+            #expect(throws: InstanceError.self, "\(bad)") {
+                try JSONDecoder().decode(InstanceState.self, from: JSONSerialization.data(withJSONObject: broken))
+            }
+        }
+        // A signed record is as before: schema 1, the same keys, no word.
+        let signed = try encoded(InstanceState(creating: release("rel-a", build: 100, sha: otherSHA), at: "2026-10-01T00:00:00Z"))
+        #expect(signed["schema"] as? Int == 1 && Set(signed.keys) == InstanceState.keys)
+    }
+
+    /// The decoder and encoder of `InstanceState` as b91f2b62 has them, the app
+    /// version before the proof rule: it knows schema 1 only.
+    private struct PreviousInstanceState: Codable {
+        var state: InstanceState
+
+        private enum CodingKeys: String, CodingKey {
+            case schema
+            case dataLayout = "data_layout"
+            case releaseID = "release_id"
+            case buildFingerprint = "build_fingerprint"
+            case buildIncremental = "build_incremental"
+            case systemDiskSHA256 = "system_disk_sha256"
+            case createdWith = "created_with"
+            case lastBooted = "last_booted"
+            case lastCompleted = "last_completed"
+            case pendingUpdate = "pending_update"
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            guard try values.decode(Int.self, forKey: .schema) == 1 else {
+                throw InstanceError.state("This virtual machine's instance.json is of a schema Andarium does not know.")
+            }
+            let build = try values.decode(String.self, forKey: .buildIncremental)
+            guard build.range(of: "^[1-9][0-9]{0,9}$", options: .regularExpression) != nil else {
+                throw InstanceError.state("This virtual machine's instance.json has an invalid build number.")
+            }
+            state = InstanceState(
+                dataLayout: try values.decode(Int.self, forKey: .dataLayout),
+                releaseID: try values.decode(String.self, forKey: .releaseID),
+                buildFingerprint: try values.decode(String.self, forKey: .buildFingerprint),
+                buildIncremental: build,
+                systemDiskSHA256: try values.decode(String.self, forKey: .systemDiskSHA256),
+                createdWith: try values.decode(String.self, forKey: .createdWith),
+                lastBooted: try values.decode(String.self, forKey: .lastBooted),
+                lastCompleted: try values.decodeIfPresent(InstanceState.Completed.self, forKey: .lastCompleted),
+                pendingUpdate: try values.decodeIfPresent(InstanceState.Pending.self, forKey: .pendingUpdate)
+            )
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var values = encoder.container(keyedBy: CodingKeys.self)
+            try values.encode(1, forKey: .schema)
+            try values.encode(state.dataLayout, forKey: .dataLayout)
+            try values.encode(state.releaseID, forKey: .releaseID)
+            try values.encode(state.buildFingerprint, forKey: .buildFingerprint)
+            try values.encode(state.buildIncremental, forKey: .buildIncremental)
+            try values.encode(state.systemDiskSHA256, forKey: .systemDiskSHA256)
+            try values.encode(state.createdWith, forKey: .createdWith)
+            try values.encode(state.lastBooted, forKey: .lastBooted)
+            if let completed = state.lastCompleted { try values.encode(completed, forKey: .lastCompleted) } else { try values.encodeNil(forKey: .lastCompleted) }
+            if let pending = state.pendingUpdate { try values.encode(pending, forKey: .pendingUpdate) } else { try values.encodeNil(forKey: .pendingUpdate) }
+        }
+    }
+
+    @Test func theVersionBeforeCannotReadAProofsRecordAndSignedRecordsPassBothWays() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // A proof's record: the previous version refuses it, so it cannot update that instance.
+        let proofRecord = InstanceState(creating: release(Self.proof, build: 1, sha: sha, proof: true), at: "2026-10-01T00:00:00Z")
+        #expect(throws: InstanceError.self) {
+            try JSONDecoder().decode(PreviousInstanceState.self, from: encoder.encode(proofRecord))
+        }
+        // A signed record: both versions read the other's bytes, and write the same bytes.
+        var signed = InstanceState(creating: release("rel-a", build: 100, sha: otherSHA), at: "2026-10-01T00:00:00Z")
+        signed.lastCompleted = InstanceState.Completed(releaseID: "rel-a", buildIncremental: "100", at: "2026-10-02T00:00:00Z")
+        let bytes = try encoder.encode(signed)
+        let previous = try JSONDecoder().decode(PreviousInstanceState.self, from: bytes)
+        #expect(previous.state == signed)
+        #expect(try encoder.encode(previous) == bytes)
+        #expect(try JSONDecoder().decode(InstanceState.self, from: encoder.encode(previous)) == signed)
+    }
+
+    @Test func anInstanceAProofCreatesRecordsItAndKeepsTheWordThroughItsLife() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = InstanceFiles(directory: root.appendingPathComponent("Guest"))
+        let proof = release(Self.proof, build: 300, sha: sha, proof: true)
+        try files.apply(try files.decide(for: proof), release: proof)
+        try Data("proof data".utf8).write(to: files.data)
+        #expect(try files.readState()?.isUnsignedProof == true)
+        let object = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: files.state)) as? [String: Any])
+        #expect(object["schema"] as? Int == 2 && object["unsigned_proof"] as? Bool == true)
+        // A start, the first boot and a clean end rewrite the record and keep it.
+        try files.apply(try files.decide(for: proof), release: proof)
+        try files.booted(release: proof)
+        try files.complete(release: proof)
+        #expect(try files.readState()?.isUnsignedProof == true)
+        // A signed release over it is refused by the word, not by the ID: the ID of the proof says nothing.
+        let renamed = release("rel-c", build: 400, sha: otherSHA)
+        #expect(try files.decide(for: renamed).action == .refuseConflict)
     }
 }
 
