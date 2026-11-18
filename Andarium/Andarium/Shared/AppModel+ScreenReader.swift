@@ -201,7 +201,9 @@ extension AppModel {
             return
         }
         guard let state = reader.state else { return }
-        let canShow = spacePause == nil && busy == nil && sheet == nil && reader.settingsOpen == 0 && reader.card == nil
+        // The card waits for the run's start sentence: its focus would cut it.
+        let canShow = spacePause == nil && busy == nil && sheet == nil && reader.settingsOpen == 0
+            && reader.card == nil && !reader.runStartAnnouncing
         if !state.isInstalled {
             if reader.card == .ask { reader.card = nil }
             if canShow, !reader.toldMissing { present(.unavailable, in: reader) }
@@ -260,17 +262,30 @@ extension AppModel {
     /// puts its cursor on the display (the direct-touch element, once Android's
     /// screen reader is found on); then the sentence that says what the run is
     /// and where the side keys are; then, where Android's screen reader was on
-    /// at the start, the news that it is on (`evaluateScreenReaderCard`), or the
-    /// card that asks, which takes the focus and so cuts what is being said. The
-    /// screen change's argument is no place for the sentence: VoiceOver does not
-    /// speak it.
+    /// at the start, the news that it is on (`evaluateScreenReaderCard`), queued
+    /// behind it, or the card that asks, which waits for the sentence's end and
+    /// then takes the focus. The wait ends at the sentence's end, or after
+    /// `runStartBound` where VoiceOver reports none. The screen change's
+    /// argument is no place for the sentence: VoiceOver does not speak it.
     func announceRunStart(_ phase: Phase) {
         VoiceOver.screenChanged()
         guard let words = RootView.spoken(phase), voiceOverRunning() else { return }
         let current = session
-        current.reader.runStartAnnouncing = true
-        runStartAnnouncer(words) { _ in
-            if current === self.session { current.reader.runStartAnnouncing = false }
+        let reader = current.reader
+        reader.runStartGeneration += 1
+        let generation = reader.runStartGeneration
+        reader.runStartAnnouncing = true
+        let release: @MainActor () -> Void = { [weak self] in
+            guard let self, current === self.session, !reader.ended,
+                  reader.runStartAnnouncing, reader.runStartGeneration == generation else { return }
+            reader.runStartAnnouncing = false
+            evaluateScreenReaderCard()
+        }
+        runStartAnnouncer(words) { _ in release() }
+        let bound = runStartBound
+        Task { @MainActor in
+            try? await Task.sleep(for: bound)
+            release()
         }
     }
 

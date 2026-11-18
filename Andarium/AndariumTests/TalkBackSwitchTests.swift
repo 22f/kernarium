@@ -630,6 +630,50 @@ struct TalkBackSwitchTests {
         #expect(spoken.lines.count == 2)
     }
 
+    /// The card that asks waits for the run-start sentence's end: its focus
+    /// would cut the sentence off. Where the sentence ends, the card rises at
+    /// once.
+    @Test func theCardWaitsForTheRunStartSentenceAndRisesAtItsEnd() async throws {
+        let (model, _) = started(voiceOver: true, interval: .milliseconds(20))
+        let spoken = RunStartSpeech()
+        model.runStartAnnouncer = { text, finished in
+            spoken.lines.append(text)
+            spoken.finish = finished
+        }
+        // Before the first read: the card would rise as soon as Android answers.
+        model.announceRunStart(.running(.normal))
+        try await settle { model.session.reader.state != nil }
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(model.session.reader.card == nil)
+        #expect(model.session.reader.runStartAnnouncing)
+        spoken.finish?(true)
+        #expect(model.session.reader.card == .ask)
+        #expect(!model.session.reader.runStartAnnouncing)
+    }
+
+    /// Where VoiceOver never says the sentence is done, the card and the
+    /// display go on after the bound.
+    @Test func theCardAndTheDisplayGoOnAfterTheBoundWhereNoEndComes() async throws {
+        let (model, _) = started(voiceOver: true, interval: .milliseconds(20))
+        model.runStartBound = .milliseconds(200)
+        let spoken = RunStartSpeech()
+        model.runStartAnnouncer = { text, finished in
+            spoken.lines.append(text)
+            spoken.finish = finished
+        }
+        model.announceRunStart(.running(.normal))
+        try await settle { model.session.reader.state != nil }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(model.session.reader.card == nil)
+        try await settle { model.session.reader.card == .ask }
+        #expect(!model.session.reader.runStartAnnouncing)
+        // An end that comes late changes nothing.
+        spoken.finish?(true)
+        #expect(model.session.reader.card == .ask)
+        model.session.reader.card = nil
+        #expect(model.displayMayTakeFocus)
+    }
+
     @Test func aScreenThatSpeaksForItselfAnnouncesNothingAtItsStart() throws {
         let (model, _) = started(voiceOver: true)
         let spoken = RunStartSpeech()

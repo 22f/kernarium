@@ -587,7 +587,7 @@ so these tests drive the interface and read no speech. The hosted
 that the session's end cancels, or that answers after it, the card, the
 display's direct touch, the loop that reads, and what VoiceOver is told (once
 per event, with the way back, and the run start's sentence queued with the
-display's focus waiting for its end); a wait in them fails where what it waited
+card and the display's focus waiting for its end, or for the bound); a wait in them fails where what it waited
 for did not happen. `GuestDisplayAccessibilityTests` read the display's
 accessibility structure: one element with the screen reader off, and with it
 on a container of one direct-touch element that carries the words, covers the

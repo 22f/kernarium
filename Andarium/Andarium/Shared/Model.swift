@@ -662,6 +662,11 @@ final class AppModel {
     @ObservationIgnored var runStartAnnouncer: @MainActor (String, @escaping @MainActor @Sendable (Bool) -> Void) -> Void = {
         VoiceOver.announce($0, queued: true, finished: $1)
     }
+    /// How long the card and the display wait for that sentence's end before
+    /// they go on without it, where VoiceOver never reports one. The sentence
+    /// takes about seven seconds at VoiceOver's default rate; the bound leaves
+    /// room for slower speech and longer languages.
+    @ObservationIgnored var runStartBound: Duration = .seconds(15)
     /// The preview's mock guest screen reader, where no runtime is behind the
     /// screens; nil in the application.
     @ObservationIgnored var screenReaderStandIn: (any ScreenReaderStandIn)?

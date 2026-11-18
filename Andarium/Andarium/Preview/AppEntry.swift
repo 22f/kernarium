@@ -185,7 +185,11 @@ struct AppEntry {
         // screen states another access (and `-systemCamera` reads the
         // Simulator's own).
         model.cameraAccess = .notDetermined
-        if voiceOver { model.voiceOverRunning = { true } }
+        if voiceOver {
+            model.voiceOverRunning = { true }
+            // The Simulator's VoiceOver is off and reports no end of a sentence.
+            model.runStartAnnouncer = { _, finished in finished(true) }
+        }
         let mockReader = PreviewScreenReader()
         model.screenReaderStandIn = mockReader
         switch talkBack {

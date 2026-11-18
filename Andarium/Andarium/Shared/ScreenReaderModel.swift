@@ -104,9 +104,13 @@ final class ScreenReaderSession {
     /// How many Settings sheets watch the state.
     var settingsOpen = 0
     /// The sentence that says what the run is, queued as the run began, is
-    /// still being spoken to VoiceOver: the display's direct-touch element does
-    /// not take VoiceOver's focus until it has been.
+    /// still being spoken to VoiceOver: neither the card that asks nor the
+    /// display's direct-touch element takes VoiceOver's focus until it has
+    /// been.
     var runStartAnnouncing = false
+    /// Which announcement of the run's start `runStartAnnouncing` is for: the
+    /// end of an earlier one does not release a later one.
+    @ObservationIgnored var runStartGeneration = 0
     /// The loop that reads while VoiceOver runs.
     @ObservationIgnored var watcher: Task<Void, Never>?
     /// The session is over: nothing begins in it, and what was under way was
