@@ -127,7 +127,10 @@ found it, because the guest resolves the fault, a copy-on-write store among
 them, and runs the instruction again; register allocation therefore never
 commits a value to a guest register before a later access of the same
 instruction that can fault. The exceptions probe's fault-state mode holds both
-engines to that.
+engines to that, except the flags of a read-modify-write, the x87 status bits
+of a store of ST(0) and the MXCSR flags of VCVTPS2PH to memory, which the
+faulting instruction has already changed; `x86-64-jit-retirement` pins that
+gap.
 
 A dispatch reports as retired only the instructions that completed, as the
 gadget engine does, and retires exactly one instruction, or one element of a

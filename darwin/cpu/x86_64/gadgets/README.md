@@ -123,6 +123,12 @@ tail and resolves the same address.
   not run. In compatibility mode FS and GS accesses check their limit, and a
   task whose ES, SS or DS is not flat writable data steps one instruction at a
   time; long-mode code pays for none of it.
+- An instruction whose store faults has changed no flag, x87 status bit,
+  MXCSR flag, register or stack pointer, apart from the elements a repeated
+  string instruction had stored. A gadget commits its results after the
+  store, and one whose helper raises status first keeps what it would change
+  and puts it back at the fault exit. The `--retirement` rows of the corpus
+  runner hold it.
 - The engine runs only on hosts with FEAT_LSE2, which the runtime checks once.
   A locked operand inside one 16-byte granule keeps the exclusive loop; one
   across a granule or a page runs under the process-wide `split_operand_lock`
