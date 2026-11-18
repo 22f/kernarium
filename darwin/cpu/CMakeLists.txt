@@ -90,6 +90,13 @@ set_property(CACHE UML_AOT_MEMORY_CALL PROPERTY STRINGS
     inline probe probe-miss)
 set(UML_AOT_HOT_LIST "" CACHE FILEPATH
     "With a call UML_AOT_MEMORY_CALL, the hot list (tools/aot/hot_list.py) naming the functions that keep the inline probe")
+set(UML_AOT_INSTANCE_CAPACITY 64 CACHE STRING
+    "How many library instances each executor thread's AOT binder holds before it replaces the oldest (64 is the product; another value is a measurement variant)")
+if(NOT UML_AOT_INSTANCE_CAPACITY MATCHES "^[0-9]+$" OR
+   UML_AOT_INSTANCE_CAPACITY LESS 1 OR UML_AOT_INSTANCE_CAPACITY GREATER 16384)
+    message(FATAL_ERROR
+        "UML_AOT_INSTANCE_CAPACITY must be an integer from 1 to 16384")
+endif()
 option(UML_AOT_SHARED_VERDICTS
     "Let address spaces share what they verified about a page the kernel declares immutable; OFF hashes every page in every address space (a measurement variant)" ON)
 option(UML_AOT_COUNT_RETIRED
@@ -566,6 +573,7 @@ function(_uml_add_gadget_executor TARGET SLOTS)
     endif()
     target_compile_definitions(${TARGET} PRIVATE
         UML_AOT=$<BOOL:${UML_AOT}>
+        UML_AOT_INSTANCE_CAPACITY=${UML_AOT_INSTANCE_CAPACITY}
         UML_GADGET_CACHE_CENSUS=$<BOOL:${UML_GADGET_CACHE_CENSUS}>
         UML_GADGET_CACHE_SLOTS=${SLOTS}
         UML_GADGET_BLOCK_INSTRUCTIONS=${UML_GADGET_BLOCK_INSTRUCTIONS}

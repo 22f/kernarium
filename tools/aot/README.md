@@ -65,6 +65,10 @@ entry-table slot in a marker word). The call saves the guest's x30 in the
 frame's last slot. The two calls are measurement variants of the same
 contract; the differential and the guest runs hold each of them.
 
+`UML_AOT_INSTANCE_CAPACITY` is the number of library instances each executor
+thread's binder holds (64 in the product; above 64 it finds an instance by hash
+instead of a scan). It is a runtime option: the blob does not change.
+
 `UML_AOT_HOT_LIST` (`--hot-list`, with a call) keeps the inline probe in the
 functions a profile calls hot and gives every other function the call.
 `hot_list.py` makes the list from the guest sampler's profile files

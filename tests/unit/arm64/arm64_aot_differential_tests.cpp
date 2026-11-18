@@ -3377,13 +3377,15 @@ void misaligned_cas_follows_the_profile(const LibraryImage &image)
 	}
 }
 
-/* More instances than the binder holds: the library mapped at 70 biases is
- * run copy by copy, twice. The ones it dropped are bound again, and every
- * run ends as the engine's does. */
+/* More instances than the binder holds: the library mapped at six more
+ * biases than the binder has places (70 in the product's 64) is run copy by
+ * copy, twice. The ones it dropped are bound again, and every run ends as
+ * the engine's does. */
 [[gnu::noinline]]
 void more_instances_than_the_binder_holds(const LibraryImage &image)
 {
-	constexpr std::size_t copies = 70;
+	const std::size_t capacity = aot_runtime::instance_capacity();
+	const std::size_t copies = capacity + 6;
 	constexpr unsigned long generation = 4540;
 	const auto first_bias = 0x7300'0000'0000ULL;
 	const auto bias_of = [&](std::size_t index) {
@@ -3425,17 +3427,17 @@ void more_instances_than_the_binder_holds(const LibraryImage &image)
 		static_cast<unsigned long long>(st.instances_created),
 		static_cast<unsigned long long>(st.instance_evictions),
 		static_cast<unsigned long long>(st.instance_rebinds));
-	/* Each copy is bound the first time, and the ones the 64 slots dropped
+	/* Each copy is bound the first time, and the ones the slots dropped
 	 * again in the second round. */
-	require(st.binds >= copies + (copies - 64));
+	require(st.binds >= copies + (copies - capacity));
 	require(st.enters >= 2 * copies);
 	require(st.poisoned == 0);
-	/* The slots are first in, first out, and 70 copies visited in turn over
-	 * 64 slots miss every time after the first fill: one instance made per
-	 * run, all but the first 64 in the place of a live one, and every one of
-	 * the second round made again. */
+	/* The slots are first in, first out, and the copies visited in turn over
+	 * fewer slots miss every time after the first fill: one instance made
+	 * per run, all but the first `capacity` in the place of a live one, and
+	 * every one of the second round made again. */
 	require(st.instances_created >= 2 * copies);
-	require(st.instance_evictions >= 2 * copies - 64);
+	require(st.instance_evictions >= 2 * copies - capacity);
 	require(st.instance_rebinds >= copies);
 }
 

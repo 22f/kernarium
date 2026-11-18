@@ -17,11 +17,24 @@
  * header is the whole boundary the gadget executor sees. Counters, reports
  * and test switches are in aot_diagnostics.hpp and exist only in builds that
  * set UML_AOT_DIAGNOSTICS. */
+/* How many library instances (a library of an address space at a load bias)
+ * one executor thread's binder holds before it replaces the oldest. The
+ * product's value is 64; UML_AOT_INSTANCE_CAPACITY is a measurement option
+ * (UML_AOT_INSTANCE_CAPACITY in CMake) and must be the same in every
+ * compilation of this header the binary links, the executor's included. */
+#ifndef UML_AOT_INSTANCE_CAPACITY
+#define UML_AOT_INSTANCE_CAPACITY 64
+#endif
+
 namespace uml::cpu::arm64::aot {
 
 /* Whether AOT code may be entered: DARWIN_UML_AOT=1 at start-up. Off by
  * default. */
 [[nodiscard]] bool enabled() noexcept;
+
+/* The instance capacity the runtime library was built with (tests that need
+ * more instances than a binder holds ask it, not the macro). */
+[[nodiscard]] std::size_t instance_capacity() noexcept;
 
 /* Why an entry was refused, for the diagnostics build's counters. */
 enum class Refusal : unsigned {
@@ -123,6 +136,10 @@ struct CrossTable final {
 	std::array<Entry, capacity> entries{};
 };
 
+/* The binder's instance lookup scans the table up to this many entries and
+ * keeps a hash index above it. */
+inline constexpr std::size_t instance_scan_limit = 64;
+
 /* The libraries an address space has mapped, identified by the digest of
  * their code pages. Each text page is hashed (SHA-256) and the hash compared
  * with the one stored for the page before any rewritten instruction of it
@@ -167,6 +184,9 @@ private:
 		 * `state_changes`. */
 		std::vector<std::uint8_t> pages{};
 		std::uint64_t state_changes{};
+		/* The next instance of the same hash bucket (a table above
+		 * instance_scan_limit entries only). */
+		std::int16_t chain{-1};
 	};
 	struct PageSlot final {
 		unsigned long generation{};
@@ -207,11 +227,26 @@ private:
 		std::uint64_t sequence, std::uint64_t low, std::uint64_t high,
 		std::uint64_t &current) noexcept;
 
-	static constexpr std::size_t instance_capacity = CrossTable::capacity;
-	/* The cross table is built from the instances: it must hold them all. */
-	static_assert(instance_capacity <= CrossTable::capacity);
-	static constexpr std::size_t page_slots = 2048;
+	static constexpr std::size_t instance_capacity = UML_AOT_INSTANCE_CAPACITY;
+	static_assert(instance_capacity >= 1 && instance_capacity <= 16384);
+	/* The cross table holds the instances of one address space (at most a
+	 * library each, a few more where a library is mapped twice): one the
+	 * table has no room for is left to the engine, never written past it. */
+	static constexpr bool indexed = instance_capacity > instance_scan_limit;
+	static constexpr std::size_t index_buckets =
+		indexed ? 2 * instance_capacity : 0;
+	/* The page states cached by (page, address space): 32 per instance, at
+	 * least the 2048 of the product's table. */
+	static constexpr std::size_t page_slots =
+		instance_capacity * 32 > 2048 ? instance_capacity * 32 : 2048;
+	[[nodiscard]] static std::size_t bucket_of(unsigned long generation,
+		std::uint32_t library, std::uint64_t bias) noexcept;
+	[[nodiscard]] Instance *find_instance(unsigned long generation,
+		std::uint32_t library, std::uint64_t bias) noexcept;
+	void unlink_instance(std::size_t index) noexcept;
+	void link_instance(std::size_t index) noexcept;
 	std::array<Instance, instance_capacity> instances_{};
+	std::array<std::int16_t, index_buckets> heads_{};
 	std::array<PageSlot, page_slots> pages_{};
 	std::size_t next_instance_{};
 	std::uint64_t ticks_{};
