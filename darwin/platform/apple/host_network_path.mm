@@ -52,7 +52,7 @@ public:
 			dispatch_queue_attr_make_with_qos_class(
 				DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)));
 		/* On the system's queue: a block that does no more than write the
-		 * state. */
+		 * state and run its observer, which only wakes a reader. */
 		const std::shared_ptr<Sink> sink = sink_;
 		nw_path_monitor_set_update_handler(monitor_, ^(nw_path_t path) {
 			sink->deliver(!hostNetworkPathIsOutage(

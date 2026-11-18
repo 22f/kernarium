@@ -38,6 +38,14 @@ public:
 	{
 		return carried_.load(std::memory_order_acquire);
 	}
+	/* How many reports said that no interface carries the path. A reader
+	 * that compares it with the count it saw at its last look learns of an
+	 * outage that began and ended between the two looks, which `carried()`
+	 * alone cannot show. */
+	[[nodiscard]] std::uint64_t uncarried_reports() const noexcept
+	{
+		return uncarried_reports_.load(std::memory_order_acquire);
+	}
 	/* Every report sets the state, so a path that is back clears the
 	 * outage. A report that gives only whether the path is usable says that
 	 * an interface carries it exactly when it is. */
@@ -49,6 +57,10 @@ public:
 	{
 		usable_.store(usable, std::memory_order_release);
 		carried_.store(carried, std::memory_order_release);
+		/* Before the total: a reader that sees a report counted sees what
+		 * it said. */
+		if (!carried)
+			uncarried_reports_.fetch_add(1, std::memory_order_release);
 		reports_.fetch_add(1, std::memory_order_release);
 		std::lock_guard guard{observer_lock_};
 		if (observer_ != nullptr)
@@ -74,6 +86,7 @@ private:
 	std::atomic<bool> usable_{true};
 	std::atomic<bool> carried_{true};
 	std::atomic<std::uint64_t> reports_{0};
+	std::atomic<std::uint64_t> uncarried_reports_{0};
 	std::mutex observer_lock_;
 	Observer observer_{};
 	void *observer_context_{};
