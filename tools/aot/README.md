@@ -73,11 +73,11 @@ blob: the engine runs it, the manifest's `refused` lists it, and the
 diagnostics report counts it (`libraries_refused`, from the header;
 `BLOB_VERSION` 2).
 
-`UML_AOT_INSTANCE_CAPACITY` is the number of library instances each executor
-thread's binder holds (2048 in the product, found by hash; 3.8 MB of binder
-state per executor thread, one per vCPU, and about 1.8 MB of page vectors in
-all after a boot and a Settings start on four vCPUs). It is a runtime option:
-the blob does not change.
+`UML_AOT_INSTANCE_CAPACITY` (a CMake cache value, 2048 by default) is the
+number of library instances each executor thread's binder holds before it
+replaces the oldest. The binder maps its tables from fresh pages, so its
+memory follows the instances made, not the capacity; an instance also holds
+one byte per text page of its library. The blob does not depend on it.
 
 Entry points: `ctest -R '^arm64-aot-tools$'` for the encoders, decoder and
 assembler, and `ctest -R '^arm64-aot-differential$'` (a configuration with
