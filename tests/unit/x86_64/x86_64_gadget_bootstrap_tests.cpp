@@ -8501,6 +8501,45 @@ void a_lane_extract_store_keeps_the_lane_across_a_page()
 		"a lane extract across a page stored something else");
 }
 
+/* VCVTPS2PH to memory narrows into a vector register before it translates the
+ * destination, and a translation that misses calls out, so the packed result
+ * must survive the call. Each float of 1.0 narrows to the half 0x3c00. */
+void a_half_precision_store_keeps_its_result_across_a_miss()
+{
+	using namespace uml::cpu::x86_64;
+	struct Width final {
+		std::uint8_t vex;
+		unsigned lanes;
+		const char *name;
+	};
+	for (const auto width : {Width{0x79, 4, "128-bit"},
+		     Width{0x7d, 8, "256-bit"}}) {
+		CallingOutMemory memory;
+		memory.load(0, {
+			0xc4, 0xe3, width.vex, 0x1d, 0x07, 0x00, // vcvtps2ph $0,x0,[rdi]
+			0x0f, 0x05,                               // syscall
+		});
+		const auto built = require_built(gadgets::build(memory, 0),
+			"the half-precision store did not build");
+		CpuState cpu{};
+		cpu.registers[7] = 0x2000; // rdi, a page no translation covers yet
+		for (unsigned lane = 0; lane < width.lanes; ++lane) {
+			const std::uint32_t one = 0x3f80'0000U;
+			std::memcpy(cpu.vectors[0].data() + 4U * lane, &one, 4);
+		}
+		const auto result = gadgets::execute(built.program, cpu, memory, 2);
+		require(result.event == uml::cpu::EngineEvent::system_call &&
+				result.retired_instructions == 2,
+			"the half-precision store did not reach SYSCALL");
+		bool exact = true;
+		for (unsigned lane = 0; lane < width.lanes; ++lane)
+			exact = exact && memory.byte(0x2000 + 2U * lane) == 0x00U &&
+				memory.byte(0x2001 + 2U * lane) == 0x3cU;
+		require(exact, std::string{"a "} + width.name +
+			" half-precision store lost its result across a miss");
+	}
+}
+
 void a_masked_store_keeps_the_unselected_bytes_across_a_miss()
 {
 	using namespace uml::cpu::x86_64;
@@ -11172,6 +11211,7 @@ int main(int argc, char **argv)
 	vector_integer_forwards_only_from_the_gadget_before();
 	a_lane_extract_store_keeps_the_lane_across_a_miss();
 	a_lane_extract_store_keeps_the_lane_across_a_page();
+	a_half_precision_store_keeps_its_result_across_a_miss();
 	a_masked_store_keeps_the_unselected_bytes_across_a_miss();
 	vector_invalid_results_use_x86_indefinite_nan();
 	locked_memory_updates_select_exclusive_gadgets();

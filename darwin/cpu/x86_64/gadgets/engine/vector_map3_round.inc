@@ -334,12 +334,18 @@ gadget vector_map3_half_\width\()_m
 	add x9, x25, #(\output_size - 1)
 	eor x9, x9, x25
 	tbnz x9, #12, Lx86_vector_map3_half_cross\@
+	/* A translation that misses calls out, which may leave anything in the
+	 * caller-saved vector registers: the result waits in x24 and x27. */
+	fmov x24, d4
+	.if \output_size == 16
+	mov x27, v4.d[1]
+	.endif
 	mov x7, x25
 	translate 1, UML_X86_64_TLB_WRITE_PAGE, \output_size, 0, Lx86_vector_map3_half_fault\@
 	.if \output_size == 8
-	str d4, [x7]
+	str x24, [x7]
 	.else
-	str q4, [x7]
+	stp x24, x27, [x7]
 	.endif
 	finish_store \output_size
 Lx86_vector_map3_half_cross\@:
