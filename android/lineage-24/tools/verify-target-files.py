@@ -5110,12 +5110,13 @@ def property_label(name: str, contexts: list[str]) -> str | None:
     return best[1] if best else None
 
 
-@functools.lru_cache(maxsize=8)
+@functools.lru_cache(maxsize=16)
 def cil_attribute_sets(
-    policy: bytes,
+    policy: bytes, exact: bool = False
 ) -> tuple[tuple[tuple[str, frozenset[str]], ...], tuple[tuple[str, list[object]], ...]]:
-    """The attributes a policy defines, without version suffixes: those whose set is a list of
-    names, with the names, and those whose set is an expression, as nested lists of names."""
+    """The attributes a policy defines, without version suffixes unless |exact|: those whose set is a list
+    of names, with the names, and those whose set is an expression, as nested lists of names."""
+    version = (lambda name: name) if exact else (lambda name: CIL_PLATFORM_VERSION_SUFFIX.sub("", name))
     lists = []
     expressions = []
     for match in CIL_TYPE_ATTRIBUTE_SET.finditer(policy):
@@ -5124,13 +5125,13 @@ def cil_attribute_sets(
             if token == "(":
                 stack.append([])
             elif token != ")":
-                stack[-1].append(CIL_PLATFORM_VERSION_SUFFIX.sub("", token))
+                stack[-1].append(version(token))
             elif len(stack) > 1:
                 closed = stack.pop()
                 stack[-1].append(closed)
         if len(stack) != 1 or len(stack[0]) != 1 or not isinstance(stack[0][0], list):
             continue
-        attribute = CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode())
+        attribute = version(match.group(1).decode())
         members = stack[0][0]
         if all(isinstance(member, str) for member in members) and not (
             members and members[0] in CIL_SET_OPERATORS
@@ -5285,12 +5286,14 @@ SEAPP_CONTEXT_FILES = (
 
 
 class CilSets:
-    """The members of the types and attributes of a set of policies, with every set expression expanded."""
+    """The members of the types and attributes of a set of policies, with every set expression expanded.
+    The names have their platform version suffixes removed, except with |exact|: then a type that carries
+    one is its own type, and a compatibility mapping gives membership only where a set lists it."""
 
-    def __init__(self, policies: tuple[bytes, ...]) -> None:
+    def __init__(self, policies: tuple[bytes, ...], exact: bool = False) -> None:
         self.definitions: dict[str, list[object]] = {}
         for policy in policies:
-            lists, expressions = cil_attribute_sets(policy)
+            lists, expressions = cil_attribute_sets(policy, exact)
             for attribute, members in lists:
                 self.definitions.setdefault(attribute, []).append(sorted(members))
             for attribute, members in expressions:
@@ -5479,12 +5482,17 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
     if creators & shut_out:
         fail(f"{sorted(creators & shut_out)} may create, bind or listen on a vsock socket")
 
+    exact = CilSets(policies, exact=True)
+
     def specific(rule: SmsRule) -> bool:
         """The service's own rule, not one it inherits. The service inherits a rule when the platform's policy
         gives it to every ordinary application domain through that one rule, one source set holding all four
-        and the service; a rule that names the service without all four, and every such rule of another
+        and the service, each by its own name (a type that differs from one of them by a version suffix is
+        another type); a rule that names the service without all four, and every such rule of another
         policy file (ours), is its own and must be on the reviewed list."""
-        return SMS_DOMAIN in rule.sources and not (rule.from_platform and rule.sources >= SMS_ORDINARY_APP_DOMAINS)
+        return SMS_DOMAIN in rule.sources and not (
+            rule.from_platform and exact.members(rule.source.decode()) >= SMS_ORDINARY_APP_DOMAINS | {SMS_DOMAIN}
+        )
 
     # The service's sockets: nothing but the service holds a permission on them (the platform's grant to
     # dumpstate apart), and what the service holds on the sockets of other types is only what every ordinary

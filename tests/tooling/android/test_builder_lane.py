@@ -477,6 +477,11 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         "base_typeattr_280": "(allow base_typeattr_280 system_app_data_file (file (read write getattr map)))\n",
         "base_typeattr_285": "(allow base_typeattr_285 virtualizationservice (vsock_socket (read write getattr)))\n",
     }
+    # A group that lists the four ordinary application domains by name, with the service: the control for a
+    # variant that lists a type of a version suffix in place of one of them.
+    stand_in = "priv_app_299999" if variant == "inherited-find-with-a-lookalike" else "priv_app"
+    plat += (f"(typeattributeset base_typeattr_290 (kernarium_sms untrusted_app platform_app {stand_in} system_app))\n"
+             "(allow base_typeattr_290 window_service (service_manager (find)))\n")
     for attribute, rule in inherited.items():
         left_out = " ".join(["isolated_app", "ephemeral_app", "sdk_sandbox_34", "sdk_sandbox_audit", "sdk_sandbox_next"]
                             + ([gap[1]] if gap[0] == attribute else []))
@@ -5967,6 +5972,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "may find \\['credstore_service'\\]"),
             ("sms-find-split-over-two-rules", {"sms_policy_variant": "inherited-find-split-over-two-rules"},
              "may find \\['credstore_service'\\]"),
+            # A type that differs from one of the four by a platform version suffix is another type.
+            ("sms-find-group-with-a-lookalike-of-priv-app", {"sms_policy_variant": "inherited-find-with-a-lookalike"},
+             "may find \\['window_service'\\]"),
             ("sms-find-group-without-untrusted-app", {"sms_policy_variant": "inherited-find-without-untrusted-app"},
              "may find \\['keystore_service'\\]"),
             ("sms-find-group-without-platform-app", {"sms_policy_variant": "inherited-find-without-platform-app"},
