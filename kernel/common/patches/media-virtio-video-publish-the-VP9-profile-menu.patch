@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 16:43:48 +0900
+Subject: [PATCH] media: virtio-video: publish the VP9 profile menu
+
+The decoder asks the host which profiles it lists for every coded
+format, but registered a profile menu for H.264 and HEVC only, so a
+client found none for VP9 and stated Profile 0 on its own. The host
+decodes VP9 Profile 2 (10-bit) too where its hardware does, so the
+driver now publishes V4L2_CID_MPEG_VIDEO_VP9_PROFILE as a read-only
+menu of the profiles the host lists, and the profile table maps the
+four VP9 profiles the wire names to their menu indexes. VP9 has no
+level control, so none is registered for it.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ drivers/media/virtio/virtio_video_dec.c     | 7 +++++--
+ drivers/media/virtio/virtio_video_helpers.c | 4 ++++
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/virtio/virtio_video_dec.c b/drivers/media/virtio/virtio_video_dec.c
+index d3ec77840dc7e7e2d2265dac1e15ea0e593f0fe8..650d97f9e31b15b06cfdac444b1d17a3e2270105 100644
+--- a/drivers/media/virtio/virtio_video_dec.c
++++ b/drivers/media/virtio/virtio_video_dec.c
+@@ -121,13 +121,16 @@ int virtio_video_dec_init_ctrls(struct virtio_video_stream *stream)
+         struct virtio_video_device *vvd = to_virtio_vd(stream->video_dev);
+         struct video_control_format *fmt;
+         list_for_each_entry(fmt, &vvd->controls_fmt_list, controls_list_entry) {
+-            u32 profile_id, level_id;
++            u32 profile_id, level_id = 0;
+             if (fmt->format == V4L2_PIX_FMT_H264) {
+                 profile_id = V4L2_CID_MPEG_VIDEO_H264_PROFILE;
+                 level_id = V4L2_CID_MPEG_VIDEO_H264_LEVEL;
+             } else if (fmt->format == V4L2_PIX_FMT_HEVC) {
+                 profile_id = V4L2_CID_MPEG_VIDEO_HEVC_PROFILE;
+                 level_id = V4L2_CID_MPEG_VIDEO_HEVC_LEVEL;
++            } else if (fmt->format == V4L2_PIX_FMT_VP9) {
++                /* VP9 has no level control. */
++                profile_id = V4L2_CID_MPEG_VIDEO_VP9_PROFILE;
+             } else {
+                 continue;
+             }
+@@ -137,7 +140,7 @@ int virtio_video_dec_init_ctrls(struct virtio_video_stream *stream)
+                     fmt->profile->min);
+                 if (ctrl) ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+             }
+-            if (fmt->level) {
++            if (fmt->level && level_id) {
+                 ctrl = v4l2_ctrl_new_std_menu(&stream->ctrl_handler, NULL,
+                     level_id, fmt->level->max, fmt->level->skip_mask,
+                     fmt->level->min);
+diff --git a/drivers/media/virtio/virtio_video_helpers.c b/drivers/media/virtio/virtio_video_helpers.c
+index 9baf5735cc4c00ca46cb40ef0925221449c5881c..dad131930ced871a5b68f57cd3509c8a80de4231 100644
+--- a/drivers/media/virtio/virtio_video_helpers.c
++++ b/drivers/media/virtio/virtio_video_helpers.c
+@@ -78,6 +78,10 @@ static struct virtio_video_convert_table profile_table[] = {
+ 	{ VIRTIO_VIDEO_PROFILE_H264_CONSTRAINED_HIGH, V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_HIGH },
+ 	{ VIRTIO_VIDEO_PROFILE_HEVC_MAIN, V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN },
+ 	{ VIRTIO_VIDEO_PROFILE_HEVC_MAIN10, V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10 },
++	{ VIRTIO_VIDEO_PROFILE_VP9_PROFILE0, V4L2_MPEG_VIDEO_VP9_PROFILE_0 },
++	{ VIRTIO_VIDEO_PROFILE_VP9_PROFILE1, V4L2_MPEG_VIDEO_VP9_PROFILE_1 },
++	{ VIRTIO_VIDEO_PROFILE_VP9_PROFILE2, V4L2_MPEG_VIDEO_VP9_PROFILE_2 },
++	{ VIRTIO_VIDEO_PROFILE_VP9_PROFILE3, V4L2_MPEG_VIDEO_VP9_PROFILE_3 },
+ 	{ VIRTIO_VIDEO_PROFILE_H264_BASELINE,
+ 		V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE },
+ 	{ VIRTIO_VIDEO_PROFILE_H264_MAIN, V4L2_MPEG_VIDEO_H264_PROFILE_MAIN },
