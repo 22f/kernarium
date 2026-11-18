@@ -534,6 +534,13 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
     elif variant == "dumpstate-getattr-over-a-smaller-group":
         plat = plat.replace("(allow dumpstate domain (vsock_socket (getattr)))",
                             "(allow dumpstate coredomain (vsock_socket (getattr)))")
+    elif variant == "dumpstate-lookalike-source":
+        plat = plat.replace("(allow dumpstate domain (vsock_socket (getattr)))",
+                            "(allow dumpstate_299999 domain (vsock_socket (getattr)))")
+    elif variant == "dumpstate-lookalike-target":
+        plat = plat.replace("(allow dumpstate domain (vsock_socket (getattr)))",
+                            "(typeattributeset domain_299999 (kernarium_sms))\n"
+                            "(allow dumpstate domain_299999 (vsock_socket (getattr)))")
     elif variant == "dumpstate-getattr-of-ours":
         ext += "(allow dumpstate kernarium_sms (vsock_socket (getattr)))\n"
     elif variant == "dumpstate-getattr-repeated-outside-the-platform":
@@ -5941,6 +5948,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "\\['system_server'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
             ("sms-dumpstate-getattr-over-a-smaller-group",
              {"sms_policy_variant": "dumpstate-getattr-over-a-smaller-group"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            # A type or attribute whose name differs from dumpstate or domain by a platform version suffix is
+            # another type: the rule must be the platform's own, token for token.
+            ("sms-dumpstate-lookalike-source", {"sms_policy_variant": "dumpstate-lookalike-source"},
+             "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
+            ("sms-dumpstate-lookalike-target", {"sms_policy_variant": "dumpstate-lookalike-target"},
              "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
             ("sms-dumpstate-getattr-of-ours", {"sms_policy_variant": "dumpstate-getattr-of-ours"},
              "\\['dumpstate'\\] hold \\['getattr'\\] on a vsock socket of kernarium_sms"),
