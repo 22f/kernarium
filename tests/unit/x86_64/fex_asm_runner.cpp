@@ -65,6 +65,15 @@ struct Region final {
 	std::uint64_t end{};
 };
 
+/* A store another vCPU makes at a chosen moment: once the first read that
+ * covers `trigger` has completed, `value` is stored at `address`, ahead of
+ * whatever the reading instruction does next. */
+struct RaceStore final {
+	std::uint64_t trigger{};
+	std::uint64_t address{};
+	std::uint8_t value{};
+};
+
 class SparseMemory final : public uml::memory::GuestAddressSpace {
 public:
 	[[nodiscard]] bool map(std::uint64_t address, std::uint64_t size)
@@ -91,8 +100,42 @@ public:
 	[[nodiscard]] bool read(std::uint64_t address,
 		std::span<std::byte> destination) override
 	{
-		return transfer_read(address, destination,
+		const bool done = transfer_read(address, destination,
 			uml::memory::MemoryAccess::read, true);
+		if (done && race_ && race_->trigger >= address &&
+			race_->trigger - address < destination.size()) {
+			const std::byte byte{race_->value};
+			const auto page_number = race_->address / page_size;
+			auto [iterator, inserted] = pages_.try_emplace(page_number);
+			if (inserted)
+				iterator->second.fill(std::byte{});
+			iterator->second[static_cast<std::size_t>(
+				race_->address % page_size)] = byte;
+			race_.reset();
+		}
+		return done;
+	}
+
+	/* Arms a store by another vCPU (see RaceStore). */
+	void race_store(const RaceStore &race) { race_ = race; }
+
+	/* Whether an access would succeed, as the product's address space
+	 * answers it: a write to a read-only range is refused at its first
+	 * refused byte. */
+	[[nodiscard]] bool validate_access(std::uint64_t address, std::size_t size,
+		uml::memory::MemoryAccess access) override
+	{
+		if (!mapped(address, size)) {
+			set_fault(address, access);
+			return false;
+		}
+		if (access == uml::memory::MemoryAccess::write) {
+			if (const auto refused = first_read_only(address, size)) {
+				set_fault(*refused, access);
+				return false;
+			}
+		}
+		return true;
 	}
 
 	[[nodiscard]] bool fetch(std::uint64_t address,
@@ -307,6 +350,7 @@ private:
 
 	std::vector<Region> regions_;
 	std::vector<Region> read_only_;
+	std::optional<RaceStore> race_;
 	std::map<std::uint64_t, Page> pages_;
 	std::map<std::uint64_t, std::uint64_t> code_versions_;
 	std::uint64_t *code_changes_{};
@@ -355,6 +399,8 @@ struct Configuration final {
 	std::vector<Region> memory_regions;
 	/* Ranges of memory_regions that refuse a write (repository cases only). */
 	std::vector<Region> read_only_regions;
+	/* Another vCPU's store during the case (repository cases only). */
+	std::optional<RaceStore> race;
 	std::vector<RegisterExpectation> registers;
 	std::vector<MemoryData> memory_data;
 	uml::cpu::x86_64::ExecutionMode mode{
@@ -568,6 +614,10 @@ struct ReportedResult final {
 	std::string status;
 	std::size_t retired{};
 	std::uint64_t address{};
+	/* The data address and access of a memory fault, as the engine reports
+	 * them to the runtime. */
+	std::uint64_t fault_address{};
+	uml::memory::MemoryAccess fault_access{uml::memory::MemoryAccess::read};
 	/* RAX where a fault or other stop left it. */
 	std::uint64_t rax{};
 	/* RFLAGS, the x87 status word and MXCSR there, as the runtime saves
@@ -580,8 +630,11 @@ ReportedResult reported;
 bool capture_results = false;
 
 /* What a stop left in the guest state, as the runtime saves it. */
-void report_stop_state(uml::cpu::x86_64::CpuState &cpu) noexcept
+void report_stop_state(uml::cpu::x86_64::CpuState &cpu,
+	const uml::cpu::FaultInfo &fault) noexcept
 {
+	reported.fault_address = fault.address;
+	reported.fault_access = fault.access;
 	uml::cpu::x86_64::materialize_flags(cpu);
 	reported.rax = cpu.gpr(uml::cpu::x86_64::Register::rax);
 	reported.flags = cpu.rflags;
@@ -1009,6 +1062,7 @@ public:
 			}
 			if (result.event != uml::cpu::EngineEvent::continued) {
 				out.reason = exit_reason(result.event, out.syndrome);
+				out.fault = result.fault;
 				break;
 			}
 			out.reason = uml::cpu::ExitReason::instruction_budget;
@@ -1088,6 +1142,8 @@ private:
 	}
 	for (const auto &region : configuration.read_only_regions)
 		memory.protect_read_only(region.begin, region.end);
+	if (configuration.race)
+		memory.race_store(*configuration.race);
 
 	uml::cpu::x86_64::CpuState cpu{};
 #if UML_FEX_ASM_JIT
@@ -1150,7 +1206,7 @@ private:
 			detail += " vector " + std::to_string(result.syndrome);
 		print_result(status, retired, cpu.rip,
 			memory.snapshot(cpu.rip, 15), detail, test);
-		report_stop_state(cpu);
+		report_stop_state(cpu, result.fault);
 		return 1;
 	}
 #else
@@ -1232,7 +1288,7 @@ private:
 				"memory_fault" : "unexpected_event";
 			print_result(status, retired, cpu.rip,
 				memory.snapshot(cpu.rip, 15), event_name(result.event), test);
-			report_stop_state(cpu);
+			report_stop_state(cpu, result.fault);
 			return 1;
 		}
 		if (result.instruction_budget_exhausted)
@@ -1867,12 +1923,13 @@ struct MaskedValue final {
 	std::uint64_t value{};
 };
 
-/* What a stop must leave in the flag state the runtime hands the guest: a
- * faulting instruction changes none of it. */
+/* What a stop must leave in the register and flag state the runtime hands the
+ * guest: a faulting instruction changes none of the flags. */
 struct StopState final {
 	std::optional<MaskedValue> flags;
 	std::optional<MaskedValue> x87_status;
 	std::optional<MaskedValue> mxcsr;
+	std::optional<MaskedValue> rax;
 
 	[[nodiscard]] bool matches(const ReportedResult &stop) const noexcept
 	{
@@ -1881,8 +1938,16 @@ struct StopState final {
 			return !expected || (actual & expected->mask) == expected->value;
 		};
 		return holds(flags, stop.flags) &&
-			holds(x87_status, stop.x87_status) && holds(mxcsr, stop.mxcsr);
+			holds(x87_status, stop.x87_status) && holds(mxcsr, stop.mxcsr) &&
+			holds(rax, stop.rax);
 	}
+};
+
+/* Where a memory fault is reported: the first byte the access was refused,
+ * and the kind of access that was. */
+struct FaultSite final {
+	std::uint64_t address{};
+	uml::memory::MemoryAccess access{uml::memory::MemoryAccess::read};
 };
 
 /* --retirement: the instructions a run retires before each kind of stop.
@@ -1916,11 +1981,18 @@ struct RetirementCase final {
 	/* Ranges of `regions` that refuse a write. */
 	std::vector<Region> read_only{};
 	StopState stop_state{};
-	/* A class of stop state the JIT does not yet hold: the JIT runners expect
-	 * it to differ, as they expect a corpus record of an exclusion class to
-	 * fail, and a case that starts matching fails the run until its row
-	 * loses the mark. The gadget engine always holds it. */
+	/* A class of stop state the JIT does not yet hold: a JIT that runs the
+	 * case alone is expected to differ, as a corpus record of an exclusion
+	 * class is expected to fail, and a case that starts matching fails the
+	 * run until its row loses the mark. After a handover the JIT's block
+	 * starts at the instruction that follows the gadgets' last, and whether
+	 * its report differs depends on that start, so only the stop is held. An
+	 * instruction the gadget engine runs always holds the state. */
 	std::string_view jit_gap{};
+	/* The data address and access a memory fault must report. */
+	std::optional<FaultSite> fault{};
+	/* A store another vCPU makes while the case runs. */
+	std::optional<RaceStore> race{};
 };
 
 [[nodiscard]] std::vector<RetirementCase> retirement_cases()
@@ -1979,6 +2051,11 @@ struct RetirementCase final {
 	/* The JIT reports flags, status bits and MXCSR flags that the faulting
 	 * instruction has already changed. */
 	constexpr std::string_view fault_state_gap = "fault-flags";
+	/* A write refused at `address`, the first byte of the page after the
+	 * operand's first. */
+	const auto write_at = [](std::uint64_t address) {
+		return FaultSite{address, uml::memory::MemoryAccess::write};
+	};
 	const auto le32 = [](std::uint64_t value) {
 		return std::array<std::uint8_t, 4>{
 			static_cast<std::uint8_t>(value),
@@ -2024,7 +2101,7 @@ struct RetirementCase final {
 			{{data, data + 0x2000}}, "memory_fault", 2, code_address + 7, {},
 			long64, {}, {{data + 0x1000, data + 0x2000}},
 			flags_are(flags_arithmetic, rflags_parity | rflags_zero),
-			fault_state_gap},
+			fault_state_gap, write_at(data + 0x1000)},
 		/* mov $data+0xffc, %esp; mov $1, %ecx; cmp %eax, %eax;
 		 * addq %rcx, (%rsp,%rdx,1); hlt: the same through an indexed
 		 * address and a register source. */
@@ -2034,43 +2111,52 @@ struct RetirementCase final {
 			code_address + 12, {}, long64, {},
 			{{data + 0x1000, data + 0x2000}},
 			flags_are(flags_arithmetic, rflags_parity | rflags_zero),
-			fault_state_gap},
-		/* fldpi; mov $data+0x1000, %ebx; fstps (%rbx), into a read-only
-		 * page; hlt: the conversion rounds, and the store faults before its
-		 * precision exception or C1 reach the status word. */
-		{"fstp-store-fault-status", {0xd9, 0xeb, 0xbb, 0x00, 0x10, 0x00,
-			0x20, 0xd9, 0x1b, 0xf4}, {{data, data + 0x2000}}, "memory_fault",
-			2, code_address + 7, {}, long64, {},
-			{{data + 0x1000, data + 0x2000}}, x87_status_is(x87_flags, 0),
-			fault_state_gap},
+			fault_state_gap, write_at(data + 0x1000)},
+		/* fld1; fldz; fdivp %st, %st(1), which raises the divide-by-zero
+		 * flag; fldpi; mov $data+0x1000, %ebx; fstps (%rbx), into a
+		 * read-only page; hlt: the conversion rounds, and the store faults
+		 * before its precision exception or C1 reach the status word, which
+		 * keeps the divide-by-zero flag. */
+		{"fstp-store-fault-status", {0xd9, 0xe8, 0xd9, 0xee, 0xde, 0xf9,
+			0xd9, 0xeb, 0xbb, 0x00, 0x10, 0x00, 0x20, 0xd9, 0x1b, 0xf4},
+			{{data, data + 0x2000}}, "memory_fault", 5, code_address + 13, {},
+			long64, {}, {{data + 0x1000, data + 0x2000}},
+			x87_status_is(x87_flags, 0x04), fault_state_gap,
+			write_at(data + 0x1000)},
 		/* mov $data+0x1000, %ebx; fstpt (%rbx), with ST(0) empty; hlt: the
 		 * stack underflow is not raised either. */
 		{"fstpt-empty-store-fault-status", {0xbb, 0x00, 0x10, 0x00, 0x20,
 			0xdb, 0x3b, 0xf4}, {{data, data + 0x2000}}, "memory_fault", 1,
 			code_address + 5, {}, long64, {}, {{data + 0x1000, data + 0x2000}},
-			x87_status_is(x87_flags, 0), fault_state_gap},
+			x87_status_is(x87_flags, 0), fault_state_gap,
+			write_at(data + 0x1000)},
 		/* fldpi; mov $data+0x1000, %ebx; fbstp (%rbx); hlt */
 		{"fbstp-store-fault-status", {0xd9, 0xeb, 0xbb, 0x00, 0x10, 0x00,
 			0x20, 0xdf, 0x33, 0xf4}, {{data, data + 0x2000}}, "memory_fault",
 			2, code_address + 7, {}, long64, {},
 			{{data + 0x1000, data + 0x2000}}, x87_status_is(x87_flags, 0),
-			fault_state_gap},
-		/* mov $data+0x1000, %ebx; mov $0x3dcccccd, %eax; vmovd %eax, %xmm0;
-		 * vcvtps2ph $0, %xmm0, (%rbx), into a read-only page; hlt: the
-		 * narrowing is inexact, and its precision flag is not raised. */
-		{"vcvtps2ph-store-fault-mxcsr", {0xbb, 0x00, 0x10, 0x00, 0x20, 0xb8,
-			0xcd, 0xcc, 0xcc, 0x3d, 0xc5, 0xf9, 0x6e, 0xc0, 0xc4, 0xe3, 0x79,
-			0x1d, 0x03, 0x00, 0xf4}, {{data, data + 0x2000}}, "memory_fault",
-			3, code_address + 14, {}, long64, {},
-			{{data + 0x1000, data + 0x2000}}, mxcsr_is(mxcsr_flags, 0),
-			fault_state_gap},
+			fault_state_gap, write_at(data + 0x1000)},
+		/* mov $0x3f800000, %eax; vmovd %eax, %xmm1; vxorps %xmm2, %xmm2,
+		 * %xmm2; vdivss %xmm2, %xmm1, %xmm1, which raises the
+		 * divide-by-zero flag; mov $data+0x1000, %ebx; mov $0x3dcccccd,
+		 * %eax; vmovd %eax, %xmm0; vcvtps2ph $0, %xmm0, (%rbx), into a
+		 * read-only page; hlt: the narrowing is inexact, and its precision
+		 * flag is not raised, while the divide-by-zero flag stays. */
+		{"vcvtps2ph-store-fault-mxcsr", {0xb8, 0x00, 0x00, 0x80, 0x3f, 0xc5,
+			0xf9, 0x6e, 0xc8, 0xc5, 0xe8, 0x57, 0xd2, 0xc5, 0xf2, 0x5e, 0xca,
+			0xbb, 0x00, 0x10, 0x00, 0x20, 0xb8, 0xcd, 0xcc, 0xcc, 0x3d, 0xc5,
+			0xf9, 0x6e, 0xc0, 0xc4, 0xe3, 0x79, 0x1d, 0x03, 0x00, 0xf4},
+			{{data, data + 0x2000}}, "memory_fault", 7, code_address + 31, {},
+			long64, {}, {{data + 0x1000, data + 0x2000}},
+			mxcsr_is(mxcsr_flags, 0x04), fault_state_gap,
+			write_at(data + 0x1000)},
 		/* The same with the 8-byte store across the page boundary. */
 		{"vcvtps2ph-cross-store-fault-mxcsr", {0xbb, 0xfc, 0x0f, 0x00, 0x20,
 			0xb8, 0xcd, 0xcc, 0xcc, 0x3d, 0xc5, 0xf9, 0x6e, 0xc0, 0xc4, 0xe3,
 			0x79, 0x1d, 0x03, 0x00, 0xf4}, {{data, data + 0x2000}},
 			"memory_fault", 3, code_address + 14, {}, long64, {},
 			{{data + 0x1000, data + 0x2000}}, mxcsr_is(mxcsr_flags, 0),
-			fault_state_gap},
+			fault_state_gap, write_at(data + 0x1000)},
 		/* mov $data+0xffe, %esp; mov $7, %eax; cmpxchgl %ecx, (%rsp), whose
 		 * operand crosses into a read-only page and differs from EAX; hlt:
 		 * a failed compare still writes the operand back, so the store
@@ -2078,13 +2164,15 @@ struct RetirementCase final {
 		{"cmpxchg-unequal-cross-store-fault", {0xbc, 0xfe, 0x0f, 0x00, 0x20,
 			0xb8, 0x07, 0x00, 0x00, 0x00, 0x0f, 0xb1, 0x0c, 0x24, 0xf4},
 			{{data, data + 0x2000}}, "memory_fault", 2, code_address + 10, {},
-			long64, 7, {{data + 0x1000, data + 0x2000}}},
+			long64, 7, {{data + 0x1000, data + 0x2000}}, {}, {},
+			write_at(data + 0x1000)},
 		/* mov $data+0xffc, %esp; mov $1, %eax; cmpxchg8b (%rsp); hlt: the
 		 * same for the 8-byte pair, whose EDX:EAX is 0:1 against 0. */
 		{"cmpxchg8b-unequal-cross-store-fault", {0xbc, 0xfc, 0x0f, 0x00,
 			0x20, 0xb8, 0x01, 0x00, 0x00, 0x00, 0x0f, 0xc7, 0x0c, 0x24,
 			0xf4}, {{data, data + 0x2000}}, "memory_fault", 2,
-			code_address + 10, {}, long64, 1, {{data + 0x1000, data + 0x2000}}},
+			code_address + 10, {}, long64, 1, {{data + 0x1000, data + 0x2000}},
+			{}, {}, write_at(data + 0x1000)},
 		/* nop; xor %ecx, %ecx; xor %edx, %edx; div %ecx; nop; hlt */
 		{"divide-error", {0x90, 0x31, 0xc9, 0x31, 0xd2, 0xf7, 0xf1, 0x90,
 			0xf4}, {}, "unexpected_event", 3, code_address + 5},
@@ -2260,20 +2348,36 @@ struct RetirementCase final {
 	};
 }
 
+/* The engine that ran the instruction that stopped a case. */
+enum class Tier {
+	gadgets,
+	jit_alone,
+	jit_after_handover,
+};
+
 /* Whether the case stopped where and as it must, and left the state a
  * faulting instruction must leave. */
-[[nodiscard]] bool stopped_as_expected(const RetirementCase &test)
+[[nodiscard]] bool stopped_as_expected(const RetirementCase &test, Tier tier)
 {
 	const bool stopped = reported.status == test.status &&
 		reported.retired == test.retired &&
 		reported.address == test.address &&
-		(!test.stop_rax || reported.rax == *test.stop_rax);
-#if UML_FEX_ASM_JIT
-	if (!test.jit_gap.empty())
+		(!test.stop_rax || reported.rax == *test.stop_rax) &&
+		(!test.fault || (reported.fault_address == test.fault->address &&
+			reported.fault_access == test.fault->access));
+	if (tier != Tier::gadgets && !test.jit_gap.empty()) {
+		if (tier == Tier::jit_after_handover)
+			return stopped;
 		return stopped && !test.stop_state.matches(reported);
-#endif
+	}
 	return stopped && test.stop_state.matches(reported);
 }
+
+#if UML_FEX_ASM_JIT
+constexpr Tier first_run_tier = Tier::jit_alone;
+#else
+constexpr Tier first_run_tier = Tier::gadgets;
+#endif
 
 [[nodiscard]] int run_retirement_cases()
 {
@@ -2286,6 +2390,7 @@ struct RetirementCase final {
 		Configuration configuration;
 		configuration.memory_regions = test.regions;
 		configuration.read_only_regions = test.read_only;
+		configuration.race = test.race;
 		configuration.mode = test.mode;
 		if (test.rax) {
 			/* Expectation keys: bit 0 names RIP, bit 1 RAX. */
@@ -2296,11 +2401,14 @@ struct RetirementCase final {
 		(void)run_configured_case(code, configuration, test.name, false,
 			Dispatch::cached);
 		capture_results = false;
-		bool passed = stopped_as_expected(test);
+		bool passed = stopped_as_expected(test, first_run_tier);
 #if UML_FEX_ASM_SWITCH
-		/* The same stop, after the same count, from every handover. */
+		/* The same stop, after the same count, from every handover. The
+		 * instruction that stops the case is the one after the `retired`
+		 * the case names, and the gadgets run it when the handover comes
+		 * after them. */
 		for (switch_after = 1; switch_sweep && passed &&
-			test.jit_gap.empty() && switch_after <= instruction_limit;
+			switch_after <= instruction_limit;
 			switch_after = next_switch_point(switch_after)) {
 			switch_taken = false;
 			capture_results = true;
@@ -2308,7 +2416,8 @@ struct RetirementCase final {
 			(void)run_configured_case(code, configuration, test.name, false,
 				Dispatch::cached);
 			capture_results = false;
-			passed = stopped_as_expected(test);
+			passed = stopped_as_expected(test, switch_after <= test.retired ?
+				Tier::jit_after_handover : Tier::gadgets);
 			if (!passed)
 				std::cout << "status=failed\ttest=" << test.name <<
 					"\tswitch=" << switch_after << "\tstop=" <<
@@ -2333,6 +2442,14 @@ struct RetirementCase final {
 		if (!test.jit_gap.empty())
 			std::cout << '\t' << "jit-gap=" << test.jit_gap;
 #endif
+		if (test.fault)
+			std::cout << '\t' << "fault=0x" << std::hex <<
+				reported.fault_address << std::dec <<
+				(reported.fault_access ==
+					uml::memory::MemoryAccess::write ? ",write" : ",other");
+		if (test.stop_state.rax)
+			std::cout << '\t' << "stop_rax=0x" << std::hex <<
+				(reported.rax & test.stop_state.rax->mask) << std::dec;
 		if (test.stop_state.flags)
 			std::cout << '\t' << "flags=0x" << std::hex <<
 				(reported.flags & test.stop_state.flags->mask) << std::dec;
@@ -2349,6 +2466,12 @@ struct RetirementCase final {
 			if (test.stop_rax)
 				std::cout << ",rax=0x" << std::hex << *test.stop_rax <<
 					std::dec;
+			if (test.fault)
+				std::cout << ",fault=0x" << std::hex << test.fault->address <<
+					std::dec;
+			if (test.stop_state.rax)
+				std::cout << ",stop_rax=0x" << std::hex <<
+					test.stop_state.rax->value << std::dec;
 			if (test.stop_state.flags)
 				std::cout << ",flags=0x" << std::hex <<
 					test.stop_state.flags->value << std::dec;
