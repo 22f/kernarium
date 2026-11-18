@@ -81,6 +81,11 @@ RUNNERS = {
         options(compiler(ONE), f"{TIMEOUT}     boot timeout"),
         "timeout must be positive",
         ("page_cache_flush_probe.cpp", (("page-cache-flush-probe", X86_64),))),
+    "pinned_code_write": (
+        options(compiler(ONE), f"{TIMEOUT}     boot timeout"),
+        "timeout must be positive",
+        ("pinned_code_write_probe.cpp",
+         (("pinned-code-write-probe", X86_64),))),
     "rflags": (
         options(compiler(BOTH), TIMEOUT), "timeout must be positive",
         ("rflags_probe.cpp",
