@@ -50,8 +50,9 @@ SLOT_COUNT = 0xF8
 # 1 once text page p matched its stored hash (the binder writes them
 # between entries; the code only reads them).
 SLOT_PSTATE = 0x100
-# Where a call to a memory-access routine keeps the guest's x30 (the call
-# overwrites it): the last 8 bytes of the 0x110-byte frame.
+# The frame's link slot, the last 8 bytes of the 0x110-byte frame: the guest
+# keeps no link register in it at an indirect branch, so the lookup of the
+# branch's target waits there.
 SLOT_LR = 0x108
 # CrossTable::Entry (aot_runtime.hpp): the offsets the cross-library thunk
 # reads from the entry the host answers with.
@@ -2369,7 +2370,7 @@ def build_blob(units: list[dict], layout: dict[str, int],
             "executable_segment": {"vaddr": unit["vaddr"],
                                    "filesz": unit["filesz"]},
             "unit_bytes": len(unit["unit"]),
-            "table_bytes": unit.get("table_region", 4 * unit["table_words"]),
+            "table_bytes": unit["table_region"],
             "functions": unit["stats"]["functions"],
             "instructions": unit["stats"]["instructions"],
             "inlined": unit["stats"]["inlined"],
