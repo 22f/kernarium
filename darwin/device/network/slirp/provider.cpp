@@ -140,6 +140,15 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 		host_addresses_distrust_logged_ = false;
 		if (!read_host_addresses_now())
 			return -EIO;
+		/* A hold of an earlier instance is over with it: the reports of
+		 * this one are read from here. */
+		address_reset_hold_.clear();
+		address_reset_table_.reset();
+		path_reports_seen_ = path_state_.reports();
+#if UML_SLIRP_TESTING
+		path_reports_handled_for_testing_.store(
+			path_reports_seen_, std::memory_order_release);
+#endif
 
 		SlirpConfig config{};
 		config.version = 6;
@@ -252,7 +261,10 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 				name_server_stream_ ? ipv4_value(nameserver_ipv4) : 0,
 				gateway_stream_ ? ipv4_value(host_alias_ipv4) : 0);
 			/* The system reports the current path at once and each change
-			 * after, and nothing else wakes the provider. */
+			 * after, and nothing else wakes the provider; a report wakes
+			 * the event loop, which decides what it means for the guest's
+			 * connections. */
+			path_state_.set_observer(notify_callback, this);
 #if UML_SLIRP_TESTING
 			if (path_monitor_for_testing_)
 #endif
@@ -265,6 +277,7 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 			/* A thread or the path monitor that could not be made (the
 			 * system is out of memory): nothing of this open may stay, so
 			 * that a later open() starts the resolver again. */
+			path_state_.set_observer(nullptr, nullptr);
 			path_monitor_.reset();
 			path_state_.report(true);
 			resolver_.stop();
@@ -363,6 +376,8 @@ void SlirpProvider::stop() noexcept
 	/* The resolver delivers into the receive ring from its own thread;
 	 * once it is joined nothing can refill the ring cleared below. */
 	resolver_.stop();
+	/* No report wakes a loop that is gone; the one in flight finishes first. */
+	path_state_.set_observer(nullptr, nullptr);
 	path_monitor_.reset();
 	/* An outage that was reported is over with the monitor: the next open's
 	 * monitor decides what the path is, and until it has reported the host
@@ -385,6 +400,7 @@ void SlirpProvider::stop() noexcept
 	}
 	slirp_.reset();
 	timers_.clear();
+	address_reset_hold_.clear();
 }
 
 #if UML_SLIRP_TESTING
