@@ -67,7 +67,7 @@ final class StoreNoticeUITests: XCTestCase {
         let link = app.links[Self.row]
         XCTAssertTrue(link.waitForExistence(timeout: 10), "Info lost its row")
         XCTAssertTrue(
-            app.staticTexts["New features arrive in this TestFlight beta first. The App Store version is more stable."]
+            app.staticTexts["New features arrive in this TestFlight beta first. The App\u{00A0}Store version is more stable."]
                 .exists)
     }
 

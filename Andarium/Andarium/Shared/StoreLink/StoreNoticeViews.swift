@@ -33,26 +33,33 @@ struct StoreNoticeIcon: View {
     }
 }
 
-/// The words of the notice, in the `StoreLink` table.
+/// The words of the notice, in the `StoreLink` table. The three long texts
+/// are shown with a no-break space inside "App Store", so that a line never
+/// ends between its two words; the table holds the words as written.
 enum StoreNoticeWords {
     static var title: String { String(localized: "Andarium is on the App Store", table: "StoreLink") }
     static var text: String {
-        String(
+        tied(String(
             localized: "Stay on this TestFlight beta for the latest features, or get the App Store version for a more stable experience.",
-            table: "StoreLink")
+            table: "StoreLink"))
     }
     static var caution: String {
-        String(
+        tied(String(
             localized: "Switching keeps your virtual machine, but it may not start until the App Store version catches up with this beta.",
-            table: "StoreLink")
+            table: "StoreLink"))
     }
     static var action: String { String(localized: "View in App Store", table: "StoreLink") }
     static var actionHint: String { String(localized: "Opens the App Store", table: "StoreLink") }
     static var row: String { String(localized: "Andarium on the App Store", table: "StoreLink") }
     static var rowNote: String {
-        String(
+        tied(String(
             localized: "New features arrive in this TestFlight beta first. The App Store version is more stable.",
-            table: "StoreLink")
+            table: "StoreLink"))
+    }
+
+    /// `text` with a no-break space between the two words of the store's name.
+    static func tied(_ text: String) -> String {
+        text.replacingOccurrences(of: "App Store", with: "App\u{00A0}Store")
     }
 }
 

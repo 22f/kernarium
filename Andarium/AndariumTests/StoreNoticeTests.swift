@@ -153,6 +153,14 @@ struct StoreNoticeTests {
         let close = try #require(node("Dismiss", in: controller.view), "\(labels(in: controller.view))")
         #expect(close.accessibilityTraits.contains(.button))
         #expect(top(of: message) <= top(of: button))
+        // The reading order is the message, the button, then the close mark (which sits at the top right, so
+        // the frames do not say it).
+        let order = labels(in: controller.view)
+        let at = (
+            message: order.firstIndex { $0.hasPrefix(Self.title) }, button: order.firstIndex(of: Self.button),
+            close: order.firstIndex(of: "Dismiss"))
+        let (first, second, third) = try (#require(at.message), #require(at.button), #require(at.close))
+        #expect(first < second && second < third, "\(order)")
         let all = labels(in: controller.view)
         #expect(!all.contains("arrow.down.app") && !all.contains("StackMark"), "\(all)")
     }
@@ -289,7 +297,8 @@ struct StoreNoticeTests {
         // The icon and the arrow are decoration: neither is read on its own.
         let spoken = labels(in: controller.view)
         #expect(!spoken.contains("arrow.up.right") && !spoken.contains("Up Right"), "\(spoken)")
-        #expect(spoken.contains("New features arrive in this TestFlight beta first. The App Store version is more stable."), "\(spoken)")
+        // The two words of the store's name are tied by a no-break space.
+        #expect(spoken.contains("New features arrive in this TestFlight beta first. The App\u{00A0}Store version is more stable."), "\(spoken)")
         let build = try #require(node("Build", in: controller.view, containing: true), "\(spoken)")
         let version = try #require(node("Andarium", in: controller.view, containing: true), "\(spoken)")
         #expect(top(of: version) < top(of: row) && top(of: row) < top(of: build))
