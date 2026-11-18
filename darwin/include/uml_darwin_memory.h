@@ -51,8 +51,11 @@ int darwin_uml_vm_invalidate_code_frame(unsigned long generation,
 					unsigned long long offset);
 /* Linux wrote the bytes of the whole guest pages [offset, offset + length)
  * of the frame at fd through its own alias, for no process and at no
- * user address: a write(2), splice(2) or truncate into a page-cache or
- * memfd frame some process maps and runs as code. The change is published
+ * user address, into a frame some process maps and runs as code: a write(2),
+ * splice(2) or truncate into a page-cache or memfd frame, or a block
+ * device's read into a page a process pinned (O_DIRECT, io_uring), whether
+ * that page is anonymous or a file's. Any frame of guest RAM is named the
+ * same way, by the fd and offset of its backing. The change is published
  * at every x86 translation of those pages, whichever address spaces map
  * them; an arm64 guest follows the architecture's cache maintenance and is
  * not told. A negative fd names no frame, and every address space hears of

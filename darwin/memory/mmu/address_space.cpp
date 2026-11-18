@@ -1519,7 +1519,9 @@ public:
 	/* Linux wrote the bytes of the whole guest pages [offset, offset +
 	 * length) of the frame source at `fd` through its own alias, for no
 	 * process and at no user address: a write(2), splice(2), truncate or hole
-	 * punch into a page-cache or memfd frame. Only x86 can hold stale code
+	 * punch into a page-cache or memfd frame, or a block read into a page a
+	 * process pinned, anonymous or not (any frame of guest RAM is named by
+	 * the fd and offset of its backing). Only x86 can hold stale code
 	 * for it (an arm64 guest follows the architecture's cache maintenance),
 	 * so the call publishes at the frames' x86 holders, whichever address
 	 * spaces map them, and returns at once while no x86 code may hold a

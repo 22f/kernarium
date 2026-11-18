@@ -1596,6 +1596,54 @@ void test_page_cache_write_frames()
 	baseline.clean("K9");
 }
 
+/* K10 (anonymous frame, frame named): a block read into a page a process
+ * pinned and runs is a kernel write into an anonymous frame. The page is mapped
+ * readable, writable and executable by one generation alone, and the frame is
+ * named as a page-cache frame is, by the fd and offset of its backing: the
+ * holder hears of exactly that page, the pages beside it and the generation
+ * that maps another frame do not, and no flush serial moves. */
+void test_anonymous_frame_write()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0xf80'0000;
+	ScratchBacking backing{"uml-frame-anon-XXXXXX", 8 * page};
+	Domain domain{73'017};
+	darwin_uml_static_vm_require_coherent_kernel_code_writes();
+	unsigned failed = 0;
+	const auto check = [&failed](bool held, const char *what) {
+		if (held)
+			return;
+		++failed;
+		std::fprintf(stderr, "K10: %s\n", what);
+	};
+	const auto calls = FrameAccounting::diagnostics().kernel_frame_writes;
+	domain.run([&] {
+		/* Frame 3 is the anonymous page, run by 921 alone; frames 2 and 4
+		 * are held by 922 and 923 beside it. */
+		require(map(921, base, backing, 3, 1, rwx) == 0);
+		require(hold_frame(921, base).result != DARWIN_UML_STATIC_FRAME_FAILED);
+		translate_frame(922, base + page, backing, 2);
+		translate_frame(923, base + 2 * page, backing, 4);
+		const Reader holder{921, base};
+		const Reader before{922, base + page};
+		const Reader after{923, base + 2 * page};
+		require(darwin_uml_static_vm_invalidate_code_frames(
+			backing.descriptor(), 3 * page, page) == 0);
+		check(holder.stamp_moved() && precisely(holder.changes(), base, page),
+			"the holder of an anonymous frame was not told of a write into it");
+		check(!holder.serial_moved(),
+			"a named write into an anonymous frame moved a flush serial");
+		check(!before.stamp_moved() && before.changes().ranges.empty() &&
+			!after.stamp_moved() && after.changes().ranges.empty(),
+			"a write into an anonymous frame reached a neighbouring frame");
+	});
+	domain.retire();
+	require(FrameAccounting::diagnostics().kernel_frame_writes == calls + 1,
+		"the anonymous frame write was not counted");
+	require(failed == 0, "a write into an anonymous frame did not reach its holder");
+	baseline.clean("K10");
+}
+
 /* E9: an address space is retired. Its states are walked after the table of
  * generations is unlocked, every holder is gone when the walk ends, a
  * registration and a reservation on a walked state are refused (counted, for
@@ -1708,6 +1756,7 @@ int main()
 	test_remote_kernel_write();
 	test_remote_kernel_write_frame();
 	test_page_cache_write_frames();
+	test_anonymous_frame_write();
 	test_a_retired_address_space();
 	test_unknown_frame();
 	test_a_debt_larger_than_the_buffer();

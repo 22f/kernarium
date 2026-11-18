@@ -281,8 +281,9 @@ generation's flush serial and publishes a whole-space code change (the range
 {0, 0}) in each, and so does a page `invalidate_code` (an AArch32
 `cacheflush()`, by address) meets that the target has no entry for yet; for the
 pages the target does map, `invalidate_code` publishes their frames. A kernel
-write into a page-cache or memfd frame ends in the x86_64 kernel's
-`flush_dcache_folio()`, which names the folio's frames
+write into a page-cache, memfd or anonymous frame (a write(2), or a UBD read
+into a page a process pinned and runs) ends in the x86_64 kernel's
+`flush_dcache_folio()` or `flush_dcache_page()`, which names the frames
 (`darwin_uml_vm_invalidate_code_frames()`, called only for a folio queued for
 the host with guest-code permission, which is a page of a `VM_EXEC` mapping)
 and publishes at their holders, or returns without work when no x86 code has

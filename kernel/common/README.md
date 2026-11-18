@@ -317,6 +317,10 @@ it. The bridge fields used below are defined by the comments in
   writeback under pressure (`guest-ubd-request-memory`). The project adds no
   behavior to upstream UML's COW implementation, and Apple launchers never
   construct a COW image pair.
+- A UBD read ends each page it filled with `flush_dcache_page()`. On x86-64 a
+  page some process runs, pinned before the read (`O_DIRECT`, an io_uring fixed
+  buffer), is named to the host so that its translation is not stale; an arm64
+  program maintains its own caches (`run_guest_x86_64_pinned_code_write.py`).
 - While the guest runs, a full host volume holds a direct UBD disk's I/O and
   the file system does not see a failure. A write, a flush or a write of zeroes
   that the host refuses with `ENOSPC` is redone, after a back-off that doubles

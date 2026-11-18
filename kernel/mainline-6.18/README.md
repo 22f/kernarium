@@ -173,7 +173,7 @@ for the emulated CPU, `modify_ldt()`, CS/SS through signals, `RFLAGS.TF`
 single-step, x86 ptrace layouts, the page-fault P bit, and the
 `flush_dcache_folio()` hook) live only in its overlay because only x86 tasks
 have an LDT, selectors, or those layouts, and only an x86 core runs the new
-bytes of a page-cache frame after a kernel write, where arm64 needs the
+bytes of a page-cache or anonymous frame after a kernel write, where arm64 needs the
 program's own cache maintenance; the arm64 kernels and Android build none of
 them.
 
