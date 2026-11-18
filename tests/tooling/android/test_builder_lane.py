@@ -230,7 +230,7 @@ def synthetic_arm_elf(
 
 
 # The permission the braille keyboard used to request for a receiver guard nobody declared: it is
-# under Google's namespace, and the verifier has no exemption for it.
+# on neither application's list of permissions.
 OLD_GUARD_PERMISSION = "com.google.android.marvin.talkback.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
 
 
@@ -243,7 +243,8 @@ def synthetic_compiled_manifest(
     debuggable is not None, an <application> that carries android:debuggable: a literal boolean,
     or a resource reference when debuggable is "reference". It requests each of `permissions` with
     <uses-permission> (and each of `sdk23` with <uses-permission-sdk-23>) and declares each of
-    `declared` with <permission>; the string pool is UTF-8
+    `declared` with <permission>; a name that starts with "@" is a resource reference, "@" and the
+    hexadecimal id; the string pool is UTF-8
     when `utf8` is set, UTF-16 as the platform's own compiled manifests are otherwise.
 
     It has the chunks the verifier reads and no more: a string pool, the resource map that gives
@@ -285,8 +286,14 @@ def synthetic_compiled_manifest(
     elements = element(2, sdk_attributes)
     for index, element_name in enumerate([6] * len(permissions) + [7] * len(declared)):
         permission = 8 + index
-        elements += element(element_name, struct.pack(
-            "<IIIHBBI", 0xFFFFFFFF, 5, permission, 8, 0, 0x03, permission))
+        text = strings[permission]
+        if text.startswith("@"):
+            # A name given as a resource reference ("@0x7f0a0001"): not a string.
+            elements += element(element_name, struct.pack(
+                "<IIIHBBI", 0xFFFFFFFF, 5, 0xFFFFFFFF, 8, 0, 0x01, int(text[1:], 16)))
+        else:
+            elements += element(element_name, struct.pack(
+                "<IIIHBBI", 0xFFFFFFFF, 5, permission, 8, 0, 0x03, permission))
     sdk23_element = 8 + len(permissions) + len(declared) + len(sdk23)
     for index in range(len(sdk23)):
         permission = 8 + len(permissions) + len(declared) + index
@@ -4208,6 +4215,21 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("talkback-that-requests-the-network-settings-permission",
              {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
                           synthetic_apk(permissions=("android.permission.NETWORK_SETTINGS",))}}),
+            ("talkback-that-requests-a-network-permission-no-name-rule-catches",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk": synthetic_apk(permissions=(
+                 "android.permission.MANAGE_IPSEC_TUNNELS", "android.permission.ACCESS_LOWPAN_STATE",
+                 "android.permission.PACKET_KEEPALIVE_OFFLOAD",
+                 "android.permission.REQUEST_COMPANION_USE_DATA_IN_BACKGROUND"))}}),
+            ("talkback-that-requests-an-ordinary-permission-outside-its-list",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("android.permission.VIBRATE",
+                                                     "android.permission.CAMERA"))}}),
+            ("espeak-that-requests-a-permission-at-all",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=("android.permission.VIBRATE",))}}),
+            ("talkback-that-requests-a-permission-by-resource-reference",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("@0x7f0a0001",))}}),
             ("device-diagnostics-in-the-image",
              {"extra_entry": "SYSTEM/priv-app/DeviceDiagnostics/DeviceDiagnostics.apk"}),
             ("application-without-a-manifest",
@@ -4953,6 +4975,32 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
                           synthetic_apk(permissions=("android.permission.NETWORK_SETTINGS",))}},
              "PRODUCT/app/TalkBack/TalkBack.apk requests android.permission.NETWORK_SETTINGS: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-a-network-permission-no-name-rule-catches-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk": synthetic_apk(permissions=(
+                 "android.permission.MANAGE_IPSEC_TUNNELS", "android.permission.ACCESS_LOWPAN_STATE",
+                 "android.permission.PACKET_KEEPALIVE_OFFLOAD",
+                 "android.permission.REQUEST_COMPANION_USE_DATA_IN_BACKGROUND"))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests android.permission.ACCESS_LOWPAN_STATE, "
+             "android.permission.MANAGE_IPSEC_TUNNELS, android.permission.PACKET_KEEPALIVE_OFFLOAD, "
+             "android.permission.REQUEST_COMPANION_USE_DATA_IN_BACKGROUND: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-an-ordinary-permission-outside-its-list-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("android.permission.VIBRATE",
+                                                     "android.permission.CAMERA"))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests android.permission.CAMERA: "
+             "TalkBack and eSpeak NG hold no network access and no Google service permission, "
+             "and request only the permissions the build is known to need"),
+            ("espeak-that-requests-a-permission-at-all-cause",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=("android.permission.VIBRATE",))}},
+             "PRODUCT/app/eSpeakNG/eSpeakNG.apk requests android.permission.VIBRATE: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-a-permission-by-resource-reference-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("@0x7f0a0001",))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests @resource 0x7f0a0001: "
              "TalkBack and eSpeak NG hold no network access"),
             ("device-diagnostics-in-the-image-cause",
              {"extra_entry": "SYSTEM/priv-app/DeviceDiagnostics/DeviceDiagnostics.apk"},

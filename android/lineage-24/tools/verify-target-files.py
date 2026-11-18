@@ -1895,56 +1895,38 @@ ACCESSIBILITY_APKS = {
 
 
 # TalkBack and eSpeak NG hold no network access and no Google service permission, so the built
-# APKs request none of these, with no exemption. A network permission is any android.permission.*
-# whose name contains one of ACCESSIBILITY_REFUSED_WORDS (it catches INTERNET, ACCESS_NETWORK_STATE,
-# the WIFI, WIMAX and CONNECTIVITY families, NETWORK_SETTINGS, NETWORK_STACK and the other NETWORK_*
-# permissions, and NEARBY_WIFI_DEVICES), or is named in ACCESSIBILITY_REFUSED_PERMISSIONS, which
-# lists the ones whose names do not say so and spells out the rest. ACCESS_LOCAL_NETWORK is in no
-# source manifest (the platform adds it to an application that holds INTERNET); the rule refuses it
-# too. Bluetooth and USB permissions are not network permissions. A Google service permission is
-# any under Google's namespace: the Analytics and Primes permission READ_GSERVICES, AICore's
-# BIND_SERVICE, those of Google Play services and the Play Store, and a permission of TalkBack's
-# upstream package name: the installed package is com.android.talkback, which declares none.
-ACCESSIBILITY_REFUSED_WORDS = ("NETWORK", "WIFI", "WIMAX", "INTERNET", "CONNECTIVITY")
-ACCESSIBILITY_REFUSED_PERMISSIONS = frozenset(
-    f"android.permission.{name}"
-    for name in (
-        "INTERNET",
-        "ACCESS_NETWORK_STATE",
-        "ACCESS_WIFI_STATE",
-        "CHANGE_NETWORK_STATE",
-        "CHANGE_WIFI_STATE",
-        "CHANGE_WIFI_MULTICAST_STATE",
-        "ACCESS_LOCAL_NETWORK",
-        "NEARBY_WIFI_DEVICES",
-        "NETWORK_SETTINGS",
-        "NETWORK_STACK",
-        "NETWORK_SETUP_WIZARD",
-        "CONNECTIVITY_INTERNAL",
-        "CONNECTIVITY_USE_RESTRICTED_NETWORKS",
-        "MANAGE_NETWORK_POLICY",
-        "READ_NETWORK_USAGE_HISTORY",
-        "UPDATE_DEVICE_STATS",
-        "CHANGE_WIMAX_STATE",
-        "ACCESS_WIMAX_STATE",
-        "TETHER_PRIVILEGED",
-        "CONTROL_VPN",
-        "BIND_VPN_SERVICE",
-    )
-)
-GOOGLE_PERMISSION_PREFIXES = ("com.google.", "com.android.vending.")
-ANDROID_PERMISSION_PREFIX = "android.permission."
+# APKs request only the permissions the build is known to need and every other request is refused,
+# in all three request spellings (the verifier does not enumerate what to refuse: a permission that
+# a library manifest adds or a platform release introduces is a finding). TalkBack's list is its
+# manifests' requests after the series left the network and Google ones out
+# (dependencies/patches/talkback); eSpeak NG requests none. A name that is a resource reference
+# cannot be read here, so it is refused as well.
+ACCESSIBILITY_PERMISSIONS = {
+    "TalkBack": {
+        "android.permission.USE_FINGERPRINT": "fingerprint-sensor gestures",
+        "android.permission.READ_PHONE_STATE": "call state, which pauses speech during a call",
+        "android.permission.VIBRATE": "haptic feedback (the screen reader and the braille keyboard)",
+        "android.permission.WAKE_LOCK": "keeps the screen on while reading continuously",
+        "android.permission.MODIFY_AUDIO_SETTINGS": "audio levels while it speaks",
+        "android.permission.RECORD_AUDIO": "voice commands and voice input",
+        "android.permission.QUERY_ALL_PACKAGES": "the names of the installed applications",
+        "android.permission.RECEIVE_BOOT_COMPLETED": "starts with the system",
+        "android.permission.FOREGROUND_SERVICE": "its foreground notification",
+        "android.permission.POST_NOTIFICATIONS": "its notifications on Android 13 and later",
+        "android.permission.BLUETOOTH_CONNECT": "connects to a Bluetooth braille display",
+        "android.permission.BLUETOOTH_SCAN": "finds a Bluetooth braille display",
+        "android.permission.BLUETOOTH": "braille display on Android 11 and earlier (maxSdkVersion 30)",
+        "android.permission.BLUETOOTH_ADMIN": "braille display on Android 11 and earlier (maxSdkVersion 30)",
+        "android.permission.ACCESS_COARSE_LOCATION": "Bluetooth scan on Android 11 and earlier (maxSdkVersion 30)",
+        "android.permission.ACCESS_FINE_LOCATION": "Bluetooth scan on Android 11 and earlier (maxSdkVersion 30)",
+    },
+    "eSpeakNG": {},
+}
 
 
-def accessibility_refused_permission(permission: str) -> bool:
-    """Whether TalkBack or eSpeak NG may not request this permission."""
-    if permission in ACCESSIBILITY_REFUSED_PERMISSIONS:
-        return True
-    if permission.startswith(GOOGLE_PERMISSION_PREFIXES):
-        return True
-    return permission.startswith(ANDROID_PERMISSION_PREFIX) and any(
-        word in permission[len(ANDROID_PERMISSION_PREFIX) :] for word in ACCESSIBILITY_REFUSED_WORDS
-    )
+def accessibility_refused_permissions(module: str, requested: set[str]) -> list[str]:
+    """The requested permissions that TalkBack or eSpeak NG ("TalkBack", "eSpeakNG") may not hold."""
+    return sorted(requested - ACCESSIBILITY_PERMISSIONS[module].keys())
 
 
 def check_accessibility(infos: dict[str, zipfile.ZipInfo]) -> None:
@@ -2497,6 +2479,7 @@ ATTR_NAME = 0x01010003
 AXML_STRING_POOL = 0x0001
 AXML_START_ELEMENT = 0x0102
 AXML_RESOURCE_MAP = 0x0180
+AXML_REFERENCE_TYPE = 0x01
 AXML_STRING_TYPE = 0x03
 AXML_UTF8_POOL = 0x100
 AXML_INTEGER_TYPES = (0x10, 0x11)
@@ -2592,10 +2575,15 @@ def manifest_requested_permissions(manifest: bytes) -> set[str]:
                 for index in range(count):
                     position = body + attribute_start + index * attribute_size
                     name, raw, _, data_type, data = struct.unpack_from("<IIHxBI", manifest, position + 4)
-                    if name < len(resource_ids) and resource_ids[name] == ATTR_NAME and data_type == AXML_STRING_TYPE:
-                        if data >= len(strings):
-                            raise ValueError("a permission name outside the string pool")
-                        requested.add(strings[data])
+                    if name < len(resource_ids) and resource_ids[name] == ATTR_NAME:
+                        if data_type == AXML_STRING_TYPE:
+                            if data >= len(strings):
+                                raise ValueError("a permission name outside the string pool")
+                            requested.add(strings[data])
+                        elif data_type == AXML_REFERENCE_TYPE:
+                            # The name is a resource, which this tool does not resolve: listed
+                            # by its id, so that a check against a list of permissions refuses it.
+                            requested.add(f"@resource 0x{data:08x}")
         offset += size
     return requested
 
@@ -2673,7 +2661,7 @@ def check_application_manifests(
     a package that is not installed grants nothing, so the request is what the check looks for,
     in every variant (a userdebug build never enters it, but the product list is one list), in
     every APK but the shell's (TRADE_IN_MODE_REQUESTERS). TalkBack and eSpeak NG request no
-    network permission and no Google service permission (accessibility_refused_permission), in
+    permission beyond the ones the build is known to need (ACCESSIBILITY_PERMISSIONS), in
     every variant. The check reads every APK of the image partitions; APKs inside an APEX payload
     are compressed EROFS and out of its reach.
     """
@@ -2703,15 +2691,15 @@ def check_application_manifests(
                 "unprovisioned first boot and restart adbd twice; the product must not carry "
                 "an application that can start it (DeviceDiagnostics is excluded)"
             )
-        if any(pattern.fullmatch(entry) for pattern in ACCESSIBILITY_APKS.values()):
-            refused = sorted(
-                permission for permission in requested if accessibility_refused_permission(permission)
-            )
+        for module, pattern in ACCESSIBILITY_APKS.items():
+            refused = accessibility_refused_permissions(module, requested) if pattern.fullmatch(entry) else []
             if refused:
                 fail(
                     f"{entry} requests {', '.join(refused)}: TalkBack and eSpeak NG hold no "
-                    "network access and no Google service permission (the TalkBack series, "
-                    "dependencies/patches/talkback, leaves them out of the manifests)"
+                    "network access and no Google service permission, and request only the "
+                    "permissions the build is known to need (ACCESSIBILITY_PERMISSIONS; the "
+                    "TalkBack series, dependencies/patches/talkback, leaves the others out of "
+                    "the manifests)"
                 )
 
 

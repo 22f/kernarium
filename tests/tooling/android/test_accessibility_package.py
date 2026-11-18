@@ -124,36 +124,44 @@ class AccessibilityPackageTests(unittest.TestCase):
         self.assertEqual({permission for _, permission in added} & set(NETWORK_PERMISSIONS), set())
         self.assertEqual(requests_changed("espeak-ng")[0], set())
 
-    def test_the_verifier_refuses_every_network_and_google_service_permission(self) -> None:
+    def test_the_verifier_accepts_only_the_permissions_the_build_is_known_to_need(self) -> None:
         verifier = load_verifier()
-        refuse = verifier.accessibility_refused_permission
-        # Named in the list, so the list alone catches them.
-        for permission in verifier.ACCESSIBILITY_REFUSED_PERMISSIONS:
-            self.assertTrue(refuse(permission), permission)
-        # Caught by the name rule alone: the list does not name them.
-        by_name = tuple(f"android.permission.{name}" for name in (
-            "OVERRIDE_WIFI_CONFIG", "MANAGE_WIFI_NETWORK_SELECTION", "NETWORK_FACTORY",
-            "NETWORK_SIGNAL_STRENGTH_WAKEUP", "CONNECTIVITY_CONSTRAINED",
-            "WIFI_ACCESS_COEX_UNSAFE_CHANNELS", "ACCESS_WIMAX_SCAN", "INTERNET_PRIVILEGED"))
-        for permission in by_name:
-            self.assertNotIn(permission, verifier.ACCESSIBILITY_REFUSED_PERMISSIONS)
-            self.assertTrue(refuse(permission), permission)
-        # Google's namespace, with no exemption for the package TalkBack is built from.
-        for permission in (
-            UNDECLARED_GUARD_PERMISSION,
-            "com.google.android.marvin.talkback.OTHER",
-            "com.google.android.providers.gsf.permission.READ_GSERVICES",
-            "com.google.android.apps.aicore.service.BIND_SERVICE",
-            "com.android.vending.BILLING",
-        ):
-            self.assertTrue(refuse(permission), permission)
-        # Bluetooth, USB and the rest of what TalkBack and eSpeak NG keep are not network access.
-        for permission in tuple(f"android.permission.{name}" for name in (
+        refused = verifier.accessibility_refused_permissions
+        allowed = verifier.ACCESSIBILITY_PERMISSIONS
+        # TalkBack's list is the 16 requests its manifests keep, each with a reason; eSpeak NG's
+        # is empty.
+        kept = {f"android.permission.{name}" for name in (
             "USE_FINGERPRINT", "READ_PHONE_STATE", "VIBRATE", "WAKE_LOCK", "MODIFY_AUDIO_SETTINGS",
             "RECORD_AUDIO", "QUERY_ALL_PACKAGES", "RECEIVE_BOOT_COMPLETED", "FOREGROUND_SERVICE",
-            "POST_NOTIFICATIONS", "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "BLUETOOTH",
-            "BLUETOOTH_ADMIN", "BLUETOOTH_CONNECT", "BLUETOOTH_SCAN", "MANAGE_USB")):
-            self.assertFalse(refuse(permission), permission)
+            "POST_NOTIFICATIONS", "ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION", "BLUETOOTH",
+            "BLUETOOTH_ADMIN", "BLUETOOTH_CONNECT", "BLUETOOTH_SCAN")}
+        self.assertEqual(set(allowed["TalkBack"]), kept)
+        self.assertTrue(all(allowed["TalkBack"].values()))
+        self.assertEqual(allowed["eSpeakNG"], {})
+        self.assertEqual(refused("TalkBack", set(kept)), [])
+        # Everything else is refused, the way its name reads or not: a network permission no
+        # name rule would catch, the ordinary permissions outside the list, Google's namespace
+        # with no exemption for the package TalkBack is built from, and an unreadable name.
+        for permission in (
+            "android.permission.INTERNET", "android.permission.ACCESS_NETWORK_STATE",
+            "android.permission.ACCESS_LOCAL_NETWORK", "android.permission.NETWORK_SETTINGS",
+            "android.permission.MANAGE_IPSEC_TUNNELS", "android.permission.ACCESS_LOWPAN_STATE",
+            "android.permission.PACKET_KEEPALIVE_OFFLOAD",
+            "android.permission.REQUEST_COMPANION_USE_DATA_IN_BACKGROUND",
+            "android.permission.CAMERA", "android.permission.MANAGE_USB",
+            UNDECLARED_GUARD_PERMISSION, "com.google.android.marvin.talkback.OTHER",
+            "com.google.android.providers.gsf.permission.READ_GSERVICES",
+            "com.google.android.apps.aicore.service.BIND_SERVICE", "com.android.vending.BILLING",
+            "@resource 0x7f0a0001",
+        ):
+            self.assertEqual(refused("TalkBack", {permission}), [permission])
+            self.assertEqual(refused("eSpeakNG", {permission}), [permission])
+        for permission in kept:
+            self.assertEqual(refused("eSpeakNG", {permission}), [permission])
+        self.assertEqual(
+            refused("TalkBack", {"android.permission.VIBRATE", "android.permission.CAMERA",
+                                 "android.permission.INTERNET"}),
+            ["android.permission.CAMERA", "android.permission.INTERNET"])
 
     def test_the_built_app_has_the_package_the_switch_recognises(self) -> None:
         patch = BUILD_PATCH.read_text(encoding="utf-8")
