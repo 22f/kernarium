@@ -15,11 +15,15 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
+import signal
+import stat
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 import xml.etree.ElementTree as ET
 import zipfile
@@ -7831,16 +7835,23 @@ def verify_camerax_denylist_assertion(android_root: Path) -> None:
 
 
 def snapshot_tree(root: Path) -> dict[str, tuple[str, object]]:
-    """Every entry under root: a file's bytes, a symlink's target, or a directory."""
+    """Every entry under root: a file's bytes, a symlink's target, a FIFO or a directory.
+
+    Symlinked directories are listed, never entered."""
     state: dict[str, tuple[str, object]] = {}
-    for path in sorted(root.rglob("*")):
-        key = path.relative_to(root).as_posix()
-        if path.is_symlink():
-            state[key] = ("link", os.readlink(path))
-        elif path.is_file():
-            state[key] = ("file", path.read_bytes())
-        else:
-            state[key] = ("directory", None)
+    for directory, names, files in os.walk(root):
+        for name in names + files:
+            path = Path(directory) / name
+            key = path.relative_to(root).as_posix()
+            mode = path.lstat().st_mode
+            if stat.S_ISLNK(mode):
+                state[key] = ("link", os.readlink(path))
+            elif stat.S_ISREG(mode):
+                state[key] = ("file", path.read_bytes())
+            elif stat.S_ISFIFO(mode):
+                state[key] = ("fifo", None)
+            else:
+                state[key] = ("directory", None)
     return state
 
 
@@ -7850,44 +7861,76 @@ def verify_stale_build_properties(android_root: Path) -> None:
 
     The step is build/build-number-properties.sh, which the script sources. It runs here against a
     stand-in output tree, with stand-ins for GNU timeout (absent on a macOS host) and for find, which
-    refuses to run outside the timeout so that no listing is unbounded."""
+    refuses to run outside the timeout so that no listing is unbounded. The same tree is checked
+    against two build numbers, so that a comparison fixed to one of them fails."""
     build = android_root / "build"
-    number = "26"
     product_path = "target/product/andarium"
+    numbers = ("26", "27")
 
-    def prop(key: str, value: str) -> bytes:
-        return f"ro.build.id=CP2A\n{key}={value}\nro.build.version.sdk=37\n".encode()
+    def prop(*lines: str) -> bytes:
+        return ("ro.build.id=CP2A\n" + "".join(f"{line}\n" for line in lines) + "ro.build.version.sdk=37\n").encode()
 
-    stale_files = {
-        f"{product_path}/vendor/build.prop": prop("ro.vendor.build.version.incremental", "25"),
-        f"{product_path}/system/build.prop": prop("ro.build.version.incremental", "25"),
-        f"{product_path}/product/build.prop": prop("ro.product.build.version.incremental", "2"),
-        f"{product_path}/system_ext/build.prop": prop("ro.system_ext.build.version.incremental", "260"),
-        f"{product_path}/ramdisk/prop.default": prop("ro.build.version.incremental", "eng.builder"),
-        "soong/.intermediates/build/soong/system-build.prop/android_common/build.prop":
-            prop("ro.build.version.incremental", "25"),
-        "soong/.intermediates/build/soong/ramdisk-prop.default/android_common/prop.default":
-            prop("ro.build.version.incremental", "25"),
-    }
-    kept_files = {
-        f"{product_path}/odm/build.prop": prop("ro.odm.build.version.incremental", number),
-        f"{product_path}/vendor/etc/prop.default": prop("ro.build.version.incremental", number),
-        # A file that names no build number, or a property of another name, is not stale.
-        f"{product_path}/vendor/etc/build.prop":
-            b"ro.vendor.build.id=CP2A\nro.vendor.build.version.incrementalx=25\nro.incremental.enable=1\n",
-        # Neither is a file of another name, nor anything in obj/, whose packaging intermediates
-        # the target-files rule rebuilds whole.
-        f"{product_path}/vendor/build.prop.bak": prop("ro.build.version.incremental", "25"),
-        f"{product_path}/obj/PACKAGING/target_files_intermediates/x/SYSTEM/build.prop":
-            prop("ro.build.version.incremental", "25"),
-        f"{product_path}/obj/ETC/vendor_intermediates/build.prop": prop("ro.build.version.incremental", "25"),
-        "soong/.intermediates/build/soong/odm-build.prop/android_common/build.prop":
-            prop("ro.odm.build.version.incremental", number),
-        # Outside the product's installed tree and Soong's intermediates.
-        "host/linux-x86/build.prop": prop("ro.build.version.incremental", "25"),
-    }
-    sibling = "aosp/out-other/target/product/andarium/vendor/build.prop"
-    linked = "outside/linked/build.prop"
+    def entry(relative: str, content: bytes, stale_26: bool, stale_27: bool) -> tuple[str, bytes, dict[str, bool]]:
+        return relative, content, {"26": stale_26, "27": stale_27}
+
+    key = "ro.build.version.incremental"
+    odm_key = "ro.odm.build.version.incremental"
+    vendor_key = "ro.vendor.build.version.incremental"
+    product_key = "ro.product.build.version.incremental"
+    system_ext_key = "ro.system_ext.build.version.incremental"
+    entries = [
+        # Installed property files that name another number than 26, or than 27.
+        entry(f"{product_path}/vendor/build.prop", prop(f"{vendor_key}=25"), True, True),
+        entry(f"{product_path}/system/build.prop", prop(f"{key}=25"), True, True),
+        entry(f"{product_path}/product/build.prop", prop(f"{product_key}=2"), True, True),
+        entry(f"{product_path}/system_ext/build.prop", prop(f"{system_ext_key}=260"), True, True),
+        entry(f"{product_path}/ramdisk/prop.default", prop(f"{key}=eng.builder"), True, True),
+        entry(f"{product_path}/odm dir/build.prop", prop(f"{key}=25"), True, True),
+        entry(f"{product_path}/odm/build.prop", prop(f"{odm_key}=26"), False, True),
+        entry(f"{product_path}/vendor/etc/prop.default", prop(f"{key}=26"), False, True),
+        entry(f"{product_path}/etc7/build.prop", prop(f"{key}=27"), True, False),
+        # How a property is read: split at the first "=", blanks and a carriage return trimmed, the
+        # whole value compared as a string.
+        entry(f"{product_path}/etc-blanks/build.prop", prop(f"{odm_key} = 25"), True, True),
+        entry(f"{product_path}/etc-second-equals/build.prop", prop(f"{odm_key}=26=old"), True, True),
+        entry(f"{product_path}/etc-crlf/build.prop", f"{odm_key}=26\r\nro.x=1\r\n".encode(), False, True),
+        entry(f"{product_path}/etc-trailing/build.prop",
+              prop(f"{odm_key}=26   ", f"  {vendor_key}  =  26  "), False, True),
+        entry(f"{product_path}/etc-leading-zero/build.prop", prop(f"{key}=026"), True, True),
+        # A stale key between current ones, and the other way round.
+        entry(f"{product_path}/etc-middle/build.prop",
+              prop(f"{key}=26", f"{product_key}=25", f"{system_ext_key}=26"), True, True),
+        entry(f"{product_path}/etc-first/build.prop",
+              prop(f"{key}=25", f"{product_key}=26", f"{system_ext_key}=26"), True, True),
+        # No incremental property, or one of another name, names no number.
+        entry(f"{product_path}/vendor/etc/build.prop",
+              b"ro.vendor.build.id=CP2A\nro.vendor.build.version.incrementalx=25\nro.incremental.enable=1\n",
+              False, False),
+        # A file of another name is not a property file, and obj/ is the target-files rule's.
+        entry(f"{product_path}/vendor/build.prop.bak", prop(f"{key}=25"), False, False),
+        entry(f"{product_path}/obj/PACKAGING/target_files_intermediates/x/SYSTEM/build.prop",
+              prop(f"{key}=25"), False, False),
+        entry(f"{product_path}/obj/ETC/vendor_intermediates/build.prop", prop(f"{key}=25"), False, False),
+        # Soong's intermediates are searched before the build only.
+        entry("soong/.intermediates/build/soong/system-build.prop/android_common/build.prop",
+              prop(f"{key}=25"), True, True),
+        entry("soong/.intermediates/build/soong/ramdisk-prop.default/android_common/prop.default",
+              prop(f"{key}=25"), True, True),
+        entry("soong/.intermediates/build/soong/a dir\nwith newline/build.prop", prop(f"{key}=25"), True, True),
+        entry("soong/.intermediates/build/soong/odm-build.prop/android_common/build.prop",
+              prop(f"{odm_key}=26"), False, True),
+        # Nothing else of the output directory is searched.
+        entry("host/linux-x86/build.prop", prop(f"{key}=25"), False, False),
+    ]
+
+    def is_installed(relative: str) -> bool:
+        return relative.startswith(f"{product_path}/") and not relative.startswith(f"{product_path}/obj/")
+
+    sibling_files = (
+        "aosp/out-other/target/product/andarium/vendor/build.prop",
+        "aosp/out-other/soong/.intermediates/x/build.prop",
+        "outside/linked/build.prop",
+    )
 
     real_find = shutil.which("find")
     if real_find is None:
@@ -7895,22 +7938,28 @@ def verify_stale_build_properties(android_root: Path) -> None:
     shims = {
         "timeout": '#!/bin/bash\n'
                    'printf "%s\\n" "$*" >>"$SHIM_LOG"\n'
+                   '[[ "${1:-}" != --foreground ]] || shift\n'
                    'if [[ "${1:-}" == -k ]]; then shift 2; fi\n'
                    '[[ "${1:-}" =~ ^[1-9][0-9]*$ ]] || exit 125\n'
                    'shift\n'
                    '[[ -z "${SHIM_TIMEOUT_STATUS:-}" ]] || exit "$SHIM_TIMEOUT_STATUS"\n'
+                   '[[ -z "${SHIM_TIMEOUT_HANG:-}" ]] || exec sleep 60\n'
+                   'if [[ -n "${SHIM_TIMEOUT_AFTER:-}" ]]; then\n'
+                   '    UNDER_TIMEOUT=1 "$@"\n'
+                   '    exit "$SHIM_TIMEOUT_AFTER"\n'
+                   'fi\n'
                    'UNDER_TIMEOUT=1 exec "$@"\n',
         "find": '#!/bin/bash\n'
                 '[[ -n "${UNDER_TIMEOUT:-}" ]] || { echo "find ran without a timeout" >&2; exit 97; }\n'
                 'unset UNDER_TIMEOUT\n'
-                f'exec {real_find} "$@"\n',
+                f'exec {shlex.quote(real_find)} "$@"\n',
     }
     failing_rm = '#!/bin/bash\n' \
                  'for argument in "$@"; do [[ "$argument" != "$SHIM_RM_FAILS" ]] || exit 1; done\n' \
                  'exec /bin/rm "$@"\n'
 
     with tempfile.TemporaryDirectory(prefix="stale-build-properties-") as temporary:
-        base = Path(temporary)
+        base = Path(temporary).resolve()
         shim_dir = base / "shims"
         shim_dir.mkdir()
         for name, text in shims.items():
@@ -7925,73 +7974,134 @@ def verify_stale_build_properties(android_root: Path) -> None:
         def build_tree(name: str) -> tuple[Path, Path, Path]:
             root = base / name
             out = root / "aosp/out-user"
-            for relative, content in {**stale_files, **kept_files}.items():
+            for relative, content, _ in entries:
                 path = out / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(content)
-            for relative in (sibling, linked):
+            for relative in sibling_files:
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(prop("ro.build.version.incremental", "25"))
-            link = out / product_path / "odm/prop.default"
-            link.symlink_to(root / linked)
+                path.write_bytes(prop(f"{key}=25"))
+            (out / product_path / "odm/prop.default").symlink_to(root / "outside/linked/build.prop")
             return root, out, out / product_path
 
-        def run(function: str, out: Path, product: Path, build_number: str = number,
+        environment_base = {**os.environ, "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}", "SHIM_LOG": str(log)}
+
+        def command(function: str, out: object, product: object, number: str) -> list[str]:
+            return ["bash", "-c", f'set -euo pipefail\nsource "$1"\nsource "$2"\n{function} "$3" "$4" "$5"',
+                    "build-aosp.sh", str(build / "common.sh"), str(build / "build-number-properties.sh"),
+                    str(out), str(product), number]
+
+        def run(function: str, out: object, product: object, number: str = "26",
                 **environment: str) -> subprocess.CompletedProcess[str]:
             log.write_text("")
-            return subprocess.run(
-                ["bash", "-c",
-                 f'set -euo pipefail\nsource "$1"\nsource "$2"\n{function} "$3" "$4" "$5"',
-                 "build-aosp.sh", str(build / "common.sh"), str(build / "build-number-properties.sh"),
-                 str(out), str(product), build_number],
-                env={**os.environ, "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
-                     "SHIM_LOG": str(log), **environment},
-                stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+            return subprocess.run(command(function, out, product, number), env={**environment_base, **environment},
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False, timeout=120)
 
-        def bounded_listings() -> int:
+        def listings() -> list[str]:
             lines = log.read_text().splitlines()
-            if any(not re.fullmatch(r"-k [1-9][0-9]* [1-9][0-9]* find .*", line) for line in lines):
-                fail(f"a listing of the output directory is not bounded by timeout: {lines}")
-            return len(lines)
+            if any(not re.fullmatch(r"--foreground -k 10 1800 find \. .*", line) for line in lines):
+                fail(f"a listing is not bounded by timeout --foreground, or not run on relative patterns: {lines}")
+            if any(str(base) in line for line in lines):
+                fail(f"a listing passes an absolute path to find: {lines}")
+            return lines
 
-        # Before the build: the stale files go by their found paths, and nothing else changes.
-        root, out, product = build_tree("remove")
+        def expected_stale(number: str, installed_only: bool = False) -> list[str]:
+            return [relative for relative, _, stale in entries
+                    if stale[number] and (is_installed(relative) or not installed_only)]
+
+        def named_in(result: subprocess.CompletedProcess[str]) -> list[str]:
+            return sorted(line.strip() for line in result.stderr.splitlines() if line.startswith("\t"))
+
+        def scratch_files(root: Path) -> list[str]:
+            return [name for _, names, files in os.walk(root) for name in names + files
+                    if ".build-number-properties" in name]
+
+        # Before the build, for each of two numbers on the same tree, in an output path that holds
+        # glob characters and blanks: the stale files go by their found paths and nothing else changes.
+        for directory, number in (("remove-26", "26"), ("remove-27", "27"), ("glob [x]*? dir/remove", "26")):
+            root, out, product = build_tree(directory)
+            before = snapshot_tree(root)
+            removed = expected_stale(number)
+            for relative in removed:
+                del before[f"aosp/out-user/{relative}"]
+            result = run("remove_stale_build_properties", out, product, number)
+            if result.returncode != 0:
+                fail(f"removing the property files that name another number than {number} failed: "
+                     f"{result.stdout}{result.stderr}")
+            if snapshot_tree(root) != before:
+                fail(f"for build number {number} in {directory!r}, the removal left a stale file or touched "
+                     "a current one, a file of another name, obj/, a link, another output directory "
+                     "or the outside of the product's installed tree and Soong's intermediates")
+            for relative in removed:
+                if str(out / relative) not in result.stdout:
+                    fail(f"the removal for build number {number} does not name {relative}: {result.stdout}")
+            if f"removed {len(removed)} property files that name another build number than {number}" \
+                    not in result.stdout:
+                fail(f"the removal for build number {number} does not count its files: {result.stdout}")
+            lines = listings()
+            if len(lines) != 2 or " -path ./obj -prune -o " not in lines[0] or "-prune" in lines[1]:
+                fail(f"the removal does not list the installed tree without obj/, then Soong's intermediates: {lines}")
+            again = run("remove_stale_build_properties", out, product, number)
+            if (again.returncode, again.stdout, again.stderr) != (0, "", ""):
+                fail(f"a second removal is not a no-op: {again.returncode} {again.stdout}{again.stderr}")
+
+        # The same output through a link, as a symlinked workspace is: only the search roots must be
+        # physical directories of the output.
+        root, out, product = build_tree("alias")
+        alias = root / "alias-out"
+        alias.symlink_to(out)
         before = snapshot_tree(root)
-        removed = {key: before.pop(f"aosp/out-user/{key}") for key in stale_files}
-        result = run("remove_stale_build_properties", out, product)
-        if result.returncode != 0:
-            fail(f"removing the stale property files failed: {result.stdout}{result.stderr}")
-        if snapshot_tree(root) != before:
-            fail("the removal left a stale file, or touched a file that is current, in obj/, outside "
-                 "the product's installed tree and Soong's intermediates, a link or another output directory")
-        for relative in stale_files:
-            if str(out / relative) not in result.stdout:
-                fail(f"the removal does not name {relative}: {result.stdout}")
-        if f"removed {len(stale_files)} property files that name another build number than {number}" \
-                not in result.stdout:
-            fail(f"the removal does not count its files: {result.stdout}")
-        if bounded_listings() != 1:
-            fail("the removal does not list the output directory exactly once")
-        again = run("remove_stale_build_properties", out, product)
-        if (again.returncode, again.stdout, again.stderr) != (0, "", ""):
-            fail(f"a second removal is not a no-op: {again.returncode} {again.stdout}{again.stderr}")
+        for relative in expected_stale("26"):
+            del before[f"aosp/out-user/{relative}"]
+        result = run("remove_stale_build_properties", alias, alias / product_path)
+        if result.returncode != 0 or snapshot_tree(root) != before:
+            fail(f"an output directory reached through a link is not cleaned: {result.stdout}{result.stderr}")
 
         # With no output directory, or one the build has not filled, it does nothing.
         missing = base / "missing/out-user"
         result = run("remove_stale_build_properties", missing, missing / product_path)
-        if (result.returncode, result.stdout, result.stderr) != (0, "", "") or missing.exists() \
-                or bounded_listings() != 0:
+        if (result.returncode, result.stdout, result.stderr) != (0, "", "") or missing.exists() or listings():
             fail(f"an absent output directory is not left alone: {result.returncode} {result.stdout}{result.stderr}")
         empty = base / "empty/out-user"
         empty.mkdir(parents=True)
-        result = run("remove_stale_build_properties", empty, empty / product_path)
-        if (result.returncode, result.stdout, result.stderr) != (0, "", "") or any(empty.iterdir()):
-            fail(f"an empty output directory is not left alone: {result.returncode} {result.stdout}{result.stderr}")
-        # The product's output must lie inside the output directory.
+        for function in ("remove_stale_build_properties", "verify_build_number_properties"):
+            result = run(function, empty, empty / product_path)
+            if (result.returncode, result.stdout, result.stderr) != (0, "", "") or any(empty.iterdir()):
+                fail(f"{function} leaves an empty output directory changed: "
+                     f"{result.returncode} {result.stdout}{result.stderr}")
+        root, out, product = build_tree("outside-product")
         result = run("remove_stale_build_properties", out, root / "outside" / "product")
         if result.returncode == 0 or "not inside the output directory" not in result.stderr:
             fail(f"a product output outside the output directory is accepted: {result.stdout}{result.stderr}")
+
+        # A search root that is a link, or behind one, or not a normalized path, fails the step
+        # before any listing, for the removal and for the scan, and nothing is deleted anywhere.
+        for label, link_relative, link_target, functions in (
+            ("soong", "soong", "aosp/out-other/soong", ("remove_stale_build_properties",)),
+            ("target", "target", "aosp/out-other/target",
+             ("remove_stale_build_properties", "verify_build_number_properties")),
+            ("product", product_path, "aosp/out-other/target/product/andarium",
+             ("remove_stale_build_properties", "verify_build_number_properties")),
+        ):
+            root, out, product = build_tree(f"link-{label}")
+            shutil.rmtree(out / link_relative)
+            (out / link_relative).symlink_to(root / link_target)
+            before = snapshot_tree(root)
+            for function in functions:
+                result = run(function, out, product)
+                if result.returncode == 0 or f"is behind a symbolic link: {out / link_relative}" not in result.stderr:
+                    fail(f"{function} accepts a symlinked {label} directory, or does not name it: "
+                         f"{result.returncode} {result.stdout}{result.stderr}")
+                if snapshot_tree(root) != before or listings():
+                    fail(f"{function} listed or changed a tree whose {label} directory is a link")
+        root, out, product = build_tree("dot-dot")
+        before = snapshot_tree(root)
+        for function in ("remove_stale_build_properties", "verify_build_number_properties"):
+            result = run(function, out, f"{out}/target/product/../product/andarium")
+            if result.returncode == 0 or "not a normalized path" not in result.stderr \
+                    or snapshot_tree(root) != before or listings():
+                fail(f"{function} accepts a product path with a '..' component: {result.stdout}{result.stderr}")
 
         # A removal that fails fails the script, naming the file, and leaves no scratch file.
         root, out, product = build_tree("remove-fails")
@@ -8003,46 +8113,107 @@ def verify_stale_build_properties(android_root: Path) -> None:
         if result.returncode == 0 or f"cannot remove the property file that names another build number: {victim}" \
                 not in result.stderr or not result.stderr.startswith("android/lineage-24/build/build-aosp.sh: "):
             fail(f"a failed removal does not fail the script: {result.returncode} {result.stdout}{result.stderr}")
-        if not victim.exists() or (out / ".build-number-properties.list").exists():
-            fail("a failed removal leaves its file removed or its scratch file behind")
-        if any(key not in before for key in snapshot_tree(root)):
+        if not victim.exists() or scratch_files(root):
+            fail("a failed removal leaves its file removed or a scratch file behind")
+        if any(name not in before for name in snapshot_tree(root)):
             fail("a failed removal created a file")
 
-        # A listing that fails or times out is an error, and removes nothing.
+        # A listing that fails or times out is an error, even after find ran, and removes nothing.
         root, out, product = build_tree("listing-fails")
         before = snapshot_tree(root)
         for function in ("remove_stale_build_properties", "verify_build_number_properties"):
-            result = run(function, out, product, SHIM_TIMEOUT_STATUS="124")
-            if result.returncode == 0 or "cannot list the property files" not in result.stderr \
-                    or "exit status 124" not in result.stderr:
-                fail(f"{function} accepts a listing that timed out: {result.returncode} {result.stdout}{result.stderr}")
-            if snapshot_tree(root) != before:
-                fail(f"{function} changed the tree after a listing that timed out")
+            for variable in ("SHIM_TIMEOUT_STATUS", "SHIM_TIMEOUT_AFTER"):
+                result = run(function, out, product, **{variable: "124"})
+                if result.returncode == 0 or "cannot list the property files" not in result.stderr \
+                        or "exit status 124" not in result.stderr:
+                    fail(f"{function} accepts a listing that timed out ({variable}): "
+                         f"{result.returncode} {result.stdout}{result.stderr}")
+                if snapshot_tree(root) != before:
+                    fail(f"{function} changed the tree, or left a scratch file, after a listing that timed out "
+                         f"({variable})")
 
-        # After the build: an installed file that names another number refuses the build, and only the
-        # installed tree is scanned.
-        root, out, product = build_tree("verify")
+        # A property file that cannot be read is an error, not a file that is current.
+        if os.geteuid() != 0:
+            root, out, product = build_tree("unreadable")
+            unreadable = out / f"{product_path}/vendor/build.prop"
+            unreadable.chmod(0)
+            try:
+                for function in ("remove_stale_build_properties", "verify_build_number_properties"):
+                    result = run(function, out, product)
+                    if result.returncode == 0 or f"cannot read the property file {unreadable}" not in result.stderr:
+                        fail(f"{function} accepts a property file it cannot read: "
+                             f"{result.returncode} {result.stdout}{result.stderr}")
+                    if scratch_files(root):
+                        fail(f"{function} leaves a scratch file behind after an unreadable property file")
+            finally:
+                unreadable.chmod(0o644)
+
+        # No fixed scratch name: a FIFO or a link at the name an earlier version used neither blocks
+        # the step nor is written through, and two runs do not share a list.
+        root, out, product = build_tree("scratch-fifo")
+        os.mkfifo(out / ".build-number-properties.list")
+        before = snapshot_tree(root)
+        for relative in expected_stale("26"):
+            del before[f"aosp/out-user/{relative}"]
+        result = run("remove_stale_build_properties", out, product)
+        if result.returncode != 0 or snapshot_tree(root) != before:
+            fail(f"a FIFO in the output directory changes the removal: {result.returncode} {result.stdout}{result.stderr}")
+        root, out, product = build_tree("scratch-link")
+        victim_file = root / "outside/victim.txt"
+        victim_file.write_text("keep\n")
+        (out / ".build-number-properties.list").symlink_to(victim_file)
         before = snapshot_tree(root)
         result = run("verify_build_number_properties", out, product)
-        installed = sorted(str(out / relative) for relative in stale_files if relative.startswith(product_path))
-        named = sorted(line.strip() for line in result.stderr.splitlines() if line.startswith("\t"))
-        if result.returncode == 0 or named != installed:
-            fail(f"the scan does not refuse exactly the stale installed files: {result.returncode} "
-                 f"{named} {result.stdout}{result.stderr}")
-        if snapshot_tree(root) != before or bounded_listings() != 1:
-            fail("the scan changes the tree or does not list the output directory exactly once")
-        if run("verify_build_number_properties", out, product, "27").returncode == 0:
-            fail("the scan accepts a tree whose files name another build number than the one built")
-        if run("remove_stale_build_properties", out, product).returncode != 0:
-            fail("the removal failed on the scan's tree")
-        result = run("verify_build_number_properties", out, product)
+        if result.returncode == 0 or victim_file.read_text() != "keep\n" or snapshot_tree(root) != before:
+            fail(f"a link in the output directory is written through, or changes the scan: {result.stderr}")
+
+        # An interrupt during a listing ends the step and removes its scratch files.
+        root, out, product = build_tree("interrupted")
+        before = snapshot_tree(root)
+        log.write_text("")
+        process = subprocess.Popen(
+            command("remove_stale_build_properties", out, product, "26"),
+            env={**environment_base, "SHIM_TIMEOUT_HANG": "1"}, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            deadline = time.monotonic() + 30
+            while not scratch_files(root) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if not scratch_files(root):
+                fail("the step creates no scratch file while it lists")
+            os.killpg(process.pid, signal.SIGTERM)
+            deadline = time.monotonic() + 30
+            while scratch_files(root) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if scratch_files(root) or snapshot_tree(root) != before:
+                fail("an interrupted step leaves a scratch file behind, or changed the tree")
+        finally:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=30)
+
+        # After the build, for each of two numbers: an installed file that names another number refuses
+        # the build, naming exactly those files, and only the installed tree is scanned.
+        for number in numbers:
+            root, out, product = build_tree(f"verify-{number}")
+            before = snapshot_tree(root)
+            result = run("verify_build_number_properties", out, product, number)
+            expected = sorted(str(out / relative) for relative in expected_stale(number, installed_only=True))
+            if result.returncode == 0 or named_in(result) != expected:
+                fail(f"the scan for build number {number} does not refuse exactly the stale installed files: "
+                     f"{result.returncode} {named_in(result)} {result.stdout}{result.stderr}")
+            if snapshot_tree(root) != before or len(listings()) != 1:
+                fail("the scan changes the tree or does not list the installed tree exactly once")
+        result = run("remove_stale_build_properties", out, product, "27")
+        if result.returncode != 0:
+            fail(f"the removal failed on the scan's tree: {result.stdout}{result.stderr}")
+        result = run("verify_build_number_properties", out, product, "27")
         if (result.returncode, result.stdout, result.stderr) != (0, "", ""):
             fail(f"the scan refuses a tree whose stale files were removed: {result.stdout}{result.stderr}")
         stray = out / product_path / "system/build.prop"
-        stray.write_bytes(prop("ro.build.version.incremental", "25"))
-        result = run("verify_build_number_properties", out, product)
-        named = [line.strip() for line in result.stderr.splitlines() if line.startswith("\t")]
-        if result.returncode == 0 or named != [str(stray)]:
+        stray.write_bytes(prop(f"{key}=26"))
+        result = run("verify_build_number_properties", out, product, "27")
+        if result.returncode == 0 or named_in(result) != [str(stray)]:
             fail(f"the scan does not name exactly the stale file left by the build: {result.stderr}")
 
     # build-aosp.sh sources the helper, and its steps keep their order: removal after the number is
@@ -8060,7 +8231,7 @@ def verify_stale_build_properties(android_root: Path) -> None:
                     '"$BUILD_NUMBER_VALUE"\nfi\n'),
         script.find('DEXPREOPT_CONFIG="'),
     ]
-    if -1 in positions or positions != sorted(positions) or len(set(positions)) != len(positions):
+    if -1 in positions or any(earlier >= later for earlier, later in zip(positions, positions[1:])):
         fail(f"build-aosp.sh does not remove the stale property files before its build and scan after it: {positions}")
 
 
