@@ -75,9 +75,10 @@ diagnostics report counts it (`libraries_refused`, from the header;
 
 `UML_AOT_INSTANCE_CAPACITY` (a CMake cache value, 2048 by default) is the
 number of library instances each executor thread's binder holds before it
-replaces the oldest. The binder maps its tables from fresh pages, so its
-memory follows the instances made, not the capacity; an instance also holds
-one byte per text page of its library. The blob does not depend on it.
+replaces the oldest. The binder's tables (the instances, their index and 8
+page-state slots an instance) are one mapping of fresh pages, so a place
+nothing has used is not held in memory; an instance also holds one byte per
+text page of its library. The blob does not depend on the capacity.
 
 Entry points: `ctest -R '^arm64-aot-tools$'` for the encoders, decoder and
 assembler, and `ctest -R '^arm64-aot-differential$'` (a configuration with
