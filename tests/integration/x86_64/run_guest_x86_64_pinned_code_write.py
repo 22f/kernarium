@@ -10,7 +10,9 @@ disk into the page with a plain O_DIRECT pread() and with an io_uring READ_FIXED
 into a buffer registered (so pinned) before the page first ran, and requires
 the new function to run afterwards: the kernel wrote the page through its own
 alias with no process on the path, and names the frame to the host when the
-write ends.
+write ends. A fifth case has a second process run the page without a pause while
+a plain read fills it, which is the window between the flush the read's pin makes
+and the write.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from probe_runner import (  # noqa: E402
 PROBE = pathlib.Path(__file__).with_name("pinned_code_write_probe.cpp")
 PROBES = {"pinned-code-write-probe": ("x86-64", X86_64)}
 GUEST_PROBE = f"{GUEST_DIRECTORY}/pinned-code-write-probe"
-MODES = ("direct-anon", "direct-shared", "fixed-anon", "fixed-shared")
+MODES = ("direct-anon", "direct-shared", "fixed-anon", "fixed-shared", "concurrent")
 VERDICT = re.compile(
     r"^pinned-code-write: mode=([\w-]+) failed=(\d+) verdict=(\w+)$", re.MULTILINE)
 KERNEL_FAILURE = re.compile(r"WARNING:|BUG:|Oops|Call Trace:|Kernel panic")

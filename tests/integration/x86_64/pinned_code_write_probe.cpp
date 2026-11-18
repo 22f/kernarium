@@ -14,7 +14,12 @@
  *			page registered, which pins it, before it first ran;
  *	fixed-shared	READ_FIXED into the writable mapping of a memfd page
  *			that is registered before it first ran through its
- *			executable one.
+ *			executable one;
+ *	concurrent	pread() into a shared memfd page that another process
+ *			runs without a pause: its translation of the page is
+ *			dropped when the read pins the page and made again from
+ *			the old bytes at once, so only a call that follows the
+ *			write can drop it again.
  *
  * Each page holds a function that returns 41 and is called many times. The
  * device holds one that returns 83. After the read, the data must be the new
@@ -32,7 +37,8 @@ using u32 = unsigned int;
 using u64 = unsigned long long;
 
 constexpr long nr_write = 1, nr_open = 2, nr_close = 3, nr_mmap = 9,
-	nr_pread64 = 17, nr_pwrite64 = 18, nr_ftruncate = 77,
+	nr_pread64 = 17, nr_pwrite64 = 18, nr_nanosleep = 35, nr_fork = 57,
+	nr_wait4 = 61, nr_kill = 62, nr_prctl = 157, nr_ftruncate = 77,
 	nr_memfd_create = 319,
 	nr_io_uring_setup = 425, nr_io_uring_enter = 426, nr_io_uring_register = 427;
 constexpr long prot_read = 1, prot_write = 2, prot_exec = 4;
@@ -220,6 +226,85 @@ long read_fixed(long disk, u8 *buffer, const u8 *executable, int &before)
 	return result;
 }
 
+void sleep_milliseconds(long milliseconds)
+{
+	long spec[2] = {milliseconds / 1000, (milliseconds % 1000) * 1000000};
+	raw_syscall(nr_nanosleep, address_of(spec), 0);
+}
+
+/* The value a process that runs the page without a pause last saw, after a
+ * pause that lets it see a change. */
+int seen_by(const volatile int *flag)
+{
+	sleep_milliseconds(200);
+	return *flag;
+}
+
+/* A shared memfd page that another process runs, and the disk read into
+ * it. */
+void exercise_concurrent()
+{
+	u8 first[page];
+	fill_function(first, old_value);
+	const long memfd = raw_syscall(nr_memfd_create, address_of("pinned"), 0);
+	if (memfd < 0) {
+		fail("memfd_create failed", memfd);
+		return;
+	}
+	raw_syscall(nr_ftruncate, memfd, page);
+	raw_syscall(nr_pwrite64, memfd, address_of(first), page, 0);
+	u8 *writable = map(page, prot_read | prot_write, map_shared, memfd);
+	u8 *executable = map(page, prot_read | prot_exec, map_shared, memfd);
+	auto *flag = reinterpret_cast<volatile int *>(
+		map(page, prot_read | prot_write, map_shared | map_anonymous));
+	if (writable == nullptr || executable == nullptr || flag == nullptr)
+		return;
+	*flag = 0;
+	const long disk = raw_syscall(nr_open, address_of("/dev/ubdb"), o_direct);
+	if (disk < 0) {
+		fail("/dev/ubdb cannot be opened with O_DIRECT", disk);
+		return;
+	}
+	const long child = raw_syscall(nr_fork);
+	if (child < 0) {
+		fail("fork failed", child);
+		return;
+	}
+	if (child == 0) {
+		raw_syscall(nr_prctl, 1, 9); /* PR_SET_PDEATHSIG, SIGKILL */
+		auto *function = reinterpret_cast<int (*)()>(executable);
+		for (;;)
+			*flag = function();
+	}
+	const int before = seen_by(flag);
+	const long done = raw_syscall(nr_pread64, disk, address_of(writable), page, 0);
+	const int after = seen_by(flag);
+	const int data = data_value(writable);
+	/* One byte, so that the page is a function whenever the other process
+	 * runs it. */
+	writable[1] = static_cast<u8>(control_value);
+	const int control = seen_by(flag);
+	raw_syscall(nr_kill, child, 9);
+	raw_syscall(nr_wait4, child, 0, 0, 0);
+	print("pinned-code-write: mode="); print(mode_name);
+	print(" io="); print(done);
+	print(" before="); print(before);
+	print(" after="); print(after);
+	print(" data="); print(data);
+	print(" control="); print(control); print("\n");
+	if (done != static_cast<long>(page))
+		fail("the read did not return a page", done);
+	if (before != old_value)
+		fail("the other process did not run the old function first", before);
+	if (data != new_value)
+		fail("the read did not change the page", data);
+	if (after != new_value)
+		fail("the other process ran the old function after the read", after);
+	if (control != control_value)
+		fail("a store through a user mapping did not take effect", control);
+	raw_syscall(nr_close, disk);
+}
+
 /* One mode. */
 void exercise(bool shared, bool fixed)
 {
@@ -330,6 +415,8 @@ extern "C" int probe_main(long *stack)
 		exercise(false, true);
 	else if (same(mode_name, "fixed-shared"))
 		exercise(true, true);
+	else if (same(mode_name, "concurrent"))
+		exercise_concurrent();
 	else {
 		print("pinned-code-write: unknown mode\n");
 		return 4;
