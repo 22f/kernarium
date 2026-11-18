@@ -13,83 +13,24 @@ struct GuestDisplayGeometry {
 }
 
 /// What VoiceOver makes of the guest's display, in the application's words.
-/// With `directTouch`, the display is a direct-touch area: a touch on it
-/// reaches the guest as it does with VoiceOver off, so a screen reader in the
-/// guest takes it. Without it, VoiceOver's own gestures work over the
-/// display, which reads as one element. Activating the element, a VoiceOver
-/// double-tap, sends the guest no touch.
+/// Without `directTouch` the display is one element: VoiceOver's own gestures
+/// work over it. With `directTouch` it is a container of one element that
+/// covers it, a direct-touch area: its touches reach the guest, so a screen
+/// reader in the guest takes them, and VoiceOver says nothing of them. The
+/// element is a child of the display, not the display itself, because
+/// VoiceOver passes touches on only to a child element. Activating the
+/// element, a VoiceOver double-tap, sends the guest no touch.
 struct GuestDisplayAccessibility: Equatable {
     var label: String
     /// What the display says of the guest, as its value.
     var value: String?
     var hint: String?
     var directTouch = false
+    /// Whether VoiceOver's focus may go to the direct-touch element as it
+    /// appears: false while another screen covers the display or an
+    /// announcement is still being spoken.
+    var takesFocus = false
 }
-
-#if !APP_STORE
-/// A developer experiment, compiled out of App Store and TestFlight builds:
-/// how the display presents itself to VoiceOver while Android's screen reader
-/// is on, chosen at launch by `ANDARIUM_A11Y_VARIANT`. Unset, empty or unknown
-/// leaves the application's own set-up. A value is one of the named variants
-/// or a `+` list of parts:
-///
-/// - V0 `trait`: the direct-touch trait alone (the application's own);
-/// - V1 `trait+silent`: with `silentOnTouch`;
-/// - V2 `trait+activate`: with `requiresActivation`;
-/// - V3 `trait+silent+activate`: with both;
-/// - V4 `none`: the display is no accessibility element;
-/// - V5 `child+trait+silent`: the display is a container and an
-///   accessibility element inside it carries the trait and `silentOnTouch`;
-/// - V6 `empty+trait+silent`: as V1 with no label, value or hint;
-/// - `sysact` leaves a VoiceOver activation to the system, which taps the guest.
-struct DirectTouchExperiment {
-    enum Placement { case display, child, none }
-    var trait = false
-    var options: UIAccessibility.DirectTouchOptions = []
-    var placement = Placement.display
-    var empty = false
-    var systemActivate = false
-
-    static let environmentName = "ANDARIUM_A11Y_VARIANT"
-    private static let named = [
-        "V0": "trait", "V1": "trait+silent", "V2": "trait+activate", "V3": "trait+silent+activate",
-        "V4": "none", "V5": "child+trait+silent", "V6": "empty+trait+silent",
-    ]
-
-    static let launch = parse(ProcessInfo.processInfo.environment[environmentName])
-
-    static func parse(_ text: String?) -> DirectTouchExperiment? {
-        guard var text, !text.isEmpty else { return nil }
-        var tail = ""
-        if let plus = text.firstIndex(of: "+"), let alias = named[String(text[..<plus])] {
-            tail = String(text[plus...])
-            text = alias
-        } else if let alias = named[text] {
-            text = alias
-        }
-        var result = DirectTouchExperiment()
-        for part in (text + tail).split(separator: "+") {
-            switch part {
-            case "trait": result.trait = true
-            case "silent": result.options.insert(.silentOnTouch)
-            case "activate": result.options.insert(.requiresActivation)
-            case "none": result.placement = .none
-            case "child": result.placement = .child
-            case "empty": result.empty = true
-            case "sysact": result.systemActivate = true
-            default: return nil
-            }
-        }
-        return result
-    }
-}
-
-final class DirectTouchChild: UIAccessibilityElement {
-    var handlesActivation = true
-
-    override func accessibilityActivate() -> Bool { handlesActivation }
-}
-#endif
 
 struct GuestDisplayView: UIViewControllerRepresentable {
     /// Kernarium's on-screen text: the guest's view then takes characters
@@ -234,6 +175,12 @@ final class GuestDisplayViewController: UIViewController {
 
 
 
+/// The display's accessibility element while a screen reader in the guest is
+/// on: it covers the display and takes no activation.
+final class GuestDisplayElement: UIAccessibilityElement {
+    override func accessibilityActivate() -> Bool { true }
+}
+
 private extension Notification.Name {
     static let guestDisplayResizeWillBegin = Notification.Name(
         "org.linux-um-darwin.guest-display-resize-will-begin"
@@ -263,10 +210,10 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     /// became meanwhile, and a touch that began as a finger stays one.
     private var pointerTouchIDs = Set<ObjectIdentifier>()
     private var windowObserver: NSObjectProtocol?
-    #if !APP_STORE
-    private var directTouchChild: DirectTouchChild?
-    private var lastDirectTouchLine = ""
-    #endif
+    /// The direct-touch element while the display describes itself that way,
+    /// and whether the focus was last allowed to go to it.
+    private var directTouchElement: GuestDisplayElement?
+    private var focusWasAllowed = false
 
     /// The hardware keyboard and mouse this view hands the system's events
     /// to. Without one the view leaves presses, hover and scroll to UIKit, and
@@ -323,9 +270,7 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        #if !APP_STORE
-        directTouchChild?.accessibilityFrameInContainerSpace = bounds
-        #endif
+        directTouchElement?.accessibilityFrameInContainerSpace = bounds
         reportLayout()
         pointerStyleDidChange()
     }
@@ -382,80 +327,47 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     }
 
     func applyAccessibility(_ accessibility: GuestDisplayAccessibility?) {
-        #if !APP_STORE
-        if let accessibility, accessibility.directTouch,
-           let experiment = DirectTouchExperiment.launch {
-            applyDirectTouchExperiment(experiment, accessibility)
+        guard let accessibility, accessibility.directTouch else {
+            directTouchElement = nil
+            focusWasAllowed = false
+            accessibilityElements = nil
+            isAccessibilityElement = accessibility != nil
+            accessibilityLabel = accessibility?.label
+            accessibilityValue = accessibility?.value
+            accessibilityHint = accessibility?.hint
+            accessibilityTraits = .none
             return
         }
-        clearDirectTouchExperiment()
-        #endif
-        isAccessibilityElement = accessibility != nil
-        accessibilityLabel = accessibility?.label
-        accessibilityValue = accessibility?.value
-        accessibilityHint = accessibility?.hint
-        accessibilityTraits = accessibility?.directTouch == true ? .allowsDirectInteraction : .none
+        isAccessibilityElement = false
+        accessibilityLabel = nil
+        accessibilityValue = nil
+        accessibilityHint = nil
+        accessibilityTraits = .none
+        let appeared = directTouchElement == nil
+        let element = directTouchElement ?? GuestDisplayElement(accessibilityContainer: self)
+        element.accessibilityLabel = accessibility.label
+        element.accessibilityValue = accessibility.value
+        element.accessibilityHint = accessibility.hint
+        // The trait first: the options apply to a direct-touch element.
+        element.accessibilityTraits = .allowsDirectInteraction
+        element.accessibilityDirectTouchOptions = .silentOnTouch
+        element.accessibilityFrameInContainerSpace = bounds
+        directTouchElement = element
+        accessibilityElements = [element]
+        // VoiceOver's focus is on the element before the first touch, as the
+        // element appears or as nothing covers it any more, so that touch is
+        // not spent moving the focus there.
+        if accessibility.takesFocus, appeared || !focusWasAllowed, UIAccessibility.isVoiceOverRunning {
+            UIAccessibility.post(notification: .screenChanged, argument: element)
+        }
+        focusWasAllowed = accessibility.takesFocus
     }
 
     /// A VoiceOver activation of the display is no touch: the default would tap
     /// the guest at the element's activation point.
     override func accessibilityActivate() -> Bool {
-        #if !APP_STORE
-        if DirectTouchExperiment.launch?.systemActivate == true { return super.accessibilityActivate() }
-        #endif
-        return isAccessibilityElement ? true : super.accessibilityActivate()
+        isAccessibilityElement ? true : super.accessibilityActivate()
     }
-
-    #if !APP_STORE
-    private func applyDirectTouchExperiment(
-        _ experiment: DirectTouchExperiment,
-        _ accessibility: GuestDisplayAccessibility
-    ) {
-        let label = experiment.empty ? "" : accessibility.label
-        let value = experiment.empty ? nil : accessibility.value
-        let hint = experiment.empty ? nil : accessibility.hint
-        let line = "a11y-variant \(ProcessInfo.processInfo.environment[DirectTouchExperiment.environmentName] ?? "") "
-            + "placement=\(experiment.placement) trait=\(experiment.trait) options=\(experiment.options.rawValue) "
-            + "empty=\(experiment.empty) systemActivate=\(experiment.systemActivate)"
-        if line != lastDirectTouchLine {
-            lastDirectTouchLine = line
-            FileHandle.standardError.write(Data((line + "\n").utf8))
-        }
-        func configure(_ target: NSObject) {
-            target.accessibilityLabel = label
-            target.accessibilityValue = value
-            target.accessibilityHint = hint
-            // The documented order: the trait first, the options after it.
-            target.accessibilityTraits = experiment.trait ? .allowsDirectInteraction : .none
-            target.accessibilityDirectTouchOptions = experiment.options
-        }
-        switch experiment.placement {
-        case .display:
-            accessibilityElements = nil
-            isAccessibilityElement = true
-            configure(self)
-        case .child:
-            isAccessibilityElement = false
-            let element = directTouchChild ?? DirectTouchChild(accessibilityContainer: self)
-            directTouchChild = element
-            element.handlesActivation = !experiment.systemActivate
-            configure(element)
-            element.accessibilityFrameInContainerSpace = bounds
-            accessibilityElements = [element]
-        case .none:
-            accessibilityElements = nil
-            isAccessibilityElement = false
-            accessibilityTraits = .none
-            accessibilityDirectTouchOptions = []
-        }
-    }
-
-    private func clearDirectTouchExperiment() {
-        guard DirectTouchExperiment.launch != nil else { return }
-        accessibilityElements = nil
-        accessibilityDirectTouchOptions = []
-    }
-    #endif
 
     func setKeyboardVisible(_ visible: Bool) {
         if visible {

@@ -222,8 +222,9 @@ extension AppModel {
         reader.card = card
         reader.cardFailure = nil
         if card == .unavailable { reader.toldMissing = true }
-        // VoiceOver lands on the card's title and reads on from it.
-        VoiceOver.screenChanged()
+        // VoiceOver lands on the card's title and reads on from it: the card
+        // takes the focus once it is on screen (`ScreenReaderCard`), where a
+        // screen change posted now would find the display still first.
     }
 
     /// Turn On on the card; the card goes when the screen reader is on, and
@@ -253,6 +254,34 @@ extension AppModel {
         reader.cardFailure = reason
         announce(ScreenReaderWords.changeFailure(turningOn: true, reason: reason))
         if reader.state == nil { refreshScreenReaderSoon(in: session) }
+    }
+
+    /// What VoiceOver hears as a run begins, in this order: the screen change
+    /// puts its cursor on the display (the direct-touch element, once Android's
+    /// screen reader is found on); then the sentence that says what the run is
+    /// and where the side keys are; then, where Android's screen reader was on
+    /// at the start, the news that it is on (`evaluateScreenReaderCard`), or the
+    /// card that asks, which takes the focus and so cuts what is being said. The
+    /// screen change's argument is no place for the sentence: VoiceOver does not
+    /// speak it.
+    func announceRunStart(_ phase: Phase) {
+        VoiceOver.screenChanged()
+        guard let words = RootView.spoken(phase), voiceOverRunning() else { return }
+        let current = session
+        current.reader.runStartAnnouncing = true
+        runStartAnnouncer(words) { _ in
+            if current === self.session { current.reader.runStartAnnouncing = false }
+        }
+    }
+
+    /// Whether VoiceOver's focus may go to the display's direct-touch element:
+    /// the run shows it with nothing over it, and the sentence of the run's
+    /// start has been spoken.
+    var displayMayTakeFocus: Bool {
+        guard case .running = phase else { return false }
+        let reader = session.reader
+        return !reader.runStartAnnouncing && reader.card == nil && reader.settingsOpen == 0
+            && busy == nil && sheet == nil && spacePause == nil && alert == nil
     }
 
     /// What VoiceOver is told of its own accord (`announcer` is a test's).

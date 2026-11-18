@@ -99,9 +99,13 @@ application that draws controls over the display passes `touchDidBegin`, which
 the display calls after it has sent the contacts of each touch that begins on
 it; Kernarium passes none. An application that passes `accessibility`
 (`GuestDisplayAccessibility`, in its own words) makes the display one VoiceOver
-element with the application's `value`, and with `directTouch` a direct-touch
-area whose touches reach the guest as they do with VoiceOver off; activating the
-element sends the guest no touch. Without `accessibility` the display is no
+element with the application's `value`; activating it sends the guest no touch.
+With `directTouch` the display is instead a container of one child element that
+covers it and carries the words, the trait `allowsDirectInteraction` and
+`silentOnTouch`, so touches reach the guest as they do with VoiceOver off and
+VoiceOver says nothing of them; `takesFocus` moves VoiceOver's focus onto that
+child as it appears, and only the child does it (the trait and option on the
+view itself do not pass touches). Without `accessibility` the display is no
 element.
 Kernarium passes none.
 

@@ -18,7 +18,9 @@ enum VoiceOver {
     /// Speaks `text` as `announce` does and calls `finished` once VoiceOver has
     /// finished or dropped it: true when it was spoken to its end. Nothing is
     /// called while VoiceOver is off.
-    static func announce(_ text: String, finished: @escaping @MainActor @Sendable (Bool) -> Void) {
+    static func announce(
+        _ text: String, queued: Bool = false, finished: @escaping @MainActor @Sendable (Bool) -> Void
+    ) {
         guard UIAccessibility.isVoiceOverRunning else { return }
         let observer = Observer()
         observer.token = NotificationCenter.default.addObserver(
@@ -30,7 +32,7 @@ enum VoiceOver {
             observer.token = nil
             Task { @MainActor in finished(successful) }
         }
-        announce(text)
+        announce(text, queued: queued)
     }
 
     private final class Observer: @unchecked Sendable {

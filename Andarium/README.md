@@ -907,8 +907,12 @@ requires reopening Andarium.
   closed side keys carry actions that move them. Android's display is one
   element (`GuestDisplayAccessibility`) whose value is Android's screen reader's
   state and whose activation sends Android no touch; while the screen reader is
-  on it is a direct-touch area, so touches reach Android and it speaks instead of
-  VoiceOver ([Android's screen reader](#android-operations)). Each option row on
+  on the display is a container of one direct-touch element, so touches reach
+  Android and it speaks instead of VoiceOver, with no rotor setting needed
+  ([Android's screen reader](#android-operations)). The sentence of a run's
+  start is queued behind the screen change; the display's element takes
+  VoiceOver's focus once it has been spoken, with nothing over the display, and
+  the card that asks takes it on its own title. Each option row on
   Home reads as one element, its control, which carries the row's title as its
   label (the title is no second stop), followed by the line under it.
 - **Keyboard and mouse.** The guest has a hardware keyboard and a mouse

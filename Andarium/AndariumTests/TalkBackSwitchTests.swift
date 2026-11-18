@@ -44,6 +44,12 @@ struct TalkBackSwitchTests {
         var queued: [Bool] = []
     }
 
+    /// What a run's start asks VoiceOver to say, and the end of it.
+    private final class RunStartSpeech {
+        var lines: [String] = []
+        var finish: (@MainActor @Sendable (Bool) -> Void)?
+    }
+
     /// Listens to what the model tells VoiceOver. Call it before anything awaits:
     /// the first read of a start comes as soon as the test suspends.
     private func listen(to model: AppModel) -> Said {
@@ -598,6 +604,87 @@ struct TalkBackSwitchTests {
         // The display is described only while the session shows it.
         model.phase = .home
         #expect(GuestLayer.accessibility(of: model) == nil)
+    }
+
+    /// What a run's start tells VoiceOver: the sentence that says what the run
+    /// is and where the side keys are goes as an announcement queued behind the
+    /// screen change (as the argument of the screen change it is not spoken), and
+    /// the display's direct-touch element takes VoiceOver's focus only once it
+    /// has been spoken.
+    @Test func theRunStartSentenceIsAnnouncedQueuedAndTheDisplayWaitsForItsEnd() throws {
+        let (model, _) = started(voiceOver: true, guestState: reading([talkBack]))
+        let spoken = RunStartSpeech()
+        model.runStartAnnouncer = { text, finished in
+            spoken.lines.append(text)
+            spoken.finish = finished
+        }
+        model.announceRunStart(.running(.normal))
+        #expect(spoken.lines == [try #require(RootView.spoken(.running(.normal)))])
+        #expect(model.session.reader.runStartAnnouncing)
+        #expect(!model.displayMayTakeFocus)
+        spoken.finish?(false)
+        #expect(!model.session.reader.runStartAnnouncing)
+        #expect(model.displayMayTakeFocus)
+        model.announceRunStart(.running(.recovery))
+        #expect(spoken.lines.last == RootView.spoken(.running(.recovery)))
+        #expect(spoken.lines.count == 2)
+    }
+
+    @Test func aScreenThatSpeaksForItselfAnnouncesNothingAtItsStart() throws {
+        let (model, _) = started(voiceOver: true)
+        let spoken = RunStartSpeech()
+        model.runStartAnnouncer = { text, finished in
+            spoken.lines.append(text)
+            spoken.finish = finished
+        }
+        for phase in [Phase.home, .booting(.normal), .failed] {
+            model.announceRunStart(phase)
+        }
+        #expect(spoken.lines.isEmpty)
+        #expect(!model.session.reader.runStartAnnouncing)
+    }
+
+    @Test func withoutVoiceOverTheRunStartAnnouncesNothingAndWaitsForNothing() throws {
+        let (model, _) = started(voiceOver: false)
+        let spoken = RunStartSpeech()
+        model.runStartAnnouncer = { text, finished in
+            spoken.lines.append(text)
+            spoken.finish = finished
+        }
+        model.announceRunStart(.running(.normal))
+        #expect(spoken.lines.isEmpty)
+        #expect(!model.session.reader.runStartAnnouncing)
+        #expect(model.displayMayTakeFocus)
+    }
+
+    /// Something over the display keeps VoiceOver's focus from going to it: the
+    /// card that asks, a Settings sheet, a busy or low-space screen, an alert.
+    @Test func theDisplayTakesNoFocusFromWhatCoversIt() throws {
+        let (model, _) = started(voiceOver: true, guestState: reading([talkBack]))
+        #expect(model.displayMayTakeFocus)
+        model.session.reader.card = .ask
+        #expect(!model.displayMayTakeFocus)
+        model.session.reader.card = nil
+        let reader = model.settingsOpened()
+        #expect(!model.displayMayTakeFocus)
+        model.settingsClosed(reader)
+        #expect(model.displayMayTakeFocus)
+        model.alert = AppAlert(title: "A", message: "B")
+        #expect(!model.displayMayTakeFocus)
+        model.alert = nil
+        model.phase = .home
+        #expect(!model.displayMayTakeFocus)
+    }
+
+    @Test func theDisplayAsksForFocusOnlyWhileTheScreenReaderIsOnAndNothingCoversIt() async throws {
+        let (model, driver) = started(voiceOver: true, interval: .milliseconds(20))
+        try await settle { model.session.reader.state != nil }
+        #expect(GuestLayer.accessibility(of: model)?.takesFocus == false)
+        driver.screenReaderState = reading([talkBack])
+        try await settle { model.session.reader.isOn }
+        #expect(GuestLayer.accessibility(of: model)?.takesFocus == true)
+        model.session.reader.runStartAnnouncing = true
+        #expect(GuestLayer.accessibility(of: model)?.takesFocus == false)
     }
 
     /// The hint VoiceOver reads on the direct-touch display ends with the way

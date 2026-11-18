@@ -656,6 +656,12 @@ final class AppModel {
     @ObservationIgnored var announcer: @MainActor (_ text: String, _ queued: Bool) -> Void = {
         VoiceOver.announce($0, queued: $1)
     }
+    /// Says what a run is as it begins, queued, and tells whether the sentence
+    /// was spoken to its end; a test collects the words and reports the end
+    /// itself.
+    @ObservationIgnored var runStartAnnouncer: @MainActor (String, @escaping @MainActor @Sendable (Bool) -> Void) -> Void = {
+        VoiceOver.announce($0, queued: true, finished: $1)
+    }
     /// The preview's mock guest screen reader, where no runtime is behind the
     /// screens; nil in the application.
     @ObservationIgnored var screenReaderStandIn: (any ScreenReaderStandIn)?

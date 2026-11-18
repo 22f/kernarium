@@ -89,7 +89,8 @@ struct GuestLayer: View {
             label: ScreenReaderWords.displayLabel,
             value: model.offersScreenReader ? ScreenReaderWords.displayValue(reader) : nil,
             hint: model.offersScreenReader ? ScreenReaderWords.displayHint(reader, edge: model.session.keysEdge) : nil,
-            directTouch: reader.isOn)
+            directTouch: reader.isOn,
+            takesFocus: reader.isOn && model.displayMayTakeFocus)
     }
 
     private var showsGuest: Bool { model.phase.showsGuestDisplay }
