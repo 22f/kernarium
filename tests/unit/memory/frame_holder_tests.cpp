@@ -1169,6 +1169,12 @@ public:
 		return stamp_of(generation_, address_) > stamp_;
 	}
 
+	/* How far the stamp's version has moved since the reader was made. */
+	[[nodiscard]] std::uint64_t stamp_steps() const
+	{
+		return stamp_of(generation_, address_) - stamp_;
+	}
+
 	[[nodiscard]] bool serial_moved() const
 	{
 		return flush_serial_of(generation_) != serial_;
@@ -1290,8 +1296,12 @@ void test_remote_kernel_write()
 /* K5 (remote, before any x86 code runs): while no x86 translation can exist
  * (nothing has asked for coherent kernel writes), a remote write into a data
  * view or an unmapped page publishes no x86 frame change and moves no flush
- * serial, so a process that runs nothing else pays nothing. This row must
- * run before any other raises the request, which no row can take back. */
+ * serial, so a process that runs nothing else pays nothing. The write into
+ * the data view steps the frame's stamp once, as every publication does
+ * through any view of a frame an executable mapping holds (a verdict filed
+ * for its bytes must not outlive the write); an x86 publication would step
+ * it again. This row must run before any other raises the request, which no
+ * row can take back. */
 void test_remote_kernel_write_before_x86_code()
 {
 	const Baseline baseline;
@@ -1307,9 +1317,9 @@ void test_remote_kernel_write_before_x86_code()
 			872, base + page, 8) == 0);
 		require(darwin_uml_static_vm_invalidate_code_generation(
 			873, base + 5 * page, 8) == 0);
-		require(!reader.stamp_moved(),
+		require(reader.stamp_steps() == 1,
 			"a remote write published an x86 frame change before x86 code "
-			"could exist");
+			"could exist, or left the frame's stamp where it was");
 		require(!reader.serial_moved(),
 			"a remote write moved a flush serial before x86 code could "
 			"exist");
