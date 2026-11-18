@@ -291,8 +291,8 @@ and publishes at their holders, or returns without work when no x86 code has
 run or the frame has no record. Three limits remain. The kernel's stores into
 an executed io_uring ring whose pages the program supplied itself
 (`IORING_SETUP_NO_MMAP`) are not announced. A loop device's zero fill of a read
-past the end of its file is announced by `memzero_page()` when the completion
-runs in a task, and only warned about, once, from an interrupt. The
+past the end of its file is warned about once and not announced when its
+completion runs in a softirq, as it does on a guest with more than one vCPU. The
 announcement follows the write, so a second vCPU may finish instructions it had
 already begun after the bytes changed.
 When a run of the emulator ends it appends the process's counts so far, which
