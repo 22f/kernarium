@@ -195,6 +195,9 @@ struct ScriptedState {
     // decoder loses its session and goes on at the next sync picture.
     unsigned dropFrom {};
     unsigned dropTo {};
+    // The packet with this number is refused once, as the platform decoder
+    // refuses a corrupt one.
+    unsigned refuse {};
 };
 class ScriptedDecoder final : public VideoDecoder {
 public:
@@ -203,6 +206,10 @@ public:
     void inspect(std::span<const std::uint8_t>) override { format_ = {sizes_.front(), sizes_.front(), 8}; }
     void submit(std::span<const std::uint8_t>, std::uint64_t timestamp) override
     {
+        if (state_->refuse && state_->submitted + 1 == state_->refuse) {
+            state_->refuse = 0;
+            throw std::runtime_error("the decoder refused the packet");
+        }
         const auto size = sizes_[std::min<std::size_t>(state_->submitted, sizes_.size() - 1)];
         const auto picture = ++state_->submitted;
         format_ = {size, size, 8};
@@ -1770,6 +1777,73 @@ void changeInsideDrain(bool markerFirst)
     video.device.reset();
 }
 
+/* A coded buffer the device holds, because two pictures wait for the client's
+ * capture buffers, is decoded when a capture buffer is queued. When the
+ * decoder refuses that packet the buffer is returned once, with the error
+ * flag, and the stream goes on with what the client queues next: the buffer is
+ * neither lost nor completed twice. */
+void refusedHeldInput()
+{
+    auto state = std::make_shared<ScriptedState>();
+    state->refuse = 3;
+    VideoFixture video(11, 8 * page, [state](auto) {
+        return std::make_unique<ScriptedDecoder>(std::vector<std::uint32_t> {64}, state);
+    });
+    const auto input = VIRTIO_VIDEO_QUEUE_TYPE_INPUT;
+    const auto output = VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT;
+    video.createStream();
+    video.setOutputFormat(VIRTIO_VIDEO_FORMAT_NV12);
+    for (unsigned id = 1; id <= 4; ++id) video.attachEncodedInput(id);
+    require(load<virtio_video_cmd_hdr>(video.attach(output, 2, {{{3 * page, 4096, {}}}, {{4 * page, 2048, {}}}}).response).type
+            == VIRTIO_VIDEO_RESP_OK_NODATA, "capture attach failed");
+    VhostUserQueueCompletion completion;
+    const auto flagsOf = [](const VhostUserQueueCompletion& done) {
+        return load<virtio_video_resource_queue_resp>(done.response).flags;
+    };
+
+    // Two packets decode into pictures nobody has a buffer for yet.
+    for (unsigned id = 1; id <= 2; ++id) {
+        require(load<virtio_video_resource_queue_resp>(
+                    video.command(video.queueCommand(input, id, 5, 100 + id)).response).flags == 0,
+                "decode input failed");
+        if (id == 1) video.expectSourceChange();
+    }
+    // The third waits behind them.
+    const auto held = video.next;
+    require(video.command(video.queueCommand(input, 3, 5, 103)).action == VhostUserQueueAction::defer,
+            "a coded buffer was taken with two pictures waiting");
+    require(!video.device.takeQueueCompletion(completion), "a held coded buffer was completed early");
+
+    // The capture buffer takes the first picture and releases the held packet, which the decoder refuses.
+    const auto capture = video.command(video.queueCommand(output, 2));
+    require(capture.action == VhostUserQueueAction::complete &&
+            load<virtio_video_resource_queue_resp>(capture.response).flags == VIRTIO_VIDEO_DEQUEUE_FLAG_ERR,
+            "a refused held packet did not fail the request that released it");
+    unsigned returned = 0;
+    while (video.device.takeQueueCompletion(completion))
+        if (completion.requestId == held) {
+            ++returned;
+            require(flagsOf(completion) == VIRTIO_VIDEO_DEQUEUE_FLAG_ERR, "the refused coded buffer came back without the error");
+        }
+    require(returned == 1, "a refused held coded buffer was not returned exactly once");
+    const auto event = video.takeEvent();
+    require(event && event->event_type == VIRTIO_VIDEO_EVENT_ERROR && event->stream_id == video.stream,
+            "a refused held packet raised no error event");
+
+    // The stream takes the next packet, and the picture still waiting is delivered.
+    require(load<virtio_video_resource_queue_resp>(
+                video.command(video.queueCommand(input, 4, 5, 104)).response).flags == 0, "the stream refused the packet after the error");
+    const auto request = video.next;
+    require(video.command(video.queueCommand(output, 2)).action == VhostUserQueueAction::defer,
+            "capture was not deferred after the error");
+    require(video.device.takeQueueCompletion(completion) && completion.requestId == request && flagsOf(completion) == 0 &&
+            load<virtio_video_resource_queue_resp>(completion.response).timestamp == 102,
+            "the picture that was waiting was not delivered after the error");
+    require(!video.device.takeQueueCompletion(completion), "an extra completion after the error");
+    video.ok(virtio_video_stream_destroy{{VIRTIO_VIDEO_CMD_STREAM_DESTROY, 11}});
+    video.device.reset();
+}
+
 /* A seek throws away what was decoded and nothing else: the decoder keeps the
  * stream's parameter sets, and the client is not told a size it already has. */
 void seekKeepsTheFormat()
@@ -2276,6 +2350,7 @@ int main()
             resolutionChange(how);
         for (const bool markerFirst : {false, true}) changeInsideDrain(markerFirst);
         seekKeepsTheFormat();
+        refusedHeldInput();
         for (const auto format : {VIRTIO_VIDEO_FORMAT_NV12, VIRTIO_VIDEO_FORMAT_P010})
             for (const bool vp9 : {false, true}) tenBitStreamToNv12(format, vp9);
         provisionalCaptureFormat(false);

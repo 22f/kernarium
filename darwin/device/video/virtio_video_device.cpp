@@ -564,13 +564,16 @@ public:
         for (;;) {
             pump(id, stream);
             if (stream.held.empty() || stream.frames.size() >= framesInFlight) return;
+            /* The request stays held until the decoder has taken its packet, so
+             * a packet it refuses is returned once, with the error, by the
+             * cancellation that follows. */
+            stream.decoder->submit(stream.held.front().packet, stream.held.front().timestamp);
             auto held = std::move(stream.held.front());
             stream.held.pop_front();
             stream.heldBytes -= held.size;
             const auto found = stream.resources.find(
                 resourceKey(VIRTIO_VIDEO_QUEUE_TYPE_INPUT, held.resource));
             if (found != stream.resources.end()) found->second.queued = false;
-            stream.decoder->submit(held.packet, held.timestamp);
             ++stream.packets;
             stream.packetBytes += held.size;
             auto result = load<virtio_video_resource_queue_resp>(queued(id, held.timestamp, 0));
