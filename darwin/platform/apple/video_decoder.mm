@@ -485,44 +485,55 @@ private:
              * frame of a superframe is read here, not only the first. A size any
              * frame states stays within the advertised rectangle, which holds
              * every picture of the stream: a frame that does not state its size
-             * takes one an earlier frame stated. */
+             * takes one an earlier frame stated. Nothing of the decoder changes
+             * until the whole packet has passed. */
             const char* fault = nullptr;
             const auto parsed = vp9::parsePacket(bytes, &fault);
             if (!parsed) throw std::runtime_error(fault);
             const auto limit = decodeSizeLimit(VideoCodec::vp9);
+            /* A key frame refreshes every reference and restates the stream's
+             * profile, colour and size, so the last one of a packet is where
+             * the packet's configuration begins, and what precedes it cannot
+             * affect any frame after it. libvpx too shows a packet's last
+             * frame and no other. */
+            std::optional<std::size_t> keyAt;
+            for (std::size_t i = 0; i < parsed->frames.size(); ++i)
+                if (parsed->frames[i].key) keyAt = i;
             /* The hardware decodes Profile 0 (8-bit) and Profile 2 (10-bit),
              * both 4:2:0. A stream keeps its profile until a key frame, and a
              * packet is one profile: a frame of another is a stream the
              * description the session was made from does not describe. */
-            const auto& first = parsed->frames.front();
-            const unsigned profile = first.key ? first.profile : vp9Profile_;
+            const unsigned profile = keyAt ? parsed->frames[*keyAt].profile : vp9Profile_;
             for (const auto& header : parsed->frames) {
                 if (header.profile != profile || (profile != 0 && profile != 2) ||
                     header.bitDepth != (profile == 2 ? 10u : 8u))
                     throw std::runtime_error("unsupported VP9 profile");
-                if (header.size && (header.size->width > limit.width || header.size->height > limit.height))
+                if (!header.size) continue;
+                if (header.size->width > limit.width || header.size->height > limit.height)
                     throw std::runtime_error("video dimensions exceed decoder capabilities");
-                /* The hardware refuses to open a session below the minimum, and
-                 * only once the decoder has moved on to the new picture. */
-                if (header.size && (header.size->width < kVp9DecodeMinimumSide ||
-                                    header.size->height < kVp9DecodeMinimumSide))
+                /* The hardware refuses to open a session below the minimum,
+                 * and only once the decoder has moved on to the new picture. */
+                if (header.size->width < kVp9DecodeMinimumSide || header.size->height < kVp9DecodeMinimumSide)
                     throw std::runtime_error("video dimensions are below decoder capabilities");
             }
-            // A superframe reaches the decoder whole; its first frame's header
-            // is the one that can resize the stream.
-            if (first.key) {
-                const VideoFormat next {first.size->width, first.size->height, first.bitDepth};
-                changed = next != format_ || first.profile != vp9Profile_ || first.colorSpace != vp9ColorSpace_ ||
-                          first.fullRange != vp9FullRange_;
+            if (keyAt) {
+                const auto& key = parsed->frames[*keyAt];
+                const VideoFormat next {key.size->width, key.size->height, key.bitDepth};
+                changed = next != format_ || key.profile != vp9Profile_ || key.colorSpace != vp9ColorSpace_ ||
+                          key.fullRange != vp9FullRange_;
                 format_ = next;
-                vp9Profile_ = first.profile;
-                vp9ColorSpace_ = first.colorSpace;
-                vp9FullRange_ = first.fullRange;
+                vp9Profile_ = key.profile;
+                vp9ColorSpace_ = key.colorSpace;
+                vp9FullRange_ = key.fullRange;
                 randomAccess = true;
+                // The frames ahead of the key frame are not sent: it replaces what they refer to.
+                if (*keyAt == 0) packet.assign(bytes.begin(), bytes.end());
+                else packet = vp9::joinFrames(std::span(parsed->data).subspan(*keyAt));
             } else if (!description_.get()) {
                 throw std::runtime_error("VP9 stream does not start with a key frame");
+            } else {
+                packet.assign(bytes.begin(), bytes.end());
             }
-            packet.assign(bytes.begin(), bytes.end());
         }
         // A picture that needs one the lost session decoded has nothing to
         // refer to, and the session is made anew at the next random access point.

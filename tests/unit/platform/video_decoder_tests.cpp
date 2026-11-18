@@ -468,6 +468,14 @@ void vp9Limits(const std::vector<uml::platform::VideoDecodeCapability>& capabili
     require(decoder->format() == VideoFormat {}, "a refused VP9 picture changed the stream size");
 }
 
+/* The hash of each picture of vp9-superframes.ivf as the NV12 libvpx writes it. */
+constexpr std::uint32_t vp9ClipHashes[] = {
+        0x43dbd20b, 0xe42453cf, 0xf304143b, 0x331687a7, 0x0503b4ac, 0xf4edc0e0, 0x78f2e9e6, 0xdabd9c03,
+        0xe8f2e510, 0x2663e199, 0x3b85cde4, 0xc4fda8fa, 0xd4aeb5af, 0x363446ca, 0xfa24799c, 0x74a9a138,
+        0x0a5b021e, 0x3fdcc5a3, 0xd87b1ee1, 0xc0f26d58, 0x320305ad, 0x7142fceb, 0xd4e512e0, 0x5731ebe9,
+        0xa95c8819, 0x9b8b1dae, 0x9e009210, 0x2d025e6e, 0xe04c90ad, 0x9eadcae1, 0xcbc865fc, 0xb0565c12,
+        0xe552355f, 0x46538305, 0x17c97a35, 0xf153862e, 0x4e533ad4, 0x743f009a, 0x84979f4d, 0x50eec70a};
+
 /* A clip of 40 packets: three of them superframes that carry a hidden
  * alternate-reference frame ahead of the shown one, and a key frame at the
  * 31st that changes the size from 64 x 64 to 96 x 80. Each packet shows one
@@ -479,12 +487,6 @@ void vp9Clip(const std::vector<uml::platform::VideoDecodeCapability>& capabiliti
     if (std::none_of(capabilities.begin(), capabilities.end(),
                      [](const auto& c) { return c.profile == VideoProfile::vp9Profile0; }))
         return;
-    static const std::uint32_t expected[] = {
-        0x43dbd20b, 0xe42453cf, 0xf304143b, 0x331687a7, 0x0503b4ac, 0xf4edc0e0, 0x78f2e9e6, 0xdabd9c03,
-        0xe8f2e510, 0x2663e199, 0x3b85cde4, 0xc4fda8fa, 0xd4aeb5af, 0x363446ca, 0xfa24799c, 0x74a9a138,
-        0x0a5b021e, 0x3fdcc5a3, 0xd87b1ee1, 0xc0f26d58, 0x320305ad, 0x7142fceb, 0xd4e512e0, 0x5731ebe9,
-        0xa95c8819, 0x9b8b1dae, 0x9e009210, 0x2d025e6e, 0xe04c90ad, 0x9eadcae1, 0xcbc865fc, 0xb0565c12,
-        0xe552355f, 0x46538305, 0x17c97a35, 0xf153862e, 0x4e533ad4, 0x743f009a, 0x84979f4d, 0x50eec70a};
     const auto packets = ivfPackets(read("vp9-superframes.ivf"));
     require(packets.size() == 40, "the VP9 clip is not 40 packets");
     auto decoder = makeVideoDecoder(VideoCodec::vp9);
@@ -501,7 +503,7 @@ void vp9Clip(const std::vector<uml::platform::VideoDecodeCapability>& capabiliti
         const VideoFormat size = i < 30 ? VideoFormat {64, 64, 8} : VideoFormat {96, 80, 8};
         require(frames[0].format == size && decoder->format() == size, "a VP9 picture has the wrong size");
         require(frames[0].timestamp == (i + 1) * 1000, "a VP9 picture lost its timestamp");
-        require(frameHash(frames[0]) == expected[i], "a VP9 picture differs from the reference decoder's");
+        require(frameHash(frames[0]) == vp9ClipHashes[i], "a VP9 picture differs from the reference decoder's");
     }
     decoder->drain();
     require(decoder->takeFrames().empty(), "a VP9 clip left a picture behind");
@@ -555,6 +557,14 @@ void vp9Profile2Limits(const std::vector<uml::platform::VideoDecodeCapability>& 
     require(decoder->format() == VideoFormat {}, "a refused VP9 Profile 2 picture changed the stream size");
 }
 
+/* The hash of each picture of vp9-profile2-superframes.ivf: libvpx's 10-bit output narrowed to 8 bits. */
+constexpr std::uint32_t vp9Profile2ClipHashes[] = {
+        0xae5a53b4, 0xc3ce3063, 0xf4897d3b, 0x32ac1857, 0xfe99c050, 0xcac607f8, 0xe03fb722, 0xa00eb758,
+        0x83afd197, 0x275106a1, 0x84afa6da, 0x8e9f7b34, 0xdc260ada, 0xbc697744, 0x4080cf19, 0x3db77c5a,
+        0x30c01b41, 0xf64a9489, 0xaa5f4b52, 0xc9ca0514, 0x577c0ee1, 0x1a2e7a27, 0xceafc4f7, 0x3a014f66,
+        0xa3164370, 0xbe498402, 0xb5339302, 0xb0b29424, 0x3ec23bab, 0x4041b52c, 0xd1d82011, 0x3b44a9d4,
+        0x42c519c2, 0x7ca235c3, 0xc2aadcb0, 0xaff21620, 0x51fd0062, 0x88b0994f, 0x1ecc7b61, 0xc7bd600b};
+
 /* A clip of 40 packets of Profile 2, built as the Profile 0 one is: four
  * superframes that carry a hidden alternate-reference frame, and a key frame at
  * the 31st that changes the size from 64 x 64 to 96 x 80. The expected hashes
@@ -568,12 +578,6 @@ void vp9Profile2Clip(const std::vector<uml::platform::VideoDecodeCapability>& ca
     if (std::none_of(capabilities.begin(), capabilities.end(),
                      [](const auto& c) { return c.profile == VideoProfile::vp9Profile2; }))
         return;
-    static const std::uint32_t expected[] = {
-        0xae5a53b4, 0xc3ce3063, 0xf4897d3b, 0x32ac1857, 0xfe99c050, 0xcac607f8, 0xe03fb722, 0xa00eb758,
-        0x83afd197, 0x275106a1, 0x84afa6da, 0x8e9f7b34, 0xdc260ada, 0xbc697744, 0x4080cf19, 0x3db77c5a,
-        0x30c01b41, 0xf64a9489, 0xaa5f4b52, 0xc9ca0514, 0x577c0ee1, 0x1a2e7a27, 0xceafc4f7, 0x3a014f66,
-        0xa3164370, 0xbe498402, 0xb5339302, 0xb0b29424, 0x3ec23bab, 0x4041b52c, 0xd1d82011, 0x3b44a9d4,
-        0x42c519c2, 0x7ca235c3, 0xc2aadcb0, 0xaff21620, 0x51fd0062, 0x88b0994f, 0x1ecc7b61, 0xc7bd600b};
     const auto packets = ivfPackets(read("vp9-profile2-superframes.ivf"));
     require(packets.size() == 40, "the VP9 Profile 2 clip is not 40 packets");
     for (const bool narrow : {true, false}) {
@@ -591,7 +595,7 @@ void vp9Profile2Clip(const std::vector<uml::platform::VideoDecodeCapability>& ca
             require(frames[0].format == size, "a VP9 Profile 2 picture has the wrong size or depth");
             require(decoder->format().bitDepth == 10, "a VP9 Profile 2 stream is not reported as 10-bit");
             require(frames[0].timestamp == (i + 1) * 1000, "a VP9 Profile 2 picture lost its timestamp");
-            require((narrow ? frameHash(frames[0]) : narrowedHash(frames[0])) == expected[i],
+            require((narrow ? frameHash(frames[0]) : narrowedHash(frames[0])) == vp9Profile2ClipHashes[i],
                     "a VP9 Profile 2 picture differs from libvpx's, narrowed");
         }
         decoder->drain();
@@ -600,6 +604,57 @@ void vp9Profile2Clip(const std::vector<uml::platform::VideoDecodeCapability>& ca
         std::printf("vp9-profile2-superframes (%s): 40 pictures bit-exact against libvpx narrowed, 4 superframes, one "
                     "resolution change\n", narrow ? "NV12" : "P010 narrowed here");
     }
+}
+
+/* A packet whose hidden frame comes ahead of a key frame that changes the size
+ * decodes as libvpx decodes it: the key frame is where the stream's
+ * configuration changes and the picture is its own. The packet is the hidden
+ * alternate-reference frame of the clip's first superframe ahead of the key
+ * frame that starts the clip's second size, 96 x 80, in a stream that has
+ * decoded the 64 x 64 pictures before it. libvpx shows the key frame's own
+ * picture for such a packet, which is what the clip's packet of that key frame
+ * shows, and the inter frame after it is decoded from it. */
+void vp9ResizeInSuperframe(const std::vector<uml::platform::VideoDecodeCapability>& capabilities,
+                           uml::platform::VideoProfile profile, const char* clipName,
+                           const std::uint32_t* expected)
+{
+    using namespace uml::platform;
+    namespace frames = uml::testing::vp9;
+    if (std::none_of(capabilities.begin(), capabilities.end(), [profile](const auto& c) { return c.profile == profile; }))
+        return;
+    const bool tenBit = profile == VideoProfile::vp9Profile2;
+    const auto packets = ivfPackets(read(clipName));
+    require(packets.size() == 40, "the VP9 clip is not 40 packets");
+    std::size_t superframe = 0;
+    while (superframe < 30 && vp9::splitSuperframe(packets[superframe])->size() < 2) ++superframe;
+    require(superframe < 30, "the VP9 clip has no superframe among its 64 x 64 pictures");
+    const auto hidden = (*vp9::splitSuperframe(packets[superframe]))[0];
+    const auto packet = frames::superframe({std::vector<std::uint8_t>(hidden.begin(), hidden.end()), packets[30]});
+    for (const bool narrow : {false, true}) {
+        if (!tenBit && narrow) continue;
+        auto decoder = makeVideoDecoder(VideoCodec::vp9);
+        if (narrow) decoder->requestOutputLayout(VideoPixelLayout::planar8Bit);
+        for (std::size_t i = 0; i < superframe; ++i) decoder->submit(packets[i], i + 1);
+        decoder->takeFrames();
+        require(decoder->format().width == 64, "the stream did not start at 64 x 64");
+        decoder->submit(packet, 100);
+        const unsigned depth = tenBit && !narrow ? 10u : 8u;
+        require(decoder->format() == VideoFormat {96, 80, tenBit ? 10u : 8u},
+                "a key frame after a hidden frame did not change the stream size");
+        auto shown = decoder->takeFrames();
+        require(shown.size() == 1 && shown[0].timestamp == 100 && shown[0].format == VideoFormat {96, 80, depth},
+                "a key frame after a hidden frame did not show its own picture");
+        const auto hashOf = [&](const DecodedVideoFrame& frame) { return tenBit && !narrow ? narrowedHash(frame) : frameHash(frame); };
+        require(hashOf(shown[0]) == expected[30], "a key frame after a hidden frame differs from the reference decoder's");
+        // The next picture is predicted from the key frame the packet carried.
+        decoder->submit(packets[31], 101);
+        decoder->drain();
+        const auto next = decoder->takeFrames();
+        require(next.size() == 1 && next[0].timestamp == 101 && hashOf(next[0]) == expected[31],
+                "the picture after a resizing superframe differs from the reference decoder's");
+    }
+    std::printf("vp9-resize-in-superframe (%s): hidden frame, then a 96 x 80 key frame, bit-exact\n",
+                tenBit ? "profile 2" : "profile 0");
 }
 
 /* One decoder carries a stream through a change of profile at a key frame, as a
@@ -1057,10 +1112,13 @@ int main(int argc, char** argv)
         h264Shapes(capabilities);
         vp9Limits(capabilities);
         vp9Clip(capabilities);
+        vp9ResizeInSuperframe(capabilities, VideoProfile::vp9Profile0, "vp9-superframes.ivf", vp9ClipHashes);
         vp9Hostile(capabilities);
         vp9Mutations(capabilities, VideoProfile::vp9Profile0, "vp9-superframes.ivf", false);
         vp9Profile2Limits(capabilities);
         vp9Profile2Clip(capabilities);
+        vp9ResizeInSuperframe(capabilities, VideoProfile::vp9Profile2, "vp9-profile2-superframes.ivf",
+                              vp9Profile2ClipHashes);
         vp9ProfileSwitch(capabilities);
         vp9Mutations(capabilities, VideoProfile::vp9Profile2, "vp9-profile2-superframes.ivf", true);
         auto decoder = makeVideoDecoder(capabilities.front().codec);

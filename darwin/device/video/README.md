@@ -70,13 +70,16 @@ without asking each other.
   client states. The device holds an encoded packet back while the hardware has
   no capture buffer to decode into.
 - **Guest input.** The platform decoder reads the headers of every VP9 frame of
-  a packet, not only the first, and refuses before the hardware sees it a
-  packet with a truncated or reserved header, a superframe index that does not
-  fit the packet, a profile other than 0 or 2, a 12-bit or non-4:2:0 stream,
-  frames of more than one profile in one packet, or a picture size past the
-  range, as it refuses an oversized H.264 or HEVC picture. Whatever follows a
-  valid header is the hardware's to decode, and its failure ends the stream's
-  pictures with an error until the client seeks.
+  a packet, not only the first, and refuses before the hardware sees it, with
+  the decoder as it was, a packet with a truncated or reserved header
+  (colour space 6 included), a last byte that reads as a superframe index
+  marker without an index that fits the packet, a profile other than 0 or 2, a
+  12-bit or non-4:2:0 stream, frames of more than one profile in one packet, or
+  a picture size outside the range, as it refuses an oversized H.264 or HEVC
+  picture. A packet with a key frame after other frames is decoded from its
+  last key frame, which replaces what the frames before it refer to. Whatever
+  follows a valid header is the hardware's to decode, and its failure ends the
+  stream's pictures with an error until the client seeks.
 
 `UML_VIDEO_ACTIVITY_LOG` names a file in which the device appends the profiles
 it advertised and each stream's codec and totals, since a guest that falls back

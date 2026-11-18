@@ -164,6 +164,17 @@ void hostileHeaders()
     require(!header(test::keyFrame(0, 64, 64, {}, test::syncCode, 3)), "frame marker 3 was accepted");
     require(!header(test::keyFrame(0, 64, 64, {}, 0x498343)), "a wrong sync code was accepted");
     require(!header(test::keyFrame(0, 64, 64, {}, 0)), "a zero sync code was accepted");
+    // Colour space 6 is reserved, in a key frame of any profile and in an intra-only frame above profile 0.
+    for (const unsigned profile : {0u, 1u, 2u, 3u}) {
+        const test::Color reserved {.colorSpace = 6, .subsamplingX = 0, .subsamplingY = 0};
+        require(!header(test::keyFrame(profile, 64, 64, reserved)), "the reserved colour space 6 was accepted");
+        if (profile > 0)
+            require(!header(test::intraOnly(profile, 64, 64, reserved)),
+                    "the reserved colour space 6 was accepted in an intra-only frame");
+        // The colour spaces on either side of it are not reserved.
+        const test::Color bt2020 {.colorSpace = 5, .subsamplingX = 0, .subsamplingY = 0};
+        require(header(test::keyFrame(profile, 64, 64, bt2020)).has_value(), "colour space 5 was refused");
+    }
     // Profile 4 and above: the high and low bits set and the reserved bit set too.
     {
         test::BitWriter bits;
@@ -207,19 +218,35 @@ void superframeIndexes()
         const auto frames = splitSuperframe(test::superframe(many, 1));
         require(frames && frames->size() == 8, "an index of eight frames did not split");
     }
-    // An index whose first byte is not its last is no index: libvpx decodes the packet as one frame.
+    // A last byte that reads as an index marker states an index, as libvpx takes it. One whose
+    // leading copy of the marker is missing, or that the packet is too short to hold, is a
+    // corrupt packet and no single frame.
     {
         auto packet = test::superframe({a, b});
         packet[packet.size() - (2 + 2 * 2)] ^= 0x01;              // the first byte of the index
-        const auto frames = splitSuperframe(packet);
-        require(frames && frames->size() == 1 && (*frames)[0].size() == packet.size(),
-                "a packet whose index does not match was not taken as one frame");
-    }
-    // A marker byte at the end with room for no index is no index either.
-    {
-        const Bytes packet {0x82, 0xc1};
-        const auto frames = splitSuperframe(packet);
-        require(frames && frames->size() == 1, "a lone marker byte was taken as an index");
+        require(!splitSuperframe(packet), "an index whose leading marker does not match was accepted");
+        // A marker byte appended to an intact frame is the same fault.
+        for (const std::uint8_t marker : {0xc0, 0xc9, 0xdf}) {
+            auto lone = a;
+            lone.push_back(marker);
+            require(!splitSuperframe(lone), "a lone marker byte after a frame was accepted");
+        }
+        // The packet holds fewer bytes than the index it states.
+        require(!splitSuperframe(Bytes {0x82, 0xc1}) && !splitSuperframe(Bytes {0xc0}) &&
+                !splitSuperframe(Bytes {0x82, 0xdf}), "an index longer than its packet was accepted");
+        const char* why = nullptr;
+        auto lone = a;
+        lone.push_back(0xc0);
+        require(!parsePacket(lone, &why) && why != nullptr && std::string(why) == "invalid VP9 superframe index",
+                "a lone marker byte did not fail the packet as an index fault");
+        // A last byte just outside the marker's pattern is the end of a frame.
+        for (const std::uint8_t last : {0xbf, 0xe0, 0x00}) {
+            auto frame = a;
+            frame.push_back(last);
+            const auto frames = splitSuperframe(frame);
+            require(frames && frames->size() == 1 && (*frames)[0].size() == frame.size(),
+                    "a packet that ends in no marker was not taken as one frame");
+        }
     }
     // An index that names more than the packet holds, an empty frame, or a size
     // the sum of the others overflows is refused.
@@ -256,6 +283,51 @@ void superframeIndexes()
         require(!none && why != nullptr && std::string(why) == "invalid VP9 superframe index",
                 "a bad index did not fail the packet with its reason");
     }
+}
+
+/* The packet the decoder builds from the frames it keeps splits back into them. */
+void joinedFrames()
+{
+    const auto a = test::key(64, 64);
+    const auto b = test::inter(true);
+    const auto view = [](const Bytes& frame) { return uml::platform::vp9::Bytes(frame); };
+    // One frame needs no index.
+    {
+        const std::vector<uml::platform::vp9::Bytes> one {view(a)};
+        const auto packet = joinFrames(one);
+        require(packet == a, "a lone frame was changed");
+    }
+    // A frame whose last byte would read as an index marker is given an index.
+    {
+        auto frame = a;
+        frame.back() = 0xc3;
+        const std::vector<uml::platform::vp9::Bytes> one {view(frame)};
+        const auto packet = joinFrames(one);
+        const auto split = splitSuperframe(packet);
+        require(packet.size() > frame.size() && split && split->size() == 1 && (*split)[0].size() == frame.size() &&
+                std::equal(frame.begin(), frame.end(), (*split)[0].begin()),
+                "a lone frame that ends like a marker did not come back whole");
+    }
+    // Two to eight frames come back as they went in, whatever their sizes need to be stated in.
+    for (const std::size_t size : {std::size_t(3), std::size_t(300), std::size_t(70000), std::size_t(17000000)}) {
+        for (const std::size_t count : {std::size_t(2), std::size_t(3), std::size_t(8)}) {
+            std::vector<Bytes> storage;
+            for (std::size_t i = 0; i < count; ++i) {
+                Bytes frame(i == 0 ? size : 3 + i, std::uint8_t(0x11 * (i + 1)));
+                storage.push_back(std::move(frame));
+            }
+            std::vector<uml::platform::vp9::Bytes> views;
+            for (const auto& frame : storage) views.push_back(view(frame));
+            const auto packet = joinFrames(views);
+            const auto split = splitSuperframe(packet);
+            require(split && split->size() == count, "joined frames did not split into as many");
+            for (std::size_t i = 0; i < count; ++i)
+                require((*split)[i].size() == storage[i].size() &&
+                        std::equal(storage[i].begin(), storage[i].end(), (*split)[i].begin()),
+                        "a joined frame is not the frame that went in");
+        }
+    }
+    std::puts("joined frames split back into the frames that went in");
 }
 
 /* Whatever bytes a guest sends, the readers return a result inside the packet,
@@ -316,6 +388,7 @@ int main(int argc, char** argv)
         headerKinds();
         hostileHeaders();
         superframeIndexes();
+        joinedFrames();
         arbitraryBytes();
         std::puts("VP9 stream readers pass");
         return 0;

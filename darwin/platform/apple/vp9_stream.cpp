@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "vp9_stream.hpp"
 
+#include <algorithm>
+
 namespace uml::platform::vp9 {
 namespace {
 
 using bitstream::BitReader;
 
 constexpr std::uint32_t frameSyncCode = 0x498342;
+constexpr unsigned colorSpaceReserved = 6;
 constexpr unsigned colorSpaceRgb = 7;
 
 /* color_config() of the uncompressed header. Profile 0 and 2 are 4:2:0 and RGB
@@ -16,6 +19,7 @@ bool readColorConfig(BitReader& reader, FrameHeader& header)
 {
     if (header.profile >= 2) header.bitDepth = reader.bits(1) ? 12 : 10;
     header.colorSpace = reader.bits(3);
+    if (header.colorSpace == colorSpaceReserved) return false;
     const bool oddProfile = header.profile == 1 || header.profile == 3;
     if (header.colorSpace != colorSpaceRgb) {
         header.fullRange = reader.bits(1) != 0;
@@ -57,30 +61,48 @@ std::optional<std::vector<Bytes>> splitSuperframe(Bytes packet)
 {
     if (packet.empty()) return std::nullopt;
     const std::uint8_t marker = packet.back();
-    if ((marker & 0xe0) == 0xc0) {
-        const std::size_t frames = std::size_t(marker & 7) + 1;
-        const std::size_t magnitude = std::size_t((marker >> 3) & 3) + 1;
-        const std::size_t indexSize = 2 + magnitude * frames;
-        // The index starts with the marker byte too. One that does not is no
-        // index, and the packet is one frame.
-        if (packet.size() >= indexSize && packet[packet.size() - indexSize] == marker) {
-            const std::size_t available = packet.size() - indexSize;
-            std::vector<Bytes> result;
-            std::size_t offset = 0;
-            std::size_t position = packet.size() - indexSize + 1;
-            for (std::size_t i = 0; i < frames; ++i) {
-                std::size_t size = 0;
-                for (std::size_t byte = 0; byte < magnitude; ++byte)
-                    size |= std::size_t(packet[position++]) << (8 * byte);
-                // An empty frame is how libvpx is told that one was lost.
-                if (size == 0 || size > available - offset) return std::nullopt;
-                result.push_back(packet.subspan(offset, size));
-                offset += size;
-            }
-            return result;
-        }
+    if ((marker & 0xe0) != 0xc0) return std::vector<Bytes> {packet};
+    const std::size_t frames = std::size_t(marker & 7) + 1;
+    const std::size_t magnitude = std::size_t((marker >> 3) & 3) + 1;
+    const std::size_t indexSize = 2 + magnitude * frames;
+    /* A last byte that reads as a marker states an index, and the index starts
+     * with the same byte. libvpx calls a packet that has no room for the index
+     * or no such byte at its front corrupt, and so does this. */
+    if (packet.size() < indexSize || packet[packet.size() - indexSize] != marker) return std::nullopt;
+    const std::size_t available = packet.size() - indexSize;
+    std::vector<Bytes> result;
+    std::size_t offset = 0;
+    std::size_t position = packet.size() - indexSize + 1;
+    for (std::size_t i = 0; i < frames; ++i) {
+        std::size_t size = 0;
+        for (std::size_t byte = 0; byte < magnitude; ++byte)
+            size |= std::size_t(packet[position++]) << (8 * byte);
+        // An empty frame is how libvpx is told that one was lost.
+        if (size == 0 || size > available - offset) return std::nullopt;
+        result.push_back(packet.subspan(offset, size));
+        offset += size;
     }
-    return std::vector<Bytes> {packet};
+    return result;
+}
+
+std::vector<std::uint8_t> joinFrames(std::span<const Bytes> frames)
+{
+    std::vector<std::uint8_t> packet;
+    std::size_t largest = 0;
+    for (const auto frame : frames) {
+        packet.insert(packet.end(), frame.begin(), frame.end());
+        largest = std::max(largest, frame.size());
+    }
+    if (frames.size() == 1 && (packet.back() & 0xe0) != 0xc0) return packet;
+    std::size_t magnitude = 1;
+    while (magnitude < 4 && (largest >> (8 * magnitude)) != 0) ++magnitude;
+    const auto marker = std::uint8_t(0xc0 | ((magnitude - 1) << 3) | (frames.size() - 1));
+    packet.push_back(marker);
+    for (const auto frame : frames)
+        for (std::size_t byte = 0; byte < magnitude; ++byte)
+            packet.push_back(std::uint8_t(frame.size() >> (8 * byte)));
+    packet.push_back(marker);
+    return packet;
 }
 
 std::optional<FrameHeader> parseFrameHeader(Bytes frame)
@@ -146,6 +168,7 @@ std::optional<Packet> parsePacket(Bytes bytes, const char** why)
         const auto header = parseFrameHeader(frame);
         if (!header) return fail("invalid VP9 frame header");
         packet.frames.push_back(*header);
+        packet.data.push_back(frame);
     }
     return packet;
 }
