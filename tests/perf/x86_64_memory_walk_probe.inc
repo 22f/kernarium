@@ -9,7 +9,7 @@
  * family is the only thing that tells them apart. Everything else a step runs
  * has one successor.
  *
- * An order table filled before the timed loop names the walk block of every
+ * An order table the assembler builds names the walk block of every
  * step, reached by an indirect jump. With WALK_RANDOM set it holds a
  * xorshift sequence longer than a branch predictor's history reaches, so the
  * memory gadget's successor is unpredictable; without it the blocks run in
@@ -33,7 +33,6 @@
 	lea	r14, [rip + .Lorder]
 	lea	r15, [rip + .Lblocks]
 	lea	rbx, [rip + .Lbuffer]
-	walk_order_fill WALK_ORDER, WALK_BLOCKS, WALK_RANDOM
 
 	mov	qword ptr [rbx], WALK_VALUE
 	mov	r9d, WALK_VALUE
@@ -82,8 +81,9 @@
 	.p2align 12
 .Lbuffer:
 	.space	64
+	.data
 	.p2align 4
 .Lorder:
-	.space	WALK_ORDER * 2
+	walk_order_table WALK_ORDER, WALK_BLOCKS, WALK_RANDOM
 
 	.section .note.GNU-stack, "", @progbits

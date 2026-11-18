@@ -24,7 +24,6 @@
 	probe_start
 	lea	r14, [rip + .Lorder]
 	lea	r15, [rip + .Lsites]
-	walk_order_fill WALK_ORDER, WALK_BLOCKS, WALK_RANDOM
 
 	mov	r11d, 3
 	xor	r10d, r10d
@@ -67,9 +66,9 @@
 
 	probe_end
 
-	.bss
+	.data
 	.p2align 4
 .Lorder:
-	.space	WALK_ORDER * 2
+	walk_order_table WALK_ORDER, WALK_BLOCKS, WALK_RANDOM
 
 	.section .note.GNU-stack, "", @progbits
