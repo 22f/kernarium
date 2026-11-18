@@ -489,6 +489,9 @@ struct AppEntry {
         #if ICP_FILING
         ICPPreview.configure(model: model)
         #endif
+        #if TESTFLIGHT_STORE_LINK
+        StoreNoticePreview.configure(model: model)
+        #endif
         if let statsReadings {
             model.session.readout = Readout(
                 previewReadings: statsReadings, memoryMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound

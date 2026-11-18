@@ -275,7 +275,8 @@ block.
   TestFlight carries Send feedback and Follow developer on X under the same
   conditions, and Buy me tokens, Review on the App Store and the ICP filing
   number never, whatever the local files hold; its bundle check requires
-  those three absent.
+  those three absent. It alone carries the [App Store notice](#app-store-notice),
+  and only when the identifier is in the ignored `Config/Review.local.xcconfig`.
 
 ```sh
 cmake --preset kernarium-ios-device-android-app-store
@@ -504,7 +505,9 @@ in an App Store build, and fails on the identifier's digits in any file of a
 bundle that does not name it (as UTF-8 or UTF-16, never printed). Tests turn it
 on in a Debug build with `REVIEW_ID=id0000000000`, which the check accepts in
 Debug alone. Its word is the `Review` string table. Opening it answers the
-[Rating prompt](#rating-prompt).
+[Rating prompt](#rating-prompt). A TestFlight build has neither the item nor
+the prompt; it reads the same identifier for the [App Store
+notice](#app-store-notice).
 
 ### Rating prompt
 
@@ -538,6 +541,32 @@ without that feature holds no request, counter or stored record.
   maker's own check; an App Store build compiles both out, which the bundle
   check's knob scan covers. The application's own launch is the only one that
   asks: the Simulator preview and a hosted test build their own.
+
+### App Store notice
+
+A card first among Home's notices and on Welcome, with the App Store
+version's icon, a line that points a tester to that version, a caution and one
+button that opens its App Store page through the system, and a row in Info that
+stays as the way back to the page once the card is dismissed
+(`Shared/StoreLink/`). It is compiled in, under the `TESTFLIGHT_STORE_LINK`
+condition, only in a TestFlight build whose ignored `Config/Review.local.xcconfig`
+names the application's App Store identifier: `STORE_LINK_ID` takes it from
+there in TestFlight and is empty in every other configuration, and Info.plist
+holds it under `AndariumStoreLinkID`, so an AppStore, Release or Debug build, a
+fork or a sideload holds no card, row, address or text. The address is the
+page's, with no write-review action, and `REVIEW_ID` stays AppStore's alone.
+The card's close mark dismisses it for the installation, whatever the build
+number, and Info keeps its row. The card is the first of Home's notices and never
+covers Start, and Welcome's column scrolls while the card is up, so that a short
+display still reaches Set up virtual machine. Its words are the `StoreLink` string table, built
+only where the notice is.
+
+The bundle check says for every configuration whether it is compiled in, allows
+the identifier in a TestFlight bundle only under that key (never under Review's),
+and refuses the key, the code, the table and the words in an AppStore bundle and
+the identifier's digits in any other file of a bundle. Tests turn the notice on
+in a Debug build and in the Preview with `STORE_LINK_ID=id0000000000`, which the
+check accepts in Debug alone.
 
 ### Home toolbar menu
 
@@ -1362,9 +1391,9 @@ The strings are String Catalogs in `Localization/` (screens, permission texts,
 What's New notes) and in `AndariumCore`'s resources. The JIT texts are their own
 catalog, table `JIT`, which the App Store configuration leaves out of the
 bundle and its check asserts is absent. The texts of Send feedback, Buy me
-tokens, Review on the App Store and Follow developer on X are catalogs of their
-own, tables `Feedback`, `TipJar`, `Review` and `FollowX`, built only where their
-feature is compiled in (`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`);
+tokens, Review on the App Store, Follow developer on X and the App Store notice
+are catalogs of their own, tables `Feedback`, `TipJar`, `Review`, `FollowX` and
+`StoreLink`, built only where their feature is compiled in (`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`);
 the bundle check refuses a table, by its file name, in a product without its
 feature and asks for it in every language of one with it. The tip's words keep
 to its rules in each language (`scripts/check-tip-words.py`): no donation, plan
@@ -1386,7 +1415,8 @@ short quoted Chinese or Japanese name is not cut across two lines.
 --stringsdata <DerivedData>` fails on a key the code uses and a catalog lacks,
 or the reverse. It runs on a development build made with
 `FEEDBACK_ADDRESS=feedback@example.com`, the four `TIP_*` identifiers,
-`REVIEW_ID=id0000000000`, `FOLLOW_X_HANDLE=example_handle` and
+`REVIEW_ID=id0000000000`, `STORE_LINK_ID=id0000000000`,
+`FOLLOW_X_HANDLE=example_handle` and
 `ICP_NUMBER=示例ICP备00000000号-0A` (the output of
 `Andarium` and `AndariumPreview` together; one without a feature has none of its
 strings and fails) and on an App Store build with `--app-store`. A
