@@ -46,7 +46,7 @@ index fad1abac06375c29246c39c7e0d22b714a0a38ee..8d650259a53c4ac2976c7a0c9b5fac23
 +	DEFINE(UM_PROT_GUEST_IMMUTABLE, 32);
  }
 diff --git a/arch/um/kernel/tlb.c b/arch/um/kernel/tlb.c
-index 04cff8cc7fb270a9b3980c3324335b5cd8868104..8838d57874d6d31f9efea48fed9d892ca56d224c 100644
+index 7ce5ae0fe9820ab0e84bdfab11d201634b1bd0d5..32e48c448287038a11e8481ecc83e34a05fbad01 100644
 --- a/arch/um/kernel/tlb.c
 +++ b/arch/um/kernel/tlb.c
 @@ -3,8 +3,11 @@

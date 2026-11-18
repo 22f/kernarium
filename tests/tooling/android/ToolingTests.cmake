@@ -82,6 +82,24 @@ uml_add_tooling_test(
     LABELS android;audit
     TIMEOUT 60)
 
+# The accessibility artifact is staged only when its files match its
+# description, as the filegroups the product imports.
+uml_add_tooling_test(
+    NAME lineage24-accessibility-artifact
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_stage_accessibility_artifact.py
+    LABELS android
+    TIMEOUT 60)
+
+# The accessibility applications' licence modules name what each APK holds, for
+# the image's NOTICE, with the text of every copyleft kind they name.
+uml_add_tooling_test(
+    NAME lineage24-accessibility-licenses
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_accessibility_licenses.py
+    LABELS android;audit
+    TIMEOUT 60)
+
 # The list of paths that decide a release names every producer, and the object
 # IDs it yields do not depend on history.
 uml_add_tooling_test(
@@ -211,6 +229,20 @@ uml_add_tooling_test(
 set_tests_properties(android17-oldapp-switch-command PROPERTIES
     SKIP_RETURN_CODE 77)
 
+# The text message service's logic on a plain JVM: the PDUs it builds, read back
+# with the platform's own UTF-16 decoder, the request's parsing and the answers,
+# the delivery record (never twice, at every point a request can end at), and the
+# host channel's server, frame and admission over stand-ins for the platform's
+# socket classes. It skips (77) where the host has no JDK.
+uml_add_tooling_test(
+    NAME android17-sms-service
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_sms_service.py
+    LABELS android
+    TIMEOUT 300)
+set_tests_properties(android17-sms-service PROPERTIES
+    SKIP_RETURN_CODE 77)
+
 # The old-application runner without a guest: the probe application's two
 # packages (manifest, DEX file, libraries built for armv7 when the host has the
 # tools), the verdicts, the permission review and the commands it sends.
@@ -276,6 +308,18 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_gamepad_runner.py
     LABELS android
     TIMEOUT 60)
+
+# The text-message runner without a guest: its frames and requests against the
+# golden file, the record file it writes, its readers of the guest's logs and
+# dumps, its judgements of a round of rows, its host and adb-server client
+# against fakes on loopback, the catalogue of rows, and a parse of the probe's
+# sources and build script.
+uml_add_tooling_test(
+    NAME android17-sms-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_sms_runner.py
+    LABELS android
+    TIMEOUT 120)
 
 # The keyboard and mouse runner's reading of the guest's input dump and of the
 # probe's log, its VNC client's wire, and its key table against the launcher's.

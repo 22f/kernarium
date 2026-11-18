@@ -61,6 +61,23 @@ nonisolated enum ThermalOverride {
     }
 }
 
+/// The state of Settings' "When hot" a harness launch states for its run
+/// (`ANDARIUM_HEAT_LIMIT`): "1" limits the frame rate while the device is hot
+/// and "0" tells Android nothing hot, whatever the person chose; anything else
+/// is no setting. The stored choice stays as it is
+/// (`HeatLimitPreference.launch`).
+nonisolated enum HeatLimitLaunch {
+    static let environmentName = "ANDARIUM_HEAT_LIMIT"
+
+    static func stated(in environment: [String: String]) -> Bool? {
+        switch environment[environmentName] {
+        case "1"?: true
+        case "0"?: false
+        default: nil
+        }
+    }
+}
+
 /// A harness launch's silent phone (`ANDARIUM_HAPTICS=0`): for that launch the
 /// device plays none of the guest's haptics, as it does while the person's
 /// Haptics switch is off, and the stored switch stays as it is. Anything else
@@ -122,6 +139,25 @@ nonisolated enum OldAppsProbeLaunch {
     }
 }
 
+/// A development launch's text message entrance (`ANDARIUM_TEXT_MESSAGES=1`).
+/// The application offers no text message until an accepted release image
+/// carries the service (`Capabilities.device`); tests and proof images switch
+/// it on with this setting. An App Store build compiles it out.
+nonisolated enum TextMessagesLaunch {
+    static let environmentName = "ANDARIUM_TEXT_MESSAGES"
+
+    static func requested(in environment: [String: String]) -> Bool {
+        environment[environmentName] == "1"
+    }
+
+    /// The device's capabilities for a launch with this environment.
+    static func capabilities(in environment: [String: String]) -> Capabilities {
+        var capabilities = Capabilities.device
+        if requested(in: environment) { capabilities.textMessages = true }
+        return capabilities
+    }
+}
+
 /// The development build's compass check (`ANDARIUM_COMPASS_READOUT=1`): the
 /// application prints the device motion sample the guest's field comes from,
 /// with iOS's own attitude and heading from it (`CompassReadout`).
@@ -136,10 +172,12 @@ nonisolated enum CompassReadoutLaunch {
 extension AppEntry {
     /// Whether the launch is the person's own, which announces the release
     /// notes (`announceWhatsNew`). A launch that states any setting, the JIT
-    /// or the thermal state included, or runs under XCTest is a harness's.
+    /// or the thermal state or the heat limit included, or runs under XCTest is a
+    /// harness's.
     static func isPersonsLaunch(overrides: LaunchOverrides, environment: [String: String]) -> Bool {
         overrides.isEmpty && JitPreference.stated(in: environment) == nil
             && ThermalOverride.stated(in: environment) == nil
+            && HeatLimitLaunch.stated(in: environment) == nil
             && !InputProbeLaunch.requested(in: environment)
             && !CompassReadoutLaunch.requested(in: environment)
             && environment[OldAppsProbeLaunch.environmentName] == nil

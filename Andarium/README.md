@@ -18,6 +18,7 @@ AndariumCore/         Swift package: the model and the adb client, no UIKit; it
                       re-exports GuestHostCore (../GuestHost/Core)
 AndariumTests/        hosted tests of the device app
 AndariumUITests/      UI tests of the device app in the Simulator
+AndariumPreviewUITests/ UI tests of the Simulator preview
 Config/               entitlements, Info.plist, privacy manifest, bridging header,
                       build settings (Andarium.xcconfig)
 scripts/              system staging, the App Store bundle check,
@@ -64,6 +65,9 @@ or state directly, and `scripts/capture-screens.py` (`--help`) captures them:
 xcodebuild -project Andarium/Andarium.xcodeproj -scheme AndariumPreview \
     -destination 'platform=iOS Simulator,name=iPad Pro 11-inch (M5)' build
 ```
+
+`AndariumPreviewUITests` drives the preview through those arguments; the
+scheme's `test` action runs it.
 
 ## Devices
 
@@ -307,7 +311,19 @@ report's overlay text is the app's own.
 Send needs both a problem (the mail's subject) and details (its body); white
 space counts as empty, and a file or the start log is neither. Send stays
 enabled while one is empty: its tap opens no composer and shows one alert that
-names what is missing, and the first empty field takes the focus after OK. Once
+names what is missing, and the first empty field takes the focus after OK. With
+both written, no bug report attached and one that can be made now, Send asks
+first (Create bug report, which stays in the sheet, or Send without bug report),
+and the bug report's row leads in to read-only pages inside the sheet's own
+navigation (Back, no Done): the file as the mail carries it, its top level as
+folders and files (at most sixteen levels of folders: what a deeper path has
+beyond them is the file's name), a text as one page that scrolls on with a thumb on the edge (only a band
+around it takes a touch, until it is held),
+and the screenshot (a PNG, rebuilt from its critical chunks before it is decoded
+as a bounded thumbnail; a JPEG is not shown). Nothing is
+extracted, and a file that is not text is dimmed and opens nothing. The start
+log's row shows its text the same way
+(`Shared/Feedback/Logic/SendFeedbackArchive*.swift`, `SendFeedbackReportPages.swift`). Once
 the mail is sent, the Feedback sent notice stays over the sheet, which keeps what
 was sent and takes no touch; the notice's Done closes both and ends the draft,
 and a swipe down or the toolbar's close does nothing meanwhile.
@@ -584,7 +600,9 @@ control out.
   `StartPlan` is what Home shows of them before Start. An update clones
   `data.img` first (the update's copy, until the updated Android has booted),
   and Erase virtual machine deletes everything the guest has stored, its snapshots,
-  the adb key and its installation identity included.
+  the adb key, its installation identity, the sender of the last text message
+  sent to it and the notice of a text message whose outcome was not yet shown
+  included.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
   user turns on Include in backups. Its snapshots are never backed up.
 - **Snapshots.** A snapshot is an APFS clone of `data.img` with a copy of
@@ -769,9 +787,20 @@ requires reopening Andarium.
   up Android lowers the guest's frame rate to 30, and the first time in a run
   that this starts the session screen says so once. The session and
   stall records, the statistics and the feedback information keep iOS's real
-  state. There is no switch. A system without the HAL hears nothing and shows
-  no notice; the
+  state. A system without the HAL hears nothing and shows no notice; the
   [Android README](../android/lineage-24/README.md) owns the HAL.
+  Settings' Performance section, after Stats in a normal session, has "When
+  hot": Limit frame rate, the default, or Full frame rate
+  (`HeatLimitPreference`, stored until it is turned back on; the feedback
+  information says it in "Frame rate limit when hot"). Full frame rate tells
+  Android none at every state of iOS's, critical included, at once when it is
+  chosen, and shows no notice at any heat; Limit frame rate again tells it the
+  policy's severity at once. The policy runs either way (`deviceIsHot` says
+  the device is held hot, for the section's footnote). The notice's
+  words are a button that opens an alert whose Turn Off chooses Full frame
+  rate in one tap; Dismiss only dismisses. A harness launch runs with the
+  default and keeps nothing; `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states it for
+  the run ([Automation](#automation)).
 - **Game controllers.** Each game controller iOS has connected is a HID
   device in the guest, made through the guest's relay over vsock 5558
   (`GamepadSession`; the wire is `GamepadProtocol`, whose golden frames the
@@ -864,6 +893,15 @@ requires reopening Andarium.
   Beside the closed keys their tip, while it shows, takes touches on its card
   alone (on a Mac, where an iPad app's popover keeps its dimming view, every
   touch), and it goes with the closed keys when they open or the session ends.
+- **VoiceOver.** A new screen, the start of a run and how an operation ended
+  are announced (`VoiceOver`), the busy and low-space screens are modal, and the
+  closed side keys carry actions that move them. Android's display is one
+  element (`GuestDisplayAccessibility`) whose value is Android's screen reader's
+  state and whose activation sends Android no touch; while the screen reader is
+  on it is a direct-touch area, so touches reach Android and it speaks instead of
+  VoiceOver ([Android's screen reader](#android-operations)). Each option row on
+  Home reads as one element, its control, which carries the row's title as its
+  label (the title is no second stop), followed by the line under it.
 - **Keyboard and mouse.** The guest has a hardware keyboard and a mouse
   (virtio-input devices, plugged and unplugged at run time) while iOS has the
   hardware. Every key goes to Android as its position (the usage on the HID
@@ -979,6 +1017,33 @@ requires reopening Andarium.
   prints, at most about twice a second, the Core Motion sample behind the
   guest's field with iOS's own attitude and heading; App Store builds compile it
   out.
+- **Text messages.** The Developer section of Settings has Send text
+  message… under ADB over network, in every build configuration, but the
+  device application holds the capability back until an accepted release image
+  carries the service (`Capabilities.device`); no shipped configuration offers
+  it. Pressed, the row closes Settings and a bar rises over the running
+  Android, above the keyboard, which does not move Android. The bar has a
+  title (the row's symbol, "Text message" as the heading VoiceOver starts on,
+  and a line saying Android receives it as an incoming text) with Close, a
+  sender (the last one used, else Andarium; it is cleaned before it is judged),
+  a message box, which alone asks iOS for a one-time code, and Send. While a
+  message is being sent the fields refuse edits and keep the keyboard. The
+  session owns the bar (`TextMessageState`): a send that is under way ends
+  with the run, and its late answer is dropped. Send waits while Android is
+  paused for lack of space, and the keyboard goes while it is, so the pause
+  card does not cover the bar's title. The words say only what is known: that
+  Android took the message, already had it, did not receive it, did not confirm
+  it, or cannot tell, and VoiceOver hears them. Sending again, within the run, a
+  message that Android did not confirm asks about the first send instead of
+  handing it over again (`GuestSms.Retries`); "not sent" is said only of a first
+  send. When a message may have arrived, the bar says so, also the next time it
+  opens after a session that ended before a send's result was shown, and sending
+  it again is then a new message (`TextMessageNotice`). Sixteen messages waiting
+  for Android to confirm them refuse a new draft until Android restarts. Each
+  message goes to the guest over vsock port 5560 (`GuestSmsChannel`), not over
+  adb. The sender and text rules and the limits are `GuestSms`'s; the system
+  image must include the
+  [SMS service](../android/lineage-24/README.md#text-messages).
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and
   every screen use; it leaves out the purgeable space iOS Settings counts, so
@@ -1087,6 +1152,37 @@ is on. `AndariumCore/Adb` speaks the protocol.
 - **Key.** `AdbKeyStore` keeps one RSA-2048 key per guest in the Keychain, this
   device only and not synchronized. Its public key goes in each boot request
   (`android_adb_public_key`), which adbd authorizes for that boot.
+- **Android's screen reader.** In a normal session, the Accessibility section,
+  last in Settings, turns Android's screen reader (TalkBack) on and off by
+  editing `enabled_accessibility_services` and `accessibility_enabled` in one
+  adb shell command that reads the list it writes, so every other service the
+  virtual machine has on stays on (`ScreenReader`, `Capabilities.screenReader`).
+  Each command acts on the foreground user (`--user`), checks that lookup and
+  the live list (split without pathname expansion; a list that is not a list of
+  services is refused before anything is written), and fails when any write or
+  the delete fails; another user's own setting stays as it is. Its reply, like a
+  read's, is exactly the report `ScreenReader.parse` defines, ending with its
+  terminator, and the screen reader is on only where the list names it and
+  `accessibility_enabled` is on: any other reply is "couldn't check", never a
+  state, and a change that left the two apart is not a change. Opening Android's
+  Accessibility page needs a shell result with status 0. A change, a read it
+  asks for and the opening of that page are the session's operations: the
+  session's end (a power off, Android's own restart) cancels them, they ask
+  nothing of Android once it has ended, and nothing they report reaches the next
+  session. The switch follows what Android reports while Settings is open
+  and, while VoiceOver runs, every few seconds. While VoiceOver runs and the
+  screen reader is off, a card over Android says that VoiceOver cannot read
+  Android's screen, that the screen reader can and how to come back (touch the
+  side keys, on the edge they are on: the keys report it as they move), and
+  asks; nothing turns the screen reader on but the person's own action, and
+  turning it off, in Settings or in Android, ends the asking for the run.
+  Turning it on says so with the way back, and so does the first read of a run
+  that finds it on already; the display's hint ends with the way back too. The
+  card that says a system has no screen reader shows once per run, not once per
+  virtual machine. The system image carries TalkBack and eSpeak NG
+  ([Android README](../android/lineage-24/README.md#accessibility)); a virtual
+  machine whose system has none shows the switch as unavailable and the card says
+  so.
 - **Create bug report and Install APK** are in every build, in a normal
   session. Settings lists Install APK and the file browser first, above the
   statistics, and the side keys' tip adds a line saying where Install APK is
@@ -1297,7 +1393,11 @@ states the resolution; the earlier `KERNARIUM_RETINA_MODE` (`1` native, `0`
 one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation; `serious` and
-`critical` reach the guest as heat.
+`critical` reach the guest as heat. `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states
+Settings' "When hot" for the run: `0` tells the guest nothing of the heat. A
+UI test's probe session (`ANDARIUM_INPUT_PROBE`) that states the thermal state
+runs the thermal session against a stand-in for the guest's HAL, and its log
+says what the guest would be told (`heat told <severity>`).
 `ANDARIUM_REVIEW_ASK_SECONDS` and `ANDARIUM_REVIEW_ASK_RESET=1` set the rating
 prompt's counter and clear its record, in a build that has the prompt
 ([Rating prompt](#rating-prompt)).
@@ -1324,6 +1424,9 @@ nothing.
 session a scripted list of two made-up old apps in place of the image's command:
 `apps` lists them (one on and open), `refuse` also refuses every change, `none` is
 an image without the command.
+`ANDARIUM_TEXT_MESSAGES=1` turns on the Text message entrance that the device
+application holds back until an accepted release image carries the service
+(`Capabilities.device`); tests and proof images use it.
 `ANDARIUM_GUEST_INSTANCE=<name>` runs an isolated guest under
 `Library/TestGuests/<name>`, for tests that need a fresh guest while the
 ordinary guest or its pending update must be preserved. A file `free-space-mib`

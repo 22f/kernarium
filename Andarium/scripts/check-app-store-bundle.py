@@ -665,6 +665,10 @@ DEBUG_SYMBOLS = (
     # AppModel.scriptedOldApps and the probe's launch setting
     # OldAppsProbeLaunch): the application asks the image.
     ("old apps preview", (b"15ScriptedOldApps", b"15scriptedOldApps", b"18OldAppsProbeLaunch")),
+    # The launch setting that shows the held-back text messages
+    # (TextMessagesLaunch): the application offers them only once an accepted
+    # image carries the service.
+    ("text messages launch", (b"18TextMessagesLaunch",)),
     # The Simulator preview's hooks into the Send feedback sheet
     # (SendFeedbackServices.previewOpensAtLaunch and previewPrepare): the
     # preview opens the sheet and fills a draft; the application never does.
@@ -686,6 +690,12 @@ DEBUG_SYMBOLS = (
     ("input probe", (b"10InputProbe", b"16InputProbeLaunch", b"29RecordingHardwareInputRuntime",
                      b"15beginInputProbe", b"17InputProbeReadout", b"19makeInputProbeModel",
                      b"10inputProbe")),
+    # The UI tests' stand-in for the guest's thermal HAL, its launch (the
+    # thermal state a probe states runs the thermal session) and the harness's
+    # statement of Settings' "When hot" (Live/ThermalProbe.swift,
+    # LaunchEnvironment.swift: ThermalProbeHal, HeatLimitLaunch,
+    # LiveRuntime.beginThermalProbe).
+    ("heat limit probe", (b"15ThermalProbeHal", b"15HeatLimitLaunch", b"17beginThermalProbe")),
     # The reading a test puts in place of the system's hinge and regions
     # (Andarium/Shared/FoldSceneReader.swift), compiled out by APP_STORE.
     ("fold reader stub", (b"15FoldSceneReaderC4stub",)),
@@ -739,6 +749,7 @@ DEBUG_STRINGS = (
                     b"ADB authorization is off", b"removed the boot payload")),
     ("remote framebuffer", (b"RFB 003.00",)),
     ("input probe", (b"inputProbeLog", b"inputProbeField")),
+    ("heat limit probe", (b"heat told ",)),
     ("camera diagnostics", (b"ROTATE_AND_CROP", b"Camera: memory: ")),
     ("compass readout", (b"Andarium: compass-check: ",)),
     ("synthetic camera", (b"SyntheticPhone1,1", b"SyntheticTablet1,1",

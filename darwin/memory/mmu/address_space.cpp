@@ -1451,7 +1451,15 @@ public:
 	 * table the kernel fills at faults) names no frame, so every generation
 	 * hears of the change. Data transfers publish nothing unless some
 	 * generation translated the frame, or the page is one the process never
-	 * touched. */
+	 * touched.
+	 *
+	 * The x86-64 holders of a frame (frame_accounting.hpp) do not read the
+	 * holder word. Once x86 code may run (kernel_code_write_publishes()),
+	 * the frame of every page the process maps is published at all of them,
+	 * whatever the process's view of it permits, and a page with no entry
+	 * moves every generation's flush serial, as no record's stamp does for
+	 * a frame nobody named (the arm64 verdicts' epochs move through the
+	 * count of such writes instead, MappedBacking::note_unnamed_publication). */
 	int invalidate_code(std::uint64_t generation, std::uint64_t address,
 			    std::uint64_t length)
 	{
@@ -1473,6 +1481,12 @@ public:
 		std::uint64_t publish_first = rounded_end;
 		std::uint64_t publish_end = first;
 		code_holders::HolderList others;
+#if DARWIN_UML_X86_64_GUEST
+		/* Whether x86 code may hold the frames written, and whether some
+		 * page named none. */
+		const bool x86_holders = kernel_code_write_publishes();
+		bool unknown_frame = false;
+#endif
 		/* The kernel's bytes are in the frame already; the holders are read
 		 * after them, as a code synchronization's fence orders it. */
 		std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -1489,19 +1503,24 @@ public:
 					others.add_every();
 					code_holders::count(&code_holders::detail::
 						CounterStore::absent_kernel_pages);
+#if DARWIN_UML_X86_64_GUEST
+					unknown_frame = true;
+#endif
 				} else {
 					step_stamp(*mapping);
 					const bool own = take_holders(*mapping, target,
 						others, holder_takes_in_flight_, true);
-					if (!mapping->guest_code && !own)
-						continue;
 #if DARWIN_UML_X86_64_GUEST
 					/* The page's frame may be translated at other
-					 * addresses and in other generations. */
-					if (kernel_code_write_publishes())
+					 * addresses and in other generations, whether or not
+					 * this view of it is code or an arm64 holder: the
+					 * holder word says nothing of x86 holders. */
+					if (x86_holders)
 						FrameAccounting::publish_kernel_write(
 							*mapping->backing, mapping->offset, 0, page_size);
 #endif
+					if (!mapping->guest_code && !own)
+						continue;
 				}
 				publish_first = std::min(publish_first, page);
 				publish_end = page + page_size;
@@ -1519,6 +1538,14 @@ public:
 		if (publish_first < publish_end)
 			::uml::memory::publish_code_change(*state, publish_first,
 				publish_end - publish_first);
+#if DARWIN_UML_X86_64_GUEST
+		/* A page that names no frame may be any frame an x86 body holds, and
+		 * the stamp of none moved: every generation compares its bodies
+		 * again. After the mapping lock, as the table of generations is
+		 * taken. */
+		if (unknown_frame && x86_holders)
+			publish_all_generations();
+#endif
 		publish_to_holders(target, others);
 		return 0;
 	}

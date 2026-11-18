@@ -143,7 +143,9 @@ class TrackedListTests(unittest.TestCase):
             uncovered, [],
             "tracked files under android/lineage-24 that input-paths.tsv does not "
             "classify as input or excluded")
-        tracked = set(files)
+        # A row may name a path outside android/lineage-24 (the accessibility
+        # artifact's inputs under dependencies/).
+        tracked = set(git(ROOT, "ls-files", "--", *[path for _, path, _ in rows]).splitlines())
         for kind, path, _ in rows:
             with self.subTest(path):
                 self.assertTrue(
@@ -165,6 +167,15 @@ class TrackedListTests(unittest.TestCase):
             "android/lineage-24/metadata/base-manifest.xml",
             "android/lineage-24/tools/publish-release.py",
             "android/lineage-24/build",
+            # The accessibility artifact and everything it is built from.
+            "android/lineage-24/metadata/accepted-accessibility.env",
+            "android/lineage-24/tools/stage-accessibility-artifact.py",
+            "dependencies/andarium-accessibility/archives.tsv",
+            "dependencies/andarium-accessibility/identity.py",
+            "dependencies/andarium-accessibility/toolchain.tsv",
+            "dependencies/build-andarium-accessibility.sh",
+            "dependencies/patches/talkback",
+            "dependencies/patches/espeak-ng",
         ):
             self.assertIn(required, inputs)
         # The acceptance record is written after a release exists, so it cannot

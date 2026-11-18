@@ -94,6 +94,7 @@ DEBUG_SUPPORT = (
     ("old apps preview", "int _s8Andarium15ScriptedOldAppsC10listOldAppsAA0cD7ListingOyYaF(void) { return 1; }\n"),
     ("old apps preview", "int _s8Andarium8AppModelC15scriptedOldAppsAA0D4AppsSource_pSgvg(void) { return 1; }\n"),
     ("old apps preview", "int _s8Andarium18OldAppsProbeLaunchO6script2inAC6ScriptOSgSDyS2SG_tFZ(void) { return 1; }\n"),
+    ("text messages launch", "int _s8Andarium18TextMessagesLaunchO9requested2inSbSDyS2SG_tFZ(void) { return 1; }\n"),
     # The Simulator preview's hooks into the Send feedback sheet.
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV20previewOpensAtLaunchSbvg(void) { return 1; }\n"),
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV14previewPrepareyyAA0aD5ModelCYaYbcvg(void) { return 1; }\n"),
@@ -115,6 +116,12 @@ DEBUG_SUPPORT = (
     ("input probe", "int _s8Andarium8AppModelC10inputProbeAA0cD0CSgvg(void) { return 1; }\n"),
     ("input probe", 'const char *fixture(void) { return "inputProbeLog"; }\n'),
     ("input probe", 'const char *fixture(void) { return "inputProbeField"; }\n'),
+    # The UI tests' stand-in for the guest's thermal HAL, the harness's statement
+    # of Settings' "When hot" and the probe's start of the thermal session.
+    ("heat limit probe", "int _s8Andarium15ThermalProbeHalC10openStreams5Int32VyKF(void) { return 1; }\n"),
+    ("heat limit probe", "int _s8Andarium15HeatLimitLaunchO6stated2inSbSgSDyS2SG_tFZ(void) { return 1; }\n"),
+    ("heat limit probe", "int _s8Andarium10LiveRuntimeC17beginThermalProbeyyF(void) { return 1; }\n"),
+    ("heat limit probe", 'const char *fixture(void) { return "heat told severe"; }\n'),
     # The development build's compass check: its class, its launch setting and its line.
     ("compass readout", "int _s8Andarium14CompassReadoutC4line3forSSSgSo14CMDeviceMotionC_tF(void) { return 1; }\n"),
     ("compass readout", "int _s8Andarium20CompassReadoutLaunchO9requested2inSbSDyS2SG_tFZ(void) { return 1; }\n"),

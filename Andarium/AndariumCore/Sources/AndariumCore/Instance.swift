@@ -396,7 +396,8 @@ enum CloneFile {
 }
 
 /// An instance's files: `data.img`, `instance.json`, the installation's
-/// identity and the snapshot of an update, in one directory.
+/// identity, the snapshot of an update and the text message notice
+/// (`TextMessageNotice`), in one directory.
 public struct InstanceFiles: Sendable {
     public static let dataDisk = "data.img"
     public static let stateFile = "instance.json"
@@ -413,6 +414,11 @@ public struct InstanceFiles: Sendable {
     /// erase deletes it, so the next installation gets values of its own. The
     /// temporary name a write of it uses starts with the same text.
     public static let identityFile = "identity.json"
+    /// What the text message bar owes the person about a message whose outcome
+    /// was not yet shown (`TextMessageNotice`). It belongs to the data disk's
+    /// inbox: an erase and a new data disk delete it, since there is no inbox
+    /// left to check.
+    public static let textMessageNotice = TextMessageNotice.fileName
 
     public var directory: URL
 
@@ -490,8 +496,9 @@ public struct InstanceFiles: Sendable {
     }
 
     /// Deletes the data disk, the record, the installation's identity, the
-    /// copies an update left and the user's snapshots, trying each of them;
-    /// the first failure is thrown once the rest are done.
+    /// copies an update left, the user's snapshots and the text message
+    /// notice, trying each of them; the first failure is thrown once the rest
+    /// are done.
     public func removeAll() throws {
         let manager = FileManager.default
         var doomed = [data, state]
@@ -504,6 +511,7 @@ public struct InstanceFiles: Sendable {
         // disk's: a guest made after this one starts with a record of its own.
         doomed.append(PartialSweepLedger.url(in: directory))
         doomed.append(firstBoot)
+        doomed.append(directory.appendingPathComponent(Self.textMessageNotice))
         var failure: Error?
         for url in doomed where manager.fileExists(atPath: url.path) {
             do { try manager.removeItem(at: url) } catch { failure = failure ?? error }
@@ -555,6 +563,8 @@ public struct InstanceFiles: Sendable {
             where entry.hasPrefix(Self.identityFile) {
                 try? manager.removeItem(at: directory.appendingPathComponent(entry))
             }
+            // And no inbox: a notice about a message of the old disk is no longer true.
+            try? manager.removeItem(at: directory.appendingPathComponent(Self.textMessageNotice))
             // A data disk that is made at the next start holds nothing.
             if !manager.fileExists(atPath: data.path) { try PartialSweepLedger.markSettled(in: directory) }
             let created = InstanceState(creating: release, at: when)

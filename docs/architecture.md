@@ -271,7 +271,12 @@ A kernel write publishes at the frame its user word names and at the frame the
 host's table of the kernel's direct ranges (32 of them, split on a partial unmap
 and counted when full) resolves its buffer to; a buffer the table does not
 resolve, or resolves to a descriptor with no backing alive, is counted and makes
-every generation read every translation again.
+every generation read every translation again. Once the process runs x86 code,
+`invalidate_code` (the kernel's call after it wrote another process's page)
+publishes the frame of every page the target maps, whatever the target's view
+of it permits and whatever the arm64 holder word names, and a page the target
+has no entry for yet is an unknown frame, which moves every generation's flush
+serial and publishes a whole-space code change (the range {0, 0}) in each.
 When a run of the emulator ends it appends the process's counts so far, which
 nothing resets (unresolved kernel writes, dropped direct ranges, global holds,
 registrations that reached the address space and their failures, refusals and lost stamp hits), to the file
@@ -594,7 +599,8 @@ be made, or a word that names more generations than it holds, publishes to
 every live generation instead.
 The x86 engines neither register nor consult it: they hold their frames in the
 [frame accounting](#x86-64-frame-accounting), which the arm64 engines never
-consult, and the kernel's `invalidate_code()` path runs both publications.
+consult, and the kernel's `invalidate_code()` path runs both publications, each
+on its own condition.
 
 ### Ahead-of-time code
 

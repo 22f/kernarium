@@ -98,12 +98,28 @@ struct RootView: View {
     @Environment(AppModel.self) private var model
     let entry: AppEntry
 
+    /// What VoiceOver says as a run begins; other screens speak for
+    /// themselves from their first element.
+    static func spoken(_ phase: Phase) -> String? {
+        switch phase {
+        case .running(.normal):
+            String(localized: "Android is running. The side keys on the screen edge have Back, Home and Settings.")
+        case .running(.recovery):
+            String(localized: "Recovery is running. The side keys\u{2019} volume keys move, and Power chooses.")
+        case .home, .booting, .failed:
+            nil
+        }
+    }
+
     var body: some View {
         @Bindable var model = model
         ZStack {
             // The guest's display lives under the screens of the boot and the
             // run, so it is one view from the first frame to the last.
             GuestLayer()
+                // The keyboard of the text message bar goes over Android; it
+                // does not move it.
+                .ignoresSafeArea(.keyboard)
             Group {
                 switch model.phase {
                 case .home:
@@ -121,6 +137,11 @@ struct RootView: View {
             if let busy = model.busy, !model.busyOverSheet {
                 BusyOverlay(state: busy)
             }
+            // While VoiceOver runs and Android's screen reader is off, the
+            // card that asks about it; the model puts it away as it ends.
+            if let card = model.session.reader.card, case .running = model.phase {
+                ScreenReaderCard(card: card)
+            }
             // Over everything the session shows, a Settings sheet aside: the
             // model closes it when the guest pauses.
             if let pause = model.spacePause {
@@ -133,8 +154,14 @@ struct RootView: View {
         // Toggles take the jade accent too, not the system green.
         .tint(Color.accentColor)
         .animation(.easeInOut(duration: 0.4), value: model.phase)
+        // A new screen replaces the old one under VoiceOver's cursor: it
+        // starts again at the top, and hears what the run now is.
+        .onChange(of: model.phase) { _, phase in
+            VoiceOver.screenChanged(Self.spoken(phase))
+        }
         .animation(.easeInOut(duration: 0.2), value: model.busy != nil)
         .animation(.easeInOut(duration: 0.2), value: model.spacePause != nil)
+        .animation(.easeInOut(duration: 0.2), value: model.session.reader.card)
         .alert(
             model.alert?.title ?? "",
             isPresented: Binding(get: { model.alert != nil }, set: { if !$0 { model.alert = nil } }),
@@ -226,8 +253,15 @@ extension LegacyInstallAlert {
         }
     }
 
+    private static var topAlert: UIAlertController? { PresentedAlert.top }
+    private static var alertIsUp: Bool { PresentedAlert.isUp }
+}
+
+/// What UIKit shows of alerts now, for the questions that must not stand
+/// without one.
+enum PresentedAlert {
     /// The UIKit alert that is the topmost presentation of a window now, if one is.
-    private static var topAlert: UIAlertController? {
+    static var top: UIAlertController? {
         for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
             for window in scene.windows {
                 var top = window.rootViewController
@@ -239,7 +273,7 @@ extension LegacyInstallAlert {
     }
 
     /// Whether a UIKit alert is the topmost presentation of any window now.
-    private static var alertIsUp: Bool { topAlert != nil }
+    static var isUp: Bool { top != nil }
 }
 
 extension View {
