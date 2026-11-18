@@ -49,10 +49,10 @@ constexpr std::size_t max_instances = UML_AOT_INSTANCE_CAPACITY;
 static_assert(max_instances >= 1 && max_instances <= 16384);
 /* Instances are found by hash chains over this many buckets. */
 constexpr std::size_t index_buckets = 2 * max_instances;
-/* The page states cached by (page, address space): 16384, or 8 per instance
- * where the capacity is above 2048. */
+/* The page states cached by (page, address space): 8 per instance, at least
+ * 2048. */
 constexpr std::size_t page_slots =
-	max_instances * 8 > 16384 ? max_instances * 8 : 16384;
+	max_instances * 8 > 2048 ? max_instances * 8 : 2048;
 /* The host's page: each table of a binder starts on one. */
 constexpr std::size_t host_page = 16384;
 /* The verdicts of every address space of the process (shared_verdicts.hpp).
