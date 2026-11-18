@@ -1141,7 +1141,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "之前发送的短信可能已送达Android，也可能没有。再次发送前，请先查看它是否已收到。"
+            "value" : "之前发送的短信可能已送达Android，也可能没有。再次发送前，请先查看是否已收到。"
           }
         },
         "zh-Hant" : {
@@ -1909,7 +1909,7 @@
         }
       }
     },
-    "Android already had this message." : {
+    "Android already received this message." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1988,7 +1988,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android无法确定此短信是否已送达。再次发送前，请先查看它是否已收到。"
+            "value" : "Android无法确定此短信是否已送达。再次发送前，请先查看是否已收到。"
           }
         },
         "zh-Hant" : {
@@ -2224,7 +2224,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Androidに受信したSMSとして届きます。"
+            "value" : "受信SMSとしてAndroidに届きます。"
           }
         },
         "zh-Hans" : {
@@ -2489,7 +2489,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Androidのスクリーンリーダーがオンになりました。"
+            "value" : "Androidのスクリーンリーダーはオンです。"
           }
         },
         "zh-Hans" : {
@@ -7157,6 +7157,28 @@
         }
       }
     },
+    "Open Settings from the side keys to turn on Android’s screen reader." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "サイドキーの“設定”で、Androidのスクリーンリーダーをオンにしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在侧边按键的“设置”中开启Android的屏幕阅读器。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "請在側邊按鍵的「設定」中開啟Android的螢幕閱讀器。"
+          }
+        }
+      }
+    },
     "Opens Andarium’s page in Settings." : {
       "comment" : "VoiceOver hint of the network notice's Open Settings button.",
       "localizations" : {
@@ -7559,24 +7581,24 @@
         }
       }
     },
-    "Recovery is running. The side keys’ volume keys move, and Power chooses." : {
+    "Recovery is running. The side keys have Up and Down to move, and Power to choose." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "リカバリモードが動作中です。サイドキーの音量キーで移動し、電源キーで選択します。"
+            "value" : "リカバリモードが動作中です。サイドキーの“上”と“下”で移動し、“電源”で選択します。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "恢复模式正在运行。侧边按键的音量键用于移动，电源键用于选择。"
+            "value" : "恢复模式正在运行。侧边按键中的“向上”和“向下”用于移动，“电源”用于选择。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "復原模式正在執行。側邊按鍵的音量鍵用於移動，電源鍵用於選擇。"
+            "value" : "復原模式正在執行。側邊按鍵中的「向上」和「向下」用於移動，「電源」用於選擇。"
           }
         }
       }
@@ -12108,28 +12130,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "開啟"
-          }
-        }
-      }
-    },
-    "Turn on Android’s screen reader in Settings, under the side keys." : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "サイドキーの“設定”で、Androidのスクリーンリーダーをオンにしてください。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "请在侧边按键的“设置”中开启Android的屏幕阅读器。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "請在側邊按鍵的「設定」中開啟Android的螢幕閱讀器。"
           }
         }
       }

@@ -54,7 +54,7 @@ nonisolated enum SmsMessages {
     /// all these words say.
     static var sentToAndroid: String { String(localized: "Sent to Android") }
     /// An earlier send of this message was handed to Android, and this one asked about it.
-    static var deliveredEarlier: String { String(localized: "Android already had this message.") }
+    static var deliveredEarlier: String { String(localized: "Android already received this message.") }
     /// Nothing was handed to Android and nothing ever will be for this send.
     static var notSent: String {
         String(localized: "The message wasn\u{2019}t sent. Android didn\u{2019}t receive it.")
