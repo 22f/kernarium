@@ -10,6 +10,9 @@ _vcpu .req x20
 _context .req x21
 _stream .req x28
 _executed .req x29
+/* The run's software TLB, loaded as the run enters. A nested run enters
+ * with its own context, and the host frame gives this one back on return. */
+_tlb .req x22
 
 	.set Lx86_guest_memory_gadget, 0
 	.set Lx86_simd_status_gadget, 0
@@ -1053,8 +1056,11 @@ Lx86_segment_ready\@:
 /* The stack's own entry, re-checked before any hashing: x25 holds the guest
  * address, and a tag equal to its page -- with no code bit set, which a
  * page holding a cached translation always has -- leaves the host address in
- * x7. Anything else takes \miss, which is the full translation with
- * `record_stack` so the next access finds the new entry here. A write also
+ * x7. Anything else takes \miss, the full translation with `record_stack`, so
+ * the next access finds the new entry here. The baked [rsp + displacement]
+ * twins make the same test with their access's alignment folded in
+ * (`generate_baked.py`) and miss to their ordinary entry, which records
+ * nothing, so an access off RSP's page leaves RSP's entry. A write also
  * requires that no earlier store left a publication pending, because the
  * ordinary translation would settle it here; with both conditions the store
  * owes no publication. It may still land in the block that is running, so a
@@ -1074,7 +1080,33 @@ Lx86_segment_ready\@:
 	add x7, x25, x13
 .endm
 
-.macro translate access, entry_offset, size, record_stack=0, fault=Lx86_memory_fault
+/* The key of a `size`-byte access at x7 into x9: the page of its last byte
+ * when the site names its crossing path `cross`, else the page of x7. The
+ * index is always the first byte's page, and a tag only ever lives at its own
+ * page's index, which is never its neighbour's, so an access that crosses a
+ * page cannot match: the miss path recognizes it and branches to `cross`
+ * with x9 as `page_cross_check` leaves it. A site without `cross` has
+ * excluded a crossing access already, or its access is one byte. */
+.macro translation_key size, cross
+	.ifnb \cross
+	.if (\size) > 1
+	add x9, x7, #((\size) - 1)
+	and x9, x9, #0xfffffffffffff000
+	.else
+	and x9, x7, #0xfffffffffffff000
+	.endif
+	.else
+	and x9, x7, #0xfffffffffffff000
+	.endif
+.endm
+
+.macro translation_cross size, cross
+	.ifnb \cross
+	page_cross_check \size, \cross
+	.endif
+.endm
+
+.macro translate access, entry_offset, size, record_stack=0, fault=Lx86_memory_fault, cross=
 	x86_marks_guest_memory
 	.if \access == 1
 	/* Only a translation that reaches the decision below may skip the store's
@@ -1082,12 +1114,9 @@ Lx86_segment_ready\@:
 	 */
 	and x23, x23, #~(1 << 60)
 	.endif
-	and x9, x7, #0xfffffffffffff000
-	lsr x10, x7, #12
-	eor x10, x10, x10, lsr #15
-	and w10, w10, #0x7fff
-	ldr x11, [_context, #UML_X86_64_CONTEXT_TLB]
-	add x11, x11, x10, lsl #5
+	translation_key \size, \cross
+	ubfx x10, x7, #12, #UML_X86_64_TLB_INDEX_BITS
+	add x11, _tlb, x10, lsl #5
 	.if \record_stack
 	str x11, [_context, #UML_X86_64_CONTEXT_STACK_ENTRY]
 	.endif
@@ -1099,6 +1128,7 @@ Lx86_segment_ready\@:
 	cmp x9, x12
 	.endif
 	b.eq Lx86_tlb_hit\@
+	translation_cross \size, \cross
 	mov x0, _context
 	mov x1, x7
 	mov w2, #\access
@@ -1159,18 +1189,16 @@ Lx86_tlb_write_code_owed\@:
  * nor settles a store's publication, and a miss the MMU refuses branches to
  * `fault`. A write probe compares the write page with its tag bits intact,
  * so a store to a page holding code always takes the miss path, where the
- * helper publishes it. Its index is translate's. */
-.macro translate_plain access, entry_offset, size, fault
+ * helper publishes it. Its index and key are translate's. */
+.macro translate_plain access, entry_offset, size, fault, cross=
 	x86_marks_guest_memory
-	and x9, x7, #0xfffffffffffff000
-	lsr x10, x7, #12
-	eor x10, x10, x10, lsr #15
-	and w10, w10, #0x7fff
-	ldr x11, [_context, #UML_X86_64_CONTEXT_TLB]
-	add x11, x11, x10, lsl #5
+	translation_key \size, \cross
+	ubfx x10, x7, #12, #UML_X86_64_TLB_INDEX_BITS
+	add x11, _tlb, x10, lsl #5
 	ldp x12, x13, [x11, #\entry_offset]
 	cmp x9, x12
 	b.eq Lx86_plain_tlb_hit\@
+	translation_cross \size, \cross
 	mov x0, _context
 	mov x1, x7
 	mov w2, #\access
@@ -1209,8 +1237,7 @@ Lx86_plain_tlb_done\@:
  * `register` give the in-page load and its register width, and `move` the
  * width at which the helper's result is copied. */
 .macro read_operand size, load, register, number, move=x
-	page_cross_check \size, Lx86_read_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, \size
+	translate 0, UML_X86_64_TLB_READ_PAGE, \size, cross=Lx86_read_cross\@
 	\load \register\()\number, [x7]
 	b Lx86_read_loaded\@
 Lx86_read_cross\@:
@@ -1249,8 +1276,7 @@ Lx86_read_loaded\@:
  * sends an access of 8 bytes or less through `cross_page_load` and moves it
  * with an x register; `single` moves a 4-byte one with a w register. */
 .macro vector_memory_source size, fault, low=1, high=3, frame=32, scalar=0, single=0, zero_high=0
-	page_cross_check \size, Lx86_vector_source_cross\@
-	translate 0, UML_X86_64_TLB_READ_PAGE, \size
+	translate 0, UML_X86_64_TLB_READ_PAGE, \size, cross=Lx86_vector_source_cross\@
 	vector_source_load \size, \low, \high, x7, \zero_high
 	b Lx86_vector_source_loaded\@
 Lx86_vector_source_cross\@:
@@ -1520,6 +1546,7 @@ CSYM(uml_x86_64_gadget_enter):
 	mov _stream, x0
 	mov _vcpu, x1
 	mov _context, x2
+	ldr _tlb, [_context, #UML_X86_64_CONTEXT_TLB]
 	mov x9, sp
 	str x9, [_context, #UML_X86_64_CONTEXT_ENTRY_STACK]
 	/* Run the dispatch in the guest's rounding mode. */
