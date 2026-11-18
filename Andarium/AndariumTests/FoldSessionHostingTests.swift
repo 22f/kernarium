@@ -631,6 +631,11 @@ struct FoldSessionHostingTests {
         let model = steadyModel()
         model.guest = nil
         model.fold = plain ? nil : pose.reading
+        #if TESTFLIGHT_STORE_LINK
+        // The App Store notice is a card in Welcome's column, which then outgrows a half and scrolls
+        // there; the pose decides Welcome's own layout, and the notice has tests of its own.
+        model.storeNoticeDismissed = true
+        #endif
         let container = UIViewController()
         lease.window.rootViewController = container
         let holder = UIView(frame: pose.reading.window)

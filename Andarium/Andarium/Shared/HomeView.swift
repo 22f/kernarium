@@ -234,6 +234,14 @@ struct HomeView: View {
     @ViewBuilder
     private var notices: some View {
         @Bindable var model = model
+        // The App Store notice of a TestFlight build comes first: it is
+        // dismissible and says nothing about the virtual machine, and the
+        // person has it before the notices that do.
+        #if TESTFLIGHT_STORE_LINK
+        if model.storeNoticeShown {
+            StoreNoticeCard()
+        }
+        #endif
         if !model.host.runsGuestGraphics {
             NoticeCard(
                 symbol: "cpu", color: .orange,
@@ -485,6 +493,15 @@ struct WelcomeView: View {
             Text("No virtual machine yet")
                 .font(.title2.weight(.bold))
                 .accessibilityAddTraits(.isHeader)
+            #if TESTFLIGHT_STORE_LINK
+            // Before any virtual machine exists, the one moment when switching
+            // costs nothing.
+            if model.storeNoticeShown {
+                StoreNoticeCard()
+                    .frame(maxWidth: 400)
+                    .padding(.top, 20)
+            }
+            #endif
             if !model.host.runsGuestGraphics {
                 NoticeCard(
                     symbol: "cpu", color: .orange,
@@ -532,20 +549,36 @@ struct NoticeCard: View {
     /// What VoiceOver says for the close button.
     var closeLabel = String(localized: "Dismiss")
     var onClose: (() -> Void)?
+    #if TESTFLIGHT_STORE_LINK
+    /// The App Store notice's picture in place of the symbol, and its second
+    /// line under the text.
+    var picture: AnyView?
+    var note: String?
+    /// The button is an element of its own after the words, which are one.
+    var buttonIsOwnElement = false
+    #endif
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: symbol)
-                .font(.title3)
-                .foregroundStyle(color)
-                .frame(width: 28)
-                .accessibilityHidden(true)
+            leading
             VStack(alignment: .leading, spacing: 2) {
-                Text(title.keepingTogether).font(.subheadline.weight(.semibold))
-                Text(text.keepingTogether)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title.keepingTogether).font(.subheadline.weight(.semibold))
+                    Text(text.keepingTogether)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    #if TESTFLIGHT_STORE_LINK
+                    if let note {
+                        Text(note.keepingTogether)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 6)
+                    }
+                    #endif
+                }
+                .accessibilityElement(children: .combine)
                 if let action {
                     Button(action.label, action: action.perform)
                         .buttonStyle(.glass)
@@ -555,8 +588,9 @@ struct NoticeCard: View {
                         .accessibilityIdentifier(action.identifier ?? "")
                 }
             }
-            // The title and its words are read as one.
-            .accessibilityElement(children: .combine)
+            // The title and its words are read as one, and so is a button after them
+            // unless it is an element of its own.
+            .accessibilityElement(children: textReading)
             Spacer(minLength: 0)
             if let onClose {
                 Button(action: onClose) {
@@ -575,6 +609,35 @@ struct NoticeCard: View {
         .padding(14)
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
         .accessibilityElement(children: .contain)
+    }
+
+    private var textReading: AccessibilityChildBehavior {
+        #if TESTFLIGHT_STORE_LINK
+        buttonIsOwnElement ? .contain : .combine
+        #else
+        .combine
+        #endif
+    }
+
+    @ViewBuilder
+    private var leading: some View {
+        #if TESTFLIGHT_STORE_LINK
+        if let picture {
+            picture
+        } else {
+            symbolImage
+        }
+        #else
+        symbolImage
+        #endif
+    }
+
+    private var symbolImage: some View {
+        Image(systemName: symbol)
+            .font(.title3)
+            .foregroundStyle(color)
+            .frame(width: 28)
+            .accessibilityHidden(true)
     }
 }
 

@@ -461,6 +461,16 @@ final class AppModel {
     /// so a model built any other way (a test, the preview) never asks.
     @ObservationIgnored var reviewAsk: ReviewAsk?
     #endif
+    #if TESTFLIGHT_STORE_LINK
+    /// What the App Store notice asks of the build and of the system
+    /// (`StoreNoticeServices`); a test or the Simulator preview replaces it,
+    /// and the dismissal is read from the new record.
+    @ObservationIgnored var storeNoticeServices = StoreNoticeServices() {
+        didSet { storeNoticeDismissed = storeNoticeServices.record.isDismissed }
+    }
+    /// The card was put away. Info keeps its row.
+    var storeNoticeDismissed = StoreNoticeRecord().isDismissed
+    #endif
     #if FOLLOW_X
     /// The handle Follow developer on X opens, from Info.plist, which only a
     /// build that names one has; a test replaces it.
