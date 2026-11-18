@@ -2439,7 +2439,9 @@ void cross_library_branches(const LibraryImage &image,
 		static_cast<unsigned long long>(st.cross_hits),
 		static_cast<unsigned long long>(st.cross_misses));
 	require(compared > 20);
-	require(st.cross_hits > 0);
+	/* A branch into the other library stays in rewritten code only where
+	 * the binder holds both instances. */
+	require(st.cross_hits > 0 || aot::instance_capacity() < 2);
 	require(st.poisoned == 0);
 }
 
