@@ -190,18 +190,29 @@ private:
 		/* The next instance of the same hash bucket. */
 		std::int16_t chain{-1};
 	};
+	/* What is known of a text page of an address space: the instance it is
+	 * in and the code-change sequence that was current when it was bound. A
+	 * slot of all zero bytes is empty. */
 	struct PageSlot final {
-		unsigned long generation{};
+		/* The page's address with bit 0 set. */
+		std::uint64_t page{};
 		std::uint64_t stamp{};
-		std::uint64_t page{1};
-		std::int32_t instance{-1};
 		/* An unreadable page, or a page of a mapping without the kernel's
 		 * immutable fact, is not tried again before this many lookups. */
 		std::uint64_t retry_at{};
-		std::uint64_t backoff{};
+		/* The low 32 bits of the address space's generation: a slot that
+		 * matches across 2^32 generations meets the instance's own check
+		 * of the whole generation. */
+		std::uint32_t generation{};
+		/* The instance the page is in, or -1: not in a library. */
+		std::int16_t instance{-1};
+		/* The wait before a retry doubles from 64 lookups to 65536: 0 is
+		 * none, n is 64 << (n - 1). */
+		std::uint8_t backoff{};
 		/* The retry waits for a mapping that lacks the fact. */
 		bool mutable_page{};
 	};
+	static_assert(sizeof(PageSlot) == 32);
 
 	/* resolve() answers an instance index, none (not a library page, or a
 	 * poisoned instance: remembered), or not_ready (do not remember). */
@@ -236,10 +247,10 @@ private:
 	 * table has no room for is left to the engine, never written past it. */
 	/* Instances are found by hash chains over this many buckets. */
 	static constexpr std::size_t index_buckets = 2 * instance_capacity;
-	/* The page states cached by (page, address space): 32 per instance, at
-	 * least 2048. */
+	/* The page states cached by (page, address space): 16384, or 8 per
+	 * instance where the capacity is above 2048. */
 	static constexpr std::size_t page_slots =
-		instance_capacity * 32 > 2048 ? instance_capacity * 32 : 2048;
+		instance_capacity * 8 > 16384 ? instance_capacity * 8 : 16384;
 	[[nodiscard]] static std::size_t bucket_of(unsigned long generation,
 		std::uint32_t library, std::uint64_t bias) noexcept;
 	[[nodiscard]] Instance *find_instance(unsigned long generation,

@@ -1427,7 +1427,8 @@ std::int32_t Binder::resolve(::uml::memory::StaticGuestMemory &memory,
 			unlink_instance(victim);
 		/* No page slot may name the instance that takes this place. */
 		for (auto &slot_entry : pages_)
-			if (slot_entry.instance == static_cast<std::int32_t>(victim)) {
+			if (slot_entry.page != 0 &&
+			    slot_entry.instance == static_cast<std::int16_t>(victim)) {
 				slot_entry = PageSlot{};
 #if UML_AOT_DIAGNOSTICS
 				counters::page_slots_filled.fetch_sub(1,
@@ -1467,7 +1468,9 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 	sync(context, generation, code_changes);
 	const auto page_va = pc & ~(page_size - 1);
 	auto &slot = pages_[((page_va >> 12) ^ generation) % page_slots];
-	bool fresh = slot.page == page_va && slot.generation == generation;
+	const auto tag = page_va | 1;
+	const auto slot_generation = static_cast<std::uint32_t>(generation);
+	bool fresh = slot.page == tag && slot.generation == slot_generation;
 	if (fresh && slot.stamp != code_changes) {
 		std::uint64_t current = 0;
 		if (changed_since(context, slot.stamp, page_va, page_va + page_size,
@@ -1485,17 +1488,17 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 			return {};
 		}
 #if UML_AOT_DIAGNOSTICS
-		if (slot.page == 1) {
+		if (slot.page == 0) {
 			UML_AOT_COUNT(page_slot_fills, 1);
 			UML_AOT_COUNT(page_slots_filled, 1);
-		} else if (slot.page != page_va || slot.generation != generation) {
+		} else if (slot.page != tag || slot.generation != slot_generation) {
 			UML_AOT_COUNT(page_slot_conflicts, 1);
 		}
 #endif
-		slot.instance = answer;
-		slot.page = page_va;
-		slot.generation = generation;
-		slot.stamp = code_changes;
+		/* The retry state is of the page, not of the slot. */
+		slot = PageSlot{.page = tag, .stamp = code_changes,
+			.generation = slot_generation,
+			.instance = static_cast<std::int16_t>(answer)};
 	}
 	if (slot.instance < 0) {
 		note_find(FindResult::uncovered, no_library);
@@ -1546,16 +1549,14 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 			break;
 		case Verdict::unreadable:
 			UML_AOT_COUNT(unreadable, 1);
-			slot.backoff = std::min<std::uint64_t>(
-				std::max<std::uint64_t>(slot.backoff * 2, 64), 65536);
-			slot.retry_at = ticks_ + slot.backoff;
+			slot.backoff = std::min<std::uint8_t>(slot.backoff + 1, 11);
+			slot.retry_at = ticks_ + (std::uint64_t{64} << (slot.backoff - 1));
 			slot.mutable_page = false;
 			note_find(FindResult::unverified, instance.library);
 			return {};
 		case Verdict::mutable_page:
-			slot.backoff = std::min<std::uint64_t>(
-				std::max<std::uint64_t>(slot.backoff * 2, 64), 65536);
-			slot.retry_at = ticks_ + slot.backoff;
+			slot.backoff = std::min<std::uint8_t>(slot.backoff + 1, 11);
+			slot.retry_at = ticks_ + (std::uint64_t{64} << (slot.backoff - 1));
 			slot.mutable_page = true;
 			note_find(FindResult::mutable_page, instance.library);
 			return {};
