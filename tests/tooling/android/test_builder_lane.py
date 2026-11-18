@@ -8058,6 +8058,20 @@ def verify_stale_build_properties(android_root: Path) -> None:
         if result.returncode != 0 or snapshot_tree(root) != before:
             fail(f"an output directory reached through a link is not cleaned: {result.stdout}{result.stderr}")
 
+        # The same when the output's own name ends in a newline, beside a directory named without it:
+        # the physical path keeps the newline, so the step works and never enters the other directory.
+        root, out, product = build_tree("newline")
+        out.rename(out.with_name(out.name + "\n"))
+        out.mkdir()
+        alias = root / "alias-out"
+        alias.symlink_to(out.with_name(out.name + "\n"))
+        before = snapshot_tree(root)
+        for relative in expected_stale("26"):
+            del before[f"aosp/out-user\n/{relative}"]
+        result = run("remove_stale_build_properties", alias, alias / product_path)
+        if result.returncode != 0 or snapshot_tree(root) != before:
+            fail(f"an output directory whose name ends in a newline is not cleaned: {result.stdout}{result.stderr}")
+
         # With no output directory, or one the build has not filled, it does nothing.
         missing = base / "missing/out-user"
         result = run("remove_stale_build_properties", missing, missing / product_path)
@@ -8177,10 +8191,10 @@ def verify_stale_build_properties(android_root: Path) -> None:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         try:
             deadline = time.monotonic() + 30
-            while not scratch_files(root) and time.monotonic() < deadline:
+            while len(scratch_files(root)) < 2 and time.monotonic() < deadline:
                 time.sleep(0.05)
-            if not scratch_files(root):
-                fail("the step creates no scratch file while it lists")
+            if len(scratch_files(root)) < 2:
+                fail("the step creates no scratch files while it lists")
             os.killpg(process.pid, signal.SIGTERM)
             deadline = time.monotonic() + 30
             while scratch_files(root) and time.monotonic() < deadline:

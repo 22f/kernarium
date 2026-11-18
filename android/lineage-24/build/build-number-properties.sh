@@ -35,10 +35,17 @@ BUILD_PROPERTY_AWK='
 }
 END { exit !stale }'
 
-# physical_path DIRECTORY: print the physical path of an existing directory.
+# physical_path DIRECTORY: set BUILD_PROPERTY_PHYSICAL to the physical path of an
+# existing directory. The sentinel keeps a name's own trailing newlines, which a
+# command substitution would strip; that is also why the path is not printed.
 physical_path()
 {
-	(CDPATH= cd -- "$1" 2>/dev/null && pwd -P)
+	BUILD_PROPERTY_PHYSICAL=$(CDPATH= cd -- "$1" 2>/dev/null && pwd -P && printf x) || {
+		BUILD_PROPERTY_PHYSICAL=
+		return 1
+	}
+	BUILD_PROPERTY_PHYSICAL=${BUILD_PROPERTY_PHYSICAL%x}
+	BUILD_PROPERTY_PHYSICAL=${BUILD_PROPERTY_PHYSICAL%$'\n'}
 }
 
 # check_search_root OUT_DIR OUT_PHYSICAL SUFFIX
@@ -68,7 +75,8 @@ check_search_root()
 	done
 	[[ -e "$current" ]] || return 1
 	[[ -d "$current" ]] || fail "the search root is not a directory: $current"
-	physical=$(physical_path "$current") || physical=
+	physical_path "$current" || BUILD_PROPERTY_PHYSICAL=
+	physical=$BUILD_PROPERTY_PHYSICAL
 	[[ "$physical" == "$out_physical/$suffix" ]] ||
 		fail "the search root $current is not inside the output directory: it resolves to ${physical:-nowhere}"
 }
@@ -122,15 +130,17 @@ each_stale_build_property()
 	"$out_dir"/?*) product_suffix=${product_dir#"$out_dir"/} ;;
 	*) fail "the product output is not inside the output directory: $product_dir" ;;
 	esac
-	out_physical=$(physical_path "$out_dir") || out_physical=
+	physical_path "$out_dir" || BUILD_PROPERTY_PHYSICAL=
+	out_physical=$BUILD_PROPERTY_PHYSICAL
 	[[ -n "$out_physical" ]] || fail "cannot resolve the output directory: $out_dir"
+	# The trap is set before either file exists, so no end of the shell leaves one.
+	BUILD_PROPERTY_RAW=
+	BUILD_PROPERTY_LIST=
+	trap 'rm -f -- ${BUILD_PROPERTY_RAW:+"$BUILD_PROPERTY_RAW"} ${BUILD_PROPERTY_LIST:+"$BUILD_PROPERTY_LIST"}' EXIT
 	BUILD_PROPERTY_RAW=$(mktemp "$out_physical/.build-number-properties.XXXXXX") ||
 		fail "cannot create a scratch file in $out_dir"
-	BUILD_PROPERTY_LIST=$(mktemp "$out_physical/.build-number-properties.XXXXXX") || {
-		rm -f -- "$BUILD_PROPERTY_RAW"
+	BUILD_PROPERTY_LIST=$(mktemp "$out_physical/.build-number-properties.XXXXXX") ||
 		fail "cannot create a scratch file in $out_dir"
-	}
-	trap 'rm -f -- "$BUILD_PROPERTY_RAW" "$BUILD_PROPERTY_LIST"' EXIT
 	# Every root is checked before any is listed.
 	product_present=0
 	soong_present=0
