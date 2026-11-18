@@ -64,12 +64,14 @@ The entry table holds 16 bits per source word (the offset of the word's native
 code, in words, from its page's anchor) and one signed 32-bit anchor per text
 page, half the bytes of a 32-bit entry per word; the blob's magic is
 `UMLAOT16`. An indirect branch and a refill spend four words more to reach the
-native code than a table of 32-bit entries would. A page whose entries lie
-further than 256 KiB of code apart is a row of branches when it holds the end
-of a function of 32 KiB or more. A library whose table cannot be formed (a page
-still wider, or more than 32 MiB of text) is not in the blob: the engine runs
-it, the manifest's `refused` lists it, and the diagnostics report counts it
-(`libraries_refused`, from the header; `BLOB_VERSION` 2).
+native code than a table of 32-bit entries would. A page that holds the end of
+a function of 32 KiB or more (its out-of-line stubs follow it, so its entries
+can lie further apart than 16 bits reach) is a row of branches, one per word,
+instead of entries. A library whose table cannot be formed (a page whose
+entries are still further apart, or more than 32 MiB of text) is not in the
+blob: the engine runs it, the manifest's `refused` lists it, and the
+diagnostics report counts it (`libraries_refused`, from the header;
+`BLOB_VERSION` 2).
 
 `UML_AOT_INSTANCE_CAPACITY` is the number of library instances each executor
 thread's binder holds (2048 in the product, found by hash; 3.8 MB of binder
