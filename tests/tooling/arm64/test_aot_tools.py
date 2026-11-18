@@ -15,6 +15,7 @@ import pathlib
 import re
 import struct
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -488,6 +489,57 @@ class PcRelativeWidthTests(unittest.TestCase):
         self.assertNotIn(0xfffffffffffff000, built)
 
 
+class ExitBelowTheLibraryTests(unittest.TestCase):
+    """A direct branch to code outside the library leaves by the branch exit.
+    Its target may lie below the library's first byte (another library mapped
+    lower: a method of boot-framework.oat calling into boot.oat) or beyond
+    4 GiB: it is then formed as a full address and leaves by the absolute
+    exit, never as a wrapped 32-bit offset."""
+
+    @staticmethod
+    def library(target: int, base: int = 0x1000) -> "rewrite.Library":
+        word = 0x94000000 | (((target - (base + 4)) // 4) & 0x3ffffff)
+        return library_of([NOP, word, RET], [(0, 12)], base=base)
+
+    def test_a_target_below_the_library_keeps_all_64_bits(self) -> None:
+        built = PcRelativeWidthTests.constants(
+            unit_words(self.library(-0x2000)))
+        self.assertIn(0xffffffffffffe000, built)
+        self.assertNotIn(0xffffe000, built)
+
+    @staticmethod
+    def jumps_to(library: "rewrite.Library", label: str) -> int:
+        """How many unconditional branches of the built unit go to `label`."""
+        words = unit_words(library)
+        target = library.asm.label_address(label)
+        found = 0
+        for index, word in enumerate(words):
+            if word >> 26 == 0b000101:
+                delta = ((word & 0x03ffffff) ^ 0x2000000) - 0x2000000
+                found += 4 * (index + delta) == target
+        return found
+
+    def test_a_target_below_the_library_leaves_by_the_absolute_exit(self
+                                                                    ) -> None:
+        library = self.library(-0x2000)
+        self.assertEqual(self.jumps_to(library, "EXIT_BRANCH_ABS"), 1)
+
+    def test_a_target_beyond_4_gib_leaves_by_the_absolute_exit(self) -> None:
+        library = self.library(0x100000100, base=0xfffff000)
+        built = PcRelativeWidthTests.constants(unit_words(library))
+        self.assertIn(0x100000100, built)
+
+    def test_a_target_inside_the_library_still_leaves_by_an_offset(self
+                                                                   ) -> None:
+        # Out of the covered code but a small positive offset: the exit
+        # routine adds the bias to it, as for every library until now.
+        library = self.library(0x3000)
+        built = PcRelativeWidthTests.constants(unit_words(library))
+        self.assertIn(0x3000, built)
+        self.assertEqual(self.jumps_to(library, "EXIT_BRANCH_ABS"), 0)
+        self.assertEqual(self.jumps_to(library, "EXIT_BRANCH"), 1)
+
+
 class ReservedWordTests(unittest.TestCase):
     """A word the instruction tables hold but the architecture leaves
     unallocated is left to the engine, which raises the illegal instruction
@@ -557,6 +609,114 @@ class ReservedWordTests(unittest.TestCase):
                 _, steps = self.classify(word)
                 self.assertEqual([cause for _, cause in steps],
                                  ["unallocated"])
+
+
+class OatFileTests(unittest.TestCase):
+    """A boot image's OAT file: no unwind table, its methods named by the
+    symbols of .gnu_debugdata, and a text that may be absent."""
+
+    def setUp(self) -> None:
+        self.elf = elf64.Elf(fixture.build_oat())
+
+    def test_methods_come_from_the_debug_symbols(self) -> None:
+        self.assertEqual(
+            [(f.start, f.end) for f in self.elf.functions()],
+            [(at, at + size) for at, size in fixture.oat_functions()])
+
+    def test_methods_that_touch_stay_apart(self) -> None:
+        functions = [(f.start, f.end) for f in self.elf.functions()]
+        self.assertIn((0x1000, 0x1010), functions)
+        self.assertIn((0x1010, 0x1020), functions)
+
+    def test_unwind_ranges_that_touch_are_still_one_function(self) -> None:
+        # Every library with an unwind table is split as before.
+        elf = elf64.Elf(fixture.build())
+        found = [(0x1000, 0x1010), (0x1010, 0x1020), (0x1200, 0x1210)]
+        with mock.patch.object(elf64.Elf, "_eh_frame_functions",
+                               return_value=found):
+            ranges = [(f.start, f.end) for f in elf.functions()]
+        self.assertIn((0x1000, 0x1020), ranges)
+        self.assertNotIn((0x1000, 0x1010), ranges)
+        self.assertIn((0x1200, 0x1210), ranges)
+
+    def test_a_symbol_with_no_size_or_no_function_type_names_no_method(self
+                                                                       ) -> None:
+        starts = [f.start for f in self.elf.functions()]
+        self.assertNotIn(fixture.OAT_TEXT + 0x300, starts)
+        self.assertNotIn(fixture.OAT_TEXT + 0x400, starts)
+
+    def test_a_file_with_no_unwind_table_and_no_symbols_is_refused(self
+                                                                   ) -> None:
+        elf = elf64.Elf(fixture.build_oat())
+        del elf.sections[".gnu_debugdata"]
+        with self.assertRaises(elf64.ElfError):
+            elf.functions()
+
+    def test_the_header_only_file_has_no_code(self) -> None:
+        self.assertTrue(self.elf.has_executable_segment())
+        self.assertFalse(elf64.Elf(fixture.build_oat(code=False)
+                                   ).has_executable_segment())
+
+    def test_every_direct_branch_below_the_library_leaves_by_the_absolute_exit(
+            self) -> None:
+        library = rewrite.Library(
+            0, "/aot-test/boot-fixture.oat", self.elf,
+            a64decode.Decoder(a64decode.DEFAULT_TABLE),
+            rewrite.read_layout(rewrite.LAYOUT_HEADER))
+        digests = [1] * ((library.table_end - library.table_base) // 4096)
+        blob = library.build(digests)["unit"]
+        words = list(struct.unpack(f"<{len(blob) // 4}I", blob))
+        built = PcRelativeWidthTests.constants(words)
+        self.assertIn(fixture.OAT_BELOW & 0xffffffffffffffff, built)
+        self.assertNotIn(fixture.OAT_BELOW & 0xffffffff, built)
+        # The five branch kinds share the one stub the first emitted.
+        self.assertEqual(ExitBelowTheLibraryTests.jumps_to(
+            library, "EXIT_BRANCH_ABS"), 1)
+
+
+class LibraryPatternTests(unittest.TestCase):
+    """A library path may end in a pattern: every file it matches, in name
+    order, except the ones that hold no code."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = pathlib.Path(self.directory.name)
+        folder = self.root / "system" / "framework" / "arm64"
+        folder.mkdir(parents=True)
+        (folder / "boot-b.oat").write_bytes(fixture.build_oat())
+        (folder / "boot-a.oat").write_bytes(fixture.build_oat())
+        (folder / "boot-c.oat").write_bytes(fixture.build_oat(code=False))
+        (folder / "boot.vdex").write_bytes(b"not an oat")
+        (folder / "other.oat").write_bytes(fixture.build_oat())
+
+    def test_a_pattern_is_every_match_in_name_order_without_the_empty_ones(
+            self) -> None:
+        libraries, skipped = rewrite.expand_libraries(
+            self.root, {}, ["/system/lib64/libz.so",
+                            "/system/framework/arm64/boot*.oat"])
+        self.assertEqual(libraries, [
+            "/system/lib64/libz.so", "/system/framework/arm64/boot-a.oat",
+            "/system/framework/arm64/boot-b.oat"])
+        self.assertEqual(skipped, ["/system/framework/arm64/boot-c.oat"])
+
+    def test_a_pattern_that_matches_nothing_is_refused(self) -> None:
+        with self.assertRaises(SystemExit):
+            rewrite.expand_libraries(self.root, {},
+                                     ["/system/framework/arm64/none*.oat"])
+
+    def test_a_pattern_is_for_the_last_component_only(self) -> None:
+        with self.assertRaises(SystemExit):
+            rewrite.expand_libraries(self.root, {},
+                                     ["/system/framework/*/boot.oat"])
+
+    def test_a_named_file_is_not_looked_at(self) -> None:
+        # Naming a file asks for it: a missing or empty one is the build's
+        # own error later, as before.
+        libraries, skipped = rewrite.expand_libraries(
+            self.root, {}, ["/system/framework/arm64/boot-c.oat"])
+        self.assertEqual(libraries, ["/system/framework/arm64/boot-c.oat"])
+        self.assertEqual(skipped, [])
 
 
 class SimdRegisterFieldTests(unittest.TestCase):

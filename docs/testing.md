@@ -807,6 +807,11 @@ blocker in every one of them.
   and sets also run from directed states, including the epilogue started
   alone in states a signal handler can leave; and structure accesses run over
   a page boundary with one page cached and the other not.
+  The boot image's OAT files are rewritten libraries like the others and run
+  in the same loops; a second generated file has their shape (no unwind
+  table, methods named by `.gnu_debugdata`, methods that touch) and holds each
+  kind of direct branch that reaches below its own first byte, into another
+  instance mapped lower, which a row runs against the engine.
   A scan runs the engine from every word of every rewritten function and
   requires that a word it rejects as an illegal instruction in every state is
   one the rewriter leaves to it (the data a method's code holds, such as the

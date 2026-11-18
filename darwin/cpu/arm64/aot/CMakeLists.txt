@@ -85,7 +85,7 @@ file(WRITE "${_uml_aot_fw_dir}/Info.plist"
 ")
 
 set(_uml_aot_library_args)
-foreach(_library IN LISTS UML_AOT_LIBRARIES)
+foreach(_library IN LISTS UML_AOT_LIBRARIES UML_AOT_BOOT_CODE)
     list(APPEND _uml_aot_library_args --library "${_library}")
 endforeach()
 
@@ -143,6 +143,7 @@ foreach(_library IN LISTS UML_AOT_LIBRARIES)
                 OUTPUT ${_dir}/identity.json
                 COMMAND ${_uml_aot_extract} --partition ${_name} --out ${_dir}
                 DEPENDS ${_uml_aot_extract_inputs}
+                    ${_uml_aot_image_dir}/identity.json
                 COMMENT "Unpacking the ${_name} partition for AOT"
                 VERBATIM)
             list(APPEND _uml_aot_trees ${_dir}/identity.json)
@@ -162,16 +163,19 @@ if(UML_AOT_DIAGNOSTICS)
         list(APPEND _uml_aot_generated_args --count-retired)
     endif()
     set(_uml_aot_fixture ${_uml_aot_dir}/fixture/libaotfixture.so)
+    set(_uml_aot_oat_fixture ${_uml_aot_dir}/fixture/boot-fixture.oat)
     add_custom_command(
-        OUTPUT ${_uml_aot_fixture}
+        OUTPUT ${_uml_aot_fixture} ${_uml_aot_oat_fixture}
         COMMAND ${Python3_EXECUTABLE} -B ${_uml_aot_tools}/fixture.py
-            --out ${_uml_aot_fixture}
+            --out ${_uml_aot_fixture} --oat-out ${_uml_aot_oat_fixture}
         DEPENDS ${_uml_aot_tools}/fixture.py
-        COMMENT "Generating the AOT test library"
+        COMMENT "Generating the AOT test libraries"
         VERBATIM)
     list(APPEND _uml_aot_generated_args
-        --generated "/aot-test/libaotfixture.so=${_uml_aot_fixture}")
-    list(APPEND _uml_aot_generated_files ${_uml_aot_fixture})
+        --generated "/aot-test/libaotfixture.so=${_uml_aot_fixture}"
+        --generated "/aot-test/boot-fixture.oat=${_uml_aot_oat_fixture}")
+    list(APPEND _uml_aot_generated_files ${_uml_aot_fixture}
+        ${_uml_aot_oat_fixture})
 endif()
 
 if(NOT UML_AOT_MEMORY_CALL MATCHES "^(inline|probe|probe-miss)$")

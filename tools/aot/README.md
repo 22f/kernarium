@@ -2,14 +2,16 @@
 
 Build tool for the ahead-of-time component (`darwin/cpu/arm64/aot`). It
 unpacks the partitions of an accepted Android release and rewrites the arm64 libraries named by
-`UML_AOT_LIBRARIES` into one position-independent blob (`rewrite.py`), which
+`UML_AOT_LIBRARIES` and the release's boot image (`UML_AOT_BOOT_CODE`) into
+one position-independent blob (`rewrite.py`), which
 `darwin/cpu/arm64/aot/CMakeLists.txt` wraps in the signed
 `UmlArm64Aot.framework`. The contract is in
 [`docs/architecture.md`](../../docs/architecture.md#ahead-of-time-code); the
 framework is generated and never committed.
 
 - `elf64.py` reads program headers and function ranges (`.eh_frame` and
-  `.plt`).
+  `.plt`; for an OAT file, which has no unwind table, the function symbols of
+  its `.gnu_debugdata`).
 - `a64decode.py` identifies an instruction exactly from
   `tests/unit/arm64/a64_instruction_decode_partitions.tsv`.
 - `asm.py` encodes the words the rewriter emits and resolves labels.
@@ -22,9 +24,20 @@ framework is generated and never committed.
 - `extract_image.py` unpacks the partitions and APEX payloads the libraries
   come from; `licences.py` records, per library, the notice the image itself
   states (generated beside the framework, not tracked).
-- `fixture.py` writes the small library of the differential test (a
+- `fixture.py` writes the small libraries of the differential test (a
   diagnostics build only): page-edge branches, loops that update one cell,
-  and one function per instruction form.
+  and one function per instruction form; and a file shaped like an OAT file
+  (no unwind table, symbols in `.gnu_debugdata`, methods that touch, direct
+  branches that reach below the library).
+
+Boot code: every `boot*.oat` of the release that has an executable segment is
+translated whole, with no profile (an OAT file with no compiled method has no
+code and is listed in the manifest's `skipped`). A `--library` path may end in
+a pattern, which names every file it matches in name order. The OAT files of
+one boot image are mapped next to each other and call each other by direct
+branches, so a branch from a later file into an earlier one reaches below the
+library's own first byte: its target is formed as a full address and leaves by
+the absolute branch exit.
 
 Tools: the build needs a Python 3 and an `fsck.erofs` that decodes
 Zstandard (`UML_AOT_FSCK_EROFS`), as the Android build produces; the

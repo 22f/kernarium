@@ -8,6 +8,11 @@ also rewrites this file. It holds a loop that runs through the interior of a
 second unwind range: a function whose backward branch lands inside another
 function. The file is generated into the build tree of a diagnostics build
 and is never part of a product.
+
+A second file imitates an OAT file of the boot image (build_oat): no unwind
+table, its methods named by the function symbols of an XZ-compressed
+.gnu_debugdata, methods that touch, and direct branches that reach below the
+library's first byte, as a boot-framework method does into boot.oat.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import lzma
 import pathlib
 import struct
 import sys
@@ -567,12 +573,146 @@ def build() -> bytes:
     return bytes(image)
 
 
+# ---- an OAT file of the boot image ----------------------------------------
+# The text starts at OAT_TEXT after a read-only first segment, as in a boot
+# image's file. Its methods are packed with no gap: M0 and M1 touch. The
+# branch methods below reach OAT_CALLEE of another instance of this file
+# mapped OAT_LOWER_BY bytes lower (the differential test maps one there), so
+# the target is below the first byte of the instance they run in.
+OAT_TEXT = 0x1000
+OAT_TEXT_PAGES = 4
+OAT_LOWER_BY = 0x10000
+OAT_CALLEE = OAT_TEXT + 0x1200
+OAT_BELOW = OAT_CALLEE - OAT_LOWER_BY          # negative: -0xde00
+OAT_PLAIN = OAT_TEXT
+OAT_BRANCHES = {"b": OAT_TEXT + 0x100, "bl": OAT_TEXT + 0x120,
+                "bcond": OAT_TEXT + 0x140, "cbz": OAT_TEXT + 0x160,
+                "tbz": OAT_TEXT + 0x180}
+
+
+def oat_code() -> dict[int, int]:
+    code: dict[int, int] = {}
+
+    def put(at: int, *words: int) -> None:
+        for index, word in enumerate(words):
+            code[at + 4 * index] = word
+
+    put(OAT_PLAIN, 0xd2800000, 0x91000400, 0x91000800, RET)    # x0 = 3
+    put(OAT_PLAIN + 0x10, 0x91001000, 0x91002000, 0x91004000, RET)
+    t = OAT_BELOW
+    e = OAT_BRANCHES
+    put(e["b"], MOV_X15_X30, b(e["b"] + 4, t))
+    put(e["bl"], MOV_X15_X30, bl(e["bl"] + 4, t), RET_X15)
+    put(e["bcond"], MOV_X15_X30, CMP_X1_X1, b_cond(0, e["bcond"] + 8, t),
+        RET)
+    put(e["cbz"], MOV_X15_X30, MOV_X2_0, cbz(2, e["cbz"] + 8, t), RET)
+    put(e["tbz"], MOV_X15_X30, MOV_X2_0, tbz(2, 0, e["tbz"] + 8, t), RET)
+    put(OAT_CALLEE, 0x91019000, RET)                           # x0 += 100
+    return code
+
+
+def oat_functions() -> tuple[tuple[int, int], ...]:
+    """(start, size) of each method, in address order."""
+    sizes = {OAT_PLAIN: 0x10, OAT_PLAIN + 0x10: 0x10, OAT_CALLEE: 8}
+    for name, at in OAT_BRANCHES.items():
+        sizes[at] = {"b": 8, "bl": 12}.get(name, 16)
+    return tuple(sorted(sizes.items()))
+
+
+def debug_data() -> bytes:
+    """The XZ-compressed ELF a stripped file carries as .gnu_debugdata: a
+    symbol table whose function symbols give each method's start and size.
+    A zero-sized function symbol and an object symbol are in it too, and
+    name no method."""
+    names = b"\0"
+    symbols = [struct.pack("<IBBHQQ", 0, 0, 0, 0, 0, 0)]
+    entries = [(f"method{index}", 2, at, size)
+               for index, (at, size) in enumerate(oat_functions())]
+    entries.append(("empty", 2, OAT_TEXT + 0x300, 0))
+    entries.append(("table", 1, OAT_TEXT + 0x400, 0x20))
+    for name, kind, value, size in entries:
+        symbols.append(struct.pack("<IBBHQQ", len(names), kind, 0, 1, value,
+                                   size))
+        names += name.encode() + b"\0"
+    section_names = b"\0.symtab\0.strtab\0.shstrtab\0"
+    image = bytearray(64)
+    symtab = len(image)
+    image += b"".join(symbols)
+    strtab = len(image)
+    image += names
+    shstrtab = len(image)
+    image += section_names
+    image += bytes(-len(image) % 8)
+    section_offset = len(image)
+
+    def section(name, kind, offset, size, entsize):
+        return struct.pack("<IIQQQQIIQQ", name, kind, 0, 0, offset, size, 0,
+                           0, 8, entsize)
+
+    image += section(0, 0, 0, 0, 0)
+    image += section(1, 2, symtab, 24 * len(symbols), 24)
+    image += section(9, 3, strtab, len(names), 0)
+    image += section(17, 3, shstrtab, len(section_names), 0)
+    image[0:64] = (b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8) +
+                   struct.pack("<HHIQQQIHHHHHH", 1, 183, 1, 0, 0,
+                               section_offset, 0, 64, 0, 0, 64, 4, 3))
+    return lzma.compress(bytes(image))
+
+
+def build_oat(code: bool = True) -> bytes:
+    """The OAT-like file; with `code` False only its header segment, as the
+    OAT file of a jar with no compiled method is."""
+    size_text = OAT_TEXT_PAGES * PAGE
+    image = bytearray(PAGE + (size_text if code else 0))
+    if code:
+        for offset in range(0, size_text, 4):
+            struct.pack_into("<I", image, OAT_TEXT + offset, BRK)
+        for address, word in oat_code().items():
+            struct.pack_into("<I", image, address, word)
+    names = b"\0.text\0.gnu_debugdata\0.shstrtab\0"
+    debug = debug_data()
+    debug_offset = len(image)
+    image += debug
+    shstr_offset = len(image)
+    image += names
+    image += bytes(-len(image) % 8)
+    section_offset = len(image)
+
+    def section(name, kind, flags, addr, offset, size):
+        return struct.pack("<IIQQQQIIQQ", name, kind, flags, addr, offset,
+                           size, 0, 0, 1, 0)
+
+    image += section(0, 0, 0, 0, 0, 0)
+    sections = 3
+    if code:
+        image += section(1, 1, 6, OAT_TEXT, OAT_TEXT, size_text)
+        sections += 1
+    image += section(7, 1, 0, 0, debug_offset, len(debug))
+    image += section(22, 3, 0, 0, shstr_offset, len(names))
+    segments = [struct.pack("<IIQQQQQQ", 1, 4, 0, 0, 0, PAGE, PAGE, PAGE)]
+    if code:
+        segments.append(struct.pack("<IIQQQQQQ", 1, 5, OAT_TEXT, OAT_TEXT,
+                                    OAT_TEXT, size_text, size_text, PAGE))
+    header = (b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8) +
+              struct.pack("<HHIQQQIHHHHHH", 3, 183, 1, 0, 64, section_offset,
+                          0, 64, 56, len(segments), 64, sections,
+                          sections - 1))
+    image[0:len(header)] = header
+    image[64:64 + 56 * len(segments)] = b"".join(segments)
+    return bytes(image)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=pathlib.Path, required=True)
+    parser.add_argument("--oat-out", type=pathlib.Path,
+                        help="also write the OAT-like file")
     arguments = parser.parse_args(argv)
     arguments.out.parent.mkdir(parents=True, exist_ok=True)
     arguments.out.write_bytes(build())
+    if arguments.oat_out is not None:
+        arguments.oat_out.parent.mkdir(parents=True, exist_ok=True)
+        arguments.oat_out.write_bytes(build_oat())
     return 0
 
 

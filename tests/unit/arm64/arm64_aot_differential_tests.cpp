@@ -2963,6 +2963,72 @@ void edge_into_another_instance(const LibraryImage &image)
 	}
 }
 
+/* A direct branch whose target lies below the first byte of the library, as
+ * a method of boot-framework.oat has into boot.oat mapped before it
+ * (tools/aot/fixture.py, build_oat): a second instance of the file is mapped
+ * 0x10000 bytes lower, and each kind of direct branch of the first reaches
+ * its callee there (the offset from the first instance is negative). The
+ * rewritten code leaves by the absolute exit and the result is the engine's:
+ * the callee adds 100, whether the lower instance was bound before or not. */
+[[gnu::noinline]]
+void direct_branches_below_the_library(const LibraryImage &image)
+{
+	constexpr std::uint64_t bias = 0x7193'0000'0000ULL;
+	constexpr std::uint64_t lower_by = 0x10000;
+	constexpr std::uint64_t lower_bias = bias - lower_by;
+	constexpr PageEdge kinds[] = {
+		{"b", 0x1100}, {"bl", 0x1120}, {"bcond", 0x1140}, {"cbz", 0x1160},
+		{"tbz", 0x1180}};
+	unsigned long generation = 5901;
+	for (const bool bound : {false, true}) {
+		for (const auto &kind : kinds) {
+			Environment ref{generation, bias, image};
+			Environment got{generation + 1, bias, image};
+			generation += 2;
+			ref.add_library(lower_bias, image);
+			got.add_library(lower_bias, image);
+			Arena ref_arena{ref.generation, arena_base(bias)};
+			Arena got_arena{got.generation, arena_base(bias)};
+			aot::reset_stats();
+			if (bound) {
+				/* The lower instance is bound first, by running its
+				 * plain method. */
+				const PageEdge plain{"plain", 0x1000};
+				auto w = edge_case(plain, 101, lower_bias);
+				aot::set_enabled(true);
+				(void)drive_on(got.executor, got.memory, got.generation,
+					lower_bias, got_arena, w, aot_max_blocks);
+				aot::set_enabled(false);
+				require(aot::stats().enters >= 1);
+			}
+			const auto before = aot::stats().enters;
+			auto c = edge_case(kind, 103, bias);
+			aot::set_enabled(false);
+			const auto want = drive_on(ref.executor, ref.memory,
+				ref.generation, bias, ref_arena, c, max_blocks);
+			require(want.finished);
+			require(want.cpu.registers[0] == 100);
+			aot::set_enabled(true);
+			const auto have = drive_on(got.executor, got.memory,
+				got.generation, bias, got_arena, c, aot_max_blocks);
+			aot::set_enabled(false);
+			if (!same(want, have, c))
+				std::fprintf(stderr, "  branch %s below the library "
+					"(lower instance %s)\n", kind.name,
+					bound ? "bound" : "not bound");
+			require(same(want, have, c));
+			const auto st = aot::stats();
+			std::fprintf(stderr, "%s below the library (lower instance %s): "
+				"x0 %llu, enters %llu\n", kind.name,
+				bound ? "bound" : "not bound",
+				static_cast<unsigned long long>(have.cpu.registers[0]),
+				static_cast<unsigned long long>(st.enters - before));
+			require(st.enters > before);
+			require(st.poisoned == 0);
+		}
+	}
+}
+
 /* ---- scenarios on the fixture's shared-memory loops and CAS forms ------- */
 
 /* tools/aot/fixture.py: the loops that add one to the cell at [x2] x0 times,
@@ -5566,6 +5632,8 @@ int main(int argc, char **argv)
 		}
 		words_the_engine_rejects_are_left_to_it(image, functions,
 			load_steps(cfg.steps, file.index));
+		if (file.guest.ends_with("/boot-fixture.oat"))
+			direct_branches_below_the_library(image);
 		/* The scenarios are about the mechanism, not about the code:
 		 * they run on one library, whatever order the build lists. */
 		if (file.index == scenario_index) {

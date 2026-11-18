@@ -3,7 +3,8 @@
 
 It reads the program headers, the section names, and the function ranges of
 .eh_frame, which is how a stripped Android library says where its functions
-are. Nothing else is interpreted.
+are, or, for an OAT file (which has no unwind table), of the function symbols
+of its .gnu_debugdata. Nothing else is interpreted.
 """
 
 from __future__ import annotations
@@ -12,12 +13,14 @@ __import__("sys").dont_write_bytecode = True
 
 import dataclasses
 import hashlib
+import lzma
 import struct
 
 PT_LOAD = 1
 PF_X = 1
 PF_W = 2
 SHT_NOTE = 7
+STT_FUNC = 2
 
 
 class ElfError(Exception):
@@ -89,6 +92,11 @@ class Elf:
         start = offset + 12 + ((namesz + 3) & ~3)
         return bytes(self.data[start:start + descsz])
 
+    def has_executable_segment(self) -> bool:
+        """Whether the file maps any code at all: an OAT file of a boot image
+        that holds no compiled method is the header and nothing else."""
+        return any(s.flags & PF_X for s in self.segments)
+
     def executable_segment(self) -> Segment:
         candidates = [s for s in self.segments if s.flags & PF_X]
         if len(candidates) != 1:
@@ -104,9 +112,43 @@ class Elf:
         raise ElfError(f"address {vaddr:#x} is not file-backed")
 
     def functions(self) -> list[Function]:
-        """The function ranges the unwind tables describe, merged and sorted."""
-        if ".eh_frame" not in self.sections:
-            raise ElfError("no .eh_frame: functions cannot be located")
+        """The function ranges of the file, sorted and merged. They come from
+        the unwind tables, or from the function symbols of .gnu_debugdata
+        when the file has no .eh_frame (an OAT file: the compiled Java
+        methods of a boot image).
+
+        Unwind ranges that touch are one function, as they always have been:
+        every earlier build of the framework has them so, and a library's
+        unit changes with its functions. The symbols of an OAT file name each
+        method exactly, so two that touch stay two."""
+        if ".eh_frame" in self.sections:
+            found = self._eh_frame_functions()
+            touching = True
+        elif ".gnu_debugdata" in self.sections:
+            found = self._debug_functions()
+            touching = False
+        else:
+            raise ElfError("no .eh_frame or .gnu_debugdata: functions cannot "
+                           "be located")
+        # The PLT has no unwind entries: its stubs (adrp, ldr, add, br) are
+        # code like any other and the calls through them are the hottest
+        # indirect branches.
+        if ".plt" in self.sections:
+            plt_addr, _, plt_size = self.sections[".plt"]
+            if plt_size > 0:
+                found.append((plt_addr, plt_addr + plt_size))
+        found.sort()
+        merged: list[Function] = []
+        for begin, finish in found:
+            if merged and (begin <= merged[-1].end if touching
+                           else begin < merged[-1].end):
+                last = merged.pop()
+                merged.append(Function(last.start, max(last.end, finish)))
+            else:
+                merged.append(Function(begin, finish))
+        return merged
+
+    def _eh_frame_functions(self) -> list[tuple[int, int]]:
         addr, offset, size = self.sections[".eh_frame"]
         data = self.data
         cies: dict[int, int] = {}
@@ -132,22 +174,27 @@ class Elf:
                 if range_ > 0:
                     found.append((begin, begin + range_))
             position += 4 + length
-        # The PLT has no unwind entries: its stubs (adrp, ldr, add, br) are
-        # code like any other and the calls through them are the hottest
-        # indirect branches.
-        if ".plt" in self.sections:
-            plt_addr, _, plt_size = self.sections[".plt"]
-            if plt_size > 0:
-                found.append((plt_addr, plt_addr + plt_size))
-        found.sort()
-        merged: list[Function] = []
-        for begin, finish in found:
-            if merged and begin <= merged[-1].end:
-                last = merged.pop()
-                merged.append(Function(last.start, max(last.end, finish)))
-            else:
-                merged.append(Function(begin, finish))
-        return merged
+        return found
+
+    def _debug_functions(self) -> list[tuple[int, int]]:
+        """The function symbols of the file's .gnu_debugdata, the XZ-
+        compressed ELF that carries a stripped file's symbols (dex2oat names
+        each compiled method there). A symbol with no size names no range."""
+        _, offset, size = self.sections[".gnu_debugdata"]
+        try:
+            debug = Elf(lzma.decompress(self.data[offset:offset + size]))
+        except (lzma.LZMAError, ElfError, struct.error) as error:
+            raise ElfError(f".gnu_debugdata cannot be read: {error}") from None
+        if ".symtab" not in debug.sections:
+            raise ElfError(".gnu_debugdata has no .symtab")
+        _, table, table_size = debug.sections[".symtab"]
+        found: list[tuple[int, int]] = []
+        for at in range(table, table + table_size - 23, 24):
+            _name, info, _other, _shndx, value, length = struct.unpack_from(
+                "<IBBHQQ", debug.data, at)
+            if info & 0x0f == STT_FUNC and length > 0:
+                found.append((value, value + length))
+        return found
 
     def _read_cie(self, position: int, end: int) -> int:
         data = self.data

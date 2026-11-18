@@ -58,6 +58,13 @@ set(UML_AOT_LIBRARIES
     "/system/lib64/libft2.so"
     CACHE STRING
     "Libraries of the release to rewrite, as absolute guest paths")
+# The boot image's compiled Java: every OAT file of the release that holds
+# code, translated whole (an OAT file without a compiled method is skipped).
+# Not a cache entry unless a build names it, so a build tree that cached an
+# older list builds it too; an empty value leaves it out (a measurement).
+if(NOT DEFINED UML_AOT_BOOT_CODE)
+    set(UML_AOT_BOOT_CODE "/system/framework/arm64/boot*.oat")
+endif()
 option(UML_AOT_DIAGNOSTICS
     "Compose the AOT runtime variant with its counters, report and test switches (never for a product)" OFF)
 set(UML_AOT_MEMORY_CALL "inline" CACHE STRING

@@ -166,6 +166,8 @@ BASE_COPY_CLASSES = {
     "log_shift", "movewide", "bitfield", "extract", "condsel", "condcmp_reg",
     "condcmp_imm", "dp_3src",
 }
+
+
 def reserved_corner(cls: str, word: int) -> bool:
     """Whether `word`, an encoding of the data-processing class `cls`, is one
     the architecture leaves unallocated by a rule on its fields that the
@@ -497,7 +499,8 @@ class Library:
         self.stats.words["gate"] += len(asm._w) - before
 
     def xb_label(self, target: int) -> str:
-        return f"L{self.index}XB{self.fn_start:x}_{target:x}"
+        # A target below the library's first byte is a negative offset.
+        return f"L{self.index}XB{self.fn_start:x}_{target & ((1 << 64) - 1):x}"
 
     def xb_ref(self, target: int) -> str:
         """The label to branch to for leaving by the branch exit of `target`:
@@ -769,8 +772,19 @@ class Library:
     def _exit_to(self, offset: int, routine: str) -> None:
         """T0 = the guest offset, then the named exit routine. The offset is
         formed in 32 bits: an exit address beyond that would leave at a
-        wrapped PC, so a build that has one is refused."""
+        wrapped PC, so a build that has one is refused.
+
+        A branch exit (a direct branch to code outside this library) may
+        target below the library's first byte, where another library mapped
+        lower lies (an OAT file of the boot image branching into one that
+        precedes it), or beyond 4 GiB: its target is then formed as a full
+        address (the load bias plus the offset, wrapping) and leaves through
+        the absolute exit."""
         asm = self.asm
+        if routine == "EXIT_BRANCH" and not 0 <= offset < 1 << 32:
+            self._materialize(T0, offset & ((1 << 64) - 1))
+            asm.b("EXIT_BRANCH_ABS")
+            return
         if not 0 <= offset < 1 << 32:
             raise A.AsmError(
                 f"an exit to {offset:#x} does not fit the 32 bits an exit "
@@ -2112,6 +2126,36 @@ def resolve_library(root: pathlib.Path, mounts: dict[str, pathlib.Path],
     return root / path.lstrip("/")
 
 
+def expand_libraries(root: pathlib.Path, mounts: dict[str, pathlib.Path],
+                     entries: list[str]) -> tuple[list[str], list[str]]:
+    """The libraries an entry list names, and the files a pattern matched
+    that have no executable code. An entry whose last component has a `*`
+    names every file of that directory the pattern matches, in name order
+    (the boot image's OAT files: some hold only a header, because their
+    jar has no compiled method); one without names that file, which must
+    exist and hold code."""
+    libraries: list[str] = []
+    skipped: list[str] = []
+    for entry in entries:
+        directory, _, pattern = entry.rpartition("/")
+        if "*" in directory:
+            raise SystemExit(f"rewrite.py: {entry}: only the last component "
+                             "of a library path may hold a pattern")
+        if "*" not in pattern:
+            libraries.append(entry)
+            continue
+        folder = resolve_library(root, mounts, directory)
+        found = sorted(path.name for path in folder.glob(pattern)
+                       if path.is_file())
+        if not found:
+            raise SystemExit(f"rewrite.py: {entry} matches no file")
+        for name in found:
+            elf = elf64.Elf((folder / name).read_bytes())
+            (libraries if elf.has_executable_segment() else skipped).append(
+                f"{directory}/{name}")
+    return libraries, skipped
+
+
 def build_unit(job: tuple) -> dict:
     """One library to its self-contained unit (runs in a worker process)."""
     index, name, file_path, count_retired, memory_call, hot = job
@@ -2274,7 +2318,10 @@ def main(argv: list[str] | None = None) -> int:
                         "repeatable")
     parser.add_argument("--library", action="append", required=True,
                         help="a library's guest path, e.g. "
-                        "/system/lib64/libz.so; repeatable")
+                        "/system/lib64/libz.so, or a pattern in its last "
+                        "component, e.g. /system/framework/arm64/boot*.oat "
+                        "(a match with no executable code is skipped); "
+                        "repeatable")
     parser.add_argument("--generated", action="append", default=[],
                         metavar="GUESTPATH=FILE",
                         help="a library generated for the tests (tools/aot/"
@@ -2311,6 +2358,8 @@ def main(argv: list[str] | None = None) -> int:
         if call == "inline":
             parser.error("--hot-list needs --memory-call probe or probe-miss")
         hot, hot_digest = read_hot_list(arguments.hot_list)
+    arguments.library, skipped = expand_libraries(
+        arguments.root, mounts, arguments.library)
     jobs = [(index, path, str(resolve_library(arguments.root, mounts, path)),
              count, call, hot)
             for index, path in enumerate(arguments.library)]
@@ -2326,6 +2375,7 @@ def main(argv: list[str] | None = None) -> int:
             units = list(pool.imap_unordered(build_unit, order))
     layout = read_layout(LAYOUT_HEADER)
     blob, manifest = build_blob(units, layout, arguments.release_id, count)
+    manifest["skipped"] = skipped
     if hot_digest is not None:
         manifest["hot_list_sha256"] = hot_digest
     arguments.out.mkdir(parents=True, exist_ok=True)
