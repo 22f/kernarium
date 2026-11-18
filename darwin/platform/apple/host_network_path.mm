@@ -24,6 +24,11 @@ bool hostNetworkPathIsOutage(nw_path_status_t status,
 		reason != nw_path_unsatisfied_reason_local_network_denied;
 }
 
+bool hostNetworkPathIsCarried(nw_path_status_t status) noexcept
+{
+	return status == nw_path_status_satisfied;
+}
+
 namespace {
 
 /* What the monitor's thread and its updates share. It outlives the monitor
@@ -37,11 +42,11 @@ struct Shared final {
 	/* The system gave no monitor: this one will never report. */
 	std::atomic<bool> failed{};
 
-	void deliver(bool usable) noexcept
+	void deliver(bool usable, bool carried) noexcept
 	{
 		std::lock_guard guard{lock};
 		if (state != nullptr)
-			state->report(usable);
+			state->report(usable, carried);
 	}
 };
 
@@ -89,11 +94,13 @@ void run(std::shared_ptr<Shared> shared, Gate gate) noexcept
 		dispatch_queue_attr_make_with_qos_class(
 			DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)));
 	/* On the system's queue: a block that does no more than write the
-	 * state. */
+	 * state and run its observer, which only wakes a reader. */
 	nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
 		shared->deliver(!hostNetworkPathIsOutage(
-			nw_path_get_status(path),
-			nw_path_get_unsatisfied_reason(path)));
+					nw_path_get_status(path),
+					nw_path_get_unsatisfied_reason(path)),
+				hostNetworkPathIsCarried(
+					nw_path_get_status(path)));
 	});
 	nw_path_monitor_start(monitor);
 	{

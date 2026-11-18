@@ -190,6 +190,19 @@ patches provide the behaviors the `slirp-network-*` tests check.
   counted as failed; answers that carry a record of the asked type stand, and
   the next report of a path ends it (`slirp-network-dns`,
   `platform-host-network-path`).
+- When the path monitor reports that an interface carries the path and the
+  host no longer has the address a guest TCP connection's host socket is bound
+  to (Wi-Fi gone, the path on cellular), the guest gets a reset on exactly
+  those connections once an interface has carried the path for 8 s since the
+  host's addresses last changed (a report with a changed address set starts
+  the 8 s over) and the address was missing at both ends of that time;
+  otherwise a connection the guest writes on hangs until the host stack gives
+  up, and one only the peer writes on never ends. An outage no interface
+  carries resets nothing and starts the 8 s over once the path is back; an
+  address first found missing when they end gets 8 s of its own. An address
+  that returns, host forwards, UDP, DNS and ICMP are left alone, and the hold
+  of a pending report is the only timer (`slirp-network-address-reset`,
+  `network-address-reset-rules`).
 - The provider counts what became of the guest's DNS queries (answered, policy
   denied, timed out, failed), its DHCP exchange and its TCP connection attempts,
   as numbers only, and the runtime writes them into the session record
