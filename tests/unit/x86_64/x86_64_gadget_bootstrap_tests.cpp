@@ -4242,6 +4242,53 @@ void execute_compat32_legacy_segment_stack()
 		"long64 mode accepted a legacy segment-stack opcode");
 }
 
+/* POP to memory computes its address after it advances ESP, so an address
+ * that names ESP sees the popped stack. A compat32 access through FS that the
+ * engines' inline limit check cannot pass leaves for the runtime's exact
+ * check and runs again, so it must leave ESP as it found it. FS here is a
+ * writable byte-granular segment that ends at 0x2003, so the four bytes at
+ * 0x2000 pass the exact check but not the inline one.
+ */
+void a_compat32_pop_through_fs_leaves_esp_for_the_exact_check()
+{
+	using namespace uml::cpu::x86_64;
+	for (const bool mapped : {true, false}) {
+		TestMemory memory{0, mapped ? 16384U : 0x2000U};
+		memory.load(0, {0x64, 0x8f, 0x03}); // pop dword ptr fs:[ebx]
+		memory.load(0x1000, {0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22});
+		CpuState cpu{};
+		linux_user_segments(cpu, ExecutionMode::compat32);
+		cpu.segment_selectors[4] = 0x63;
+		cpu.tls_descriptors[0] = 0x0040'f300'0000'2003ULL;
+		require(!enter_segments(cpu),
+			"the compat32 FS segment did not load");
+		cpu.gpr(Register::rsp) = 0x1000;
+		cpu.gpr(Register::rbx) = 0x2000;
+		const auto built = require_built(
+			gadgets::build(memory, 0, ExecutionMode::compat32, 1),
+			"compat32 POP through FS did not build");
+		const auto result = gadgets::execute(built.program, cpu, memory, 1);
+		if (mapped) {
+			require(result.event == uml::cpu::EngineEvent::continued &&
+					result.retired_instructions == 1,
+				"compat32 POP through FS did not retire once");
+			require(memory.dword(0x2000) == 0x1111'1111U &&
+					cpu.gpr(Register::rsp) == 0x1004,
+				"compat32 POP through FS popped twice after the exact "
+				"segment check");
+		} else {
+			require(result.event == uml::cpu::EngineEvent::memory_fault &&
+					result.retired_instructions == 0 &&
+					result.fault.address == 0x2000 &&
+					result.fault.access ==
+						uml::memory::MemoryAccess::write,
+				"compat32 POP through FS did not fault on its store");
+			require(cpu.gpr(Register::rsp) == 0x1000 && cpu.rip == 0,
+				"a faulting compat32 POP through FS changed ESP");
+		}
+	}
+}
+
 void execute_long64_interrupt_return_stack_switch()
 {
 	using namespace uml::cpu::x86_64;
@@ -8454,6 +8501,45 @@ void a_lane_extract_store_keeps_the_lane_across_a_page()
 		"a lane extract across a page stored something else");
 }
 
+/* VCVTPS2PH to memory narrows into a vector register before it translates the
+ * destination, and a translation that misses calls out, so the packed result
+ * must survive the call. Each float of 1.0 narrows to the half 0x3c00. */
+void a_half_precision_store_keeps_its_result_across_a_miss()
+{
+	using namespace uml::cpu::x86_64;
+	struct Width final {
+		std::uint8_t vex;
+		unsigned lanes;
+		const char *name;
+	};
+	for (const auto width : {Width{0x79, 4, "128-bit"},
+		     Width{0x7d, 8, "256-bit"}}) {
+		CallingOutMemory memory;
+		memory.load(0, {
+			0xc4, 0xe3, width.vex, 0x1d, 0x07, 0x00, // vcvtps2ph $0,x0,[rdi]
+			0x0f, 0x05,                               // syscall
+		});
+		const auto built = require_built(gadgets::build(memory, 0),
+			"the half-precision store did not build");
+		CpuState cpu{};
+		cpu.registers[7] = 0x2000; // rdi, a page no translation covers yet
+		for (unsigned lane = 0; lane < width.lanes; ++lane) {
+			const std::uint32_t one = 0x3f80'0000U;
+			std::memcpy(cpu.vectors[0].data() + 4U * lane, &one, 4);
+		}
+		const auto result = gadgets::execute(built.program, cpu, memory, 2);
+		require(result.event == uml::cpu::EngineEvent::system_call &&
+				result.retired_instructions == 2,
+			"the half-precision store did not reach SYSCALL");
+		bool exact = true;
+		for (unsigned lane = 0; lane < width.lanes; ++lane)
+			exact = exact && memory.byte(0x2000 + 2U * lane) == 0x00U &&
+				memory.byte(0x2001 + 2U * lane) == 0x3cU;
+		require(exact, std::string{"a "} + width.name +
+			" half-precision store lost its result across a miss");
+	}
+}
+
 void a_masked_store_keeps_the_unselected_bytes_across_a_miss()
 {
 	using namespace uml::cpu::x86_64;
@@ -11055,6 +11141,7 @@ int main(int argc, char **argv)
 	execute_compat32_pushfd_popfd();
 	execute_compat32_enter_frames();
 	execute_compat32_legacy_segment_stack();
+	a_compat32_pop_through_fs_leaves_esp_for_the_exact_check();
 	execute_long64_interrupt_return_stack_switch();
 	execute_long64_interrupt_return_operand_sizes();
 	interrupt_return_masks_user_flags();
@@ -11124,6 +11211,7 @@ int main(int argc, char **argv)
 	vector_integer_forwards_only_from_the_gadget_before();
 	a_lane_extract_store_keeps_the_lane_across_a_miss();
 	a_lane_extract_store_keeps_the_lane_across_a_page();
+	a_half_precision_store_keeps_its_result_across_a_miss();
 	a_masked_store_keeps_the_unselected_bytes_across_a_miss();
 	vector_invalid_results_use_x86_indefinite_nan();
 	locked_memory_updates_select_exclusive_gadgets();
