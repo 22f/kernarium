@@ -1895,13 +1895,17 @@ ACCESSIBILITY_APKS = {
 
 
 # TalkBack and eSpeak NG hold no network access and no Google service permission, so the built
-# APKs request none of these. ACCESS_LOCAL_NETWORK is in no source manifest (the platform adds it
-# to an application that holds INTERNET); it is named so that a manifest asking for it is refused
-# too. A Google service permission is any under Google's namespace: the Analytics and Primes
-# permission READ_GSERVICES, AICore's BIND_SERVICE, and those of Google Play services and the
-# Play Store. TalkBack's own package name is under that namespace, and the braille keyboard's
-# manifest requests, by that exact name, the signature permission that guards the application's
-# own receivers: it is the one exemption.
+# APKs request none of these, with no exemption. A network permission is any android.permission.*
+# whose name contains one of ACCESSIBILITY_REFUSED_WORDS (it catches INTERNET, ACCESS_NETWORK_STATE,
+# the WIFI, WIMAX and CONNECTIVITY families, NETWORK_SETTINGS, NETWORK_STACK and the other NETWORK_*
+# permissions, and NEARBY_WIFI_DEVICES), or is named in ACCESSIBILITY_REFUSED_PERMISSIONS, which
+# lists the ones whose names do not say so and spells out the rest. ACCESS_LOCAL_NETWORK is in no
+# source manifest (the platform adds it to an application that holds INTERNET); the rule refuses it
+# too. Bluetooth and USB permissions are not network permissions. A Google service permission is
+# any under Google's namespace: the Analytics and Primes permission READ_GSERVICES, AICore's
+# BIND_SERVICE, those of Google Play services and the Play Store, and a permission of TalkBack's
+# upstream package name: the installed package is com.android.talkback, which declares none.
+ACCESSIBILITY_REFUSED_WORDS = ("NETWORK", "WIFI", "WIMAX", "INTERNET", "CONNECTIVITY")
 ACCESSIBILITY_REFUSED_PERMISSIONS = frozenset(
     f"android.permission.{name}"
     for name in (
@@ -1913,12 +1917,34 @@ ACCESSIBILITY_REFUSED_PERMISSIONS = frozenset(
         "CHANGE_WIFI_MULTICAST_STATE",
         "ACCESS_LOCAL_NETWORK",
         "NEARBY_WIFI_DEVICES",
+        "NETWORK_SETTINGS",
+        "NETWORK_STACK",
+        "NETWORK_SETUP_WIZARD",
+        "CONNECTIVITY_INTERNAL",
+        "CONNECTIVITY_USE_RESTRICTED_NETWORKS",
+        "MANAGE_NETWORK_POLICY",
+        "READ_NETWORK_USAGE_HISTORY",
+        "UPDATE_DEVICE_STATS",
+        "CHANGE_WIMAX_STATE",
+        "ACCESS_WIMAX_STATE",
+        "TETHER_PRIVILEGED",
+        "CONTROL_VPN",
+        "BIND_VPN_SERVICE",
     )
 )
 GOOGLE_PERMISSION_PREFIXES = ("com.google.", "com.android.vending.")
-ACCESSIBILITY_OWN_PERMISSION = (
-    "com.google.android.marvin.talkback.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
-)
+ANDROID_PERMISSION_PREFIX = "android.permission."
+
+
+def accessibility_refused_permission(permission: str) -> bool:
+    """Whether TalkBack or eSpeak NG may not request this permission."""
+    if permission in ACCESSIBILITY_REFUSED_PERMISSIONS:
+        return True
+    if permission.startswith(GOOGLE_PERMISSION_PREFIXES):
+        return True
+    return permission.startswith(ANDROID_PERMISSION_PREFIX) and any(
+        word in permission[len(ANDROID_PERMISSION_PREFIX) :] for word in ACCESSIBILITY_REFUSED_WORDS
+    )
 
 
 def check_accessibility(infos: dict[str, zipfile.ZipInfo]) -> None:
@@ -2647,7 +2673,7 @@ def check_application_manifests(
     a package that is not installed grants nothing, so the request is what the check looks for,
     in every variant (a userdebug build never enters it, but the product list is one list), in
     every APK but the shell's (TRADE_IN_MODE_REQUESTERS). TalkBack and eSpeak NG request no
-    network permission and no Google service permission (ACCESSIBILITY_REFUSED_PERMISSIONS), in
+    network permission and no Google service permission (accessibility_refused_permission), in
     every variant. The check reads every APK of the image partitions; APKs inside an APEX payload
     are compressed EROFS and out of its reach.
     """
@@ -2679,13 +2705,7 @@ def check_application_manifests(
             )
         if any(pattern.fullmatch(entry) for pattern in ACCESSIBILITY_APKS.values()):
             refused = sorted(
-                permission
-                for permission in requested
-                if permission in ACCESSIBILITY_REFUSED_PERMISSIONS
-                or (
-                    permission.startswith(GOOGLE_PERMISSION_PREFIXES)
-                    and permission != ACCESSIBILITY_OWN_PERMISSION
-                )
+                permission for permission in requested if accessibility_refused_permission(permission)
             )
             if refused:
                 fail(

@@ -16,9 +16,11 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import importlib.util
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -66,7 +68,15 @@ NETWORK_PERMISSIONS = (
 )
 TALKBACK_MANIFEST = "talkback/src/main/AndroidManifest.xml"
 BRAILLE_DISPLAY_MANIFEST = "braille/brailledisplay/src/phone/AndroidManifest.xml"
+BRAILLE_KEYBOARD_MANIFEST = "braille/brailleime/src/phone/AndroidManifest.xml"
+# A signature guard for receivers that the installed package (com.android.talkback) never declares.
+UNDECLARED_GUARD_PERMISSION = (
+    "com.google.android.marvin.talkback.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+)
 PERMISSION_REQUEST = re.compile(r'<uses-permission[^>]*android:name="([^"]+)"')
+# An element that carries its name on the next line.
+PERMISSION_ELEMENT_OPEN = re.compile(r"<uses-permission\s*$")
+PERMISSION_NAME = re.compile(r'^\s*android:name="([^"]+)"')
 
 
 def requests_changed(project: str) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
@@ -77,13 +87,31 @@ def requests_changed(project: str) -> tuple[set[tuple[str, str]], set[tuple[str,
         if not line.startswith("patch\t"):
             continue
         path = ""
+        opened = ""
         for text in (PATCHES / project / line.split("\t")[1]).read_text(encoding="utf-8").splitlines():
             if text.startswith("+++ b/"):
                 path = text[len("+++ b/"):]
+            if not text or text[0] not in "+-" or not path.endswith("AndroidManifest.xml"):
+                opened = ""
+                continue
             request = PERMISSION_REQUEST.search(text[1:])
-            if request and text[0] in "+-" and path.endswith("AndroidManifest.xml"):
-                (added if text[0] == "+" else removed).add((path, request.group(1)))
+            name = PERMISSION_NAME.search(text[1:]) if opened == text[0] else None
+            if request or name:
+                (added if text[0] == "+" else removed).add((path, (request or name).group(1)))
+            opened = text[0] if PERMISSION_ELEMENT_OPEN.search(text[1:]) else ""
     return added, removed
+
+
+def load_verifier():
+    """Import the target-files verifier, whose hyphenated file name is not a module name."""
+    spec = importlib.util.spec_from_file_location("verify_target_files", VERIFIER)
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(VERIFIER.parent))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(VERIFIER.parent))
+    return module
 
 
 class AccessibilityPackageTests(unittest.TestCase):
@@ -92,8 +120,40 @@ class AccessibilityPackageTests(unittest.TestCase):
         for permission in NETWORK_PERMISSIONS:
             self.assertIn((TALKBACK_MANIFEST, permission), removed)
         self.assertIn((BRAILLE_DISPLAY_MANIFEST, "android.permission.INTERNET"), removed)
+        self.assertIn((BRAILLE_KEYBOARD_MANIFEST, UNDECLARED_GUARD_PERMISSION), removed)
         self.assertEqual({permission for _, permission in added} & set(NETWORK_PERMISSIONS), set())
         self.assertEqual(requests_changed("espeak-ng")[0], set())
+
+    def test_the_verifier_refuses_every_network_and_google_service_permission(self) -> None:
+        verifier = load_verifier()
+        refuse = verifier.accessibility_refused_permission
+        # Named in the list, so the list alone catches them.
+        for permission in verifier.ACCESSIBILITY_REFUSED_PERMISSIONS:
+            self.assertTrue(refuse(permission), permission)
+        # Caught by the name rule alone: the list does not name them.
+        by_name = tuple(f"android.permission.{name}" for name in (
+            "OVERRIDE_WIFI_CONFIG", "MANAGE_WIFI_NETWORK_SELECTION", "NETWORK_FACTORY",
+            "NETWORK_SIGNAL_STRENGTH_WAKEUP", "CONNECTIVITY_CONSTRAINED",
+            "WIFI_ACCESS_COEX_UNSAFE_CHANNELS", "ACCESS_WIMAX_SCAN", "INTERNET_PRIVILEGED"))
+        for permission in by_name:
+            self.assertNotIn(permission, verifier.ACCESSIBILITY_REFUSED_PERMISSIONS)
+            self.assertTrue(refuse(permission), permission)
+        # Google's namespace, with no exemption for the package TalkBack is built from.
+        for permission in (
+            UNDECLARED_GUARD_PERMISSION,
+            "com.google.android.marvin.talkback.OTHER",
+            "com.google.android.providers.gsf.permission.READ_GSERVICES",
+            "com.google.android.apps.aicore.service.BIND_SERVICE",
+            "com.android.vending.BILLING",
+        ):
+            self.assertTrue(refuse(permission), permission)
+        # Bluetooth, USB and the rest of what TalkBack and eSpeak NG keep are not network access.
+        for permission in tuple(f"android.permission.{name}" for name in (
+            "USE_FINGERPRINT", "READ_PHONE_STATE", "VIBRATE", "WAKE_LOCK", "MODIFY_AUDIO_SETTINGS",
+            "RECORD_AUDIO", "QUERY_ALL_PACKAGES", "RECEIVE_BOOT_COMPLETED", "FOREGROUND_SERVICE",
+            "POST_NOTIFICATIONS", "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "BLUETOOTH",
+            "BLUETOOTH_ADMIN", "BLUETOOTH_CONNECT", "BLUETOOTH_SCAN", "MANAGE_USB")):
+            self.assertFalse(refuse(permission), permission)
 
     def test_the_built_app_has_the_package_the_switch_recognises(self) -> None:
         patch = BUILD_PATCH.read_text(encoding="utf-8")

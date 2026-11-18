@@ -10,7 +10,9 @@ READ_GSERVICES and the AICore BIND_SERVICE (the Google Analytics, Primes
 and Gemini permissions), nor the unused GET_PACKAGE_SIZE; the braille
 display library's INTERNET request goes as well. The platform adds
 ACCESS_LOCAL_NETWORK only to an application that holds INTERNET, so the
-application holds none of the three.
+application holds none of the three. The braille keyboard's request for
+the receiver guard permission of Google's own package goes too: nothing
+declares it, and its receiver is registered not exported.
 
 Everything that needed those permissions is absent from the interface
 instead of disabled:
@@ -40,6 +42,15 @@ instead of disabled:
   carry, so its flag is off: no dialog asks to update Gboard, the New
   features pages and the gesture list do not offer it, and the two-finger
   double tap stays play/pause.
+- A stored "Summarize view" or "Describe image" gesture or key combo is
+  unassigned while the capability is off: the shared command entry
+  returns no feedback, so no stored value opens the online opt-in dialog.
+- Google Assistant is not offered: the two tutorial tips that recommend
+  it and the voice command help entry are removed, and the "assistant"
+  voice command no longer starts an activity.
+- The keymap changes page shows no Google help link, and the new key map
+  dialog no longer carries the help center address. Its text still says
+  "help center" in every language, because it has no separate sentence.
 
 The Gemini code stays compiled but unreachable: every entry point checks
 the flags above, and no request can leave the application without the
@@ -48,18 +59,23 @@ permission.
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  .../src/phone/AndroidManifest.xml             |  1 -
- .../dialog/ChangeGestureDialog.java           | 20 ++++++------
- talkback/src/main/AndroidManifest.xml         | 13 --------
+ .../brailleime/src/phone/AndroidManifest.xml  |  3 --
+ .../dialog/ChangeGestureDialog.java           | 20 +++++------
+ talkback/src/main/AndroidManifest.xml         | 13 -------
  .../actor/gemini/GeminiConfiguration.java     |  7 ++--
+ .../voicecommands/VoiceCommandProcessor.java  | 10 ------
  .../talkback/flags/FeatureFlagReader.java     |  6 +++-
- .../keyboard/NewKeymapNotificationDialog.java |  7 ----
- .../preference/TalkBackPreferenceFilter.java  | 11 +++++--
+ .../keyboard/NewKeymapNotificationDialog.java | 13 -------
+ .../TalkBackKeymapChangesActivity.java        | 32 ++++-------------
+ .../preference/TalkBackPreferenceFilter.java  | 11 ++++--
  .../base/PunctuationListPreference.java       |  8 -----
- .../utils/TalkbackFeatureSupport.java         | 21 ++----------
- .../training/TutorialConfigUtils.java         | 30 -----------------
- .../accessibility/utils/NetworkUtils.java     | 32 +++----------------
- .../utils/PackageManagerUtils.java            | 25 ++++-----------
- 12 files changed, 41 insertions(+), 140 deletions(-)
+ .../talkback/utils/GeminiCommandUtils.java    | 15 +++++++-
+ .../utils/TalkbackFeatureSupport.java         | 21 ++---------
+ .../training/TutorialConfigUtils.java         | 36 ++-----------------
+ .../training/VoiceCommandAndHelpConfigs.java  |  4 +--
+ .../accessibility/utils/NetworkUtils.java     | 32 +++--------------
+ .../utils/PackageManagerUtils.java            | 25 ++++---------
+ 17 files changed, 64 insertions(+), 193 deletions(-)
 
 diff --git a/braille/brailledisplay/src/phone/AndroidManifest.xml b/braille/brailledisplay/src/phone/AndroidManifest.xml
 index da09b79c66442d75150e23ddb54e3e9f3c995767..53d9a2f5bc455bdfc13eb40d5c36a30c93c85da8 100644
@@ -73,6 +89,20 @@ index da09b79c66442d75150e23ddb54e3e9f3c995767..53d9a2f5bc455bdfc13eb40d5c36a30c
    <!-- Bluetooth permissions introduced in API level 31. -->
    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+diff --git a/braille/brailleime/src/phone/AndroidManifest.xml b/braille/brailleime/src/phone/AndroidManifest.xml
+index 4453be0ee92936a60a6a57eab57f36974b8b1136..8fad79acf4dc5138e93813d30ef57ea447b01e91 100644
+--- a/braille/brailleime/src/phone/AndroidManifest.xml
++++ b/braille/brailleime/src/phone/AndroidManifest.xml
+@@ -9,9 +9,6 @@
+ 
+   <!-- Required for haptic feedback. -->
+   <uses-permission android:name="android.permission.VIBRATE" />
+-  <!-- Required to receive broadcasts from unexported receivers. -->
+-  <uses-permission
+-      android:name="com.google.android.marvin.talkback.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+ 
+   <application>
+     <service
 diff --git a/braille/brailleime/src/phone/java/com/google/android/accessibility/brailleime/dialog/ChangeGestureDialog.java b/braille/brailleime/src/phone/java/com/google/android/accessibility/brailleime/dialog/ChangeGestureDialog.java
 index 1e8ce3e10c7fe9791eda9cf51fb84202f6ba9073..8768f76929c10eca1b167d7f9fd82d19352197cf 100644
 --- a/braille/brailleime/src/phone/java/com/google/android/accessibility/brailleime/dialog/ChangeGestureDialog.java
@@ -185,6 +215,34 @@ index 6558b0acb7259a7c01a45a06a120002f99a26987..d235f08789b6cdbb87615075c1064d34
    }
  
    public static int imageQnaTypingSizeLimit(Context context) {
+diff --git a/talkback/src/main/java/com/google/android/accessibility/talkback/actor/voicecommands/VoiceCommandProcessor.java b/talkback/src/main/java/com/google/android/accessibility/talkback/actor/voicecommands/VoiceCommandProcessor.java
+index ee882b007bc435d198ac317b129d65c6e2132780..188538e208d4a13cf7d78d6732b7638afa7e32c4 100644
+--- a/talkback/src/main/java/com/google/android/accessibility/talkback/actor/voicecommands/VoiceCommandProcessor.java
++++ b/talkback/src/main/java/com/google/android/accessibility/talkback/actor/voicecommands/VoiceCommandProcessor.java
+@@ -45,7 +45,6 @@ import static com.google.android.accessibility.talkback.Interpretation.VoiceComm
+ import static com.google.android.accessibility.talkback.actor.voicecommands.VoiceCommandActor.RECOGNITION_SPEECH_DELAY_MS;
+ import static com.google.android.accessibility.talkback.analytics.TalkBackAnalytics.VOICE_COMMAND_RECOGNIZED;
+ import static com.google.android.accessibility.talkback.analytics.TalkBackAnalytics.VOICE_COMMAND_TYPE_ALL_APPS;
+-import static com.google.android.accessibility.talkback.analytics.TalkBackAnalytics.VOICE_COMMAND_TYPE_ASSISTANT;
+ import static com.google.android.accessibility.talkback.analytics.TalkBackAnalytics.VOICE_COMMAND_TYPE_BACK;
+ import static com.google.android.accessibility.talkback.analytics.TalkBackAnalytics.VOICE_COMMAND_TYPE_COPY;
+ import static com.google.android.accessibility.talkback.analytics.TalkBackAnalytics.VOICE_COMMAND_TYPE_COPY_LAST_UTTERANCE;
+@@ -748,15 +747,6 @@ public class VoiceCommandProcessor {
+       return true;
+     }
+ 
+-    // assistant voice command
+-    // command format: * assistant *
+-    if (containsWord(command, R.string.voice_commands_assistant)) {
+-      service.startActivity(
+-          new Intent(Intent.ACTION_VOICE_COMMAND).setFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+-      handleVoiceCommandRecognized(VOICE_COMMAND_TYPE_ASSISTANT);
+-      return true;
+-    }
+-
+     // home voice command
+     // command format: * home *, * desktop *
+     if (containsWord(command, R.string.voice_commands_home)
 diff --git a/talkback/src/main/java/com/google/android/accessibility/talkback/flags/FeatureFlagReader.java b/talkback/src/main/java/com/google/android/accessibility/talkback/flags/FeatureFlagReader.java
 index 94104e50020a98e0fdfc55af854c15755bd613dd..018f5e362993d08cf6657356ebe547a031c567de 100644
 --- a/talkback/src/main/java/com/google/android/accessibility/talkback/flags/FeatureFlagReader.java
@@ -204,10 +262,30 @@ index 94104e50020a98e0fdfc55af854c15755bd613dd..018f5e362993d08cf6657356ebe547a0
  
    public static boolean enableSpeakDialogContent(Context context) {
 diff --git a/talkback/src/main/java/com/google/android/accessibility/talkback/keyboard/NewKeymapNotificationDialog.java b/talkback/src/main/java/com/google/android/accessibility/talkback/keyboard/NewKeymapNotificationDialog.java
-index 40fb33c9d139d5702f46fc608505f059b09fc394..a0d77d984a1a93392553333ffe0c196e3aa55dc2 100644
+index 40fb33c9d139d5702f46fc608505f059b09fc394..6d1aa9a55aec8b9615f7012cffb72410270e3dd8 100644
 --- a/talkback/src/main/java/com/google/android/accessibility/talkback/keyboard/NewKeymapNotificationDialog.java
 +++ b/talkback/src/main/java/com/google/android/accessibility/talkback/keyboard/NewKeymapNotificationDialog.java
-@@ -51,7 +51,6 @@ public class NewKeymapNotificationDialog extends BaseDialog {
+@@ -22,7 +22,6 @@ import android.content.Context;
+ import android.content.DialogInterface;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
+-import android.net.Uri;
+ import android.view.LayoutInflater;
+ import android.view.View;
+ import androidx.annotation.StringRes;
+@@ -38,11 +37,6 @@ import com.google.android.libraries.accessibility.utils.log.LogUtils;
+ public class NewKeymapNotificationDialog extends BaseDialog {
+   private static final String TAG = "NewKeymapNotificationDialog";
+ 
+-  /** The URL to open when the user clicks the neutral button. */
+-  // TODO: b/410892855 - Update the URL to the final one.
+-  public static final Uri NEW_KEYMAP_HELP_PAGE_URI =
+-      Uri.parse("https://support.google.com/accessibility/android/answer/6110948");
+-
+   @StringRes private int messageResId = ID_NULL;
+ 
+   public NewKeymapNotificationDialog(
+@@ -51,7 +45,6 @@ public class NewKeymapNotificationDialog extends BaseDialog {
      this.messageResId = messageResId;
      setPositiveButtonStringRes(R.string.keycombo_new_keymap_notification_dialog_positive_button);
      setNegativeButtonStringRes(R.string.keycombo_new_keymap_notification_dialog_negative_button);
@@ -215,7 +293,7 @@ index 40fb33c9d139d5702f46fc608505f059b09fc394..a0d77d984a1a93392553333ffe0c196e
    }
  
    @Override
-@@ -67,12 +66,6 @@ public class NewKeymapNotificationDialog extends BaseDialog {
+@@ -67,12 +60,6 @@ public class NewKeymapNotificationDialog extends BaseDialog {
              TalkBackKeyboardShortcutPreferenceFragment.class.getName());
          context.startActivity(intent);
        }
@@ -228,6 +306,67 @@ index 40fb33c9d139d5702f46fc608505f059b09fc394..a0d77d984a1a93392553333ffe0c196e
        default -> {
          // Do nothing.
        }
+diff --git a/talkback/src/main/java/com/google/android/accessibility/talkback/keyboard/TalkBackKeymapChangesActivity.java b/talkback/src/main/java/com/google/android/accessibility/talkback/keyboard/TalkBackKeymapChangesActivity.java
+index 40b562a87aa76b01e52632f820fba30e18489911..db0626c038567f7b85228bb81cc3b2f6e0d01a2e 100644
+--- a/talkback/src/main/java/com/google/android/accessibility/talkback/keyboard/TalkBackKeymapChangesActivity.java
++++ b/talkback/src/main/java/com/google/android/accessibility/talkback/keyboard/TalkBackKeymapChangesActivity.java
+@@ -3,50 +3,30 @@ package com.google.android.accessibility.talkback.keyboard;
+ import static com.google.android.accessibility.utils.preference.PreferencesActivity.FRAGMENT_NAME;
+ 
+ import android.content.Intent;
+-import android.net.Uri;
+ import android.os.Bundle;
+-import android.text.SpannableString;
+-import android.text.SpannableStringBuilder;
+-import android.text.method.LinkMovementMethod;
+-import android.text.style.URLSpan;
++import android.text.Spanned;
+ import android.widget.Button;
+ import android.widget.TextView;
+-import androidx.annotation.VisibleForTesting;
+ import androidx.core.text.HtmlCompat;
+ import com.android.talkback.TalkBackPreferencesActivity;
+ import com.google.android.accessibility.talkback.R;
+ import com.google.android.accessibility.talkback.preference.base.TalkBackKeyboardShortcutPreferenceFragment;
+ import com.google.android.accessibility.utils.preference.BasePreferencesActivity;
+-import java.util.Locale;
+ 
+ /** Activity shows notifications for user how to switch to Default keymap. */
+ // TODO: b/370662049 - Remove this activity after the new keymap is fully launched.
+ public class TalkBackKeymapChangesActivity extends BasePreferencesActivity {
+ 
+-  @VisibleForTesting
+-  static final Uri HYPERLINK_DEFAULT_KEYMAP_HELP_PAGE =
+-      Uri.parse("https://support.google.com/accessibility/android/answer/6110948");
+-
+   @Override
+   public void onCreate(Bundle savedInstanceState) {
+     super.onCreate(savedInstanceState);
+     setContentView(R.layout.activity_talkback_keymap_changes);
+-    SpannableStringBuilder content =
+-        new SpannableStringBuilder(
+-            HtmlCompat.fromHtml(
+-                getString(R.string.keycombo_keymap_changes_activity_content),
+-                HtmlCompat.FROM_HTML_MODE_LEGACY));
+-    content.append("\n");
+-    SpannableString learnMore =
+-        SpannableString.valueOf(
+-            getString(R.string.keycombo_keymap_changes_activity_content_learn_more));
+-    URLSpan urlSpan =
+-        new URLSpan(
+-            HYPERLINK_DEFAULT_KEYMAP_HELP_PAGE + "?hl=" + Locale.getDefault().toLanguageTag());
+-    learnMore.setSpan(urlSpan, 0, learnMore.length(), SpannableString.SPAN_EXCLUSIVE_EXCLUSIVE);
+-    content.append(learnMore);
++    // The page offers no help link: it shows only the keymap text.
++    Spanned content =
++        HtmlCompat.fromHtml(
++            getString(R.string.keycombo_keymap_changes_activity_content),
++            HtmlCompat.FROM_HTML_MODE_LEGACY);
+     TextView contentTextView = findViewById(R.id.content);
+-    contentTextView.setMovementMethod(LinkMovementMethod.getInstance());
+     contentTextView.setText(content);
+ 
+     Button openSettings = findViewById(R.id.open_settings);
 diff --git a/talkback/src/main/java/com/google/android/accessibility/talkback/preference/TalkBackPreferenceFilter.java b/talkback/src/main/java/com/google/android/accessibility/talkback/preference/TalkBackPreferenceFilter.java
 index 3d4b05e807c9a4dca078047b2143e7dcc006e5a3..97137cb0ec69479688169b74ce875d43148bb1b0 100644
 --- a/talkback/src/main/java/com/google/android/accessibility/talkback/preference/TalkBackPreferenceFilter.java
@@ -270,6 +409,52 @@ index fdbaad1cb4372e3299dd6d354a1aff647aa27a2e..6e068814cd84e5b775109ec8f42ddc97
    }
  
    /** Dialog fragment of the preference. */
+diff --git a/talkback/src/main/java/com/google/android/accessibility/talkback/utils/GeminiCommandUtils.java b/talkback/src/main/java/com/google/android/accessibility/talkback/utils/GeminiCommandUtils.java
+index d95b305784dc8282c59f474b620f92fde6982aa7..c4d5db1384c4365ef9ae502fc300f05b9bcae858 100644
+--- a/talkback/src/main/java/com/google/android/accessibility/talkback/utils/GeminiCommandUtils.java
++++ b/talkback/src/main/java/com/google/android/accessibility/talkback/utils/GeminiCommandUtils.java
+@@ -21,13 +21,16 @@ import androidx.core.view.accessibility.AccessibilityNodeInfoCompat;
+ import com.google.android.accessibility.talkback.ActorState;
+ import com.google.android.accessibility.talkback.Feedback;
+ import com.google.android.accessibility.talkback.R;
++import com.google.android.accessibility.talkback.actor.ImageCaptioner;
++import com.google.android.accessibility.talkback.actor.gemini.GeminiConfiguration;
+ import com.google.android.accessibility.talkback.actor.gemini.GeminiFunctionUtils;
+ import com.google.android.accessibility.utils.output.FeedbackItem;
+ import com.google.android.accessibility.utils.output.SpeechController.SpeakOptions;
+ 
+ /**
+  * Utility class for Gemini functions called by {@link GestureController} and {@link
+- * KeyComboMapper}.
++ * KeyComboMapper}. Both return null, which the callers treat as no feedback, while the capability
++ * is off.
+  */
+ public final class GeminiCommandUtils {
+   private static final String TAG = "GeminiCommandUtils";
+@@ -42,6 +45,10 @@ public final class GeminiCommandUtils {
+ 
+   public static Feedback.Part.Builder feedbackForDescribeImage(
+       Context context, AccessibilityNodeInfoCompat node, ActorState actorState) {
++    // A stored "Describe image" gesture or key combo is unassigned while the capability is off.
++    if (!ImageCaptioner.supportsImageCaption(context)) {
++      return null;
++    }
+     if (node == null) {
+       return Feedback.speech(context.getString(R.string.image_caption_no_result), SPEAK_OPTIONS);
+     }
+@@ -51,6 +58,12 @@ public final class GeminiCommandUtils {
+ 
+   public static Feedback.Part.Builder feedbackForScreenOverview(
+       Context context, AccessibilityNodeInfoCompat node) {
++    // A stored "Summarize view" gesture or key combo is unassigned while the capability is off,
++    // so no stored value reaches the online opt-in dialog.
++    if (!ImageCaptioner.supportsImageCaption(context)
++        || !GeminiConfiguration.screenOverviewEnabled(context)) {
++      return null;
++    }
+     if (node == null) {
+       return Feedback.speech(context.getString(R.string.screen_overview_no_result), SPEAK_OPTIONS);
+     }
 diff --git a/talkback/src/main/java/com/google/android/accessibility/talkback/utils/TalkbackFeatureSupport.java b/talkback/src/main/java/com/google/android/accessibility/talkback/utils/TalkbackFeatureSupport.java
 index 8488d99403cf3d2a6fdc2301ca13d650bcd9c5f9..e95db8eeb5737a2a2a8211f889c8a253af1220bb 100644
 --- a/talkback/src/main/java/com/google/android/accessibility/talkback/utils/TalkbackFeatureSupport.java
@@ -312,7 +497,7 @@ index 8488d99403cf3d2a6fdc2301ca13d650bcd9c5f9..e95db8eeb5737a2a2a8211f889c8a253
  
    public static boolean supportMultipleAutoScroll() {
 diff --git a/talkback/src/phone/java/com/android/talkback/training/TutorialConfigUtils.java b/talkback/src/phone/java/com/android/talkback/training/TutorialConfigUtils.java
-index a28a306d21317f722cea91effb410ba59bcc7688..3fde3bf2ceb6e066e46bee424e0fffa193d1df2c 100644
+index a28a306d21317f722cea91effb410ba59bcc7688..17bd4cc62daf4b8a30d647ebc41e9486678e2c27 100644
 --- a/talkback/src/phone/java/com/android/talkback/training/TutorialConfigUtils.java
 +++ b/talkback/src/phone/java/com/android/talkback/training/TutorialConfigUtils.java
 @@ -173,15 +173,6 @@ final class TutorialConfigUtils {
@@ -363,7 +548,23 @@ index a28a306d21317f722cea91effb410ba59bcc7688..3fde3bf2ceb6e066e46bee424e0fffa1
                .addLink(
                    R.string.voice_commands_link_text,
                    R.string.voice_commands_link_subtext,
-@@ -948,9 +921,6 @@ final class TutorialConfigUtils {
+@@ -702,13 +675,11 @@ final class TutorialConfigUtils {
+               .captureAllGestures();
+       case PAGE_ID_ADDITIONAL_TIPS_MAKING_CALLS ->
+           PageConfig.builder(PAGE_ID_ADDITIONAL_TIPS_MAKING_CALLS, R.string.making_calls_title)
+-              .addText(R.string.making_calls_text)
+-              .addTip(R.string.making_calls_tips);
++              .addText(R.string.making_calls_text);
+       case PAGE_ID_ADDITIONAL_TIPS_SENDING_MESSAGES ->
+           PageConfig.builder(
+                   PAGE_ID_ADDITIONAL_TIPS_SENDING_MESSAGES, R.string.sending_messages_title)
+-              .addText(R.string.sending_messages_text)
+-              .addTip(R.string.sending_message_tips);
++              .addText(R.string.sending_messages_text);
+       case PAGE_ID_ADDITIONAL_TIPS_READING_WEB_EMAILS ->
+           PageConfig.builder(
+                   PAGE_ID_ADDITIONAL_TIPS_READING_WEB_EMAILS, R.string.reading_web_emails_title)
+@@ -948,9 +919,6 @@ final class TutorialConfigUtils {
          .addPageEndOfSection(
              getInitialPageBuilder(PAGE_ID_KEYBOARD_TUTORIAL_CUSTOMIZE_READING_CONTROLS));
  
@@ -373,6 +574,21 @@ index a28a306d21317f722cea91effb410ba59bcc7688..3fde3bf2ceb6e066e46bee424e0fffa1
      // Voice commands section
      builder.addPageEndOfSection(getInitialPageBuilder(PAGE_ID_KEYBOARD_TUTORIAL_VOICE_COMMANDS));
  
+diff --git a/talkback/src/phone/java/com/android/talkback/training/VoiceCommandAndHelpConfigs.java b/talkback/src/phone/java/com/android/talkback/training/VoiceCommandAndHelpConfigs.java
+index fafea27009e7f2f44870c22f0f19224305bcadf5..ca13634d8e0468381c9d7890e72a7c546b3e968b 100644
+--- a/talkback/src/phone/java/com/android/talkback/training/VoiceCommandAndHelpConfigs.java
++++ b/talkback/src/phone/java/com/android/talkback/training/VoiceCommandAndHelpConfigs.java
+@@ -124,9 +124,7 @@ final class VoiceCommandAndHelpConfigs {
+           .addTextWithBullet(R.string.voice_commands_quick_settings)
+           .addTextWithBullet(R.string.voice_commands_overview)
+           .addSubText(R.string.voice_commands_help_overview_description)
+-          .addTextWithBullet(R.string.voice_commands_all_apps, SUPPORT_SYSTEM_ACTIONS)
+-          .addTextWithBullet(R.string.voice_commands_assistant)
+-          .addSubText(R.string.voice_commands_help_assistant_description);
++          .addTextWithBullet(R.string.voice_commands_all_apps, SUPPORT_SYSTEM_ACTIONS);
+ 
+   static final PageConfig.Builder VoiceCommandOtherCommands =
+       PageConfig.builder(
 diff --git a/utils/src/main/java/com/google/android/accessibility/utils/NetworkUtils.java b/utils/src/main/java/com/google/android/accessibility/utils/NetworkUtils.java
 index 38c45513bab92d83d6ffa24ffe07d75146178f14..ea47370f9f89c75661b8ab034db23073885fe30e 100644
 --- a/utils/src/main/java/com/google/android/accessibility/utils/NetworkUtils.java

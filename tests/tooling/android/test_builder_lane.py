@@ -229,6 +229,11 @@ def synthetic_arm_elf(
     return with_imports(bytes(payload), False, imports) if imports is not None else bytes(payload)
 
 
+# The permission the braille keyboard used to request for a receiver guard nobody declared: it is
+# under Google's namespace, and the verifier has no exemption for it.
+OLD_GUARD_PERMISSION = "com.google.android.marvin.talkback.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+
+
 def synthetic_compiled_manifest(
     target_sdk: int | None, *, string_value: bool = False, debuggable: bool | str | None = None,
     permissions: tuple[str, ...] = (), declared: tuple[str, ...] = (), utf8: bool = False,
@@ -3580,19 +3585,20 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         f"{result.returncode} {result.stdout}"
                     )
 
-        # TalkBack keeps the permissions of its other features, among them the signature
-        # permission under its own package name that guards its receivers, and an application
-        # that declares the network permission does not request it: every variant accepts both.
+        # TalkBack keeps the permissions of its other features, Bluetooth and location among them,
+        # and an application that declares the network permission does not request it: every
+        # variant accepts both. None of the kept permissions is a network permission.
         for variant in BUILD_VARIANTS:
             fixture = root / f"{variant}-with-talkback-permissions-it-keeps.zip"
             write_fixture(
                 fixture, build_variant=variant,
                 entries={"PRODUCT/app/TalkBack/TalkBack.apk": synthetic_apk(
-                    permissions=("android.permission.RECORD_AUDIO", "android.permission.VIBRATE",
-                                 "android.permission.WAKE_LOCK",
-                                 "android.permission.BLUETOOTH_CONNECT",
-                                 "com.google.android.marvin.talkback."
-                                 "DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"),
+                    permissions=tuple(f"android.permission.{name}" for name in (
+                        "USE_FINGERPRINT", "READ_PHONE_STATE", "VIBRATE", "WAKE_LOCK",
+                        "MODIFY_AUDIO_SETTINGS", "RECORD_AUDIO", "QUERY_ALL_PACKAGES",
+                        "RECEIVE_BOOT_COMPLETED", "FOREGROUND_SERVICE", "POST_NOTIFICATIONS",
+                        "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "BLUETOOTH",
+                        "BLUETOOTH_ADMIN", "BLUETOOTH_CONNECT", "BLUETOOTH_SCAN")),
                     sdk23=("android.permission.WAKE_LOCK",),
                     declared=("android.permission.INTERNET",))},
             )
@@ -4193,9 +4199,15 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("talkback-that-requests-the-network-as-an-sdk-23-permission",
              {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
                           synthetic_apk(sdk23=("android.permission.INTERNET",))}}),
-            ("talkback-that-requests-another-permission-of-its-own-package",
+            ("talkback-that-requests-the-old-guard-permission",
              {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
-                          synthetic_apk(permissions=("com.google.android.marvin.talkback.OTHER",))}}),
+                          synthetic_apk(permissions=(OLD_GUARD_PERMISSION,))}}),
+            ("espeak-that-requests-the-old-guard-permission",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=(OLD_GUARD_PERMISSION,))}}),
+            ("talkback-that-requests-the-network-settings-permission",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("android.permission.NETWORK_SETTINGS",))}}),
             ("device-diagnostics-in-the-image",
              {"extra_entry": "SYSTEM/priv-app/DeviceDiagnostics/DeviceDiagnostics.apk"}),
             ("application-without-a-manifest",
@@ -4927,10 +4939,20 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           synthetic_apk(sdk23=("android.permission.INTERNET",))}},
              "PRODUCT/app/TalkBack/TalkBack.apk requests android.permission.INTERNET: "
              "TalkBack and eSpeak NG hold no network access"),
-            ("talkback-that-requests-another-permission-of-its-own-package-cause",
+            ("talkback-that-requests-the-old-guard-permission-cause",
              {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
-                          synthetic_apk(permissions=("com.google.android.marvin.talkback.OTHER",))}},
-             "PRODUCT/app/TalkBack/TalkBack.apk requests com.google.android.marvin.talkback.OTHER: "
+                          synthetic_apk(permissions=(OLD_GUARD_PERMISSION,))}},
+             f"PRODUCT/app/TalkBack/TalkBack.apk requests {OLD_GUARD_PERMISSION}: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("espeak-that-requests-the-old-guard-permission-cause",
+             {"entries": {"PRODUCT/app/eSpeakNG/eSpeakNG.apk":
+                          synthetic_apk(permissions=(OLD_GUARD_PERMISSION,))}},
+             f"PRODUCT/app/eSpeakNG/eSpeakNG.apk requests {OLD_GUARD_PERMISSION}: "
+             "TalkBack and eSpeak NG hold no network access"),
+            ("talkback-that-requests-the-network-settings-permission-cause",
+             {"entries": {"PRODUCT/app/TalkBack/TalkBack.apk":
+                          synthetic_apk(permissions=("android.permission.NETWORK_SETTINGS",))}},
+             "PRODUCT/app/TalkBack/TalkBack.apk requests android.permission.NETWORK_SETTINGS: "
              "TalkBack and eSpeak NG hold no network access"),
             ("device-diagnostics-in-the-image-cause",
              {"extra_entry": "SYSTEM/priv-app/DeviceDiagnostics/DeviceDiagnostics.apk"},
