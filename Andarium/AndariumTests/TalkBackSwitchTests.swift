@@ -720,6 +720,30 @@ struct TalkBackSwitchTests {
         #expect(said.high == [true])
     }
 
+    /// A change that ends while the run's sentence is spoken says nothing over
+    /// it and sets nothing: the sentence's end reads again and tells it, once.
+    @Test func aChangeThatEndsWhileTheRunStartSentenceIsSpokenIsToldAfterIt() async throws {
+        let (model, _) = started(voiceOver: true, interval: .milliseconds(20))
+        let said = listen(to: model)
+        let spoken = RunStartSpeech()
+        model.runStartAnnouncer = { text, finished in
+            spoken.lines.append(text)
+            spoken.finish = finished
+        }
+        model.announceRunStart(.running(.normal))
+        try await settle { model.session.reader.state != nil }
+        model.setScreenReader(true)
+        try await settle { model.session.reader.isOn && model.session.reader.changing == nil }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(said.lines.isEmpty)
+        #expect(!model.session.reader.toldOn)
+        spoken.finish?(true)
+        #expect(said.lines == [ScreenReaderWords.announcement(on: true, edge: model.session.keysEdge)])
+        #expect(said.high == [true])
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(said.lines.count == 1)
+    }
+
     @Test func aScreenThatSpeaksForItselfAnnouncesNothingAtItsStart() throws {
         let (model, _) = started(voiceOver: true)
         let spoken = RunStartSpeech()

@@ -153,9 +153,13 @@ extension AppModel {
                 }
                 reader.finishChange(after)
                 if on {
-                    // The way back is said with the news, once.
-                    reader.toldOn = true
-                    announce(ScreenReaderWords.announcement(on: true, edge: session.keysEdge), highPriority: true)
+                    // The way back is said with the news, once. While the run's
+                    // start sentence is spoken it is not said over it: the
+                    // sentence's end reads again, and says it as at a start.
+                    if !reader.runStartAnnouncing {
+                        reader.toldOn = true
+                        announce(ScreenReaderWords.announcement(on: true, edge: session.keysEdge), highPriority: true)
+                    }
                 } else {
                     announce(ScreenReaderWords.announcement(on: false, edge: session.keysEdge))
                 }
