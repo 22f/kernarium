@@ -1986,9 +1986,13 @@ void another_generations_change_reaches_native_code(
 				require(same(want, b.result, c));
 				refused += b.stats.enters == 0 ? 1 : 0;
 			}
+			/* The page's retry is answered by the table when verdicts are
+			 * shared, and by one hash when they are not. */
 			require(b.stats.enters > 0 && b.stats.steps == 0 && refused > 1 &&
 				answered_by_the_table(b.stats) &&
-				b.stats.binds - refused_binds + 1 == b.stats.shared_hits);
+				b.stats.binds - refused_binds + 1 ==
+					(AOT_TEST_SHARED_VERDICTS != 0 ? b.stats.shared_hits :
+					 b.stats.verifications));
 			writer.change(changed, route);
 			const auto d = run_shared(*retried, c);
 			if (!same(want_changed, d.result, c) || d.stats.enters != 0) {
