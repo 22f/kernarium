@@ -585,6 +585,18 @@ void vp9Stream()
         require(load<virtio_video_cmd_hdr>(video.command(set).response).type == VIRTIO_VIDEO_RESP_ERR_INVALID_PARAMETER,
                 "a VP9 size beyond the rectangle was accepted");
     }
+    // Below the minimum on either axis is refused, on the coded queue and on the picture queue.
+    for (const auto& [width, height] : {std::pair {63u, 64u}, std::pair {64u, 63u}, std::pair {32u, 4096u},
+                                        std::pair {4096u, 1u}}) {
+        set.params.frame_width = width; set.params.frame_height = height;
+        require(load<virtio_video_cmd_hdr>(video.command(set).response).type == VIRTIO_VIDEO_RESP_ERR_INVALID_PARAMETER,
+                "a VP9 size below the rectangle was accepted");
+        auto picture = set;
+        picture.params.queue_type = VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT;
+        picture.params.format = VIRTIO_VIDEO_FORMAT_NV12;
+        require(load<virtio_video_cmd_hdr>(video.command(picture).response).type == VIRTIO_VIDEO_RESP_ERR_INVALID_PARAMETER,
+                "a VP9 picture size below the rectangle was accepted");
+    }
     set.params.frame_width = 64; set.params.frame_height = 64;
     video.ok(set);
     video.setOutputFormat(VIRTIO_VIDEO_FORMAT_NV12);

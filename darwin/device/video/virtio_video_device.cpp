@@ -763,6 +763,11 @@ public:
             if (cap == capabilities.end() || !validQueue(p.queue_type) || !p.frame_width || !p.frame_height ||
                 p.frame_width > cap->maximumWidth || p.frame_height > cap->maximumHeight)
                 throw std::invalid_argument("invalid video parameters");
+            // The range the device states starts at the VP9 minimum, and its hardware opens nothing below it.
+            if (cap->codec == uml::platform::VideoCodec::vp9 &&
+                (p.frame_width < uml::platform::kVp9DecodeMinimumSide ||
+                 p.frame_height < uml::platform::kVp9DecodeMinimumSide))
+                throw std::invalid_argument("video parameters below the advertised minimum");
             if (p.queue_type == VIRTIO_VIDEO_QUEUE_TYPE_INPUT) {
                 if (p.format != stream.coded) {
                     if (!stream.resources.empty() || stream.sourceKnown)

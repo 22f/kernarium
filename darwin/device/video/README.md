@@ -59,8 +59,9 @@ without asking each other.
   Profile 2 (10-bit 4:2:0), up to 4096 x 4096 each; the driver's VP9 profile
   menu lists the profiles the host lists and it publishes no VP9 level
   control. The range is the square Android states for `c2.v4l2.vp9.decoder`,
-  which it applies to both axes. A 10-bit stream reaches an 8-bit capture
-  format narrowed to the high 8 bits, as HEVC Main 10 does.
+  which it applies to both axes, from 64 samples on each. A 10-bit stream
+  reaches an 8-bit capture format narrowed to the high 8 bits, as HEVC Main 10
+  does.
   `platform-video-decoder` decodes at the stated maximums, so a host whose
   hardware does less fails that test and not a guest.
 - **Flow.** Input is complete Annex B access units, complete JPEG images, or VP9

@@ -502,6 +502,11 @@ private:
                     throw std::runtime_error("unsupported VP9 profile");
                 if (header.size && (header.size->width > limit.width || header.size->height > limit.height))
                     throw std::runtime_error("video dimensions exceed decoder capabilities");
+                /* The hardware refuses to open a session below the minimum, and
+                 * only once the decoder has moved on to the new picture. */
+                if (header.size && (header.size->width < kVp9DecodeMinimumSide ||
+                                    header.size->height < kVp9DecodeMinimumSide))
+                    throw std::runtime_error("video dimensions are below decoder capabilities");
             }
             // A superframe reaches the decoder whole; its first frame's header
             // is the one that can resize the stream.

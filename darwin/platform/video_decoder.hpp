@@ -26,6 +26,11 @@ struct VideoDecodeCapability {
     std::uint32_t bitDepth;
 };
 
+// The smallest side of a VP9 picture the host decodes. The capability list
+// states 64 for every codec, but the VP9 hardware is the one that refuses a
+// session below it, and only after a decoder has taken the new size on.
+inline constexpr std::uint32_t kVp9DecodeMinimumSide = 64;
+
 struct VideoFormat {
     std::uint32_t width {};
     std::uint32_t height {};

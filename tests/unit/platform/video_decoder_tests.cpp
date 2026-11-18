@@ -711,6 +711,16 @@ void vp9Hostile(const std::vector<uml::platform::VideoDecodeCapability>& capabil
         {"a key frame 65536 x 65536", frames::key(65536, 65536)},
         {"a profile 2 key frame 4097 wide", frames::keyFrame(2, 4097, 16)},
         {"a profile 2 key frame 8192 x 8192", frames::keyFrame(2, 8192, 8192)},
+        // Below the 64 samples the hardware opens a session for, on either axis and in whichever frame it is stated.
+        {"a key frame 63 wide", frames::key(63, 64)},
+        {"a key frame 63 high", frames::key(64, 63)},
+        {"a key frame 32 x 64", frames::key(32, 64)},
+        {"a key frame 1 x 1", frames::key(1, 1)},
+        {"a profile 2 key frame 63 wide", frames::keyFrame(2, 63, 64)},
+        {"a hidden frame below the minimum in a superframe", frames::superframe({real, frames::inter(false, 64, 32)})},
+        {"an intra-only frame below the minimum in a superframe",
+            frames::superframe({real, frames::intraOnly(0, 48, 200)})},
+        {"a key frame below the minimum after a shown frame", frames::superframe({real, frames::key(63, 63)})},
         // The profiles and depths the hardware path does not carry.
         {"a 12-bit profile 2 key frame", frames::keyFrame(2, 64, 64, {.twelveBit = true})},
         {"a profile 2 key frame of RGB", frames::keyFrame(2, 64, 64, {.colorSpace = 7})},
