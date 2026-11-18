@@ -881,10 +881,13 @@ blocker in every one of them.
 - `aot-guest-workloads` (integration, opt-in like the other Android guest
   tests: it exists where `UML_AOT_IMAGE` and the Android launcher target do)
   boots the release twice, without and with `DARWIN_UML_AOT=1`, runs the
-  covered library families' workloads three times each, the guest probe
+  covered library families' workloads three times each (a Java command
+  among them, which runs the boot image's compiled code), the guest probe
   (faults inside rewritten libz code, text patched at run time), the debug
   rows and the share rows, and requires every command to succeed with
-  identical output; `run_aot_guest.py` lists what each part judges.
+  identical output; `run_aot_guest.py` lists what each part judges. With
+  `UML_AOT_DIAGNOSTICS` the AOT arm must also have entered the main boot
+  oats when the framework translates boot code.
   The debug rows (`aot_guest_debug.cpp`, `debug_rows.py`) compare what a
   debugger and the crash reporter see: tombstones of crashes in rewritten
   libz and libc, and a tracer's registers, breakpoints and steps. The program

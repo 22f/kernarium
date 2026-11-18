@@ -254,6 +254,7 @@ set_property(GLOBAL PROPERTY UML_AOT_FUNCTIONS "${_uml_aot_dir}/functions.txt")
 set_property(GLOBAL PROPERTY UML_AOT_LIBRARY_FILES "${_uml_aot_dir}/libraries.txt")
 set_property(GLOBAL PROPERTY UML_AOT_SITES "${_uml_aot_dir}/sites.txt")
 set_property(GLOBAL PROPERTY UML_AOT_STEPS "${_uml_aot_dir}/steps.txt")
+set_property(GLOBAL PROPERTY UML_AOT_BOOT_CODE "${UML_AOT_BOOT_CODE}")
 
 # The part the gadget executor links: the binder and the entry call. The
 # product target is compiled with no counter, report or test switch in any

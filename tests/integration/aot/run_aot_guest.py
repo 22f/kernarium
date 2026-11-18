@@ -6,7 +6,8 @@ The guest is the release on a fresh data disk, started with the macOS launcher
 (tools/boot_android.py) twice: once as the engine runs it, once with
 DARWIN_UML_AOT=1 (docs/architecture.md, "Ahead-of-time code"). In each the
 runner executes one workload per family of the libraries the framework covers
-(zlib, libcrypto, libc, libpcre2 through libselinux, libbinder) and, when
+(zlib, libcrypto, libc, libpcre2 through libselinux, libbinder, and the
+boot image's compiled Java through a Java command) and, when
 given, the guest probe (aot_guest_probe.cpp), which takes faults inside
 rewritten libz code and patches covered text at run time.
 
@@ -132,6 +133,7 @@ run libc_sort "$T sort -r $D/n.txt"
 run libc_grep "$T grep -c 9.*9.*9 $D/n.txt"
 run pcre2_restorecon "restorecon -n -R /system/lib64 && echo done"
 run binder_cmd "i=0; while [ \$i -lt 5 ]; do cmd package list packages; i=\$((i+1)); done | $T wc -l"
+run java_content "content query --uri content://settings/system --projection name --where \"name='screen_off_timeout'\""
 rm -f $D/w.gz $D/n.txt $D/o.out $D/t.err $D/rc
 echo workloads-done
 """

@@ -73,11 +73,19 @@ if(TARGET uml_arm64_aot_framework AND TARGET uml-darwin-android17)
     set(_uml_aot_diagnostics_args)
     if(UML_AOT_DIAGNOSTICS)
         get_property(_uml_aot_manifest GLOBAL PROPERTY UML_AOT_MANIFEST)
+        get_property(_uml_aot_boot_code GLOBAL PROPERTY UML_AOT_BOOT_CODE)
+        # Libraries the workloads and the booted system run: every one
+        # the framework covers, and the boot image's compiled code that every
+        # Java process runs when the framework translates it.
+        set(_uml_aot_expect_entered
+            libc.so,linker64,libart.so,libhwui.so,venus_gallium_dri.so,surfaceflinger,libcrypto.so,libpcre2.so,libbinder.so,libz.so)
+        if(_uml_aot_boot_code)
+            string(APPEND _uml_aot_expect_entered
+                ,boot.oat,boot-framework.oat,boot-core-libart.oat,boot-core-icu4j.oat)
+        endif()
         set(_uml_aot_diagnostics_args --diagnostics
             --manifest ${_uml_aot_manifest}
-            # Libraries the workloads and the booted system run: every one
-            # the framework covers.
-            --expect-entered libc.so,linker64,libart.so,libhwui.so,venus_gallium_dri.so,surfaceflinger,libcrypto.so,libpcre2.so,libbinder.so,libz.so)
+            --expect-entered ${_uml_aot_expect_entered})
     endif()
     uml_add_integration_test(
         NAME aot-guest-workloads
