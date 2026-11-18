@@ -266,6 +266,8 @@ private extension View {
                 .overlay {
                     Color.clear
                         .contentShape(Rectangle())
+                        // The element is for VoiceOver; touches go to the mock guest under it.
+                        .allowsHitTesting(false)
                         .accessibilityElement()
                         .accessibilityLabel(ScreenReaderWords.displayLabel)
                         .accessibilityValue(offered && !reader.displayWaitsForRead ? ScreenReaderWords.displayValue(reader) : "")
