@@ -97,8 +97,12 @@ final class ScreenReaderSession {
     var declined = false
     /// VoiceOver has been told that the screen reader is on, and how to come
     /// back, in this session: by the change that turned it on, or at the first
-    /// read that found it on.
+    /// read that found it on, where the display's own words did not carry it.
     var toldOn = false
+    /// Android's first answer in this session found the screen reader on: it
+    /// was on before the run began, and no change of this session turned it on.
+    @ObservationIgnored private(set) var wasOnAtStart = false
+    @ObservationIgnored private var answered = false
     /// The card that says the image has none has been shown in this session.
     var toldMissing = false
     /// How many Settings sheets watch the state.
@@ -184,6 +188,10 @@ final class ScreenReaderSession {
         state = answer
         readFailed = answer == nil
         if let answer {
+            if !answered {
+                answered = true
+                wasOnAtStart = answer.isOn
+            }
             noticeTurnedOff(answer)
             // What the card said about not being able to ask is answered.
             if failure == nil { cardFailure = nil }
@@ -212,6 +220,7 @@ final class ScreenReaderSession {
         changing = nil
         state = after
         readFailed = false
+        answered = true
         noticeTurnedOff(after)
     }
 
