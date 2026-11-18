@@ -586,14 +586,17 @@ so these tests drive the interface and read no speech. The hosted
 (and fail after a partial write): overlapping reads and changes, an operation
 that the session's end cancels, or that answers after it, the card, the
 display's direct touch, the loop that reads, and what VoiceOver is told (once
-per event, with the way back, and the run start's sentence announced with the
-card and the display's focus waiting for its end, or for the bound); a wait in them fails where what it waited
+per event, with the way back; the run start's sentence and the news that the
+screen reader is on at high priority, with the card, the news and the display's
+focus waiting for the sentence's end, or for the bound; the display with no
+value until Android has been read); a wait in them fails where what it waited
 for did not happen. `GuestDisplayAccessibilityTests` read the display's
-accessibility structure: one element with the screen reader off, and with it
-on a container of one direct-touch element that carries the words, covers the
-display and follows its layout. `ScreenReaderAdapterTests` run the adapter over a shell that answers
-as told, and `ScreenReaderShellTests` in `andarium-core` run the commands in a
-real shell with fake `am`, `pm` and `settings` tools that keep a store per user.
+accessibility structure: one element with the screen reader off, and with it on
+a container of one direct-touch element that carries the words, covers the
+display and follows its layout. `ScreenReaderAdapterTests` run the adapter over
+a shell that answers as told, and `ScreenReaderShellTests` in `andarium-core`
+run the commands in a real shell with fake `am`, `pm` and `settings` tools that
+keep a store per user.
 
 The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
 `andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.

@@ -265,10 +265,13 @@ extension AppModel {
     /// moment after the screen change would cut a queued or default
     /// announcement off after a second); then, where Android's screen reader
     /// was on at the start, the news that it is on (`evaluateScreenReaderCard`),
-    /// queued behind it, or the card that asks, which waits for the sentence's
-    /// end and then takes the focus. The wait ends at the sentence's end, or
-    /// after `runStartBound` where VoiceOver reports none. The screen change's
-    /// argument is no place for the sentence: VoiceOver does not speak it.
+    /// also at high priority, or the card that asks. Both wait for the
+    /// sentence's end, or for `runStartBound` where VoiceOver reports none.
+    /// VoiceOver adds speech of its own: the element it lands on after the
+    /// screen change (the display, with its label alone until Android has been
+    /// read), held behind the sentence, and its words again when the display
+    /// becomes a direct-touch element. The screen change's argument is no
+    /// place for the sentence: VoiceOver does not speak it.
     func announceRunStart(_ phase: Phase) {
         VoiceOver.screenChanged()
         guard let words = RootView.spoken(phase), voiceOverRunning() else { return }

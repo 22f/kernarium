@@ -46,8 +46,9 @@ enum VoiceOver {
         var token: NSObjectProtocol?
     }
 
-    /// The screen changed as a whole: VoiceOver moves to its first element,
-    /// and says `text` instead when it is given.
+    /// The screen changed as a whole: VoiceOver moves to its first element.
+    /// It did not speak `text` where that was a run's start sentence, so a
+    /// sentence is said with `announce`.
     static func screenChanged(_ text: String? = nil) {
         guard UIAccessibility.isVoiceOverRunning else { return }
         UIAccessibility.post(notification: .screenChanged, argument: text)

@@ -104,7 +104,8 @@ With `directTouch` the display is instead a container of one child element that
 covers it and carries the words, the trait `allowsDirectInteraction` and
 `silentOnTouch`, so touches reach the guest as they do with VoiceOver off and
 VoiceOver says nothing of them; `takesFocus` moves VoiceOver's focus onto that
-child as it appears, and only the child does it (the trait and option on the
+child each time it turns true (as the child appears, and when nothing covers
+the display any more), and only the child does it (the trait and option on the
 view itself do not pass touches). Without `accessibility` the display is no
 element.
 Kernarium passes none.

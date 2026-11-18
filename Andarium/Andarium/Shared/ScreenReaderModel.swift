@@ -103,7 +103,7 @@ final class ScreenReaderSession {
     var toldMissing = false
     /// How many Settings sheets watch the state.
     var settingsOpen = 0
-    /// The sentence that says what the run is, queued as the run began, is
+    /// The sentence that says what the run is, announced as the run began, is
     /// still being spoken to VoiceOver: neither the card that asks nor the
     /// display's direct-touch element takes VoiceOver's focus until it has
     /// been.

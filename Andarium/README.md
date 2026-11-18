@@ -913,11 +913,11 @@ requires reopening Andarium.
   start is announced at high priority, which VoiceOver's own speech of the
   element its cursor lands on after the screen change does not cut off; the
   display's element takes VoiceOver's focus once it has been spoken, with
-  nothing over the display, and the card that asks waits for it too (at most
-  15 seconds, where VoiceOver reports no end) and then takes the focus on its
-  own title. Each option row on
-  Home reads as one element, its control, which carries the row's title as its
-  label (the title is no second stop), followed by the line under it.
+  nothing over the display, and the card that asks, and the news that the screen
+  reader is on, wait for it too (at most 15 seconds, where VoiceOver reports no
+  end); the card then takes the focus on its own title. Each option row on Home
+  reads as one element, its control, which carries the row's title as its label
+  (the title is no second stop), followed by the line under it.
 - **Keyboard and mouse.** The guest has a hardware keyboard and a mouse
   (virtio-input devices, plugged and unplugged at run time) while iOS has the
   hardware. Every key goes to Android as its position (the usage on the HID
