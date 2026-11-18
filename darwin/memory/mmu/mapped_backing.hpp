@@ -82,7 +82,8 @@ public:
 		const void *handle, RecordStamp &stamp) noexcept;
 	/* A publication that names no frame, to every generation: a kernel
 	 * write whose target page its address space does not map. Moves the
-	 * epoch of every page at once, for good. */
+	 * epoch of every page at once, for good: the count stops at its limit,
+	 * where every stamp reports never-share. */
 	static void note_unnamed_publication() noexcept;
 	/* A publication: the page's bytes were written through a path no
 	 * translated store saw. Moves the version and the epoch, except that a

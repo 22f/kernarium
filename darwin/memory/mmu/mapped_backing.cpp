@@ -37,8 +37,9 @@ constexpr std::uint64_t fresh_never_share = std::uint64_t{1} << 63;
 /* Publications that name no frame: a kernel write whose target page its
  * address space does not map reaches every generation but moves no record.
  * The count rides in the high bits of every page's reported epoch, which
- * moves the epoch of every page at once; it fails closed (no verdict is
- * shared again) before it can carry out of its field. */
+ * moves the epoch of every page at once. It stops at its limit, and a stamp
+ * that loads it there says never-share (no verdict is shared again) before
+ * the field could wrap. */
 constexpr unsigned unnamed_shift = 39;
 constexpr std::uint64_t unnamed_limit = std::uint64_t{1} << 24;
 std::atomic_uint64_t unnamed_publications{};
@@ -313,14 +314,23 @@ bool MappedBacking::load_code_page_stamp(
 	const auto unnamed = unnamed_publications.load(std::memory_order_acquire);
 	stamp.epoch = ((fresh & fresh_epoch_mask) >> 24) |
 		((unnamed & (unnamed_limit - 1)) << unnamed_shift);
-	stamp.never_share = (fresh & fresh_never_share) != 0;
+	/* A count at its limit would read as zero in its field: it says
+	 * never-share from this very load, not from the latch, which is set
+	 * after the count and which a reader can run ahead of. */
+	stamp.never_share = (fresh & fresh_never_share) != 0 ||
+		unnamed >= unnamed_limit;
 	return true;
 }
 
 void MappedBacking::note_unnamed_publication() noexcept
 {
-	if (unnamed_publications.fetch_add(1, std::memory_order_seq_cst) + 1 >=
-	    unnamed_limit)
+	/* The count stops at its limit. */
+	auto count = unnamed_publications.load(std::memory_order_relaxed);
+	while (count < unnamed_limit &&
+	       !unnamed_publications.compare_exchange_weak(count, count + 1,
+		       std::memory_order_seq_cst, std::memory_order_relaxed)) {
+	}
+	if (count + 1 >= unnamed_limit)
 		latch_sharing_off();
 }
 
@@ -435,6 +445,21 @@ namespace testing {
 void clear_sharing_latch() noexcept
 {
 	sharing_latched.store(false, std::memory_order_relaxed);
+}
+
+void set_unnamed_publication_count(std::uint64_t count) noexcept
+{
+	unnamed_publications.store(count, std::memory_order_seq_cst);
+}
+
+std::uint64_t unnamed_publication_count() noexcept
+{
+	return unnamed_publications.load(std::memory_order_seq_cst);
+}
+
+std::uint64_t unnamed_publication_limit() noexcept
+{
+	return unnamed_limit;
 }
 } // namespace testing
 #endif

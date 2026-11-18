@@ -79,6 +79,13 @@ void count_anomaly() noexcept;
 [[nodiscard]] std::size_t count_anomalies() noexcept;
 /* Lets a test that provoked an anomaly on purpose share again. */
 void clear_sharing_latch() noexcept;
+/* The process-wide count of publications that name no frame
+ * (MappedBacking::note_unnamed_publication), which a test sets near its limit
+ * and reads back. The limit is the count at which the stamp reports
+ * never-share and the count stops. */
+void set_unnamed_publication_count(std::uint64_t count) noexcept;
+[[nodiscard]] std::uint64_t unnamed_publication_count() noexcept;
+[[nodiscard]] std::uint64_t unnamed_publication_limit() noexcept;
 /* The frame accounting holds a frame's stripe lock between these two calls on
  * the thread that holds it; a checkpoint reached in between is an allocation
  * under a stripe lock, which is counted. */

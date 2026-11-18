@@ -778,6 +778,83 @@ void test_a_kernel_write_to_a_page_nobody_maps_moves_every_epoch()
 	require(darwin_uml_static_vm_destroy(writer) == 0);
 }
 
+/* The count of publications that name no frame rides in the high bits of
+ * every reported epoch, in a field of its own. At its limit the field would
+ * wrap to the value it had before any such write, so a stamp reports
+ * never-share from the very load of the count that reached the limit (not
+ * from a flag set after it, which a reader can run ahead of), and the count
+ * stops there. The row sets the count near the limit through the test seam. */
+void test_the_count_of_unnamed_publications_fails_closed_at_its_limit()
+{
+	namespace testing = uml::memory::testing;
+	constexpr unsigned long reader = 517, writer = 518;
+	constexpr unsigned long base = 0x1c0'0000, view = 0x1d0'0000;
+	ScratchBacking backing{backing_name, page};
+	map(reader, base, backing, 0, 1, rx, 3);
+	map(writer, view, backing, 0, 1, rw, 0);
+	unmap(writer, view, 1);
+	require(darwin_uml_static_vm_activate(reader) == 0);
+	void *handle = nullptr;
+	darwin_uml_static_code_page_stamp stamp{};
+	require(darwin_uml_static_vm_code_page(reader, base, &handle, &stamp) ==
+		DARWIN_UML_STATIC_TRANSLATED);
+	const auto stamp_now = [&] {
+		darwin_uml_static_code_page_stamp now{};
+		require(darwin_uml_static_vm_code_page_stamp(handle, &now) == 0);
+		return now;
+	};
+	const auto never_share = [](const darwin_uml_static_code_page_stamp &now) {
+		return (now.flags & DARWIN_UML_STATIC_STAMP_NEVER_SHARE) != 0;
+	};
+	const auto unnamed_write = [&] {
+		require(darwin_uml_static_vm_invalidate_code_generation(writer, view,
+			page) == 0);
+	};
+
+	const auto saved = testing::unnamed_publication_count();
+	const auto limit = testing::unnamed_publication_limit();
+	testing::clear_sharing_latch();
+	testing::set_unnamed_publication_count(limit - 2);
+	const auto before = stamp_now();
+	require(!never_share(before));
+
+	/* One write short of the limit: the epoch moved, sharing stands. */
+	unnamed_write();
+	const auto below = stamp_now();
+	require(below.epoch != before.epoch && !never_share(below),
+		"a write below the limit of the count shared no verdict");
+	require(testing::unnamed_publication_count() == limit - 1);
+
+	/* The write that reaches it: never-share, with the latch cleared again,
+	 * so that the stamp says it from the count alone. */
+	unnamed_write();
+	testing::clear_sharing_latch();
+	require(never_share(stamp_now()),
+		"a stamp at the limit of the count did not report never-share");
+	require(testing::unnamed_publication_count() == limit);
+
+	/* The count is where a reader that ran ahead of the latch finds it: at
+	 * the limit, with the latch clear, whatever got it there. */
+	testing::set_unnamed_publication_count(limit);
+	testing::clear_sharing_latch();
+	require(never_share(stamp_now()),
+		"a stamp read between the count and the latch shared a verdict");
+
+	/* It stops at the limit and stays never-share. */
+	for (unsigned round = 0; round < 3; ++round) {
+		unnamed_write();
+		require(testing::unnamed_publication_count() == limit,
+			"the count went past its limit");
+		require(never_share(stamp_now()));
+	}
+
+	testing::set_unnamed_publication_count(saved);
+	testing::clear_sharing_latch();
+	require(!never_share(stamp_now()));
+	require(darwin_uml_static_vm_destroy(reader) == 0);
+	require(darwin_uml_static_vm_destroy(writer) == 0);
+}
+
 /* A kernel write into a guest-code page, the bytes a 4 KiB uaccess copies
  * back from the kernel's alias, lands either way. It publishes no code change
  * until code whose fetch is coherent with every store (x86) is about to run:
@@ -890,6 +967,7 @@ int main()
 	test_a_stamp_carries_the_epoch_and_the_mapping_fact();
 	test_a_publication_through_a_view_that_cannot_execute_moves_the_stamp();
 	test_a_kernel_write_to_a_page_nobody_maps_moves_every_epoch();
+	test_the_count_of_unnamed_publications_fails_closed_at_its_limit();
 	test_a_kernel_write_publishes_once_x86_code_may_run();
 	/* Every generation of every row is gone: no record counts a mapping. */
 	require(uml::memory::testing::audit_executable_counts() == 0);
