@@ -251,27 +251,44 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 			observer_.serve_dns_streams(
 				name_server_stream_ ? ipv4_value(nameserver_ipv4) : 0,
 				gateway_stream_ ? ipv4_value(host_alias_ipv4) : 0);
-			/* The system reports the current path at once and each change
-			 * after, and nothing else wakes the provider. The first open
-			 * makes the monitor and it lives as long as the provider, across
-			 * every stop and reopen (a guest's restart). It runs on a thread
-			 * of its own whose Mach port the system's start-up ties to it:
-			 * a monitor made again at each boot would let that thread's port
-			 * go and leave the process one short of its first boot's, which
-			 * the restart audit (guest-restart) reports. */
+			/* The system reports the current path at once and each
+			 * change after, and nothing else wakes the provider. The
+			 * first open makes the monitor and it lives as long as the
+			 * provider: across every stop and reopen (a guest's
+			 * restart) and across a failed open, for it belongs to the
+			 * provider and not to the open that made it. It runs on a
+			 * thread of its own whose Mach port the system's start-up
+			 * ties to it: a monitor made again at each boot would let
+			 * that thread's port go and leave the process one short of
+			 * its first boot's, which the restart audit
+			 * (guest-restart) reports. A monitor the system gave no
+			 * native monitor never reports: the open makes another. */
 #if UML_SLIRP_TESTING
-			if (!path_monitor_for_testing_)
+			if (!path_monitor_for_testing_ && path_monitor_) {
 				path_monitor_.reset();
+				/* Its last report is not the state of what
+				 * follows, and none is running now to write
+				 * another. */
+				path_state_.report(true);
+			}
 			const bool monitored = path_monitor_for_testing_;
 #else
 			constexpr bool monitored = true;
 #endif
+			if (path_monitor_ && path_monitor_->failed())
+				path_monitor_.reset();
 			if (monitored && !path_monitor_) {
-				path_monitor_ = uml::platform::
-					makeAppleHostNetworkPathMonitor(path_state_);
 #if UML_SLIRP_TESTING
+				auto &make = path_monitor_factory_for_testing_;
+				path_monitor_ = make ? make(path_state_) :
+					uml::platform::
+					makeAppleHostNetworkPathMonitor(
+						path_state_);
 				path_monitors_made_for_testing_.fetch_add(
 					1, std::memory_order_relaxed);
+#else
+				path_monitor_ = uml::platform::
+					makeAppleHostNetworkPathMonitor(path_state_);
 #endif
 			}
 			worker_ = std::jthread{[this](std::stop_token stop_token) {
@@ -279,8 +296,10 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 			}};
 		} catch (...) {
 			/* A thread or the path monitor that could not be made (the
-			 * system is out of memory): nothing of this open may stay, so
-			 * that a later open() starts the resolver again. */
+			 * system is out of memory): nothing of this open may stay but
+			 * a monitor already installed, which belongs to the provider
+			 * and keeps reporting, so that a later open() starts the
+			 * resolver again. */
 			resolver_.stop();
 			slirp_.reset();
 			return -EIO;

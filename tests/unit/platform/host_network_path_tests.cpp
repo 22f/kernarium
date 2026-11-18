@@ -9,16 +9,20 @@
  * status and reason mean as an outage is a function of the two values, checked
  * for each of them. The monitor ties no Mach port of the process to the thread
  * that made it, whichever thread that is: the system's start-up would, and a
- * guest's restart ends the thread that booted it (guest-restart). A monitor
- * that has ended leaves nothing behind that writes to the state.
+ * guest's restart ends the thread that booted it (guest-restart). A system
+ * that gives no monitor leaves a monitor that says so, on a thread of its own,
+ * and one that works does not. A monitor that has ended leaves nothing behind
+ * that writes to the state.
  */
 #include "platform/host_network_path.hpp"
+#include "host_network_path_attempt.hpp"
 #include "host_network_path_status.hpp"
 #include "require.hpp"
 #include "wait_until.hpp"
 
 #include <mach/mach.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -63,6 +67,17 @@ std::size_t portsOfThreadKind()
 			    reinterpret_cast<vm_address_t>(types),
 			    typeCount * sizeof(mach_port_type_t));
 	return count;
+}
+
+/* Where the system's creation was asked for, and how often. */
+std::atomic<std::thread::id> askedOn{};
+std::atomic<int> asked{};
+
+bool theSystemGivesNoMonitor()
+{
+	askedOn.store(std::this_thread::get_id());
+	asked.fetch_add(1);
+	return false;
 }
 
 /* The first monitor of the process, made on a thread that ends while the
@@ -148,7 +163,31 @@ void the_monitor_reports_the_path_at_each_start()
 		require(waitUntil([&] { return state.reports() >= start; },
 				  std::chrono::seconds{10}),
 			"the system did not report the path at a start");
+		require(!monitor->failed(), "a monitor that reports is failed");
 	}
+}
+
+/* The system's call that makes a monitor returns null when it cannot: the
+ * monitor says so, its thread asks on a thread other than the requester's, and
+ * ends the monitor's wait for a report that will not come. Nothing is reported
+ * and the state stays as it was. */
+void a_system_that_gives_no_monitor_leaves_a_monitor_that_says_so()
+{
+	HostNetworkPathState state;
+	std::unique_ptr<HostNetworkPathMonitor> monitor =
+		uml::platform::makeAppleHostNetworkPathMonitor(
+			state, theSystemGivesNoMonitor);
+	require(monitor != nullptr, "no monitor");
+	require(waitUntil([&] { return monitor->failed(); },
+			  std::chrono::seconds{10}),
+		"a system that gave no monitor was not told");
+	require(asked.load() == 1, "the system was asked more than once");
+	require(askedOn.load() != std::this_thread::get_id(),
+		"the system's monitor was made on the thread that asked for it");
+	std::this_thread::sleep_for(std::chrono::milliseconds{100});
+	require(state.reports() == 0 && state.usable(),
+		"a monitor the system did not give wrote to the state");
+	monitor.reset();
 }
 
 void a_monitor_that_ended_writes_nothing()
@@ -189,6 +228,7 @@ int main()
 	a_state_nobody_reported_to_is_usable_and_each_report_replaces_it();
 	only_an_unsatisfied_path_is_an_outage_and_a_local_network_denial_is_not();
 	the_monitor_reports_the_path_at_each_start();
+	a_system_that_gives_no_monitor_leaves_a_monitor_that_says_so();
 	a_monitor_that_ended_writes_nothing();
 	std::puts("host network path tests passed");
 	return 0;

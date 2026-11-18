@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "platform/host_network_path.hpp"
+#include "host_network_path_attempt.hpp"
 #include "host_network_path_status.hpp"
 
 #import <Network/Network.h>
 
 #include <pthread.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
-#include <new>
 #include <thread>
 
 namespace uml::platform {
@@ -31,6 +32,8 @@ struct Shared final {
 	std::condition_variable wake;
 	HostNetworkPathState *state{};
 	bool ended{};
+	/* The system gave no monitor: this one will never report. */
+	std::atomic<bool> failed{};
 
 	void deliver(bool usable) noexcept
 	{
@@ -48,42 +51,49 @@ struct Shared final {
  * short of its first boot's, which the restart audit (guest-restart) reports.
  * The monitor is therefore made on a thread of its own, which lives as long as
  * the monitor does and waits without waking for anything.
+ *
+ * When the system gives no monitor the thread says so and ends: nothing waits
+ * for what will not come, and the owner makes another monitor at its next try.
  */
-void run(std::shared_ptr<Shared> shared) noexcept
+void run(std::shared_ptr<Shared> shared,
+	 HostNetworkPathAttempt attempt) noexcept
 {
 	(void)::pthread_setname_np("uml-network-path");
-	nw_path_monitor_t monitor = nw_path_monitor_create();
-	if (monitor != nil) {
-		nw_path_monitor_set_queue(monitor, dispatch_queue_create(
-			"uml.network-path",
-			dispatch_queue_attr_make_with_qos_class(
-				DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)));
-		/* On the system's queue: a block that does no more than write the
-		 * state. */
-		nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
-			shared->deliver(!hostNetworkPathIsOutage(
-				nw_path_get_status(path),
-				nw_path_get_unsatisfied_reason(path)));
-		});
-		nw_path_monitor_start(monitor);
+	nw_path_monitor_t monitor =
+		(attempt == nullptr || attempt()) ? nw_path_monitor_create() : nil;
+	if (monitor == nil) {
+		shared->failed.store(true, std::memory_order_release);
+		return;
 	}
+	nw_path_monitor_set_queue(monitor, dispatch_queue_create(
+		"uml.network-path",
+		dispatch_queue_attr_make_with_qos_class(
+			DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)));
+	/* On the system's queue: a block that does no more than write the
+	 * state. */
+	nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
+		shared->deliver(!hostNetworkPathIsOutage(
+			nw_path_get_status(path),
+			nw_path_get_unsatisfied_reason(path)));
+	});
+	nw_path_monitor_start(monitor);
 	{
 		std::unique_lock guard{shared->lock};
 		shared->wake.wait(guard, [&] { return shared->ended; });
 	}
-	if (monitor != nil)
-		nw_path_monitor_cancel(monitor);
+	nw_path_monitor_cancel(monitor);
 }
 
 class AppleHostNetworkPathMonitor final : public HostNetworkPathMonitor {
 public:
-	explicit AppleHostNetworkPathMonitor(HostNetworkPathState &state)
+	AppleHostNetworkPathMonitor(HostNetworkPathState &state,
+				    HostNetworkPathAttempt attempt)
 	{
 		shared_->state = &state;
 		/* The thread holds the shared part alone: it may outlive this
 		 * object by the time it takes to cancel the monitor. */
 		const std::shared_ptr<Shared> shared = shared_;
-		std::thread{[shared] { run(shared); }}.detach();
+		std::thread{[shared, attempt] { run(shared, attempt); }}.detach();
 	}
 
 	~AppleHostNetworkPathMonitor() override
@@ -96,6 +106,11 @@ public:
 		shared_->wake.notify_all();
 	}
 
+	[[nodiscard]] bool failed() const noexcept override
+	{
+		return shared_->failed.load(std::memory_order_acquire);
+	}
+
 private:
 	std::shared_ptr<Shared> shared_{std::make_shared<Shared>()};
 };
@@ -103,10 +118,16 @@ private:
 } // namespace
 
 std::unique_ptr<HostNetworkPathMonitor>
+makeAppleHostNetworkPathMonitor(HostNetworkPathState &state,
+				HostNetworkPathAttempt attempt)
+{
+	return std::make_unique<AppleHostNetworkPathMonitor>(state, attempt);
+}
+
+std::unique_ptr<HostNetworkPathMonitor>
 makeAppleHostNetworkPathMonitor(HostNetworkPathState &state)
 {
-	return std::unique_ptr<HostNetworkPathMonitor>{
-		new (std::nothrow) AppleHostNetworkPathMonitor(state)};
+	return makeAppleHostNetworkPathMonitor(state, nullptr);
 }
 
 } // namespace uml::platform
