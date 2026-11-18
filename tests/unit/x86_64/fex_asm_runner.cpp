@@ -2037,6 +2037,11 @@ struct RetirementCase final {
 		state.x87_status = MaskedValue{mask, value};
 		return state;
 	};
+	const auto rax_is = [](std::uint64_t value) {
+		StopState state;
+		state.rax = MaskedValue{~std::uint64_t{}, value};
+		return state;
+	};
 	const auto mxcsr_is = [](std::uint64_t mask, std::uint64_t value) {
 		StopState state;
 		state.mxcsr = MaskedValue{mask, value};
@@ -2051,6 +2056,9 @@ struct RetirementCase final {
 	/* The JIT reports flags, status bits and MXCSR flags that the faulting
 	 * instruction has already changed. */
 	constexpr std::string_view fault_state_gap = "fault-flags";
+	/* The JIT writes a failed split CMPXCHG's operand back from the copy it
+	 * read, so a store another vCPU made since is lost. */
+	constexpr std::string_view split_store_back_gap = "split-store-back";
 	/* A write refused at `address`, the first byte of the page after the
 	 * operand's first. */
 	const auto write_at = [](std::uint64_t address) {
@@ -2173,6 +2181,29 @@ struct RetirementCase final {
 			0xf4}, {{data, data + 0x2000}}, "memory_fault", 2,
 			code_address + 10, {}, long64, 1, {{data + 0x1000, data + 0x2000}},
 			{}, {}, write_at(data + 0x1000)},
+		/* mov $data+0xffe, %ebx; mov $7, %eax; cmpxchgl %ecx, (%rbx), whose
+		 * operand crosses a page and differs from EAX; movzbl (%rbx), %eax;
+		 * mov $0x30000000, %esi; mov (%rsi), %edx, which faults to end the
+		 * case: another vCPU stores a byte into the operand after the
+		 * compare read it, and a failed compare writes nothing, so the byte
+		 * survives. */
+		{"cmpxchg-unequal-split-keeps-concurrent-store", {0xbb, 0xfe, 0x0f,
+			0x00, 0x20, 0xb8, 0x07, 0x00, 0x00, 0x00, 0x0f, 0xb1, 0x0b, 0x0f,
+			0xb6, 0x03, 0xbe, 0x00, 0x00, 0x00, 0x30, 0x8b, 0x16},
+			{{data, data + 0x2000}}, "memory_fault", 5, code_address + 21, {},
+			long64, {}, {}, rax_is(1), split_store_back_gap,
+			FaultSite{0x3000'0000, uml::memory::MemoryAccess::read},
+			RaceStore{data + 0xffe, data + 0xffe, 1}},
+		/* mov $data+0xffc, %ebx; mov $1, %eax; cmpxchg8b (%rbx); movzbl
+		 * (%rbx), %eax; mov $0x30000000, %esi; mov (%rsi), %edx: the same
+		 * for the 8-byte pair. */
+		{"cmpxchg8b-unequal-split-keeps-concurrent-store", {0xbb, 0xfc, 0x0f,
+			0x00, 0x20, 0xb8, 0x01, 0x00, 0x00, 0x00, 0x0f, 0xc7, 0x0b, 0x0f,
+			0xb6, 0x03, 0xbe, 0x00, 0x00, 0x00, 0x30, 0x8b, 0x16},
+			{{data, data + 0x2000}}, "memory_fault", 5, code_address + 21, {},
+			long64, {}, {}, rax_is(1), split_store_back_gap,
+			FaultSite{0x3000'0000, uml::memory::MemoryAccess::read},
+			RaceStore{data + 0xffc, data + 0xffc, 1}},
 		/* nop; xor %ecx, %ecx; xor %edx, %edx; div %ecx; nop; hlt */
 		{"divide-error", {0x90, 0x31, 0xc9, 0x31, 0xd2, 0xf7, 0xf1, 0x90,
 			0xf4}, {}, "unexpected_event", 3, code_address + 5},
