@@ -76,14 +76,17 @@ EXIT_BUDGET, EXIT_BRANCH, EXIT_STEP = 0, 1, 2
 ABSOLUTE = 0x100
 
 PAGE = 4096
-ENTRY_MAGIC = b"UMLAOTB2"
+# The magic names the entry table's layout: 16-bit entries and an anchor per
+# text page (Library.fill_entry16).
+ENTRY_MAGIC = b"UMLAOT16"
 # A function this long or longer makes the page that holds its end a row of
-# branches in the 16-bit entry table (Library.entry16_wide_pages).
+# branches in the entry table (Library.entry16_wide_pages).
 WIDE16_FUNCTION = 32768
-# The magic of a blob whose entry tables are 16-bit (--entry-table16).
-ENTRY_MAGIC16 = b"UMLAOT16"
-# The version of the layout the magic names (see the runtime's blob_version).
-BLOB_VERSION = 1
+# The farthest an entry of a page may lie from its anchor: 65535 words.
+ENTRY16_REACH = 4 * 65535
+# The version of the layout the magic names (see the runtime's blob_version):
+# 2 adds the count of libraries the rewriter left to the engine.
+BLOB_VERSION = 2
 HEADER_SIZE = 256
 LIB_RECORD_SIZE = 256
 
@@ -301,16 +304,18 @@ class Stats:
     census: dict = dataclasses.field(default_factory=dict)
 
 
+class EntryTableRefused(Exception):
+    """A library whose entry table cannot be formed: it is left out of the
+    blob and the engine runs it."""
+
+
 class Library:
     """One library's rewrite: classification, then emission into the blob."""
 
     def __init__(self, index: int, name: str, elf: elf64.Elf,
                  decoder: a64decode.Decoder, layout: dict[str, int],
-                 count_retired: bool = False,
-                 entry16: bool = False) -> None:
+                 count_retired: bool = False) -> None:
         self.count_retired = count_retired
-        # The entry table in 16-bit words (see entry16_layout).
-        self.entry16 = entry16
         self.index = index
         self.name = name
         self.elf = elf
@@ -530,7 +535,7 @@ class Library:
         emit_refill_stubs(asm, self)
         self.tag("stub.refill", before)
         before = len(asm._w)
-        self.wide16 = self.entry16_wide_pages() if self.entry16 else ()
+        self.wide16 = self.entry16_wide_pages()
         have = set(self.entry_labels)
         for page in self.wide16:
             # One `b` per word of the page, to the word's native code: the
@@ -568,35 +573,27 @@ class Library:
         entries = {offset: asm.label_address(
             self.lab("G" if offset in self.charge else "E", offset))
             for offset in self.entry_labels}
-        if self.entry16:
-            self.fill_entry16(unit, table_at, entries, {
-                page: asm.label_address(f"TR{page:x}")
-                for page in self.wide16})
-        else:
-            view = memoryview(unit)[table_at:table_at + 4 * self.table_words
-                                    ].cast("I")
-            for offset, address in entries.items():
-                view[(offset - self.table_base) // 4] = address
-            view.release()
+        self.fill_entry16(unit, table_at, entries, {
+            page: asm.label_address(f"TR{page:x}") for page in self.wide16})
         return {"unit": bytes(unit), "table_at": table_at,
                 "table_region": self.table_region_bytes(),
-                "entry16": self.entry16,
                 "hashes_at": asm.label_address("SRC")}
 
-    # ---- the 16-bit entry table (a measurement variant) -------------------
+    # ---- the entry table ----------------------------------------------------
     #
-    # The product's table holds one 32-bit entry per source word: the unit
-    # offset of the word's native code, 0 for a word without. The variant
-    # holds 16 bits per word, followed (from the next 4 KiB, so that the
-    # array is one add away) by one signed 32-bit anchor per text page,
-    # relative to that array: a word's entry is the anchor of its page plus
-    # four bytes for each unit of its 16 bits, and 0 still means none. The
-    # anchor is the page's lowest entry less one word, so the page's entries
-    # must lie within 256 KiB of code. A function's out-of-line stubs follow
-    # it, so a page that holds the end of a function of WIDE16_FUNCTION bytes
-    # or more (and the start of the next) can be wider than that: it gets a
-    # row of 1024 branches instead, one to each word's native code, and its
-    # entries index the row.
+    # The table holds 16 bits per source word (the unit offset of the word's
+    # native code, 0 for a word without), followed (from the next 4 KiB, so
+    # that the array is one add away) by one signed 32-bit anchor per text
+    # page, relative to that array: a word's entry is the anchor of its page
+    # plus four bytes for each unit of its 16 bits. The anchor is the page's
+    # lowest entry less one word, so the page's entries must lie within
+    # 256 KiB of code. A function's out-of-line stubs follow it, so a page
+    # that holds the end of a function of WIDE16_FUNCTION bytes or more (and
+    # the start of the next) can be wider than that: it gets a row of 1024
+    # branches instead, one to each word's native code, and its entries
+    # index the row. A table that cannot be formed (a page whose entries are
+    # still further apart, or more than 16 MiB of entries) raises
+    # EntryTableRefused, and the library is left to the engine.
 
     def entry16_wide_pages(self) -> tuple[int, ...]:
         """The pages whose entries are reached through a row of branches."""
@@ -611,8 +608,6 @@ class Library:
         return (2 * self.table_words + PAGE - 1) & ~(PAGE - 1)
 
     def table_region_bytes(self) -> int:
-        if not self.entry16:
-            return 4 * self.table_words
         return self.table_len16() + 4 * ((self.table_words + 1023) // 1024)
 
     def fill_entry16(self, unit: bytearray, table_at: int,
@@ -634,8 +629,8 @@ class Library:
                                      word % 1024 + 1)
                 continue
             anchor = min(address for _, address in items) - 4
-            if max(address for _, address in items) - anchor > 4 * 65535:
-                raise RuntimeError(
+            if max(address for _, address in items) - anchor > ENTRY16_REACH:
+                raise EntryTableRefused(
                     f"{self.name}: the entries of text page {page} span "
                     "more than 256 KiB of code")
             struct.pack_into("<i", unit, pb_at + 4 * page, anchor - pb_at)
@@ -1610,8 +1605,8 @@ def _entry16_jump(asm: A.Assembler, library: "Library", off: int, table: int,
     knows has one."""
     len16 = library.table_len16()
     if len16 >> 12 >= 4096:
-        raise A.AsmError(f"{library.name}: the 16-bit entry table of "
-                         f"{len16} bytes is too large for one add")
+        raise EntryTableRefused(f"{library.name}: the entry table of "
+                                f"{len16} bytes is too large for one add")
     asm.adrp_add(table, "TAB")
     asm.word(A.lsr_imm(page, off, 12))
     asm.word(A.lsr_imm(off, off, 2))
@@ -1811,16 +1806,9 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     asm.word(A.mov_reg(T2, 0))
     restore()
     asm.cbz(T2, "REFILL_FAIL", sf=1, nz=False)
-    if library.entry16:
-        # T1 = the slot's byte offset; T0 and T2 are free here, the
-        # instruction recomputes what it needs from its entry.
-        _entry16_jump(asm, library, T1, T0, T2)
-    else:
-        asm.adrp_add(T2, "TAB")
-        asm.word(A.ldr_reg_w(T1, T2, T1))
-        asm.adrp_add(T2, "UNIT")
-        asm.word(A.add_reg(T2, T2, T1))
-        asm.word(A.br(T2))
+    # T1 = the slot's byte offset; T0 and T2 are free here, the instruction
+    # recomputes what it needs from its entry.
+    _entry16_jump(asm, library, T1, T0, T2)
     asm.label("REFILL_FAIL")
     base_pages = library.table_base >> 12
     if library.table_base & 0xfff or library.table_base >= 1 << 32:
@@ -1864,22 +1852,13 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     asm.word(A.add_reg(T2, T2, T1, shift=1, amount=12))
     asm.word(A.ldrb_w(T2, T2, 0))
     asm.cbz(T2, "EXIT_BRANCH_ABS", sf=0, nz=False)
-    if library.entry16:
-        # T0, the guest target, is the register the lookup needs most: it
-        # waits in the frame's link slot (free: no memory-access call is
-        # in flight at an indirect branch).
-        asm.word(A.str_x(T0, 31, SLOT_LR))
-        _entry16_jump(asm, library, T1, T0, T2, none="IND_NOENTRY")
-        asm.label("IND_NOENTRY")
-        asm.word(A.ldr_x(T0, 31, SLOT_LR))
-        asm.b("EXIT_BRANCH_ABS")
-    else:
-        asm.adrp_add(T2, "TAB")
-        asm.word(A.ldr_reg_w(T1, T2, T1))
-        asm.cbz(T1, "EXIT_BRANCH_ABS", sf=0, nz=False)
-        asm.adrp_add(T2, "UNIT")
-        asm.word(A.add_reg(T2, T2, T1))
-        asm.word(A.br(T2))
+    # T0, the guest target, is the register the lookup needs most: it waits
+    # in the frame's link slot (free at an indirect branch).
+    asm.word(A.str_x(T0, 31, SLOT_LR))
+    _entry16_jump(asm, library, T1, T0, T2, none="IND_NOENTRY")
+    asm.label("IND_NOENTRY")
+    asm.word(A.ldr_x(T0, 31, SLOT_LR))
+    asm.b("EXIT_BRANCH_ABS")
 
     # An indirect branch to an address outside this library: T0 = the target.
     # When the host knows a verified library instance that holds it, the
@@ -2242,13 +2221,11 @@ def expand_libraries(root: pathlib.Path, mounts: dict[str, pathlib.Path],
 def build_unit(job: tuple) -> dict:
     """One library to its self-contained unit (runs in a worker process)."""
     index, name, file_path, count_retired = job[:4]
-    tuning = job[4] if len(job) > 4 else {}
     decoder = a64decode.Decoder(a64decode.DEFAULT_TABLE)
     layout = read_layout(LAYOUT_HEADER)
     data = pathlib.Path(file_path).read_bytes()
     elf = elf64.Elf(data)
-    library = Library(index, name, elf, decoder, layout, count_retired,
-                      **tuning)
+    library = Library(index, name, elf, decoder, layout, count_retired)
     segment = library.segment
     digests = []
     pages = []
@@ -2258,7 +2235,10 @@ def build_unit(job: tuple) -> dict:
         page += bytes(PAGE - len(page))
         digests.append(page_digest(page))
         pages.append(page)
-    unit = library.build(digests, b"".join(pages))
+    try:
+        unit = library.build(digests, b"".join(pages))
+    except EntryTableRefused as refusal:
+        return {"index": index, "path": name, "refused": str(refusal)}
     unit.update({
         "index": index,
         "path": name,
@@ -2288,9 +2268,12 @@ def build_unit(job: tuple) -> dict:
 
 
 def build_blob(units: list[dict], layout: dict[str, int],
-               release_id: str, count_retired: bool = False
-               ) -> tuple[bytes, dict]:
-    """Place the units after the header and ENTER; add the digest hash."""
+               release_id: str, count_retired: bool = False,
+               refused: list[dict] | None = None) -> tuple[bytes, dict]:
+    """Place the units after the header and ENTER; add the digest hash.
+    `refused` names the libraries left to the engine; the header carries
+    their count for the runtime's diagnostics."""
+    refused = refused or []
     units = sorted(units, key=lambda unit: unit["index"])
     enter_asm = A.Assembler()
     emit_enter(enter_asm, layout, count_retired)
@@ -2345,10 +2328,9 @@ def build_blob(units: list[dict], layout: dict[str, int],
             struct.pack_into("<QII", blob, hash_at + 16 * slot, digest,
                              unit["index"], page_index)
     record_at = HEADER_SIZE
-    struct.pack_into("<8sIIIIIII", blob, 0,
-                     ENTRY_MAGIC16 if any(unit.get("entry16") for unit in units)
-                     else ENTRY_MAGIC, BLOB_VERSION, HEADER_SIZE,
-                     len(units), record_at, enter_at, hash_at, slots)
+    struct.pack_into("<8sIIIIIIII", blob, 0, ENTRY_MAGIC, BLOB_VERSION,
+                     HEADER_SIZE, len(units), record_at, enter_at, hash_at,
+                     slots, len(refused))
     struct.pack_into("96s", blob, 0x30, release_id.encode()[:96])
     for unit, base in zip(units, bases):
         name = unit["path"].encode()
@@ -2367,6 +2349,9 @@ def build_blob(units: list[dict], layout: dict[str, int],
             base + unit["hashes_at"])
     manifest = {
         "release_id": release_id,
+        # The libraries left to the engine because their entry table cannot
+        # be formed (the header carries the count).
+        "refused": refused,
         "blob_bytes": len(blob),
         # What is not in a unit: the header and library records, ENTER, the
         # page-digest hash, and the padding that aligns the units.
@@ -2404,6 +2389,18 @@ def build_blob(units: list[dict], layout: dict[str, int],
     return bytes(blob), manifest
 
 
+def split_refused(units: list[dict]) -> tuple[list[dict], list[dict]]:
+    """The built units in index order, numbered again without the libraries
+    the engine keeps (build_unit's `refused` answers), and those."""
+    refused = sorted((unit for unit in units if "refused" in unit),
+                     key=lambda unit: unit["index"])
+    kept = sorted((unit for unit in units if "refused" not in unit),
+                  key=lambda unit: unit["index"])
+    for position, unit in enumerate(kept):
+        unit["index"] = position
+    return kept, refused
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=pathlib.Path, required=True,
@@ -2431,10 +2428,6 @@ def main(argv: list[str] | None = None) -> int:
                         help="count the instructions each entry starts and "
                         "report that count (a diagnostics build, to measure "
                         "the budget's bound independently)")
-    parser.add_argument("--entry-table16", action="store_true",
-                        help="hold the entry table in 16-bit words and one "
-                        "anchor per text page (a measurement variant, "
-                        "tools/aot/README.md)")
     parser.add_argument("--jobs", type=int, default=0,
                         help="worker processes (default: about half the CPUs)")
     arguments = parser.parse_args(argv)
@@ -2445,15 +2438,12 @@ def main(argv: list[str] | None = None) -> int:
     count = arguments.count_retired
     arguments.library, skipped = expand_libraries(
         arguments.root, mounts, arguments.library)
-    tuning = {}
-    if arguments.entry_table16:
-        tuning["entry16"] = True
     jobs = [(index, path, str(resolve_library(arguments.root, mounts, path)),
-             count, tuning)
+             count)
             for index, path in enumerate(arguments.library)]
     for item in arguments.generated:
         guest, _, host = item.partition("=")
-        jobs.append((len(jobs), guest, host, count, tuning))
+        jobs.append((len(jobs), guest, host, count))
     workers = arguments.jobs or max(1, (os.cpu_count() or 2) // 2)
     order = sorted(jobs, key=lambda job: -pathlib.Path(job[2]).stat().st_size)
     if workers == 1 or len(jobs) == 1:
@@ -2462,9 +2452,19 @@ def main(argv: list[str] | None = None) -> int:
         with multiprocessing.Pool(min(workers, len(jobs))) as pool:
             units = list(pool.imap_unordered(build_unit, order))
     layout = read_layout(LAYOUT_HEADER)
-    blob, manifest = build_blob(units, layout, arguments.release_id, count)
+    # A library whose entry table cannot be formed is not in the blob: the
+    # engine runs it, as it runs any library the blob does not hold.
+    units, refused = split_refused(units)
+    for unit in refused:
+        print(f"rewrite.py: left to the engine: {unit['refused']}",
+              file=sys.stderr)
+    kept = {unit["path"] for unit in units}
+    arguments.library = [path for path in arguments.library if path in kept]
+    blob, manifest = build_blob(
+        units, layout, arguments.release_id, count,
+        [{"path": unit["path"], "reason": unit["refused"]}
+         for unit in refused])
     manifest["skipped"] = skipped
-    manifest.update(tuning)
     arguments.out.mkdir(parents=True, exist_ok=True)
     # The notice of each library as the image states it: generated output
     # beside the framework, never tracked.

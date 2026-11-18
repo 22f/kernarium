@@ -72,7 +72,7 @@ struct Stats final {
 	 * page, and a second after a hash that matched. */
 	std::uint64_t stamp_queries{};
 	/* Instances the binders made (a library of an address space at a bias,
-	 * in a vCPU's table of 64), how many took the place of a live one (the
+	 * in a vCPU's table), how many took the place of a live one (the
 	 * table is first in, first out), and how many were made again for a
 	 * (vCPU, address space, library, bias) the table had held before: each
 	 * of those costs the instance's page states and a verification of every
@@ -96,6 +96,9 @@ struct Stats final {
 	std::uint64_t stack_task_bytes{};
 	std::uint64_t stack_engine_free{};
 	std::uint64_t stack_max_growth{};
+	/* The libraries the rewriter left to the engine because their entry
+	 * table could not be formed (the blob header's count). */
+	std::uint64_t libraries_refused{};
 };
 
 /* Override DARWIN_UML_AOT (nullopt: read the environment again). */

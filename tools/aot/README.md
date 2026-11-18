@@ -60,12 +60,16 @@ A change a runtime built for the old layout would misread changes the magic; an
 addition it can ignore raises the version (`BLOB_VERSION`), and a runtime
 accepts any version at or above the one it was built for.
 
-`UML_AOT_ENTRY_TABLE16` (`--entry-table16`) holds each library's entry table in
-16-bit words, with one signed 32-bit anchor per text page after them, in place
-of 32 bits per source word: an indirect branch and a refill then spend four
-more words to reach the native code, and the rewriter refuses a page whose
-entries lie further apart than 256 KiB of code. The blob's magic changes
-(`UMLAOT16`), so a runtime built without the option refuses it.
+The entry table holds 16 bits per source word (the offset of the word's native
+code, in words, from its page's anchor) and one signed 32-bit anchor per text
+page, half the bytes of a 32-bit entry per word; the blob's magic is
+`UMLAOT16`. An indirect branch and a refill spend four words more to reach the
+native code than a table of 32-bit entries would. A page whose entries lie
+further than 256 KiB of code apart is a row of branches when it holds the end
+of a function of 32 KiB or more. A library whose table cannot be formed (a page
+still wider, or more than 32 MiB of text) is not in the blob: the engine runs
+it, the manifest's `refused` lists it, and the diagnostics report counts it
+(`libraries_refused`, from the header; `BLOB_VERSION` 2).
 
 `UML_AOT_INSTANCE_CAPACITY` is the number of library instances each executor
 thread's binder holds (64 in the product; above 64 it finds an instance by hash

@@ -178,9 +178,6 @@ if(UML_AOT_DIAGNOSTICS)
         ${_uml_aot_oat_fixture})
 endif()
 
-if(UML_AOT_ENTRY_TABLE16)
-    list(APPEND _uml_aot_generated_args --entry-table16)
-endif()
 
 # Rewrite the libraries into one position-independent blob.
 add_custom_command(
@@ -260,7 +257,6 @@ function(_uml_aot_add_runtime TARGET DIAGNOSTICS)
         UML_MEMORY_COUNT_AUDIT=${DIAGNOSTICS}
         UML_AOT_KERNEL_STACK_BYTES=${_uml_aot_kernel_stack_bytes}
         UML_AOT_INSTANCE_CAPACITY=${UML_AOT_INSTANCE_CAPACITY}
-        UML_AOT_ENTRY16=$<BOOL:${UML_AOT_ENTRY_TABLE16}>
         UML_AOT_SHARED_VERDICTS=$<BOOL:${UML_AOT_SHARED_VERDICTS}>)
 endfunction()
 

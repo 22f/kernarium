@@ -40,20 +40,13 @@ constexpr std::uint64_t page_size = 4096;
  * A verdict names a physical-page record that is never reused, so an entry
  * can outlive the address space that filed it and never be answered wrongly. */
 VerdictTable g_verdicts;
-#ifndef UML_AOT_ENTRY16
-#define UML_AOT_ENTRY16 0
-#endif
-#if UML_AOT_ENTRY16
 constexpr char blob_magic[8] = {'U', 'M', 'L', 'A', 'O', 'T', '1', '6'};
-#else
-constexpr char blob_magic[8] = {'U', 'M', 'L', 'A', 'O', 'T', 'B', '2'};
-#endif
 /* The magic names the layout, and the word after it the version of that
  * layout: a change an older runtime would misread changes the magic, and an
  * addition it can ignore raises the version, which a runtime accepts at or
  * above the one it was built for (tools/aot/rewrite.py: BLOB_VERSION). */
 constexpr std::size_t header_version = 8;
-constexpr std::uint32_t blob_version = 1;
+constexpr std::uint32_t blob_version = 2;
 /* The stored hash of a text page: SHA-256 (tools/aot/rewrite.py:
  * page_hashes). */
 constexpr std::size_t page_hash_size = CC_SHA256_DIGEST_LENGTH;
@@ -64,6 +57,9 @@ constexpr std::size_t header_records = 20;
 constexpr std::size_t header_enter = 24;
 constexpr std::size_t header_hash = 28;
 constexpr std::size_t header_slots = 32;
+/* How many libraries the rewriter left to the engine: their entry table
+ * could not be formed (version 2). */
+constexpr std::size_t header_refused = 36;
 constexpr std::size_t record_size = 256;
 constexpr std::size_t record_table_base = 152;
 constexpr std::size_t record_table_end = 160;
@@ -93,14 +89,12 @@ struct Library final {
 };
 
 /* The unit offset of the native code of the source word `word` of a
- * library, or 0 for a word without. The product's table holds it in 32 bits
- * per word; a blob built with --entry-table16 holds 16 bits per word and, from
- * the next 4 KiB, one signed 32-bit anchor per page, relative to that array
- * (tools/aot/rewrite.py: Library.fill_entry16). */
+ * library, or 0 for a word without. The table holds 16 bits per word and,
+ * from the next 4 KiB, one signed 32-bit anchor per page, relative to that
+ * array (tools/aot/rewrite.py: Library.fill_entry16). */
 [[nodiscard]] std::uint32_t native_entry(const Library &library,
 	std::uint64_t word) noexcept
 {
-#if UML_AOT_ENTRY16
 	const auto entry =
 		read<std::uint16_t>(library.table_offset + 2 * word);
 	if (entry == 0)
@@ -111,9 +105,6 @@ struct Library final {
 	return static_cast<std::uint32_t>(
 		static_cast<std::int64_t>(anchors) + relative + 4 * entry -
 		static_cast<std::int64_t>(library.unit_offset));
-#else
-	return read<std::uint32_t>(library.table_offset + 4 * word);
-#endif
 }
 
 struct Directory final {
@@ -123,6 +114,7 @@ struct Directory final {
 	std::size_t enter{};
 	std::size_t hash{};
 	std::uint32_t slots{};
+	std::uint32_t refused{};
 
 	[[nodiscard]] Library library(std::uint32_t index) const noexcept
 	{
@@ -150,6 +142,7 @@ struct Directory final {
 		d.enter = read<std::uint32_t>(header_enter);
 		d.hash = read<std::uint32_t>(header_hash);
 		d.slots = read<std::uint32_t>(header_slots);
+		d.refused = read<std::uint32_t>(header_refused);
 		d.valid = d.libraries != 0 && d.slots != 0 &&
 			(d.slots & (d.slots - 1)) == 0;
 		return d;
@@ -641,6 +634,8 @@ void write_report() noexcept
 		get(counters::stack_kind_at_min),
 		static_cast<unsigned long long>(kernel_stack_bytes),
 		get(counters::stack_engine_free), get(counters::stack_max_growth));
+	std::fprintf(file, "libraries %u libraries_refused %u\n",
+		directory().libraries, directory().refused);
 	std::fprintf(file, "count_audit runs %llu skipped %llu records %llu "
 		"mismatches %llu last_mismatches %llu anomalies %llu "
 		"nanos_total %llu nanos_max %llu started %llu last_exact %llu\n",
@@ -994,6 +989,7 @@ Stats stats() noexcept
 	result.stack_task_bytes = kernel_stack_bytes;
 	result.stack_engine_free = get(counters::stack_engine_free);
 	result.stack_max_growth = get(counters::stack_max_growth);
+	result.libraries_refused = directory().refused;
 	return result;
 }
 

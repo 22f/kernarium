@@ -5670,6 +5670,9 @@ int main(int argc, char **argv)
 			require(p.compared > p.cases / 2);
 			require(ps.enters > p.compared / 2);
 			require(ps.poisoned == 0);
+			/* Every library of the tree has its entry table: none was left
+			 * to the engine (the blob header's count). */
+			require(ps.libraries_refused == 0);
 			loop_through_another_range(image, functions);
 			code_change_in_the_dispatch_window(image, functions, false);
 			code_change_in_the_dispatch_window(image, functions, true);

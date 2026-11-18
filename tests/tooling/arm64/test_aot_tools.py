@@ -327,9 +327,12 @@ class ExitBelowTheLibraryTests(unittest.TestCase):
         """How many unconditional branches of the built unit go to `label`."""
         words = unit_words(library)
         target = library.asm.label_address(label)
+        # The indirect branch routine's own way out when a word has no entry
+        # is not a function's.
+        routine = library.asm.label_address("IND_NOENTRY") + 4
         found = 0
         for index, word in enumerate(words):
-            if word >> 26 == 0b000101:
+            if word >> 26 == 0b000101 and 4 * index != routine:
                 delta = ((word & 0x03ffffff) ^ 0x2000000) - 0x2000000
                 found += 4 * (index + delta) == target
         return found
@@ -915,10 +918,11 @@ class RunBoundTests(unittest.TestCase):
         self.assertGreaterEqual(paid, len(words))
 
 
-class EntryTable16Tests(unittest.TestCase):
-    """The 16-bit entry table (UML_AOT_ENTRY_TABLE16): the same words have
-    entries, they are reachable from their page's anchor, and the blob says
-    which table it holds."""
+class EntryTableTests(unittest.TestCase):
+    """The entry table is 16 bits per source word and an anchor per text page:
+    the words have entries, they are reachable from their page's anchor, a
+    page of a long function's end is a row of branches, and a table that
+    cannot be formed leaves the library to the engine."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -932,20 +936,12 @@ class EntryTable16Tests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.directory.cleanup()
 
-    def unit(self, entry16: bool) -> dict:
+    def unit(self) -> dict:
         return rewrite.build_unit(
-            (0, "/aot-test/libaotfixture.so", str(self.path), False,
-             {"entry16": True} if entry16 else {}))
+            (0, "/aot-test/libaotfixture.so", str(self.path), False))
 
     @staticmethod
-    def entries32(unit: dict) -> dict[int, int]:
-        at, words = unit["table_at"], unit["table_words"]
-        data = unit["unit"][at:at + 4 * words]
-        values = struct.unpack(f"<{words}I", data)
-        return {word: value for word, value in enumerate(values) if value}
-
-    @staticmethod
-    def entries16(unit: dict) -> dict[int, int]:
+    def entries(unit: dict) -> dict[int, int]:
         at, words = unit["table_at"], unit["table_words"]
         len16 = (2 * words + 4095) & ~4095
         data = unit["unit"]
@@ -958,32 +954,33 @@ class EntryTable16Tests(unittest.TestCase):
                 out[word] = at + len16 + anchor + 4 * entry
         return out
 
-    def test_the_same_words_have_entries_inside_the_unit(self) -> None:
-        wide, narrow = self.unit(False), self.unit(True)
-        self.assertGreater(len(self.entries32(wide)), 100)
-        self.assertEqual(set(self.entries16(narrow)),
-                         set(self.entries32(wide)))
-        for address in self.entries16(narrow).values():
+    def test_the_words_have_entries_inside_the_unit(self) -> None:
+        unit = self.unit()
+        found = self.entries(unit)
+        self.assertGreater(len(found), 100)
+        for address in found.values():
             self.assertEqual(address % 4, 0)
-            self.assertLess(address, narrow["table_at"])
+            self.assertLess(address, unit["table_at"])
         # The table is the 16-bit words, padded to 4 KiB, and the anchors.
-        words = narrow["table_words"]
-        self.assertEqual(narrow["table_region"],
+        words = unit["table_words"]
+        self.assertEqual(unit["table_region"],
                          ((2 * words + 4095) & ~4095) +
                          4 * ((words + 1023) // 1024))
-        self.assertLess(narrow["table_region"], 4 * words)
+        self.assertLess(unit["table_region"], 4 * words)
 
-    def test_the_census_and_the_magic_follow(self) -> None:
-        narrow = self.unit(True)
-        census = narrow["stats"]["census"]
-        self.assertEqual(sum(census.values()), len(narrow["unit"]))
+    def test_the_census_the_magic_and_the_header_follow(self) -> None:
+        unit = self.unit()
+        census = unit["stats"]["census"]
+        self.assertEqual(sum(census.values()), len(unit["unit"]))
         self.assertEqual(census["other"], 0)
-        self.assertEqual(census["table"], narrow["table_region"])
-        for entry16, magic in ((False, rewrite.ENTRY_MAGIC),
-                               (True, rewrite.ENTRY_MAGIC16)):
-            blob, manifest = rewrite.build_blob(
-                [self.unit(entry16)], self.layout, "entry16-row", False)
-            self.assertEqual(blob[:8], magic)
+        self.assertEqual(census["table"], unit["table_region"])
+        blob, manifest = rewrite.build_blob(
+            [unit], self.layout, "entry-table-row", False)
+        self.assertEqual(blob[:8], b"UMLAOT16")
+        self.assertEqual(struct.unpack_from("<I", blob, 8)[0],
+                         rewrite.BLOB_VERSION)
+        self.assertEqual(struct.unpack_from("<I", blob, 36)[0], 0)
+        self.assertEqual(manifest["refused"], [])
 
     def test_a_page_that_holds_a_long_function_s_end_is_a_row_of_branches(
             self) -> None:
@@ -994,18 +991,16 @@ class EntryTable16Tests(unittest.TestCase):
         words = [NOP] * (n - 1) + [RET, NOP, RET]
         functions = [(0, 4 * n), (4 * n, 4 * n + 8)]
         digests = [1] * ((4 * len(words) + 4095) // 4096)
-        wide = library_of(words, functions, entry16=True)
+        wide = library_of(words, functions)
         built = wide.build(digests)
         page = (4 * n - 4) // 4096
         self.assertEqual(wide.wide16, (page,))
         unit = {"unit": built["unit"], "table_at": built["table_at"],
                 "table_words": wide.table_words}
-        found = self.entries16(unit)
-        narrow = library_of(words, functions)
-        plain = narrow.build(digests)
-        self.assertEqual(sorted(found), sorted(self.entries32(
-            {"unit": plain["unit"], "table_at": plain["table_at"],
-             "table_words": narrow.table_words})))
+        found = self.entries(unit)
+        self.assertEqual(sorted(found), sorted(
+            (offset - wide.table_base) // 4
+            for offset in wide.entry_labels))
         row_start = built["table_at"] - 4096
         final = {}
         for word, address in found.items():
@@ -1025,11 +1020,44 @@ class EntryTable16Tests(unittest.TestCase):
         self.assertEqual(sum(wide.stats.census.values()), len(built["unit"]))
 
     def test_a_page_whose_entries_are_too_far_apart_is_refused(self) -> None:
-        library = library_of([NOP, RET], [(0, 8)], entry16=True)
+        library = library_of([NOP, RET], [(0, 8)])
         unit = bytearray(1 << 20)
-        with self.assertRaises(RuntimeError):
-            library.fill_entry16(unit, 0, {0x1000: 4, 0x1004: 4 + 4 * 65536})
-        library.fill_entry16(unit, 0, {0x1000: 4, 0x1004: 4 + 4 * 65534})
+        reach = rewrite.ENTRY16_REACH
+        self.assertEqual(reach, 4 * 65535)
+        with self.assertRaises(rewrite.EntryTableRefused):
+            library.fill_entry16(unit, 0, {0x1000: 4, 0x1004: reach + 4})
+        library.fill_entry16(unit, 0, {0x1000: 4, 0x1004: reach})
+
+    def test_a_table_too_large_for_one_add_is_refused(self) -> None:
+        # 16 MiB of 16-bit entries: 8M source words, 32 MiB of text.
+        words = 1 << 23
+        library = library_of([NOP, RET], [(0, 8)])
+        library.table_words = words
+        with self.assertRaises(rewrite.EntryTableRefused):
+            rewrite._entry16_jump(A.Assembler(), library, 1, 2, 3)
+
+    def test_a_refused_library_leaves_the_blob_with_a_count(self) -> None:
+        with mock.patch.object(rewrite, "ENTRY16_REACH", 8):
+            refused = self.unit()
+        self.assertIn("span more than 256 KiB", refused["refused"])
+        self.assertEqual(refused["path"], "/aot-test/libaotfixture.so")
+        good = self.unit()
+        good["index"] = 2
+        refused["index"] = 1
+        first = dict(good, index=0, path="/first", sha256="11" * 32)
+        kept, left = rewrite.split_refused([good, refused, first])
+        self.assertEqual([(unit["index"], unit["path"]) for unit in kept],
+                         [(0, "/first"), (1, good["path"])])
+        self.assertEqual(left, [refused])
+        blob, manifest = rewrite.build_blob(
+            kept, self.layout, "refused-row", False,
+            [{"path": unit["path"], "reason": unit["refused"]}
+             for unit in left])
+        self.assertEqual(struct.unpack_from("<I", blob, 16)[0], 2)
+        self.assertEqual(struct.unpack_from("<I", blob, 36)[0], 1)
+        self.assertEqual([entry["path"] for entry in manifest["refused"]],
+                         [refused["path"]])
+        self.assertEqual(len(manifest["libraries"]), 2)
 
     def test_the_new_instructions_encode_as_the_assembler_does(self) -> None:
         self.assertEqual(A.ldrh_reg(1, 2, 3), 0x78637841)
@@ -1300,7 +1328,9 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(census["mem.access"], 2 * 4)
         self.assertEqual(census["stub.mm"], 2 * 2 * 4)
         self.assertEqual(census["insn"], 4)
-        self.assertEqual(census["table"], 4096)  # one text page of entries
+        # One text page of entries (its 16-bit words padded to 4 KiB) and
+        # the page's anchor.
+        self.assertEqual(census["table"], 4096 + 4)
 
     def test_only_the_refill_routines_a_site_enters_exist(self) -> None:
         census, _ = self.census()

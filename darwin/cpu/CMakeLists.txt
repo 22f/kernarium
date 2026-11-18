@@ -84,8 +84,6 @@ if(NOT DEFINED UML_AOT_BOOT_CODE)
 endif()
 option(UML_AOT_DIAGNOSTICS
     "Compose the AOT runtime variant with its counters, report and test switches (never for a product)" OFF)
-option(UML_AOT_ENTRY_TABLE16
-    "Hold each library's entry table in 16-bit words and one anchor per text page instead of 32 bits per word (a measurement variant)" OFF)
 set(UML_AOT_INSTANCE_CAPACITY 64 CACHE STRING
     "How many library instances each executor thread's AOT binder holds before it replaces the oldest (64 is the product; another value is a measurement variant)")
 if(NOT UML_AOT_INSTANCE_CAPACITY MATCHES "^[0-9]+$" OR
