@@ -1057,57 +1057,41 @@ std::size_t Binder::bucket_of(unsigned long generation, std::uint32_t library,
 		key *= 0xff51afd7ed558ccdULL;
 		key ^= key >> 33;
 	}
-	return static_cast<std::size_t>(key % (index_buckets ? index_buckets : 1));
+	return static_cast<std::size_t>(key % index_buckets);
 }
 
 Binder::Instance *Binder::find_instance(unsigned long generation,
 	std::uint32_t library, std::uint64_t bias) noexcept
 {
-	if constexpr (indexed) {
-		for (auto at = heads_[bucket_of(generation, library, bias)]; at >= 0;
-		     at = instances_[static_cast<std::size_t>(at)].chain) {
-			auto &candidate = instances_[static_cast<std::size_t>(at)];
-			if (candidate.generation == generation &&
-			    candidate.library == library && candidate.bias == bias)
-				return &candidate;
-		}
-		return nullptr;
-	} else {
-		for (auto &candidate : instances_)
-			if (candidate.used && candidate.generation == generation &&
-			    candidate.library == library && candidate.bias == bias)
-				return &candidate;
-		return nullptr;
+	for (auto at = heads_[bucket_of(generation, library, bias)]; at >= 0;
+	     at = instances_[static_cast<std::size_t>(at)].chain) {
+		auto &candidate = instances_[static_cast<std::size_t>(at)];
+		if (candidate.generation == generation &&
+		    candidate.library == library && candidate.bias == bias)
+			return &candidate;
 	}
+	return nullptr;
 }
 
 void Binder::unlink_instance(std::size_t index) noexcept
 {
-	if constexpr (indexed) {
-		auto &victim = instances_[index];
-		auto *at = &heads_[bucket_of(victim.generation, victim.library,
-			victim.bias)];
-		while (*at >= 0 && static_cast<std::size_t>(*at) != index)
-			at = &instances_[static_cast<std::size_t>(*at)].chain;
-		if (*at >= 0)
-			*at = victim.chain;
-		victim.chain = -1;
-	} else {
-		(void)index;
-	}
+	auto &victim = instances_[index];
+	auto *at = &heads_[bucket_of(victim.generation, victim.library,
+		victim.bias)];
+	while (*at >= 0 && static_cast<std::size_t>(*at) != index)
+		at = &instances_[static_cast<std::size_t>(*at)].chain;
+	if (*at >= 0)
+		*at = victim.chain;
+	victim.chain = -1;
 }
 
 void Binder::link_instance(std::size_t index) noexcept
 {
-	if constexpr (indexed) {
-		auto &added = instances_[index];
-		auto &head = heads_[bucket_of(added.generation, added.library,
-			added.bias)];
-		added.chain = head;
-		head = static_cast<std::int16_t>(index);
-	} else {
-		(void)index;
-	}
+	auto &added = instances_[index];
+	auto &head = heads_[bucket_of(added.generation, added.library,
+		added.bias)];
+	added.chain = head;
+	head = static_cast<std::int16_t>(index);
 }
 
 bool Binder::changed_since(void *context, std::uint64_t sequence,

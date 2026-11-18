@@ -84,8 +84,8 @@ if(NOT DEFINED UML_AOT_BOOT_CODE)
 endif()
 option(UML_AOT_DIAGNOSTICS
     "Compose the AOT runtime variant with its counters, report and test switches (never for a product)" OFF)
-set(UML_AOT_INSTANCE_CAPACITY 64 CACHE STRING
-    "How many library instances each executor thread's AOT binder holds before it replaces the oldest (64 is the product; another value is a measurement variant)")
+set(UML_AOT_INSTANCE_CAPACITY 2048 CACHE STRING
+    "How many library instances each executor thread's AOT binder holds before it replaces the oldest")
 if(NOT UML_AOT_INSTANCE_CAPACITY MATCHES "^[0-9]+$" OR
    UML_AOT_INSTANCE_CAPACITY LESS 1 OR UML_AOT_INSTANCE_CAPACITY GREATER 16384)
     message(FATAL_ERROR

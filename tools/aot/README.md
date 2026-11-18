@@ -72,8 +72,10 @@ it, the manifest's `refused` lists it, and the diagnostics report counts it
 (`libraries_refused`, from the header; `BLOB_VERSION` 2).
 
 `UML_AOT_INSTANCE_CAPACITY` is the number of library instances each executor
-thread's binder holds (64 in the product; above 64 it finds an instance by hash
-instead of a scan). It is a runtime option: the blob does not change.
+thread's binder holds (2048 in the product, found by hash; 3.8 MB of binder
+state per executor thread, one per vCPU, and about 1.8 MB of page vectors in
+all after a boot and a Settings start on four vCPUs). It is a runtime option:
+the blob does not change.
 
 Entry points: `ctest -R '^arm64-aot-tools$'` for the encoders, decoder and
 assembler, and `ctest -R '^arm64-aot-differential$'` (a configuration with

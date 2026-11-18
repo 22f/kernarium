@@ -18,12 +18,12 @@
  * and test switches are in aot_diagnostics.hpp and exist only in builds that
  * set UML_AOT_DIAGNOSTICS. */
 /* How many library instances (a library of an address space at a load bias)
- * one executor thread's binder holds before it replaces the oldest. The
- * product's value is 64; UML_AOT_INSTANCE_CAPACITY is a measurement option
- * (UML_AOT_INSTANCE_CAPACITY in CMake) and must be the same in every
- * compilation of this header the binary links, the executor's included. */
+ * one executor thread's binder holds before it replaces the oldest: 2048
+ * unless UML_AOT_INSTANCE_CAPACITY in CMake says otherwise, the same in
+ * every compilation of this header the binary links, the executor's
+ * included. */
 #ifndef UML_AOT_INSTANCE_CAPACITY
-#define UML_AOT_INSTANCE_CAPACITY 64
+#define UML_AOT_INSTANCE_CAPACITY 2048
 #endif
 
 namespace uml::cpu::arm64::aot {
@@ -136,10 +136,6 @@ struct CrossTable final {
 	std::array<Entry, capacity> entries{};
 };
 
-/* The binder's instance lookup scans the table up to this many entries and
- * keeps a hash index above it. */
-inline constexpr std::size_t instance_scan_limit = 64;
-
 /* The libraries an address space has mapped, identified by the digest of
  * their code pages. Each text page is hashed (SHA-256) and the hash compared
  * with the one stored for the page before any rewritten instruction of it
@@ -184,8 +180,7 @@ private:
 		 * `state_changes`. */
 		std::vector<std::uint8_t> pages{};
 		std::uint64_t state_changes{};
-		/* The next instance of the same hash bucket (a table above
-		 * instance_scan_limit entries only). */
+		/* The next instance of the same hash bucket. */
 		std::int16_t chain{-1};
 	};
 	struct PageSlot final {
@@ -232,11 +227,10 @@ private:
 	/* The cross table holds the instances of one address space (at most a
 	 * library each, a few more where a library is mapped twice): one the
 	 * table has no room for is left to the engine, never written past it. */
-	static constexpr bool indexed = instance_capacity > instance_scan_limit;
-	static constexpr std::size_t index_buckets =
-		indexed ? 2 * instance_capacity : 0;
+	/* Instances are found by hash chains over this many buckets. */
+	static constexpr std::size_t index_buckets = 2 * instance_capacity;
 	/* The page states cached by (page, address space): 32 per instance, at
-	 * least the 2048 of the product's table. */
+	 * least 2048. */
 	static constexpr std::size_t page_slots =
 		instance_capacity * 32 > 2048 ? instance_capacity * 32 : 2048;
 	[[nodiscard]] static std::size_t bucket_of(unsigned long generation,

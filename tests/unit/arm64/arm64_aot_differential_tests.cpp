@@ -3378,7 +3378,7 @@ void misaligned_cas_follows_the_profile(const LibraryImage &image)
 }
 
 /* More instances than the binder holds: the library mapped at six more
- * biases than the binder has places (70 in the product's 64) is run copy by
+ * biases than the binder has places (2054 in the product's 2048) is run copy by
  * copy, twice. The ones it dropped are bound again, and every run ends as
  * the engine's does. */
 [[gnu::noinline]]
