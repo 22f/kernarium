@@ -53,7 +53,6 @@ __import__("sys").dont_write_bytecode = True
 import argparse
 import gzip
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -69,9 +68,6 @@ import release_inputs  # noqa: E402
 
 DECISION_ENV = "PENDING_INPUTS_DECISION"
 ANDROID_DESCRIPTOR = "android/lineage-24/metadata/accepted-release.env"
-ACCESSIBILITY_IDENTITY = "dependencies/andarium-accessibility/identity.py"
-# Read by the accessibility identity beyond the input list: the source pins.
-ACCESSIBILITY_PINS = "dependencies/manifest.tsv"
 INPUT_TREES_KEY = "LINEAGE24_ACCEPTED_INPUT_TREES"
 STAGED_SYSTEM = ".build/andarium-system"
 PACKAGED_SYSTEM = "andarium-system"
@@ -329,46 +325,6 @@ def check_packaged_disk(report, staged, packaged, release_id):
         )
 
 
-def load_module(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def check_accessibility(repo, report, release_id, label):
-    """The accessibility artifact the release carries is the one this commit's
-    pins, series, archive list, builder and toolchain list describe."""
-    try:
-        identity = load_module(repo / ACCESSIBILITY_IDENTITY, "accessibility_identity")
-        values = identity.read_descriptor(repo / identity.DESCRIPTOR)
-        wanted = identity.expected(repo)
-    except Exception as error:  # an unreadable file, or identity.IdentityError
-        report.error("the accessibility artifact's descriptor or its inputs are unreadable", str(error))
-        return
-    state = values.get(identity.DESCRIPTOR_PREFIX + "STATE")
-    if state != "accepted":
-        report.pend(
-            release_id,
-            f"{label} carries no accepted accessibility artifact",
-            f"{identity.DESCRIPTOR} is {state}; build the artifact "
-            "(dependencies/build-andarium-accessibility.sh), accept it with "
-            "stage-accessibility-artifact.py --accept and release it",
-        )
-        return
-    changed = identity.descriptor_differences(values, wanted)
-    if not changed:
-        report.note(f"{label}: its accessibility artifact is the one this commit's inputs describe")
-        return
-    report.pend(
-        release_id,
-        f"{label} carries an accessibility artifact behind this commit: "
-        f"{len(changed)} input{'s' if len(changed) != 1 else ''} differ from what it was built from",
-        *[f"{name}: this commit has {tracked}, the accepted artifact was built from {built}"
-          for name, tracked, built in changed],
-    )
-
-
 NEW_INPUT = "is an input now and was not when the release was built"
 
 
@@ -417,8 +373,6 @@ def check_android(repo, report, staged_root, app):
             and packaged_manifest.get("release_id") == release_id
         ):
             check_packaged_disk(report, staged, packaged, release_id)
-
-    check_accessibility(repo, report, release_id, label)
 
     recorded_text = descriptor.get(INPUT_TREES_KEY)
     if recorded_text is None:
@@ -717,7 +671,7 @@ def main(argv=None):
 
     covered = []
     if options.android_release:
-        covered += [ANDROID_DESCRIPTOR, release_inputs.LIST_RELATIVE, ACCESSIBILITY_PINS]
+        covered += [ANDROID_DESCRIPTOR, release_inputs.LIST_RELATIVE]
         try:
             covered += release_inputs.input_paths(repo / release_inputs.LIST_RELATIVE)
         except release_inputs.InputError:

@@ -14,23 +14,6 @@ uml_add_tooling_test(
     LABELS dependency
     TIMEOUT 120)
 
-# The accessibility builder refuses an incomplete toolchain before it builds,
-# and builds the packages the LineageOS product and ScreenReader name.
-uml_add_tooling_test(
-    NAME dependency-andarium-accessibility-builder
-    COMMAND ${PROJECT_SOURCE_DIR}/tests/tooling/dependencies/test_build_andarium_accessibility.sh
-    LABELS dependency;andarium
-    TIMEOUT 60)
-
-# The accessibility artifact's identity: what the tracked inputs expect, what
-# an APK may hold, and how a signed APK links back to the unsigned one.
-uml_add_tooling_test(
-    NAME dependency-andarium-accessibility-identity
-    COMMAND ${Python3_EXECUTABLE} -B
-        ${PROJECT_SOURCE_DIR}/tests/tooling/dependencies/test_accessibility_identity.py
-    LABELS dependency;andarium
-    TIMEOUT 60)
-
 uml_add_tooling_test(
     NAME dependency-build-manifest
     COMMAND ${PROJECT_SOURCE_DIR}/tests/tooling/dependencies/test_build_manifest.sh
@@ -132,12 +115,3 @@ if(UML_KOSMICKRISP_SPIRV_BUILD_HOST)
         LABELS dependency gpu
         TIMEOUT 3600)
 endif()
-
-# pin-archives.py reaches the network only as the child of prepare.sh
-# --pin-archives, and compares and parses without it.
-uml_add_tooling_test(
-    NAME dependency-andarium-accessibility-pin-archives
-    COMMAND ${Python3_EXECUTABLE} -B
-        ${PROJECT_SOURCE_DIR}/tests/tooling/dependencies/test_pin_archives.py
-    LABELS dependency;andarium
-    TIMEOUT 60)

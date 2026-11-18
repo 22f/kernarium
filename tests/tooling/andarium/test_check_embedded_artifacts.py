@@ -30,12 +30,6 @@ SCRIPT = REPOSITORY / "scripts/check-embedded-artifacts.py"
 sys.path.insert(0, str(REPOSITORY / "android/lineage-24/tools"))
 import release_inputs  # noqa: E402
 
-IDENTITY = REPOSITORY / "dependencies/andarium-accessibility/identity.py"
-spec = importlib.util.spec_from_file_location("accessibility_identity", IDENTITY)
-identity = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(identity)
-ACCESSIBILITY = identity.DESCRIPTOR
-PINS = {"talkback": "1" * 40, "espeak-ng": "2" * 40, "sonic": "3" * 40}
 
 RELEASE_ID = "20261201-los24-r99"
 KERNEL_ID = "20261201-6.18.99-ks99"
@@ -52,6 +46,8 @@ CONFIG = "CONFIG_UML=y\nCONFIG_MODULES=n\nCONFIG_BINDER=y\n# CONFIG_NFS_FS is no
 INPUTS = (
     "input\tandroid/lineage-24/overlay\tthe product tree\n"
     "input\tandroid/lineage-24/tools/publish-release.py\twrites the manifest\n"
+    "input\tandroid/lineage-24/third_party\tthe pins of the sources the image builds\n"
+    "input\tdependencies/patches/talkback\tthe series applied to TalkBack\n"
     "excluded\tandroid/lineage-24/README.md\tdocumentation\n"
     "excluded\tandroid/lineage-24/metadata/accepted-release.env\tthe acceptance record\n"
     "excluded\tandroid/lineage-24/support/release/input-paths.tsv\tthis list\n"
@@ -135,35 +131,13 @@ class Fixture:
         write(self.repo, "kernel/mainline-6.18/config/android.fragment", "# android\nCONFIG_BINDER=y\n# CONFIG_NFS_FS is not set\n")
         write(self.repo, "kernel/mainline-6.18/config/android-required-builtins.txt", "CONFIG_BINDER\n")
         write(self.repo, "kernel/mainline-6.18/config/android-forbidden-options.txt", "CONFIG_NFS_FS\n")
-        self.accessibility_inputs()
+        write(self.repo, "android/lineage-24/third_party/accessibility/metadata.env", f"TALKBACK_UPSTREAM_COMMIT='{'1' * 40}'\n")
+        write(self.repo, "dependencies/patches/talkback/series.tsv", f"# series\ntree\t{'4' * 40}\n")
         self.first = commit(self.repo, "base")
         self.trees = release_inputs.object_ids(self.repo, release_inputs.input_paths(self.repo / LIST))
         self.set_descriptors()
         self.stage()
         self.app = self.package()
-
-    def accessibility_inputs(self) -> None:
-        """The inputs the accessibility artifact is identified by: the pins,
-        the two series, the archive list, the builder and the toolchain list."""
-        (self.repo / "dependencies/andarium-accessibility").mkdir(parents=True, exist_ok=True)
-        shutil.copy(IDENTITY, self.repo / "dependencies/andarium-accessibility/identity.py")
-        write(self.repo, "dependencies/manifest.tsv", "# pins\nname\tversion\tproducts\trepository\tcommit\tpaths\tseries\n" + "".join(
-            f"{name}\t1\tandarium-accessibility\thttps://example.invalid/{name}.git\t{commit_id}\t.\t-\n"
-            for name, commit_id in PINS.items()))
-        for name, tree in (("talkback", "4" * 40), ("espeak-ng", "5" * 40)):
-            write(self.repo, f"dependencies/patches/{name}/series.tsv", f"# series\ntree\t{tree}\n")
-        write(self.repo, "dependencies/andarium-accessibility/archives.tsv", "# archives\nname\turl\tsha256\n")
-        write(self.repo, "dependencies/andarium-accessibility/toolchain.tsv", "# toolchain\nndk\t29.0.1\njdk\t17.0.1\n")
-        write(self.repo, "dependencies/build-andarium-accessibility.sh", "#!/bin/sh\n# builder\n")
-
-    def accept_accessibility(self, state: str = "accepted") -> None:
-        fields = {
-            identity.DESCRIPTOR_PREFIX + "SCHEMA": "1", identity.DESCRIPTOR_PREFIX + "STATE": state,
-            identity.DESCRIPTOR_PREFIX + "ARTIFACT_SHA256": "c" * 64,
-        }
-        if state == "accepted":
-            fields.update({identity.env_name(key): value for key, value in identity.expected(self.repo).items()})
-        write(self.repo, ACCESSIBILITY, "".join(f"{name}='{value}'\n" for name, value in fields.items()))
 
     def set_descriptors(
         self, trees=None, schema: int = 7, kernel_tree: str = TREE, release_id: str = RELEASE_ID
@@ -181,7 +155,6 @@ class Fixture:
             f"UML_KERNEL_ARTIFACT_RELEASE_ID='{KERNEL_ID}'\n"
             f"UML_KERNEL_ARTIFACT_RELEASE='{KERNEL_RELEASE}'\n"
             f"UML_KERNEL_ARTIFACT_FINAL_TREE='{kernel_tree}'\n")
-        self.accept_accessibility()
         commit(self.repo, "accept the artifacts")
 
     def manifest(self, release_id: str = RELEASE_ID, trees=None) -> dict:
@@ -261,44 +234,23 @@ class CheckTests(unittest.TestCase):
             "overlay: change the product", "overlay: add more", "PENDING_INPUTS_DECISION=" + RELEASE_ID)
         self.assertNotIn("publish-release.py changed", result.stderr)
 
-    def test_the_accessibility_artifact_is_checked_against_the_tree_that_builds_it(self) -> None:
-        # A pin of dependencies/manifest.tsv is no row of the input list: the
-        # identity the accepted artifact records is what sees it move.
-        manifest = (self.repo / "dependencies/manifest.tsv").read_text()
-        write(self.repo, "dependencies/manifest.tsv", manifest.replace("3" * 40, "9" * 40))
-        commit(self.repo, "dependencies: move the sonic pin")
-        result = self.fixture.run()
-        self.fails(result, RELEASE_ID, "accessibility artifact behind this commit", "source.sonic.head", "9" * 40)
-        self.assertNotIn("source.talkback", result.stderr)
-        self.passes(self.fixture.run(decision=RELEASE_ID))
-
-    def test_each_other_input_of_the_accessibility_artifact_is_seen(self) -> None:
-        changes = (
-            ("dependencies/patches/talkback/series.tsv", "# series\ntree\t" + "6" * 40 + "\n", "source.talkback.tree"),
-            ("dependencies/andarium-accessibility/archives.tsv", "# archives\nname\turl\tsha256\nx\ty\tz\n", "archives.sha256"),
-            ("dependencies/build-andarium-accessibility.sh", "#!/bin/sh\n# another builder\n", "recipe.blob"),
-            ("dependencies/andarium-accessibility/toolchain.tsv", "# toolchain\nndk\t29.0.2\njdk\t17.0.1\n", "toolchain.ndk"),
-        )
-        for path, text, name in changes:
-            with self.subTest(name):
+    def test_a_source_the_image_builds_is_an_input_of_the_release(self) -> None:
+        # TalkBack and eSpeak NG are built by the image build, so their pins and
+        # series decide the release as any other input does.
+        for path, text, name in (
+            ("android/lineage-24/third_party/accessibility/metadata.env",
+             f"TALKBACK_UPSTREAM_COMMIT='{'9' * 40}'\n", "android/lineage-24/third_party"),
+            ("dependencies/patches/talkback/series.tsv",
+             f"# series\ntree\t{'6' * 40}\n", "dependencies/patches/talkback"),
+        ):
+            with self.subTest(path):
                 original = (self.repo / path).read_text()
                 write(self.repo, path, text)
                 commit(self.repo, f"change {path}")
-                self.fails(self.fixture.run(), RELEASE_ID, "accessibility artifact behind this commit", name)
+                self.fails(self.fixture.run(), RELEASE_ID, f"{name} changed")
                 write(self.repo, path, original)
                 commit(self.repo, f"restore {path}")
                 self.passes(self.fixture.run())
-
-    def test_no_accepted_accessibility_artifact_is_pending(self) -> None:
-        self.fixture.accept_accessibility("pending")
-        commit(self.repo, "the accessibility artifact is not accepted")
-        self.fails(self.fixture.run(), RELEASE_ID, "carries no accepted accessibility artifact")
-        self.passes(self.fixture.run(decision=RELEASE_ID))
-
-    def test_an_unreadable_accessibility_descriptor_fails_whatever_the_decision(self) -> None:
-        (self.repo / ACCESSIBILITY).unlink()
-        commit(self.repo, "remove the accessibility descriptor")
-        self.fails(self.fixture.run(decision=RELEASE_ID), "accessibility artifact's descriptor or its inputs are unreadable")
 
     def test_an_excluded_path_changes_nothing(self) -> None:
         write(self.repo, "android/lineage-24/README.md", "more docs\n")
