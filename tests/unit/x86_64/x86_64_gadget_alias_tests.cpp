@@ -1346,6 +1346,55 @@ void test_a_whole_space_publication_resets_the_links()
 	require(failed == 0, "a whole-space publication left a link running");
 }
 
+/* The kernel pins a frame to write it and names it. Between the pin and the
+ * write the target replaces what is mapped at the address with another frame,
+ * so the call meets a page that is not the frame written, and the reader of
+ * the frame written must still hear of the write. The reader runs once more
+ * after the replacement, so no publication of the replacement can account for
+ * what it hears. */
+void test_a_remote_write_after_the_target_remapped()
+{
+	const Clean clean;
+	darwin_uml_static_vm_require_coherent_kernel_code_writes();
+	constexpr std::uint64_t reading = 0x3e00'0000;
+	constexpr std::uint64_t writing = 0x3f00'0000;
+	enum class Replacement { data, code };
+	unsigned long generation = 9700;
+	unsigned failed = 0;
+	for (const auto replacement : {Replacement::data, Replacement::code}) {
+		const char *name = replacement == Replacement::data ?
+			"a data view of another frame" : "a code view of another frame";
+		ScratchBacking pinned{"uml-x86-alias-remap-p-XXXXXX", page};
+		ScratchBacking other{"uml-x86-alias-remap-o-XXXXXX", page};
+		load_return(pinned, 1);
+		load_return(other, 3);
+		Space reader{generation++};
+		Space target{generation++};
+		reader.map(reading, pinned, 0, rx, 1);
+		target.map(writing, pinned, 0, rw, 0);
+		require(reader.run_to_system_call(reading).rax == 1);
+		/* The pin, then the replacement. */
+		target.unmap(writing);
+		if (replacement == Replacement::data)
+			target.map(writing, other, 0, rw, 0);
+		else
+			target.map(writing, other, 0, rx, 1);
+		require(reader.run_to_system_call(reading).rax == 1);
+		/* The store reaches the pinned frame, which the call names. */
+		load_return(pinned, 2);
+		require(darwin_uml_static_vm_invalidate_code_frame(
+			target.generation(), writing, page, pinned.descriptor(), 0) == 0);
+		if (reader.run_to_system_call(reading).rax != 2) {
+			std::fprintf(stderr, "a remote write after the target replaced "
+				"its mapping with %s did not reach a translation of the "
+				"frame\n", name);
+			++failed;
+		}
+	}
+	require(failed == 0, "a remote write after a remap left a translation "
+		"running");
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -1429,6 +1478,10 @@ int main(int argc, char **argv)
 	if (selected("remote") || selected("whole-space")) {
 		test_a_whole_space_publication_resets_the_links();
 		std::puts("whole-space publication and links ok");
+	}
+	if (selected("remote") || selected("remapped")) {
+		test_a_remote_write_after_the_target_remapped();
+		std::puts("remote write after a remap ok");
 	}
 	const auto now = FrameAccounting::diagnostics();
 	require(now.holder_leaks == start.holder_leaks, "a holder leaked");
