@@ -10,7 +10,10 @@ state each stream's feature, and the tests that read it state what it checks.
 
 - Each `.bin` is one Annex B access unit, a JPEG image, one VP9 frame, or (for
   the order and resolution-change streams) a whole Annex B stream, with no
-  container. Its `.raw` reference is tightly packed NV12 or P010, with no row
+  container. `vp9-superframes.ivf` is the one IVF file: 40 VP9 packets (three
+  superframes with a hidden frame, and a key frame that changes the size), whose
+  test states the hash of each decoded picture as a reference decoder
+  (libvpx) writes it. Its `.raw` reference is tightly packed NV12 or P010, with no row
   padding.
 - The patterns contain no third-party imagery. The order and resolution-change
   streams are flat gray pictures whose luma rises by a fixed step per picture
@@ -23,7 +26,8 @@ state each stream's feature, and the tests that read it state what it checks.
   capability probe reports, so nothing is advertised that the hardware does
   not decode.
 
-They are produced with ffmpeg, libx264 and libx265, for example
+They are produced with ffmpeg, libx264, libx265 and libvpx-vp9 (`-c:v libvpx-vp9 -f ivf`,
+cut into frames for the single-frame ones), for example
 `ffmpeg -f lavfi -i "color=c=black:size=64x64:rate=30,format=yuv420p,geq=lum='16+10*N':cb=128:cr=128" -frames:v 20 -c:v libx265 -x265-params "bframes=3:b-pyramid=1:keyint=12:min-keyint=12:open-gop=0:no-scenecut=1:b-adapt=0:no-info=1:repeat-headers=1" -f hevc hevc-bframes.bin`;
 H.264 streams use `-bsf:v filter_units=remove_types=6` to drop the
 identification SEI.

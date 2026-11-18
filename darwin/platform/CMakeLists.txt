@@ -36,7 +36,8 @@ target_include_directories(uml_published_figures INTERFACE
 set(UML_VIDEO_DECODER_SOURCES
     apple/video_decoder.mm
     apple/hevc_stream.cpp
-    apple/h264_stream.cpp)
+    apple/h264_stream.cpp
+    apple/vp9_stream.cpp)
 add_library(uml_video_decoder STATIC ${UML_VIDEO_DECODER_SOURCES})
 add_library(UML::VideoDecoder ALIAS uml_video_decoder)
 uml_declare_architecture_target(uml_video_decoder platform)

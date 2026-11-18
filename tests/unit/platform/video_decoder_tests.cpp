@@ -3,7 +3,9 @@
 #include "video_decoder_test_support.hpp"
 #include "apple/h264_stream.hpp"
 #include "apple/hevc_stream.hpp"
+#include "apple/vp9_stream.hpp"
 #include "require.hpp"
+#include "vp9_test_frames.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -432,6 +434,237 @@ void h264Limits(const std::vector<uml::platform::VideoDecodeCapability>& capabil
         std::puts("h264-high-level-5-2: 4096x2304 level 5.2 decoded in hardware");
     }
 }
+
+/* The VP9 size range the host states is the rectangle the guest's symmetric
+ * Android size range requires, and every shape inside it decodes: the square
+ * the area of a level would not allow, a portrait picture and a 4K one. One
+ * a dimension beyond it is refused before the hardware sees it. */
+void vp9Limits(const std::vector<uml::platform::VideoDecodeCapability>& capabilities)
+{
+    using namespace uml::platform;
+    const auto cap = std::find_if(capabilities.begin(), capabilities.end(),
+                                  [](const auto& c) { return c.profile == VideoProfile::vp9Profile0; });
+    if (cap == capabilities.end()) return;
+    require(cap->maximumWidth == 4096 && cap->maximumHeight == 4096 && cap->bitDepth == 8 && cap->maximumLevel == 0,
+            "the advertised VP9 range is not the 4096 x 4096 square Android is given");
+    struct Shape { const char* name; std::uint32_t width, height; };
+    for (const auto& shape : {Shape {"vp9-uhd-3840x2160", 3840, 2160}, Shape {"vp9-portrait-2304x4096", 2304, 4096},
+                              Shape {"vp9-square-4096x4096", 4096, 4096}}) {
+        auto decoder = makeVideoDecoder(VideoCodec::vp9);
+        decoder->submit(read(std::string(shape.name) + ".bin"), 5);
+        require(decoder->format() == VideoFormat {shape.width, shape.height, 8}, "the stream size was not reported");
+        decoder->drain();
+        const auto frames = decoder->takeFrames();
+        require(frames.size() == 1 && frames[0].format == VideoFormat {shape.width, shape.height, 8},
+                "a VP9 picture within the advertised range did not decode");
+        require(std::abs(meanLuma(frames[0]) - 128.0) <= 3.0, "a VP9 picture within the range decoded wrongly");
+        std::printf("%s: %ux%u decoded in hardware\n", shape.name, shape.width, shape.height);
+    }
+    /* 4112 is the first width past it: refused for the guest as the other codecs are. */
+    auto decoder = makeVideoDecoder(VideoCodec::vp9);
+    bool refused = false;
+    try { decoder->submit(read("vp9-too-wide-4112x2304.bin"), 5); } catch (const std::runtime_error&) { refused = true; }
+    require(refused, "a VP9 picture beyond the advertised range was accepted");
+    require(decoder->format() == VideoFormat {}, "a refused VP9 picture changed the stream size");
+}
+
+/* A clip of 40 packets: three of them superframes that carry a hidden
+ * alternate-reference frame ahead of the shown one, and a key frame at the
+ * 31st that changes the size from 64 x 64 to 96 x 80. Each packet shows one
+ * picture, and a VP9 decoder is exact, so the picture's hash is the hash of
+ * the NV12 a reference decoder (libvpx) writes for it. */
+void vp9Clip(const std::vector<uml::platform::VideoDecodeCapability>& capabilities)
+{
+    using namespace uml::platform;
+    if (std::none_of(capabilities.begin(), capabilities.end(),
+                     [](const auto& c) { return c.profile == VideoProfile::vp9Profile0; }))
+        return;
+    static const std::uint32_t expected[] = {
+        0x43dbd20b, 0xe42453cf, 0xf304143b, 0x331687a7, 0x0503b4ac, 0xf4edc0e0, 0x78f2e9e6, 0xdabd9c03,
+        0xe8f2e510, 0x2663e199, 0x3b85cde4, 0xc4fda8fa, 0xd4aeb5af, 0x363446ca, 0xfa24799c, 0x74a9a138,
+        0x0a5b021e, 0x3fdcc5a3, 0xd87b1ee1, 0xc0f26d58, 0x320305ad, 0x7142fceb, 0xd4e512e0, 0x5731ebe9,
+        0xa95c8819, 0x9b8b1dae, 0x9e009210, 0x2d025e6e, 0xe04c90ad, 0x9eadcae1, 0xcbc865fc, 0xb0565c12,
+        0xe552355f, 0x46538305, 0x17c97a35, 0xf153862e, 0x4e533ad4, 0x743f009a, 0x84979f4d, 0x50eec70a};
+    const auto packets = ivfPackets(read("vp9-superframes.ivf"));
+    require(packets.size() == 40, "the VP9 clip is not 40 packets");
+    auto decoder = makeVideoDecoder(VideoCodec::vp9);
+    unsigned superframes = 0;
+    for (std::size_t i = 0; i < packets.size(); ++i) {
+        const auto split = vp9::splitSuperframe(packets[i]);
+        require(split.has_value(), "a packet of the clip is not one the readers accept");
+        if (split->size() > 1) ++superframes;
+        decoder->submit(packets[i], (i + 1) * 1000);
+        /* A packet's picture is complete once the caller drains or the next
+         * arrives; the decoder holds nothing back for a VP9 stream. */
+        auto frames = decoder->takeFrames();
+        require(frames.size() == 1, "a VP9 packet did not show exactly one picture");
+        const VideoFormat size = i < 30 ? VideoFormat {64, 64, 8} : VideoFormat {96, 80, 8};
+        require(frames[0].format == size && decoder->format() == size, "a VP9 picture has the wrong size");
+        require(frames[0].timestamp == (i + 1) * 1000, "a VP9 picture lost its timestamp");
+        require(frameHash(frames[0]) == expected[i], "a VP9 picture differs from the reference decoder's");
+    }
+    decoder->drain();
+    require(decoder->takeFrames().empty(), "a VP9 clip left a picture behind");
+    require(superframes == 3, "the VP9 clip does not hold its three superframes");
+    std::puts("vp9-superframes: 40 pictures bit-exact, 3 superframes, one resolution change");
+}
+
+/* What a guest can send that no encoder writes, each of which the decoder must
+ * refuse before the hardware sees it, with the stream it had left as it was. */
+void vp9Hostile(const std::vector<uml::platform::VideoDecodeCapability>& capabilities)
+{
+    using namespace uml::platform;
+    namespace frames = uml::testing::vp9;
+    if (std::none_of(capabilities.begin(), capabilities.end(),
+                     [](const auto& c) { return c.profile == VideoProfile::vp9Profile0; }))
+        return;
+    const auto real = read("vp9-profile0.bin");
+    const auto clip = ivfPackets(read("vp9-superframes.ivf"));
+    struct Case { const char* what; Bytes packet; };
+    auto truncated = real;
+    truncated.resize(6);
+    auto badMarker = real;
+    badMarker[0] &= 0x3f;
+    auto badSync = real;
+    badSync[2] ^= 0x10;
+    auto tooLong = frames::superframe({real, real});
+    tooLong[tooLong.size() - 5] = 0xff;      // the first frame's size, 65535 bytes
+    tooLong[tooLong.size() - 4] = 0xff;
+    const Case refused[] = {
+        {"a packet of zeros", Bytes(64, 0)},
+        {"a truncated key frame header", truncated},
+        {"a frame marker that is not 2", badMarker},
+        {"a wrong synchronization code", badSync},
+        {"a key frame 4097 wide", frames::key(4097, 16)},
+        {"a key frame 8192 x 8192", frames::key(8192, 8192)},
+        {"a key frame 65536 x 65536", frames::key(65536, 65536)},
+        {"a profile 2 stream", frames::keyFrame(2, 64, 64)},
+        {"a profile 1 stream", frames::keyFrame(1, 64, 64, {.subsamplingX = 1, .subsamplingY = 0})},
+        {"a profile 3 stream", frames::keyFrame(3, 64, 64, {.subsamplingX = 1, .subsamplingY = 0})},
+        {"a reserved profile", Bytes {0xb8, 0, 0, 0, 0, 0, 0, 0}},
+        {"a superframe whose frame is too long", tooLong},
+        {"a superframe that names an empty frame", frames::superframe({real, Bytes {}})},
+        // The sizes a later frame states count as much as the first one's.
+        {"a hidden frame past the range in a superframe", frames::superframe({real, frames::inter(false, 4112, 2304)})},
+        {"an intra-only frame past the range in a superframe",
+            frames::superframe({real, frames::intraOnly(0, 4097, 64)})},
+        {"a key frame past the range after a shown frame", frames::superframe({real, frames::key(8192, 4320)})},
+        {"a profile 2 frame after a profile 0 one", frames::superframe({real, frames::keyFrame(2, 64, 64)})},
+    };
+    for (const auto& item : refused) {
+        // Both a fresh stream and one that has decoded a picture refuse it.
+        for (const bool primed : {false, true}) {
+            auto decoder = makeVideoDecoder(VideoCodec::vp9);
+            if (primed) {
+                decoder->submit(real, 1);
+                decoder->takeFrames();
+            }
+            const auto before = decoder->format();
+            bool threw = false;
+            try { decoder->submit(item.packet, 2); } catch (const std::runtime_error&) { threw = true; }
+            if (!threw) std::fprintf(stderr, "accepted: %s (%s)\n", item.what, primed ? "primed" : "fresh");
+            require(threw, "a VP9 packet the decoder must refuse was accepted");
+            require(decoder->format() == before, "a refused VP9 packet changed the stream size");
+            require(decoder->takeFrames().empty(), "a refused VP9 packet produced a picture");
+            // The refusal leaves the stream usable: the next key frame decodes.
+            decoder->submit(real, 3);
+            decoder->drain();
+            const auto after = decoder->takeFrames();
+            require(after.size() == 1 && after[0].timestamp == 3 && after[0].format == VideoFormat {128, 96, 8},
+                    "a refused VP9 packet left the decoder unusable");
+        }
+    }
+    std::printf("vp9-hostile: %zu packets refused, fresh and mid-stream\n", sizeof(refused) / sizeof(refused[0]));
+    /* A stream that does not begin with a key frame is refused whole; one that
+     * does and then continues from frames it never decoded is the hardware's to
+     * refuse, which it does with an error the decoder reports until a seek. */
+    {
+        auto decoder = makeVideoDecoder(VideoCodec::vp9);
+        bool threw = false;
+        try { decoder->submit(clip[2], 2); } catch (const std::runtime_error&) { threw = true; }
+        require(threw, "an inter frame with no key frame before it was accepted");
+    }
+    {
+        auto decoder = makeVideoDecoder(VideoCodec::vp9);
+        decoder->submit(real, 1);
+        decoder->takeFrames();
+        bool failed = false;
+        try {
+            decoder->submit(clip[2], 2);
+            decoder->drain();
+            decoder->takeFrames();
+        } catch (const std::runtime_error& error) {
+            failed = true;
+            std::printf("vp9-hostile: an inter frame from another stream: %s\n", error.what());
+        }
+        std::printf("vp9-hostile: the hardware %s an inter frame from another stream\n", failed ? "refused" : "took");
+        // The stream's error stays until the client seeks, as it does for every codec.
+        decoder->discard();
+        decoder->submit(real, 3);
+        decoder->drain();
+        const auto after = decoder->takeFrames();
+        require(after.size() == 1 && after[0].timestamp == 3 && after[0].format == VideoFormat {128, 96, 8},
+                "a key frame after a hardware refusal did not decode");
+    }
+}
+
+/* Packets cut and corrupted at random from the clip's real ones: whatever the
+ * decoder does with them, it answers with an error of its own or with pictures
+ * inside the advertised rectangle, and a seek leaves it able to decode the
+ * next key frame. The seed is fixed so a failure repeats. */
+void vp9Mutations(const std::vector<uml::platform::VideoDecodeCapability>& capabilities)
+{
+    using namespace uml::platform;
+    if (std::none_of(capabilities.begin(), capabilities.end(),
+                     [](const auto& c) { return c.profile == VideoProfile::vp9Profile0; }))
+        return;
+    const auto clip = ivfPackets(read("vp9-superframes.ivf"));
+    std::uint32_t state = 0x9e3779b9u;
+    const auto next = [&state](std::uint32_t bound) {
+        state = state * 1664525u + 1013904223u;
+        return (state >> 8) % bound;
+    };
+    auto decoder = makeVideoDecoder(VideoCodec::vp9);
+    unsigned refused = 0, decoded = 0;
+    const unsigned rounds = 240;
+    for (unsigned round = 0; round < rounds; ++round) {
+        // Each round starts at a key frame and then plays one mutated packet.
+        decoder->discard();
+        decoder->submit(clip[round % 2 ? 0 : 30], 1);
+        decoder->drain();
+        require(decoder->takeFrames().size() == 1, "the key frame of a mutation round did not decode");
+        auto packet = clip[1 + next(29)];
+        switch (next(3)) {
+        case 0:   // a few bytes of the header changed
+            for (unsigned i = 0, count = 1 + next(3); i < count; ++i) packet[next(12)] ^= std::uint8_t(1u << next(8));
+            break;
+        case 1:   // cut short anywhere
+            packet.resize(1 + next(std::uint32_t(packet.size())));
+            break;
+        default:  // bytes anywhere, the index among them
+            for (unsigned i = 0, count = 1 + next(4); i < count; ++i)
+                packet[next(std::uint32_t(packet.size()))] = std::uint8_t(next(256));
+            break;
+        }
+        try {
+            decoder->submit(packet, 2);
+            decoder->drain();
+            for (const auto& frame : decoder->takeFrames()) {
+                require(frame.format.width >= 1 && frame.format.width <= 4096 && frame.format.height >= 1 &&
+                            frame.format.height <= 4096 && !frame.luma.empty() && !frame.chroma.empty(),
+                        "a corrupted VP9 packet produced a picture outside the advertised rectangle");
+                ++decoded;
+            }
+        } catch (const std::runtime_error&) {
+            ++refused;
+        }
+    }
+    decoder->discard();
+    decoder->submit(clip[0], 3);
+    decoder->drain();
+    require(decoder->takeFrames().size() == 1, "the decoder did not recover from corrupted VP9 packets");
+    std::printf("vp9-mutations: %u packets, %u refused, %u pictures\n", rounds, refused, decoded);
+}
 }
 
 int main(int argc, char** argv)
@@ -636,6 +869,10 @@ int main(int argc, char** argv)
         }
         h264Limits(capabilities);
         h264Shapes(capabilities);
+        vp9Limits(capabilities);
+        vp9Clip(capabilities);
+        vp9Hostile(capabilities);
+        vp9Mutations(capabilities);
         auto decoder = makeVideoDecoder(capabilities.front().codec);
         bool rejected = false;
         try { decoder->submit({}, 0); } catch (const std::runtime_error&) { rejected = true; }

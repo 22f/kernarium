@@ -55,12 +55,23 @@ without asking each other.
   highest the platform capability reports, and picture sizes up to its maximum
   per axis. HEVC states levels 1 to 6.2 with no tier. H.264 stops at 5.2,
   because the hardware does not open the 8192 x 4320 frame a level 6 stream may
-  carry. `platform-video-decoder` decodes at the stated maximums, so a host whose
+  carry. VP9 is Profile 0 (8-bit 4:2:0) up to 4096 x 4096, and the driver
+  publishes no VP9 profile or level control. The range is the square Android
+  states for `c2.v4l2.vp9.decoder`, which it applies to both axes.
+  `platform-video-decoder` decodes at the stated maximums, so a host whose
   hardware does less fails that test and not a guest.
-- **Flow.** Input is complete Annex B access units or complete JPEG and VP9
-  frames. The coded queue's buffer size follows the picture size the client
-  states. The device holds an encoded packet back while the hardware has no
-  capture buffer to decode into.
+- **Flow.** Input is complete Annex B access units, complete JPEG images, or VP9
+  packets: one frame, or a superframe whose hidden frames the hardware decodes
+  with the shown one. The coded queue's buffer size follows the picture size the
+  client states. The device holds an encoded packet back while the hardware has
+  no capture buffer to decode into.
+- **Guest input.** The platform decoder reads the headers of every VP9 frame of
+  a packet, not only the first, and refuses before the hardware sees it a
+  packet that is truncated, has no valid superframe index, states a profile
+  other than 0, or states a picture size past the range, as it refuses an
+  oversized H.264 or HEVC picture. Whatever follows a valid header is the
+  hardware's to decode, and its failure ends the stream's pictures with an
+  error until the client seeks.
 
 `UML_VIDEO_ACTIVITY_LOG` names a file in which the device appends the profiles
 it advertised and each stream's codec and totals, since a guest that falls back

@@ -457,10 +457,13 @@ void codecLevelControls()
                           Case {VideoCodec::h264, 62, VIRTIO_VIDEO_LEVEL_H264_6_2, 19},
                           Case {VideoCodec::hevc, 186, VIRTIO_VIDEO_LEVEL_HEVC_6_2, 13},
                           Case {VideoCodec::hevc, 153, VIRTIO_VIDEO_LEVEL_HEVC_5_1, 9},
-                          Case {VideoCodec::jpeg, 0, 0, 0}}) {
+                          Case {VideoCodec::jpeg, 0, 0, 0},
+                          // The guest driver publishes no VP9 profile or level: Android states them itself.
+                          Case {VideoCodec::vp9, 0, 0, 0}}) {
         const auto codec = c.codec;
         VirtioVideoDevice device({{codec, codec == VideoCodec::hevc ? VideoProfile::hevcMain :
-            codec == VideoCodec::jpeg ? VideoProfile::jpegBaseline : VideoProfile::h264High,
+            codec == VideoCodec::jpeg ? VideoProfile::jpegBaseline :
+            codec == VideoCodec::vp9 ? VideoProfile::vp9Profile0 : VideoProfile::h264High,
             4096, 2304, c.maximum, 8}}, [](auto) { return std::make_unique<Decoder>(false); });
         virtio_video_stream_create create {};
         create.hdr = {VIRTIO_VIDEO_CMD_STREAM_CREATE, 1};
@@ -474,9 +477,9 @@ void codecLevelControls()
         const auto result = device.processQueue(0, 2, request, 128);
         const auto header = load<virtio_video_cmd_hdr>(result.response);
         const auto levels = levelsOf(device, wireCodec(codec));
-        if (codec == VideoCodec::jpeg) {
-            require(header.type == VIRTIO_VIDEO_RESP_ERR_UNSUPPORTED_CONTROL, "JPEG exposed a coded level");
-            require(levels.empty(), "JPEG listed coded levels");
+        if (codec == VideoCodec::jpeg || codec == VideoCodec::vp9) {
+            require(header.type == VIRTIO_VIDEO_RESP_ERR_UNSUPPORTED_CONTROL, "a codec without levels exposed a coded level");
+            require(levels.empty(), "a codec without levels listed coded levels");
         } else {
             require(header.type == VIRTIO_VIDEO_RESP_OK_GET_CONTROL, "level control failed");
             const auto value = load<virtio_video_control_val_level>(std::span(result.response).subspan(sizeof(header)));
@@ -488,6 +491,82 @@ void codecLevelControls()
                 VIRTIO_VIDEO_LEVEL_HEVC_1), "the level list starts at the wrong level");
         }
     }
+}
+
+/* VP9 is one coded format whose size range is the rectangle the host decodes.
+ * The guest driver gives Android no profile or level control for it, so Android
+ * states profile 0, levels 1 to 5 and sizes up to 4096 x 4096 on its own, and
+ * the range the host states has to be that square. A stream of it is decoded
+ * as the others are: the packet in the coded buffer reaches the decoder whole
+ * (a superframe among them) and the picture comes back from the decoder alone. */
+void vp9Stream()
+{
+    const std::vector<VideoDecodeCapability> capabilities {
+        {VideoCodec::vp9, VideoProfile::vp9Profile0, 4096, 4096, 0, 8}};
+    std::vector<VideoCodec> made;
+    VideoFixture video(7, 8 * page, [&made](auto codec) {
+        made.push_back(codec);
+        return std::make_unique<Decoder>(false);
+    }, capabilities);
+
+    std::vector<std::uint8_t> request;
+    append(request, virtio_video_query_capability{{VIRTIO_VIDEO_CMD_QUERY_CAPABILITY, 0},
+                                                  VIRTIO_VIDEO_QUEUE_TYPE_INPUT, {}});
+    const auto reply = video.device.processQueue(0, 90, request, 4096).response;
+    require(load<virtio_video_query_capability_resp>(reply).num_descs == 1, "VP9 alone is not one coded format");
+    const auto desc = load<virtio_video_format_desc>(std::span(reply).subspan(sizeof(virtio_video_query_capability_resp)));
+    require(desc.format == VIRTIO_VIDEO_FORMAT_VP9 && desc.num_frames == 1, "the coded format is not VP9");
+    const auto range = load<virtio_video_format_frame>(
+        std::span(reply).subspan(sizeof(virtio_video_query_capability_resp) + sizeof(virtio_video_format_desc)));
+    require(range.width.min == 64 && range.height.min == 64 && range.width.max == 4096 && range.height.max == 4096,
+            "the VP9 size range is not the symmetric rectangle the host decodes");
+
+    virtio_video_stream_create create {};
+    create.hdr = {VIRTIO_VIDEO_CMD_STREAM_CREATE, 7};
+    create.coded_format = VIRTIO_VIDEO_FORMAT_VP9;
+    video.ok(create);
+    require(made.size() == 1 && made.back() == VideoCodec::vp9, "the stream did not get a VP9 decoder");
+
+    // Every size inside the rectangle is accepted and none beyond it.
+    virtio_video_set_params set {};
+    set.hdr = {VIRTIO_VIDEO_CMD_SET_PARAMS, 7};
+    set.params.queue_type = VIRTIO_VIDEO_QUEUE_TYPE_INPUT;
+    set.params.format = VIRTIO_VIDEO_FORMAT_VP9;
+    for (const auto& [width, height] : {std::pair {4096u, 4096u}, std::pair {2304u, 4096u}, std::pair {64u, 4096u}}) {
+        set.params.frame_width = width; set.params.frame_height = height;
+        video.ok(set);
+    }
+    for (const auto& [width, height] : {std::pair {4097u, 64u}, std::pair {64u, 4097u}, std::pair {4112u, 2304u}}) {
+        set.params.frame_width = width; set.params.frame_height = height;
+        require(load<virtio_video_cmd_hdr>(video.command(set).response).type == VIRTIO_VIDEO_RESP_ERR_INVALID_PARAMETER,
+                "a VP9 size beyond the rectangle was accepted");
+    }
+    set.params.frame_width = 64; set.params.frame_height = 64;
+    video.ok(set);
+    video.setOutputFormat(VIRTIO_VIDEO_FORMAT_NV12);
+
+    // One packet in, one picture out, with the packet's timestamp.
+    const auto input = VIRTIO_VIDEO_QUEUE_TYPE_INPUT;
+    const auto output = VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT;
+    video.attachEncodedInput();
+    Planes planes;
+    const unsigned sizes[] = {4096u, 2048u};
+    for (unsigned i = 0; i < 2; ++i) planes.push_back({{(3 + i) * page, sizes[i], {}}});
+    require(load<virtio_video_cmd_hdr>(video.attach(output, 2, planes).response).type == VIRTIO_VIDEO_RESP_OK_NODATA,
+            "output attach failed");
+    const auto capture = video.queueCommand(output, 2);
+    const auto captureRequest = video.next;
+    require(video.command(capture).action == VhostUserQueueAction::defer, "capture did not wait for input");
+    const auto packet = video.queueCommand(input, 1, 5, 4242);
+    require(load<virtio_video_resource_queue_resp>(video.command(packet).response).flags == 0, "VP9 input failed");
+    video.expectSourceChange();
+    VhostUserQueueCompletion completion;
+    require(video.device.takeQueueCompletion(completion) && completion.requestId == captureRequest,
+            "a VP9 packet produced no picture");
+    const auto result = load<virtio_video_resource_queue_resp>(completion.response);
+    require(result.flags == 0 && result.timestamp == packet.timestamp && result.data_sizes[0] == sizes[0],
+            "the VP9 picture is wrong");
+    video.ok(virtio_video_stream_destroy{{VIRTIO_VIDEO_CMD_STREAM_DESTROY, 7}});
 }
 
 /* The encoder's commands share this header, but a decoder never offers
@@ -611,7 +690,7 @@ void activityLog()
      * close line can name the one that decoded. */
     std::vector<VideoDecodeCapability> both {
         {VideoCodec::h264, VideoProfile::h264High, 4096, 2304, 51, 8},
-        {VideoCodec::vp9, VideoProfile::vp9Profile0, 4096, 2304, 0, 8}};
+        {VideoCodec::vp9, VideoProfile::vp9Profile0, 4096, 4096, 0, 8}};
     ::setenv("UML_VIDEO_ACTIVITY_LOG", path.c_str(), 1);
     {
         VirtioVideoDevice device(both, [](auto) { return std::make_unique<Decoder>(false); });
@@ -1739,7 +1818,7 @@ void tenBitStreamToNv12(unsigned format)
 void capabilityMasks()
 {
     std::vector<VideoDecodeCapability> caps {
-        {VideoCodec::vp9, VideoProfile::vp9Profile0, 4096, 2304, 0, 8},
+        {VideoCodec::vp9, VideoProfile::vp9Profile0, 4096, 4096, 0, 8},
         {VideoCodec::hevc, VideoProfile::hevcMain, 8192, 4320, 0, 8},
         {VideoCodec::hevc, VideoProfile::hevcMain10, 8192, 4320, 0, 10},
     };
@@ -2100,6 +2179,7 @@ int main()
         h264ProfileControls();
         codecLevelControls();
         decoderRejectsEncoderCommands();
+        vp9Stream();
         capabilityMasks();
         sharedMemoryCapture();
         for (const bool decoderPacks : {true, false})

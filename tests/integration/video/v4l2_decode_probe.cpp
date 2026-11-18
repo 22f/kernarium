@@ -17,7 +17,7 @@
 // - the H.264 and HEVC profile and level menus: Constrained High beside High,
 //   levels from 1.0 up to 5.2 and from 1 up to 6.2, the current level the
 //   highest;
-// - flat portrait and square H.264 and HEVC pictures (2304 x 4096,
+// - flat portrait and square H.264, HEVC and VP9 pictures (2304 x 4096,
 //   4096 x 4096, 4320 x 8192), decoded to frames of their own size inside a
 //   frame range that is a rectangle;
 // - a stream that changes its picture size twice, decoded the way Android's
@@ -2012,6 +2012,10 @@ int main(int argc, char** argv)
             if (coded.pixelformat == V4L2_PIX_FMT_HEVC)
                 require(sizes.stepwise.max_width >= 8192 && sizes.stepwise.max_height >= 8192,
                         "the advertised HEVC range stops short of 8192 x 8192");
+            // Android's VP9 decoder states up to 4096 x 4096 on both axes whatever the driver says.
+            if (coded.pixelformat == V4L2_PIX_FMT_VP9)
+                require(sizes.stepwise.max_width >= 4096 && sizes.stepwise.max_height >= 4096,
+                        "the advertised VP9 range stops short of 4096 x 4096");
             /* A capture list in wire order names the planar format the device
              * actually decodes to; a reversed one names only the tail. */
             bool planar = false;
@@ -2086,6 +2090,9 @@ int main(int argc, char** argv)
                 decode(device, argv[1], "vp9-profile0", fmt.pixelformat, V4L2_PIX_FMT_ABGR32);
                 decode(device, argv[1], "vp9-profile0", fmt.pixelformat, V4L2_PIX_FMT_ABGR32,
                        V4L2_MEMORY_DMABUF);
+                decodeShape(device, argv[1], "vp9-uhd-3840x2160", fmt.pixelformat, 3840, 2160);
+                decodeShape(device, argv[1], "vp9-portrait-2304x4096", fmt.pixelformat, 2304, 4096);
+                decodeShape(device, argv[1], "vp9-square-4096x4096", fmt.pixelformat, 4096, 4096);
                 ++tested; continue;
             }
             require(fmt.pixelformat == V4L2_PIX_FMT_H264 || fmt.pixelformat == V4L2_PIX_FMT_HEVC, "advertised codec lacks a fixture");
