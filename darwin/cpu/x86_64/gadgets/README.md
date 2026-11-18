@@ -235,24 +235,25 @@ Known deviations from x86 that remain:
 
 - [`../code_page_registry.hpp`](../code_page_registry.hpp) keeps, per
   address-space generation, the set of pages in which any executor holds a
-  translation. A store publishes a code change only when its page is in that
-  set, which keeps publication precise under READ_IMPLIES_EXEC. A participant
-  with another TLB layout, such as the x86-64 JIT, joins with a function that
-  retires its own entry for a page. A page enters the set before any
-  translation built from it is handed out, and every participating executor's
-  write-side TLB entry for it is retired before the registration returns.
-  A registration waits at most one second for a participant that is still
-  inside the engine, and says so once; the page then stays unsettled for as
-  long as that participant stays inside, and the gadget engine builds the
-  translation of an unsettled page again at every dispatch instead of
-  caching it.
+  translation. A store publishes a code change at its own page only when that
+  page is in that set (a store through a writable alias also publishes at the
+  other holders of its frame), which keeps publication precise under
+  READ_IMPLIES_EXEC. A participant with another TLB layout, such as the x86-64
+  JIT, joins with a function that retires its own entry for a page. A page
+  enters the set before any translation built from it is handed out, and every
+  participating executor's write-side TLB entry for it is retired before the
+  registration returns. A registration waits at most one second for a
+  participant that is still inside the engine, and says so once; the page then
+  stays unsettled for as long as that participant stays inside, and the gadget
+  engine builds the translation of an unsettled page again at every dispatch
+  instead of caching it.
 - The memory layer accounts the writer locations and the holders of each frame
   ([`docs/architecture.md`](../../../../docs/architecture.md#x86-64-frame-accounting)).
   A translator that registers a frame retires the write translations of the
   writer locations the registration names.
 - A translation is built and validated only from a frame its generation holds:
   the executor registers the frame at the page's location before it reads a
-  byte, and runs nothing from a page whose registration did not settle: an
+  byte, and caches nothing from a page whose registration did not settle: an
   unsettled, failed or refused one gives a transient program, one instruction
   when no holder stands, never cached and rebuilt at the next dispatch (a
   refused first page, one that is not a code page or whose generation is
