@@ -1035,15 +1035,15 @@ and the product exposes them through Codec2. The vendor service
 `android.hardware.media.c2-service-v4l2` of `external/v4l2_codec2` (route
 `p0018`, which also adds the HEVC component) serves AVC and HEVC encoders and
 AVC, HEVC and VP9 decoders beside the software `c2.android.*` components;
-MediaCodec chooses the hardware decoders first. The VP9 decoder is Profile 0
-(8-bit) and the component lists no other profile, so a player that asks
-MediaCodec for a VP9 decoder with the stream's profile gets the software
-decoder for Profile 2 (10-bit), as it does for AV1, which the host does not
-decode. A player that picks the first VP9 decoder without stating the profile
-(Media3, for a WebM or MP4 file) gets the hardware decoder, which refuses a
-Profile 2 stream. Encoder parameters come from the device, and a
-capability the device does not list is not advertised. HDR content is shown as
-SDR because the host has no P010 sampler.
+MediaCodec chooses the hardware decoders first. The VP9 decoder lists Profile 0
+and, where the host's hardware decodes it, Profile 2 (10-bit), which is shown
+as 8-bit as HEVC Main 10 is. A VP9 stream of 12 bits or of 4:4:4 or 4:2:2 is
+refused by the hardware decoder, so a player that picks the first VP9 decoder
+without stating the profile (Media3, for a WebM or MP4 file) reports a playback
+error; AV1, which the host does not decode, stays with the software decoder.
+Encoder parameters come from the device, and a capability the device does not
+list is not advertised. HDR content is shown as SDR because the host has no
+P010 sampler.
 
 `overlay/config/media_codecs_c2.xml` is the product's one vendor codec list. Its
 performance points, the encoder floors, the instance limits and pixel rates, and
