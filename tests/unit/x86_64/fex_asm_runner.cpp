@@ -2071,6 +2071,20 @@ struct RetirementCase final {
 			"memory_fault", 3, code_address + 14, {}, long64, {},
 			{{data + 0x1000, data + 0x2000}}, mxcsr_is(mxcsr_flags, 0),
 			fault_state_gap},
+		/* mov $data+0xffe, %esp; mov $7, %eax; cmpxchgl %ecx, (%rsp), whose
+		 * operand crosses into a read-only page and differs from EAX; hlt:
+		 * a failed compare still writes the operand back, so the store
+		 * faults, and EAX keeps its value. */
+		{"cmpxchg-unequal-cross-store-fault", {0xbc, 0xfe, 0x0f, 0x00, 0x20,
+			0xb8, 0x07, 0x00, 0x00, 0x00, 0x0f, 0xb1, 0x0c, 0x24, 0xf4},
+			{{data, data + 0x2000}}, "memory_fault", 2, code_address + 10, {},
+			long64, 7, {{data + 0x1000, data + 0x2000}}},
+		/* mov $data+0xffc, %esp; mov $1, %eax; cmpxchg8b (%rsp); hlt: the
+		 * same for the 8-byte pair, whose EDX:EAX is 0:1 against 0. */
+		{"cmpxchg8b-unequal-cross-store-fault", {0xbc, 0xfc, 0x0f, 0x00,
+			0x20, 0xb8, 0x01, 0x00, 0x00, 0x00, 0x0f, 0xc7, 0x0c, 0x24,
+			0xf4}, {{data, data + 0x2000}}, "memory_fault", 2,
+			code_address + 10, {}, long64, 1, {{data + 0x1000, data + 0x2000}}},
 		/* nop; xor %ecx, %ecx; xor %edx, %edx; div %ecx; nop; hlt */
 		{"divide-error", {0x90, 0x31, 0xc9, 0x31, 0xd2, 0xf7, 0xf1, 0x90,
 			0xf4}, {}, "unexpected_event", 3, code_address + 5},
