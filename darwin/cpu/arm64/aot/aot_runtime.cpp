@@ -303,7 +303,7 @@ std::array<std::atomic<std::uint64_t>, 64> library_epoch_rehashes{};
  * (binder, address space, library, bias) that was made. */
 std::array<std::atomic<std::uint64_t>, 64> library_instances{};
 std::array<std::atomic<std::uint64_t>, 64> library_rebinds{};
-constexpr std::size_t instance_seen_slots = 16384;
+constexpr std::size_t instance_seen_slots = 65536;
 std::array<std::atomic<std::uint64_t>, instance_seen_slots> instance_seen{};
 /* What find() answered: an entry, or why not (FindResult), in all and per
  * library where the answer names one; and what a cross-library lookup that
@@ -494,6 +494,10 @@ void note_instance(const void *binder, unsigned long generation,
 		key *= 0xff51afd7ed558ccdULL;
 		key ^= key >> 33;
 	}
+	/* The last avalanche: parts that differ in high bits only (biases a
+	 * few GiB apart) must still spread over the table. */
+	key *= 0xc4ceb9fe1a85ec53ULL;
+	key ^= key >> 29;
 	key |= 1;
 	std::size_t slot = key >> 20;
 	for (std::size_t probe = 0; probe < 64; ++probe) {
