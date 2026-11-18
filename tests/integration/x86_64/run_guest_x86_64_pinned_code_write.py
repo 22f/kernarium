@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Check that a block device read into a page the process runs reaches the code.
+"""Check that a kernel read into a page the process runs reaches the code.
 
 Cross-builds the freestanding pinned_code_write_probe.cpp for x86-64 and boots
 an x86-64 image on an emulator built with the macos-x86_64 preset, with a second
@@ -12,7 +12,10 @@ the new function to run afterwards: the kernel wrote the page through its own
 alias with no process on the path, and names the frame to the host when the
 write ends. A fifth case has a second process run the page without a pause while
 a plain read fills it, which is the window between the flush the read's pin makes
-and the write.
+and the write. Two more read a buffered file, and a loop device over it, into a
+registered page with READ_FIXED: the kernel copies the file's bytes into the page
+with the generic copy-out of a buffer vector, which ends each page it wrote the
+same way.
 """
 
 from __future__ import annotations
@@ -39,7 +42,8 @@ from probe_runner import (  # noqa: E402
 PROBE = pathlib.Path(__file__).with_name("pinned_code_write_probe.cpp")
 PROBES = {"pinned-code-write-probe": ("x86-64", X86_64)}
 GUEST_PROBE = f"{GUEST_DIRECTORY}/pinned-code-write-probe"
-MODES = ("direct-anon", "direct-shared", "fixed-anon", "fixed-shared", "concurrent")
+MODES = ("direct-anon", "direct-shared", "fixed-anon", "fixed-shared", "concurrent",
+         "fixed-file", "loop-fixed")
 VERDICT = re.compile(
     r"^pinned-code-write: mode=([\w-]+) failed=(\d+) verdict=(\w+)$", re.MULTILINE)
 KERNEL_FAILURE = re.compile(r"WARNING:|BUG:|Oops|Call Trace:|Kernel panic")

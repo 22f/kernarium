@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* Freestanding x86-64 Linux guest probe: a block device read that lands in a
- * page the process has pinned and runs.
+/* Freestanding x86-64 Linux guest probe: a kernel read that lands in a page
+ * the process has pinned and runs.
  *
  * A read from /dev/ubdb opened with O_DIRECT is written by the kernel into the
  * caller's own pages through the kernel's alias of them, with no process and
  * no user address on the path, so the host's translation of the code that
- * page holds must hear of it from the kernel. One mode runs per process:
+ * page holds must hear of it from the kernel. So is a read into a registered
+ * buffer that a file's read copies, as the generic copy-out of a buffer
+ * vector does. One mode runs per process:
  *
  *	direct-anon	pread() into an anonymous page the process runs;
  *	direct-shared	pread() into a shared memfd page the process runs
@@ -19,7 +21,12 @@
  *			runs without a pause: its translation of the page is
  *			dropped when the read pins the page and made again from
  *			the old bytes at once, so only a call that follows the
- *			write can drop it again.
+ *			write can drop it again;
+ *	fixed-file	READ_FIXED of a buffered file (a memfd that holds the
+ *			new function) into an anonymous page registered before
+ *			it first ran;
+ *	loop-fixed	the same read from a loop device, opened with O_DIRECT,
+ *			that has the memfd as its backing file.
  *
  * Each page holds a function that returns 41 and is called many times. The
  * device holds one that returns 83. After the read, the data must be the new
@@ -37,13 +44,14 @@ using u32 = unsigned int;
 using u64 = unsigned long long;
 
 constexpr long nr_write = 1, nr_open = 2, nr_close = 3, nr_mmap = 9,
-	nr_pread64 = 17, nr_pwrite64 = 18, nr_nanosleep = 35, nr_fork = 57,
+	nr_ioctl = 16, nr_pread64 = 17, nr_pwrite64 = 18, nr_nanosleep = 35, nr_fork = 57,
 	nr_wait4 = 61, nr_kill = 62, nr_prctl = 157, nr_ftruncate = 77,
 	nr_memfd_create = 319,
 	nr_io_uring_setup = 425, nr_io_uring_enter = 426, nr_io_uring_register = 427;
 constexpr long prot_read = 1, prot_write = 2, prot_exec = 4;
 constexpr long map_shared = 0x01, map_private = 0x02, map_anonymous = 0x20;
-constexpr long o_direct = 040000;
+constexpr long o_rdwr = 2, o_direct = 040000;
+constexpr long loop_set_fd = 0x4C00, loop_clr_fd = 0x4C01, loop_ctl_get_free = 0x4C82;
 constexpr word page = 4096;
 constexpr int calls = 128;
 constexpr int old_value = 41, new_value = 83, control_value = 97;
@@ -305,6 +313,108 @@ void exercise_concurrent()
 	raw_syscall(nr_close, disk);
 }
 
+/* The decimal digits of @value, for a device name. */
+void number_to_text(long value, char *out)
+{
+	char digits[16];
+	int count = 0;
+	do {
+		digits[count++] = static_cast<char>('0' + value % 10);
+		value /= 10;
+	} while (value != 0);
+	int at = 0;
+	while (count != 0)
+		out[at++] = digits[--count];
+	out[at] = 0;
+}
+
+/* A loop device with the file @backing, opened with O_DIRECT, or a negative
+ * error. */
+long open_loop(long backing)
+{
+	const long control = raw_syscall(nr_open, address_of("/dev/loop-control"), o_rdwr);
+	if (control < 0)
+		return control;
+	const long index = raw_syscall(nr_ioctl, control, loop_ctl_get_free);
+	raw_syscall(nr_close, control);
+	if (index < 0)
+		return index;
+	char path[32] = "/dev/loop";
+	number_to_text(index, path + 9);
+	long device = -1;
+	/* The node appears once the device does. */
+	for (int tries = 0; tries < 50 && device < 0; ++tries) {
+		device = raw_syscall(nr_open, address_of(path), o_rdwr | o_direct);
+		if (device < 0)
+			sleep_milliseconds(100);
+	}
+	if (device < 0)
+		return device;
+	const long bound = raw_syscall(nr_ioctl, device, loop_set_fd, backing);
+	if (bound < 0) {
+		raw_syscall(nr_close, device);
+		return bound;
+	}
+	return device;
+}
+
+/* A page the process runs, registered before it first ran, and the
+ * READ_FIXED of a buffered file into it: a memfd that holds the new function,
+ * or a loop device over that memfd. The kernel copies the file's bytes into
+ * the buffer with the generic copy-out of a buffer vector. */
+void exercise_file(bool loop)
+{
+	u8 first[page], second[page];
+	fill_function(first, old_value);
+	fill_function(second, new_value);
+	u8 *writable = map(page, prot_read | prot_write | prot_exec, map_private | map_anonymous);
+	if (writable == nullptr)
+		return;
+	for (word at = 0; at < page; ++at)
+		writable[at] = first[at];
+	const long memfd = raw_syscall(nr_memfd_create, address_of("source"), 0);
+	if (memfd < 0) {
+		fail("memfd_create failed", memfd);
+		return;
+	}
+	raw_syscall(nr_ftruncate, memfd, page);
+	raw_syscall(nr_pwrite64, memfd, address_of(second), page, 0);
+	long source = memfd;
+	if (loop) {
+		source = open_loop(memfd);
+		if (source < 0) {
+			fail("a loop device over the memfd cannot be set up", source);
+			return;
+		}
+	}
+	int before = 0;
+	const long done = read_fixed(source, writable, writable, before);
+	const int after = run(writable);
+	const int data = data_value(writable);
+	fill_function(writable, control_value);
+	const int control = run(writable);
+	print("pinned-code-write: mode="); print(mode_name);
+	print(" io="); print(done);
+	print(" before="); print(before);
+	print(" after="); print(after);
+	print(" data="); print(data);
+	print(" control="); print(control); print("\n");
+	if (done != static_cast<long>(page))
+		fail("the read did not return a page", done);
+	if (before != old_value)
+		fail("the page did not run the old function first", before);
+	if (data != new_value)
+		fail("the read did not change the page", data);
+	if (after != new_value)
+		fail("the page ran the old function after the read", after);
+	if (control != control_value)
+		fail("a store through a user mapping did not take effect", control);
+	if (loop) {
+		raw_syscall(nr_ioctl, source, loop_clr_fd);
+		raw_syscall(nr_close, source);
+	}
+}
+
 /* One mode. */
 void exercise(bool shared, bool fixed)
 {
@@ -417,6 +527,10 @@ extern "C" int probe_main(long *stack)
 		exercise(true, true);
 	else if (same(mode_name, "concurrent"))
 		exercise_concurrent();
+	else if (same(mode_name, "fixed-file"))
+		exercise_file(false);
+	else if (same(mode_name, "loop-fixed"))
+		exercise_file(true);
 	else {
 		print("pinned-code-write: unknown mode\n");
 		return 4;
