@@ -149,23 +149,54 @@ def make_proof(root: pathlib.Path, edit=None, digest: bool = True) -> pathlib.Pa
     return proof
 
 
-def make_line(root: pathlib.Path, major: int = 17, page_size: int = 4096, kernel_page_size: int = 4096,
-              family: str = FAMILY) -> list[str]:
-    """Synthesized tracked metadata, as the script's arguments."""
-    image = root / "lineage.env"
-    image.write_text(f"LINEAGE24_ANDROID_MAJOR={major}\nLINEAGE24_KERNEL_PAGE_SIZE={page_size}\n")
-    kernel = root / "accepted-android-4k.env"
-    kernel.write_text(
+class Checkout:
+    """A checkout of its own: the staging script, the two files it imports and
+    the tracked metadata it reads, so a test chooses the line without options
+    of the script. `revision` is its one commit when it is a Git repository."""
+
+    def __init__(self, script: pathlib.Path, revision: str | None) -> None:
+        self.script = script
+        self.revision = revision
+
+
+def make_checkout(
+    root: pathlib.Path, major: int = 17, page_size: int = 4096, kernel_page_size: int = 4096,
+    family: str = FAMILY, git: bool = False,
+) -> Checkout:
+    for relative in (
+        "Andarium/scripts/stage-system-image.py", "kernel/common/artifacts/contract_checks.py",
+        "android/lineage-24/tools/ubd-disk.py",
+    ):
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPOSITORY / relative, root / relative)
+    metadata = root / "android/lineage-24/metadata"
+    metadata.mkdir(parents=True)
+    (metadata / "lineage.env").write_text(
+        f"LINEAGE24_ANDROID_MAJOR={major}\nLINEAGE24_KERNEL_PAGE_SIZE={page_size}\n")
+    make_acceptance(metadata / "accepted-release.env", LINEAGE24_ACCEPTED_PRODUCT_FAMILY=family)
+    kernel = root / "kernel/mainline-6.18/artifacts"
+    kernel.mkdir(parents=True)
+    (kernel / "accepted-android-4k.env").write_text(
         f"UML_KERNEL_ARTIFACT_RELEASE='{KERNEL_RELEASE}'\nUML_KERNEL_ARTIFACT_PAGE_SIZE={kernel_page_size}\n")
-    acceptance = make_acceptance(root / "accepted-release.env", LINEAGE24_ACCEPTED_PRODUCT_FAMILY=family)
-    return ["--acceptance", str(acceptance), "--image-metadata", str(image), "--kernel-descriptor", str(kernel)]
+    revision = None
+    if git:
+        for command in (["init", "-q", "."], ["add", "-A"], ["commit", "-q", "-m", "fixture"]):
+            subprocess.run(["git", "-C", str(root), *command], check=True, capture_output=True,
+                           stdin=subprocess.DEVNULL)
+        revision = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True,
+                                  text=True, stdin=subprocess.DEVNULL).stdout.strip()
+    return Checkout(root / "Andarium/scripts/stage-system-image.py", revision)
+
+
+def run_script(script: pathlib.Path, *arguments: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-B", str(script), *arguments],
+        capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL,
+    )
 
 
 def run(*arguments: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-B", str(SCRIPT), *arguments],
-        capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL,
-    )
+    return run_script(SCRIPT, *arguments)
 
 
 def tree(directory: pathlib.Path) -> list[str]:
@@ -288,11 +319,12 @@ class UnsignedProofTests(unittest.TestCase):
         self.addCleanup(self._scratch.cleanup)
         self.root = pathlib.Path(self._scratch.name)
         self.output = self.root / "out/andarium-system"
-        self.line = make_line(self.root)
+        self.checkout = make_checkout(self.root / "checkout")
 
-    def stage(self, proof: pathlib.Path, *extra: str, output: pathlib.Path | None = None):
-        return run("--release", str(proof), "--unsigned-proof", "--output", str(output or self.output),
-                   *self.line, *extra)
+    def stage(self, proof: pathlib.Path, *extra: str, output: pathlib.Path | None = None,
+              checkout: Checkout | None = None):
+        return run_script((checkout or self.checkout).script, "--release", str(proof), "--unsigned-proof",
+                          "--output", str(output or self.output), *extra)
 
     def test_a_proof_is_staged_with_a_manifest_that_still_says_it_is_one(self):
         proof = make_proof(self.root / "proofs")
@@ -340,11 +372,23 @@ class UnsignedProofTests(unittest.TestCase):
             self.assertIn(needle, result.stdout)
 
     def test_the_revision_is_said_to_be_in_this_checkout_when_it_is(self):
-        head = subprocess.run(["git", "-C", str(REPOSITORY), "rev-parse", "HEAD"], capture_output=True,
-                              text=True, check=True, stdin=subprocess.DEVNULL).stdout.strip()
-        proof = make_proof(self.root / "proofs", set_path("outer", "revision", value=head))
-        result = self.stage(proof)
-        self.assertIn(f"built from revision {head[:12]}, which is in this checkout's history", result.stdout)
+        checkout = make_checkout(self.root / "repository", git=True)
+        proof = make_proof(self.root / "proofs", set_path("outer", "revision", value=checkout.revision))
+        result = self.stage(proof, checkout=checkout)
+        self.assertIn(f"built from revision {checkout.revision[:12]}, which is in this checkout's history", result.stdout)
+
+    def test_the_output_lists_everything_that_is_not_checked(self):
+        with_digest = self.stage(make_proof(self.root / "with"))
+        without = self.stage(make_proof(self.root / "without", digest=False), output=self.root / "out/other")
+        for result in (with_digest, without):
+            line = next(each for each in result.stdout.splitlines() if "not checked:" in each)
+            for needle in (
+                "the signature", "the target files", "the input trees", "the source provenance",
+                "the inventory", "the command line's content", "the tracked disk policy",
+            ):
+                self.assertIn(needle, line)
+        self.assertNotIn("the producer's own disk digest", with_digest.stdout)
+        self.assertIn("the producer's own disk digest (the proof records none)", without.stdout)
 
     def test_without_the_flag_a_proof_is_refused_and_the_flag_is_named(self):
         proof = make_proof(self.root / "proofs")
@@ -367,8 +411,8 @@ class UnsignedProofTests(unittest.TestCase):
         for acceptance in ("accepted", "candidate"):
             with self.subTest(acceptance):
                 release = make_release(self.root / acceptance, acceptance=acceptance)
-                result = run("--release", str(release), "--unsigned-proof", "--output", str(self.output),
-                             *self.line)
+                result = run_script(self.checkout.script, "--release", str(release), "--unsigned-proof",
+                                    "--output", str(self.output))
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("--unsigned-proof stages an unsigned proof", result.stderr)
                 self.assertIn(repr(acceptance), result.stderr)
@@ -396,6 +440,11 @@ class UnsignedProofTests(unittest.TestCase):
         def remove(relative):
             def edit(directory, _manifest):
                 (directory / relative).unlink()
+            return edit
+
+        def write_text(relative, text):
+            def edit(directory, _manifest):
+                (directory / relative).write_text(text)
             return edit
 
         def truncate(directory, _manifest):
@@ -430,10 +479,13 @@ class UnsignedProofTests(unittest.TestCase):
             "no signed statement": (set_path("android", "signed", value=None), "unsigned"),
             "other major": (set_path("android", "major", value=16), "Android major"),
             "no fingerprint": (set_path("android", "fingerprint", value=None), "no fingerprint"),
-            "no build ID": (set_path("android", "build_id", value=""), "no build_id"),
             "build number": (set_path("android", "build_number", value=0), "build_number"),
             "boolean build number": (set_path("android", "build_number", value=True), "build_number"),
-            "patch level": (set_path("android", "security_patch", value="October"), "security_patch"),
+            "eleven-digit build number": (set_path("android", "build_number", value=10**10), "build_number"),
+            "patch level that is no string": (set_path("android", "security_patch", value=20261001), "security_patch"),
+            "bare proof prefix": (set_path("release_id", value="unsigned-proof-", ), "name a release"),
+            "stated kernel release": (set_path("kernel", "release", value="6.18.1-gstated"), "accepted Android kernel's"),
+            "empty command line": (write_text("boot/kernel-command-line.txt", "  \n"), "command line is empty"),
             "no android section": (set_path("android", value=None), "no android section"),
             "no kernel section": (set_path("kernel", value=None), "no kernel section"),
         }
@@ -450,16 +502,32 @@ class UnsignedProofTests(unittest.TestCase):
         proof = make_proof(self.root / "proofs")
         for name, change in (("image line", {"page_size": 16384}), ("kernel", {"kernel_page_size": 16384})):
             with self.subTest(name):
-                line_root = self.root / name
-                line_root.mkdir()
-                line = make_line(line_root, **change)
-                result = run("--release", str(proof), "--unsigned-proof", "--output", str(self.output), *line)
+                checkout = make_checkout(self.root / name, **change)
+                result = self.stage(proof, checkout=checkout)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("4096-byte-page line", result.stderr)
                 self.assertFalse(self.output.exists())
 
-    def test_a_proof_that_states_a_field_keeps_it(self):
-        edits = [set_path("android", "major", value=17), set_path("kernel", "release", value="6.18.1-gstated"),
+    def test_a_repeated_json_key_in_the_manifest_or_the_layout_is_refused(self):
+        def repeat(text: str, key: str, value: str) -> str:
+            return text.rstrip().rstrip("}").rstrip() + f',\n"{key}": {value}}}\n'
+
+        for name, relative, key, value in (
+            ("manifest acceptance", "release-manifest.json", "acceptance", '"unsigned-proof"'),
+            ("manifest release ID", "release-manifest.json", "release_id", '"unsigned-proof-other"'),
+            ("layout schema", "guest/partition-layout.json", "schema_version", "2"),
+        ):
+            with self.subTest(name):
+                proof = make_proof(self.root / name)
+                path = proof / relative
+                path.write_text(repeat(path.read_text(), key, value))
+                result = self.stage(proof, output=self.root / "out" / name)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(f"repeats the key {key}", result.stderr)
+                self.assertFalse((self.root / "out" / name).exists())
+
+    def test_a_proof_that_states_a_field_the_tracked_line_agrees_with_keeps_it(self):
+        edits = [set_path("android", "major", value=17), set_path("kernel", "release", value=KERNEL_RELEASE),
                  set_path("kernel", "page_size", value=4096)]
 
         def edit(directory, manifest):
@@ -469,7 +537,7 @@ class UnsignedProofTests(unittest.TestCase):
         proof = make_proof(self.root / "proofs", edit)
         self.assertEqual(self.stage(proof).returncode, 0)
         staged = json.loads((self.output / "release-manifest.json").read_text())
-        self.assertEqual(staged["kernel"], {"page_size": 4096, "release": "6.18.1-gstated"})
+        self.assertEqual(staged["kernel"], {"page_size": 4096, "release": KERNEL_RELEASE})
         self.assertEqual(staged["proof_staging"]["derived"], [])
 
     def test_a_failed_staging_keeps_what_was_staged(self):

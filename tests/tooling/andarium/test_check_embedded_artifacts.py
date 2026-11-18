@@ -690,11 +690,11 @@ class BuildPhaseTests(unittest.TestCase):
 
         fixture = Fixture(self.root)
         shutil.rmtree(fixture.repo / ".build/andarium-system")
-        (self.root / "line").mkdir()
         proof = staging.make_proof(self.root / "proofs")
-        result = staging.run(
-            "--release", str(proof), "--unsigned-proof", "--output", str(fixture.repo / ".build/andarium-system"),
-            *staging.make_line(self.root / "line"))
+        checkout = staging.make_checkout(self.root / "checkout")
+        result = staging.run_script(
+            checkout.script, "--release", str(proof), "--unsigned-proof",
+            "--output", str(fixture.repo / ".build/andarium-system"))
         self.assertEqual(result.returncode, 0, result.stderr)
         fixture.app = fixture.package()
         self.assert_only_release_builds_refuse(fixture)

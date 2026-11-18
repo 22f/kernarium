@@ -61,8 +61,9 @@ UNSIGNED_PROOF = "unsigned-proof"
 PROOF_ID_PREFIX = "unsigned-proof-"
 # What the application accepts as a release ID (ReleaseIdentity.releaseIDIsValid).
 RELEASE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
-PATCH_LEVEL_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+# The most digits the instance record takes for a build number (InstanceState).
+MAX_BUILD_NUMBER = 9_999_999_999
 
 
 class StageError(Exception):
@@ -71,6 +72,11 @@ class StageError(Exception):
 
 def fail(message: str) -> None:
     raise SystemExit(f"Andarium/scripts/stage-system-image.py: {message}")
+
+
+def read_strict_json(path: Path) -> dict:
+    """Reads a JSON object, refusing a key repeated in any object."""
+    return contract_checks.load_json_object(path, StageError)
 
 
 def read_json(path: Path) -> dict:
@@ -134,9 +140,9 @@ def check_release(release: Path, manifest: dict, accepted: dict[str, str] | None
     check_layout(release)
 
 
-def check_layout(release: Path) -> dict:
+def check_layout(release: Path, read=read_json) -> dict:
     """Checks the system disk against its partition layout; returns the layout."""
-    layout = read_json(release / PARTITION_LAYOUT)
+    layout = read(release / PARTITION_LAYOUT)
     if layout.get("schema_version") != LAYOUT_SCHEMA:
         raise StageError(f"the partition layout is not schema {LAYOUT_SCHEMA}")
     system = layout.get("system_disk")
@@ -184,8 +190,9 @@ def check_proof(release: Path, manifest: dict, line: dict) -> dict:
     # path). A proof has an ID of its own, "unsigned-proof-" and the ID of the
     # release it is the proof of, so it can never stand for an accepted release.
     release_id = manifest.get("release_id")
-    if not isinstance(release_id, str) or not release_id.startswith(PROOF_ID_PREFIX):
-        raise StageError(f"the proof's release ID does not start with {PROOF_ID_PREFIX}")
+    if not isinstance(release_id, str) or not release_id.startswith(PROOF_ID_PREFIX) \
+            or release_id == PROOF_ID_PREFIX:
+        raise StageError(f"the proof's release ID does not start with {PROOF_ID_PREFIX} and name a release")
     if not RELEASE_ID_RE.fullmatch(release_id):
         raise StageError("the proof's release ID is not one the application accepts")
     producer = manifest.get("producer")
@@ -207,16 +214,19 @@ def check_proof(release: Path, manifest: dict, line: dict) -> dict:
     android = manifest.get("android")
     if not isinstance(android, dict):
         raise StageError("the proof's manifest has no android section")
-    # What the application's release identity reads (ReleaseIdentity).
-    for key in ("build_id", "fingerprint"):
-        if not isinstance(android.get(key), str) or not android[key]:
-            raise StageError(f"the proof's android section has no {key}")
+    # What the application's readers refuse, and nothing more: the release
+    # identity (ReleaseIdentity) needs a fingerprint, a build number from 1 and
+    # a security patch string; the instance record (InstanceState) refuses a
+    # build number of more than ten digits; the system info (SystemInfo) reads
+    # the build ID and the patch date if they are there and shows none otherwise.
+    fingerprint = android.get("fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise StageError("the proof's android section has no fingerprint")
     number = android.get("build_number")
-    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
-        raise StageError("the proof's android build_number is not a positive integer")
-    patch = android.get("security_patch")
-    if not isinstance(patch, str) or not PATCH_LEVEL_RE.fullmatch(patch):
-        raise StageError("the proof's android security_patch is not a date")
+    if not isinstance(number, int) or isinstance(number, bool) or not 1 <= number <= MAX_BUILD_NUMBER:
+        raise StageError(f"the proof's android build_number is not an integer of 1 to {MAX_BUILD_NUMBER}")
+    if not isinstance(android.get("security_patch"), str):
+        raise StageError("the proof's android security_patch is not a string")
     # A proof is built from the unsigned target files: it says so.
     if android.get("signed") is not False:
         raise StageError("the proof does not say its android build is unsigned")
@@ -226,23 +236,32 @@ def check_proof(release: Path, manifest: dict, line: dict) -> dict:
     # Signed release: kernel.page_size == 4096 (the 4 KiB line) and the kernel
     # build that qualified the target files. A proof records no kernel: the page
     # size is the tracked line's and the release the accepted Android kernel's,
-    # which the runtime in the application is. A stated page size must be 4096.
+    # which the runtime in the application is. A stated page size or release
+    # must be the tracked one.
     kernel = manifest.get("kernel")
     if not isinstance(kernel, dict):
         raise StageError("the proof's manifest has no kernel section")
     if "page_size" in kernel and kernel["page_size"] != GUEST_PAGE_SIZE:
         raise StageError(f"the proof is not a {GUEST_PAGE_SIZE}-byte-page image")
-    if "release" in kernel and (not isinstance(kernel["release"], str) or not kernel["release"]):
-        raise StageError("the proof's kernel release is empty")
+    if "release" in kernel and kernel["release"] != line["kernel_release"]:
+        raise StageError(
+            f"the proof's kernel release {kernel['release']!r} is not the accepted Android "
+            f"kernel's {line['kernel_release']!r}, whose runtime the application packages")
 
-    # Signed release: the inventory lists the system disk and the files with
-    # their sizes. A proof has an empty inventory: the files are checked against
-    # the partition layout instead (sizes and sha256), as below.
+    # Signed release: the inventory lists the system disk, the layout and the
+    # command line with their sizes. A proof has an empty inventory: only the
+    # system disk is checked, against the partition layout (size and sha256, as
+    # below); the layout and the command line are checked for being there, not
+    # links, and the command line for a word in it. Their sizes and the command
+    # line's content are not checked.
     for relative in (COMMAND_LINE, PARTITION_LAYOUT, SYSTEM_DISK):
         path = release / relative
         if not path.is_file() or path.is_symlink():
             raise StageError(f"missing or unsafe release file: {path}")
-    layout = check_layout(release)
+    # The runtime's reader refuses a command line with no word in it.
+    if not (release / COMMAND_LINE).read_text(encoding="utf-8", errors="replace").split():
+        raise StageError("the proof's kernel command line is empty")
+    layout = check_layout(release, read_strict_json)
     # The proof's own record of the disk's digest, where it carries one (the
     # producer section's), is a second statement beside the layout's.
     recorded = producer.get("system_disk_sha256")
@@ -260,11 +279,14 @@ def check_proof(release: Path, manifest: dict, line: dict) -> dict:
         detail = (verified.stderr.strip() or verified.stdout.strip()).splitlines()
         raise StageError(f"the system disk does not match its partition layout: {detail[-1] if detail else 'no reason given'}")
 
-    # Not checked, because a proof cannot satisfy them: the signature (a proof
-    # is built from AOSP test keys), the target files (outside the directory;
-    # the producer's digest of them stands unverified), the input trees
-    # (outer.input_trees: a proof records none), and the source provenance
-    # (source: empty). The revision it was built from is reported, not required.
+    # Not checked, because a proof cannot satisfy them or no consumer needs
+    # them (proof_notes lists each): the signature (a proof is built from AOSP
+    # test keys), the target files (outside the directory; the producer's digest
+    # of them stands unverified), the input trees (outer.input_trees: a proof
+    # records none), the source provenance (source: empty), the inventory, the
+    # command line's content, the tracked disk policy, and the producer's own
+    # digest of the disk when it records none. The revision it was built from
+    # is reported, not required.
     staged = json.loads(json.dumps(manifest))
     derived = []
     for section, key, value in (
@@ -303,6 +325,13 @@ def revision_note(manifest: dict) -> str:
 def proof_notes(manifest: dict, staged: dict) -> list[str]:
     """What the person staging a proof is told beside the result."""
     derived = staged["proof_staging"]["derived"]
+    unchecked = [
+        "the signature (test keys)", "the target files", "the input trees", "the source provenance",
+        "the inventory (the sizes of the command line and the layout file)", "the command line's content",
+        "the tracked disk policy",
+    ]
+    if "system_disk_sha256" not in manifest["producer"]:
+        unchecked.append("the producer's own disk digest (the proof records none)")
     notes = [
         "for a developer build only: an AppStore or TestFlight build refuses it",
         revision_note(manifest),
@@ -314,7 +343,7 @@ def proof_notes(manifest: dict, staged: dict) -> list[str]:
     ]
     if derived:
         notes.append("taken from this checkout's tracked metadata, not from the proof: " + ", ".join(derived))
-    notes.append("not checked: the signature (test keys), the target files, the input trees, the source provenance")
+    notes.append("not checked: " + ", ".join(unchecked))
     return notes
 
 
@@ -366,8 +395,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--acceptance", type=Path, default=DEFAULT_ACCEPTANCE, help=argparse.SUPPRESS)
     parser.add_argument("--releases", type=Path, default=DEFAULT_RELEASES, help=argparse.SUPPRESS)
-    parser.add_argument("--image-metadata", type=Path, default=IMAGE_METADATA, help=argparse.SUPPRESS)
-    parser.add_argument("--kernel-descriptor", type=Path, default=KERNEL_DESCRIPTOR, help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
 
     notes: list[str] = []
@@ -390,7 +417,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise StageError(
                     "--unsigned-proof stages an unsigned proof, and this release's acceptance is "
                     f"{manifest.get('acceptance')!r}: stage an accepted release without it")
-            line = tracked_line(arguments.acceptance, arguments.image_metadata, arguments.kernel_descriptor)
+            line = tracked_line(arguments.acceptance, IMAGE_METADATA, KERNEL_DESCRIPTOR)
+            manifest = read_strict_json(release / MANIFEST)
             staged = check_proof(release, manifest, line)
             staged_manifest = (json.dumps(staged, indent=2, sort_keys=True) + "\n").encode("utf-8")
             notes = proof_notes(manifest, staged)
