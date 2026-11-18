@@ -281,10 +281,10 @@ Lx86_x87_scalar_load_cross\@:
 Lx86_x87_scalar_load_done\@:
 .endm
 
-.macro x87_scalar_store size, source
+.macro x87_scalar_store size, source, fault=Lx86_memory_fault
 	mov x24, \source
 	mov x7, x25
-	translate 1, UML_X86_64_TLB_WRITE_PAGE, \size, cross=Lx86_x87_scalar_store_cross\@
+	translate 1, UML_X86_64_TLB_WRITE_PAGE, \size, 0, \fault, Lx86_x87_scalar_store_cross\@
 	.if \size == 2
 	strh w24, [x7]
 	.elseif \size == 4
@@ -294,7 +294,7 @@ Lx86_x87_scalar_load_done\@:
 	.endif
 	b Lx86_x87_scalar_store_done\@
 Lx86_x87_scalar_store_cross\@:
-	cross_page_store x24, \size
+	cross_page_store x24, \size, \fault
 Lx86_x87_scalar_store_done\@:
 .endm
 

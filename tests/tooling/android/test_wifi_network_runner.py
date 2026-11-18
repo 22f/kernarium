@@ -26,7 +26,9 @@ import inspect
 import io
 from pathlib import Path
 import re
+import select
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -3577,16 +3579,29 @@ class StationReadingTests(unittest.TestCase):
 
 class LoopbackGuest:
     """A TCP echo server on the loopback that stands for the echo server of the guest: it echoes each line, and
-    `ends_after` lines it has echoed it ends the connection (a guest whose connection is dead)."""
+    `ends_after` lines it has echoed (or on the line `ends_on`, which it does not echo) it ends the connection (a
+    guest whose connection is dead).
 
-    def __init__(self, ends_after: int | None = None, ends_on: str | None = None) -> None:
+    The end is a shutdown of its sending side; it then reads and drops what the host still writes until the host
+    closes. A close would not do: a close with a line of the host unread, or a line of the host that reaches a closed
+    socket, is answered with a reset, and whether the host reads the end or the reset first is the kernel's timing,
+    which a slow scheduler changes. `resets` ends the connection with that reset on purpose. `end_with_line_pending`
+    holds the end until a line of the host has reached the guest (`line_pending` records whether it did, or the wait
+    ran out first), and `ended` is set once the guest has made its end: they put the end and the host's next line in
+    either order, for the rows that force it."""
+
+    def __init__(self, ends_after: int | None = None, ends_on: str | None = None, resets: bool = False,
+                 end_with_line_pending: bool = False) -> None:
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen()
         self.port = self.listener.getsockname()[1]
         self.ends_after, self.ends_on = ends_after, ends_on
+        self.resets, self.end_with_line_pending = resets, end_with_line_pending
         self.seen: list[str] = []
         self.closed = threading.Event()
+        self.ended = threading.Event()
+        self.line_pending: bool | None = None
         threading.Thread(target=self.accept, daemon=True).start()
 
     def accept(self) -> None:
@@ -3615,14 +3630,44 @@ class LoopbackGuest:
                     text = line.decode()
                     self.seen.append(text)
                     if text == self.ends_on:
+                        self.end(connection)
                         return
                     connection.sendall(line + b"\n")
                     echoed += 1
                     if self.ends_after is not None and echoed >= self.ends_after:
+                        self.end(connection)
                         return
+
+    def end(self, connection: socket.socket) -> None:
+        if self.end_with_line_pending:
+            self.line_pending = bool(select.select([connection], [], [], 5)[0])
+        if self.resets:
+            connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            connection.close()
+            self.ended.set()
+            return
+        connection.shutdown(socket.SHUT_WR)
+        self.ended.set()
+        while True:
+            try:
+                if not connection.recv(4096):
+                    return
+            except OSError:
+                return
 
     def close(self) -> None:
         self.listener.close()
+
+
+class LateReader(runner.Echo):
+    """A host whose thread the scheduler holds between its write and its read: `pause` seconds pass after a line
+    it writes."""
+
+    pause = 0.0
+
+    def send(self, text: str) -> None:
+        super().send(text)
+        time.sleep(self.pause)
 
 
 class EchoConnectionTests(unittest.TestCase):
@@ -3633,8 +3678,8 @@ class EchoConnectionTests(unittest.TestCase):
         self.addCleanup(self.server.close)
         self.connections: list[runner.Echo] = []
 
-    def connect(self, name: str = "S") -> runner.Echo:
-        connection = runner.Echo(self.server.port, name)
+    def connect(self, name: str = "S", kind: type[runner.Echo] = runner.Echo) -> runner.Echo:
+        connection = kind(self.server.port, name)
         self.connections.append(connection)
         self.addCleanup(connection.close)
         return connection
@@ -3659,6 +3704,34 @@ class EchoConnectionTests(unittest.TestCase):
         connection = self.connect()
         self.assertIsNone(connection.exchange("one"))
         self.assertEqual(connection.exchange("two", 5), "the guest ended the connection")
+
+    def test_the_end_is_read_when_the_hosts_next_line_reached_the_guest_before_the_end(self) -> None:
+        # A guest thread that the scheduler held after its last echo: the line is unread when the end comes.
+        self.server.ends_after = 1
+        self.server.end_with_line_pending = True
+        connection = self.connect()
+        self.assertIsNone(connection.exchange("one"))
+        self.assertEqual(connection.exchange("two", 5), "the guest ended the connection")
+        self.assertTrue(self.server.line_pending, "the guest ended before the host's line reached it: "
+                                                  "the ordering that the row forces did not happen")
+
+    def test_the_end_is_read_when_the_host_reads_long_after_it_wrote_to_the_ended_connection(self) -> None:
+        # A host thread that the scheduler held between its write and its read: whatever the guest's socket
+        # answered the line with has arrived by the time the host reads.
+        self.server.ends_after = 1
+        connection = self.connect(kind=LateReader)
+        self.assertIsNone(connection.exchange("one"))
+        self.assertTrue(self.server.ended.wait(5))
+        connection.pause = 0.2
+        self.assertEqual(connection.exchange("two", 5), "the guest ended the connection")
+
+    def test_a_connection_that_the_guest_reset_is_what_the_failure_says(self) -> None:
+        self.server.ends_on = "two"
+        self.server.resets = True
+        connection = self.connect()
+        self.assertIsNone(connection.exchange("one"))
+        found = connection.exchange("two", 5)
+        self.assertTrue(found.startswith("the connection broke ("), found)
 
     def test_the_host_closing_its_end_reaches_the_server(self) -> None:
         connection = self.connect()
@@ -3919,7 +3992,7 @@ class StayRowTests(unittest.TestCase):
     def test_a_connection_that_is_dead_after_the_wake_fails_the_row(self) -> None:
         self.echo.ends_after = 1
         self.fails(self.guest(), "the open connection S carries no data after the wake: "
-                                 "(the guest ended the connection|the connection broke)")
+                                 "the guest ended the connection")
 
     def test_a_network_that_the_wake_replaced_fails_the_row_naming_both(self) -> None:
         guest = self.guest()
@@ -3960,7 +4033,7 @@ class StayRowTests(unittest.TestCase):
     def test_a_line_that_the_host_wrote_in_the_stay_must_arrive(self) -> None:
         self.echo.ends_on = "C-during-stay"
         self.fails(self.guest(), "the line the host sent during the stay did not arrive: "
-                                 "(the guest ended the connection|the connection broke)", frozen=True)
+                                 "the guest ended the connection", frozen=True)
 
     def test_an_idle_connection_that_carries_nothing_after_the_stay_fails_the_row(self) -> None:
         self.echo.ends_on = "B-after-wake"

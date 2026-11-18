@@ -25,6 +25,23 @@ Lx86_cmpxchg_register_flags\@:
 	retire_and_next
 .endm
 
+/* A compare that fails writes nothing in the guest's memory, but the
+ * instruction still needs write access to the whole operand, which the
+ * hardware checks first. A split operand leaves the exclusive path, so the
+ * only check left is a translation of each page it touches, under the split
+ * lock and with nothing committed. The operand is not written back: another
+ * vCPU's store between the read and now, which the lock does not exclude,
+ * would be lost. x25 holds the operand's guest address; a refused page
+ * leaves through `Lx86_memory_fault`, which releases the lock, with the
+ * first byte the page refuses as the fault address. */
+.macro probe_split_write size
+	mov x7, x25
+	translate_plain 1, UML_X86_64_TLB_WRITE_PAGE, 1, Lx86_memory_fault
+	add x7, x25, #((\size) - 1)
+	and x7, x7, #0xfffffffffffff000
+	translate_plain 1, UML_X86_64_TLB_WRITE_PAGE, 1, Lx86_memory_fault
+.endm
+
 .macro compare_exchange_memory width, load, store, host_register, accumulator_store_register
 gadget cmpxchg_\width\()_mr
 	effective_address
@@ -77,6 +94,7 @@ Lx86_cmpxchg_memory_written\@:
 	record_deferred 2, \width
 	finish_store (\width / 8)
 Lx86_cmpxchg_memory_unequal\@:
+	probe_split_write (\width / 8)
 	split_lock_leave
 	\store \accumulator_store_register\()24, [_vcpu, #UML_X86_64_CPU_REGISTERS]
 	mov x11, x27
@@ -245,6 +263,7 @@ Lx86_cmpxchg_pair_8_written:
 	compare_exchange_pair_flags
 	finish_store 8
 Lx86_cmpxchg_pair_8_unequal:
+	probe_split_write 8
 	split_lock_leave
 	mov w19, wzr
 	mov w8, w24
@@ -287,3 +306,4 @@ gadget cmpxchg_pair_16
 	retire_and_next
 
 .purgem compare_exchange_pair_flags
+.purgem probe_split_write

@@ -873,22 +873,30 @@ def arith_destination_body(o, op, width, fall=None):
     o.emit(f'\tadr x19, {loaded}')
     o.emit(f'\tb Lx86_baked_cross_load_{width}')
     o.emit(f'{loaded}:')
-    o.emit('\tmov x24, x11')
-    o.emit(f'\t{host} {hr}27, {hr}24, {hr}26')
-    normalize(o, width, f'{hr}27')
     if not writes:
+        o.emit('\tmov x24, x11')
+        o.emit(f'\t{host} {hr}27, {hr}24, {hr}26')
+        normalize(o, width, f'{hr}27')
         flag_form(o, op, width, 24, 26)
         o.emit(f'\tb {computed}')
         return
+    # The crossing store can still fault, and a faulting instruction changes
+    # no flag: the old operand waits in x27, which the helper keeps, and the
+    # record is taken once the store is behind us. x27 is free here: the
+    # result moves to x24, the store's value, and the record reads it there.
+    # The run's TLB base register is not a scratch register.
     stored = o.label('mrstored')
-    o.emit('\tmov x11, x24')
-    o.emit('\tmov x12, x26')
-    o.emit('\tmov x13, x27')
-    record(o, flagop, width)
+    o.emit(f'\t{host} {hr}27, {hr}11, {hr}26')
+    normalize(o, width, f'{hr}27')
     o.emit('\tmov x24, x27')
+    o.emit('\tmov x27, x11')
     o.emit(f'\tadr x19, {stored}')
     o.emit(f'\tb Lx86_baked_cross_store_{size}')
     o.emit(f'{stored}:')
+    o.emit('\tmov x11, x27')
+    o.emit('\tmov x12, x26')
+    o.emit('\tmov x13, x24')
+    record(o, flagop, width)
     finish_store(o, size)
 
 

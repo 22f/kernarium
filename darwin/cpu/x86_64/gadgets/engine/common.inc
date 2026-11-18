@@ -944,7 +944,12 @@ Lx86_lazy_ready\@:
 	.endif
 .endm
 
-/* Stream descriptor:
+/* `segment_exit` is where an access that fails the inline limit check of FS or
+ * GS in compatibility mode leaves for the runtime's exact check, which runs the
+ * instruction again: an instruction that has changed state before its address
+ * is computed passes an exit that puts it back.
+ *
+ * Stream descriptor:
  *   15:0   value-register byte offset
  *   25:16  base-register byte offset, or UML_X86_64_CPU_SEGMENT_ZERO when
  *          there is no base register
@@ -965,7 +970,7 @@ Lx86_lazy_ready\@:
  * Followed by the folded displacement/absolute address. Every CpuState
  * offset a descriptor names is below 1024, which the builder checks.
  */
-.macro effective_address
+.macro effective_address segment_exit=Lx86_segment_check
 	ldp x23, x14, [_stream], #16
 	ubfx x9, x23, #16, #10
 	ubfx x11, x23, #26, #10
@@ -1031,7 +1036,7 @@ Lx86_address_compat\@:
 	sub x12, x7, x12
 	cmp x12, x13
 	b.ls Lx86_address_checked\@
-	b Lx86_segment_check
+	b \segment_exit
 Lx86_address_checked\@:
 	add x11, _vcpu, x9, lsl #3
 	ldr x10, [x11, #UML_X86_64_CPU_SEGMENT_ZERO]

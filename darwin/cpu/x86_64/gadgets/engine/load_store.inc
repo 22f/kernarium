@@ -319,7 +319,7 @@ gadget pop_\width\()_m
 	mov w26, w26
 	.endif
 	str x26, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
-	effective_address
+	effective_address Lx86_pop_memory_segment_check\@
 	str x25, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
 	mov x27, x7
 	translate 1, UML_X86_64_TLB_WRITE_PAGE, (\width / 8), cross=Lx86_pop_memory_destination_cross\@
@@ -336,6 +336,11 @@ Lx86_pop_memory_destination_cross\@:
 	helper_call uml_x86_64_gadget_cross_page_store
 	cbz w0, Lx86_memory_fault
 	b Lx86_pop_memory_done\@
+	/* The segment check leaves before anything commits and runs the POP
+	 * again: ESP goes back to the stack pointer the POP found, in x25. */
+Lx86_pop_memory_segment_check\@:
+	str x25, [_vcpu, #(UML_X86_64_CPU_REGISTERS + 4 * 8)]
+	b Lx86_segment_check
 .endm
 
 pop_memory 16, ldrh, w, strh, w

@@ -142,11 +142,20 @@ tail and resolves the same address.
   not run. In compatibility mode FS and GS accesses check their limit, and a
   task whose ES, SS or DS is not flat writable data steps one instruction at a
   time; long-mode code pays for none of it.
+- An instruction whose store faults has changed no flag, x87 status bit,
+  MXCSR flag, register or stack pointer, apart from the elements a repeated
+  string instruction had stored. A gadget commits its results after the
+  store, and one whose helper raises status first keeps what it would change
+  and puts it back at the fault exit. An exit for the runtime's exact segment
+  check, which runs the instruction again, has changed none of it either. The
+  `--retirement` rows of the corpus runner hold it.
 - The engine runs only on hosts with FEAT_LSE2, which the runtime checks once.
   A locked operand inside one 16-byte granule keeps the exclusive loop; one
   across a granule or a page runs under the process-wide `split_operand_lock`
   (`../split_operand_lock.hpp`), which is atomic only against other operands on
-  that path.
+  that path. A split CMPXCHG whose compare fails writes nothing back, because
+  another vCPU's plain store may have landed since the read; it checks write
+  access to each page instead.
 - Every gadget that touches guest memory leaves through a `dmb ish`, because
   x86 promises total store order and full-fence LOCK and XCHG. `translate`,
   `stack_fast` and the bulk-helper macros mark their gadget
@@ -155,7 +164,9 @@ tail and resolves the same address.
 - A translation may miss and a miss is a call that does not save host vector
   registers, so a gadget may not hold a guest value in one across its own
   translation. This is also why vector result forwarding takes register forms
-  only.
+  only. The corpus CTest `x86-64-instruction-corpus-clobbered-calls` holds it:
+  every call into the address space leaves garbage in the caller-saved
+  registers.
 - The software TLB is direct-mapped and indexed by the low
   `UML_X86_64_TLB_INDEX_BITS` bits of the page number
   (`../layout/assembly_offsets.h`); `native_tlb_index` in
