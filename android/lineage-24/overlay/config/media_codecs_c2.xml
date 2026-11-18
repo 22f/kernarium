@@ -12,9 +12,11 @@
   Profile 2), the formats the host decodes in hardware. The component takes the
   profiles and levels from the device and lists the High tier of every HEVC
   level the device lists; the device lists the VP9 profiles the host decodes
-  and no VP9 level, so the component states levels 1 to 5, and every other VP9
-  stream the hardware does not take stays with the software decoder. A 10-bit
-  stream (HEVC Main 10, VP9 Profile 2) reaches the guest narrowed to 8 bits.
+  and no VP9 level, so the component states levels 1 to 5. Another VP9 stream
+  (12-bit, 4:4:4, 4:2:2) reaches the software decoder only through a player
+  that selects the decoder by profile; one that takes the first VP9 decoder
+  reports a playback error. A 10-bit stream (HEVC Main 10, VP9 Profile 2)
+  reaches the guest narrowed to 8 bits.
   This file states what MediaCodecInfo
   cannot learn from the component. CTS wants the width and height ranges of a
   decoder to be the same, and the component limits a stream to 4096x4096

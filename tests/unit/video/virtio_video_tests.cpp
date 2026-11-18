@@ -502,7 +502,7 @@ void codecLevelControls()
                           Case {VideoCodec::hevc, 186, VIRTIO_VIDEO_LEVEL_HEVC_6_2, 13},
                           Case {VideoCodec::hevc, 153, VIRTIO_VIDEO_LEVEL_HEVC_5_1, 9},
                           Case {VideoCodec::jpeg, 0, 0, 0},
-                          // The guest driver publishes no VP9 profile or level: Android states them itself.
+                          // VP9 has a profile menu and no levels: Android states those itself.
                           Case {VideoCodec::vp9, 0, 0, 0}}) {
         const auto codec = c.codec;
         VirtioVideoDevice device({{codec, codec == VideoCodec::hevc ? VideoProfile::hevcMain :
@@ -538,9 +538,10 @@ void codecLevelControls()
 }
 
 /* VP9 is one coded format whose size range is the rectangle the host decodes.
- * The guest driver gives Android no profile or level control for it, so Android
- * states profile 0, levels 1 to 5 and sizes up to 4096 x 4096 on its own, and
- * the range the host states has to be that square. A stream of it is decoded
+ * The guest driver gives Android a profile menu for it but no level control, so
+ * Android states levels 1 to 5 and sizes up to 4096 x 4096 on its own, and the
+ * range the host states has to be that square, from 64 on each axis, which
+ * SET_PARAMS holds a stream to as it does the maximum. A stream of it is decoded
  * as the others are: the packet in the coded buffer reaches the decoder whole
  * (a superframe among them) and the picture comes back from the decoder alone. */
 void vp9Stream()
