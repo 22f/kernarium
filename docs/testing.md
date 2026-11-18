@@ -418,7 +418,8 @@ mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
-FEEDBACK_ADDRESS=feedback@example.com REVIEW_ID=id0000000000 FOLLOW_X_HANDLE=example_handle
+FEEDBACK_ADDRESS=feedback@example.com REVIEW_ID=id0000000000 STORE_LINK_ID=id0000000000
+FOLLOW_X_HANDLE=example_handle
 TIP_LITE=com.example.andarium.tip.lite TIP_PRO=com.example.andarium.tip.pro
 TIP_MAX=com.example.andarium.tip.max TIP_ULTRA=com.example.andarium.tip.ultra
 SHEET_DEVELOPER_NAME=example SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle
@@ -456,7 +457,9 @@ StoreKit's test session over `AndariumTests/TipJar.storekit`, example
 identifiers only, never the App Store), and `ReviewScreenTests`,
 `ReviewAskFlowTests` and `ReviewAskStoreTests` `REVIEW_ID`
 ([Review on the App Store](../Andarium/README.md#review-on-the-app-store); the
-system's rating prompt is never asked for). `HomeMenuTests` (Home's toolbar
+system's rating prompt is never asked for), and `StoreNoticeTests` `STORE_LINK_ID`
+([App Store notice](../Andarium/README.md#app-store-notice); the system's `open`
+is replaced, so no address opens). `HomeMenuTests` (Home's toolbar
 menu) exist with any of Send feedback, Review and Buy me tokens, and
 `HomePlainInfoTests` (the plain Info button) only with none
 ([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
@@ -641,6 +644,10 @@ rejects the forbidden terms of each language and a token amount in the
 `TipJar` table, and requires the statement that a tip is voluntary, one-time
 and the features free; the bundle check also covers the developer header's
 keys and artwork),
+the App Store notice's build conditions (`andarium-store-link-configuration`: the
+resolved build settings of each configuration build it into TestFlight alone, and
+`AndariumCore`'s `StoreLinkTests` hold its address, its dismissal record and its
+visibility rule),
 document pickers' build conditions (`andarium-document-pickers`: the App Store
 configuration opens files in place, every other presents the copy-mode picker,
 and an in-place importer anywhere else is in an App Store branch or a named
