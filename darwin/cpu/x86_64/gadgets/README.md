@@ -11,7 +11,7 @@ both gadget engines is [`NOTICE.md`](../../arm64/gadgets/NOTICE.md).
 | Path | Role |
 | --- | --- |
 | `engine.S`, `engine/*.inc` | The gadgets. `engine/region.inc` places every group. |
-| `engine/generate_baked.py` | Writes the register-baked scalar bank (`baked_scalar.inc`) at build time. |
+| `engine/generate_baked.py` | Writes the register-baked scalar bank at build time: `baked_scalar.inc`, and `baked_tail.inc` for the families behind the last group. |
 | `engine/fit_slots.py` | Reports the groups that no longer fit their slot. |
 | `native_builder.cpp`, `native_baked.hpp`, `native_entry.hpp` | Turn decoded instructions into streams. |
 | `executor.cpp`, `program.cpp`, `translation_body.hpp`, `translation_space.*` | The translation cache, its sharing and its budget. |
@@ -53,11 +53,19 @@ rejects.
   128-byte line. Setting those rows' slots moves later groups by whole lines
   and keeps their phase, so the commit says which slots grew and needs no pad
   control ([optimization history](../../../../docs/optimization-history.md)).
-- A phase never changes. A new group takes a new row with phase 0: a new
-  `engine/*.inc` file's at the end of the table, a new baked family's after the
-  last baked one.
+- A phase never changes. A new group takes a new row with phase 0, in the
+  order `engine.S` emits it: a family the generator writes to
+  `baked_scalar.inc` after the last of those; a new `engine/*.inc` file's after
+  the last of those, in front of the tail families, which then move by whole
+  lines and keep their phase; and a family the generator writes to
+  `baked_tail.inc` after the last tail group, `baked_compare_branch` being the
+  first. The tail families end the table, so a new one moves no other bank
+  group; the cold part starts on the first page after the bank's slots and
+  moves by whole pages.
 - A call to a helper outside the engine is a `helper_call`, and a new helper
-  is appended to the island's list in `engine/common.inc`.
+  is appended to the island's list in `engine/common.inc`. The helper may
+  overwrite x0 to x17, so no gadget keeps a value in x2 to x17 across the call
+  (`x86-64-gadget-helper-clobbers`).
 
 ## Gadget banks
 
@@ -89,6 +97,13 @@ tail and resolves the same address.
   guest bounds and the first entry (`link_header` in `program.hpp`): a body's
   own, or an unlinked record's, whose entry is `link_exit`.
   `x86-64-gadget-link-layout` holds the layout.
+- In long64 code with the baked bank on, a register CMP or TEST against an
+  immediate or a register at 32 or 64 bits and the conditional branch right
+  after it are one baked entry when the branch takes its inline form (its
+  fall-through follows it and its target has a link), for every condition but
+  parity and, after TEST, the four that read the carry (B, AE, BE, A). The
+  branch then has no stream word, and a stream built without links keeps the
+  two apart.
 - A dispatch's instruction budget bounds how long it runs, not where a block
   stops: the block that crosses it runs to its end. Only a single step and the
   instruction a POPF or IRET setting TF leaves before its trap ask for an exact
@@ -105,7 +120,11 @@ tail and resolves the same address.
 - The deferred-flag record (`DeferredFlagOperation`, `CpuState::carry_slot`) is
   read by assembly and C++ materializers that must agree. A producer that
   leaves host NZCV lets the next SETcc, CMOVcc or Jcc read it, and the deferred
-  record is always written as well.
+  record is written as well, but for one case: in long64 with the baked bank
+  on, a register-only ADD, SUB, AND, OR or XOR at 32 or 64 bits whose next
+  instruction in the block is a register-only ADD, SUB, AND, OR, XOR, CMP or
+  TEST writes neither, since that instruction writes the whole record before
+  anything can read it.
 
 ## Guest-visible model
 
@@ -137,10 +156,29 @@ tail and resolves the same address.
   registers, so a gadget may not hold a guest value in one across its own
   translation. This is also why vector result forwarding takes register forms
   only.
-- The software TLB is direct-mapped. `native_tlb_entry_count` in
-  `../software_tlb.hpp` is the one constant; the three assembly copies of the
-  index (`translate` and `translate_plain` in `engine/common.inc`, and the
-  baked entries in `engine/generate_baked.py`) must change with it.
+- The software TLB is direct-mapped and indexed by the low
+  `UML_X86_64_TLB_INDEX_BITS` bits of the page number
+  (`../layout/assembly_offsets.h`); `native_tlb_index` in
+  `../software_tlb.hpp` and the three assembly copies of the index
+  (`translate` and `translate_plain` in `engine/common.inc`, and the baked
+  entries in `engine/generate_baked.py`) all read that constant. A
+  translation compares the page of its access's last byte, and an index that
+  never puts neighbouring pages in one entry is what makes every access that
+  crosses a page miss and take its crossing path.
+- x22 (`_tlb` in `engine/common.inc`) holds the run's software-TLB base:
+  `uml_x86_64_gadget_enter` loads it from the context, the host frame gives
+  the caller its own back, and no gadget writes it
+  (`x86-64-gadget-tlb-register`).
+- A stack access first re-checks the entry that the run's last stack
+  translation used (`stack_fast`): PUSH, POP, CALL and RET, and the stack twin
+  that the baked tables name in place of every fused [rsp + displacement]
+  entry. A run starts at the entry of RSP's page. A hit needs the entry's exact
+  tag, so it is that page's own entry and retires with it, and a store hits
+  only a page holding no code while the run's `write_code` is clear, so it
+  keeps the overlap test and skips the publication test. A twin hits only an
+  access aligned to its size, which cannot cross a page. A crossing or
+  misaligned access or another page takes the ordinary translation, and only
+  the stack instructions' misses move the entry.
 
 ## Floating-point environment
 

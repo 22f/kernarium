@@ -19,6 +19,7 @@
 	xor	edx, edx
 	mov	r11, -1
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	add	rax, 1
 	cmp	rax, r11

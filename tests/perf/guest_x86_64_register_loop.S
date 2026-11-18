@@ -28,6 +28,7 @@
 	xor	r15d, r15d
 
 	mov	r8d, BENCH_ITERATIONS
+	jmp	.Lloop
 .Lloop:
 	add	rax, 1
 	sub	rcx, 1
@@ -47,7 +48,9 @@
 	add	rbx, r15
 	sub	r8, 1
 	jnz	.Lloop
+	jmp	.Lresult
 
+.Lresult:
 	/* BENCH_ITERATIONS is even, so the XOR of rsi cancels. */
 	mov	r8d, BENCH_ITERATIONS
 	cmp	rax, r8
