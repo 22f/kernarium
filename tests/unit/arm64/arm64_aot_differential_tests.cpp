@@ -592,6 +592,35 @@ struct BlockLog final {
 	std::vector<std::array<std::uint64_t, 5>> blocks;
 } g_log;
 
+/* Give the host the writable page of a guest page before a run starts. A
+ * host page first read through its mapping and then written takes two faults,
+ * and the second one costs the thread its exclusive monitor, as an interrupt
+ * would: a store-exclusive of the guest's first atomic on a page nothing has
+ * written yet then fails once. The architecture allows it and the guest's
+ * loop absorbs it, but a run that fails there leaves a state the stepped
+ * trace (where every instruction starts a new entry and the software monitor
+ * completes the store) never visits. The run being compared is the guest's
+ * code, not the host's page tables, so the pages are written first. */
+void warm_page(StaticGuestMemory &memory, unsigned long generation,
+	const Arena &arena, std::size_t page)
+{
+	if (arena.kind(page) != 2)
+		return;
+	memory.set_generation(generation);
+	volatile auto *byte = reinterpret_cast<volatile unsigned char *>(
+		memory.atomic_pointer(arena.base() + page * page_bytes, 1,
+			::uml::memory::MemoryAccess::write));
+	if (byte != nullptr)
+		*byte = *byte;
+}
+
+void warm_pages(StaticGuestMemory &memory, unsigned long generation,
+	const Arena &arena)
+{
+	for (std::size_t page = 0; page < arena.total(); ++page)
+		warm_page(memory, generation, arena, page);
+}
+
 /* The blocks of a run from the state in `cpu`, until the guest makes a system
  * call, an exit it sees, a fault no page can repair or `blocks` of them have
  * run. A fault inside the arena gets its page (writable) and the run goes on
@@ -604,6 +633,7 @@ struct BlockLog final {
 {
 	Result r;
 	std::size_t faults_taken = 0;
+	warm_pages(memory, generation, arena);
 	for (; r.blocks < blocks; ++r.blocks) {
 		const auto before = cpu.pc;
 		const auto out = run_selected(
@@ -652,6 +682,7 @@ struct BlockLog final {
 		if (arena.kind(page) == 2)
 			break;
 		arena.set_kind(page, 2);
+		warm_page(memory, generation, arena, page);
 	}
 	arm64::restore_native_fp_environment(cpu);
 	/* Whether a run loaded a deferred floating-point state depends on the
