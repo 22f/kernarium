@@ -5503,9 +5503,9 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
         if rule.targets is not None and SMS_DOMAIN in rule.targets and rule.sources - {SMS_DOMAIN}:
             fail(f"{sorted(rule.sources - {SMS_DOMAIN})} hold {sorted(rule.permissions)} on a vsock socket of "
                  f"{SMS_DOMAIN}")
-        if rule.targets is not None and SMS_DOMAIN not in rule.targets and specific(rule):
-            fail(f"{SMS_DOMAIN} holds {sorted(rule.permissions)} on the vsock sockets of {sorted(rule.targets)}: "
-                 "only what every ordinary application domain holds is allowed")
+        if rule.targets is not None and rule.targets - {SMS_DOMAIN} and specific(rule):
+            fail(f"{SMS_DOMAIN} holds {sorted(rule.permissions)} on the vsock sockets of "
+                 f"{sorted(rule.targets - {SMS_DOMAIN})}: only what every ordinary application domain holds is allowed")
 
     attributes = cil_types_and_attributes(policies, SMS_DOMAIN)
     for attribute in ("coredomain", "appdomain", "unconstrained_vsock_violators"):

@@ -500,6 +500,8 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         "(allow kernarium_sms package_service (service_manager (find)))\n"
         "(allow kernarium_sms role_service (service_manager (find)))\n"
         "(allow kernarium_sms self (vsock_socket (create bind listen accept read write shutdown getattr getopt)))\n"
+        # Its own type named as the target is its own socket, as self is.
+        "(allow kernarium_sms kernarium_sms (vsock_socket (getattr)))\n"
         "(allow installd app_data_file_type (dir (create getattr open read search write)))\n"
         "(allow installd app_data_file_type (file (create getattr open read write unlink)))\n"
     )
@@ -550,6 +552,9 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         ext += "(allow dumpstate kernarium_sms (vsock_socket (getattr)))\n"
     elif variant == "dumpstate-getattr-repeated-outside-the-platform":
         ext += "(allow dumpstate domain (vsock_socket (getattr)))\n"
+    elif variant == "outbound-to-a-group-with-the-service":
+        ext += ("(typeattributeset base_typeattr_95 (kernarium_sms virtualizationservice))\n"
+                "(allow kernarium_sms base_typeattr_95 (vsock_socket (getattr)))\n")
     elif variant == "inherited-find-service-only":
         plat += "(allow kernarium_sms credstore_service (service_manager (find)))\n"
     elif variant == "inherited-find-split-over-two-rules":
@@ -5993,6 +5998,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "has a rule on system_app_data_file"),
             ("sms-vsock-in-system-ext", {"sms_policy_variant": "inherited-vsock-in-system-ext"},
              "kernarium_sms holds .* on the vsock sockets of"),
+            # A target group that holds the service and another type is the other type's socket too.
+            ("sms-vsock-outbound-to-a-group-with-the-service",
+             {"sms_policy_variant": "outbound-to-a-group-with-the-service"},
+             "kernarium_sms holds .* on the vsock sockets of \\['virtualizationservice'\\]"),
             ("sms-service-on-other-sockets", {"sms_policy_variant": "service-on-another-sockets"},
              "kernarium_sms holds .* on the vsock sockets of"),
             ("sms-data-through-app-data-file-type", {"sms_policy_variant": "data-through-app-data-file-type"},
