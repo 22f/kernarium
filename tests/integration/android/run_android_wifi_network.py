@@ -1642,11 +1642,10 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path, re
         boot_android.data_capacity(boot_options, identity))
     command.append(f"--net-forward=tcp:127.0.0.1:{options.forward_port}-{GUEST_WIFI_ADDRESS}:{ECHO_PORT}")
     log = private / f"emulator-{instance.name}-{int(time.time())}.log"
-    stream = log.open("wb")
-    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
-                               start_new_session=True,
-                               env={**os.environ, "TMPDIR": str(private), "PYTHONDONTWRITEBYTECODE": "1"})
-    stream.close()
+    with log.open("wb") as stream:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
+                                   start_new_session=True,
+                                   env={**os.environ, "TMPDIR": str(private), "PYTHONDONTWRITEBYTECODE": "1"})
     serial = f"127.0.0.1:{options.adb_port}"
     guest = Guest(adb, serial, process, log, Console(private / f"uml-kern{process.pid}", private), private)
     guest.forward_port = options.forward_port
@@ -1671,10 +1670,13 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path, re
 def stop(guest: Guest) -> None:
     # A guest that is still stopped (a section that failed in its stay) would not see the signals that end it.
     guest.thaw()
-    if guest.capture is not None:
-        guest.capture.stop()
-    boot_android.disconnect_adb(guest.adb, guest.serial)
-    boot_android.stop_guest(guest.process)
+    try:
+        if guest.capture is not None:
+            guest.capture.stop()
+    finally:
+        # The emulator ends whatever the capture's own end does.
+        boot_android.disconnect_adb(guest.adb, guest.serial)
+        boot_android.stop_guest(guest.process)
 
 
 # ---- The sections.

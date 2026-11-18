@@ -266,6 +266,18 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 30)
 
+# The start_guest of the thermal, keyboard and mouse, gamepad, camera, Wi-Fi
+# network and orientation runners (the compass and old-application runners
+# start through the orientation runner's) against a stand-in emulator and an
+# adb that does nothing: a start that fails or is interrupted stops the
+# emulator it launched, and a guest that booted is returned running.
+uml_add_tooling_test(
+    NAME android17-runner-start-failure
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_runner_start_failure.py
+    LABELS android
+    TIMEOUT 180)
+
 # The gamepad runner without a guest: the host's end of the wire against the
 # golden frames and the C++ header, the controller families against the
 # drivers' own report structures, the parsers of what the guest prints, the
