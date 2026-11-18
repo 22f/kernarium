@@ -42,6 +42,7 @@ struct TalkBackSwitchTests {
     private final class Said {
         var lines: [String] = []
         var queued: [Bool] = []
+        var high: [Bool] = []
     }
 
     /// What a run's start asks VoiceOver to say, and the end of it.
@@ -54,9 +55,10 @@ struct TalkBackSwitchTests {
     /// the first read of a start comes as soon as the test suspends.
     private func listen(to model: AppModel) -> Said {
         let said = Said()
-        model.announcer = { text, queued in
+        model.announcer = { text, queued, high in
             said.lines.append(text)
             said.queued.append(queued)
+            said.high.append(high)
         }
         return said
     }
@@ -508,6 +510,7 @@ struct TalkBackSwitchTests {
         try await settle { model.session.reader.isOn }
         said.lines.removeAll()
         said.queued.removeAll()
+        said.high.removeAll()
         driver.screenReaderReadDelays = Array(repeating: .zero, count: driver.screenReaderReads) + [.milliseconds(300)]
         let reads = driver.screenReaderReads
         let late = Task { await model.refreshScreenReader() }
@@ -630,9 +633,6 @@ struct TalkBackSwitchTests {
         #expect(spoken.lines.count == 2)
     }
 
-    /// The card that asks waits for the run-start sentence's end: its focus
-    /// would cut the sentence off. Where the sentence ends, the card rises at
-    /// once.
     /// The display says nothing of the screen reader's state while the run's
     /// sentence is spoken and Android has not been read: VoiceOver composes
     /// what it says on landing there now and speaks it after the sentence, so
@@ -656,6 +656,9 @@ struct TalkBackSwitchTests {
         #expect(GuestLayer.accessibility(of: model)?.value != nil)
     }
 
+    /// The card that asks waits for the run-start sentence's end: its focus
+    /// would cut the sentence off. Where the sentence ends, the card rises at
+    /// once.
     @Test func theCardWaitsForTheRunStartSentenceAndRisesAtItsEnd() async throws {
         let (model, _) = started(voiceOver: true, interval: .milliseconds(20))
         let spoken = RunStartSpeech()
@@ -695,6 +698,26 @@ struct TalkBackSwitchTests {
         #expect(model.session.reader.card == .ask)
         model.session.reader.card = nil
         #expect(model.displayMayTakeFocus)
+    }
+
+    /// The news that the screen reader is on is at high priority, so the
+    /// display's own speech does not cut it off, and at a run start it waits
+    /// for the run's sentence rather than over it.
+    @Test func theNewsThatTheScreenReaderIsOnIsHighPriorityAndWaitsForTheRunStartSentence() async throws {
+        let (model, _) = started(voiceOver: true, guestState: reading([talkBack]), interval: .milliseconds(20))
+        let said = listen(to: model)
+        let spoken = RunStartSpeech()
+        model.runStartAnnouncer = { text, finished in
+            spoken.lines.append(text)
+            spoken.finish = finished
+        }
+        model.announceRunStart(.running(.normal))
+        try await settle { model.session.reader.isOn }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(said.lines.isEmpty)
+        spoken.finish?(true)
+        #expect(said.lines == [ScreenReaderWords.announcement(on: true, edge: model.session.keysEdge)])
+        #expect(said.high == [true])
     }
 
     @Test func aScreenThatSpeaksForItselfAnnouncesNothingAtItsStart() throws {
@@ -973,8 +996,9 @@ struct TalkBackSwitchTests {
         model.settingsClosed(reader)
         try await Task.sleep(for: .milliseconds(60))
         #expect(said.lines == [ScreenReaderWords.announcement(on: true, edge: .right)])
-        // After the run sentence, not over it; and no card asks.
-        #expect(said.queued == [true])
+        // At high priority, so the display's own speech does not cut it off;
+        // and no card asks.
+        #expect(said.high == [true])
         #expect(model.session.reader.card == nil)
     }
 

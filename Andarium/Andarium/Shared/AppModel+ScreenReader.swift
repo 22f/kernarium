@@ -155,7 +155,7 @@ extension AppModel {
                 if on {
                     // The way back is said with the news, once.
                     reader.toldOn = true
-                    announce(ScreenReaderWords.announcement(on: true, edge: session.keysEdge))
+                    announce(ScreenReaderWords.announcement(on: true, edge: session.keysEdge), highPriority: true)
                 } else {
                     announce(ScreenReaderWords.announcement(on: false, edge: session.keysEdge))
                 }
@@ -210,10 +210,11 @@ extension AppModel {
         } else if state.isOn {
             if reader.card == .ask { reader.card = nil }
             // A start where Android's screen reader was on already: VoiceOver
-            // is told, once, with the way back (no card; nothing to ask).
-            if !reader.toldOn, reader.changing == nil {
+            // is told, once, with the way back (no card; nothing to ask), after
+            // the run's start sentence, not over it.
+            if !reader.toldOn, reader.changing == nil, !reader.runStartAnnouncing {
                 reader.toldOn = true
-                announce(ScreenReaderWords.announcement(on: true, edge: session.keysEdge), queued: true)
+                announce(ScreenReaderWords.announcement(on: true, edge: session.keysEdge), highPriority: true)
             }
         } else if canShow, !reader.declined, reader.changing == nil {
             present(.ask, in: reader)
@@ -300,9 +301,11 @@ extension AppModel {
             && busy == nil && sheet == nil && spacePause == nil && alert == nil
     }
 
-    /// What VoiceOver is told of its own accord (`announcer` is a test's).
-    func announce(_ text: String, queued: Bool = false) {
-        announcer(text, queued)
+    /// What VoiceOver is told of its own accord (`announcer` is a test's). At
+    /// high priority it is not cut off by VoiceOver's own speech of the element
+    /// its cursor lands on.
+    func announce(_ text: String, queued: Bool = false, highPriority: Bool = false) {
+        announcer(text, queued, highPriority)
     }
 
     /// Not Now on the card: no card again in this session.
