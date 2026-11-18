@@ -378,6 +378,9 @@ private:
 	[[nodiscard]] std::uint32_t address_reset_timeout(
 		std::uint32_t timeout) const noexcept;
 	void reset_flows_on_lost_addresses() noexcept;
+	/* Whether the system has reported an outage that the loop has not read
+	 * into the hold yet, or reports one now. */
+	[[nodiscard]] bool path_outage_unread() const noexcept;
 	/* The host's addresses, read now; none when the system cannot list
 	 * them. */
 	[[nodiscard]] std::optional<HostAddresses> read_address_table() noexcept;
@@ -438,6 +441,7 @@ private:
 	AddressResetHold address_reset_hold_;
 	std::optional<HostAddresses> address_reset_table_;
 	std::uint64_t path_reports_seen_{};
+	std::uint64_t path_outages_seen_{};
 	HostResolver resolver_;
 	std::uint16_t next_identification_{1};
 	/* Where SLiRP's guest forward carries DNS over TCP to the resolver;

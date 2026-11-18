@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <optional>
+#include <type_traits>
 #include <vector>
 
 namespace uml::network {
@@ -226,6 +228,14 @@ void SlirpProvider::check_address_reset() noexcept
 	const auto reports = path_state_.reports();
 	if (reports != path_reports_seen_) {
 		path_reports_seen_ = reports;
+		/* An outage that began and ended between two looks leaves no
+		 * trace in the state but its count: the connections it
+		 * interrupted resume, so the hold starts over. */
+		if (const auto outages = path_state_.uncarried_reports();
+		    outages != path_outages_seen_) {
+			path_outages_seen_ = outages;
+			address_reset_hold_.clear();
+		}
 		/* The table is read at a report and when its hold ends, never in
 		 * between; a failed read leaves the last one standing. */
 		bool changed = false;
@@ -236,15 +246,15 @@ void SlirpProvider::check_address_reset() noexcept
 		}
 		address_reset_hold_.reported(path_state_.carried(), changed,
 					     host_clock_now());
-#if UML_SLIRP_TESTING
-		path_reports_handled_for_testing_.store(
-			reports, std::memory_order_release);
-#endif
 	}
 	if (address_reset_hold_.take_due(path_state_.carried(),
 					 host_clock_now()))
 		reset_flows_on_lost_addresses();
 #if UML_SLIRP_TESTING
+	/* Counted when the pass is over, so that a test that waits for them has
+	 * the reports it waited for read and their hold looked at. */
+	path_reports_handled_for_testing_.store(path_reports_seen_,
+						std::memory_order_release);
 	address_reset_checks_for_testing_.fetch_add(
 		1, std::memory_order_release);
 #endif
@@ -266,7 +276,8 @@ std::uint32_t SlirpProvider::address_reset_timeout(
 
 struct SlirpProvider::LostAddressQuery {
 	const SlirpProvider &provider;
-	const HostAddresses &table;
+	const HostAddresses &first;
+	const HostAddresses &now;
 };
 
 bool SlirpProvider::lost_address_callback(slirp_os_socket descriptor,
@@ -287,36 +298,60 @@ bool SlirpProvider::lost_address_callback(slirp_os_socket descriptor,
 			(static_cast<std::uint32_t>((*address)[1]) << 16) |
 			(static_cast<std::uint32_t>((*address)[2]) << 8) |
 			(*address)[3]);
-		return local_address_is_gone(local, query.table);
+		return local_address_is_gone(local, query.first, query.now);
 	}
 #endif
 	socklen_t length = sizeof(local);
 	if (::getsockname(descriptor, reinterpret_cast<sockaddr *>(&local),
 			  &length) != 0)
 		return false;
-	return local_address_is_gone(local, query.table);
+	return local_address_is_gone(local, query.first, query.now);
+}
+
+bool SlirpProvider::path_outage_unread() const noexcept
+{
+	return !path_state_.carried() ||
+		path_state_.uncarried_reports() != path_outages_seen_;
 }
 
 void SlirpProvider::reset_flows_on_lost_addresses() noexcept
 {
-	/* Judged against the addresses as they are now, not as they were at the
-	 * report: the hold exists so that an address that came back is not
-	 * lost. A table that cannot be read judges nothing. */
-	auto table = read_address_table();
-	if (!table || !slirp_)
+	/* An outage the loop has not read yet is as good as one it has: it
+	 * cancels what the hold was for, and the next pass starts over. */
+	if (!slirp_ || path_outage_unread())
 		return;
-	address_reset_table_ = *table;
+	/* Judged against the addresses as they are now, not only as they were
+	 * at the report: the hold exists so that an address that came back is
+	 * not lost. A table that cannot be read judges nothing. */
+	auto fresh = read_address_table();
+	if (!fresh || path_outage_unread())
+		return;
+	/* Moves only: this function cannot throw. */
+	static_assert(std::is_nothrow_move_assignable_v<
+		      std::optional<HostAddresses>>);
+	const auto first = std::move(address_reset_table_);
+	address_reset_table_ = std::move(fresh);
+	const HostAddresses &now = *address_reset_table_;
+	/* Without the table the hold started with, no address is known to
+	 * have been missing for the hold. */
+	if (first) {
 #if UML_SLIRP_TESTING
-	address_reset_calls_for_testing_.fetch_add(
-		1, std::memory_order_release);
+		address_reset_calls_for_testing_.fetch_add(
+			1, std::memory_order_release);
 #endif
-	LostAddressQuery query{*this, *table};
-	const int reset = slirp_reset_tcp_flows(
-		slirp_.get(), lost_address_callback, &query);
-	if (reset > 0)
-		std::fprintf(stderr, "Darwin user network: reset %d connection%s "
-				     "bound to an address the host no longer "
-				     "has\n", reset, reset == 1 ? "" : "s");
+		LostAddressQuery query{*this, *first, now};
+		const int reset = slirp_reset_tcp_flows(
+			slirp_.get(), lost_address_callback, &query);
+		if (reset > 0)
+			std::fprintf(stderr, "Darwin user network: reset %d "
+					     "connection%s bound to an address "
+					     "the host no longer has\n", reset,
+				     reset == 1 ? "" : "s");
+	}
+	/* An address that went missing since the hold started has not been
+	 * gone for the hold: its connections get a hold of their own. */
+	if (!first || now.lost_since(*first))
+		address_reset_hold_.reported(true, true, host_clock_now());
 }
 
 void SlirpProvider::event_loop(std::stop_token stop_token) noexcept

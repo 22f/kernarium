@@ -15,11 +15,13 @@
  *
  * The rule is the pair below. A path report that says an interface carries
  * the path starts a hold; when the hold has elapsed and the path is still
- * carried, the connections whose local address the host no longer has are
- * reset. An outage (no interface carries the path) cancels the hold and
- * resets nothing, since the same address may come back and the connections
- * resume; so does an address that comes back before the hold ends. Both are
- * functions of values, so a unit test needs no socket and no clock.
+ * carried, the connections whose local address the host has not had for the
+ * whole hold are reset. An outage (no interface carries the path) cancels the
+ * hold and resets nothing, since the same address may come back and the
+ * connections resume; so does an address that comes back before the hold
+ * ends. An address first found missing when the hold ends has not been gone
+ * for the hold: it starts one of its own. Both parts are functions of
+ * values, so a unit test needs no socket and no clock.
  */
 
 #include "host_addresses.hpp"
@@ -101,10 +103,14 @@ private:
 
 /* Whether a host socket's local address is one the host has lost: an IPv4
  * address, not the unspecified one a socket that has not connected yet
- * reports, that no interface in `table` holds. Anything else (a Unix-domain
- * socket, an address of another family) is not the host's address to
- * lose. */
+ * reports, that no interface held in `first`, the table the hold started
+ * with, or in `now`, the table read when it ended. An address that was there
+ * at the start and is gone now is not lost yet: the hold starts again for
+ * it. An interface's broadcast address is not an address a socket connects
+ * from, so it holds nothing. Anything else (a Unix-domain socket, an address
+ * of another family) is not the host's address to lose. */
 [[nodiscard]] bool local_address_is_gone(const sockaddr_storage &local,
-					 const HostAddresses &table) noexcept;
+					 const HostAddresses &first,
+					 const HostAddresses &now) noexcept;
 
 } // namespace uml::network

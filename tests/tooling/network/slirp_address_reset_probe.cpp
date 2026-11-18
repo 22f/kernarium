@@ -23,6 +23,18 @@
  *  - a plain outage (no interface carries the path) resets nothing, however
  *    long it lasts; an interface that then carries the path with the address
  *    still gone resets after the hold;
+ *  - an outage that begins and ends between two looks of the event loop, or
+ *    during the read that ends the hold, starts the hold again: nothing is
+ *    reset when the old one would have ended;
+ *  - an address that goes missing without a report while the hold runs is not
+ *    reset when the hold ends: the hold starts again for it;
+ *  - the event loop learns of a report and of the end of a hold from the
+ *    report's own wake and the hold's own deadline, not from its periodic
+ *    pass: with the passes a second apart and a wake or a hold half a second
+ *    off their beat, a late look shows (the clock of that scenario is the
+ *    real one);
+ *  - the table the read at the end of the hold returns is moved into storage:
+ *    a copy of it would allocate, and the allocation is made to fail;
  *  - the provider stopped and opened again while a hold was pending: the hold
  *    does not call into the new instance;
  *  - asked of the real sockets: a connection to the host's LAN address is
@@ -52,14 +64,45 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <initializer_list>
 #include <map>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
 #include <thread>
 #include <vector>
+
+/* An allocation of one size that fails once, for the scenario that shows the
+ * event loop keeps a table it read without allocating: the whole process's
+ * allocator, with nothing else changed. */
+namespace allocation_trap {
+std::atomic<std::size_t> bytes{0};
+std::atomic<bool> fired{false};
+} // namespace allocation_trap
+
+void *operator new(std::size_t size)
+{
+	if (size != 0 &&
+	    size == allocation_trap::bytes.load(std::memory_order_relaxed)) {
+		allocation_trap::bytes.store(0, std::memory_order_relaxed);
+		allocation_trap::fired.store(true, std::memory_order_relaxed);
+		throw std::bad_alloc{};
+	}
+	if (void *memory = std::malloc(size != 0 ? size : 1))
+		return memory;
+	throw std::bad_alloc{};
+}
+void *operator new[](std::size_t size) { return operator new(size); }
+void operator delete(void *memory) noexcept { std::free(memory); }
+void operator delete(void *memory, std::size_t) noexcept { std::free(memory); }
+void operator delete[](void *memory) noexcept { std::free(memory); }
+void operator delete[](void *memory, std::size_t) noexcept
+{
+	std::free(memory);
+}
 
 namespace {
 
@@ -304,15 +347,33 @@ struct Flow {
 /* The provider, its stand-ins and the guest. */
 class Rig final {
 public:
-	Rig()
+	/* `real_clock`: the hold is timed by the system's clock. */
+	explicit Rig(bool real_clock = false)
 	{
-		provider.set_clock_for_testing([this] { return clock.now(); });
-		provider.set_host_address_reader_for_testing([this] {
-			std::lock_guard guard{lock_};
-			HostAddresses table;
-			table.assign_ipv4(addresses_);
-			return std::optional<HostAddresses>{table};
-		});
+		if (!real_clock)
+			provider.set_clock_for_testing(
+				[this] { return clock.now(); });
+		provider.set_host_address_reader_for_testing(
+			[this]() -> std::optional<HostAddresses> {
+				std::function<void()> action;
+				std::optional<HostAddresses> table;
+				{
+					std::lock_guard guard{lock_};
+					action = std::move(on_read_);
+					on_read_ = nullptr;
+					if (next_read_) {
+						table = std::move(next_read_);
+						next_read_.reset();
+					} else {
+						table.emplace();
+						table->assign_ipv4(addresses_);
+					}
+				}
+				/* Outside the lock: the action may publish reports. */
+				if (action)
+					action();
+				return table;
+			});
 	}
 	~Rig() { provider.stop(); }
 	Rig(const Rig &) = delete;
@@ -325,6 +386,21 @@ public:
 		addresses_.clear();
 		for (const auto &address : addresses)
 			addresses_.push_back(value(address));
+	}
+
+	/* What happens during the next read of the host's addresses, on the
+	 * thread that reads: `action` runs after the table is taken. */
+	void during_next_read(std::function<void()> action)
+	{
+		std::lock_guard guard{lock_};
+		on_read_ = std::move(action);
+	}
+
+	/* The next read of the host's addresses returns `table`, moved out. */
+	void next_read_returns(HostAddresses table)
+	{
+		std::lock_guard guard{lock_};
+		next_read_ = std::move(table);
 	}
 
 	/* The guest's connections to `server`, a Unix-domain one, are forwarded
@@ -374,40 +450,53 @@ public:
 	}
 
 	/* The system reports its path: an interface carries it, or none. The
-	 * event loop has read the report when this returns. */
+	 * event loop has read the report when this returns, woken by the
+	 * report alone. */
 	void report_carried()
 	{
 		provider.path_state_for_testing().report(true, true);
-		settle();
+		settle_reports();
 	}
 	void report_outage()
 	{
 		provider.path_state_for_testing().report(false, false);
-		settle();
+		settle_reports();
 	}
 
 	/* Time passes for the hold, and the event loop has looked at it when
-	 * this returns. */
+	 * this returns: a test clock gives no wake of its own, so one is given. */
 	void advance(std::chrono::milliseconds amount)
 	{
 		clock.advance(amount);
-		settle();
+		/* A pass that begins after this read reads the clock as moved. */
+		const auto begun = provider.event_loop_passes_for_testing();
+		provider.wake_for_testing();
+		wait_for_checks(begun + 1);
+		settle_reports();
 	}
 
-	/* Waits until the event loop has read every report so far and made two
-	 * more looks at the hold, the second of which began after everything
-	 * the caller did. */
-	void settle()
+	/* Waits until the event loop has read every report, those published
+	 * while it read included, with no wake but the reports' own. */
+	void settle_reports()
 	{
-		const auto reports = provider.path_state_for_testing().reports();
-		const auto checks = provider.address_reset_checks_for_testing();
 		const auto deadline = Clock::now() + std::chrono::milliseconds{prompt_ms};
 		while (Clock::now() < deadline) {
-			provider.wake_for_testing();
-			std::this_thread::sleep_for(std::chrono::milliseconds{5});
-			if (provider.path_reports_handled_for_testing() >= reports &&
-			    provider.address_reset_checks_for_testing() >= checks + 2)
+			if (provider.path_reports_handled_for_testing() >=
+			    provider.path_state_for_testing().reports())
 				return;
+			std::this_thread::sleep_for(std::chrono::milliseconds{2});
+		}
+		fail("settle", "a report did not wake the event loop in time");
+	}
+
+	/* Waits until the event loop has looked at the hold `checks` times. */
+	void wait_for_checks(std::uint64_t checks)
+	{
+		const auto deadline = Clock::now() + std::chrono::milliseconds{prompt_ms};
+		while (Clock::now() < deadline) {
+			if (provider.address_reset_checks_for_testing() >= checks)
+				return;
+			std::this_thread::sleep_for(std::chrono::milliseconds{2});
 		}
 		fail("settle", "the event loop did not look at the hold in time");
 	}
@@ -589,6 +678,8 @@ private:
 
 	std::mutex lock_;
 	std::vector<std::uint32_t> addresses_;
+	std::function<void()> on_read_;
+	std::optional<HostAddresses> next_read_;
 	std::map<std::string, Address> bound_;
 	std::vector<std::pair<std::uint16_t, std::uint16_t>> datagrams_;
 	std::uint16_t next_port_{40000};
@@ -776,6 +867,210 @@ void a_plain_outage_resets_nothing()
 	      "an interface that carries the path left the lost flow alone");
 }
 
+/* The scenarios of the hold's edges start alike: the host holds the kept
+ * address only, the lost one gone before the hold starts, and an interface
+ * carries the path. */
+bool start_hold_with_lost_address_gone(const char *scenario, Rig &rig, Pair &pair)
+{
+	if (!make_pair(scenario, rig, pair))
+		return false;
+	rig.set_addresses({kept_address});
+	rig.report_carried();
+	return true;
+}
+
+void an_outage_between_two_passes_starts_the_hold_again()
+{
+	const char *scenario = "outage between two passes";
+	Rig rig;
+	Pair pair;
+	if (!start_hold_with_lost_address_gone(scenario, rig, pair))
+		return;
+	rig.advance(std::chrono::milliseconds{7900});
+	/* While the loop reads the table for the next report, the system
+	 * reports an outage and the path coming back: the loop sees one report
+	 * more than it can tell apart from an ordinary one, and the flag says
+	 * carried. */
+	auto &state = rig.provider.path_state_for_testing();
+	rig.during_next_read([&state] {
+		state.report(false, false);
+		state.report(true, true);
+	});
+	rig.report_carried();
+	/* The old hold would have ended at 8 s. */
+	rig.advance(std::chrono::milliseconds{200});
+	check(scenario, no_reset_among(rig.watch(quiet_ms)),
+	      "an outage that came and went reset a flow when the old hold ended");
+	check(scenario, rig.provider.address_reset_calls_for_testing() == 0,
+	      "the old hold ended though an outage had cancelled it");
+	rig.advance(std::chrono::milliseconds{7600});
+	check(scenario, no_reset_among(rig.watch(quiet_ms)),
+	      "the hold did not start again at the outage");
+	/* The address is still gone a whole hold after the path was back. */
+	rig.advance(std::chrono::milliseconds{400});
+	check(scenario, rig.reset_of(*pair.lost, prompt_ms).has_value(),
+	      "the new hold ended in no reset");
+	check(scenario, rig.provider.address_reset_calls_for_testing() == 1,
+	      "libslirp was not asked exactly once");
+}
+
+void an_outage_during_the_read_that_ends_the_hold_resets_nothing()
+{
+	const char *scenario = "outage during the read at the end of the hold";
+	Rig rig;
+	Pair pair;
+	if (!start_hold_with_lost_address_gone(scenario, rig, pair))
+		return;
+	rig.advance(std::chrono::milliseconds{7900});
+	/* The hold ends carried; while its table is read the path is lost and
+	 * comes back: the flag alone says carried again. */
+	auto &state = rig.provider.path_state_for_testing();
+	rig.during_next_read([&state] {
+		state.report(false, false);
+		state.report(true, true);
+	});
+	rig.advance(std::chrono::milliseconds{200});
+	check(scenario, no_reset_among(rig.watch(quiet_ms)),
+	      "a flow was reset though an outage came during the read");
+	check(scenario, rig.provider.address_reset_calls_for_testing() == 0,
+	      "libslirp was asked though an outage came during the read");
+	/* The outage started the hold again from the path coming back. */
+	rig.advance(std::chrono::milliseconds{7700});
+	check(scenario, no_reset_among(rig.watch(quiet_ms)),
+	      "the outage did not start the hold again");
+	rig.advance(std::chrono::milliseconds{300});
+	check(scenario, rig.reset_of(*pair.lost, prompt_ms).has_value(),
+	      "the new hold ended in no reset");
+}
+
+void an_address_that_goes_missing_at_the_end_of_the_hold_gets_a_hold_of_its_own()
+{
+	const char *scenario = "address missing since the end of the hold";
+	Rig rig;
+	Pair pair;
+	if (!make_pair(scenario, rig, pair))
+		return;
+	/* The hold starts with both addresses held. */
+	rig.report_carried();
+	rig.advance(std::chrono::milliseconds{7950});
+	/* The lost one goes with no report, 50 ms before the hold ends. */
+	rig.set_addresses({kept_address});
+	rig.advance(std::chrono::milliseconds{100});
+	check(scenario, no_reset_among(rig.watch(quiet_ms)),
+	      "an address missing for 50 ms was reset");
+	check(scenario, rig.provider.address_reset_calls_for_testing() == 1,
+	      "the hold did not end once");
+	rig.advance(std::chrono::milliseconds{7800});
+	check(scenario, no_reset_among(rig.watch(quiet_ms)),
+	      "the address was reset before it had been gone for a hold");
+	rig.advance(std::chrono::milliseconds{300});
+	check(scenario, rig.reset_of(*pair.lost, prompt_ms).has_value(),
+	      "an address gone for a whole hold was not reset");
+	check(scenario, rig.provider.address_reset_calls_for_testing() == 2,
+	      "the address's own hold did not end once");
+}
+
+/* Waits for the event loop to finish a pass, then lets half a second go by:
+ * the next periodic pass is half a second away. */
+void off_the_beat_of_the_loop(Rig &rig)
+{
+	const auto passes = rig.provider.event_loop_passes_for_testing();
+	const auto deadline = Clock::now() + std::chrono::milliseconds{2500};
+	while (rig.provider.event_loop_passes_for_testing() == passes &&
+	       Clock::now() < deadline)
+		std::this_thread::sleep_for(std::chrono::milliseconds{2});
+	std::this_thread::sleep_for(std::chrono::milliseconds{500});
+}
+
+void the_loop_needs_no_wake_but_the_reports_and_the_deadline()
+{
+	/* With no connection open the loop passes once a second and no oftener
+	 * (libslirp asks for a quicker pass while a connection lives). A report
+	 * half a second after a pass must be read at once, by the wake it gives;
+	 * a hold that ends half a second after a pass must be looked at when it
+	 * ends, by its own deadline. A late look is a wake the provider forgot;
+	 * a few tries tell that from a loaded machine. */
+	const char *scenario = "report wake and deadline wake";
+	Rig rig{true};
+	rig.set_addresses({kept_address});
+	if (!rig.open()) {
+		fail(scenario, "the provider did not open");
+		return;
+	}
+	auto &state = rig.provider.path_state_for_testing();
+
+	bool read_at_once = false;
+	for (int attempt = 0; attempt < 3 && !read_at_once; ++attempt) {
+		off_the_beat_of_the_loop(rig);
+		const auto reports = state.reports() + 1;
+		const auto start = Clock::now();
+		/* An outage: it starts no hold. */
+		state.report(false, false);
+		while (rig.provider.path_reports_handled_for_testing() < reports &&
+		       Clock::now() < start + std::chrono::milliseconds{prompt_ms})
+			std::this_thread::sleep_for(std::chrono::milliseconds{1});
+		read_at_once = Clock::now() - start < std::chrono::milliseconds{250};
+	}
+	check(scenario, read_at_once,
+	      "a report was read at the next periodic pass, not at once");
+
+	const auto hold = std::chrono::duration_cast<std::chrono::milliseconds>(
+		uml::network::address_reset_hold);
+	bool ended_on_time = false;
+	for (int attempt = 0; attempt < 2 && !ended_on_time; ++attempt) {
+		const auto asked = rig.provider.address_reset_calls_for_testing();
+		state.report(true, true);
+		rig.settle_reports();
+		const auto started = Clock::now();
+		/* The beat now follows the pass that began the hold: shift it. */
+		std::this_thread::sleep_for(std::chrono::milliseconds{500});
+		rig.provider.wake_for_testing();
+		const auto limit = started + hold + std::chrono::milliseconds{3000};
+		while (rig.provider.address_reset_calls_for_testing() == asked &&
+		       Clock::now() < limit)
+			std::this_thread::sleep_for(std::chrono::milliseconds{2});
+		const auto late = Clock::now() - (started + hold);
+		check(scenario,
+		      rig.provider.address_reset_calls_for_testing() > asked,
+		      "the end of the hold was never looked at");
+		check(scenario, late > std::chrono::milliseconds{-100},
+		      "the hold ended before its time");
+		ended_on_time = late < std::chrono::milliseconds{300};
+	}
+	check(scenario, ended_on_time,
+	      "the end of the hold was looked at at the next periodic pass, "
+	      "not when it ended");
+}
+
+void the_table_read_at_the_end_of_the_hold_is_kept_without_allocating()
+{
+	const char *scenario = "table kept without a copy";
+	Rig rig;
+	Pair pair;
+	if (!start_hold_with_lost_address_gone(scenario, rig, pair))
+		return;
+	/* A table whose copy would allocate a block no other allocation of the
+	 * event loop does; the hold ends with it read, and the allocation of that
+	 * size is made to fail. A copy in the event loop, which cannot throw,
+	 * would end the process. */
+	constexpr std::size_t count = 1237;
+	std::vector<std::uint32_t> addresses{value(kept_address)};
+	for (std::size_t index = 1; index < count; ++index)
+		addresses.push_back(0xc6120000U + static_cast<std::uint32_t>(index));
+	HostAddresses big;
+	big.assign_ipv4(std::move(addresses));
+	rig.advance(std::chrono::milliseconds{7900});
+	rig.next_read_returns(std::move(big));
+	allocation_trap::fired.store(false);
+	allocation_trap::bytes.store(count * sizeof(std::uint32_t));
+	rig.advance(std::chrono::milliseconds{200});
+	allocation_trap::bytes.store(0);
+	check(scenario, !allocation_trap::fired.load(),
+	      "the table read at the end of the hold was copied");
+	check(scenario, rig.reset_of(*pair.lost, prompt_ms).has_value(),
+	      "the flow bound to the lost address got no reset");
+}
+
 void a_hold_does_not_outlive_its_instance()
 {
 	const char *scenario = "stop and reopen during a hold";
@@ -787,9 +1082,14 @@ void a_hold_does_not_outlive_its_instance()
 	rig.set_addresses({kept_address});
 	rig.report_carried();
 	rig.provider.stop();
+	/* The system's monitor lives across a stop, so a report can come between
+	 * the stop and the next open: it reaches the state and nothing else. */
+	rig.provider.path_state_for_testing().report(false, false);
+	rig.provider.path_state_for_testing().report(true, true);
 
 	/* The same provider opens again; a flow bound to the lost address, on the
-	 * new instance, is not the old hold's business. */
+	 * new instance, is not the old hold's business, nor are the reports that
+	 * came while it was stopped. */
 	if (!rig.open()) {
 		fail(scenario, "the provider did not open again");
 		return;
@@ -823,8 +1123,9 @@ std::optional<Address> host_lan_address()
 			continue;
 		const auto host = ntohl(reinterpret_cast<const sockaddr_in *>(
 						entry->ifa_addr)->sin_addr.s_addr);
-		/* Not an address SLiRP drops or serves. */
-		if ((host >> 24) == 169 || (host >> 24) == 10)
+		/* Not an address SLiRP drops (link-local) or serves (its own
+		 * 10.0.2.0/24): a host on another 10.x network has one to use. */
+		if ((host >> 24) == 169 || (host >> 8) == 0x0a0002U)
 			continue;
 		found = Address{static_cast<std::uint8_t>(host >> 24),
 				static_cast<std::uint8_t>(host >> 16),
@@ -897,8 +1198,9 @@ void the_sockets_decide_what_is_reset()
 	}
 	const auto lan = host_lan_address();
 	if (!lan)
-		std::puts("note: the host has no address but the loopback; the "
-			  "connection to a host address is not checked");
+		std::puts("note: the host has no usable address (only loopback, "
+			  "link-local or SLiRP's own 10.0.2.0/24); the connection to "
+			  "a host address is not checked");
 
 	Rig rig;
 	/* The host has one address, and it is not one of its own: every host
@@ -1042,6 +1344,11 @@ int main()
 	address_back_within_the_hold_resets_nothing();
 	address_back_without_a_report_resets_nothing();
 	a_plain_outage_resets_nothing();
+	an_outage_between_two_passes_starts_the_hold_again();
+	an_outage_during_the_read_that_ends_the_hold_resets_nothing();
+	an_address_that_goes_missing_at_the_end_of_the_hold_gets_a_hold_of_its_own();
+	the_loop_needs_no_wake_but_the_reports_and_the_deadline();
+	the_table_read_at_the_end_of_the_hold_is_kept_without_allocating();
 	a_hold_does_not_outlive_its_instance();
 	the_sockets_decide_what_is_reset();
 	if (failures != 0) {

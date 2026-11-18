@@ -145,6 +145,7 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 		address_reset_hold_.clear();
 		address_reset_table_.reset();
 		path_reports_seen_ = path_state_.reports();
+		path_outages_seen_ = path_state_.uncarried_reports();
 #if UML_SLIRP_TESTING
 		path_reports_handled_for_testing_.store(
 			path_reports_seen_, std::memory_order_release);
