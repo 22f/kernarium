@@ -169,6 +169,10 @@ public:
 	/* The library and offset a guest address belongs to, for reports. */
 	[[nodiscard]] bool locate(unsigned long generation, std::uint64_t address,
 		std::uint32_t &library, std::uint64_t &offset) const noexcept;
+	/* A diagnostics build's measure of the tables (instances, index and page
+	 * slots): their size, and how much of it the host holds in memory. */
+	[[nodiscard]] std::size_t tables_bytes() const noexcept;
+	[[nodiscard]] std::size_t tables_resident_bytes() const noexcept;
 
 private:
 	struct Instance final {

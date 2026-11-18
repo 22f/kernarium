@@ -387,7 +387,7 @@ def read_report(path: pathlib.Path) -> dict[str, int]:
             prefix, rest = f"library.{rest[0]}.", rest[1:]
         elif head in ("find", "cross_miss", "refused", "count_audit", "count_audit_detail", "report"):
             prefix = head + "."
-        elif head in ("binds", "max_retired", "stack_free"):
+        elif head in ("binds", "max_retired", "stack_free", "binders"):
             rest = fields
         else:
             continue

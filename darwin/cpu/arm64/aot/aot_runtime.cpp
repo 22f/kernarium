@@ -25,8 +25,11 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string>
+#include <sys/mman.h>
 #include <thread>
 #include <time.h>
+#include <unistd.h>
+#include <vector>
 #endif
 
 /* The framework's blob (aot_blob.S). */
@@ -231,6 +234,20 @@ std::atomic<std::uint64_t> g_learning_epoch{0};
 		  "v29", "v30", "v31", "cc");
 }
 
+/* The binders alive (one per executor thread), for the report's measure of
+ * their tables. Never destroyed, like the report's own lock. */
+[[nodiscard]] std::mutex &binders_lock() noexcept
+{
+	static std::mutex &lock = *new std::mutex;
+	return lock;
+}
+
+[[nodiscard]] std::vector<const Binder *> &binders() noexcept
+{
+	static std::vector<const Binder *> &list = *new std::vector<const Binder *>;
+	return list;
+}
+
 [[nodiscard]] const char *find_result_name(std::size_t kind) noexcept
 {
 	constexpr const char *names[] = {"hit", "uncovered", "not_ready",
@@ -246,7 +263,9 @@ std::atomic<std::uint64_t> binds{0}, verifications{0}, pages_hashed{0},
 	history_queries{0}, mops_slow{0}, mops_fault{0}, mops_illegal{0},
 	shared_hits{0}, mutable_pages{0}, epoch_rehashes{0}, stamp_queries{0},
 	instances_created{0}, instance_evictions{0}, instance_rebinds{0},
-	instance_page_bytes{0}, instance_page_bytes_peak{0}, binder_bytes{0};
+	instance_page_bytes{0}, instance_page_bytes_peak{0}, binder_bytes{0},
+	page_lookups{0}, page_slot_fills{0}, page_slot_conflicts{0},
+	page_slots_filled{0};
 std::array<std::atomic<std::uint64_t>, 5> refusals{};
 /* The guest addresses AOT code stepped at most: library << 40 | offset. */
 constexpr std::size_t step_slots = 32768;
@@ -628,6 +647,27 @@ void write_report() noexcept
 		get(counters::stamp_queries), get(counters::instances_created),
 		get(counters::instance_evictions), get(counters::instance_rebinds),
 		get(counters::instance_page_bytes_peak), get(counters::binder_bytes));
+	{
+		/* The binders' tables, reserved and in memory, the page states the
+		 * live instances hold now, and how the page slots were used:
+		 * lookups, binds into an empty slot, binds that replaced another
+		 * page's slot, and the slots filled now. */
+		unsigned long long count = 0, reserved = 0, resident = 0;
+		const std::lock_guard binders_guard{binders_lock()};
+		for (const auto *binder : binders()) {
+			++count;
+			reserved += binder->tables_bytes();
+			resident += binder->tables_resident_bytes();
+		}
+		std::fprintf(file, "binders %llu binder_tables_bytes %llu "
+			"binder_tables_resident_bytes %llu instance_page_bytes %llu "
+			"page_lookups %llu page_slot_fills %llu page_slot_conflicts %llu "
+			"page_slots_filled %llu\n",
+			count, reserved, resident, get(counters::instance_page_bytes),
+			get(counters::page_lookups), get(counters::page_slot_fills),
+			get(counters::page_slot_conflicts),
+			get(counters::page_slots_filled));
+	}
 	std::fprintf(file, "stack_free %llu stack_size %llu stack_kind %llu "
 		"stack_task_bytes %llu stack_engine_free %llu stack_growth %llu\n",
 		get(counters::stack_min_free), get(counters::stack_size_at_min),
@@ -1046,6 +1086,8 @@ Binder::Binder() noexcept
 	heads_.fill(-1);
 #if UML_AOT_DIAGNOSTICS
 	counters::binder_bytes.store(sizeof(Binder), std::memory_order_relaxed);
+	const std::lock_guard guard{binders_lock()};
+	binders().push_back(this);
 #endif
 }
 
@@ -1057,8 +1099,35 @@ Binder::~Binder()
 	for (const auto &instance : instances_)
 		held += instance.pages.size();
 	counters::instance_page_bytes.fetch_sub(held, std::memory_order_relaxed);
+	const std::lock_guard guard{binders_lock()};
+	std::erase(binders(), this);
 #endif
 }
+
+#if UML_AOT_DIAGNOSTICS
+std::size_t Binder::tables_bytes() const noexcept
+{
+	return sizeof(instances_) + sizeof(heads_) + sizeof(pages_);
+}
+
+std::size_t Binder::tables_resident_bytes() const noexcept
+{
+	const auto host = static_cast<std::uintptr_t>(getpagesize());
+	const auto first = reinterpret_cast<std::uintptr_t>(&instances_) &
+		~(host - 1);
+	const auto last = (reinterpret_cast<std::uintptr_t>(&pages_) +
+		sizeof(pages_) + host - 1) & ~(host - 1);
+	std::vector<char> in_core((last - first) / host);
+	if (mincore(reinterpret_cast<void *>(first), last - first,
+		    in_core.data()) != 0)
+		return 0;
+	std::size_t count = 0;
+	for (const char page : in_core)
+		if ((page & MINCORE_INCORE) != 0)
+			++count;
+	return count * host;
+}
+#endif
 
 std::size_t Binder::bucket_of(unsigned long generation, std::uint32_t library,
 	std::uint64_t bias) noexcept
@@ -1358,8 +1427,13 @@ std::int32_t Binder::resolve(::uml::memory::StaticGuestMemory &memory,
 			unlink_instance(victim);
 		/* No page slot may name the instance that takes this place. */
 		for (auto &slot_entry : pages_)
-			if (slot_entry.instance == static_cast<std::int32_t>(victim))
+			if (slot_entry.instance == static_cast<std::int32_t>(victim)) {
 				slot_entry = PageSlot{};
+#if UML_AOT_DIAGNOSTICS
+				counters::page_slots_filled.fetch_sub(1,
+					std::memory_order_relaxed);
+#endif
+			}
 		found = &instances_[victim];
 		*found = Instance{};
 		found->generation = generation;
@@ -1382,6 +1456,7 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 	if (!directory().valid || (pc & 3U) != 0)
 		return {};
 	++ticks_;
+	UML_AOT_COUNT(page_lookups, 1);
 #if UML_AOT_DIAGNOSTICS
 	if (code_changes != last_changes_) {
 		UML_AOT_COUNT(code_bumps, 1);
@@ -1409,6 +1484,14 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 			note_find(FindResult::not_ready, no_library);
 			return {};
 		}
+#if UML_AOT_DIAGNOSTICS
+		if (slot.page == 1) {
+			UML_AOT_COUNT(page_slot_fills, 1);
+			UML_AOT_COUNT(page_slots_filled, 1);
+		} else if (slot.page != page_va || slot.generation != generation) {
+			UML_AOT_COUNT(page_slot_conflicts, 1);
+		}
+#endif
 		slot.instance = answer;
 		slot.page = page_va;
 		slot.generation = generation;
@@ -1424,6 +1507,9 @@ Hit Binder::find(::uml::memory::StaticGuestMemory &memory, void *context,
 		note_find(instance.poisoned ? FindResult::poisoned :
 			FindResult::stale, instance.poisoned ? instance.library :
 			no_library);
+#if UML_AOT_DIAGNOSTICS
+		counters::page_slots_filled.fetch_sub(1, std::memory_order_relaxed);
+#endif
 		slot = PageSlot{};
 		return {};
 	}
