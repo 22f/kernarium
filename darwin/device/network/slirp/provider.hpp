@@ -6,6 +6,7 @@
 #include "host_addresses.hpp"
 #include "network_counters.hpp"
 #include "platform/descriptor.hpp"
+#include "platform/host_network_path.hpp"
 
 #include <libslirp.h>
 #include <poll.h>
@@ -262,6 +263,49 @@ public:
 	{
 		dns_streams_unavailable_for_testing_ = unavailable;
 	}
+	void set_dns_before_answer_for_testing(void (*hook)(void *),
+					       void *context) noexcept
+	{
+		resolver_.set_before_answer_for_testing(hook, context);
+	}
+	/* The host's network path, which the resolver reads when it answers.
+	 * The product starts the system's monitor at open(); the test build does
+	 * not unless asked, so a machine with no network behaves as one with
+	 * (the probes need none), and a test sets the state itself. Applies to
+	 * the next open(), which drops a monitor that is no longer asked for. */
+	void set_path_monitor_for_testing(bool enabled) noexcept
+	{
+		path_monitor_for_testing_ = enabled;
+	}
+	[[nodiscard]] uml::platform::HostNetworkPathState &
+	path_state_for_testing() noexcept
+	{
+		return path_state_;
+	}
+	/* Monitors this provider has made: one for its life, however often it is
+	 * stopped and opened, unless the system gave none (then the next open
+	 * makes another). */
+	[[nodiscard]] std::uint64_t path_monitors_made_for_testing() const noexcept
+	{
+		return path_monitors_made_for_testing_.load(
+			std::memory_order_relaxed);
+	}
+	/* The monitor the provider holds now, for a test that waits for what
+	 * its thread says of it. */
+	[[nodiscard]] const uml::platform::HostNetworkPathMonitor *
+	path_monitor_for_testing() const noexcept
+	{
+		return path_monitor_.get();
+	}
+	/* Makes each monitor in place of the platform's own, so that a test has
+	 * the system give none. Applies to the next monitor made. */
+	using PathMonitorFactory = std::function<
+		std::unique_ptr<uml::platform::HostNetworkPathMonitor>(
+			uml::platform::HostNetworkPathState &)>;
+	void set_path_monitor_factory_for_testing(PathMonitorFactory factory)
+	{
+		path_monitor_factory_for_testing_ = std::move(factory);
+	}
 	[[nodiscard]] HostResolver &resolver_for_testing() noexcept
 	{
 		return resolver_;
@@ -353,6 +397,14 @@ private:
 	/* Declared before what counts into them. */
 	NetworkCounters counters_;
 	TrafficObserver observer_{counters_};
+	/* The host's network path: the monitor writes it from the system's
+	 * thread and the resolver reads it when it answers. The first open()
+	 * makes the monitor, which then lives as long as the provider and keeps
+	 * the state current across a stop and reopen; the state outlives it. With
+	 * no monitor, or one the system gave no monitor, the state is usable again
+	 * when the provider stops. */
+	uml::platform::HostNetworkPathState path_state_;
+	std::unique_ptr<uml::platform::HostNetworkPathMonitor> path_monitor_;
 	HostResolver resolver_;
 	std::uint16_t next_identification_{1};
 	/* Where SLiRP's guest forward carries DNS over TCP to the resolver;
@@ -379,6 +431,9 @@ private:
 	std::atomic_size_t internet_sockets_for_testing_{};
 	std::uint32_t dns_interface_for_testing_{};
 	bool dns_streams_unavailable_for_testing_{};
+	bool path_monitor_for_testing_{};
+	std::atomic_uint64_t path_monitors_made_for_testing_{};
+	PathMonitorFactory path_monitor_factory_for_testing_;
 	bool write_pause_requested_for_testing_{};
 	bool write_pause_reached_for_testing_{};
 	bool release_write_for_testing_{};
