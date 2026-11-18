@@ -14,15 +14,16 @@
  *
  *   guest/guest    A and C each write and synchronize their own view.
  *   guest/kernel   A synchronizes; the kernel then writes the frame through
- *                  B's read-write view (process_vm_writev(), a ptrace write
- *                  or an AArch32 cacheflush() into B) and calls
- *                  darwin_uml_vm_invalidate_code for B.
+ *                  B's read-write view (process_vm_writev() or a ptrace write
+ *                  into B, or an AArch32 cacheflush() of it) and calls
+ *                  darwin_uml_vm_invalidate_code_frame (naming the frame) or,
+ *                  for the cacheflush(), darwin_uml_vm_invalidate_code for B.
  *   kernel/kernel  The same, with A's own change a kernel write too.
  *   kernel/guest   A's change is a kernel write, C's a synchronization.
  *
  * Each also runs with a late holder L, a process that translates the page
  * after A's take and before the second change: B and L must both run it.
- * Both engines.
+ * Every kernel write runs by address and by frame. Both engines.
  */
 #include "arm64_cross_generation_test_support.hpp"
 
@@ -76,8 +77,21 @@ void expect(std::uint64_t got, std::uint64_t wanted, const char *engine,
 		static_cast<unsigned long long>(wanted));
 }
 
+/* The kernel's call for `generation` after it wrote the frame through the
+ * view at alias_base: by address, or naming the frame. */
+void kernel_publication(bool named, unsigned long generation,
+	uml::testing::ScratchBacking &shared)
+{
+	if (named)
+		require(darwin_uml_static_vm_invalidate_code_frame(generation,
+			alias_base, 4, shared.descriptor(), 0) == 0);
+	else
+		require(darwin_uml_static_vm_invalidate_code_generation(generation,
+			alias_base, 4) == 0);
+}
+
 void overlap(uml::cpu::EngineKind kind, bool first_kernel, bool second_kernel,
-	bool late_holder, unsigned long &next)
+	bool late_holder, bool named, unsigned long &next)
 {
 	const auto b = next++;
 	const auto a = next++;
@@ -86,8 +100,9 @@ void overlap(uml::cpu::EngineKind kind, bool first_kernel, bool second_kernel,
 	for (const auto generation : {b, a, c, l})
 		require(darwin_uml_static_vm_activate(generation) == 0);
 	char what[64];
-	std::snprintf(what, sizeof what, "%s/%s%s", first_kernel ? "kernel" : "guest",
-		second_kernel ? "kernel" : "guest", late_holder ? " late" : "");
+	std::snprintf(what, sizeof what, "%s/%s%s%s",
+		first_kernel ? "kernel" : "guest", second_kernel ? "kernel" : "guest",
+		late_holder ? " late" : "", named ? " frame" : " address");
 	{
 		uml::testing::ScratchBacking shared{"uml-overlap-code.XXXXXX", page};
 		const std::uint32_t old_words[] = {movz_x0(1), svc0};
@@ -114,8 +129,7 @@ void overlap(uml::cpu::EngineKind kind, bool first_kernel, bool second_kernel,
 			holds_at_publication = true;
 			shared.put32(0, movz_x0(2));
 			if (first_kernel) {
-				require(darwin_uml_static_vm_invalidate_code_generation(
-					a, alias_base, 4) == 0);
+				kernel_publication(named, a, shared);
 			} else {
 				require(darwin_uml_static_vm_activate(a) == 0);
 				uml_arm64_guest_code_synchronize(alias_base);
@@ -137,8 +151,7 @@ void overlap(uml::cpu::EngineKind kind, bool first_kernel, bool second_kernel,
 			late_first = late.call(l, shared_base);
 		shared.put32(0, movz_x0(3));
 		if (second_kernel) {
-			require(darwin_uml_static_vm_invalidate_code_generation(
-				b, alias_base, 4) == 0);
+			kernel_publication(named, b, shared);
 		} else {
 			require(darwin_uml_static_vm_activate(c) == 0);
 			uml_arm64_guest_code_synchronize(alias_base);
@@ -170,9 +183,15 @@ int main(int argc, char **argv)
 	for_each_engine(argc > 1 ? argv[1] : "", [&](uml::cpu::EngineKind kind) {
 		for (const bool late_holder : {false, true}) {
 			for (const bool first_kernel : {false, true}) {
-				for (const bool second_kernel : {false, true})
-					overlap(kind, first_kernel, second_kernel, late_holder,
-						generation);
+				for (const bool second_kernel : {false, true}) {
+					for (const bool named : {false, true}) {
+						/* No kernel write: nothing to name. */
+						if (named && !first_kernel && !second_kernel)
+							continue;
+						overlap(kind, first_kernel, second_kernel,
+							late_holder, named, generation);
+					}
+				}
 			}
 		}
 	});

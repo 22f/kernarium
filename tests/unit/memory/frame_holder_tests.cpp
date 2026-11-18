@@ -1308,6 +1308,342 @@ void test_remote_kernel_write_before_x86_code()
 	baseline.clean("K5");
 }
 
+/* The kernel names the frame it wrote, with the page's range in the target's
+ * generation (darwin_uml_vm_invalidate_code_frame): frame `frame` of `backing`. */
+int write_frame(unsigned long target, unsigned long address, unsigned long length,
+	ScratchBacking &backing, unsigned long frame)
+{
+	return darwin_uml_static_vm_invalidate_code_frame(target, address, length,
+		backing.descriptor(), frame * page);
+}
+
+/* K6 (remote, frame named): the kernel stored into another process's page
+ * through its own alias of a frame it names. The holders of that frame hear
+ * of it whatever the target's own view of the frame is (K4's cases), and no
+ * other frame is published: a page the target maps nothing at, or maps
+ * another frame at, does not make the write a change of an unknown frame, so
+ * no flush serial moves. A frame the kernel cannot name does (K6e). */
+void test_remote_kernel_write_frame()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0xe00'0000;
+	ScratchBacking backing{"uml-frame-named-XXXXXX", 16 * page};
+	Domain domain{73'013};
+	darwin_uml_static_vm_require_coherent_kernel_code_writes();
+	unsigned failed = 0;
+	const auto check = [&failed](bool held, const char *what) {
+		if (held)
+			return;
+		++failed;
+		std::fprintf(stderr, "K6: %s\n", what);
+	};
+	domain.run([&] {
+		/* K6a: frame 2 is translated in 881; 882 maps it writable, and
+		 * not as code. */
+		translate_frame(881, base, backing, 2);
+		require(map(882, base + page, backing, 2, 1, rw, 0) == 0);
+		{
+			const Reader reader{881, base};
+			require(write_frame(882, base + page + 0x40, 8, backing, 2) == 0);
+			check(reader.stamp_moved(),
+				"a named write into a data view left the stamp of a "
+				"translated frame");
+			check(precisely(reader.changes(), base, page),
+				"the translator of a frame was not told of a named write "
+				"into a data view of it");
+			check(!reader.serial_moved(),
+				"a named write into a data view moved a flush serial");
+		}
+
+		/* K6b: the control. 884 maps frame 3 as code, as 883 does. */
+		translate_frame(883, base + 2 * page, backing, 3);
+		translate_frame(884, base + 3 * page, backing, 3);
+		{
+			const Reader reader{883, base + 2 * page};
+			require(write_frame(884, base + 3 * page + 0x80, 4, backing, 3) == 0);
+			check(reader.stamp_moved(),
+				"a named write into an executable view left the stamp");
+			check(precisely(reader.changes(), base + 2 * page, page),
+				"a named write into an executable view was not published "
+				"at the other translator");
+			check(!reader.serial_moved(),
+				"a named write into an executable view moved a flush serial");
+		}
+
+		/* K6c: 886 maps another page and nothing at the one written: the
+		 * frame is named, so only its holders hear of it. */
+		translate_frame(885, base + 4 * page, backing, 4);
+		require(map(886, base + 9 * page, backing, 8, 1, rw, 0) == 0);
+		{
+			const Reader reader{885, base + 4 * page};
+			require(write_frame(886, base + 5 * page + 0x10, 8, backing, 4) == 0);
+			check(reader.stamp_moved(),
+				"a named write to an unmapped page left the stamp of the "
+				"frame");
+			check(precisely(reader.changes(), base + 4 * page, page),
+				"a named write to an unmapped page was not published at "
+				"the translator of the frame");
+			check(!reader.serial_moved(),
+				"a named write to an unmapped page moved a flush serial");
+		}
+
+		/* K6d: two pages are two calls: the first a data view of frame 6,
+		 * the second unmapped, and its frame (7) held by nobody. */
+		translate_frame(887, base + 6 * page, backing, 6);
+		require(map(888, base + 10 * page, backing, 6, 1, rw, 0) == 0);
+		{
+			const Reader reader{887, base + 6 * page};
+			require(write_frame(888, base + 10 * page + page - 8, 8, backing, 6) == 0);
+			require(write_frame(888, base + 11 * page, 8, backing, 7) == 0);
+			check(reader.stamp_moved(),
+				"the mapped page of a named write was not published");
+			check(precisely(reader.changes(), base + 6 * page, page),
+				"the mapped page of a named write was not published at "
+				"its translator");
+			check(!reader.serial_moved(),
+				"the unmapped page of a named write moved a flush serial");
+		}
+
+		/* K6f: the page the target maps now holds another frame, which
+		 * another generation translated. The frame written is published, and
+		 * the one mapped now is not. */
+		translate_frame(891, base + 12 * page, backing, 9);
+		translate_frame(892, base + 13 * page, backing, 10);
+		require(map(893, base + 14 * page, backing, 10, 1, rw, 0) == 0);
+		{
+			const Reader written{891, base + 12 * page};
+			const Reader mapped_now{892, base + 13 * page};
+			require(write_frame(893, base + 14 * page + 0x20, 4, backing, 9) == 0);
+			check(precisely(written.changes(), base + 12 * page, page),
+				"the frame written was not published when the target "
+				"mapped another frame at the address");
+			check(written.stamp_moved(),
+				"the stamp of the frame written did not move");
+			check(mapped_now.changes().ranges.empty() && !mapped_now.stamp_moved(),
+				"a named write published the frame the target mapped at the "
+				"address now");
+			check(!written.serial_moved() && !mapped_now.serial_moved(),
+				"a named write moved a flush serial");
+		}
+
+		/* K6e: a frame the kernel cannot name (fd < 0) is an unknown frame,
+		 * as K4c's unmapped page is. */
+		translate_frame(889, base + 15 * page, backing, 11);
+		require(map(890, base + 8 * page, backing, 12, 1, rw, 0) == 0);
+		{
+			const Reader reader{889, base + 15 * page};
+			require(darwin_uml_static_vm_invalidate_code_frame(
+				890, base + 8 * page + 0x10, 8, -1, 0) == 0);
+			check(covers(reader.changes(), base + 15 * page, page),
+				"a write that named no frame was not published");
+			check(reader.serial_moved(),
+				"a write that named no frame did not move the flush serial "
+				"of a generation that translated");
+		}
+	});
+	domain.retire();
+	require(failed == 0, "a named remote kernel write did not reach a holder");
+	baseline.clean("K6");
+}
+
+/* K7 (remote, frame named, before any x86 code runs): K5's twin. */
+void test_remote_kernel_write_frame_before_x86_code()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0xe80'0000;
+	ScratchBacking backing{"uml-frame-named-first-XXXXXX", 8 * page};
+	Domain domain{73'014};
+	domain.run([&] {
+		translate_frame(895, base, backing, 2);
+		require(map(896, base + page, backing, 2, 1, rw, 0) == 0);
+		require(map(897, base + 4 * page, backing, 5, 1, rw, 0) == 0);
+		const Reader reader{895, base};
+		require(write_frame(896, base + page, 8, backing, 2) == 0);
+		require(write_frame(897, base + 5 * page, 8, backing, 6) == 0);
+		require(darwin_uml_static_vm_invalidate_code_frame(
+			897, base + 5 * page, 8, -1, 0) == 0);
+		require(!reader.serial_moved(),
+			"a named remote write moved a flush serial before x86 code "
+			"could exist");
+	});
+	domain.retire();
+	baseline.clean("K7");
+}
+
+/* K8 (page cache, frame named, before any x86 code runs): K5's twin for a
+ * kernel write into a page-cache frame, which names no process. While no x86
+ * translation can exist the call does no work: no stamp moves, nothing is
+ * published, no flush serial moves, even for a write that names no frame. */
+void test_page_cache_write_before_x86_code()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0xf00'0000;
+	ScratchBacking backing{"uml-frame-cache-first-XXXXXX", 4 * page};
+	Domain domain{73'015};
+	domain.run([&] {
+		translate_frame(901, base, backing, 1);
+		const Reader reader{901, base};
+		const auto calls = FrameAccounting::diagnostics().kernel_frame_writes;
+		require(darwin_uml_static_vm_invalidate_code_frames(
+			backing.descriptor(), 1 * page, page) == 0);
+		require(darwin_uml_static_vm_invalidate_code_frames(-1, 0, page) == 0);
+		require(FrameAccounting::diagnostics().kernel_frame_writes == calls + 2,
+			"a page-cache write before x86 code was not counted");
+		require(!reader.stamp_moved() && reader.changes().ranges.empty(),
+			"a page-cache write published before x86 code could exist");
+		require(!reader.serial_moved(),
+			"a page-cache write moved a flush serial before x86 code could "
+			"exist");
+	});
+	domain.retire();
+	baseline.clean("K8");
+}
+
+/* K9 (page cache, frame named): the kernel wrote whole pages of a frame
+ * through its own alias, for no process and at no user address. The x86
+ * holders of exactly those frames hear of it, wherever and however they map
+ * them (a code view and a data view of the frame, in generations that did not
+ * write it), a frame with no holder costs nothing, an unknown frame goes to
+ * every generation, and a call with a length that is not whole pages is
+ * refused. */
+void test_page_cache_write_frames()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0xf40'0000;
+	ScratchBacking backing{"uml-frame-cache-XXXXXX", 16 * page};
+	ScratchBacking unmapped{"uml-frame-cache-unmapped-XXXXXX", 4 * page};
+	Domain domain{73'016};
+	darwin_uml_static_vm_require_coherent_kernel_code_writes();
+	unsigned failed = 0;
+	const auto check = [&failed](bool held, const char *what) {
+		if (held)
+			return;
+		++failed;
+		std::fprintf(stderr, "K9: %s\n", what);
+	};
+	const auto calls = FrameAccounting::diagnostics().kernel_frame_writes;
+	domain.run([&] {
+		/* K9a: frame 2 is translated in 911 and mapped as data in 912. */
+		translate_frame(911, base, backing, 2);
+		require(map(912, base + page, backing, 2, 1, rw, 0) == 0);
+		/* K9b: frames 4 and 5 are translated in 913 and 914, frame 6 is
+		 * held by nobody, and frame 8 is translated in 915 beside them. */
+		translate_frame(913, base + 2 * page, backing, 4);
+		translate_frame(914, base + 3 * page, backing, 5);
+		translate_frame(915, base + 4 * page, backing, 8);
+		{
+			const Reader reader{911, base};
+			const Reader beside{915, base + 4 * page};
+			require(darwin_uml_static_vm_invalidate_code_frames(
+				backing.descriptor(), 2 * page, page) == 0);
+			check(reader.stamp_moved() &&
+				precisely(reader.changes(), base, page),
+				"the holder of a page-cache frame was not told of a write "
+				"into it");
+			check(!reader.serial_moved(),
+				"a named page-cache write moved a flush serial");
+			check(!beside.stamp_moved() && beside.changes().ranges.empty(),
+				"a page-cache write was published at another frame's holder");
+		}
+		{
+			const Reader first{913, base + 2 * page};
+			const Reader second{914, base + 3 * page};
+			const Reader beside{915, base + 4 * page};
+			require(darwin_uml_static_vm_invalidate_code_frames(
+				backing.descriptor(), 4 * page, 3 * page) == 0);
+			check(precisely(first.changes(), base + 2 * page, page) &&
+				precisely(second.changes(), base + 3 * page, page),
+				"a write across frames did not reach each frame's holder");
+			check(first.stamp_moved() && second.stamp_moved(),
+				"a write across frames left a stamp");
+			check(!beside.stamp_moved() && beside.changes().ranges.empty(),
+				"a write across frames reached the frame past its end");
+			check(!first.serial_moved() && !second.serial_moved(),
+				"a named write across frames moved a flush serial");
+		}
+		/* K9c: a frame no generation maps has no backing and no holder. */
+		{
+			const Reader reader{915, base + 4 * page};
+			require(darwin_uml_static_vm_invalidate_code_frames(
+				unmapped.descriptor(), 0, 4 * page) == 0);
+			check(!reader.stamp_moved() && reader.changes().ranges.empty() &&
+				!reader.serial_moved(),
+				"a write to a frame nobody maps published");
+		}
+		/* K9d: a frame the kernel cannot name is an unknown frame. */
+		{
+			const Reader reader{915, base + 4 * page};
+			require(darwin_uml_static_vm_invalidate_code_frames(-1, 0, page) == 0);
+			check(covers(reader.changes(), base + 4 * page, page),
+				"a page-cache write that named no frame was not published");
+			check(reader.serial_moved(),
+				"a page-cache write that named no frame did not move the "
+				"flush serial of a generation that translated");
+		}
+		/* K9e: what is not whole pages is refused, and nothing is a no-op. */
+		require(darwin_uml_static_vm_invalidate_code_frames(
+			backing.descriptor(), page / 2, page) < 0);
+		require(darwin_uml_static_vm_invalidate_code_frames(
+			backing.descriptor(), 0, page - 1) < 0);
+		require(darwin_uml_static_vm_invalidate_code_frames(
+			backing.descriptor(), 0, 0) == 0);
+	});
+	domain.retire();
+	/* Four calls named a frame; the refused ones and the empty one did not. */
+	require(FrameAccounting::diagnostics().kernel_frame_writes == calls + 4,
+		"the page-cache writes were not counted");
+	require(failed == 0, "a page-cache write did not reach a holder");
+	baseline.clean("K9");
+}
+
+/* K10 (anonymous frame, frame named): a block read into a page a process
+ * pinned and runs is a kernel write into an anonymous frame. The page is mapped
+ * readable, writable and executable by one generation alone, and the frame is
+ * named as a page-cache frame is, by the fd and offset of its backing: the
+ * holder hears of exactly that page, the pages beside it and the generation
+ * that maps another frame do not, and no flush serial moves. */
+void test_anonymous_frame_write()
+{
+	const Baseline baseline;
+	constexpr unsigned long base = 0xf80'0000;
+	ScratchBacking backing{"uml-frame-anon-XXXXXX", 8 * page};
+	Domain domain{73'017};
+	darwin_uml_static_vm_require_coherent_kernel_code_writes();
+	unsigned failed = 0;
+	const auto check = [&failed](bool held, const char *what) {
+		if (held)
+			return;
+		++failed;
+		std::fprintf(stderr, "K10: %s\n", what);
+	};
+	const auto calls = FrameAccounting::diagnostics().kernel_frame_writes;
+	domain.run([&] {
+		/* Frame 3 is the anonymous page, run by 921 alone; frames 2 and 4
+		 * are held by 922 and 923 beside it. */
+		require(map(921, base, backing, 3, 1, rwx) == 0);
+		require(hold_frame(921, base).result != DARWIN_UML_STATIC_FRAME_FAILED);
+		translate_frame(922, base + page, backing, 2);
+		translate_frame(923, base + 2 * page, backing, 4);
+		const Reader holder{921, base};
+		const Reader before{922, base + page};
+		const Reader after{923, base + 2 * page};
+		require(darwin_uml_static_vm_invalidate_code_frames(
+			backing.descriptor(), 3 * page, page) == 0);
+		check(holder.stamp_moved() && precisely(holder.changes(), base, page),
+			"the holder of an anonymous frame was not told of a write into it");
+		check(!holder.serial_moved(),
+			"a named write into an anonymous frame moved a flush serial");
+		check(!before.stamp_moved() && before.changes().ranges.empty() &&
+			!after.stamp_moved() && after.changes().ranges.empty(),
+			"a write into an anonymous frame reached a neighbouring frame");
+	});
+	domain.retire();
+	require(FrameAccounting::diagnostics().kernel_frame_writes == calls + 1,
+		"the anonymous frame write was not counted");
+	require(failed == 0, "a write into an anonymous frame did not reach its holder");
+	baseline.clean("K10");
+}
+
 /* E9: an address space is retired. Its states are walked after the table of
  * generations is unlocked, every holder is gone when the walk ends, a
  * registration and a reservation on a walked state are refused (counted, for
@@ -1409,6 +1745,8 @@ int main()
 		uml::memory::testing::allocations_under_stripe_lock();
 	/* First: no row after it may ask for coherent kernel code writes. */
 	test_remote_kernel_write_before_x86_code();
+	test_remote_kernel_write_frame_before_x86_code();
+	test_page_cache_write_before_x86_code();
 	test_holders_follow_every_primitive();
 	test_debts();
 	test_publication();
@@ -1416,6 +1754,9 @@ int main()
 	test_kernel_write_frames();
 	test_kernel_write_after_a_partial_unmap();
 	test_remote_kernel_write();
+	test_remote_kernel_write_frame();
+	test_page_cache_write_frames();
+	test_anonymous_frame_write();
 	test_a_retired_address_space();
 	test_unknown_frame();
 	test_a_debt_larger_than_the_buffer();

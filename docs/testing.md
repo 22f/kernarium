@@ -1089,7 +1089,12 @@ confirmed carrying before a restart or suspend; crashes and ANRs of
 NetworkStack, SystemUI and Settings, and illegal instructions, are read from
 the whole stream and fail the run, in the section whose window holds them or in
 none.
-The network joins again after a suspend and after a restart, and the boot script
+A suspend keeps the station: the network after the wake is the one before it,
+the guest's log shows no disconnect, a request a second after the wake succeeds
+and the connections the host holds into the guest carry data, also after Wi-Fi
+was turned off and on and through a stay with the emulator stopped; a suspend
+that lands inside the station's connect delay ends with a working network and a
+quiet guest console. The network joins again after a restart, and the boot script
 runs without SELinux denials; a joined network keeps its metered and
 Auto-connect settings, a forgotten one stays forgotten and Wi-Fi that is off
 stays off. A guest stopped when the Wi-Fi service lists the network, or when
