@@ -1960,6 +1960,15 @@ struct RetirementCase final {
 		state.flags = MaskedValue{mask, value};
 		return state;
 	};
+	const auto x87_status_is = [](std::uint64_t mask, std::uint64_t value) {
+		StopState state;
+		state.x87_status = MaskedValue{mask, value};
+		return state;
+	};
+	/* The x87 status word's exception flags, summary and C1, which a
+	 * conversion or a stack underflow sets; TOP and the other condition codes
+	 * are not the instruction's to change before its store. */
+	constexpr std::uint64_t x87_flags = 0x02ff;
 	/* The JIT reports flags, status bits and MXCSR flags that the faulting
 	 * instruction has already changed. */
 	constexpr std::string_view fault_state_gap = "fault-flags";
@@ -2018,6 +2027,26 @@ struct RetirementCase final {
 			code_address + 12, {}, long64, {},
 			{{data + 0x1000, data + 0x2000}},
 			flags_are(flags_arithmetic, rflags_parity | rflags_zero),
+			fault_state_gap},
+		/* fldpi; mov $data+0x1000, %ebx; fstps (%rbx), into a read-only
+		 * page; hlt: the conversion rounds, and the store faults before its
+		 * precision exception or C1 reach the status word. */
+		{"fstp-store-fault-status", {0xd9, 0xeb, 0xbb, 0x00, 0x10, 0x00,
+			0x20, 0xd9, 0x1b, 0xf4}, {{data, data + 0x2000}}, "memory_fault",
+			2, code_address + 7, {}, long64, {},
+			{{data + 0x1000, data + 0x2000}}, x87_status_is(x87_flags, 0),
+			fault_state_gap},
+		/* mov $data+0x1000, %ebx; fstpt (%rbx), with ST(0) empty; hlt: the
+		 * stack underflow is not raised either. */
+		{"fstpt-empty-store-fault-status", {0xbb, 0x00, 0x10, 0x00, 0x20,
+			0xdb, 0x3b, 0xf4}, {{data, data + 0x2000}}, "memory_fault", 1,
+			code_address + 5, {}, long64, {}, {{data + 0x1000, data + 0x2000}},
+			x87_status_is(x87_flags, 0), fault_state_gap},
+		/* fldpi; mov $data+0x1000, %ebx; fbstp (%rbx); hlt */
+		{"fbstp-store-fault-status", {0xd9, 0xeb, 0xbb, 0x00, 0x10, 0x00,
+			0x20, 0xdf, 0x33, 0xf4}, {{data, data + 0x2000}}, "memory_fault",
+			2, code_address + 7, {}, long64, {},
+			{{data + 0x1000, data + 0x2000}}, x87_status_is(x87_flags, 0),
 			fault_state_gap},
 		/* nop; xor %ecx, %ecx; xor %edx, %edx; div %ecx; nop; hlt */
 		{"divide-error", {0x90, 0x31, 0xc9, 0x31, 0xd2, 0xf7, 0xf1, 0x90,
