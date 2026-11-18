@@ -6,7 +6,12 @@ The guest is the release on a fresh data disk (or on the instance named by --ins
 launcher and ``--vsock-forward=127.0.0.1:0-5560``, so that the runner plays the host application: it sends the
 requests of the contract over the forward, in frames. The contract is android/lineage-24/README.md ("Text
 messages"); the bytes are tests/unit/andarium/fixtures/sms-golden-frames.txt, which this runner reads, and the
-service is android/lineage-24/overlay/sms. The runner has three modes, each one boot:
+service is android/lineage-24/overlay/sms. The runner has four modes, each one boot:
+
+- ``delivery`` (an image of any build type, no root, no probe): D1 a plain message from the host is handed over,
+  answered and stored in the inbox; D2 a message with a one-time code is too, and com.android.phone keeps its
+  pid. It is the smallest check of a built image's text-message path, and the one for an unsigned proof image
+  (``--proof-image``): a service that drops every connection fails it at the first answer.
 
 - ``channel`` (a release image, no root): the channel's rows. G1 a host's request is taken, handed over,
   and answered; G2a-d the provider is gone and a guest-local or adb-made connection is refused or ends at once;
@@ -31,6 +36,7 @@ The runner is opt-in: it needs the macos-android17 executable, an installed rele
 channel mode, the probe's APK and DEX (tests/integration/android/sms/build-apk.sh).
 usage: run_android_sms.py --emulator uml-darwin-android17 --mode channel --probe-apk AndariumSmsProbe.apk
            --vsockprobe-dex vsockprobe.dex [--release DIR] [--variant messaging|no-messaging|no-provider]
+       run_android_sms.py --emulator uml-darwin-android17 --mode delivery --release DIR [--proof-image]
        run_android_sms.py --list-rows
 """
 
@@ -89,6 +95,8 @@ INBOX_SECONDS = 20
 PROBE_SECONDS = 30
 VM_SECONDS = 60
 SWEEP_PORT_SECONDS = 2
+PHONE = "com.android.phone"
+PHONE_SETTLE_SECONDS = 5
 SWEEP_SECONDS = 1800
 SWEEP_WIDTH = 16
 # The shared adb server's port: the sweep speaks its protocol to ask adbd for a connection.
@@ -325,6 +333,23 @@ class Process:
         return parts[2] if len(parts) > 2 else ""
 
 
+def crash_lines_naming(crash_buffer: str, package: str) -> int:
+    """How many lines of a ``logcat -b crash`` dump name the package."""
+    return sum(package in line for line in crash_buffer.splitlines())
+
+
+def phone_problem(before: str, after: str, crashes_before: int, crashes_after: int) -> str | None:
+    """None when com.android.phone lived through a message: the same pid (``pidof``'s text) before and after,
+    and no crash of it in between. It must be running before, since it is persistent."""
+    if not before.strip().isdigit():
+        return f"{PHONE} was not running before the message (pidof says {before.strip()!r})"
+    if before.strip() != after.strip():
+        return f"{PHONE} was pid {before.strip()} before the message and is {after.strip() or 'gone'} after it"
+    if crashes_after != crashes_before:
+        return f"the crash buffer gained {crashes_after - crashes_before} line(s) naming {PHONE}"
+    return None
+
+
 def parse_ps(text: str) -> list[Process]:
     """``ps -A -Z``: the label, the user, the pid and the name of each process."""
     found = []
@@ -530,6 +555,8 @@ NEEDS = {
 }
 
 ROWS = (
+    Row("D1", "delivery", "a plain message is handed over, answered and stored"),
+    Row("D2", "delivery", "a message with a one-time code is too, and com.android.phone keeps its pid"),
     Row("G1", "channel", "a host's request is taken, handed over and answered", ("H2",)),
     Row("G2a", "channel", "the provider is gone", ("H4",)),
     Row("G2b", "channel", "an adb forward to vsock:3 is refused", ("H3",)),
@@ -866,6 +893,42 @@ def refused(run: Run, port: int, label: str) -> None:
     if received or not closed:
         raise Failure(f"{label}: expected the end of the stream with no byte within {REFUSAL_SECONDS} s, got "
                       f"{len(received)} byte(s), closed={closed}, after {elapsed:.1f} s")
+
+
+# ---- The delivery rows.
+
+def row_d1(run: Run) -> None:
+    sender, text = run.sender_and_text("plain")
+    identifier = new_identifier()
+    run.expect(run.first(identifier, sender, text), "handed-over", identifier, "1")
+    if run.has_inbox:
+        rows = run.inbox_rows_within(sender, text)
+        if rows != 1:
+            raise Failure(f"the inbox holds {rows} rows for the message, expected 1")
+
+
+def phone_state(run: Run) -> tuple[str, int]:
+    pid = run.guest.shell(f"pidof {PHONE}", check=False)
+    return pid, crash_lines_naming(run.guest.logcat("-b", "crash"), PHONE)
+
+
+def row_d2(run: Run) -> None:
+    before = phone_state(run)
+    sender = "+15550100"
+    for form in ("Your verification code is {}", "{} is your login code. Never share it with anyone."):
+        text = form.format(int.from_bytes(os.urandom(3), "big") % 900000 + 100000)
+        identifier = new_identifier()
+        run.expect(run.first(identifier, sender, text), "handed-over", identifier, "1")
+        if run.has_inbox:
+            rows = run.inbox_rows_within(sender, text)
+            if rows != 1:
+                raise Failure(f"the inbox holds {rows} rows for a message with a one-time code, expected 1")
+    time.sleep(PHONE_SETTLE_SECONDS)
+    after = phone_state(run)
+    problem = phone_problem(before[0], after[0], before[1], after[1])
+    if problem:
+        raise Failure(problem)
+    run.note(f"{PHONE} kept pid {after[0].strip()}")
 
 
 # ---- The channel rows.
@@ -1325,6 +1388,7 @@ def row_i6(run: Run) -> None:
 
 
 ROW_FUNCTIONS: dict[str, Callable[[Run], None]] = {
+    "D1": row_d1, "D2": row_d2,
     "G1": row_g1, "G2a": row_g2a, "G2b": row_g2b, "G2c": row_g2c, "G2d": row_g2d, "G2e": row_g2e, "G3": row_g3,
     "G4": row_g4, "G5": row_g5, "G6": row_g6, "G7": row_g7, "G8": row_g8, "G9": row_g9, "H6": row_h6, "H9": row_h9,
     "I1": row_i1, "I2": row_i2, "I3": row_i3, "I4": row_i4, "I5": row_i5, "I6": row_i6, "I7": row_i7, "I8": row_i8,
@@ -1363,13 +1427,19 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path) ->
     ])
     emulator = boot_android.resolve_executable(boot_options.emulator)
     release = boot_android.release_path(boot_options.release)
-    identity = boot_android.android_instance.read_release(release)
-    decision = boot_android.plan_start(boot_options, identity, instance)
-    boot_android.android_instance.apply(instance, identity, decision)
+    identity = None
+    if options.proof_image:
+        # No installed-release reader takes a proof's manifest (schema 0): the emulator makes the identity file
+        # and the data disk of the fresh instance, whose directory must exist first.
+        instance.mkdir(parents=True, exist_ok=True)
+    else:
+        identity = boot_android.android_instance.read_release(release)
+        decision = boot_android.plan_start(boot_options, identity, instance)
+        boot_android.android_instance.apply(instance, identity, decision)
     command = [
         *boot_android.emulator_command(
             boot_options, release, instance / boot_android.android_instance.DATA_DISK, emulator,
-            boot_android.data_capacity(boot_options, identity)),
+            None if identity is None else boot_android.data_capacity(boot_options, identity)),
         f"--vsock-forward=127.0.0.1:0-{SMS_PORT}",
     ]
     log = private / "emulator.log"
@@ -1385,7 +1455,8 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path) ->
         boot_android.wait_for_adb(adb, serial, process, options.boot_timeout)
         if not boot_android.wait_for_boot_completed(adb, serial, process, options.boot_timeout):
             raise Failure("Android did not reach sys.boot_completed")
-        boot_android.android_instance.booted(instance, identity)
+        if identity is not None:
+            boot_android.android_instance.booted(instance, identity)
         if not options.instance:
             boot_android.provision_guest(adb, serial)
         print(f"booted; settling for {SETTLE_SECONDS} s")
@@ -1423,13 +1494,16 @@ def available_needs(options: argparse.Namespace) -> set[str]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mode", choices=("channel", "record", "proof"), default="channel")
+    parser.add_argument("--mode", choices=("delivery", "channel", "record", "proof"), default="channel")
     parser.add_argument("--variant", choices=("messaging", "no-messaging", "no-provider"), default="messaging",
                         help="what the image has: Messaging and the SMS provider; the provider alone; neither")
     parser.add_argument("--list-rows", action="store_true", help="print the rows and what each needs, and stop")
     parser.add_argument("--emulator", type=pathlib.Path,
                         help="the macos-android17 uml-darwin-android17 (the launcher's default)")
     parser.add_argument("--release", type=pathlib.Path, help="installed Android release (default: accepted)")
+    parser.add_argument("--proof-image", action="store_true",
+                        help="--release is an unsigned proof image (manifest schema 0), which no installed-release "
+                        "reader takes: it boots on a fresh instance the emulator makes, with nothing recorded")
     parser.add_argument("--instance", type=pathlib.Path,
                         help="an existing instance to boot; the default is a fresh one that is removed at the end")
     parser.add_argument("--adb", default="adb", help="adb client to use")
@@ -1450,7 +1524,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def print_rows() -> None:
-    for mode in ("channel", "record", "proof"):
+    for mode in ("delivery", "channel", "record", "proof"):
         print(f"mode {mode}:")
         for row in (row for row in ROWS if row.mode == mode):
             covers = f" (also {', '.join(row.covers)})" if row.covers else ""
@@ -1468,6 +1542,10 @@ def main() -> int:
         return 0
     if options.cpus <= 0 or options.boot_timeout <= 0:
         print("counts and timeouts must be positive", file=sys.stderr)
+        return 2
+    if options.proof_image and (options.release is None or options.instance is not None):
+        print("--proof-image names its image with --release and boots a fresh instance (no --instance)",
+              file=sys.stderr)
         return 2
     if options.mode == "channel" and not all(
             path is not None and path.is_file() for path in (options.probe_apk, options.vsockprobe_dex)):

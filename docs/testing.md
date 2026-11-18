@@ -1180,6 +1180,11 @@ crash, a reboot and fifty kills. `--mode proof` (a userdebug build) writes a
 pending record and traces the order of the record's writes; the variants without
 Messaging or without an SMS provider, the adbd topic and the kernel configuration
 are options of the runner (`--list-rows` names each row and what it needs).
+`--mode delivery` is the smallest check of a built image and needs no probe, root
+or registration: a plain message and one with a one-time code are handed over,
+answered and stored in the inbox, and `com.android.phone` keeps its pid. With
+`--proof-image` it boots an unsigned proof image (manifest schema 0), which no
+installed-release reader takes, on a fresh instance.
 `android17-sms-runner` (tooling) runs its wire, record file, parsers and
 judgements without a guest.
 `android-oldapp` (integration) registers when `UML_ANDROID_OLDAPP_RELEASE`

@@ -280,6 +280,20 @@ u:r:system_app:s0              system         950    300   10000   1000 0       
         self.assertFalse(runner.cap_eff_bit(status, 9))
         self.assertIsNone(runner.cap_eff_bit("Name:\tadbd\n", 10))
 
+    def test_the_phone_process_through_a_message(self) -> None:
+        self.assertIsNone(runner.phone_problem("1878\n", "1878\r\n", 0, 0))
+        self.assertIsNone(runner.phone_problem("1878", "1878", 2, 2))
+        self.assertIn("not running before", runner.phone_problem("", "1878", 0, 0))
+        self.assertIn("was pid 1878 before the message and is 2041 after it",
+                      runner.phone_problem("1878", "2041", 0, 0))
+        self.assertIn("is gone after it", runner.phone_problem("1878", "", 0, 0))
+        self.assertIn("gained 1 line(s)", runner.phone_problem("1878", "1878", 0, 1))
+        crash = ("11-18 20:10:40 E AndroidRuntime: FATAL EXCEPTION: main\n"
+                 "11-18 20:10:40 E AndroidRuntime: Process: com.android.phone, PID: 9\n"
+                 "11-18 20:10:41 E AndroidRuntime: Process: com.example.other, PID: 10\n")
+        self.assertEqual(runner.crash_lines_naming(crash, runner.PHONE), 1)
+        self.assertEqual(runner.crash_lines_naming("", runner.PHONE), 0)
+
     def test_the_kernel_configuration(self) -> None:
         accepted = "CONFIG_VSOCKETS=y\nCONFIG_VIRTIO_VSOCKETS=y\n# CONFIG_VHOST_VSOCK is not set\nCONFIG_OTHER=y\n"
         self.assertEqual(runner.kernel_config_problems(accepted + "CONFIG_X=y\n", accepted), [])
@@ -352,13 +366,13 @@ class CatalogueTests(unittest.TestCase):
         self.assertEqual(sorted(row.name for row in runner.ROWS), sorted(runner.ROW_FUNCTIONS))
         self.assertEqual(len({row.name for row in runner.ROWS}), len(runner.ROWS))
         for row in runner.ROWS:
-            self.assertIn(row.mode, ("channel", "record", "proof"))
+            self.assertIn(row.mode, ("delivery", "channel", "record", "proof"))
             self.assertTrue(row.needs is None or row.needs in runner.NEEDS, row.name)
 
     def test_the_designs_rows_are_here_or_named_elsewhere(self) -> None:
         names = {row.name for row in runner.ROWS}
         covered = {c for row in runner.ROWS for c in row.covers}
-        for wanted in ("G1", "G2a", "G2b", "G2c", "G2d", "G2e", "G3", "G4", "G5", "G6", "G7", "G8", "G9",
+        for wanted in ("D1", "D2", "G1", "G2a", "G2b", "G2c", "G2d", "G2e", "G3", "G4", "G5", "G6", "G7", "G8", "G9",
                        "I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8"):
             self.assertIn(wanted, names)
         for wanted in ("H1", "H2", "H3", "H4", "H5", "H7", "H8", "H10", "H11", "H13"):
@@ -367,6 +381,15 @@ class CatalogueTests(unittest.TestCase):
         elsewhere = " ".join(names for names, _ in runner.ELSEWHERE)
         for wanted in ("B1", "H12", "U6"):
             self.assertIn(wanted, elsewhere)
+
+    def test_the_delivery_mode_needs_no_probe_and_no_extras(self) -> None:
+        run, skipped = runner.plan_rows("delivery", set())
+        self.assertEqual([row.name for row in run], ["D1", "D2"])
+        self.assertEqual(skipped, [])
+        options = runner.build_parser().parse_args(["--mode", "delivery", "--proof-image", "--release", "x"])
+        self.assertTrue(options.proof_image)
+        self.assertEqual(runner.available_needs(options), {"stock-adbd"})
+        self.assertFalse(runner.build_parser().parse_args([]).proof_image)
 
     def test_what_a_run_without_the_extras_skips(self) -> None:
         run, skipped = runner.plan_rows("channel", {"stock-adbd"})
@@ -542,8 +565,10 @@ class StartFailureTests(unittest.TestCase):
 
     MARKER = "sms-start-failure-test"
 
-    def start_and_fail(self, forward: object = 12345, **patched: object) -> list[subprocess.Popen]:
-        """Runs start_guest with the launcher's steps replaced; returns the spawned children left running."""
+    def start_and_fail(self, forward: object = 12345, proof_image: bool = False,
+                       **patched: object) -> list[subprocess.Popen]:
+        """Runs start_guest with the launcher's steps replaced; returns the spawned children left running.
+        A proof image has no installed-release identity: nothing of it may be read, planned or recorded."""
         boot = runner.boot_android
         children: list[subprocess.Popen] = []
         real_popen = subprocess.Popen
@@ -555,7 +580,7 @@ class StartFailureTests(unittest.TestCase):
             return process
 
         options = SimpleNamespace(instance=None, release=None, emulator=None, adb_port=5599, cpus=2,
-                                  memory="2G", boot_timeout=5)
+                                  memory="2G", boot_timeout=5, proof_image=proof_image)
         steps = {
             "wait_for_adb": mock.DEFAULT,
             "wait_for_boot_completed": True,
@@ -568,11 +593,15 @@ class StartFailureTests(unittest.TestCase):
                 emulator="fake", release="fake")))
             stack.enter_context(mock.patch.object(boot, "resolve_executable", return_value=sys.executable))
             stack.enter_context(mock.patch.object(boot, "release_path", return_value=directory))
-            stack.enter_context(mock.patch.object(boot.android_instance, "read_release", return_value=object()))
-            stack.enter_context(mock.patch.object(boot, "plan_start", return_value=object()))
-            stack.enter_context(mock.patch.object(boot.android_instance, "apply"))
-            stack.enter_context(mock.patch.object(boot.android_instance, "booted"))
-            stack.enter_context(mock.patch.object(boot, "data_capacity", return_value=1))
+            unread = AssertionError("a proof image's identity was read")
+            for name, owner in (("read_release", boot.android_instance), ("plan_start", boot),
+                                ("apply", boot.android_instance), ("booted", boot.android_instance),
+                                ("data_capacity", boot)):
+                if proof_image:
+                    stack.enter_context(mock.patch.object(owner, name, side_effect=unread))
+                else:
+                    stack.enter_context(mock.patch.object(
+                        owner, name, return_value=1 if name == "data_capacity" else object()))
             stack.enter_context(mock.patch.object(boot, "disconnect_adb"))
             stack.enter_context(mock.patch.object(boot, "emulator_command", return_value=[
                 sys.executable, "-c", f"import time; time.sleep(120)  # {self.MARKER}"]))
@@ -601,6 +630,13 @@ class StartFailureTests(unittest.TestCase):
                 for child in children:
                     child.wait(timeout=10)
         return alive
+
+    def test_a_proof_image_starts_without_an_installed_identity(self) -> None:
+        for name, patched in {"Android never boots": {"wait_for_boot_completed": False},
+                              "adb never answers": {"wait_for_adb": runner.boot_android.LauncherError("injected")}
+                              }.items():
+            with self.subTest(name):
+                self.assertEqual([], self.start_and_fail(proof_image=True, **patched))
 
     def test_a_failure_after_the_spawn_leaves_no_emulator(self) -> None:
         boot = runner.boot_android
