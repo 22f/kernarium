@@ -2007,9 +2007,9 @@ public:
 		assert(state.changes == changes);
 		const auto tag = tag_of(pc);
 		/* Nothing is stored under a key with no compact form, which no
-		 * slot can name. The caller runs the copy it is handed once and
-		 * drops it: the copy owns its words, so it outlives the scratch
-		 * the next build rewinds. */
+		 * slot can name. The callers build such a key unlinked and run
+		 * it once (build_uncached()), so this only refuses one that
+		 * arrives anyway: the copy it hands back owns its words. */
 		if (tag == unmatchable_tag)
 			return result;
 		auto *body = state.space->publish(result, validation,
@@ -3161,6 +3161,18 @@ std::optional<BuildResult> GadgetExecutor::find(
 
 namespace {
 
+/* The translation of a key no slot can name (compact_tag_key), built for one
+ * run: unlinked, so that it makes no link record or indirect site in its
+ * address space, which nothing would ever sweep or charge against the budget,
+ * and in memory of its own, which its caller drops with it. */
+[[nodiscard]] BuildResult build_uncached(std::uint64_t pc,
+	std::span<const std::uint32_t> window,
+	const arm64::gadgets::BuildOptions &options)
+{
+	return arm64::gadgets::Builder{}.build(pc, window, {},
+		std::pmr::get_default_resource(), {}, options);
+}
+
 /* A store whose link sweep released records may have released one the return
  * ring names. The ring only predicts, so it starts again empty. */
 void forget_returns(arm64::CpuState &cpu) noexcept
@@ -3210,6 +3222,8 @@ void note_exit_histogram(GadgetCacheDiagnostics &d, Programs &programs,
 BuildResult GadgetExecutor::translate(
 	std::uint64_t pc, std::span<const std::uint32_t> window)
 {
+	if (compact_tag_key(pc) == unmatchable_tag)
+		return build_uncached(pc, window, build_options_);
 	const auto decoded = arm64::gadgets::Builder{}.build(
 		pc, window,
 		[this](std::uint64_t target) {
@@ -3409,21 +3423,25 @@ GadgetExecutor::finish_block(ProgramCache &programs, const BuildResult &built,
 		++cache_diagnostics_.translations;
 		auto options = build_options_;
 		options.svcr = mode;
-		const auto decoded = arm64::gadgets::Builder{}.build(
-			cpu.pc, window,
-			[&programs](std::uint64_t target) {
-				return programs.link(target);
-			},
-			programs.program_storage(),
-			[&programs](std::uint64_t source_pc) {
-				return programs.indirect_link(source_pc);
-			},
-			options);
-		const auto sweeps = cache_diagnostics_.link_sweeps;
-		selected.emplace(programs.store(cpu.pc, decoded, window,
-			code_changes, cache_diagnostics_));
-		if (cache_diagnostics_.link_sweeps != sweeps)
-			forget_returns(cpu);
+		if (compact_tag_key(cpu.pc) == unmatchable_tag) {
+			selected.emplace(build_uncached(cpu.pc, window, options));
+		} else {
+			const auto decoded = arm64::gadgets::Builder{}.build(
+				cpu.pc, window,
+				[&programs](std::uint64_t target) {
+					return programs.link(target);
+				},
+				programs.program_storage(),
+				[&programs](std::uint64_t source_pc) {
+					return programs.indirect_link(source_pc);
+				},
+				options);
+			const auto sweeps = cache_diagnostics_.link_sweeps;
+			selected.emplace(programs.store(cpu.pc, decoded, window,
+				code_changes, cache_diagnostics_));
+			if (cache_diagnostics_.link_sweeps != sweeps)
+				forget_returns(cpu);
+		}
 	}
 	const auto &built = *selected;
 	if (built.program.instruction_count() == 0) {

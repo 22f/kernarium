@@ -4,6 +4,7 @@
 #include "runtime_test_route.hpp"
 
 #include "cpu/arm64/gadgets/executor.hpp"
+#include "cpu/gadget_cache_budget.hpp"
 #include "cpu/gadget_cache_geometry.hpp"
 #include "static_mmu_test_support.hpp"
 
@@ -1022,7 +1023,7 @@ void put_block(JitBacking &backing, std::uint64_t offset, std::uint32_t value)
 	return pc;
 }
 
-/* The four rows below stay out of line: an executor is large, and rows
+/* The five rows below stay out of line: an executor is large, and rows
  * inlined into run_all() would add their frames to its, past the main thread's
  * stack under the sanitizers. */
 
@@ -1170,6 +1171,63 @@ void put_block(JitBacking &backing, std::uint64_t offset, std::uint32_t value)
 	}
 }
 
+/* An uncacheable block is built unlinked, so it leaves no link record or
+ * indirect site in its address space. Nothing would collect them: a sweep
+ * follows a block's departure from a slot, and the budget is relieved by a
+ * store. A direct exit and an indirect one each leave the block with its PC and
+ * its one instruction retired, and a thousand distinct entries leave the
+ * address space's charged bytes as they were. */
+[[gnu::noinline]] void uncacheable_blocks_leave_no_link_state()
+{
+	constexpr unsigned long generation = 994;
+	constexpr std::size_t entries = 1024;
+	constexpr std::uint32_t nop = 0xd503'201fU;
+	const std::uint64_t exits = uncacheable_pc;
+	const std::uint64_t direct = exits;
+	const std::uint64_t indirect = exits + 0x100;
+	const std::uint64_t target = exits + 0x200;
+	const std::uint64_t run_base = exits + DARWIN_UML_GUEST_PAGE_SIZE;
+
+	JitBacking anchor{1}, code{1}, nops{1};
+	code.put32(direct - exits, branch(direct, target));
+	code.put32(indirect - exits, branch_register(1));
+	put_block(code, target - exits, 5);
+	for (std::size_t index = 0; index < entries; ++index)
+		nops.put32(index * sizeof(std::uint32_t), nop);
+	JitMapping mapping{generation, code_base, anchor, 1};
+	const uml::emulator::tests::GenerationMapping code_mapping{generation,
+		exits, code, 1, PROT_READ | PROT_EXEC, true};
+	const uml::emulator::tests::GenerationMapping nop_mapping{generation,
+		run_base, nops, 1, PROT_READ | PROT_EXEC, true};
+
+	StaticGuestMemory memory;
+	gadgets::GadgetExecutor executor{sharing_options()};
+	require(run_block_at(executor, memory, generation, target) == 5);
+	const auto charged = ::uml::cpu::gadget_cache::ledger_state().total;
+
+	arm64::CpuState jump{};
+	jump.pc = direct;
+	const auto direct_exit = run_once(executor, memory, generation, jump);
+	require(direct_exit.event == ::uml::cpu::EngineEvent::continued);
+	require(direct_exit.executed == 1);
+	require(jump.pc == target);
+
+	arm64::CpuState computed{};
+	computed.pc = indirect;
+	computed.registers[1] = target;
+	const auto indirect_exit = run_once(executor, memory, generation, computed);
+	require(indirect_exit.event == ::uml::cpu::EngineEvent::continued);
+	require(indirect_exit.executed == 1);
+	require(computed.pc == target);
+
+	for (std::size_t index = 0; index < entries; ++index) {
+		arm64::CpuState cpu{};
+		cpu.pc = run_base + index * sizeof(std::uint32_t);
+		require(run_once(executor, memory, generation, cpu).executed != 0);
+	}
+	require(::uml::cpu::gadget_cache::ledger_state().total == charged);
+}
+
 /* The same cases with each address space's translations private to its
  * executor and then shared among them: the cache's slots and bodies keep
  * their own packing in both. */
@@ -1190,6 +1248,7 @@ void run_all()
 	a_peer_executor_does_not_adopt_an_uncacheable_block();
 	an_uncacheable_block_takes_no_way_from_its_set();
 	a_cache_that_ran_an_uncacheable_block_tears_down();
+	uncacheable_blocks_leave_no_link_state();
 }
 
 } // namespace
