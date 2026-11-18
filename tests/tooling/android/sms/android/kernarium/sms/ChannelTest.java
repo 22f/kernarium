@@ -18,7 +18,6 @@ import android.system.VmSocketAddress;
 import java.io.ByteArrayOutputStream;
 import java.io.FileDescriptor;
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -57,6 +56,7 @@ public final class ChannelTest {
     static final class Script implements Server.Conn {
         final List<String> events;
         int cid = 2;
+        /** The accept reported no peer address. */
         boolean peerThrows;
         byte[] incoming = new byte[0];
         int position;
@@ -80,7 +80,7 @@ public final class ChannelTest {
         @Override
         public int peerCid() throws Exception {
             events.add("peer");
-            if (peerThrows) throw new IOException("not a vsock peer");
+            if (peerThrows) throw new IOException("accept gave no peer address");
             return cid;
         }
 
@@ -187,9 +187,16 @@ public final class ChannelTest {
         final Script strange = new Script(events).sends(request);
         strange.peerThrows = true;
         final Handling handling = new Handling();
-        serve(handling, new ArrayList<>(), strange);
-        check(!events.contains("read") && !events.contains("write") && strange.closed && handling.payloads.isEmpty(),
-                "a peer that is not a vsock address is refused unread: " + events);
+        final List<String> unaddressedLog = new ArrayList<>();
+        serve(handling, unaddressedLog, strange);
+        check(!events.contains("read") && !events.contains("write") && !events.contains("look") && strange.closed
+                && handling.payloads.isEmpty(), "a connection with no peer address is refused unread: " + events);
+        same(1, unaddressedLog.size(), "and said so once: " + unaddressedLog);
+        check(!unaddressedLog.isEmpty()
+                && unaddressedLog.get(0).startsWith("refused a connection with no peer address"),
+                "in the line that says what it was: " + unaddressedLog);
+        check(unaddressedLog.stream().allMatch(line -> line.chars().noneMatch(Character::isDigit)),
+                "which names no CID or port");
         final List<String> admittedEvents = new ArrayList<>();
         final Script host = new Script(admittedEvents).sends(request);
         serve(handling, new ArrayList<>(), host);
@@ -207,7 +214,18 @@ public final class ChannelTest {
         final Server loop = server(queue, new Handling(), log);
         for (int i = 0; i < 300; ++i) loop.serveOne();
         same(2, log.size(), "two refusals logged of 300: " + log);
-        check(log.get(0).contains("CID 1"), "the log names the CID");
+        check(!log.isEmpty() && log.get(0).contains("CID 1"), "the log names the CID");
+        // A connection with no peer address is logged for the first, then one in 256, apart from the refusals.
+        final List<String> unaddressed = new ArrayList<>();
+        final Queue strangers = new Queue(new ArrayList<>());
+        for (int i = 0; i < 300; ++i) {
+            final Script conn = new Script(new ArrayList<>());
+            conn.peerThrows = true;
+            strangers.conns.add(conn);
+        }
+        final Server watch = server(strangers, new Handling(), unaddressed);
+        for (int i = 0; i < 300; ++i) watch.serveOne();
+        same(2, unaddressed.size(), "two unaddressed connections logged of 300: " + unaddressed);
     }
 
     /** The frame: the bytes of the golden file, one at a time, cut, and with more than one frame. */
@@ -449,8 +467,11 @@ public final class ChannelTest {
     /** The world the glue sees: sockets that the test queues, each with a peer and what it sends. */
     static final class World implements Os.Backend {
         static final class Sock {
-            SocketAddress peer;
-            boolean peerThrows;
+            /** The peer's CID, as accept fills it into the address it is given; null: it leaves the address alone. */
+            Integer cid;
+            int port = 51234;
+            /** The library cannot convert the peer's address: accept closes the connection and returns null. */
+            boolean libraryRefuses;
             byte[] incoming = new byte[0];
             int position;
             boolean ends = true;
@@ -467,6 +488,8 @@ public final class ChannelTest {
         final FileDescriptor listener = new FileDescriptor();
         final List<ErrnoException> bindFailures = new ArrayList<>();
         final List<ErrnoException> acceptFailures = new ArrayList<>();
+        /** The address each accept was given to fill. */
+        final List<SocketAddress> acceptAddresses = new ArrayList<>();
         SocketAddress bound;
         int listens;
         int sockets;
@@ -491,23 +514,38 @@ public final class ChannelTest {
             ++listens;
         }
 
+        /** Like libjavacore's accept: a VmSocketAddress it is given is filled with the peer's port and CID. */
         @Override
         public FileDescriptor accept(FileDescriptor fd, SocketAddress peer) throws ErrnoException {
             calls.add("accept");
+            acceptAddresses.add(peer);
             if (!acceptFailures.isEmpty()) throw acceptFailures.remove(0);
             final Sock sock = queued.poll();
             if (sock == null) throw new ErrnoException("accept", OsConstants.EAGAIN);
+            if (sock.libraryRefuses) {
+                sock.closed = true;
+                return null;
+            }
+            if (peer instanceof VmSocketAddress && sock.cid != null) fill((VmSocketAddress) peer, sock.port, sock.cid);
             final FileDescriptor child = new FileDescriptor();
             socks.put(child, sock);
             return child;
         }
 
-        @Override
-        public SocketAddress getpeername(FileDescriptor fd) throws ErrnoException {
-            calls.add("getpeername");
-            final Sock sock = socks.get(fd);
-            if (sock.peerThrows) throw new ErrnoException("getpeername", 107);
-            return sock.peer;
+        /** What the library's accept does through JNI: it sets the two fields of the address it was given. */
+        private static void fill(VmSocketAddress address, int port, int cid) {
+            try {
+                set(address, "svmPort", port);
+                set(address, "svmCid", cid);
+            } catch (ReflectiveOperationException e) {
+                throw new AssertionError(e);
+            }
+        }
+
+        private static void set(VmSocketAddress address, String name, int value) throws ReflectiveOperationException {
+            final java.lang.reflect.Field field = VmSocketAddress.class.getDeclaredField(name);
+            field.setAccessible(true);
+            field.setInt(address, value);
         }
 
         @Override
@@ -599,7 +637,7 @@ public final class ChannelTest {
 
         // The host, a byte at a time, and a short write on the way back.
         final World.Sock host = new World.Sock();
-        host.peer = new VmSocketAddress(51234, 2);
+        host.cid = OsConstants.VMADDR_CID_HOST;
         host.incoming = request;
         host.ends = false;
         world.queued.add(host);
@@ -612,33 +650,74 @@ public final class ChannelTest {
                 && ((VmSocketAddress) world.bound).getSvmCid() == OsConstants.VMADDR_CID_ANY, "listening on port 5560, any CID");
         same("socket " + OsConstants.AF_VSOCK, world.calls.get(0), "a vsock socket");
         check(log.contains("listening on vsock port 5560"), "the first listen is logged");
+        // The peer is what accept reported: the address it was given to fill, never getpeername, which
+        // fails for AF_VSOCK on the image (the stub's Os.getpeername throws as the guest's library does).
+        check(world.acceptAddresses.size() == 1 && world.acceptAddresses.get(0) instanceof VmSocketAddress,
+                "accept is given a VmSocketAddress to fill: " + world.acceptAddresses);
         final int firstRead = world.calls.indexOf("read");
-        check(world.calls.indexOf("getpeername") >= 0 && world.calls.indexOf("getpeername") < firstRead,
-                "getpeername comes before the first read: " + world.calls);
+        check(firstRead > world.calls.indexOf("accept") && world.calls.indexOf("accept") >= 0,
+                "the peer is known from the accept, before the first read: " + world.calls);
+        check(!log.stream().anyMatch(line -> line.startsWith("refused")), "the host is not refused: " + log);
 
-        // Another CID, another address type, a failing getpeername: closed unread and unwritten.
-        final List<SocketAddress> peers = new ArrayList<>();
-        for (int cid : new int[] {0, 1, 3, -1}) peers.add(new VmSocketAddress(51234, cid));
-        peers.add(new InetSocketAddress("127.0.0.1", 5560));
-        peers.add(null);
-        for (SocketAddress peer : peers) {
+        // Another CID: closed unread and unwritten, and refused in the line that names it, once.
+        final int refusalsLogged = log.size();
+        for (int cid : new int[] {0, 1, 3, 4, Integer.MIN_VALUE}) {
             final int callsBefore = world.calls.size();
             final World.Sock other = new World.Sock();
-            other.peer = peer;
-            other.peerThrows = peer == null;
+            other.cid = cid;
             other.incoming = request;
+            other.ends = false; // a request that was admitted would be dispatched
             world.queued.add(other);
             handling.payloads.clear();
             server.serveOne();
             final List<String> calls = new ArrayList<>(world.calls.subList(callsBefore, world.calls.size()));
             check(!calls.contains("read") && !calls.contains("write") && other.closed && other.shutdown,
-                    "a peer " + peer + " is closed unread: " + calls);
+                    "a peer with CID " + cid + " is closed unread: " + calls);
             check(handling.payloads.isEmpty(), "and not dispatched");
         }
+        same(Arrays.asList("refused a connection from CID 0"), log.subList(refusalsLogged, log.size()),
+                "the first refusal is logged with its CID");
+
+        // No address: the accept left the address alone, or filled the CID that no peer has. Closed unread and
+        // unwritten, never served, and said so (once) in a line with no CID or port in it.
+        final int unaddressedLogged = log.size();
+        for (Integer cid : new Integer[] {null, OsConstants.VMADDR_CID_ANY}) {
+            final int callsBefore = world.calls.size();
+            final World.Sock other = new World.Sock();
+            other.cid = cid;
+            other.incoming = request;
+            other.ends = false; // a request that was admitted would be dispatched
+            world.queued.add(other);
+            handling.payloads.clear();
+            server.serveOne();
+            final List<String> calls = new ArrayList<>(world.calls.subList(callsBefore, world.calls.size()));
+            check(!calls.contains("read") && !calls.contains("write") && other.closed && other.shutdown,
+                    "a peer whose address is " + cid + " is closed unread: " + calls);
+            check(handling.payloads.isEmpty(), "and not dispatched");
+        }
+        same(Arrays.asList("refused a connection with no peer address: IOException"),
+                log.subList(unaddressedLogged, log.size()), "the first of them is logged, with no CID or port");
+
+        // A connection whose address the library cannot convert is closed by it, never reaches the server,
+        // and the next one is served.
+        final World.Sock unconvertible = new World.Sock();
+        unconvertible.libraryRefuses = true;
+        unconvertible.incoming = request;
+        final World.Sock next = new World.Sock();
+        next.cid = OsConstants.VMADDR_CID_HOST;
+        next.incoming = request;
+        next.ends = false;
+        world.queued.add(unconvertible);
+        world.queued.add(next);
+        handling.payloads.clear();
+        server.serveOne();
+        check(unconvertible.closed && !unconvertible.shutdown && unconvertible.written.size() == 0,
+                "an address the library cannot convert is closed unread");
+        same(1, handling.payloads.size(), "and the next connection, the host's, is served");
 
         // A deadline that has nearly passed, and a peer that says nothing: dropped.
         final World.Sock quiet = new World.Sock();
-        quiet.peer = new VmSocketAddress(1, 2);
+        quiet.cid = OsConstants.VMADDR_CID_HOST;
         quiet.ends = false;
         world.queued.add(quiet);
         final Server hurried = new Server(listener, handling, log::add, () -> System.nanoTime() - 4_999_000_000L, 1);
@@ -655,7 +734,7 @@ public final class ChannelTest {
         final List<String> logAgain = new ArrayList<>();
         final VsockListener patient = new VsockListener(logAgain::add, waits);
         final World.Sock one = new World.Sock();
-        one.peer = new VmSocketAddress(1, 2);
+        one.cid = OsConstants.VMADDR_CID_HOST;
         again.queued.add(one);
         final Server.Conn conn = patient.accept();
         check(conn != null, "the listener was set up after two failures");
@@ -669,14 +748,14 @@ public final class ChannelTest {
         again.acceptFailures.add(new ErrnoException("accept", OsConstants.EINTR));
         again.acceptFailures.add(new ErrnoException("accept", OsConstants.ECONNABORTED));
         final World.Sock two = new World.Sock();
-        two.peer = new VmSocketAddress(1, 2);
+        two.cid = OsConstants.VMADDR_CID_HOST;
         again.queued.add(two);
         final int socketsBefore = again.sockets;
         check(patient.accept() != null, "accept goes on after EINTR and ECONNABORTED");
         same(socketsBefore, again.sockets, "without listening again");
         again.acceptFailures.add(new ErrnoException("accept", 24));
         final World.Sock three = new World.Sock();
-        three.peer = new VmSocketAddress(1, 2);
+        three.cid = OsConstants.VMADDR_CID_HOST;
         again.queued.add(three);
         check(patient.accept() != null, "accept goes on after another failure");
         same(socketsBefore + 1, again.sockets, "with a new listener");

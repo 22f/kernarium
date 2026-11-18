@@ -23,8 +23,6 @@ public final class Os {
 
         FileDescriptor accept(FileDescriptor fd, SocketAddress peer) throws ErrnoException, SocketException;
 
-        SocketAddress getpeername(FileDescriptor fd) throws ErrnoException;
-
         int poll(StructPollfd[] fds, int timeoutMillis) throws ErrnoException;
 
         int read(FileDescriptor fd, byte[] buffer, int offset, int length) throws ErrnoException, IOException;
@@ -56,8 +54,13 @@ public final class Os {
         return backend.accept(fd, peer);
     }
 
+    /**
+     * What the guest's libjavacore does for an AF_VSOCK socket: it converts the address of getsockname and
+     * getpeername for AF_UNIX, AF_INET, AF_INET6, AF_NETLINK and AF_PACKET only, and fails for any other
+     * family. No test can script it to answer: a peer's CID comes from the address that accept fills.
+     */
     public static SocketAddress getpeername(FileDescriptor fd) throws ErrnoException {
-        return backend.getpeername(fd);
+        throw new IllegalArgumentException("unsupported ss_family: " + OsConstants.AF_VSOCK);
     }
 
     public static int poll(StructPollfd[] fds, int timeoutMillis) throws ErrnoException {
