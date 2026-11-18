@@ -27,7 +27,6 @@ import a64decode  # noqa: E402
 import asm as A  # noqa: E402
 import elf64  # noqa: E402
 import fixture  # noqa: E402
-import hot_list  # noqa: E402
 import rewrite  # noqa: E402
 
 ENCODERS = [
@@ -150,15 +149,11 @@ class FakeElf:
 
 
 def library_of(words: list[int], functions: list[tuple[int, int]],
-               memory_call: str = "inline", base: int = 0x1000,
-               hot_starts: "frozenset | None" = None,
-               **tuning) -> "rewrite.Library":
+               base: int = 0x1000, **tuning) -> "rewrite.Library":
     layout = rewrite.read_layout(rewrite.LAYOUT_HEADER)
     return rewrite.Library(0, "/test/lib.so",
                            FakeElf(words, functions, base),
-                           a64decode.Decoder(), layout,
-                           memory_call=memory_call, hot_starts=hot_starts,
-                           **tuning)
+                           a64decode.Decoder(), layout, **tuning)
 
 
 def unit_words(library: "rewrite.Library") -> list[int]:
@@ -216,221 +211,6 @@ class AssemblerFarBranchTests(unittest.TestCase):
         self.assertIn("128 MiB", str(raised.exception))
         A.b_word((1 << 25) - 1)
         A.b_word(-(1 << 25))
-
-
-class MemoryCallTests(unittest.TestCase):
-    """A plain load or store may reach its probe by a call to a routine of
-    its unit (an experiment; the inline probe stays the default)."""
-
-    LDR = 0xf9400020      # ldr x0, [x1]
-    STR = 0xf9000022      # str x2, [x1]
-    RET = RET
-
-    def build(self, mode: str, words=None, functions=None):
-        words = words or [self.LDR, self.STR, self.RET]
-        functions = functions or [(0, 4 * len(words))]
-        library = library_of(words, functions, mode)
-        unit = unit_words(library)
-        return library, unit
-
-    def calls(self, library, unit):
-        """The word index of every bl in the unit and its target address."""
-        found = []
-        for index, word in enumerate(unit):
-            if word >> 26 == 0b100101:
-                delta = word & 0x3ffffff
-                delta -= (delta & 0x2000000) << 1
-                found.append((index, 4 * (index + delta)))
-        return found
-
-    def test_the_default_is_the_inline_probe(self) -> None:
-        library, _ = self.build("inline")
-        census = library.stats.census
-        self.assertEqual(census["mem.call"], 0)
-        self.assertEqual(census["mem.routine"], 0)
-        self.assertEqual(census["mem.probe"], 2 * 8 * 4)
-
-    def test_an_unknown_mode_is_refused(self) -> None:
-        with self.assertRaises(ValueError):
-            library_of([self.RET], [(0, 4)], "everywhere")
-
-    def test_probe_call_keeps_the_stub_and_moves_the_compare(self) -> None:
-        library, unit = self.build("probe")
-        census = library.stats.census
-        self.assertEqual(sum(census.values()), 4 * len(unit))
-        self.assertEqual(census["other"], 0)
-        self.assertEqual(census["mem.probe"], 0)
-        # untag, save x30, call, restore x30, branch to the stub: five words
-        # a site, and the two-word stub is still there.
-        self.assertEqual(census["mem.call"], 2 * 5 * 4)
-        self.assertEqual(census["stub.mm"], 2 * 2 * 4)
-        # the probe word for word, without the branch, and a return
-        self.assertEqual(census["mem.routine"], 2 * 7 * 4)
-        self.assertEqual(census["stub.refill"], 2 * 2 * 4)
-        calls = self.calls(library, unit)
-        self.assertEqual(len(calls), 2)
-        asm = library.asm
-        self.assertEqual({target for _, target in calls},
-                         {asm.label_address("MEMP_LOAD_8"),
-                          asm.label_address("MEMP_STORE_8")})
-        for index, _ in calls:
-            self.assertEqual(unit[index - 1],
-                             A.str_x(30, 31, rewrite.SLOT_LR))
-            self.assertEqual(unit[index + 1],
-                             A.ldr_x(30, 31, rewrite.SLOT_LR))
-
-    def test_probe_miss_call_has_no_stub_and_names_its_slot(self) -> None:
-        library, unit = self.build("probe-miss")
-        census = library.stats.census
-        self.assertEqual(sum(census.values()), 4 * len(unit))
-        self.assertEqual(census["other"], 0)
-        self.assertEqual(census["mem.probe"], 0)
-        self.assertEqual(census["stub.mm"], 0)
-        # untag, save x30, marker, call, restore x30
-        self.assertEqual(census["mem.call"], 2 * 5 * 4)
-        # six probe words, the branch to the miss tail, a return, and the
-        # five-word tail
-        self.assertEqual(census["mem.routine"], 2 * 13 * 4)
-        self.assertEqual(census["stub.refill"], 2 * 2 * 4)
-        for index, target in self.calls(library, unit):
-            marker = unit[index - 1]
-            # the routine reads the marker at the return address less 8
-            self.assertEqual((4 * (index + 1)) - 8, 4 * (index - 1))
-            self.assertEqual(marker & 0x1f, 31)           # into XZR
-            self.assertEqual(marker >> 23, 0b110100101)   # MOVZ, 64-bit
-            self.assertEqual(unit[index - 2],
-                             A.str_x(30, 31, rewrite.SLOT_LR))
-        slots = sorted(((unit[i - 1] >> 5) & 0x3ffff) * 4
-                       for i, _ in self.calls(library, unit))
-        self.assertEqual(slots, [0, 4])
-
-    def test_a_slot_beyond_a_mebibyte_has_its_own_routine(self) -> None:
-        count = (3 << 20) // 4 + 8     # the load's slot is 3 MiB + 32
-        words = [NOP] * count + [self.LDR, self.RET]
-        library, unit = self.build(
-            "probe-miss", words, [(4 * count, 4 * count + 8)])
-        asm = library.asm
-        self.assertIn("MEMC_LOAD_8_3", asm._labels)
-        self.assertNotIn("MEMC_LOAD_8_0", asm._labels)
-        # the tail of a later chunk forms the higher bits of the slot (a
-        # movz and an orr more)
-        self.assertEqual(library.stats.census["mem.routine"], 15 * 4)
-        index = self.calls(library, unit)[0][0]
-        slot = 4 * count
-        self.assertEqual(((unit[index - 1] >> 5) & 0x3ffff) * 4,
-                         slot & ((1 << 20) - 1))
-
-    def test_a_pair_and_a_byte_load_use_their_own_routines(self) -> None:
-        ldrb = 0x39400020   # ldrb w0, [x1]
-        ldp = 0xa9400820    # ldp x0, x2, [x1]
-        library, unit = self.build("probe", [ldrb, ldp, self.RET])
-        asm = library.asm
-        self.assertIn("MEMP_LOAD_1", asm._labels)
-        self.assertIn("MEMP_LOAD_16", asm._labels)
-        # a one-byte access has no last-byte arithmetic: six words
-        # (untag at the site) and five in the routine
-        self.assertEqual(library.stats.census["mem.routine"],
-                         (5 + 7) * 4)
-
-
-class HotListTests(unittest.TestCase):
-    """With a call for cold code, the functions of a hot list keep the inline
-    probe; the profile is turned into a hot list by tools/aot/hot_list.py."""
-
-    LDR = 0xf9400020      # ldr x0, [x1]
-    RET = RET
-    BASE = 0x1000
-
-    def census(self, words, functions, mode, hot):
-        library = library_of(words, functions, mode, self.BASE, hot)
-        unit = unit_words(library)
-        self.assertEqual(sum(library.stats.census.values()), 4 * len(unit))
-        self.assertEqual(library.stats.census["other"], 0)
-        return library, library.stats.census
-
-    def test_a_hot_function_is_inline_and_a_cold_one_calls(self) -> None:
-        one = [self.LDR, self.RET]
-        _, inline = self.census(one, [(0, 8)], "inline", None)
-        _, called = self.census(one, [(0, 8)], "probe-miss", None)
-        library, mixed = self.census(one + one, [(0, 8), (8, 16)],
-                                     "probe-miss",
-                                     frozenset({self.BASE}))
-        self.assertEqual(library.hot_functions, 1)
-        self.assertEqual(mixed["mem.probe"], inline["mem.probe"])
-        self.assertEqual(mixed["stub.mm"], inline["stub.mm"])
-        self.assertEqual(mixed["mem.call"], called["mem.call"])
-        self.assertEqual(mixed["mem.routine"], called["mem.routine"])
-        self.assertGreater(mixed["mem.call"], 0)
-        self.assertGreater(mixed["mem.probe"], 0)
-
-    def test_a_probe_call_keeps_its_stub_for_cold_code_only(self) -> None:
-        one = [self.LDR, self.RET]
-        _, called = self.census(one, [(0, 8)], "probe", None)
-        _, inline = self.census(one, [(0, 8)], "inline", None)
-        _, mixed = self.census(one + one, [(0, 8), (8, 16)], "probe",
-                               frozenset({self.BASE + 8}))
-        self.assertEqual(mixed["stub.mm"],
-                         inline["stub.mm"] + called["stub.mm"])
-        self.assertEqual(mixed["mem.probe"], inline["mem.probe"])
-
-    def test_no_hot_list_and_an_empty_one_differ(self) -> None:
-        words = [self.LDR, self.RET]
-        a, with_none = self.census(words, [(0, 8)], "probe-miss", None)
-        b, with_empty = self.census(words, [(0, 8)], "probe-miss",
-                                    frozenset())
-        self.assertEqual(with_none, with_empty)
-        self.assertEqual(b.hot_functions, 0)
-        self.assertEqual(with_empty["mem.probe"], 0)
-
-    def test_an_inline_build_ignores_the_list(self) -> None:
-        words = [self.LDR, self.RET]
-        _, plain = self.census(words, [(0, 8)], "inline", None)
-        _, listed = self.census(words, [(0, 8)], "inline", frozenset())
-        self.assertEqual(plain, listed)
-
-    def test_the_file_is_read_with_its_digest(self) -> None:
-        import tempfile
-        text = (f"# {rewrite.HOT_LIST_FORMAT}\n# profile-sha256 00\n"
-                "aa\t0x10\t0x20\t5.00\t/x\naa\t0x40\t0x50\t1.00\t/x\n"
-                "bb\t0x10\t0x20\t2.00\t/y\n")
-        with tempfile.TemporaryDirectory() as directory:
-            path = pathlib.Path(directory) / "hot.txt"
-            path.write_text(text)
-            hot, digest = rewrite.read_hot_list(path)
-            self.assertEqual(hot, {"aa": frozenset({0x10, 0x40}),
-                                   "bb": frozenset({0x10})})
-            self.assertEqual(digest, hashlib.sha256(text.encode()).hexdigest())
-            path.write_text("aa\t0x10\t0x20\n")
-            with self.assertRaises(ValueError):
-                rewrite.read_hot_list(path)
-
-    def test_the_smallest_set_holding_the_coverage_is_chosen(self) -> None:
-        rows = [(5.0, "a", 0x20, 0x30, "/x"), (90.0, "b", 0x10, 0x20, "/y"),
-                (5.0, "a", 0x10, 0x20, "/x")]
-        chosen, held, total = hot_list.choose(rows, 0.9)
-        self.assertEqual(chosen, [rows[1]])
-        self.assertEqual((held, total), (90.0, 100.0))
-        # equal weights fall by digest, then address, however they arrive
-        chosen, held, _ = hot_list.choose(rows, 0.95)
-        self.assertEqual(chosen, [rows[2], rows[1]])
-        chosen, _, _ = hot_list.choose(list(reversed(rows)), 0.95)
-        self.assertEqual(chosen, [rows[2], rows[1]])
-        chosen, held, _ = hot_list.choose(rows, 1.0)
-        self.assertEqual(len(chosen), 3)
-
-    def test_samples_are_shared_among_the_places_a_block_is_found(self) -> None:
-        words = [0x11, 0x22, 0x33, 0x44, 0x11, 0x22, 0x55, 0x66]
-        text = struct.pack("<8I", *words)
-        library = {"text": text, "vaddr": 0x1000,
-                   "ranges": [(0x1000, 0x1010), (0x1010, 0x1020)],
-                   "starts": [0x1000, 0x1010],
-                   "weight": collections.Counter()}
-        blocks = collections.Counter({(0x33, 0x44): 6, (0x11, 0x22): 10,
-                                      (0x55, 0x66): 3, (0x77, 0x88): 9})
-        hot_list.attribute(blocks, [library])
-        # (0x11, 0x22) is at 0x1000 and 0x1010: five samples each
-        self.assertEqual(dict(library["weight"]),
-                         {0x1000: 11.0, 0x1010: 8.0})
 
 
 class ExitAddressWidthTests(unittest.TestCase):
@@ -1155,7 +935,7 @@ class EntryTable16Tests(unittest.TestCase):
     def unit(self, entry16: bool) -> dict:
         return rewrite.build_unit(
             (0, "/aot-test/libaotfixture.so", str(self.path), False,
-             "inline", None, {"entry16": True} if entry16 else {}))
+             {"entry16": True} if entry16 else {}))
 
     @staticmethod
     def entries32(unit: dict) -> dict[int, int]:
@@ -1280,8 +1060,7 @@ class CountingLayoutTests(unittest.TestCase):
 
     def unit(self, count: bool) -> dict:
         return rewrite.build_unit(
-            (0, "/aot-test/libaotfixture.so", str(self.path), count,
-             "inline", None))
+            (0, "/aot-test/libaotfixture.so", str(self.path), count))
 
     @staticmethod
     def words(code: bytes) -> list[int]:
@@ -1352,7 +1131,7 @@ class SameFileTwiceTests(unittest.TestCase):
 
     def unit(self, index: int, name: str, which: str) -> dict:
         return rewrite.build_unit(
-            (index, name, str(self.paths[which]), False, "inline", None))
+            (index, name, str(self.paths[which]), False))
 
     def test_the_same_file_under_two_paths_is_refused(self) -> None:
         units = [self.unit(0, "/apex/a/lib64/libx.so", "a"),

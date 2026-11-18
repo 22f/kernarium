@@ -178,25 +178,8 @@ if(UML_AOT_DIAGNOSTICS)
         ${_uml_aot_oat_fixture})
 endif()
 
-if(NOT UML_AOT_MEMORY_CALL MATCHES "^(inline|probe|probe-miss)$")
-    message(FATAL_ERROR
-        "UML_AOT_MEMORY_CALL must be inline, probe or probe-miss")
-endif()
-if(NOT UML_AOT_MEMORY_CALL STREQUAL "inline")
-    list(APPEND _uml_aot_generated_args
-        --memory-call ${UML_AOT_MEMORY_CALL})
-endif()
 if(UML_AOT_ENTRY_TABLE16)
     list(APPEND _uml_aot_generated_args --entry-table16)
-endif()
-set(_uml_aot_hot_inputs)
-if(UML_AOT_HOT_LIST)
-    if(UML_AOT_MEMORY_CALL STREQUAL "inline")
-        message(FATAL_ERROR
-            "UML_AOT_HOT_LIST needs UML_AOT_MEMORY_CALL probe or probe-miss")
-    endif()
-    list(APPEND _uml_aot_generated_args --hot-list ${UML_AOT_HOT_LIST})
-    set(_uml_aot_hot_inputs ${UML_AOT_HOT_LIST})
 endif()
 
 # Rewrite the libraries into one position-independent blob.
@@ -213,7 +196,7 @@ add_custom_command(
         --release-id "${_uml_aot_release_id}"
         --out ${_uml_aot_dir}
     DEPENDS ${_uml_aot_trees} ${_uml_aot_tool_sources}
-        ${_uml_aot_generated_files} ${_uml_aot_hot_inputs}
+        ${_uml_aot_generated_files}
         ${PROJECT_SOURCE_DIR}/tests/unit/arm64/a64_instruction_decode_partitions.tsv
         ${PROJECT_SOURCE_DIR}/darwin/cpu/arm64/layout/assembly_offsets.h
     COMMENT "Rewriting the AOT libraries"

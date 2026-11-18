@@ -60,14 +60,6 @@ A change a runtime built for the old layout would misread changes the magic; an
 addition it can ignore raises the version (`BLOB_VERSION`), and a runtime
 accepts any version at or above the one it was built for.
 
-`UML_AOT_MEMORY_CALL` (`--memory-call`) selects how a plain load or store
-reaches its TLB probe: `inline` (the product), `probe` (a call to a routine of
-the same unit that returns the compare; the miss exit stays at the site) or
-`probe-miss` (the routine also takes the miss exit; the site names its
-entry-table slot in a marker word). The call saves the guest's x30 in the
-frame's last slot. The two calls are measurement variants of the same
-contract; the differential and the guest runs hold each of them.
-
 `UML_AOT_ENTRY_TABLE16` (`--entry-table16`) holds each library's entry table in
 16-bit words, with one signed 32-bit anchor per text page after them, in place
 of 32 bits per source word: an indirect branch and a refill then spend four
@@ -78,19 +70,6 @@ entries lie further apart than 256 KiB of code. The blob's magic changes
 `UML_AOT_INSTANCE_CAPACITY` is the number of library instances each executor
 thread's binder holds (64 in the product; above 64 it finds an instance by hash
 instead of a scan). It is a runtime option: the blob does not change.
-
-`UML_AOT_HOT_LIST` (`--hot-list`, with a call) keeps the inline probe in the
-functions a profile calls hot and gives every other function the call.
-`hot_list.py` makes the list from the guest sampler's profile files
-(`darwin/cpu/arm64/gadgets/guest_sampler.hpp`): it matches each sampled block
-by its instruction words against the executable segment of every covered
-library, shares a block found in several places among them, and takes the
-functions in order of samples (ties by library digest, then address) until
-they hold `--coverage` of the samples. The list names each function by library
-SHA-256 and range, and its header records the digest of the profile it came
-from; the blob manifest records the list's digest (`hot_list_sha256`) and each
-library's `hot_functions`. A library the list does not name is all cold. The
-list is a build input, so a given profile and image make one blob.
 
 Entry points: `ctest -R '^arm64-aot-tools$'` for the encoders, decoder and
 assembler, and `ctest -R '^arm64-aot-differential$'` (a configuration with

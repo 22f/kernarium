@@ -84,12 +84,6 @@ if(NOT DEFINED UML_AOT_BOOT_CODE)
 endif()
 option(UML_AOT_DIAGNOSTICS
     "Compose the AOT runtime variant with its counters, report and test switches (never for a product)" OFF)
-set(UML_AOT_MEMORY_CALL "inline" CACHE STRING
-    "How rewritten loads and stores reach their TLB probe: inline (the product), probe (a call returns the compare) or probe-miss (a call also takes the miss exit); the other two are experiments")
-set_property(CACHE UML_AOT_MEMORY_CALL PROPERTY STRINGS
-    inline probe probe-miss)
-set(UML_AOT_HOT_LIST "" CACHE FILEPATH
-    "With a call UML_AOT_MEMORY_CALL, the hot list (tools/aot/hot_list.py) naming the functions that keep the inline probe")
 option(UML_AOT_ENTRY_TABLE16
     "Hold each library's entry table in 16-bit words and one anchor per text page instead of 32 bits per word (a measurement variant)" OFF)
 set(UML_AOT_INSTANCE_CAPACITY 64 CACHE STRING
