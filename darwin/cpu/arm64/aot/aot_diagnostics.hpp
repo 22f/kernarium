@@ -85,6 +85,8 @@ struct Stats final {
 	 * page slots, cross table). */
 	std::uint64_t instance_page_bytes_peak{};
 	std::uint64_t binder_bytes{};
+	/* The page-state bytes the live instances of all binders hold now. */
+	std::uint64_t instance_page_bytes{};
 	/* The stack the runtime measured (see the report's stack_ fields): the
 	 * least left at a sample site (all ones: none sampled), the size of the
 	 * stack that was on, its kind (0 task, 1 host, 2 signal), the task stack

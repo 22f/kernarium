@@ -148,6 +148,9 @@ struct CrossTable final {
 class Binder final {
 public:
 	Binder() noexcept;
+	~Binder();
+	Binder(const Binder &) = delete;
+	Binder &operator=(const Binder &) = delete;
 
 	/* The AOT entry for `pc`, or an empty Hit. `context` is the executor's
 	 * execution context (it names the code-change history); `code_changes`

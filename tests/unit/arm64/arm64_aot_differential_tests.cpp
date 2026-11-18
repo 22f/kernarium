@@ -3441,6 +3441,27 @@ void more_instances_than_the_binder_holds(const LibraryImage &image)
 	require(st.instance_rebinds >= copies);
 }
 
+/* The page states of a binder's instances are counted while it lives and
+ * leave the count with it: executors made and dropped one after another do
+ * not add up. */
+[[gnu::noinline]]
+void a_dropped_binder_gives_back_its_page_states(const LibraryImage &image)
+{
+	const auto bias = Fixture::bias;
+	const auto before = aot::stats().instance_page_bytes;
+	{
+		Fixture got{4570, image};
+		auto c = loop_case(91, bias, 0x1000, arena_base(bias));
+		c.cpu.registers[3] = 50;
+		aot::set_enabled(true);
+		const auto have = drive(got.env, got.arena, c, aot_max_blocks);
+		aot::set_enabled(false);
+		require(have.finished);
+		require(aot::stats().instance_page_bytes > before);
+	}
+	require(aot::stats().instance_page_bytes == before);
+}
+
 /* A shootdown (a mapping change by another thread) arrives while rewritten
  * code runs a long loop: the vCPU leaves at its next return to the
  * dispatcher, the writer is never kept waiting, and the loop ends in the
@@ -5684,6 +5705,7 @@ int main(int argc, char **argv)
 			cas_outcomes_and_permissions(image);
 			misaligned_cas_follows_the_profile(image);
 			more_instances_than_the_binder_holds(image);
+			a_dropped_binder_gives_back_its_page_states(image);
 			code_change_history_overflows(image, functions);
 			a_changed_bit_anywhere_in_a_page_is_refused(image, functions);
 			a_shootdown_reaches_a_native_loop(image);

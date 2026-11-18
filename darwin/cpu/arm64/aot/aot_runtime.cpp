@@ -983,6 +983,7 @@ Stats stats() noexcept
 	result.instance_rebinds = get(counters::instance_rebinds);
 	result.instance_page_bytes_peak = get(counters::instance_page_bytes_peak);
 	result.binder_bytes = get(counters::binder_bytes);
+	result.instance_page_bytes = get(counters::instance_page_bytes);
 	result.stack_min_free = get(counters::stack_min_free);
 	result.stack_size_at_min = get(counters::stack_size_at_min);
 	result.stack_kind_at_min = get(counters::stack_kind_at_min);
@@ -1045,6 +1046,17 @@ Binder::Binder() noexcept
 	heads_.fill(-1);
 #if UML_AOT_DIAGNOSTICS
 	counters::binder_bytes.store(sizeof(Binder), std::memory_order_relaxed);
+#endif
+}
+
+Binder::~Binder()
+{
+#if UML_AOT_DIAGNOSTICS
+	/* The page states the live instances held leave the count with them. */
+	std::size_t held = 0;
+	for (const auto &instance : instances_)
+		held += instance.pages.size();
+	counters::instance_page_bytes.fetch_sub(held, std::memory_order_relaxed);
 #endif
 }
 
