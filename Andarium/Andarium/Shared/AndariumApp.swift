@@ -105,7 +105,7 @@ struct RootView: View {
         case .running(.normal):
             String(localized: "Android is running. The side keys on the screen edge have Back, Home and Settings.")
         case .running(.recovery):
-            String(localized: "Recovery is running. The side keys\u{2019} volume keys move, and Power chooses.")
+            String(localized: "Recovery is running. The side keys have Up and Down to move, and Power to choose.")
         case .home, .booting, .failed:
             nil
         }
