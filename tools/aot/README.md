@@ -68,19 +68,12 @@ entry-table slot in a marker word). The call saves the guest's x30 in the
 frame's last slot. The two calls are measurement variants of the same
 contract; the differential and the guest runs hold each of them.
 
-`UML_AOT_SHARED_EXITS` (`--shared-exits`) forms the high 16-bit chunks of an
-exit target once per exit routine and chunk of a library, where the product
-puts a `movk` in each exit stub; a stub then costs two words and the exit one
-more branch. `UML_AOT_RUN_LIMIT` (`--run-limit`, 32 in the product) is the
-longest run of instructions between charge points: a larger value inserts fewer
-charge points and makes an indirect branch pay more, and the differential test's
-bound on an entry follows it. Both are measurement variants with the same
-contract. `UML_AOT_ENTRY_TABLE16` (`--entry-table16`) holds each library's
-entry table in 16-bit words, with one signed 32-bit anchor per text page after
-them, in place of 32 bits per source word: an indirect branch and a refill
-then spend four more words to reach the native code, and the rewriter refuses a
-page whose entries lie further apart than 256 KiB of code. The blob's magic
-changes (`UMLAOT16`), so a runtime built without the option refuses it.
+`UML_AOT_ENTRY_TABLE16` (`--entry-table16`) holds each library's entry table in
+16-bit words, with one signed 32-bit anchor per text page after them, in place
+of 32 bits per source word: an indirect branch and a refill then spend four
+more words to reach the native code, and the rewriter refuses a page whose
+entries lie further apart than 256 KiB of code. The blob's magic changes
+(`UMLAOT16`), so a runtime built without the option refuses it.
 
 `UML_AOT_INSTANCE_CAPACITY` is the number of library instances each executor
 thread's binder holds (64 in the product; above 64 it finds an instance by hash

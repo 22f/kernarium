@@ -282,7 +282,7 @@ CENSUS = ("other", "insn", "spill", "branch", "pcrel", "step", "hint",
           "atomic", "mops.site", "mem.ea", "mem.probe", "mem.access",
           "mem.wb", "charge", "gate", "stub.mm", "stub.st", "stub.xu",
           "stub.ma", "stub.xb", "exits", "mops.thunk", "table", "src",
-          "stub.refill", "mem.call", "mem.routine", "count", "stub.xc")
+          "stub.refill", "mem.call", "mem.routine", "count")
 CENSUS_CODE = {name: code for code, name in enumerate(CENSUS)}
 CENSUS_OUTER = {"branch_imm": "branch", "condbranch": "branch",
                 "compbranch": "branch", "testbranch": "branch",
@@ -316,22 +316,12 @@ class Library:
                  count_retired: bool = False,
                  memory_call: str = "inline",
                  hot_starts: frozenset | None = None,
-                 shared_exits: bool = False,
-                 run_limit: int = RUN_LIMIT,
                  entry16: bool = False) -> None:
         if memory_call not in MEMORY_CALLS:
             raise ValueError(f"unknown memory_call {memory_call!r}")
-        if not 1 <= run_limit <= 4094:
-            raise ValueError(f"run_limit {run_limit} is not 1 to 4094")
         self.count_retired = count_retired
-        # Measurement variants (tools/aot/README.md): an exit routine
-        # entered through a stub of the 64 KiB chunk of its guest offset,
-        # and the longest run of instructions one charge pays for.
-        self.shared_exits = shared_exits
-        self.run_limit = run_limit
         # The entry table in 16-bit words (see entry16_layout).
         self.entry16 = entry16
-        self.exit_chunks: set[tuple[str, int]] = set()
         # The shape the library's cold code uses; a function in hot_starts
         # keeps the inline probe, and with no hot list every function uses
         # the library's shape. memory_call is the shape of the function
@@ -456,7 +446,7 @@ class Library:
                 if successor in self.covered and successor not in points:
                     longest = max(longest, run[successor])
             run[offset] = 1 + longest
-            if offset not in points and run[offset] > self.run_limit:
+            if offset not in points and run[offset] > RUN_LIMIT:
                 points.add(offset)
         return {offset: run[offset] for offset in points
                 if offset in self.covered}
@@ -563,12 +553,6 @@ class Library:
         before = len(asm._w)
         emit_refill_stubs(asm, self)
         self.tag("stub.refill", before)
-        before = len(asm._w)
-        for routine, chunk in sorted(self.exit_chunks):
-            asm.label(f"{routine}_C{chunk:x}")
-            asm.word(A.movk(T0, chunk, 1))
-            asm.b(routine)
-        self.tag("stub.xc", before)
         before = len(asm._w)
         self.wide16 = self.entry16_wide_pages() if self.entry16 else ()
         have = set(self.entry_labels)
@@ -900,13 +884,6 @@ class Library:
                 "4 GiB)")
         asm.word(A.movz(T0, offset & 0xffff))
         if offset >> 16:
-            if self.shared_exits:
-                # The rest of the offset is supplied by one routine per
-                # 64 KiB of the library: movk then the exit, the registers
-                # and flags of the entry to the exit unchanged.
-                self.exit_chunks.add((routine, offset >> 16))
-                asm.b(f"{routine}_C{offset >> 16:x}")
-                return
             asm.word(A.movk(T0, (offset >> 16) & 0xffff, 1))
         asm.b(routine)
 
@@ -1072,7 +1049,7 @@ class Library:
         asm = self.asm
         rn = (word >> 5) & 31
         self.fn_xu.add(offset)
-        asm.word(A.add_imm(BUD, BUD, self.run_limit + 1, sub=True))
+        asm.word(A.add_imm(BUD, BUD, RUN_LIMIT + 1, sub=True))
         asm.tbz(BUD, 63, self.lab("XU", offset), nz=True)
         guest = self._resolve(rn, False)
         if guest in VIRTUAL:
@@ -2596,15 +2573,6 @@ def main(argv: list[str] | None = None) -> int:
                         help="the functions that keep the inline probe when "
                         "--memory-call is a call (tools/aot/hot_list.py); a "
                         "library the list does not name is all cold")
-    parser.add_argument("--shared-exits", action="store_true",
-                        help="exit stubs of a guest offset above 64 KiB "
-                        "enter the exit through one routine per 64 KiB "
-                        "instead of forming the offset in full (a "
-                        "measurement variant, tools/aot/README.md)")
-    parser.add_argument("--run-limit", type=int, default=RUN_LIMIT,
-                        help="the longest run of instructions one budget "
-                        f"charge pays for (default {RUN_LIMIT}; another "
-                        "value is a measurement variant)")
     parser.add_argument("--entry-table16", action="store_true",
                         help="hold the entry table in 16-bit words and one "
                         "anchor per text page (a measurement variant, "
@@ -2627,10 +2595,6 @@ def main(argv: list[str] | None = None) -> int:
     arguments.library, skipped = expand_libraries(
         arguments.root, mounts, arguments.library)
     tuning = {}
-    if arguments.shared_exits:
-        tuning["shared_exits"] = True
-    if arguments.run_limit != RUN_LIMIT:
-        tuning["run_limit"] = arguments.run_limit
     if arguments.entry_table16:
         tuning["entry16"] = True
     jobs = [(index, path, str(resolve_library(arguments.root, mounts, path)),

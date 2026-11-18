@@ -1135,84 +1135,6 @@ class RunBoundTests(unittest.TestCase):
         self.assertGreaterEqual(paid, len(words))
 
 
-class SizeVariantTests(unittest.TestCase):
-    """The measurement variants that change the size of a unit: the default
-    stays the product, and each variant keeps the census whole."""
-
-    @staticmethod
-    def far_exits() -> list[int]:
-        # Two direct branches out of the library to targets in the same
-        # 64 KiB chunk, and a third to another.
-        def b(from_word: int, to_offset: int) -> int:
-            return 0x14000000 | (((to_offset - 4 * from_word) >> 2) &
-                                 0x3ffffff)
-        return [b(0, 0x20100), b(1, 0x20200), b(2, 0x30100), RET]
-
-    def test_the_default_is_the_run_limit_and_one_chunk_per_stub(self) -> None:
-        words = self.far_exits()
-        default = library_of(words, [(0, 4), (4, 8), (8, 12), (12, 16)],
-                             base=0)
-        explicit = library_of(words, [(0, 4), (4, 8), (8, 12), (12, 16)],
-                              base=0, shared_exits=False,
-                              run_limit=rewrite.RUN_LIMIT)
-        self.assertEqual(unit_words(default), unit_words(explicit))
-        movk = lambda chunk: A.movk(rewrite.T0, chunk, 1)
-        unit = unit_words(default)
-        self.assertEqual(unit.count(movk(2)), 2)
-        self.assertEqual(unit.count(movk(3)), 1)
-
-    def test_shared_exits_form_each_chunk_once(self) -> None:
-        words = self.far_exits()
-        functions = [(0, 4), (4, 8), (8, 12), (12, 16)]
-        default = library_of(words, functions, base=0)
-        shared = library_of(words, functions, base=0, shared_exits=True)
-        before = unit_words(default)
-        after = unit_words(shared)
-        movk = lambda chunk: A.movk(rewrite.T0, chunk, 1)
-        # One movk per chunk and routine, not one per target.
-        self.assertEqual(after.count(movk(2)), 1)
-        self.assertEqual(after.count(movk(3)), 1)
-        self.assertEqual(sum(shared.stats.census.values()), 4 * len(after))
-        self.assertEqual(shared.stats.census["other"], 0)
-        self.assertEqual(default.stats.census["stub.xc"], 0)
-        # Three targets lose their movk, and the two chunks cost two words
-        # apiece: the variant pays only where many targets share a chunk.
-        self.assertEqual(len(after), len(before) + 1)
-        self.assertEqual(shared.stats.census["stub.xc"], 2 * 2 * 4)
-        self.assertEqual(default.stats.census["stub.xu"] +
-                         default.stats.census["stub.xb"] -
-                         shared.stats.census["stub.xu"] -
-                         shared.stats.census["stub.xb"], 3 * 4)
-
-    def test_a_shorter_run_limit_charges_more_often(self) -> None:
-        words = [NOP] * 200 + [RET]
-        functions = [(0, 4 * len(words))]
-        for limit in (8, 100):
-            library = library_of(words, functions, run_limit=limit)
-            unit = unit_words(library)
-            self.assertEqual(sum(library.stats.census.values()),
-                             4 * len(unit))
-            points = sorted(library.charge)
-            for cost in library.charge.values():
-                self.assertLessEqual(cost, limit + 1)
-            edges = points + [0x1000 + 4 * len(words)]
-            for before, after in zip(edges, edges[1:]):
-                self.assertLessEqual((after - before) // 4, limit + 1)
-        short = library_of(words, functions, run_limit=8)
-        long = library_of(words, functions, run_limit=100)
-        self.assertGreater(len(short.charge), len(long.charge))
-        # An indirect branch pays for the longest run after any landing.
-        indirect = library_of([NOP, 0xd61f0200, RET], [(0, 12)],
-                              run_limit=100)
-        self.assertIn(A.add_imm(rewrite.BUD, rewrite.BUD, 101, sub=True),
-                      unit_words(indirect))
-
-    def test_a_run_limit_outside_the_encoding_is_refused(self) -> None:
-        for limit in (0, 4095):
-            with self.assertRaises(ValueError):
-                library_of([RET], [(0, 4)], run_limit=limit)
-
-
 class EntryTable16Tests(unittest.TestCase):
     """The 16-bit entry table (UML_AOT_ENTRY_TABLE16): the same words have
     entries, they are reachable from their page's anchor, and the blob says
@@ -1400,9 +1322,8 @@ class CountingLayoutTests(unittest.TestCase):
                   "unit" / "arm64" /
                   "arm64_aot_differential_tests.cpp").read_text()
         match = re.search(
-            r"#define AOT_TEST_RUN_LIMIT (\d+)\b.*\n#endif\n"
-            r"constexpr std::uint64_t entry_bound = "
-            r"4096 \+ AOT_TEST_RUN_LIMIT \+ (\d+);", source)
+            r"constexpr std::uint64_t entry_bound = 4096 \+ (\d+) \+ (\d+);",
+            source)
         self.assertIsNotNone(match)
         self.assertEqual(int(match.group(1)), rewrite.RUN_LIMIT)
         # The charge point's own word and the entry's last instruction.

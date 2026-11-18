@@ -2559,17 +2559,7 @@ void loop_through_another_range(const LibraryImage &image,
  * framework made with UML_AOT_COUNT_RETIRED counts each one it starts; the
  * product's layout reports the budget the entry spent, which the same bound
  * covers. */
-#ifndef AOT_TEST_RUN_LIMIT
-#define AOT_TEST_RUN_LIMIT 32 /* RUN_LIMIT, rewrite.py */
-#endif
-constexpr std::uint64_t entry_bound = 4096 + AOT_TEST_RUN_LIMIT + 2;
-/* An entry's retired count is the budget it spent, which a charge point pays
- * a run at a time. The engine leaves an address to itself when its entries
- * retire fewer than aot_short_entry (96), and a run limit above the product's
- * makes a short function look as long as the run that holds it, so the rows
- * that count short refusals judge the product's 32 and a larger limit keeps
- * their equality checks only. */
-constexpr bool short_entries_judged = AOT_TEST_RUN_LIMIT <= 32;
+constexpr std::uint64_t entry_bound = 4096 + 32 + 2; /* RUN_LIMIT, rewrite.py */
 
 /* A state rewritten code may be entered with: SP aligned and none of the
  * FPCR controls the entry refuses. */
@@ -4217,8 +4207,8 @@ void short_entries_are_left_to_the_engine(const LibraryImage &image)
 		"engine %llu\n", static_cast<unsigned long long>(st.enters),
 		static_cast<unsigned long long>(st.refusals[4]));
 	require(st.enters >= 2);
-	require(!short_entries_judged || st.enters < 100);
-	require(!short_entries_judged || st.refusals[4] > 100);
+	require(st.enters < 100);
+	require(st.refusals[4] > 100);
 }
 
 /* The history the engine keeps for admission (the address a stepped
@@ -4297,14 +4287,13 @@ void admission_history_survives_changes_as_a_hint_only(
 	run(got.env, got.arena, want_original, 200, "warming");
 	const auto warm = aot::stats();
 	require(warm.enters >= 2);
-	require(!short_entries_judged || warm.refusals[4] > 100);
+	require(warm.refusals[4] > 100);
 	/* The text under the address changes (and is published). A refused entry
 	 * is the engine's; the one in 64 that is tried finds the page changed. */
 	publish(nop);
 	run(got.env, got.arena, want_changed, 200, "text changed");
 	const auto after_change = aot::stats();
-	require(!short_entries_judged ||
-		after_change.refusals[4] > warm.refusals[4]);
+	require(after_change.refusals[4] > warm.refusals[4]);
 	/* The bytes are back: rewritten code is entered again. */
 	publish(original);
 	run(got.env, got.arena, want_original, 200, "text restored");
@@ -4312,8 +4301,7 @@ void admission_history_survives_changes_as_a_hint_only(
 	/* Another address space whose text differs at the address. */
 	const auto before_other = aot::stats();
 	run(other.env, other.arena, want_changed, 200, "other address space");
-	require(!short_entries_judged ||
-		aot::stats().refusals[4] > before_other.refusals[4]);
+	require(aot::stats().refusals[4] > before_other.refusals[4]);
 	/* Another address space in which the page is not mapped. */
 	run(hole_env, hole_arena, want_hole, 200, "unmapped text");
 	/* And back in the first one. */
