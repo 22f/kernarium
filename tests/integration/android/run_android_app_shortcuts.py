@@ -54,6 +54,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import collections
 import hashlib
 import importlib.util
 import pathlib
@@ -489,7 +490,7 @@ def icons_of(guest, tokens: list[str]) -> list[IconRecord]:
 
 
 def install(guest, apk: pathlib.Path, package: str) -> None:
-    result = guest.adb_run("install", "-r", str(apk), timeout=INSTALL_SECONDS)
+    result = guest.adb_run("install", "-r", "-t", str(apk), timeout=INSTALL_SECONDS)   # test-only: the shell may enable its alias
     text = (result.stdout + result.stderr).decode("utf-8", errors="replace")
     if result.returncode != 0 or "Success" not in text:
         raise fail(f"installing {package}: {text.strip()[-400:]}")
@@ -825,13 +826,34 @@ def check_usage(guest) -> str:
     return "unknown verbs, flags and argument counts are status 64 with nothing on stdout"
 
 
-def denials(guest) -> list[str]:
-    """The audit lines of denials to the shell domain in the whole log. A log that cannot be read is a failure."""
+AVC_DENIED = re.compile(r'avc:\s+denied\s+\{([^}]*)\}(.*?)\bscontext=(\S+)\s+tcontext=(\S+)\s+tclass=(\S+)')
+AVC_NAME = re.compile(r'\bname=("[^"]*"|\S+)')
+
+
+def audit_key(line: str) -> tuple[str, ...] | None:
+    """The identity of a denial: the record type, the permissions, the source and target contexts, the class and the
+    name. The time, the pid, the audit serial, the comm and the log tag are left out, so one denial is one key however
+    often and however the log shows it. None when the line is no denial to the shell domain."""
+    if "avc" not in line or "denied" not in line:
+        return None
+    found = AVC_DENIED.search(line)
+    if found is None:
+        # An audit line this runner cannot take apart still counts, by its text from the record on.
+        return ("unparsed", line[line.index("avc"):].strip()) if f"scontext={SHELL_CONTEXT}" in line else None
+    permissions, between, source, target, kind = found.groups()
+    if not source.startswith(SHELL_CONTEXT):
+        return None
+    name = AVC_NAME.search(between)
+    return ("avc", " ".join(sorted(permissions.split())), source, target, kind, name.group(1) if name else "")
+
+
+def denials(guest) -> collections.Counter:
+    """The denials to the shell domain in the whole log, counted by identity. The log holds each one as two lines and
+    a repeat as two more, so a count that grows is a denial that happened again. A log that cannot be read is a failure."""
     read = guest.run("logcat -d -b all", timeout=60)
     if read.status != 0:
         raise fail(f"the log could not be read: logcat -d -b all exited {read.status}")
-    return [line.strip() for line in read.text.splitlines()
-            if "avc" in line and "denied" in line and f"scontext={SHELL_CONTEXT}" in line]
+    return collections.Counter(key for key in map(audit_key, read.text.splitlines()) if key is not None)
 
 
 def tmp_listing(guest) -> str:
@@ -879,13 +901,15 @@ def check_set_changes(guest, apks: dict[str, pathlib.Path]) -> str:
             "earlier digest back; only the updated application's icon keys change")
 
 
-def check_clean(guest, before_files: str, before_denials: set[str]) -> str:
+def check_clean(guest, before_files: str, before_denials: collections.Counter) -> str:
     after_files = tmp_listing(guest)
     if after_files != before_files:
         raise fail(f"{SHELL_DATA} changed: before {before_files.split()}, after {after_files.split()}")
-    new = [line for line in denials(guest) if line not in before_denials]
+    after = denials(guest)
+    new = [key for key in after if after[key] > before_denials[key]]
     if new:
-        raise fail("the shell domain was denied something while the command ran:\n" + "\n".join(new[:8]))
+        raise fail("the shell domain was denied something while the command ran:\n"
+                   + "\n".join(" ".join(key) for key in sorted(new)[:8]))
     return f"{SHELL_DATA} unchanged; no new denial of {SHELL_CONTEXT}"
 
 
@@ -914,7 +938,7 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
             report.run(f"{variant}: install", lambda variant=variant: (
                 fresh_install(guest, apks[variant], probe.package_of(variant)) or f"{probe.package_of(variant)} installed"))
         before_files = tmp_listing(guest)
-        before_denials = set(denials(guest))   # before the command's first call: a denial that only that call meets counts
+        before_denials = denials(guest)   # before the command's first call: a denial that only that call meets counts
         report.run("digest and list agree on the header block", lambda: check_header(guest))
         report.run("list names the built-in and the probe's applications, escaped and bounded", lambda: check_rows(guest))
         report.run("icons are PNG records that check out", lambda: check_icons(guest))
@@ -936,7 +960,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--emulator", type=pathlib.Path,
                         help="the macos-android17 uml-darwin-android17 (the launcher's default)")
     parser.add_argument("--release", type=pathlib.Path, help="installed Android release built with the command")
-    parser.add_argument("--serial", help="a running guest (host:port); no guest is launched")
+    parser.add_argument("--serial", help="a running, provisioned guest (host:port; the home key must reach the launcher); "
+                        "no guest is launched")
     parser.add_argument("--adb", default="adb", help="adb client to use")
     parser.add_argument("--adb-port", type=int,
                         default=orient.slot_ports.slot_port(orient.slot_ports.ADB_OFFSET, orient.DEFAULT_ADB_PORT),

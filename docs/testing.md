@@ -1052,7 +1052,8 @@ labels that are safe and within the bounds; Settings is listed as built in under
 application (`appsprobe_apk.py`: two launcher activities, one with a hostile label and one with a
 label over the bound, a launcher activity that is not exported, an exported one with no launcher
 filter and a launcher alias that the manifest disables; a second package whose label is a string
-resource and whose icon is an adaptive icon of a colour and a bitmap layer) with the escaped and the
+resource and whose icon is an adaptive icon of a colour and a bitmap layer; both are test-only and
+installed with `-t`, as the shell may change a component's state of a test-only package alone) with the escaped and the
 cut labels and none of the others; `icons` answers records whose length and SHA-256 check out,
 decoded (8-bit RGB or RGBA, every chunk's checksum checked) to pictures that are not blank and whose alpha flag is true, the second
 package's with its colour in the corners and its disc in the middle, `noicon` for the first,
@@ -1064,7 +1065,8 @@ it is open) and refuses with status 2 and no output the not exported and no-filt
 built-in application's other activity, a package that is not installed, a disabled application and
 every hostile argument, none of which runs (a marker file stays absent); usage errors are status
 64; the shell user's data directory is unchanged and no new denial of the shell domain reaches
-the log; and the digest changes with an install, an update in place (whose icon keys alone
+the log (denials are compared by permission, contexts, class and name, as counts, so the time, the
+pid and the log's two lines for one denial do not matter); and the digest changes with an install, an update in place (whose icon keys alone
 change) and a disabled application, and returns to its earlier value when the application is
 removed. `android17-app-shortcuts-command` (tooling; skipped without a JDK) runs the command's
 grammar, the labels' escaping and bounds, the listing, digest and icon keys, every answer's

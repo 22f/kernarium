@@ -103,6 +103,7 @@ class Package:
             activity.setdefault("target", None)
         self.activities = activities
         self.enabled = True
+        self.test_only = False
 
 
 class ScriptedImage:
@@ -121,7 +122,8 @@ class ScriptedImage:
              "label": "Calculator", "icon": "legacy"}]))
         self.resumed: str | None = None
         self.files: set[str] = set()
-        self.denials: list[str] = []
+        self.denials: list[tuple[int, str, str, str]] = []   # serial, comm, target context, name
+        self.reads = 0
         self.locales = "en-US"
         self.commands: list[str] = []
         self.calls = 0
@@ -143,6 +145,9 @@ class ScriptedImage:
                 manifest = binary_xml.decode_manifest(archive.read("AndroidManifest.xml"))
             name = dict(manifest.attributes)["package"]
             version = dict(manifest.attributes)["versionCode"]
+            test_only = any(dict(child.attributes).get("testOnly") for child in manifest.children if child.tag == "application")
+            if test_only and "-t" not in arguments:
+                return subprocess.CompletedProcess(arguments, 1, b"", b"Failure [INSTALL_FAILED_TEST_ONLY]\n")
             old = self.packages.get(name)
             self.clock += 5_000
             activities = []
@@ -161,6 +166,7 @@ class ScriptedImage:
                         "alias": activity.tag == "activity-alias", "target": attributes.get("targetActivity"),
                         "label": label, "icon": "resource" if isinstance(application_icon, binary_xml.Reference) else None})
             self.add(Package(name, version, old.installed if old else self.clock, False, activities))
+            self.packages[name].test_only = test_only
             if old:
                 self.packages[name].version = version
                 self.packages[name].installed = self.clock  # lastUpdateTime moves
@@ -209,6 +215,8 @@ class ScriptedImage:
             enable = words[1] == "enable"
             if "/" in words[-1]:
                 package, _, name = words[-1].partition("/")
+                if not self.packages[package].test_only:   # the shell changes the state of a test-only package's component alone
+                    return "", 255, f"java.lang.SecurityException: Shell cannot change component state for {words[-1]} to 1\n"
                 for activity in self.packages[package].activities:
                     if activity["name"] == name:
                         activity["enabled"] = enable
@@ -226,10 +234,29 @@ class ScriptedImage:
         if words[:2] == ["ls", "-A"]:
             return "".join(f"{name.rsplit('/', 1)[1]}\n" for name in sorted(self.files)), 0, ""
         if words[:3] == ["logcat", "-d", "-b"]:
-            return "\n".join(self.denials) + "\n", 0, ""
+            return self.log(), 0, ""
         if words[0] == runner.COMMAND:
             return self.tool(command, words[1:])
         raise AssertionError(f"the scripted guest does not know {command!r}")
+
+    def denial(self, comm: str, target: str, name: str = "") -> None:
+        self.denials.append((len(self.denials), comm, target, name))
+
+    def log(self) -> str:
+        """`logcat -d -b all`: a denial is two lines, the kernel's with the comm and the one under the process's own tag
+        without it. A deviation shows the same denials with other times and pids at every read."""
+        self.reads += 1
+        shift = self.reads if self.deviation == "log-rerendered" else 0
+        lines = ["11-19 04:00:00.000   100   100 I vold    : an unrelated line"]
+        for serial, comm, target, name in self.denials:
+            stamp = f"11-19 04:46:{(serial + shift) % 60:02d}.{shift:03d} {2400 + shift:5d} {2400 + shift:5d}"
+            record = f"type=1400 audit(0.0:{160 + serial + shift}): avc:  denied  {{ read }} for "
+            named = f'name="{name}" ' if name else ""
+            tail = f'dev="tmpfs" ino=317 scontext=u:r:shell:s0 tcontext={target} tclass=file permissive=0'
+            lines.append(f'{stamp} I auditd  : {record}comm="{comm}" {named}{tail}')
+            lines.append(f"{stamp} W {comm}: {record}{named}{tail}")
+        lines.append("11-19 04:50:00.000   100   100 I vold    : another unrelated line")
+        return "\n".join(lines) + "\n"
 
     # -- the command
     def rows(self) -> list[tuple[str, str, str, int, str]]:
@@ -293,12 +320,11 @@ class ScriptedImage:
             self.files.add(f"{runner.SHELL_DATA}/kernarium_apps.cache")
         self.calls += 1
         if self.deviation == "first-call-denial" and self.calls == 1:
-            self.denials.append('11-19 11:00:00.000   500   500 W auditd : avc:  denied  { read } for comm="app_process64" '
-                                'scontext=u:r:shell:s0 tcontext=u:object_r:resourcecache_data_file:s0 tclass=file permissive=0')
+            self.denial("app_process64", "u:object_r:resourcecache_data_file:s0")
         if self.deviation == "denial" and words[:1] == ["list"]:
-            self.denials.append(f'11-19 11:00:{len(self.denials):02d}.000   500   500 W auditd : avc:  denied  {{ read }} '
-                                'for comm="app_process64" scontext=u:r:shell:s0 tcontext=u:object_r:apk_data_file:s0 '
-                                'tclass=file permissive=0')
+            self.denial("app_process64", "u:object_r:apk_data_file:s0", f"base-{len(self.denials)}.apk")
+        if self.deviation == "repeat-denial" and self.calls == 1:
+            self.denial("kernarium_apps-", "u:object_r:qemu_sf_lcd_density_prop:s0", "u:object_r:qemu_sf_lcd_density_prop:s0")
         known = {"digest": 1, "list": 1}
         if not words or (words[0] in known and len(words) != 1) or words[0] not in ("digest", "list", "icons", "launch") \
                 or (words[0] == "icons" and not 2 <= len(words) <= 9) or (words[0] == "launch" and len(words) != 2):
@@ -424,6 +450,7 @@ class ProbePackages(Fixture):
             self.assertEqual(probe.package_of(variant), attributes["package"])
             self.assertEqual(2 if variant.endswith("-v2") else 1, attributes["versionCode"])
             application = next(child for child in manifest.children if child.tag == "application")
+            self.assertIs(True, dict(application.attributes).get("testOnly"), "the shell enables an alias of a test-only package")
             activities = [child for child in application.children if child.tag == "activity"]
             aliases = [child for child in application.children if child.tag == "activity-alias"]
             self.assertEqual(len(probe.activity_names(variant)), len(activities))
@@ -642,6 +669,28 @@ class Parsers(unittest.TestCase):
         with self.assertRaises(Failure):
             runner.decode_png(good[:-6])
 
+    def test_a_denial_is_the_same_denial_however_the_log_shows_it(self) -> None:
+        auditd = ('11-19 04:46:11.653  2416  2416 I auditd  : type=1400 audit(0.0:160): avc:  denied  { read } for  '
+                  'comm="kernarium_apps-" name="u:object_r:qemu_sf_lcd_density_prop:s0" dev="tmpfs" ino=317 '
+                  'scontext=u:r:shell:s0 tcontext=u:object_r:qemu_sf_lcd_density_prop:s0 tclass=file permissive=0')
+        tagged = ('11-19 04:48:02.001  2999  2999 W main    : type=1400 audit(0.0:171): avc:  denied  { read } for '
+                  'name="u:object_r:qemu_sf_lcd_density_prop:s0" dev="tmpfs" ino=317 scontext=u:r:shell:s0 '
+                  'tcontext=u:object_r:qemu_sf_lcd_density_prop:s0 tclass=file permissive=0')
+        key = runner.audit_key(auditd)
+        self.assertEqual(("avc", "read", "u:r:shell:s0", "u:object_r:qemu_sf_lcd_density_prop:s0", "file",
+                          '"u:object_r:qemu_sf_lcd_density_prop:s0"'), key)
+        self.assertEqual(key, runner.audit_key(tagged))
+        for changed in (auditd.replace("{ read }", "{ write }"), auditd.replace("tclass=file", "tclass=dir"),
+                        auditd.replace("qemu_sf_lcd_density_prop:s0\" dev", "other:s0\" dev"),
+                        auditd.replace("tcontext=u:object_r:qemu_sf_lcd_density_prop", "tcontext=u:object_r:other"),
+                        auditd.replace("scontext=u:r:shell:s0", "scontext=u:r:shell:s0:c1")):
+            self.assertNotEqual(key, runner.audit_key(changed), changed)
+        for other in (auditd.replace("scontext=u:r:shell:s0", "scontext=u:r:system_server:s0"),
+                      auditd.replace("denied", "granted"), "an unrelated line", ""):
+            self.assertIsNone(runner.audit_key(other), other)
+        # A shell denial in a shape this runner cannot take apart still counts.
+        self.assertIsNotNone(runner.audit_key("avc: denied for scontext=u:r:shell:s0 odd"))
+
     def test_the_resumed_component_is_read_whole(self) -> None:
         dump = ("  mResumedActivity: ActivityRecord{1a2b u0 org.x.a/.Main t14}\n"
                 "  topResumedActivity=ActivityRecord{3c4d u0 org.x.b/android.app.Activity t15 f}\n"
@@ -654,6 +703,8 @@ class Steps(Fixture):
     def run_steps(self, deviation: str | None) -> dict[str, str]:
         image = ScriptedImage()
         image.deviation = deviation
+        if deviation in ("repeat-denial", "log-rerendered"):   # an earlier run's denial is in the log before this one starts
+            image.denial("kernarium_apps-", "u:object_r:qemu_sf_lcd_density_prop:s0", "u:object_r:qemu_sf_lcd_density_prop:s0")
         report = runner.Report()
         options = types_namespace()
         with contextlib.redirect_stdout(io.StringIO()), \
@@ -673,6 +724,10 @@ class Steps(Fixture):
         self.assertEqual({"PASS"}, set(statuses.values()), statuses)
         self.assertEqual(12, len(statuses))
         self.assertEqual(set(), self.image.files)
+
+    def test_a_log_shown_differently_holds_no_new_denial(self) -> None:
+        statuses = self.run_steps("log-rerendered")
+        self.assertEqual({"PASS"}, set(statuses.values()), statuses)
 
     def test_each_deviation_fails_its_step(self) -> None:
         header = "digest and list agree on the header block"
@@ -695,7 +750,7 @@ class Steps(Fixture):
             "alias-manifest-flag": alias, "alias-disabled-listed": rows,
             "launch-hidden": refusals, "guarded-launched": refusals, "injection": refusals, "refusal-multiline": refusals, "disabled-launch": refusals,
             "usage-status": usage,
-            "writes-file": clean, "denial": clean, "first-call-denial": clean,
+            "writes-file": clean, "denial": clean, "first-call-denial": clean, "repeat-denial": clean,
             "digest-constant": sets, "static-keys": sets, "builtin-icons-error": icons,
         }
         for deviation, step in expected.items():

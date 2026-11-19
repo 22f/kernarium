@@ -20,6 +20,9 @@ application, and the manifest is what the command reads:
   path, source bound and composition exist for. It is installed and removed to change the set of applications;
 - ``first-v2`` is ``first`` with a higher version code, signed with the same key: an update in place.
 
+Both are test-only applications, installed with ``-t``: the shell may change the state of a component only for a
+test-only package, which the alias's ``pm enable`` needs.
+
 The runner's tooling test reads the manifests back with ``orientation_probe_apk.decode_manifest``.
 """
 
@@ -42,7 +45,7 @@ SUCCESSORS = ("first-v2",)
 #: alias's target), with their android.R.attr ids.
 ATTRIBUTES = {**binary_xml.ATTRIBUTES, "icon": 0x01010002, "enabled": 0x0101000E, "drawable": 0x01010199,
               "targetActivity": 0x01010202,
-              "permission": 0x01010006}
+              "permission": 0x01010006, "testOnly": 0x01010272}
 
 #: The resource ids of the second package's table (package 0x7f; types 1 mipmap, 2 drawable, 3 color, 4 string).
 RES_MIPMAP_ICON = 0x7F010000
@@ -130,7 +133,7 @@ def manifest_tree(variant: str) -> binary_xml.Element:
             ("name", ALIAS_NAME), ("targetActivity", ALIAS_TARGET), ("exported", True), ("enabled", False),
             ("label", ALIAS_LABEL)), (launcher_filter(),)))
     application: list[tuple[str, str | int | bool | binary_xml.Reference]] = [
-        ("label", "Apps Probe Application"), ("hasCode", False)]
+        ("label", "Apps Probe Application"), ("hasCode", False), ("testOnly", True)]
     if resource_backed:
         application.append(("icon", binary_xml.Reference(RES_MIPMAP_ICON)))
     return binary_xml.Element("manifest", (("package", package_of(variant)), ("versionCode", version)), (
