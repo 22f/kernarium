@@ -191,9 +191,10 @@ private:
 		/* An unreadable page, or a page of a mapping without the kernel's
 		 * immutable fact, is not tried again before this many lookups. */
 		std::uint64_t retry_at{};
-		/* The low 32 bits of the address space's generation: a slot that
-		 * matches across 2^32 generations meets the instance's own check
-		 * of the whole generation. */
+		/* The low 32 bits of the address space's generation. A kernel
+		 * generation is a 32-bit counter (memory/mmu/code_holders.hpp);
+		 * the instance a slot names holds, and is checked for, the whole
+		 * value. */
 		std::uint32_t generation{};
 		/* The instance the page is in, or -1: not in a library. */
 		std::int16_t instance{-1};
