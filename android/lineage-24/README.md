@@ -1048,10 +1048,10 @@ setting. It builds the framework's system assets itself, without the static
 overlays that target the framework (their idmaps come from `idmap2`, which the
 shell domain may not execute), and falls back to the framework's own
 initialisation when that is not possible. Reading any resources initialises the
-framework's display metrics, which read `qemu.sf.lcd_density`: `list` and
-`icons` draw one denial of the shell domain for it (`qemu_sf_lcd_density_prop`,
-read) until the policy lets the shell read that property; `digest` and `launch`
-draw none.
+framework's display metrics, which read `qemu.sf.lcd_density` and fall back
+when the shell domain may not: the policy's one line for the tool
+(`overlay/sepolicy/system_ext/private/kernarium_apps.te`) is a `dontaudit` of
+that read, so no call draws a denial and the shell domain gains no permission.
 
 - **Entries.** One entry is a launcher activity of the foreground user: enabled for
   that user (the package manager's own answer, so an alias the manifest disables
