@@ -2123,6 +2123,69 @@ class VerdictBoundaryTests(unittest.TestCase):
         self.assertEqual(outcome[0], "served")
         self.assertEqual(reads, [10, 11, 12])
 
+    def watch_over_a_copy_that_spans_a_sleep(self, beats_after):
+        """A watch (with an approval recorded) whose first copy of the heartbeat
+        (beat 10) is begun before the Mac sleeps and returns after it; the
+        later copies show `beats_after`, one each, the last repeating. It is
+        stopped after its reads. The reads made."""
+        watch = self.watch
+        watch.latch.set("possible", "old", self.log, "an outstanding approval")
+        reads = []
+
+        def read(*args, **kwargs):
+            if not reads:
+                self.clock.suspend(3600)
+                beat = 10
+            else:
+                beat = beats_after[min(len(reads), len(beats_after)) - 1]
+            reads.append(beat)
+            return dict(self.state, time=beat)
+        hook = lambda clock: watch.stop.set() if len(reads) > len(beats_after) else None
+        self.clock.hooks.append(hook)
+        try:
+            with mock.patch.object(automation, "host_state", read):
+                watch.run()
+        finally:
+            self.clock.hooks.remove(hook)
+        return reads
+
+    def test_the_observer_discards_a_copy_that_spans_a_sleep(self) -> None:
+        # Rule (R1): a copy begun before a sleep and finished after it can hold
+        # what the host wrote before; the host wrote its last beat, 11, during
+        # the sleep and died. The copy is thrown away, the next read is the
+        # first one, and the frozen beat 11 after it is no progress: the host is
+        # not adopted, nothing is published, and the approval record stays.
+        self.watch_over_a_copy_that_spans_a_sleep([11])
+        self.assertNotIn("alive_at", self.watch.record.data)
+        self.assertFalse(self.watch.adopted)
+        self.assertIsNotNone(self.watch.latch.read())
+
+    def test_a_host_that_beats_on_after_a_copy_that_spanned_a_sleep_is_adopted(self) -> None:
+        self.watch_over_a_copy_that_spans_a_sleep([11, 12])
+        self.assertTrue(self.watch.adopted)
+        self.assertIn("alive_at", self.watch.record.data)
+        self.assertIsNone(self.watch.latch.read())
+
+    def test_a_copy_begun_after_a_sleep_in_the_process_lookup_is_a_fresh_baseline(self) -> None:
+        # Rule (R1): the sleep fell before the copy began, so the copy is of the
+        # host now. It is kept as the first read: the next read that advances
+        # is progress.
+        observer = self.watch.observer
+        observer.on_progress = self.watch.progress
+
+        def gone():
+            self.clock.suspend(3600)
+            return True
+        self.state["time"] += 1
+        with mock.patch.object(observer, "supervisor_gone", gone):
+            observer.check()
+        self.assertNotIn("alive_at", self.watch.record.data)
+        self.state["time"] += 1
+        self.clock.advance(6)
+        with mock.patch.object(observer, "supervisor_gone", lambda: True):
+            observer.check()
+        self.assertIn("alive_at", self.watch.record.data)
+
     def test_a_sleep_during_the_process_lookup_makes_the_next_beat_no_progress(self) -> None:
         # Rule (R1): the observer's turn looks at the host's processes and then
         # copies its heartbeat; a sleep anywhere from the lookup through the copy

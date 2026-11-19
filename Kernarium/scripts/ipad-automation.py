@@ -1979,19 +1979,22 @@ class HostObserver:
 
     def pull(self, since=None):
         """One read of the heartbeat. `since` is the (monotonic, wall) time at
-        which the turn that makes it began: a sleep anywhere from there to the
-        end of the copy (the lookup of the host's processes, then the copy) makes
-        the copy a first read."""
+        which the turn that makes it began. A sleep of the Mac in the lookup of
+        the host's processes, before the copy, makes the copy a first read: it
+        is of the host now. A sleep during the copy throws it away: it may be of
+        what the host wrote before the sleep, and the host may have died after
+        it."""
         started = self.clock.monotonic()
         wall = self.clock.time()
         self.last_pull = started
         since_mono, since_wall = since or (started, wall)
+        if abs((wall - since_wall) - (started - since_mono)) > WATCH_CLOCK_GAP:
+            self.forget()
         state = host_state(self.options)
         ended = self.clock.monotonic()
-        if abs((self.clock.time() - since_wall) - (ended - since_mono)) > WATCH_CLOCK_GAP:
-            # The Mac slept since the turn began: the copy may be of what the
-            # host wrote before the sleep, and says nothing of the host now.
+        if abs((self.clock.time() - wall) - (ended - started)) > WATCH_CLOCK_GAP:
             self.forget()
+            state = None
         if state is None:
             self.candidate = None
             self.lose(started)
