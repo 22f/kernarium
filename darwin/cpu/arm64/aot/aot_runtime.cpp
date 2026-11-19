@@ -371,9 +371,12 @@ std::array<std::atomic<std::uint64_t>, refill_pc_slots> refill_pc_key{};
 std::array<std::array<std::atomic<std::uint64_t>, refill_cause_count>,
 	refill_pc_slots> refill_pc_count{};
 /* The last conflicting refill of each site: the page it asked for and the
- * page the entry held. */
+ * page the entry held, one pair at a time: a sequence number (odd while a
+ * writer holds the slot) lets a reader take both of one refill, and a writer
+ * that finds the slot held drops its sample. */
 std::array<std::array<std::atomic<std::uint64_t>, 2>, refill_pc_slots>
 	refill_pc_last{};
+std::array<std::atomic<std::uint64_t>, refill_pc_slots> refill_pc_seq{};
 std::atomic<bool> reporter_started{false};
 /* The audit of the executable-mapping counts of the memory layer, run by the
  * reporter thread: audits that held every address space at once, those that
@@ -923,14 +926,29 @@ void write_refill_sites() noexcept
 				std::memory_order_relaxed);
 			total += each[cause];
 		}
+		unsigned long long wanted = 0, held = 0;
+		for (int attempt = 0; attempt < 8; ++attempt) {
+			const auto before = counters::refill_pc_seq[slot].load(
+				std::memory_order_acquire);
+			if ((before & 1U) != 0)
+				continue;
+			const auto a = counters::refill_pc_last[slot][0].load(
+				std::memory_order_relaxed);
+			const auto b = counters::refill_pc_last[slot][1].load(
+				std::memory_order_relaxed);
+			std::atomic_thread_fence(std::memory_order_acquire);
+			if (counters::refill_pc_seq[slot].load(
+				    std::memory_order_relaxed) == before) {
+				wanted = a;
+				held = b;
+				break;
+			}
+		}
 		std::fprintf(file, "refill_site %llu %llx %llu %llu %llu %llu %llu "
 			"%llu %llu last %llx %llx\n", (key >> 40) - 1,
 			static_cast<unsigned long long>(key & ((1ULL << 40) - 1)), total,
-			each[0], each[1], each[2], each[3], each[4], each[5],
-			static_cast<unsigned long long>(counters::refill_pc_last[slot][0]
-				.load(std::memory_order_relaxed)),
-			static_cast<unsigned long long>(counters::refill_pc_last[slot][1]
-				.load(std::memory_order_relaxed)));
+			each[0], each[1], each[2], each[3], each[4], each[5], wanted,
+			held);
 	}
 	if (std::fclose(file) != 0 || std::rename(part.c_str(), path) != 0)
 		(void)std::remove(part.c_str());
@@ -1135,11 +1153,19 @@ void note_refill(const void *tlb_pointer, std::uint64_t address,
 			counters::refill_pc_count[at][cause].fetch_add(
 				1, std::memory_order_relaxed);
 			if (cause == 2) {
-				counters::refill_pc_last[at][0].store(
-					address >> DARWIN_UML_GUEST_PAGE_SHIFT,
+				auto seq = counters::refill_pc_seq[at].load(
 					std::memory_order_relaxed);
-				counters::refill_pc_last[at][1].store(
-					held, std::memory_order_relaxed);
+				if ((seq & 1U) == 0 &&
+				    counters::refill_pc_seq[at].compare_exchange_strong(
+					    seq, seq + 1, std::memory_order_acquire)) {
+					counters::refill_pc_last[at][0].store(
+						address >> DARWIN_UML_GUEST_PAGE_SHIFT,
+						std::memory_order_relaxed);
+					counters::refill_pc_last[at][1].store(
+						held, std::memory_order_relaxed);
+					counters::refill_pc_seq[at].store(
+						seq + 2, std::memory_order_release);
+				}
 			}
 			return;
 		}
@@ -1389,7 +1415,11 @@ void note_engine_dispatch(const Binder &binder, unsigned long generation,
 		thread_local std::array<Known, 512> known{};
 		const auto page = pc >> 12;
 		auto &slot = known[page % known.size()];
-		if (slot.page != page + 1 || slot.generation != generation) {
+		/* Only a page found to be covered is kept: a page asked about before
+		 * the binder discovered its library is asked again, so a later refusal
+		 * on it is charged to the library. */
+		if (slot.page != page + 1 || slot.generation != generation ||
+		    !slot.covered) {
 			std::uint32_t library;
 			std::uint64_t offset;
 			slot = {page + 1, generation,
