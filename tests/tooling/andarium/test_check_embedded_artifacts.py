@@ -35,8 +35,14 @@ SCRIPT = REPOSITORY / "scripts/check-embedded-artifacts.py"
 sys.path.insert(0, str(REPOSITORY / "android/lineage-24/tools"))
 import release_inputs  # noqa: E402
 
+sys.path.insert(0, str(REPOSITORY / "tools/aot"))
+import release_artifact  # noqa: E402
+
 
 RELEASE_ID = "20261201-los24-r99"
+# The system partition digest the staged layout states, which the AOT blob of
+# the release binds to as well as to the manifest's digest.
+AOT_SYSTEM_SHA256 = "bb" * 32
 KERNEL_ID = "20261201-6.18.99-ks99"
 KERNEL_RELEASE = "6.18.99-gfeedface0000"
 DISK = b"disk-bytes" * 100
@@ -79,11 +85,24 @@ def commit(repo: Path, message: str) -> str:
     return git(repo, "rev-parse", "HEAD")
 
 
-def macho(sections: dict) -> bytes:
-    """A thin arm64 Mach-O whose __TEXT segment holds the given sections."""
+LC_LOAD_DYLIB = 0x0C
+LC_LOAD_WEAK_DYLIB = 0x80000018
+
+
+def dylib_command(command: int, name: str) -> bytes:
+    """One load command that names a dependency by install name."""
+    raw = name.encode() + b"\0"
+    raw += b"\0" * (-len(raw) % 8)
+    return struct.pack("<IIIIII", command, 24 + len(raw), 24, 2, 0x10000, 0x10000) + raw
+
+
+def macho(sections: dict, dylibs: tuple = ()) -> bytes:
+    """A thin arm64 Mach-O whose __TEXT segment holds the given sections and
+    that requires the given dependencies, as (load command, install name)."""
     names = list(sections)
     command_size = 72 + 80 * len(names)
-    offset = 32 + command_size
+    required = b"".join(dylib_command(command, name) for command, name in dylibs)
+    offset = 32 + command_size + len(required)
     entries = b""
     payload = b""
     for name in names:
@@ -97,8 +116,9 @@ def macho(sections: dict) -> bytes:
         struct.pack("<II", 0x19, command_size) + b"__TEXT".ljust(16, b"\0")
         + struct.pack("<QQQQIIII", 0, offset + len(payload), 0, offset + len(payload), 7, 5, len(names), 0)
     )
-    header = struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 6, 1, command_size, 0, 0)
-    return header + segment + entries + payload
+    header = struct.pack(
+        "<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 6, 1 + len(dylibs), command_size + len(required), 0, 0)
+    return header + segment + entries + required + payload
 
 
 NEUTRAL_BUILDER = "kernarium@kernarium"
@@ -177,7 +197,13 @@ class Fixture:
     def layout(disk: bytes) -> dict:
         import hashlib
 
-        return {"schema_version": 2, "system_disk": {"size_bytes": len(disk), "sha256": hashlib.sha256(disk).hexdigest()}}
+        return {
+            "schema_version": 2,
+            "system_disk": {
+                "size_bytes": len(disk), "sha256": hashlib.sha256(disk).hexdigest(),
+                "partitions": [{"name": "system", "sha256": AOT_SYSTEM_SHA256}],
+            },
+        }
 
     def manifest(self, release_id: str = RELEASE_ID, trees=None) -> dict:
         trees = self.trees if trees is None else trees
@@ -613,6 +639,263 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
 
+AOT_DESCRIPTOR = release_artifact.ACCEPTED_DESCRIPTOR
+AOT_DIRECTORY = f"lineage24-mainline6.18-4k-{RELEASE_ID}"
+AOT_FRAMEWORK = "UmlArm64Aot"
+
+
+def aot_blob(
+    manifest_sha256: str, release_id: str = RELEASE_ID, filler: int = 1,
+    system_sha256: str = AOT_SYSTEM_SHA256,
+) -> bytes:
+    """A blob with the header rewrite.py gives one, and bytes after it."""
+    blob = bytearray(16384)
+    struct.pack_into("<8sI", blob, 0, release_artifact.BLOB_MAGIC, 3)
+    blob[release_artifact.BLOB_RELEASE_ID_OFFSET:
+         release_artifact.BLOB_RELEASE_ID_OFFSET + len(release_id)] = release_id.encode()
+    blob[release_artifact.BLOB_MANIFEST_SHA256_OFFSET:
+         release_artifact.BLOB_MANIFEST_SHA256_OFFSET + 32] = bytes.fromhex(manifest_sha256)
+    blob[release_artifact.BLOB_SYSTEM_SHA256_OFFSET:
+         release_artifact.BLOB_SYSTEM_SHA256_OFFSET + 32] = bytes.fromhex(system_sha256)
+    blob[8192:] = bytes([filler]) * (len(blob) - 8192)
+    return bytes(blob)
+
+
+class AotTests(unittest.TestCase):
+    """--aot: the framework an archive packages is the accepted artifact, and only when the switch says so."""
+
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.fixture = Fixture(self.root)
+        self.repo = self.fixture.repo
+        for index, relative in enumerate(release_artifact.GENERATOR_INPUTS):
+            write(self.repo, relative, f"generator input {index}\n")
+        write(self.repo, "tools/aot/rewrite.py", "BLOB_VERSION = 3\n")
+        write(self.repo, "tools/aot/libraries.txt",
+              "library /system/lib64/libz.so\nboot /system/framework/arm64/boot*.oat\n")
+        commit(self.repo, "the AOT tools")
+        # What the runtime reads from the packaged system, as the blob of the release binds it.
+        self.identity = release_artifact.release_identity(self.fixture.app / "andarium-system")
+        self.bound = {key: self.identity[key] for key in release_artifact.RELEASE_KEYS}
+        self.blob = aot_blob(self.identity["release_manifest_sha256"])
+
+    def accept(self, archives: str = "no", release_id: str = RELEASE_ID, install: bool = True) -> dict:
+        """An artifact of the fixture's tools, installed beside the release, and the descriptor that accepts it."""
+        directory = self.repo / ".build/android/aot" / AOT_DIRECTORY
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(parents=True)
+        (directory / "blob.bin").write_bytes(self.blob)
+        write(directory, "manifest.json", json.dumps({"release_id": RELEASE_ID, "blob_bytes": len(self.blob)}))
+        write(directory, "licences.json", json.dumps({"release_id": RELEASE_ID, "libraries": {}}))
+        libraries, boot = release_artifact.library_list(self.repo)
+        description = release_artifact.write_description(directory, self.bound, libraries, boot, self.repo)
+        text = release_artifact.render_accepted(
+            description, release_artifact.sha256_file(directory / "artifact.json"), archives)
+        write(self.repo, AOT_DESCRIPTOR, text.replace(f"'{RELEASE_ID}'", f"'{release_id}'"))
+        commit(self.repo, "accept the AOT artifact")
+        if not install:
+            shutil.rmtree(directory)
+        return description
+
+    def package_aot(self, blob: bytes | None = None) -> None:
+        framework = self.fixture.app / "Frameworks" / f"{AOT_FRAMEWORK}.framework"
+        framework.mkdir(parents=True, exist_ok=True)
+        (framework / AOT_FRAMEWORK).write_bytes(macho({"__text": self.blob if blob is None else blob}))
+
+    def link_runtime(self, command: int = LC_LOAD_DYLIB, name: str = "@rpath/UmlArm64Aot.framework/UmlArm64Aot") -> None:
+        """The packaged Android runtime with a load command that names the AOT framework."""
+        runtime = self.fixture.app / "Frameworks" / f"{FRAMEWORK}.framework" / FRAMEWORK
+        runtime.write_bytes(macho({"__uml_elf": kernel_image()}, ((command, name),)))
+
+    def run_check(self, *arguments: str, decision: str | None = None):
+        return self.fixture.run("--aot", *arguments, decision=decision)
+
+    def passes(self, result) -> None:
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def fails(self, result, *needles: str) -> None:
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for needle in needles:
+            self.assertIn(needle, result.stderr)
+
+    def test_no_accepted_artifact_and_no_framework_passes(self) -> None:
+        result = self.run_check()
+        self.passes(result)
+        self.assertIn("no AOT artifact is accepted, and the application carries none", result.stdout)
+
+    def test_a_framework_without_an_accepted_artifact_fails(self) -> None:
+        self.package_aot()
+        self.fails(self.run_check(), "no AOT artifact is accepted")
+
+    def test_a_framework_in_an_archive_while_the_switch_is_no_fails(self) -> None:
+        self.accept("no")
+        self.package_aot()
+        self.fails(self.run_check(), "which no archive may yet", "ARCHIVES to no")
+        # The same descriptor passes a build that packages no application.
+        self.passes(self.fixture.run("--aot", app=False))
+
+    def test_no_framework_while_the_switch_is_no_passes(self) -> None:
+        self.accept("no")
+        self.passes(self.run_check())
+
+    def test_the_accepted_blob_in_an_archive_passes_when_the_switch_is_yes(self) -> None:
+        self.accept("yes")
+        self.package_aot()
+        result = self.run_check()
+        self.passes(result)
+        self.assertIn("is the blob of the AOT artifact of", result.stdout)
+        self.assertIn("generator inputs are the ones on this commit", result.stdout)
+
+    def test_a_runtime_that_links_the_framework_fails_an_application_without_it(self) -> None:
+        # With no accepted artifact, with the switch at no and with it at yes:
+        # dyld refuses the launch whatever the descriptor says.
+        self.link_runtime()
+        self.fails(self.run_check(), f"the packaged runtime {FRAMEWORK} links UmlArm64Aot.framework",
+                   "dyld refuses to launch")
+        self.accept("no")
+        self.fails(self.run_check(), f"the packaged runtime {FRAMEWORK} links UmlArm64Aot.framework")
+        self.accept("yes")
+        self.fails(self.run_check(), f"the packaged runtime {FRAMEWORK} links UmlArm64Aot.framework",
+                   "carries no AOT framework")
+        # The framework present is the passing direction.
+        self.package_aot()
+        self.passes(self.run_check())
+
+    def test_a_runtime_that_is_cut_short_ends_in_the_checks_own_error(self) -> None:
+        def thin(commands: bytes, count: int) -> bytes:
+            header = struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 6, count, len(commands), 0, 0)
+            return header + commands
+
+        runtime = self.fixture.app / "Frameworks" / f"{FRAMEWORK}.framework" / FRAMEWORK
+        for name, content in (
+            ("a fat header with no entries", struct.pack(">II", 0xCAFEBABE, 3)),
+            ("a header that counts commands there are none of", thin(b"", 2)),
+            ("a command shorter than its header", thin(struct.pack("<II", LC_LOAD_DYLIB, 4), 1)),
+            ("a dylib command with no name", thin(struct.pack("<II", LC_LOAD_DYLIB, 8), 1)),
+            ("a command that runs past the end", thin(struct.pack("<II", LC_LOAD_DYLIB, 4096) + b"\0" * 8, 1)),
+            ("a dylib name outside its command",
+             thin(struct.pack("<IIIIII", LC_LOAD_DYLIB, 24, 4096, 2, 0x10000, 0x10000), 1)),
+        ):
+            with self.subTest(name):
+                runtime.write_bytes(content)
+                result = self.run_check()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn(f"the packaged framework {FRAMEWORK} cannot be read as a Mach-O file", result.stderr)
+        # A file that is not a Mach-O at all names nothing: nothing to refuse.
+        runtime.write_bytes(macho({"__uml_elf": kernel_image()}))
+        other = self.fixture.app / "Frameworks/Other.framework"
+        other.mkdir(parents=True)
+        (other / "Other").write_bytes(b"text, not code\n")
+        self.passes(self.run_check())
+
+    def test_a_runtime_that_links_another_framework_or_weakly_needs_nothing(self) -> None:
+        self.accept("no")
+        self.link_runtime(name="@rpath/Other.framework/Other")
+        self.passes(self.run_check())
+        self.link_runtime(LC_LOAD_WEAK_DYLIB)
+        self.passes(self.run_check())
+        # A build that packages no application has no runtime to read.
+        self.link_runtime()
+        self.passes(self.fixture.run("--aot", app=False))
+
+    def test_an_archive_without_the_framework_fails_when_the_switch_is_yes(self) -> None:
+        self.accept("yes")
+        self.fails(self.run_check(), "carries no AOT framework")
+
+    def test_another_blob_fails_and_no_decision_covers_it(self) -> None:
+        self.accept("yes")
+        self.package_aot(aot_blob(self.identity["release_manifest_sha256"], filler=2))
+        self.fails(self.run_check(decision=f"aot-{RELEASE_ID}"), "is not the blob of the AOT artifact")
+
+    def test_a_blob_made_from_another_system_than_the_packaged_one_fails(self) -> None:
+        # The descriptor names this blob, but the packaged system is not the
+        # release it was made from: the runtime would run without it.
+        # (The release ID is the descriptor's: another one fails before this.)
+        for field, other in (("manifest", {"manifest_sha256": "cc" * 32}),
+                             ("system partition", {"system_sha256": "dd" * 32})):
+            with self.subTest(field=field):
+                arguments = {"manifest_sha256": self.identity["release_manifest_sha256"], **other}
+                self.blob = aot_blob(**arguments)
+                # The artifact binds the same release as its blob: only the packaged system differs.
+                self.bound = {"release_id": RELEASE_ID,
+                              "release_manifest_sha256": arguments["manifest_sha256"],
+                              "system_partition_sha256": arguments.get("system_sha256", AOT_SYSTEM_SHA256)}
+                self.accept("yes")
+                self.package_aot()
+                self.fails(self.run_check(), "was not made from the packaged system",
+                           "run without it")
+        # The same blob with the packaged system's own values passes, and says so.
+        self.blob = aot_blob(self.identity["release_manifest_sha256"])
+        self.bound = {key: self.identity[key] for key in release_artifact.RELEASE_KEYS}
+        self.accept("yes")
+        self.package_aot()
+        result = self.run_check()
+        self.passes(result)
+        self.assertIn("the packaged AOT blob is made from the packaged system", result.stdout)
+
+    def test_a_packaged_system_that_states_no_release_cannot_be_compared(self) -> None:
+        self.accept("yes")
+        self.package_aot()
+        (self.fixture.app / "andarium-system/guest/partition-layout.json").write_text("{}", encoding="utf-8")
+        self.fails(self.run_check(), "cannot be compared with the packaged system")
+
+    def test_a_framework_without_a_text_section_fails(self) -> None:
+        self.accept("yes")
+        self.package_aot()
+        framework = self.fixture.app / "Frameworks" / f"{AOT_FRAMEWORK}.framework" / AOT_FRAMEWORK
+        framework.write_bytes(macho({"__data": b"x" * 64}))
+        self.fails(self.run_check(), "has no __text section")
+
+    def test_a_descriptor_for_another_release_fails(self) -> None:
+        self.accept("yes", release_id="20261201-los24-r98")
+        self.package_aot()
+        self.fails(self.run_check(), "is not for the accepted Android release")
+
+    def test_a_changed_generator_input_is_pending_until_the_user_decides(self) -> None:
+        self.accept("yes")
+        self.package_aot()
+        write(self.repo, "tools/aot/asm.py", "changed\n")
+        commit(self.repo, "aot: change the assembler")
+        result = self.run_check()
+        self.fails(result, "is behind this commit", "tools/aot/asm.py", "aot: change the assembler",
+                   f"PENDING_INPUTS_DECISION=aot-{RELEASE_ID}")
+        decided = self.run_check(decision=f"aot-{RELEASE_ID}")
+        self.passes(decided)
+        self.assertIn("the archive will not carry it", decided.stderr)
+
+    def test_a_decision_for_another_artifact_covers_nothing(self) -> None:
+        self.accept("yes")
+        self.package_aot()
+        write(self.repo, "tools/aot/asm.py", "changed\n")
+        commit(self.repo, "aot: change the assembler")
+        self.fails(self.run_check(decision=RELEASE_ID), "is behind this commit")
+
+    def test_an_artifact_that_is_not_installed_is_pending_when_it_is_packaged(self) -> None:
+        self.accept("yes", install=False)
+        self.package_aot()
+        self.fails(self.run_check(), "is not installed", ".build/android/aot/")
+
+    def test_an_installed_artifact_that_is_not_the_accepted_one_fails(self) -> None:
+        self.accept("yes")
+        directory = self.repo / ".build/android/aot" / AOT_DIRECTORY
+        (directory / "blob.bin").write_bytes(aot_blob(self.identity["release_manifest_sha256"], filler=3))
+        self.package_aot()
+        self.fails(self.run_check(), "the installed AOT artifact is not the accepted one")
+
+    def test_a_dirty_generator_input_fails(self) -> None:
+        self.accept("yes")
+        self.package_aot()
+        write(self.repo, "tools/aot/asm.py", "uncommitted\n")
+        self.fails(self.run_check(), "uncommitted changes", "tools/aot/asm.py")
+
+    def test_naming_only_aot_is_enough(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "--repository", str(self.repo), "--aot"],
+            check=False, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        self.passes(result)
+
+
 class ConfigParityTests(unittest.TestCase):
     """The symbol check agrees with the kernel build's own (config-fragments.sh)."""
 
@@ -704,6 +987,9 @@ class BuildPhaseTests(unittest.TestCase):
         self.assertIn("--app", self.script)
         self.assertIn("--android-release", self.script)
         self.assertIn("--kernel android", self.script)
+        self.assertIn("--aot", self.script)
+        # And that the application carries no AOT diagnostics build.
+        self.assertIn("check-no-aot-diagnostics.py", self.script)
 
     def test_a_staged_unsigned_proof_stops_an_appstore_and_a_testflight_build_only(self) -> None:
         fixture = Fixture(self.root)
@@ -737,6 +1023,22 @@ class BuildPhaseTests(unittest.TestCase):
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stderr, "")
+
+    def test_an_aot_framework_stops_an_appstore_and_a_testflight_build_only(self) -> None:
+        # No AOT artifact is accepted, so no archive may carry the component;
+        # a development build is not checked.
+        fixture = Fixture(self.root)
+        framework = fixture.app / "Frameworks" / f"{AOT_FRAMEWORK}.framework"
+        framework.mkdir(parents=True)
+        (framework / AOT_FRAMEWORK).write_bytes(macho({"__text": b"x" * 64}))
+        for configuration in self.CONFIGURATIONS:
+            with self.subTest(configuration):
+                result = self.run_phase(configuration, fixture)
+                if configuration in ("AppStore", "TestFlight"):
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("no AOT artifact is accepted", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_the_accepted_release_passes_the_phase_in_every_configuration(self) -> None:
         fixture = Fixture(self.root)

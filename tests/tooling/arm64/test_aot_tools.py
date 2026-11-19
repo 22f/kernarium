@@ -29,6 +29,9 @@ import elf64  # noqa: E402
 import fixture  # noqa: E402
 import rewrite  # noqa: E402
 
+# The release the blobs are built for: the header carries both digests.
+RELEASE = {"manifest_sha256": "ab" * 32, "system_sha256": "cd" * 32}
+
 ENCODERS = [
     ("add x0, x1, #1", 0x91000420, lambda: A.add_imm(0, 1, 1)),
     ("sub sp, sp, #240", 0xd103c3ff,
@@ -975,12 +978,25 @@ class EntryTableTests(unittest.TestCase):
         self.assertEqual(census["other"], 0)
         self.assertEqual(census["table"], unit["table_region"])
         blob, manifest = rewrite.build_blob(
-            [unit], self.layout, "entry-table-row", False)
+            [unit], self.layout, "entry-table-row", False, **RELEASE)
         self.assertEqual(blob[:8], b"UMLAOT16")
         self.assertEqual(struct.unpack_from("<I", blob, 8)[0],
                          rewrite.BLOB_VERSION)
         self.assertEqual(struct.unpack_from("<I", blob, 36)[0], 0)
         self.assertEqual(manifest["refused"], [])
+        # The release the blob belongs to: ID, manifest digest, system digest.
+        self.assertEqual(blob[0x30:0x30 + 96].rstrip(b"\0"),
+                         b"entry-table-row")
+        self.assertEqual(blob[0x90:0xB0], bytes.fromhex(RELEASE[
+            "manifest_sha256"]))
+        self.assertEqual(blob[0xB0:0xD0], bytes.fromhex(RELEASE[
+            "system_sha256"]))
+        self.assertEqual(manifest["release_manifest_sha256"],
+                         RELEASE["manifest_sha256"])
+        with self.assertRaises(ValueError):
+            rewrite.build_blob([unit], self.layout, "short-digest", False,
+                               manifest_sha256="ab" * 31,
+                               system_sha256=RELEASE["system_sha256"])
 
     def test_a_page_that_holds_a_long_function_s_end_is_a_row_of_branches(
             self) -> None:
@@ -1052,7 +1068,7 @@ class EntryTableTests(unittest.TestCase):
         blob, manifest = rewrite.build_blob(
             kept, self.layout, "refused-row", False,
             [{"path": unit["path"], "reason": unit["refused"]}
-             for unit in left])
+             for unit in left], **RELEASE)
         self.assertEqual(struct.unpack_from("<I", blob, 16)[0], 2)
         self.assertEqual(struct.unpack_from("<I", blob, 36)[0], 1)
         self.assertEqual([entry["path"] for entry in manifest["refused"]],
@@ -1115,7 +1131,8 @@ class CountingLayoutTests(unittest.TestCase):
     def test_the_entry_zeroes_and_reports_the_count(self) -> None:
         for count in (False, True):
             blob, manifest = rewrite.build_blob(
-                [self.unit(count)], self.layout, "counting-row", count)
+                [self.unit(count)], self.layout, "counting-row", count,
+                **RELEASE)
             words = self.words(blob)
             zero = A.str_x(31, 31, rewrite.SLOT_COUNT)
             report = A.ldr_x(1, 31, rewrite.SLOT_COUNT)
@@ -1165,13 +1182,13 @@ class SameFileTwiceTests(unittest.TestCase):
         units = [self.unit(0, "/apex/a/lib64/libx.so", "a"),
                  self.unit(1, "/apex/b/lib64/libx.so", "b")]
         with self.assertRaises(ValueError) as raised:
-            rewrite.build_blob(units, self.layout, "same-twice")
+            rewrite.build_blob(units, self.layout, "same-twice", **RELEASE)
         self.assertIn("list it once", str(raised.exception))
 
     def test_a_unit_names_every_page_it_can_bind(self) -> None:
         blob, manifest = rewrite.build_blob(
             [self.unit(0, "/apex/a/lib64/libx.so", "a")], self.layout,
-            "once")
+            "once", **RELEASE)
         library = manifest["libraries"][0]
         self.assertGreater(library["pages"], 0)
         self.assertEqual(library["bindable_pages"], library["pages"])

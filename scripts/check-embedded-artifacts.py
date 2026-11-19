@@ -35,6 +35,30 @@ Kernel bundle (--kernel android|arm64|x86_64):
     configuration identity, so a symbol removed from a fragment, which falls
     back to its default, is the one change this cannot see.
 
+AOT artifact (--aot):
+  - without an accepted descriptor (android/lineage-24/metadata/accepted-aot.env)
+    an application that packages UmlArm64Aot.framework fails. The descriptor's
+    archive field (LINEAGE24_ACCEPTED_AOT_ARCHIVES) is the one switch that lets
+    an App Store or TestFlight archive carry the component: a framework in an
+    archive while it is "no" fails, and so does an archive without one while
+    it is "yes";
+  - a packaged runtime framework whose load commands name UmlArm64Aot.framework
+    fails an application that carries no such framework, whatever the switch
+    says: dyld refuses to launch an application that lacks a framework its
+    runtime links (the descriptor and the switch decide the build, this decides
+    the product);
+  - the packaged framework's code section is the blob the descriptor names
+    (SHA-256), and the descriptor is for the accepted Android release;
+  - that blob names the packaged system: the release ID, the manifest digest
+    and the system partition digest in its header are the packaged system's own
+    (release-manifest.json and guest/partition-layout.json), the values the
+    runtime compares at launch, so an archive never carries a blob the
+    application would not run;
+  - the artifact installed below .build/android/aot is the one the descriptor
+    names, and every file its blob is a function of (tools/aot, the decode
+    partitions, the library list) equals what it was built with: a changed
+    one is pending, as for the other artifacts.
+
 The inputs, the descriptors and the files the checks read must be clean in the
 work tree: an uncommitted change would be archived without a commit that
 records it.
@@ -66,9 +90,10 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
-for _tools in ("kernel/common/artifacts", "android/lineage-24/tools"):
+for _tools in ("kernel/common/artifacts", "android/lineage-24/tools", "tools/aot"):
     sys.path.insert(0, str(HERE / _tools))
 import contract_checks  # noqa: E402
+import release_artifact  # noqa: E402
 import release_inputs  # noqa: E402
 
 DECISION_ENV = "PENDING_INPUTS_DECISION"
@@ -78,6 +103,11 @@ UNSIGNED_PROOF = "unsigned-proof"
 STAGED_SYSTEM = ".build/andarium-system"
 # Where install-release.py installs a release, below the work tree.
 INSTALLED_RELEASES = ".build/android/releases"
+# The AOT artifact beside it, and where the framework holds its blob.
+INSTALLED_AOT = ".build/android/aot"
+AOT_NAME = "UmlArm64Aot"
+PACKAGED_AOT = f"Frameworks/{AOT_NAME}.framework/{AOT_NAME}"
+AOT_SECTION = ("__TEXT", "__text")
 PACKAGED_SYSTEM = "andarium-system"
 MANIFEST = "release-manifest.json"
 LAYOUT = "guest/partition-layout.json"
@@ -491,6 +521,135 @@ def check_android(repo, report, staged_root, app):
     )
 
 
+# -------------------------------------------------------------------- AOT --
+
+
+def check_blob_release(report, app, blob):
+    """The packaged blob is the one the packaged system selects at launch:
+    the runtime runs the component only when the release the blob names (its
+    ID, manifest digest and system partition digest) is the release it boots,
+    which the staged system's own files state. Anything else would archive an
+    application that silently runs without it."""
+    try:
+        _, _, named = release_artifact.parse_blob_header(blob[:release_artifact.BLOB_HEADER_BYTES])
+        booted = release_artifact.release_identity(app / PACKAGED_SYSTEM)
+    except release_artifact.ArtifactError as error:
+        report.error("the packaged AOT blob cannot be compared with the packaged system", str(error))
+        return
+    differing = [key for key in release_artifact.RELEASE_KEYS if named[key] != booted[key]]
+    if differing:
+        report.error(
+            "the packaged AOT blob was not made from the packaged system, so the application would run without it",
+            f"{', '.join(differing)} differ between the blob's header and {PACKAGED_SYSTEM}",
+        )
+    else:
+        report.note("the packaged AOT blob is made from the packaged system")
+
+
+def check_aot(repo, report, app):
+    descriptor_path = repo / release_artifact.ACCEPTED_DESCRIPTOR
+    accepted = None
+    if descriptor_path.exists():
+        try:
+            accepted = release_artifact.read_accepted(descriptor_path)
+        except release_artifact.ArtifactError as error:
+            report.error("the accepted AOT descriptor is unreadable", str(error))
+            return
+    framework = app / PACKAGED_AOT if app is not None else None
+    packaged = framework is not None and framework.exists()
+    if app is not None and not packaged:
+        # A runtime that links the component needs it to launch, whatever the
+        # descriptor says: the build asked for it by name or by default.
+        linking, unreadable = runtimes_requiring(app, AOT_NAME)
+        for runtime, reason in unreadable:
+            report.error(
+                f"the packaged framework {runtime} cannot be read as a Mach-O file, "
+                f"so what it links is unknown", reason)
+        for runtime in linking:
+            report.error(
+                f"the packaged runtime {runtime} links {AOT_NAME}.framework, but the application carries no AOT framework",
+                f"{PACKAGED_AOT} is missing, and dyld refuses to launch an application without a framework its runtime links",
+            )
+    if accepted is None:
+        if packaged:
+            report.error(
+                "the application carries the AOT component, but no AOT artifact is accepted",
+                f"{release_artifact.ACCEPTED_DESCRIPTOR} names none",
+            )
+        else:
+            report.note("no AOT artifact is accepted, and the application carries none")
+        return
+    release_id = accepted["LINEAGE24_ACCEPTED_AOT_RELEASE_ID"]
+    label = f"the AOT artifact of {release_id}"
+    archives = accepted[release_artifact.ARCHIVES_KEY] == "yes"
+    try:
+        release = descriptor_of(repo, ANDROID_DESCRIPTOR)
+        release_directory = release["LINEAGE24_ACCEPTED_DIRECTORY_NAME"]
+        accepted_release = release["LINEAGE24_ACCEPTED_RELEASE_ID"]
+    except (ValueError, KeyError) as error:
+        report.error("the Android release descriptor is unreadable", str(error))
+        return
+    if accepted_release != release_id:
+        report.error(f"{label} is not for the accepted Android release {accepted_release}")
+        return
+    if packaged and not archives:
+        report.error(
+            "the application carries the AOT component, which no archive may yet",
+            f"{release_artifact.ACCEPTED_DESCRIPTOR} sets {release_artifact.ARCHIVES_KEY} to no",
+        )
+    if app is not None and archives and not packaged:
+        report.error(
+            f"{label} is accepted for archives, but the application carries no AOT framework",
+            f"{PACKAGED_AOT} is missing",
+        )
+    if packaged:
+        blob = macho_section(framework, AOT_SECTION)
+        if blob is None:
+            report.error(f"the packaged AOT framework has no {AOT_SECTION[1]} section")
+        else:
+            digest = hashlib.sha256(blob).hexdigest()
+            recorded = accepted["LINEAGE24_ACCEPTED_AOT_BLOB_SHA256"]
+            if digest != recorded:
+                report.error(
+                    f"the packaged AOT framework is not the blob of {label}",
+                    f"it holds {digest}; the descriptor names {recorded}",
+                )
+            else:
+                report.note(f"the packaged AOT framework is the blob of {label}")
+                check_blob_release(report, app, blob)
+
+    installed = repo / INSTALLED_AOT / release_directory
+    if not installed.is_dir():
+        if packaged or archives:
+            report.pend(
+                f"aot-{release_id}",
+                f"{label} is not installed, so its tools cannot be compared with this commit",
+                f"expected at {INSTALLED_AOT}/{release_directory} (install-release.py --aot-artifact)",
+            )
+        return
+    try:
+        description = release_artifact.verify(
+            installed, repo=repo, accepted=descriptor_path, generator=False)
+    except release_artifact.ArtifactError as error:
+        report.error(f"the installed AOT artifact is not the accepted one: {error}")
+        return
+    changed = release_artifact.generator_changes(description, repo)
+    if not changed:
+        report.note(f"{label}: its generator inputs are the ones on this commit")
+        return
+    details = []
+    for path in changed:
+        details.append(path)
+        for line in commit_lines(commits_touching(repo, path)):
+            details.append(f"    {line}")
+    report.pend(
+        f"aot-{release_id}",
+        f"{label} is behind this commit: {len(changed)} generator input"
+        f"{'s' if len(changed) != 1 else ''} differ from what it was built with",
+        *details,
+    )
+
+
 # ----------------------------------------------------------------- kernel --
 
 
@@ -549,11 +708,18 @@ def config_mismatches(repo, kernel, config_text):
     return problems
 
 
+class MachOError(ValueError):
+    """A Mach-O file that is cut short or lists a load command that is."""
+
+
 def thin_offset(data):
     if len(data) < 8:
         return None
     if struct.unpack_from(">I", data, 0)[0] == 0xCAFEBABE:
-        for index in range(min(struct.unpack_from(">I", data, 4)[0], 16)):
+        count = min(struct.unpack_from(">I", data, 4)[0], 16)
+        if len(data) < 8 + 20 * count:
+            raise MachOError("the fat header is cut short")
+        for index in range(count):
             cpu, _, offset, _, _ = struct.unpack_from(">IIIII", data, 8 + 20 * index)
             if cpu == 0x0100000C:
                 return offset
@@ -562,27 +728,95 @@ def thin_offset(data):
 
 
 def macho_section(path, wanted):
-    """The bytes of one section of an arm64 Mach-O file, or None."""
+    """The bytes of one section of an arm64 Mach-O file, or None (a file that
+    is not one, or is cut short, has no such section)."""
     data = path.read_bytes()
+    try:
+        base = thin_offset(data[:4096])
+        if base is None:
+            return None
+        count = struct.unpack_from("<I", data, base + 16)[0]
+        position = base + 32
+        for _ in range(count):
+            command, size = struct.unpack_from("<II", data, position)
+            if command == 0x19:  # LC_SEGMENT_64
+                sections = struct.unpack_from("<I", data, position + 64)[0]
+                entry = position + 72
+                for _ in range(sections):
+                    name = data[entry:entry + 16].rstrip(b"\0").decode("ascii", "replace")
+                    segment = data[entry + 16:entry + 32].rstrip(b"\0").decode("ascii", "replace")
+                    length, offset = struct.unpack_from("<QI", data, entry + 40)
+                    if (segment, name) == wanted:
+                        return data[base + offset:base + offset + length]
+                    entry += 80
+            position += size
+    except (MachOError, struct.error):
+        return None
+    return None
+
+
+# The load commands that make dyld refuse to launch an image whose dependency
+# is missing: LC_LOAD_DYLIB, LC_LOAD_UPWARD_DYLIB, LC_REEXPORT_DYLIB and
+# LC_LAZY_LOAD_DYLIB. LC_LOAD_WEAK_DYLIB (0x80000018) lets the image launch.
+STRONG_DYLIB_COMMANDS = frozenset({0x0C, 0x20, 0x8000001F, 0x80000023})
+
+
+def macho_dylibs(path):
+    """The install names an arm64 Mach-O file requires at launch, in load
+    command order; an empty list for any file that is not one. Raises
+    MachOError for one that is cut short: a fat header, the load commands or
+    a dylib command that ends before its own header does."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return []
     base = thin_offset(data[:4096])
     if base is None:
-        return None
+        return []
+    if len(data) < base + 32:
+        raise MachOError("the Mach-O header is cut short")
     count = struct.unpack_from("<I", data, base + 16)[0]
     position = base + 32
-    for _ in range(count):
+    names = []
+    for index in range(count):
+        if position + 8 > len(data):
+            raise MachOError(f"load command {index} starts past the end of the file")
         command, size = struct.unpack_from("<II", data, position)
-        if command == 0x19:  # LC_SEGMENT_64
-            sections = struct.unpack_from("<I", data, position + 64)[0]
-            entry = position + 72
-            for _ in range(sections):
-                name = data[entry:entry + 16].rstrip(b"\0").decode("ascii", "replace")
-                segment = data[entry + 16:entry + 32].rstrip(b"\0").decode("ascii", "replace")
-                length, offset = struct.unpack_from("<QI", data, entry + 40)
-                if (segment, name) == wanted:
-                    return data[base + offset:base + offset + length]
-                entry += 80
+        if size < 8 or position + size > len(data):
+            raise MachOError(f"load command {index} is shorter than its header or runs past the end of the file")
+        if command in STRONG_DYLIB_COMMANDS:
+            if size < 24:
+                raise MachOError(f"dylib load command {index} is shorter than its header")
+            offset = struct.unpack_from("<I", data, position + 8)[0]
+            if not 24 <= offset < size:
+                raise MachOError(f"dylib load command {index} names its dependency outside itself")
+            raw = data[position + offset:position + size]
+            names.append(raw.split(b"\0", 1)[0].decode("utf-8", "replace"))
         position += size
-    return None
+    return names
+
+
+def runtimes_requiring(app, framework_name):
+    """(the embedded frameworks, by name, whose load commands require
+    `<framework_name>.framework/<framework_name>`, and those that cannot be
+    read as (name, reason))."""
+    wanted = f"/{framework_name}.framework/{framework_name}"
+    frameworks = app / "Frameworks"
+    found, unreadable = [], []
+    if not frameworks.is_dir():
+        return found, unreadable
+    for directory in sorted(frameworks.glob("*.framework")):
+        if directory.stem == framework_name:
+            continue
+        binary = directory / directory.stem
+        if not binary.is_file():
+            continue
+        try:
+            if any(name.endswith(wanted) for name in macho_dylibs(binary)):
+                found.append(directory.stem)
+        except MachOError as error:
+            unreadable.append((directory.stem, str(error)))
+    return found, unreadable
 
 
 def kernel_banner_releases(image):
@@ -730,12 +964,14 @@ def main(argv=None):
                         help="check the accepted Android release")
     parser.add_argument("--kernel", action="append", default=[], choices=sorted(KERNELS),
                         help="check an accepted kernel bundle (repeatable)")
+    parser.add_argument("--aot", action="store_true",
+                        help="check the AOT artifact and, with --app, the framework that packages it")
     parser.add_argument("--decision", default=None,
                         help=f"the release IDs the user decided to ship as they are "
                              f"(default: ${DECISION_ENV})")
     options = parser.parse_args(argv)
-    if not options.android_release and not options.kernel:
-        parser.error("name an artifact: --android-release or --kernel")
+    if not options.android_release and not options.kernel and not options.aot:
+        parser.error("name an artifact: --android-release, --kernel or --aot")
 
     repo = options.repository.resolve()
     decisions = parse_decisions(
@@ -754,6 +990,9 @@ def main(argv=None):
             covered += release_inputs.input_paths(repo / release_inputs.LIST_RELATIVE)
         except release_inputs.InputError:
             pass  # check_android reports the unreadable list
+    if options.aot:
+        covered += [release_artifact.ACCEPTED_DESCRIPTOR, ANDROID_DESCRIPTOR,
+                    *release_artifact.GENERATOR_INPUTS]
     for name in options.kernel:
         kernel = KERNELS[name]
         covered += [kernel["descriptor"], kernel["metadata"], *kernel["series"], *kernel["fragments"]]
@@ -775,6 +1014,8 @@ def main(argv=None):
         check_android(repo, report, staged, options.app)
     for name in options.kernel:
         check_kernel(repo, report, name, options.app)
+    if options.aot:
+        check_aot(repo, report, options.app)
     return report.finish()
 
 
