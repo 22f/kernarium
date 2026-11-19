@@ -2674,8 +2674,11 @@ class Watch:
                     "nothing else was started")
         if why == "stopped":
             return ("stopped",)
-        if after:
-            return ("approval", self.approval_text(after, launch))
+        # What was latched before the cleanup stands, whatever the last scan
+        # shows (as in `transition`): the record blocks the next watch.
+        refusal = after or risk
+        if refusal:
+            return ("approval", self.approval_text(refusal, launch))
         if why == "exited":
             ended = ("after its test started" if scan.test_started
                      else "before the runner came up")
@@ -2687,6 +2690,10 @@ class Watch:
                     or host_state(self.options, timeout=WATCH_READ_WAIT) is None):
                 return ("retry", detail)
             return ("failed", detail)
+        if scan.test_started:
+            return ("failed", "the runner came up and its test started, but the "
+                    f"heartbeat did not advance within {WATCH_RUNNER_WAIT} s; "
+                    f"log {launch.log_path}")
         return ("failed", f"the runner did not come up within {self.options.wait} s; "
                 f"log {launch.log_path}")
 

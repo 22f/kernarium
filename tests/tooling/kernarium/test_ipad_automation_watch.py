@@ -1771,6 +1771,51 @@ class VerdictBoundaryTests(unittest.TestCase):
         self.assertTrue(all(timeout <= automation.WATCH_READ_WAIT
                             for _, timeout in reads[1:]), reads)
 
+    def overdue(self, test_start):
+        """`replace` of a launch whose runner came up and never serves, with
+        the first runner's test-start line `already` in the log, or arriving
+        (`during`) while the launch is ended. The exit code and the watch
+        record."""
+        log = Path(self.tmp.name) / "replacement.log"
+        log.write_text(automation.RUNNER_UP_LINE + "\n"
+                       + (automation.TEST_STARTED_LINE + "\n"
+                          if test_start == "already" else ""))
+        process = mock.Mock()
+        process.poll.return_value = None
+        launch = automation.Launch(process, log, "new")
+
+        def end(*args, **kwargs):
+            if test_start == "during":
+                with log.open("a") as stream:
+                    print(automation.TEST_STARTED_LINE, file=stream)
+            return automation.ENDED
+        with mock.patch.object(self.watch, "end_all", return_value=automation.ENDED), \
+                mock.patch.object(automation, "launch_host", return_value=launch), \
+                mock.patch.object(automation, "end_host", end):
+            code = self.watch.replace(self.reason)
+        return code, self.watch.record.data
+
+    def test_a_started_test_whose_heartbeat_never_advanced_is_not_a_runner_that_never_came_up(self) -> None:
+        # Rule (R6): the runner came up and its test started: nothing was asked
+        # of the device, so start-failed with no latch, and the record says what
+        # happened, not that the runner never came up.
+        code, record = self.overdue("already")
+        self.assertEqual(code, 5)
+        self.assertEqual(record["state"], automation.START_FAILED)
+        self.assertIsNone(self.watch.latch.read())
+        self.assertIn("heartbeat did not advance", record["detail"])
+        self.assertNotIn("did not come up", record["detail"])
+
+    def test_a_risk_latched_before_the_test_started_is_honoured_in_the_exit(self) -> None:
+        # Rule (R6): the first scan finds a runner that said nothing and
+        # latches "possible"; the test's start line arrives while the launch is
+        # ended. What was latched stands (the record blocks the next watch), so
+        # the watch ends as it does for any latched risk: needs-approval, exit 4.
+        code, record = self.overdue("during")
+        self.assertEqual(code, automation.EXIT_NEEDS_APPROVAL)
+        self.assertEqual(record["state"], automation.NEEDS_APPROVAL)
+        self.assertEqual(self.watch.latch.read()["kind"], "possible")
+
     def finished(self, lines, unreadable=False, device_answers=True):
         """What `finish` says of a launch whose xcodebuild exited, with a log of
         `lines`."""
