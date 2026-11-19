@@ -19,6 +19,7 @@ enum AddToHomePreview {
     private static let requestScreens: Set<String> = [
         "add-home-boot", "add-home-pill", "add-home-wait-update", "add-home-wait-space",
         "add-home-banner-gone", "add-home-banner-slow", "add-home-banner-recovery", "add-home-banner-setup",
+        "add-home-banner-tool",
         "add-home-alert-no-android", "add-home-flow-cold", "add-home-flow-warm", "add-home-flow-gone",
     ]
 
@@ -89,7 +90,7 @@ enum AddToHomePreview {
         switch screen {
         case "add-home-flow-cold", "add-home-flow-warm", "add-home-flow-gone":
             scripted.readyDelay = freeze ? .seconds(3600) : .milliseconds(1800)
-        case "add-home-banner-gone", "add-home-banner-slow", "add-home-banner-setup":
+        case "add-home-banner-gone", "add-home-banner-slow", "add-home-banner-setup", "add-home-banner-tool":
             scripted.readyDelay = .milliseconds(300)
         default:
             scripted.readyDelay = .seconds(3600)
@@ -118,6 +119,10 @@ enum AddToHomePreview {
             model.phase = .running(.normal)
         case "add-home-banner-slow":
             scripted.tool.answer(open: app.component, .failed)
+            model.phase = .running(.normal)
+        case "add-home-banner-tool":
+            // The image has no tool that opens apps (an older one): no Try again.
+            scripted.tool.answer(open: app.component, .unavailable)
             model.phase = .running(.normal)
         case "add-home-pill", "add-home-flow-warm":
             model.phase = .running(.normal)

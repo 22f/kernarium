@@ -265,6 +265,13 @@ final class AddToHomeUITests: XCTestCase {
         app = launch("add-home-banner-setup")
         XCTAssertTrue(app.staticTexts["Android is still being set up"].waitForExistence(timeout: 20))
         XCTAssertTrue(app.buttons["Try again"].exists)
+        app.terminate()
+
+        // An Android without the tool: the short title, the approved text, no Try again.
+        app = launch("add-home-banner-tool")
+        XCTAssertTrue(app.staticTexts["Can\u{2019}t open \u{201C}Comet Hop\u{201D}"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["This version of Android is too old to open apps directly. Update Andarium, then open the app again."].exists)
+        XCTAssertFalse(app.buttons["Try again"].exists, "an Android without the tool has no Try again")
     }
 
     @MainActor

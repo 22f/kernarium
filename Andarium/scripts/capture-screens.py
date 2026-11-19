@@ -446,6 +446,7 @@ SHOTS: list[Shot] = [
     s("add-home-banner-slow", "Add to Home Screen", "add-home-banner-slow", "The banner when Android took too long: Try again and the close mark.", dark=True),
     s("add-home-banner-recovery", "Add to Home Screen", "add-home-banner-recovery", "The banner when Android is in recovery mode."),
     s("add-home-banner-setup", "Add to Home Screen", "add-home-banner-setup", "The banner when Android's first-run setup is not finished: it names the app and offers Try again."),
+    s("add-home-banner-tool", "Add to Home Screen", "add-home-banner-tool", "The banner when the installed Android has no tool that opens apps: a short title with the app, the text that says to update Andarium, and no Try again."),
     s("add-home-alert-no-android", "Add to Home Screen", "add-home-alert-no-android", "An icon used when there is no virtual machine (erased, or never set up): the alert that the app is not in Android and the icon works again once it is installed in a new virtual machine."),
     feedback("feedback-file-refused-four", "feedback-file-refused-four", "The alert for four items that were not added for four different reasons: not enough space, a folder or a package, an empty file and a file that could not be read, a line each.", dark=True),
     feedback("feedback-file-apk", "feedback-file-apk", "One pick of an ordinary file and an APK: the file is attached, and the alert says that mail services reject a message that carries an APK, so the APK was not attached, and asks for a download link in the details."),
