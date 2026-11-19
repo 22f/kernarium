@@ -425,13 +425,17 @@ final class AndroidPlatform implements AppsCommand.Platform {
     /**
      * SIGKILL for a child that SIGTERM did not end. This libcore's {@code Process.destroyForcibly()} is
      * {@code destroy()} (SIGTERM) again and the class has no {@code pid()}, so the pid is read from the child's
-     * own field and {@code android.os.Process.killProcess} sends the signal (the child is the shell user's own, and
-     * it has not been reaped, so the pid is still its). A failure here is not reported: the wait that follows says
-     * whether the child is gone.
+     * own field and {@code android.os.Process.killProcess} sends the signal. This libcore has no handle bound to the
+     * child, so the child must be alive right before the signal (a reaped child's number may be another's); the
+     * reaper running between that check and the signal is the one window left, as it is for the JDK's own destroy. A
+     * failure here is not reported: the wait that follows says whether the child is gone.
      */
     private static final class KillByPid implements ChildProcess.Kill {
         @Override
         public void kill(Process process) throws Exception {
+            if (!process.isAlive()) {
+                return; // a number that was the child's may be another process's now
+            }
             java.lang.reflect.Field field = process.getClass().getDeclaredField("pid");
             field.setAccessible(true);
             android.os.Process.killProcess(field.getInt(process));

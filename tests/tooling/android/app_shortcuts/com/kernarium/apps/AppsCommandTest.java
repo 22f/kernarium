@@ -1229,6 +1229,63 @@ public final class AppsCommandTest {
         return file;
     }
 
+    /**
+     * A child whose answers to isAlive are scripted. The first (the check on entry) is true; the second, which the
+     * terminate code asks right before it would ask for a kill, is {@code aliveBeforeKill}; the rest are
+     * {@code aliveAfter}. The timed wait never says the child ended: it says so false, or is interrupted.
+     */
+    private static final class ScriptedChild extends Process {
+        private final boolean interrupted;
+        private final boolean[] answers;
+        private int asked;
+
+        ScriptedChild(boolean interrupted, boolean aliveBeforeKill, boolean aliveAfter) {
+            this.interrupted = interrupted;
+            this.answers = new boolean[] {true, aliveBeforeKill, aliveAfter};
+        }
+
+        @Override
+        public boolean isAlive() {
+            return answers[Math.min(asked++, answers.length - 1)];
+        }
+
+        @Override
+        public boolean waitFor(long timeout, java.util.concurrent.TimeUnit unit) throws InterruptedException {
+            if (interrupted) {
+                throw new InterruptedException("scripted");
+            }
+            return false;
+        }
+
+        @Override
+        public java.io.OutputStream getOutputStream() {
+            return java.io.OutputStream.nullOutputStream();
+        }
+
+        @Override
+        public java.io.InputStream getInputStream() {
+            return java.io.InputStream.nullInputStream();
+        }
+
+        @Override
+        public java.io.InputStream getErrorStream() {
+            return java.io.InputStream.nullInputStream();
+        }
+
+        @Override
+        public int waitFor() {
+            return 0;
+        }
+
+        @Override
+        public int exitValue() {
+            return 0;
+        }
+
+        @Override
+        public void destroy() { }
+    }
+
     /** A JVM's own kill, which is a real SIGKILL there (on the target libcore it is not: AndroidPlatform sends one by pid). */
     private static final ChildProcess.Kill JDK_KILL = Process::destroyForcibly;
 
@@ -1290,6 +1347,23 @@ public final class AppsCommandTest {
             }
             same(1, asked[0], "it ignored SIGTERM: one kill");
             check(!alive(stubborn), "and it is gone");
+        });
+        row("child-is-not-signalled-after-it-has-ended", () -> {
+            // The child ends between the timed wait and the kill (its pid may be another process's by then): no kill is
+            // asked, on the deadline path and on the interrupted one. A child that stays alive is asked once.
+            int[] asked = new int[1];
+            ChildProcess.Kill counting = process -> asked[0]++;
+            same(true, ChildProcess.terminate(new ScriptedChild(false, false, false), counting, 50), "ended in the wait: gone");
+            same(0, asked[0], "ended during the wait: no kill");
+            same(true, ChildProcess.terminate(new ScriptedChild(true, false, false), counting, 50), "ended before the interrupt was seen");
+            Thread.interrupted(); // the interrupted path sets the flag again
+            same(0, asked[0], "ended before the interrupt was seen: no kill");
+            same(false, ChildProcess.terminate(new ScriptedChild(false, true, true), counting, 50), "alive after the kill: not gone");
+            same(1, asked[0], "alive at the deadline: one kill");
+            asked[0] = 0;
+            same(false, ChildProcess.terminate(new ScriptedChild(true, true, true), counting, 50), "alive when interrupted: not gone");
+            Thread.interrupted();
+            same(1, asked[0], "alive when interrupted: one kill");
         });
         row("child-that-survives-the-kill-is-reported", () -> {
             // A kill that does not work, as destroyForcibly is not one on the target libcore: the final wait says so.

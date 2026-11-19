@@ -41,7 +41,8 @@ final class ChildProcess {
      * The kill for a child that SIGTERM did not end. It is the platform's: on the target libcore
      * {@code Process.destroyForcibly()} calls {@code destroy()} (SIGTERM) again and the class has no
      * {@code pid()}, so the platform sends SIGKILL by the child's pid. Whether the child is gone is judged by
-     * waiting for it, not by what this call says.
+     * waiting for it, not by what this call says. It is asked only of a child that is still alive when it is asked:
+     * a number that was a reaped child's may be another process's by then.
      */
     interface Kill {
         void kill(Process process) throws Exception;
@@ -117,21 +118,24 @@ final class ChildProcess {
     }
 
     /**
-     * Ends the child, if it is running: SIGTERM and a wait, then the kill and a wait (a bounded time each).
+     * Ends the child, if it is running: SIGTERM and a wait, then the kill and a wait (a bounded time each). The kill
+     * is not asked of a child that ended during the wait, here or after an interrupt: its pid may be another's.
      * Returns whether the child is gone. The streams are closed.
      */
-    private static boolean terminate(Process process, Kill kill, long graceMillis) {
+    static boolean terminate(Process process, Kill kill, long graceMillis) {
         try {
             if (process.isAlive()) {
                 process.destroy();
-                if (!process.waitFor(graceMillis, TimeUnit.MILLISECONDS)) {
+                if (!process.waitFor(graceMillis, TimeUnit.MILLISECONDS) && process.isAlive()) {
                     kill(process, kill);
                     process.waitFor(graceMillis, TimeUnit.MILLISECONDS);
                 }
             }
             return !process.isAlive();
         } catch (InterruptedException interrupted) {
-            kill(process, kill);
+            if (process.isAlive()) {
+                kill(process, kill);
+            }
             Thread.currentThread().interrupt();
             return !process.isAlive();
         } finally {
