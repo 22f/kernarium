@@ -273,7 +273,14 @@ extension AppModel {
 
     /// The boot reached Android: a request that was starting opens now.
     func androidAppsBootFinished(recovery: Bool) {
-        let effect = androidApps.open.androidIsUp(recovery: recovery, now: Date())
+        let state = androidApps
+        // The wait for Home's first resume is for a request that began the
+        // boot, or arrived while it ran, when the launcher may not be up yet:
+        // it keeps its look. With none waiting, Android is past its boot, and
+        // a request that comes later (with some app in front, the ordinary
+        // case) does not wait for Home.
+        if !recovery, state.open.pending?.stage != .starting { state.homeReached = true }
+        let effect = state.open.androidIsUp(recovery: recovery, now: Date())
         performAndroidAppEffect(effect)
         if !recovery { refreshAndroidAppsAtStart() }
     }

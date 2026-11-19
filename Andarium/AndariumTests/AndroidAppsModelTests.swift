@@ -786,6 +786,49 @@ final class AndroidAppsModelTests {
         #expect(rig.tool.opened == [comet.component, inkleaf.component])
     }
 
+    @Test func theFirstOpenOfARunPastItsBootDoesNotWaitForHome() async throws {
+        let rig = try rig(phase: .running(.normal))
+        rig.state.startDelay = .seconds(3600)
+        rig.scripted.requiresHomeResumed = true
+        // An app is in front, and no request of this run has asked anything: the run's boot completed, nobody waited for it.
+        rig.scripted.homeInFront = false
+        rig.model.androidAppsBootFinished(recovery: false)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually(3) { rig.tool.opened == [comet.component] }, "the first open launches without waiting for Home")
+        #expect(rig.state.open.banner == nil)
+        #expect(rig.scripted.homeReachedAsked == [true])
+        // A new run has not been through its boot: it starts unreached again.
+        rig.model.androidAppsRunEnded()
+        #expect(!rig.state.homeReached)
+        rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
+        #expect(await eventually(3) { rig.state.open.banner?.failure == .tookTooLong })
+        #expect(rig.scripted.homeReachedAsked == [true, false])
+        #expect(rig.tool.opened == [comet.component])
+    }
+
+    @Test func aRequestThatStartedTheBootStillWaitsForHomesFirstResume() async throws {
+        let rig = try rig(phase: .home, plan: .normal)
+        rig.state.startDelay = .seconds(3600)
+        rig.scripted.requiresHomeResumed = true
+        rig.scripted.homeInFront = false
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(rig.state.open.pending?.stage == .starting)
+        // The boot it started completes; the launcher is not up (something else is in front).
+        rig.model.phase = .running(.normal)
+        rig.model.androidAppsBootFinished(recovery: false)
+        #expect(await eventually(3) { rig.state.open.banner?.failure == .tookTooLong }, "the look for Home was kept for it")
+        #expect(rig.tool.opened.isEmpty)
+        #expect(rig.scripted.homeReachedAsked == [false])
+        // With Home resumed the same request launches, and the run has seen Home: the next one does not look.
+        rig.scripted.homeInFront = true
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually(3) { rig.tool.opened == [comet.component] })
+        rig.scripted.homeInFront = false
+        rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
+        #expect(await eventually(3) { rig.tool.opened == [comet.component, inkleaf.component] })
+        #expect(rig.scripted.homeReachedAsked == [false, false, true])
+    }
+
     @Test func aLaunchAlreadySentIsNotSentAgainByAPauseAndAResume() async throws {
         let rig = try rig(phase: .running(.normal))
         // The command is out and its reply is slow.
