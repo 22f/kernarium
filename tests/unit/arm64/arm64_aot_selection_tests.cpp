@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* Whether the ahead-of-time component is on is decided once per process, so
- * each case runs in a process of its own: the parent starts this program
+/* Whether the ahead-of-time component is on is decided by each run of a
+ * process (a restart decides again), so each case runs in a process of its
+ * own: the parent starts this program
  * again with the case named and the environment the case states, and the
  * child answers with its exit status. The component is on by default for the
  * release its blob was made from; the environment turns it off, a launch's
@@ -196,16 +197,86 @@ int an_undecided_process_is_off()
 #endif
 }
 
-int a_late_change_is_refused()
+/* A run that starts again in the process decides again. The executors of a
+ * run read the answer once, when they are made, so the first run's executor
+ * keeps what it was made with and the next run's is made with the new
+ * answer. */
+int a_restart_with_the_same_release_stays_on()
 {
 	const auto release = same_release();
 	require(aot::select(AotSelection::automatic, &release));
-	require(aot::enabled());
-	/* The same word is kept, a different one cannot be. */
+	uml::cpu::arm64::gadgets::GadgetExecutor first;
+	require(first.aot_selected());
 	require(aot::select(AotSelection::on, &release));
 	require(aot::select(AotSelection::automatic, &release));
-	require(!aot::select(AotSelection::off, &release));
+	uml::cpu::arm64::gadgets::GadgetExecutor second;
+	require(second.aot_selected());
+	return 0;
+}
+
+/* The release changed under a launch that began on the component: under
+ * `automatic` the next run is not a failure, it runs on the engine, and none
+ * of its executors enters the blob. */
+template<AotRelease (*Release)()>
+int a_restart_with_another_release_runs_on_the_engine()
+{
+	const auto release = same_release();
+	require(aot::select(AotSelection::automatic, &release));
+	uml::cpu::arm64::gadgets::GadgetExecutor first;
+	require(first.aot_selected());
+	const auto other = Release();
+	require(aot::select(AotSelection::automatic, &other));
+	require(!aot::enabled());
+	uml::cpu::arm64::gadgets::GadgetExecutor second;
+	require(!second.aot_selected());
+	/* Nor does the run after it enter it before its release fits again. */
+	require(aot::select(AotSelection::automatic, &other));
+	uml::cpu::arm64::gadgets::GadgetExecutor third;
+	require(!third.aot_selected());
+	return 0;
+}
+
+/* A launch that insists on the component still does not start on a release
+ * the blob does not fit, whatever the process ran before. */
+int a_restart_that_insists_on_another_release_fails()
+{
+	const auto release = same_release();
+	require(aot::select(AotSelection::on, &release));
+	const auto other = other_system();
+	require(!aot::select(AotSelection::on, &other));
+	/* The refusal decided nothing: the process still runs it for this one. */
 	require(aot::enabled());
+	require(aot::select(AotSelection::on, &release));
+	return 0;
+}
+
+/* A process that ran without the component does not turn it on later: a run
+ * under `automatic` that the blob fits again runs on the engine, and one that
+ * insists on it does not start. */
+int a_restart_after_a_mismatch_stays_on_the_engine()
+{
+	const auto release = same_release();
+	const auto other = other_manifest();
+	require(aot::select(AotSelection::automatic, &other));
+	require(!aot::enabled());
+	require(aot::select(AotSelection::automatic, &release));
+	require(!aot::enabled());
+	uml::cpu::arm64::gadgets::GadgetExecutor executor;
+	require(!executor.aot_selected());
+	require(!aot::select(AotSelection::on, &release));
+	require(!aot::enabled());
+	return 0;
+}
+
+/* A launch's own `off` is per run too. */
+int a_restart_that_says_off_runs_on_the_engine()
+{
+	const auto release = same_release();
+	require(aot::select(AotSelection::on, &release));
+	require(aot::select(AotSelection::off, &release));
+	require(!aot::enabled());
+	require(aot::select(AotSelection::automatic, &release));
+	require(!aot::enabled());
 	return 0;
 }
 
@@ -243,7 +314,20 @@ const Case cases[]{
 	{"release_launch_selects_executor", nullptr,
 		a_release_launch_is_on_for_an_executor},
 	{"undecided_is_off", nullptr, an_undecided_process_is_off},
-	{"late_change", nullptr, a_late_change_is_refused},
+	{"restart_same_release_stays_on", nullptr,
+		a_restart_with_the_same_release_stays_on},
+	{"restart_other_id_runs_on_the_engine", nullptr,
+		a_restart_with_another_release_runs_on_the_engine<other_id>},
+	{"restart_other_system_runs_on_the_engine", nullptr,
+		a_restart_with_another_release_runs_on_the_engine<other_system>},
+	{"restart_other_manifest_runs_on_the_engine", nullptr,
+		a_restart_with_another_release_runs_on_the_engine<other_manifest>},
+	{"restart_insisting_on_another_release_fails", nullptr,
+		a_restart_that_insists_on_another_release_fails},
+	{"restart_after_a_mismatch_stays_on_the_engine", nullptr,
+		a_restart_after_a_mismatch_stays_on_the_engine},
+	{"restart_that_says_off_runs_on_the_engine", nullptr,
+		a_restart_that_says_off_runs_on_the_engine},
 	{"late_on_after_off", "1", a_late_on_is_refused_after_off},
 };
 

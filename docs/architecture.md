@@ -663,8 +663,11 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   the release the blob was made from (Release, below). `DARWIN_UML_AOT=0`
   in the environment, or `--aot=off` on the launch, runs the engine alone;
   `--aot=on` (or `--aot`) fails a launch whose build has none, and the launch's
-  word beats the environment. The choice is made once, when the first executor
-  is made, and before any per-thread table exists. The App Store runtime
+  word beats the environment. Each run makes the choice before its first
+  executor and any per-thread table exist; a restart in the same process
+  decides again, and a release the blob no longer fits runs on the engine.
+  A process that ran without the component does not turn it on later. The
+  App Store runtime
   reads no environment for it. An archive
   configuration (App Store, TestFlight) carries the component only when
   `accepted-aot.env` sets `LINEAGE24_ACCEPTED_AOT_ARCHIVES` to `yes`: the

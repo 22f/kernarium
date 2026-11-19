@@ -1005,16 +1005,33 @@ bool select(::uml::cpu::AotSelection selection,
 	case AotSelection::off:
 		break;
 	}
-	auto expected = -1;
-	if (g_state.compare_exchange_strong(expected, wanted ? 1 : 0,
-		    std::memory_order_relaxed)) {
+	/* The decision of this run, taken before any executor of it exists (the
+	 * executors read it once, when they are made, so a run's own executors
+	 * all agree). A run that restarts in the process decides again: one the
+	 * blob no longer fits is off, never entering it. A process that ran
+	 * without the component does not turn it on later: a launch under
+	 * `automatic` then runs on the engine, which is always correct, and one
+	 * that insists on it does not start. */
+	auto state = g_state.load(std::memory_order_relaxed);
+	for (;;) {
+		if (state < 0) {
+			if (!g_state.compare_exchange_weak(state, wanted ? 1 : 0,
+				    std::memory_order_relaxed))
+				continue;
 #if UML_AOT_DIAGNOSTICS
-		if (wanted)
-			start_reporter();
+			if (wanted)
+				start_reporter();
 #endif
-		return true;
+			return true;
+		}
+		if ((state != 0) == wanted)
+			return true;
+		if (wanted)
+			return selection != AotSelection::on;
+		if (g_state.compare_exchange_weak(state, 0,
+			    std::memory_order_relaxed))
+			return true;
 	}
-	return (expected != 0) == wanted;
 }
 
 void note_refusal(Refusal reason) noexcept

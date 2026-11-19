@@ -33,10 +33,11 @@ namespace uml::cpu {
 /* A launch's word on ahead-of-time code (cpu/arm64/aot) and the release it
  * boots (null when the guest is not an Android release): false when it cannot
  * be kept, which is `on` for a build or a framework without the component,
- * for a release the framework was not made from (or none), or any change once
- * an executor exists. Before the run's first executor; `automatic` is on for
- * the release the framework was made from unless the environment says
- * DARWIN_UML_AOT=0, and off for any other. */
+ * for a release the framework was not made from (or none), or in a process
+ * that already runs without it. Before each run's first executor;
+ * `automatic` is on for the release the framework was made from unless the
+ * environment says DARWIN_UML_AOT=0, and off for any other. A later run of
+ * the process that the framework no longer fits is off, never a failure. */
 [[nodiscard]] bool select_aot(AotSelection selection,
 	const AotRelease *release) noexcept;
 
