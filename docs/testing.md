@@ -1043,6 +1043,33 @@ packages, install times and processes, and `android17-oldapp-switch-command`
 (tooling; skipped without a JDK) runs the command's rule, listing, cleanup,
 lock file (on real files), writes and exit statuses on a plain JVM; the Android
 calls need a built image.
+`android-app-shortcuts` (integration) registers when
+`UML_ANDROID_APP_SHORTCUTS_RELEASE` names a release built with the launcher-application
+command ([README](../android/lineage-24/README.md#launcher-applications)): as the adb shell
+user, `kernarium_apps` is in the image and its `digest` and `list` carry one header block (the foreground
+user, the system's first locale, a count that matches), with rows in order, names in the grammar and
+labels that are safe and within the bounds; Settings is listed as built in, and the probe
+application (`appsprobe_apk.py`: two launcher activities, one with a hostile label and one with a
+label over the bound, a launcher activity that is not exported and an exported one with no launcher
+filter) with the escaped and the cut labels and neither of the other two; `icons` answers records
+whose length and SHA-256 check out, decoded to pictures that are not blank, adaptive ones with
+opaque corners, `noicon` for the probe, `missing` for what is not an entry, in the order asked, and
+nine components are status 64; `launch` makes the probe's activity the resumed one (and again when
+it is open) and refuses with status 2 and no output the not exported and no-filter activities, a
+built-in application's other activity, a package that is not installed, a disabled application and
+every hostile argument, none of which runs (a marker file stays absent); usage errors are status
+64; the shell user's data directory is unchanged and no new denial of the shell domain reaches
+the log; and the digest changes with an install, an update in place (whose icon keys alone
+change) and a disabled application, and returns to its earlier value when the application is
+removed. `android17-app-shortcuts-command` (tooling; skipped without a JDK) runs the command's
+grammar, the labels' escaping and bounds, the listing, digest and icon keys, every answer's
+framing read back by a parser of its own, the icon records, the launch's refusals and argument
+vector, and the statuses on a plain JVM, then again with one rule removed at a time (the escaping,
+a bound, the launch refusal, the grammar, the digest's inputs, the PNG checks, the deadline),
+where the rows it names must fail; it also checks the image's wiring and that the sources write
+and open nothing. `android17-app-shortcuts-runner` (tooling; skipped without keytool and
+jarsigner) runs the probe packages, the strict parsers and every step against a scripted guest
+that differs one way at a time; the Android calls need a built image.
 `android17-sms-service` (tooling; skipped without a JDK) runs the text message
 service on a plain JVM: the PDUs it builds, read back with a parser of its own
 and the JDK's `UTF-16` decoder, the one Android applies to a UCS-2 message, which
