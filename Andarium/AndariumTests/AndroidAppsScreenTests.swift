@@ -20,7 +20,10 @@ import UIKit
 /// a run without it finds none and the tests say so.
 @Suite(.serialized)
 @MainActor
-struct AndroidAppsScreenTests {
+final class AndroidAppsScreenTests {
+    init() async { await AndroidAppsHubLock.shared.acquire() }
+    deinit { Task { await AndroidAppsHubLock.shared.release() } }
+
     private let host = HostDevice(
         name: "iPhone", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 41_000_000_000)
     private let comet = ScriptedAndroidApps.installedApps[0]

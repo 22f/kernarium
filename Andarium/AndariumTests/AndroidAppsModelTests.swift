@@ -26,7 +26,10 @@ final class RecordingAppsIndex: AndroidAppsSearchIndexing {
 /// a stub and the tool is the played one (`ScriptedAndroidApps`).
 @Suite(.serialized)
 @MainActor
-struct AndroidAppsModelTests {
+final class AndroidAppsModelTests {
+    init() async { await AndroidAppsHubLock.shared.acquire() }
+    deinit { Task { await AndroidAppsHubLock.shared.release() } }
+
     private let host = HostDevice(
         name: "iPhone", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 40_000_000_000)
     private let system = SystemInfo(
