@@ -796,6 +796,227 @@ cannot hold has focused tests whose headers say what they check
 AArch32 JIT tests exist only on macOS). A guest `SIGILL` is a correctness
 blocker in every one of them.
 
+- `arm64-aot-differential` exists only in a build configured with
+  `UML_AOT_IMAGE`, `UML_AOT_FSCK_EROFS` and `UML_AOT_DIAGNOSTICS`, and so does
+  `arm64-aot-reporter`: a unit tree configured without them has neither row,
+  and its `check-unit` says nothing about ahead-of-time code. It runs
+  functions of every rewritten library through the gadget engine with and
+  without ahead-of-time code and requires the same guest state, memory,
+  ending event and exception syndrome, and the same registers, flags, vector
+  registers and memory at every fault. The unhappy paths are part of it:
+  single step, the preemption bound, two load biases, other or changed bytes
+  (including one changed bit anywhere in a page whose 64-bit digest is made
+  to match), pages that appear or change after their neighbours were
+  verified, edges
+  into such pages, more code changes than the history keeps, more libraries
+  than the binder holds, tagged pointers, page crossings, forced refills and
+  a shootdown by another thread while rewritten code loops, and another
+  address space of the guest that changes the bytes of a frame whose page
+  rewritten code has run, by a store and code synchronization and by the
+  kernel's write, which names the address or the frame it holds. The runs use the
+  product's code layout; `UML_AOT_COUNT_RETIRED=ON` rewrites the libraries to
+  count each instruction an entry runs, which checks the budget's bound
+  exactly (`arm64-aot-tools` builds that layout on the generated library in
+  every run, so it cannot stop assembling unnoticed).
+  A generated library holds the forms of the ordered, atomic, memory copy and
+  set, and Advanced SIMD structure classes. Each form runs from random
+  states; compare-and-swap runs with every outcome and permission; loops that
+  update one cell run from rewritten code and the engine on two vCPUs; copies
+  and sets also run from directed states, including the epilogue started
+  alone in states a signal handler can leave; and structure accesses run over
+  a page boundary with one page cached and the other not.
+  The boot image's OAT files are rewritten libraries like the others and run
+  in the same loops; a second generated file has their shape (no unwind
+  table, methods named by `.gnu_debugdata`, methods that touch) and holds each
+  kind of direct branch that reaches below its own first byte, into another
+  instance mapped lower, which a row runs against the engine.
+  A scan runs the engine from every word of every rewritten function and
+  requires that a word it rejects as an illegal instruction in every state is
+  one the rewriter leaves to it (the data a method's code holds, such as the
+  literal pools of compiled Java, is full of reserved encodings, and code is
+  entered at any word); `--words-only 1` runs the scan alone.
+  Admission and retry decisions are performance hints: rows warm them and
+  then change the text, restore it, and move the executor to another address
+  space, and the result must stay the engine's. Entering rewritten code must
+  not need more than a bounded part of the task stack the guest kernel's
+  threads run on (the size the kernel configuration gives, which the build
+  reads from it): a row runs the paths on a painted stack, holds the
+  high-water mark to a budget, and requires the runtime's own sampler to
+  agree with it. The guest runner requires the sample, rejects an unsampled
+  report and a size that is not the kernel's, and bounds how much deeper
+  than the start of its run the runtime went.
+  Every state rewritten code returns the engine at, every fault and the end
+  of a run lie, in order, on the path of the same run one instruction at a
+  time (registers, flags, FPCR and FPSR, thread pointer, vector registers
+  and memory; a comparison with one field changed in turn must fail). An
+  interrupt token flipped during a native loop through the engine adapter,
+  as the stop flag or the sequence word, ends the run on that path within
+  one block of the flip, and the run then goes on to the end the engine
+  alone reaches. A breakpoint written into the text and published through
+  the generation bridge keeps the page from being entered and stops at the
+  instruction in the engine's state, also when it is published while a vCPU
+  runs the loop, and rewritten code is entered again once the word is back.
+  Random cases start with cumulative FPSR flags set and, one in eight, with
+  the floating-point state not loaded yet; a change published in the dispatch
+  window comes from the vCPU's own thread and from a second one; and the
+  engine adapter's choice between the plain and the rewritten-code loop is
+  made once, when its executor is made.
+  `arm64-aot-tools` checks the generator's encoders, classifier, byte census
+  and fixture layout, including which forms are left to the engine.
+- `arm64-aot-runtime-product` checks that the product compilation of the AOT
+  runtime holds none of the diagnostics or test switches, and
+  `memory-product-carries-no-count-audit` that the product compilation of the
+  static MMU holds none of the count audit a diagnostics build links in a
+  second compilation. The unit tree builds that compilation as a probe nothing
+  links, so the gate also runs `memory-audit-compilation-fails-packaging` (the
+  packaging check refuses it, by its own message) and
+  `memory-audit-symbols-are-refused` (it refuses every memory-layer name `nm`
+  reports for the audited objects and not for the product's).
+- `arm64-aot-guest-runner` drives the guest runner of the next test against
+  scripted guests: a complete pair of arms passes, and every failed or
+  incomplete one (an exit status, a missing or empty workload row, a probe
+  that skipped scenarios or recorded no faults, a product arm without
+  residency evidence) fails. `arm64-aot-debug-rows` does the same for the
+  debug rows on scripted protobuf tombstones and records: a moved frame, a
+  register that changes only with the component, an incomplete mode and a
+  tombstone that was there before the run fail, and only a field that two runs
+  of one engine already differ in is masked.
+  `arm64-aot-tombstone-pb` holds the tombstone reader to the wire format
+  (a truncated file, a length past its parent, an unknown wire type, a
+  singular field twice, a field of the wrong wire type, trailing bytes: each
+  fails), pins the field numbers the model reads, and holds the model to the
+  crashing thread's registers, the mapping list (any order, no overlap, every
+  name by its exact bytes), the pointer into the faulting mapping and the
+  stacks of different threads.
+  `arm64-aot-share-rows` does the same for the share rows' records and
+  counter bounds. `arm64-aot-records` holds the records the guest debug
+  program prints to their one reader: it decodes hand-written lines exactly
+  (every malformed number, text, place and record is refused), builds on the
+  host the header the program prints with and requires the same line as the
+  Python encoder for the same value (names of any bytes, layouts of any number
+  of shapes), and runs the program's own maps reading through the runner for a
+  text that does not fit its buffer (the row fails).
+- `aot-guest-workloads` (integration, opt-in like the other Android guest
+  tests: it exists where `UML_AOT_IMAGE` and the Android launcher target do)
+  boots the release twice, without and with `DARWIN_UML_AOT=1`, runs the
+  covered library families' workloads three times each (a Java command
+  among them, which runs the boot image's compiled code), the guest probe
+  (faults inside rewritten libz code, text patched at run time), the debug
+  rows and the share rows, and requires every command to succeed with
+  identical output; `run_aot_guest.py` lists what each part judges. With
+  `UML_AOT_DIAGNOSTICS` the AOT arm must also have entered the main boot
+  oats when the framework translates boot code.
+  The debug rows (`aot_guest_debug.cpp`, `debug_rows.py`) compare what a
+  debugger and the crash reporter see: tombstones of crashes in rewritten
+  libz and libc, and a tracer's registers, breakpoints and steps. The program
+  runs under the `ADDR_NO_RANDOMIZE` personality, and a register that points
+  into a mapping is compared by the file (its base name in the program's own
+  records, its whole path in a tombstone) or mapping and the offset in it (an
+  unnamed mapping by its size, its protection, its place among the unnamed
+  mappings of that shape, lowest address first, and how many there are),
+  because the image's userspace still places libraries and stacks at random.
+  What the program prints is records, one field per line (the kind, the
+  field, a type and the value, tab-separated; every byte of a text outside a
+  small safe set is written `%xx`, so a mapping name of any bytes is one
+  value); `records.py` is the one reader, and accepts a line only if encoding
+  what it read gives the line back and a record only if it has every field of
+  its kind once, in order. A tombstone is read from the protobuf file the crash
+  reporter writes beside the text one (`tombstone_NN.pb`, taken out of the
+  guest in base64 with its size and SHA-256 checked, and chosen by the process
+  id the program's shell says first among the files that are new since a
+  listing of the tombstone directory taken before the program ran): a
+  first-party strict reader of the wire
+  format (`protowire.py`) and a table of the field numbers the model reads
+  (`tombstone_pb.py`; the table follows the `tombstone.proto` of the source tree
+  the image is built from, and fields it does not list are skipped by wire type,
+  counted and reported on the row's line) build the same records, and a
+  register missing from the crashing thread, a mapping list that overlaps and a
+  file that ends before its last field fail. A pointer is located against the
+  file's own mapping list, put in address order, by the exact bytes of the
+  mapping's name; a thread's stack, whose name holds its thread id, is told
+  from the other stacks by its place among them (lowest address first) and
+  how many there are. Nothing in the comparison reads text. Records are compared
+  field by name, and the mask is a set of record kind and field pairs, never a
+  position in text. A pointer into an unnamed
+  mapping is proved over the whole record, field by name, or the row fails and
+  the field is never masked: every run compared must record it as a pointer
+  into mappings of one shape counted among the same number of them, and the
+  baselines must record it alike (equal counts are necessary, not sufficient,
+  for the same set of mappings); a pointer into one of several thread stacks
+  is held to the same rule. Mappings that share a name otherwise (a signal
+  stack, a heap region) are told apart by the offset in the mapping only. Only
+  a field that names nothing (a process id, a random value) may differ between
+  two runs of one engine, and few of them. A listed file is new if its name was
+  not listed or its size, modification time or SHA-256 differs from the listing
+  before the run; files are compared with their earlier selves and not with
+  the clock, so a step of the guest's clock moves none in or out, a name the
+  reporter reuses holds other bytes, and a tombstone of an earlier process of
+  the same number never stands for this run (the row fails when no new file
+  names the process); a file written again with the same bytes in the same
+  second is not told from the old one. That a file is whole rests on the
+  reporter having exited, the guest's own size and SHA-256 of the file, and
+  its last field (which the reporter writes last) being there; a file written
+  in another order is not proved whole by it.
+  Every error the program prints is a line of its own that begins with `FAIL`;
+  the runner rejects an output with `FAIL` anywhere and a line that is not a
+  whole record of the program's schema. The image is a user build, so
+  `debuggerd -b` and `kill -3` of a system process (which need root) are not
+  run.
+  The share rows (`aot_guest_share.cpp`, `share_rows.py`) run libz in many
+  processes: the read-only file system's library, a copy on the writable one,
+  a page copied by a write (in the children, or in their parent before they
+  are made), a protection that changed with and without a store, and memory
+  pressure. In a diagnostics build each mode states what the framework's
+  counts must show: verdicts reused for the file system's pages, a copied or
+  writable-file-system page refused and never shared, a page nothing wrote
+  never refused. The kernel's page cache does give up some of a covered
+  library's frames in an unrooted guest (under pressure, and to `fadvise` for
+  pages no process has mapped at that moment), but a read-only system file's
+  residency is observable only through the faults that reading it back takes:
+  for a file the caller neither owns, has a capability over, nor could open
+  for writing, `mincore` reports every page as resident and `cachestat`
+  refuses with `EPERM` (the guest's shell owns neither the system image's
+  files nor `libz.so`, and the owner and capability exceptions do not apply
+  to it). The `pressure` and `evict` rows print that count and
+  require the pages that stayed to share their verdicts, and `evict` also
+  requires that a file nothing maps loses its pages. The faults that read a
+  page of `libz.so` back across the two rows are printed as informational,
+  since whether the guest let a page go there is chance; the frame's last
+  departure and reuse are the reclaim row's and the memory layer's unit rows.
+  `--study-eviction` adds the `reclaim` row, for a guest kernel that treats
+  every caller as the owner of every file for the page cache (a study-only
+  change to `madvise(MADV_PAGEOUT)` and `mincore`; no artifact of it is
+  accepted or published). It evicts the library's pages from every address
+  space that maps them, three rounds over (a frame freed in one round can
+  come back to the page it held before), each round in an invocation of its
+  own so that the framework's counts can be read around it, asserts from
+  `mincore` that most of the pages left in each round and that reading them
+  back took faults, and requires the children which run the library
+  afterwards to have at least half as many pages verified by hash again, and
+  then to share those verdicts. The page cache's choice of frames is not
+  assumed: the framework counts the pages it hashed because the epoch of
+  their frame had moved (the table held that frame's verdict for the same
+  page under an older epoch), and every round after the first must have at
+  least one. The option needs `--share-program`, `--diagnostics` and
+  `--manifest` (the runner refuses it before a guest starts without them),
+  and the records of both arms must show the eviction whether or not
+  anything was counted, so on a stock kernel the row fails however the
+  runner was invoked.
+  Execution evidence exists only in a diagnostics build, where the libraries
+  the run names must have been entered, and where the memory layer recounts
+  the executable mappings of every physical-page record against the
+  executable words of every address space (every two seconds, holding them
+  all at once): a mismatch or an accounting anomaly fails the
+  run, and so does a run that never audited, a report without every result
+  of the audit, and one in which no exact audit finished after the guest's
+  work was done (every report carries the instant its counters were read and
+  the last exact audit it finished by sequence number; the runner takes the
+  number to exceed from a report read after the work ended, and waits for an
+  audit numbered above it). A product build has residency
+  evidence: the framework's text became resident in the emulator process
+  (`vmmap`, macOS) and was not with the component off. Reading the text
+  raises residency too, so that proves the framework was touched and not that
+  rewritten instructions ran. Speed is printed, not judged.
 - `arm64-instruction-corpus` runs the generated A64 corpus through both
   engines; the special records (native SME, absent features, the SM = 0 family,
   top-byte ignore, indirect-branch targets, compare-retry exclusives, native
@@ -930,7 +1151,7 @@ anywhere is a blocker. The candidate must show:
   `userdata`, a newer release keeps an older instance's apps and data and an
   older release on a newer instance is refused.
 - **Hardware video** (a guest started with `--video`). `MediaCodecList` lists
-  the four `c2.v4l2.*` codecs with no SELinux or seccomp denial; the encoder
+  the five `c2.v4l2.*` codecs with no SELinux or seccomp denial; the encoder
   and decoder classes of the media CTS modules pass on both ABIs through the
   hardware codecs, which the host's video activity log confirms, and the
   software `c2.android.*` results do not regress. Run the decoder performance
@@ -1096,8 +1317,10 @@ drops a leading byte order mark; the request's parser and the answers against th
 golden file the host's tests read too; the delivery record at each point where a
 request can end (a forced end, a failing file operation, a second process on its
 lock); and the host channel's server, frame and admission over stand-ins for the
-platform's socket classes. `Delivery` and `HostChannel` (the broadcasts, the inbox
-and the socket calls) need a built image.
+platform's socket classes. The stand-ins make public only what the platform's
+public API has, and a row lists it, so that a call of a hidden member fails there
+as it does in the image build. `Delivery` and `HostChannel` (the broadcasts, the
+inbox and the socket calls) need a built image.
 `android-vulkan-smoke` (integration) registers when `UML_ANDROID_VULKAN_SMOKE_RELEASE`
 names a release and runs the image's `kernarium_vk_ahb_import` in a guest: hardware
 buffers imported and read back, and the guest memory file descriptors
@@ -1242,6 +1465,14 @@ crash, a reboot and fifty kills. `--mode proof` (a userdebug build) writes a
 pending record and traces the order of the record's writes; the variants without
 Messaging or without an SMS provider, the adbd topic and the kernel configuration
 are options of the runner (`--list-rows` names each row and what it needs).
+`--mode delivery` is the smallest check of a built image and needs no probe, root
+or registration, but the SMS provider (it refuses `--variant no-provider`): D1 and
+then D2 send a plain message and messages with a one-time code, each handed over,
+answered and stored as exactly one new inbox row, and `com.android.phone`, waited
+for, keeps its pid; D3 reads the service's log: it listens, nothing was refused,
+and the platform warned of no hidden-API access and denied no vsock socket.
+With `--proof-image` it boots an unsigned proof image
+(manifest schema 0), which no installed-release reader takes, on a fresh instance.
 `android17-sms-runner` (tooling) runs its wire, record file, parsers and
 judgements without a guest.
 `android-oldapp` (integration) registers when `UML_ANDROID_OLDAPP_RELEASE`

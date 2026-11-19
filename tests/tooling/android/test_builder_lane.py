@@ -4466,10 +4466,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("video-codec-list-lacks-hevc-decoder",
              {"entries": {"VENDOR/etc/media_codecs_c2.xml": video_codec_list(
                  hardware_decoders={"c2.v4l2.avc.decoder": "video/avc"})}}),
+            ("video-codec-list-lacks-vp9-decoder",
+             {"entries": {"VENDOR/etc/media_codecs_c2.xml": video_codec_list(
+                 hardware_decoders={name: kind for name, kind in tool.VIDEO_DECODER_CODECS.items()
+                                    if name != "c2.v4l2.vp9.decoder"})}}),
             ("video-unapproved-hardware-decoder",
              {"entries": {"VENDOR/etc/media_codecs_c2.xml": video_codec_list(
                  hardware_decoders={**tool.VIDEO_DECODER_CODECS,
-                                    "c2.v4l2.vp9.decoder": "video/x-vnd.on2.vp9"})}}),
+                                    "c2.v4l2.vp8.decoder": "video/x-vnd.on2.vp8"})}}),
             ("video-decoder-without-adaptive-playback",
              {"entries": {"VENDOR/etc/media_codecs_c2.xml": video_codec_list(
                  decoder_features=("dynamic-color-aspects",))}}),
@@ -4519,11 +4523,15 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("video-unapproved-decoder-property",
              {"video_properties": {
                  **good_video_properties,
-                 "ro.vendor.v4l2_codec2.decoder.supported.vp9": "true"}}),
+                 "ro.vendor.v4l2_codec2.decoder.supported.av1": "true"}}),
             ("missing-video-decoder-property",
              {"video_properties": {
                  name: value for name, value in good_video_properties.items()
                  if not name.endswith("decoder.supported.h264")}}),
+            ("missing-video-vp9-decoder-property",
+             {"video_properties": {
+                 name: value for name, value in good_video_properties.items()
+                 if not name.endswith("decoder.supported.vp9")}}),
             ("video-decode-concurrency-property",
              {"video_properties": {
                  **good_video_properties,
@@ -5670,10 +5678,15 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              {"entries": {"VENDOR/etc/media_codecs_c2.xml": video_codec_list(
                  hardware_decoders={"c2.v4l2.avc.decoder": "video/avc"})}},
              "must name the hardware decoders"),
+            ("video-codec-list-lacks-vp9-decoder-cause",
+             {"entries": {"VENDOR/etc/media_codecs_c2.xml": video_codec_list(
+                 hardware_decoders={name: kind for name, kind in tool.VIDEO_DECODER_CODECS.items()
+                                    if name != "c2.v4l2.vp9.decoder"})}},
+             "must name the hardware decoders"),
             ("video-unapproved-hardware-decoder-cause",
              {"entries": {"VENDOR/etc/media_codecs_c2.xml": video_codec_list(
                  hardware_decoders={**tool.VIDEO_DECODER_CODECS,
-                                    "c2.v4l2.vp9.decoder": "video/x-vnd.on2.vp9"})}},
+                                    "c2.v4l2.vp8.decoder": "video/x-vnd.on2.vp8"})}},
              "must name the hardware decoders"),
             ("video-decoder-without-adaptive-playback-cause",
              {"entries": {"VENDOR/etc/media_codecs_c2.xml": video_codec_list(
@@ -5682,8 +5695,13 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("video-unapproved-decoder-property-cause",
              {"video_properties": {
                  **good_video_properties,
-                 "ro.vendor.v4l2_codec2.decoder.supported.vp9": "true"}},
+                 "ro.vendor.v4l2_codec2.decoder.supported.av1": "true"}},
              "outside the approved set"),
+            ("missing-video-vp9-decoder-property-cause",
+             {"video_properties": {
+                 name: value for name, value in good_video_properties.items()
+                 if not name.endswith("decoder.supported.vp9")}},
+             "lacks ro.vendor.v4l2_codec2.decoder.supported.vp9"),
             ("missing-video-decoder-property-cause",
              {"video_properties": {
                  name: value for name, value in good_video_properties.items()
