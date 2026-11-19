@@ -796,7 +796,13 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   packaging and the Andarium archive phase on a binary that linked a
   diagnostics compilation of either), and
   in no build does a vCPU thread do file I/O or allocate while it is inside
-  rewritten code.
+  rewritten code. The report says why the gadget engine ran instead of
+  rewritten code (the engine's dispatches by refusal or find result, with the
+  instructions it ran on covered pages), why a memory probe refilled the TLB
+  (an empty slot, another page of the same slot, a page access of the other
+  kind, a page-crossing access), and how many lookups a dispatch made; the
+  executor's counters exist only in a diagnostics tree. A per-site refill
+  histogram goes to a second file when the environment names one.
 
 Build and tests: `tools/aot/README.md`.
 
