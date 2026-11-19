@@ -1346,9 +1346,10 @@ is on. `AndariumCore/Adb` speaks the protocol.
   file says.
   A request from an icon follows the Start button's rules (`AppOpenPlanner`): a
   running Android opens the app once `AndroidAppReadiness` says it is ready
-  (setup finished for the foreground user; the home screen's first resume
-  observed once in the run, after which another app in front is no obstacle;
-  a launch that was sent is never sent again), a stopped one is started, and a
+  (setup finished for the foreground user; for a request that began the boot or
+  arrived during it, the home screen's first resume observed, and once the boot
+  is over another app in front is no obstacle; a launch that was sent is never
+  sent again), a stopped one is started, and a
   start that needs the person's answer (an unfinished update, too little space,
   a restore under way) waits for it in a card above Home's notice; a request
   during an erase is dropped. The request is in memory only and Don't open
