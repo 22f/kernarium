@@ -1913,6 +1913,65 @@ class VerdictBoundaryTests(unittest.TestCase):
         outcome, _ = self.await_replacement([10, 11], dead_from=2)
         self.assertNotEqual(outcome[0], "served")
 
+    def await_with_a_copy_that_spans_a_sleep(self, beats_after):
+        """`await_launch` of a replacement whose first copy of the heartbeat
+        (beat 10) is taken before the Mac sleeps and returns after it; the later
+        reads show `beats_after`, one each, the last repeating. Its supervisor
+        runs. The outcome and the reads made."""
+        process = mock.Mock()
+        process.poll.return_value = None
+        launch = automation.Launch(process, self.log, "replacement")
+        self.log.write_text(automation.RUNNER_UP_LINE + "\n"
+                            + automation.TEST_STARTED_LINE + "\n")
+        reads = []
+
+        def read(*args, **kwargs):
+            if not reads:
+                self.clock.suspend(3600)
+                beat = 10
+            else:
+                beat = beats_after[min(len(reads), len(beats_after)) - 1]
+            reads.append(beat)
+            return dict(self.state, nonce=launch.nonce, time=beat)
+        with mock.patch.object(automation, "host_state", read), \
+                mock.patch.object(automation, "end_host",
+                                  return_value=automation.ENDED):
+            return self.watch.await_launch(launch), reads
+
+    def test_a_copy_that_spans_a_sleep_is_not_kept_as_a_first_beat(self) -> None:
+        # Rule (R1): a copy begun before a sleep and finished after it can hold
+        # what the host wrote before the sleep. It is thrown away, and the next
+        # read is the first one: the host died in its sleep after writing beat
+        # 11, its supervisor is still up, and the frozen beat 11 is not served.
+        outcome, reads = self.await_with_a_copy_that_spans_a_sleep([11])
+        self.assertNotEqual(outcome[0], "served", reads[:8])
+
+    def test_a_host_that_beats_on_after_a_copy_that_spanned_a_sleep_is_served(self) -> None:
+        outcome, reads = self.await_with_a_copy_that_spans_a_sleep([11, 12])
+        self.assertEqual(outcome[0], "served")
+        self.assertEqual(reads, [10, 11, 12])
+
+    def test_a_sleep_during_the_process_lookup_makes_the_next_beat_no_progress(self) -> None:
+        # Rule (R1): the observer's turn looks at the host's processes and then
+        # copies its heartbeat; a sleep anywhere from the lookup through the copy
+        # makes that copy a first read, not progress. The runner died in the
+        # sleep after writing one more beat.
+        observer = self.watch.observer
+        observer.on_progress = self.watch.progress
+
+        def gone():
+            self.clock.suspend(3600)
+            return True
+        self.state["time"] += 1
+        with mock.patch.object(observer, "supervisor_gone", gone):
+            observer.check()
+        self.assertNotIn("alive_at", self.watch.record.data)
+        self.state["time"] += 1
+        self.clock.advance(6)
+        with mock.patch.object(observer, "supervisor_gone", lambda: True):
+            observer.check()
+        self.assertIn("alive_at", self.watch.record.data)
+
     def following(self, gap):
         """A watch that follows host A (it has an approval recorded) while host
         B's beats are read: A1, B10, then `gap`, then B11. The watch is stopped

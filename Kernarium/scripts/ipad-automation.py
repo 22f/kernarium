@@ -1963,16 +1963,20 @@ class HostObserver:
         if self.unknown_since is None:
             self.unknown_since = started
 
-    def pull(self):
-        """One read of the heartbeat."""
+    def pull(self, since=None):
+        """One read of the heartbeat. `since` is the (monotonic, wall) time at
+        which the turn that makes it began: a sleep anywhere from there to the
+        end of the copy (the lookup of the host's processes, then the copy) makes
+        the copy a first read."""
         started = self.clock.monotonic()
         wall = self.clock.time()
         self.last_pull = started
+        since_mono, since_wall = since or (started, wall)
         state = host_state(self.options)
         ended = self.clock.monotonic()
-        if abs((self.clock.time() - wall) - (ended - started)) > WATCH_CLOCK_GAP:
-            # The Mac slept during the read: its copy may be of what the host
-            # wrote before the sleep, and says nothing of the host now.
+        if abs((self.clock.time() - since_wall) - (ended - since_mono)) > WATCH_CLOCK_GAP:
+            # The Mac slept since the turn began: the copy may be of what the
+            # host wrote before the sleep, and says nothing of the host now.
             self.forget()
         if state is None:
             self.candidate = None
@@ -2028,7 +2032,7 @@ class HostObserver:
         quick = gone or relaunched
         if (self.nonce is None or slept or quick
                 or now - self.last_pull >= WATCH_PULL_EVERY):
-            self.pull()
+            self.pull((now, wall))
         self.verdict = None
         if self.nonce is None:
             return None
@@ -2612,14 +2616,18 @@ class Watch:
             if self.stop.is_set():
                 return self.finish(launch, scan, "stopped")
             scan.read()
+            # A sleep of the Mac since the last look: the next beat is a first
+            # one again.
             gap = slept()
             started = self.clock.monotonic()
             state = host_state(options, timeout=WATCH_READ_WAIT)
             unreadable = unreadable or state is None
             ended = self.clock.monotonic()
-            # A sleep of the Mac before or during the read: its copy says
-            # nothing of whether the host beats now.
-            gap = slept() or gap
+            if slept():
+                # The copy was begun before a sleep and finished after it: it
+                # can hold what the host wrote before, so it is thrown away, not
+                # kept as the first beat.
+                state = None
             if self.stop.is_set():
                 # Told to end while the read blocked: nothing more is read.
                 return self.finish(launch, scan, "stopped")
