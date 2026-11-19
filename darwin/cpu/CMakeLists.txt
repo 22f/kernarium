@@ -14,6 +14,97 @@ add_subdirectory(jit_memory)
 # The AArch32 decoder both arm64 engines and the semantic library share.
 add_subdirectory(arm64/aarch32)
 
+# Ahead-of-time native code for the Android image's libraries is built only
+# from an accepted release; without one there is no AOT component and the
+# gadget executor compiles none of its hooks.
+set(UML_AOT_IMAGE "" CACHE PATH
+    "An accepted Android release directory to generate the AOT framework from; empty builds without AOT")
+set(UML_AOT_FSCK_EROFS "" CACHE FILEPATH
+    "An fsck.erofs that decodes Zstandard, used to unpack UML_AOT_IMAGE")
+set(UML_AOT_LIBRARIES
+    "/apex/com.android.runtime/lib64/bionic/libc.so"
+    "/apex/com.android.runtime/bin/linker64"
+    "/apex/com.android.art/lib64/libart.so"
+    "/system/lib64/libhwui.so"
+    "/vendor/lib64/venus_gallium_dri.so"
+    "/system/bin/surfaceflinger"
+    "/system/lib64/libcrypto.so"
+    "/system/lib64/libpcre2.so"
+    "/system/lib64/libbinder.so"
+    "/system/lib64/libz.so"
+    "/system/bin/toybox"
+    "/system/lib64/libselinux.so"
+    "/system/lib64/libtracing_perfetto.so"
+    "/apex/com.android.art/lib64/libartpalette.so"
+    "/system/lib64/libutils.so"
+    "/system/lib64/libcutils.so"
+    "/apex/com.android.art/lib64/libdexfile.so"
+    "/system/lib64/libbinder_ndk.so"
+    "/system/lib64/bootstrap/libc.so"
+    "/apex/com.android.art/lib64/libc++.so"
+    "/system/lib64/libandroidfw.so"
+    "/apex/com.android.art/lib64/libartbase.so"
+    "/apex/com.android.runtime/lib64/bionic/libm.so"
+    "/system/lib64/libgui.so"
+    "/system/lib64/libui.so"
+    "/apex/com.android.art/lib64/libjavacore.so"
+    "/system/bin/bootstrap/linker64"
+    "/system/lib64/liblog.so"
+    "/system/lib64/android.hardware.graphics.composer3-V5-ndk.so"
+    "/vendor/lib64/libutils.so"
+    "/system/lib64/libminikin.so"
+    "/system/lib64/libandroid_runtime.so"
+    "/system/lib64/libsqlite.so"
+    "/system/lib64/libft2.so"
+    # One path per distinct file: a unit binds by the content of its pages, so
+    # it serves every identical copy another APEX ships too.
+    "/apex/com.android.media.swcodec/lib64/libcodec2_soft_av1dec_gav1.so"
+    "/apex/com.android.conscrypt/lib64/libcrypto.so"
+    "/apex/com.android.media.swcodec/lib64/libFraunhoferAAC.so"
+    "/apex/com.android.art/bin/dex2oat64"
+    "/vendor/lib64/hw/vulkan.virtio.so"
+    "/apex/com.android.media.swcodec/lib64/libcodec2_soft_av1dec_dav1d.so"
+    "/apex/com.android.media.swcodec/lib64/libopus.so"
+    "/apex/com.android.conscrypt/lib64/libssl.so"
+    "/apex/com.android.art/lib64/liblzma.so"
+    "/system/lib64/liblzma.so"
+    "/apex/com.android.conscrypt/lib64/libjavacrypto.so"
+    "/apex/com.android.art/lib64/liblz4.so"
+    "/system/lib64/liblz4.so"
+    "/apex/com.android.media.swcodec/lib64/libvpx.so"
+    "/apex/com.android.media.swcodec/lib64/libcodec2_soft_avcdec.so"
+    CACHE STRING
+    "Libraries of the release to rewrite, as absolute guest paths")
+# The boot image's compiled Java: every OAT file of the release that holds
+# code, translated whole (an OAT file without a compiled method is skipped).
+# Not a cache entry unless a build names it, so a build tree that cached an
+# older list builds it too; an empty value leaves it out (a measurement).
+if(NOT DEFINED UML_AOT_BOOT_CODE)
+    set(UML_AOT_BOOT_CODE "/system/framework/arm64/boot*.oat")
+endif()
+option(UML_AOT_DIAGNOSTICS
+    "Compose the AOT runtime variant with its counters, report and test switches (never for a product)" OFF)
+set(UML_AOT_INSTANCE_CAPACITY 2048 CACHE STRING
+    "How many library instances each executor thread's AOT binder holds before it replaces the oldest")
+if(NOT UML_AOT_INSTANCE_CAPACITY MATCHES "^[0-9]+$" OR
+   UML_AOT_INSTANCE_CAPACITY LESS 1 OR UML_AOT_INSTANCE_CAPACITY GREATER 16384)
+    message(FATAL_ERROR
+        "UML_AOT_INSTANCE_CAPACITY must be an integer from 1 to 16384")
+endif()
+option(UML_AOT_SHARED_VERDICTS
+    "Let address spaces share what they verified about a page the kernel declares immutable; OFF hashes every page in every address space (a measurement variant)" ON)
+option(UML_AOT_COUNT_RETIRED
+    "With UML_AOT_DIAGNOSTICS, rewrite the libraries to count each instruction an entry runs (the blob then differs from the product's)" OFF)
+set(UML_AOT OFF)
+if(UML_AOT_IMAGE)
+    if(NOT UML_TARGET_MACOS OR UML_APP_STORE_RUNTIME)
+        message(FATAL_ERROR
+            "UML_AOT_IMAGE is supported for the macOS product only so far")
+    endif()
+    set(UML_AOT ON)
+    add_subdirectory(arm64/aot)
+endif()
+
 # A private cache holds one translation per slot, so the slot count is the
 # working set an executor can keep. Counted on Geekbench 6 Clang, the workload
 # with the largest code footprint, one executor reaches about 194,000 distinct
@@ -470,7 +561,12 @@ function(_uml_add_gadget_executor TARGET SLOTS)
     _uml_add_cpu_objects(${TARGET} gadget arm64/gadgets/executor.cpp)
     # The program slabs and record tables come from the memory layer's heaps.
     target_link_libraries(${TARGET} PUBLIC uml_arm64_gadgets UML::MemoryHeap)
+    if(UML_AOT)
+        get_property(_aot_runtime GLOBAL PROPERTY UML_AOT_RUNTIME_TARGET)
+        target_link_libraries(${TARGET} PUBLIC ${_aot_runtime})
+    endif()
     target_compile_definitions(${TARGET} PRIVATE
+        UML_AOT=$<BOOL:${UML_AOT}>
         UML_GADGET_CACHE_CENSUS=$<BOOL:${UML_GADGET_CACHE_CENSUS}>
         UML_GADGET_CACHE_SLOTS=${SLOTS}
         UML_GADGET_BLOCK_INSTRUCTIONS=${UML_GADGET_BLOCK_INSTRUCTIONS}
@@ -496,6 +592,8 @@ endif()
 _uml_add_cpu_objects(uml_arm64_gadget_engine gadget
     arm64/gadgets/engine_adapter.cpp)
 target_link_libraries(uml_arm64_gadget_engine PUBLIC uml_arm64_gadget_executor)
+target_compile_definitions(uml_arm64_gadget_engine PRIVATE
+    UML_AOT=$<BOOL:${UML_AOT}>)
 
 if(UML_ARM64_JIT_ENGINE)
     _uml_add_cpu_objects(uml_arm64_jit_engine native
@@ -552,6 +650,13 @@ target_sources(uml_cpu_engine_objects INTERFACE
     $<TARGET_OBJECTS:uml_arm64_aarch32_semantics>
     $<TARGET_OBJECTS:uml_arm64_gadgets>
     $<TARGET_OBJECTS:uml_arm64_execution_helpers>)
+if(UML_AOT)
+    get_property(_aot_runtime GLOBAL PROPERTY UML_AOT_RUNTIME_TARGET)
+    target_link_libraries(uml_cpu_engine_objects INTERFACE
+        uml_arm64_aot_framework)
+    target_sources(uml_cpu_engine_objects INTERFACE
+        $<TARGET_OBJECTS:${_aot_runtime}>)
+endif()
 # The JIT engine's objects, and the executable-memory owner they alone link.
 if(UML_ARM64_JIT_ENGINE)
     target_sources(uml_cpu_engine_objects INTERFACE
