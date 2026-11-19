@@ -4691,10 +4691,12 @@ void rewritten_code_stays_within_a_stack_budget(const LibraryImage &image)
  * engine at some of them and never at another: whatever ends a run (the
  * budget, an interrupt, a fault, a breakpoint, a system call) leaves the
  * registers, flags, FPCR and FPSR, thread pointer, vector registers and
- * memory of one instruction boundary of that trace, and later exits come
- * later on it. A debugger, a signal frame, ptrace and a crash report see
- * only such states. (The exclusive monitor is not guest-visible state and is
- * not part of the comparison.) */
+ * memory of one state of that trace, and later exits come later on it. The
+ * trace holds the state after each instruction and the state at each fault the
+ * run repairs and resumes, which a memory copy or set that stops between its
+ * pages leaves in the middle of the instruction. A debugger, a signal frame,
+ * ptrace and a crash report see only such states. (The exclusive monitor is
+ * not guest-visible state and is not part of the comparison.) */
 
 /* The index of the first state at or after `from` that is `now`, or the size
  * of the trace. */
