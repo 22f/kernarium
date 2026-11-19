@@ -15,6 +15,16 @@ uml_add_tooling_test(
     LABELS cpu
     TIMEOUT 60)
 
+# The AOT artifact of an Android release: verify accepts the one its release,
+# descriptor and tools name, and refuses a changed blob, release, generator
+# input or library list.
+uml_add_tooling_test(
+    NAME arm64-aot-release-artifact
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/arm64/test_aot_release_artifact.py
+    LABELS cpu
+    TIMEOUT 60)
+
 # The AOT guest runner against scripted guests: it fails every incomplete or
 # failed run instead of reporting "identical".
 uml_add_tooling_test(

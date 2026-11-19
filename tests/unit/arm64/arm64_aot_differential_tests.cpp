@@ -5538,7 +5538,7 @@ void the_dispatch_choice_is_made_when_the_executor_is_made(
 	aot::set_enabled(false);
 	const auto off_while_off = entries(*off);
 	const auto on_while_off = entries(*on);
-	aot::set_enabled(std::nullopt);
+	aot::set_enabled(false);
 	std::fprintf(stderr, "dispatch choice: made off %llu entries while on, "
 		"%llu while off; made on %llu while on, %llu while off\n",
 		static_cast<unsigned long long>(off_while_on),
@@ -5598,7 +5598,10 @@ int main(int argc, char **argv)
 	 * report shows as never entered is the result this build exists to
 	 * catch. */
 	require(libraries.size() <= 64);
-	require(!aot_runtime::enabled());
+	/* The component is on by default; the harness turns it on and off row by
+	 * row (set_enabled) and starts each scenario from the engine alone. */
+	require(aot_runtime::enabled());
+	aot::set_enabled(false);
 	if (!cfg.only.empty()) {
 		/* One case from a failure report, under the diagnosis. */
 		unsigned long long seed = 0, pc = 0;

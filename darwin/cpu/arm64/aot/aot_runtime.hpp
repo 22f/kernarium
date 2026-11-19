@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "cpu/aot_selection.hpp"
 #include "cpu/arm64/cpu_state.hpp"
 #include "memory/static_guest_memory.hpp"
 #include "memory/tlb.hpp"
@@ -8,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <type_traits>
 
 /* Ahead-of-time native code for the Android image's own arm64 libraries
@@ -19,9 +21,30 @@
  * set UML_AOT_DIAGNOSTICS. */
 namespace uml::cpu::arm64::aot {
 
-/* Whether AOT code may be entered: DARWIN_UML_AOT=1 at start-up. Off by
- * default. */
+/* Whether AOT code may be entered. Decided by the select() of each run, before
+ * its first executor, which reads the answer once when it is made; a process
+ * whose launch selected nothing has it off (a diagnostics build, which tests
+ * drive without a launch, takes the environment's answer: on unless
+ * DARWIN_UML_AOT=0). Always off when the framework's blob is not valid. */
 [[nodiscard]] bool enabled() noexcept;
+
+/* The release the framework's blob was made from, as its header names it
+ * (the ID points into the blob); empty when the blob is not valid. */
+[[nodiscard]] std::optional<::uml::cpu::AotRelease> embedded_release() noexcept;
+
+/* A launch's own word (--aot=) and the release it boots (null for a guest
+ * that is not an Android release). The blob runs only with the release it
+ * was made from: `automatic` is on (unless DARWIN_UML_AOT=0) only for that
+ * release, and `on` fails for any other release or none. The decision is made
+ * before any executor, so a launch the blob does not fit allocates nothing
+ * of it. A run that starts again in the process (a guest restart) decides
+ * again: a release the blob no longer fits is off, and a process that ran
+ * without the component does not turn it on, so `automatic` runs on the
+ * engine. False when it cannot be kept: `on` for a framework whose blob is not
+ * valid, for a release it does not fit, or in a process that already runs
+ * without it. */
+[[nodiscard]] bool select(::uml::cpu::AotSelection selection,
+	const ::uml::cpu::AotRelease *release) noexcept;
 
 /* Why an entry was refused, for the diagnostics build's counters. */
 enum class Refusal : unsigned {
