@@ -586,6 +586,153 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
             "property_context": property_context}
 
 
+_ORIENTATION_PROBE = None
+ICONS_APK_ENTRY = "SYSTEM_EXT/app/KernariumIcons/KernariumIcons.apk"
+ICONS_PERMISSION = "android.permission.ACCESS_CONTENT_PROVIDERS_EXTERNALLY"
+# android.R.attr ids of the icon renderer's manifest attributes (the framework's attribute table gives them), which the
+# compiled binary manifest carries beside the names.
+ICONS_ATTRIBUTE_IDS = {
+    "authorities": 0x01010018, "permission": 0x01010006, "isolatedProcess": 0x010103A9, "directBootAware": 0x01010505,
+    "allowBackup": 0x01010280, "usesNonSdkApi": 0x0101058E, "persistent": 0x0101000D, "grantUriPermissions": 0x0101001B,
+    "sharedUserId": 0x0101000B, "enabled": 0x0101000E, "readPermission": 0x01010007,
+}
+# The platform's seapp_contexts lines the icon renderer's two processes meet (a subset, in the platform's order).
+ICONS_SEAPP_PLAT = (
+    "user=_isolated domain=isolated_app levelFrom=user\n"
+    "user=_isolated isIsolatedComputeApp=true domain=isolated_compute_app levelFrom=user\n"
+    "user=_app seinfo=platform domain=platform_app_36 type=app_data_file levelFrom=user\n"
+    "user=_app isPrivApp=true domain=priv_app_36 type=privapp_data_file levelFrom=user\n"
+    "user=_app minTargetSdkVersion=37 domain=untrusted_app type=app_data_file levelFrom=all\n"
+    "user=_app minTargetSdkVersion=34 domain=untrusted_app_34 type=app_data_file levelFrom=all\n"
+    "user=_app minTargetSdkVersion=30 domain=untrusted_app_30 type=app_data_file levelFrom=all\n"
+    "user=_app minTargetSdkVersion=29 domain=untrusted_app_29 type=app_data_file levelFrom=all\n"
+    "user=_app domain=untrusted_app_25 type=app_data_file levelFrom=user\n"
+    "user=_app minTargetSdkVersion=28 fromRunAs=true domain=runas_app levelFrom=all\n"
+)
+
+
+def icons_fixture(verifier: Path, variant: str | None) -> dict:
+    """The icon renderer's part of a target-files fixture: its package with a compiled manifest, its line of the
+    package signing table and the seapp_contexts lines its processes meet. A variant breaks one thing, in the way
+    the verifier's check must catch: the baseline is the application as overlay/app_icons builds it."""
+    global _ORIENTATION_PROBE
+    if _ORIENTATION_PROBE is None:
+        path = verifier.parents[3] / "tests" / "integration" / "android" / "orientation_probe_apk.py"
+        spec = importlib.util.spec_from_file_location("orientation_probe_apk", path)
+        _ORIENTATION_PROBE = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = _ORIENTATION_PROBE  # its dataclasses look their module up by name
+        spec.loader.exec_module(_ORIENTATION_PROBE)
+    binary_xml = _ORIENTATION_PROBE
+    element = binary_xml.Element
+    reference = binary_xml.Reference
+    manifest = {"package": "com.kernarium.icons", "versionCode": 1}
+    sdk = {"minSdkVersion": 36, "targetSdkVersion": 37}
+    application = {"label": "Andarium icons", "allowBackup": False, "directBootAware": True, "usesNonSdkApi": True}
+    provider = {"name": ".IconProvider", "authorities": "com.kernarium.icons", "exported": True,
+                "permission": ICONS_PERMISSION, "directBootAware": True}
+    service = {"name": ".IconRenderService", "exported": False, "isolatedProcess": True,
+               "directBootAware": True}
+    top, inside, providers = [], [], [provider]
+    entries: dict[str, bytes | None] = {}
+    certificate = "build/make/target/product/security/testkey.x509.pem"
+    partition = "system_ext"
+    apkcerts = True
+    seapp_plat, seapp_ext = ICONS_SEAPP_PLAT, ""
+    edits = {
+        "package-changed": lambda: manifest.update(package="com.kernarium.other"),
+        "shared-user": lambda: manifest.update(sharedUserId="android.uid.system"),
+        "asks-a-permission": lambda: top.append(element("uses-permission", (("name", "android.permission.INTERNET"),))),
+        "asks-a-permission-from-sdk-m": lambda: top.append(
+            element("uses-permission-sdk-m", (("name", "android.permission.VIBRATE"),))),
+        "asks-a-permission-from-sdk-23": lambda: top.append(
+            element("uses-permission-sdk-23", (("name", "android.permission.VIBRATE"),))),
+        "provider-enabled-by-reference": lambda: provider.update(enabled=reference(0x7F050001)),
+        "provider-read-permission-by-reference": lambda: provider.update(readPermission=reference(0x7F050002)),
+        "provider-class-changed": lambda: provider.update(name="com.kernarium.icons.BackupIconProvider"),
+        "provider-class-of-another-package": lambda: provider.update(name="com.example.IconProvider"),
+        "service-class-changed": lambda: service.update(name="com.kernarium.icons.IconRenderServiceTwo"),
+        "service-app-zygote": lambda: service.update(useAppZygote=True),
+        "has-an-activity": lambda: inside.append(element("activity", (("name", "com.kernarium.icons.Main"),))),
+        "has-a-receiver": lambda: inside.append(element("receiver", (("name", "com.kernarium.icons.Boot"),))),
+        "has-a-filter": lambda: inside.append(element("service", (("name", "com.kernarium.icons.Other"),), (
+            element("intent-filter", (), (element("action", (("name", "x"),)),)),))),
+        "second-provider": lambda: providers.append(dict(provider, name="com.kernarium.icons.Other", authorities="x")),
+        "provider-not-exported": lambda: provider.update(exported=False),
+        "provider-open": lambda: provider.pop("permission"),
+        "provider-other-permission": lambda: provider.update(permission="android.permission.INTERACT_ACROSS_USERS"),
+        "provider-grants-uris": lambda: provider.update(grantUriPermissions=True),
+        "provider-disabled": lambda: provider.update(enabled=False),
+        "provider-other-authority": lambda: provider.update(authorities="com.kernarium.icon"),
+        "provider-not-direct-boot-aware": lambda: provider.pop("directBootAware"),
+        "service-not-isolated": lambda: service.update(isolatedProcess=False),
+        "service-exported": lambda: service.update(exported=True),
+        "service-guarded": lambda: service.update(permission=ICONS_PERMISSION),
+        "service-not-direct-boot-aware": lambda: service.pop("directBootAware"),
+        "application-allows-backup": lambda: application.update(allowBackup=True),
+        "application-not-direct-boot-aware": lambda: application.pop("directBootAware"),
+        "application-closed-to-hidden-apis": lambda: application.pop("usesNonSdkApi"),
+        "application-persistent": lambda: application.update(persistent=True),
+        "no-target-sdk": lambda: sdk.pop("targetSdkVersion"),
+    }
+    if variant in edits:
+        edits[variant]()
+    elif variant == "privileged-copy":
+        entries["SYSTEM_EXT/priv-app/KernariumIcons/KernariumIcons.apk"] = synthetic_apk(debuggable=False)
+    elif variant == "missing":
+        entries[ICONS_APK_ENTRY] = None
+    elif variant == "not-an-apk":
+        entries[ICONS_APK_ENTRY] = b"not a package"
+    elif variant == "platform-key":
+        certificate = "build/make/target/product/security/platform.x509.pem"
+    elif variant == "platform-key-in-the-tree":
+        certificate = "vendor/lineage/build/target/product/security/media.x509.pem"
+    elif variant == "other-partition":
+        partition = "system"
+    elif variant == "no-signing-line":
+        apkcerts = "other"
+    elif variant == "no-signing-table":
+        apkcerts = False
+    elif variant == "seapp-by-name":
+        seapp_ext = "user=_app name=com.kernarium.icons domain=untrusted_app type=app_data_file levelFrom=all\n"
+    elif variant == "seapp-by-prefix":
+        seapp_ext = "user=_app seinfo=default name=com.kernarium.* domain=kernarium_icons type=app_data_file levelFrom=all\n"
+    elif variant == "seapp-app-domain-changed":
+        seapp_plat = seapp_plat.replace("minTargetSdkVersion=37 domain=untrusted_app ", "minTargetSdkVersion=37 domain=platform_app ")
+    elif variant == "seapp-privileged-domain":
+        seapp_plat = seapp_plat.replace("minTargetSdkVersion=37 domain=untrusted_app ", "minTargetSdkVersion=37 domain=priv_app ")
+    elif variant == "seapp-isolated-changed":
+        seapp_plat = seapp_plat.replace("user=_isolated domain=isolated_app ", "user=_isolated domain=untrusted_app ")
+    elif variant == "seapp-isolated-for-another-seinfo":
+        seapp_plat = seapp_plat.replace("user=_isolated domain=isolated_app levelFrom=user\n",
+                                        "user=_isolated seinfo=platform domain=isolated_app levelFrom=user\n")
+    elif variant == "seapp-isolated-for-a-newer-target":
+        seapp_plat = seapp_plat.replace("user=_isolated domain=isolated_app levelFrom=user\n",
+                                        "user=_isolated minTargetSdkVersion=38 domain=isolated_app levelFrom=user\n")
+    elif variant == "seapp-no-isolated":
+        seapp_plat = seapp_plat.replace("user=_isolated domain=isolated_app levelFrom=user\n", "")
+    elif variant is not None:
+        fail(f"icons_fixture does not know the variant {variant}")
+    ids = dict(binary_xml.ATTRIBUTES)
+    ids.update(ICONS_ATTRIBUTE_IDS)
+    components = [
+        element("provider", tuple(item.items())) for item in providers
+    ] + [element("service", tuple(service.items()))] + inside
+    tree = element("manifest", tuple(manifest.items()), (
+        element("uses-sdk", tuple(sdk.items())), *top, element("application", tuple(application.items()), tuple(components))))
+    if ICONS_APK_ENTRY not in entries:
+        package = io.BytesIO()
+        with zipfile.ZipFile(package, "w") as apk:
+            apk.writestr("AndroidManifest.xml", binary_xml.encode_manifest(tree, ids))
+        entries[ICONS_APK_ENTRY] = package.getvalue()
+    name = "KernariumIcons.apk" if apkcerts != "other" else "Other.apk"
+    table = None if apkcerts is False else (
+        f'name="{name}" certificate="{certificate}" private_key="{certificate.replace(".x509.pem", ".pk8")}" '
+        f'partition="{partition}"\n'
+        'name="Other.apk" certificate="build/make/target/product/security/platform.x509.pem" '
+        'private_key="build/make/target/product/security/platform.pk8" partition="system"\n')
+    return {"entries": entries, "apkcerts": table, "seapp_plat": seapp_plat, "seapp_ext": seapp_ext}
+
+
 def tracked_fstab(android_root: Path) -> str:
     """The UML fstab the product installs, which the verifiers compare against."""
     return (android_root / "overlay/config/fstab.uml").read_text()
@@ -987,6 +1134,69 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 fail(f"the overlay manifest reader reads {found} for {expected}")
     if tool.manifest_element_attributes(synthetic_compiled_manifest(None), "overlay") is not None:
         fail("the overlay manifest reader finds an <overlay> element in a manifest without one")
+    # The icon renderer's check reads every element of a compiled manifest and asks the seapp_contexts which domain the
+    # platform gives the application's two processes.
+    with zipfile.ZipFile(io.BytesIO(icons_fixture(verifier, None)["entries"][ICONS_APK_ENTRY])) as package:
+        icons_elements = tool.manifest_elements(package.read("AndroidManifest.xml"))
+    if [name for name, _ in icons_elements] != ["manifest", "uses-sdk", "application", "provider", "service"]:
+        fail(f"the manifest reader finds the elements {[name for name, _ in icons_elements]}")
+    icons_attributes = dict(icons_elements)
+    if (icons_attributes["manifest"].get("package") != "com.kernarium.icons"
+            or icons_attributes["uses-sdk"].get("targetSdkVersion") != 37
+            or icons_attributes["application"].get("usesNonSdkApi") is not True
+            or icons_attributes["application"].get("allowBackup") is not False
+            or icons_attributes["provider"].get("permission") != ICONS_PERMISSION
+            or icons_attributes["service"].get("isolatedProcess") is not True):
+        fail(f"the manifest reader reads {icons_attributes}")
+    try:
+        tool.manifest_elements(b"not a manifest")
+        fail("the manifest reader takes a file that is not compiled XML")
+    except ValueError:
+        pass
+    seapp = tool.parse_seapp_contexts(ICONS_SEAPP_PLAT)
+    for target, expected in ((38, "untrusted_app"), (37, "untrusted_app"), (36, "untrusted_app_34"), (34, "untrusted_app_34"),
+                             (33, "untrusted_app_30"), (30, "untrusted_app_30"), (29, "untrusted_app_29"), (28, "untrusted_app_25")):
+        found = tool.seapp_app_domain(seapp, "default", "com.kernarium.icons", target)
+        if found != expected:
+            fail(f"the seapp_contexts lookup gives an application of target SDK {target} the domain {found}, not {expected}")
+    if tool.seapp_app_domain(seapp, "platform", "com.kernarium.icons", 37) != "platform_app_36":
+        fail("the seapp_contexts lookup does not follow the seinfo")
+    named = seapp + tool.parse_seapp_contexts(
+        "user=_app name=com.kernarium.icons domain=named type=app_data_file\n"
+        "user=_app name=com.vendor.* domain=prefixed type=app_data_file\n")
+    for package_name, expected in (("com.kernarium.icons", "named"), ("com.kernarium.other", "untrusted_app"),
+                                   ("com.vendor.app", "prefixed"), ("com.vendorx", "untrusted_app")):
+        found = tool.seapp_app_domain(named, "default", package_name, 37)
+        if found != expected:
+            fail(f"the seapp_contexts lookup gives {package_name} the domain {found}, not {expected}")
+    if tool.seapp_app_domain(tool.parse_seapp_contexts("user=_app isPrivApp=true domain=priv_app\n"
+                                                       "user=_app isEphemeralApp=true domain=ephemeral_app\n"
+                                                       "user=_app fromRunAs=true domain=runas_app\n"
+                                                       "user=system domain=system_app\n"), "default", "x.y", 37) is not None:
+        fail("the seapp_contexts lookup takes a line for privileged, ephemeral, run-as or system-user processes")
+    if tool.seapp_isolated_domain(seapp, "default", "com.kernarium.icons", 37) != "isolated_app":
+        fail("the seapp_contexts lookup does not give an isolated service isolated_app")
+    if tool.seapp_isolated_domain(tool.parse_seapp_contexts("user=_isolated isIsolatedComputeApp=true domain=isolated_compute_app\n"),
+                                  "default", "x.y", 37) is not None or tool.seapp_isolated_domain([], "default", "x.y", 37) is not None:
+        fail("the seapp_contexts lookup takes a line for a shared isolated process, or invents one")
+    if tool.seapp_isolated_domain(seapp + tool.parse_seapp_contexts("user=_isolated name=x.y domain=special\n"),
+                                  "default", "x.y", 37) != "special":
+        fail("the seapp_contexts lookup does not prefer a line by name")
+    for lines, seinfo, target, expected in (
+            ("user=_isolated seinfo=platform domain=isolated_platform\n", "default", 37, None),
+            ("user=_isolated seinfo=platform domain=isolated_platform\n", "platform", 37, "isolated_platform"),
+            ("user=_isolated minTargetSdkVersion=38 domain=newer\n", "default", 37, None),
+            ("user=_isolated maxTargetSdkVersion=36 domain=older\n", "default", 37, None),
+            ("user=_isolated seinfo=platform domain=by_info\nuser=_isolated domain=plain\n", "default", 37, "plain"),
+            ("user=_isolated domain=plain\nuser=_isolated seinfo=default domain=by_info\n", "default", 37, "by_info")):
+        found = tool.seapp_isolated_domain(tool.parse_seapp_contexts(lines), seinfo, "x.y", target)
+        if found != expected:
+            fail(f"the seapp_contexts lookup gives an isolated process of seinfo {seinfo} and target SDK {target} "
+                 f"{found!r} for {lines!r}, not {expected!r}")
+    for package_name, name, expected in (("a.b", ".C", "a.b.C"), ("a.b", "C", "a.b.C"), ("a.b", "x.y.C", "x.y.C"),
+                                         ("a.b", "", None), ("a.b", None, None), ("a.b", 5, None)):
+        if tool.manifest_component_class(package_name, name) != expected:
+            fail(f"the manifest's component class for {name!r} in {package_name} is not {expected!r}")
     release_manifest = synthetic_compiled_manifest(None, debuggable=False)
     release_apk = synthetic_apk(debuggable=False)
     preopt_apks = sorted(tool.REQUIRED_PREOPT_APKS)
@@ -996,6 +1206,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         and entry != pinner_overlay_entry
         and entry != wifi_overlay_entry  # written with its own resources
         and entry != tool.CAMERA_APP  # written with its own resources
+        and entry != tool.ICONS_APK  # written with its own manifest
     )
     arm_preopt_apks = sorted(tool.REQUIRED_ARM_PREOPT_APKS)
     uml_fstab = tracked_fstab(verifier.parents[1])
@@ -1347,6 +1558,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           adb_prop_unreadable_by_vendor_init: bool = False,
                           lineage_policy: str | None = None,
                           missing_mediaserver_audit: bool = False,
+                          missing_shell_density_audit: bool = False,
                           missing_virtio_console: bool = False,
                           unsupported_hvc: bool = False,
                           missing_mesa_gles: bool = False,
@@ -1389,6 +1601,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           time_zone_variant: str | None = None,
                           keyboard_default_variant: str | None = None,
                           oldswitch_variant: str | None = None,
+                          appshell_variant: str | None = None,
+                          icons_variant: str | None = None,
                           wallpaper_variant: str | None = None,
                           cas_hal_variant: str | None = None,
                           adbd_variant: str | None = None,
@@ -2121,6 +2335,35 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     archive.writestr("SYSTEM_EXT/framework/kernarium_oldapp.jar", b"not a jar")
                 elif oldswitch_variant != "missing-jar":
                     archive.writestr("SYSTEM_EXT/framework/kernarium_oldapp.jar", oldapp_jar.getvalue())
+                # The launcher-application shell command of Add to Home Screen: the tracked wrapper script, and
+                # a jar whose code holds the command's class.
+                apps_wrapper = (verifier.parents[1] / "overlay/app_shortcuts/kernarium_apps").read_text()
+                for variant, (old, new) in {
+                    "wrapper-no-classpath": ("export CLASSPATH=$base/framework/kernarium_apps.jar\n", ""),
+                    "wrapper-wrong-jar": ("framework/kernarium_apps.jar", "framework/other.jar"),
+                    "wrapper-wrong-class": ("com.kernarium.apps.Main", "com.kernarium.apps.Other"),
+                    "wrapper-no-exec": ("exec app_process", "app_process"),
+                }.items():
+                    if appshell_variant == variant:
+                        if old not in apps_wrapper:
+                            fail(f"the launcher-application wrapper lacks '{old}' for the {variant} variant")
+                        apps_wrapper = apps_wrapper.replace(old, new)
+                if appshell_variant != "missing-wrapper":
+                    archive.writestr("SYSTEM_EXT/bin/kernarium_apps", apps_wrapper)
+                apps_jar = io.BytesIO()
+                with zipfile.ZipFile(apps_jar, "w") as jar:
+                    jar.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+                    if appshell_variant != "jar-stripped":
+                        jar.writestr(
+                            "classes.dex",
+                            b"dex\n035\0"
+                            + (b"Lcom/kernarium/apps/Other;" if appshell_variant == "jar-without-class"
+                               else b"Lcom/kernarium/apps/Main;"),
+                        )
+                if appshell_variant == "jar-not-zip":
+                    archive.writestr("SYSTEM_EXT/framework/kernarium_apps.jar", b"not a jar")
+                elif appshell_variant != "missing-jar":
+                    archive.writestr("SYSTEM_EXT/framework/kernarium_apps.jar", apps_jar.getvalue())
                 # The device configuration of the host's keyboard and mouse: the tracked files.
                 for name, destination in input_device_files.items():
                     archive.writestr(destination, (verifier.parents[1] / "overlay/input" / name).read_text())
@@ -2153,8 +2396,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     ),
                 )
                 sms_policy = sms_policy_fixture(verifier, sms_policy_variant)
-                archive.writestr("SYSTEM/etc/selinux/plat_seapp_contexts", sms_policy["seapp_plat"])
-                archive.writestr("SYSTEM_EXT/etc/selinux/system_ext_seapp_contexts", sms_policy["seapp_ext"])
+                icons = icons_fixture(verifier, icons_variant)
+                archive.writestr("SYSTEM/etc/selinux/plat_seapp_contexts", sms_policy["seapp_plat"] + icons["seapp_plat"])
+                archive.writestr("SYSTEM_EXT/etc/selinux/system_ext_seapp_contexts", sms_policy["seapp_ext"] + icons["seapp_ext"])
                 # Platform, vendor and system_ext policy as the builder emits them: the
                 # platform's core domains, a vendor-owned property that only
                 # vendor_init sets, and the system-owned property adbd reports its host in.
@@ -2305,6 +2549,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         ""
                         if missing_mediaserver_audit
                         else "(dontaudit mediaserver vendor_default_prop (file (read)))\n"
+                    )
+                    + (
+                        ""
+                        if missing_shell_density_audit
+                        else "(dontaudit shell qemu_sf_lcd_density_prop (file (read)))\n"
                     )
                     + (
                         "(allow fsck_untrusted self (capability (sys_admin)))\n"
@@ -2808,6 +3057,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             archive.writestr(f"{artifact}.vdex", b"vdex")
                 for apk in plain_apks:
                     archive.writestr(apk, application_payload(apk))
+                # The icon renderer: its own manifest, and its line of the package signing table.
+                for entry, payload in icons["entries"].items():
+                    if payload is not None:
+                        archive.writestr(entry, payload)
+                if icons["apkcerts"] is not None:
+                    archive.writestr("META/apkcerts.txt", icons["apkcerts"])
                 # The overlay that releases the home app's pin: built for SDK 28, with the
                 # resource it sets in its table.
                 pinner_overlay = io.BytesIO()
@@ -4061,6 +4316,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("lineage-vold-relabelto", {"lineage_policy": "vold-relabelto"}),
             ("lineage-permissive-backuptool", {"lineage_policy": "permissive-backuptool"}),
             ("missing-mediaserver-audit", {"missing_mediaserver_audit": True}),
+            ("missing-shell-density-audit", {"missing_shell_density_audit": True}),
             ("missing-virtio-console", {"missing_virtio_console": True}),
             ("unsupported-hvc", {"unsupported_hvc": True}),
             ("missing-mesa-gles", {"missing_mesa_gles": True}),
@@ -4826,6 +5082,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "makes the domain backuptool permissive"),
             ("missing-mediaserver-audit-cause", {"missing_mediaserver_audit": True},
              "does not silence the denial of mediaserver reading vendor_default_prop"),
+            ("missing-shell-density-audit-cause", {"missing_shell_density_audit": True},
+             "does not silence the denial of the shell domain reading qemu_sf_lcd_density_prop"),
             ("adb-prop-unreadable-by-vendor-init-cause",
              {"adb_prop_unreadable_by_vendor_init": True},
              "names sys.kernarium.adb.host_connected, labelled kernarium_adb_host_prop, "
@@ -6129,6 +6387,99 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "kernarium_oldapp.jar is not a readable jar"),
             ("oldapp-jar-without-class", {"oldswitch_variant": "jar-without-class"},
              "holds code without the class com.kernarium.oldapp.Main"),
+            ("apps-command-missing-wrapper", {"appshell_variant": "missing-wrapper"},
+             "required entries are missing: .*SYSTEM_EXT/bin/kernarium_apps"),
+            ("apps-command-missing-jar", {"appshell_variant": "missing-jar"},
+             "required entries are missing: .*SYSTEM_EXT/framework/kernarium_apps.jar"),
+            ("apps-command-wrapper-no-classpath", {"appshell_variant": "wrapper-no-classpath"},
+             "kernarium_apps does not contain 'CLASSPATH=.base/framework/kernarium_apps.jar'"),
+            ("apps-command-wrapper-wrong-jar", {"appshell_variant": "wrapper-wrong-jar"},
+             "kernarium_apps does not contain 'CLASSPATH=.base/framework/kernarium_apps.jar'"),
+            ("apps-command-wrapper-wrong-class", {"appshell_variant": "wrapper-wrong-class"},
+             "kernarium_apps does not contain 'exec app_process .base/bin com.kernarium.apps.Main'"),
+            ("apps-command-wrapper-no-exec", {"appshell_variant": "wrapper-no-exec"},
+             "kernarium_apps does not contain 'exec app_process"),
+            ("apps-command-jar-not-zip", {"appshell_variant": "jar-not-zip"},
+             "kernarium_apps.jar is not a readable jar"),
+            ("apps-command-jar-without-class", {"appshell_variant": "jar-without-class"},
+             "holds code without the class com.kernarium.apps.Main"),
+            ("apps-command-jar-stripped", {"appshell_variant": "jar-stripped"},
+             "kernarium_apps.jar has no classes.dex and no preoptimized odex and vdex"),
+            ("icons-app-missing", {"icons_variant": "missing"},
+             "required entries are missing: .*SYSTEM_EXT/app/KernariumIcons/KernariumIcons.apk"),
+            ("icons-app-privileged-copy", {"icons_variant": "privileged-copy"},
+             "priv-app/KernariumIcons/KernariumIcons.apk: the icon renderer is an ordinary application of app/"),
+            ("icons-app-not-an-apk", {"icons_variant": "not-an-apk"}, "KernariumIcons.apk has no readable manifest"),
+            ("icons-app-package-changed", {"icons_variant": "package-changed"},
+             "is the package com.kernarium.other, not com.kernarium.icons"),
+            ("icons-app-shared-user", {"icons_variant": "shared-user"}, "the manifest sets sharedUserId"),
+            ("icons-app-asks-a-permission", {"icons_variant": "asks-a-permission"},
+             "has uses-permission: the renderer asks for no permission"),
+            ("icons-app-asks-a-permission-from-sdk-m", {"icons_variant": "asks-a-permission-from-sdk-m"},
+             "has uses-permission-sdk-m: the renderer asks for no permission"),
+            ("icons-app-asks-a-permission-from-sdk-23", {"icons_variant": "asks-a-permission-from-sdk-23"},
+             "has uses-permission-sdk-23: the renderer asks for no permission"),
+            ("icons-provider-enabled-by-reference", {"icons_variant": "provider-enabled-by-reference"},
+             "the provider sets enabled"),
+            ("icons-provider-read-permission-by-reference", {"icons_variant": "provider-read-permission-by-reference"},
+             "the provider sets readPermission"),
+            ("icons-provider-class-changed", {"icons_variant": "provider-class-changed"},
+             "the provider is com.kernarium.icons.BackupIconProvider, not com.kernarium.icons.IconProvider"),
+            ("icons-provider-class-of-another-package", {"icons_variant": "provider-class-of-another-package"},
+             "the provider is com.example.IconProvider, not com.kernarium.icons.IconProvider"),
+            ("icons-service-class-changed", {"icons_variant": "service-class-changed"},
+             "the service is com.kernarium.icons.IconRenderServiceTwo, not com.kernarium.icons.IconRenderService"),
+            ("icons-service-app-zygote", {"icons_variant": "service-app-zygote"}, "the service sets useAppZygote"),
+            ("icons-seapp-isolated-for-another-seinfo", {"icons_variant": "seapp-isolated-for-another-seinfo"},
+             "put the icon renderer's isolated service in None, not isolated_app"),
+            ("icons-seapp-isolated-for-a-newer-target", {"icons_variant": "seapp-isolated-for-a-newer-target"},
+             "put the icon renderer's isolated service in None, not isolated_app"),
+            ("icons-app-has-an-activity", {"icons_variant": "has-an-activity"}, "has activity: the renderer asks for no permission"),
+            ("icons-app-has-a-receiver", {"icons_variant": "has-a-receiver"}, "has receiver: the renderer asks for no permission"),
+            ("icons-app-has-a-filter", {"icons_variant": "has-a-filter"}, "has intent-filter: the renderer asks for no permission"),
+            ("icons-app-second-provider", {"icons_variant": "second-provider"}, "has 2 provider elements, not 1"),
+            ("icons-provider-not-exported", {"icons_variant": "provider-not-exported"}, "the provider's exported is False, not True"),
+            ("icons-provider-open", {"icons_variant": "provider-open"},
+             "the provider's permission is None, not 'android.permission.ACCESS_CONTENT_PROVIDERS_EXTERNALLY'"),
+            ("icons-provider-other-permission", {"icons_variant": "provider-other-permission"},
+             "the provider's permission is 'android.permission.INTERACT_ACROSS_USERS'"),
+            ("icons-provider-grants-uris", {"icons_variant": "provider-grants-uris"}, "the provider sets grantUriPermissions"),
+            ("icons-provider-disabled", {"icons_variant": "provider-disabled"}, "the provider sets enabled"),
+            ("icons-provider-other-authority", {"icons_variant": "provider-other-authority"},
+             "the provider's authorities is 'com.kernarium.icon'"),
+            ("icons-provider-not-direct-boot-aware", {"icons_variant": "provider-not-direct-boot-aware"},
+             "the provider's directBootAware is None, not True"),
+            ("icons-service-not-isolated", {"icons_variant": "service-not-isolated"}, "the service's isolatedProcess is False, not True"),
+            ("icons-service-exported", {"icons_variant": "service-exported"}, "the service's exported is True, not False"),
+            ("icons-service-guarded", {"icons_variant": "service-guarded"}, "the service sets permission"),
+            ("icons-service-not-direct-boot-aware", {"icons_variant": "service-not-direct-boot-aware"},
+             "the service's directBootAware is None, not True"),
+            ("icons-application-allows-backup", {"icons_variant": "application-allows-backup"},
+             "the application's allowBackup is not false"),
+            ("icons-application-not-direct-boot-aware", {"icons_variant": "application-not-direct-boot-aware"},
+             "the application's directBootAware is not true"),
+            ("icons-application-closed-to-hidden-apis", {"icons_variant": "application-closed-to-hidden-apis"},
+             "the application's usesNonSdkApi is not true"),
+            ("icons-application-persistent", {"icons_variant": "application-persistent"}, "the application sets persistent"),
+            ("icons-app-no-target-sdk", {"icons_variant": "no-target-sdk"}, "has no integer targetSdkVersion"),
+            ("icons-app-platform-key", {"icons_variant": "platform-key"},
+             "KernariumIcons.apk is signed with 'build/make/target/product/security/platform.x509.pem'"),
+            ("icons-app-media-key", {"icons_variant": "platform-key-in-the-tree"}, "KernariumIcons.apk is signed with"),
+            ("icons-app-other-partition", {"icons_variant": "other-partition"}, "on 'system': the renderer takes the default key"),
+            ("icons-app-no-signing-line", {"icons_variant": "no-signing-line"}, "apkcerts.txt has no line for KernariumIcons.apk"),
+            ("icons-app-no-signing-table", {"icons_variant": "no-signing-table"}, "META/apkcerts.txt is missing"),
+            ("icons-seapp-by-name", {"icons_variant": "seapp-by-name"},
+             "seapp_contexts select untrusted_app for the icon renderer by name \\(com.kernarium.icons\\)"),
+            ("icons-seapp-by-prefix", {"icons_variant": "seapp-by-prefix"},
+             "seapp_contexts select kernarium_icons for the icon renderer by name \\(com.kernarium.\\*\\)"),
+            ("icons-seapp-app-domain-changed", {"icons_variant": "seapp-app-domain-changed"},
+             "put the icon renderer's provider in platform_app, not an untrusted_app domain"),
+            ("icons-seapp-privileged-domain", {"icons_variant": "seapp-privileged-domain"},
+             "put the icon renderer's provider in priv_app, not an untrusted_app domain"),
+            ("icons-seapp-isolated-changed", {"icons_variant": "seapp-isolated-changed"},
+             "put the icon renderer's isolated service in untrusted_app, not isolated_app"),
+            ("icons-seapp-no-isolated", {"icons_variant": "seapp-no-isolated"},
+             "put the icon renderer's isolated service in None, not isolated_app"),
             ("oldapp-missing-context", {"oldswitch_variant": "missing-context"},
              "is labelled default_prop, not kernarium_oldapp_prop"),
             ("oldapp-exact-context", {"oldswitch_variant": "exact-context"},

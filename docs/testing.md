@@ -573,7 +573,10 @@ line from a probe session's Settings. `FeedbackAskUITests` (the same build) adds
 `ANDARIUM_FEEDBACK_PROBE` to the probe session, which gives the sheet mail that can be
 sent, a composer stand-in and the preview's bug report, and walks Send's
 question, Create bug report, the pages of the report's row and Send without
-bug report.
+bug report. `AddToHomeUITests` (`ANDARIUM_ANDROID_APPS_PROBE`, a played list of
+Android apps) walks Settings > Apps > Add to Home Screen to the guide and presses
+Apple's Shortcuts button: Shortcuts opens on Andarium's page with a tile for each
+app.
 
 `AndariumPreviewUITests` drives `AndariumPreview` in the Simulator
 (`xcodebuild test -scheme AndariumPreview`): the screens it lists pass the
@@ -694,11 +697,13 @@ starts the next only once the old one is shown to be dead (three reads in a row
 that all worked and all showed the same beat), and otherwise replaces nothing
 and ends with a status and state of its own that `status` reports (approval the
 device may have asked for, a heartbeat it cannot read, a remainder of the old
-host that is not shown gone). The refusal for approval stays in the state
-directory until a host serves, and a device with no host to read is the first
-`start`'s job. A command in flight when its host is replaced is not repeated,
-and its sender gets status 3. Run it in a terminal, detached with
-`watch --detach`, or as a job manager's job (`watch --print-launchd-job
+host that is not shown gone). A replacement start that the device's connection
+drops under, before its runner came up or after its test started, is made again
+once the device answers (four starts in all). The refusal for approval stays in
+the state directory until a host serves, and a device with no host to read is
+the first `start`'s job. A command in flight when its host is replaced is not
+repeated, and its sender gets status 3. Run it in a terminal, detached
+with `watch --detach`, or as a job manager's job (`watch --print-launchd-job
 <label>` prints a launchd job that launchd never restarts, and creates nothing:
 make its log directory first; launchd must be able to open the job file and the
 log, so both belong on a volume with ownership enabled, and `--launchd-log`
@@ -1281,6 +1286,62 @@ packages, install times and processes, and `android17-oldapp-switch-command`
 (tooling; skipped without a JDK) runs the command's rule, listing, cleanup,
 lock file (on real files), writes and exit statuses on a plain JVM; the Android
 calls need a built image.
+`android-app-shortcuts` (integration) registers when
+`UML_ANDROID_APP_SHORTCUTS_RELEASE` names a release built with the launcher-application
+command ([README](../android/lineage-24/README.md#launcher-applications)): as the adb shell
+user, `kernarium_apps` is in the image and its `digest` and `list` carry one header block (the foreground
+user, the system's first locale, a count that matches), with rows in order, names in the grammar and
+labels that are safe and within the bounds; Settings is listed as built in under its own label, and the probe
+application (`appsprobe_apk.py`: two launcher activities, one with a hostile label and one with a
+label over the bound, a launcher activity that is not exported, an exported one with no launcher
+filter and a launcher alias that the manifest disables; a second package whose label is a string
+resource and whose icon is an adaptive icon of a colour and a bitmap layer, and a third that is the
+second with a foreground that is no picture; all three are test-only and
+installed with `-t`, as the shell may change a component's state of a test-only package alone) with the escaped and the
+cut labels and none of the others; `icons` answers records whose length and SHA-256 check out,
+decoded (8-bit RGB or RGBA, every chunk's checksum checked) to pictures that are not blank and whose alpha flag is true, the second
+package's with its colour in the corners and its disc in the middle, `noicon` for the first,
+`missing` for what is not an entry, in the order asked, no built-in application's icon is `error`, and nine
+components are status 64; the drawing is
+not in the shell (while `icons` runs over eight components the tool's process, sampled through
+`/proc`, maps and holds no package, overlay or resource-cache file and nothing of a target's own
+directory, and the renderer runs in two processes of its own, an ordinary application's and an isolated one's, as
+`untrusted_app` and `isolated_app`), an application's own call of the renderer's provider is refused for
+the shell-only permission, and the bad icon is `error` among seven good ones that are all `ok`; the alias
+is not listed until `pm enable` enables it for the user, and then listed, drawn and started; the
+digest is recomputed from the rows; `launch` makes the probe's activity the resumed one (and again when
+it is open) and refuses with status 2 and no output the not exported and no-filter activities, a
+built-in application's other activity, a package that is not installed, a disabled application and
+every hostile argument, none of which runs (a marker file stays absent); usage errors are status
+64; the shell user's data directory is unchanged and no denial of the shell domain is logged
+from a time on the device's clock taken before the first call (only that window is read, so a line
+the log buffer has dropped cannot hide a new one), and the isolated renderer's audit lines in that window
+are printed with the result without being judged; and the digest changes with an install, an update in place (whose icon keys alone
+change) and a disabled application, and returns to its earlier value when the application is
+removed. `android17-app-shortcuts-command` (tooling; skipped without a JDK) runs the command's
+grammar, the labels' escaping and bounds, the listing, digest and icon keys, every answer's
+framing read back by a parser of its own, the icon records, the launch's refusals and argument
+vector, how a start's output is read, the child process (real processes: output drained,
+deadline, termination and reaping), the renderer's hold (whose provider it takes, the one user for
+every acquisition, a provider that died, a hold that stays closed, a call that is never answered),
+the icon source's bound, the resource files' order and the statuses on a plain JVM, then again with one rule removed at a time (the escaping, a bound, the
+launch refusal, the grammar, the digest's inputs, the PNG checks, the deadlines, the reaping),
+where the rows it names must fail; it also checks the image's wiring, that the sources write
+and open nothing, and, as text with a mutant for each, what the Android glue must not do (a
+substitute for a failed lookup, the manifest's enabled flag, the wall clock, the device's own
+configuration for an icon or a label, a built-in application's icon key without the image's build time, a
+file measured by its extension, a kill that is not a SIGKILL by pid).
+`android17-icon-renderer` (tooling; skipped without a JDK) runs what the icon renderer
+(`KernariumIcons`) shares with the command (the shell user's uid, the shape of a request, a path's
+rules, the sizes and bounds) and the provider's worker (one deadline over a request's queue, bind and
+drawing; an idle cleanup that never blocks a bind; a worker that failed is never reused) over stand-ins for the platform, on a plain JVM, then again with one rule removed at a time, and checks as text,
+with a mutant for each rule, what its provider, worker, drawing and service must do and must not touch,
+and its manifest and build file (an unprivileged, direct-boot-aware application with a guarded
+provider and an isolated service, and nothing else).
+`android17-app-shortcuts-runner` (tooling; skipped without keytool and
+jarsigner) runs the probe packages (the bad icon and the caller that is an ordinary application), the strict
+parsers (the sampler's answer too), what the tool's process may hold and the domains the renderer's processes may run in,
+and every step against a scripted guest that differs one way at a time; the Android calls need a built image.
 `android17-sms-service` (tooling; skipped without a JDK) runs the text message
 service on a plain JVM: the PDUs it builds, read back with a parser of its own
 and the JDK's `UTF-16` decoder, the one Android applies to a UCS-2 message, which
