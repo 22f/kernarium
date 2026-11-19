@@ -197,6 +197,33 @@ class ArtifactTests(unittest.TestCase):
         descriptor.write_text(text + "LINEAGE24_ACCEPTED_AOT_EXTRA=1\n")
         self.refuses("keys differ", accepted=descriptor)
 
+    def test_archives_switch_is_a_descriptor_field_the_artifact_check_ignores(
+            self) -> None:
+        digest = R.sha256_file(self.artifact / "artifact.json")
+        descriptor = self.scratch / "accepted-aot.env"
+        for state in R.ARCHIVE_STATES:
+            descriptor.write_text(
+                R.render_accepted(self.description, digest, state))
+            self.assertEqual(R.read_accepted(descriptor)[R.ARCHIVES_KEY],
+                             state)
+            self.check(accepted=descriptor)
+        with self.assertRaises(R.ArtifactError):
+            R.render_accepted(self.description, digest, "maybe")
+        descriptor.write_text(R.render_accepted(self.description, digest)
+                              .replace("ARCHIVES='no'", "ARCHIVES='soon'"))
+        with self.assertRaises(R.ArtifactError):
+            R.read_accepted(descriptor)
+
+    def test_generator_changes_names_the_files_in_tree_order(self) -> None:
+        self.assertEqual(R.generator_changes(self.description, self.tree), [])
+        (self.tree / "tools/aot/rewrite.py").write_text("BLOB_VERSION = 2\n#")
+        (self.tree / "tools/aot/asm.py").write_text("changed")
+        (self.tree / "tools/aot/licences.py").unlink()
+        self.assertEqual(
+            R.generator_changes(self.description, self.tree),
+            ["tools/aot/asm.py", "tools/aot/licences.py",
+             "tools/aot/rewrite.py"])
+
     def test_install_checks_then_copies_once(self) -> None:
         destination = self.scratch / "aot"
         installed = R.install(self.artifact, self.release, destination,

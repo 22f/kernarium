@@ -35,6 +35,20 @@ Kernel bundle (--kernel android|arm64|x86_64):
     configuration identity, so a symbol removed from a fragment, which falls
     back to its default, is the one change this cannot see.
 
+AOT artifact (--aot):
+  - without an accepted descriptor (android/lineage-24/metadata/accepted-aot.env)
+    an application that packages UmlArm64Aot.framework fails. The descriptor's
+    archive field (LINEAGE24_ACCEPTED_AOT_ARCHIVES) is the one switch that lets
+    an App Store or TestFlight archive carry the component: a framework in an
+    archive while it is "no" fails, and so does an archive without one while
+    it is "yes";
+  - the packaged framework's code section is the blob the descriptor names
+    (SHA-256), and the descriptor is for the accepted Android release;
+  - the artifact installed below .build/android/aot is the one the descriptor
+    names, and every file its blob is a function of (tools/aot, the decode
+    partitions, the library list) equals what it was built with: a changed
+    one is pending, as for the other artifacts.
+
 The inputs, the descriptors and the files the checks read must be clean in the
 work tree: an uncommitted change would be archived without a commit that
 records it.
@@ -66,9 +80,10 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
-for _tools in ("kernel/common/artifacts", "android/lineage-24/tools"):
+for _tools in ("kernel/common/artifacts", "android/lineage-24/tools", "tools/aot"):
     sys.path.insert(0, str(HERE / _tools))
 import contract_checks  # noqa: E402
+import release_artifact  # noqa: E402
 import release_inputs  # noqa: E402
 
 DECISION_ENV = "PENDING_INPUTS_DECISION"
@@ -78,6 +93,10 @@ UNSIGNED_PROOF = "unsigned-proof"
 STAGED_SYSTEM = ".build/andarium-system"
 # Where install-release.py installs a release, below the work tree.
 INSTALLED_RELEASES = ".build/android/releases"
+# The AOT artifact beside it, and where the framework holds its blob.
+INSTALLED_AOT = ".build/android/aot"
+PACKAGED_AOT = "Frameworks/UmlArm64Aot.framework/UmlArm64Aot"
+AOT_SECTION = ("__TEXT", "__text")
 PACKAGED_SYSTEM = "andarium-system"
 MANIFEST = "release-manifest.json"
 LAYOUT = "guest/partition-layout.json"
@@ -491,6 +510,99 @@ def check_android(repo, report, staged_root, app):
     )
 
 
+# -------------------------------------------------------------------- AOT --
+
+
+def check_aot(repo, report, app):
+    descriptor_path = repo / release_artifact.ACCEPTED_DESCRIPTOR
+    accepted = None
+    if descriptor_path.exists():
+        try:
+            accepted = release_artifact.read_accepted(descriptor_path)
+        except release_artifact.ArtifactError as error:
+            report.error("the accepted AOT descriptor is unreadable", str(error))
+            return
+    framework = app / PACKAGED_AOT if app is not None else None
+    packaged = framework is not None and framework.exists()
+    if accepted is None:
+        if packaged:
+            report.error(
+                "the application carries the AOT component, but no AOT artifact is accepted",
+                f"{release_artifact.ACCEPTED_DESCRIPTOR} names none",
+            )
+        else:
+            report.note("no AOT artifact is accepted, and the application carries none")
+        return
+    release_id = accepted["LINEAGE24_ACCEPTED_AOT_RELEASE_ID"]
+    label = f"the AOT artifact of {release_id}"
+    archives = accepted[release_artifact.ARCHIVES_KEY] == "yes"
+    try:
+        release = descriptor_of(repo, ANDROID_DESCRIPTOR)
+        release_directory = release["LINEAGE24_ACCEPTED_DIRECTORY_NAME"]
+        accepted_release = release["LINEAGE24_ACCEPTED_RELEASE_ID"]
+    except (ValueError, KeyError) as error:
+        report.error("the Android release descriptor is unreadable", str(error))
+        return
+    if accepted_release != release_id:
+        report.error(f"{label} is not for the accepted Android release {accepted_release}")
+        return
+    if packaged and not archives:
+        report.error(
+            "the application carries the AOT component, which no archive may yet",
+            f"{release_artifact.ACCEPTED_DESCRIPTOR} sets {release_artifact.ARCHIVES_KEY} to no",
+        )
+    if app is not None and archives and not packaged:
+        report.error(
+            f"{label} is accepted for archives, but the application carries no AOT framework",
+            f"{PACKAGED_AOT} is missing",
+        )
+    if packaged:
+        blob = macho_section(framework, AOT_SECTION)
+        if blob is None:
+            report.error(f"the packaged AOT framework has no {AOT_SECTION[1]} section")
+        else:
+            digest = hashlib.sha256(blob).hexdigest()
+            recorded = accepted["LINEAGE24_ACCEPTED_AOT_BLOB_SHA256"]
+            if digest != recorded:
+                report.error(
+                    f"the packaged AOT framework is not the blob of {label}",
+                    f"it holds {digest}; the descriptor names {recorded}",
+                )
+            else:
+                report.note(f"the packaged AOT framework is the blob of {label}")
+
+    installed = repo / INSTALLED_AOT / release_directory
+    if not installed.is_dir():
+        if packaged or archives:
+            report.pend(
+                f"aot-{release_id}",
+                f"{label} is not installed, so its tools cannot be compared with this commit",
+                f"expected at {INSTALLED_AOT}/{release_directory} (install-release.py --aot-artifact)",
+            )
+        return
+    try:
+        description = release_artifact.verify(
+            installed, repo=repo, accepted=descriptor_path, generator=False)
+    except release_artifact.ArtifactError as error:
+        report.error(f"the installed AOT artifact is not the accepted one: {error}")
+        return
+    changed = release_artifact.generator_changes(description, repo)
+    if not changed:
+        report.note(f"{label}: its generator inputs are the ones on this commit")
+        return
+    details = []
+    for path in changed:
+        details.append(path)
+        for line in commit_lines(commits_touching(repo, path)):
+            details.append(f"    {line}")
+    report.pend(
+        f"aot-{release_id}",
+        f"{label} is behind this commit: {len(changed)} generator input"
+        f"{'s' if len(changed) != 1 else ''} differ from what it was built with",
+        *details,
+    )
+
+
 # ----------------------------------------------------------------- kernel --
 
 
@@ -730,12 +842,14 @@ def main(argv=None):
                         help="check the accepted Android release")
     parser.add_argument("--kernel", action="append", default=[], choices=sorted(KERNELS),
                         help="check an accepted kernel bundle (repeatable)")
+    parser.add_argument("--aot", action="store_true",
+                        help="check the AOT artifact and, with --app, the framework that packages it")
     parser.add_argument("--decision", default=None,
                         help=f"the release IDs the user decided to ship as they are "
                              f"(default: ${DECISION_ENV})")
     options = parser.parse_args(argv)
-    if not options.android_release and not options.kernel:
-        parser.error("name an artifact: --android-release or --kernel")
+    if not options.android_release and not options.kernel and not options.aot:
+        parser.error("name an artifact: --android-release, --kernel or --aot")
 
     repo = options.repository.resolve()
     decisions = parse_decisions(
@@ -754,6 +868,9 @@ def main(argv=None):
             covered += release_inputs.input_paths(repo / release_inputs.LIST_RELATIVE)
         except release_inputs.InputError:
             pass  # check_android reports the unreadable list
+    if options.aot:
+        covered += [release_artifact.ACCEPTED_DESCRIPTOR, ANDROID_DESCRIPTOR,
+                    *release_artifact.GENERATOR_INPUTS]
     for name in options.kernel:
         kernel = KERNELS[name]
         covered += [kernel["descriptor"], kernel["metadata"], *kernel["series"], *kernel["fragments"]]
@@ -775,6 +892,8 @@ def main(argv=None):
         check_android(repo, report, staged, options.app)
     for name in options.kernel:
         check_kernel(repo, report, name, options.app)
+    if options.aot:
+        check_aot(repo, report, options.app)
     return report.finish()
 
 

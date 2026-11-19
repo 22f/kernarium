@@ -71,7 +71,13 @@ ACCEPTED_FIELDS = (
     ("LINEAGE24_ACCEPTED_AOT_ARTIFACT_SHA256", False),
     ("LINEAGE24_ACCEPTED_AOT_BLOB_SHA256", False),
     ("LINEAGE24_ACCEPTED_AOT_BLOB_VERSION", True),
+    ("LINEAGE24_ACCEPTED_AOT_ARCHIVES", False),
 )
+# The one switch for the archive configurations (App Store, TestFlight): the
+# component is in their runtimes, and allowed in their apps, only when the
+# descriptor says "yes". Every other product takes an accepted artifact.
+ARCHIVES_KEY = "LINEAGE24_ACCEPTED_AOT_ARCHIVES"
+ARCHIVE_STATES = ("no", "yes")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 RELEASE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
@@ -141,7 +147,26 @@ def blob_version(repo: Path) -> int:
 
 
 def generator_digests(repo: Path) -> dict[str, str]:
-    return {path: sha256_file(repo / path) for path in GENERATOR_INPUTS}
+    try:
+        return {path: sha256_file(repo / path) for path in GENERATOR_INPUTS}
+    except OSError as error:
+        fail(f"cannot read a generator input: {error}")
+
+
+def generator_changes(description: dict, repo: Path) -> list[str]:
+    """The files the rewrite is a function of that are not what the artifact
+    was built with, in tree order; a file the artifact does not record or the
+    tree lacks counts."""
+    recorded = description["generator"]
+    changed = []
+    for path in GENERATOR_INPUTS:
+        try:
+            current = sha256_file(repo / path)
+        except OSError:
+            current = None
+        if recorded.get(path) != current:
+            changed.append(path)
+    return changed
 
 
 def release_identity(release: Path) -> dict:
@@ -267,8 +292,7 @@ def verify(artifact: Path, *, repo: Path | None = None,
         current = generator_digests(repo)
         if set(recorded) != set(current):
             fail("artifact.json names other generator inputs than the tree")
-        changed = sorted(path for path in current
-                         if recorded[path] != current[path])
+        changed = generator_changes(description, repo)
         if changed:
             fail("the artifact was built with other generator inputs than "
                  f"this tree's: {', '.join(changed)}")
@@ -288,13 +312,13 @@ def verify(artifact: Path, *, repo: Path | None = None,
         values = accepted_values(description,
                                  sha256_file(artifact / "artifact.json"))
         for key, _ in ACCEPTED_FIELDS:
-            if expected[key] != values[key]:
+            if key != ARCHIVES_KEY and expected[key] != values[key]:
                 fail(f"the artifact differs from accepted descriptor {key}")
     return description
 
 
-def accepted_values(description: dict, artifact_json_sha256: str
-                    ) -> dict[str, str]:
+def accepted_values(description: dict, artifact_json_sha256: str,
+                    archives: str = "no") -> dict[str, str]:
     return {
         "LINEAGE24_ACCEPTED_AOT_SCHEMA": str(description["schema"]),
         "LINEAGE24_ACCEPTED_AOT_RELEASE_ID":
@@ -303,11 +327,15 @@ def accepted_values(description: dict, artifact_json_sha256: str
         "LINEAGE24_ACCEPTED_AOT_BLOB_SHA256": description["blob"]["sha256"],
         "LINEAGE24_ACCEPTED_AOT_BLOB_VERSION":
             str(description["blob"]["version"]),
+        ARCHIVES_KEY: archives,
     }
 
 
-def render_accepted(description: dict, artifact_json_sha256: str) -> str:
-    values = accepted_values(description, artifact_json_sha256)
+def render_accepted(description: dict, artifact_json_sha256: str,
+                    archives: str = "no") -> str:
+    if archives not in ARCHIVE_STATES:
+        fail(f"archives must be one of {ARCHIVE_STATES}")
+    values = accepted_values(description, artifact_json_sha256, archives)
     lines = ["# SPDX-License-Identifier: GPL-2.0-or-later",
              "# Accepted AOT artifact of an Android release "
              "(tools/aot/release_artifact.py)."]
@@ -332,6 +360,8 @@ def read_accepted(path: Path) -> dict[str, str]:
             else match.group(3)
     if set(values) != {key for key, _ in ACCEPTED_FIELDS}:
         fail(f"{path}: keys differ from the accepted-artifact contract")
+    if values[ARCHIVES_KEY] not in ARCHIVE_STATES:
+        fail(f"{path}: {ARCHIVES_KEY} is not one of {ARCHIVE_STATES}")
     return values
 
 
@@ -473,6 +503,9 @@ def main(argv: list[str] | None = None) -> int:
     verify_parser.add_argument("--no-generator", action="store_true")
     describe_parser = commands.add_parser("describe")
     describe_parser.add_argument("--artifact", type=Path, required=True)
+    describe_parser.add_argument("--archives", choices=ARCHIVE_STATES,
+                                 default="no", help="whether the archive "
+                                 "configurations may carry the component")
     install_parser = commands.add_parser("install")
     install_parser.add_argument("--artifact", type=Path, required=True)
     install_parser.add_argument("--release", type=Path, required=True)
@@ -502,7 +535,8 @@ def main(argv: list[str] | None = None) -> int:
             artifact = arguments.artifact.resolve()
             description = verify(artifact)
             sys.stdout.write(render_accepted(
-                description, sha256_file(artifact / "artifact.json")))
+                description, sha256_file(artifact / "artifact.json"),
+                arguments.archives))
         else:
             root = arguments.destination_root or repo / ".build/android/aot"
             destination = install(arguments.artifact.resolve(),

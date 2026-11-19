@@ -80,10 +80,9 @@ set(UML_AOT OFF)
 set(UML_AOT_SOURCE "")
 set(UML_AOT_ARTIFACT_DIR "")
 set(UML_AOT_ARTIFACT_ACCEPTED "")
-set(_uml_aot_supported FALSE)
-if(UML_TARGET_MACOS AND NOT UML_APP_STORE_RUNTIME)
-    set(_uml_aot_supported TRUE)
-endif()
+# Every Apple product that runs Android carries it: macOS, the iOS Simulator
+# and the iOS device (the App Store runtime too, which reads no environment
+# for it).
 if(UML_AOT_MODE STREQUAL "OFF")
     if(UML_AOT_IMAGE OR UML_AOT_ARTIFACT)
         message(STATUS "UML_AOT_MODE=OFF: building without the AOT component")
@@ -92,19 +91,21 @@ elseif(UML_AOT_IMAGE AND UML_AOT_ARTIFACT)
     message(FATAL_ERROR
         "UML_AOT_IMAGE and UML_AOT_ARTIFACT name two blobs; name one")
 elseif(UML_AOT_IMAGE OR UML_AOT_ARTIFACT)
-    if(NOT _uml_aot_supported)
-        message(FATAL_ERROR
-            "The AOT component is supported for the macOS product only so far")
-    endif()
     if(UML_AOT_IMAGE)
+        if(NOT UML_TARGET_MACOS)
+            message(FATAL_ERROR
+                "UML_AOT_IMAGE generates a blob for the macOS tests; an iOS "
+                "product wraps an artifact (UML_AOT_ARTIFACT)")
+        endif()
         set(UML_AOT_SOURCE image)
     else()
         set(UML_AOT_SOURCE artifact)
         set(UML_AOT_ARTIFACT_DIR "${UML_AOT_ARTIFACT}")
     endif()
-elseif(_uml_aot_supported)
+elseif(UML_TARGET_MACOS OR UML_KERNEL_PRODUCT STREQUAL "android-17")
     # The accepted artifact: the descriptor names the release it was built
-    # from, and it is installed beside the accepted release.
+    # from, and it is installed beside the accepted release. An iOS runtime
+    # of the Linux product has no Android library to rewrite and takes none.
     set(_uml_aot_accepted
         ${PROJECT_SOURCE_DIR}/android/lineage-24/metadata/accepted-aot.env)
     set(_uml_aot_release
@@ -130,9 +131,26 @@ elseif(_uml_aot_supported)
                 "'${_uml_aot_accepted_id}', but the accepted release is "
                 "'${_uml_aot_release_id_line}'")
         endif()
+        # An archive configuration takes it only when the descriptor says so
+        # (LINEAGE24_ACCEPTED_AOT_ARCHIVES): the device runtimes are the ones
+        # an App Store or TestFlight archive embeds. macOS and the Simulator
+        # take every accepted artifact.
+        file(STRINGS "${_uml_aot_accepted}" _uml_aot_archives
+            REGEX "^LINEAGE24_ACCEPTED_AOT_ARCHIVES='.*'$")
+        string(REGEX REPLACE "^[A-Z0-9_]+='(.*)'$" "\\1"
+            _uml_aot_archives "${_uml_aot_archives}")
+        set(_uml_aot_archive_product FALSE)
+        if(UML_APPLE_PLATFORM STREQUAL "ios" OR UML_APP_STORE_RUNTIME)
+            set(_uml_aot_archive_product TRUE)
+        endif()
         set(_uml_aot_default
             "${PROJECT_SOURCE_DIR}/.build/android/aot/${_uml_aot_release_dir}")
-        if(EXISTS "${_uml_aot_default}/artifact.json")
+        if(_uml_aot_archive_product AND NOT _uml_aot_archives STREQUAL "yes")
+            message(STATUS
+                "The accepted AOT artifact is not accepted for archives "
+                "yet (LINEAGE24_ACCEPTED_AOT_ARCHIVES): building without the "
+                "AOT component")
+        elseif(EXISTS "${_uml_aot_default}/artifact.json")
             set(UML_AOT_SOURCE artifact)
             set(UML_AOT_ARTIFACT_DIR "${_uml_aot_default}")
             set(UML_AOT_ARTIFACT_ACCEPTED "${_uml_aot_accepted}")

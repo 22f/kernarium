@@ -33,6 +33,19 @@ set(_uml_aot_manifest ${_uml_aot_dir}/manifest.json)
 set(_uml_aot_fw_parent "${PROJECT_BINARY_DIR}/lib")
 set(_uml_aot_fw_dir "${_uml_aot_fw_parent}/UmlArm64Aot.framework")
 
+# An iOS framework states the lowest system that loads it, as App Store
+# validation requires of every embedded framework.
+set(_uml_aot_plist_minimum)
+if(NOT UML_TARGET_MACOS)
+    if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+        message(FATAL_ERROR
+            "UmlArm64Aot needs the Apple deployment target for its Info.plist")
+    endif()
+    set(_uml_aot_plist_minimum
+"	<key>MinimumOSVersion</key>
+	<string>${CMAKE_OSX_DEPLOYMENT_TARGET}</string>
+")
+endif()
 file(MAKE_DIRECTORY "${_uml_aot_fw_dir}")
 file(WRITE "${_uml_aot_fw_dir}/Info.plist"
 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -53,7 +66,7 @@ file(WRITE "${_uml_aot_fw_dir}/Info.plist"
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-</dict>
+${_uml_aot_plist_minimum}</dict>
 </plist>
 ")
 

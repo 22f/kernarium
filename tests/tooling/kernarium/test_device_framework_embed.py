@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -99,6 +100,65 @@ class DeviceFrameworkEmbedTests(unittest.TestCase):
                      env={**self.environment, **overrides})
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
+
+    def embed_optional(self, framework, **overrides):
+        result = run([str(EMBED), "--optional", str(framework)],
+                     env={**self.environment, **overrides})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def add_simulator_slice(self):
+        simulator = self.framework / "ios-arm64-simulator/Driver.framework"
+        simulator.mkdir(parents=True)
+        (simulator / "Driver").write_bytes(
+            (self.library / "Driver.changed").read_bytes())
+        (simulator / "Info.plist").write_text(
+            INFO_PLIST % {"name": "Driver", "type": "FMWK"})
+        return simulator
+
+    def test_a_device_only_framework_is_not_embedded_for_the_simulator(self):
+        self.add_simulator_slice()
+        output = self.embed(PLATFORM_NAME="iphonesimulator")
+        self.assertIn("device-only framework", output)
+        self.assertFalse(self.embedded.exists())
+
+    def test_an_optional_framework_embeds_the_slice_of_the_sdk(self):
+        simulator = self.add_simulator_slice()
+        # Unsigned, so the embedded bytes are the slice's.
+        unsigned = {"CODE_SIGNING_ALLOWED": "NO"}
+        self.assertIn("embedded Driver for iphoneos",
+                      self.embed_optional(self.framework, **unsigned))
+        self.assertEqual((self.embedded / "Driver").read_bytes(),
+                         (self.source / "Driver").read_bytes())
+        self.assertIn("embedded Driver for iphonesimulator", self.embed_optional(
+            self.framework, PLATFORM_NAME="iphonesimulator", **unsigned))
+        self.assertEqual((self.embedded / "Driver").read_bytes(),
+                         (simulator / "Driver").read_bytes())
+        self.assertIn("already embedded for iphonesimulator", self.embed_optional(
+            self.framework, PLATFORM_NAME="iphonesimulator", **unsigned))
+
+    def test_an_optional_framework_that_is_not_packaged_embeds_nothing_and_clears_a_stale_copy(self):
+        self.embed()
+        self.assertTrue(self.embedded.exists())
+        missing = self.root / "Missing.xcframework"
+        self.assertIn("not packaged", self.embed_optional(missing))
+        self.assertTrue(self.embedded.exists(), "a different framework's copy stays")
+        # The same name: the packaging step no longer makes it, so the copy goes.
+        shutil.rmtree(self.framework)
+        self.assertIn("not packaged", self.embed_optional(self.framework))
+        self.assertFalse(self.embedded.exists())
+
+    def test_an_optional_framework_without_a_slice_for_the_sdk_embeds_nothing(self):
+        self.assertIn("embedded Driver for iphoneos", self.embed_optional(self.framework))
+        output = self.embed_optional(self.framework, PLATFORM_NAME="iphonesimulator")
+        self.assertIn("not packaged for iphonesimulator", output)
+        self.assertFalse(self.embedded.exists())
+
+    def test_a_required_framework_without_its_slice_still_fails(self):
+        shutil.rmtree(self.source)
+        result = run([str(EMBED), str(self.framework)], env=self.environment)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("has no device slice", result.stderr)
 
     def sign_application(self):
         """What Xcode does when it signs the application."""

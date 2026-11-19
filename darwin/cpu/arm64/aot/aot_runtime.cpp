@@ -804,9 +804,14 @@ constexpr std::uint32_t no_library = 0xffffffffU;
  * measurement uses to compare against the engine alone. */
 [[nodiscard]] bool environment_enabled() noexcept
 {
+#ifdef UML_APP_STORE_RUNTIME
+	/* The App Store runtime reads no environment knob. */
+	return directory().valid;
+#else
 	const char *value = std::getenv("DARWIN_UML_AOT");
 	const bool off = value != nullptr && value[0] == '0' && value[1] == '\0';
 	return !off && directory().valid;
+#endif
 }
 
 /* Rewritten code asks for the TLB entry of a page it missed (see the refill
