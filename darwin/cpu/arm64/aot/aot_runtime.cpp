@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <span>
+#include <string_view>
 #include <sys/mman.h>
 
 #if UML_AOT_DIAGNOSTICS
@@ -65,7 +66,7 @@ constexpr char blob_magic[8] = {'U', 'M', 'L', 'A', 'O', 'T', '1', '6'};
  * addition it can ignore raises the version, which a runtime accepts at or
  * above the one it was built for (tools/aot/rewrite.py: BLOB_VERSION). */
 constexpr std::size_t header_version = 8;
-constexpr std::uint32_t blob_version = 2;
+constexpr std::uint32_t blob_version = 3;
 /* The stored hash of a text page: SHA-256 (tools/aot/rewrite.py:
  * page_hashes). */
 constexpr std::size_t page_hash_size = CC_SHA256_DIGEST_LENGTH;
@@ -79,6 +80,12 @@ constexpr std::size_t header_slots = 32;
 /* How many libraries the rewriter left to the engine: their entry table
  * could not be formed (version 2). */
 constexpr std::size_t header_refused = 36;
+/* The release the blob was made from (version 3): its ID, then the SHA-256 of
+ * its manifest and of its system partition. */
+constexpr std::size_t header_release_id = 0x30;
+constexpr std::size_t release_id_bytes = 96;
+constexpr std::size_t header_manifest_sha256 = 0x90;
+constexpr std::size_t header_system_sha256 = 0xb0;
 constexpr std::size_t record_size = 256;
 constexpr std::size_t record_table_base = 152;
 constexpr std::size_t record_table_end = 160;
@@ -167,6 +174,32 @@ struct Directory final {
 		return d;
 	}();
 	return value;
+}
+
+/* The release the blob names, which the layout ties to the system a launch
+ * must boot (tools/aot/rewrite.py: build_blob). */
+[[nodiscard]] ::uml::cpu::AotRelease header_release() noexcept
+{
+	::uml::cpu::AotRelease release;
+	const auto *id = reinterpret_cast<const char *>(
+		uml_aot_blob + header_release_id);
+	release.id = std::string_view{id, strnlen(id, release_id_bytes)};
+	std::memcpy(release.manifest_sha256.data(),
+		uml_aot_blob + header_manifest_sha256,
+		release.manifest_sha256.size());
+	std::memcpy(release.system_sha256.data(),
+		uml_aot_blob + header_system_sha256, release.system_sha256.size());
+	return release;
+}
+
+/* Whether the blob was made from the release a launch boots: the ID and both
+ * digests are the ones its header names. */
+[[nodiscard]] bool made_from(const ::uml::cpu::AotRelease &booted) noexcept
+{
+	const auto own = header_release();
+	return !own.id.empty() && own.id == booted.id &&
+		own.manifest_sha256 == booted.manifest_sha256 &&
+		own.system_sha256 == booted.system_sha256;
 }
 
 /* The identity of one 4 KiB page (tools/aot/rewrite.py: page_digest). */
@@ -927,7 +960,13 @@ bool enabled() noexcept
 {
 	auto state = g_state.load(std::memory_order_relaxed);
 	if (state < 0) {
+#if UML_AOT_DIAGNOSTICS
+		/* A test that drives executors without a launch has no release to
+		 * name; only a build that carries the test hooks answers for it. */
 		state = environment_enabled() ? 1 : 0;
+#else
+		state = 0;
+#endif
 		g_state.store(state, std::memory_order_relaxed);
 #if UML_AOT_DIAGNOSTICS
 		if (state != 0)
@@ -937,13 +976,35 @@ bool enabled() noexcept
 	return state != 0;
 }
 
-bool select(::uml::cpu::AotSelection selection) noexcept
+std::optional<::uml::cpu::AotRelease> embedded_release() noexcept
+{
+	if (!directory().valid)
+		return std::nullopt;
+	return header_release();
+}
+
+bool select(::uml::cpu::AotSelection selection,
+	const ::uml::cpu::AotRelease *release) noexcept
 {
 	using ::uml::cpu::AotSelection;
-	const bool wanted = selection == AotSelection::automatic ?
-		environment_enabled() : selection == AotSelection::on;
-	if (wanted && !directory().valid)
-		return false;
+	/* A blob that is not valid, or was made from another release than the
+	 * one booted, is never entered: not under `automatic`, and a launch that
+	 * insists on it does not start. */
+	const bool fits = directory().valid && release != nullptr &&
+		made_from(*release);
+	bool wanted = false;
+	switch (selection) {
+	case AotSelection::automatic:
+		wanted = fits && environment_enabled();
+		break;
+	case AotSelection::on:
+		if (!fits)
+			return false;
+		wanted = true;
+		break;
+	case AotSelection::off:
+		break;
+	}
 	auto expected = -1;
 	if (g_state.compare_exchange_strong(expected, wanted ? 1 : 0,
 		    std::memory_order_relaxed)) {

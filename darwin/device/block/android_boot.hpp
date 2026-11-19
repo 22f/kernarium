@@ -5,9 +5,11 @@
 #include "android_data_disk.hpp"
 #include "android_identity.hpp"
 #include "android_layout.hpp"
+#include "android_release_identity.hpp"
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -64,6 +66,12 @@ public:
 	Storage(std::filesystem::path release, std::filesystem::path dataDisk);
 
 	const Layout &layout() const noexcept { return layout_; }
+	/* What this release says it is (android_release_identity.hpp), for the
+	 * launch to tell the emulator which system it boots. */
+	std::optional<ReleaseIdentity> releaseIdentity() const noexcept
+	{
+		return readReleaseIdentity(release_, layout_);
+	}
 	const std::filesystem::path &release() const noexcept { return release_; }
 	const std::filesystem::path &systemDisk() const noexcept { return systemDisk_; }
 	const std::filesystem::path &dataDisk() const noexcept { return dataDisk_; }

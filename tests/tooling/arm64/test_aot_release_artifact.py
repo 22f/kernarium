@@ -41,7 +41,7 @@ def make_tree(root: pathlib.Path) -> pathlib.Path:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"input {index}\n")
-    (root / "tools/aot/rewrite.py").write_text("BLOB_VERSION = 2\n")
+    (root / "tools/aot/rewrite.py").write_text("BLOB_VERSION = 3\n")
     (root / "tools/aot/libraries.txt").write_text(
         "# libraries\nlibrary /system/lib64/libz.so\n"
         "library /apex/com.android.art/lib64/libart.so\n"
@@ -65,9 +65,14 @@ def make_artifact(directory: pathlib.Path, tree: pathlib.Path,
                   ) -> dict:
     directory.mkdir(parents=True)
     blob = bytearray(4096)
-    struct.pack_into("<8sI", blob, 0, R.BLOB_MAGIC, 2)
+    struct.pack_into("<8sI", blob, 0, R.BLOB_MAGIC, 3)
     blob[R.BLOB_RELEASE_ID_OFFSET:R.BLOB_RELEASE_ID_OFFSET + len(
         release_id)] = release_id.encode()
+    identity = R.release_identity(release)
+    blob[R.BLOB_MANIFEST_SHA256_OFFSET:R.BLOB_SYSTEM_SHA256_OFFSET] = \
+        bytes.fromhex(identity["release_manifest_sha256"])
+    blob[R.BLOB_SYSTEM_SHA256_OFFSET:R.BLOB_HEADER_BYTES] = bytes.fromhex(
+        identity["system_partition_sha256"])
     (directory / "blob.bin").write_bytes(bytes(blob))
     write_json(directory / "manifest.json", {
         "release_id": release_id, "blob_bytes": len(blob)})
@@ -133,6 +138,30 @@ class ArtifactTests(unittest.TestCase):
                             libraries, boot, self.tree)
         self.refuses("another release")
 
+    def test_blob_of_another_system_is_refused(self) -> None:
+        # The header's digests are the release's: a blob built from another
+        # system partition, or another manifest, does not verify even under
+        # the same release ID.
+        for offset, key in ((R.BLOB_MANIFEST_SHA256_OFFSET,
+                             "release_manifest_sha256"),
+                            (R.BLOB_SYSTEM_SHA256_OFFSET,
+                             "system_partition_sha256")):
+            with self.subTest(key=key):
+                blob = (self.artifact / "blob.bin").read_bytes()
+                changed = bytearray(blob)
+                changed[offset] ^= 1
+                (self.artifact / "blob.bin").write_bytes(bytes(changed))
+                libraries, boot = R.library_list(self.tree)
+                R.write_description(
+                    self.artifact, R.release_identity(self.release),
+                    libraries, boot, self.tree)
+                self.refuses(key)
+                (self.artifact / "blob.bin").write_bytes(blob)
+                R.write_description(
+                    self.artifact, R.release_identity(self.release),
+                    libraries, boot, self.tree)
+                self.check(release=self.release)
+
     def test_changed_notices_or_manifest_are_refused(self) -> None:
         write_json(self.artifact / "licences.json",
                    {"release_id": RELEASE_ID, "libraries": {"a": 1}})
@@ -146,7 +175,7 @@ class ArtifactTests(unittest.TestCase):
         self.check(generator=False)
 
     def test_changed_blob_version_is_refused(self) -> None:
-        (self.tree / "tools/aot/rewrite.py").write_text("BLOB_VERSION = 3\n")
+        (self.tree / "tools/aot/rewrite.py").write_text("BLOB_VERSION = 4\n")
         self.refuses("tools/aot/rewrite.py")
         self.rewrite_description(lambda d: d["generator"].update(
             {"tools/aot/rewrite.py": R.sha256_file(
@@ -190,7 +219,7 @@ class ArtifactTests(unittest.TestCase):
         descriptor.write_text(text)
         self.check(accepted=descriptor)
         self.assertEqual(R.read_accepted(descriptor)[
-            "LINEAGE24_ACCEPTED_AOT_BLOB_VERSION"], "2")
+            "LINEAGE24_ACCEPTED_AOT_BLOB_VERSION"], "3")
         descriptor.write_text(text.replace(self.description["blob"]["sha256"],
                                            "11" * 32))
         self.refuses("ACCEPTED_AOT_BLOB_SHA256", accepted=descriptor)
@@ -272,7 +301,7 @@ class ArtifactTests(unittest.TestCase):
         self.assertGreater(len(libraries), 40)
         self.assertEqual(len(libraries), len(set(libraries)))
         self.assertEqual(boot, ["/system/framework/arm64/boot*.oat"])
-        self.assertEqual(R.blob_version(R.repository_root()), 2)
+        self.assertEqual(R.blob_version(R.repository_root()), 3)
 
 
 if __name__ == "__main__":

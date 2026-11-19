@@ -2,11 +2,13 @@
 /* Whether the ahead-of-time component is on is decided once per process, so
  * each case runs in a process of its own: the parent starts this program
  * again with the case named and the environment the case states, and the
- * child answers with its exit status. The component is on by default; the
- * environment turns it off, and a launch's own word (--aot=) beats the
- * environment. */
+ * child answers with its exit status. The component is on by default for the
+ * release its blob was made from; the environment turns it off, a launch's
+ * own word (--aot=) beats the environment, and no word runs a blob with a
+ * release it was not made from. */
 #include "cpu/aot_selection.hpp"
 #include "cpu/arm64/aot/aot_runtime.hpp"
+#include "cpu/arm64/gadgets/executor.hpp"
 
 #include <spawn.h>
 #include <sys/wait.h>
@@ -23,6 +25,7 @@ extern char **environ;
 namespace {
 
 namespace aot = uml::cpu::arm64::aot;
+using uml::cpu::AotRelease;
 using uml::cpu::AotSelection;
 
 #define require(condition) \
@@ -40,89 +43,208 @@ struct Case final {
 	int (*run)();
 };
 
-int default_is_on()
+/* The release the framework's blob was made from: what a launch of that
+ * release states. */
+AotRelease same_release()
 {
+	const auto release = aot::embedded_release();
+	return release ? *release : AotRelease{};
+}
+
+AotRelease other_id()
+{
+	auto release = same_release();
+	release.id = "another-release";
+	return release;
+}
+
+AotRelease other_system()
+{
+	auto release = same_release();
+	release.system_sha256[31] ^= 1U;
+	return release;
+}
+
+AotRelease other_manifest()
+{
+	auto release = same_release();
+	release.manifest_sha256[0] ^= 1U;
+	return release;
+}
+
+int the_blob_names_a_release()
+{
+	const auto release = aot::embedded_release();
+	require(release.has_value());
+	require(!release->id.empty());
+	return 0;
+}
+
+int same_release_is_on()
+{
+	const auto release = same_release();
+	require(aot::select(AotSelection::automatic, &release));
 	require(aot::enabled());
 	return 0;
 }
 
 int environment_turns_it_off()
 {
+	const auto release = same_release();
+	require(aot::select(AotSelection::automatic, &release));
 	require(!aot::enabled());
 	return 0;
 }
 
 int environment_one_is_on()
 {
+	const auto release = same_release();
+	require(aot::select(AotSelection::automatic, &release));
 	require(aot::enabled());
 	return 0;
 }
 
 int other_values_are_the_default()
 {
+	const auto release = same_release();
+	require(aot::select(AotSelection::automatic, &release));
 	require(aot::enabled());
-	return 0;
-}
-
-int automatic_follows_the_environment_on()
-{
-	require(aot::select(AotSelection::automatic));
-	require(aot::enabled());
-	return 0;
-}
-
-int automatic_follows_the_environment_off()
-{
-	require(aot::select(AotSelection::automatic));
-	require(!aot::enabled());
 	return 0;
 }
 
 int launch_off_beats_the_default()
 {
-	require(aot::select(AotSelection::off));
+	const auto release = same_release();
+	require(aot::select(AotSelection::off, &release));
 	require(!aot::enabled());
 	return 0;
 }
 
 int launch_on_beats_the_environment()
 {
-	require(aot::select(AotSelection::on));
+	const auto release = same_release();
+	require(aot::select(AotSelection::on, &release));
 	require(aot::enabled());
 	return 0;
+}
+
+/* Another release, or the same ID with another manifest or system partition,
+ * is not the system the blob was made from: off by default, and a launch
+ * that insists on the component does not start. Nothing is latched by the
+ * refusal. */
+template<AotRelease (*Release)()>
+int a_release_the_blob_does_not_fit()
+{
+	const auto release = Release();
+	require(aot::select(AotSelection::automatic, &release));
+	require(!aot::enabled());
+	return 0;
+}
+
+template<AotRelease (*Release)()>
+int a_launch_that_insists_on_another_release_fails()
+{
+	const auto release = Release();
+	require(!aot::select(AotSelection::on, &release));
+	/* The refusal decided nothing: the launch that follows is its own. */
+	const auto same = same_release();
+	require(aot::select(AotSelection::automatic, &same));
+	require(aot::enabled());
+	return 0;
+}
+
+/* A guest that is not an Android release states none. It gets no
+ * ahead-of-time code: the answer is off before any executor exists, and an
+ * executor made after it holds no state of the component (no tables, which a
+ * binder allocates on its first lookup). */
+int a_guest_with_no_release_pays_nothing()
+{
+	require(aot::select(AotSelection::automatic, nullptr));
+	require(!aot::enabled());
+	uml::cpu::arm64::gadgets::GadgetExecutor executor;
+	require(!executor.aot_selected());
+	return 0;
+}
+
+int a_guest_with_no_release_refuses_on()
+{
+	require(!aot::select(AotSelection::on, nullptr));
+	require(aot::select(AotSelection::off, nullptr));
+	require(!aot::enabled());
+	return 0;
+}
+
+int a_release_launch_is_on_for_an_executor()
+{
+	const auto release = same_release();
+	require(aot::select(AotSelection::automatic, &release));
+	uml::cpu::arm64::gadgets::GadgetExecutor executor;
+	require(executor.aot_selected());
+	return 0;
+}
+
+/* A process whose launch selected nothing never enters the component (a
+ * diagnostics build, which tests drive without a launch, answers with the
+ * environment instead). */
+int an_undecided_process_is_off()
+{
+#if UML_AOT_DIAGNOSTICS
+	return 0;
+#else
+	require(!aot::enabled());
+	return 0;
+#endif
 }
 
 int a_late_change_is_refused()
 {
+	const auto release = same_release();
+	require(aot::select(AotSelection::automatic, &release));
 	require(aot::enabled());
 	/* The same word is kept, a different one cannot be. */
-	require(aot::select(AotSelection::on));
-	require(aot::select(AotSelection::automatic));
-	require(!aot::select(AotSelection::off));
+	require(aot::select(AotSelection::on, &release));
+	require(aot::select(AotSelection::automatic, &release));
+	require(!aot::select(AotSelection::off, &release));
 	require(aot::enabled());
 	return 0;
 }
 
-int a_late_off_is_refused_for_on()
+int a_late_on_is_refused_after_off()
 {
-	require(aot::select(AotSelection::off));
+	const auto release = same_release();
+	require(aot::select(AotSelection::off, &release));
 	require(!aot::enabled());
-	require(!aot::select(AotSelection::on));
-	require(aot::select(AotSelection::off));
+	require(!aot::select(AotSelection::on, &release));
+	require(aot::select(AotSelection::off, &release));
 	return 0;
 }
 
 const Case cases[]{
-	{"default_is_on", nullptr, default_is_on},
+	{"blob_names_a_release", nullptr, the_blob_names_a_release},
+	{"same_release_is_on", nullptr, same_release_is_on},
 	{"environment_turns_it_off", "0", environment_turns_it_off},
 	{"environment_one_is_on", "1", environment_one_is_on},
 	{"other_values_are_the_default", "yes", other_values_are_the_default},
-	{"automatic_on", nullptr, automatic_follows_the_environment_on},
-	{"automatic_off", "0", automatic_follows_the_environment_off},
 	{"launch_off", nullptr, launch_off_beats_the_default},
 	{"launch_on", "0", launch_on_beats_the_environment},
+	{"other_id_is_off", nullptr, a_release_the_blob_does_not_fit<other_id>},
+	{"other_system_is_off", nullptr,
+		a_release_the_blob_does_not_fit<other_system>},
+	{"other_manifest_is_off", nullptr,
+		a_release_the_blob_does_not_fit<other_manifest>},
+	{"other_id_fails_on", nullptr,
+		a_launch_that_insists_on_another_release_fails<other_id>},
+	{"other_system_fails_on", nullptr,
+		a_launch_that_insists_on_another_release_fails<other_system>},
+	{"other_manifest_fails_on", nullptr,
+		a_launch_that_insists_on_another_release_fails<other_manifest>},
+	{"no_release_pays_nothing", nullptr, a_guest_with_no_release_pays_nothing},
+	{"no_release_refuses_on", nullptr, a_guest_with_no_release_refuses_on},
+	{"release_launch_selects_executor", nullptr,
+		a_release_launch_is_on_for_an_executor},
+	{"undecided_is_off", nullptr, an_undecided_process_is_off},
 	{"late_change", nullptr, a_late_change_is_refused},
-	{"late_on_after_off", "1", a_late_off_is_refused_for_on},
+	{"late_on_after_off", "1", a_late_on_is_refused_after_off},
 };
 
 int run_child(const Case &test)
@@ -163,8 +285,9 @@ int run_parent(const char *program)
 		}
 	}
 	if (failures == 0)
-		std::printf("the component is on by default, the environment "
-			    "turns it off and a launch's word wins\n");
+		std::printf("the component is on by default for the release it was "
+			    "made from, the environment turns it off, a launch's "
+			    "word wins, and no other release gets it\n");
 	return failures == 0 ? 0 : 1;
 }
 

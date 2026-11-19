@@ -9,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <type_traits>
 
 /* Ahead-of-time native code for the Android image's own arm64 libraries
@@ -20,16 +21,27 @@
  * set UML_AOT_DIAGNOSTICS. */
 namespace uml::cpu::arm64::aot {
 
-/* Whether AOT code may be entered. Decided once, at the first executor: by
- * select() when a launch states it, otherwise on unless DARWIN_UML_AOT=0
- * (DARWIN_UML_AOT=1 is the default's own word). Always off when the
+/* Whether AOT code may be entered. Decided once, at the first executor, by
+ * the select() of the launch; a process whose launch selected nothing has it
+ * off (a diagnostics build, which tests drive without a launch, takes the
+ * environment's answer: on unless DARWIN_UML_AOT=0). Always off when the
  * framework's blob is not valid. */
 [[nodiscard]] bool enabled() noexcept;
 
-/* A launch's own word (--aot=). False when it cannot be kept: `on` for a
- * framework whose blob is not valid, or any change after enabled() was
+/* The release the framework's blob was made from, as its header names it
+ * (the ID points into the blob); empty when the blob is not valid. */
+[[nodiscard]] std::optional<::uml::cpu::AotRelease> embedded_release() noexcept;
+
+/* A launch's own word (--aot=) and the release it boots (null for a guest
+ * that is not an Android release). The blob runs only with the release it
+ * was made from: `automatic` is on (unless DARWIN_UML_AOT=0) only for that
+ * release, and `on` fails for any other release or none. The decision is made
+ * before any executor, so a launch the blob does not fit allocates nothing
+ * of it. False when it cannot be kept: `on` for a framework whose blob is not
+ * valid or for a release it does not fit, or any change after enabled() was
  * answered, since executors read the answer once. */
-[[nodiscard]] bool select(::uml::cpu::AotSelection selection) noexcept;
+[[nodiscard]] bool select(::uml::cpu::AotSelection selection,
+	const ::uml::cpu::AotRelease *release) noexcept;
 
 /* Why an entry was refused, for the diagnostics build's counters. */
 enum class Refusal : unsigned {

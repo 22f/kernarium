@@ -103,8 +103,32 @@ if(UML_AOT_SOURCE STREQUAL "image")
     endif()
     file(READ "${UML_AOT_IMAGE}/release-manifest.json" _uml_aot_release_json)
     string(JSON _uml_aot_release_id GET "${_uml_aot_release_json}" release_id)
+    # The blob names the release it is made from, by its ID and the digests of
+    # its manifest and of its system partition, and runs only with it.
+    file(SHA256 "${UML_AOT_IMAGE}/release-manifest.json"
+        _uml_aot_release_manifest_sha256)
+    file(READ "${UML_AOT_IMAGE}/guest/partition-layout.json"
+        _uml_aot_layout_json)
+    string(JSON _uml_aot_partitions GET "${_uml_aot_layout_json}"
+        system_disk partitions)
+    string(JSON _uml_aot_partition_count LENGTH "${_uml_aot_partitions}")
+    set(_uml_aot_system_sha256)
+    math(EXPR _uml_aot_partition_last "${_uml_aot_partition_count} - 1")
+    foreach(_index RANGE ${_uml_aot_partition_last})
+        string(JSON _name GET "${_uml_aot_partitions}" ${_index} name)
+        if(_name STREQUAL "system")
+            string(JSON _uml_aot_system_sha256 GET "${_uml_aot_partitions}"
+                ${_index} sha256)
+        endif()
+    endforeach()
+    if(NOT _uml_aot_system_sha256)
+        message(FATAL_ERROR
+            "${UML_AOT_IMAGE}/guest/partition-layout.json has no system "
+            "partition digest")
+    endif()
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        "${UML_AOT_IMAGE}/release-manifest.json")
+        "${UML_AOT_IMAGE}/release-manifest.json"
+        "${UML_AOT_IMAGE}/guest/partition-layout.json")
 
     set(_uml_aot_library_args)
     foreach(_library IN LISTS UML_AOT_LIBRARIES UML_AOT_BOOT_CODE)
@@ -207,6 +231,8 @@ if(UML_AOT_SOURCE STREQUAL "image")
             ${_uml_aot_library_args}
             ${_uml_aot_generated_args}
             --release-id "${_uml_aot_release_id}"
+            --release-manifest-sha256 "${_uml_aot_release_manifest_sha256}"
+            --system-partition-sha256 "${_uml_aot_system_sha256}"
             --out ${_uml_aot_dir}
         DEPENDS ${_uml_aot_trees} ${_uml_aot_tool_sources}
             ${_uml_aot_generated_files}

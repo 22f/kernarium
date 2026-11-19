@@ -663,13 +663,25 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   in the environment, or `--aot=off` on the launch, runs the engine alone;
   `--aot=on` (or `--aot`) fails a launch whose build has none, and the launch's
   word beats the environment. The choice is made once, when the first executor
-  is made. The App Store runtime reads no environment for it. An archive
+  is made, and before any per-thread table exists. The App Store runtime
+  reads no environment for it. An archive
   configuration (App Store, TestFlight) carries the component only when
   `accepted-aot.env` sets `LINEAGE24_ACCEPTED_AOT_ARCHIVES` to `yes`: the
   device runtimes take no accepted artifact before, and
   `scripts/check-embedded-artifacts.py --aot` fails a packaged framework
   without an accepted artifact or while the field is `no`, and one whose blob
   is not the accepted digest.
+- Release: the blob runs only with the release it was made from. Its header
+  carries the release ID, the SHA-256 of the release manifest and the SHA-256
+  of the system partition; the launcher (macOS and iOS) reads the same three
+  values from the verified release it boots (`Storage::releaseIdentity()`) and
+  states them to the emulator (`--aot-release=`). Selection compares them
+  before anything else: another release, a proof or test image, an updated
+  image whose blob is stale, or a launch that states none (a Linux guest, or a
+  release with no identity) runs without the component under `auto` and fails
+  UNSUPPORTED under `on`, and allocates no AOT state. The tests of a build with
+  `UML_AOT_DIAGNOSTICS` select it without a stated release; a product has no
+  such entry.
 - Units: each library is a self-contained unit of the framework. Branches
   between libraries mapped in one address space stay in rewritten code when
   the target page is verified (below); any other target leaves to the engine.

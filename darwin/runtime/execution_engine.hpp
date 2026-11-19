@@ -35,10 +35,13 @@ inline constexpr unsigned maximum_guest_cpu_count = 64;
 [[nodiscard]] bool set_translation_cache_budget(std::size_t total_bytes,
 	unsigned executors, std::size_t per_executor_bytes) noexcept;
 
-/* A launch's word on ahead-of-time code (--aot=), before the run's first
- * executor: false when it cannot be kept (cpu/engine_factory.hpp). */
+/* A launch's word on ahead-of-time code (--aot=) and the release the launch
+ * boots (null for a guest that is not an Android release), before the run's
+ * first executor: false when it cannot be kept (cpu/engine_factory.hpp). */
 using AotSelection = ::uml::cpu::AotSelection;
-[[nodiscard]] bool select_aot(AotSelection selection) noexcept;
+using AotRelease = ::uml::cpu::AotRelease;
+[[nodiscard]] bool select_aot(AotSelection selection,
+	const AotRelease *release) noexcept;
 
 [[nodiscard]] bool acquire_translation_cache_run_session() noexcept;
 void release_translation_cache_run_session() noexcept;

@@ -78,11 +78,12 @@ std::unique_ptr<CpuEngine> make_gadget_engine(EngineConfiguration configuration)
 	return std::make_unique<GadgetEngine>(configuration);
 }
 
-bool select_aot(AotSelection selection) noexcept
+bool select_aot(AotSelection selection, const AotRelease *release) noexcept
 {
 #if UML_AOT
-	return arm64::aot::select(selection);
+	return arm64::aot::select(selection, release);
 #else
+	(void)release;
 	return selection != AotSelection::on;
 #endif
 }

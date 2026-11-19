@@ -75,9 +75,9 @@ void materialize_architectural_state(arm64::CpuState &cpu) noexcept
 	arm64::restore_native_fp_environment(cpu);
 }
 
-bool select_aot(AotSelection selection) noexcept
+bool select_aot(AotSelection selection, const AotRelease *release) noexcept
 {
-	return arm64::detail::select_aot(selection);
+	return arm64::detail::select_aot(selection, release);
 }
 
 #if UML_ARM64_JIT_ENGINE

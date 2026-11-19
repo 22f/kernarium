@@ -803,8 +803,12 @@ blocker in every one of them.
   code (a tree with an artifact runs every other row with the component on, as
   the default has it). `arm64-aot-selection` runs where a build has the
   component: on by default, off by `DARWIN_UML_AOT=0`, and a launch's word beats
-  the environment, each case in a process of its own; `emulator-options` holds
-  the `--aot=` parsing. `arm64-aot-release-artifact` holds the artifact check
+  the environment, and it binds the launch to the release (the same release is
+  on; another release ID, manifest digest or system-partition digest is off
+  under `auto` and fails under `on`; a launch that states no release has no
+  component and no tables), each case in a process of its own;
+  `emulator-options` holds the `--aot=` and `--aot-release=` parsing and
+  `android-release-identity` the launcher's reading of the release identity. `arm64-aot-release-artifact` holds the artifact check
   to what it must refuse (another release, partition, blob, tool or library
   list). The differential runs functions of every rewritten library through
   the gadget engine with and without ahead-of-time code and requires the same

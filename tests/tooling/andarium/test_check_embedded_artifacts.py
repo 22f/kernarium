@@ -619,14 +619,20 @@ class CheckTests(unittest.TestCase):
 AOT_DESCRIPTOR = release_artifact.ACCEPTED_DESCRIPTOR
 AOT_DIRECTORY = f"lineage24-mainline6.18-4k-{RELEASE_ID}"
 AOT_FRAMEWORK = "UmlArm64Aot"
+AOT_MANIFEST_SHA256 = "aa" * 32
+AOT_SYSTEM_SHA256 = "bb" * 32
 
 
 def aot_blob(release_id: str = RELEASE_ID, filler: int = 1) -> bytes:
     """A blob with the header rewrite.py gives one, and bytes after it."""
     blob = bytearray(16384)
-    struct.pack_into("<8sI", blob, 0, release_artifact.BLOB_MAGIC, 2)
+    struct.pack_into("<8sI", blob, 0, release_artifact.BLOB_MAGIC, 3)
     blob[release_artifact.BLOB_RELEASE_ID_OFFSET:
          release_artifact.BLOB_RELEASE_ID_OFFSET + len(release_id)] = release_id.encode()
+    blob[release_artifact.BLOB_MANIFEST_SHA256_OFFSET:
+         release_artifact.BLOB_MANIFEST_SHA256_OFFSET + 32] = bytes.fromhex(AOT_MANIFEST_SHA256)
+    blob[release_artifact.BLOB_SYSTEM_SHA256_OFFSET:
+         release_artifact.BLOB_SYSTEM_SHA256_OFFSET + 32] = bytes.fromhex(AOT_SYSTEM_SHA256)
     blob[8192:] = bytes([filler]) * (len(blob) - 8192)
     return bytes(blob)
 
@@ -640,7 +646,7 @@ class AotTests(unittest.TestCase):
         self.repo = self.fixture.repo
         for index, relative in enumerate(release_artifact.GENERATOR_INPUTS):
             write(self.repo, relative, f"generator input {index}\n")
-        write(self.repo, "tools/aot/rewrite.py", "BLOB_VERSION = 2\n")
+        write(self.repo, "tools/aot/rewrite.py", "BLOB_VERSION = 3\n")
         write(self.repo, "tools/aot/libraries.txt",
               "library /system/lib64/libz.so\nboot /system/framework/arm64/boot*.oat\n")
         commit(self.repo, "the AOT tools")
@@ -656,7 +662,8 @@ class AotTests(unittest.TestCase):
         write(directory, "licences.json", json.dumps({"release_id": RELEASE_ID, "libraries": {}}))
         libraries, boot = release_artifact.library_list(self.repo)
         identity = {
-            "release_id": RELEASE_ID, "release_manifest_sha256": "aa" * 32, "system_partition_sha256": "bb" * 32,
+            "release_id": RELEASE_ID, "release_manifest_sha256": AOT_MANIFEST_SHA256,
+            "system_partition_sha256": AOT_SYSTEM_SHA256,
         }
         description = release_artifact.write_description(directory, identity, libraries, boot, self.repo)
         text = release_artifact.render_accepted(

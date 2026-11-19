@@ -327,6 +327,15 @@ std::vector<std::string> boot_command_line(
 	auto forwarded = host_arguments;
 	for (auto &argument : storage.kernelArguments(boot))
 		forwarded.push_back(std::move(argument));
+	/* The release the guest boots, as its files state it: the ahead-of-time
+	 * component runs only with the release it was made from. A release that
+	 * states none gets no such code. */
+	if (const auto identity = storage.releaseIdentity())
+		if (auto argument = uml::emulator::aot_release_argument(
+			    identity->id, identity->manifestSha256,
+			    identity->systemSha256);
+		    !argument.empty())
+			forwarded.push_back(std::move(argument));
 	std::vector<std::string_view> launcher_prefixes{
 		adb_authorization_prefix,
 		hardware_sku_prefix,

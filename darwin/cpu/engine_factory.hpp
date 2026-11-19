@@ -30,12 +30,15 @@ namespace uml::cpu {
 [[nodiscard]] bool set_translation_cache_budget(std::size_t total_bytes,
 	unsigned executors, std::size_t per_executor_bytes) noexcept;
 
-/* A launch's word on ahead-of-time code (cpu/arm64/aot): false when it cannot
- * be kept, which is `on` for a build or a framework without the component, or
- * any change once an executor exists. Before the run's first executor;
- * `automatic` follows the environment (DARWIN_UML_AOT=0 turns the default
- * off). */
-[[nodiscard]] bool select_aot(AotSelection selection) noexcept;
+/* A launch's word on ahead-of-time code (cpu/arm64/aot) and the release it
+ * boots (null when the guest is not an Android release): false when it cannot
+ * be kept, which is `on` for a build or a framework without the component,
+ * for a release the framework was not made from (or none), or any change once
+ * an executor exists. Before the run's first executor; `automatic` is on for
+ * the release the framework was made from unless the environment says
+ * DARWIN_UML_AOT=0, and off for any other. */
+[[nodiscard]] bool select_aot(AotSelection selection,
+	const AotRelease *release) noexcept;
 
 /* Serializes JIT-capable emulator runs before any guest vCPU can allocate an
  * executor slot. Other engine kinds do not take this process-wide session.

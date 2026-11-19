@@ -2049,6 +2049,15 @@ private:
         for (auto& argument :
              request_.androidStorage->kernelArguments(androidBoot_))
             arguments.push_back(std::move(argument));
+        /* The release the guest boots, as its files state it: the
+         * ahead-of-time component runs only with the release it was made
+         * from. A release that states none gets no such code. */
+        if (const auto identity = request_.androidStorage->releaseIdentity()) {
+            auto argument = uml::emulator::aot_release_argument(
+                identity->id, identity->manifestSha256, identity->systemSha256);
+            if (!argument.empty())
+                arguments.push_back(std::move(argument));
+        }
         appendKernelCommandLine(
             arguments,
             *request_.androidStorage,

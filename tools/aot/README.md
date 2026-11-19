@@ -72,7 +72,11 @@ Homebrew `erofs-utils` is built without libzstd and cannot read the release
 The blob's magic names its layout and the word after it the layout's version.
 A change a runtime built for the old layout would misread changes the magic; an
 addition it can ignore raises the version (`BLOB_VERSION`), and a runtime
-accepts any version at or above the one it was built for.
+accepts any version at or above the one it was built for. The header names the
+release the blob was made from: its ID (offset 0x30), the SHA-256 of its
+release manifest (0x90) and the SHA-256 of its system partition (0xB0), which
+the runtime compares with the release it boots (version 3); `verify` holds all
+three to `artifact.json`.
 
 The entry table holds 16 bits per source word (the offset of the word's native
 code, in words, from its page's anchor) and one signed 32-bit anchor per text
@@ -85,7 +89,7 @@ instead of entries. A library whose table cannot be formed (a page whose
 entries are still further apart, or more than 32 MiB of text) is not in the
 blob: the engine runs it, the manifest's `refused` lists it, and the
 diagnostics report counts it (`libraries_refused`, from the header;
-`BLOB_VERSION` 2).
+`BLOB_VERSION` 2 or later).
 
 `UML_AOT_INSTANCE_CAPACITY` (a CMake cache value, 2048 by default) is the
 number of library instances each executor thread's binder holds before it

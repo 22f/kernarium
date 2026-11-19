@@ -48,10 +48,14 @@ from pathlib import Path
 ARTIFACT_SCHEMA = 1
 ARTIFACT_FILES = ("artifact.json", "blob.bin", "licences.json", "manifest.json")
 BLOB_MAGIC = b"UMLAOT16"
-# The release-id field of the blob header, which rewrite.py writes.
+# The release fields of the blob header, which rewrite.py writes and the
+# runtime compares with the release a launch boots: the ID, then the SHA-256
+# of the release's manifest and of its system partition.
 BLOB_RELEASE_ID_OFFSET = 0x30
 BLOB_RELEASE_ID_BYTES = 96
-BLOB_HEADER_BYTES = BLOB_RELEASE_ID_OFFSET + BLOB_RELEASE_ID_BYTES
+BLOB_MANIFEST_SHA256_OFFSET = BLOB_RELEASE_ID_OFFSET + BLOB_RELEASE_ID_BYTES
+BLOB_SYSTEM_SHA256_OFFSET = BLOB_MANIFEST_SHA256_OFFSET + 32
+BLOB_HEADER_BYTES = BLOB_SYSTEM_SHA256_OFFSET + 32
 # Every file the blob is a function of, relative to the repository root.
 GENERATOR_INPUTS = (
     "tools/aot/a64decode.py",
@@ -191,14 +195,22 @@ def release_identity(release: Path) -> dict:
     }
 
 
-def read_blob_header(blob: Path) -> tuple[bytes, int, str]:
+def read_blob_header(blob: Path) -> tuple[bytes, int, dict]:
+    """The magic, the layout version and the release the header names (ID,
+    manifest digest, system partition digest) of a blob."""
     with open(blob, "rb") as handle:
         header = handle.read(BLOB_HEADER_BYTES)
     if len(header) < BLOB_HEADER_BYTES:
         fail("blob.bin is shorter than its header")
     magic, version = struct.unpack_from("<8sI", header, 0)
-    raw = header[BLOB_RELEASE_ID_OFFSET:BLOB_HEADER_BYTES].split(b"\0", 1)[0]
-    return magic, version, raw.decode("ascii", "replace")
+    raw = header[BLOB_RELEASE_ID_OFFSET:BLOB_MANIFEST_SHA256_OFFSET]
+    return magic, version, {
+        "release_id": raw.split(b"\0", 1)[0].decode("ascii", "replace"),
+        "release_manifest_sha256": header[
+            BLOB_MANIFEST_SHA256_OFFSET:BLOB_SYSTEM_SHA256_OFFSET].hex(),
+        "system_partition_sha256": header[
+            BLOB_SYSTEM_SHA256_OFFSET:BLOB_HEADER_BYTES].hex(),
+    }
 
 
 def _check_regular_files(artifact: Path) -> None:
@@ -275,8 +287,9 @@ def verify(artifact: Path, *, repo: Path | None = None,
     magic, version, header_release = read_blob_header(blob_path)
     if magic != BLOB_MAGIC or version != blob["version"]:
         fail("blob.bin header differs from artifact.json")
-    if header_release != bound["release_id"]:
-        fail("blob.bin names another release than artifact.json")
+    for key in RELEASE_KEYS:
+        if header_release[key] != bound[key]:
+            fail(f"blob.bin names another release than artifact.json ({key})")
     manifest = load_json(artifact / "manifest.json")
     if manifest.get("release_id") != bound["release_id"] or \
             manifest.get("blob_bytes") != blob["bytes"]:
@@ -440,6 +453,10 @@ def build(release: Path, fsck_erofs: Path, out: Path, *,
         command = [python, "-B", str(tools / "rewrite.py"),
                    "--root", str(image / "root"), *mounts,
                    "--release-id", identity["release_id"],
+                   "--release-manifest-sha256",
+                   identity["release_manifest_sha256"],
+                   "--system-partition-sha256",
+                   identity["system_partition_sha256"],
                    "--out", str(rewritten)]
         for path in (*libraries, *boot):
             command += ["--library", path]
