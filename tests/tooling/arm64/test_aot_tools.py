@@ -822,6 +822,39 @@ class FixtureTests(unittest.TestCase):
             (fixture.IPLT, fixture.IPLT + 4 * len(fixture.PLT_CODE)),
             functions)
 
+    def test_a_routine_only_a_symbol_names_is_a_function(self) -> None:
+        # Assembly with no unwind entry, a data word inside its range.
+        functions = [(f.start, f.end) for f in self.elf.functions()]
+        self.assertIn((fixture.SYMBOL_ONLY,
+                       fixture.SYMBOL_ONLY + 4 * len(fixture.SYMBOL_CODE)),
+                      functions)
+
+    def test_symbols_that_name_no_range_or_one_already_given_add_nothing(
+            self) -> None:
+        functions = [(f.start, f.end) for f in self.elf.functions()]
+        starts = [start for start, _ in functions]
+        for at in fixture.SYMBOLS_NO_RANGE:
+            self.assertNotIn(at, starts)
+        self.assertIn((fixture.LOOP_A, fixture.LOOP_A + 0x10), functions)
+
+    def test_a_symbol_extends_the_function_it_overlaps_not_one_it_touches(
+            self) -> None:
+        merged = [elf64.Function(0x1000, 0x1010),
+                  elf64.Function(0x1020, 0x1030)]
+        symbols = [(0x1008, 0x1018), (0x1030, 0x1040),
+                   (0x100000, 0x100010)]
+        with mock.patch.object(elf64.Elf, "_symbol_functions",
+                               return_value=symbols):
+            found = [(f.start, f.end) for f in self.elf._with_symbols(merged)]
+        self.assertEqual(found, [(0x1000, 0x1018), (0x1020, 0x1030),
+                                 (0x1030, 0x1040)])
+
+    def test_the_symbols_of_the_debug_data_are_a_source(self) -> None:
+        elf = elf64.Elf(fixture.build_oat())
+        ranges = elf._symbol_functions()
+        for at, size in fixture.oat_functions():
+            self.assertIn((at, at + size), ranges)
+
     def test_loop_branch_lands_inside_another_range(self) -> None:
         # b.lo at 0x1028 (range B) targets 0x1004 (inside range A), and no
         # function entry lies on the cycle.
@@ -1678,6 +1711,27 @@ class WideningTests(unittest.TestCase):
             expected[f"{kind}_xzr_d"] = {"mops-invalid"}
         self.assertEqual(stepped, expected)
 
+
+    def test_stack_pairs_with_plain_data_registers_are_inlined(self) -> None:
+        # The fixture's stack-base pairs with plain data registers (inside one
+        # aligned granule and outside it) run in the rewritten code, so the
+        # differential exercises the stack-granule probe on pairs.
+        elf = elf64.Elf(fixture.build())
+        library = rewrite.Library(
+            0, "/aot-test/libaotfixture.so", elf,
+            a64decode.Decoder(a64decode.DEFAULT_TABLE),
+            rewrite.read_layout(rewrite.LAYOUT_HEADER))
+        library.build([1] * ((library.table_end - library.table_base) // 4096))
+        causes = dict(library.step_list)
+        seen = 0
+        for index, (name, words) in enumerate(fixture.pair_forms()):
+            if "_sp_pp_" not in name and not name.endswith("_sp_zz"):
+                continue
+            seen += 1
+            base = fixture.PAIRS_AT + index * fixture.PAIR_SIZE
+            for position in range(len(words)):
+                self.assertNotIn(base + 4 * position, causes, name)
+        self.assertEqual(seen, 17)
 
 if __name__ == "__main__":
     unittest.main()

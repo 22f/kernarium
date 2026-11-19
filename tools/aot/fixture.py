@@ -26,6 +26,7 @@ import struct
 import sys
 
 PAGE = 4096
+STT_OBJECT, STT_FUNC = 1, 2
 TEXT = 0x1000
 TEXT_PAGES = 4
 EH_FRAME = TEXT + TEXT_PAGES * PAGE
@@ -146,6 +147,23 @@ PLT_CODE = (
     0x91040210,                                     # add x16, x16, #0x100
     0xd61f0220,                                     # br x17
 )
+
+# A routine only a function symbol names, as the assembly of a crypto library
+# is: no unwind entry, a data word after its RET inside the symbol's size (a
+# round constant of SHA-256), and the symbols around it that name no range (no
+# size, a data object, an address that is no instruction's, an undefined one)
+# or one the unwind tables already give.
+SYMBOL_ONLY = DST_PAGE + 0xe00
+SYMBOL_CODE = (
+    0x91001c00,                                     # add x0, x0, #7
+    0x18000061,                                     # ldr w1, [the data word]
+    0x8b010000,                                     # add x0, x0, x1
+    RET,
+    0x428a2f98,                                     # the data word
+)
+SYMBOL_DATA = SYMBOL_ONLY + 4 * (len(SYMBOL_CODE) - 1)
+SYMBOLS_NO_RANGE = (DST_PAGE + 0xb00, DST_PAGE + 0xb40, DST_PAGE + 0xb82)
+
 
 # The same stub in an .iplt section, as the linker makes them for the ifunc
 # targets of a static executable. It sits after every other function so the
@@ -582,6 +600,19 @@ def pair_forms() -> list[tuple[str, list[int]]]:
                                          25)]))
     out.append(("stp_post_vb_base", [pair(False, "post", 2, 0, 0x38, 24, 25,
                                           25)]))
+    # The stack pointer as the base with plain data registers: the offsets
+    # inside one aligned 16-byte granule (the stack-granule probe's short
+    # form) and those that leave it, 64-bit and 32-bit, a post-index pair, and
+    # a store of two zero registers.
+    for load in (True, False):
+        tag = "ldp" if load else "stp"
+        for mode, imm, opc in (("off", 0x10, 2), ("off", 0x18, 2),
+                               ("pre", 0x10, 2), ("pre", 0x18, 2),
+                               ("post", 0x20, 2), ("off", 0x18, 0),
+                               ("off", 0x1c, 0), ("pre", 0x1c, 0)):
+            out.append((f"{tag}_{mode}_sp_pp_{'x' if opc else 'w'}{imm:x}",
+                        [pair(load, mode, opc, 0, imm, 1, 2, 31)]))
+    out.append(("stp_off_sp_zz", [pair(False, "off", 2, 0, 0x10, 31, 31, 31)]))
     # The vector pairs with a virtual base or the stack pointer.
     for opc in (0, 1, 2):
         for load in (True, False):
@@ -651,17 +682,39 @@ def build() -> bytes:
         raise ValueError("the pair forms run out of their page")
     for address, word in pair_code().items():
         struct.pack_into("<I", text, address - TEXT, word)
+    if PAIRS_AT + len(pair_forms()) * PAIR_SIZE > SYMBOL_ONLY:
+        raise ValueError("the pair forms run into the symbol-only routine")
     for index, word in enumerate(PLT_CODE):
         struct.pack_into("<I", text, PLT - TEXT + 4 * index, word)
         struct.pack_into("<I", text, IPLT - TEXT + 4 * index, word)
+    for index, word in enumerate(SYMBOL_CODE):
+        struct.pack_into("<I", text, SYMBOL_ONLY - TEXT + 4 * index, word)
     frame = eh_frame()
-    names = b"\0.text\0.plt\0.iplt\0.eh_frame\0.shstrtab\0"
+    names = (b"\0.text\0.plt\0.iplt\0.eh_frame\0.shstrtab\0.symtab\0"
+             b".strtab\0")
     size_load = EH_FRAME + len(frame)
     image = bytearray(size_load)
     image[TEXT:TEXT + len(text)] = text
     image[EH_FRAME:EH_FRAME + len(frame)] = frame
     shstr_offset = len(image)
     image += names
+    image += bytes(-len(image) % 8)
+    symbols = [struct.pack("<IBBHQQ", 0, 0, 0, 0, 0, 0)]
+    symbol_names = b"\0"
+    for name, kind, shndx, value, size in (
+            ("symbol_only", STT_FUNC, 1, SYMBOL_ONLY, 4 * len(SYMBOL_CODE)),
+            ("inside_loop_a", STT_FUNC, 1, LOOP_A, 0x10),
+            ("no_size", STT_FUNC, 1, SYMBOLS_NO_RANGE[0], 0),
+            ("object", STT_OBJECT, 1, SYMBOLS_NO_RANGE[1], 0x20),
+            ("misaligned", STT_FUNC, 1, SYMBOLS_NO_RANGE[2], 0x10),
+            ("undefined", STT_FUNC, 0, 0, 0x10)):
+        symbols.append(struct.pack("<IBBHQQ", len(symbol_names), kind, 0,
+                                   shndx, value, size))
+        symbol_names += name.encode() + b"\0"
+    symtab_offset = len(image)
+    image += b"".join(symbols)
+    strtab_offset = len(image)
+    image += symbol_names
     image += bytes(-len(image) % 8)
     section_offset = len(image)
 
@@ -675,9 +728,11 @@ def build() -> bytes:
     image += section(12, 1, 6, IPLT, IPLT, 4 * len(PLT_CODE), 16)
     image += section(18, 1, 2, EH_FRAME, EH_FRAME, len(frame), 8)
     image += section(28, 3, 0, 0, shstr_offset, len(names), 1)
+    image += section(38, 2, 0, 0, symtab_offset, 24 * len(symbols), 8)
+    image += section(46, 3, 0, 0, strtab_offset, len(symbol_names), 1)
     header = (b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8) +
               struct.pack("<HHIQQQIHHHHHH", 3, 183, 1, 0, 64, section_offset,
-                          0, 64, 56, 1, 64, 6, 5))
+                          0, 64, 56, 1, 64, 8, 5))
     program = struct.pack("<IIQQQQQQ", 1, 5, 0, 0, 0, size_load, size_load,
                           PAGE)
     image[0:len(header)] = header

@@ -4,7 +4,9 @@
 It reads the program headers, the section names, and the function ranges of
 .eh_frame, which is how a stripped Android library says where its functions
 are, or, for an OAT file (which has no unwind table), of the function symbols
-of its .gnu_debugdata. Nothing else is interpreted.
+of its .gnu_debugdata. A library with unwind tables also names its assembly
+routines (which have no unwind entry) by sized function symbols: those of its
+.symtab, .dynsym and .gnu_debugdata. Nothing else is interpreted.
 """
 
 from __future__ import annotations
@@ -120,7 +122,11 @@ class Elf:
         Unwind ranges that touch are one function, as they always have been:
         every earlier build of the framework has them so, and a library's
         unit changes with its functions. The symbols of an OAT file name each
-        method exactly, so two that touch stay two."""
+        method exactly, so two that touch stay two. The sized function
+        symbols of a file with unwind tables add the routines the unwind
+        tables lack (assembly): a symbol that lies inside a function adds
+        nothing, one that overlaps a function extends it, and any other,
+        touching ones too, is a function of its own."""
         if ".eh_frame" in self.sections:
             found = self._eh_frame_functions()
             touching = True
@@ -148,7 +154,66 @@ class Elf:
                 merged.append(Function(last.start, max(last.end, finish)))
             else:
                 merged.append(Function(begin, finish))
+        if ".eh_frame" in self.sections:
+            merged = self._with_symbols(merged)
         return merged
+
+    def _with_symbols(self, merged: list[Function]) -> list[Function]:
+        """`merged` with the sized function symbols of the file added (see
+        functions)."""
+        try:
+            segment = self.executable_segment()
+        except ElfError:
+            return merged
+        low, high = segment.vaddr, segment.vaddr + segment.filesz
+        found = [(function.start, function.end) for function in merged]
+        for begin, finish in self._symbol_functions():
+            if low <= begin and finish <= high:
+                found.append((begin, finish))
+        found.sort()
+        out: list[Function] = []
+        for begin, finish in found:
+            if out and begin < out[-1].end:
+                last = out.pop()
+                out.append(Function(last.start, max(last.end, finish)))
+            else:
+                out.append(Function(begin, finish))
+        return out
+
+    def _symbol_functions(self) -> list[tuple[int, int]]:
+        """The sized function symbols of .symtab, .dynsym and .gnu_debugdata,
+        each a range of whole instructions."""
+        found: list[tuple[int, int]] = []
+        for name in (".symtab", ".dynsym"):
+            if name in self.sections:
+                found += self._symbols(self, name)
+        if ".gnu_debugdata" in self.sections:
+            debug = self._debug_elf()
+            if ".symtab" in debug.sections:
+                found += self._symbols(debug, ".symtab")
+        return found
+
+    @staticmethod
+    def _symbols(elf: "Elf", name: str) -> list[tuple[int, int]]:
+        """The defined STT_FUNC symbols with a size in the named symbol
+        table; a symbol with no size names no range, and a range that does
+        not start and end on an instruction is not one."""
+        _, table, table_size = elf.sections[name]
+        found: list[tuple[int, int]] = []
+        for at in range(table, table + table_size - 23, 24):
+            _name, info, _other, shndx, value, length = struct.unpack_from(
+                "<IBBHQQ", elf.data, at)
+            if (info & 0x0f == STT_FUNC and shndx != 0 and length > 0 and
+                    value % 4 == 0 and length % 4 == 0):
+                found.append((value, value + length))
+        return found
+
+    def _debug_elf(self) -> "Elf":
+        _, offset, size = self.sections[".gnu_debugdata"]
+        try:
+            return Elf(lzma.decompress(self.data[offset:offset + size]))
+        except (lzma.LZMAError, ElfError, struct.error) as error:
+            raise ElfError(f".gnu_debugdata cannot be read: {error}") from None
 
     def _eh_frame_functions(self) -> list[tuple[int, int]]:
         addr, offset, size = self.sections[".eh_frame"]
@@ -182,11 +247,7 @@ class Elf:
         """The function symbols of the file's .gnu_debugdata, the XZ-
         compressed ELF that carries a stripped file's symbols (dex2oat names
         each compiled method there). A symbol with no size names no range."""
-        _, offset, size = self.sections[".gnu_debugdata"]
-        try:
-            debug = Elf(lzma.decompress(self.data[offset:offset + size]))
-        except (lzma.LZMAError, ElfError, struct.error) as error:
-            raise ElfError(f".gnu_debugdata cannot be read: {error}") from None
+        debug = self._debug_elf()
         if ".symtab" not in debug.sections:
             raise ElfError(".gnu_debugdata has no .symtab")
         _, table, table_size = debug.sections[".symtab"]
