@@ -1064,9 +1064,9 @@ digest is recomputed from the rows; `launch` makes the probe's activity the resu
 it is open) and refuses with status 2 and no output the not exported and no-filter activities, a
 built-in application's other activity, a package that is not installed, a disabled application and
 every hostile argument, none of which runs (a marker file stays absent); usage errors are status
-64; the shell user's data directory is unchanged and no new denial of the shell domain reaches
-the log (denials are compared by permission, contexts, class and name, as counts, so the time, the
-pid and the log's two lines for one denial do not matter); and the digest changes with an install, an update in place (whose icon keys alone
+64; the shell user's data directory is unchanged and no denial of the shell domain is logged
+from a time on the device's clock taken before the first call (only that window is read, so a line
+the log buffer has dropped cannot hide a new one); and the digest changes with an install, an update in place (whose icon keys alone
 change) and a disabled application, and returns to its earlier value when the application is
 removed. `android17-app-shortcuts-command` (tooling; skipped without a JDK) runs the command's
 grammar, the labels' escaping and bounds, the listing, digest and icon keys, every answer's

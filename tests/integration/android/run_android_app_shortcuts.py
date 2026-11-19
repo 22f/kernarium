@@ -54,7 +54,6 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
-import collections
 import hashlib
 import importlib.util
 import pathlib
@@ -832,8 +831,8 @@ AVC_NAME = re.compile(r'\bname=("[^"]*"|\S+)')
 
 def audit_key(line: str) -> tuple[str, ...] | None:
     """The identity of a denial: the record type, the permissions, the source and target contexts, the class and the
-    name. The time, the pid, the audit serial, the comm and the log tag are left out, so one denial is one key however
-    often and however the log shows it. None when the line is no denial to the shell domain."""
+    name. The time, the pid, the audit serial, the comm and the log tag are left out, so the two lines the log holds
+    for one denial are one key. None when the line is no denial to the shell domain."""
     if "avc" not in line or "denied" not in line:
         return None
     found = AVC_DENIED.search(line)
@@ -847,13 +846,27 @@ def audit_key(line: str) -> tuple[str, ...] | None:
     return ("avc", " ".join(sorted(permissions.split())), source, target, kind, name.group(1) if name else "")
 
 
-def denials(guest) -> collections.Counter:
-    """The denials to the shell domain in the whole log, counted by identity. The log holds each one as two lines and
-    a repeat as two more, so a count that grows is a denial that happened again. A log that cannot be read is a failure."""
-    read = guest.run("logcat -d -b all", timeout=60)
+LOG_TIME = re.compile(r"^\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}$")
+
+
+def window_start(guest) -> str:
+    """Where the window the command's calls are judged in begins: a whole second of the device's clock after everything
+    the earlier steps did (logcat takes a time to the millisecond), so no line of theirs shares it."""
+    time.sleep(1.1)
+    stamp = guest.shell("date +'%m-%d %H:%M:%S.000'").strip()
+    if not LOG_TIME.match(stamp):
+        raise fail(f"the device's clock reads {stamp!r}, not MM-DD HH:MM:SS.mmm")
+    return stamp
+
+
+def denials_since(guest, since: str) -> list[str]:
+    """The audit lines of denials to the shell domain that the log holds from `since` on. Only the window is read, so a
+    line the buffer dropped before it cannot stand in for one in it: any denial in the window is a denial. A log that
+    cannot be read is a failure."""
+    read = guest.run(f"logcat -d -b all -T {shlex.quote(since)}", timeout=60)
     if read.status != 0:
-        raise fail(f"the log could not be read: logcat -d -b all exited {read.status}")
-    return collections.Counter(key for key in map(audit_key, read.text.splitlines()) if key is not None)
+        raise fail(f"the log could not be read: logcat -d -b all -T exited {read.status}: {read.err.strip()[-200:]}")
+    return [line.strip() for line in read.text.splitlines() if audit_key(line) is not None]
 
 
 def tmp_listing(guest) -> str:
@@ -901,16 +914,18 @@ def check_set_changes(guest, apks: dict[str, pathlib.Path]) -> str:
             "earlier digest back; only the updated application's icon keys change")
 
 
-def check_clean(guest, before_files: str, before_denials: collections.Counter) -> str:
+def check_clean(guest, before_files: str, since: str) -> str:
     after_files = tmp_listing(guest)
     if after_files != before_files:
         raise fail(f"{SHELL_DATA} changed: before {before_files.split()}, after {after_files.split()}")
-    after = denials(guest)
-    new = [key for key in after if after[key] > before_denials[key]]
-    if new:
-        raise fail("the shell domain was denied something while the command ran:\n"
-                   + "\n".join(" ".join(key) for key in sorted(new)[:8]))
-    return f"{SHELL_DATA} unchanged; no new denial of {SHELL_CONTEXT}"
+    found = denials_since(guest, since)
+    if found:
+        # One line for each denial (the log holds two), as the log gives it, with its comm and pid where it has them.
+        first: dict[tuple[str, ...], str] = {}
+        for line in found:
+            first.setdefault(audit_key(line), line)
+        raise fail(f"the shell domain was denied something since {since}:\n" + "\n".join(list(first.values())[:8]))
+    return f"{SHELL_DATA} unchanged; no denial of {SHELL_CONTEXT} since {since}"
 
 
 def open_guest(options: argparse.Namespace, adb: str, private: pathlib.Path):
@@ -938,7 +953,7 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
             report.run(f"{variant}: install", lambda variant=variant: (
                 fresh_install(guest, apks[variant], probe.package_of(variant)) or f"{probe.package_of(variant)} installed"))
         before_files = tmp_listing(guest)
-        before_denials = denials(guest)   # before the command's first call: a denial that only that call meets counts
+        since = window_start(guest)   # before the command's first call: the log is judged from here on
         report.run("digest and list agree on the header block", lambda: check_header(guest))
         report.run("list names the built-in and the probe's applications, escaped and bounded", lambda: check_rows(guest))
         report.run("icons are PNG records that check out", lambda: check_icons(guest))
@@ -946,7 +961,7 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
         report.run("a launcher alias enabled for the user is listed, drawn and started", lambda: check_alias(guest))
         report.run("launch refuses all else, and runs nothing it is given", lambda: check_refusals(guest))
         report.run("usage errors are status 64", lambda: check_usage(guest))
-        report.run("the command writes nothing and is denied nothing", lambda: check_clean(guest, before_files, before_denials))
+        report.run("the command writes nothing and is denied nothing", lambda: check_clean(guest, before_files, since))
         report.run("the digest follows the set of applications", lambda: check_set_changes(guest, apks))
     finally:
         for variant in probe.VARIANTS:

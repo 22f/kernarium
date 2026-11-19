@@ -122,8 +122,9 @@ class ScriptedImage:
              "label": "Calculator", "icon": "legacy"}]))
         self.resumed: str | None = None
         self.files: set[str] = set()
-        self.denials: list[tuple[int, str, str, str]] = []   # serial, comm, target context, name
-        self.reads = 0
+        self.denials: list[tuple[str, str, str, str]] = []   # time, comm, target context, name
+        self.wall = 5 * 3600   # the device's clock, in seconds of the day
+        self.evict_before: str | None = None   # a log time before which the buffer has dropped its lines
         self.locales = "en-US"
         self.commands: list[str] = []
         self.calls = 0
@@ -233,29 +234,39 @@ class ScriptedImage:
             return "", (0 if words[1] in self.files else 1), ""
         if words[:2] == ["ls", "-A"]:
             return "".join(f"{name.rsplit('/', 1)[1]}\n" for name in sorted(self.files)), 0, ""
-        if words[:3] == ["logcat", "-d", "-b"]:
-            return self.log(), 0, ""
+        if words[:4] == ["logcat", "-d", "-b", "all"] and (len(words) == 4 or (len(words) == 6 and words[4] == "-T")):
+            return self.log(words[5] if len(words) == 6 else None), 0, ""
+        if words[0] == "date":
+            stamp = self.stamp()[:-3] + "000"   # a whole second; the clock then moves on, as a real one does between calls
+            self.wall += 2
+            return stamp + "\n", 0, ""
         if words[0] == runner.COMMAND:
             return self.tool(command, words[1:])
         raise AssertionError(f"the scripted guest does not know {command!r}")
 
-    def denial(self, comm: str, target: str, name: str = "") -> None:
-        self.denials.append((len(self.denials), comm, target, name))
+    def stamp(self, seconds: int | None = None) -> str:
+        seconds = self.wall if seconds is None else seconds
+        return f"11-19 {seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}.653"
 
-    def log(self) -> str:
-        """`logcat -d -b all`: a denial is two lines, the kernel's with the comm and the one under the process's own tag
-        without it. A deviation shows the same denials with other times and pids at every read."""
-        self.reads += 1
-        shift = self.reads if self.deviation == "log-rerendered" else 0
-        lines = ["11-19 04:00:00.000   100   100 I vold    : an unrelated line"]
-        for serial, comm, target, name in self.denials:
-            stamp = f"11-19 04:46:{(serial + shift) % 60:02d}.{shift:03d} {2400 + shift:5d} {2400 + shift:5d}"
-            record = f"type=1400 audit(0.0:{160 + serial + shift}): avc:  denied  {{ read }} for "
+    def denial(self, comm: str, target: str, name: str = "", at: str | None = None) -> None:
+        self.denials.append((at or self.stamp(), comm, target, name))
+
+    def log(self, since: str | None = None) -> str:
+        """`logcat -d -b all [-T time]`: a denial is two lines, the kernel's with the comm and the one under the process's
+        own tag without it. A buffer that has dropped its old lines no longer shows them."""
+        lines = [f"{self.stamp(4 * 3600)} 100   100 I vold    : an unrelated line"]
+        for serial, (at, comm, target, name) in enumerate(self.denials):
+            if self.evict_before is not None and at < self.evict_before:
+                continue
+            stamp = f"{at} {2400 + serial:5d} {2400 + serial:5d}"
+            record = f"type=1400 audit(0.0:{160 + serial}): avc:  denied  {{ read }} for "
             named = f'name="{name}" ' if name else ""
             tail = f'dev="tmpfs" ino=317 scontext=u:r:shell:s0 tcontext={target} tclass=file permissive=0'
             lines.append(f'{stamp} I auditd  : {record}comm="{comm}" {named}{tail}')
             lines.append(f"{stamp} W {comm}: {record}{named}{tail}")
-        lines.append("11-19 04:50:00.000   100   100 I vold    : another unrelated line")
+        lines.append(f"{self.stamp()} 100   100 I vold    : another unrelated line")
+        if since is not None:
+            lines = [line for line in lines if line[:18] >= since]
         return "\n".join(lines) + "\n"
 
     # -- the command
@@ -323,8 +334,10 @@ class ScriptedImage:
             self.denial("app_process64", "u:object_r:resourcecache_data_file:s0")
         if self.deviation == "denial" and words[:1] == ["list"]:
             self.denial("app_process64", "u:object_r:apk_data_file:s0", f"base-{len(self.denials)}.apk")
-        if self.deviation == "repeat-denial" and self.calls == 1:
+        if self.deviation in ("repeat-denial", "evicted-baseline") and self.calls == 1:
             self.denial("kernarium_apps-", "u:object_r:qemu_sf_lcd_density_prop:s0", "u:object_r:qemu_sf_lcd_density_prop:s0")
+            if self.deviation == "evicted-baseline":   # the buffer drops the older line as the new one comes in
+                self.evict_before = self.stamp()
         known = {"digest": 1, "list": 1}
         if not words or (words[0] in known and len(words) != 1) or words[0] not in ("digest", "list", "icons", "launch") \
                 or (words[0] == "icons" and not 2 <= len(words) <= 9) or (words[0] == "launch" and len(words) != 2):
@@ -703,8 +716,9 @@ class Steps(Fixture):
     def run_steps(self, deviation: str | None) -> dict[str, str]:
         image = ScriptedImage()
         image.deviation = deviation
-        if deviation in ("repeat-denial", "log-rerendered"):   # an earlier run's denial is in the log before this one starts
-            image.denial("kernarium_apps-", "u:object_r:qemu_sf_lcd_density_prop:s0", "u:object_r:qemu_sf_lcd_density_prop:s0")
+        if deviation in ("repeat-denial", "evicted-baseline", "old-denial"):   # an earlier run's denial is in the log already
+            image.denial("kernarium_apps-", "u:object_r:qemu_sf_lcd_density_prop:s0", "u:object_r:qemu_sf_lcd_density_prop:s0",
+                         at=image.stamp(4 * 3600 + 46 * 60 + 11))
         report = runner.Report()
         options = types_namespace()
         with contextlib.redirect_stdout(io.StringIO()), \
@@ -725,8 +739,8 @@ class Steps(Fixture):
         self.assertEqual(12, len(statuses))
         self.assertEqual(set(), self.image.files)
 
-    def test_a_log_shown_differently_holds_no_new_denial(self) -> None:
-        statuses = self.run_steps("log-rerendered")
+    def test_a_denial_from_before_the_window_is_not_the_commands(self) -> None:
+        statuses = self.run_steps("old-denial")
         self.assertEqual({"PASS"}, set(statuses.values()), statuses)
 
     def test_each_deviation_fails_its_step(self) -> None:
@@ -751,6 +765,7 @@ class Steps(Fixture):
             "launch-hidden": refusals, "guarded-launched": refusals, "injection": refusals, "refusal-multiline": refusals, "disabled-launch": refusals,
             "usage-status": usage,
             "writes-file": clean, "denial": clean, "first-call-denial": clean, "repeat-denial": clean,
+            "evicted-baseline": clean,
             "digest-constant": sets, "static-keys": sets, "builtin-icons-error": icons,
         }
         for deviation, step in expected.items():
