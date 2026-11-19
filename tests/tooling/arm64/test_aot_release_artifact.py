@@ -128,6 +128,20 @@ class ArtifactTests(unittest.TestCase):
             handle.write(b"\1")
         self.refuses("blob.bin differs")
 
+    def test_blob_of_another_layout_mark_is_refused(self) -> None:
+        # The format mark names the layout the units and the runtime share: a
+        # blob with another one (a build of an earlier layout) is not read,
+        # whether its header or the descriptor names it.
+        path = self.artifact / "blob.bin"
+        data = bytearray(path.read_bytes())
+        data[:8] = b"UMLAOT15"
+        path.write_bytes(bytes(data))
+        digest = R.sha256_file(path)
+        self.rewrite_description(lambda d: d["blob"].update(sha256=digest))
+        self.refuses("blob.bin header differs from artifact.json")
+        self.rewrite_description(lambda d: d["blob"].update(magic="UMLAOT15"))
+        self.refuses("blob is malformed")
+
     def test_blob_of_another_release_is_refused(self) -> None:
         with open(self.artifact / "blob.bin", "r+b") as handle:
             handle.seek(R.BLOB_RELEASE_ID_OFFSET)
