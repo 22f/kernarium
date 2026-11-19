@@ -1185,11 +1185,25 @@ class Library:
         if literal is None and base_g != "sp":
             asm.word(A.ubfx(T0, ea, 0, 56))
         entry = 0 if load else 16
-        self.fn_mm.append((offset, "LOAD" if load else "STORE", total, short))
-        asm.word(A.ubfx(T2, T0, 12, 14))
+        # A scalar of more than one byte is indexed by the page of its last
+        # byte and its tag compared with the page of its first, which T0 keeps
+        # for the access (register-offset form: the host delta of the entry
+        # plus the guest address): neighbouring pages have different direct
+        # slots, so an access that crosses a page finds the slot of the second
+        # page holding another page and misses, and the probe needs no add on
+        # T0 or the delta. A stack access in one granule needs no last byte at
+        # all. A pair adds the delta itself, so it keeps the first form.
+        flip = total > 1 and not pair and not short
+        first = short or flip
+        self.fn_mm.append((offset, "LOAD" if load else "STORE", total, first))
+        if flip:
+            asm.word(A.add_imm(T1, T0, total - 1))
+            asm.word(A.ubfx(T2, T1, 12, 14))
+        else:
+            asm.word(A.ubfx(T2, T0, 12, 14))
         asm.word(A.add_reg(T2, TLB, T2, shift=0, amount=5))
         asm.word(A.ldp_x(T1, T2, T2, entry))
-        if total > 1 and not short:
+        if pair and not short:
             asm.word(A.add_reg(T2, T2, T0))
             asm.word(A.add_imm(T0, T0, total - 1))
         elif short and pair:
@@ -1232,13 +1246,9 @@ class Library:
                     self._load_guest(T1, guest_rt)
             elif guest_rt == "zr":
                 host_rt = 31
-            if total > 1 and not short:
-                asm.word((size << 30) | (0b111 << 27) | (vector << 26) |
-                         (0b01 << 24) | (mem_opc << 22) | (T2 << 5) | host_rt)
-            else:
-                asm.word((size << 30) | (0b111 << 27) | (vector << 26) |
-                         (mem_opc << 22) | (1 << 21) | (T0 << 16) |
-                         (0b011 << 13) | (0b10 << 10) | (T2 << 5) | host_rt)
+            asm.word((size << 30) | (0b111 << 27) | (vector << 26) |
+                     (mem_opc << 22) | (1 << 21) | (T0 << 16) |
+                     (0b011 << 13) | (0b10 << 10) | (T2 << 5) | host_rt)
             if guest_rt in VIRTUAL and load:
                 self._store_guest(T1, guest_rt)
         self.tag("mem.access", census_start)

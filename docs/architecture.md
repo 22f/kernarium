@@ -779,9 +779,10 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   text, a remap or another address space can cost a declined entry and never
   run stale code.
 - Memory and atomics: an inline probe of the engine's TLB entry, refilled
-  through the executor on a miss (an access of more than one byte is probed
-  by its last byte; a stack access with an immediate offset inside one
-  aligned 16-byte granule cannot cross a page and is probed by its first);
+  through the executor on a miss (a scalar of more than one byte indexes the
+  entry by its last byte and compares the tag with its first, so a page
+  crossing misses; a stack access with an immediate offset inside one aligned
+  16-byte granule cannot cross a page and is probed by its first byte);
   ordered accesses, the LSE atomic operations
   and compare-and-swap run as the host's own instruction on naturally aligned
   addresses. Advanced SIMD structure loads and stores (LD1 to LD4, ST1 to

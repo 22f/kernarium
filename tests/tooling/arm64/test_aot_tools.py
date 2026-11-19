@@ -866,47 +866,49 @@ class FixtureTests(unittest.TestCase):
         self.assertNotIn(0x1008, self.library.charge)
 
 
-class StackAccessProbeTests(unittest.TestCase):
-    """An SP access with an immediate offset inside one aligned 16-byte
-    granule has no last-byte address: its probe is shorter, a scalar's access
-    adds the host delta itself, and the cold miss stub enters the routine that
-    gives the host the last byte as every other probe does."""
+class MemoryProbeShapeTests(unittest.TestCase):
+    """The words of an access's probe: an SP access with an immediate offset
+    inside one aligned 16-byte granule has no last-byte address, any other
+    scalar of more than one byte indexes by its last byte and compares the tag
+    with its first (the access then adds the host delta itself), a byte and a
+    pair keep their forms; a probe that leaves the first byte's address enters
+    the refill routine that gives the host the last."""
 
     @staticmethod
-    def words(word: int) -> tuple[int, int, "rewrite.Library"]:
+    def shape(word: int) -> tuple[int, int, set]:
         library = library_of([word, RET], [(0, 8)])
         unit_words(library)
         assert library.stats.steps == 0, hex(word)
         census = library.stats.census
-        return census["mem.probe"] // 4, census["mem.access"] // 4, library
+        return (census["mem.probe"] // 4, census["mem.access"] // 4,
+                library.refill_used)
 
-    def test_a_scalar_inside_the_granule_saves_two_words(self) -> None:
-        for short, long_, kind, total in (
-                (0xf94007e0, 0xf840c3e0, "LOAD", 8),    # ldr x0,[sp,#8] / ldur x0,[sp,#12]
-                (0x3dc007e0, 0x3cc083e0, "LOAD", 16),   # ldr q0,[sp,#16] / ldur q0,[sp,#8]
-                (0xf90007e0, 0xf800c3e0, "STORE", 8)):  # str x0,[sp,#8] / stur x0,[sp,#12]
-            probe_short, access_short, library = self.words(short)
-            probe_long, access_long, other = self.words(long_)
-            self.assertEqual((probe_long + access_long) -
-                             (probe_short + access_short), 2, hex(short))
-            self.assertEqual(library.refill_used, {(kind, total, 0, True)})
-            self.assertEqual(other.refill_used, {(kind, total, 0, False)})
+    def test_a_stack_scalar_inside_the_granule(self) -> None:
+        for word, kind, total in (
+                (0xf94007e0, "LOAD", 8),     # ldr x0,[sp,#8]
+                (0x3dc007e0, "LOAD", 16),    # ldr q0,[sp,#16]
+                (0xf90007e0, "STORE", 8)):   # str x0,[sp,#8]
+            self.assertEqual(self.shape(word),
+                             (5, 1, {(kind, total, 0, True)}), hex(word))
 
-    def test_a_pair_inside_the_granule_saves_one_word(self) -> None:
-        for short, long_ in ((0xa94107e0, 0xa94087e0),   # ldp x0,x1,[sp,#16] / [sp,#8]
-                             (0xa90107e0, 0xa90087e0)):  # stp x0,x1,[sp,#16] / [sp,#8]
-            probe_short, access_short, _ = self.words(short)
-            probe_long, access_long, _ = self.words(long_)
-            self.assertEqual((probe_long + access_long) -
-                             (probe_short + access_short), 1, hex(short))
+    def test_other_scalars_index_by_the_last_byte(self) -> None:
+        for word, probe, kind, total in (
+                (0xf840c3e0, 6, "LOAD", 8),     # ldur x0,[sp,#12]: no granule
+                (0x3cc083e0, 6, "LOAD", 16),    # ldur q0,[sp,#8]
+                (0xf800c3e0, 6, "STORE", 8),    # stur x0,[sp,#12]
+                (0xf9400420, 7, "LOAD", 8)):    # ldr x0,[x1,#8]: strips the tag
+            self.assertEqual(self.shape(word),
+                             (probe, 1, {(kind, total, 0, True)}), hex(word))
 
-    def test_other_bases_keep_the_long_probe(self) -> None:
-        # The same offsets on a plain base register are not in a granule the
-        # SP's alignment proves.
-        probe_sp, access_sp, _ = self.words(0xf94007e0)       # ldr x0,[sp,#8]
-        probe_plain, access_plain, _ = self.words(0xf9400420)  # ldr x0,[x1,#8]
-        self.assertGreater(probe_plain + access_plain,
-                           probe_sp + access_sp + 2)
+    def test_a_byte_and_a_pair_keep_their_forms(self) -> None:
+        for word, probe, kind, total, first in (
+                (0x394007e0, 5, "LOAD", 1, False),    # ldrb w0,[sp,#1]
+                (0xa94107e0, 6, "LOAD", 16, True),    # ldp x0,x1,[sp,#16]
+                (0xa94087e0, 7, "LOAD", 16, False),   # ldp x0,x1,[sp,#8]
+                (0xa90087e0, 7, "STORE", 16, False),  # stp x0,x1,[sp,#8]
+                (0xa9410440, 8, "LOAD", 16, False)):  # ldp x0,x1,[x2,#16]
+            self.assertEqual(self.shape(word),
+                             (probe, 1, {(kind, total, 0, first)}), hex(word))
 
 
 class HintAndFloatingPointTests(unittest.TestCase):
@@ -1421,10 +1423,10 @@ class CensusTests(unittest.TestCase):
 
     def test_a_load_and_a_store_are_a_probe_an_access_and_a_stub(self) -> None:
         census, _ = self.census()
-        # A probe of a wide access is eight words: the untag, the index, the
-        # entry address, the entry load, the host address, the last byte,
-        # the compare and the branch to its cold stub of two words.
-        self.assertEqual(census["mem.probe"], 2 * 8 * 4)
+        # A probe of a wide scalar is seven words: the untag, the last byte,
+        # the index, the entry address, the entry load, the compare with the
+        # first byte's page and the branch to its cold stub of two words.
+        self.assertEqual(census["mem.probe"], 2 * 7 * 4)
         self.assertEqual(census["mem.access"], 2 * 4)
         self.assertEqual(census["stub.mm"], 2 * 2 * 4)
         self.assertEqual(census["insn"], 4)
@@ -1434,8 +1436,9 @@ class CensusTests(unittest.TestCase):
 
     def test_only_the_refill_routines_a_site_enters_exist(self) -> None:
         census, _ = self.census()
-        # A load and a store of eight bytes: a movz and a branch each.
-        self.assertEqual(census["stub.refill"], 2 * 2 * 4)
+        # A load and a store of eight bytes: the last byte's address (the
+        # probe left the first), a movz and a branch each.
+        self.assertEqual(census["stub.refill"], 2 * 3 * 4)
 
     def test_a_function_that_falls_off_its_end_tags_the_branch(self) -> None:
         library = library_of([self.ADD, self.ADD], [(0, 8)])
