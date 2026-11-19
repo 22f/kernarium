@@ -570,6 +570,49 @@ struct Snapshot final {
 	return s;
 }
 
+/* The states of a run one instruction at a time, each marked with whether it
+ * was recorded at a fault (a state in the middle of an instruction, which a
+ * memory copy or set leaves between its pages) or at an instruction boundary.
+ * An exit of rewritten code that is a fault must lie on a state recorded at a
+ * fault, and any other exit (a block, the budget, the end) on a boundary: a
+ * state only a fault reaches is not one an ordinary exit may leave a guest
+ * in, where the fault is still to be taken. */
+struct Trace final {
+	std::vector<Snapshot> states;
+	std::vector<bool> at_fault;
+
+	void push(const Snapshot &state, bool fault)
+	{
+		states.push_back(state);
+		at_fault.push_back(fault);
+	}
+	[[nodiscard]] std::size_t size() const noexcept { return states.size(); }
+	[[nodiscard]] const Snapshot &operator[](std::size_t i) const noexcept
+	{
+		return states[i];
+	}
+	[[nodiscard]] const Snapshot &back() const noexcept
+	{
+		return states.back();
+	}
+	/* The index of the first state at or after `from` that is `now` and of
+	 * the kind of the exit (`fault`), or the size of the trace. */
+	[[nodiscard]] std::size_t find(std::size_t from, const Snapshot &now,
+		bool fault) const noexcept
+	{
+		for (std::size_t i = from; i < states.size(); ++i)
+			if (at_fault[i] == fault && states[i] == now)
+				return i;
+		return states.size();
+	}
+};
+
+/* A row that plays a wrong exit sets this: the next fault of a run through
+ * rewritten code is returned as an ordinary exit (as the end of a budget
+ * would), the instruction runs again at the same address and takes the fault
+ * then. */
+bool g_report_next_fault_as_continued = false;
+
 /* run_once, through the ahead-of-time step while it is switched on, as the
  * engine's entry would choose (GadgetExecutor::aot_selected). */
 [[nodiscard]] Outcome run_selected(GadgetExecutor &executor,
@@ -581,6 +624,11 @@ struct Snapshot final {
 		executor.run_aot_block(cpu, memory, generation, executed) :
 		executor.run_block(cpu, memory, generation, executed);
 	executor.end_execution();
+	if (g_report_next_fault_as_continued && event == EngineEvent::memory_fault &&
+	    aot_runtime::enabled()) {
+		g_report_next_fault_as_continued = false;
+		return {EngineEvent::continued, executed};
+	}
 	return {event, executed};
 }
 
@@ -1027,37 +1075,39 @@ void randomize_fp_state(Case &c)
 	Environment test{id + 1, bias, image};
 	Arena ref_arena{ref.generation, arena_base(bias)};
 	Arena test_arena{test.generation, arena_base(bias)};
-	std::vector<Snapshot> trace;
+	Trace trace;
 	aot::set_enabled(false);
 	ref.executor.set_single_step(true);
-	trace.push_back([&] {
+	trace.push([&] {
 		auto first = c.cpu;
 		first.pc = bias + c.pc_offset;
 		return snapshot_of(first);
-	}());
-	/* The states at a fault the run repairs are on the path, and so is the
-	 * state it ends in. */
-	const auto record = [&](const arm64::CpuState &cpu) {
-		trace.push_back(snapshot_of(cpu));
+	}(), false);
+	/* The states at a fault the run repairs are on the path, marked as such,
+	 * and so is the state it ends in. */
+	const auto record = [&](const arm64::CpuState &cpu, bool fault) {
+		trace.push(snapshot_of(cpu), fault);
 	};
-	const auto ref_ended = drive(ref, ref_arena, c, 300000, record, record);
-	record(ref_ended.cpu);
+	const auto ref_ended = drive(ref, ref_arena, c, 300000,
+		[&](const arm64::CpuState &cpu) { record(cpu, false); },
+		[&](const arm64::CpuState &cpu) { record(cpu, true); });
+	record(ref_ended.cpu, false);
 	aot::set_enabled(true);
 	std::size_t at = 0;
 	std::size_t exits = 0;
 	bool reported = false;
 	g_log.enabled = true;
 	g_log.blocks.clear();
-	const auto check = [&](const arm64::CpuState &cpu) {
+	const auto check = [&](const arm64::CpuState &cpu, bool fault) {
 		if (reported)
 			return;
 		++exits;
 		const auto now = snapshot_of(cpu);
-		for (std::size_t i = at; i < trace.size(); ++i)
-			if (trace[i] == now) {
-				at = i;
-				return;
-			}
+		const auto found = trace.find(at, now, fault);
+		if (found != trace.size()) {
+			at = found;
+			return;
+		}
 		reported = true;
 		std::fprintf(stderr, "first state off the reference path after "
 			"exit %zu (last matching reference step %zu of %zu)\n",
@@ -1077,8 +1127,10 @@ void randomize_fp_state(Case &c)
 						static_cast<unsigned long long>(now.x[r]));
 		}
 	};
-	const auto ended = drive(test, test_arena, c, 4000, check, check);
-	check(ended.cpu);
+	const auto ended = drive(test, test_arena, c, 4000,
+		[&](const arm64::CpuState &cpu) { check(cpu, false); },
+		[&](const arm64::CpuState &cpu) { check(cpu, true); });
+	check(ended.cpu, false);
 	aot::set_enabled(false);
 	g_log.enabled = false;
 	for (std::size_t i = g_log.blocks.size() > 6 ? g_log.blocks.size() - 6 : 0;
@@ -4694,20 +4746,10 @@ void rewritten_code_stays_within_a_stack_budget(const LibraryImage &image)
  * memory of one state of that trace, and later exits come later on it. The
  * trace holds the state after each instruction and the state at each fault the
  * run repairs and resumes, which a memory copy or set that stops between its
- * pages leaves in the middle of the instruction. A debugger, a signal frame,
- * ptrace and a crash report see only such states. (The exclusive monitor is
- * not guest-visible state and is not part of the comparison.) */
-
-/* The index of the first state at or after `from` that is `now`, or the size
- * of the trace. */
-[[nodiscard]] std::size_t find_on_trace(const std::vector<Snapshot> &trace,
-	std::size_t from, const Snapshot &now) noexcept
-{
-	for (std::size_t i = from; i < trace.size(); ++i)
-		if (trace[i] == now)
-			return i;
-	return trace.size();
-}
+ * pages leaves in the middle of the instruction; a fault exit lies on the
+ * second kind and every other exit on the first (Trace). A debugger, a signal
+ * frame, ptrace and a crash report see only such states. (The exclusive
+ * monitor is not guest-visible state and is not part of the comparison.) */
 
 void print_difference(const char *tag, const Snapshot &want,
 	const Snapshot &have)
@@ -4747,7 +4789,7 @@ void prepare_arena(Arena &arena, const Case &c)
  * after each instruction and at each fault the run repairs, with the arena
  * hashed where `hash_memory`. */
 struct Stepped final {
-	std::vector<Snapshot> states;
+	Trace states;
 	Result result;
 };
 
@@ -4762,27 +4804,30 @@ Stepped run_stepped(Environment &env, Arena &arena, const Case &c, std::size_t c
 	const auto memory = [&]() -> std::uint64_t {
 		return hash_memory ? hash_bytes(arena.snapshot()) : 0;
 	};
-	const auto record = [&](const arm64::CpuState &cpu) {
-		out.states.push_back(snapshot_of(cpu, memory()));
+	const auto record = [&](const arm64::CpuState &cpu, bool fault) {
+		out.states.push(snapshot_of(cpu, memory()), fault);
 	};
-	record(start.cpu);
+	record(start.cpu, false);
 	env.executor.set_single_step(true);
 	/* A fault the run repairs (a page of the arena it gets) is a state of
 	 * the trace too: a memory copy or set commits the bytes before the page
 	 * that faults, and the state it stops in is neither before nor after the
 	 * instruction. */
 	out.result = run_from(env.executor, env.memory, env.generation, arena,
-		start.cpu, cap, record, false, record);
+		start.cpu, cap, [&](const arm64::CpuState &cpu) {
+		record(cpu, false);
+	}, false, [&](const arm64::CpuState &cpu) { record(cpu, true); });
 	env.executor.set_single_step(false);
-	out.states.push_back(snapshot_of(out.result.cpu,
-		hash_memory ? hash_bytes(out.result.memory) : 0));
+	out.states.push(snapshot_of(out.result.cpu,
+		hash_memory ? hash_bytes(out.result.memory) : 0), false);
 	return out;
 }
 
 /* The number of instructions after which `c`, run one at a time on the
  * engine, is in `target` (arena included), or SIZE_MAX if it is not within
- * `cap` of them. A state at a fault the run repairs counts the instructions
- * before it. The arena is hashed only where the rest matches. */
+ * `cap` of them. The arena is hashed only where the rest matches. A state at
+ * a fault is not looked at: the targets are interrupt and breakpoint stops,
+ * which leave a guest at an instruction boundary. */
 [[nodiscard, gnu::noinline]] std::size_t step_to(Environment &env,
 	Arena &arena, const Case &c, std::size_t cap, const Snapshot &target)
 {
@@ -4806,7 +4851,7 @@ Stepped run_stepped(Environment &env, Arena &arena, const Case &c, std::size_t c
 		start.cpu, cap, [&](const arm64::CpuState &cpu) {
 		++steps;
 		look(cpu);
-	}, false, look);
+	});
 	env.executor.set_single_step(false);
 	return index;
 }
@@ -4815,8 +4860,7 @@ Stepped run_stepped(Environment &env, Arena &arena, const Case &c, std::size_t c
  * of a state in the middle of a trace is changed in turn, and the changed
  * state must be on no part of the trace. */
 [[gnu::noinline]]
-void the_matcher_notices_every_field(
-	const std::vector<Snapshot> &trace)
+void the_matcher_notices_every_field(const Trace &trace)
 {
 	require(trace.size() >= 8);
 	const auto middle = trace[trace.size() / 2];
@@ -4825,7 +4869,8 @@ void the_matcher_notices_every_field(
 		auto now = middle;
 		change(now);
 		++fields;
-		if (find_on_trace(trace, 0, now) != trace.size()) {
+		if (trace.find(0, now, false) != trace.size() ||
+		    trace.find(0, now, true) != trace.size()) {
 			std::fprintf(stderr, "the trace comparison does not see a "
 				"changed %s\n", what);
 			require(false);
@@ -4910,13 +4955,14 @@ TraceTotals exits_lie_on_the_stepped_trace(
 		const auto &trace = stepped.states;
 		std::size_t at = 0, exits = 0;
 		bool off = false;
-		const auto check = [&](const arm64::CpuState &cpu, const char *what) {
+		const auto check = [&](const arm64::CpuState &cpu, const char *what,
+		                       bool fault) {
 			if (off)
 				return;
 			++exits;
 			const auto now = snapshot_of(cpu,
 				hash_bytes(test_arena.snapshot()));
-			const auto found = find_on_trace(trace, at, now);
+			const auto found = trace.find(at, now, fault);
 			if (found != trace.size()) {
 				at = found;
 				return;
@@ -4929,17 +4975,19 @@ TraceTotals exits_lie_on_the_stepped_trace(
 			print_difference("trace state", trace[at], now);
 			if (at + 1 < trace.size())
 				print_difference("next trace state", trace[at + 1], now);
-			const auto earlier = find_on_trace(trace, 0, now);
+			const auto earlier = trace.find(0, now, fault);
 			if (earlier != trace.size())
 				std::fprintf(stderr, "  the state is on the trace, "
 					"earlier, at %zu\n", earlier);
 		};
 		aot::set_enabled(true);
 		const auto got = drive(test, test_arena, c, aot_max_blocks,
-			[&](const arm64::CpuState &cpu) { check(cpu, "block exit"); },
-			[&](const arm64::CpuState &cpu) { check(cpu, "fault"); });
+			[&](const arm64::CpuState &cpu) {
+				check(cpu, "block exit", false);
+			},
+			[&](const arm64::CpuState &cpu) { check(cpu, "fault", true); });
 		aot::set_enabled(false);
-		check(got.cpu, "end");
+		check(got.cpu, "end", false);
 		require(!off);
 		require(same(want, got, c));
 		t.exits += exits;
@@ -4965,7 +5013,9 @@ TraceTotals exits_lie_on_the_stepped_trace(
  * destination whose next page below faults. Each exit of rewritten code, each
  * fault and the end must lie on the stepped trace; a trace without the
  * states at faults fails this row on its first case, whatever sample the
- * differential draws. */
+ * differential draws. The last cases return the first fault as an ordinary
+ * exit, which the check must refuse: the state is one only the fault reaches,
+ * and the fault is still to be taken. */
 [[gnu::noinline]]
 void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 	const LibraryImage &image)
@@ -4989,7 +5039,8 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 	aot::reset_stats();
 	const auto check_case = [&](std::size_t row, std::uint64_t destination,
 	                            std::uint64_t source, std::uint64_t count,
-	                            const std::vector<std::uint8_t> &kinds) {
+	                            const std::vector<std::uint8_t> &kinds,
+	                            bool lie = false) {
 		auto c = make_case_from_seed(rng.next(), bias,
 			mops_at + row * mops_step, true, true, base);
 		enterable(c);
@@ -5007,31 +5058,47 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 		const auto &trace = stepped.states;
 		std::size_t at = 0;
 		bool off = false;
-		const auto check = [&](const arm64::CpuState &cpu, const char *what) {
+		const auto check = [&](const arm64::CpuState &cpu, const char *what,
+		                       bool fault) {
 			if (off)
 				return;
 			const auto now = snapshot_of(cpu,
 				hash_bytes(got.arena.snapshot()));
-			const auto found = find_on_trace(trace, at, now);
+			const auto found = trace.find(at, now, fault);
 			if (found != trace.size()) {
 				at = found;
 				return;
 			}
 			off = true;
-			describe("a MOPS fault exit is off the stepped trace", c);
+			if (lie)
+				return;
+			describe("a MOPS exit is off the stepped trace", c);
 			std::fprintf(stderr, "  row %zu, %s, after trace state %zu of "
 				"%zu\n", row, what, at, trace.size());
 			print_difference("trace state", trace[at], now);
 		};
 		aot::set_enabled(true);
+		g_report_next_fault_as_continued = lie;
 		const auto have = drive(got.env, got.arena, c, aot_max_blocks,
-			[&](const arm64::CpuState &cpu) { check(cpu, "block exit"); },
+			[&](const arm64::CpuState &cpu) { check(cpu, "block exit", false); },
 			[&](const arm64::CpuState &cpu) {
 				++fault_exits;
-				check(cpu, "fault");
+				check(cpu, "fault", true);
 			});
 		aot::set_enabled(false);
-		check(have.cpu, "end");
+		check(have.cpu, "end", false);
+		if (lie) {
+			/* The check must refuse the wrong exit: a state only a fault
+			 * reaches is not a state a run is left in at an ordinary one. */
+			require(!g_report_next_fault_as_continued);
+			if (!off) {
+				describe("an ordinary exit at a state only a fault reaches "
+					"was taken for a state of the stepped trace", c);
+				std::fprintf(stderr, "  row %zu\n", row);
+			}
+			require(off);
+			return;
+		}
 		require(!off);
 		require(same(stepped.result, have, c));
 		++cases;
@@ -5070,6 +5137,16 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 	 * the trace check and say nothing about rewritten code. */
 	require(st.enters == cases);
 	require(st.mops_fault == cases);
+	/* The wrong exit: the first fault of each kind returned as an ordinary
+	 * exit. */
+	check_case(row_cpyf, page_at(4) + page_bytes - 20, page_at(1) + 0x40,
+		page_bytes + 60, with({{5, 0}, {6, 0}}), true);
+	check_case(row_set, page_at(4) + page_bytes - 20, 0, page_bytes + 60,
+		with({{5, 0}, {6, 0}}), true);
+	check_case(row_cpyf, page_at(7) + 0x20, page_at(2) + page_bytes - 20, 80,
+		with({{3, 0}}), true);
+	check_case(row_cpy, page_at(4) - 24, page_at(4) - 40, 80,
+		with({{3, 0}}), true);
 }
 
 /* ---- An interrupt token flipped during a native loop -----------------------
