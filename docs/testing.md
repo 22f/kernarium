@@ -799,11 +799,18 @@ blocker in every one of them.
 - `arm64-aot-differential` exists only in a build configured with
   `UML_AOT_IMAGE`, `UML_AOT_FSCK_EROFS` and `UML_AOT_DIAGNOSTICS`, and so does
   `arm64-aot-reporter`: a unit tree configured without them has neither row,
-  and its `check-unit` says nothing about ahead-of-time code. It runs
-  functions of every rewritten library through the gadget engine with and
-  without ahead-of-time code and requires the same guest state, memory,
-  ending event and exception syndrome, and the same registers, flags, vector
-  registers and memory at every fault. The unhappy paths are part of it:
+  and its `check-unit` says nothing about the differential of ahead-of-time
+  code (a tree with an artifact runs every other row with the component on, as
+  the default has it). `arm64-aot-selection` runs where a build has the
+  component: on by default, off by `DARWIN_UML_AOT=0`, and a launch's word beats
+  the environment, each case in a process of its own; `emulator-options` holds
+  the `--aot=` parsing. `arm64-aot-release-artifact` holds the artifact check
+  to what it must refuse (another release, partition, blob, tool or library
+  list). The differential runs functions of every rewritten library through
+  the gadget engine with and without ahead-of-time code and requires the same
+  guest state, memory, ending event and exception syndrome, and the same
+  registers, flags, vector registers and memory at every fault. The unhappy
+  paths are part of it:
   single step, the preemption bound, two load biases, other or changed bytes
   (including one changed bit anywhere in a page whose 64-bit digest is made
   to match), pages that appear or change after their neighbours were
@@ -898,7 +905,8 @@ blocker in every one of them.
   text that does not fit its buffer (the row fails).
 - `aot-guest-workloads` (integration, opt-in like the other Android guest
   tests: it exists where `UML_AOT_IMAGE` and the Android launcher target do)
-  boots the release twice, without and with `DARWIN_UML_AOT=1`, runs the
+  boots the release twice, without (`DARWIN_UML_AOT=0`) and with the
+  component, runs the
   covered library families' workloads three times each (a Java command
   among them, which runs the boot image's compiled code), the guest probe
   (faults inside rewritten libz code, text patched at run time), the debug

@@ -1,13 +1,26 @@
 # AOT rewriter
 
 Build tool for the ahead-of-time component (`darwin/cpu/arm64/aot`). It
-unpacks the partitions of an accepted Android release and rewrites the arm64 libraries named by
-`UML_AOT_LIBRARIES` and the release's boot image (`UML_AOT_BOOT_CODE`) into
-one position-independent blob (`rewrite.py`), which
+unpacks the partitions of an accepted Android release and rewrites the arm64
+libraries named by [`libraries.txt`](libraries.txt) and the release's boot
+image into one position-independent blob (`rewrite.py`), which
 `darwin/cpu/arm64/aot/CMakeLists.txt` wraps in the signed
 `UmlArm64Aot.framework`. The contract is in
 [`docs/architecture.md`](../../docs/architecture.md#ahead-of-time-code); the
-framework is generated and never committed.
+blob and the framework are generated and never committed.
+
+- `release_artifact.py` builds the blob of an installed release into an
+  artifact directory (`blob.bin`, `manifest.json`, `licences.json` and
+  `artifact.json`, which binds them to the release ID, its manifest and its
+  system partition, and records the SHA-256 of every file the rewrite is a
+  function of), verifies one (`verify`, against a release with `--release`,
+  against the descriptor with `--accepted`), prints the descriptor that accepts
+  it (`describe`, with `--archives yes` once the archive configurations may
+  carry it) and installs it below `.build/android/aot`
+  (`install-release.py --aot-artifact` does the same with the release). A
+  product build wraps the accepted artifact, or the one `UML_AOT_ARTIFACT`
+  names, and checks it again at build time; a tree whose tools differ from the
+  artifact's fails the check.
 
 - `elf64.py` reads program headers and function ranges (`.eh_frame` and
   `.plt`; for an OAT file, which has no unwind table, the function symbols of
@@ -49,8 +62,9 @@ so it serves every identical copy that another APEX or partition ships; the
 build refuses a path listed twice, and two paths whose files are the same
 bytes.
 
-Tools: the build needs a Python 3 and an `fsck.erofs` that decodes
-Zstandard (`UML_AOT_FSCK_EROFS`), as the Android build produces; the
+Tools: building an artifact, or a generating build (`UML_AOT_IMAGE`), needs a
+Python 3 and an `fsck.erofs` that decodes Zstandard (`UML_AOT_FSCK_EROFS`,
+`--fsck-erofs`), as the Android build produces; wrapping one needs neither. The
 Homebrew `erofs-utils` is built without libzstd and cannot read the release
 (CMake fails the configure step when the tool's `--help` does not list
 `zstd`).
@@ -86,6 +100,5 @@ assembler, and `ctest -R '^arm64-aot-differential$'` (a configuration with
 engine.
 
 Licence: the tool is GPL-2.0-or-later. The libraries it rewrites keep their
-own licences. The framework is generated at build time from an accepted
-image and staged into a local macOS application build for tests; nothing
-built from it is published or released from this branch.
+own licences, and each artifact's `licences.json` records the notice every
+library states in the image.

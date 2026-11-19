@@ -162,7 +162,12 @@ xcodebuild -project Andarium/Andarium.xcodeproj -scheme Andarium \
 ```
 
 The frameworks go to `.build/kernarium-xcframeworks`, which Kernarium shares,
-so package the runtime a build needs just before it. The staging script checks
+so package the runtime a build needs just before it. A runtime that links the
+ahead-of-time framework is packaged with `UmlArm64Aot.xcframework`: the
+Simulator runtime takes the accepted AOT artifact, and the device runtime
+takes it only when `accepted-aot.env` accepts it for archives (a device build
+that measures it names an artifact, `-DUML_AOT_ARTIFACT=DIR`, when it
+configures the runtime). The staging script checks
 the accepted release against its manifest and layout and stages the system
 disk, partition layout, kernel command line and manifest into
 `.build/andarium-system`, which the application bundles as it stands.
@@ -246,7 +251,11 @@ block.
   packaged system disk must be the one of the accepted release installed below
   `.build/android/releases`, not only the one their own layout names. It also
   refuses a packaged kernel whose Linux banner names a build user or host other
-  than the neutral `kernarium@kernarium`. A release that records no input trees, a
+  than the neutral `kernarium@kernarium`. With `--aot` it also checks the AOT
+  artifact: an archive embeds `UmlArm64Aot.framework` (made by the packaging
+  step when the runtime links it, and embedded only then) only when
+  `android/lineage-24/metadata/accepted-aot.env` accepts it for archives, and
+  the framework's blob is the accepted one. A release that records no input trees, a
   dirty input, or a staged or packaged artifact that is not the accepted one
   (an unsigned proof image included) stops the build; only the user decides to
   ship pending changes, by naming the release ID in `PENDING_INPUTS_DECISION`.

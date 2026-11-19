@@ -1255,7 +1255,12 @@ android/lineage-24/tools/install-release.py \
 
 The installer validates the candidate, including every system disk partition
 hash, and installs it atomically below `.build/android/releases`. It never
-replaces an existing release. Apple CMake does not import the rootfs release
+replaces an existing release. `--aot-artifact` also installs the release's AOT
+artifact (`tools/aot/release_artifact.py`) below `.build/android/aot`, once it
+verifies against the release; `metadata/accepted-aot.env` accepts it, and its
+`LINEAGE24_ACCEPTED_AOT_ARCHIVES` field is whether the App Store and TestFlight
+configurations may carry it. The artifact is not part of the release's file
+inventory. Apple CMake does not import the rootfs release
 and does not invoke Repo, Soong, Kbuild, image assembly, publication, or
 transport.
 
