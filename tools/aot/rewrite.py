@@ -54,19 +54,15 @@ SLOT_PSTATE = 0x100
 # keeps no link register in it at an indirect branch, so the lookup of the
 # branch's target waits there.
 SLOT_LR = 0x108
-# CrossTable and its Entry (aot_runtime.hpp): the offsets the cross-library
-# transfer reads. The table holds the blob's address, the count and the
-# entries sorted by their low address; an entry is its code range, load bias,
-# page states, library index and the offset of the library's unit in the blob.
-XTAB_BLOB, CROSS_COUNT, CROSS_ENTRIES, CROSS_ENTRY_SIZE = 24, 32, 40, 40
-CROSS_LOW, CROSS_HIGH, CROSS_BIAS, CROSS_PAGES, CROSS_UNIT = 0, 8, 16, 24, 36
-CROSS_CAPACITY = 64
+# CrossTable::Entry (aot_runtime.hpp): the offsets the cross-library thunk
+# reads from the entry the host answers with.
+CROSS_BIAS, CROSS_PAGES = 16, 24
 # The refill thunk's own frame: x0-x17, x30, NZCV, then q0-q31.
 REFILL_FRAME = 0x2a0
 # The members of the host table that ENTER's last argument names (CrossTable
 # in aot_runtime.hpp) the generated thunks call through.
 XTAB_REFILL, XTAB_LOOKUP, XTAB_MOPS = 0, 8, 16
-COND_HS, COND_LO, COND_MI = 2, 3, 4
+COND_LO, COND_MI = 3, 4
 # The kinds the host's MOPS epilogue routine takes.
 MOPS_KIND = {"cpyf": 0, "cpy": 1, "set": 2}
 VSLOT = {18: 0xC0, 24: 0xC8, 25: 0xD0, 26: 0xD8, 27: 0xE0, 28: 0xE8}
@@ -81,10 +77,9 @@ EXIT_BUDGET, EXIT_BRANCH, EXIT_STEP = 0, 1, 2
 ABSOLUTE = 0x100
 
 PAGE = 4096
-# The magic names the layout the units and the runtime share: 16-bit entries
-# and an anchor per text page (Library.fill_entry16), and the CrossTable the
-# units read in place (see CROSS_* above).
-ENTRY_MAGIC = b"UMLAOT17"
+# The magic names the entry table's layout: 16-bit entries and an anchor per
+# text page (Library.fill_entry16).
+ENTRY_MAGIC = b"UMLAOT16"
 # A function this long or longer makes the page that holds its end a row of
 # branches in the entry table (Library.entry16_wide_pages).
 WIDE16_FUNCTION = 32768
@@ -531,10 +526,6 @@ class Library:
         self.xb_emitted = {}
         self.refill_used = set()
         asm.label("UNIT")
-        # The first word of a unit is the way in of a transfer from another
-        # library (emit_exits: XLIB), which has set the bias and the page
-        # states of this instance: the unit's own indirect-branch routine.
-        asm.b("IND")
         emit_exits(asm, self)
         self.tag("exits", 0)
         for function in self.functions:
@@ -1892,69 +1883,6 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
     # branch goes on in that instance's code (and its load bias); otherwise
     # the entry ends at the branch and the engine takes it.
     asm.label("XLIB")
-    # The target is found in the address space's table of verified instances
-    # with no call into the host: a branch-free binary search of the entries
-    # (sorted by their low address, at most CROSS_CAPACITY), the instance's
-    # bias and page states made the frame's, and a branch to the first word of
-    # the instance's unit, whose indirect-branch routine finds the native code
-    # of the word (or leaves with the target, as an unverified page or a word
-    # without one does). The routine touches no guest memory and no vector
-    # register and keeps the flags; it spills x0-x3 and NZCV on the host
-    # stack. An address outside every instance, a misaligned one, goes the
-    # way it went before, through the host's lookup (XLIB_SLOW).
-    spill = 48
-    asm.word(A.mrs(T1, "nzcv"))
-    asm.word(A.add_imm(31, 31, spill, sub=True))
-    asm.word(A.stp_x(0, 1, 31, 0))
-    asm.word(A.stp_x(2, 3, 31, 16))
-    asm.word(A.str_x(T1, 31, 32))
-    asm.word(A.ldr_x(0, 31, spill + SLOT_XTAB))
-    asm.word(A.ldr_x(1, 0, CROSS_COUNT))
-    asm.word(A.add_imm(2, 0, CROSS_ENTRIES))
-    asm.word(A.movz(3, 0))
-    # x3 = the last entry whose low address is at most the target (0 when
-    # none is), by halving steps over the 64 slots; a step past the count
-    # keeps x3 (the slots past it are never examined for their contents).
-    for step in (32, 16, 8, 4, 2, 1):
-        asm.word(A.add_imm(T1, 3, step))
-        asm.word(A.cmp_reg(T1, 1))
-        asm.word(A.add_reg(T2, 2, T1, shift=0, amount=3))
-        asm.word(A.add_reg(T2, T2, T1, shift=0, amount=5))
-        asm.word(A.ldr_x(T2, T2, CROSS_LOW))
-        asm.word(A.ccmp_reg(T0, T2, 0, COND_LO))
-        asm.word(A.csel(3, T1, 3, COND_HS))
-    assert CROSS_ENTRY_SIZE == 40 and CROSS_CAPACITY == 64
-    asm.word(A.cmp_reg(3, 1))
-    asm.bcond(COND_HS, "XLIB_MISS")
-    asm.word(A.add_reg(T2, 2, 3, shift=0, amount=3))
-    asm.word(A.add_reg(T2, T2, 3, shift=0, amount=5))
-    asm.word(A.ldp_x(T1, 1, T2, CROSS_LOW))
-    asm.word(A.cmp_reg(T0, T1))
-    asm.bcond(COND_LO, "XLIB_MISS")
-    asm.word(A.cmp_reg(T0, 1))
-    asm.bcond(COND_HS, "XLIB_MISS")
-    asm.word(A.and_ones(T1, T0, 2))
-    asm.cbz(T1, "XLIB_MISS", nz=True)
-    asm.word(A.ldr_x(1, T2, CROSS_BIAS))
-    asm.word(A.str_x(1, 31, spill + SLOT_BIAS))
-    asm.word(A.ldr_x(1, T2, CROSS_PAGES))
-    asm.word(A.str_x(1, 31, spill + SLOT_PSTATE))
-    asm.word(A.ldr_w(3, T2, CROSS_UNIT))
-    asm.word(A.ldr_x(0, 0, XTAB_BLOB))
-    asm.word(A.add_reg(T2, 0, 3))
-    asm.word(A.ldr_x(T1, 31, 32))
-    asm.word(A.msr("nzcv", T1))
-    asm.word(A.ldp_x(2, 3, 31, 16))
-    asm.word(A.ldp_x(0, 1, 31, 0))
-    asm.word(A.add_imm(31, 31, spill))
-    asm.word(A.br(T2))
-    asm.label("XLIB_MISS")
-    asm.word(A.ldr_x(T1, 31, 32))
-    asm.word(A.msr("nzcv", T1))
-    asm.word(A.ldp_x(2, 3, 31, 16))
-    asm.word(A.ldp_x(0, 1, 31, 0))
-    asm.word(A.add_imm(31, 31, spill))
-    asm.label("XLIB_SLOW")
     save()
     asm.word(A.ldr_x(0, 31, rf + SLOT_XTAB))
     asm.word(A.ldr_x(9, 0, 8))

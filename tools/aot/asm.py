@@ -115,12 +115,6 @@ def ccmp_imm(rn: int, imm5: int, nzcv: int, cond: int) -> int:
             (rn << 5) | _u(nzcv, 4))
 
 
-def ccmp_reg(rn: int, rm: int, nzcv: int, cond: int) -> int:
-    """CCMP (register), 64-bit."""
-    return (0xfa400000 | (rm << 16) | (_u(cond, 4) << 12) | (rn << 5) |
-            _u(nzcv, 4))
-
-
 def orr_reg(rd: int, rn: int, rm: int, *, shift: int = 0, amount: int = 0
             ) -> int:
     """ORR (shifted register), 64-bit."""

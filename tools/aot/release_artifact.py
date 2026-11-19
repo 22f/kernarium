@@ -47,7 +47,7 @@ from pathlib import Path
 
 ARTIFACT_SCHEMA = 1
 ARTIFACT_FILES = ("artifact.json", "blob.bin", "licences.json", "manifest.json")
-BLOB_MAGIC = b"UMLAOT17"
+BLOB_MAGIC = b"UMLAOT16"
 # The release fields of the blob header, which rewrite.py writes and the
 # runtime compares with the release a launch boots: the ID, then the SHA-256
 # of the release's manifest and of its system partition.

@@ -60,7 +60,7 @@ constexpr std::size_t host_page = 16384;
  * A verdict names a physical-page record that is never reused, so an entry
  * can outlive the address space that filed it and never be answered wrongly. */
 VerdictTable g_verdicts;
-constexpr char blob_magic[8] = {'U', 'M', 'L', 'A', 'O', 'T', '1', '7'};
+constexpr char blob_magic[8] = {'U', 'M', 'L', 'A', 'O', 'T', '1', '6'};
 /* The magic names the layout, and the word after it the version of that
  * layout: a change an older runtime would misread changes the magic, and an
  * addition it can ignore raises the version, which a runtime accepts at or
@@ -1547,7 +1547,6 @@ Binder::Binder() noexcept
 #endif
 	cross_.lookup = &lookup;
 	cross_.mops = &mops;
-	cross_.blob = uml_aot_blob;
 	const auto whole = [](std::size_t bytes) {
 		return (bytes + host_page - 1) & ~(host_page - 1);
 	};
@@ -2120,8 +2119,7 @@ const CrossTable &Binder::cross(unsigned long generation,
 		cross_.entries[cross_.count++] = {
 			instance.bias + library.table_base,
 			instance.bias + library.table_end, instance.bias,
-			instance.pages, instance.library,
-			static_cast<std::uint32_t>(library.unit_offset)};
+			instance.pages, instance.library, 0};
 	}
 	std::sort(cross_.entries.begin(), cross_.entries.begin() +
 		static_cast<std::ptrdiff_t>(cross_.count),

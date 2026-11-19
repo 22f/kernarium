@@ -106,12 +106,10 @@ struct CrossEntry final {
 	std::uint64_t bias;
 	const std::uint8_t *pages;
 	std::uint32_t library;
-	/* The library's unit as an offset in the blob: generated code branches
-	 * to the unit's first word (tools/aot/rewrite.py: XLIB). */
-	std::uint32_t unit;
+	std::uint32_t reserved;
 };
-static_assert(sizeof(CrossEntry) == 40 && offsetof(CrossEntry, bias) == 16 &&
-	offsetof(CrossEntry, pages) == 24 && offsetof(CrossEntry, unit) == 36);
+static_assert(offsetof(CrossEntry, bias) == 16 &&
+	offsetof(CrossEntry, pages) == 24);
 
 /* The answer of a cross-library lookup: the native code of a guest address
  * in another library instance, and that instance's entry. */
@@ -144,16 +142,9 @@ struct CrossTable final {
 	 * prologue. */
 	std::uint64_t (*mops)(CpuState *cpu, ::uml::memory::Tlb *tlb,
 		std::uint64_t *registers, std::uint64_t kind) noexcept;
-	/* The blob's address, the entries' count and the entries sorted by `low`,
-	 * which generated code searches for an indirect branch to another library
-	 * (tools/aot/rewrite.py: XLIB) before it asks `lookup`. */
-	const std::uint8_t *blob{};
 	std::uint64_t count{};
 	std::array<Entry, capacity> entries{};
 };
-static_assert(offsetof(CrossTable, blob) == 24 &&
-	offsetof(CrossTable, count) == 32 &&
-	offsetof(CrossTable, entries) == 40 && CrossTable::capacity == 64);
 
 /* The libraries an address space has mapped, identified by the digest of
  * their code pages. Each text page is hashed (SHA-256) and the hash compared
