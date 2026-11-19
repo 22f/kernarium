@@ -320,6 +320,10 @@ CORE_DEVICE_DOMAIN = "Domain: com.apple.dt.CoreDeviceError"
 CONNECTION_LOST_CODE = "3"
 # The time at the start of a line xcodebuild or the runner prints.
 LOG_TIME = re.compile(r"^\d{4}-\d\d-\d\d (\d\d:\d\d:\d\d)\.\d+")
+# Why a verdict no longer stands when the watch checks it under the launch
+# lock; these two are gaps in what the watch has seen of the host.
+UNREADABLE_NOW = "the heartbeat cannot be read now"
+OTHER_HOST_NOW = "the heartbeat is another host's now"
 # The watch record's states: the first three while the watch runs, the others
 # when it has ended.
 WATCHING, RESTARTING, STARTING = "watching", "restarting", "starting"
@@ -1804,6 +1808,22 @@ class LogScan:
         return f" at {times[0]}" if times and times[0] else ""
 
 
+class SleepWatch:
+    """Tells that the Mac slept: calling it says whether the wall clock gained
+    on the monotonic one (which stops while the Mac sleeps) since the call
+    before, by more than WATCH_CLOCK_GAP."""
+
+    def __init__(self, clock):
+        self.clock = clock
+        self.mono, self.wall = clock.monotonic(), clock.time()
+
+    def __call__(self):
+        mono, wall = self.clock.monotonic(), self.clock.time()
+        drift = (wall - self.wall) - (mono - self.mono)
+        self.mono, self.wall = mono, wall
+        return abs(drift) > WATCH_CLOCK_GAP
+
+
 class HostObserver:
     """Tells, from what a host and its processes show, whether it is dead. It
     says so only on evidence.
@@ -1865,9 +1885,23 @@ class HostObserver:
         if self.on_progress is not None:
             self.on_progress()
 
-    def reset(self):
-        """A verdict that did not stand: count again."""
+    def reset(self, forget=False):
+        """A verdict that did not stand: count again. With `forget`, the
+        verdict was dropped for a gap in what was read (see `forget`)."""
+        if forget:
+            self.forget()
         self.run = None
+
+    def forget(self):
+        """After a gap in what was read (a read that failed, a sleep of the Mac,
+        another host's beat, a long wait elsewhere), nothing read before says
+        what the host does now: not the count, the beat, or a candidate. The
+        next read that works is a first one, and the heartbeat is progress only
+        when a read after it advances. A host that beat once more before it died
+        shows that last beat on the first read, which proves nothing."""
+        self.beat = None
+        self.run = None
+        self.candidate = None
 
     def note(self, state, started, ended):
         """A read of this host's heartbeat that worked."""
@@ -1896,10 +1930,16 @@ class HostObserver:
     def pull(self):
         """One read of the heartbeat."""
         started = self.clock.monotonic()
+        wall = self.clock.time()
         self.last_pull = started
         state = host_state(self.options)
         ended = self.clock.monotonic()
+        if abs((self.clock.time() - wall) - (ended - started)) > WATCH_CLOCK_GAP:
+            # The Mac slept during the read: its copy may be of what the host
+            # wrote before the sleep, and says nothing of the host now.
+            self.forget()
         if state is None:
+            self.candidate = None
             self.lose(started)
         elif self.nonce is None:
             self.follow(state, started, ended)
@@ -1943,10 +1983,8 @@ class HostObserver:
         slept = abs((wall - self.last_wall) - (now - self.last_mono)) > WATCH_CLOCK_GAP
         self.last_mono, self.last_wall = now, wall
         if slept:
-            # What was read before says nothing of the host now: not the
-            # count, and not the beat either.
-            self.beat = None
-            self.run = None
+            # What was read before says nothing of the host now.
+            self.forget()
         gone = self.supervisor_gone()
         self.scan.read()
         relaunched = self.scan.runner_up > self.runners
@@ -2224,9 +2262,9 @@ class Watch:
             return "a host another launch started is still coming up"
         state = host_state(options)
         if state is None:
-            return "the heartbeat cannot be read now"
+            return UNREADABLE_NOW
         if state.get("nonce") != verdict["nonce"]:
-            return "the heartbeat is another host's now"
+            return OTHER_HOST_NOW
         if verdict.get("hung"):
             if state.get("command") != verdict["command"]:
                 return "the command that kept the host busy has ended"
@@ -2391,7 +2429,7 @@ class Watch:
         if local_record(self.options).get("nonce") != expected:
             self.say("not starting again: a start was published meanwhile; "
                      "looking again")
-            self.observer.reset()
+            self.observer.reset(forget=True)
             return AGAIN
         return self.start_attempt()
 
@@ -2418,7 +2456,7 @@ class Watch:
         why = self.recheck(verdict)
         if why:
             self.say(f"not replacing it: {why}; looking again")
-            observer.reset()
+            observer.reset(forget=why in (UNREADABLE_NOW, OTHER_HOST_NOW))
             return AGAIN
         if self.latch.read():
             return self.refuse_after_approval_failure()
@@ -2488,7 +2526,9 @@ class Watch:
         once it ended.
 
         Served is a heartbeat of this launch's nonce that advances between two
-        reads (the nonce is new, so nothing older can show it). The log is
+        reads with no gap between them (the nonce is new, so nothing older can
+        show it, but a read that failed or a sleep of the Mac makes the next
+        beat a first one again), while the launch's supervisor runs. The log is
         read again after every wait that can take long."""
         options = self.options
         scan = LogScan(launch.log_path)
@@ -2496,28 +2536,39 @@ class Watch:
         runner_up_at = None
         first = None
         unreadable = False
+        slept = SleepWatch(self.clock)
         while True:
             if self.stop.is_set():
                 return self.finish(launch, scan, "stopped")
             scan.read()
+            gap = slept()
             started = self.clock.monotonic()
             state = host_state(options)
             unreadable = unreadable or state is None
             ended = self.clock.monotonic()
+            # A sleep of the Mac before or during the read: its copy says
+            # nothing of whether the host beats now.
+            gap = slept() or gap
             scan.read()
             if scan.approval_failure:
                 return self.finish(launch, scan, "approval")
+            # A supervisor that ended ended with its xcodebuild: a beat read
+            # now is not proof of a host.
+            if launch.process.poll() is not None:
+                return self.finish(launch, scan, "exited", unreadable)
             if (state and state.get("nonce") == launch.nonce
                     and not state.get("finished")):
                 beat = state.get("time", 0)
-                if first is None:
+                if gap or first is None:
                     first = beat
                 elif beat != first:
                     return ("served", HostObserver(
                         options, launch.nonce, state, launch.process, scan,
                         self.clock, self.progress, seen=(started, ended)))
-            if launch.process.poll() is not None:
-                return self.finish(launch, scan, "exited", unreadable)
+            else:
+                # A read that failed, or shows another host: the next beat of
+                # this launch is a first one again.
+                first = None
             now = self.clock.monotonic()
             if scan.runner_up and runner_up_at is None:
                 runner_up_at = now

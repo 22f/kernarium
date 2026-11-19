@@ -1604,6 +1604,142 @@ class VerdictBoundaryTests(unittest.TestCase):
             self.assertEqual(self.watch.latch.read()["kind"], "possible")
             self.watch.latch.clear()
 
+    def await_replacement(self, beats, dead_from, gap=None):
+        """`await_launch` of a replacement whose heartbeat reads are `beats`
+        (None is a read that fails), in order; its supervisor has ended once
+        read number `dead_from` was made. `gap` is "sleep" to have the Mac
+        sleep after the first read. Returns the outcome and the reads made."""
+        process = mock.Mock()
+        launch = automation.Launch(process, self.log, "replacement")
+        self.log.write_text(automation.RUNNER_UP_LINE + "\n"
+                            + automation.TEST_STARTED_LINE + "\n")
+        reads = []
+
+        def read(*args, **kwargs):
+            reads.append(1)
+            beat = beats[min(len(reads), len(beats)) - 1]
+            return None if beat is None else dict(
+                self.state, nonce=launch.nonce, time=beat)
+        process.poll.side_effect = lambda: 1 if len(reads) >= dead_from else None
+        hook = ((lambda clock: clock.suspend(3600) if len(reads) == 1 else None)
+                if gap == "sleep" else None)
+        if hook:
+            self.clock.hooks.append(hook)
+        try:
+            with mock.patch.object(automation, "host_state", read), \
+                    mock.patch.object(automation, "end_host",
+                                      return_value=automation.ENDED):
+                return self.watch.await_launch(launch), len(reads)
+        finally:
+            if hook:
+                self.clock.hooks.remove(hook)
+
+    def test_a_replacements_first_beat_after_a_gap_is_not_a_host_that_serves(self) -> None:
+        # Rule (R1): after a read that failed, or a sleep of the Mac, the next
+        # beat read says nothing of whether the host beats now: it may be the
+        # last one a dead host wrote. The host serves only when a read after
+        # that one advances, and its supervisor has not ended.
+        for gap, beats in (("copy failed", [10, None, 11]), ("sleep", [10, 11])):
+            with self.subTest(gap):
+                outcome, _ = self.await_replacement(
+                    beats, dead_from=len(beats), gap="sleep" if gap == "sleep" else None)
+                self.assertNotEqual(outcome[0], "served", gap)
+
+    def test_a_replacement_that_beats_on_after_a_gap_serves_at_the_second_read(self) -> None:
+        for gap, beats in (("copy failed", [10, None, 11, 12]), ("sleep", [10, 11, 12])):
+            with self.subTest(gap):
+                outcome, reads = self.await_replacement(
+                    beats, dead_from=99, gap="sleep" if gap == "sleep" else None)
+                self.assertEqual(outcome[0], "served", gap)
+                self.assertEqual(reads, len(beats))
+
+    def test_a_replacement_whose_supervisor_ended_is_not_a_host_that_serves(self) -> None:
+        # Rule (R1): its supervisor ends only with xcodebuild, so a beat read
+        # with no supervisor left is not proof of a host.
+        outcome, _ = self.await_replacement([10, 11], dead_from=2)
+        self.assertNotEqual(outcome[0], "served")
+
+    def following(self, gap):
+        """A watch that follows host A (it has an approval recorded) while host
+        B's beats are read: A1, B10, then `gap`, then B11. The watch is stopped
+        after the reads. Whether it adopted B, and published progress."""
+        watch = self.watch
+        watch.latch.set("possible", "recorded", self.log, "unresolved")
+        states = [dict(self.state, nonce="A", time=1),
+                  dict(self.state, nonce="B", time=10)]
+        if gap == "copy failed":
+            states.append(None)
+        states.append(dict(self.state, nonce="B", time=11))
+
+        def tick(clock):
+            if not states:
+                watch.stop.set()
+            elif gap == "sleep" and len(states) == 1:
+                clock.suspend(3600)
+        self.clock.hooks.append(tick)
+        try:
+            with mock.patch.object(automation, "host_state",
+                                   lambda *args, **kwargs: states.pop(0)):
+                watch.run()
+        finally:
+            self.clock.hooks.remove(tick)
+        return watch
+
+    def test_another_hosts_beat_after_a_gap_is_not_followed_or_published(self) -> None:
+        # Rule (R1): the host another start made is followed once its beat
+        # advances between two reads with no gap between them. A read that
+        # failed or a sleep in between starts that count again: nothing is
+        # adopted, no progress is published, and the approval record stays.
+        for gap in ("copy failed", "sleep"):
+            with self.subTest(gap):
+                watch = self.following(gap)
+                self.assertNotEqual(watch.record.data.get("host"), "B")
+                self.assertNotIn("alive_at", watch.record.data)
+                self.assertIsNotNone(watch.latch.read())
+
+    def test_another_hosts_beat_that_advances_with_no_gap_is_followed(self) -> None:
+        watch = self.watch
+        watch.latch.set("possible", "recorded", self.log, "unresolved")
+        states = [dict(self.state, nonce="A", time=1),
+                  dict(self.state, nonce="B", time=10),
+                  dict(self.state, nonce="B", time=11)]
+        self.clock.hooks.append(lambda clock: watch.stop.set() if not states else None)
+        with mock.patch.object(automation, "host_state",
+                               lambda *args, **kwargs: states.pop(0)):
+            watch.run()
+        self.assertEqual(watch.record.data.get("host"), "B")
+        self.assertIsNone(watch.latch.read())
+
+    def test_an_unreadable_recheck_under_the_lock_is_a_gap_in_what_was_seen(self) -> None:
+        # Rule (R1): the verdict was dropped because the heartbeat could not be
+        # read under the launch lock. The next read, which may show the last
+        # beat a dead host wrote, is not progress.
+        observer = self.watch.observer
+        observer.on_progress = self.watch.progress
+        with mock.patch.object(automation, "host_state", return_value=None):
+            self.assertEqual(self.watch.replace(self.reason), automation.AGAIN)
+        self.state["time"] += 1
+        self.clock.advance(6)
+        observer.check()
+        self.assertNotIn("alive_at", self.watch.record.data)
+        self.state["time"] += 1
+        self.clock.advance(6)
+        observer.check()
+        self.assertIn("alive_at", self.watch.record.data)
+
+    def test_a_sleep_during_a_read_makes_its_beat_no_progress(self) -> None:
+        # Rule (R1): the copy of the heartbeat may have been taken before the
+        # sleep or after it; either way it is a first read, not an advance.
+        observer = self.watch.observer
+        observer.on_progress = self.watch.progress
+
+        def read(*args, **kwargs):
+            self.clock.suspend(3600)
+            return dict(self.state, time=self.state["time"] + 1)
+        with mock.patch.object(automation, "host_state", read):
+            observer.check()
+        self.assertNotIn("alive_at", self.watch.record.data)
+
     def test_a_finished_snapshot_followed_only_by_failed_reads_ends_unknown(self) -> None:
         # Rule (R3, the reviewer's final probe): one snapshot that says the host
         # finished, then reads that all fail. The verdict it gave is cached and
