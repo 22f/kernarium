@@ -1322,7 +1322,9 @@ removed. `android17-app-shortcuts-command` (tooling; skipped without a JDK) runs
 grammar, the labels' escaping and bounds, the listing, digest and icon keys, every answer's
 framing read back by a parser of its own, the icon records, the launch's refusals and argument
 vector, how a start's output is read, the child process (real processes: output drained,
-deadline, termination and reaping), the renderer's hold (whose provider it takes, the one user for
+deadline, termination and reaping; each row ends every process it started by SIGKILL to its pid
+before it returns, and every JVM runs as a process group of its own, so that a process still alive
+when it has ended is ended and fails the test), the renderer's hold (whose provider it takes, the one user for
 every acquisition, a provider that died, a hold that stays closed, a call that is never answered),
 the icon source's bound, the resource files' order and the statuses on a plain JVM, then again with one rule removed at a time (the escaping, a bound, the
 launch refusal, the grammar, the digest's inputs, the PNG checks, the deadlines, the reaping),

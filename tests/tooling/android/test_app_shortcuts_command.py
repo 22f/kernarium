@@ -21,7 +21,10 @@ application's icon key, kill a child by anything but its pid, draw or decode any
 must reach the renderer (the provider held for the foreground user and released, a dead provider asked for again
 once, the request that is the resource id and the files and nothing else) is checked on its text, and each of those
 checks has its own mutant. The Java rows run on a 64 MiB heap, so that a label of megabytes does not fit a copy of
-itself (the cleaning's bound is a row). Skipped (status 77) where the host has no JDK.
+itself (the cleaning's bound is a row). The rows start real processes, some that ignore SIGTERM: each JVM runs as the
+leader of a process group of its own, and a process of that group that is still alive when the JVM has ended is a
+leftover of this test and no one else's, so the test fails on it after ending it by SIGKILL to its pid (a mutant
+that stops a row halfway must not leave one behind). Skipped (status 77) where the host has no JDK.
 """
 
 from __future__ import annotations
@@ -32,9 +35,11 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPOSITORY = HERE.parents[2]
@@ -793,7 +798,90 @@ def jdk_tool(name: str) -> str | None:
     return path if probe.returncode == 0 else None
 
 
-def compile_and_run(javac: str, java: str, scratch: pathlib.Path, sources: list[pathlib.Path]) -> tuple[int, str]:
+def group_members(group: int) -> list[tuple[int, str]]:
+    """The live processes of one process group, as (pid, command line); a zombie is not one. A group's id is its
+    leader's pid, which the kernel does not give to another process while the group has a member."""
+    listing = subprocess.run(["ps", "-axo", "pid=,pgid=,stat=,command="], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace",
+                             timeout=60, check=False).stdout
+    members = []
+    for line in listing.splitlines():
+        fields = line.split(None, 3)
+        if len(fields) >= 3 and fields[1] == str(group) and not fields[2].startswith("Z"):
+            members.append((int(fields[0]), fields[3] if len(fields) > 3 else ""))
+    return members
+
+
+def end_group(group: int, settle: float = 5.0) -> list[str]:
+    """Ends what is left of a process group once its leader is gone, and says what was.
+
+    A process of the group that ends by itself within `settle` seconds is no leftover (a `sleep 1` whose shell was
+    killed). Each that is still there after that is a leftover: it is ended by SIGKILL to its own pid and seen gone,
+    and one line (pid and command) is returned for it, so that the caller fails.
+    """
+    deadline = time.monotonic() + settle
+    members = group_members(group)
+    while members and time.monotonic() < deadline:
+        time.sleep(0.1)
+        members = group_members(group)
+    left = [f"pid {pid}: {command}" for pid, command in members]
+    deadline = time.monotonic() + 10
+    while members and time.monotonic() < deadline:
+        for pid, _ in members:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        time.sleep(0.05)
+        members = group_members(group)
+    left += [f"pid {pid} could not be ended: {command}" for pid, command in members]
+    return left
+
+
+def run_owned(argv: list[str], timeout: float, settle: float = 5.0) -> tuple[int, str, list[str]]:
+    """Runs `argv` as the leader of a process group of its own: (status, output, leftovers).
+
+    Every process it starts has that group, so those that are still alive when it has ended are its leavings and
+    nobody else's: they are ended by SIGKILL to their pids and returned (end_group), and the test fails on them.
+    A run that times out is ended and swept the same way before the timeout is raised.
+    """
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, start_new_session=True)
+    try:
+        try:
+            output, _ = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise
+    finally:
+        left = end_group(process.pid, settle)
+    return process.returncode, output, left
+
+
+def check_leftover_detection() -> int:
+    """The check on leftovers can tell a leftover from none (a check that cannot is no check).
+
+    A shell that leaves an immortal child behind (the shape of the rows' stubborn child) is reported and what it
+    left ended; a shell that leaves one that ends by itself is not reported.
+    """
+    stubborn = "(trap '' TERM; while :; do sleep 1; done) </dev/null >/dev/null 2>&1 & exit 0"
+    status, _, left = run_owned(["/bin/sh", "-c", stubborn], 30, settle=0.5)
+    if status != 0 or not any("trap" in line for line in left):
+        print(f"FAIL: a child left behind is not reported (status {status}): {left}", file=sys.stderr)
+        return 1
+    transient = "(sleep 1) </dev/null >/dev/null 2>&1 & exit 0"
+    status, _, left = run_owned(["/bin/sh", "-c", transient], 30, settle=5.0)
+    if status != 0 or left:
+        print(f"FAIL: a child that ends by itself is reported (status {status}): {left}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def compile_and_run(javac: str, java: str, scratch: pathlib.Path,
+                    sources: list[pathlib.Path]) -> tuple[int, str, list[str]]:
+    """Compiles the sources and the test and runs it: (status, output, leftovers). The test's rows start real
+    processes; the leftovers are those still alive when it has ended, and are ended (run_owned)."""
     classes = scratch / "classes"
     if classes.exists():
         shutil.rmtree(classes)
@@ -804,11 +892,9 @@ def compile_and_run(javac: str, java: str, scratch: pathlib.Path, sources: list[
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240,
         check=False)
     if compiled.returncode != 0:
-        return -1, f"javac:\n{compiled.stdout}"
-    ran = subprocess.run([java, "-Xmx64m", "-Dfile.encoding=UTF-8", "-cp", str(classes), "com.kernarium.apps.AppsCommandTest"],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                         timeout=120, check=False)
-    return ran.returncode, ran.stdout
+        return -1, f"javac:\n{compiled.stdout}", []
+    return run_owned([java, "-Xmx64m", "-Dfile.encoding=UTF-8", "-cp", str(classes),
+                      "com.kernarium.apps.AppsCommandTest"], 120)
 
 
 def failed_rows(output: str) -> set[str]:
@@ -937,6 +1023,8 @@ def main() -> int:
     if javac is None or java is None:
         print("SKIP: no JDK (javac and java) on PATH")
         return SKIP
+    if check_leftover_detection() != 0:
+        return 1
     package_dir = SOURCES / PACKAGE_DIR
     sources = sorted(path for path in package_dir.glob("*.java") if path.name not in ANDROID_GLUE)
     expected = {"AppsCommand.java", "ChildProcess.java", "Component.java", "Entry.java", "Icon.java", "LabelText.java",
@@ -952,10 +1040,13 @@ def main() -> int:
             return 1
     with tempfile.TemporaryDirectory(prefix="uml-app-shortcuts-") as directory:
         scratch = pathlib.Path(directory)
-        status, output = compile_and_run(javac, java, scratch / "base", [*sources, PROTOCOL])
+        status, output, left = compile_and_run(javac, java, scratch / "base", [*sources, PROTOCOL])
         print(output, end="")
         if status != 0 or not output.rstrip().endswith("PASS"):
             print("FAIL: the command's test", file=sys.stderr)
+            return 1
+        if left:
+            print("FAIL: the command's test left processes behind (ended):\n  " + "\n  ".join(left), file=sys.stderr)
             return 1
         rows = set(re.findall(r"^ok ([a-z0-9-]+)", output, re.MULTILINE))
 
@@ -974,10 +1065,13 @@ def main() -> int:
                 return False, f"FAIL: mutation {name}: the text to remove occurs {text.count(old)} times in {source}"
             target.write_text(text.replace(old, new), encoding="utf-8")
             mutated = sorted(path for path in copy.glob("*.java") if path.name not in ANDROID_GLUE)
-            mutant_status, mutant_output = compile_and_run(javac, java, scratch / f"run-{name}", mutated)
+            mutant_status, mutant_output, left = compile_and_run(javac, java, scratch / f"run-{name}", mutated)
             shutil.rmtree(copy)
             if mutant_status == -1:
                 return False, f"FAIL: mutation {name} does not compile:\n{mutant_output}"
+            if left:
+                return False, (f"FAIL: mutation {name} ({source}) left processes behind (ended):\n  "
+                               + "\n  ".join(left))
             missed = must_fail - failed_rows(mutant_output)
             if mutant_status == 0 or missed:
                 return False, f"FAIL: mutation {name} ({source}) was not caught by {sorted(missed) or 'any row'}"
