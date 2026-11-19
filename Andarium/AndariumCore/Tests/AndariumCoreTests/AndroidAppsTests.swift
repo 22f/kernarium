@@ -26,6 +26,10 @@ private final class FakeTool: AndroidAppsTool, @unchecked Sendable {
     var digestAnswer: AndroidAppDigestAnswer?
     var icons: [String: AndroidAppIconAnswer] = [:]
     var opens: [AndroidComponent: AndroidAppOpenAnswer] = [:]
+    /// The most icons one ask is answered for; a bigger ask gets no answer (the tool ran out of time).
+    var answersOnlyUpTo: Int?
+    /// Icons answered `deferred` the first time they are asked for.
+    var deferredOnce: Set<String> = []
     private(set) var iconAsks: [[String]] = []
     private(set) var openAsks: [AndroidComponent] = []
     private(set) var listAsks = 0
@@ -51,8 +55,15 @@ private final class FakeTool: AndroidAppsTool, @unchecked Sendable {
     }
 
     func icons(of apps: [AndroidApp], limit: Duration) async -> [String: AndroidAppIconAnswer] {
-        lock.withLock { iconAsks.append(apps.map(\.id)) }
-        return Dictionary(uniqueKeysWithValues: apps.compactMap { app in icons[app.id].map { (app.id, $0) } })
+        let asked = lock.withLock { () -> [String] in
+            iconAsks.append(apps.map(\.id))
+            return iconAsks.dropLast().flatMap { $0 }
+        }
+        if let answersOnlyUpTo, apps.count > answersOnlyUpTo { return [:] }
+        return Dictionary(uniqueKeysWithValues: apps.compactMap { app in
+            if deferredOnce.contains(app.id), !asked.contains(app.id) { return (app.id, .deferred) }
+            return icons[app.id].map { (app.id, $0) }
+        })
     }
 
     func open(_ component: AndroidComponent, limit: Duration) async -> AndroidAppOpenAnswer {
@@ -115,6 +126,9 @@ struct AndroidAppTextTests {
         #expect(AndroidAppText.label("  Comet\tHop \u{202E}\n", fallback: "x") == "Comet Hop")
         #expect(AndroidAppText.label("a\u{2066}b\u{2069}", fallback: "x") == "ab")
         #expect(AndroidAppText.label("   ", fallback: "com.example") == "com.example")
+        // Characters that draw nothing and are no format character: the Hangul fillers and the blank braille.
+        #expect(AndroidAppText.label("\u{3164}\u{115F}\u{2800}\u{FFA0}\u{1160}", fallback: "com.example") == "com.example")
+        #expect(AndroidAppText.label("\u{3164}Comet\u{2800}Hop\u{3164}", fallback: "x") == "Comet Hop")
         #expect(AndroidAppText.label(String(repeating: "é", count: 1_000), fallback: "x").count == AndroidAppLimits.longestLabel)
     }
 
@@ -345,6 +359,53 @@ struct AndroidAppRefreshTests {
         tool.icons = [apps[0].id: .deferred, apps[1].id: .missing]
         _ = await AndroidAppRefresh.run(tool: tool, store: store)
         #expect(store.appsMissingIcons(in: AndroidAppList(apps: apps, digest: nil)).count == 3)
+    }
+
+    @Test func aBatchThatGotNoAnswerIsAskedAgainInSmallerBatches() async throws {
+        let directory = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AndroidAppStore(directory: directory)
+        let apps = (0..<8).map { app("com.example.a\($0)", "A\($0)") }
+        let tool = FakeTool(.apps(AndroidAppList(apps: apps, digest: "d")))
+        for app in apps { tool.icons[app.id] = .png(Data([1]), hasAlpha: false) }
+        tool.answersOnlyUpTo = 2
+        _ = await AndroidAppRefresh.run(tool: tool, store: store)
+        // Eight, then four, then pairs: every icon arrived in this refresh.
+        #expect(tool.iconAsks.map(\.count) == [8, 4, 2, 2, 2, 2])
+        #expect(store.appsMissingIcons(in: AndroidAppList(apps: apps, digest: nil)).isEmpty)
+    }
+
+    @Test func aToolThatNeverAnswersIsGivenUpOnAfterThreeAsks() async throws {
+        let directory = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AndroidAppStore(directory: directory)
+        let apps = (0..<8).map { app("com.example.a\($0)", "A\($0)") }
+        let tool = FakeTool(.apps(AndroidAppList(apps: apps, digest: "d")))
+        tool.answersOnlyUpTo = 0
+        let result = await AndroidAppRefresh.run(tool: tool, store: store)
+        #expect(tool.iconAsks.map(\.count) == [8, 4, 2])
+        guard case .refreshed = result else { Issue.record("the names are kept even when no icon comes: \(result)"); return }
+        #expect(store.catalog()?.apps.count == 8)
+        #expect(store.appsMissingIcons(in: AndroidAppList(apps: apps, digest: nil)).count == 8)
+    }
+
+    @Test func anIconTheToolDeferredIsAskedAgainWithinTheRefreshButNotWithoutEnd() async throws {
+        let directory = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AndroidAppStore(directory: directory)
+        let apps = [app("com.example.a", "A"), app("com.example.b", "B")]
+        let tool = FakeTool(.apps(AndroidAppList(apps: apps, digest: "d")))
+        tool.icons = [apps[0].id: .png(Data([1]), hasAlpha: false), apps[1].id: .deferred]
+        tool.deferredOnce = [apps[0].id]
+        _ = await AndroidAppRefresh.run(tool: tool, store: store)
+        // A came back deferred once and arrived at the second ask; B is deferred every time and is asked three times.
+        #expect(store.icon(forID: apps[0].id) == Data([1]))
+        #expect(tool.askedIcons.filter { $0 == apps[1].id }.count == 1 + AndroidAppLimits.deferredRetries)
+        #expect(store.icon(forID: apps[1].id) == nil)
+    }
+
+    @Test func theLimitOfOneIconsAskIsFortySeconds() {
+        #expect(AndroidAppLimits.iconLimit == .seconds(40))
     }
 
     @Test func aListingThatFailsOrIsMissingChangesNothing() async throws {

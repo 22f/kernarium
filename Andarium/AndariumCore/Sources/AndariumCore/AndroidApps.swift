@@ -211,11 +211,17 @@ public enum AndroidAppLimits {
     /// The tool's own deadlines sit inside these.
     public static let digestLimit = Duration.seconds(15)
     public static let listLimit = Duration.seconds(30)
-    public static let iconLimit = Duration.seconds(30)
+    /// One `icons` ask is at most about 28 s of the tool's work.
+    public static let iconLimit = Duration.seconds(40)
     public static let openLimit = Duration.seconds(30)
     /// The most apps one listing may hold, and the most icons one ask names.
     public static let mostApps = 1_024
     public static let iconsPerAsk = 8
+    /// How often an icon the tool answered `deferred` is asked again in one
+    /// refresh, and how many asks in a row may get no answer before the
+    /// refresh stops asking for icons (the next one asks again).
+    public static let deferredRetries = 2
+    public static let silentAsksBeforeGivingUp = 3
     /// The longest name the screens are given: a label is the app's own text,
     /// which the tool bounds at 80 characters.
     public static let longestLabel = 200
@@ -233,11 +239,22 @@ public enum AndroidAppText {
     public static func label(_ text: String, fallback: String) -> String {
         let plain = String(String.UnicodeScalarView(text.unicodeScalars.compactMap {
             if isBidirectionalControl($0) { return nil }
-            return $0.properties.generalCategory == .control ? " " : $0
+            return $0.properties.generalCategory == .control || isBlankLookalike($0) ? " " : $0
         }))
         let trimmed = plain.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return fallback }
         return String(trimmed.prefix(AndroidAppLimits.longestLabel))
+    }
+
+    /// The characters that draw nothing but are no format character, so a
+    /// label made of them looks empty: the Hangul fillers (U+115F, U+1160,
+    /// U+3164, U+FFA0) and the blank braille pattern (U+2800). They count as
+    /// space, so a label of nothing else is the package name.
+    private static func isBlankLookalike(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800: true
+        default: false
+        }
     }
 
     /// The embedding, override and isolate controls (U+202A to U+202E and

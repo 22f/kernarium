@@ -286,6 +286,25 @@ struct AndroidAppsCommandsTests {
         #expect(answers[apps[8].id] == nil)
     }
 
+    @Test func aComponentIsNeverNamedTwiceInOneAsk() async {
+        let a = AndroidApp(component: AndroidComponent(packageName: "com.example.a", activityClass: "com.example.Main")!, label: "A", builtIn: false, iconTag: key1)
+        let b = AndroidApp(component: AndroidComponent(packageName: "com.example.b", activityClass: "com.example.Main")!, label: "B", builtIn: false, iconTag: key1)
+        // The tool exits 64 on a component twice: the host does not send one.
+        let shell = ScriptedShell(.success(iconsAnswer(2, records: [a, b].map { record($0.id, status: "noicon") })))
+        let answers = await AndroidAppsCommands(shell: shell).icons(of: [a, b, a])
+        #expect(shell.commands.count == 1)
+        #expect(shell.commands[0].split(separator: " ").count == 4)
+        #expect(answers.count == 2)
+    }
+
+    @Test func anIconsAnswerWithAnyNonzeroStatusIsDiscardedWhateverItCarries() {
+        let a = AndroidComponent(packageName: "com.example.a", activityClass: "com.example.Main")!
+        let good = iconsAnswer(1, records: [record(a.identifier, status: "noicon")]).stdout
+        for status in [1, 2, 64, 124, 126, 127, 255] {
+            #expect(AndroidAppsCommands.parseIcons(ShellResult(stdout: good, exitCode: status), asked: [a]) == nil, "exit \(status)")
+        }
+    }
+
     // MARK: Launch
 
     @Test func aLaunchIsOpenedRefusedOrFailedByItsExitStatus() {

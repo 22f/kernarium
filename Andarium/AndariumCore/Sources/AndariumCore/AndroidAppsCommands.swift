@@ -60,7 +60,9 @@ public struct AndroidAppsCommands: AndroidAppsTool {
     }
 
     public func icons(of apps: [AndroidApp], limit: Duration = AndroidAppLimits.iconLimit) async -> [String: AndroidAppIconAnswer] {
-        let asked = Array(apps.prefix(AndroidAppLimits.iconsPerAsk))
+        // The tool refuses a component named twice.
+        var seen = Set<String>()
+        let asked = Array(apps.filter { seen.insert($0.id).inserted }.prefix(AndroidAppLimits.iconsPerAsk))
         guard let command = Self.iconsCommand(for: asked.map(\.component)),
               let result = try? await shell.runBinary(command, limit: limit),
               let answers = Self.parseIcons(result, asked: asked.map(\.component))

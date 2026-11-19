@@ -343,18 +343,37 @@ public enum AndroidAppRefresh {
         let list = AndroidAppList(apps: catalog.apps, digest: catalog.digest)
         var missing = store.appsMissingIcons(in: list)
         progress(catalog, missing.count)
-        // An app the tool did not answer for, or answered `deferred` or `error`
-        // for, is asked again at the next refresh, not in this one.
+        // `error` and `missing` are asked again at the next refresh. A batch the
+        // tool gave no answer to (it ran out of time) is asked again in
+        // smaller batches, and an icon it answered `deferred` (it ran out of
+        // time on the one before) a few more times, all within this refresh.
+        var size = AndroidAppLimits.iconsPerAsk
+        var emptyInARow = 0
+        var asked: [String: Int] = [:]
         while !missing.isEmpty {
             if Task.isCancelled { break }
-            let batch = Array(missing.prefix(AndroidAppLimits.iconsPerAsk))
+            let batch = Array(missing.prefix(size))
             missing.removeFirst(batch.count)
             let answers = await tool.icons(of: batch, limit: AndroidAppLimits.iconLimit)
+            if answers.isEmpty {
+                emptyInARow += 1
+                if emptyInARow >= AndroidAppLimits.silentAsksBeforeGivingUp { break }
+                if batch.count > 1 {
+                    size = max(1, batch.count / 2)
+                    missing.insert(contentsOf: batch, at: 0)
+                }
+                progress(catalog, missing.count)
+                continue
+            }
+            emptyInARow = 0
             for app in batch {
                 switch answers[app.id] {
                 case let .png(data, _)?: store.setIcon(data, for: app)
                 case .noIcon?: store.markNoIcon(for: app)
-                case .missing?, .error?, .deferred?, nil: break
+                case .deferred?:
+                    asked[app.id, default: 0] += 1
+                    if asked[app.id, default: 0] <= AndroidAppLimits.deferredRetries { missing.append(app) }
+                case .missing?, .error?, nil: break
                 }
             }
             progress(catalog, missing.count)
