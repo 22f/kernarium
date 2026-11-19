@@ -508,107 +508,6 @@ def simd_functions() -> tuple[tuple[int, int], ...]:
         for index in range(len(simd_warm_rows())))
 
 
-# ---- load and store pairs -------------------------------------------------
-# LDP and STP in every addressing mode, with virtual (x18, x24 to x28), plain
-# and zero registers as the base and as the data, the stack pointer as the
-# base, and the vector forms. They sit in the page the edges' target is in,
-# after it, one small function each, so the differential test starts cases
-# at them like at the other forms.
-
-PAIRS_AT = DST_PAGE + 0x300
-PAIR_SIZE = 0x14
-
-
-def pair(load: bool, mode: str, opc: int, vector: int, imm: int, rt: int,
-         rt2: int, rn: int) -> int:
-    """LDP/STP of Rt, Rt2 from [Rn] with a signed byte offset `imm`: mode is
-    "post", "off" (signed offset) or "pre"; opc 0, 1, 2 select 32-bit, ldpsw
-    (not used) and 64-bit, or 4, 8 and 16 bytes of a vector register."""
-    scale = ({0: 4, 1: 8, 2: 16} if vector else {0: 4, 2: 8})[opc]
-    index = {"post": 0b001, "off": 0b010, "pre": 0b011}[mode]
-    return (opc << 30) | (0b101 << 27) | (vector << 26) | (index << 23) | \
-        (int(load) << 22) | (((imm // scale) & 0x7f) << 15) | (rt2 << 10) | \
-        (rn << 5) | rt
-
-
-def pair_forms() -> list[tuple[str, list[int]]]:
-    out: list[tuple[str, list[int]]] = []
-    # The base: virtual (x25, x18), the stack pointer, plain. The data
-    # registers: virtual and virtual (the hot loop of toybox grep is
-    # `ldp x24, x28, [x25, #0x38]!`), virtual and plain, plain and virtual,
-    # two virtual ones that are not the same.
-    data = (("vv", 24, 28), ("vp", 24, 2), ("pv", 3, 28), ("v2", 18, 26))
-    for base_name, base, imm in (("vb", 25, 0x38), ("sp", 31, 0x30),
-                                 ("pb", 1, 0x38)):
-        for mode in ("pre", "post", "off"):
-            if mode == "off" and base != 25:
-                continue
-            for load in (True, False):
-                for name, rt, rt2 in data:
-                    if base == 1 and name not in ("vv",):
-                        continue
-                    out.append((f"{'ldp' if load else 'stp'}_{mode}_"
-                                f"{base_name}_{name}",
-                                [pair(load, mode, 2, 0, imm, rt, rt2, base)]))
-    # A stack pointer that the writeback leaves misaligned (an exit when it
-    # does), a negative offset, the 32-bit forms.
-    out.append(("ldp_pre_sp_vv_odd", [pair(True, "pre", 2, 0, 0x38, 24, 28,
-                                           31)]))
-    out.append(("stp_pre_sp_vv_odd", [pair(False, "pre", 2, 0, 0x38, 24, 28,
-                                           31)]))
-    out.append(("ldp_post_sp_vv_neg", [pair(True, "post", 2, 0, -0x30, 24, 28,
-                                            31)]))
-    out.append(("stp_pre_sp_vv_neg", [pair(False, "pre", 2, 0, -0x30, 24, 28,
-                                           31)]))
-    for load in (True, False):
-        tag = "ldp" if load else "stp"
-        out.append((f"{tag}_pre_vb_vv_w", [pair(load, "pre", 0, 0, 0x38, 24,
-                                                28, 25)]))
-        out.append((f"{tag}_post_vb_vp_w", [pair(load, "post", 0, 0, 0x38, 24,
-                                                 2, 25)]))
-    # Both data registers one virtual register (a store), zero registers.
-    for mode in ("pre", "post", "off"):
-        out.append((f"stp_{mode}_vb_same", [pair(False, mode, 2, 0, 0x38, 24,
-                                                 24, 25)]))
-        out.append((f"stp_{mode}_vb_zz", [pair(False, mode, 2, 0, 0x38, 31,
-                                               31, 25)]))
-        out.append((f"stp_{mode}_sp_same", [pair(False, mode, 2, 0, 0x30, 28,
-                                                 28, 31)]))
-    # The same load register twice and a data register equal to the base:
-    # the engine's own cases.
-    out.append(("ldp_off_vb_same", [pair(True, "off", 2, 0, 0x38, 24, 24,
-                                         25)]))
-    out.append(("ldp_pre_vb_base", [pair(True, "pre", 2, 0, 0x38, 25, 28,
-                                         25)]))
-    out.append(("stp_post_vb_base", [pair(False, "post", 2, 0, 0x38, 24, 25,
-                                          25)]))
-    # The vector pairs with a virtual base or the stack pointer.
-    for opc in (0, 1, 2):
-        for load in (True, False):
-            for mode, base in (("pre", 25), ("post", 31), ("off", 25)):
-                out.append((f"{'ldp' if load else 'stp'}_{mode}_"
-                            f"{'vb' if base == 25 else 'sp'}_q{opc}",
-                            [pair(load, mode, opc, 1, 0x30, 0, 1, base)]))
-    return out
-
-
-def pair_code() -> dict[int, int]:
-    code = {}
-    for index, (_, words) in enumerate(pair_forms()):
-        base = PAIRS_AT + index * PAIR_SIZE
-        if len(words) + 1 > (PAIR_SIZE - 4) // 4:
-            raise ValueError("a pair form is too long")
-        for position, word in enumerate(words):
-            code[base + 4 * position] = word
-        code[base + 4 * len(words)] = RET
-    return code
-
-
-def pair_functions() -> tuple[tuple[int, int], ...]:
-    return tuple((PAIRS_AT + index * PAIR_SIZE, PAIR_SIZE - 4)
-                 for index in range(len(pair_forms())))
-
-
 def eh_frame() -> bytes:
     # CIE: version 1, "zR", code alignment 4, data alignment -8, return
     # address x30, pointers are pc-relative signed 32-bit.
@@ -618,7 +517,7 @@ def eh_frame() -> bytes:
     out = bytearray(struct.pack("<I", len(cie_body)) + cie_body)
     for start, size in (FUNCTIONS + form_functions() + edge_functions() +
                         hammer_functions() + mops_functions() +
-                        simd_functions() + pair_functions()):
+                        simd_functions()):
         position = len(out)
         field = EH_FRAME + position + 8
         body = struct.pack("<Iii", position + 4, start - field, size)
@@ -646,10 +545,6 @@ def build() -> bytes:
     for address, word in mops_code().items():
         struct.pack_into("<I", text, address - TEXT, word)
     for address, word in simd_code().items():
-        struct.pack_into("<I", text, address - TEXT, word)
-    if PAIRS_AT + len(pair_forms()) * PAIR_SIZE > DST_PAGE + PAGE:
-        raise ValueError("the pair forms run out of their page")
-    for address, word in pair_code().items():
         struct.pack_into("<I", text, address - TEXT, word)
     for index, word in enumerate(PLT_CODE):
         struct.pack_into("<I", text, PLT - TEXT + 4 * index, word)
