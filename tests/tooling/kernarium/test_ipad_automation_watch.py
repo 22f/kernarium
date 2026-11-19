@@ -1624,6 +1624,55 @@ class ObserverTests(unittest.TestCase):
         self.assertIn("has not advanced", reason)
         self.assertGreaterEqual(after, automation.HEARTBEAT_STALE - 2)
 
+    def watched(self, progressed: list):
+        """An observer of the host that tells `progressed` each time it sees
+        the heartbeat advance."""
+        process = mock.Mock()
+        process.poll = lambda: None
+        return automation.HostObserver(
+            self.options, self.nonce, self.state(), process, None, self.clock,
+            on_progress=lambda: progressed.append(self.clock.monotonic()))
+
+    def test_the_first_read_after_a_blind_stretch_is_not_progress(self) -> None:
+        # Rule: a read that works after reads that did not shows the beat the
+        # host wrote before it died, which differs from the last beat read
+        # before the stretch. It is not progress (it would let commands go to
+        # a dead host); a later read that shows the beat advance is.
+        progressed: list = []
+        observer = self.watched(progressed)
+        self.device_clock += 2
+        observer.pull()
+        self.assertEqual(len(progressed), 1)
+        self.readable = False
+        observer.pull()
+        # The host beat once more after the last read and then died.
+        self.device_clock += 2
+        self.readable = True
+        observer.pull()
+        observer.pull()
+        self.assertEqual(len(progressed), 1, "a dead host's old beat is not progress")
+        # A host that does beat shows it on a later read.
+        self.device_clock += 2
+        observer.pull()
+        self.assertEqual(len(progressed), 2)
+
+    def test_the_first_read_after_a_sleep_of_the_mac_is_not_progress(self) -> None:
+        # Rule: what was read before a sleep says nothing of the host now,
+        # the beat included: a beat the host wrote just before it died is not
+        # fresh progress on waking.
+        progressed: list = []
+        observer = self.watched(progressed)
+        self.device_clock += 2
+        observer.pull()
+        self.assertEqual(len(progressed), 1)
+        self.clock.suspend(6 * 3600)
+        self.device_clock += 2
+        self.assertIsNone(observer.check())
+        self.assertEqual(len(progressed), 1, "a dead host's old beat is not progress")
+        self.clock.advance(2)
+        self.assertIsNone(observer.check())
+        self.assertEqual(len(progressed), 1)
+
     def test_a_command_longer_than_the_busy_limit_is_a_hung_host(self) -> None:
         self.run_for(10)
         self.command = self.device_clock

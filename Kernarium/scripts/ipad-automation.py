@@ -1866,7 +1866,10 @@ class HostObserver:
         self.run = (ended, started, 1)
 
     def lose(self, started):
-        """A read that said nothing about this host."""
+        """A read that said nothing about this host. The beat read before it
+        goes too: the next read may show a beat the host wrote just before it
+        died, which is not progress."""
+        self.beat = None
         self.run = None
         if self.unknown_since is None:
             self.unknown_since = started
@@ -1921,7 +1924,9 @@ class HostObserver:
         slept = abs((wall - self.last_wall) - (now - self.last_mono)) > WATCH_CLOCK_GAP
         self.last_mono, self.last_wall = now, wall
         if slept:
-            # What was read before says nothing of the host now.
+            # What was read before says nothing of the host now: not the
+            # count, and not the beat either.
+            self.beat = None
             self.run = None
         gone = self.supervisor_gone()
         self.scan.read()
