@@ -132,10 +132,21 @@ final class AndroidAppsState {
     /// How many times the run's first refresh is asked.
     static let startAttempts = 5
 
-    init(store: AndroidAppStore = AndroidAppsHub.shared.store) {
-        self.store = store
+    init(store: AndroidAppStore? = nil) {
+        self.store = store ?? Self.defaultStore()
         searchOn = AndroidAppsHub.shared.preference.isOn
         adoptCache()
+    }
+
+    /// The process's cache (what the App Intent's queries read). A hosted test
+    /// builds many models, and a model that ends its run ends the refresh of
+    /// every model that shares its cache: each gets a cache of its own, and the
+    /// tests of Add to Home Screen put the hub's (`AndroidAppsHub.configure`) in theirs.
+    private static func defaultStore() -> AndroidAppStore {
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil else { return AndroidAppsHub.shared.store }
+        return AndroidAppStore(
+            directory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("andarium-apps-model-\(UUID().uuidString)", isDirectory: true))
     }
 
     /// The cached list, as the store has it now.
