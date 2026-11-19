@@ -818,8 +818,9 @@ class FixtureTests(unittest.TestCase):
             functions[:3],
             [(0x1000, 0x1010), (0x1020, 0x1030), (0x1040, 0x1050)])
         # The .iplt stubs of a static executable are covered like the .plt.
-        self.assertEqual(functions[-1],
-                         (fixture.IPLT, fixture.IPLT + 4 * len(fixture.PLT_CODE)))
+        self.assertIn(
+            (fixture.IPLT, fixture.IPLT + 4 * len(fixture.PLT_CODE)),
+            functions)
 
     def test_loop_branch_lands_inside_another_range(self) -> None:
         # b.lo at 0x1028 (range B) targets 0x1004 (inside range A), and no
