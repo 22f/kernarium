@@ -997,6 +997,50 @@ class ReconnectTests(WatchTestCase):
         self.assertEqual(sum(self.device.alive(item["pid"])
                              for item in self.device.invocations()), 1)
 
+    def test_a_start_refused_before_anything_began_is_tried_again_after_the_backoff(self) -> None:
+        # Rule (R3): the report preflight refused once, and the dead host's
+        # heartbeat file is gone from the container; the device itself is
+        # connected. Nothing started, so the next start follows the bounded
+        # backoff and reaches a serving host; the watch does not wait for a
+        # file that is not there.
+        self.tune(WATCH_RECONNECT_WAIT=1.5)
+        first = self.watch_over_host()
+        real = automation.check_report_slots
+        refusals = []
+
+        def preflight(options, processes):
+            if options.command == "watch" and not refusals:
+                refusals.append(1)
+                (self.device.channel / "state.json").unlink()
+                return False
+            return real(options, processes)
+        with mock.patch.object(automation, "check_report_slots", preflight):
+            self.device.control(first, "die")
+            second = self.watching(restarts=1)
+        self.assertEqual(len(refusals), 1)
+        self.invoked(2)
+        self.assertEqual(self.nonces()[-1], second)
+        self.assertIsNone(automation.ApprovalLatch(self.options("status")).read())
+
+    def test_a_connected_device_with_no_heartbeat_file_is_answering(self) -> None:
+        # Rule (R3): the wait is for the device, not for a host to have written
+        # its heartbeat. The tunnel returns with the heartbeat file gone from
+        # the container: the device answers (its error is the file's), and the
+        # watch starts again.
+        self.tune(WATCH_RECONNECT_WAIT=2.5)
+        self.device.scenarios([{"kind": "serve"},
+                               {"kind": "exit", "status": 70, "unreachable": True},
+                               {"kind": "serve"}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
+        self.waiting()
+        (self.device.channel / "state.json").unlink()
+        self.device.unreachable(False)
+        self.watching(restarts=1)
+        self.invoked(3)
+        self.assertIsNone(watch.code, self.messages)
+
     def test_an_approval_failure_recorded_during_the_wait_is_not_retried_over(self) -> None:
         # Rule: whatever is latched while the watch waits is read again before
         # anything starts: a device that needs the owner gets no second start.
@@ -1012,6 +1056,27 @@ class ReconnectTests(WatchTestCase):
         self.device.unreachable(False)
         self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL, self.messages)
         self.invoked(2)
+
+
+class DeviceAnswerTests(WatchTestCase):
+    """What the watch calls the device answering, against the fake device."""
+
+    def answers(self) -> bool:
+        return automation.device_answers(self.options("status"), timeout=20)
+
+    def test_the_device_answers_with_a_heartbeat_or_with_only_the_files_absence(self) -> None:
+        # Rule (R3): a connected device answers whether or not a host ever
+        # wrote its heartbeat; one that is not connected does not.
+        self.device.channel.mkdir(parents=True, exist_ok=True)
+        (self.device.channel / "state.json").write_text("{}")
+        self.assertTrue(self.answers())
+        (self.device.channel / "state.json").unlink()
+        self.assertTrue(self.answers())
+        self.device.unreachable(True)
+        self.assertFalse(self.answers())
+        self.device.unreachable(False)
+        (self.device.channel / "state.json").write_text("not json")
+        self.assertTrue(self.answers())
 
 
 class OneWatchTests(WatchTestCase):
@@ -1331,6 +1396,10 @@ class VerdictBoundaryTests(unittest.TestCase):
         self.state = {"nonce": "same-launch", "time": 10000, "started": 9000,
                       "deadline": 20000, "finished": False}
         self.patch(automation, "log", lambda _: None)
+        # No test of the policy asks a device: whatever a read that failed
+        # leaves unsaid stays unsaid.
+        self.patch(automation, "answered_without_heartbeat",
+                   lambda *args, **kwargs: False)
         self.patch(automation, "local_record", lambda _: dict(self.record))
         self.patch(automation, "recorded_supervisor", lambda _: None)
         self.patch(automation, "host_state",
@@ -1571,9 +1640,12 @@ class VerdictBoundaryTests(unittest.TestCase):
                 [("retry", "lost"), ("failed", "no")])
         self.assertEqual((result, started), (5, 2))
 
-    def test_a_refused_start_is_waited_for_like_a_lost_one(self) -> None:
-        # Rule: a start refused before anything began (the report store has no
-        # room, the device is not there) shares the attempt bound and the wait.
+    def test_a_refused_start_is_tried_again_after_the_backoff_alone(self) -> None:
+        # Rule (R3): a start refused before anything began (the report store
+        # has no room, the device is not there) shares the attempt bound and
+        # waits only the bounded backoff: it does not wait for the device to
+        # answer, so a connected device with no heartbeat to read is no reason
+        # to give up.
         waits = []
 
         def await_device(detail):
@@ -1583,10 +1655,14 @@ class VerdictBoundaryTests(unittest.TestCase):
                     automation, "launch_host",
                     side_effect=automation.LaunchRefused("no room")) as started, \
                 mock.patch.object(self.watch, "await_device", await_device):
+            began = self.clock.monotonic()
             self.assertEqual(self.watch.replace(self.reason), 5)
         self.assertEqual(started.call_count, automation.WATCH_ATTEMPTS)
-        self.assertEqual(waits, ["no room"] * (automation.WATCH_ATTEMPTS - 1))
+        self.assertEqual(waits, [])
+        self.assertGreaterEqual(self.clock.monotonic() - began,
+                                sum(automation.WATCH_BACKOFF))
         self.assertIn("no room", self.watch.record.data["detail"])
+        self.assertIn("were refused", self.watch.record.data["detail"])
 
     def test_the_wait_for_the_device_is_a_hard_bound(self) -> None:
         reads = []

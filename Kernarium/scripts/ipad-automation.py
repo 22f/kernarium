@@ -138,8 +138,10 @@ what it could not establish and ends with a status of its own.
   slots short), and one that ended with the device's connection lost or
   unreadable before its runner came up or after its test started (a runner
   that came up and lost the connection before the test started may have asked
-  for an approval, and is the owner's). The watch waits up to 180 s for the
-  device to answer, then starts again: 4 starts in all, 5, 10 and 20 s apart.
+  for an approval, and is the owner's). After a refusal the watch waits 5, 10
+  and 20 s; after a host that ended it waits up to 180 s for the device to
+  answer (a connected device with no heartbeat to read answers), then 5, 10 and
+  20 s; it makes 4 starts at most.
   Any other launch whose runner never came up (xcodebuild ended, or the runner
   did not come up in --wait), and a device that does not answer in that time,
   end the watch with status 5 and start-failed, and no latch. No built host, or
@@ -249,8 +251,8 @@ WATCH_RUNNER_WAIT = 90
 # have been asked for: one that is refused before anything starts (the device
 # is not connected, the report store has no room) and one that ended with the
 # device's connection lost before its runner came up or after its test started;
-# and the pauses between them. Between two attempts the watch waits up to
-# WATCH_RECONNECT_WAIT for the device to answer again.
+# and the pauses between them. After an attempt that ended, the watch first
+# waits up to WATCH_RECONNECT_WAIT for the device to answer again.
 WATCH_ATTEMPTS = 4
 WATCH_BACKOFF = (5, 10, 20)
 WATCH_RECONNECT_WAIT = 180
@@ -496,6 +498,33 @@ def host_state(options, timeout=60):
         except ValueError:
             return None
         return state if isinstance(state, dict) else None
+
+
+# What devicectl says when the file it was asked for is not on the device, as
+# against what it says of a device that is not connected.
+MISSING_FILE = re.compile(r"no such file|NSCocoaErrorDomain Code=260|does not exist",
+                          re.IGNORECASE)
+
+
+def answered_without_heartbeat(options, timeout=60):
+    """Whether the device answered a read of the heartbeat file with no
+    heartbeat in it: the file is not there (no host ever wrote one, or its
+    container was cleared), or it is not a heartbeat. A device that is not
+    connected says something else."""
+    with tempfile.TemporaryDirectory() as scratch:
+        status, output = devicectl(
+            ["copy", "from", "--source", f"{CHANNEL}/state.json",
+             "--destination", str(pathlib.Path(scratch) / "state.json"),
+             *container_args(options)], options.device, timeout)
+    return status == 0 or bool(MISSING_FILE.search(output))
+
+
+def device_answers(options, timeout=60):
+    """Whether the device answers a read: it gives its heartbeat, or says that
+    there is none to give. A connected device with no host to read answers."""
+    if host_state(options, timeout) is not None:
+        return True
+    return answered_without_heartbeat(options, timeout)
 
 
 def liveness(state):
@@ -2353,8 +2382,9 @@ class Watch:
                 self.say(f"{refusal}; looking again")
                 self.observer.reset()
                 return AGAIN
-            if isinstance(step, tuple):
-                # Nothing was started.
+            refused = isinstance(step, tuple)
+            if refused:
+                # Nothing was started, and nothing asked of the device.
                 detail = step[1]
             elif isinstance(step, Launch):
                 retired.add(step.nonce)
@@ -2388,11 +2418,15 @@ class Watch:
             # What is left of this attempt is ended, and the device was asked
             # for nothing: the one failure that is tried again.
             expected = local_record(options).get("nonce")
-            self.say(f"attempt {number} of {WATCH_ATTEMPTS} started no host: {detail}")
-            self.record.update(detail=f"attempt {number} started no host: {detail}")
+            said = "was refused" if refused else "started no host"
+            self.say(f"attempt {number} of {WATCH_ATTEMPTS} {said}: {detail}")
+            self.record.update(detail=f"attempt {number} {said}: {detail}")
             if number == WATCH_ATTEMPTS:
                 break
-            waited = self.await_device(detail)
+            # A start refused before anything began waits the backoff alone,
+            # for whatever refused it may pass; a host that ended with the
+            # connection lost waits first for the device to answer.
+            waited = None if refused else self.await_device(detail)
             if waited == "timeout":
                 return self.give_up(
                     START_FAILED,
@@ -2402,15 +2436,16 @@ class Watch:
                     self.stop, WATCH_BACKOFF[number - 1]):
                 return self.stopped()
         return self.give_up(
-            START_FAILED, f"{WATCH_ATTEMPTS} attempts to start a host did not "
-            f"succeed; the last: {detail}", EXIT_WATCH_GAVE_UP)
+            START_FAILED, f"{WATCH_ATTEMPTS} attempts to start a host "
+            f"{'were refused' if refused else 'did not succeed'}; the last: "
+            f"{detail}", EXIT_WATCH_GAVE_UP)
 
     def await_device(self, detail):
         """Outside the launch lock: waits until the device answers a read of
         its heartbeat file, or WATCH_RECONNECT_WAIT has passed. None once it
         answers, else "timeout", or "stopped" when the watch was told to end."""
         options = self.options
-        if host_state(options) is not None:
+        if device_answers(options, WATCH_READ_WAIT):
             return None
         self.say(f"the device is not answering ({detail}); waiting up to "
                  f"{WATCH_RECONNECT_WAIT} s for the connection to return")
@@ -2423,7 +2458,7 @@ class Watch:
             left = deadline - self.clock.monotonic()
             if left <= 0:
                 return "timeout"
-            if host_state(options, timeout=max(1, min(60, int(left)))) is not None:
+            if device_answers(options, max(1, min(WATCH_READ_WAIT, int(left)))):
                 return None
 
     def restart(self, expected, retired):
