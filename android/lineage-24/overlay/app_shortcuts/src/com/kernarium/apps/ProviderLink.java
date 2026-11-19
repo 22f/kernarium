@@ -135,9 +135,9 @@ final class ProviderLink {
     }
 
     /**
-     * The icon of one request. A provider that died costs this icon: the next is asked of a fresh hold, once; when
-     * none can be had the renderer is gone ({@link AppsCommand.RendererGone}). An answer that is not an ok is an error
-     * for this icon alone, and the hold is kept.
+     * The icon of one request. A provider that died costs this icon, and the hold is given back; the next icon takes a
+     * fresh hold, and when none can be had the renderer is gone ({@link AppsCommand.RendererGone}). An answer that is
+     * not an ok is an error for this icon alone, and the hold is kept.
      */
     Icon render(int resource, int[] kinds, String[] paths) throws Exception {
         Holding holding;
@@ -151,8 +151,7 @@ final class ProviderLink {
         try {
             icon = holding.render(resource, kinds, paths);
         } catch (ProviderDied dead) {
-            release();
-            renewed();
+            release(); // the next icon takes a fresh hold; nothing takes one for an icon that nobody waits for
             throw new PlatformException("the icon renderer died");
         }
         if (icon == null) {
@@ -161,7 +160,7 @@ final class ProviderLink {
         return icon;
     }
 
-    /** A fresh hold, taken for the next icon after a death. */
+    /** A fresh hold, taken for the next icon after a death, as that icon is asked. */
     private Holding renewed() throws AppsCommand.RendererGone {
         try {
             return acquire();

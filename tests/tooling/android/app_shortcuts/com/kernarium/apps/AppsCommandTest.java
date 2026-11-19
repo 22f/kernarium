@@ -308,6 +308,14 @@ public final class AppsCommandTest {
         return transport;
     }
 
+    private static void waitUntil(java.util.function.BooleanSupplier condition, String what) throws Exception {
+        long end = System.nanoTime() + 5_000_000_000L;
+        while (!condition.getAsBoolean()) {
+            check(System.nanoTime() < end, what);
+            Thread.sleep(5);
+        }
+    }
+
     private static Icon ask(ProviderLink link) throws Exception {
         return link.render(0x7f010000, new int[] {IconProtocol.KIND_BASE}, new String[] {"/system/app/A/A.apk"});
     }
@@ -1288,6 +1296,13 @@ public final class AppsCommandTest {
             try {
                 ask(link);
                 check(false, "the death costs the icon");
+            } catch (PlatformException died) {
+                same("the icon renderer died", died.getMessage(), "the icon in flight is the one lost");
+            }
+            same(Arrays.asList("acquire 10", "release 10"), transport.log, "no hold is taken for no icon");
+            try {
+                ask(link);
+                check(false, "the next icon has no renderer to be drawn by");
             } catch (AppsCommand.RendererGone gone) {
                 same(ProviderLink.UNAVAILABLE, gone.getMessage(), "the new answerer is not the provider: the renderer is gone");
             }
@@ -1310,6 +1325,7 @@ public final class AppsCommandTest {
             } catch (PlatformException died) {
                 same("the icon renderer died", died.getMessage(), "fixed words");
             }
+            same(Arrays.asList("acquire 0", "release 0"), transport.log, "a fresh hold is taken for the next icon, not before");
             check(ask(link) != null, "the next icon is drawn");
             same(1, second.asked, "by the fresh hold");
             LinkTransport gone = transportOf(first);
@@ -1317,9 +1333,15 @@ public final class AppsCommandTest {
             gone.answers.add(null);
             try {
                 ask(alone);
+                check(false, "the icon in flight is lost");
+            } catch (PlatformException died) {
+                same("the icon renderer died", died.getMessage(), "an error of that icon, not the end of the renderer");
+            }
+            try {
+                ask(alone);
                 check(false, "the provider is not there again");
             } catch (AppsCommand.RendererGone lost) {
-                same(ProviderLink.UNAVAILABLE, lost.getMessage(), "the renderer is gone, with the fixed reason");
+                same(ProviderLink.UNAVAILABLE, lost.getMessage(), "the next icon finds the renderer gone, with the fixed reason");
             }
         });
         row("link-an-answer-that-is-not-an-ok-keeps-the-hold", () -> {
@@ -1378,7 +1400,7 @@ public final class AppsCommandTest {
             release.countDown();
             call.join(5_000);
             check(!call.isAlive(), "the abandoned call ended");
-            check(ended[0] instanceof AppsCommand.RendererGone, "it ended without drawing: " + ended[0]);
+            check(ended[0] instanceof PlatformException, "it ended as the error of its icon: " + ended[0]);
             same(Arrays.asList("acquire 0", "release 0"), transport.log,
                     "one hold, one release: the death delivered after close takes no hold and gives none back");
         });
@@ -1394,6 +1416,11 @@ public final class AppsCommandTest {
             Throwable[] ended = new Throwable[1];
             Thread call = new Thread(() -> {
                 try {
+                    try {
+                        ask(link);
+                    } catch (PlatformException died) {
+                        // the icon in flight is lost; the next one asks for a fresh hold
+                    }
                     ask(link);
                 } catch (Throwable problem) {
                     ended[0] = problem;
@@ -1407,6 +1434,41 @@ public final class AppsCommandTest {
             check(!call.isAlive(), "the abandoned call ended");
             check(ended[0] instanceof AppsCommand.RendererGone, "it ended without drawing: " + ended[0]);
             same(transport.count("acquire"), transport.count("release"), "every hold was given back: " + transport.log);
+        });
+        row("link-an-abandoned-call-takes-no-replacement-hold", () -> {
+            // The command stopped waiting for a call and interrupted it; the provider dies after that and before the
+            // command closes the renderer. The abandoned call gives the dead hold back and takes no other: nobody could
+            // use it, and only the next live request takes a hold.
+            LinkHolding first = new LinkHolding();
+            LinkTransport transport = transportOf(first, new LinkHolding());
+            first.answer = entry -> {
+                try {
+                    Thread.sleep(60_000);
+                } catch (InterruptedException interrupted) {
+                    throw new ProviderLink.ProviderDied(interrupted);
+                }
+                return null;
+            };
+            ProviderLink link = new ProviderLink(transport, 0);
+            Throwable[] ended = new Throwable[1];
+            Thread call = new Thread(() -> {
+                try {
+                    ask(link);
+                } catch (Throwable problem) {
+                    ended[0] = problem;
+                }
+            });
+            call.start();
+            waitUntil(() -> first.asked == 1, "the call is in flight");
+            transport.log.add("interrupt");
+            call.interrupt();
+            call.join(5_000);
+            check(!call.isAlive(), "the abandoned call ended");
+            check(ended[0] instanceof PlatformException, "as the error of that icon: " + ended[0]);
+            transport.log.add("close");
+            link.close();
+            same(Arrays.asList("acquire 0", "interrupt", "release 0", "close"), transport.log,
+                    "one hold, given back by the call that found it dead; no second hold, and close has nothing to give back");
         });
         row("icons-deadline-defers-the-rest", () -> {
             Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"), app("com.b.app", "com.b.app.Main"),
