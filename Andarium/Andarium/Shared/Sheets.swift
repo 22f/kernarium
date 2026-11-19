@@ -171,6 +171,9 @@ struct InfoSheet: View {
                         .accessibilityIdentifier("info-whats-new")
                     }
                 }
+                #if TESTFLIGHT_STORE_LINK
+                StoreLinkSection()
+                #endif
                 Section("System info") {
                     LabeledContent("Build", value: model.system.buildLabel)
                     LabeledContent("Android version", value: model.system.version)

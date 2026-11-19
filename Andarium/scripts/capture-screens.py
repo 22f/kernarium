@@ -75,7 +75,10 @@ on the Simulator's account.
 
 The Info shots show Follow developer on X in a Preview built with
 `FOLLOW_X_HANDLE=example_handle` (and `FOLLOW_X_LOGO_SOURCE=local` for the real
-logo from `Config/Local/`); without it the row is absent from them.
+logo from `Config/Local/`); without it the row is absent from them. A Preview
+built with `STORE_LINK_ID=id0000000000` has the App Store notice, the card first
+on the Home and Welcome shots and its row in Info's; the store shots are taken
+without it.
 
 Light mode is captured for every screen; dark mode only for the screens flagged
 in the table, where the design adapts to it. Every Simulator command has a hard

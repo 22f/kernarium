@@ -93,6 +93,12 @@
             "AndariumPreview/resources",
           ],
         }, {
+          "path": "StoreLink.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
           "path": "FollowX.xcstrings",
           "target-membership": [
             "Andarium/resources",
@@ -195,7 +201,7 @@
           "shell": "/bin/sh",
           "script": [
             "case \"$CONFIGURATION\" in AppStore|TestFlight) ;; *) exit 0 ;; esac",
-            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --configuration \"$CONFIGURATION\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --tip-products \"$TIP_LITE,$TIP_PRO,$TIP_MAX,$TIP_ULTRA\" --tip-local-products \"$TIP_PRODUCT_LITE,$TIP_PRODUCT_PRO,$TIP_PRODUCT_MAX,$TIP_PRODUCT_ULTRA\" --review-id \"$REVIEW_ID\" --review-local-id \"$REVIEW_APP_ID\" --follow-x-handle \"$FOLLOW_X_HANDLE\" --developer-x-handle \"$DEVELOPER_X_HANDLE\" --developer-name \"$SHEET_DEVELOPER_NAME\" --developer-github \"$SHEET_DEVELOPER_GITHUB\" --developer-x \"$SHEET_DEVELOPER_X\" --developer-local-github \"$DEVELOPER_GITHUB_HANDLE\" --icp-number \"$ICP_NUMBER\" --icp-local-number \"$DEVELOPER_ICP_NUMBER\" --info-source \"$SRCROOT/Config/Info.plist\" --beta-notes \"$SRCROOT/Andarium/Shared/WhatsNew.json\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --configuration \"$CONFIGURATION\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --tip-products \"$TIP_LITE,$TIP_PRO,$TIP_MAX,$TIP_ULTRA\" --tip-local-products \"$TIP_PRODUCT_LITE,$TIP_PRODUCT_PRO,$TIP_PRODUCT_MAX,$TIP_PRODUCT_ULTRA\" --review-id \"$REVIEW_ID\" --review-local-id \"$REVIEW_APP_ID\" --store-link-id \"$STORE_LINK_ID\" --follow-x-handle \"$FOLLOW_X_HANDLE\" --developer-x-handle \"$DEVELOPER_X_HANDLE\" --developer-name \"$SHEET_DEVELOPER_NAME\" --developer-github \"$SHEET_DEVELOPER_GITHUB\" --developer-x \"$SHEET_DEVELOPER_X\" --developer-local-github \"$DEVELOPER_GITHUB_HANDLE\" --icp-number \"$ICP_NUMBER\" --icp-local-number \"$DEVELOPER_ICP_NUMBER\" --info-source \"$SRCROOT/Config/Info.plist\" --beta-notes \"$SRCROOT/Andarium/Shared/WhatsNew.json\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
         }, {
@@ -239,6 +245,20 @@
           "script": [
             "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
             "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --review --configuration \"$CONFIGURATION\" --review-id \"$REVIEW_ID\" --review-local-id \"$REVIEW_APP_ID\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "",
+          ],
+        }, {
+          "kind": "script",
+          "name": "Check App Store notice",
+          "input-paths": [
+            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+          ],
+          "run-on-every-build": true,
+          "shell": "/bin/sh",
+          "script": [
+            "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --store-link --configuration \"$CONFIGURATION\" --store-link-id \"$STORE_LINK_ID\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
         }, {
@@ -320,7 +340,7 @@
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
         "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
         "INFOPLIST_PREPROCESS": "YES",
-        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(TIP_JAR_PLIST_DEFINITION) $(REVIEW_PLIST_DEFINITION) $(DEVELOPER_PLIST_DEFINITIONS) $(FOLLOW_X_PLIST_DEFINITION) $(ICP_PLIST_DEFINITION)",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(TIP_JAR_PLIST_DEFINITION) $(REVIEW_PLIST_DEFINITION) $(STORE_LINK_PLIST_DEFINITION) $(DEVELOPER_PLIST_DEFINITIONS) $(FOLLOW_X_PLIST_DEFINITION) $(ICP_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
@@ -468,7 +488,7 @@
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
         "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
         "INFOPLIST_PREPROCESS": "YES",
-        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(TIP_JAR_PLIST_DEFINITION) $(REVIEW_PLIST_DEFINITION) $(DEVELOPER_PLIST_DEFINITIONS) $(FOLLOW_X_PLIST_DEFINITION) $(ICP_PLIST_DEFINITION)",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(TIP_JAR_PLIST_DEFINITION) $(REVIEW_PLIST_DEFINITION) $(STORE_LINK_PLIST_DEFINITION) $(DEVELOPER_PLIST_DEFINITIONS) $(FOLLOW_X_PLIST_DEFINITION) $(ICP_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
@@ -480,6 +500,7 @@
         "SHEET_DEVELOPER_GITHUB": "",
         "SHEET_DEVELOPER_NAME": "",
         "SHEET_DEVELOPER_X": "",
+        "STORE_LINK_ID": "",
         "SUPPORTED_PLATFORMS": "iphonesimulator",
         "SUPPORTS_MACCATALYST": "NO",
         "SWIFT_APPROACHABLE_CONCURRENCY": "YES",
