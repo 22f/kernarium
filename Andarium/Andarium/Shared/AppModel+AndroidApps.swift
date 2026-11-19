@@ -242,7 +242,8 @@ extension AppModel {
             guard let self else { return }
             let run = session
             let source = androidAppsSource
-            let outcome = await source?.awaitAndroidReady(homeReached: state.homeReached) ?? .timedOut
+            // Only the request that began the boot, or arrived during it, waits for Home.
+            let outcome = await source?.awaitAndroidReady(homeReached: state.bootRequest != request) ?? .timedOut
             guard session === run, !Task.isCancelled, state.open.pending?.request == request else { return }
             switch outcome {
             case .setupUnfinished:
@@ -250,8 +251,6 @@ extension AppModel {
             case .timedOut:
                 state.open.opened(.failed, for: request, now: Date())
             case .ready:
-                // A look saw Home resumed (or this run had): the start is over for the run.
-                state.homeReached = true
                 // The wait took seconds: the run may have ended, or paused for space.
                 guard state.open.readyToLaunch(request, in: androidAppOpenSituation, now: Date()) else {
                     state.scheduleExpiry { }
@@ -286,12 +285,11 @@ extension AppModel {
     /// The boot reached Android: a request that was starting opens now.
     func androidAppsBootFinished(recovery: Bool) {
         let state = androidApps
-        // The wait for Home's first resume is for a request that began the
-        // boot, or arrived while it ran, when the launcher may not be up yet:
-        // it keeps its look. With none waiting, Android is past its boot, and
-        // a request that comes later (with some app in front, the ordinary
-        // case) does not wait for Home.
-        if !recovery, state.open.pending?.stage != .starting { state.homeReached = true }
+        // The wait for Home's first resume is for the request that began the
+        // boot, or arrived while it ran, when the launcher may not be up yet.
+        // The boot is over for every request that comes later (with some app
+        // in front, the ordinary case), whatever became of that one.
+        if !recovery { state.bootRequest = state.open.pending?.stage == .starting ? state.open.pending?.request : nil }
         let effect = state.open.androidIsUp(recovery: recovery, now: Date())
         performAndroidAppEffect(effect)
         if !recovery { refreshAndroidAppsAtStart() }

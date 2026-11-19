@@ -47,10 +47,10 @@ public enum AndroidAppReadiness {
     /// cannot be asked, fails, or answers anything else is "not yet".
     ///
     /// The home activity's first resume is Android's own start being over (an
-    /// activity started before it is pushed behind it). Once a look of this
-    /// run saw it (`homeReached`), another app in front is the normal state of
-    /// a running Android and does not say the start is not over: that look is
-    /// not made again, and every other question still is.
+    /// activity started before it is pushed behind it). For a caller that need
+    /// not wait for it (`homeReached`: the start is over, or was not the
+    /// caller's), another app in front is the normal state of a running
+    /// Android: that look is not made, and every other question still is.
     public static func check(
         shell: any GuestShell, storageReady: () async -> Bool?, homeReached: Bool = false
     ) async -> State {

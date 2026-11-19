@@ -827,9 +827,13 @@ final class AndroidAppsModelTests {
         rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
         #expect(await eventually(3) { rig.tool.opened == [comet.component, inkleaf.component] }, "one launch of the second app")
         #expect(rig.state.open.banner == nil, "no timeout")
-        // A new run has not seen Home: its first open waits for it, and an app in front keeps it from coming.
+        // A new run's boot is begun by a request: that request waits for Home, and an app in front keeps it from coming.
+        rig.state.startDelay = .seconds(3600)
         rig.model.androidAppsRunEnded()
+        rig.model.phase = .home
         rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        rig.model.phase = .running(.normal)
+        rig.model.androidAppsBootFinished(recovery: false)
         #expect(await eventually(3) { rig.state.open.banner?.failure == .tookTooLong })
         #expect(rig.tool.opened == [comet.component, inkleaf.component])
     }
@@ -845,13 +849,6 @@ final class AndroidAppsModelTests {
         #expect(await eventually(3) { rig.tool.opened == [comet.component] }, "the first open launches without waiting for Home")
         #expect(rig.state.open.banner == nil)
         #expect(rig.scripted.homeReachedAsked == [true])
-        // A new run has not been through its boot: it starts unreached again.
-        rig.model.androidAppsRunEnded()
-        #expect(!rig.state.homeReached)
-        rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
-        #expect(await eventually(3) { rig.state.open.banner?.failure == .tookTooLong })
-        #expect(rig.scripted.homeReachedAsked == [true, false])
-        #expect(rig.tool.opened == [comet.component])
     }
 
     @Test func aRequestThatStartedTheBootStillWaitsForHomesFirstResume() async throws {
@@ -867,14 +864,34 @@ final class AndroidAppsModelTests {
         #expect(await eventually(3) { rig.state.open.banner?.failure == .tookTooLong }, "the look for Home was kept for it")
         #expect(rig.tool.opened.isEmpty)
         #expect(rig.scripted.homeReachedAsked == [false])
-        // With Home resumed the same request launches, and the run has seen Home: the next one does not look.
+        // The boot is over for the requests that come later (Try Again is one), with Home in front or not.
         rig.scripted.homeInFront = true
         rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
         #expect(await eventually(3) { rig.tool.opened == [comet.component] })
         rig.scripted.homeInFront = false
         rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
         #expect(await eventually(3) { rig.tool.opened == [comet.component, inkleaf.component] })
-        #expect(rig.scripted.homeReachedAsked == [false, false, true])
+        #expect(rig.scripted.homeReachedAsked == [false, true, true])
+    }
+
+    @Test func aRequestAfterTheBootDoesNotWaitForHomeWhenTheRequestThatBeganItStoppedAtSetup() async throws {
+        let rig = try rig(phase: .home, plan: .normal)
+        rig.state.startDelay = .seconds(3600)
+        rig.scripted.requiresHomeResumed = true
+        rig.scripted.readiness = .setupUnfinished
+        // Icon A starts Android; the boot completes and Android's own setup is still on the screen.
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(rig.state.open.pending?.stage == .starting)
+        rig.model.phase = .running(.normal)
+        rig.model.androidAppsBootFinished(recovery: false)
+        #expect(await eventually(3) { rig.state.open.banner?.failure == .setupUnfinished })
+        // The setup is finished, with another app in front. Icon B opens at once: the boot is over.
+        rig.scripted.readiness = .ready
+        rig.scripted.homeInFront = false
+        rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
+        #expect(await eventually(3) { rig.tool.opened == [inkleaf.component] }, "icon B launches without waiting for Home")
+        #expect(rig.state.open.banner == nil)
+        #expect(rig.scripted.homeReachedAsked == [false, true])
     }
 
     @Test func aLaunchAlreadySentIsNotSentAgainByAPauseAndAResume() async throws {

@@ -22,8 +22,9 @@ protocol AndroidAppsSource: AnyObject {
     /// its storage up, its home screen resumed. The wait ends early when
     /// Android's own first-run setup is on the screen, and by itself after
     /// `AndroidAppReadiness.limit` of the guest's running time. `homeReached`
-    /// says that this run already saw the home screen resumed: another app in
-    /// front is then the normal state, and the home screen is not waited for.
+    /// says that the home screen's resume is not waited for: the request
+    /// neither began the run's boot nor arrived during it, so another app in
+    /// front is the normal state.
     func awaitAndroidReady(homeReached: Bool) async -> AndroidAppReadiness.Outcome
 }
 
@@ -116,10 +117,11 @@ final class AndroidAppsState {
     /// A snapshot restore is under way, and the release of the requests it
     /// held waits for the model to have adopted what it restored.
     @ObservationIgnored var restoring = false
-    /// A look of this run saw Android's home screen resumed: the start is over
-    /// and an app in front no longer keeps a request from opening. Lasts for
-    /// the run.
-    @ObservationIgnored var homeReached = false
+    /// The request that began this run's boot, or arrived while it ran: the
+    /// launcher may not be up when the boot ends, so only that request waits
+    /// for Android's home screen to resume. A request that comes once the boot
+    /// is over does not, whatever is in front. Lasts for the run.
+    @ObservationIgnored var bootRequest: AppOpenRequest?
     /// A change (an install) was announced while a refresh was under way: the
     /// refresh's owner makes one more after it, because what changed may have
     /// come after the listing it captured.
@@ -238,7 +240,7 @@ final class AndroidAppsState {
         listed = false
         failed = false
         unavailable = false
-        homeReached = false
+        bootRequest = nil
         expiry?.cancel()
         expiry = nil
     }
