@@ -697,10 +697,16 @@ def check_sources() -> int:
                      "check_apps_command("):
         if expected not in verifier:
             problems.append(f"the image verifier lacks {expected}")
+    # The tool holds no permission: its one policy line silences a denial, and nothing else names it.
     sepolicy = LINEAGE / "overlay" / "sepolicy"
+    policy = sepolicy / "system_ext" / "private" / "kernarium_apps.te"
     for path in sepolicy.rglob("*"):
-        if path.is_file() and "kernarium_apps" in path.read_text(encoding="utf-8", errors="replace"):
-            problems.append(f"{path.relative_to(LINEAGE)} names kernarium_apps: the tool needs no policy of its own")
+        if path.is_file() and path != policy and "kernarium_apps" in path.read_text(encoding="utf-8", errors="replace"):
+            problems.append(f"{path.relative_to(LINEAGE)} names kernarium_apps: its only policy is {policy.name}")
+    rules = [line.strip() for line in policy.read_text(encoding="utf-8").splitlines()
+             if line.strip() and not line.strip().startswith("#")]
+    if rules != ["dontaudit shell qemu_sf_lcd_density_prop:file read;"]:
+        problems.append(f"{policy.name} is not the one dontaudit line (no allow rule, no other policy): {rules}")
     for problem in problems:
         print(f"FAIL: {problem}", file=sys.stderr)
     return 1 if problems else 0
