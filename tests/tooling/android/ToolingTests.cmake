@@ -240,6 +240,21 @@ uml_add_tooling_test(
 set_tests_properties(android17-oldapp-switch-command PROPERTIES
     SKIP_RETURN_CODE 77)
 
+# The icon renderer (android/lineage-24/overlay/app_icons, the app KernariumIcons): what it shares with
+# kernarium_apps (the shell user's uid, the shape of a request, a path's rules, the sizes and bounds) on a plain
+# JVM and again with one rule removed at a time, where the named rows must fail; and, as text with a mutant for
+# each rule, what its provider, worker, drawing and service must do and must not touch, with its manifest
+# (unprivileged, direct-boot aware, a guarded provider and an isolated service, nothing else) and build file.
+# It skips (77) where the host has no JDK.
+uml_add_tooling_test(
+    NAME android17-icon-renderer
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_icon_renderer.py
+    LABELS android
+    TIMEOUT 600)
+set_tests_properties(android17-icon-renderer PROPERTIES
+    SKIP_RETURN_CODE 77)
+
 # The launcher-application shell command (android/lineage-24/overlay/app_shortcuts) on a plain JVM:
 # the component grammar, the labels' escaping and bounds, the listing's rule, digest and icon keys,
 # the framing of every answer read back by a parser of the test's own, the icon records, the launch's

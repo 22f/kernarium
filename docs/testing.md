@@ -1080,6 +1080,12 @@ and open nothing, and, as text with a mutant for each, what the Android glue mus
 substitute for a failed lookup, the manifest's enabled flag, the wall clock, the device's own
 configuration for an icon or a label, a built-in application's icon key without the image's build time, a
 file measured by its extension, a kill that is not a SIGKILL by pid).
+`android17-icon-renderer` (tooling; skipped without a JDK) runs what the icon renderer
+(`KernariumIcons`) shares with the command (the shell user's uid, the shape of a request, a path's
+rules, the sizes and bounds) on a plain JVM, then again with one rule removed at a time, and checks as text,
+with a mutant for each rule, what its provider, worker, drawing and service must do and must not touch,
+and its manifest and build file (an unprivileged, direct-boot-aware application with a guarded
+provider and an isolated service, and nothing else).
 `android17-app-shortcuts-runner` (tooling; skipped without keytool and
 jarsigner) runs the probe packages, the strict parsers and every step against a scripted guest
 that differs one way at a time; the Android calls need a built image.
