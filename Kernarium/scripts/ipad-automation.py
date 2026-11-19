@@ -159,7 +159,8 @@ The host's test run records no video of the screen and keeps no attachments: a
 host runs for hours, and Xcode's defaults would store a recording of whatever
 the device shows. The KernariumAutomation scheme turns both off, `start`
 refuses a built test run file that does not say so, and the run's result
-bundle lives next to the host log in --state-dir. `start`, `launch` and
+bundle lives next to the host log in --state-dir (a failed run collects no
+device diagnostics into it). `start`, `launch` and
 `activate` first make room for diagnostic reports on the device
 (tests/integration/support/ios_device_reports.py), so a kill during the run
 leaves a report.
@@ -1296,6 +1297,9 @@ def command_supervise(options):
                "-xctestrun", options.xctestrun,
                "-destination", f"platform=iOS,id={options.device}",
                "-resultBundlePath", options.result_bundle,
+               # A failed run would otherwise collect the device's diagnostics
+               # (devicectl diagnose) into the result bundle.
+               "-collect-test-diagnostics", "never",
                f"-only-testing:{TEST}"]
     stopping = []
     for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):

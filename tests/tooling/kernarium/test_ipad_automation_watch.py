@@ -356,6 +356,24 @@ class ReplacementTests(WatchTestCase):
         self.device.wait(lambda: host.process.poll() is not None, 15,
                          "the first host's supervisor has ended")
 
+    def test_the_supervised_xcodebuild_collects_no_device_diagnostics(self) -> None:
+        # Rule: a failed run must not write the device's diagnostics archive
+        # (personal data of the device) into the result bundle, so the
+        # supervised xcodebuild is told never to collect them, for the host
+        # `start` makes and for the one the watch makes.
+        host = self.start_host(hours=1)
+        self.run_watch()
+        self.wait_record(state=automation.WATCHING)
+        self.device.control(host.nonce, "die")
+        self.watching(restarts=1)
+        invocations = self.device.invocations()
+        self.assertEqual(len(invocations), 2)
+        for item in invocations:
+            argv = item["argv"]
+            self.assertIn("-collect-test-diagnostics", argv)
+            self.assertEqual(argv[argv.index("-collect-test-diagnostics") + 1],
+                             "never")
+
     def test_the_host_the_watch_starts_is_watched_too(self) -> None:
         # Rule: the replacement is watched like the host before it.
         first = self.watch_over_host()
