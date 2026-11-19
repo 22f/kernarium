@@ -446,6 +446,7 @@ int main(int argc, char *argv[], char *envp[])
 			.top_byte_ignore = true,
 			.input_mode = uml::app::DisplayInput::touchscreen,
 			.console_reports_boot_completion = true,
+			.states_aot_release = true,
 		};
 		if (!information_only) {
 			if (options.release.empty() || options.data_disk.empty())

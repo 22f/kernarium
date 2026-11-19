@@ -686,7 +686,9 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   before anything else: another release, a proof or test image, an updated
   image whose blob is stale, or a launch that states none (a Linux guest, or a
   release with no identity) runs without the component under `auto` and fails
-  UNSUPPORTED under `on`, and allocates no AOT state. The tests of a build with
+  UNSUPPORTED under `on`, and allocates no AOT state. Only a launcher that
+  attaches an Android release states the release; the Linux launcher refuses
+  `--aot-release=` on its command line. The tests of a build with
   `UML_AOT_DIAGNOSTICS` select it without a stated release; a product has no
   such entry.
 - Units: each library is a self-contained unit of the framework. Branches
