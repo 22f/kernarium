@@ -1046,9 +1046,10 @@ starts, installed on system_ext like `kernarium_oldapp`). It runs as the adb she
 user, holds no permission of its own, needs no policy rule and writes nothing: no
 file, property or setting.
 
-- **Entries.** One entry is a launcher activity of the foreground user: enabled,
-  exported, handling `MAIN` with `LAUNCHER`, asking for no permission the shell
-  user lacks. Its identity is `package/activity`, which an update or a
+- **Entries.** One entry is a launcher activity of the foreground user: enabled for
+  that user (the package manager's own answer, so an alias the manifest disables
+  and `pm enable` enabled counts), exported, handling `MAIN` with `LAUNCHER`,
+  asking for no permission the shell user lacks. Its identity is `package/activity`, which an update or a
   reinstall keeps. The grammar of both names (ASCII, at most 255 bytes each) is
   the one place that says what the tool lists, takes and passes to a process.
 - **Commands.** `digest` prints a header block whose digest changes with the set
@@ -1056,17 +1057,23 @@ file, property or setting.
   Android's language (it opens no application's resources); `list` prints the
   block and one row per entry with the label in Android's current language, a
   built-in flag and an icon key; `icons` answers one PNG record (192 by 192, adaptive
-  icons composed from their layers with no mask) for each of up to eight
-  components, with its length and SHA-256; `launch` starts exactly one entry as a
+  icons composed from their layers with no mask, drawn for a fixed density, day mode
+  and locale so that a key is one picture) for each of up to eight components, with
+  its length and SHA-256; labels and icons come from the application's effective
+  resource files for the user (splits, shared libraries and overlays); `launch` starts exactly one entry as a
   launcher's tap does, by running `cmd activity start-activity` with separate
   arguments, and refuses (status 2) anything that is not an entry now.
   A change of the set is noticed by comparing digests, and an icon is fetched only when
   its key changed.
 - **Bounds.** A label is made safe (no control, separator, bidirectional or
   invisible format character) and cut to 80 code points; at most 8 entries per
-  package, 1024 rows, 8 icons per call, 96 KiB per PNG, 20 s of rendering per
-  call; every answer is under 1 MiB, and a command that fails prints nothing on
-  standard output. The exit statuses are 0 done, 1 failure, 2 refused, 64 usage.
+  package, 1024 rows, 8 icons per call, 96 KiB per PNG, 20 s before no further icon is
+  started and 8 s for one icon's render (an icon's source is bounded from its
+  files' headers before it is inflated); every answer is under 1 MiB, and a command
+  that fails prints nothing on standard output and one line of the tool's own words
+  on standard error. A question without an answer (the foreground user, a
+  permission, the configuration) fails the command: there is no substitute.
+  The exit statuses are 0 done, 1 failure, 2 refused, 64 usage.
 - **Kept by a later release.** The command's name, verbs, answer framing, grammar,
   bounds and statuses; an older image has no command (the shell's status 127) and
   the host does not offer the feature. `tests/integration/android/run_android_app_shortcuts.py`

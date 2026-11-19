@@ -39,7 +39,7 @@ final class Listing {
     /** The most rows a listing carries. */
     static final int MAX_ROWS = 1024;
     /** Changes when the way an icon is rendered does, so that the host fetches every icon again. */
-    static final int RENDER_VERSION = 1;
+    static final int RENDER_VERSION = 2;
 
     final int user;
     final String locales;
@@ -89,7 +89,7 @@ final class Listing {
             rows.add(entry);
         }
         String locales = localeLine(localeTags);
-        return new Listing(user, locales, rows, skipped, digest(user, locales, rows));
+        return new Listing(user, locales, rows, skipped, digest(user, locales, restOfLocales(localeTags, locales), rows));
     }
 
     static final Comparator<Entry> ORDER = new Comparator<Entry>() {
@@ -108,7 +108,7 @@ final class Listing {
             if (taken == 5) {
                 break;
             }
-            if (tag == null || tag.isEmpty() || tag.length() > 35 || !isTag(tag)) {
+            if (tag == null || tag.isEmpty() || !isTag(tag)) {
                 continue;
             }
             if (out.length() + (out.length() == 0 ? 0 : 1) + tag.length() > 128) {
@@ -121,6 +121,22 @@ final class Listing {
             taken++;
         }
         return out.toString();
+    }
+
+    /**
+     * What the header's locale line leaves out of the system's whole locale list (more than five tags, a tag
+     * over the budget, a tag of other characters), as a hash; empty when the line says it all. The labels
+     * follow the whole list, so the digest does too.
+     */
+    static String restOfLocales(List<String> tags, String line) {
+        StringBuilder all = new StringBuilder();
+        for (String tag : tags) {
+            if (all.length() > 0) {
+                all.append(',');
+            }
+            all.append(tag);
+        }
+        return all.toString().equals(line) ? "" : sha256Hex(all.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     private static boolean isTag(String tag) {
@@ -137,22 +153,29 @@ final class Listing {
      * The digest of the listing without its labels: the rows' identities, built-in flags and icon
      * keys, the locale line and the user, so that a language change is a change too.
      */
-    static String digest(int user, String locales, List<Entry> rows) {
+    static String digest(int user, String locales, String restOfLocales, List<Entry> rows) {
         StringBuilder text = new StringBuilder("kernarium_apps-digest-1\n");
         for (Entry entry : rows) {
             text.append(entry.packageName).append('\t').append(entry.activity).append('\t')
                     .append(entry.builtin ? '1' : '0').append('\t').append(iconKey(entry)).append('\n');
         }
         text.append("locales\t").append(locales).append('\n');
+        if (!restOfLocales.isEmpty()) {
+            text.append("localesall\t").append(restOfLocales).append('\n');
+        }
         text.append("user\t").append(user).append('\n');
         return sha256Hex(text.toString().getBytes(StandardCharsets.UTF_8));
     }
 
-    /** 16 hex characters that change when the app's icon may: its version, install time, icon resource and the renderer. */
+    /**
+     * 16 hex characters that change when the app's icon may: its version, install time, icon resource, the files
+     * its resources come from and the renderer. The icon is drawn for fixed inputs (density, night mode, locale),
+     * so one key is one picture.
+     */
     static String iconKey(Entry entry) {
         String text = "kernarium_apps-icon-" + RENDER_VERSION + '\0' + entry.packageName + '\0' + entry.activity
                 + '\0' + entry.versionCode + '\0' + entry.lastUpdateMillis + '\0' + entry.iconResource + '\0'
-                + (entry.builtin ? '1' : '0');
+                + (entry.builtin ? '1' : '0') + '\0' + entry.resources;
         return sha256Hex(text.getBytes(StandardCharsets.UTF_8)).substring(0, 16);
     }
 

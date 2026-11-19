@@ -1050,11 +1050,15 @@ user, `kernarium_apps` is in the image and its `digest` and `list` carry one hea
 user, the system's first locale, a count that matches), with rows in order, names in the grammar and
 labels that are safe and within the bounds; Settings is listed as built in, and the probe
 application (`appsprobe_apk.py`: two launcher activities, one with a hostile label and one with a
-label over the bound, a launcher activity that is not exported and an exported one with no launcher
-filter) with the escaped and the cut labels and neither of the other two; `icons` answers records
-whose length and SHA-256 check out, decoded to pictures that are not blank, adaptive ones with
-opaque corners, `noicon` for the probe, `missing` for what is not an entry, in the order asked, and
-nine components are status 64; `launch` makes the probe's activity the resumed one (and again when
+label over the bound, a launcher activity that is not exported, an exported one with no launcher
+filter and a launcher alias that the manifest disables; a second package whose label is a string
+resource and whose icon is an adaptive icon of a colour and a bitmap layer) with the escaped and the
+cut labels and none of the others; `icons` answers records whose length and SHA-256 check out,
+decoded (8-bit RGB or RGBA) to pictures that are not blank and whose alpha flag is true, the second
+package's with its colour in the corners and its disc in the middle, `noicon` for the first,
+`missing` for what is not an entry, in the order asked, and nine components are status 64; the alias
+is not listed until `pm enable` enables it for the user, and then listed, drawn and started; the
+digest is recomputed from the rows; `launch` makes the probe's activity the resumed one (and again when
 it is open) and refuses with status 2 and no output the not exported and no-filter activities, a
 built-in application's other activity, a package that is not installed, a disabled application and
 every hostile argument, none of which runs (a marker file stays absent); usage errors are status
@@ -1064,10 +1068,14 @@ change) and a disabled application, and returns to its earlier value when the ap
 removed. `android17-app-shortcuts-command` (tooling; skipped without a JDK) runs the command's
 grammar, the labels' escaping and bounds, the listing, digest and icon keys, every answer's
 framing read back by a parser of its own, the icon records, the launch's refusals and argument
-vector, and the statuses on a plain JVM, then again with one rule removed at a time (the escaping,
-a bound, the launch refusal, the grammar, the digest's inputs, the PNG checks, the deadline),
-where the rows it names must fail; it also checks the image's wiring and that the sources write
-and open nothing. `android17-app-shortcuts-runner` (tooling; skipped without keytool and
+vector, how a start's output is read, the child process (real processes: output drained,
+deadline, termination and reaping), the icon source's bound, the resource files' order and the
+statuses on a plain JVM, then again with one rule removed at a time (the escaping, a bound, the
+launch refusal, the grammar, the digest's inputs, the PNG checks, the deadlines, the reaping),
+where the rows it names must fail; it also checks the image's wiring, that the sources write
+and open nothing, and, as text with a mutant for each, what the Android glue must not do (a
+substitute for a failed lookup, the manifest's enabled flag, the wall clock, the device's own
+configuration for an icon). `android17-app-shortcuts-runner` (tooling; skipped without keytool and
 jarsigner) runs the probe packages, the strict parsers and every step against a scripted guest
 that differs one way at a time; the Android calls need a built image.
 `android17-sms-service` (tooling; skipped without a JDK) runs the text message

@@ -243,16 +243,18 @@ set_tests_properties(android17-oldapp-switch-command PROPERTIES
 # The launcher-application shell command (android/lineage-24/overlay/app_shortcuts) on a plain JVM:
 # the component grammar, the labels' escaping and bounds, the listing's rule, digest and icon keys,
 # the framing of every answer read back by a parser of the test's own, the icon records, the launch's
-# refusals and argument vector and the exit statuses against a fake platform, and again with one rule
-# removed at a time, where the named rows must fail. It also checks the image's wiring of the command
-# (product, build check, verifier list, no policy) and that the sources write and open nothing. It
-# skips (77) where the host has no JDK.
+# refusals and argument vector, how a start's output is read, the child process (real processes), the
+# icon source's bound, the resource files' order and the exit statuses against a fake platform, and
+# again with one rule removed at a time, where the named rows must fail. It also checks the image's
+# wiring of the command (product, build check, verifier list, no policy), that the sources write and
+# open nothing, and what the Android glue must not do (as text, each rule with a mutant). It skips
+# (77) where the host has no JDK.
 uml_add_tooling_test(
     NAME android17-app-shortcuts-command
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_app_shortcuts_command.py
     LABELS android
-    TIMEOUT 600)
+    TIMEOUT 900)
 set_tests_properties(android17-app-shortcuts-command PROPERTIES
     SKIP_RETURN_CODE 77)
 

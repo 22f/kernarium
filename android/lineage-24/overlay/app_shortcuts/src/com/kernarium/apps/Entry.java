@@ -34,10 +34,13 @@ final class Entry {
     final long lastUpdateMillis;
     /** The icon resource of the activity, else of the application; 0 when neither declares one. */
     final int iconResource;
+    /** A fingerprint of the APK files the application's resources come from (splits, libraries, overlays), for the icon key. */
+    final String resources;
     final Object source;
 
     Entry(String packageName, String activity, boolean builtin, boolean exported, boolean enabled,
-            boolean permitted, long versionCode, long lastUpdateMillis, int iconResource, Object source) {
+            boolean permitted, long versionCode, long lastUpdateMillis, int iconResource, String resources,
+            Object source) {
         this.packageName = packageName;
         this.activity = activity;
         this.builtin = builtin;
@@ -47,6 +50,7 @@ final class Entry {
         this.versionCode = versionCode;
         this.lastUpdateMillis = lastUpdateMillis;
         this.iconResource = iconResource;
+        this.resources = resources;
         this.source = source;
     }
 

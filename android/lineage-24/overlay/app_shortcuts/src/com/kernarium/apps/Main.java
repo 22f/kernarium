@@ -35,7 +35,7 @@ public final class Main {
         try {
             status = AppsCommand.run(args, AndroidPlatform::new, out, err);
         } catch (Throwable problem) {
-            err.print(AppsCommand.NAME + ": " + StartOutcome.ascii(String.valueOf(problem), 400) + "\n");
+            err.print(AppsCommand.NAME + ": " + AppsCommand.reason(problem) + "\n");
             status = AppsCommand.EXIT_FAILURE;
         }
         try {

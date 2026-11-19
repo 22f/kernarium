@@ -4,7 +4,9 @@
 // platform, on a plain JVM: the component grammar, the label's escaping and bounds, the listing's
 // rule (order, filters, bounds, digest and icon keys), the framing of every answer read back by a
 // parser of the test's own, the icon records (statuses, size steps, the PNG bound, the deadline),
-// the launch's refusals and the argument vector that reaches the process, and the exit statuses.
+// the launch's refusals and the argument vector that reaches the process, how a start's output is read, the
+// child process's drain, deadline and reaping (real processes), the icon source's bound, the resource files'
+// order, and the exit statuses.
 // Each row prints "ok <name>" or "FAIL <name>: why"; the last line is PASS when no row failed.
 // The package is the command's, so that the test reaches what the command keeps to itself.
 // test_app_shortcuts_command.py compiles and runs it, and runs it again on sources with one rule
@@ -99,6 +101,7 @@ public final class AppsCommandTest {
         final List<List<String>> started = new ArrayList<>();
         long clock;
         long clockStep;
+        long renderLimit = AppsCommand.ICON_RENDER_MILLIS;
         final List<Integer> iconSizes = new ArrayList<>();
 
         Fake with(Entry... more) {
@@ -107,18 +110,18 @@ public final class AppsCommandTest {
         }
 
         @Override
-        public int currentUser() {
+        public int currentUser() throws Exception {
             return user;
         }
 
         @Override
-        public List<Entry> launcherActivities(int forUser) {
+        public List<Entry> launcherActivities(int forUser) throws Exception {
             check(forUser == user, "the listing is asked for the foreground user");
             return new ArrayList<>(entries);
         }
 
         @Override
-        public List<String> localeTags() {
+        public List<String> localeTags() throws Exception {
             return locales;
         }
 
@@ -148,19 +151,24 @@ public final class AppsCommandTest {
             clock += clockStep;
             return now;
         }
+
+        @Override
+        public long renderLimitMillis() {
+            return renderLimit;
+        }
     }
 
     private static Entry app(String packageName, String activity) {
-        return new Entry(packageName, activity, false, true, true, true, 10, 1_000, 0x7f010000, null);
+        return new Entry(packageName, activity, false, true, true, true, 10, 1_000, 0x7f010000, "", null);
     }
 
     private static Entry builtin(String packageName, String activity) {
-        return new Entry(packageName, activity, true, true, true, true, 10, 1_000, 0x7f010000, null);
+        return new Entry(packageName, activity, true, true, true, true, 10, 1_000, 0x7f010000, "", null);
     }
 
     private static Entry entry(String packageName, String activity, boolean builtin, boolean exported,
             boolean enabled, boolean permitted, long version, long updated, int icon) {
-        return new Entry(packageName, activity, builtin, exported, enabled, permitted, version, updated, icon, null);
+        return new Entry(packageName, activity, builtin, exported, enabled, permitted, version, updated, icon, "", null);
     }
 
     /** What one run of the command gave. */
@@ -342,6 +350,9 @@ public final class AppsCommandTest {
         icons();
         launch();
         usageAndFailures();
+        starts();
+        children();
+        sources();
         sizes();
         System.out.println(failures == 0 ? "PASS" : "FAILED " + failures);
         System.exit(failures == 0 ? 0 : 1);
@@ -510,6 +521,22 @@ public final class AppsCommandTest {
                     "a renamed launcher activity changes it");
             check(!base.equals(Listing.of(0, Arrays.asList("fr-FR"), fake.entries).digest), "Android's language changes it");
             check(!base.equals(Listing.of(10, fake.locales, fake.entries).digest), "another foreground user changes it");
+            check(!base.equals(Listing.of(0, fake.locales, withReplaced(fake.entries, 0,
+                    new Entry("com.a.app", "com.a.app.Main", false, true, true, true, 10, 1_000, 0x7f010000, "overlay", null))).digest),
+                    "an overlay, split or library coming or going changes it");
+        });
+        row("digest-follows-the-whole-locale-list", () -> {
+            Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"));
+            List<String> six = Arrays.asList("a", "b", "c", "d", "e", "f");
+            List<String> other = Arrays.asList("a", "b", "c", "d", "e", "g");
+            Listing first = Listing.of(0, six, fake.entries);
+            Listing second = Listing.of(0, other, fake.entries);
+            same(first.locales, second.locales, "the header shows the same five tags");
+            check(!first.digest.equals(second.digest), "the sixth locale changes the labels, so it changes the digest");
+            check(!first.digest.equals(Listing.of(0, Arrays.asList("a", "b", "c", "d", "e"), fake.entries).digest),
+                    "a sixth locale coming changes it");
+            same(Listing.of(0, Arrays.asList("a", "b"), fake.entries).digest, Listing.of(0, Arrays.asList("a", "b"), fake.entries).digest,
+                    "stable");
         });
         row("icon-key-follows-the-icon", () -> {
             Entry a = app("com.a.app", "com.a.app.Main");
@@ -521,6 +548,9 @@ public final class AppsCommandTest {
             check(!key.equals(Listing.iconKey(entry("com.a.app", "com.a.app.Main", false, true, true, true, 10, 1_000, 5))), "icon resource");
             check(!key.equals(Listing.iconKey(app("com.a.app", "com.a.app.Other"))), "component");
             check(!key.equals(Listing.iconKey(builtin("com.a.app", "com.a.app.Main"))), "built-in flag");
+            check(!key.equals(Listing.iconKey(new Entry("com.a.app", "com.a.app.Main", false, true, true, true, 10, 1_000,
+                    0x7f010000, "split", null))), "the files the resources come from");
+            same(2, Listing.RENDER_VERSION, "the renderer's version (the icons are drawn for fixed inputs since 2)");
         });
         row("locale-line", () -> {
             same("en-US,ja-JP", Listing.localeLine(Arrays.asList("en-US", "ja-JP")), "tags joined");
@@ -530,6 +560,10 @@ public final class AppsCommandTest {
             String longTag = repeat("a", 35);
             String joined = Listing.localeLine(Arrays.asList(longTag, longTag, longTag, longTag, longTag));
             check(joined.length() <= 128, "128 bytes at most");
+            String valid41 = "zh-Hant-TW-u-ca-chinese-nu-hanidec-x-private";
+            check(valid41.length() > 35 && valid41.length() <= 128, "a valid tag longer than 35 characters");
+            same(valid41, Listing.localeLine(Arrays.asList(valid41)), "it fits the budget and is shown");
+            same("", Listing.localeLine(Arrays.asList(repeat("a", 129))), "a tag over the budget is not");
         });
     }
 
@@ -705,6 +739,52 @@ public final class AppsCommandTest {
             same(192, records.get(0).width, "at the first size");
             same(98304, records.get(0).length, "length");
         });
+        row("icons-failing-render-is-silent", () -> {
+            Throwable[] failures = {new OutOfMemoryError("a hostile bitmap"), new StackOverflowError(),
+                new IllegalStateException("uid=2000 android.permission.SECRET"), new AssertionError("x")};
+            java.io.PrintStream before = System.err;
+            ByteArrayOutputStream captured = new ByteArrayOutputStream();
+            System.setErr(new java.io.PrintStream(captured, true));
+            List<String> got;
+            try {
+                got = new ArrayList<>();
+                for (Throwable failure : failures) {
+                    Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"));
+                    fake.icons = (entry, size) -> {
+                        throw sneaky(failure);
+                    };
+                    Result result = run(fake, "icons", "com.a.app/com.a.app.Main");
+                    got.addAll(statuses(parseIcons(result)));
+                    same(0, result.err.length(), "nothing on the command's stderr");
+                }
+            } finally {
+                System.setErr(before);
+            }
+            same(Arrays.asList("error", "error", "error", "error"), got, "an exception or an error is that icon's error");
+            same(0, captured.size(), "no stack trace of a dying worker reaches the process's stderr");
+        });
+        row("icons-render-time-limit", () -> {
+            Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"), app("com.b.app", "com.b.app.Main"),
+                    entry("com.c.app", "com.c.app.Main", false, true, true, true, 1, 1, 0),
+                    entry("com.hidden.app", "com.hidden.app.Main", false, false, true, true, 1, 1, 1));
+            fake.renderLimit = 200;
+            java.util.concurrent.CountDownLatch never = new java.util.concurrent.CountDownLatch(1);
+            fake.icons = (entry, size) -> {
+                if (entry.packageName.equals("com.a.app")) {
+                    never.await();
+                }
+                return new Icon(size, false, false, png(100, 1));
+            };
+            long begin = System.nanoTime();
+            List<IconRecord> records = parseIcons(run(fake, "icons", "com.a.app/com.a.app.Main", "com.b.app/com.b.app.Main",
+                    "com.c.app/com.c.app.Main", "com.hidden.app/com.hidden.app.Main"));
+            long tookMillis = (System.nanoTime() - begin) / 1_000_000;
+            same(Arrays.asList("error", "deferred", "noicon", "missing"), statuses(records),
+                    "the stuck one is an error, no other render is started, the answers that need none are given");
+            check(tookMillis < 1500, "the command did not wait for the stuck render: " + tookMillis + " ms");
+            same(Arrays.asList(192), fake.iconSizes, "only the stuck render was started");
+            never.countDown();
+        });
         row("icons-deadline-defers-the-rest", () -> {
             Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"), app("com.b.app", "com.b.app.Main"),
                     app("com.c.app", "com.c.app.Main"));
@@ -741,6 +821,7 @@ public final class AppsCommandTest {
             Result twice = run(fake, "icons", "com.a.app/com.a.app.Main", "com.a.app/com.a.app.Main");
             same(64, twice.status, "the same component twice");
             same(0, twice.out.length, "no stdout");
+            same("kernarium_apps: the same component twice\n", twice.err, "one line, not the usage text");
         });
         row("icons-answer-size", () -> {
             Fake fake = new Fake();
@@ -756,6 +837,12 @@ public final class AppsCommandTest {
             same(8, parseIcons(result).size(), "eight records");
             check(result.out.length < 800 * 1024, "under 800 KiB: " + result.out.length);
         });
+    }
+
+    /** Throws {@code failure} whatever its kind, as a platform's code that does not declare it would. */
+    @SuppressWarnings("unchecked")
+    private static <T extends Throwable> RuntimeException sneaky(Throwable failure) throws T {
+        throw (T) failure;
     }
 
     private static List<String> statuses(List<IconRecord> records) {
@@ -833,18 +920,76 @@ public final class AppsCommandTest {
             fake.startResult = new AppsCommand.StartResult(0, "Starting: Intent { }\nWarning: Activity not started, its current task has been brought to the front\n");
             Result front = run(fake, "launch", settings);
             same(0, front.status, "an app already open is brought to the front");
-            fake.startResult = new AppsCommand.StartResult(0, "Starting: Intent { }\nSecurity exception: Permission Denial: starting Intent\n");
-            same(1, run(fake, "launch", settings).status, "a permission denial");
+            fake.startResult = new AppsCommand.StartResult(255, "Starting: Intent { }\n\nException occurred while executing 'start-activity':\n"
+                    + "java.lang.SecurityException: Permission Denial: starting Intent { cmp=com.x/com.x.Y } from null (pid=1, uid=2000) requires android.permission.SECRET\n"
+                    + "\tat com.android.server.am.ActivityManagerService.start(ActivityManagerService.java:1)\n");
+            Result denied = run(fake, "launch", settings);
+            same(1, denied.status, "a permission denial");
+            same("kernarium_apps: cmd activity start-activity: permission denied (exit 255)\n", denied.err,
+                    "fixed words: neither the uid nor the permission is copied");
         });
+        row("launch-component-named-like-an-error", () -> {
+            // The command echoes the intent it starts, component included: a launcher named like a failure starts.
+            String[][] names = {
+                {"com.example.viewer", "com.example.viewer.SecurityExceptionViewer"},
+                {"com.example.errors", "com.example.errors.ErrorActivity"},
+                {"com.example.perm", "com.example.perm.PermissionDenialMain"},
+                {"com.example.exc", "com.example.exc.ExceptionList"},
+                {"com.example.error", "com.example.error.Error"},
+            };
+            for (String[] name : names) {
+                Fake fake = new Fake().with(app(name[0], name[1]));
+                String token = name[0] + "/" + name[1];
+                fake.startResult = new AppsCommand.StartResult(0, "Starting: Intent { act=android.intent.action.MAIN "
+                        + "cat=[android.intent.category.LAUNCHER] flg=0x10200000 cmp=" + token + " }\n");
+                Result result = run(fake, "launch", token);
+                same(0, result.status, "a start of " + token);
+                same("launched\t" + token + "\n", result.text(), "the answer");
+                fake.startResult = new AppsCommand.StartResult(0, "Starting: Intent { cmp=" + token + " }\n"
+                        + "Warning: Activity not started, its current task has been brought to the front\n");
+                same(0, run(fake, "launch", token).status, "an app already open: " + token);
+            }
+        });
+    }
+
+    private static void starts() {
         row("start-outcome", () -> {
             check(StartOutcome.failure(0, "Starting: Intent { cmp=a.b/c.D }\n") == null, "plain start");
             check(StartOutcome.failure(0, "") == null, "no output");
-            check(StartOutcome.failure(1, "") != null, "status 1");
+            same("cmd activity start-activity: exited 1", StartOutcome.failure(1, ""), "status 1 and nothing said");
+            check(StartOutcome.failure(0, "Starting: Intent { cmp=a.b/c.SecurityExceptionViewer }\n"
+                    + "Warning: Activity not started, intent has been delivered to currently running top-most instance.\n") == null,
+                    "a warning is not a failure");
             String reason = StartOutcome.failure(1, "Error: \u202E \u0001 bad \u00e9 " + repeat("x", 500) + "\n");
-            check(reason.length() <= 200, "bounded");
+            same("cmd activity start-activity: start failed (exit 1)", reason, "an Error line gives a fixed reason, not its text");
             for (char c : reason.toCharArray()) {
                 check(c >= 0x20 && c < 0x7F, "printable ASCII only");
             }
+        });
+        row("start-outcome-kinds", () -> {
+            String denied = "cmd activity start-activity: permission denied";
+            check(StartOutcome.failure(255, "Starting: Intent { }\n\nException occurred while executing 'start-activity':\n"
+                    + "java.lang.SecurityException: Permission Denial: starting Intent { } from null (pid=9, uid=2000)\n").startsWith(denied),
+                    "a security exception is a denial, the first 'Exception occurred' line notwithstanding");
+            check(StartOutcome.failure(0, "Starting: Intent { }\nError: Activity not started, you do not have permission to access it.\n")
+                    .startsWith(denied), "an Error line about a permission");
+            check(StartOutcome.failure(0, "Permission Denial: starting Intent { } from null requires android.permission.X\n")
+                    .startsWith(denied), "a Permission Denial line");
+            String missing = "cmd activity start-activity: no such activity";
+            check(StartOutcome.failure(0, "Starting: Intent { }\nError type 3\nError: Activity class {com.x/com.x.Y} does not exist.\n")
+                    .startsWith(missing), "a class that does not exist");
+            String failed = "cmd activity start-activity: start failed";
+            check(StartOutcome.failure(0, "Starting: Intent { }\nError: Activity not started, unable to resolve Intent { }\n")
+                    .startsWith(failed), "another Error line");
+            check(StartOutcome.failure(255, "java.lang.IllegalStateException: boom\n").startsWith(failed), "another exception");
+            check(StartOutcome.failure(1, "at com.android.Foo.bar(Foo.java:1)\n").equals("cmd activity start-activity: exited 1"),
+                    "a stack frame alone says nothing");
+            String reason = StartOutcome.failure(255, "Error: uid=2000 android.permission.SECRET /data/app/x\n");
+            check(!reason.contains("2000") && !reason.contains("SECRET") && !reason.contains("/data"),
+                    "nothing of the command's own words: " + reason);
+            check(StartOutcome.failure(0, "Starting: Intent { cmp=a.b/c.ErrorActivity }\n") == null, "an echoed component");
+            check(StartOutcome.failure(0, "Starting: Intent { cmp=a.b/c.Error }\nStarting: Exception\n") == null,
+                    "Starting lines never count");
         });
     }
 
@@ -867,15 +1012,15 @@ public final class AppsCommandTest {
         row("failure-leaves-no-stdout", () -> {
             Fake fake = new Fake() {
                 @Override
-                public List<Entry> launcherActivities(int forUser) {
-                    throw new IllegalStateException("the package manager died");
+                public List<Entry> launcherActivities(int forUser) throws Exception {
+                    throw new PlatformException("the package manager gave no answer");
                 }
             };
             for (String verb : new String[] {"digest", "list"}) {
                 Result result = run(fake, verb);
                 same(1, result.status, verb + " exit status");
                 same(0, result.out.length, verb + " prints nothing");
-                check(result.err.contains("package manager died"), "stderr says why");
+                same("kernarium_apps: " + verb + " failed: the package manager gave no answer\n", result.err, "stderr says why");
             }
             Result icons = run(fake, "icons", "a.b/C");
             same(1, icons.status, "icons");
@@ -888,20 +1033,84 @@ public final class AppsCommandTest {
             StringWriter err = new StringWriter();
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             int status = AppsCommand.run(new String[] {"list"}, () -> {
-                throw new IllegalStateException("the package manager is not running");
+                throw new PlatformException("the package manager is not running");
             }, out, new PrintWriter(err));
             same(1, status, "exit status");
             same(0, out.size(), "no stdout");
-            check(err.toString().contains("not running"), "stderr says why");
+            same("kernarium_apps: the package manager is not running\n", err.toString(), "stderr says why");
             same(64, AppsCommand.run(new String[] {"nope"}, () -> {
                 throw new IllegalStateException("never made");
             }, out, new PrintWriter(new StringWriter())), "a usage error needs no platform");
         });
-        row("stderr-is-one-bounded-line", () -> {
+        row("failure-reasons-are-fixed", () -> {
+            // A framework's message can carry a uid, a permission or a path: only the class of the exception is said.
             Fake fake = new Fake() {
                 @Override
                 public int currentUser() {
-                    throw new IllegalStateException(repeat("long message \u202E ", 500) + "\nsecond line");
+                    throw new SecurityException("Permission Denial: getCurrentUser() from pid=1, uid=2000 requires android.permission.INTERACT_ACROSS_USERS");
+                }
+            };
+            for (String verb : new String[] {"digest", "list"}) {
+                Result result = run(fake, verb);
+                same(1, result.status, verb + " exit status");
+                same("kernarium_apps: " + verb + " failed: unexpected java.lang.SecurityException\n", result.err, "the class only");
+                same(0, result.out.length, "nothing on stdout");
+            }
+            Result icons = run(fake, "icons", "a.b/C");
+            same(1, icons.status, "icons");
+            same(0, icons.out.length, "icons prints nothing");
+            same("kernarium_apps: icons failed: unexpected java.lang.SecurityException\n", icons.err, "icons says the class");
+            Result launch = run(fake, "launch", "a.b/C");
+            same(1, launch.status, "launch with no known foreground user");
+            same(0, launch.out.length, "no stdout");
+            same(0, fake.started.size(), "nothing is started for a user that is not known");
+        });
+        row("failure-of-any-question-is-a-failure", () -> {
+            // The commands take no substitute: a configuration, a listing or a user that cannot be had is exit 1.
+            final String[] broken = {"locales", "listing", "user"};
+            for (String what : broken) {
+                Fake fake = new Fake() {
+                    @Override
+                    public int currentUser() throws Exception {
+                        if (what.equals("user")) {
+                            throw new PlatformException("the foreground user is not known");
+                        }
+                        return super.currentUser();
+                    }
+
+                    @Override
+                    public List<String> localeTags() throws Exception {
+                        if (what.equals("locales")) {
+                            throw new PlatformException("the system's configuration cannot be read");
+                        }
+                        return super.localeTags();
+                    }
+
+                    @Override
+                    public List<Entry> launcherActivities(int forUser) throws Exception {
+                        if (what.equals("listing")) {
+                            throw new PlatformException("a permission could not be checked");
+                        }
+                        return super.launcherActivities(forUser);
+                    }
+                };
+                fake.with(app("com.a.app", "com.a.app.Main"));
+                for (String[] args : new String[][] {{"digest"}, {"list"}, {"launch", "com.a.app/com.a.app.Main"}}) {
+                    if (what.equals("locales") && args[0].equals("launch")) {
+                        continue; // a launch needs no locale
+                    }
+                    Result result = run(fake, args);
+                    same(1, result.status, what + " broken: " + args[0]);
+                    same(0, result.out.length, "no stdout");
+                }
+                same(0, fake.started.size(), what + " broken: nothing started");
+            }
+        });
+        row("stderr-is-one-bounded-line", () -> {
+            Fake fake = new Fake() {
+                @Override
+                public int currentUser() throws Exception {
+                    throw new PlatformException(repeat("long message \u202E ", 500) + "\nsecond line");
                 }
             };
             Result result = run(fake, "list");
@@ -922,11 +1131,276 @@ public final class AppsCommandTest {
             same(8, AppsCommand.MAX_ICONS, "components per icons");
             same(98304, AppsCommand.MAX_PNG_BYTES, "PNG bound");
             same(20_000L, AppsCommand.ICON_DEADLINE_MILLIS, "deadline");
+            same(8_000L, AppsCommand.ICON_RENDER_MILLIS, "one icon's render");
+            check(AppsCommand.ICON_DEADLINE_MILLIS + AppsCommand.ICON_RENDER_MILLIS <= 30_000, "the whole icons command in the host's 30 s");
             same(1024, Listing.MAX_ROWS, "rows");
+            same(32, SourceBound.MAX_RESOURCES, "resources one icon may reach");
+            same(6, SourceBound.MAX_DEPTH, "depth of the chain one icon may reach");
             same(8, Listing.MAX_PER_PACKAGE, "per package");
             same(80, LabelText.MAX_CODE_POINTS, "label code points");
             same(320, LabelText.MAX_BYTES, "label bytes");
         });
+    }
+
+    /** A shell command line as the argument vector of a process. */
+    private static List<String> sh(String script, String... arguments) {
+        List<String> argv = new ArrayList<>(Arrays.asList("/bin/sh", "-c", script, "sh"));
+        argv.addAll(Arrays.asList(arguments));
+        return argv;
+    }
+
+    /** Whether a process that the child wrote its pid for is still there (a zombie is not reaped, so it counts). */
+    private static boolean alive(java.io.File pidFile) throws Exception {
+        String text = new String(java.nio.file.Files.readAllBytes(pidFile.toPath()), StandardCharsets.US_ASCII).trim();
+        check(!text.isEmpty(), "the child wrote its pid");
+        java.util.Optional<ProcessHandle> handle = ProcessHandle.of(Long.parseLong(text));
+        boolean here = handle.isPresent() && handle.get().isAlive();
+        if (here) {
+            handle.get().destroyForcibly(); // do not leave it behind when the row fails
+        }
+        return here;
+    }
+
+    private static java.io.File pidFile() throws Exception {
+        java.io.File file = java.io.File.createTempFile("kernarium-apps-pid", ".txt");
+        file.deleteOnExit();
+        return file;
+    }
+
+    private static void children() {
+        row("child-output-is-drained", () -> {
+            // 330 kB of output and status 3: a parent that does not read while it waits stalls the child on a full pipe.
+            ChildProcess.Result result = ChildProcess.run(sh("i=0; while [ $i -lt 30000 ]; do echo 0123456789; i=$((i+1)); done; exit 3"),
+                    4_000, 4096);
+            same(3, result.exit, "the child's status");
+            same(4096, result.output.length(), "the first bytes are kept and no more");
+            check(result.output.startsWith("0123456789\n"), "the output is the child's");
+        });
+        row("child-output-merges-error", () -> {
+            ChildProcess.Result result = ChildProcess.run(sh("echo out; echo err >&2"), 4_000, 4096);
+            same(0, result.exit, "status");
+            check(result.output.contains("out") && result.output.contains("err"), "both streams: " + show(result.output));
+        });
+        row("child-deadline-terminates-and-reaps", () -> {
+            java.io.File pid = pidFile();
+            try {
+                ChildProcess.run(sh("echo $$ > \"$1\"; exec sleep 60", pid.getPath()), 600, 4096);
+                throw new Mismatch("a child past the deadline is a failure");
+            } catch (PlatformException late) {
+                same("cmd activity start-activity did not finish", late.getMessage(), "the reason is fixed");
+            }
+            check(!alive(pid), "the child is gone when run returns");
+        });
+        row("child-that-ignores-termination-is-killed", () -> {
+            java.io.File pid = pidFile();
+            long begin = System.nanoTime();
+            try {
+                ChildProcess.run(sh("trap '' TERM; echo $$ > \"$1\"; while :; do sleep 1; done", pid.getPath()), 600, 4096);
+                throw new Mismatch("a child past the deadline is a failure");
+            } catch (PlatformException late) {
+                check(late.getMessage() != null, "failed");
+            }
+            long tookMillis = (System.nanoTime() - begin) / 1_000_000;
+            check(!alive(pid), "SIGKILL ended it");
+            check(tookMillis < 600 + 2 * ChildProcess.GRACE_MILLIS + 2_000, "bounded: " + tookMillis + " ms");
+        });
+        row("child-is-reaped-when-the-run-is-interrupted", () -> {
+            java.io.File pid = pidFile();
+            Throwable[] ended = new Throwable[1];
+            Thread runner = new Thread(() -> {
+                try {
+                    ChildProcess.run(sh("echo $$ > \"$1\"; exec sleep 60", pid.getPath()), 30_000, 4096);
+                } catch (Throwable problem) {
+                    ended[0] = problem;
+                }
+            });
+            runner.start();
+            while (pid.length() == 0 && runner.isAlive()) {
+                Thread.sleep(20);
+            }
+            Thread.sleep(100);
+            runner.interrupt();
+            runner.join(10_000);
+            check(!runner.isAlive(), "the run ended");
+            check(ended[0] instanceof InterruptedException, "by the interrupt: " + ended[0]);
+            check(!alive(pid), "the child is gone");
+        });
+        row("child-that-cannot-start-fails", () -> {
+            try {
+                ChildProcess.run(Arrays.asList("/nonexistent/kernarium-apps-test"), 1_000, 4096);
+                throw new Mismatch("no such program");
+            } catch (java.io.IOException expected) {
+                check(true, "an exception, not a result");
+            }
+        });
+    }
+
+    /** A graph of resources by id, for the source bound's rows. */
+    private static final class FakeGraph implements SourceBound.Graph {
+        final Map<Integer, SourceBound.Node> nodes = new HashMap<>();
+        final List<Integer> asked = new ArrayList<>();
+
+        FakeGraph with(int id, SourceBound.Node node) {
+            nodes.put(id, node);
+            return this;
+        }
+
+        @Override
+        public SourceBound.Node node(int id) throws Exception {
+            asked.add(id);
+            SourceBound.Node node = nodes.get(id);
+            if (node == null) {
+                throw new java.io.IOException("no resource " + id);
+            }
+            return node;
+        }
+    }
+
+    private static boolean within(FakeGraph graph, int root) throws Exception {
+        return SourceBound.within(graph, root, 640);
+    }
+
+    private static void sources() {
+        row("source-bound-one-bitmap", () -> {
+            int none = SourceBound.DENSITY_NONE;
+            check(within(new FakeGraph().with(1, SourceBound.Node.bitmap(4096, 4096, none)), 1), "4096 x 4096 never scaled is 16 Mi pixels");
+            check(!within(new FakeGraph().with(1, SourceBound.Node.bitmap(4097, 4096, none)), 1), "one column more is over");
+            check(!within(new FakeGraph().with(1, SourceBound.Node.bitmap(20_000, 20_000, none)), 1), "a bitmap of 400 Mpixels");
+            check(!within(new FakeGraph().with(1, SourceBound.Node.bitmap(Integer.MAX_VALUE, Integer.MAX_VALUE, 0)), 1),
+                    "dimensions that overflow a product");
+            check(within(new FakeGraph().with(1, SourceBound.Node.bitmap(192, 192, 640)), 1), "an icon as drawn");
+            check(within(new FakeGraph().with(1, SourceBound.Node.other()), 1), "a colour");
+            check(within(new FakeGraph(), 0), "no resource");
+        });
+        row("source-bound-follows-the-density", () -> {
+            // The framework scales an image resource to the density it is loaded for: a file with no density
+            // (the default, 160) at 640 is four times as wide and four times as tall.
+            check(within(new FakeGraph().with(1, SourceBound.Node.bitmap(1024, 1024, 0)), 1), "1024 x 1024 at 160 becomes 4096 x 4096");
+            check(!within(new FakeGraph().with(1, SourceBound.Node.bitmap(1025, 1024, 0)), 1), "one column more is over");
+            check(!within(new FakeGraph().with(1, SourceBound.Node.bitmap(2048, 2048, 160)), 1), "declared 160 is the default");
+            check(within(new FakeGraph().with(1, SourceBound.Node.bitmap(2048, 2048, 320)), 1), "xhdpi at 640 is twice");
+            check(within(new FakeGraph().with(1, SourceBound.Node.bitmap(4096, 4096, SourceBound.DENSITY_NONE)), 1),
+                    "nodpi is not scaled");
+        });
+        row("source-bound-layers-add-up", () -> {
+            int none = SourceBound.DENSITY_NONE;
+            FakeGraph adaptive = new FakeGraph().with(1, SourceBound.Node.xml(2, 3))
+                    .with(2, SourceBound.Node.other()).with(3, SourceBound.Node.xml(4)).with(4, SourceBound.Node.bitmap(432, 432, none));
+            check(within(adaptive, 1), "an adaptive icon with a colour background and a bitmap foreground");
+            FakeGraph big = new FakeGraph().with(1, SourceBound.Node.xml(2, 3, 4, 5, 6))
+                    .with(2, SourceBound.Node.bitmap(4096, 2048, none)).with(3, SourceBound.Node.bitmap(4096, 2048, none))
+                    .with(4, SourceBound.Node.bitmap(4096, 2048, none)).with(5, SourceBound.Node.bitmap(4096, 2048, none))
+                    .with(6, SourceBound.Node.bitmap(10, 10, none));
+            check(!within(big, 1), "four bitmaps of 8 Mpixels are 32 Mpixels and the fifth thing tips it over");
+            FakeGraph fits = new FakeGraph().with(1, SourceBound.Node.xml(2, 3, 4))
+                    .with(2, SourceBound.Node.bitmap(4096, 2048, none)).with(3, SourceBound.Node.bitmap(4096, 2048, none))
+                    .with(4, SourceBound.Node.bitmap(4096, 2048, none));
+            check(within(fits, 1), "three of them (24 Mpixels) are within the total");
+            FakeGraph exact = new FakeGraph().with(1, SourceBound.Node.xml(2, 3))
+                    .with(2, SourceBound.Node.bitmap(4096, 4096, none)).with(3, SourceBound.Node.bitmap(4096, 4096, none));
+            check(within(exact, 1), "two of 16 Mpixels are exactly the total");
+            FakeGraph over = new FakeGraph().with(1, SourceBound.Node.xml(2, 3, 4))
+                    .with(2, SourceBound.Node.bitmap(4096, 4096, none)).with(3, SourceBound.Node.bitmap(4096, 4096, none))
+                    .with(4, SourceBound.Node.bitmap(1, 1, none));
+            check(!within(over, 1), "one pixel more than the total");
+        });
+        row("source-bound-walk-is-bounded", () -> {
+            FakeGraph cycle = new FakeGraph().with(1, SourceBound.Node.xml(2)).with(2, SourceBound.Node.xml(1, 2, 1));
+            check(within(cycle, 1), "a cycle ends");
+            same(Arrays.asList(1, 2), cycle.asked, "each resource is looked at once");
+            FakeGraph chain = new FakeGraph();
+            for (int id = 1; id <= 10; id++) {
+                chain.with(id, SourceBound.Node.xml(id + 1));
+            }
+            chain.with(11, SourceBound.Node.other());
+            check(!within(chain, 1), "a chain deeper than 6 is over");
+            FakeGraph shallow = new FakeGraph();
+            for (int id = 1; id <= 7; id++) {
+                shallow.with(id, id == 7 ? SourceBound.Node.other() : SourceBound.Node.xml(id + 1));
+            }
+            check(within(shallow, 1), "a chain of exactly the depth is within");
+            FakeGraph wide = new FakeGraph();
+            int[] ids = new int[32];
+            for (int i = 0; i < ids.length; i++) {
+                ids[i] = 100 + i;
+                wide.with(ids[i], SourceBound.Node.bitmap(10, 10, SourceBound.DENSITY_NONE));
+            }
+            wide.with(1, SourceBound.Node.xml(ids));
+            check(!within(wide, 1), "the root and 32 files are 33 resources, over 32");
+            FakeGraph many = new FakeGraph();
+            int[] some = new int[31];
+            for (int i = 0; i < some.length; i++) {
+                some[i] = 100 + i;
+                many.with(some[i], SourceBound.Node.bitmap(10, 10, SourceBound.DENSITY_NONE));
+            }
+            many.with(1, SourceBound.Node.xml(some));
+            check(within(many, 1), "the root and 31 files are exactly 32 resources, within");
+        });
+        row("source-bound-colours-are-free", () -> {
+            // A vector with many named colours is not a big icon: only the files count towards the bound.
+            FakeGraph colours = new FakeGraph();
+            int[] ids = new int[100];
+            for (int i = 0; i < ids.length; i++) {
+                ids[i] = 1000 + i;
+                colours.with(ids[i], SourceBound.Node.other());
+            }
+            colours.with(1, SourceBound.Node.xml(ids));
+            check(within(colours, 1), "a hundred colours");
+        });
+        row("source-bound-unreadable-is-an-error", () -> {
+            try {
+                within(new FakeGraph().with(1, SourceBound.Node.xml(2)), 1);
+                throw new Mismatch("a resource that cannot be read");
+            } catch (java.io.IOException expected) {
+                check(true, "thrown");
+            }
+            try {
+                within(new FakeGraph().with(1, SourceBound.Node.bitmap(0, 0, 0)), 1);
+                throw new Mismatch("a bitmap with no size");
+            } catch (java.io.IOException expected) {
+                check(true, "thrown");
+            }
+            try {
+                within(new FakeGraph().with(1, SourceBound.Node.bitmap(-1, -1, 0)), 1);
+                throw new Mismatch("a bitmap whose bounds could not be read");
+            } catch (java.io.IOException expected) {
+                check(true, "thrown");
+            }
+        });
+        row("resource-paths-follow-the-framework", () -> {
+            List<ResourcePaths.Item> items = ResourcePaths.of("/data/app/a/base.apk", "/data/app/a/private.apk",
+                    new String[] {"/data/app/a/split_one.apk", "", null, "/data/app/a/split_two.apk"},
+                    new String[] {"/data/app/a/private_split.apk"},
+                    new String[] {"/system/framework/lib.jar", "/data/app/lib/lib.apk", null},
+                    new String[] {"/o/legacy.apk", "/o/both.idmap"},
+                    new String[] {"/o/both.idmap", "/o/new.idmap"});
+            same(Arrays.asList("BASE /data/app/a/base.apk", "SPLIT /data/app/a/split_one.apk", "SPLIT /data/app/a/split_two.apk",
+                    "LIBRARY /data/app/lib/lib.apk", "OVERLAY /o/legacy.apk", "OVERLAY /o/both.idmap", "OVERLAY /o/new.idmap"),
+                    describe(items), "base, splits, libraries (APKs only), overlays (legacy first, each once)");
+            check(ResourcePaths.hasBase(items), "it can be opened");
+            same(Arrays.asList("BASE /data/app/a/private.apk", "SPLIT /data/app/a/private_split.apk"),
+                    describe(ResourcePaths.of(null, "/data/app/a/private.apk", null, new String[] {"/data/app/a/private_split.apk"},
+                            null, null, null)), "the source directories when no public ones are given");
+            check(!ResourcePaths.hasBase(ResourcePaths.of(null, null, new String[] {"/x.apk"}, null, null, null, null)),
+                    "no base, no resources");
+            check(!ResourcePaths.hasBase(ResourcePaths.of("", "", null, null, null, null, null)), "an empty base");
+            String key = ResourcePaths.fingerprint(items);
+            same(key, ResourcePaths.fingerprint(items), "stable");
+            check(key.matches("[0-9a-f]{16}"), "16 hex characters");
+            check(!key.equals(ResourcePaths.fingerprint(ResourcePaths.of("/data/app/a/base.apk", null, null, null, null, null, null))),
+                    "it follows the list");
+            check(!ResourcePaths.fingerprint(ResourcePaths.of("/a.apk", null, new String[] {"/b.apk"}, null, null, null, null))
+                    .equals(ResourcePaths.fingerprint(ResourcePaths.of("/a.apk", null, null, null, new String[] {"/b.apk"}, null, null))),
+                    "a split is not a library");
+        });
+    }
+
+    private static List<String> describe(List<ResourcePaths.Item> items) {
+        List<String> described = new ArrayList<>();
+        for (ResourcePaths.Item item : items) {
+            described.add(item.kind + " " + item.path);
+        }
+        return described;
     }
 
     private static void sizes() {

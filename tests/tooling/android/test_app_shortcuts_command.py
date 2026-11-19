@@ -10,14 +10,19 @@ fake platform. The sources compile here without the Android glue (AndroidPlatfor
 framework); the Android calls are compiled by the build host's request and exercised by the runner on an image.
 
 The test also runs the Java rows on copies of the sources with one rule removed at a time (the escaping, a bound,
-the launch refusal, the grammar, the digest's inputs, the PNG checks, the deadline), and requires the rows named
-here to fail: a row that cannot tell the rule from its absence is no row. Skipped (status 77) where the host has
-no JDK.
+the launch refusal, the grammar, the digest's inputs, the PNG checks, the deadlines, the child process's drain
+and reaping, the icon source's bound), and requires the rows named here to fail: a row that cannot tell the rule
+from its absence is no row. The Android glue (AndroidPlatform) cannot run on a JVM: what it must not do (take a
+substitute for a lookup that failed, read the manifest's enabled flag, use the wall clock, draw an icon for the
+device's own configuration, add resource files its own way) is checked on its text, and each of those checks has its
+own mutant. Skipped (status 77) where the host has no JDK.
 """
 
 from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
+import concurrent.futures
+import os
 import pathlib
 import re
 import shutil
@@ -108,9 +113,25 @@ MUTATIONS = [
      "\"-n\", \"'\" + component.token() + \"'\");",
      {"launch-starts-exactly-the-component"}),
     ("launch-error-line-ignored", "StartOutcome.java",
-     "if (trimmed.startsWith(\"Error\") || trimmed.contains(\"Permission Denial\")",
-     "if (false || trimmed.contains(\"Permission Denial\")",
-     {"launch-failures"}),
+     "boolean error = line.startsWith(\"Error\");",
+     "boolean error = false;",
+     {"launch-failures", "start-outcome-kinds"}),
+    ("error-matched-anywhere-in-a-line", "StartOutcome.java",
+     "boolean error = line.startsWith(\"Error\");",
+     "boolean error = line.contains(\"Error\");",
+     {"launch-component-named-like-an-error", "start-outcome-kinds"}),
+    ("exception-matched-anywhere-in-a-line", "StartOutcome.java",
+     "if (error || line.startsWith(\"Exception\")) {",
+     "if (error || line.contains(\"Exception\")) {",
+     {"launch-component-named-like-an-error", "start-outcome"}),
+    ("start-reason-copies-the-commands-text", "StartOutcome.java",
+     "return ascii(\"cmd activity start-activity: \" + reason, MAX_REASON);",
+     "return ascii(\"cmd activity start-activity: \" + reason + output, MAX_REASON);",
+     {"start-outcome-kinds", "launch-failures"}),
+    ("framework-message-printed", "AppsCommand.java",
+     "return \"unexpected \" + kind;",
+     "return String.valueOf(problem.getMessage());",
+     {"failure-reasons-are-fixed"}),
     ("digest-ignores-language", "Listing.java",
      "        text.append(\"locales\\t\").append(locales).append('\\n');\n",
      "",
@@ -144,9 +165,17 @@ MUTATIONS = [
      "if (false) {",
      {"icons-deadline-defers-the-rest"}),
     ("icon-render-failure-escapes", "AppsCommand.java",
-     "            } catch (Throwable problem) {\n                return null; // an icon",
-     "            } catch (Exception problem) {\n                return null; // an icon",
-     {"icons-statuses"}),
+     "            } catch (Throwable problem) {\n                made[0] = null;",
+     "            } catch (Exception problem) {\n                made[0] = null;",
+     {"icons-failing-render-is-silent"}),
+    ("icon-render-time-limit-removed", "AppsCommand.java",
+     "worker.join(platform.renderLimitMillis());",
+     "worker.join(3_000);",
+     {"icons-render-time-limit"}),
+    ("stuck-render-does-not-stop-the-rest", "AppsCommand.java",
+     "stuck = render.timedOut;",
+     "stuck = false;",
+     {"icons-render-time-limit"}),
     ("icons-count-unbounded", "AppsCommand.java",
      "return args.length >= 2 && args.length <= 1 + MAX_ICONS;",
      "return args.length >= 2;",
@@ -170,11 +199,174 @@ MUTATIONS = [
     ("stderr-unbounded", "StartOutcome.java",
      "for (int i = 0; i < text.length() && out.length() < limit; i++) {",
      "for (int i = 0; i < text.length(); i++) {",
-     {"stderr-is-one-bounded-line", "start-outcome"}),
+     {"stderr-is-one-bounded-line"}),
     ("stderr-not-ascii", "StartOutcome.java",
      "out.append(c >= 0x20 && c < 0x7F ? c : '?');",
      "out.append(c);",
-     {"stderr-is-one-bounded-line", "start-outcome"}),
+     {"stderr-is-one-bounded-line"}),
+    ("locale-tag-limited-to-35", "Listing.java",
+     "if (tag == null || tag.isEmpty() || !isTag(tag)) {",
+     "if (tag == null || tag.isEmpty() || tag.length() > 35 || !isTag(tag)) {",
+     {"locale-line"}),
+    ("digest-ignores-the-rest-of-the-locales", "Listing.java",
+     "if (!restOfLocales.isEmpty()) {",
+     "if (false) {",
+     {"digest-follows-the-whole-locale-list"}),
+    ("icon-key-ignores-the-resource-files", "Listing.java",
+     "(entry.builtin ? '1' : '0') + '\\0' + entry.resources;",
+     "(entry.builtin ? '1' : '0');",
+     {"icon-key-follows-the-icon", "digest-follows-the-set"}),
+    ("render-version-not-bumped", "Listing.java",
+     "static final int RENDER_VERSION = 2;",
+     "static final int RENDER_VERSION = 1;",
+     {"icon-key-follows-the-icon"}),
+    ("source-bitmap-bound-removed", "SourceBound.java",
+     "static final long MAX_BITMAP_PIXELS = 16L * 1024 * 1024;",
+     "static final long MAX_BITMAP_PIXELS = 16L * 1024 * 1024 * 1024;",
+     {"source-bound-one-bitmap", "source-bound-follows-the-density"}),
+    ("source-total-bound-removed", "SourceBound.java",
+     "static final long MAX_TOTAL_PIXELS = 32L * 1024 * 1024;",
+     "static final long MAX_TOTAL_PIXELS = 32L * 1024 * 1024 * 1024;",
+     {"source-bound-layers-add-up"}),
+    ("source-density-ignored", "SourceBound.java",
+     "if (node.density != DENSITY_NONE) {",
+     "if (false) {",
+     {"source-bound-follows-the-density"}),
+    ("source-resource-count-removed", "SourceBound.java",
+     "static final int MAX_RESOURCES = 32;",
+     "static final int MAX_RESOURCES = 3200;",
+     {"source-bound-walk-is-bounded"}),
+    ("source-depth-removed", "SourceBound.java",
+     "static final int MAX_DEPTH = 6;",
+     "static final int MAX_DEPTH = 600;",
+     {"source-bound-walk-is-bounded"}),
+    ("source-cycle-not-noticed", "SourceBound.java",
+     "if (id == 0 || !seen.add(id)) {",
+     "if (id == 0) {",
+     {"source-bound-walk-is-bounded"}),
+    ("source-counts-colours", "SourceBound.java",
+     "            seen.remove(id); // a colour or a string costs nothing: only the files count towards the bound\n",
+     "",
+     {"source-bound-colours-are-free"}),
+    ("source-unreadable-bitmap-passes", "SourceBound.java",
+     "if (node.width <= 0 || node.height <= 0) {",
+     "if (false) {",
+     {"source-bound-unreadable-is-an-error"}),
+    ("resource-overlays-dropped", "ResourcePaths.java",
+     "            items.add(new Item(Kind.OVERLAY, overlay));\n",
+     "",
+     {"resource-paths-follow-the-framework"}),
+    ("resource-libraries-not-only-apks", "ResourcePaths.java",
+     "if (present(library) && library.endsWith(\".apk\")) {",
+     "if (present(library)) {",
+     {"resource-paths-follow-the-framework"}),
+    ("resource-base-is-the-private-source-dir", "ResourcePaths.java",
+     "String base = present(publicSourceDir) ? publicSourceDir : sourceDir;",
+     "String base = sourceDir;",
+     {"resource-paths-follow-the-framework"}),
+    ("resource-splits-dropped", "ResourcePaths.java",
+     "String[] splits = splitPublicSourceDirs != null ? splitPublicSourceDirs : splitSourceDirs;",
+     "String[] splits = null;",
+     {"resource-paths-follow-the-framework"}),
+    ("resource-overlays-not-deduplicated", "ResourcePaths.java",
+     "if (present(overlay) && !overlays.contains(overlay)) {",
+     "if (present(overlay)) {",
+     {"resource-paths-follow-the-framework"}),
+    ("child-output-not-drained", "ChildProcess.java",
+     "            reader.start();\n",
+     "",
+     {"child-output-is-drained"}),
+    ("child-not-terminated", "ChildProcess.java",
+     "                terminate(process);\n",
+     "",
+     {"child-deadline-terminates-and-reaps", "child-is-reaped-when-the-run-is-interrupted",
+      "child-that-ignores-termination-is-killed"}),
+    ("child-not-killed", "ChildProcess.java",
+     "                    process.destroyForcibly();\n                    process.waitFor(GRACE_MILLIS, TimeUnit.MILLISECONDS);\n",
+     "",
+     {"child-that-ignores-termination-is-killed"}),
+    ("child-deadline-is-not-a-failure", "ChildProcess.java",
+     "throw new PlatformException(\"cmd activity start-activity did not finish\");",
+     "return new Result(-1, \"\");",
+     {"child-deadline-terminates-and-reaps"}),
+]
+
+# What the Android glue must and must not do, as text (it cannot run on a JVM): (message, test of the comment-free text).
+# One mutant for each: (name, text replaced, replacement, the message that must be reported).
+PLATFORM_RULES = [
+    ("no substitute for the foreground user", lambda t: "UserHandle" not in t),
+    ("no process default for the locales", lambda t: "LocaleList.getDefault" not in t),
+    ("the foreground user's lookup fails the command", lambda t: 'throw new PlatformException("the foreground user is not known"' in t),
+    ("a failed permission check fails the command", lambda t: 'throw new PlatformException("a permission could not be checked"' in t),
+    ("a failed configuration read fails the command", lambda t: t.count('throw new PlatformException("the system\'s configuration cannot be read"') == 2),
+    ("a package gone since the query is left out",
+     lambda t: re.search(r"if \(packageInfo == null\) \{\s*continue;", t) is not None and "packageInfo == null ?" not in t),
+    ("no catch swallows a failure",
+     lambda t: re.search(r"catch \((?:Exception|RuntimeException|Throwable) \w+\) \{\s*\}", t) is None),
+    ("enabled is the resolver's answer, not the manifest flag", lambda t: "isEnabled(" not in t and ".enabled" not in t
+     and re.search(r"info\.exported,\s*true,\s*permitted\(", t) is not None),
+    ("the icon deadline uses the monotonic clock", lambda t: "SystemClock.elapsedRealtime()" in t and "currentTimeMillis" not in t),
+    ("the icon source is bounded before it is inflated",
+     lambda t: "SourceBound.within(" in t and t.index("SourceBound.within(") < t.index("getDrawableForDensity(")),
+    ("icons are drawn for a fixed configuration", lambda t: "UI_MODE_NIGHT_NO" in t and "ICON_LOCALE" in t
+     and "configuration()" not in t.split("private static Configuration iconConfiguration()")[1].split("\n    }\n")[0]),
+    ("every resource file the framework adds is added",
+     lambda t: all(word in t for word in ("addAssetPathAsSharedLibrary(", "addOverlayPath(", "ResourcePaths.of(",
+                                          "application.publicSourceDir", "application.splitPublicSourceDirs",
+                                          "application.sharedLibraryFiles", "application.resourceDirs",
+                                          "application.overlayPaths"))),
+    ("a base, split or library that cannot be added leaves the resources unopened",
+     lambda t: "complete = cookie != 0 || item.kind == ResourcePaths.Kind.OVERLAY;" in t),
+    ("the start is run by ChildProcess", lambda t: "ChildProcess.run(AppsCommand.startArguments(" in t
+     and "ProcessBuilder" not in t and "waitFor" not in t),
+]
+
+PLATFORM_MUTATIONS = [
+    ("foreground-user-substituted",
+     "throw new PlatformException(\"the foreground user is not known\", problem);",
+     "return android.os.UserHandle.myUserId();",
+     "no substitute for the foreground user"),
+    ("locales-default-substituted",
+     "throw new PlatformException(\"the system's configuration cannot be read\", problem);",
+     "return new Configuration();",
+     "a failed configuration read fails the command"),
+    ("permission-check-swallowed",
+     "throw new PlatformException(\"a permission could not be checked\", problem);",
+     "known = false;",
+     "a failed permission check fails the command"),
+    ("vanished-package-listed",
+     "            if (packageInfo == null) {\n                continue; // removed since the query\n            }\n",
+     "",
+     "a package gone since the query is left out"),
+    ("manifest-enabled-flag-read",
+     "info.exported, true, permitted(info.permission)",
+     "info.exported, info.isEnabled(), permitted(info.permission)",
+     "enabled is the resolver's answer, not the manifest flag"),
+    ("wall-clock-for-the-deadline",
+     "return SystemClock.elapsedRealtime();",
+     "return System.currentTimeMillis();",
+     "the icon deadline uses the monotonic clock"),
+    ("icon-source-unbounded",
+     "        if (!SourceBound.within(new ResourceGraph(resources), entry.iconResource, ICON_DENSITY)) {\n"
+     "            throw new PlatformException(\"the icon's source is over the bound\");\n        }\n",
+     "",
+     "the icon source is bounded before it is inflated"),
+    ("icon-drawn-for-the-device-configuration",
+     "        Configuration configuration = new Configuration();\n        configuration.densityDpi = ICON_DENSITY;",
+     "        Configuration configuration = new Configuration(configuration());\n        configuration.densityDpi = ICON_DENSITY;",
+     "icons are drawn for a fixed configuration"),
+    ("overlays-not-added",
+     "cookie = assets.addOverlayPath(item.path);",
+     "cookie = 1;",
+     "every resource file the framework adds is added"),
+    ("split-failure-ignored",
+     "complete = cookie != 0 || item.kind == ResourcePaths.Kind.OVERLAY;",
+     "complete = true;",
+     "a base, split or library that cannot be added leaves the resources unopened"),
+    ("start-waits-before-reading",
+     "ChildProcess.run(AppsCommand.startArguments(user, component),",
+     "new ProcessBuilder(AppsCommand.startArguments(user, component)).start().waitFor(); ChildProcess.run(AppsCommand.startArguments(user, component),",
+     "the start is run by ChildProcess"),
 ]
 
 
@@ -210,6 +402,35 @@ def failed_rows(output: str) -> set[str]:
     return {m.group(1) for m in re.finditer(r"^FAIL ([a-z0-9-]+)", output, re.MULTILINE)}
 
 
+def strip_comments(text: str) -> str:
+    """Java source without its comments (the glue has no string with a slash pair in it)."""
+    return re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", text, flags=re.S))
+
+
+def platform_problems(text: str) -> list[str]:
+    """The messages of the rules the Android glue's text breaks."""
+    code = strip_comments(text)
+    return [message for message, holds in PLATFORM_RULES if not holds(code)]
+
+
+def check_platform_rules(platform: str) -> int:
+    """The rules hold for the glue, and each rule fails for a copy of it that breaks it."""
+    failures = 0
+    for message in platform_problems(platform):
+        print(f"FAIL: AndroidPlatform: {message}", file=sys.stderr)
+        failures += 1
+    for name, old, new, message in PLATFORM_MUTATIONS:
+        if platform.count(old) != 1:
+            print(f"FAIL: platform mutation {name}: the text to replace occurs {platform.count(old)} times", file=sys.stderr)
+            failures += 1
+        elif message not in platform_problems(platform.replace(old, new)):
+            print(f"FAIL: platform mutation {name} was not caught by the rule '{message}'", file=sys.stderr)
+            failures += 1
+        else:
+            print(f"platform mutation {name}: caught by '{message}'")
+    return failures
+
+
 def check_sources() -> int:
     """What the Java cannot tell on a JVM: the wiring, and that the tool writes and opens nothing."""
     problems: list[str] = []
@@ -226,14 +447,19 @@ def check_sources() -> int:
                 problems.append(f"{name} uses {forbidden}: the command writes nothing and opens no network")
         if "FileOutputStream" in text and name != "Main.java":
             problems.append(f"{name} opens a FileOutputStream: only Main writes, to the descriptor of stdout")
-        if "ProcessBuilder" in text and name != "AndroidPlatform.java":
-            problems.append(f"{name} starts a process: only the platform's start does")
+        if "ProcessBuilder" in text and name != "ChildProcess.java":
+            problems.append(f"{name} starts a process: only ChildProcess does")
     main = java_files["Main.java"]
     if re.findall(r"new FileOutputStream\((.*?)\)", main) != ["FileDescriptor.out"]:
         problems.append("Main writes anything but the descriptor of stdout")
     platform = java_files["AndroidPlatform.java"]
-    if platform.count("new ProcessBuilder(") != 1 or "new ProcessBuilder(AppsCommand.startArguments(" not in platform:
-        problems.append("the platform starts a process other than the one with the command's argument vector")
+    child = java_files["ChildProcess.java"]
+    if child.count("new ProcessBuilder(argv)") != 1 or "redirectErrorStream(true)" not in child:
+        problems.append("ChildProcess starts a process other than the one with the caller's argument vector")
+    if "finally" not in child or "terminate(process);" not in child:
+        problems.append("ChildProcess does not terminate its child in a finally")
+    if check_platform_rules(platform):
+        problems.append("the Android glue breaks a rule it must keep")
     commands = java_files["AppsCommand.java"]
     if '"/system/bin/cmd", "activity", "start-activity"' not in commands:
         problems.append("the start is not cmd activity start-activity")
@@ -285,8 +511,8 @@ def main() -> int:
         return SKIP
     package_dir = SOURCES / PACKAGE_DIR
     sources = sorted(path for path in package_dir.glob("*.java") if path.name not in ANDROID_GLUE)
-    expected = {"AppsCommand.java", "Component.java", "Entry.java", "Icon.java", "LabelText.java", "Listing.java",
-                "StartOutcome.java"}
+    expected = {"AppsCommand.java", "ChildProcess.java", "Component.java", "Entry.java", "Icon.java", "LabelText.java",
+                "Listing.java", "PlatformException.java", "ResourcePaths.java", "SourceBound.java", "StartOutcome.java"}
     if {path.name for path in sources} != expected:
         print(f"FAIL: the platform-free sources are {sorted(path.name for path in sources)}, not {sorted(expected)}",
               file=sys.stderr)
@@ -303,37 +529,38 @@ def main() -> int:
             print("FAIL: the command's test", file=sys.stderr)
             return 1
         rows = set(re.findall(r"^ok ([a-z0-9-]+)", output, re.MULTILINE))
-        failures = 0
-        for name, source, old, new, must_fail in MUTATIONS:
+
+        def mutate(mutation: tuple) -> tuple[bool, str]:
+            """One mutant: (caught, the line to print). Each has a scratch directory of its own."""
+            name, source, old, new, must_fail = mutation
             unknown = must_fail - rows
             if unknown:
-                print(f"FAIL: mutation {name} names rows that do not exist: {sorted(unknown)}", file=sys.stderr)
-                failures += 1
-                continue
+                return False, f"FAIL: mutation {name} names rows that do not exist: {sorted(unknown)}"
             copy = scratch / f"src-{name}"
             shutil.copytree(package_dir, copy)
             target = copy / source
             text = target.read_text(encoding="utf-8")
             if text.count(old) != 1:
-                print(f"FAIL: mutation {name}: the text to remove occurs {text.count(old)} times in {source}",
-                      file=sys.stderr)
-                failures += 1
-                continue
+                return False, f"FAIL: mutation {name}: the text to remove occurs {text.count(old)} times in {source}"
             target.write_text(text.replace(old, new), encoding="utf-8")
             mutated = sorted(path for path in copy.glob("*.java") if path.name not in ANDROID_GLUE)
             mutant_status, mutant_output = compile_and_run(javac, java, scratch / f"run-{name}", mutated)
+            shutil.rmtree(copy)
             if mutant_status == -1:
-                print(f"FAIL: mutation {name} does not compile:\n{mutant_output}", file=sys.stderr)
-                failures += 1
-                continue
+                return False, f"FAIL: mutation {name} does not compile:\n{mutant_output}"
             missed = must_fail - failed_rows(mutant_output)
             if mutant_status == 0 or missed:
-                print(f"FAIL: mutation {name} ({source}) was not caught by {sorted(missed) or 'any row'}",
-                      file=sys.stderr)
-                failures += 1
-            else:
-                print(f"mutation {name}: caught by {sorted(failed_rows(mutant_output) & must_fail)}")
-            shutil.rmtree(copy)
+                return False, f"FAIL: mutation {name} ({source}) was not caught by {sorted(missed) or 'any row'}"
+            return True, f"mutation {name}: caught by {sorted(failed_rows(mutant_output) & must_fail)}"
+
+        # The mutants are independent processes: a few at a time keeps the whole under the test's timeout.
+        workers = max(1, min(3, (os.cpu_count() or 1) - 1))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(mutate, MUTATIONS))
+        failures = 0
+        for caught, line in results:
+            print(line, file=sys.stdout if caught else sys.stderr)
+            failures += 0 if caught else 1
         if failures:
             return 1
     print("PASS")

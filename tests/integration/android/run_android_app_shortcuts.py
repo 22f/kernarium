@@ -18,19 +18,28 @@ that:
   with the labels the escaping and the cut give, and its not exported launcher activity and its activity with no
   launcher filter are not listed;
 - ``icons`` gives a PNG of the declared size whose length and SHA-256 are the declared ones, with the signature and
-  a header that agrees, decodes to a picture that is not blank (an adaptive icon has opaque corners: it is composed
-  with no mask), for the built-in applications; ``noicon`` for the probe (it declares no icon); ``missing`` for a
-  component that is not a launcher activity; records in the order asked; nine components are a usage error;
-- ``launch`` starts the probe's launcher activity (it becomes the resumed activity) and starts it again when it is
-  already open, and refuses with status 2 and nothing on standard output: an activity that is not exported, one with no
+  a header that agrees, that decodes (8-bit RGB or RGBA) to a picture that is not blank and whose ALPHA field says
+  exactly whether any pixel is not opaque (an adaptive icon has opaque corners: it is composed with no mask), for the
+  built-in applications; for the second probe, whose label is a string resource and whose icon is an adaptive icon of
+  a colour and a bitmap layer, an adaptive 192 x 192 picture with the colour in its corners and the bitmap's disc in
+  its middle; ``noicon`` for the first probe (it declares no icon); ``missing`` for a component that is not a launcher
+  activity; records in the order asked; nine components are a usage error;
+- ``launch`` starts the probe's launcher activity (it becomes the resumed activity, and the answer is exactly its
+  ``launched`` line with nothing on standard error) and starts it again when it is already open (the same), and
+  refuses with status 2 and nothing on standard output: an activity that is not exported, one with no
   launcher filter, a built-in application's activity that is not a launcher one, a package that is not installed, a
   disabled application, and every hostile argument (shell metacharacters, options, a second component, the
   shorthand), none of which runs anything (a marker file that the hostile arguments would create is never made);
+- a launcher alias that the manifest disables is not listed, has no icon and is refused; once ``pm enable`` has
+  enabled it for the foreground user it is listed (with its label), answered ``noicon`` and started, and disabled
+  again it is gone, with the earlier digest back;
+- the digest is the one the contract defines: it is recomputed here from the rows, the locale line and the user;
 - the digest follows the set: the same twice, different once another application is installed, the same again once
   it is removed, different after an update in place (and the icon keys of the updated application change, those of
   others do not) and different with an application disabled;
 - usage errors are status 64 with nothing on standard output, the command writes no file in the shell user's data
-  directory and no new denial of the shell domain reaches the log.
+  directory and no new denial of the shell domain reaches the log (the log is read before the first call of the
+  command, so a denial that only the first call meets counts).
 
 Not automated: Android's language changing the labels (the listing reads the system's configuration, which a user
 build's shell cannot change; the first locale of the header is checked against the property), and the user switching.
@@ -237,6 +246,23 @@ def parse_digest(out: bytes) -> Header:
     return header
 
 
+DIGEST_SALT = "kernarium_apps-digest-1\n"
+
+
+def expected_digest(listed: "Listed", all_locales: list[str]) -> str:
+    """The digest the contract defines (section 4): SHA-256 over the salt line, one line for each row without its label,
+    the locale line (and, only when it is not the whole locale list, a line with the hash of the whole list), and the
+    user."""
+    text = DIGEST_SALT + "".join(f"{row.package}\t{row.activity}\t{1 if row.builtin else 0}\t{row.key}\n"
+                                for row in listed.rows)
+    text += f"locales\t{listed.header.locales}\n"
+    joined = ",".join(all_locales)
+    if joined != listed.header.locales:
+        text += f"localesall\t{hashlib.sha256(joined.encode()).hexdigest()}\n"
+    text += f"user\t{listed.header.user}\n"
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 def label_problem(label: str) -> str | None:
     """Why a label is not safe, or None."""
     if not label:
@@ -320,15 +346,22 @@ def decode_png(data: bytes) -> tuple[int, int, int, list[bytes]]:
     channels = 3 if colour == 2 else 4
     compressed = b""
     offset = 8
+    ended = False
     while offset + 12 <= len(data):
         length = struct.unpack(">I", data[offset:offset + 4])[0]
         kind = data[offset + 4:offset + 8]
         if kind == b"IDAT":
             compressed += data[offset + 8:offset + 8 + length]
         if kind == b"IEND":
+            ended = True
             break
         offset += 12 + length
-    raw = zlib.decompress(compressed)
+    if not ended:
+        raise fail("the PNG has no IEND chunk")
+    try:
+        raw = zlib.decompress(compressed)
+    except zlib.error as problem:
+        raise fail(f"the PNG's pixel data does not decompress: {problem}") from problem
     stride = width * channels
     if len(raw) != height * (stride + 1):
         raise fail("the PNG's pixel data is not the size its header says")
@@ -483,6 +516,14 @@ def command_present(guest) -> str:
     return f"{resolved}; adb shell is {context}"
 
 
+def system_locales(guest) -> list[str]:
+    """The system's whole locale list, as BCP-47 tags, when the image says it (else the empty list)."""
+    value = guest.shell("settings get system system_locales").strip()
+    if not value or value == "null":
+        value = ""
+    return [tag.replace("_", "-") for tag in value.split(",") if tag]
+
+
 def check_header(guest) -> str:
     started = time.monotonic()
     first = parse_digest(good(guest, "digest").out)
@@ -505,6 +546,11 @@ def check_header(guest) -> str:
         raise fail(f"the first locale is {tags[:1]}, the system's is {system!r}")
     if listed.header.count != len(listed.rows) or listed.header.count == 0:
         raise fail(f"count is {listed.header.count} for {len(listed.rows)} rows")
+    all_locales = system_locales(guest) or tags
+    computed = expected_digest(listed, all_locales)
+    if listed.header.digest != computed:
+        raise fail(f"the digest {listed.header.digest} is not the one the contract defines for these rows, locales "
+                   f"{listed.header.locales!r} (all {all_locales}) and user {listed.header.user}: {computed}")
     return (f"digest {first.digest[:12]}, {first.count} rows, skipped {first.skipped}, locales "
             f"{first.locales or '-'}, user {first.user}; digest in {seconds:.1f} s")
 
@@ -534,21 +580,32 @@ def check_rows(guest) -> str:
             "no-filter activities are not")
 
 
-def check_picture(record: IconRecord) -> str:
-    """The picture of an ok record is not blank, and an adaptive one is a full square."""
-    try:
-        width, height, channels, rows = decode_png(record.data)
-    except Failure:
-        return "kind not decoded"
+def check_picture(record: IconRecord, corners: tuple[int, int, int] | None = None,
+                  centre: tuple[int, int, int] | None = None) -> str:
+    """The picture of an ok record decodes (8-bit RGB or RGBA: anything else is a failure), is the size the record says,
+    is not blank, and has the alpha the record says: ALPHA is 1 exactly when some pixel is not opaque. `corners` and
+    `centre` name the colour that the four corners and the middle must have."""
+    width, height, channels, rows = decode_png(record.data)
+    if (width, height) != (record.width, record.height):
+        raise fail(f"{record.token}: the PNG is {width} by {height}, the record says {record.width} by {record.height}")
     colours = {pixel(rows, channels, x, y)
                for y in range(0, height, max(1, height // 24)) for x in range(0, width, max(1, width // 24))}
     if len(colours) < 2:
         raise fail(f"the picture of {record.token} is one colour: {colours}")
-    corners = [pixel(rows, channels, x, y) for x in (0, width - 1) for y in (0, height - 1)]
-    if record.kind == "adaptive" and record.alpha == "0" and channels == 4 and any(c[3] != 255 for c in corners):
-        raise fail(f"{record.token} says it is opaque and a corner is not: {corners}")
-    if record.alpha == "1" and channels == 3:
-        raise fail(f"{record.token} says it has alpha and the PNG has no alpha channel")
+    translucent = channels == 4 and any(min(row[3::4]) != 255 for row in rows)
+    if record.alpha == "1" and not translucent:
+        raise fail(f"{record.token} says it has alpha and every pixel is opaque")
+    if record.alpha == "0" and translucent:
+        raise fail(f"{record.token} says it is opaque and a pixel is not")
+    for x, y in ((0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)):
+        value = pixel(rows, channels, x, y)
+        if record.kind == "adaptive" and record.alpha == "0" and channels == 4 and value[3] != 255:
+            raise fail(f"{record.token}: an adaptive icon's corner {value} is not opaque")
+        if corners is not None and any(abs(value[i] - corners[i]) > 2 for i in range(3)):
+            raise fail(f"{record.token}: the corner ({x}, {y}) is {value}, not {corners}")
+    middle = pixel(rows, channels, width // 2, height // 2)
+    if centre is not None and any(abs(middle[i] - centre[i]) > 2 for i in range(3)):
+        raise fail(f"{record.token}: the middle is {middle}, not {centre}")
     return "decoded"
 
 
@@ -571,6 +628,12 @@ def check_icons(guest) -> str:
     record = icons_of(guest, settings[:1])[0]
     if record.status != "ok" or record.width != 192:
         raise fail(f"the icon of {record.token} is {record.status} at {record.width}, not ok at 192")
+    resource_token = probe.component("second", "only")
+    resource = icons_of(guest, [resource_token])[0]
+    if resource.status != "ok" or resource.kind != "adaptive" or resource.width != 192 or resource.alpha != "0":
+        raise fail(f"the resource-backed icon of {resource_token} is {resource.status} {resource.kind} "
+                   f"{resource.width} alpha {resource.alpha}, not an opaque adaptive ok at 192")
+    check_picture(resource, corners=probe.BACKGROUND_RGB, centre=probe.FOREGROUND_RGB)
     probe_listed = probe.component("first", "listed")
     asked = [probe_listed, SETTINGS_NOT_LAUNCHER, probe.component("first", "hidden"), settings[0],
              probe.component("first", "plain"), "org.example.andarium.appsprobe.absent/android.app.Activity"]
@@ -582,17 +645,20 @@ def check_icons(guest) -> str:
     if too_many.status != EXIT_USAGE or too_many.out:
         raise fail(f"nine components exit {too_many.status} with {len(too_many.out)} bytes on stdout, not 64 and none")
     return (f"{totals} over {len(built_in)} built-in activities, {kinds['adaptive']} adaptive and "
-            f"{kinds['legacy']} legacy; Settings at 192 x 192; noicon, missing and the order asked")
+            f"{kinds['legacy']} legacy; Settings at 192 x 192; the string- and bitmap-backed adaptive icon of the second "
+            "probe has the colour in its corners and the disc in its middle; noicon, missing and the order asked")
 
 
-def resumed(guest, token: str, seconds: float = LAUNCH_SECONDS) -> bool:
-    """Whether the component becomes the resumed activity within the time."""
+def resumed(guest, token: str, seconds: float = LAUNCH_SECONDS, alternatives: tuple[str, ...] = ()) -> bool:
+    """Whether the component becomes the resumed activity within the time (an alias may show as the activity it
+    stands for: name that one in `alternatives`)."""
     package = token.split("/")[0]
+    names = (token.split("/")[1], *alternatives)
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         dump = guest.run("dumpsys activity activities", timeout=60).text
         for line in dump.splitlines():
-            if "ResumedActivity" in line and package in line and token.split("/")[1] in line:
+            if "ResumedActivity" in line and package in line and any(name in line for name in names):
                 return True
         time.sleep(1)
     return False
@@ -608,9 +674,53 @@ def check_launch(guest) -> str:
     guest.shell("input keyevent KEYCODE_HOME")
     time.sleep(2)
     again = command_run(guest, "launch", target)
-    if again.status != 0 or not resumed(guest, target):
-        raise fail(f"launching {target} again (the app already open): exit {again.status}")
+    if again.status != 0 or again.out != f"launched\t{target}\n".encode() or again.err.strip():
+        raise fail(f"launch {target} again: exit {again.status}, stdout {again.out!r}, stderr {again.err.strip()!r}")
+    if not resumed(guest, target):
+        raise fail(f"{target} is not the resumed activity after launching it again (the app already open)")
     return f"{target} started, resumed, and brought to the front again"
+
+
+def check_alias(guest) -> str:
+    """A launcher alias that the manifest disables and `pm enable` has enabled for the user is a launcher activity: the
+    command lists it, answers its icon and starts it, and takes it back once it is disabled again."""
+    alias = probe.alias_component()
+    user = int(guest.shell("am get-current-user").strip())
+    first = list_of(guest)
+    if any(row.token == alias for row in first.rows):
+        raise fail(f"{alias} is listed while the manifest disables it")
+    absent = icons_of(guest, [alias])[0]
+    if absent.status != "missing":
+        raise fail(f"the icon of the disabled alias is {absent.status}, not missing")
+    refused = command_run(guest, "launch", alias)
+    if refused.status != EXIT_REFUSED or refused.out:
+        raise fail(f"launch of the disabled alias: exit {refused.status}, stdout {refused.out[:60]!r}")
+    guest.shell(f"pm enable --user {user} {alias}")
+    try:
+        enabled = list_of(guest)
+        rows = [row for row in enabled.rows if row.token == alias]
+        if [(row.label, row.builtin) for row in rows] != [(probe.LISTED_ALIAS_LABEL, False)]:
+            raise fail(f"the alias enabled for the user is listed as {rows}, not once with {probe.LISTED_ALIAS_LABEL!r}")
+        if enabled.header.digest == first.header.digest:
+            raise fail("enabling the alias leaves the digest as it was")
+        icon = icons_of(guest, [alias])[0]
+        if icon.status != "noicon":
+            raise fail(f"the icon of the enabled alias is {icon.status}, not noicon (the application declares none)")
+        guest.shell("input keyevent KEYCODE_HOME")
+        time.sleep(2)
+        started = command_run(guest, "launch", alias)
+        if started.status != 0 or started.out != f"launched\t{alias}\n".encode() or started.err.strip():
+            raise fail(f"launch {alias}: exit {started.status}, stdout {started.out!r}, stderr {started.err.strip()!r}")
+        if not resumed(guest, alias, alternatives=(probe.ALIAS_TARGET,)):
+            raise fail(f"{alias} did not become the resumed activity within {LAUNCH_SECONDS} s")
+        guest.shell("input keyevent KEYCODE_HOME")
+    finally:
+        guest.shell(f"pm disable --user {user} {alias}")
+    after = list_of(guest)
+    if any(row.token == alias for row in after.rows) or after.header.digest != first.header.digest:
+        raise fail("the alias is still listed after it is disabled again, or the digest is not the earlier one")
+    return "disabled in the manifest: not listed, missing, refused; enabled for the user: listed, noicon, started; " \
+           "disabled again: gone, earlier digest back"
 
 
 def check_refusals(guest) -> str:
@@ -765,12 +875,12 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
             report.run(f"{variant}: install", lambda variant=variant: (
                 fresh_install(guest, apks[variant], probe.package_of(variant)) or f"{probe.package_of(variant)} installed"))
         before_files = tmp_listing(guest)
-        guest.run(f"{COMMAND} list", timeout=COMMAND_SECONDS)   # a warm start: later denials are the command's own
-        before_denials = set(denials(guest))
+        before_denials = set(denials(guest))   # before the command's first call: a denial that only that call meets counts
         report.run("digest and list agree on the header block", lambda: check_header(guest))
         report.run("list names the built-in and the probe's applications, escaped and bounded", lambda: check_rows(guest))
         report.run("icons are PNG records that check out", lambda: check_icons(guest))
         report.run("launch starts a launcher activity", lambda: check_launch(guest))
+        report.run("a launcher alias enabled for the user is listed, drawn and started", lambda: check_alias(guest))
         report.run("launch refuses all else, and runs nothing it is given", lambda: check_refusals(guest))
         report.run("usage errors are status 64", lambda: check_usage(guest))
         report.run("the command writes nothing and is denied nothing", lambda: check_clean(guest, before_files, before_denials))

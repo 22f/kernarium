@@ -63,6 +63,12 @@ final class AppsCommand {
     static final int MAX_PNG_BYTES = 98304;
     /** After this long {@code icons} starts no further icon: the rest are answered {@code deferred}. */
     static final long ICON_DEADLINE_MILLIS = 20_000;
+    /**
+     * How long one icon's render (all its sizes) may take: after this it is an {@code error}, nothing of it is
+     * printed, and no further icon is started (the rest are {@code deferred}: the stuck render may still hold the
+     * renderer).
+     */
+    static final long ICON_RENDER_MILLIS = 8_000;
     /** How long {@code cmd activity start-activity} may take. */
     static final int START_SECONDS = 20;
     static final String START_FLAGS = "0x10200000";
@@ -70,7 +76,7 @@ final class AppsCommand {
 
     /** The platform the commands stand on; the Android one is {@link AndroidPlatform}. */
     interface Platform {
-        /** The foreground user's id. */
+        /** The foreground user's id; throws when the platform cannot say (there is no substitute for it). */
         int currentUser() throws Exception;
 
         /**
@@ -79,7 +85,7 @@ final class AppsCommand {
          */
         List<Entry> launcherActivities(int user) throws Exception;
 
-        /** The system's locale list as BCP-47 tags. */
+        /** The system's locale list as BCP-47 tags; throws when the platform cannot say. */
         List<String> localeTags() throws Exception;
 
         /** The activity's label in the system's current language, or null when it has none. */
@@ -91,7 +97,13 @@ final class AppsCommand {
         /** Runs {@link #startArguments} and returns how it ended and what it printed (at most a few KiB). */
         StartResult start(int user, Component component) throws Exception;
 
+        /** A monotonic clock in milliseconds: the icons' deadline must not follow a correction of the wall clock. */
         long nowMillis();
+
+        /** How long one icon's render may take, all its sizes together. */
+        default long renderLimitMillis() {
+            return ICON_RENDER_MILLIS;
+        }
     }
 
     /** How the start's process ended. */
@@ -167,8 +179,8 @@ final class AppsCommand {
         Platform platform;
         try {
             platform = factory.create();
-        } catch (Exception problem) {
-            err.print(NAME + ": " + StartOutcome.ascii(String.valueOf(problem), 400) + "\n");
+        } catch (Throwable problem) {
+            err.print(NAME + ": " + reason(problem) + "\n");
             return EXIT_FAILURE;
         }
         Answer answer = new Answer();
@@ -189,7 +201,7 @@ final class AppsCommand {
                     break;
             }
         } catch (Throwable problem) {
-            err.print(NAME + ": " + args[0] + " failed: " + StartOutcome.ascii(String.valueOf(problem), 400) + "\n");
+            err.print(NAME + ": " + args[0] + " failed: " + reason(problem) + "\n");
             return EXIT_FAILURE;
         }
         if (status != EXIT_OK) {
@@ -202,6 +214,25 @@ final class AppsCommand {
             return EXIT_FAILURE;
         }
         return EXIT_OK;
+    }
+
+    /**
+     * Why a failure happened, in words of this tool: the fixed reason of a {@link PlatformException}, else the
+     * class of the exception and never its message (a framework's can carry a user id, a permission or a path).
+     */
+    static String reason(Throwable problem) {
+        if (problem instanceof PlatformException) {
+            return StartOutcome.ascii(String.valueOf(problem.getMessage()), 160);
+        }
+        StringBuilder kind = new StringBuilder();
+        String name = problem.getClass().getName();
+        for (int i = 0; i < name.length() && kind.length() < 100; i++) {
+            char c = name.charAt(i);
+            boolean part = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'
+                    || c == '$' || c == '.';
+            kind.append(part ? c : '?');
+        }
+        return "unexpected " + kind;
     }
 
     private static int refuse(PrintWriter err, String reason) {
@@ -263,6 +294,7 @@ final class AppsCommand {
         List<Entry> reported = platform.launcherActivities(user);
         answer.line("kernarium_apps " + FORMAT_VERSION);
         answer.line("icons\t" + components.size());
+        boolean stuck = false;
         for (Component component : components) {
             if (platform.nowMillis() - begin > ICON_DEADLINE_MILLIS) {
                 answer.nonImage(component, "deferred");
@@ -273,12 +305,15 @@ final class AppsCommand {
                 answer.nonImage(component, "missing");
             } else if (entry.iconResource == 0) {
                 answer.nonImage(component, "noicon");
+            } else if (stuck) {
+                answer.nonImage(component, "deferred");
             } else {
-                Icon icon = render(platform, entry);
-                if (icon == null) {
+                Render render = renderWithin(platform, entry);
+                stuck = render.timedOut;
+                if (render.icon == null) {
                     answer.nonImage(component, "error");
                 } else {
-                    answer.image(component, icon);
+                    answer.image(component, render.icon);
                 }
             }
         }
@@ -286,15 +321,51 @@ final class AppsCommand {
         return EXIT_OK;
     }
 
-    /** The icon at the largest size whose PNG is within the bound, or null when none can be had. */
-    private static Icon render(Platform platform, Entry entry) {
-        for (int size : ICON_SIZES) {
-            Icon icon;
+    /** What one icon's render came to: the icon, or none (an error), and whether it was still running when its time was up. */
+    private static final class Render {
+        Icon icon;
+        boolean timedOut;
+    }
+
+    /**
+     * The render of one icon in a worker thread that the command waits for no longer than the limit: a render
+     * that does not end in time is abandoned (the thread is a daemon and the process ends with the answer), and
+     * nothing of it is used.
+     */
+    private static Render renderWithin(Platform platform, Entry entry) {
+        final Icon[] made = new Icon[1];
+        Thread worker = new Thread(() -> {
             try {
-                icon = platform.icon(entry, size);
+                made[0] = render(platform, entry);
             } catch (Throwable problem) {
-                return null; // an icon that cannot be drawn (or not within the process's memory) is an error
+                made[0] = null;
             }
+        }, NAME + "-icon");
+        worker.setDaemon(true);
+        worker.start();
+        try {
+            worker.join(platform.renderLimitMillis());
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        Render render = new Render();
+        if (worker.isAlive()) {
+            worker.interrupt();
+            render.timedOut = true; // whatever it makes later is not read
+        } else {
+            render.icon = made[0];
+        }
+        return render;
+    }
+
+    /**
+     * The icon at the largest size whose PNG is within the bound, or null when none can be had. A failure of
+     * the platform's render (an exception, or an error such as running out of memory) reaches the worker in
+     * {@link #renderWithin}, which catches it: the icon is then an error.
+     */
+    private static Icon render(Platform platform, Entry entry) throws Exception {
+        for (int size : ICON_SIZES) {
+            Icon icon = platform.icon(entry, size);
             if (icon == null || icon.size != size || !isPng(icon.png)) {
                 return null;
             }

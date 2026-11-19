@@ -5,9 +5,9 @@
 run_android_app_shortcuts.py drives the image's `kernarium_apps` command and checks what it answers. Here a
 scripted guest plays an image that follows the contract (it reads the manifests of the probe packages the runner
 installs, keeps a foreground activity and a marker file, and prints the command's answers), and each way the image
-can differ makes the step that owns that rule fail: the probe packages (manifests read back), the strict parsers
-(each deviation of a header, a row, a label, an icon record), and every step against the scripted guest. It
-skips (77) where the host has no keytool and jarsigner (the packages are signed).
+can differ makes the step that owns that rule fail: the probe packages (manifests and resource table read back), the
+strict parsers (each deviation of a header, a row, a label, an icon record), and every step against the scripted
+guest. It skips (77) where the host has no keytool and jarsigner (the packages are signed).
 """
 
 from __future__ import annotations
@@ -61,9 +61,46 @@ def make_png(size: int, opaque_corners: bool = True, alpha: bool = True) -> byte
     return runner.PNG_SIGNATURE + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(bytes(rows))) + chunk(b"IEND", b"")
 
 
+def chunked(signature: bytes, parts: list[tuple[bytes, bytes]]) -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    return signature + b"".join(chunk(kind, data) for kind, data in parts)
+
+
+def gray_png(size: int) -> bytes:
+    """A valid 8-bit grayscale PNG: not the RGB or RGBA the contract names."""
+    rows = b"".join(b"\0" + bytes((i * 7 + y) & 255 for i in range(size)) for y in range(size))
+    return chunked(runner.PNG_SIGNATURE, [(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 0, 0, 0, 0)),
+                                          (b"IDAT", zlib.compress(rows)), (b"IEND", b"")])
+
+
+def corrupt_png(size: int) -> bytes:
+    """A PNG whose header is right and whose pixel data is not zlib."""
+    return chunked(runner.PNG_SIGNATURE, [(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)),
+                                          (b"IDAT", b"not zlib at all" * 8), (b"IEND", b"")])
+
+
+def probe_png(size: int, flat: bool = False) -> bytes:
+    """What an adaptive icon of the second probe comes out as: its background colour, with its disc in the middle."""
+    rows = bytearray()
+    for y in range(size):
+        rows.append(0)
+        for x in range(size):
+            inside = not flat and (x + 0.5 - size / 2) ** 2 + (y + 0.5 - size / 2) ** 2 <= (size / 3) ** 2
+            rows += bytes((*(probe.FOREGROUND_RGB if inside else probe.BACKGROUND_RGB), 255))
+    return chunked(runner.PNG_SIGNATURE, [(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)),
+                                          (b"IDAT", zlib.compress(bytes(rows))), (b"IEND", b"")])
+
+
 class Package:
     def __init__(self, name: str, version: int, installed: int, builtin: bool, activities: list[dict]) -> None:
         self.name, self.version, self.installed, self.builtin = name, version, installed, builtin
+        for activity in activities:
+            activity.setdefault("enabled", True)
+            activity.setdefault("manifest_enabled", True)
+            activity.setdefault("alias", False)
+            activity.setdefault("target", None)
         self.activities = activities
         self.enabled = True
 
@@ -87,6 +124,8 @@ class ScriptedImage:
         self.denials: list[str] = []
         self.locales = "en-US"
         self.commands: list[str] = []
+        self.calls = 0
+        self.launches = 0
         # Ways to differ.
         self.deviation: str | None = None
 
@@ -108,12 +147,18 @@ class ScriptedImage:
             self.clock += 5_000
             activities = []
             for application in (child for child in manifest.children if child.tag == "application"):
+                application_icon = application.attributes.get("icon")
                 for activity in application.children:
                     attributes = dict(activity.attributes)
+                    label = attributes.get("label", "Apps Probe Application")
+                    if isinstance(label, binary_xml.Reference):
+                        label = probe.SECOND_LABEL   # the string resource's text
                     activities.append({
                         "name": attributes["name"], "exported": bool(attributes.get("exported")),
                         "launcher": any(child.tag == "intent-filter" for child in activity.children),
-                        "label": attributes.get("label", "Apps Probe Application"), "icon": None})
+                        "enabled": attributes.get("enabled", True), "manifest_enabled": attributes.get("enabled", True),
+                        "alias": activity.tag == "activity-alias", "target": attributes.get("targetActivity"),
+                        "label": label, "icon": "resource" if isinstance(application_icon, binary_xml.Reference) else None})
             self.add(Package(name, version, old.installed if old else self.clock, False, activities))
             if old:
                 self.packages[name].version = version
@@ -152,12 +197,21 @@ class ScriptedImage:
             return line, 0, ""
         if words[:2] == ["input", "keyevent"]:
             return "", 0, ""
+        if words[:3] == ["settings", "get", "system"]:
+            return "null\n", 0, ""
         if words[:2] == ["pm", "disable-user"]:
             self.packages[words[-1]].enabled = False
             return "", 0, ""
-        if words[:2] == ["pm", "enable"]:
-            self.packages[words[-1]].enabled = True
-            return "", 0, ""
+        if words[:2] in (["pm", "enable"], ["pm", "disable"]):
+            enable = words[1] == "enable"
+            if "/" in words[-1]:
+                package, _, name = words[-1].partition("/")
+                for activity in self.packages[package].activities:
+                    if activity["name"] == name:
+                        activity["enabled"] = enable
+            else:
+                self.packages[words[-1]].enabled = enable
+            return "Component new state\n", 0, ""
         if words[:2] == ["pm", "uninstall"]:
             self.packages.pop(words[-1], None)
             return "Success\n", 0, ""
@@ -183,9 +237,11 @@ class ScriptedImage:
                 continue
             for activity in package.activities:
                 listed = activity["launcher"] and (activity["exported"] or self.deviation == "hidden-listed")
-                if not listed:
+                if not listed or not self.component_enabled(activity):
                     continue
                 label = activity["label"]
+                if self.deviation == "label-resource-unread" and label == probe.SECOND_LABEL:
+                    label = package.name
                 label = {probe.HOSTILE_LABEL: probe.LISTED_HOSTILE_LABEL, probe.LONG_LABEL: probe.LISTED_LONG_LABEL}.get(label, label)
                 if self.deviation == "label-raw" and activity["label"] == probe.HOSTILE_LABEL:
                     label = "Apps\tProbe"
@@ -199,6 +255,14 @@ class ScriptedImage:
             found.reverse()
         return found
 
+    def component_enabled(self, activity: dict) -> bool:
+        """The component's state: the manifest's flag until `pm enable` or `pm disable` has set it."""
+        if self.deviation == "alias-manifest-flag" and activity["alias"]:
+            return bool(activity["manifest_enabled"])   # the bug: the manifest's flag, not the user's state
+        if self.deviation == "alias-disabled-listed" and activity["alias"]:
+            return True
+        return bool(activity["enabled"])
+
     def key(self, package: Package, activity: dict) -> str:
         text = f"{package.name}\0{activity['name']}\0{'' if self.deviation == 'static-keys' else package.version}\0" \
                f"{'' if self.deviation == 'static-keys' else package.installed}\0{int(package.builtin)}"
@@ -209,7 +273,9 @@ class ScriptedImage:
             return "0" * 64
         if self.deviation == "digest-short":
             return "0" * 63
-        text = "".join(f"{row[0]}\t{row[1]}\t{row[3]}\t{row[4]}\n" for row in rows) + f"locales\t{self.locales}\nuser\t0\n"
+        salt = "" if self.deviation == "digest-unsalted" else "kernarium_apps-digest-1\n"
+        text = salt + "".join(f"{row[0]}\t{row[1]}\t{row[3]}\t{row[4]}\n" for row in rows) \
+            + f"locales\t{self.locales}\nuser\t0\n"
         return hashlib.sha256(text.encode()).hexdigest()
 
     def header(self, rows, digest=None) -> str:
@@ -219,6 +285,10 @@ class ScriptedImage:
     def tool(self, command: str, words: list[str]):
         if self.deviation == "writes-file" and words[:1] == ["list"]:
             self.files.add(f"{runner.SHELL_DATA}/kernarium_apps.cache")
+        self.calls += 1
+        if self.deviation == "first-call-denial" and self.calls == 1:
+            self.denials.append('11-19 11:00:00.000   500   500 W auditd : avc:  denied  { read } for comm="app_process64" '
+                                'scontext=u:r:shell:s0 tcontext=u:object_r:resourcecache_data_file:s0 tclass=file permissive=0')
         if self.deviation == "denial" and words[:1] == ["list"]:
             self.denials.append(f'11-19 11:00:{len(self.denials):02d}.000   500   500 W auditd : avc:  denied  {{ read }} '
                                 'for comm="app_process64" scontext=u:r:shell:s0 tcontext=u:object_r:apk_data_file:s0 '
@@ -248,7 +318,8 @@ class ScriptedImage:
             found = None
             if package in self.packages:
                 for candidate in self.packages[package].activities:
-                    if candidate["name"] == activity and candidate["launcher"] and candidate["exported"]:
+                    if (candidate["name"] == activity and candidate["launcher"] and candidate["exported"]
+                            and self.component_enabled(candidate)):
                         found = candidate
             if found is None or not self.packages[package].enabled:
                 out += f"icon\t{token}\tmissing\t0\t0\t-\t0\t0\t-\n".encode()
@@ -256,12 +327,22 @@ class ScriptedImage:
                 out += f"icon\t{token}\tnoicon\t0\t0\t-\t0\t0\t-\n".encode()
             else:
                 alpha = self.deviation == "icon-corner"
-                data = make_png(192, opaque_corners=not alpha)
+                resource = found["icon"] == "resource"
+                kind = "adaptive" if resource else found["icon"]
+                if resource:
+                    data = probe_png(192, flat=self.deviation == "icon-resource-flat")
+                else:
+                    data = make_png(192, opaque_corners=not alpha)
+                if self.deviation == "icon-gray":
+                    data = gray_png(192)
+                if self.deviation == "icon-corrupt":
+                    data = corrupt_png(192)
+                flag = "1" if self.deviation == "icon-alpha-claimed" else "0"
                 size = 128 if self.deviation == "icon-size" else 192
                 sha = hashlib.sha256(data).hexdigest()
                 if self.deviation == "icon-sha":
                     sha = "0" * 64
-                out += (f"icon\t{token}\tok\t{size}\t{size}\t{found['icon']}\t0\t{len(data)}\t{sha}\n"
+                out += (f"icon\t{token}\tok\t{size}\t{size}\t{kind}\t{flag}\t{len(data)}\t{sha}\n"
                         .encode() + data + b"\n")
         if self.deviation != "icons-no-end":
             out += f"end\t{len(tokens)}\n".encode()
@@ -274,8 +355,8 @@ class ScriptedImage:
         found = None
         if grammar_ok and package in self.packages and self.packages[package].enabled:
             for candidate in self.packages[package].activities:
-                if candidate["name"] == activity and candidate["launcher"] and (candidate["exported"]
-                                                                              or self.deviation == "launch-hidden"):
+                if candidate["name"] == activity and candidate["launcher"] and self.component_enabled(candidate) and (
+                        candidate["exported"] or self.deviation == "launch-hidden"):
                     found = candidate
         if self.deviation == "injection" and not grammar_ok and "touch" in token:
             self.files.add(marker)
@@ -286,8 +367,10 @@ class ScriptedImage:
             if self.deviation == "refusal-multiline":
                 err += "second line\n"
             return "", 2, err
-        self.resumed = f"{package}/{activity}"
-        return f"launched\t{token}\n", 0, ""
+        self.resumed = f"{package}/{found['target']}" if found["alias"] else f"{package}/{activity}"
+        self.launches += 1
+        err = "kernarium_apps: noise\n" if self.deviation == "launch-again-noisy" and self.launches == 2 else ""
+        return f"launched\t{token}\n", 0, err
 
 
 class Fixture(unittest.TestCase):
@@ -326,8 +409,11 @@ class ProbePackages(Fixture):
             self.assertEqual(probe.package_of(variant), attributes["package"])
             self.assertEqual(2 if variant.endswith("-v2") else 1, attributes["versionCode"])
             application = next(child for child in manifest.children if child.tag == "application")
-            self.assertEqual(len(probe.activity_names(variant)), len(application.children))
-            for activity, expected in zip(application.children, probe.activity_names(variant)):
+            activities = [child for child in application.children if child.tag == "activity"]
+            aliases = [child for child in application.children if child.tag == "activity-alias"]
+            self.assertEqual(len(probe.activity_names(variant)), len(activities))
+            self.assertEqual(1 if variant.startswith("first") else 0, len(aliases))
+            for activity, expected in zip(activities, probe.activity_names(variant)):
                 values = dict(activity.attributes)
                 self.assertEqual(probe.CLASSES[expected], values["name"])
                 self.assertEqual(expected != "hidden", values["exported"])
@@ -337,15 +423,63 @@ class ProbePackages(Fixture):
                     self.assertEqual(probe.HOSTILE_LABEL, values["label"])
                 if expected == "long":
                     self.assertEqual(probe.LONG_LABEL, values["label"])
+                if expected == "only":
+                    self.assertEqual(binary_xml.Reference(probe.RES_STRING_LABEL), values["label"])
+            for alias in aliases:
+                values = dict(alias.attributes)
+                self.assertEqual(probe.ALIAS_NAME, values["name"])
+                self.assertEqual(probe.ALIAS_TARGET, values["targetActivity"])
+                self.assertIs(False, values["enabled"], "the alias is disabled in the manifest")
+                self.assertIs(True, values["exported"])
+                self.assertEqual(1, len([child for child in alias.children if child.tag == "intent-filter"]))
+            icon = dict(application.attributes).get("icon")
+            self.assertEqual(binary_xml.Reference(probe.RES_MIPMAP_ICON) if variant == "second" else None, icon)
+
+    def test_the_resource_backed_package_reads_back(self) -> None:
+        with zipfile.ZipFile(self.apks["second"]) as archive:
+            names = archive.namelist()
+            table = probe.decode_resource_table(archive.read("resources.arsc"))
+            icon = binary_xml.decode_manifest(archive.read(probe.ICON_XML))
+            png = archive.read(probe.FOREGROUND_PNG)
+        for name in ("resources.arsc", probe.ICON_XML, probe.FOREGROUND_PNG):
+            self.assertIn(name, names)
+        self.assertEqual({
+            probe.RES_MIPMAP_ICON: ("mipmap", "ic_launcher", probe.DENSITY_ANY, 26, probe.VALUE_STRING, probe.ICON_XML),
+            probe.RES_DRAWABLE_FOREGROUND: ("drawable", "layer_foreground", probe.DENSITY_XXXHIGH, 0, probe.VALUE_STRING,
+                                            probe.FOREGROUND_PNG),
+            probe.RES_COLOR_BACKGROUND: ("color", "layer_background", 0, 0, probe.VALUE_COLOR,
+                                         0xFF000000 | probe.BACKGROUND_RGB[0] << 16 | probe.BACKGROUND_RGB[1] << 8
+                                         | probe.BACKGROUND_RGB[2]),
+            probe.RES_STRING_LABEL: ("string", "probe_label", 0, 0, probe.VALUE_STRING, probe.SECOND_LABEL),
+        }, table)
+        self.assertEqual("adaptive-icon", icon.tag)
+        self.assertEqual([("background", binary_xml.Reference(probe.RES_COLOR_BACKGROUND)),
+                          ("foreground", binary_xml.Reference(probe.RES_DRAWABLE_FOREGROUND))],
+                         [(child.tag, child.attributes["drawable"]) for child in icon.children])
+        width, height, channels, rows = runner.decode_png(png)
+        self.assertEqual((probe.FOREGROUND_SIZE, probe.FOREGROUND_SIZE, 4), (width, height, channels))
+        middle = probe.FOREGROUND_SIZE // 2
+        self.assertEqual((*probe.FOREGROUND_RGB, 255), runner.pixel(rows, channels, middle, middle))
+        self.assertEqual((0, 0, 0, 0), runner.pixel(rows, channels, 0, 0))
+
+    def test_the_resource_table_reader_rejects_a_damaged_table(self) -> None:
+        table = probe.build_resource_table(probe.package_of("second"))
+        for damaged in (table[:-4], table + b"\0\0\0\0", b"\0" * 12 + table[12:],
+                        table[:4] + struct.pack("<I", len(table) + 4) + table[8:]):
+            with self.assertRaises((ValueError, struct.error)):
+                probe.decode_resource_table(damaged)
 
     def test_the_variants_of_a_package_are_one_package(self) -> None:
         self.assertEqual(probe.package_of("first"), probe.package_of("first-v2"))
         self.assertNotEqual(probe.package_of("first"), probe.package_of("second"))
         self.assertEqual(len(set(probe.CLASSES[name] for name in probe.activity_names("first"))), 4)
+        self.assertEqual(f"{probe.package_of('first')}/{probe.ALIAS_NAME}", probe.alias_component())
+        self.assertTrue(runner.ACTIVITY_NAME.fullmatch(probe.ALIAS_NAME))
 
     def test_expected_labels_follow_the_rule(self) -> None:
         self.assertIsNone(runner.label_problem(probe.LISTED_HOSTILE_LABEL))
         self.assertIsNone(runner.label_problem(probe.LISTED_LONG_LABEL))
+        self.assertIsNone(runner.label_problem(probe.LISTED_ALIAS_LABEL))
         self.assertEqual(80, len(probe.LISTED_LONG_LABEL))
         self.assertIsNotNone(runner.label_problem(probe.HOSTILE_LABEL))
         self.assertIsNotNone(runner.label_problem(probe.LONG_LABEL))
@@ -435,6 +569,46 @@ class Parsers(unittest.TestCase):
         with self.assertRaises(Failure):
             runner.check_picture(transparent)
 
+    def test_the_picture_is_checked_strictly(self) -> None:
+        def record(data: bytes, alpha: str = "0", kind: str = "adaptive", size: int = 192) -> "runner.IconRecord":
+            return runner.IconRecord("a.b/C", "ok", size, size, kind, alpha, len(data), "x", data)
+
+        self.assertEqual("decoded", runner.check_picture(record(make_png(192))))
+        self.assertEqual("decoded", runner.check_picture(record(make_png(192, opaque_corners=False), alpha="1")))
+        self.assertEqual("decoded", runner.check_picture(record(make_png(192, alpha=False))), "RGB is allowed")
+        for data, why in [
+                (gray_png(192), "a grayscale PNG is not RGB or RGBA"), (corrupt_png(192), "pixel data that does not decompress"),
+                (make_png(192)[:-12], "a PNG with no IEND"), (make_png(128), "a picture of another size than the record's")]:
+            with self.assertRaises(Failure, msg=why):
+                runner.check_picture(record(data))
+        with self.assertRaises(Failure, msg="alpha claimed, every pixel opaque"):
+            runner.check_picture(record(make_png(192), alpha="1"))
+        with self.assertRaises(Failure, msg="opaque claimed, a pixel is not"):
+            runner.check_picture(record(make_png(192, opaque_corners=False), alpha="0", kind="legacy"))
+        with self.assertRaises(Failure, msg="RGB cannot have alpha"):
+            runner.check_picture(record(make_png(192, alpha=False), alpha="1"))
+        with self.assertRaises(Failure, msg="one colour"):
+            runner.check_picture(record(probe_png(192, flat=True)))
+        self.assertEqual("decoded", runner.check_picture(
+            record(probe_png(192)), corners=probe.BACKGROUND_RGB, centre=probe.FOREGROUND_RGB))
+        with self.assertRaises(Failure, msg="the wrong corner colour"):
+            runner.check_picture(record(probe_png(192)), corners=(1, 2, 3), centre=probe.FOREGROUND_RGB)
+        with self.assertRaises(Failure, msg="the wrong middle colour"):
+            runner.check_picture(record(probe_png(192)), corners=probe.BACKGROUND_RGB, centre=(1, 2, 3))
+
+    def test_the_digest_is_recomputed(self) -> None:
+        header = runner.Header("0" * 64, 2, 0, "en-US", 0)
+        rows = [runner.Row("a.b", "a.b.A", "A", True, "0123456789abcdef"),
+                runner.Row("c.d", "c.d.C", "Another label", False, "fedcba9876543210")]
+        text = ("kernarium_apps-digest-1\na.b\ta.b.A\t1\t0123456789abcdef\nc.d\tc.d.C\t0\tfedcba9876543210\n"
+                "locales\ten-US\nuser\t0\n")
+        self.assertEqual(hashlib.sha256(text.encode()).hexdigest(), runner.expected_digest(runner.Listed(header, rows), ["en-US"]))
+        longer = "locales\ten-US\nlocalesall\t" + hashlib.sha256(b"en-US,fr-FR").hexdigest() + "\nuser\t0\n"
+        self.assertEqual(hashlib.sha256(text.replace("locales\ten-US\nuser\t0\n", longer).encode()).hexdigest(),
+                         runner.expected_digest(runner.Listed(header, rows), ["en-US", "fr-FR"]))
+        self.assertNotEqual(runner.expected_digest(runner.Listed(header, rows), ["en-US"]),
+                            runner.expected_digest(runner.Listed(header, rows[:1]), ["en-US"]))
+
     def test_png_decoder(self) -> None:
         width, height, channels, rows = runner.decode_png(make_png(24))
         self.assertEqual((24, 24, 4), (width, height, channels))
@@ -463,7 +637,7 @@ class Steps(Fixture):
     def test_a_conforming_image_passes_every_step(self) -> None:
         statuses = self.run_steps(None)
         self.assertEqual({"PASS"}, set(statuses.values()), statuses)
-        self.assertEqual(11, len(statuses))
+        self.assertEqual(12, len(statuses))
         self.assertEqual(set(), self.image.files)
 
     def test_each_deviation_fails_its_step(self) -> None:
@@ -474,16 +648,19 @@ class Steps(Fixture):
         refusals = "launch refuses all else, and runs nothing it is given"
         usage = "usage errors are status 64"
         clean = "the command writes nothing and is denied nothing"
+        alias = "a launcher alias enabled for the user is listed, drawn and started"
         sets = "the digest follows the set of applications"
         expected = {
             "digest-short": header, "header-differs": header, "unsorted": header, "label-raw": header,
-            "label-uncut": header, "label-bidi": header, "list-no-end": header,
-            "hidden-listed": rows,
+            "label-uncut": header, "label-bidi": header, "list-no-end": header, "digest-unsalted": header,
+            "hidden-listed": rows, "label-resource-unread": rows,
             "icon-sha": icons, "icon-size": icons, "icon-corner": icons, "icons-no-end": icons, "icons-order": icons,
-            "launch-not-resumed": launch,
+            "icon-gray": icons, "icon-corrupt": icons, "icon-alpha-claimed": icons, "icon-resource-flat": icons,
+            "launch-not-resumed": launch, "launch-again-noisy": launch,
+            "alias-manifest-flag": alias, "alias-disabled-listed": rows,
             "launch-hidden": refusals, "injection": refusals, "refusal-multiline": refusals, "disabled-launch": refusals,
             "usage-status": usage,
-            "writes-file": clean, "denial": clean,
+            "writes-file": clean, "denial": clean, "first-call-denial": clean,
             "digest-constant": sets, "static-keys": sets,
         }
         for deviation, step in expected.items():
