@@ -50,26 +50,38 @@ public final class AppsCommandTest {
 
     private static void row(String name, Row body) {
         current = name;
-        Set<Long> before = childPids();
-        String problem = null;
+        List<String> problems = new ArrayList<>();
+        Set<Long> before = null;
+        try {
+            before = childPids();
+        } catch (Throwable thrown) {
+            problems.add("could not list the processes of this JVM: " + thrown);
+        }
         try {
             body.run();
         } catch (Mismatch mismatch) {
-            problem = String.valueOf(mismatch.getMessage());
+            problems.add(String.valueOf(mismatch.getMessage()));
         } catch (Throwable thrown) {
-            problem = String.valueOf(thrown);
+            problems.add(String.valueOf(thrown));
         }
         // However the body ended, a process it started and left is ended here, and the row fails on it: a row that
         // stops halfway (a check that throws before its own clean-up) must not leave a child that ignores SIGTERM.
-        String stray = endStrays(before);
-        if (stray != null) {
-            problem = problem == null ? stray : problem + "; " + stray;
+        // Whatever this does fails the row and never the run: the rows after it still print.
+        if (before != null) {
+            try {
+                String stray = endStrays(before);
+                if (stray != null) {
+                    problems.add(stray);
+                }
+            } catch (Throwable thrown) {
+                problems.add("could not end the processes it started: " + thrown);
+            }
         }
-        if (problem == null) {
+        if (problems.isEmpty()) {
             System.out.println("ok " + name);
         } else {
             failures++;
-            System.out.println("FAIL " + name + ": " + problem);
+            System.out.println("FAIL " + name + ": " + String.join("; ", problems));
         }
     }
 

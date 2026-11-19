@@ -800,15 +800,19 @@ def jdk_tool(name: str) -> str | None:
 
 def group_members(group: int) -> list[tuple[int, str]]:
     """The live processes of one process group, as (pid, command line); a zombie is not one. A group's id is its
-    leader's pid, which the kernel does not give to another process while the group has a member."""
-    listing = subprocess.run(["ps", "-axo", "pid=,pgid=,stat=,command="], stdin=subprocess.DEVNULL,
+    leader's pid, which the kernel does not give to another process while the group has a member; the leader itself,
+    once it has been reaped, is not asked for."""
+    listing = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,stat=,command="], stdin=subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace",
                              timeout=60, check=False).stdout
     members = []
     for line in listing.splitlines():
-        fields = line.split(None, 3)
-        if len(fields) >= 3 and fields[1] == str(group) and not fields[2].startswith("Z"):
-            members.append((int(fields[0]), fields[3] if len(fields) > 3 else ""))
+        fields = line.split(None, 4)
+        if len(fields) >= 4 and fields[2] == str(group) and not fields[3].startswith("Z"):
+            # Not the leader's pid and not a child of it: once the leader is gone its number may be a new process's
+            # (and that one's children), which are no one's leavings. What the leader left has been re-parented.
+            if int(fields[0]) != group and int(fields[1]) != group:
+                members.append((int(fields[0]), fields[4] if len(fields) > 4 else ""))
     return members
 
 
@@ -1074,7 +1078,8 @@ def main() -> int:
                                + "\n  ".join(left))
             missed = must_fail - failed_rows(mutant_output)
             if mutant_status == 0 or missed:
-                return False, f"FAIL: mutation {name} ({source}) was not caught by {sorted(missed) or 'any row'}"
+                return False, (f"FAIL: mutation {name} ({source}) was not caught by {sorted(missed) or 'any row'} "
+                               f"(status {mutant_status}; the end of its output:\n{mutant_output[-1500:]})")
             return True, f"mutation {name}: caught by {sorted(failed_rows(mutant_output) & must_fail)}"
 
         # The mutants are independent processes: a few at a time keeps the whole under the test's timeout.
