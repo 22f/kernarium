@@ -14,8 +14,9 @@ the launch refusal, the grammar, the digest's inputs, the PNG checks, the deadli
 and reaping, the icon source's bound), and requires the rows named here to fail: a row that cannot tell the rule
 from its absence is no row. The Android glue (AndroidPlatform) cannot run on a JVM: what it must not do (take a
 substitute for a lookup that failed, read the manifest's enabled flag, use the wall clock, draw an icon for the
-device's own configuration, add resource files its own way) is checked on its text, and each of those checks has its
-own mutant. Skipped (status 77) where the host has no JDK.
+device's own configuration, add resource files its own way, leave the image's build time out of a built-in
+application's icon key) is checked on its text, and each of those checks has its own mutant. The Java rows run on a
+64 MiB heap, so that a label of megabytes does not fit a copy of itself (the cleaning's bound is a row). Skipped (status 77) where the host has no JDK.
 """
 
 from __future__ import annotations
@@ -57,9 +58,27 @@ MUTATIONS = [
      "        if (false) {",
      {"label-bidi-and-format-dropped", "list-hostile-labels"}),
     ("label-not-escaped-in-the-listing", "AppsCommand.java",
-     "LabelText.sanitize(label, entry.packageName)",
-     "(label == null ? entry.packageName : label)",
+     "return LabelText.sanitize(platform.label(entry), entry.packageName);",
+     "String raw = platform.label(entry);\n            return raw == null ? entry.packageName : raw;",
      {"list-hostile-labels"}),
+    ("label-cleaned-whole", "LabelText.java",
+     "            if (out.length() > CLEAN_LIMIT) {\n"
+     "                break; // past both bounds already: cut() keeps less than this, so the rest cannot change the label\n"
+     "            }\n",
+     "",
+     {"label-huge-is-cut-without-copying-it", "list-huge-label-is-one-row"}),
+    ("label-cleaning-stops-too-soon", "LabelText.java",
+     "static final int CLEAN_LIMIT = 2 * MAX_BYTES;",
+     "static final int CLEAN_LIMIT = 10;",
+     {"label-cleaning-stops-without-changing-the-label", "label-huge-is-cut-without-copying-it"}),
+    ("label-out-of-memory-not-contained", "AppsCommand.java",
+     "} catch (Exception | OutOfMemoryError problem) {",
+     "} catch (Exception problem) {",
+     {"list-label-out-of-memory-uses-the-package"}),
+    ("label-failure-fails-the-listing", "AppsCommand.java",
+     "            return LabelText.sanitize(null, entry.packageName);\n        }\n    }",
+     "            throw new IllegalStateException(problem);\n        }\n    }",
+     {"list-label-unreadable-uses-the-package", "list-label-out-of-memory-uses-the-package"}),
     ("label-surrogates-pass", "LabelText.java",
      "if (type == Character.SURROGATE || (cp & 0xFFFE) == 0xFFFE",
      "if (false || (cp & 0xFFFE) == 0xFFFE",
@@ -310,6 +329,12 @@ PLATFORM_RULES = [
      lambda t: "SourceBound.within(" in t and t.index("SourceBound.within(") < t.index("getDrawableForDensity(")),
     ("icons are drawn for a fixed configuration", lambda t: "UI_MODE_NIGHT_NO" in t and "ICON_LOCALE" in t
      and "configuration()" not in t.split("private static Configuration iconConfiguration()")[1].split("\n    }\n")[0]),
+    ("a built-in application that was never updated carries the image's build time in its icon key",
+     lambda t: re.search(r"FLAG_SYSTEM\) != 0;", t) is not None
+     and re.search(r"builtIn && \(application\.flags & ApplicationInfo\.FLAG_UPDATED_SYSTEM_APP\) == 0\) \{\s*"
+                   r"updated = Math\.max\(updated, Build\.TIME\);", t) is not None
+     and re.search(r"info\.exported,\s*true,\s*permitted\(info\.permission\), packageInfo\.getLongVersionCode\(\),\s*"
+                   r"updated,", t) is not None),
     ("every resource file the framework adds is added",
      lambda t: all(word in t for word in ("addAssetPathAsSharedLibrary(", "addOverlayPath(", "ResourcePaths.of(",
                                           "application.publicSourceDir", "application.splitPublicSourceDirs",
@@ -355,6 +380,14 @@ PLATFORM_MUTATIONS = [
      "        Configuration configuration = new Configuration();\n        configuration.densityDpi = ICON_DENSITY;",
      "        Configuration configuration = new Configuration(configuration());\n        configuration.densityDpi = ICON_DENSITY;",
      "icons are drawn for a fixed configuration"),
+    ("image-build-left-out-of-the-icon-key",
+     "updated = Math.max(updated, Build.TIME);",
+     "updated = updated + 0;",
+     "a built-in application that was never updated carries the image's build time in its icon key"),
+    ("updated-built-in-also-takes-the-image-build",
+     "if (builtIn && (application.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0) {",
+     "if (builtIn) {",
+     "a built-in application that was never updated carries the image's build time in its icon key"),
     ("overlays-not-added",
      "cookie = assets.addOverlayPath(item.path);",
      "cookie = 1;",
@@ -392,7 +425,7 @@ def compile_and_run(javac: str, java: str, scratch: pathlib.Path, sources: list[
         check=False)
     if compiled.returncode != 0:
         return -1, f"javac:\n{compiled.stdout}"
-    ran = subprocess.run([java, "-Dfile.encoding=UTF-8", "-cp", str(classes), "com.kernarium.apps.AppsCommandTest"],
+    ran = subprocess.run([java, "-Xmx64m", "-Dfile.encoding=UTF-8", "-cp", str(classes), "com.kernarium.apps.AppsCommandTest"],
                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                          timeout=120, check=False)
     return ran.returncode, ran.stdout

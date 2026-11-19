@@ -34,6 +34,7 @@ import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.drawable.AdaptiveIconDrawable;
 import android.graphics.drawable.Drawable;
+import android.os.Build;
 import android.os.LocaleList;
 import android.os.ServiceManager;
 import android.os.SystemClock;
@@ -121,9 +122,17 @@ final class AndroidPlatform implements AppsCommand.Platform {
             // Enabled: the resolver's own answer. The query does not ask for disabled components, so every
             // activity it returns is enabled for the user, and ActivityInfo.isEnabled() (the manifest's flag
             // and the application's) would drop an alias that is disabled in the manifest and enabled since.
-            result.add(new Entry(info.packageName, info.name, (application.flags & ApplicationInfo.FLAG_SYSTEM) != 0,
+            boolean builtIn = (application.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+            long updated = packageInfo.lastUpdateTime;
+            if (builtIn && (application.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0) {
+                // A built-in application that was never updated takes its update time from its APK's file
+                // time, one fixed date in every image, and the resource fingerprint names paths and not
+                // content: the image's own build time is what changes the icon key across an image update.
+                updated = Math.max(updated, Build.TIME);
+            }
+            result.add(new Entry(info.packageName, info.name, builtIn,
                     info.exported, true, permitted(info.permission), packageInfo.getLongVersionCode(),
-                    packageInfo.lastUpdateTime, info.getIconResource(), ResourcePaths.fingerprint(paths), info));
+                    updated, info.getIconResource(), ResourcePaths.fingerprint(paths), info));
         }
         return result;
     }

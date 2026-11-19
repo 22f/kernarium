@@ -561,6 +561,9 @@ def check_rows(guest) -> str:
     if not any(row.package == SETTINGS_PACKAGE for row in built_in):
         raise fail(f"{SETTINGS_PACKAGE} is not listed as a built-in application: "
                    f"{[row.package for row in built_in][:12]}")
+    if any(row.package == SETTINGS_PACKAGE and row.label == SETTINGS_PACKAGE for row in built_in):
+        raise fail(f"{SETTINGS_PACKAGE} is listed under its package name: the labels in the applications' "
+                   "resources are not read")
     mine = rows_of(listed, probe.package_of("first"))
     expected = {
         probe.component("first", "listed"): probe.LISTED_HOSTILE_LABEL,
@@ -575,9 +578,9 @@ def check_rows(guest) -> str:
     if [(row.token, row.label, row.builtin) for row in other] != [
             (probe.component("second", "only"), probe.LISTED_SECOND_LABEL, False)]:
         raise fail(f"the second probe's rows are {other}")
-    return (f"{len(built_in)} built in, Settings among them; the probe's two launcher activities are listed with "
-            f"{probe.LISTED_HOSTILE_LABEL!r} and a {len(probe.LISTED_LONG_LABEL)}-character cut label; its hidden and "
-            "no-filter activities are not")
+    return (f"{len(built_in)} built in, Settings among them under its own label; the probe's two launcher "
+            f"activities are listed with {probe.LISTED_HOSTILE_LABEL!r} and a {len(probe.LISTED_LONG_LABEL)}-character "
+            "cut label; its hidden and no-filter activities are not")
 
 
 def check_picture(record: IconRecord, corners: tuple[int, int, int] | None = None,
@@ -636,8 +639,9 @@ def check_icons(guest) -> str:
     check_picture(resource, corners=probe.BACKGROUND_RGB, centre=probe.FOREGROUND_RGB)
     probe_listed = probe.component("first", "listed")
     asked = [probe_listed, SETTINGS_NOT_LAUNCHER, probe.component("first", "hidden"), settings[0],
-             probe.component("first", "plain"), "org.example.andarium.appsprobe.absent/android.app.Activity"]
-    expected = ["noicon", "missing", "missing", "ok", "missing", "missing"]
+             probe.component("first", "plain"), probe.component("first", "guarded"),
+             "org.example.andarium.appsprobe.absent/android.app.Activity"]
+    expected = ["noicon", "missing", "missing", "ok", "missing", "missing", "missing"]
     statuses = [record.status for record in icons_of(guest, asked)]
     if statuses != expected:
         raise fail(f"statuses for {asked} are {statuses}, not {expected}")
@@ -649,9 +653,10 @@ def check_icons(guest) -> str:
             "probe has the colour in its corners and the disc in its middle; noicon, missing and the order asked")
 
 
-def resumed(guest, token: str, seconds: float = LAUNCH_SECONDS, alternatives: tuple[str, ...] = ()) -> bool:
+def resumed(guest, token: str, seconds: float | None = None, alternatives: tuple[str, ...] = ()) -> bool:
     """Whether the component becomes the resumed activity within the time (an alias may show as the activity it
     stands for: name that one in `alternatives`)."""
+    seconds = LAUNCH_SECONDS if seconds is None else seconds
     package = token.split("/")[0]
     names = (token.split("/")[1], *alternatives)
     deadline = time.monotonic() + seconds
@@ -664,6 +669,19 @@ def resumed(guest, token: str, seconds: float = LAUNCH_SECONDS, alternatives: tu
     return False
 
 
+def go_home(guest, package: str, seconds: float | None = None) -> None:
+    """Presses HOME and waits, with a bound, until none of the package's activities is the resumed one."""
+    seconds = LAUNCH_SECONDS if seconds is None else seconds
+    guest.shell("input keyevent KEYCODE_HOME")
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        dump = guest.run("dumpsys activity activities", timeout=60).text
+        if not any("ResumedActivity" in line and package in line for line in dump.splitlines()):
+            return
+        time.sleep(1)
+    raise fail(f"{package} is still the resumed application {seconds:g} s after the home key")
+
+
 def check_launch(guest) -> str:
     target = probe.component("first", "listed")
     result = command_run(guest, "launch", target)
@@ -671,8 +689,7 @@ def check_launch(guest) -> str:
         raise fail(f"launch {target}: exit {result.status}, stdout {result.out!r}, stderr {result.err.strip()!r}")
     if not resumed(guest, target):
         raise fail(f"{target} did not become the resumed activity within {LAUNCH_SECONDS} s")
-    guest.shell("input keyevent KEYCODE_HOME")
-    time.sleep(2)
+    go_home(guest, probe.package_of("first"))
     again = command_run(guest, "launch", target)
     if again.status != 0 or again.out != f"launched\t{target}\n".encode() or again.err.strip():
         raise fail(f"launch {target} again: exit {again.status}, stdout {again.out!r}, stderr {again.err.strip()!r}")
@@ -706,8 +723,7 @@ def check_alias(guest) -> str:
         icon = icons_of(guest, [alias])[0]
         if icon.status != "noicon":
             raise fail(f"the icon of the enabled alias is {icon.status}, not noicon (the application declares none)")
-        guest.shell("input keyevent KEYCODE_HOME")
-        time.sleep(2)
+        go_home(guest, probe.package_of("first"))
         started = command_run(guest, "launch", alias)
         if started.status != 0 or started.out != f"launched\t{alias}\n".encode() or started.err.strip():
             raise fail(f"launch {alias}: exit {started.status}, stdout {started.out!r}, stderr {started.err.strip()!r}")
@@ -728,6 +744,7 @@ def check_refusals(guest) -> str:
     refused = [
         probe.component("first", "hidden"),      # not exported
         probe.component("first", "plain"),       # exported, no launcher filter
+        probe.component("first", "guarded"),     # exported with a launcher filter, behind a permission the shell lacks
         SETTINGS_NOT_LAUNCHER,                   # a built-in application's activity that is not a launcher one
         f"{first}/android.app.Missing",          # an activity the package does not have
         "org.example.andarium.appsprobe.absent/android.app.Activity",   # a package that is not installed

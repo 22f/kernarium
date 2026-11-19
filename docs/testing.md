@@ -1048,7 +1048,7 @@ calls need a built image.
 command ([README](../android/lineage-24/README.md#launcher-applications)): as the adb shell
 user, `kernarium_apps` is in the image and its `digest` and `list` carry one header block (the foreground
 user, the system's first locale, a count that matches), with rows in order, names in the grammar and
-labels that are safe and within the bounds; Settings is listed as built in, and the probe
+labels that are safe and within the bounds; Settings is listed as built in under its own label, and the probe
 application (`appsprobe_apk.py`: two launcher activities, one with a hostile label and one with a
 label over the bound, a launcher activity that is not exported, an exported one with no launcher
 filter and a launcher alias that the manifest disables; a second package whose label is a string
@@ -1075,7 +1075,8 @@ launch refusal, the grammar, the digest's inputs, the PNG checks, the deadlines,
 where the rows it names must fail; it also checks the image's wiring, that the sources write
 and open nothing, and, as text with a mutant for each, what the Android glue must not do (a
 substitute for a failed lookup, the manifest's enabled flag, the wall clock, the device's own
-configuration for an icon). `android17-app-shortcuts-runner` (tooling; skipped without keytool and
+configuration for an icon, a built-in application's icon key without the image's build time).
+`android17-app-shortcuts-runner` (tooling; skipped without keytool and
 jarsigner) runs the probe packages, the strict parsers and every step against a scripted guest
 that differs one way at a time; the Android calls need a built image.
 `android17-sms-service` (tooling; skipped without a JDK) runs the text message

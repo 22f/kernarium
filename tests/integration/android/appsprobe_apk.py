@@ -6,13 +6,15 @@ MAIN with the LAUNCHER category, with their labels, and starts one. Each activit
 framework class (see orientation_probe_apk.py: the package has no code of its own), so a manifest is the whole
 application, and the manifest is what the command reads:
 
-- ``first`` has four activities: ``listed`` (a launcher activity whose label holds a TAB, a line break, a
+- ``first`` has five activities: ``listed`` (a launcher activity whose label holds a TAB, a line break, a
   right-to-left override and a zero-width space, which the listing must escape), ``long`` (a launcher activity
   whose label is longer than the listing's bound), ``hidden`` (a launcher activity that is not exported, which
-  the command must neither list nor start) and ``plain`` (exported, with no launcher filter, which the command
-  must not start either), and an ``activity-alias`` (``alias``, a launcher alias that is disabled in the manifest:
-  the command lists it, draws it and starts it only once ``pm enable`` has enabled it for the user). The package
-  declares no icon, so the icon of its activities is ``noicon``;
+  the command must neither list nor start), ``plain`` (exported, with no launcher filter, which the command
+  must not start either) and ``guarded`` (exported, with a launcher filter, behind a permission that nothing
+  grants the shell user: not an entry, so neither listed, drawn nor started), and an ``activity-alias``
+  (``alias``, a launcher alias that is disabled in the manifest: the command lists it, draws it and starts it
+  only once ``pm enable`` has enabled it for the user). The package declares no icon, so the icon of its
+  activities is ``noicon``;
 - ``second`` has one launcher activity, a resource-backed one: its label is a string resource and its icon (the
   application's) is an adaptive icon of a colour resource and a bitmap layer, the case the command's resource
   path, source bound and composition exist for. It is installed and removed to change the set of applications;
@@ -39,7 +41,8 @@ SUCCESSORS = ("first-v2",)
 #: The attributes the probe's XML uses (the shared table's, and the icon, the drawable of a layer, enabled and the
 #: alias's target), with their android.R.attr ids.
 ATTRIBUTES = {**binary_xml.ATTRIBUTES, "icon": 0x01010002, "enabled": 0x0101000E, "drawable": 0x01010199,
-              "targetActivity": 0x01010202}
+              "targetActivity": 0x01010202,
+              "permission": 0x01010006}
 
 #: The resource ids of the second package's table (package 0x7f; types 1 mipmap, 2 drawable, 3 color, 4 string).
 RES_MIPMAP_ICON = 0x7F010000
@@ -59,8 +62,11 @@ CLASSES = {
     "long": "android.app.TabActivity",
     "hidden": "android.app.ListActivity",
     "plain": "android.app.ExpandableListActivity",
+    "guarded": "android.app.AliasActivity",
     "only": "android.app.Activity",
 }
+#: The permission that ``guarded`` asks for: nobody defines it, so the shell user does not hold it.
+GUARD_PERMISSION = f"{PACKAGE_PREFIX}.permission.GUARD"
 #: The launcher alias of ``first``: its own name, and the activity it stands for.
 ALIAS_NAME = "org.example.andarium.appsprobe.first.Alias"
 ALIAS_TARGET = CLASSES["listed"]
@@ -83,7 +89,7 @@ def package_of(variant: str) -> str:
 
 def activity_names(variant: str) -> tuple[str, ...]:
     """The activities a variant's manifest declares."""
-    return ("listed", "long", "hidden", "plain") if variant.startswith("first") else ("only",)
+    return ("listed", "long", "hidden", "plain", "guarded") if variant.startswith("first") else ("only",)
 
 
 def alias_component() -> str:
@@ -110,6 +116,8 @@ def manifest_tree(variant: str) -> binary_xml.Element:
     for activity in activity_names(variant):
         attributes: list[tuple[str, str | int | bool | binary_xml.Reference]] = [("name", CLASSES[activity])]
         attributes.append(("exported", activity != "hidden"))
+        if activity == "guarded":
+            attributes.append(("permission", GUARD_PERMISSION))
         label: str | binary_xml.Reference | None = {"listed": HOSTILE_LABEL, "long": LONG_LABEL}.get(activity)
         if activity == "only":
             label = binary_xml.Reference(RES_STRING_LABEL)

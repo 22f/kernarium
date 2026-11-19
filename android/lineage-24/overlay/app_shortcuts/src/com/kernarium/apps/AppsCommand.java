@@ -264,18 +264,24 @@ final class AppsCommand {
         header(answer, listing);
         answer.line("rows");
         for (Entry entry : listing.rows) {
-            String label;
-            try {
-                label = platform.label(entry);
-            } catch (Exception problem) {
-                label = null; // an application whose label cannot be read is listed under its package name
-            }
-            answer.line(entry.packageName + "\t" + entry.activity + "\t"
-                    + LabelText.sanitize(label, entry.packageName) + "\t" + (entry.builtin ? "1" : "0") + "\t"
-                    + Listing.iconKey(entry));
+            answer.line(entry.packageName + "\t" + entry.activity + "\t" + label(platform, entry) + "\t"
+                    + (entry.builtin ? "1" : "0") + "\t" + Listing.iconKey(entry));
         }
         answer.line("end\t" + listing.rows.size());
         return EXIT_OK;
+    }
+
+    /**
+     * The safe label of one application. A label that cannot be read, or that is too big to read or
+     * clean (an application's own text can be megabytes), is that one application's failure: it is listed
+     * under its package name, and the rest of the listing is unaffected.
+     */
+    private static String label(Platform platform, Entry entry) {
+        try {
+            return LabelText.sanitize(platform.label(entry), entry.packageName);
+        } catch (Exception | OutOfMemoryError problem) {
+            return LabelText.sanitize(null, entry.packageName);
+        }
     }
 
     private static Entry find(List<Entry> reported, Component component) {

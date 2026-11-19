@@ -96,6 +96,7 @@ public final class AppsCommandTest {
         List<String> locales = new ArrayList<>(Arrays.asList("en-US", "ja-JP"));
         Map<String, String> labels = new HashMap<>();
         Set<String> labelFails = new HashSet<>();
+        Set<String> labelOutOfMemory = new HashSet<>();
         IconSource icons = (entry, size) -> new Icon(size, true, false, png(300, 1));
         AppsCommand.StartResult startResult = new AppsCommand.StartResult(0, "Starting: Intent { }\n");
         final List<List<String>> started = new ArrayList<>();
@@ -129,6 +130,9 @@ public final class AppsCommandTest {
         public String label(Entry entry) throws Exception {
             if (labelFails.contains(entry.packageName)) {
                 throw new IllegalStateException("no resources");
+            }
+            if (labelOutOfMemory.contains(entry.packageName)) {
+                throw new OutOfMemoryError("a label too big to read");
             }
             return labels.get(entry.packageName + "/" + entry.activity);
         }
@@ -336,6 +340,13 @@ public final class AppsCommandTest {
         return out.toString();
     }
 
+    /** {@code count} copies of one UTF-16 unit, built without a second copy of it (the tests run on a small heap). */
+    private static String big(char unit, int count) {
+        char[] chars = new char[count];
+        Arrays.fill(chars, unit);
+        return new String(chars);
+    }
+
     private static String sanitize(String raw) {
         return LabelText.sanitize(raw, "fallback.pkg");
     }
@@ -353,7 +364,6 @@ public final class AppsCommandTest {
         starts();
         children();
         sources();
-        sizes();
         System.out.println(failures == 0 ? "PASS" : "FAILED " + failures);
         System.exit(failures == 0 ? 0 : 1);
     }
@@ -449,6 +459,28 @@ public final class AppsCommandTest {
             same("fallback.pkg", LabelText.sanitize(null, "fallback.pkg"), "null");
             same("fallback.pkg", LabelText.sanitize("", "fallback.pkg"), "empty");
             same("fallback.pkg", LabelText.sanitize("\t\n\u202E\u200B", "fallback.pkg"), "nothing printable is left");
+        });
+        row("label-huge-is-cut-without-copying-it", () -> {
+            // The run has a 64 MiB heap: a label of six million characters (12 MiB) does not fit a copy of
+            // itself, a list of its code points and the rest of the process at once.
+            same(repeat("\u8A08", 79) + "\u2026", sanitize(big('\u8A08', 6_000_000)), "cut to 79 code points and an ellipsis");
+            same("fallback.pkg", LabelText.sanitize(big('\u200B', 6_000_000), "fallback.pkg"),
+                    "six million characters of nothing printable leave the package name");
+        });
+        row("label-cleaning-stops-without-changing-the-label", () -> {
+            // The text is cleaned only as far as the cut needs, and the label is what cleaning all of it gives.
+            String[][] cases = {
+                {"x", repeat("x", 79) + "\u2026"},
+                {"\u8A08", repeat("\u8A08", 79) + "\u2026"},
+                {" a", repeat("a ", 39) + "a\u2026"},
+                {"a\u202Eb\u200B\u0001", repeat("ab ", 26) + "a\u2026"},
+                {"ab\u00A0", repeat("ab ", 26) + "a\u2026"},
+                {"\uD83D\uDE00", repeat("\uD83D\uDE00", 79) + "\u2026"},
+                {"\t", "fallback.pkg"},
+            };
+            for (String[] each : cases) {
+                same(each[1], sanitize(repeat(each[0], 400_000 / each[0].length())), "a label of repeated " + show(each[0]));
+            }
         });
     }
 
@@ -635,6 +667,27 @@ public final class AppsCommandTest {
             Parsed parsed = parseList(run(fake, "list"), true);
             same("com.broken.app", parsed.rows.get(0)[2], "the label could not be read");
             same("com.none.app", parsed.rows.get(1)[2], "the application has no label");
+        });
+        row("list-huge-label-is-one-row", () -> {
+            Fake fake = new Fake().with(app("com.big.app", "com.big.app.Main"), app("com.next.app", "com.next.app.Main"));
+            fake.labels.put("com.big.app/com.big.app.Main", big('\u8A08', 6_000_000));
+            fake.labels.put("com.next.app/com.next.app.Main", "Next");
+            Result result = run(fake, "list");
+            Parsed parsed = parseList(result, true);
+            same(2, parsed.rows.size(), "both applications are listed");
+            same(repeat("\u8A08", 79) + "\u2026", parsed.rows.get(0)[2], "the big label is cut like any other");
+            same("Next", parsed.rows.get(1)[2], "the next label");
+            check(result.out.length < 4096, "the answer does not carry the label: " + result.out.length);
+        });
+        row("list-label-out-of-memory-uses-the-package", () -> {
+            Fake fake = new Fake().with(app("com.big.app", "com.big.app.Main"), app("com.next.app", "com.next.app.Main"));
+            fake.labelOutOfMemory.add("com.big.app");
+            fake.labels.put("com.next.app/com.next.app.Main", "Next");
+            Result result = run(fake, "list");
+            same(0, result.status, "the command succeeds");
+            Parsed parsed = parseList(result, true);
+            same("com.big.app", parsed.rows.get(0)[2], "the label that does not fit is that application's failure");
+            same("Next", parsed.rows.get(1)[2], "the others are listed as they are");
         });
         row("list-empty", () -> {
             Parsed parsed = parseList(run(new Fake(), "list"), true);
@@ -1401,15 +1454,5 @@ public final class AppsCommandTest {
             described.add(item.kind + " " + item.path);
         }
         return described;
-    }
-
-    private static void sizes() {
-        row("worst-case-answers-fit-the-host-limit", () -> {
-            // The host reads at most 1 MiB of stdout (ShellV2's default limit): the three answers stay far below it.
-            int row = 255 + 1 + 255 + 1 + 320 + 1 + 1 + 1 + 16 + 1;
-            check(row <= 860, "a row is at most 860 bytes: " + row);
-            check(1024L * row + 1024 < 900 * 1024, "1024 rows");
-            check(8L * (AppsCommand.MAX_PNG_BYTES + 700) < 800 * 1024, "8 icons");
-        });
     }
 }

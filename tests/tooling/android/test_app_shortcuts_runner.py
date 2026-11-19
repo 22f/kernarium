@@ -157,6 +157,7 @@ class ScriptedImage:
                         "name": attributes["name"], "exported": bool(attributes.get("exported")),
                         "launcher": any(child.tag == "intent-filter" for child in activity.children),
                         "enabled": attributes.get("enabled", True), "manifest_enabled": attributes.get("enabled", True),
+                        "permission": attributes.get("permission"),
                         "alias": activity.tag == "activity-alias", "target": attributes.get("targetActivity"),
                         "label": label, "icon": "resource" if isinstance(application_icon, binary_xml.Reference) else None})
             self.add(Package(name, version, old.installed if old else self.clock, False, activities))
@@ -196,6 +197,8 @@ class ScriptedImage:
                 line = ""
             return line, 0, ""
         if words[:2] == ["input", "keyevent"]:
+            if words[2] == "KEYCODE_HOME" and self.deviation != "home-ignored":
+                self.resumed = None
             return "", 0, ""
         if words[:3] == ["settings", "get", "system"]:
             return "null\n", 0, ""
@@ -236,11 +239,14 @@ class ScriptedImage:
             if not package.enabled:
                 continue
             for activity in package.activities:
-                listed = activity["launcher"] and (activity["exported"] or self.deviation == "hidden-listed")
+                listed = activity["launcher"] and (activity["exported"] or self.deviation == "hidden-listed") \
+                    and (not activity.get("permission") or self.deviation == "guarded-listed")
                 if not listed or not self.component_enabled(activity):
                     continue
                 label = activity["label"]
                 if self.deviation == "label-resource-unread" and label == probe.SECOND_LABEL:
+                    label = package.name
+                if self.deviation == "label-unresolved" and package.builtin:
                     label = package.name
                 label = {probe.HOSTILE_LABEL: probe.LISTED_HOSTILE_LABEL, probe.LONG_LABEL: probe.LISTED_LONG_LABEL}.get(label, label)
                 if self.deviation == "label-raw" and activity["label"] == probe.HOSTILE_LABEL:
@@ -319,7 +325,8 @@ class ScriptedImage:
             if package in self.packages:
                 for candidate in self.packages[package].activities:
                     if (candidate["name"] == activity and candidate["launcher"] and candidate["exported"]
-                            and self.component_enabled(candidate)):
+                            and self.component_enabled(candidate)
+                            and (not candidate.get("permission") or self.deviation == "guarded-icon")):
                         found = candidate
             if found is None or not self.packages[package].enabled:
                 out += f"icon\t{token}\tmissing\t0\t0\t-\t0\t0\t-\n".encode()
@@ -356,7 +363,8 @@ class ScriptedImage:
         if grammar_ok and package in self.packages and self.packages[package].enabled:
             for candidate in self.packages[package].activities:
                 if candidate["name"] == activity and candidate["launcher"] and self.component_enabled(candidate) and (
-                        candidate["exported"] or self.deviation == "launch-hidden"):
+                        candidate["exported"] or self.deviation == "launch-hidden") and (
+                        not candidate.get("permission") or self.deviation == "guarded-launched"):
                     found = candidate
         if self.deviation == "injection" and not grammar_ok and "touch" in token:
             self.files.add(marker)
@@ -417,6 +425,7 @@ class ProbePackages(Fixture):
                 values = dict(activity.attributes)
                 self.assertEqual(probe.CLASSES[expected], values["name"])
                 self.assertEqual(expected != "hidden", values["exported"])
+                self.assertEqual(probe.GUARD_PERMISSION if expected == "guarded" else None, values.get("permission"))
                 launcher = [child for child in activity.children if child.tag == "intent-filter"]
                 self.assertEqual(0 if expected == "plain" else 1, len(launcher))
                 if expected == "listed":
@@ -472,7 +481,7 @@ class ProbePackages(Fixture):
     def test_the_variants_of_a_package_are_one_package(self) -> None:
         self.assertEqual(probe.package_of("first"), probe.package_of("first-v2"))
         self.assertNotEqual(probe.package_of("first"), probe.package_of("second"))
-        self.assertEqual(len(set(probe.CLASSES[name] for name in probe.activity_names("first"))), 4)
+        self.assertEqual(len(set(probe.CLASSES[name] for name in probe.activity_names("first"))), 5)
         self.assertEqual(f"{probe.package_of('first')}/{probe.ALIAS_NAME}", probe.alias_component())
         self.assertTrue(runner.ACTIVITY_NAME.fullmatch(probe.ALIAS_NAME))
 
@@ -625,6 +634,7 @@ class Steps(Fixture):
         options = types_namespace()
         with contextlib.redirect_stdout(io.StringIO()), \
                 unittest.mock.patch.object(runner.time, "sleep", lambda seconds: None), \
+                unittest.mock.patch.object(runner, "LAUNCH_SECONDS", 0.5), \
                 unittest.mock.patch.object(runner, "open_guest", lambda options, adb, private: (image, lambda: None)), \
                 unittest.mock.patch.object(runner.probe, "build_apk", self.build):
             runner.run(options, "adb", pathlib.Path(tempfile.mkdtemp(prefix="uml-appshort-run-")), report)
@@ -653,12 +663,12 @@ class Steps(Fixture):
         expected = {
             "digest-short": header, "header-differs": header, "unsorted": header, "label-raw": header,
             "label-uncut": header, "label-bidi": header, "list-no-end": header, "digest-unsalted": header,
-            "hidden-listed": rows, "label-resource-unread": rows,
+            "hidden-listed": rows, "label-resource-unread": rows, "label-unresolved": rows, "guarded-listed": rows,
             "icon-sha": icons, "icon-size": icons, "icon-corner": icons, "icons-no-end": icons, "icons-order": icons,
-            "icon-gray": icons, "icon-corrupt": icons, "icon-alpha-claimed": icons, "icon-resource-flat": icons,
-            "launch-not-resumed": launch, "launch-again-noisy": launch,
+            "guarded-icon": icons, "icon-gray": icons, "icon-corrupt": icons, "icon-alpha-claimed": icons, "icon-resource-flat": icons,
+            "launch-not-resumed": launch, "launch-again-noisy": launch, "home-ignored": launch,
             "alias-manifest-flag": alias, "alias-disabled-listed": rows,
-            "launch-hidden": refusals, "injection": refusals, "refusal-multiline": refusals, "disabled-launch": refusals,
+            "launch-hidden": refusals, "guarded-launched": refusals, "injection": refusals, "refusal-multiline": refusals, "disabled-launch": refusals,
             "usage-status": usage,
             "writes-file": clean, "denial": clean, "first-call-denial": clean,
             "digest-constant": sets, "static-keys": sets,

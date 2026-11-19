@@ -40,6 +40,8 @@ final class LabelText {
     static final int MAX_CODE_POINTS = 80;
     static final int MAX_BYTES = 320;
     static final int ELLIPSIS = 0x2026;
+    /** UTF-16 units of cleaned text past which cut() cuts whatever follows (a label can be megabytes). */
+    static final int CLEAN_LIMIT = 2 * MAX_BYTES;
 
     private LabelText() {}
 
@@ -53,10 +55,13 @@ final class LabelText {
     }
 
     private static String clean(String raw) {
-        StringBuilder out = new StringBuilder(raw.length());
+        StringBuilder out = new StringBuilder(Math.min(raw.length(), CLEAN_LIMIT + 2));
         boolean pendingSpace = false;
         int i = 0;
         while (i < raw.length()) {
+            if (out.length() > CLEAN_LIMIT) {
+                break; // past both bounds already: cut() keeps less than this, so the rest cannot change the label
+            }
             int cp = raw.codePointAt(i);
             i += Character.charCount(cp);
             int replacement = classify(cp);

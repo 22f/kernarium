@@ -1053,8 +1053,9 @@ file, property or setting.
   reinstall keeps. The grammar of both names (ASCII, at most 255 bytes each) is
   the one place that says what the tool lists, takes and passes to a process.
 - **Commands.** `digest` prints a header block whose digest changes with the set
-  of entries, their versions and install times, the foreground user and
-  Android's language (it opens no application's resources); `list` prints the
+  of entries, their versions and update times (a built-in application that was never
+  updated takes the image's build time, since its files carry one fixed time), the
+  foreground user and Android's language (it opens no application's resources); `list` prints the
   block and one row per entry with the label in Android's current language, a
   built-in flag and an icon key; `icons` answers one PNG record (192 by 192, adaptive
   icons composed from their layers with no mask, drawn for a fixed density, day mode
@@ -1066,7 +1067,9 @@ file, property or setting.
   A change of the set is noticed by comparing digests, and an icon is fetched only when
   its key changed.
 - **Bounds.** A label is made safe (no control, separator, bidirectional or
-  invisible format character) and cut to 80 code points; at most 8 entries per
+  invisible format character) and cut to 80 code points, and cleaned only as far as
+  the cut needs; one that cannot be read or does not fit in memory is listed under its
+  package name and costs no other entry; at most 8 entries per
   package, 1024 rows, 8 icons per call, 96 KiB per PNG, 20 s before no further icon is
   started and 8 s for one icon's render (an icon's source is bounded from its
   files' headers before it is inflated); every answer is under 1 MiB, and a command
