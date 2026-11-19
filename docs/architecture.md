@@ -659,7 +659,8 @@ clean and file-backed and one copy serves every process at any load bias.
 `GadgetExecutor::run_aot`; it includes no engine and reaches memory only
 through the executor's TLB and `StaticGuestMemory::fetch`.
 
-- Switch: the component is on wherever a product carries it. `DARWIN_UML_AOT=0`
+- Switch: the component is on wherever a product carries it and the launch boots
+  the release the blob was made from (Release, below). `DARWIN_UML_AOT=0`
   in the environment, or `--aot=off` on the launch, runs the engine alone;
   `--aot=on` (or `--aot`) fails a launch whose build has none, and the launch's
   word beats the environment. The choice is made once, when the first executor
@@ -671,7 +672,8 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   configuration fails to configure with an explicit `UML_AOT_ARTIFACT` unless
   the field is `yes`. `scripts/check-embedded-artifacts.py --aot` fails a
   packaged framework without an accepted artifact or while the field is `no`,
-  one whose blob is not the accepted digest, and an application whose
+  one whose blob is not the accepted digest or was not made from the packaged
+  system (the three values the launch compares, below), and an application whose
   packaged runtime links the framework (its load commands name it) while the
   framework is absent, since dyld refuses to launch it; the application's
   optional embed step (`embed-device-framework.sh --optional`) stops the build

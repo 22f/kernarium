@@ -800,9 +800,9 @@ blocker in every one of them.
   `UML_AOT_IMAGE`, `UML_AOT_FSCK_EROFS` and `UML_AOT_DIAGNOSTICS`, and so does
   `arm64-aot-reporter`: a unit tree configured without them has neither row,
   and its `check-unit` says nothing about the differential of ahead-of-time
-  code (a tree with an artifact runs every other row with the component on, as
-  the default has it). `arm64-aot-selection` runs where a build has the
-  component: on by default, off by `DARWIN_UML_AOT=0`, and a launch's word beats
+  code (a tree with an artifact has the component only where a launch selects
+  it for the release the artifact was made from). `arm64-aot-selection` runs
+  where a build has the component: on by default, off by `DARWIN_UML_AOT=0`, and a launch's word beats
   the environment, and it binds the launch to the release (the same release is
   on; another release ID, manifest digest or system-partition digest is off
   under `auto` and fails under `on`; a launch that states no release has no
