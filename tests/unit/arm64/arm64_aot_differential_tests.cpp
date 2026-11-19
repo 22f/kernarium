@@ -995,8 +995,9 @@ void randomize_fp_state(Case &c)
 }
 
 /* Where an AOT run first leaves the reference's path: the reference single
- * steps and records every instruction's state; each state the AOT run
- * returns the engine at must be one of them, in order. */
+ * steps and records every instruction's state, the state at each fault it
+ * repairs and the state it ends in; each state the AOT run returns the engine
+ * at, at a fault and at the end must be one of them, in order. */
 [[nodiscard]] bool diagnose(const Case &c, const LibraryImage &image,
 	std::uint64_t bias)
 {
@@ -1032,17 +1033,20 @@ void randomize_fp_state(Case &c)
 		first.pc = bias + c.pc_offset;
 		return snapshot_of(first);
 	}());
-	(void)drive(ref, ref_arena, c, 300000, [&](const arm64::CpuState &cpu) {
+	/* The states at a fault the run repairs are on the path, and so is the
+	 * state it ends in. */
+	const auto record = [&](const arm64::CpuState &cpu) {
 		trace.push_back(snapshot_of(cpu));
-	});
+	};
+	const auto ref_ended = drive(ref, ref_arena, c, 300000, record, record);
+	record(ref_ended.cpu);
 	aot::set_enabled(true);
 	std::size_t at = 0;
 	std::size_t exits = 0;
 	bool reported = false;
 	g_log.enabled = true;
 	g_log.blocks.clear();
-	const auto ended = drive(test, test_arena, c, 4000,
-		[&](const arm64::CpuState &cpu) {
+	const auto check = [&](const arm64::CpuState &cpu) {
 		if (reported)
 			return;
 		++exits;
@@ -1070,7 +1074,9 @@ void randomize_fp_state(Case &c)
 						r, static_cast<unsigned long long>(trace[i].x[r]),
 						static_cast<unsigned long long>(now.x[r]));
 		}
-	});
+	};
+	const auto ended = drive(test, test_arena, c, 4000, check, check);
+	check(ended.cpu);
 	aot::set_enabled(false);
 	g_log.enabled = false;
 	for (std::size_t i = g_log.blocks.size() > 6 ? g_log.blocks.size() - 6 : 0;
@@ -5726,7 +5732,8 @@ int main(int argc, char **argv)
 	require(aot_runtime::enabled());
 	aot::set_enabled(false);
 	if (!cfg.only.empty()) {
-		/* One case from a failure report, under the diagnosis. */
+		/* One case from a failure report, under the diagnosis: the exit
+		 * status says whether every exit lay on the reference path. */
 		unsigned long long seed = 0, pc = 0;
 		int faulting = 0, tbi = 0;
 		require(std::sscanf(cfg.only.c_str(), "%llx:%llx:%d:%d", &seed,
@@ -5738,8 +5745,7 @@ int main(int argc, char **argv)
 		auto c = make_case_from_seed(seed, bias, pc, faulting != 0,
 			tbi != 0, arena_base(bias));
 		randomize_fp_state(c);
-		(void)diagnose(c, image, bias);
-		return 0;
+		return diagnose(c, image, bias) ? 0 : 1;
 	}
 	bool scenarios_done = false;
 	/* libz when the build holds it (some scenarios name its functions),
