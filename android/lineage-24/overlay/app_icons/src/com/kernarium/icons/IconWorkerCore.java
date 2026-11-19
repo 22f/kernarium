@@ -172,11 +172,12 @@ final class IconWorkerCore {
             if (session == null) {
                 return answer;
             }
-            if (left(deadline) <= 0) {
-                return answer; // the bind took the rest; the worker is bound and idle
+            long remaining = left(deadline); // read once: this reading is the one the drawing is waited for with
+            if (remaining <= 0) {
+                return answer; // the bind took the rest: an immediate timeout, and the worker is bound and idle
             }
             asked = true;
-            answer = transact(session, resource, kinds, paths, left(deadline));
+            answer = transact(session, resource, kinds, paths, remaining);
             return answer;
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();

@@ -417,6 +417,26 @@ public final class IconProtocolTest {
         }
     }
 
+    /** A clock that reads what a row scripts, one reading per call, then the last one again; the real one when none. */
+    private static final class ScriptedClock implements IconWorkerCore.Clock {
+        volatile long[] script;
+        final AtomicInteger readings = new AtomicInteger();
+
+        void script(long... values) {
+            readings.set(0);
+            script = values;
+        }
+
+        @Override
+        public long now() {
+            long[] values = script;
+            if (values == null) {
+                return System.nanoTime() / 1_000_000;
+            }
+            return values[Math.min(readings.getAndIncrement(), values.length - 1)];
+        }
+    }
+
     private static IconWorkerCore.Reply ask(IconWorkerCore core) {
         return core.render(0x7f010000, new int[] {0}, new String[] {"/a/base.apk"});
     }
@@ -617,6 +637,55 @@ public final class IconProtocolTest {
                 same(0, rig.unbinds.get(), "the worker that connected is not blamed");
             } finally {
                 rig.shutdown();
+            }
+        });
+        row("worker-no-time-left-after-the-bind-starts-no-draw", () -> {
+            // Nothing left, or less than nothing, once the worker is bound: an immediate timeout. No draw is started,
+            // nothing is joined (a join of 0 waits for ever, a negative one throws), the worker stays bound and idle.
+            for (long over : new long[] {0, 1}) {
+                Rig rig = new Rig();
+                try {
+                    ScriptedClock clock = new ScriptedClock();
+                    IconWorkerCore core = new IconWorkerCore(rig.link, rig.poster, clock, LIMITS);
+                    check(ask(core).ok(), "a first request binds the worker");
+                    int drawn = rig.renders.get();
+                    rig.hangs = true;
+                    long start = 10_000;
+                    // readings: the deadline's start, the wait for the turn, the check after admission, then what is left
+                    clock.script(start, start, start, start + LIMITS.deadlineMillis + over);
+                    Call call = new Call(core, 0).await();
+                    check(!call.ok(), "no time left is a failure, not an exception");
+                    same(drawn, rig.renders.get(), "no draw was started");
+                    same(0, rig.unbinds.get(), "the worker is left bound: it was not asked");
+                    clock.script = null;
+                    rig.hangs = false;
+                    check(ask(core).ok(), "the next icon is still asked");
+                    same(1, rig.binds.get(), "of the same worker");
+                } finally {
+                    rig.shutdown();
+                }
+            }
+        });
+        row("worker-the-budget-is-read-once", () -> {
+            // 1 ms is left when the bind is checked and none (or less) by the time the draw would be waited for: the
+            // one reading decides, so the draw is joined for that 1 ms and fails, it is not joined for nothing.
+            for (long later : new long[] {0, 1}) {
+                Rig rig = new Rig();
+                try {
+                    ScriptedClock clock = new ScriptedClock();
+                    IconWorkerCore core = new IconWorkerCore(rig.link, rig.poster, clock, LIMITS);
+                    check(ask(core).ok(), "a first request binds the worker");
+                    rig.hangs = true;
+                    long start = 10_000;
+                    long almost = start + LIMITS.deadlineMillis - 1;
+                    clock.script(start, start, start, almost, almost + 1 + later);
+                    Call call = new Call(core, 0).await();
+                    check(!call.ok(), "the hung draw fails");
+                    check(call.millis < LIMITS.deadlineMillis, "at once, not when the worker ends: " + call.millis + " ms");
+                    waitFor(() -> rig.unbinds.get() == 1, 3000, "a worker that did not answer is released");
+                } finally {
+                    rig.shutdown();
+                }
             }
         });
         row("worker-a-bind-that-is-refused-is-a-failure", () -> {
