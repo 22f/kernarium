@@ -49,6 +49,10 @@ final class AndariumProcess {
         model = entry.makeModel()
         // An App Intent that runs in this process hands its request to this model.
         AndroidAppsHub.shared.attach(model)
+        // The tiles under Andarium in Shortcuts come from the cache, which
+        // answers while Android is off: each launch tells the system to ask for
+        // them again, as a refresh does when the list changes.
+        if !model.androidApps.apps.isEmpty { AndroidAppsHub.shared.searchIndex.shortcutsChanged() }
         #if TIP_JAR
         // From launch: a purchase the store delivers outside the sheet (an
         // approval, an interrupted purchase) is finished, whether or not the

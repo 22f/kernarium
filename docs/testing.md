@@ -573,7 +573,10 @@ line from a probe session's Settings. `FeedbackAskUITests` (the same build) adds
 `ANDARIUM_FEEDBACK_PROBE` to the probe session, which gives the sheet mail that can be
 sent, a composer stand-in and the preview's bug report, and walks Send's
 question, Create bug report, the pages of the report's row and Send without
-bug report.
+bug report. `AddToHomeUITests` (`ANDARIUM_ANDROID_APPS_PROBE`, a played list of
+Android apps) walks Settings > Apps > Add to Home Screen to the guide and presses
+Apple's Shortcuts button: Shortcuts opens on Andarium's page with a tile for each
+app.
 
 `AndariumPreviewUITests` drives `AndariumPreview` in the Simulator
 (`xcodebuild test -scheme AndariumPreview`): the screens it lists pass the
