@@ -2085,46 +2085,24 @@
         }
       }
     },
-    "Android apps appear in Search while this is on. Shortcuts and Siri still list them." : {
+    "Android apps appear in Search while this is on. They stay available in Shortcuts and Siri when it’s off." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "オンにすると、Androidアプリが検索に表示されます。“ショートカット”とSiriには引き続き表示されます。"
+            "value" : "オンの間は、Androidアプリが検索に表示されます。オフにしても、“ショートカット”とSiriでは引き続き使えます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "开启时，Android应用会出现在搜索中。“快捷指令”和Siri仍会列出它们。"
+            "value" : "开启时，Android应用会出现在搜索中。关闭后，仍可在“快捷指令”和Siri中使用。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "開啟時，Android應用程式會出現在搜尋中。「捷徑」和Siri仍會列出它們。"
-          }
-        }
-      }
-    },
-    "Android can’t open “%@” from an icon" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Androidでは“%@”をアイコンから開けません"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Android无法通过图标打开“%@”"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Android無法透過圖像打開「%@」"
+            "value" : "開啟時，Android應用程式會出現在「搜尋」中。關閉後，仍可在「捷徑」和Siri中使用。"
           }
         }
       }
@@ -3479,6 +3457,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "無法回復"
+          }
+        }
+      }
+    },
+    "Can’t open “%@”" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”を開けません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法打开“%@”"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法打開「%@」"
           }
         }
       }
@@ -5068,13 +5068,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "请先完成Android的设置，然后重新打开“%@”。"
+            "value" : "请先完成Android的设置，然后再打开“%@”。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "請先完成Android的設定，然後重新打開「%@」。"
+            "value" : "請先完成Android的設定，然後再打開「%@」。"
           }
         }
       }
@@ -9335,7 +9335,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "検索に表示"
+            "value" : "検索で表示"
           }
         },
         "zh-Hans" : {
@@ -9347,7 +9347,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在搜尋中顯示"
+            "value" : "顯示於「搜尋」"
           }
         }
       }
@@ -12873,24 +12873,24 @@
         }
       }
     },
-    "This version of Android is too old for Home Screen icons. Update Android in Andarium, then use the icon again." : {
+    "This version of Android is too old to open apps directly. Update Andarium, then open the app again." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このバージョンのAndroidは古く、ホーム画面のアイコンに対応していません。AndariumでAndroidをアップデートしてから、もう一度アイコンを使ってください。"
+            "value" : "このバージョンのAndroidは古いため、アプリを直接開けません。Andariumをアップデートしてから、もう一度開いてください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "这个版本的Android太旧，不支持主屏幕图标。请在Andarium中更新Android，然后再使用该图标。"
+            "value" : "此版本的Android太旧，无法直接打开应用。请更新Andarium，然后再打开该应用。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "這個版本的Android太舊，不支援主畫面圖像。請在Andarium中更新Android，然後再使用該圖像。"
+            "value" : "此版本的Android太舊，無法直接打開應用程式。請更新Andarium，然後再打開該應用程式。"
           }
         }
       }

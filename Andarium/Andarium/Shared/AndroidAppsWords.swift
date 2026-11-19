@@ -26,7 +26,8 @@ nonisolated enum AndroidAppsWords {
     static let emptyText = String(localized: "Android has no app with an icon to add.")
     static let noResultsText = String(localized: "No app in Android has this name.")
     static let searchSwitch = String(localized: "Show in Search")
-    static let searchFooter = String(localized: "Android apps appear in Search while this is on. Shortcuts and Siri still list them.")
+    static let searchFooter = String(
+        localized: "Android apps appear in Search while this is on. They stay available in Shortcuts and Siri when it\u{2019}s off.")
 
     static func noResults(_ query: String) -> String {
         String(localized: "No Results for \u{201C}\(query)\u{201D}")
@@ -122,11 +123,11 @@ nonisolated enum AndroidAppsWords {
     }
 
     static func toolMissingTitle(_ app: String) -> String {
-        String(localized: "Android can\u{2019}t open \u{201C}\(app)\u{201D} from an icon")
+        String(localized: "Can\u{2019}t open \u{201C}\(app)\u{201D}")
     }
 
     static let toolMissingText = String(
-        localized: "This version of Android is too old for Home Screen icons. Update Android in Andarium, then use the icon again.")
+        localized: "This version of Android is too old to open apps directly. Update Andarium, then open the app again.")
 
     static func recoveryText(_ app: String) -> String {
         String(localized: "Restart Android normally to open \u{201C}\(app)\u{201D}.")

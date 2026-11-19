@@ -429,7 +429,7 @@ SHOTS: list[Shot] = [
     feedback("feedback-file-refused-one", "feedback-file-refused-one", "The alert for one file that was not added: the title for one item and its reason."),
     s("add-home-row", "Add to Home Screen", "add-home-row", "Settings as the side keys open it while Android runs and lists apps: the Apps section has the Add to Home Screen row, Shortcuts on its right.", dark=True),
     s("add-home-page", "Add to Home Screen", "add-home-page", "The chooser: the apps Android lists with their icons, installed ones first and the ones built into Android after, each leading to the guide.", dark=True, wait=4.0),
-    s("add-home-page-search", "Add to Home Screen", "add-home-page-search", "The chooser with a short list, so that its last section is in view: the switch for Search, on, and the sentence under it that Shortcuts and Siri still list the apps.", dark=True, wait=4.0),
+    s("add-home-page-search", "Add to Home Screen", "add-home-page-search", "The chooser with a short list, so that its last section is in view: the switch for Search, on, and the sentence under it that the apps stay available in Shortcuts and Siri when it is off.", dark=True, wait=4.0),
     s("add-home-page-refreshing", "Add to Home Screen", "add-home-page-refreshing", "The chooser while Android is asked for a fresher list: the remembered list under a line that says so.", wait=4.0),
     s("add-home-page-loading", "Add to Home Screen", "add-home-page-loading", "The chooser with no list yet and none remembered: only the note that the list is being read from Android.", wait=4.0),
     s("add-home-page-failed", "Add to Home Screen", "add-home-page-failed", "The chooser when Android did not answer: the last list it gave, dated, with Try again.", wait=4.0),

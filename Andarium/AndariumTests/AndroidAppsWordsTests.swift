@@ -31,7 +31,7 @@ struct AndroidAppsWordsTests {
         "Android didn’t answer. Showing the list from %@.",
         "Add “%@” to Home Screen",
         "Show in Search",
-        "Android apps appear in Search while this is on. Shortcuts and Siri still list them.",
+        "Android apps appear in Search while this is on. They stay available in Shortcuts and Siri when it’s off.",
         "Android app",
         "In the Shortcuts app",
         "Open Shortcuts",
@@ -69,8 +69,8 @@ struct AndroidAppsWordsTests {
         "Restart Android normally to open “%@”.",
         "Android is still being set up",
         "Finish setting up Android, then open “%@” again.",
-        "Android can’t open “%@” from an icon",
-        "This version of Android is too old for Home Screen icons. Update Android in Andarium, then use the icon again.",
+        "Can’t open “%@”",
+        "This version of Android is too old to open apps directly. Update Andarium, then open the app again.",
     ]
 
     private func bundle(_ language: String) throws -> Bundle {

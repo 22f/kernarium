@@ -109,7 +109,7 @@ final class AddToHomeUITests: XCTestCase {
         XCTAssertTrue(toggle.exists, "the chooser has no Search switch")
         XCTAssertEqual(toggle.label, "Show in Search")
         XCTAssertEqual(toggle.value as? String, "1", "Search is on by default")
-        XCTAssertTrue(app.staticTexts["Android apps appear in Search while this is on. Shortcuts and Siri still list them."].exists)
+        XCTAssertTrue(app.staticTexts["Android apps appear in Search while this is on. They stay available in Shortcuts and Siri when it’s off."].exists)
     }
 
     @MainActor
@@ -118,7 +118,7 @@ final class AddToHomeUITests: XCTestCase {
         let toggle = element(app, "android-apps-search-switch")
         XCTAssertTrue(toggle.waitForExistence(timeout: 20))
         XCTAssertTrue(toggle.isHittable, "the switch for Search is in view without scrolling")
-        XCTAssertTrue(app.staticTexts["Android apps appear in Search while this is on. Shortcuts and Siri still list them."].exists)
+        XCTAssertTrue(app.staticTexts["Android apps appear in Search while this is on. They stay available in Shortcuts and Siri when it’s off."].exists)
     }
 
     @MainActor
