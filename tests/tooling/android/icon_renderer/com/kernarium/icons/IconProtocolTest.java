@@ -833,22 +833,19 @@ public final class IconProtocolTest {
                 rig.shutdown();
             }
         });
-        row("worker-an-idle-cleanup-that-finds-the-turn-held-is-not-lost", () -> {
-            // The request that scheduled the cleanup is paused between posting it and unlocking; the idle delay expires
-            // and the cleanup is dispatched while that request still holds the turn. It must look again, not give up:
-            // when the turn is free the worker is unbound, once.
+        row("worker-the-request-is-never-the-holder-its-own-cleanup-waits-for", () -> {
+            // The request is paused right after it handed its cleanup to the platform: the cleanup is dispatched, and it
+            // finds the turn free (the request has released it) and unbinds the worker, though the request is not back yet.
             Rig rig = new Rig();
             try {
                 rig.parkFirstPost = new CountDownLatch(1);
                 IconWorkerCore core = rig.core(LIMITS);
                 Call call = new Call(core, 0);
                 check(rig.firstPostParked.await(5, TimeUnit.SECONDS), "the request is paused after posting its cleanup");
-                Thread.sleep(LIMITS.idleMillis + 250); // the delay expires, the cleanup is dispatched and finds the turn held
-                same(0, rig.unbinds.get(), "the turn is held: nothing is unbound");
+                waitFor(() -> rig.unbinds.get() == 1, 3000, "the cleanup waits for the request that scheduled it");
                 rig.parkFirstPost.countDown();
                 call.await();
                 check(call.ok(), "the request was answered");
-                waitFor(() -> rig.unbinds.get() == 1, 3000, "the cleanup was lost: the worker stays bound");
                 Thread.sleep(250);
                 same(1, rig.unbinds.get(), "exactly once");
                 check(ask(core).ok(), "and the next request binds again");
@@ -857,7 +854,31 @@ public final class IconProtocolTest {
                 rig.shutdown();
             }
         });
-        row("worker-a-cleanup-of-an-older-request-does-nothing-and-is-not-retried", () -> {
+        row("worker-a-cleanup-is-not-lost-however-long-the-last-request-is-paused", () -> {
+            // After one successful drawing the request is paused after it posts its idle cleanup; the delay and every retry
+            // of the cleanup run out; then the request resumes and no more icons come. The worker is unbound, once.
+            Rig rig = new Rig();
+            try {
+                rig.autoIdle = false;
+                rig.parkFirstPost = new CountDownLatch(1);
+                IconWorkerCore core = rig.core(IconWorkerCore.PRODUCTION);
+                Call call = new Call(core, 0);
+                check(rig.firstPostParked.await(5, TimeUnit.SECONDS), "the request is paused after posting its cleanup");
+                for (int i = 0; i < IconWorkerCore.MAX_CLEANUP_RETRIES + 20; i++) {
+                    // bounded: a cleanup that waits for the turn would hold the main thread, and this with it
+                    rig.main.submit(rig.lastPosted()).get(5, TimeUnit.SECONDS);
+                }
+                rig.parkFirstPost.countDown();
+                call.await();
+                check(call.ok(), "the request was answered");
+                waitFor(() -> rig.unbinds.get() == 1, 3000, "the last request's cleanup was lost: the worker stays bound");
+                Thread.sleep(250);
+                same(1, rig.unbinds.get(), "exactly once");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-a-cleanup-of-an-older-request-does-nothing", () -> {
             Rig rig = new Rig();
             try {
                 rig.autoIdle = false;
@@ -867,36 +888,38 @@ public final class IconProtocolTest {
                 rig.drawMillis = 400;
                 Call second = new Call(core, 0);
                 waitFor(() -> rig.running.get() == 1, 3000, "the second is drawing, with the turn");
-                int posts = rig.posted.size();
                 rig.main.submit(stale).get(5, TimeUnit.SECONDS); // dispatched while a newer request holds the turn
-                same(posts, rig.posted.size(), "it is stale: it looks again for nothing");
-                same(0, rig.unbinds.get(), "and it unbinds nothing");
+                Thread.sleep(150); // an unbind is made on a thread of its own: give a wrong one the time to show
+                same(0, rig.unbinds.get(), "it unbinds nothing while the newer request holds the turn");
                 second.await();
                 check(second.ok(), "the second was answered by the worker it was using");
-                rig.main.submit(stale).get(); // and now that the turn is free
-                Thread.sleep(150); // an unbind is made on a thread of its own: give a wrong one the time to show
+                rig.main.submit(stale).get(5, TimeUnit.SECONDS); // and now that the turn is free
+                Thread.sleep(150);
                 same(0, rig.unbinds.get(), "still nothing: its generation is not the current one");
-                rig.main.submit(rig.lastPosted()).get();
+                rig.main.submit(rig.lastPosted()).get(5, TimeUnit.SECONDS);
                 waitFor(() -> rig.unbinds.get() == 1, 3000, "the cleanup of the last request does unbind");
             } finally {
                 rig.shutdown();
             }
         });
-        row("worker-a-cleanup-that-keeps-finding-the-turn-held-gives-up", () -> {
+        row("worker-a-cleanup-that-keeps-finding-the-turn-held-by-another-request-gives-up", () -> {
             Rig rig = new Rig();
             try {
                 rig.autoIdle = false;
-                rig.parkFirstPost = new CountDownLatch(1);
                 IconWorkerCore core = rig.core(LIMITS);
-                Call call = new Call(core, 0);
-                check(rig.firstPostParked.await(5, TimeUnit.SECONDS), "the request is paused after posting its cleanup");
+                check(ask(core).ok(), "the first");
+                Runnable cleanup = rig.lastPosted();
+                rig.drawMillis = 3000;
+                Call second = new Call(core, 0);
+                waitFor(() -> rig.running.get() == 1, 3000, "the second is drawing, with the turn");
+                int posts = rig.posted.size();
                 for (int i = 0; i < IconWorkerCore.MAX_CLEANUP_RETRIES + 20; i++) {
                     // bounded: a cleanup that waits for the turn would hold the main thread, and this with it
-                    rig.main.submit(rig.lastPosted()).get(5, TimeUnit.SECONDS);
+                    rig.main.submit(cleanup).get(5, TimeUnit.SECONDS);
                 }
-                same(1 + IconWorkerCore.MAX_CLEANUP_RETRIES, rig.posted.size(), "one cleanup and a bounded number of looks again");
-                rig.parkFirstPost.countDown();
-                call.await();
+                same(posts + IconWorkerCore.MAX_CLEANUP_RETRIES, rig.posted.size(), "a bounded number of looks again");
+                same(0, rig.unbinds.get(), "and nothing is unbound");
+                second.await();
             } finally {
                 rig.shutdown();
             }

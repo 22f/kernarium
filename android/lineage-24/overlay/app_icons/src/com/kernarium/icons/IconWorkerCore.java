@@ -31,10 +31,10 @@ import java.util.concurrent.locks.ReentrantLock;
  * next bind waits for that release (within its own deadline), so that a new bind never meets the worker that is being
  * ended.
  *
- * <p>An idle cleanup that finds the turn held does not wait for it; it looks again a little later (a bounded number of
- * times), because the request that scheduled it holds the turn until it has returned and may not have unlocked yet, and
- * nobody else would schedule another. A cleanup of an older request has nothing to look for: the newer request schedules
- * its own.
+ * <p>A request makes its idle cleanup under the turn and hands it to the platform after it has released the turn, so the
+ * request that scheduled a cleanup is never the holder it finds. A cleanup that finds the turn held (by a request that
+ * came since) does not wait for it: it looks again a little later, a bounded number of times, and acts only under the
+ * turn and only if no request has come since it was scheduled.
  *
  * <p>One deadline covers a request from its arrival: the wait for its turn, the bind and the drawing. A request whose
  * deadline passed while it queued never starts drawing, and every request is answered before the shell tool's own limit
@@ -146,8 +146,8 @@ final class IconWorkerCore {
     private final ReentrantLock mTurn = new ReentrantLock(true);
     private Connection mConnection;
     private Handle mHandle;
-    /** Moves with every request: an idle cleanup scheduled before it is stale. Written in the turn, read without it. */
-    private volatile long mGeneration;
+    /** Moves with every request: an idle cleanup scheduled before it is stale. */
+    private long mGeneration;
     /** The idle cleanup scheduled by the last request. */
     private Runnable mIdle;
     /** The release of the bind detached last: counted down when its unbind has returned; null when none is out. */
@@ -175,6 +175,7 @@ final class IconWorkerCore {
         }
         boolean asked = false;
         Reply answer = Reply.FAILED;
+        Cleanup cleanup;
         try {
             mGeneration++;
             if (mIdle != null) {
@@ -202,8 +203,12 @@ final class IconWorkerCore {
             if (asked && !answer.ok()) {
                 disconnect(); // a worker that failed, or that did not answer in time, is never trusted again
             }
-            scheduleIdle();
+            cleanup = mHandle == null ? null : new Cleanup(mGeneration);
+            mIdle = cleanup;
             mTurn.unlock();
+            if (cleanup != null) {
+                mPoster.postDelayed(cleanup, mLimits.idleMillis); // after the turn is released: not as its holder
+            }
         }
     }
 
@@ -292,13 +297,6 @@ final class IconWorkerCore {
         release.start();
     }
 
-    private void scheduleIdle() {
-        if (mHandle != null) {
-            mIdle = new Cleanup(mGeneration);
-            mPoster.postDelayed(mIdle, mLimits.idleMillis);
-        }
-    }
-
     /** The idle cleanup one request schedules: it ends the worker unless a request has come since. */
     private final class Cleanup implements Runnable {
         private final long mScheduledIn;
@@ -313,8 +311,8 @@ final class IconWorkerCore {
         public void run() {
             if (!mTurn.tryLock()) {
                 // Never wait for the turn here: this is the platform's main thread, which a pending bind's connection needs.
-                // A newer request schedules its own cleanup; the request that scheduled this one may not have unlocked yet.
-                if (mScheduledIn == mGeneration && mRetries++ < MAX_CLEANUP_RETRIES) {
+                // The holder is a request that came since; look again for the turn, a bounded number of times.
+                if (mRetries++ < MAX_CLEANUP_RETRIES) {
                     mPoster.postDelayed(this, CLEANUP_RETRY_MILLIS);
                 }
                 return;
