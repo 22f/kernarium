@@ -99,6 +99,14 @@ elseif(UML_AOT_IMAGE OR UML_AOT_ARTIFACT)
         endif()
         set(UML_AOT_SOURCE image)
     else()
+        # An App Store runtime takes a named artifact under the same switch
+        # as the accepted one.
+        if(UML_APP_STORE_RUNTIME)
+            include(UmlAotArchives)
+            uml_aot_require_archives(
+                "${PROJECT_SOURCE_DIR}/android/lineage-24/metadata/accepted-aot.env"
+                "${UML_AOT_ARTIFACT}")
+        endif()
         set(UML_AOT_SOURCE artifact)
         set(UML_AOT_ARTIFACT_DIR "${UML_AOT_ARTIFACT}")
     endif()
@@ -135,10 +143,8 @@ elseif(UML_TARGET_MACOS OR UML_KERNEL_PRODUCT STREQUAL "android-17")
         # (LINEAGE24_ACCEPTED_AOT_ARCHIVES): the device runtimes are the ones
         # an App Store or TestFlight archive embeds. macOS and the Simulator
         # take every accepted artifact.
-        file(STRINGS "${_uml_aot_accepted}" _uml_aot_archives
-            REGEX "^LINEAGE24_ACCEPTED_AOT_ARCHIVES='.*'$")
-        string(REGEX REPLACE "^[A-Z0-9_]+='(.*)'$" "\\1"
-            _uml_aot_archives "${_uml_aot_archives}")
+        include(UmlAotArchives)
+        uml_aot_archives_state(_uml_aot_archives "${_uml_aot_accepted}")
         set(_uml_aot_archive_product FALSE)
         if(UML_APPLE_PLATFORM STREQUAL "ios" OR UML_APP_STORE_RUNTIME)
             set(_uml_aot_archive_product TRUE)

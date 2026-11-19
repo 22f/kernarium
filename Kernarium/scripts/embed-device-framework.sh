@@ -31,7 +31,10 @@
 # only when the Android runtime links it). An XCFramework that is not there,
 # or has no slice for the SDK being built, embeds nothing and removes a copy
 # an earlier build left, so an application never carries a framework its
-# runtime does not load.
+# runtime does not load. It also fails when an embedded framework's load
+# commands name the missing one: dyld refuses to launch an application without
+# a framework its runtime links, so the build stops where the slice is missing
+# rather than at the first launch.
 set -eu
 
 fail()
@@ -70,9 +73,29 @@ esac
 DESTINATION="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/$NAME.framework"
 STAMP="$TARGET_TEMP_DIR/embed-device-framework-$NAME.stamp"
 
+# linking_framework: the first embedded framework, other than this one, whose
+# load commands name it. It is empty when none does.
+linking_framework()
+{
+	for candidate in "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"/*.framework; do
+		[ -d "$candidate" ] || continue
+		candidate_name=$(basename -- "$candidate" .framework)
+		[ "$candidate_name" != "$NAME" ] && [ -f "$candidate/$candidate_name" ] || continue
+		if /usr/bin/otool -L "$candidate/$candidate_name" 2>/dev/null |
+			LC_ALL=C grep -Fq "@rpath/$NAME.framework/$NAME"; then
+			printf '%s\n' "$candidate_name"
+			return 0
+		fi
+	done
+	return 0
+}
+
 SLICE="$XCFRAMEWORK/$SLICE_NAME/$NAME.framework"
 if [ ! -d "$SLICE" ]; then
 	if [ "$OPTIONAL" -eq 1 ]; then
+		LINKER=$(linking_framework)
+		[ -z "$LINKER" ] ||
+			fail "$LINKER links $NAME, and $XCFRAMEWORK has no $SLICE_NAME slice: package it with Kernarium/scripts/package-ios-frameworks.sh"
 		rm -rf -- "$DESTINATION" "$STAMP"
 		printf '%s\n' "$NAME is not packaged for ${PLATFORM_NAME}: not embedded"
 		exit 0

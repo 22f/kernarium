@@ -82,11 +82,24 @@ def commit(repo: Path, message: str) -> str:
     return git(repo, "rev-parse", "HEAD")
 
 
-def macho(sections: dict) -> bytes:
-    """A thin arm64 Mach-O whose __TEXT segment holds the given sections."""
+LC_LOAD_DYLIB = 0x0C
+LC_LOAD_WEAK_DYLIB = 0x80000018
+
+
+def dylib_command(command: int, name: str) -> bytes:
+    """One load command that names a dependency by install name."""
+    raw = name.encode() + b"\0"
+    raw += b"\0" * (-len(raw) % 8)
+    return struct.pack("<IIIIII", command, 24 + len(raw), 24, 2, 0x10000, 0x10000) + raw
+
+
+def macho(sections: dict, dylibs: tuple = ()) -> bytes:
+    """A thin arm64 Mach-O whose __TEXT segment holds the given sections and
+    that requires the given dependencies, as (load command, install name)."""
     names = list(sections)
     command_size = 72 + 80 * len(names)
-    offset = 32 + command_size
+    required = b"".join(dylib_command(command, name) for command, name in dylibs)
+    offset = 32 + command_size + len(required)
     entries = b""
     payload = b""
     for name in names:
@@ -100,8 +113,9 @@ def macho(sections: dict) -> bytes:
         struct.pack("<II", 0x19, command_size) + b"__TEXT".ljust(16, b"\0")
         + struct.pack("<QQQQIIII", 0, offset + len(payload), 0, offset + len(payload), 7, 5, len(names), 0)
     )
-    header = struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 6, 1, command_size, 0, 0)
-    return header + segment + entries + payload
+    header = struct.pack(
+        "<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 6, 1 + len(dylibs), command_size + len(required), 0, 0)
+    return header + segment + entries + required + payload
 
 
 NEUTRAL_BUILDER = "kernarium@kernarium"
@@ -679,6 +693,11 @@ class AotTests(unittest.TestCase):
         framework.mkdir(parents=True, exist_ok=True)
         (framework / AOT_FRAMEWORK).write_bytes(macho({"__text": self.blob if blob is None else blob}))
 
+    def link_runtime(self, command: int = LC_LOAD_DYLIB, name: str = "@rpath/UmlArm64Aot.framework/UmlArm64Aot") -> None:
+        """The packaged Android runtime with a load command that names the AOT framework."""
+        runtime = self.fixture.app / "Frameworks" / f"{FRAMEWORK}.framework" / FRAMEWORK
+        runtime.write_bytes(macho({"__uml_elf": kernel_image()}, ((command, name),)))
+
     def run_check(self, *arguments: str, decision: str | None = None):
         return self.fixture.run("--aot", *arguments, decision=decision)
 
@@ -717,6 +736,31 @@ class AotTests(unittest.TestCase):
         self.passes(result)
         self.assertIn("is the blob of the AOT artifact of", result.stdout)
         self.assertIn("generator inputs are the ones on this commit", result.stdout)
+
+    def test_a_runtime_that_links_the_framework_fails_an_application_without_it(self) -> None:
+        # With no accepted artifact, with the switch at no and with it at yes:
+        # dyld refuses the launch whatever the descriptor says.
+        self.link_runtime()
+        self.fails(self.run_check(), f"the packaged runtime {FRAMEWORK} links UmlArm64Aot.framework",
+                   "dyld refuses to launch")
+        self.accept("no")
+        self.fails(self.run_check(), f"the packaged runtime {FRAMEWORK} links UmlArm64Aot.framework")
+        self.accept("yes")
+        self.fails(self.run_check(), f"the packaged runtime {FRAMEWORK} links UmlArm64Aot.framework",
+                   "carries no AOT framework")
+        # The framework present is the passing direction.
+        self.package_aot()
+        self.passes(self.run_check())
+
+    def test_a_runtime_that_links_another_framework_or_weakly_needs_nothing(self) -> None:
+        self.accept("no")
+        self.link_runtime(name="@rpath/Other.framework/Other")
+        self.passes(self.run_check())
+        self.link_runtime(LC_LOAD_WEAK_DYLIB)
+        self.passes(self.run_check())
+        # A build that packages no application has no runtime to read.
+        self.link_runtime()
+        self.passes(self.fixture.run("--aot", app=False))
 
     def test_an_archive_without_the_framework_fails_when_the_switch_is_yes(self) -> None:
         self.accept("yes")

@@ -667,10 +667,15 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   reads no environment for it. An archive
   configuration (App Store, TestFlight) carries the component only when
   `accepted-aot.env` sets `LINEAGE24_ACCEPTED_AOT_ARCHIVES` to `yes`: the
-  device runtimes take no accepted artifact before, and
-  `scripts/check-embedded-artifacts.py --aot` fails a packaged framework
-  without an accepted artifact or while the field is `no`, and one whose blob
-  is not the accepted digest.
+  device runtimes take no accepted artifact before, and the App Store runtime
+  configuration fails to configure with an explicit `UML_AOT_ARTIFACT` unless
+  the field is `yes`. `scripts/check-embedded-artifacts.py --aot` fails a
+  packaged framework without an accepted artifact or while the field is `no`,
+  one whose blob is not the accepted digest, and an application whose
+  packaged runtime links the framework (its load commands name it) while the
+  framework is absent, since dyld refuses to launch it; the application's
+  optional embed step (`embed-device-framework.sh --optional`) stops the build
+  for the same missing slice.
 - Release: the blob runs only with the release it was made from. Its header
   carries the release ID, the SHA-256 of the release manifest and the SHA-256
   of the system partition; the launcher (macOS and iOS) reads the same three

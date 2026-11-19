@@ -66,6 +66,12 @@ class DeviceFrameworkEmbedTests(unittest.TestCase):
         compile_binary(cls.library / "Driver.changed", "int driver(void){return 8;}",
                        "-dynamiclib", "-install_name", "@rpath/Driver.framework/Driver")
         compile_binary(cls.library / "Fixture", "int main(void){return 0;}")
+        # An embedded runtime that links Driver, and one that does not.
+        compile_binary(cls.library / "Runtime", "extern int driver(void); int runtime(void){return driver();}",
+                       "-dynamiclib", "-install_name", "@rpath/Runtime.framework/Runtime",
+                       "-x", "none", str(cls.library / "Driver"))
+        compile_binary(cls.library / "Runtime.alone", "int runtime(void){return 1;}",
+                       "-dynamiclib", "-install_name", "@rpath/Runtime.framework/Runtime")
 
     def setUp(self):
         scratch = tempfile.TemporaryDirectory(prefix="framework embed ")
@@ -106,6 +112,12 @@ class DeviceFrameworkEmbedTests(unittest.TestCase):
                      env={**self.environment, **overrides})
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
+
+    def embed_runtime(self, library):
+        """An embedded runtime framework, as the Embed Frameworks phase leaves it."""
+        runtime = self.app / "Frameworks/Runtime.framework"
+        runtime.mkdir(parents=True, exist_ok=True)
+        (runtime / "Runtime").write_bytes((self.library / library).read_bytes())
 
     def add_simulator_slice(self):
         simulator = self.framework / "ios-arm64-simulator/Driver.framework"
@@ -153,6 +165,31 @@ class DeviceFrameworkEmbedTests(unittest.TestCase):
         output = self.embed_optional(self.framework, PLATFORM_NAME="iphonesimulator")
         self.assertIn("not packaged for iphonesimulator", output)
         self.assertFalse(self.embedded.exists())
+
+    def test_an_optional_framework_a_runtime_links_must_have_its_slice(self):
+        # The runtime names Driver in its load commands, so an application
+        # without Driver would not launch: the missing slice stops the build.
+        self.embed_runtime("Runtime")
+        self.assertIn("embedded Driver for iphoneos", self.embed_optional(self.framework))
+        for environment in ({}, {"PLATFORM_NAME": "iphonesimulator"}):
+            result = run([str(EMBED), "--optional", str(self.framework)],
+                         env={**self.environment, **environment})
+            if environment:
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("Runtime links Driver", result.stderr)
+                self.assertIn("no ios-arm64-simulator slice", result.stderr)
+            else:
+                self.assertEqual(result.returncode, 0, result.stderr)
+        # An XCFramework that is not there at all is the same failure.
+        shutil.rmtree(self.framework)
+        result = run([str(EMBED), "--optional", str(self.framework)], env=self.environment)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Runtime links Driver", result.stderr)
+
+    def test_an_optional_framework_no_runtime_links_stays_optional(self):
+        self.embed_runtime("Runtime.alone")
+        shutil.rmtree(self.framework)
+        self.assertIn("not packaged", self.embed_optional(self.framework))
 
     def test_a_required_framework_without_its_slice_still_fails(self):
         shutil.rmtree(self.source)

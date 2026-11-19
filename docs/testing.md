@@ -808,7 +808,10 @@ blocker in every one of them.
   under `auto` and fails under `on`; a launch that states no release has no
   component and no tables), each case in a process of its own;
   `emulator-options` holds the `--aot=` and `--aot-release=` parsing and
-  `android-release-identity` the launcher's reading of the release identity. `arm64-aot-release-artifact` holds the artifact check
+  `android-release-identity` the launcher's reading of the release identity.
+  `aot-archive-switch-gates-explicit-artifacts` (tooling) holds the archive
+  switch to the App Store runtime's configure: an explicit artifact needs the
+  descriptor's `yes`. `arm64-aot-release-artifact` holds the artifact check
   to what it must refuse (another release, partition, blob, tool or library
   list). The differential runs functions of every rewritten library through
   the gadget engine with and without ahead-of-time code and requires the same

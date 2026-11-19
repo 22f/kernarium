@@ -42,6 +42,11 @@ AOT artifact (--aot):
     an App Store or TestFlight archive carry the component: a framework in an
     archive while it is "no" fails, and so does an archive without one while
     it is "yes";
+  - a packaged runtime framework whose load commands name UmlArm64Aot.framework
+    fails an application that carries no such framework, whatever the switch
+    says: dyld refuses to launch an application that lacks a framework its
+    runtime links (the descriptor and the switch decide the build, this decides
+    the product);
   - the packaged framework's code section is the blob the descriptor names
     (SHA-256), and the descriptor is for the accepted Android release;
   - the artifact installed below .build/android/aot is the one the descriptor
@@ -95,7 +100,8 @@ STAGED_SYSTEM = ".build/andarium-system"
 INSTALLED_RELEASES = ".build/android/releases"
 # The AOT artifact beside it, and where the framework holds its blob.
 INSTALLED_AOT = ".build/android/aot"
-PACKAGED_AOT = "Frameworks/UmlArm64Aot.framework/UmlArm64Aot"
+AOT_NAME = "UmlArm64Aot"
+PACKAGED_AOT = f"Frameworks/{AOT_NAME}.framework/{AOT_NAME}"
 AOT_SECTION = ("__TEXT", "__text")
 PACKAGED_SYSTEM = "andarium-system"
 MANIFEST = "release-manifest.json"
@@ -524,6 +530,14 @@ def check_aot(repo, report, app):
             return
     framework = app / PACKAGED_AOT if app is not None else None
     packaged = framework is not None and framework.exists()
+    if app is not None and not packaged:
+        # A runtime that links the component needs it to launch, whatever the
+        # descriptor says: the build asked for it by name or by default.
+        for runtime in runtimes_requiring(app, AOT_NAME):
+            report.error(
+                f"the packaged runtime {runtime} links {AOT_NAME}.framework, but the application carries no AOT framework",
+                f"{PACKAGED_AOT} is missing, and dyld refuses to launch an application without a framework its runtime links",
+            )
     if accepted is None:
         if packaged:
             report.error(
@@ -695,6 +709,56 @@ def macho_section(path, wanted):
                 entry += 80
         position += size
     return None
+
+
+# The load commands that make dyld refuse to launch an image whose dependency
+# is missing: LC_LOAD_DYLIB, LC_LOAD_UPWARD_DYLIB, LC_REEXPORT_DYLIB and
+# LC_LAZY_LOAD_DYLIB. LC_LOAD_WEAK_DYLIB (0x80000018) lets the image launch.
+STRONG_DYLIB_COMMANDS = frozenset({0x0C, 0x20, 0x8000001F, 0x80000023})
+
+
+def macho_dylibs(path):
+    """The install names an arm64 Mach-O file requires at launch, in load
+    command order; an empty list for any other file."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return []
+    base = thin_offset(data[:4096])
+    if base is None or len(data) < base + 32:
+        return []
+    count = struct.unpack_from("<I", data, base + 16)[0]
+    position = base + 32
+    names = []
+    for _ in range(count):
+        if position + 8 > len(data):
+            break
+        command, size = struct.unpack_from("<II", data, position)
+        if size < 8 or position + size > len(data):
+            break
+        if command in STRONG_DYLIB_COMMANDS:
+            offset = struct.unpack_from("<I", data, position + 8)[0]
+            raw = data[position + offset:position + size]
+            names.append(raw.split(b"\0", 1)[0].decode("utf-8", "replace"))
+        position += size
+    return names
+
+
+def runtimes_requiring(app, framework_name):
+    """The embedded frameworks (by name) whose load commands require
+    `<framework_name>.framework/<framework_name>`."""
+    wanted = f"/{framework_name}.framework/{framework_name}"
+    frameworks = app / "Frameworks"
+    found = []
+    if not frameworks.is_dir():
+        return found
+    for directory in sorted(frameworks.glob("*.framework")):
+        if directory.stem == framework_name:
+            continue
+        binary = directory / directory.stem
+        if binary.is_file() and any(name.endswith(wanted) for name in macho_dylibs(binary)):
+            found.append(directory.stem)
+    return found
 
 
 def kernel_banner_releases(image):
