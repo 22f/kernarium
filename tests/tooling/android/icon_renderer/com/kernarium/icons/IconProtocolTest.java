@@ -82,6 +82,7 @@ public final class IconProtocolTest {
             same("com.kernarium.icons", IconProtocol.PACKAGE, "package");
             same("com.kernarium.icons", IconProtocol.AUTHORITY, "authority");
             same("com.kernarium.icons.IconRenderService", IconProtocol.SERVICE_CLASS, "service");
+            same("com.kernarium.icons.IconProvider", IconProtocol.PROVIDER_CLASS, "provider");
             same("render", IconProtocol.METHOD_RENDER, "method");
             same(0, IconProtocol.STATUS_OK, "ok");
             same(1, IconProtocol.STATUS_ERROR, "error");
@@ -96,14 +97,11 @@ public final class IconProtocolTest {
     private static void shell() {
         row("protocol-shell-uid", () -> {
             check(IconProtocol.fromShell(2000), "the shell user");
-            check(IconProtocol.fromShell(1002000), "the shell user of another Android user");
-            check(IconProtocol.fromShell(102000), "the same app id in a user's range");
             for (int other : new int[] {0, 1000, 1001, 1999, 2001, 10000, 10125, 12000, 99000, 100000, 1000000, 99009, -1,
-                -2000, -98000}) {
-                check(!IconProtocol.fromShell(other), "uid " + other + " is not the shell user's");
+                -2000, -98000, 102000, 1002000, 2000 + 100000 * 9, Integer.MAX_VALUE, Integer.MIN_VALUE}) {
+                check(!IconProtocol.fromShell(other), "uid " + other + " is not the adb shell user's");
             }
-            same(2000, IconProtocol.SHELL_APP_ID, "the shell app id");
-            same(100000, IconProtocol.PER_USER_RANGE, "the range of one user");
+            same(2000, IconProtocol.SHELL_UID, "the adb shell user's uid");
         });
     }
 
@@ -118,11 +116,16 @@ public final class IconProtocolTest {
             check(valid(most), "128 files");
             check(IconProtocol.validRequest(Integer.MAX_VALUE, new int[] {0}, paths(1)), "the largest resource id");
             check(IconProtocol.validRequest(1, new int[] {0}, paths(1)), "the smallest resource id");
+            check(IconProtocol.validRequest(0x80010000, new int[] {0}, paths(1)), "a drawable of resource package 0x80");
+            check(IconProtocol.validRequest(0xFF7F0000, new int[] {0, 3}, paths(2)), "a resource package 0xFF");
         });
         row("request-needs-a-resource", () -> {
             check(!IconProtocol.validRequest(0, new int[] {0}, paths(1)), "resource 0 is no resource");
-            check(!IconProtocol.validRequest(-1, new int[] {0}, paths(1)), "a negative resource id");
-            check(!IconProtocol.validRequest(Integer.MIN_VALUE, new int[] {0}, paths(1)), "the least resource id");
+        });
+        row("request-resource-ids-with-the-sign-bit-are-valid", () -> {
+            check(IconProtocol.validRequest(-1, new int[] {0}, paths(1)), "resource -1 (0xFFFFFFFF) is for the lookup to judge");
+            check(IconProtocol.validRequest(Integer.MIN_VALUE, new int[] {0}, paths(1)), "the least resource id, 0x80000000");
+            check(IconProtocol.validRequest(0x80000001, new int[] {0}, paths(1)), "0x80000001");
         });
         row("request-arrays-agree", () -> {
             check(!IconProtocol.validRequest(1, null, paths(1)), "no kinds");

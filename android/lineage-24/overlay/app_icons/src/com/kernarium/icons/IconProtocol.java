@@ -62,24 +62,26 @@ public final class IconProtocol {
     /** An adaptive icon's layers are drawn 108 dp for the 72 dp window a launcher shows: a quarter more on each side. */
     public static final float LAYER_OUTSET = 0.25f;
 
-    /** The shell user's app id, and the range of one user's uids. */
-    public static final int SHELL_APP_ID = 2000;
-    public static final int PER_USER_RANGE = 100000;
+    /** The adb shell user's uid: the shell is one user's, whichever Android user is in the foreground. */
+    public static final int SHELL_UID = 2000;
+    /** The class of the provider whose answers the tool takes. */
+    public static final String PROVIDER_CLASS = "com.kernarium.icons.IconProvider";
 
     private IconProtocol() {}
 
-    /** Whether the uid is the shell user's (of any Android user). */
+    /** Whether the uid is the adb shell user's, exactly: another Android user's app id 2000 is another uid. */
     public static boolean fromShell(int uid) {
-        return uid % PER_USER_RANGE == SHELL_APP_ID;
+        return uid == SHELL_UID;
     }
 
     /**
-     * Whether a request is one the renderer will open: a resource id, and one to {@link #MAX_FILES} files that start
-     * with exactly one base, then splits, libraries and overlays in that order, each an absolute path of printable
-     * characters without a dot segment.
+     * Whether a request is one the renderer will open: a resource id (any but zero: the id of a resource package
+     * from 0x80 up has the sign bit set, and the framework's lookup judges it), and one to {@link #MAX_FILES} files
+     * that start with exactly one base, then splits, libraries and overlays in that order, each an absolute path of
+     * printable characters without a dot segment.
      */
     public static boolean validRequest(int resource, int[] kinds, String[] paths) {
-        if (resource <= 0 || kinds == null || paths == null || kinds.length != paths.length || kinds.length == 0
+        if (resource == 0 || kinds == null || paths == null || kinds.length != paths.length || kinds.length == 0
                 || kinds.length > MAX_FILES || kinds[0] != KIND_BASE) {
             return false;
         }

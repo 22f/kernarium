@@ -41,12 +41,14 @@ GLUE = ("IconDrawing.java", "IconProvider.java", "IconRenderService.java", "Icon
 
 # One rule of IconProtocol removed per entry: (name, the text that is replaced, its replacement, the rows that must fail).
 PROTOCOL_MUTATIONS = [
-    ("shell-uid-ignores-the-user", "uid % PER_USER_RANGE == SHELL_APP_ID", "uid == SHELL_APP_ID", {"protocol-shell-uid"}),
-    ("every-uid-is-the-shell", "uid % PER_USER_RANGE == SHELL_APP_ID", "uid >= 0", {"protocol-shell-uid"}),
-    ("shell-app-id-changed", "SHELL_APP_ID = 2000;", "SHELL_APP_ID = 2001;", {"protocol-shell-uid"}),
-    ("per-user-range-changed", "PER_USER_RANGE = 100000;", "PER_USER_RANGE = 1000000;", {"protocol-shell-uid"}),
-    ("resource-zero-allowed", "resource <= 0 || kinds == null", "kinds == null", {"request-needs-a-resource"}),
-    ("resource-negative-allowed", "resource <= 0", "resource == 0", {"request-needs-a-resource"}),
+    ("shell-uid-by-app-id", "uid == SHELL_UID", "uid % 100000 == SHELL_UID", {"protocol-shell-uid"}),
+    ("every-uid-is-the-shell", "uid == SHELL_UID", "uid >= 0", {"protocol-shell-uid"}),
+    ("shell-uid-changed", "SHELL_UID = 2000;", "SHELL_UID = 2001;", {"protocol-shell-uid"}),
+    ("resource-zero-allowed", "resource == 0 || kinds == null", "kinds == null", {"request-needs-a-resource"}),
+    ("resource-sign-bit-refused", "resource == 0 ||", "resource <= 0 ||", {"request-resource-ids-with-the-sign-bit-are-valid",
+                                                                         "request-shapes-that-are-accepted"}),
+    ("provider-class-changed", "PROVIDER_CLASS = \"com.kernarium.icons.IconProvider\";",
+     "PROVIDER_CLASS = \"com.kernarium.icons.IconProviderX\";", {"protocol-names-are-the-contract"}),
     ("null-kinds-allowed", "kinds == null || paths == null ||", "", {"request-arrays-agree"}),
     ("unequal-arrays-allowed", "kinds.length != paths.length ||", "", {"request-arrays-agree"}),
     ("empty-request-allowed", "kinds.length == 0\n", "false\n", {"request-arrays-agree"}),
