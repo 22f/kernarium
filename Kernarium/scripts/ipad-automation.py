@@ -521,10 +521,13 @@ def answered_without_heartbeat(options, timeout=60):
 
 def device_answers(options, timeout=60):
     """Whether the device answers a read: it gives its heartbeat, or says that
-    there is none to give. A connected device with no host to read answers."""
+    there is none to give. A connected device with no host to read answers.
+    Both reads are made within `timeout` in all."""
+    began = time.monotonic()
     if host_state(options, timeout) is not None:
         return True
-    return answered_without_heartbeat(options, timeout)
+    return answered_without_heartbeat(
+        options, max(1, timeout - (time.monotonic() - began)))
 
 
 def liveness(state):
@@ -2441,25 +2444,37 @@ class Watch:
             f"{detail}", EXIT_WATCH_GAVE_UP)
 
     def await_device(self, detail):
-        """Outside the launch lock: waits until the device answers a read of
-        its heartbeat file, or WATCH_RECONNECT_WAIT has passed. None once it
-        answers, else "timeout", or "stopped" when the watch was told to end."""
+        """Outside the launch lock: waits until the device answers a read, or
+        WATCH_RECONNECT_WAIT has passed, counted from before the first read and
+        covering every read and sleep. None once it answers in time, else
+        "timeout", or "stopped" when the watch was told to end. A stop is
+        looked for before each read, and no read is longer than
+        WATCH_READ_WAIT or than what is left of the wait; an answer that comes
+        after the deadline is no answer."""
         options = self.options
-        if device_answers(options, WATCH_READ_WAIT):
-            return None
-        self.say(f"the device is not answering ({detail}); waiting up to "
-                 f"{WATCH_RECONNECT_WAIT} s for the connection to return")
-        self.record.update(state=RESTARTING,
-                           detail=f"waiting for device connection: {detail}")
         deadline = self.clock.monotonic() + WATCH_RECONNECT_WAIT
+        announced = False
         while True:
-            if self.clock.wait(self.stop, WATCH_PULL_EVERY):
+            if self.stop.is_set():
                 return "stopped"
             left = deadline - self.clock.monotonic()
             if left <= 0:
                 return "timeout"
-            if device_answers(options, max(1, min(WATCH_READ_WAIT, int(left)))):
+            answered = device_answers(options, max(1, min(WATCH_READ_WAIT, left)))
+            if self.clock.monotonic() >= deadline:
+                return "timeout"
+            if answered:
                 return None
+            if not announced:
+                self.say(f"the device is not answering ({detail}); waiting up to "
+                         f"{WATCH_RECONNECT_WAIT} s for the connection to return")
+                self.record.update(
+                    state=RESTARTING,
+                    detail=f"waiting for device connection: {detail}")
+                announced = True
+            left = deadline - self.clock.monotonic()
+            if self.clock.wait(self.stop, max(0, min(WATCH_PULL_EVERY, left))):
+                return "stopped"
 
     def restart(self, expected, retired):
         """Under the launch lock, for an attempt after the first, once the
@@ -2596,12 +2611,15 @@ class Watch:
             scan.read()
             gap = slept()
             started = self.clock.monotonic()
-            state = host_state(options)
+            state = host_state(options, timeout=WATCH_READ_WAIT)
             unreadable = unreadable or state is None
             ended = self.clock.monotonic()
             # A sleep of the Mac before or during the read: its copy says
             # nothing of whether the host beats now.
             gap = slept() or gap
+            if self.stop.is_set():
+                # Told to end while the read blocked: nothing more is read.
+                return self.finish(launch, scan, "stopped")
             scan.read()
             if scan.approval_failure:
                 return self.finish(launch, scan, "approval")
@@ -2663,8 +2681,10 @@ class Watch:
                      else "before the runner came up")
             detail = (f"xcodebuild ended {ended} ({scan.describe()}); "
                       f"log {launch.log_path}")
+            if self.stop.is_set():
+                return ("stopped",)
             if (scan.connection_lost or unreadable
-                    or host_state(self.options) is None):
+                    or host_state(self.options, timeout=WATCH_READ_WAIT) is None):
                 return ("retry", detail)
             return ("failed", detail)
         return ("failed", f"the runner did not come up within {self.options.wait} s; "

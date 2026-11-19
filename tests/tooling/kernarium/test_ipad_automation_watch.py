@@ -1696,6 +1696,81 @@ class VerdictBoundaryTests(unittest.TestCase):
         with mock.patch.object(automation, "host_state", return_value=None):
             self.assertEqual(self.watch.await_device("lost"), "stopped")
 
+    def waited_for_the_device(self, answer_after=None):
+        """`await_device` against reads that each take as long as they are
+        allowed, and answer only from `answer_after` seconds on (never, for
+        None). The result, the seconds it took and the reads made."""
+        began = self.clock.monotonic()
+        reads = []
+
+        def read(options, timeout=60):
+            reads.append((self.clock.monotonic() - began, timeout))
+            started = self.clock.monotonic() - began
+            self.clock.advance(timeout)
+            if answer_after is not None and started >= answer_after:
+                return dict(self.state)
+            return None
+        with mock.patch.object(automation, "host_state", read):
+            result = self.watch.await_device("the tunnel dropped")
+        return result, self.clock.monotonic() - began, reads
+
+    def test_the_wait_for_the_device_ends_at_its_deadline_whatever_the_reads_take(self) -> None:
+        # Rule (R4): the deadline starts before the first read and covers the
+        # reads and the sleeps. A device that never answers ends the wait at
+        # WATCH_RECONNECT_WAIT (and a read that began just before it by no more
+        # than that read's own time), not a read or two later.
+        result, took, reads = self.waited_for_the_device()
+        self.assertEqual(result, "timeout")
+        self.assertLessEqual(took, automation.WATCH_RECONNECT_WAIT + 1)
+        self.assertGreaterEqual(took, automation.WATCH_RECONNECT_WAIT)
+        for began, timeout in reads:
+            self.assertLessEqual(timeout, automation.WATCH_READ_WAIT)
+            self.assertLessEqual(began + timeout,
+                                 automation.WATCH_RECONNECT_WAIT + 1, reads[-3:])
+
+    def test_a_reply_after_the_deadline_is_not_an_answer(self) -> None:
+        # Rule (R4): a device that answers late has not answered in time; the
+        # watch ends with start-failed, as for one that never answers.
+        # The reads begin 25 s apart; the one that begins at 175 s is given
+        # what is left (5 s) and ends at the deadline, with its answer.
+        result, took, _ = self.waited_for_the_device(answer_after=160)
+        self.assertEqual(result, "timeout")
+        self.assertLessEqual(took, automation.WATCH_RECONNECT_WAIT + 1)
+        result, took, _ = self.waited_for_the_device(answer_after=30)
+        self.assertIsNone(result)
+        self.assertLess(took, automation.WATCH_RECONNECT_WAIT)
+
+    def test_a_stop_during_the_launch_ends_the_watch_without_another_read(self) -> None:
+        # Rule (R4): SIGTERM arrives as the launch wait's read of the device
+        # blocks. No read is started after it (not by the launch's ending, not
+        # by the wait for the device), and no read is long: `end_watch` gives
+        # the watch 90 s to end.
+        self.watch.record.update(state=automation.RESTARTING)
+        process = mock.Mock()
+        process.poll.return_value = 1
+        launch = automation.Launch(process, self.log, "replacement")
+        self.log.write_text("")
+        reads = []
+
+        def read(options, timeout=60):
+            reads.append((self.watch.stop.is_set(), timeout))
+            if len(reads) == 1:
+                return dict(self.state)   # the old host, its death confirmed
+            self.watch.stop.set()
+            self.clock.advance(timeout)
+            return None
+        began = self.clock.monotonic()
+        with mock.patch.object(automation, "host_state", read), \
+                mock.patch.object(automation, "launch_host", return_value=launch), \
+                mock.patch.object(automation, "end_host", return_value=automation.ENDED), \
+                mock.patch.object(self.watch, "end_all", return_value=automation.ENDED):
+            result = self.watch.replace(self.reason)
+        self.assertEqual(result, 0)
+        self.assertLess(self.clock.monotonic() - began, automation.WATCH_END_WAIT / 2)
+        self.assertEqual([stopped for stopped, _ in reads[1:]], [False], reads)
+        self.assertTrue(all(timeout <= automation.WATCH_READ_WAIT
+                            for _, timeout in reads[1:]), reads)
+
     def finished(self, lines, unreadable=False, device_answers=True):
         """What `finish` says of a launch whose xcodebuild exited, with a log of
         `lines`."""
