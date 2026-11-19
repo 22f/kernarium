@@ -666,6 +666,12 @@ function(_uml_add_gadget_executor TARGET SLOTS)
         get_property(_aot_runtime GLOBAL PROPERTY UML_AOT_RUNTIME_TARGET)
         target_link_libraries(${TARGET} PUBLIC ${_aot_runtime})
     endif()
+    # A diagnostics build's executor carries the hooks that count what the
+    # engine ran in place of rewritten code (aot_diagnostics.hpp); a product
+    # build compiles none of them.
+    if(UML_AOT AND UML_AOT_DIAGNOSTICS)
+        target_compile_definitions(${TARGET} PRIVATE UML_AOT_DIAGNOSTICS=1)
+    endif()
     target_compile_definitions(${TARGET} PRIVATE
         UML_AOT=$<BOOL:${UML_AOT}>
         UML_GADGET_CACHE_CENSUS=$<BOOL:${UML_GADGET_CACHE_CENSUS}>

@@ -382,6 +382,34 @@ class ReservedWordTests(unittest.TestCase):
         ("extr x0, x1, x2, #40", 0x93c2a020),
         ("add x0, x1, w2, uxtw #4", 0x8b225020),
         ("orr w0, w1, w2, lsl #31", 0x2a027c20),
+        # One bit from a reserved form of the classes below.
+        ("add vector, 4H", 0x0e608400),
+        ("saddlv", 0x0e303800),
+        ("saddw", 0x0e201000),
+        ("smlal by element", 0x0f402000),
+        ("ext", 0x2e000000),
+        ("dup element", 0x0e010400),
+        ("rev16", 0x0e201800),
+        ("uzp1", 0x0e401800),
+        ("cmgt", 0x0e203400),
+        ("sshll", 0x0f08a400),
+        ("sqdmlal scalar", 0x5e609000),
+        ("sqdmlal scalar by element", 0x5f403000),
+        ("sqxtn scalar", 0x5e614800),
+        ("dup scalar", 0x5e010400),
+        ("sqdmulh scalar", 0x5e60b400),
+        ("scvtf scalar by immediate", 0x5f18e400),
+        ("madd", 0x9b000000),
+        ("smulh", 0x9b407c00),
+        ("scvtf s0, w0, #32", 0x1e028000),
+        ("fcmpe s0, #0.0", 0x1e202018),
+        ("fcmpe s0, s1", 0x1e212010),
+        ("ldp s0, s1, [x0]", 0x2d400400),
+        ("ldnp s0, s1, [x0]", 0x2c400400),
+        ("ldp s0, s1, [x0], #0", 0x2cc00400),
+        ("ldp s0, s1, [x0, #0]!", 0x2dc00400),
+        ("ldp w0, wzr, [sp]", 0x29407c00),
+        ("ldp x0, x1, [x2]", 0xa9400440),
     ]
     # The same forms with a field the architecture does not allow.
     RESERVED = [
@@ -397,6 +425,34 @@ class ReservedWordTests(unittest.TestCase):
         ("32-bit logical immediate with N set", 0x12401c20),
         ("logical immediate of all ones", 0x12007c20),
         ("logical immediate with no element", 0x1200fc20),
+        # The Advanced SIMD, multiply-high and fixed-point classes: the
+        # engine rejects a reserved size, Q, opcode or scale like these, and
+        # the tables do not tell them from the allocated forms.
+        ("add vector, 2D with Q clear", 0x0ee08400),
+        ("across lanes, reserved size", 0x0eb03800),
+        ("three different, reserved size", 0x0e209000),
+        ("by element, reserved size", 0x0f002000),
+        ("ext with Q clear and imm4 bit 3", 0x2e004000),
+        ("copy, reserved imm5", 0x0e000400),
+        ("two-register misc, reserved size", 0x0e601800),
+        ("permute, 2D with Q clear", 0x0ec01800),
+        ("three same, reserved opcode", 0x0e20b400),
+        ("shift by immediate, reserved immh", 0x0f08e400),
+        ("scalar three different, reserved size", 0x5e209000),
+        ("scalar by element, reserved size", 0x5f003000),
+        ("scalar two-register misc, reserved size", 0x5ee14800),
+        ("scalar copy, reserved imm5", 0x5e000400),
+        ("scalar three same, reserved size", 0x5e20b400),
+        ("scalar shift by immediate, reserved immh", 0x5f08e400),
+        ("smulh with Ra not the zero register", 0x9b400000),
+        ("32-bit fixed-point convert, scale of 0", 0x1e020000),
+        ("fcmpe against zero with Rm named", 0x1e212018),
+        ("ldp s0, s0, [x0]", 0x2d400000),
+        ("ldnp s0, s0, [x0]", 0x2c400000),
+        ("ldp s0, s0, [x0], #0", 0x2cc00000),
+        ("ldp s0, s0, [x0, #0]!", 0x2dc00000),
+        ("ldp wzr, wzr, [sp]", 0x29407fff),
+        ("ldp x1, x1, [x2]", 0xa9400441),
     ]
     # Words the tables list as unallocated by name, in a class the rewriter
     # otherwise copies (found as the data of a literal pool).
@@ -421,7 +477,8 @@ class ReservedWordTests(unittest.TestCase):
             with self.subTest(text):
                 _, steps = self.classify(word)
                 self.assertEqual(len(steps), 1, text)
-                self.assertIn(steps[0][1], ("unallocated", "reserved"))
+                self.assertIn(steps[0][1], ("unallocated", "reserved",
+                                            "pair-same-register"))
 
     def test_words_the_tables_name_unallocated_are_left_to_the_engine(self
                                                                       ) -> None:
@@ -813,9 +870,47 @@ class FixtureTests(unittest.TestCase):
             rewrite.read_layout(rewrite.LAYOUT_HEADER))
 
     def test_ranges_and_plt(self) -> None:
+        functions = [(f.start, f.end) for f in self.elf.functions()]
         self.assertEqual(
-            [(f.start, f.end) for f in self.elf.functions()][:3],
+            functions[:3],
             [(0x1000, 0x1010), (0x1020, 0x1030), (0x1040, 0x1050)])
+        # The .iplt stubs of a static executable are covered like the .plt.
+        self.assertIn(
+            (fixture.IPLT, fixture.IPLT + 4 * len(fixture.PLT_CODE)),
+            functions)
+
+    def test_a_routine_only_a_symbol_names_is_a_function(self) -> None:
+        # Assembly with no unwind entry, a data word inside its range.
+        functions = [(f.start, f.end) for f in self.elf.functions()]
+        self.assertIn((fixture.SYMBOL_ONLY,
+                       fixture.SYMBOL_ONLY + 4 * len(fixture.SYMBOL_CODE)),
+                      functions)
+
+    def test_symbols_that_name_no_range_or_one_already_given_add_nothing(
+            self) -> None:
+        functions = [(f.start, f.end) for f in self.elf.functions()]
+        starts = [start for start, _ in functions]
+        for at in fixture.SYMBOLS_NO_RANGE:
+            self.assertNotIn(at, starts)
+        self.assertIn((fixture.LOOP_A, fixture.LOOP_A + 0x10), functions)
+
+    def test_a_symbol_extends_the_function_it_overlaps_not_one_it_touches(
+            self) -> None:
+        merged = [elf64.Function(0x1000, 0x1010),
+                  elf64.Function(0x1020, 0x1030)]
+        symbols = [(0x1008, 0x1018), (0x1030, 0x1040),
+                   (0x100000, 0x100010)]
+        with mock.patch.object(elf64.Elf, "_symbol_functions",
+                               return_value=symbols):
+            found = [(f.start, f.end) for f in self.elf._with_symbols(merged)]
+        self.assertEqual(found, [(0x1000, 0x1018), (0x1020, 0x1030),
+                                 (0x1030, 0x1040)])
+
+    def test_the_symbols_of_the_debug_data_are_a_source(self) -> None:
+        elf = elf64.Elf(fixture.build_oat())
+        ranges = elf._symbol_functions()
+        for at, size in fixture.oat_functions():
+            self.assertIn((at, at + size), ranges)
 
     def test_loop_branch_lands_inside_another_range(self) -> None:
         # b.lo at 0x1028 (range B) targets 0x1004 (inside range A), and no
@@ -824,6 +919,51 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual((kind, target), ("cond", 0x1004))
         self.assertIn(0x1004, self.library.charge)
         self.assertNotIn(0x1008, self.library.charge)
+
+
+class MemoryProbeShapeTests(unittest.TestCase):
+    """The words of an access's probe: an SP access with an immediate offset
+    inside one aligned 16-byte granule has no last-byte address, any other
+    scalar of more than one byte indexes by its last byte and compares the tag
+    with its first (the access then adds the host delta itself), a byte and a
+    pair keep their forms; a probe that leaves the first byte's address enters
+    the refill routine that gives the host the last."""
+
+    @staticmethod
+    def shape(word: int) -> tuple[int, int, set]:
+        library = library_of([word, RET], [(0, 8)])
+        unit_words(library)
+        assert library.stats.steps == 0, hex(word)
+        census = library.stats.census
+        return (census["mem.probe"] // 4, census["mem.access"] // 4,
+                library.refill_used)
+
+    def test_a_stack_scalar_inside_the_granule(self) -> None:
+        for word, kind, total in (
+                (0xf94007e0, "LOAD", 8),     # ldr x0,[sp,#8]
+                (0x3dc007e0, "LOAD", 16),    # ldr q0,[sp,#16]
+                (0xf90007e0, "STORE", 8)):   # str x0,[sp,#8]
+            self.assertEqual(self.shape(word),
+                             (5, 1, {(kind, total, 0, True)}), hex(word))
+
+    def test_other_scalars_index_by_the_last_byte(self) -> None:
+        for word, probe, kind, total in (
+                (0xf840c3e0, 6, "LOAD", 8),     # ldur x0,[sp,#12]: no granule
+                (0x3cc083e0, 6, "LOAD", 16),    # ldur q0,[sp,#8]
+                (0xf800c3e0, 6, "STORE", 8),    # stur x0,[sp,#12]
+                (0xf9400420, 7, "LOAD", 8)):    # ldr x0,[x1,#8]: strips the tag
+            self.assertEqual(self.shape(word),
+                             (probe, 1, {(kind, total, 0, True)}), hex(word))
+
+    def test_a_byte_and_a_pair_keep_their_forms(self) -> None:
+        for word, probe, kind, total, first in (
+                (0x394007e0, 5, "LOAD", 1, False),    # ldrb w0,[sp,#1]
+                (0xa94107e0, 6, "LOAD", 16, True),    # ldp x0,x1,[sp,#16]
+                (0xa94087e0, 7, "LOAD", 16, False),   # ldp x0,x1,[sp,#8]
+                (0xa90087e0, 7, "STORE", 16, False),  # stp x0,x1,[sp,#8]
+                (0xa9410440, 8, "LOAD", 16, False)):  # ldp x0,x1,[x2,#16]
+            self.assertEqual(self.shape(word),
+                             (probe, 1, {(kind, total, 0, first)}), hex(word))
 
 
 class HintAndFloatingPointTests(unittest.TestCase):
@@ -1338,10 +1478,10 @@ class CensusTests(unittest.TestCase):
 
     def test_a_load_and_a_store_are_a_probe_an_access_and_a_stub(self) -> None:
         census, _ = self.census()
-        # A probe of a wide access is eight words: the untag, the index, the
-        # entry address, the entry load, the host address, the last byte,
-        # the compare and the branch to its cold stub of two words.
-        self.assertEqual(census["mem.probe"], 2 * 8 * 4)
+        # A probe of a wide scalar is seven words: the untag, the last byte,
+        # the index, the entry address, the entry load, the compare with the
+        # first byte's page and the branch to its cold stub of two words.
+        self.assertEqual(census["mem.probe"], 2 * 7 * 4)
         self.assertEqual(census["mem.access"], 2 * 4)
         self.assertEqual(census["stub.mm"], 2 * 2 * 4)
         self.assertEqual(census["insn"], 4)
@@ -1351,8 +1491,9 @@ class CensusTests(unittest.TestCase):
 
     def test_only_the_refill_routines_a_site_enters_exist(self) -> None:
         census, _ = self.census()
-        # A load and a store of eight bytes: a movz and a branch each.
-        self.assertEqual(census["stub.refill"], 2 * 2 * 4)
+        # A load and a store of eight bytes: the last byte's address (the
+        # probe left the first), a movz and a branch each.
+        self.assertEqual(census["stub.refill"], 2 * 3 * 4)
 
     def test_a_function_that_falls_off_its_end_tags_the_branch(self) -> None:
         library = library_of([self.ADD, self.ADD], [(0, 8)])
@@ -1627,6 +1768,27 @@ class WideningTests(unittest.TestCase):
             expected[f"{kind}_xzr_d"] = {"mops-invalid"}
         self.assertEqual(stepped, expected)
 
+
+    def test_stack_pairs_with_plain_data_registers_are_inlined(self) -> None:
+        # The fixture's stack-base pairs with plain data registers (inside one
+        # aligned granule and outside it) run in the rewritten code, so the
+        # differential exercises the stack-granule probe on pairs.
+        elf = elf64.Elf(fixture.build())
+        library = rewrite.Library(
+            0, "/aot-test/libaotfixture.so", elf,
+            a64decode.Decoder(a64decode.DEFAULT_TABLE),
+            rewrite.read_layout(rewrite.LAYOUT_HEADER))
+        library.build([1] * ((library.table_end - library.table_base) // 4096))
+        causes = dict(library.step_list)
+        seen = 0
+        for index, (name, words) in enumerate(fixture.pair_forms()):
+            if "_sp_pp_" not in name and not name.endswith("_sp_zz"):
+                continue
+            seen += 1
+            base = fixture.PAIRS_AT + index * fixture.PAIR_SIZE
+            for position in range(len(words)):
+                self.assertNotIn(base + 4 * position, causes, name)
+        self.assertEqual(seen, 17)
 
 if __name__ == "__main__":
     unittest.main()

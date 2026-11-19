@@ -15,6 +15,10 @@
  * none of this. The counters are fixed atomics bumped by the vCPU thread; the
  * report is written by a thread of its own to DARWIN_UML_AOT_REPORT
  * (a few times a second), so no vCPU thread does file I/O or allocates. */
+namespace uml::cpu::arm64::aot {
+class Binder;
+} // namespace uml::cpu::arm64::aot
+
 namespace uml::cpu::arm64::aot::diagnostics {
 
 /* The number of library instances a binder (one per executor thread) holds
@@ -110,6 +114,41 @@ struct Stats final {
 	 * table could not be formed (the blob header's count). */
 	std::uint64_t libraries_refused{};
 };
+
+/* Why the engine, not rewritten code, ran the block of a dispatch: an
+ * instruction the dispatcher would enter was not entered. The first five are
+ * the refusals and the retry rule of the executor, the next seven what the
+ * binder's lookup answered (FindResult), then an entry that retired nothing. */
+enum class EngineReason : unsigned {
+	retry,
+	exclusive_monitor,
+	tbi_disabled,
+	sp_misaligned,
+	fp_environment,
+	short_entry,
+	not_ready,
+	uncovered,
+	poisoned,
+	unverified,
+	no_entry,
+	stale,
+	mutable_page,
+	no_progress,
+	count,
+};
+
+/* The dispatch that starts at `pc` ends with the engine running the block
+ * there, for `reason`; the guest instructions it runs are counted by
+ * note_engine_run, on the page's cover as the binder knows it now (a long
+ * block chain may leave the page). The executor calls both when the
+ * diagnostics build compiled it with the hooks. */
+void note_engine_dispatch(const Binder &binder, unsigned long generation,
+	std::uint64_t pc, EngineReason reason) noexcept;
+void note_engine_run(std::uint64_t instructions) noexcept;
+/* A dispatch ended: how many lookups it made and how many entries it took. */
+void note_dispatch(unsigned finds, unsigned enters) noexcept;
+/* The reason the last lookup of this thread that found no entry gave. */
+[[nodiscard]] EngineReason find_reason() noexcept;
 
 /* Override DARWIN_UML_AOT (nullopt: read the environment again). */
 void set_enabled(std::optional<bool> state) noexcept;

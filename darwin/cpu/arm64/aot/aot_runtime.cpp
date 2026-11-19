@@ -345,6 +345,38 @@ std::array<std::atomic<std::uint64_t>, 8> find_results{};
 std::array<std::array<std::atomic<std::uint64_t>, 8>, 64> library_finds{};
 std::array<std::atomic<std::uint64_t>, 3> cross_miss_kinds{};
 std::array<std::atomic<std::uint64_t>, 64> library_cross_misses{};
+/* The dispatches that ended with the engine running the block, by the
+ * reason no entry was taken (diagnostics::EngineReason), the guest
+ * instructions the engine then ran (on a page the binder knows as a library
+ * page, on another, or one it cannot classify), the dispatches in all and the
+ * ones that took an entry, and how many lookups a dispatch made. */
+constexpr std::size_t engine_reason_count =
+	static_cast<std::size_t>(diagnostics::EngineReason::count);
+std::array<std::atomic<std::uint64_t>, engine_reason_count> engine_dispatches{},
+	engine_covered{}, engine_other{}, engine_unknown{};
+std::atomic<std::uint64_t> dispatches{0}, dispatches_entered{0};
+std::array<std::atomic<std::uint64_t>, 8> dispatch_finds{};
+/* Refills by what the TLB entry held when the thunk asked: nothing at all
+ * (a first touch, or a flush), the page the other kind holds, a page of the
+ * same kind, a page of the other kind, the page itself already, a crossing of
+ * a page boundary; and, per site, how many of each. The second index tells
+ * whether the TLB's generation or change count had moved since this thread's
+ * previous refill. */
+constexpr std::size_t refill_cause_count = 6;
+std::array<std::array<std::atomic<std::uint64_t>, 2>, refill_cause_count>
+	refill_causes{};
+std::array<std::atomic<std::uint64_t>, 2> refill_kinds{};
+constexpr std::size_t refill_pc_slots = 32768;
+std::array<std::atomic<std::uint64_t>, refill_pc_slots> refill_pc_key{};
+std::array<std::array<std::atomic<std::uint64_t>, refill_cause_count>,
+	refill_pc_slots> refill_pc_count{};
+/* The last conflicting refill of each site: the page it asked for and the
+ * page the entry held, one pair at a time: a sequence number (odd while a
+ * writer holds the slot) lets a reader take both of one refill, and a writer
+ * that finds the slot held drops its sample. */
+std::array<std::array<std::atomic<std::uint64_t>, 2>, refill_pc_slots>
+	refill_pc_last{};
+std::array<std::atomic<std::uint64_t>, refill_pc_slots> refill_pc_seq{};
 std::atomic<bool> reporter_started{false};
 /* The audit of the executable-mapping counts of the memory layer, run by the
  * reporter thread: audits that held every address space at once, those that
@@ -489,8 +521,43 @@ thread_local std::uint64_t t_run_start_kind = 0;
 
 constexpr std::uint32_t no_library = 0xffffffffU;
 
+/* The reason the last lookup of this thread that found no entry gave, and the
+ * dispatch whose engine run is still to be counted (note_engine_run). */
+thread_local diagnostics::EngineReason t_find_reason =
+	diagnostics::EngineReason::no_entry;
+struct PendingEngineRun final {
+	bool set;
+	std::uint8_t cover;
+	diagnostics::EngineReason reason;
+};
+thread_local PendingEngineRun t_pending{};
+
+[[nodiscard]] diagnostics::EngineReason engine_reason_of(
+	FindResult result) noexcept
+{
+	switch (result) {
+	case FindResult::not_ready:
+		return diagnostics::EngineReason::not_ready;
+	case FindResult::uncovered:
+		return diagnostics::EngineReason::uncovered;
+	case FindResult::poisoned:
+		return diagnostics::EngineReason::poisoned;
+	case FindResult::unverified:
+		return diagnostics::EngineReason::unverified;
+	case FindResult::stale:
+		return diagnostics::EngineReason::stale;
+	case FindResult::mutable_page:
+		return diagnostics::EngineReason::mutable_page;
+	case FindResult::hit:
+	case FindResult::no_entry:
+		break;
+	}
+	return diagnostics::EngineReason::no_entry;
+}
+
 void note_find(FindResult result, std::uint32_t library) noexcept
 {
+	t_find_reason = engine_reason_of(result);
 	counters::find_results[static_cast<std::size_t>(result)].fetch_add(
 		1, std::memory_order_relaxed);
 	if (library < 64)
@@ -763,6 +830,38 @@ void write_report() noexcept
 		"%llu\n", get(counters::cross_miss_kinds[0]),
 		get(counters::cross_miss_kinds[1]),
 		get(counters::cross_miss_kinds[2]));
+	std::fprintf(file, "dispatch total %llu entered %llu finds0 %llu "
+		"finds1 %llu finds2 %llu finds3 %llu finds4 %llu finds5_8 %llu "
+		"finds9_16 %llu finds17p %llu\n", get(counters::dispatches),
+		get(counters::dispatches_entered),
+		get(counters::dispatch_finds[0]), get(counters::dispatch_finds[1]),
+		get(counters::dispatch_finds[2]), get(counters::dispatch_finds[3]),
+		get(counters::dispatch_finds[4]), get(counters::dispatch_finds[5]),
+		get(counters::dispatch_finds[6]), get(counters::dispatch_finds[7]));
+	{
+		constexpr const char *reasons[] = {"retry", "exclusive_monitor",
+			"tbi_disabled", "sp_misaligned", "fp_environment",
+			"short_entry", "not_ready", "uncovered", "poisoned",
+			"unverified", "no_entry", "stale", "mutable_page",
+			"no_progress"};
+		for (std::size_t reason = 0; reason < counters::engine_reason_count;
+		     ++reason)
+			std::fprintf(file, "engine_dispatch %s dispatches %llu "
+				"covered %llu other %llu unknown %llu\n", reasons[reason],
+				get(counters::engine_dispatches[reason]),
+				get(counters::engine_covered[reason]),
+				get(counters::engine_other[reason]),
+				get(counters::engine_unknown[reason]));
+		constexpr const char *causes[] = {"empty", "upgrade", "conflict",
+			"conflict_other_kind", "already", "crossing"};
+		for (std::size_t cause = 0; cause < counters::refill_cause_count;
+		     ++cause)
+			std::fprintf(file, "refill_cause %s steady %llu moved %llu\n",
+				causes[cause], get(counters::refill_causes[cause][0]),
+				get(counters::refill_causes[cause][1]));
+		std::fprintf(file, "refill_kind read %llu write %llu\n",
+			get(counters::refill_kinds[0]), get(counters::refill_kinds[1]));
+	}
 	for (std::size_t library = 0; library < 64; ++library) {
 		const auto enters = get(counters::library_enters[library]);
 		unsigned long long finds = 0;
@@ -801,6 +900,60 @@ void write_report() noexcept
 		(void)std::remove(part.c_str());
 }
 
+/* The per-site refill histogram, to the file DARWIN_UML_AOT_REPORT_PC names
+ * (when it is set), made beside it and renamed over it like the report: one
+ * line per site, `refill_site <library> <guest offset in hex> <total> <the
+ * six causes of counters::refill_causes> last <page asked for> <page held>`,
+ * the last two from the site's last conflicting refill. */
+void write_refill_sites() noexcept
+{
+	const char *path = std::getenv("DARWIN_UML_AOT_REPORT_PC");
+	if (path == nullptr)
+		return;
+	const std::string part = std::string{path} + ".part";
+	std::FILE *file = std::fopen(part.c_str(), "w");
+	if (file == nullptr)
+		return;
+	for (std::size_t slot = 0; slot < counters::refill_pc_slots; ++slot) {
+		const auto key = counters::refill_pc_key[slot].load(
+			std::memory_order_relaxed);
+		if (key == 0)
+			continue;
+		unsigned long long total = 0, each[counters::refill_cause_count];
+		for (std::size_t cause = 0; cause < counters::refill_cause_count;
+		     ++cause) {
+			each[cause] = counters::refill_pc_count[slot][cause].load(
+				std::memory_order_relaxed);
+			total += each[cause];
+		}
+		unsigned long long wanted = 0, held = 0;
+		for (int attempt = 0; attempt < 8; ++attempt) {
+			const auto before = counters::refill_pc_seq[slot].load(
+				std::memory_order_acquire);
+			if ((before & 1U) != 0)
+				continue;
+			const auto a = counters::refill_pc_last[slot][0].load(
+				std::memory_order_relaxed);
+			const auto b = counters::refill_pc_last[slot][1].load(
+				std::memory_order_relaxed);
+			std::atomic_thread_fence(std::memory_order_acquire);
+			if (counters::refill_pc_seq[slot].load(
+				    std::memory_order_relaxed) == before) {
+				wanted = a;
+				held = b;
+				break;
+			}
+		}
+		std::fprintf(file, "refill_site %llu %llx %llu %llu %llu %llu %llu "
+			"%llu %llu last %llx %llx\n", (key >> 40) - 1,
+			static_cast<unsigned long long>(key & ((1ULL << 40) - 1)), total,
+			each[0], each[1], each[2], each[3], each[4], each[5], wanted,
+			held);
+	}
+	if (std::fclose(file) != 0 || std::rename(part.c_str(), path) != 0)
+		(void)std::remove(part.c_str());
+}
+
 void start_reporter() noexcept
 {
 	if (std::getenv("DARWIN_UML_AOT_REPORT") == nullptr ||
@@ -815,6 +968,8 @@ void start_reporter() noexcept
 				if (tick % 4 == 0)
 					run_count_audit();
 				write_report();
+				if (tick % 8 == 7)
+					write_refill_sites();
 			}
 		}).detach();
 	} catch (...) {
@@ -923,6 +1078,101 @@ std::uint64_t mops(CpuState *cpu, ::uml::memory::Tlb *tlb,
 		outcome == MopsOutcome::fault ? 0 : 2;
 }
 
+#if UML_AOT_DIAGNOSTICS
+/* The library whose unit holds the code at `blob_offset` (units lie in
+ * library order), or no_library. */
+[[nodiscard]] std::uint32_t library_of_unit_offset(
+	std::size_t blob_offset) noexcept
+{
+	const auto &dir = directory();
+	std::uint32_t low = 0, high = dir.libraries;
+	while (low < high) {
+		const auto middle = low + (high - low) / 2;
+		if (dir.library(middle).unit_offset <= blob_offset)
+			low = middle + 1;
+		else
+			high = middle;
+	}
+	return low == 0 ? no_library : low - 1;
+}
+
+/* What the TLB entry holds when a refill is asked for, as a cause (see
+ * counters::refill_causes). `site` is the instruction's byte offset in its
+ * library's entry table, the thunk's T1. */
+void note_refill(const void *tlb_pointer, std::uint64_t address,
+	std::uint64_t code, std::uint64_t site, const void *caller) noexcept
+{
+	const auto &tlb = *static_cast<const ::uml::memory::Tlb *>(tlb_pointer);
+	const auto kind = code & 0xff;
+	const auto bytes = code >> 8;
+	if (bytes > 1)
+		address -= bytes - 1;
+	std::size_t cause;
+	std::uint64_t held = 0;
+	if ((address & (page_size - 1)) + bytes > page_size) {
+		cause = 5;
+	} else {
+		const auto page = address >> DARWIN_UML_GUEST_PAGE_SHIFT;
+		const auto &entry =
+			tlb.entries[page & (::uml::memory::tlb_entry_count - 1)];
+		const auto same = kind == 1 ? entry.write_page : entry.read_page;
+		const auto other = kind == 1 ? entry.read_page : entry.write_page;
+		constexpr auto empty = ::uml::memory::tlb_empty_key;
+		if (same == page)
+			cause = 4;
+		else if (same == empty)
+			cause = other == empty ? 0 : other == page ? 1 : 3;
+		else {
+			cause = 2;
+			held = same;
+		}
+	}
+	thread_local const void *last_tlb = nullptr;
+	thread_local std::uint64_t last_generation = 0, last_changes = 0;
+	const std::size_t moved = &tlb != last_tlb ||
+		tlb.generation != last_generation || tlb.changes != last_changes;
+	last_tlb = &tlb;
+	last_generation = tlb.generation;
+	last_changes = tlb.changes;
+	counters::refill_causes[cause][moved].fetch_add(1, std::memory_order_relaxed);
+	counters::refill_kinds[kind & 1].fetch_add(1, std::memory_order_relaxed);
+	const auto library = library_of_unit_offset(
+		static_cast<std::size_t>(static_cast<const std::uint8_t *>(caller) -
+			uml_aot_blob));
+	if (library == no_library)
+		return;
+	const std::uint64_t key = ((std::uint64_t{library} + 1) << 40) |
+		(directory().library(library).table_base + site);
+	std::size_t slot = (key * 0x9e3779b97f4a7c15ULL) >> 49;
+	for (std::size_t probe = 0; probe < 32; ++probe) {
+		const auto at = (slot + probe) % counters::refill_pc_slots;
+		auto seen = counters::refill_pc_key[at].load(std::memory_order_relaxed);
+		if (seen == 0)
+			counters::refill_pc_key[at].compare_exchange_strong(seen, key);
+		if (counters::refill_pc_key[at].load(std::memory_order_relaxed) == key) {
+			counters::refill_pc_count[at][cause].fetch_add(
+				1, std::memory_order_relaxed);
+			if (cause == 2) {
+				auto seq = counters::refill_pc_seq[at].load(
+					std::memory_order_relaxed);
+				if ((seq & 1U) == 0 &&
+				    counters::refill_pc_seq[at].compare_exchange_strong(
+					    seq, seq + 1, std::memory_order_acquire)) {
+					counters::refill_pc_last[at][0].store(
+						address >> DARWIN_UML_GUEST_PAGE_SHIFT,
+						std::memory_order_relaxed);
+					counters::refill_pc_last[at][1].store(
+						held, std::memory_order_relaxed);
+					counters::refill_pc_seq[at].store(
+						seq + 2, std::memory_order_release);
+				}
+			}
+			return;
+		}
+	}
+}
+#endif
+
 /* Rewritten code branches to an address outside its own library: answer the
  * native code of the verified instance that holds it, or none. */
 Target lookup(const CrossTable *table, std::uint64_t address) noexcept
@@ -955,6 +1205,28 @@ Target lookup(const CrossTable *table, std::uint64_t address) noexcept
 }
 
 } // namespace
+
+#if UML_AOT_DIAGNOSTICS
+/* The refill thunk's call, with the instruction's slot (the thunk's T1,
+ * x27, which a callee keeps) as a fourth argument: the trampoline below puts
+ * it in x3 and branches, so the return address stays the thunk's. */
+extern "C" std::uint64_t uml_aot_refill_site(void *tlb, std::uint64_t address,
+	std::uint64_t code, std::uint64_t site) noexcept;
+asm(".text\n"
+    ".p2align 2\n"
+    ".globl _uml_aot_refill_diag\n"
+    "_uml_aot_refill_diag:\n"
+    "\tmov x3, x27\n"
+    "\tb _uml_aot_refill_site\n");
+extern "C" std::uint64_t uml_aot_refill_diag(void *tlb, std::uint64_t address,
+	std::uint64_t code) noexcept;
+extern "C" std::uint64_t uml_aot_refill_site(void *tlb, std::uint64_t address,
+	std::uint64_t code, std::uint64_t site) noexcept
+{
+	note_refill(tlb, address, code, site, __builtin_return_address(0));
+	return refill(tlb, address, code);
+}
+#endif
 
 bool enabled() noexcept
 {
@@ -1110,6 +1382,80 @@ void clear_shared_verdicts() noexcept
 	g_verdicts.clear();
 }
 
+EngineReason find_reason() noexcept
+{
+	return t_find_reason;
+}
+
+void note_engine_dispatch(const Binder &binder, unsigned long generation,
+	std::uint64_t pc, EngineReason reason) noexcept
+{
+	/* The lookup's own answers say whether the page is a library page; the
+	 * refusals and the retry rule come before any lookup, so they ask the
+	 * binder, through a small cache of this thread's answers. */
+	std::uint8_t cover = 2;
+	switch (reason) {
+	case EngineReason::not_ready:
+	case EngineReason::uncovered:
+		cover = 0;
+		break;
+	case EngineReason::poisoned:
+	case EngineReason::unverified:
+	case EngineReason::no_entry:
+	case EngineReason::stale:
+	case EngineReason::mutable_page:
+		cover = 1;
+		break;
+	default: {
+		struct Known final {
+			std::uint64_t page;
+			unsigned long generation;
+			bool covered;
+		};
+		thread_local std::array<Known, 512> known{};
+		const auto page = pc >> 12;
+		auto &slot = known[page % known.size()];
+		/* Only a page found to be covered is kept: a page asked about before
+		 * the binder discovered its library is asked again, so a later refusal
+		 * on it is charged to the library. */
+		if (slot.page != page + 1 || slot.generation != generation ||
+		    !slot.covered) {
+			std::uint32_t library;
+			std::uint64_t offset;
+			slot = {page + 1, generation,
+				binder.locate(generation, pc, library, offset)};
+		}
+		cover = slot.covered ? 1 : 0;
+		break;
+	}
+	}
+	t_pending = {true, cover, reason};
+	counters::engine_dispatches[static_cast<std::size_t>(reason)].fetch_add(
+		1, std::memory_order_relaxed);
+}
+
+void note_engine_run(std::uint64_t instructions) noexcept
+{
+	if (!t_pending.set)
+		return;
+	t_pending.set = false;
+	auto &row = t_pending.cover == 1 ? counters::engine_covered :
+		t_pending.cover == 0 ? counters::engine_other :
+		counters::engine_unknown;
+	row[static_cast<std::size_t>(t_pending.reason)].fetch_add(
+		instructions, std::memory_order_relaxed);
+}
+
+void note_dispatch(unsigned finds, unsigned enters) noexcept
+{
+	counters::dispatches.fetch_add(1, std::memory_order_relaxed);
+	if (enters != 0)
+		counters::dispatches_entered.fetch_add(1, std::memory_order_relaxed);
+	const std::size_t bucket = finds <= 4 ? finds : finds <= 8 ? 5 :
+		finds <= 16 ? 6 : 7;
+	counters::dispatch_finds[bucket].fetch_add(1, std::memory_order_relaxed);
+}
+
 std::size_t instance_capacity() noexcept
 {
 	return max_instances;
@@ -1199,6 +1545,24 @@ void reset_stats() noexcept
 		counter.store(0, std::memory_order_relaxed);
 	for (auto &counter : counters::library_cross_misses)
 		counter.store(0, std::memory_order_relaxed);
+	for (auto *row : {&counters::engine_dispatches, &counters::engine_covered,
+		     &counters::engine_other, &counters::engine_unknown})
+		for (auto &counter : *row)
+			counter.store(0, std::memory_order_relaxed);
+	for (auto *counter : {&counters::dispatches, &counters::dispatches_entered})
+		counter->store(0, std::memory_order_relaxed);
+	for (auto &counter : counters::dispatch_finds)
+		counter.store(0, std::memory_order_relaxed);
+	for (auto &row : counters::refill_causes)
+		for (auto &counter : row)
+			counter.store(0, std::memory_order_relaxed);
+	for (auto &counter : counters::refill_kinds)
+		counter.store(0, std::memory_order_relaxed);
+	for (auto &counter : counters::refill_pc_key)
+		counter.store(0, std::memory_order_relaxed);
+	for (auto &row : counters::refill_pc_count)
+		for (auto &counter : row)
+			counter.store(0, std::memory_order_relaxed);
 }
 
 } // namespace diagnostics
@@ -1206,7 +1570,11 @@ void reset_stats() noexcept
 
 Binder::Binder() noexcept
 {
+#if UML_AOT_DIAGNOSTICS
+	cross_.refill = &uml_aot_refill_diag;
+#else
 	cross_.refill = &refill;
+#endif
 	cross_.lookup = &lookup;
 	cross_.mops = &mops;
 	const auto whole = [](std::size_t bytes) {
