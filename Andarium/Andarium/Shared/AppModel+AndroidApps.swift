@@ -89,12 +89,24 @@ extension AppModel {
         case .failed:
             break
         }
-        // A change was announced while this refresh was under way: it is listed now.
+        // A change was announced while this refresh was under way: it is listed
+        // now, or, where Android cannot be asked (paused for space), once the
+        // run can be asked again (`listTheChangeOwed`).
         if state.refreshAgain, session === run, state.owns(token) {
+            guard canAskAndroidApps else { return true }
             state.refreshAgain = false
             return await refreshAndroidApps()
         }
         return true
+    }
+
+    /// The pause for space ended: a refresh that a change owed and the pause
+    /// kept from being made is made now, unless one under way will make it.
+    private func listTheChangeOwed() {
+        let state = androidApps
+        guard state.refreshAgain, state.inFlight == nil, canAskAndroidApps else { return }
+        state.refreshAgain = false
+        Task { await refreshAndroidApps() }
     }
 
     /// Android is up (the boot screen ends): the run lists the apps once, a few
@@ -322,6 +334,7 @@ extension AppModel {
     func androidAppsHoldEnded(_ hold: AppOpenHold) {
         let effect = androidApps.open.releaseHold(hold, in: androidAppOpenSituation, now: Date())
         performAndroidAppEffect(effect)
+        if hold == .space { listTheChangeOwed() }
     }
 
     /// "Don't open": the request is dropped, and Android keeps starting.

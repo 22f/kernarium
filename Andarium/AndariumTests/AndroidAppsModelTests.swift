@@ -938,6 +938,33 @@ final class AndroidAppsModelTests {
         #expect(AndroidAppsHub.shared.entities().contains { $0.id == extra.id })
     }
 
+    @Test func anInstallThatLandsAfterTheListWasCapturedIsListedOnceAPauseForSpaceEnds() async throws {
+        let rig = try rig(phase: .running(.normal))
+        rig.tool.delay = .milliseconds(40)
+        // The system takes the first refresh's offer slowly.
+        rig.index.holdsNextOffer = true
+        let first = Task { await rig.model.refreshAndroidApps() }
+        #expect(await eventually { rig.tool.listingsAsked >= 1 })
+        // An app is installed after the list was captured, and the install asks for a refresh after it.
+        let extra = AndroidApp(
+            component: try #require(AndroidComponent(packageName: "com.example.latecomer", activityClass: "com.example.latecomer.Main")),
+            label: "Latecomer", builtIn: false, iconTag: "0000000000000043")
+        rig.tool.install(extra)
+        await rig.model.refreshAndroidApps(afterAChange: true)
+        // All guest work of the refresh is done; the offer is under way when Android pauses for space.
+        #expect(await eventually { rig.index.events.contains("offer-started") })
+        rig.model.spacePause = SpacePause(freeBytes: 0, stage: .paused)
+        rig.index.letGo()
+        _ = await first.value
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(!rig.state.apps.contains { $0.id == extra.id }, "nothing is asked of a paused guest")
+        #expect(rig.tool.listingsAsked == 1)
+        // The person makes room and the guest resumes: the refresh that was owed is made.
+        rig.model.spacePause = nil
+        #expect(await eventually(3) { rig.state.apps.contains { $0.id == extra.id } && !rig.state.refreshing }, "the install is listed")
+        #expect(AndroidAppsHub.shared.entities().contains { $0.id == extra.id })
+    }
+
     // MARK: How an open ends, more
 
     @Test func anImageWithoutTheToolEndsAnOpenWithItsOwnBannerAndWithdrawsTheApps() async throws {
