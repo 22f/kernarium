@@ -114,7 +114,10 @@ extension AppModel {
                 guard let self, let state, !Task.isCancelled, self.androidApps === state else { return }
                 // An app that is being opened has Android's attention first.
                 var opening = false
-                if case .opening? = state.open.pending?.stage { opening = true }
+                switch state.open.pending?.stage {
+                case .opening?, .launching?: opening = true
+                default: break
+                }
                 let storageUp = if let driver = self.driver { await driver.storageReady() == true } else { true }
                 if !opening, storageUp { await self.refreshAndroidApps() }
                 if state.listed { break }

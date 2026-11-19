@@ -40,6 +40,10 @@ public enum AppOpenStage: Equatable, Sendable {
     case starting
     /// Android is up: the app opens when Android is ready for it.
     case opening
+    /// The launch command is sent and its reply is awaited. It is never sent
+    /// again for this request: a pause or a hold that comes now waits for the
+    /// reply, it does not queue another launch.
+    case launching
 }
 
 public struct PendingAppOpen: Equatable, Sendable {
@@ -335,7 +339,9 @@ public struct AppOpenState: Equatable, Sendable {
     /// The guest was paused for want of space while Android was being made
     /// ready for the request: it waits for the person's answer like one that
     /// arrived during the pause, and the wait is bounded by `holdLimit`.
-    /// Returns whether a request that was opening now waits.
+    /// Returns whether a request that was opening now waits. A request whose
+    /// launch is sent (`.launching`) is left as it is: its reply is awaited,
+    /// and the launch is not sent again.
     @discardableResult
     public mutating func spacePaused(now: Date) -> Bool {
         guard var pending, pending.stage == .opening else { return false }
@@ -352,6 +358,8 @@ public struct AppOpenState: Equatable, Sendable {
         guard pending?.request == request, pending?.stage == .opening else { return false }
         switch AppOpenPlanner.decide(situation) {
         case .openNow:
+            // The launch goes out now; from here its reply is waited for.
+            pending?.stage = .launching
             return true
         case .hold(.space):
             pending?.stage = .waiting(.space, since: now)

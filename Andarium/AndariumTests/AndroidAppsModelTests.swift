@@ -769,6 +769,21 @@ final class AndroidAppsModelTests {
         #expect(rig.state.open.pending != nil)
     }
 
+    @Test func aLaunchAlreadySentIsNotSentAgainByAPauseAndAResume() async throws {
+        let rig = try rig(phase: .running(.normal))
+        // The command is out and its reply is slow.
+        rig.tool.delay = .milliseconds(300)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually(3) { rig.tool.opened == [comet.component] }, "the tool received the command")
+        rig.model.spacePause = SpacePause(freeBytes: 0, stage: .pausing)
+        try await Task.sleep(for: .milliseconds(450))
+        rig.model.spacePause = nil
+        try await Task.sleep(for: .milliseconds(450))
+        #expect(rig.tool.opened == [comet.component], "exactly one launch")
+        #expect(rig.state.open.pending == nil, "the reply ended the request")
+        #expect(rig.state.open.banner == nil)
+    }
+
     // MARK: Refresh ownership
 
     @Test func anEraseDuringARefreshLeavesNothingOfIt() async throws {

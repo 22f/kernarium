@@ -65,7 +65,7 @@ struct SessionNoticesOverlay: View {
 
     var body: some View {
         let denial = model.networkDenialShowing
-        let opening = model.androidApps.open.pending.flatMap { $0.stage == .opening ? $0.request : nil }
+        let opening = model.androidApps.open.pending.flatMap { $0.stage == .opening || $0.stage == .launching ? $0.request : nil }
         let failure = model.androidApps.open.banner
         let showing = denial != nil || model.graphicsNotice.isShowing || model.thermalNotice.isShowing
             || model.cameraNoticeShowing || opening != nil || failure != nil
