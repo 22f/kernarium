@@ -594,7 +594,7 @@ ICONS_PERMISSION = "android.permission.ACCESS_CONTENT_PROVIDERS_EXTERNALLY"
 ICONS_ATTRIBUTE_IDS = {
     "authorities": 0x01010018, "permission": 0x01010006, "isolatedProcess": 0x010103A9, "directBootAware": 0x01010505,
     "allowBackup": 0x01010280, "usesNonSdkApi": 0x0101058E, "persistent": 0x0101000D, "grantUriPermissions": 0x0101001B,
-    "sharedUserId": 0x0101000B, "enabled": 0x0101000E,
+    "sharedUserId": 0x0101000B, "enabled": 0x0101000E, "readPermission": 0x01010007,
 }
 # The platform's seapp_contexts lines the icon renderer's two processes meet (a subset, in the platform's order).
 ICONS_SEAPP_PLAT = (
@@ -624,12 +624,13 @@ def icons_fixture(verifier: Path, variant: str | None) -> dict:
         spec.loader.exec_module(_ORIENTATION_PROBE)
     binary_xml = _ORIENTATION_PROBE
     element = binary_xml.Element
+    reference = binary_xml.Reference
     manifest = {"package": "com.kernarium.icons", "versionCode": 1}
     sdk = {"minSdkVersion": 36, "targetSdkVersion": 37}
     application = {"label": "Andarium icons", "allowBackup": False, "directBootAware": True, "usesNonSdkApi": True}
-    provider = {"name": "com.kernarium.icons.IconProvider", "authorities": "com.kernarium.icons", "exported": True,
+    provider = {"name": ".IconProvider", "authorities": "com.kernarium.icons", "exported": True,
                 "permission": ICONS_PERMISSION, "directBootAware": True}
-    service = {"name": "com.kernarium.icons.IconRenderService", "exported": False, "isolatedProcess": True,
+    service = {"name": ".IconRenderService", "exported": False, "isolatedProcess": True,
                "directBootAware": True}
     top, inside, providers = [], [], [provider]
     entries: dict[str, bytes | None] = {}
@@ -641,6 +642,16 @@ def icons_fixture(verifier: Path, variant: str | None) -> dict:
         "package-changed": lambda: manifest.update(package="com.kernarium.other"),
         "shared-user": lambda: manifest.update(sharedUserId="android.uid.system"),
         "asks-a-permission": lambda: top.append(element("uses-permission", (("name", "android.permission.INTERNET"),))),
+        "asks-a-permission-from-sdk-m": lambda: top.append(
+            element("uses-permission-sdk-m", (("name", "android.permission.VIBRATE"),))),
+        "asks-a-permission-from-sdk-23": lambda: top.append(
+            element("uses-permission-sdk-23", (("name", "android.permission.VIBRATE"),))),
+        "provider-enabled-by-reference": lambda: provider.update(enabled=reference(0x7F050001)),
+        "provider-read-permission-by-reference": lambda: provider.update(readPermission=reference(0x7F050002)),
+        "provider-class-changed": lambda: provider.update(name="com.kernarium.icons.BackupIconProvider"),
+        "provider-class-of-another-package": lambda: provider.update(name="com.example.IconProvider"),
+        "service-class-changed": lambda: service.update(name="com.kernarium.icons.IconRenderServiceTwo"),
+        "service-app-zygote": lambda: service.update(useAppZygote=True),
         "has-an-activity": lambda: inside.append(element("activity", (("name", "com.kernarium.icons.Main"),))),
         "has-a-receiver": lambda: inside.append(element("receiver", (("name", "com.kernarium.icons.Boot"),))),
         "has-a-filter": lambda: inside.append(element("service", (("name", "com.kernarium.icons.Other"),), (
@@ -691,6 +702,12 @@ def icons_fixture(verifier: Path, variant: str | None) -> dict:
         seapp_plat = seapp_plat.replace("minTargetSdkVersion=37 domain=untrusted_app ", "minTargetSdkVersion=37 domain=priv_app ")
     elif variant == "seapp-isolated-changed":
         seapp_plat = seapp_plat.replace("user=_isolated domain=isolated_app ", "user=_isolated domain=untrusted_app ")
+    elif variant == "seapp-isolated-for-another-seinfo":
+        seapp_plat = seapp_plat.replace("user=_isolated domain=isolated_app levelFrom=user\n",
+                                        "user=_isolated seinfo=platform domain=isolated_app levelFrom=user\n")
+    elif variant == "seapp-isolated-for-a-newer-target":
+        seapp_plat = seapp_plat.replace("user=_isolated domain=isolated_app levelFrom=user\n",
+                                        "user=_isolated minTargetSdkVersion=38 domain=isolated_app levelFrom=user\n")
     elif variant == "seapp-no-isolated":
         seapp_plat = seapp_plat.replace("user=_isolated domain=isolated_app levelFrom=user\n", "")
     elif variant is not None:
@@ -1157,13 +1174,29 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                                                        "user=_app fromRunAs=true domain=runas_app\n"
                                                        "user=system domain=system_app\n"), "default", "x.y", 37) is not None:
         fail("the seapp_contexts lookup takes a line for privileged, ephemeral, run-as or system-user processes")
-    if tool.seapp_isolated_domain(seapp, "com.kernarium.icons") != "isolated_app":
+    if tool.seapp_isolated_domain(seapp, "default", "com.kernarium.icons", 37) != "isolated_app":
         fail("the seapp_contexts lookup does not give an isolated service isolated_app")
     if tool.seapp_isolated_domain(tool.parse_seapp_contexts("user=_isolated isIsolatedComputeApp=true domain=isolated_compute_app\n"),
-                                  "x.y") is not None or tool.seapp_isolated_domain([], "x.y") is not None:
+                                  "default", "x.y", 37) is not None or tool.seapp_isolated_domain([], "default", "x.y", 37) is not None:
         fail("the seapp_contexts lookup takes a line for a shared isolated process, or invents one")
-    if tool.seapp_isolated_domain(seapp + tool.parse_seapp_contexts("user=_isolated name=x.y domain=special\n"), "x.y") != "special":
+    if tool.seapp_isolated_domain(seapp + tool.parse_seapp_contexts("user=_isolated name=x.y domain=special\n"),
+                                  "default", "x.y", 37) != "special":
         fail("the seapp_contexts lookup does not prefer a line by name")
+    for lines, seinfo, target, expected in (
+            ("user=_isolated seinfo=platform domain=isolated_platform\n", "default", 37, None),
+            ("user=_isolated seinfo=platform domain=isolated_platform\n", "platform", 37, "isolated_platform"),
+            ("user=_isolated minTargetSdkVersion=38 domain=newer\n", "default", 37, None),
+            ("user=_isolated maxTargetSdkVersion=36 domain=older\n", "default", 37, None),
+            ("user=_isolated seinfo=platform domain=by_info\nuser=_isolated domain=plain\n", "default", 37, "plain"),
+            ("user=_isolated domain=plain\nuser=_isolated seinfo=default domain=by_info\n", "default", 37, "by_info")):
+        found = tool.seapp_isolated_domain(tool.parse_seapp_contexts(lines), seinfo, "x.y", target)
+        if found != expected:
+            fail(f"the seapp_contexts lookup gives an isolated process of seinfo {seinfo} and target SDK {target} "
+                 f"{found!r} for {lines!r}, not {expected!r}")
+    for package_name, name, expected in (("a.b", ".C", "a.b.C"), ("a.b", "C", "a.b.C"), ("a.b", "x.y.C", "x.y.C"),
+                                         ("a.b", "", None), ("a.b", None, None), ("a.b", 5, None)):
+        if tool.manifest_component_class(package_name, name) != expected:
+            fail(f"the manifest's component class for {name!r} in {package_name} is not {expected!r}")
     release_manifest = synthetic_compiled_manifest(None, debuggable=False)
     release_apk = synthetic_apk(debuggable=False)
     preopt_apks = sorted(tool.REQUIRED_PREOPT_APKS)
@@ -6382,6 +6415,25 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("icons-app-shared-user", {"icons_variant": "shared-user"}, "the manifest sets sharedUserId"),
             ("icons-app-asks-a-permission", {"icons_variant": "asks-a-permission"},
              "has uses-permission: the renderer asks for no permission"),
+            ("icons-app-asks-a-permission-from-sdk-m", {"icons_variant": "asks-a-permission-from-sdk-m"},
+             "has uses-permission-sdk-m: the renderer asks for no permission"),
+            ("icons-app-asks-a-permission-from-sdk-23", {"icons_variant": "asks-a-permission-from-sdk-23"},
+             "has uses-permission-sdk-23: the renderer asks for no permission"),
+            ("icons-provider-enabled-by-reference", {"icons_variant": "provider-enabled-by-reference"},
+             "the provider sets enabled"),
+            ("icons-provider-read-permission-by-reference", {"icons_variant": "provider-read-permission-by-reference"},
+             "the provider sets readPermission"),
+            ("icons-provider-class-changed", {"icons_variant": "provider-class-changed"},
+             "the provider is com.kernarium.icons.BackupIconProvider, not com.kernarium.icons.IconProvider"),
+            ("icons-provider-class-of-another-package", {"icons_variant": "provider-class-of-another-package"},
+             "the provider is com.example.IconProvider, not com.kernarium.icons.IconProvider"),
+            ("icons-service-class-changed", {"icons_variant": "service-class-changed"},
+             "the service is com.kernarium.icons.IconRenderServiceTwo, not com.kernarium.icons.IconRenderService"),
+            ("icons-service-app-zygote", {"icons_variant": "service-app-zygote"}, "the service sets useAppZygote"),
+            ("icons-seapp-isolated-for-another-seinfo", {"icons_variant": "seapp-isolated-for-another-seinfo"},
+             "put the icon renderer's isolated service in None, not isolated_app"),
+            ("icons-seapp-isolated-for-a-newer-target", {"icons_variant": "seapp-isolated-for-a-newer-target"},
+             "put the icon renderer's isolated service in None, not isolated_app"),
             ("icons-app-has-an-activity", {"icons_variant": "has-an-activity"}, "has activity: the renderer asks for no permission"),
             ("icons-app-has-a-receiver", {"icons_variant": "has-a-receiver"}, "has receiver: the renderer asks for no permission"),
             ("icons-app-has-a-filter", {"icons_variant": "has-a-filter"}, "has intent-filter: the renderer asks for no permission"),

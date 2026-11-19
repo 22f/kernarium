@@ -4937,7 +4937,7 @@ ICONS_ABSENT_ATTRIBUTES = {
     "manifest": ("sharedUserId", "sharedUserLabel"),
     "application": ("debuggable", "persistent", "process", "sharedUserId", "testOnly", "backupAgent", "usesCleartextTraffic"),
     "provider": ("readPermission", "writePermission", "grantUriPermissions", "multiprocess", "process", "enabled", "isolatedProcess"),
-    "service": ("permission", "process", "enabled", "externalService", "foregroundServiceType"),
+    "service": ("permission", "process", "enabled", "externalService", "foregroundServiceType", "useAppZygote"),
 }
 
 
@@ -4992,41 +4992,53 @@ def seapp_entry_names(entry: dict[str, str], name: str) -> bool:
     return wanted == name
 
 
+def seapp_applies(entry: dict[str, str], seinfo: str, name: str, target_sdk: int) -> tuple[int, int, int] | None:
+    """How specifically an seapp_contexts entry applies to the process of an ordinary installed application (not
+    privileged, not ephemeral, not started by run-as, not a system server, sdk sandbox or shared compute process) of this
+    seinfo, package and target SDK, as the key of its precedence (seinfo stated, name stated, the highest
+    minTargetSdkVersion), or None when a selector of the entry leaves it out."""
+    if any(entry.get(key) not in (None, "false") for key in
+           ("isSystemServer", "isEphemeralApp", "isPrivApp", "fromRunAs", "isIsolatedComputeApp", "isSdkSandboxNext",
+            "isSdkSandboxAudit")):
+        return None
+    if entry.get("seinfo") not in (None, seinfo) or not seapp_entry_names(entry, name):
+        return None
+    minimum = int(entry.get("minTargetSdkVersion", "0"))
+    if target_sdk < minimum or ("maxTargetSdkVersion" in entry and target_sdk > int(entry["maxTargetSdkVersion"])):
+        return None
+    return (1 if "seinfo" in entry else 0, 1 if "name" in entry else 0, minimum)
+
+
+def seapp_domain(entries: list[dict[str, str]], user: str, seinfo: str, name: str, target_sdk: int) -> str | None:
+    """The domain the platform picks for a process of this seapp user (_app or _isolated) of an application of this
+    seinfo, package and target SDK: the applicable entry of highest precedence, the earlier one of equals."""
+    best: tuple[tuple[int, int, int], dict[str, str]] | None = None
+    for entry in entries:
+        if entry.get("user") != user or "domain" not in entry:
+            continue
+        key = seapp_applies(entry, seinfo, name, target_sdk)
+        if key is not None and (best is None or key > best[0]):
+            best = (key, entry)
+    return best[1]["domain"] if best else None
+
+
 def seapp_app_domain(entries: list[dict[str, str]], seinfo: str, name: str, target_sdk: int) -> str | None:
-    """The domain the platform picks for the process of an ordinary installed application (its own user id in the app
-    range, not privileged, not ephemeral, not started by run-as) of this seinfo, package and target SDK: the entry whose
-    seinfo is stated, then whose name is stated, then whose minTargetSdkVersion is the highest, the earlier one of equals."""
-    best: tuple[tuple[int, int, int], int, dict[str, str]] | None = None
-    for index, entry in enumerate(entries):
-        if entry.get("user") != "_app" or "domain" not in entry:
-            continue
-        if any(entry.get(key) not in (None, "false") for key in
-               ("isSystemServer", "isEphemeralApp", "isPrivApp", "fromRunAs", "isIsolatedComputeApp", "isSdkSandboxNext",
-                "isSdkSandboxAudit")):
-            continue
-        if entry.get("seinfo") not in (None, seinfo) or not seapp_entry_names(entry, name):
-            continue
-        minimum = int(entry.get("minTargetSdkVersion", "0"))
-        if target_sdk < minimum or ("maxTargetSdkVersion" in entry and target_sdk > int(entry["maxTargetSdkVersion"])):
-            continue
-        key = (1 if "seinfo" in entry else 0, 1 if "name" in entry else 0, minimum)
-        if best is None or key > best[0]:
-            best = (key, index, entry)
-    return best[2]["domain"] if best else None
+    """The domain of the process of an ordinary installed application (its own user id in the app range)."""
+    return seapp_domain(entries, "_app", seinfo, name, target_sdk)
 
 
-def seapp_isolated_domain(entries: list[dict[str, str]], name: str) -> str | None:
-    """The domain the platform picks for an isolated process of this package that does not share it with others."""
-    best: tuple[int, int, dict[str, str]] | None = None
-    for index, entry in enumerate(entries):
-        if entry.get("user") != "_isolated" or "domain" not in entry or entry.get("isIsolatedComputeApp") not in (None, "false"):
-            continue
-        if not seapp_entry_names(entry, name):
-            continue
-        key = 1 if "name" in entry else 0
-        if best is None or key > best[0]:
-            best = (key, index, entry)
-    return best[2]["domain"] if best else None
+def seapp_isolated_domain(entries: list[dict[str, str]], seinfo: str, name: str, target_sdk: int) -> str | None:
+    """The domain of an isolated process of this application that does not share it with others."""
+    return seapp_domain(entries, "_isolated", seinfo, name, target_sdk)
+
+
+def manifest_component_class(package: str, name: object) -> str | None:
+    """The class a manifest names for a component: a name that starts with a dot, or has none, is the package's."""
+    if not isinstance(name, str) or not name:
+        return None
+    if name.startswith("."):
+        return package + name
+    return name if "." in name else f"{package}.{name}"
 
 
 def check_icons_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo], seapp_contexts: str) -> None:
@@ -5049,7 +5061,7 @@ def check_icons_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo],
     first = {name: attributes for name, attributes in reversed(elements)}
     if first["manifest"].get("package") != ICONS_PACKAGE:
         fail(f"{ICONS_APK} is the package {first['manifest'].get('package')}, not {ICONS_PACKAGE}")
-    for kind in ("uses-permission", "uses-permission-sdk-23", "permission", "activity", "activity-alias", "receiver",
+    for kind in (*sorted(PERMISSION_REQUEST_ELEMENTS), "permission", "activity", "activity-alias", "receiver",
                  "intent-filter", "uses-library", "uses-native-library", "meta-data", "grant-uri-permission", "path-permission"):
         if kind in names:
             fail(f"{ICONS_APK} has {kind}: the renderer asks for no permission and has no activity, receiver, filter or launcher entry")
@@ -5058,8 +5070,8 @@ def check_icons_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo],
             fail(f"{ICONS_APK} has {names.count(kind)} {kind} elements, not {wanted}")
     for kind, attributes in ICONS_ABSENT_ATTRIBUTES.items():
         for attribute in attributes:
-            value = first[kind].get(attribute)
-            if value is not None and not (attribute == "enabled" and value is True):
+            # By the key: a value that is a resource reference reads as no value, and is set all the same.
+            if attribute in first[kind] and not (attribute == "enabled" and first[kind][attribute] is True):
                 fail(f"{ICONS_APK}: the {kind} sets {attribute}")
     application = first["application"]
     for attribute, value in (("allowBackup", False), ("directBootAware", True), ("usesNonSdkApi", True)):
@@ -5074,8 +5086,10 @@ def check_icons_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo],
     for attribute, value in (("exported", False), ("isolatedProcess", True), ("directBootAware", True)):
         if service.get(attribute) is not value:
             fail(f"{ICONS_APK}: the service's {attribute} is {service.get(attribute)!r}, not {value!r}: it runs in an isolated process and is not exported")
-    if not str(provider.get("name", "")).endswith("IconProvider") or not str(service.get("name", "")).endswith("IconRenderService"):
-        fail(f"{ICONS_APK}: the provider and the service are not IconProvider and IconRenderService")
+    for kind, component, wanted in (("provider", provider, "IconProvider"), ("service", service, "IconRenderService")):
+        found = manifest_component_class(ICONS_PACKAGE, component.get("name"))
+        if found != f"{ICONS_PACKAGE}.{wanted}":
+            fail(f"{ICONS_APK}: the {kind} is {found}, not {ICONS_PACKAGE}.{wanted}")
     target = first.get("uses-sdk", {}).get("targetSdkVersion")
     if not isinstance(target, int) or isinstance(target, bool):
         fail(f"{ICONS_APK} has no integer targetSdkVersion: the domain of its process cannot be told")
@@ -5099,7 +5113,7 @@ def check_icons_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo],
     domain = seapp_app_domain(entries, "default", ICONS_PACKAGE, target)
     if domain is None or ORDINARY_APP_DOMAIN.fullmatch(domain) is None:
         fail(f"seapp_contexts put the icon renderer's provider in {domain}, not an untrusted_app domain")
-    isolated = seapp_isolated_domain(entries, ICONS_PACKAGE)
+    isolated = seapp_isolated_domain(entries, "default", ICONS_PACKAGE, target)
     if isolated != "isolated_app":
         fail(f"seapp_contexts put the icon renderer's isolated service in {isolated}, not isolated_app")
 
