@@ -386,7 +386,7 @@ class CatalogueTests(unittest.TestCase):
 
     def test_the_delivery_mode_needs_no_probe_and_no_extras(self) -> None:
         run, skipped = runner.plan_rows("delivery", set())
-        self.assertEqual([row.name for row in run], ["D1", "D2"])
+        self.assertEqual([row.name for row in run], ["D1", "D2", "D3"])
         self.assertEqual(skipped, [])
         options = runner.build_parser().parse_args(["--mode", "delivery", "--proof-image", "--release", "x"])
         self.assertTrue(options.proof_image)
@@ -796,9 +796,56 @@ class DeliveryRowTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.Failure, "a message with a one-time code: 0 new inbox rows"):
             self.run_row(runner.row_d2, self.Guest(["100"]), copies=0)
 
+    LISTENING = ("11-18 20:09:43.609  1402  1480 I AndariumSms: listening on vsock port 5560\n"
+                 "11-18 20:09:43.603  1402  1402 I AndariumSms: record in /x, labelled u:object_r:y:s0\n")
+    START_UP_DENIALS = (
+        "11-18 20:09:44.100  1402  1402 I auditd  : type=1400 audit(0.0:9): avc:  denied  { find } for pid=1402 "
+        "name=gpu scontext=u:r:kernarium_sms:s0 tcontext=u:object_r:gpu_service:s0 tclass=service_manager "
+        "permissive=0\n"
+        "11-18 20:09:44.200  1402  1402 I auditd  : type=1400 audit(0.0:10): avc:  denied  { search } for "
+        "name=\"data\" scontext=u:r:kernarium_sms:s0 tcontext=u:object_r:system_data_file:s0 tclass=dir "
+        "permissive=0\n")
+
+    def test_what_the_service_log_must_and_must_not_show(self) -> None:
+        problems = runner.service_log_problems
+        self.assertEqual(problems(self.LISTENING, self.START_UP_DENIALS, "1402"), [])
+        self.assertIn("never logged that it listens", problems("", "", "1402")[0])
+        refused = self.LISTENING + ("11-18 20:10:00.000  1402  1480 I AndariumSms: refused a connection with no "
+                                    "peer address: IOException\n")
+        self.assertEqual(problems(refused, "", "1402"),
+                         ["the service logged 'refused a connection with no peer address: IOException'"])
+        cid = self.LISTENING + "11-18 20:10:00.000  1402  1480 I AndariumSms: refused a connection from CID 1\n"
+        self.assertEqual(len(problems(cid, "", "1402")), 1)
+        failed = self.LISTENING + ("11-18 20:10:00.000  1402  1480 I AndariumSms: host channel: cannot read a "
+                                   "peer's CID: NoSuchMethodException\n")
+        self.assertIn("host channel: cannot read a peer's CID", problems(failed, "", "1402")[0])
+        vsock = ("11-18 20:10:00.000  1402  1480 I auditd  : type=1400 audit(0.0:11): avc:  denied  { accept } for "
+                 "scontext=u:r:kernarium_sms:s0 tcontext=u:r:kernarium_sms:s0 tclass=vsock_socket permissive=0\n")
+        self.assertEqual(problems(self.LISTENING, vsock, "1402"), ["SELinux denied the service a vsock socket"])
+        hidden = ("11-18 20:09:43.700  1402  1402 W d.kernarium.sms: Accessing hidden method "
+                  "Landroid/system/Os;->accept(Ljava/io/FileDescriptor;Ljava/net/SocketAddress;)"
+                  "Ljava/io/FileDescriptor; (unsupported, reflection, denied)\n")
+        self.assertIn("hidden-API access by the service", problems(self.LISTENING, hidden, "1402")[0])
+        self.assertEqual(problems(self.LISTENING, hidden, "999"), [], "another process's warning is not the service's")
+        other = hidden.replace("Landroid/system/Os;->accept", "Landroid/app/Activity;->x")
+        self.assertEqual(problems(self.LISTENING, other, "1402"), [])
+
+    def test_d3_reads_the_service_and_its_process(self) -> None:
+        guest = self.Guest(["100"])
+        guest.pid = lambda: 1402  # type: ignore[method-assign]
+        guest.service_log = lambda: self.LISTENING  # type: ignore[method-assign]
+        guest.logcat = lambda *arguments: self.START_UP_DENIALS  # type: ignore[method-assign]
+        self.run_row(runner.row_d3, guest)
+        guest.service_log = lambda: ""  # type: ignore[method-assign]
+        with self.assertRaisesRegex(runner.Failure, "never logged that it listens"):
+            self.run_row(runner.row_d3, guest)
+        guest.pid = lambda: None  # type: ignore[method-assign]
+        with self.assertRaisesRegex(runner.Failure, "is not running"):
+            self.run_row(runner.row_d3, guest)
+
     def test_delivery_runs_d1_before_d2(self) -> None:
         rows, _ = runner.plan_rows("delivery", set())
-        self.assertEqual([row.name for row in rows], ["D1", "D2"])
+        self.assertEqual([row.name for row in rows], ["D1", "D2", "D3"])
 
 
 class ProbeSourceTests(unittest.TestCase):

@@ -10,9 +10,10 @@ service is android/lineage-24/overlay/sms. The runner has four modes, each one b
 
 - ``delivery`` (an image of any build type with the SMS provider, no root, no probe): D1 a plain message from
   the host is handed over, answered and stored as exactly one new inbox row; D2 messages with a one-time code
-  are too, and com.android.phone, waited for, keeps its pid. D1 runs first. It is the smallest check of a built
-  image's text-message path, and the one for an unsigned proof image (``--proof-image``): a service that drops
-  every connection fails it at the first answer.
+  are too, and com.android.phone, waited for, keeps its pid; D3 the service's log shows that it listens and
+  refused nothing, with no hidden-API warning and no vsock denial for it. D1 runs first. It is the smallest
+  check of a built image's text-message path, and the one for an unsigned proof image (``--proof-image``): a
+  service that drops every connection fails it at the first answer.
 
 - ``channel`` (a release image, no root): the channel's rows. G1 a host's request is taken, handed over,
   and answered; G2a-d the provider is gone and a guest-local or adb-made connection is refused or ends at once;
@@ -354,6 +355,33 @@ def phone_problem(before: str, after: str, crashes_before: int, crashes_after: i
     return None
 
 
+# The service's own log lines that say it could not do its work: a refusal, or a failure of the host channel.
+SERVICE_FAILURE_LINES = ("refused a connection", "host channel:")
+HIDDEN_API = re.compile(r"Accessing hidden (?:method|field) L(?:android/system|libcore)/")
+
+
+def service_log_problems(service_log: str, full_log: str, pid: str) -> list[str]:
+    """What the service's log, and the whole log of the service's process, must not show after the host's
+    messages were delivered: the service says it listens, and no line of it says a connection was refused or the
+    channel failed (a service that cannot read a peer's CID logs both, and refuses the host), no vsock socket of
+    it was denied by SELinux (denials of the start-up, on the service manager and on the data directory, are not
+    this row's), and the platform did not warn of hidden-API access to android.system or libcore from it (the
+    warning of a process that is not exempt)."""
+    problems = []
+    if "listening on vsock port" not in service_log:
+        problems.append("the service never logged that it listens on a vsock port")
+    for line in service_log.splitlines():
+        if any(failure in line for failure in SERVICE_FAILURE_LINES):
+            problems.append(f"the service logged {line.split(f'{TAG}: ', 1)[-1].strip()!r}")
+    for line in full_log.splitlines():
+        if "avc:" in line and "denied" in line and "kernarium_sms" in line and "vsock_socket" in line:
+            problems.append("SELinux denied the service a vsock socket")
+        fields = line.split()
+        if len(fields) > 2 and fields[2] == pid and HIDDEN_API.search(line):
+            problems.append(f"the platform warned of hidden-API access by the service: {line[line.find('Accessing'):]}")
+    return problems
+
+
 def inbox_ids_command(sender: str, text: str) -> str:
     """The shell command that lists the ids of the inbox rows from the sender with exactly this text. It selects
     the id alone, so no message body is in its output."""
@@ -589,6 +617,8 @@ NEEDS = {
 ROWS = (
     Row("D1", "delivery", "a plain message is handed over, answered and stored"),
     Row("D2", "delivery", "a message with a one-time code is too, and com.android.phone keeps its pid"),
+    Row("D3", "delivery", "the service logs that it listens and refuses nothing, with no hidden-API warning or "
+        "vsock denial"),
     Row("G1", "channel", "a host's request is taken, handed over and answered", ("H2",)),
     Row("G2a", "channel", "the provider is gone", ("H4",)),
     Row("G2b", "channel", "an adb forward to vsock:3 is refused", ("H3",)),
@@ -978,6 +1008,16 @@ def row_d2(run: Run) -> None:
     if problem:
         raise Failure(problem)
     run.note(f"{PHONE} kept pid {after[0].strip()}")
+
+
+def row_d3(run: Run) -> None:
+    pid = run.guest.pid()
+    if pid is None:
+        raise Failure(f"{PACKAGE} is not running")
+    problems = service_log_problems(run.guest.service_log(), run.guest.logcat("-b", "all", "-v", "threadtime"),
+                                    str(pid))
+    if problems:
+        raise Failure("; ".join(problems))
 
 
 # ---- The channel rows.
@@ -1437,7 +1477,7 @@ def row_i6(run: Run) -> None:
 
 
 ROW_FUNCTIONS: dict[str, Callable[[Run], None]] = {
-    "D1": row_d1, "D2": row_d2,
+    "D1": row_d1, "D2": row_d2, "D3": row_d3,
     "G1": row_g1, "G2a": row_g2a, "G2b": row_g2b, "G2c": row_g2c, "G2d": row_g2d, "G2e": row_g2e, "G3": row_g3,
     "G4": row_g4, "G5": row_g5, "G6": row_g6, "G7": row_g7, "G8": row_g8, "G9": row_g9, "H6": row_h6, "H9": row_h9,
     "I1": row_i1, "I2": row_i2, "I3": row_i3, "I4": row_i4, "I5": row_i5, "I6": row_i6, "I7": row_i7, "I8": row_i8,

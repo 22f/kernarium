@@ -1186,7 +1186,9 @@ are options of the runner (`--list-rows` names each row and what it needs).
 or registration, but the SMS provider (it refuses `--variant no-provider`): D1 and
 then D2 send a plain message and messages with a one-time code, each handed over,
 answered and stored as exactly one new inbox row, and `com.android.phone`, waited
-for, keeps its pid. With `--proof-image` it boots an unsigned proof image
+for, keeps its pid; D3 reads the service's log: it listens, nothing was refused,
+and the platform warned of no hidden-API access and denied no vsock socket.
+With `--proof-image` it boots an unsigned proof image
 (manifest schema 0), which no installed-release reader takes, on a fresh instance.
 `android17-sms-runner` (tooling) runs its wire, record file, parsers and
 judgements without a guest.
