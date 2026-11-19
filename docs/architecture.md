@@ -663,8 +663,11 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   the release the blob was made from (Release, below). `DARWIN_UML_AOT=0`
   in the environment, or `--aot=off` on the launch, runs the engine alone;
   `--aot=on` (or `--aot`) fails a launch whose build has none, and the launch's
-  word beats the environment. The choice is made once, when the first executor
-  is made, and before any per-thread table exists. The App Store runtime
+  word beats the environment. Each run makes the choice before its first
+  executor and any per-thread table exist; a restart in the same process
+  decides again, and a release the blob no longer fits runs on the engine.
+  A process that ran without the component does not turn it on later. The
+  App Store runtime
   reads no environment for it. An archive
   configuration (App Store, TestFlight) carries the component only when
   `accepted-aot.env` sets `LINEAGE24_ACCEPTED_AOT_ARCHIVES` to `yes`: the
@@ -686,7 +689,9 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   before anything else: another release, a proof or test image, an updated
   image whose blob is stale, or a launch that states none (a Linux guest, or a
   release with no identity) runs without the component under `auto` and fails
-  UNSUPPORTED under `on`, and allocates no AOT state. The tests of a build with
+  UNSUPPORTED under `on`, and allocates no AOT state. Only a launcher that
+  attaches an Android release states the release; the Linux launcher refuses
+  `--aot-release=` on its command line. The tests of a build with
   `UML_AOT_DIAGNOSTICS` select it without a stated release; a product has no
   such entry.
 - Units: each library is a self-contained unit of the framework. Branches

@@ -560,7 +560,12 @@ def check_aot(repo, report, app):
     if app is not None and not packaged:
         # A runtime that links the component needs it to launch, whatever the
         # descriptor says: the build asked for it by name or by default.
-        for runtime in runtimes_requiring(app, AOT_NAME):
+        linking, unreadable = runtimes_requiring(app, AOT_NAME)
+        for runtime, reason in unreadable:
+            report.error(
+                f"the packaged framework {runtime} cannot be read as a Mach-O file, "
+                f"so what it links is unknown", reason)
+        for runtime in linking:
             report.error(
                 f"the packaged runtime {runtime} links {AOT_NAME}.framework, but the application carries no AOT framework",
                 f"{PACKAGED_AOT} is missing, and dyld refuses to launch an application without a framework its runtime links",
@@ -703,11 +708,18 @@ def config_mismatches(repo, kernel, config_text):
     return problems
 
 
+class MachOError(ValueError):
+    """A Mach-O file that is cut short or lists a load command that is."""
+
+
 def thin_offset(data):
     if len(data) < 8:
         return None
     if struct.unpack_from(">I", data, 0)[0] == 0xCAFEBABE:
-        for index in range(min(struct.unpack_from(">I", data, 4)[0], 16)):
+        count = min(struct.unpack_from(">I", data, 4)[0], 16)
+        if len(data) < 8 + 20 * count:
+            raise MachOError("the fat header is cut short")
+        for index in range(count):
             cpu, _, offset, _, _ = struct.unpack_from(">IIIII", data, 8 + 20 * index)
             if cpu == 0x0100000C:
                 return offset
@@ -716,26 +728,30 @@ def thin_offset(data):
 
 
 def macho_section(path, wanted):
-    """The bytes of one section of an arm64 Mach-O file, or None."""
+    """The bytes of one section of an arm64 Mach-O file, or None (a file that
+    is not one, or is cut short, has no such section)."""
     data = path.read_bytes()
-    base = thin_offset(data[:4096])
-    if base is None:
+    try:
+        base = thin_offset(data[:4096])
+        if base is None:
+            return None
+        count = struct.unpack_from("<I", data, base + 16)[0]
+        position = base + 32
+        for _ in range(count):
+            command, size = struct.unpack_from("<II", data, position)
+            if command == 0x19:  # LC_SEGMENT_64
+                sections = struct.unpack_from("<I", data, position + 64)[0]
+                entry = position + 72
+                for _ in range(sections):
+                    name = data[entry:entry + 16].rstrip(b"\0").decode("ascii", "replace")
+                    segment = data[entry + 16:entry + 32].rstrip(b"\0").decode("ascii", "replace")
+                    length, offset = struct.unpack_from("<QI", data, entry + 40)
+                    if (segment, name) == wanted:
+                        return data[base + offset:base + offset + length]
+                    entry += 80
+            position += size
+    except (MachOError, struct.error):
         return None
-    count = struct.unpack_from("<I", data, base + 16)[0]
-    position = base + 32
-    for _ in range(count):
-        command, size = struct.unpack_from("<II", data, position)
-        if command == 0x19:  # LC_SEGMENT_64
-            sections = struct.unpack_from("<I", data, position + 64)[0]
-            entry = position + 72
-            for _ in range(sections):
-                name = data[entry:entry + 16].rstrip(b"\0").decode("ascii", "replace")
-                segment = data[entry + 16:entry + 32].rstrip(b"\0").decode("ascii", "replace")
-                length, offset = struct.unpack_from("<QI", data, entry + 40)
-                if (segment, name) == wanted:
-                    return data[base + offset:base + offset + length]
-                entry += 80
-        position += size
     return None
 
 
@@ -747,25 +763,33 @@ STRONG_DYLIB_COMMANDS = frozenset({0x0C, 0x20, 0x8000001F, 0x80000023})
 
 def macho_dylibs(path):
     """The install names an arm64 Mach-O file requires at launch, in load
-    command order; an empty list for any other file."""
+    command order; an empty list for any file that is not one. Raises
+    MachOError for one that is cut short: a fat header, the load commands or
+    a dylib command that ends before its own header does."""
     try:
         data = path.read_bytes()
     except OSError:
         return []
     base = thin_offset(data[:4096])
-    if base is None or len(data) < base + 32:
+    if base is None:
         return []
+    if len(data) < base + 32:
+        raise MachOError("the Mach-O header is cut short")
     count = struct.unpack_from("<I", data, base + 16)[0]
     position = base + 32
     names = []
-    for _ in range(count):
+    for index in range(count):
         if position + 8 > len(data):
-            break
+            raise MachOError(f"load command {index} starts past the end of the file")
         command, size = struct.unpack_from("<II", data, position)
         if size < 8 or position + size > len(data):
-            break
+            raise MachOError(f"load command {index} is shorter than its header or runs past the end of the file")
         if command in STRONG_DYLIB_COMMANDS:
+            if size < 24:
+                raise MachOError(f"dylib load command {index} is shorter than its header")
             offset = struct.unpack_from("<I", data, position + 8)[0]
+            if not 24 <= offset < size:
+                raise MachOError(f"dylib load command {index} names its dependency outside itself")
             raw = data[position + offset:position + size]
             names.append(raw.split(b"\0", 1)[0].decode("utf-8", "replace"))
         position += size
@@ -773,20 +797,26 @@ def macho_dylibs(path):
 
 
 def runtimes_requiring(app, framework_name):
-    """The embedded frameworks (by name) whose load commands require
-    `<framework_name>.framework/<framework_name>`."""
+    """(the embedded frameworks, by name, whose load commands require
+    `<framework_name>.framework/<framework_name>`, and those that cannot be
+    read as (name, reason))."""
     wanted = f"/{framework_name}.framework/{framework_name}"
     frameworks = app / "Frameworks"
-    found = []
+    found, unreadable = [], []
     if not frameworks.is_dir():
-        return found
+        return found, unreadable
     for directory in sorted(frameworks.glob("*.framework")):
         if directory.stem == framework_name:
             continue
         binary = directory / directory.stem
-        if binary.is_file() and any(name.endswith(wanted) for name in macho_dylibs(binary)):
-            found.append(directory.stem)
-    return found
+        if not binary.is_file():
+            continue
+        try:
+            if any(name.endswith(wanted) for name in macho_dylibs(binary)):
+                found.append(directory.stem)
+        except MachOError as error:
+            unreadable.append((directory.stem, str(error)))
+    return found, unreadable
 
 
 def kernel_banner_releases(image):

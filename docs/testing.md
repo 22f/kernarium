@@ -806,7 +806,9 @@ blocker in every one of them.
   the environment, and it binds the launch to the release (the same release is
   on; another release ID, manifest digest or system-partition digest is off
   under `auto` and fails under `on`; a launch that states no release has no
-  component and no tables), each case in a process of its own;
+  component and no tables; a restart in the process decides again, so a
+  release the blob no longer fits runs on the engine), each case in a process
+  of its own;
   `emulator-options` holds the `--aot=` and `--aot-release=` parsing and
   `android-release-identity` the launcher's reading of the release identity.
   `aot-archive-switch-gates-explicit-artifacts` (tooling) holds the archive
