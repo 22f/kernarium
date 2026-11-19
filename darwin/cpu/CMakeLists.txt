@@ -21,66 +21,34 @@ set(UML_AOT_IMAGE "" CACHE PATH
     "An accepted Android release directory to generate the AOT framework from; empty builds without AOT")
 set(UML_AOT_FSCK_EROFS "" CACHE FILEPATH
     "An fsck.erofs that decodes Zstandard, used to unpack UML_AOT_IMAGE")
-set(UML_AOT_LIBRARIES
-    "/apex/com.android.runtime/lib64/bionic/libc.so"
-    "/apex/com.android.runtime/bin/linker64"
-    "/apex/com.android.art/lib64/libart.so"
-    "/system/lib64/libhwui.so"
-    "/vendor/lib64/venus_gallium_dri.so"
-    "/system/bin/surfaceflinger"
-    "/system/lib64/libcrypto.so"
-    "/system/lib64/libpcre2.so"
-    "/system/lib64/libbinder.so"
-    "/system/lib64/libz.so"
-    "/system/bin/toybox"
-    "/system/lib64/libselinux.so"
-    "/system/lib64/libtracing_perfetto.so"
-    "/apex/com.android.art/lib64/libartpalette.so"
-    "/system/lib64/libutils.so"
-    "/system/lib64/libcutils.so"
-    "/apex/com.android.art/lib64/libdexfile.so"
-    "/system/lib64/libbinder_ndk.so"
-    "/system/lib64/bootstrap/libc.so"
-    "/apex/com.android.art/lib64/libc++.so"
-    "/system/lib64/libandroidfw.so"
-    "/apex/com.android.art/lib64/libartbase.so"
-    "/apex/com.android.runtime/lib64/bionic/libm.so"
-    "/system/lib64/libgui.so"
-    "/system/lib64/libui.so"
-    "/apex/com.android.art/lib64/libjavacore.so"
-    "/system/bin/bootstrap/linker64"
-    "/system/lib64/liblog.so"
-    "/system/lib64/android.hardware.graphics.composer3-V5-ndk.so"
-    "/vendor/lib64/libutils.so"
-    "/system/lib64/libminikin.so"
-    "/system/lib64/libandroid_runtime.so"
-    "/system/lib64/libsqlite.so"
-    "/system/lib64/libft2.so"
-    # One path per distinct file: a unit binds by the content of its pages, so
-    # it serves every identical copy another APEX ships too.
-    "/apex/com.android.media.swcodec/lib64/libcodec2_soft_av1dec_gav1.so"
-    "/apex/com.android.conscrypt/lib64/libcrypto.so"
-    "/apex/com.android.media.swcodec/lib64/libFraunhoferAAC.so"
-    "/apex/com.android.art/bin/dex2oat64"
-    "/vendor/lib64/hw/vulkan.virtio.so"
-    "/apex/com.android.media.swcodec/lib64/libcodec2_soft_av1dec_dav1d.so"
-    "/apex/com.android.media.swcodec/lib64/libopus.so"
-    "/apex/com.android.conscrypt/lib64/libssl.so"
-    "/apex/com.android.art/lib64/liblzma.so"
-    "/system/lib64/liblzma.so"
-    "/apex/com.android.conscrypt/lib64/libjavacrypto.so"
-    "/apex/com.android.art/lib64/liblz4.so"
-    "/system/lib64/liblz4.so"
-    "/apex/com.android.media.swcodec/lib64/libvpx.so"
-    "/apex/com.android.media.swcodec/lib64/libcodec2_soft_avcdec.so"
-    CACHE STRING
-    "Libraries of the release to rewrite, as absolute guest paths")
-# The boot image's compiled Java: every OAT file of the release that holds
-# code, translated whole (an OAT file without a compiled method is skipped).
+# What the rewriter translates is tools/aot/libraries.txt, which the release
+# artifact tool reads too. A build that names UML_AOT_LIBRARIES or
+# UML_AOT_BOOT_CODE measures another set; an empty UML_AOT_BOOT_CODE leaves
+# the boot image out.
+set(_uml_aot_list ${PROJECT_SOURCE_DIR}/tools/aot/libraries.txt)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${_uml_aot_list}")
+file(STRINGS "${_uml_aot_list}" _uml_aot_list_lines)
+set(_uml_aot_default_libraries)
+set(_uml_aot_default_boot)
+foreach(_line IN LISTS _uml_aot_list_lines)
+    if(_line MATCHES "^library (/[^ ]+)$")
+        list(APPEND _uml_aot_default_libraries "${CMAKE_MATCH_1}")
+    elseif(_line MATCHES "^boot (/[^ ]+)$")
+        list(APPEND _uml_aot_default_boot "${CMAKE_MATCH_1}")
+    elseif(NOT _line MATCHES "^(#.*)?$")
+        message(FATAL_ERROR "${_uml_aot_list}: unrecognised line: ${_line}")
+    endif()
+endforeach()
+set(UML_AOT_LIBRARIES "" CACHE STRING
+    "Libraries of the release to rewrite, as absolute guest paths; empty takes tools/aot/libraries.txt")
+if(NOT UML_AOT_LIBRARIES)
+    set(UML_AOT_LIBRARIES ${_uml_aot_default_libraries})
+endif()
 # Not a cache entry unless a build names it, so a build tree that cached an
-# older list builds it too; an empty value leaves it out (a measurement).
+# older list builds the current one too.
 if(NOT DEFINED UML_AOT_BOOT_CODE)
-    set(UML_AOT_BOOT_CODE "/system/framework/arm64/boot*.oat")
+    set(UML_AOT_BOOT_CODE ${_uml_aot_default_boot})
 endif()
 option(UML_AOT_DIAGNOSTICS
     "Compose the AOT runtime variant with its counters, report and test switches (never for a product)" OFF)
