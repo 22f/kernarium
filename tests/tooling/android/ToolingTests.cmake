@@ -240,6 +240,53 @@ uml_add_tooling_test(
 set_tests_properties(android17-oldapp-switch-command PROPERTIES
     SKIP_RETURN_CODE 77)
 
+# The icon renderer (android/lineage-24/overlay/app_icons, the app KernariumIcons): what it shares with
+# kernarium_apps (the shell user's uid, the shape of a request, a path's rules, the sizes and bounds) on a plain
+# JVM and again with one rule removed at a time, where the named rows must fail; and, as text with a mutant for
+# each rule, what its provider, worker, drawing and service must do and must not touch, with its manifest
+# (unprivileged, direct-boot aware, a guarded provider and an isolated service, nothing else) and build file.
+# It skips (77) where the host has no JDK.
+uml_add_tooling_test(
+    NAME android17-icon-renderer
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_icon_renderer.py
+    LABELS android
+    TIMEOUT 600)
+set_tests_properties(android17-icon-renderer PROPERTIES
+    SKIP_RETURN_CODE 77)
+
+# The launcher-application shell command (android/lineage-24/overlay/app_shortcuts) on a plain JVM:
+# the component grammar, the labels' escaping and bounds, the listing's rule, digest and icon keys,
+# the framing of every answer read back by a parser of the test's own, the icon records, the launch's
+# refusals and argument vector, how a start's output is read, the child process (real processes), the
+# icon source's bound, the resource files' order and the exit statuses against a fake platform, and
+# again with one rule removed at a time, where the named rows must fail. It also checks the image's
+# wiring of the command (product, build check, verifier list, no policy), that the sources write and
+# open nothing, and what the Android glue must not do (as text, each rule with a mutant). It skips
+# (77) where the host has no JDK.
+uml_add_tooling_test(
+    NAME android17-app-shortcuts-command
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_app_shortcuts_command.py
+    LABELS android
+    TIMEOUT 900)
+set_tests_properties(android17-app-shortcuts-command PROPERTIES
+    SKIP_RETURN_CODE 77)
+
+# The launcher-application runner without a guest: the probe packages (manifests read back, the bad icon and
+# the caller), the strict parsers of the command's answers (each deviation of a header, a row, a label and an
+# icon record, and of the sampler's answer), the judgement of what the tool's process holds and of the
+# renderer's two processes, and every step against a scripted guest that follows the contract and differs one
+# way at a time. It skips (77) where the host has no keytool and jarsigner.
+uml_add_tooling_test(
+    NAME android17-app-shortcuts-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_app_shortcuts_runner.py
+    LABELS android
+    TIMEOUT 300)
+set_tests_properties(android17-app-shortcuts-runner PROPERTIES
+    SKIP_RETURN_CODE 77)
+
 # The text message service's logic on a plain JVM: the PDUs it builds, read back
 # with the platform's own UTF-16 decoder, the request's parsing and the answers,
 # the delivery record (never twice, at every point a request can end at), and the

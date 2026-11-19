@@ -584,6 +584,15 @@ PRODUCT_PACKAGES += kernarium_keyboard_default_script
 # a Java tool, so the package manager can give the labels in the guest's language.
 PRODUCT_PACKAGES += kernarium_oldapp
 
+# Andarium's Add to Home Screen needs the launcher applications with their labels (in the guest's
+# language) and icons, and a safe way to start one. The adb shell user runs this command: a Java tool
+# started through app_process like kernarium_oldapp, so it needs no service and no permission of its own
+# (overlay/app_shortcuts). It draws no icon: KernariumIcons (overlay/app_icons) does, in an isolated process
+# behind a provider that only the shell user may use. That application is an ordinary one, signed with the
+# default key and with no SELinux rule of its own.
+PRODUCT_PACKAGES += kernarium_apps
+PRODUCT_PACKAGES += KernariumIcons
+
 # A Vulkan hardware-buffer import check: it fills gralloc buffers of several
 # formats and widths through the CPU, imports each into Vulkan and reads it
 # back, so a row pitch the driver cannot import or the renderer misreads fails
