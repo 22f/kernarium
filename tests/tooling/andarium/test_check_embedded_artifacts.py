@@ -761,6 +761,34 @@ class AotTests(unittest.TestCase):
         self.package_aot()
         self.passes(self.run_check())
 
+    def test_a_runtime_that_is_cut_short_ends_in_the_checks_own_error(self) -> None:
+        def thin(commands: bytes, count: int) -> bytes:
+            header = struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 6, count, len(commands), 0, 0)
+            return header + commands
+
+        runtime = self.fixture.app / "Frameworks" / f"{FRAMEWORK}.framework" / FRAMEWORK
+        for name, content in (
+            ("a fat header with no entries", struct.pack(">II", 0xCAFEBABE, 3)),
+            ("a header that counts commands there are none of", thin(b"", 2)),
+            ("a command shorter than its header", thin(struct.pack("<II", LC_LOAD_DYLIB, 4), 1)),
+            ("a dylib command with no name", thin(struct.pack("<II", LC_LOAD_DYLIB, 8), 1)),
+            ("a command that runs past the end", thin(struct.pack("<II", LC_LOAD_DYLIB, 4096) + b"\0" * 8, 1)),
+            ("a dylib name outside its command",
+             thin(struct.pack("<IIIIII", LC_LOAD_DYLIB, 24, 4096, 2, 0x10000, 0x10000), 1)),
+        ):
+            with self.subTest(name):
+                runtime.write_bytes(content)
+                result = self.run_check()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn(f"the packaged framework {FRAMEWORK} cannot be read as a Mach-O file", result.stderr)
+        # A file that is not a Mach-O at all names nothing: nothing to refuse.
+        runtime.write_bytes(macho({"__uml_elf": kernel_image()}))
+        other = self.fixture.app / "Frameworks/Other.framework"
+        other.mkdir(parents=True)
+        (other / "Other").write_bytes(b"text, not code\n")
+        self.passes(self.run_check())
+
     def test_a_runtime_that_links_another_framework_or_weakly_needs_nothing(self) -> None:
         self.accept("no")
         self.link_runtime(name="@rpath/Other.framework/Other")
