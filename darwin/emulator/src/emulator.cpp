@@ -562,6 +562,11 @@ public:
 		if (runtime_.set_execution_engine(prepared.engine) != 0)
 			return -UML_EMULATOR_UNSUPPORTED;
 		runtime_.set_top_byte_ignore(prepared.top_byte_ignore);
+		/* Before any executor reads it; a launch that asks for the
+		 * component its build or framework does not have does not start. */
+		if (!prepared.informational &&
+		    !::uml::runtime::select_aot(prepared.aot))
+			return -UML_EMULATOR_UNSUPPORTED;
 		if (!prepared.informational)
 			prepare_guest_hibernation(prepared.guest_hibernation);
 		runtime_.set_x86_jit_tier(prepared.jit_tier_instructions);

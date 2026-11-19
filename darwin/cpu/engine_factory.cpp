@@ -75,6 +75,11 @@ void materialize_architectural_state(arm64::CpuState &cpu) noexcept
 	arm64::restore_native_fp_environment(cpu);
 }
 
+bool select_aot(AotSelection selection) noexcept
+{
+	return arm64::detail::select_aot(selection);
+}
+
 #if UML_ARM64_JIT_ENGINE
 bool set_translation_cache_budget(std::size_t total_bytes,
 	unsigned executors, std::size_t per_executor_bytes) noexcept

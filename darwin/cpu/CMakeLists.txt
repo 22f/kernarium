@@ -63,12 +63,121 @@ option(UML_AOT_SHARED_VERDICTS
     "Let address spaces share what they verified about a page the kernel declares immutable; OFF hashes every page in every address space (a measurement variant)" ON)
 option(UML_AOT_COUNT_RETIRED
     "With UML_AOT_DIAGNOSTICS, rewrite the libraries to count each instruction an entry runs (the blob then differs from the product's)" OFF)
+# Which blob the component carries (UML_AOT_SOURCE): the one a release
+# artifact holds, which is the product, or one generated from a release's
+# image, which qualifies a release or measures a variant. UML_AOT_MODE says
+# whether to build the component at all: AUTO builds it when a blob is
+# available and the product supports it, ON requires one, OFF builds none.
+set(UML_AOT_MODE AUTO CACHE STRING
+    "AUTO builds the AOT component when an artifact or UML_AOT_IMAGE is available, ON requires one, OFF builds none")
+set_property(CACHE UML_AOT_MODE PROPERTY STRINGS AUTO ON OFF)
+set(UML_AOT_ARTIFACT "" CACHE PATH
+    "A release's AOT artifact directory (tools/aot/release_artifact.py); empty takes the accepted artifact installed below .build/android/aot when android/lineage-24/metadata/accepted-aot.env names one")
+if(NOT UML_AOT_MODE MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR "UML_AOT_MODE must be AUTO, ON or OFF")
+endif()
 set(UML_AOT OFF)
-if(UML_AOT_IMAGE)
-    if(NOT UML_TARGET_MACOS OR UML_APP_STORE_RUNTIME)
-        message(FATAL_ERROR
-            "UML_AOT_IMAGE is supported for the macOS product only so far")
+set(UML_AOT_SOURCE "")
+set(UML_AOT_ARTIFACT_DIR "")
+set(UML_AOT_ARTIFACT_ACCEPTED "")
+set(_uml_aot_supported FALSE)
+if(UML_TARGET_MACOS AND NOT UML_APP_STORE_RUNTIME)
+    set(_uml_aot_supported TRUE)
+endif()
+if(UML_AOT_MODE STREQUAL "OFF")
+    if(UML_AOT_IMAGE OR UML_AOT_ARTIFACT)
+        message(STATUS "UML_AOT_MODE=OFF: building without the AOT component")
     endif()
+elseif(UML_AOT_IMAGE AND UML_AOT_ARTIFACT)
+    message(FATAL_ERROR
+        "UML_AOT_IMAGE and UML_AOT_ARTIFACT name two blobs; name one")
+elseif(UML_AOT_IMAGE OR UML_AOT_ARTIFACT)
+    if(NOT _uml_aot_supported)
+        message(FATAL_ERROR
+            "The AOT component is supported for the macOS product only so far")
+    endif()
+    if(UML_AOT_IMAGE)
+        set(UML_AOT_SOURCE image)
+    else()
+        set(UML_AOT_SOURCE artifact)
+        set(UML_AOT_ARTIFACT_DIR "${UML_AOT_ARTIFACT}")
+    endif()
+elseif(_uml_aot_supported)
+    # The accepted artifact: the descriptor names the release it was built
+    # from, and it is installed beside the accepted release.
+    set(_uml_aot_accepted
+        ${PROJECT_SOURCE_DIR}/android/lineage-24/metadata/accepted-aot.env)
+    set(_uml_aot_release
+        ${PROJECT_SOURCE_DIR}/android/lineage-24/metadata/accepted-release.env)
+    if(EXISTS "${_uml_aot_accepted}")
+        file(STRINGS "${_uml_aot_accepted}" _uml_aot_accepted_id
+            REGEX "^LINEAGE24_ACCEPTED_AOT_RELEASE_ID='.*'$")
+        file(STRINGS "${_uml_aot_release}" _uml_aot_release_id_line
+            REGEX "^LINEAGE24_ACCEPTED_RELEASE_ID='.*'$")
+        file(STRINGS "${_uml_aot_release}" _uml_aot_release_dir_line
+            REGEX "^LINEAGE24_ACCEPTED_DIRECTORY_NAME='.*'$")
+        string(REGEX REPLACE "^[A-Z0-9_]+='(.*)'$" "\\1"
+            _uml_aot_accepted_id "${_uml_aot_accepted_id}")
+        string(REGEX REPLACE "^[A-Z0-9_]+='(.*)'$" "\\1"
+            _uml_aot_release_id_line "${_uml_aot_release_id_line}")
+        string(REGEX REPLACE "^[A-Z0-9_]+='(.*)'$" "\\1"
+            _uml_aot_release_dir "${_uml_aot_release_dir_line}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${_uml_aot_accepted}" "${_uml_aot_release}")
+        if(NOT _uml_aot_accepted_id STREQUAL _uml_aot_release_id_line)
+            message(FATAL_ERROR
+                "accepted-aot.env accepts the artifact of "
+                "'${_uml_aot_accepted_id}', but the accepted release is "
+                "'${_uml_aot_release_id_line}'")
+        endif()
+        set(_uml_aot_default
+            "${PROJECT_SOURCE_DIR}/.build/android/aot/${_uml_aot_release_dir}")
+        if(EXISTS "${_uml_aot_default}/artifact.json")
+            set(UML_AOT_SOURCE artifact)
+            set(UML_AOT_ARTIFACT_DIR "${_uml_aot_default}")
+            set(UML_AOT_ARTIFACT_ACCEPTED "${_uml_aot_accepted}")
+        elseif(UML_AOT_MODE STREQUAL "AUTO")
+            message(STATUS
+                "The accepted AOT artifact is not installed at "
+                "${_uml_aot_default}: building without the AOT component")
+        endif()
+    endif()
+endif()
+if(UML_AOT_MODE STREQUAL "ON" AND NOT UML_AOT_SOURCE)
+    message(FATAL_ERROR
+        "UML_AOT_MODE=ON needs an AOT artifact (UML_AOT_ARTIFACT, or the "
+        "accepted one installed below .build/android/aot), or UML_AOT_IMAGE, "
+        "and a macOS product")
+endif()
+if(UML_AOT_SOURCE STREQUAL "artifact")
+    if(UML_AOT_DIAGNOSTICS)
+        message(FATAL_ERROR
+            "UML_AOT_DIAGNOSTICS needs the tables of a generated blob: "
+            "name UML_AOT_IMAGE, not an artifact")
+    endif()
+    if(NOT EXISTS "${UML_AOT_ARTIFACT_DIR}/artifact.json")
+        message(FATAL_ERROR
+            "${UML_AOT_ARTIFACT_DIR} is not an AOT artifact directory")
+    endif()
+    set(_uml_aot_verify_command
+        ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tools/aot/release_artifact.py verify
+        --artifact "${UML_AOT_ARTIFACT_DIR}")
+    if(UML_AOT_ARTIFACT_ACCEPTED)
+        list(APPEND _uml_aot_verify_command
+            --accepted "${UML_AOT_ARTIFACT_ACCEPTED}")
+    endif()
+    execute_process(COMMAND ${_uml_aot_verify_command}
+        RESULT_VARIABLE _uml_aot_verify_status
+        OUTPUT_VARIABLE _uml_aot_verify_output
+        ERROR_VARIABLE _uml_aot_verify_output)
+    if(NOT _uml_aot_verify_status EQUAL 0)
+        message(FATAL_ERROR
+            "The AOT artifact ${UML_AOT_ARTIFACT_DIR} does not verify: "
+            "${_uml_aot_verify_output}")
+    endif()
+endif()
+if(UML_AOT_SOURCE)
     set(UML_AOT ON)
     add_subdirectory(arm64/aot)
 endif()

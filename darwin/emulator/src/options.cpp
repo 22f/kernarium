@@ -191,6 +191,20 @@ namespace {
 	return true;
 }
 
+[[nodiscard]] bool parse_aot_selection(
+	std::string_view value, ::uml::runtime::AotSelection &selection)
+{
+	if (value == "auto")
+		selection = ::uml::runtime::AotSelection::automatic;
+	else if (value == "on")
+		selection = ::uml::runtime::AotSelection::on;
+	else if (value == "off")
+		selection = ::uml::runtime::AotSelection::off;
+	else
+		return false;
+	return true;
+}
+
 } // namespace
 
 unsigned configured_guest_cpu_count(
@@ -259,6 +273,18 @@ EmulatorOptions prepare_emulator_options(
 		if (argument == "--execution-engine") {
 			if (++index >= argc || argv[index] == nullptr ||
 				!parse_execution_engine(argv[index], prepared.engine)) {
+				prepared.valid = false;
+				return prepared;
+			}
+			continue;
+		}
+		if (argument == "--aot") {
+			prepared.aot = ::uml::runtime::AotSelection::on;
+			continue;
+		}
+		if (argument.starts_with("--aot=")) {
+			if (!parse_aot_selection(
+					argument.substr(6), prepared.aot)) {
 				prepared.valid = false;
 				return prepared;
 			}

@@ -40,7 +40,7 @@ ONE_RECORD = [runner.debug_rows.Record("done", (("mode", "x"),))]
 FAKE_LAUNCHER = """\
 import os, pathlib, signal, sys, time
 state = pathlib.Path(os.environ["FAKE_GUEST_STATE"])
-arm = "on" if os.environ.get("DARWIN_UML_AOT") == "1" else "off"
+arm = {"1": "on", "0": "off"}[os.environ["DARWIN_UML_AOT"]]
 (state / "arm").write_text(arm)
 scenario = json.loads((state / "scenario.json").read_text())
 report = os.environ.get("DARWIN_UML_AOT_REPORT")

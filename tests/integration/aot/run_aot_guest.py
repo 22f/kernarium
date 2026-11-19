@@ -3,8 +3,9 @@
 """Run an Android guest with ahead-of-time code off and on and compare the work.
 
 The guest is the release on a fresh data disk, started with the macOS launcher
-(tools/boot_android.py) twice: once as the engine runs it, once with
-DARWIN_UML_AOT=1 (docs/architecture.md, "Ahead-of-time code"). In each the
+(tools/boot_android.py) twice: once as the engine runs it
+(DARWIN_UML_AOT=0), once with the component (DARWIN_UML_AOT=1;
+docs/architecture.md, "Ahead-of-time code"). In each the
 runner executes one workload per family of the libraries the framework covers
 (zlib, libcrypto, libc, libpcre2 through libselinux, libbinder, and the
 boot image's compiled Java through a Java command) and, when
@@ -560,8 +561,8 @@ class Arm:
         environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         environment.pop("DARWIN_UML_AOT", None)
         environment.pop("DARWIN_UML_AOT_REPORT", None)
-        if self.aot:
-            environment["DARWIN_UML_AOT"] = "1"
+        # Each arm states itself: the component is on unless told otherwise.
+        environment["DARWIN_UML_AOT"] = "1" if self.aot else "0"
         if options.diagnostics:
             environment["DARWIN_UML_AOT_REPORT"] = str(report)
         serial = f"127.0.0.1:{options.adb_port}"

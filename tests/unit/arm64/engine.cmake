@@ -488,6 +488,13 @@ get_property(_uml_static_mmu GLOBAL PROPERTY UML_STATIC_MMU_TARGET)
         uml_add_arm64_unit_test(gadget_${GADGET_RUNTIME_TEST} WITHOUT_HARNESS
             OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS})
     endforeach()
+    # Whether the component is on, decided once per process: on by default,
+    # off by the environment, and a launch's own word beats it.
+    if(TARGET uml_arm64_aot_framework)
+        uml_add_arm64_unit_test(aot_selection WITHOUT_HARNESS
+            OBJECTS ${UML_ARM64_GADGET_RUNTIME_TEST_OBJECTS}
+                $<TARGET_OBJECTS:uml_arm64_gadget_engine>)
+    endif()
     # The differential harness drives the executor with the AOT component on
     # and off and reads the diagnostics build's counters. It runs every
     # function sample of every rewritten library, so its time grows with the

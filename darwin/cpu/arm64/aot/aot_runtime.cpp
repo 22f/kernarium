@@ -799,11 +799,14 @@ inline void note_instance(const void *, unsigned long, std::uint32_t,
 constexpr std::uint32_t no_library = 0xffffffffU;
 #endif
 
+/* On unless DARWIN_UML_AOT is "0": the component is the default wherever a
+ * product carries it, and the environment is the switch a test or a
+ * measurement uses to compare against the engine alone. */
 [[nodiscard]] bool environment_enabled() noexcept
 {
 	const char *value = std::getenv("DARWIN_UML_AOT");
-	return value != nullptr && value[0] == '1' && value[1] == '\0' &&
-		directory().valid;
+	const bool off = value != nullptr && value[0] == '0' && value[1] == '\0';
+	return !off && directory().valid;
 }
 
 /* Rewritten code asks for the TLB entry of a page it missed (see the refill
@@ -927,6 +930,25 @@ bool enabled() noexcept
 #endif
 	}
 	return state != 0;
+}
+
+bool select(::uml::cpu::AotSelection selection) noexcept
+{
+	using ::uml::cpu::AotSelection;
+	const bool wanted = selection == AotSelection::automatic ?
+		environment_enabled() : selection == AotSelection::on;
+	if (wanted && !directory().valid)
+		return false;
+	auto expected = -1;
+	if (g_state.compare_exchange_strong(expected, wanted ? 1 : 0,
+		    std::memory_order_relaxed)) {
+#if UML_AOT_DIAGNOSTICS
+		if (wanted)
+			start_reporter();
+#endif
+		return true;
+	}
+	return (expected != 0) == wanted;
 }
 
 void note_refusal(Refusal reason) noexcept

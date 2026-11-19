@@ -3,6 +3,9 @@
 
 #include "cpu/arm64/engine_execution.hpp"
 #include "cpu/arm64/gadgets/executor.hpp"
+#if UML_AOT
+#include "cpu/arm64/aot/aot_runtime.hpp"
+#endif
 
 #include <memory>
 
@@ -73,6 +76,15 @@ private:
 std::unique_ptr<CpuEngine> make_gadget_engine(EngineConfiguration configuration)
 {
 	return std::make_unique<GadgetEngine>(configuration);
+}
+
+bool select_aot(AotSelection selection) noexcept
+{
+#if UML_AOT
+	return arm64::aot::select(selection);
+#else
+	return selection != AotSelection::on;
+#endif
 }
 
 } // namespace uml::cpu::arm64::detail

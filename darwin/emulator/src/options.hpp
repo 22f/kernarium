@@ -59,6 +59,11 @@ struct EmulatorOptions final {
 	/* --session-record=: the file the run records how its session ended in,
 	 * for the next launch (runtime/session_record.hpp). Empty keeps none. */
 	std::string session_record_path;
+	/* --aot, --aot=on|off|auto: ahead-of-time code for the Android image's
+	 * own libraries (cpu/arm64/aot). Auto, the default, is on in a build that
+	 * carries the component unless DARWIN_UML_AOT=0; on fails a launch whose
+	 * build has none. */
+	::uml::runtime::AotSelection aot{::uml::runtime::AotSelection::automatic};
 	std::size_t guest_memory_bytes{};
 	unsigned guest_cpus{1};
 	/* Whether the engines ignore the top byte of a data address. On for every

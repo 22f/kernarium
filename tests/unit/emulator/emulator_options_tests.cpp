@@ -290,6 +290,39 @@ void test_gadget_cache_budget_option()
 		"the gadget cache budget ignored trailing text");
 }
 
+void test_aot_option()
+{
+	using uml::runtime::AotSelection;
+	const char *absent[]{"uml-test"};
+	require(uml::emulator::prepare_emulator_options(
+		1, absent, "/tmp/rootfs.erofs").aot == AotSelection::automatic,
+		"ahead-of-time code was not left to the default");
+	const char *bare[]{"uml-test", "--aot", "ip=dhcp"};
+	auto options = uml::emulator::prepare_emulator_options(
+		3, bare, "/tmp/rootfs.erofs");
+	require(options.valid && options.aot == AotSelection::on &&
+		!contains(options, "--aot") && contains(options, "ip=dhcp"),
+		"--aot was not consumed as on");
+	const char *off[]{"uml-test", "--aot=on", "--aot=off"};
+	options = uml::emulator::prepare_emulator_options(
+		3, off, "/tmp/rootfs.erofs");
+	require(options.valid && options.aot == AotSelection::off &&
+		!contains(options, "--aot=on") && !contains(options, "--aot=off"),
+		"the last --aot= did not win");
+	const char *automatic[]{"uml-test", "--aot=off", "--aot=auto"};
+	require(uml::emulator::prepare_emulator_options(
+		3, automatic, "/tmp/rootfs.erofs").aot == AotSelection::automatic,
+		"--aot=auto did not restore the default");
+	const char *unknown[]{"uml-test", "--aot=maybe"};
+	require(!uml::emulator::prepare_emulator_options(
+		2, unknown, "/tmp/rootfs.erofs").valid,
+		"an unknown --aot value was accepted");
+	const char *empty[]{"uml-test", "--aot="};
+	require(!uml::emulator::prepare_emulator_options(
+		2, empty, "/tmp/rootfs.erofs").valid,
+		"an empty --aot value was accepted");
+}
+
 void test_memory_limit_option()
 {
 	const char *absent[]{"uml-test"};
@@ -767,6 +800,7 @@ int main()
 		test_x86_64_kernel_memory_accounting_policy();
 		test_guest_memory_budget_matches_kernel_memparse();
 		test_gadget_cache_budget_option();
+		test_aot_option();
 		test_memory_limit_option();
 		test_jit_tier_option();
 		test_guest_hibernation_option();

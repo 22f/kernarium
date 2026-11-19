@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "cpu/aot_selection.hpp"
 #include "cpu/arm64/cpu_state.hpp"
 #include "memory/static_guest_memory.hpp"
 #include "memory/tlb.hpp"
@@ -19,9 +20,16 @@
  * set UML_AOT_DIAGNOSTICS. */
 namespace uml::cpu::arm64::aot {
 
-/* Whether AOT code may be entered: DARWIN_UML_AOT=1 at start-up. Off by
- * default. */
+/* Whether AOT code may be entered. Decided once, at the first executor: by
+ * select() when a launch states it, otherwise on unless DARWIN_UML_AOT=0
+ * (DARWIN_UML_AOT=1 is the default's own word). Always off when the
+ * framework's blob is not valid. */
 [[nodiscard]] bool enabled() noexcept;
+
+/* A launch's own word (--aot=). False when it cannot be kept: `on` for a
+ * framework whose blob is not valid, or any change after enabled() was
+ * answered, since executors read the answer once. */
+[[nodiscard]] bool select(::uml::cpu::AotSelection selection) noexcept;
 
 /* Why an entry was refused, for the diagnostics build's counters. */
 enum class Refusal : unsigned {
