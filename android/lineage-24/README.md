@@ -1044,9 +1044,13 @@ Andarium's Add to Home Screen puts an Android application's icon on the iOS Home
 Screen, so the host asks the guest which applications have a launcher entry, with
 their labels and icons, and has one started. The image carries one command for
 both, `kernarium_apps` (`overlay/app_shortcuts`, a Java tool that `app_process`
-starts, installed on system_ext like `kernarium_oldapp`). It runs as the adb shell
+starts, installed on system_ext like `kernarium_oldapp`), and one application that
+draws, `KernariumIcons` (`overlay/app_icons`). The command runs as the adb shell
 user, holds no permission of its own and writes nothing: no file, property or
-setting. It builds the framework's system assets itself, without the static
+setting. It reads the labels (string resources) and nothing else of an application's
+resources: it opens no image, drawable or icon file, and `icons` only asks the
+renderer for each picture and relays a PNG it has checked. It builds the framework's
+system assets for the labels itself, without the static
 overlays that target the framework (their idmaps come from `idmap2`, which the
 shell domain may not execute), and falls back to the framework's own
 initialisation when that is not possible. Reading any resources initialises the
@@ -1054,6 +1058,25 @@ framework's display metrics, which read `qemu.sf.lcd_density` and fall back
 when the shell domain may not: the policy's one line for the tool
 (`overlay/sepolicy/system_ext/private/kernarium_apps.te`) is a `dontaudit` of
 that read, so no call draws a denial and the shell domain gains no permission.
+
+- **Renderer.** `KernariumIcons` (`com.kernarium.icons`) is an ordinary application of
+  system_ext: signed with the default key, in `app/` and not `priv-app/`, with no
+  launcher entry, no permission, no network, no backup, and no SELinux rule of its
+  own (its processes run as `untrusted_app` and `isolated_app`). Its one provider
+  (`content://com.kernarium.icons`) only brokers: the platform lets the shell user
+  and the system in (`ACCESS_CONTENT_PROVIDERS_EXTERNALLY`) and the provider
+  refuses any other uid again. It binds its one service, which runs in an isolated
+  process, and that process opens the target application's package files and
+  runtime overlays and draws the icon (a fixed density, day mode and locale, so
+  that a key is one picture); the PNG comes back to the tool through the provider. The shell
+  user cannot bind a service, so the tool reaches the provider through the activity
+  manager. A worker that dies or hangs costs the one icon (it is `error`, never
+  retried at a smaller size) and the next icon is drawn by a fresh one. An image
+  without the renderer fails `icons` with status 1 and one line, and the tool's
+  other commands are unaffected. Each start of the isolated process leaves one
+  audit record, AOSP's own and tagged with its bug note: a denied `getattr` of the
+  application's data directory, which has no effect. `check_icons_app` in
+  `tools/verify-target-files.py` holds the package to this description.
 
 - **Entries.** One entry is a launcher activity of the foreground user: enabled for
   that user (the package manager's own answer, so an alias the manifest disables
@@ -1071,7 +1094,10 @@ that read, so no call draws a denial and the shell domain gains no permission.
   icons composed from their layers with no mask, drawn for a fixed density, day mode
   and locale so that a key is one picture) for each of up to eight components, with
   its length and SHA-256; labels and icons come from the application's effective
-  resource files for the user (splits, shared libraries and overlays); `launch` starts exactly one entry as a
+  resource files for the user (splits, shared libraries and overlays); the tool
+  passes on only a PNG whose signature, header (with its checksum), dimensions
+  (the size asked), 8-bit RGB or RGBA, non-interlaced layout and 96 KiB bound it has
+  checked, and an icon whose picture fails the check is `error`; `launch` starts exactly one entry as a
   launcher's tap does, by running `cmd activity start-activity` with separate
   arguments, and refuses (status 2) anything that is not an entry now.
   A change of the set is noticed by comparing digests, and an icon is fetched only when
@@ -1081,17 +1107,17 @@ that read, so no call draws a denial and the shell domain gains no permission.
   the cut needs; one that cannot be read or does not fit in memory is listed under its
   package name and costs no other entry; at most 8 entries per
   package, 1024 rows, 8 icons per call, 96 KiB per PNG, 20 s before no further icon is
-  started and 8 s for one icon's render (an icon's source is bounded from its
-  files' headers before it is inflated: every use of a bitmap is charged, an XML
-  resource's length is checked before its parser is opened, and a file whose cost
-  cannot be established is an error); every answer is under 1 MiB, and a command
+  started and 8 s for one icon's render (the renderer ends its worker first, so a drawing that
+  hangs or exhausts memory, which its isolated process contains, is `error` for that icon
+  alone); every answer is under 1 MiB, and a command
   that fails prints nothing on standard output and one line of the tool's own words
   on standard error. A question without an answer (the foreground user, a
   permission, the configuration) fails the command: there is no substitute.
   The exit statuses are 0 done, 1 failure, 2 refused, 64 usage.
 - **Kept by a later release.** The command's name, verbs, answer framing, grammar,
   bounds and statuses; an older image has no command (the shell's status 127) and
-  the host does not offer the feature. `tests/integration/android/run_android_app_shortcuts.py`
+  the host does not offer the feature. The renderer's authority, request and answer
+  are between the tool and the application of one image, which ship together. `tests/integration/android/run_android_app_shortcuts.py`
   qualifies it ([testing](../../docs/testing.md#android)).
 
 ### Branding and diagnostics

@@ -18,9 +18,14 @@ application, and the manifest is what the command reads:
 - ``second`` has one launcher activity, a resource-backed one: its label is a string resource and its icon (the
   application's) is an adaptive icon of a colour resource and a bitmap layer, the case the command's resource
   path, source bound and composition exist for. It is installed and removed to change the set of applications;
-- ``first-v2`` is ``first`` with a higher version code, signed with the same key: an update in place.
+- ``bad`` is ``second`` with a foreground layer that is not a picture: its icon cannot be drawn, so the renderer
+  answers ``error`` for it and for it alone, among the icons of good applications asked in the same batch;
+- ``first-v2`` is ``first`` with a higher version code, signed with the same key: an update in place;
+- the caller is no launcher application: one exported broadcast receiver (the property probe's code) whose shell
+  calls the icon renderer's provider as an ordinary application, which the platform must refuse. It is debuggable so
+  that the runner reads the answer with ``run-as``, and its code is property_probe_dex.py's.
 
-Both are test-only applications, installed with ``-t``: the shell may change the state of a component only for a
+The three variants are test-only applications, installed with ``-t``: the shell may change the state of a component only for a
 test-only package, which the alias's ``pm enable`` needs.
 
 The runner's tooling test reads the manifests back with ``orientation_probe_apk.decode_manifest``.
@@ -35,10 +40,13 @@ import struct
 import zlib
 
 import orientation_probe_apk as binary_xml
+import property_probe_dex
 
 PACKAGE_PREFIX = "org.example.andarium.appsprobe"
-VARIANTS = ("first", "second")
+VARIANTS = ("first", "second", "bad")
 SUCCESSORS = ("first-v2",)
+#: The variants whose icon is the resource-backed adaptive one (``bad`` with a foreground that does not decode).
+RESOURCE_VARIANTS = ("second", "bad")
 
 #: The framework classes the activities are, one for each activity of a package: a class that needs no code.
 #: The attributes the probe's XML uses (the shared table's, and the icon, the drawable of a layer, enabled and the
@@ -79,6 +87,8 @@ ALIAS_LABEL = "Alias Probe"
 HOSTILE_LABEL = "Apps\tProbe\nName‮ Evil​  Label "
 LONG_LABEL = "Long" + "x" * 196
 SECOND_LABEL = "Second Probe"
+#: What ``bad`` holds where the foreground bitmap should be: the signature of a PNG and then no chunk at all.
+BAD_FOREGROUND = b"\x89PNG\r\n\x1a\n" + b"this is not a picture" * 8
 #: ...and what the listing must show for them.
 LISTED_HOSTILE_LABEL = "Apps Probe Name Evil Label"
 LISTED_LONG_LABEL = "Long" + "x" * 75 + "…"
@@ -115,7 +125,7 @@ def launcher_filter() -> binary_xml.Element:
 def manifest_tree(variant: str) -> binary_xml.Element:
     version = 2 if variant.endswith("-v2") else 1
     activities: list[binary_xml.Element] = []
-    resource_backed = variant == "second"
+    resource_backed = variant in RESOURCE_VARIANTS
     for activity in activity_names(variant):
         attributes: list[tuple[str, str | int | bool | binary_xml.Reference]] = [("name", CLASSES[activity])]
         attributes.append(("exported", activity != "hidden"))
@@ -284,13 +294,42 @@ def decode_resource_table(data: bytes) -> dict[int, tuple[str, str, int, int, in
 def package_files(variant: str) -> dict[str, bytes]:
     """The files of the package besides its manifest: the resource table, the adaptive icon and the bitmap of the
     resource-backed variant."""
-    if variant != "second":
+    if variant not in RESOURCE_VARIANTS:
         return {}
     return {
         "resources.arsc": build_resource_table(package_of(variant)),
         ICON_XML: binary_xml.encode_manifest(icon_tree(), ATTRIBUTES),
-        FOREGROUND_PNG: foreground_png(),
+        FOREGROUND_PNG: BAD_FOREGROUND if variant == "bad" else foreground_png(),
     }
+
+
+#: The caller: the package, its receiver, the file its shell writes (relative to the data directory, as `run-as` reads it)
+#: and what that shell runs as the application: the shell user's own call of the renderer's provider.
+CALLER_PACKAGE = f"{PACKAGE_PREFIX}.caller"
+CALLER_RECEIVER = property_probe_dex.CLASS_NAME
+CALLER_RESULT = "files/result"
+RENDERER_AUTHORITY = "com.kernarium.icons"
+CALL_RENDERER = f"content call --uri content://{RENDERER_AUTHORITY} --method render"
+CALLER_SCRIPT = (f"d=/data/data/{CALLER_PACKAGE}/files; mkdir -p $d; "
+                 f"{{ {CALL_RENDERER} 2>&1; echo \"status=$?\"; }} > $d/result.tmp && mv $d/result.tmp $d/result")
+
+
+def caller_manifest() -> binary_xml.Element:
+    return binary_xml.Element("manifest", (("package", CALLER_PACKAGE), ("versionCode", 1)), (
+        binary_xml.Element("uses-sdk", (("minSdkVersion", binary_xml.MIN_SDK), ("targetSdkVersion", binary_xml.TARGET_SDK))),
+        # The receiver lists the network interfaces first (property_probe_dex.py), which an application without the
+        # permission cannot do.
+        binary_xml.Element("uses-permission", (("name", "android.permission.INTERNET"),)),
+        binary_xml.Element("application", (("label", "Apps Probe Caller"), ("debuggable", True)), (
+            binary_xml.Element("receiver", (("name", CALLER_RECEIVER), ("exported", True))),
+        )),
+    ))
+
+
+def build_caller_apk(destination: pathlib.Path, keystore: pathlib.Path | None = None) -> pathlib.Path:
+    """The signed package of the caller."""
+    dex = property_probe_dex.build_dex(CALLER_PACKAGE, "", "", shell_script=CALLER_SCRIPT)
+    return binary_xml.build_apk(destination, tree=caller_manifest(), keystore=keystore, files={"classes.dex": dex})
 
 
 def build_apk(destination: pathlib.Path, variant: str, keystore: pathlib.Path | None = None) -> pathlib.Path:

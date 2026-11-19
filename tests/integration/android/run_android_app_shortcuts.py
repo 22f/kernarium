@@ -24,6 +24,12 @@ that:
   a colour and a bitmap layer, an adaptive 192 x 192 picture with the colour in its corners and the bitmap's disc in
   its middle; ``noicon`` for the first probe (it declares no icon); ``missing`` for a component that is not a launcher
   activity; records in the order asked; nine components are a usage error;
+- the drawing is not done in the shell: while ``icons`` runs over eight components (the second probe's among them) the
+  tool's own process, sampled through /proc, maps and holds open no application, overlay or resource-cache file (nor
+  anything in the directory of a target application), and the platform runs the renderer in two processes of
+  its own, an ordinary application's (untrusted_app, u0_a) and an isolated one's (isolated_app, u0_i), neither the
+  shell's; the renderer refuses an ordinary application's call; and an icon that cannot be drawn (the ``bad`` probe,
+  a foreground that is not a picture) is ``error`` for it alone among seven good ones;
 - ``launch`` starts the probe's launcher activity (it becomes the resumed activity, and the answer is exactly its
   ``launched`` line with nothing on standard error) and starts it again when it is already open (the same), and
   refuses with status 2 and nothing on standard output: an activity that is not exported, one with no
@@ -39,7 +45,9 @@ that:
   others do not) and different with an application disabled;
 - usage errors are status 64 with nothing on standard output, the command writes no file in the shell user's data
   directory and no new denial of the shell domain reaches the log (the log is read before the first call of the
-  command, so a denial that only the first call meets counts).
+  command, so a denial that only the first call meets counts). The isolated renderer's own audit lines in that
+  window are reported with the result, not judged: AOSP's one known record, a getattr on the application's data
+  directory with its bug note, is one of them.
 
 Not automated: Android's language changing the labels (the listing reads the system's configuration, which a user
 build's shell cannot change; the first locale of the header is checked against the property), and the user switching.
@@ -114,6 +122,19 @@ DIGEST_SECONDS = 30
 PACKAGE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+")
 ACTIVITY_NAME = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+#: The renderer: its package, the two processes it runs in, the domains and users the platform gives them.
+RENDERER_PACKAGE = "com.kernarium.icons"
+RENDERER_ISOLATED_PROCESS = "com.kernarium.icons:com.kernarium.icons.IconRenderService"
+ISOLATED_CONTEXT = "u:r:isolated_app:s0"
+PROVIDER_DOMAIN = re.compile(r"u:r:untrusted_app(_\d+)?:s0(:\S+)?")
+PROVIDER_USER = re.compile(r"u0_a\d+")
+ISOLATED_USER = re.compile(r"u0_i\d+")
+#: What the sampler's script prints (one `M` line for each path the tool process maps or holds, one `P` line for each
+#: process of the renderer's package, the number of rounds and the tool's status), and where it starts.
+SAMPLER_MARK = "# kernarium_apps process sampler"
+SAMPLER_ROUNDS = 600
+SAMPLER_SECONDS = 120
+CALLER_SECONDS = 40
 
 
 class Run(NamedTuple):
@@ -663,6 +684,195 @@ def check_icons(guest) -> str:
             "probe has the colour in its corners and the disc in its middle; noicon, missing and the order asked")
 
 
+class Sampled(NamedTuple):
+    paths: set[str]
+    processes: list[tuple[str, str, str]]   # (label, user, name) of each process of the renderer's package
+    rounds: int
+    status: int
+
+
+def sampler_script(tokens: list[str]) -> str:
+    """The shell script that runs `icons` over the tokens in the background and, until it ends (or SAMPLER_ROUNDS rounds
+    have passed), lists every path the tool's process maps or holds open and every process of the renderer's package
+    with its context and user, each once. The shell may read /proc/<pid>/maps and /proc/<pid>/fd of its own tool."""
+    return "\n".join([
+        SAMPLER_MARK,
+        f"{COMMAND} icons {quoted(*tokens)} >/dev/null 2>&1 &",
+        "p=$!; n=0",
+        f"{{ while [ $n -lt {SAMPLER_ROUNDS} ] && kill -0 $p 2>/dev/null; do",
+        "    n=$((n+1))",
+        "    awk '{print \"M \" $6}' /proc/$p/maps 2>/dev/null",
+        "    ls -l /proc/$p/fd 2>/dev/null | awk '{print \"M \" $NF}'",
+        f"    ps -AZ 2>/dev/null | grep -F ' {RENDERER_PACKAGE}' | awk '{{print \"P \" $0}}'",
+        "  done; echo \"N $n\"; } | sort -u",
+        "wait $p; echo \"status=$?\"",
+    ])
+
+
+def parse_sampler(out: str) -> Sampled:
+    """The sampler's answer, strictly: M, P and N lines and the status line last."""
+    paths: set[str] = set()
+    processes: list[tuple[str, str, str]] = []
+    rounds: int | None = None
+    status: int | None = None
+    for line in out.splitlines():
+        if status is not None:
+            raise fail(f"the sampler: a line follows the status: {line!r}")
+        if line.startswith("M "):
+            if line[2:].strip():
+                paths.add(line[2:].strip())
+        elif line.startswith("P "):
+            fields = line[2:].split()
+            if len(fields) < 3 or fields[0].count(":") < 3:
+                raise fail(f"the sampler: a process line that is not a context, a user and a name: {line!r}")
+            processes.append((fields[0], fields[1], fields[-1]))
+        elif line.startswith("N ") and line[2:].isdigit() and rounds is None:
+            rounds = int(line[2:])
+        elif line.startswith("status=") and line[7:].isdigit():
+            status = int(line[7:])
+        elif line.strip():
+            raise fail(f"the sampler: a line that is none of M, P, N and status: {line!r}")
+    if rounds is None or status is None:
+        raise fail("the sampler's answer has no round count or no status")
+    return Sampled(paths, processes, rounds, status)
+
+
+def application_paths(guest, packages: list[str]) -> list[str]:
+    """Where the platform keeps each package's code (`pm path`: the base package and the splits)."""
+    found: list[str] = []
+    for package in packages:
+        listed = guest.shell(f"pm path {package}").splitlines()
+        paths = [line[len("package:"):].strip() for line in listed if line.startswith("package:")]
+        if not paths:
+            raise fail(f"pm path {package} names no package file: {listed!r}")
+        found.extend(paths)
+    return found
+
+
+def own_directory(path: str) -> str | None:
+    """The directory an application's package file lives in when that directory is the application's own (named for the
+    package file, or holding a base or a split package under the name the installer gives it), else None: a directory
+    shared with other files is never a reason to refuse a path."""
+    directory, _, name = path.rpartition("/")
+    stem = name.rsplit(".", 1)[0]
+    leaf = directory.rpartition("/")[2]
+    named = leaf == stem or leaf.startswith(stem + "-") or stem == "base" or stem.startswith("split_")
+    return directory if directory.count("/") >= 2 and named else None
+
+
+def drawing_in_the_tool(sampled: Sampled, packages: list[str], package_files: list[str]) -> list[str]:
+    """The paths that show the tool's own process reading an application or an overlay: a package file, a runtime
+    overlay or its index, the resource cache, anything in the directory of a target application or in its data."""
+    own = [directory for directory in map(own_directory, package_files) if directory is not None]
+    found = []
+    for path in sorted(sampled.paths):
+        if path.endswith((".apk", ".frro", ".idmap")) or "/resource-cache/" in path or path in package_files \
+                or any(path.startswith(directory + "/") for directory in own) \
+                or any(path.startswith(f"/data/data/{package}/") or path.startswith(f"/data/user/0/{package}/")
+                       for package in packages):
+            found.append(path)
+    return found
+
+
+def renderer_domains(sampled: Sampled) -> str:
+    """The renderer's two processes, in the domains and under the users the platform gives an ordinary application and its
+    isolated service: not the shell's, and not a privileged application's."""
+    provider = [(label, user) for label, user, name in sampled.processes if name == RENDERER_PACKAGE]
+    isolated = [(label, user) for label, user, name in sampled.processes if name == RENDERER_ISOLATED_PROCESS]
+    if not provider:
+        raise fail(f"no process {RENDERER_PACKAGE} while icons ran: {sorted(set(sampled.processes))[:4]}")
+    if not isolated:
+        raise fail(f"no process {RENDERER_ISOLATED_PROCESS} while icons ran: {sorted(set(sampled.processes))[:4]}")
+    for label, user in provider:
+        if not PROVIDER_DOMAIN.fullmatch(label) or not PROVIDER_USER.fullmatch(user):
+            raise fail(f"the renderer's provider process runs as {user} in {label}, not an ordinary application "
+                       "(u0_a in untrusted_app)")
+    for label, user in isolated:
+        if not label.startswith(ISOLATED_CONTEXT) or not ISOLATED_USER.fullmatch(user):
+            raise fail(f"the renderer's isolated process runs as {user} in {label}, not u0_i in {ISOLATED_CONTEXT}")
+    return f"{provider[0][1]} in {provider[0][0].split(':s0')[0]}, {isolated[0][1]} in {isolated[0][0].split(':s0')[0]}"
+
+
+def check_renderer_split(guest) -> str:
+    listed = list_of(guest)
+    built_in = [row.token for row in listed.rows if row.builtin]
+    second = probe.component("second", "only")
+    tokens = [*built_in[:MAX_ICONS - 1], second]
+    if len(tokens) != MAX_ICONS:
+        raise fail(f"only {len(built_in)} built-in launcher activities are listed: no batch of {MAX_ICONS} to draw")
+    packages = sorted({token.partition("/")[0] for token in tokens})
+    package_files = application_paths(guest, packages)
+    result = guest.run(sampler_script(tokens), timeout=SAMPLER_SECONDS)
+    if result.status != 0:
+        raise fail(f"the sampler exited {result.status}: {(result.text + result.err).strip()[-300:]}")
+    sampled = parse_sampler(result.text)
+    if sampled.status != 0:
+        raise fail(f"icons exited {sampled.status} under the sampler")
+    if sampled.rounds < 1 or not any(path.rpartition("/")[2].startswith("app_process") for path in sampled.paths):
+        raise fail(f"the sampler did not see the tool's process ({sampled.rounds} rounds, {len(sampled.paths)} paths): "
+                   "it proves nothing")
+    reads = drawing_in_the_tool(sampled, packages, package_files)
+    if reads:
+        raise fail(f"the tool's own process holds {len(reads)} application, overlay or resource files while it draws "
+                   f"(the drawing is in the shell): {reads[:6]}")
+    domains = renderer_domains(sampled)
+    return (f"{len(sampled.paths)} distinct paths in {sampled.rounds} rounds of a tool over {len(packages)} applications "
+            f"(the second probe's among them): none is a package file, an overlay, the resource cache or a target's own "
+            f"directory; the renderer runs as {domains}")
+
+
+def check_bad_icon(guest) -> str:
+    listed = list_of(guest)
+    built_in = [row.token for row in listed.rows if row.builtin][:12]
+    good = [record.token for start in range(0, len(built_in), MAX_ICONS)
+            for record in icons_of(guest, built_in[start:start + MAX_ICONS]) if record.status == "ok"][:6]
+    if len(good) < 6:
+        raise fail(f"only {len(good)} of the first built-in activities draw: no batch of seven good icons")
+    bad = probe.component("bad", "only")
+    batch = [*good[:3], bad, *good[3:], probe.component("second", "only")]
+    statuses = {record.token: record.status for record in icons_of(guest, batch)}
+    if statuses[bad] != "error":
+        raise fail(f"the icon of {bad} (a foreground that is not a picture) is {statuses[bad]}, not error")
+    broken = [token for token, status in statuses.items() if token != bad and status != "ok"]
+    if broken:
+        raise fail(f"the bad icon costs the batch more than itself: {broken} are not ok among {statuses}")
+    again = icons_of(guest, [bad])[0].status
+    if again != "error":
+        raise fail(f"the bad icon asked again alone is {again}, not error")
+    return ("among seven good icons (one resource-backed) the bad one is error and the seven are ok; "
+            "asked again alone it is error again")
+
+
+def check_untrusted_caller(guest, caller: pathlib.Path) -> str:
+    control = guest.run(probe.CALL_RENDERER)
+    if control.status != 0 or "Result:" not in control.text:
+        raise fail(f"the shell's own call of the renderer's provider did not answer: {control.status} "
+                   f"{(control.text + control.err).strip()[-300:]}")
+    fresh_install(guest, caller, probe.CALLER_PACKAGE)
+    try:
+        guest.run(f"run-as {probe.CALLER_PACKAGE} rm -f {probe.CALLER_RESULT}")
+        sent = guest.run(f"am broadcast -n {probe.CALLER_PACKAGE}/{probe.CALLER_RECEIVER}")
+        if sent.status != 0 or "Broadcast completed" not in sent.text:
+            raise fail(f"the caller's receiver was not started: {sent.status} {(sent.text + sent.err).strip()[-300:]}")
+        deadline = time.monotonic() + CALLER_SECONDS
+        answer = ""
+        while time.monotonic() < deadline:
+            read = guest.run(f"run-as {probe.CALLER_PACKAGE} cat {probe.CALLER_RESULT}")
+            if read.status == 0 and "status=" in read.text:
+                answer = read.text
+                break
+            time.sleep(0.5)
+        if not answer:
+            raise fail(f"the caller left no answer in {CALLER_SECONDS} s")
+    finally:
+        guest.adb_run("uninstall", probe.CALLER_PACKAGE, timeout=60)
+    if "ACCESS_CONTENT_PROVIDERS_EXTERNALLY" not in answer or "Result:" in answer:
+        raise fail(f"an ordinary application's call of the renderer was not refused for the shell-only permission: "
+                   f"{answer.strip()[-400:]}")
+    return ("the shell's own call is answered; an ordinary application's call is refused for "
+            "ACCESS_CONTENT_PROVIDERS_EXTERNALLY")
+
+
 RESUMED_ACTIVITY = re.compile(r"ResumedActivity[=:] *ActivityRecord\{\S+ u\d+ (\S+)[^}]*\}")
 
 
@@ -826,21 +1036,22 @@ def check_usage(guest) -> str:
 
 
 AVC_DENIED = re.compile(r'avc:\s+denied\s+\{([^}]*)\}(.*?)\bscontext=(\S+)\s+tcontext=(\S+)\s+tclass=(\S+)')
-AVC_NAME = re.compile(r'\bname=("[^"]*"|\S+)')
+AVC_NAME = re.compile(r'\b(?:name|path)=("[^"]*"|\S+)')
+AVC_BUG = re.compile(r'\bbug=(\S+)')
 
 
-def audit_key(line: str) -> tuple[str, ...] | None:
+def audit_key(line: str, domain: str = SHELL_CONTEXT) -> tuple[str, ...] | None:
     """The identity of a denial: the record type, the permissions, the source and target contexts, the class and the
-    name. The time, the pid, the audit serial, the comm and the log tag are left out, so the two lines the log holds
-    for one denial are one key. None when the line is no denial to the shell domain."""
+    name or path. The time, the pid, the audit serial, the comm and the log tag are left out, so the two lines the log
+    holds for one denial are one key. None when the line is no denial to the domain."""
     if "avc" not in line or "denied" not in line:
         return None
     found = AVC_DENIED.search(line)
     if found is None:
         # An audit line this runner cannot take apart still counts, by its text from the record on.
-        return ("unparsed", line[line.index("avc"):].strip()) if f"scontext={SHELL_CONTEXT}" in line else None
+        return ("unparsed", line[line.index("avc"):].strip()) if f"scontext={domain}" in line else None
     permissions, between, source, target, kind = found.groups()
-    if not source.startswith(SHELL_CONTEXT):
+    if not source.startswith(domain):
         return None
     name = AVC_NAME.search(between)
     return ("avc", " ".join(sorted(permissions.split())), source, target, kind, name.group(1) if name else "")
@@ -859,14 +1070,37 @@ def window_start(guest) -> str:
     return stamp
 
 
-def denials_since(guest, since: str) -> list[str]:
-    """The audit lines of denials to the shell domain that the log holds from `since` on. Only the window is read, so a
-    line the buffer dropped before it cannot stand in for one in it: any denial in the window is a denial. A log that
-    cannot be read is a failure."""
+def denials_since(guest, since: str, domain: str = SHELL_CONTEXT) -> list[str]:
+    """The audit lines of denials to a domain (the shell's unless another is named) that the log holds from `since` on.
+    Only the window is read, so a line the buffer dropped before it cannot stand in for one in it: any denial in the
+    window is a denial. A log that cannot be read is a failure."""
     read = guest.run(f"logcat -d -b all -T {shlex.quote(since)}", timeout=60)
     if read.status != 0:
         raise fail(f"the log could not be read: logcat -d -b all -T exited {read.status}: {read.err.strip()[-200:]}")
-    return [line.strip() for line in read.text.splitlines() if audit_key(line) is not None]
+    return [line.strip() for line in read.text.splitlines() if audit_key(line, domain) is not None]
+
+
+def audit_report(lines: list[str], domain: str) -> str:
+    """What the audit lines of a domain say, one clause for each denial (the log holds two lines for one): its
+    permissions, the class, the name or path it names, the target type and the bug note the policy tags it with."""
+    seen: dict[tuple[str, ...], list] = {}
+    for line in lines:
+        key = audit_key(line, domain)
+        if key is None:
+            continue
+        entry = seen.setdefault(key, [line, 0])
+        entry[1] += 1
+    if not seen:
+        return f"{domain} audit lines: none"
+    clauses = []
+    for key, (line, count) in seen.items():
+        bug = AVC_BUG.search(line)
+        if key[0] == "avc":
+            head = f"{{ {key[1]} }} {key[4]} {key[5]} -> {key[3]}".replace("  ", " ")
+        else:
+            head = key[1]
+        clauses.append(f"{head}{' (' + bug.group(1) + ')' if bug else ''} x{count}")
+    return f"{domain} audit lines (reported, not judged): " + "; ".join(clauses)
 
 
 def tmp_listing(guest) -> str:
@@ -925,7 +1159,8 @@ def check_clean(guest, before_files: str, since: str) -> str:
         for line in found:
             first.setdefault(audit_key(line), line)
         raise fail(f"the shell domain was denied something since {since}:\n" + "\n".join(list(first.values())[:8]))
-    return f"{SHELL_DATA} unchanged; no denial of {SHELL_CONTEXT} since {since}"
+    return (f"{SHELL_DATA} unchanged; no denial of {SHELL_CONTEXT} since {since}; "
+            + audit_report(denials_since(guest, since, ISOLATED_CONTEXT), ISOLATED_CONTEXT))
 
 
 def open_guest(options: argparse.Namespace, adb: str, private: pathlib.Path):
@@ -946,6 +1181,7 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
     keystore = private / "first-family.p12"   # `first` and its update are signed with one key
     apks = {variant: probe.build_apk(private / f"{variant}.apk", variant, keystore=keystore)
             for variant in (*probe.VARIANTS, *probe.SUCCESSORS)}
+    caller = probe.build_caller_apk(private / "caller.apk", keystore=private / "caller-family.p12")
     guest, stop = open_guest(options, adb, private)
     try:
         report.run("the command is in the image", lambda: command_present(guest))
@@ -957,6 +1193,9 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
         report.run("digest and list agree on the header block", lambda: check_header(guest))
         report.run("list names the built-in and the probe's applications, escaped and bounded", lambda: check_rows(guest))
         report.run("icons are PNG records that check out", lambda: check_icons(guest))
+        report.run("the drawing is done in the renderer's two processes, not in the shell", lambda: check_renderer_split(guest))
+        report.run("a bad icon costs only itself", lambda: check_bad_icon(guest))
+        report.run("an ordinary application cannot use the renderer", lambda: check_untrusted_caller(guest, caller))
         report.run("launch starts a launcher activity", lambda: check_launch(guest))
         report.run("a launcher alias enabled for the user is listed, drawn and started", lambda: check_alias(guest))
         report.run("launch refuses all else, and runs nothing it is given", lambda: check_refusals(guest))
@@ -966,6 +1205,7 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
     finally:
         for variant in probe.VARIANTS:
             guest.adb_run("uninstall", probe.package_of(variant), timeout=60)
+        guest.adb_run("uninstall", probe.CALLER_PACKAGE, timeout=60)
         guest.run(f"rm -f {MARKER}")
         stop()
 

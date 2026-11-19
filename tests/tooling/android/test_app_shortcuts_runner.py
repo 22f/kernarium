@@ -6,7 +6,8 @@ run_android_app_shortcuts.py drives the image's `kernarium_apps` command and che
 scripted guest plays an image that follows the contract (it reads the manifests of the probe packages the runner
 installs, keeps a foreground activity and a marker file, and prints the command's answers), and each way the image
 can differ makes the step that owns that rule fail: the probe packages (manifests and resource table read back), the
-strict parsers (each deviation of a header, a row, a label, an icon record), and every step against the scripted
+strict parsers (each deviation of a header, a row, a label, an icon record, the sampler's answer), the judgement of
+what the tool's process holds and which domains the renderer's processes run in, and every step against the scripted
 guest. It skips (77) where the host has no keytool and jarsigner (the packages are signed).
 """
 
@@ -17,6 +18,7 @@ import contextlib
 import hashlib
 import io
 import pathlib
+import re
 import shlex
 import shutil
 import struct
@@ -27,6 +29,7 @@ import unittest
 import unittest.mock
 import zipfile
 import zlib
+from typing import NamedTuple
 
 HERE = pathlib.Path(__file__).resolve().parent
 INTEGRATION = HERE.parents[1] / "integration" / "android"
@@ -93,6 +96,22 @@ def probe_png(size: int, flat: bool = False) -> bytes:
                                           (b"IDAT", zlib.compress(bytes(rows))), (b"IEND", b"")])
 
 
+class Denial(NamedTuple):
+    at: str
+    comm: str
+    target: str
+    name: str
+    source: str = "u:r:shell:s0"
+    perms: str = "read"
+    kind: str = "file"
+    key: str = "name"
+    bug: str = ""
+
+
+ISOLATED_SOURCE = "u:r:isolated_app:s0:c512,c768"
+APP_DATA = "u:object_r:app_data_file:s0:c125,c256,c512,c768"
+
+
 class Package:
     def __init__(self, name: str, version: int, installed: int, builtin: bool, activities: list[dict]) -> None:
         self.name, self.version, self.installed, self.builtin = name, version, installed, builtin
@@ -120,9 +139,14 @@ class ScriptedImage:
         self.add(Package(CALCULATOR, 200, 1, True, [
             {"name": "com.android.calculator2.Calculator", "exported": True, "launcher": True,
              "label": "Calculator", "icon": "legacy"}]))
+        for index in range(1, 7):   # a batch of eight takes seven built-in applications and the second probe
+            self.add(Package(f"com.android.extra{index}", 300 + index, 1, True, [
+                {"name": f"com.android.extra{index}.Main", "exported": True, "launcher": True, "label": f"Extra {index}",
+                 "icon": "adaptive" if index % 2 else "legacy"}]))
         self.resumed: str | None = None
         self.files: set[str] = set()
-        self.denials: list[tuple[str, str, str, str]] = []   # time, comm, target context, name
+        self.denials: list[Denial] = []
+        self.caller_started: str | None = None
         self.wall = 5 * 3600   # the device's clock, in seconds of the day
         self.evict_before: str | None = None   # a log time before which the buffer has dropped its lines
         self.locales = "en-US"
@@ -240,30 +264,132 @@ class ScriptedImage:
             stamp = self.stamp()[:-3] + "000"   # a whole second; the clock then moves on, as a real one does between calls
             self.wall += 2
             return stamp + "\n", 0, ""
+        if command.startswith(runner.SAMPLER_MARK):
+            return self.sampler(words)
+        if words[:2] == ["pm", "path"]:
+            return f"package:{self.apk_path(words[2])}\n", 0, ""
+        if words == probe.CALL_RENDERER.split():
+            if self.deviation == "renderer-silent":
+                return "", 1, "Error while accessing provider:com.kernarium.icons\n"
+            return "Result: Bundle[{status=1}]\n", 0, ""
+        if words[:3] == ["am", "broadcast", "-n"]:
+            if self.deviation == "caller-not-started":
+                return "", 1, "Error: Broadcast not delivered\n"
+            self.caller_started = words[3].partition("/")[0]
+            return f"Broadcasting: Intent {{ cmp={words[3]} }}\nBroadcast completed: result=0\n", 0, ""
+        if words[0] == "run-as":
+            if words[2:4] == ["rm", "-f"]:
+                self.caller_started = None
+                return "", 0, ""
+            if words[2] == "cat" and self.caller_started == words[1] and self.deviation != "caller-no-answer":
+                return self.caller_answer(), 0, ""
+            return "", 1, f"cat: {words[-1]}: No such file or directory\n"
         if words[0] == runner.COMMAND:
             return self.tool(command, words[1:])
         raise AssertionError(f"the scripted guest does not know {command!r}")
+
+    def apk_path(self, package: str) -> str:
+        if self.packages[package].builtin:
+            leaf = package.rsplit(".", 1)[1].capitalize()
+            return f"/system/priv-app/{leaf}/{leaf}.apk"
+        return f"/data/app/~~abc/{package}-xyz/base.apk"
+
+    def caller_answer(self) -> str:
+        """What the caller's shell wrote: its call of the renderer's provider as an ordinary application."""
+        if self.deviation == "caller-allowed":
+            return "Result: Bundle[{status=1}]\nstatus=0\n"
+        if self.deviation == "caller-allowed-and-names-the-permission":
+            return "Result: Bundle[{status=1}]\nwarning: ACCESS_CONTENT_PROVIDERS_EXTERNALLY\nstatus=0\n"
+        if self.deviation == "caller-refused-for-nothing":
+            return "Error while accessing provider:com.kernarium.icons\njava.lang.IllegalStateException: Could not find provider\nstatus=0\n"
+        return ("Error while accessing provider:com.kernarium.icons\njava.lang.SecurityException: Permission Denial: "
+                "Do not have permission in call getContentProviderExternal() from pid=5447, uid=10135 requires "
+                "android.permission.ACCESS_CONTENT_PROVIDERS_EXTERNALLY\nstatus=0\n")
+
+    def sampler(self, words: list[str]):
+        """The sampler's answer for `icons` over the tokens in its script: the paths the tool's process holds, the two
+        processes of the renderer's package, the rounds and the tool's status. Deviations differ in one way."""
+        end = next(index for index, word in enumerate(words) if word.startswith(">"))
+        tokens = words[words.index("icons") + 1:end]
+        self.calls += 1
+        self.isolated_denial()
+        lines = ["M /system/bin/app_process64", "M /system_ext/framework/kernarium_apps.jar", "M /apex/com.android.art/javalib/core-oj.jar",
+                 "M anon_inode:[eventfd]", "M socket:[1234]", "M pipe:[5678]"]
+        deviation = self.deviation
+        target = tokens[-1].partition("/")[0]
+        if deviation == "tool-maps-apk":
+            lines.append(f"M {self.apk_path(target)}")
+        if deviation == "tool-maps-builtin-apk":
+            lines.append(f"M {self.apk_path(tokens[0].partition('/')[0])}")
+        if deviation == "tool-maps-framework-res":
+            lines.append("M /system/framework/framework-res.apk")
+        if deviation == "tool-maps-overlay":
+            lines.append("M /data/resource-cache/x@y.frro")
+        if deviation == "tool-maps-target-dir":
+            lines.append(f"M {self.apk_path(tokens[0].partition('/')[0]).rsplit('/', 1)[0]}/oat/arm64/x.odex")
+        if deviation == "tool-holds-data":
+            lines.append(f"M /data/user/0/{target}/files/x")
+        if deviation == "sampler-blind":
+            lines = []
+        processes = [
+            f"P u:r:untrusted_app:s0:c125,c256,c512,c768 u0_a125 4321 1234 1 1 0 0 S {runner.RENDERER_PACKAGE}",
+            f"P u:r:isolated_app:s0:c512,c768 u0_i9013 4322 1234 1 1 0 0 S {runner.RENDERER_ISOLATED_PROCESS}"]
+        if deviation == "no-isolated-process":
+            processes = processes[:1]
+        if deviation == "no-provider-process":
+            processes = processes[1:]
+        if deviation == "isolated-in-shell-domain":
+            processes[1] = processes[1].replace("u:r:isolated_app:s0:c512,c768", "u:r:shell:s0")
+        if deviation == "isolated-wrong-domain":
+            processes[1] = processes[1].replace("u:r:isolated_app", "u:r:untrusted_app")
+        if deviation == "isolated-user-wrong":
+            processes[1] = processes[1].replace("u0_i9013", "u0_a9013")
+        if deviation == "provider-privileged":
+            processes[0] = processes[0].replace("u:r:untrusted_app", "u:r:priv_app")
+        if deviation == "provider-platform-user":
+            processes[0] = processes[0].replace("u0_a125", "system")
+        if deviation == "provider-in-shell":
+            processes[0] = processes[0].replace("u:r:untrusted_app:s0:c125,c256,c512,c768", "u:r:shell:s0").replace("u0_a125", "shell")
+        lines += processes
+        lines += ["N 0" if deviation == "sampler-no-rounds" else "N 7"]
+        if deviation == "sampler-garbage":
+            lines.append("what is this")
+        status = "status=1" if deviation == "tool-fails-under-sampler" else "status=0"
+        if deviation != "sampler-no-status":
+            lines.append(status)
+        if deviation == "sampler-fails":
+            return "\n".join(lines) + "\n", 3, "sh: boom\n"
+        return "\n".join(lines) + "\n", 0, ""
+
+    def isolated_denial(self) -> None:
+        """AOSP's one known record of an isolated process, as the log holds it for each start."""
+        self.denial("onRenderService", APP_DATA, "/data/user/0/com.kernarium.icons", source=ISOLATED_SOURCE,
+                    perms="getattr", kind="dir", key="path", bug="b/120394782")
+        if self.deviation == "isolated-denies-more":
+            self.denial("onRenderService", "u:object_r:apk_data_file:s0", "base.apk", source=ISOLATED_SOURCE)
 
     def stamp(self, seconds: int | None = None) -> str:
         seconds = self.wall if seconds is None else seconds
         return f"11-19 {seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}.653"
 
-    def denial(self, comm: str, target: str, name: str = "", at: str | None = None) -> None:
-        self.denials.append((at or self.stamp(), comm, target, name))
+    def denial(self, comm: str, target: str, name: str = "", at: str | None = None, **more: str) -> None:
+        self.denials.append(Denial(at or self.stamp(), comm, target, name, **more))
 
     def log(self, since: str | None = None) -> str:
         """`logcat -d -b all [-T time]`: a denial is two lines, the kernel's with the comm and the one under the process's
         own tag without it. A buffer that has dropped its old lines no longer shows them."""
         lines = [f"{self.stamp(4 * 3600)} 100   100 I vold    : an unrelated line"]
-        for serial, (at, comm, target, name) in enumerate(self.denials):
-            if self.evict_before is not None and at < self.evict_before:
+        for serial, denial in enumerate(self.denials):
+            if self.evict_before is not None and denial.at < self.evict_before:
                 continue
-            stamp = f"{at} {2400 + serial:5d} {2400 + serial:5d}"
-            record = f"type=1400 audit(0.0:{160 + serial}): avc:  denied  {{ read }} for "
-            named = f'name="{name}" ' if name else ""
-            tail = f'dev="tmpfs" ino=317 scontext=u:r:shell:s0 tcontext={target} tclass=file permissive=0'
-            lines.append(f'{stamp} I auditd  : {record}comm="{comm}" {named}{tail}')
-            lines.append(f"{stamp} W {comm}: {record}{named}{tail}")
+            stamp = f"{denial.at} {2400 + serial:5d} {2400 + serial:5d}"
+            record = f"type=1400 audit(0.0:{160 + serial}): avc:  denied  {{ {denial.perms} }} for "
+            named = f'{denial.key}="{denial.name}" ' if denial.name else ""
+            bug = f" bug={denial.bug}" if denial.bug else ""
+            tail = (f'dev="tmpfs" ino=317 scontext={denial.source} tcontext={denial.target} tclass={denial.kind} '
+                    f"permissive=0{bug}")
+            lines.append(f'{stamp} I auditd  : {record}comm="{denial.comm}" {named}{tail}')
+            lines.append(f"{stamp} W {denial.comm}: {record}{named}{tail}")
         lines.append(f"{self.stamp()} 100   100 I vold    : another unrelated line")
         if since is not None:
             lines = [line for line in lines if line[:18] >= since]
@@ -351,12 +477,15 @@ class ScriptedImage:
             body = "rows\n" + "".join("\t".join(map(str, row)) + "\n" for row in rows)
             return header + body + ("" if self.deviation == "list-no-end" else f"end\t{len(rows)}\n"), 0, ""
         if words[0] == "icons":
+            self.isolated_denial()
             return self.icons(rows, words[1:]), 0, ""
         return self.launch(rows, words[1])
 
     def icons(self, rows, tokens: list[str]) -> bytes:
         if self.deviation == "icons-order":
             tokens = list(reversed(tokens))
+        bad_package = probe.package_of("bad")
+        batch_has_bad = any(token.partition("/")[0] == bad_package for token in tokens)
         out = b"kernarium_apps 1\n" + f"icons\t{len(tokens)}\n".encode()
         for token in tokens:
             package, _, activity = token.partition("/")
@@ -374,6 +503,11 @@ class ScriptedImage:
                 out += f"icon\t{token}\tmissing\t0\t0\t-\t0\t0\t-\n".encode()
             elif found["icon"] is None:
                 out += f"icon\t{token}\tnoicon\t0\t0\t-\t0\t0\t-\n".encode()
+            elif package == bad_package and not (self.deviation == "bad-icon-ok" or (
+                    self.deviation == "bad-icon-alone-ok" and len(tokens) == 1)):
+                out += f"icon\t{token}\terror\t0\t0\t-\t0\t0\t-\n".encode()
+            elif self.deviation == "bad-icon-spoils-batch" and batch_has_bad:
+                out += f"icon\t{token}\terror\t0\t0\t-\t0\t0\t-\n".encode()
             else:
                 alpha = self.deviation == "icon-corner"
                 resource = found["icon"] == "resource"
@@ -429,6 +563,7 @@ class ScriptedImage:
 
 class Fixture(unittest.TestCase):
     apks: dict[str, pathlib.Path] = {}
+    caller: pathlib.Path
     scratch: pathlib.Path
 
     @classmethod
@@ -443,6 +578,7 @@ class Fixture(unittest.TestCase):
         keystore = cls.scratch / "family.p12"
         for variant in (*probe.VARIANTS, *probe.SUCCESSORS):
             cls.apks[variant] = probe.build_apk(cls.scratch / f"{variant}.apk", variant, keystore=keystore)
+        cls.caller = probe.build_caller_apk(cls.scratch / "caller.apk", keystore=cls.scratch / "caller.p12")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -450,6 +586,10 @@ class Fixture(unittest.TestCase):
 
     def build(self, destination: pathlib.Path, variant: str, keystore=None) -> pathlib.Path:
         shutil.copy(self.apks[variant], destination)
+        return destination
+
+    def build_caller(self, destination: pathlib.Path, keystore=None) -> pathlib.Path:
+        shutil.copy(self.caller, destination)
         return destination
 
 
@@ -489,7 +629,7 @@ class ProbePackages(Fixture):
                 self.assertIs(True, values["exported"])
                 self.assertEqual(1, len([child for child in alias.children if child.tag == "intent-filter"]))
             icon = dict(application.attributes).get("icon")
-            self.assertEqual(binary_xml.Reference(probe.RES_MIPMAP_ICON) if variant == "second" else None, icon)
+            self.assertEqual(binary_xml.Reference(probe.RES_MIPMAP_ICON) if variant in probe.RESOURCE_VARIANTS else None, icon)
 
     def test_the_resource_backed_package_reads_back(self) -> None:
         with zipfile.ZipFile(self.apks["second"]) as archive:
@@ -517,6 +657,40 @@ class ProbePackages(Fixture):
         middle = probe.FOREGROUND_SIZE // 2
         self.assertEqual((*probe.FOREGROUND_RGB, 255), runner.pixel(rows, channels, middle, middle))
         self.assertEqual((0, 0, 0, 0), runner.pixel(rows, channels, 0, 0))
+
+    def test_the_bad_package_is_the_second_with_a_foreground_that_is_no_picture(self) -> None:
+        with zipfile.ZipFile(self.apks["bad"]) as bad, zipfile.ZipFile(self.apks["second"]) as second:
+            self.assertEqual(sorted(second.namelist()), sorted(bad.namelist()))
+            png = bad.read(probe.FOREGROUND_PNG)
+            self.assertEqual(second.read(probe.ICON_XML), bad.read(probe.ICON_XML))
+            self.assertNotEqual(second.read(probe.FOREGROUND_PNG), png)
+            table = probe.decode_resource_table(bad.read("resources.arsc"))
+        self.assertTrue(png.startswith(runner.PNG_SIGNATURE), "the signature of a picture, nothing after it")
+        with self.assertRaises(Failure):
+            runner.decode_png(png)
+        self.assertEqual(4, len(table))
+        self.assertEqual(f"{probe.PACKAGE_PREFIX}.bad", probe.package_of("bad"))
+        self.assertEqual(f"{probe.PACKAGE_PREFIX}.bad/android.app.Activity", probe.component("bad", "only"))
+
+    def test_the_caller_is_a_debuggable_receiver_that_calls_the_renderer(self) -> None:
+        with zipfile.ZipFile(self.caller) as archive:
+            manifest = binary_xml.decode_manifest(archive.read("AndroidManifest.xml"))
+            dex = archive.read("classes.dex")
+        self.assertEqual(probe.CALLER_PACKAGE, dict(manifest.attributes)["package"])
+        application = next(child for child in manifest.children if child.tag == "application")
+        self.assertIs(True, dict(application.attributes).get("debuggable"), "run-as reads its answer")
+        self.assertEqual(["receiver"], [child.tag for child in application.children], "no activity: never listed")
+        receiver = dict(application.children[0].attributes)
+        self.assertEqual((probe.CALLER_RECEIVER, True), (receiver["name"], receiver["exported"]))
+        self.assertEqual(0, len([child for child in application.children if child.children]), "no intent filter")
+        self.assertIn("android.permission.INTERNET",
+                      [dict(child.attributes)["name"] for child in manifest.children if child.tag == "uses-permission"])
+        self.assertIn(probe.CALLER_SCRIPT.encode(), dex, "the receiver's shell runs the call")
+        self.assertIn(f"content call --uri content://{probe.RENDERER_AUTHORITY} --method render", probe.CALLER_SCRIPT)
+        self.assertEqual("com.kernarium.icons", probe.RENDERER_AUTHORITY)
+        self.assertIn(f"/data/data/{probe.CALLER_PACKAGE}/files", probe.CALLER_SCRIPT)
+        self.assertTrue(probe.CALLER_SCRIPT.endswith("> $d/result.tmp && mv $d/result.tmp $d/result"))
+        self.assertTrue(probe.CALLER_RESULT.endswith("result"))
 
     def test_the_resource_table_reader_rejects_a_damaged_table(self) -> None:
         table = probe.build_resource_table(probe.package_of("second"))
@@ -704,6 +878,121 @@ class Parsers(unittest.TestCase):
         # A shell denial in a shape this runner cannot take apart still counts.
         self.assertIsNotNone(runner.audit_key("avc: denied for scontext=u:r:shell:s0 odd"))
 
+    GOOD_SAMPLE = ("M /system/bin/app_process64\nM /apex/com.android.art/javalib/core-oj.jar\nM anon_inode:[eventfd]\n"
+                   "P u:r:untrusted_app:s0:c125,c256,c512,c768 u0_a125 4321 1234 1 1 0 0 S com.kernarium.icons\n"
+                   "P u:r:isolated_app:s0:c512,c768 u0_i9013 4322 1234 1 1 0 0 S "
+                   "com.kernarium.icons:com.kernarium.icons.IconRenderService\nN 7\nstatus=0\n")
+
+    def test_the_sampler_answer_is_read_strictly(self) -> None:
+        sampled = runner.parse_sampler(self.GOOD_SAMPLE)
+        self.assertEqual((3, 7, 0, 2), (len(sampled.paths), sampled.rounds, sampled.status, len(sampled.processes)))
+        self.assertEqual(("u:r:isolated_app:s0:c512,c768", "u0_i9013", runner.RENDERER_ISOLATED_PROCESS), sampled.processes[1])
+        self.assertEqual(3, runner.parse_sampler(self.GOOD_SAMPLE.replace("status=0", "status=3")).status)
+        for broken, why in [
+                (self.GOOD_SAMPLE.replace("N 7\n", ""), "no round count"),
+                (self.GOOD_SAMPLE.replace("status=0\n", ""), "no status"),
+                (self.GOOD_SAMPLE + "M /late\n", "a line after the status"),
+                (self.GOOD_SAMPLE.replace("N 7\n", "N 7\nN 8\n"), "two round counts"),
+                (self.GOOD_SAMPLE.replace("N 7", "N x"), "a round count that is not a number"),
+                (self.GOOD_SAMPLE.replace("status=0", "status=x"), "a status that is not a number"),
+                (self.GOOD_SAMPLE.replace("N 7\n", "N 7\nwhat is this\n"), "a line that is nothing"),
+                (self.GOOD_SAMPLE.replace("P u:r:untrusted_app:s0:c125,c256,c512,c768 u0_a125 4321", "P u0_a125 4321"),
+                 "a process line with no context"),
+                ("", "nothing at all")]:
+            with self.assertRaises(Failure, msg=why):
+                runner.parse_sampler(broken)
+
+    def test_what_the_tool_process_holds_is_judged(self) -> None:
+        files = ["/system/priv-app/Settings/Settings.apk", "/data/app/~~abc/org.x.second-xyz/base.apk",
+                 "/data/app/~~def/org.y.split-xyz/split_config.xxhdpi.apk"]
+        packages = ["com.android.settings", "org.x.second", "org.y.split"]
+
+        def judged(*paths: str) -> list[str]:
+            return runner.drawing_in_the_tool(runner.Sampled(set(paths), [], 1, 0), packages, files)
+
+        for fine in ("/system/bin/app_process64", "/system_ext/framework/kernarium_apps.jar", "/system/framework/framework.jar",
+                     "/apex/com.android.art/javalib/core-oj.jar", "anon_inode:[eventfd]", "socket:[1]", "/dev/null",
+                     "/system/priv-app/SettingsX/other.jar", "/data/app/~~abc/org.x.second-xyzzy/other"):
+            self.assertEqual([], judged(fine), fine)
+        for held in files + ["/system/framework/framework-res.apk", "/data/resource-cache/a@b.frro", "/vendor/overlay/A.idmap", "/vendor/overlay/B.frro",
+                             "/data/resource-cache/anything", "/system/priv-app/Settings/oat/arm64/Settings.odex",
+                             "/data/app/~~abc/org.x.second-xyz/oat/arm64/base.odex", "/data/app/~~abc/org.x.second-xyz/lib/arm64/x.so",
+                             "/data/user/0/org.x.second/files/x", "/data/data/org.y.split/cache/y", "/data/app/~~def/org.y.split-xyz/x.dm"]:
+            self.assertEqual([held], judged(held), held)
+        self.assertEqual("/data/app/~~abc/org.x.second-xyz", runner.own_directory(files[1]))
+        self.assertEqual("/data/app/~~def/org.y.split-xyz", runner.own_directory(files[2]))
+        self.assertEqual("/system/priv-app/Settings", runner.own_directory(files[0]))
+        for shared in ("/system/framework/framework-res.apk", "/system/app/Bar.apk", "/foo.apk", "/product/app/Other/Foo.apk"):
+            self.assertIsNone(runner.own_directory(shared), shared)
+
+    def test_the_renderers_two_processes_are_judged(self) -> None:
+        provider = ("u:r:untrusted_app:s0:c125,c256,c512,c768", "u0_a125", runner.RENDERER_PACKAGE)
+        isolated = ("u:r:isolated_app:s0:c512,c768", "u0_i9013", runner.RENDERER_ISOLATED_PROCESS)
+
+        def judged(*processes: tuple[str, str, str]) -> str:
+            return runner.renderer_domains(runner.Sampled(set(), list(processes), 1, 0))
+
+        self.assertIn("u0_a125 in u:r:untrusted_app", judged(provider, isolated))
+        self.assertIn("u0_a125 in u:r:untrusted_app_29", judged((provider[0].replace("untrusted_app", "untrusted_app_29"),
+                                                                 *provider[1:]), isolated))
+        self.assertIn("u0_a125", judged((provider[0].replace(":c125,c256,c512,c768", ""), *provider[1:]), isolated))
+        for broken, why in [
+                ((provider,), "no isolated process"), ((isolated,), "no provider process"), ((), "no process at all"),
+                ((provider, (isolated[0].replace("isolated_app", "untrusted_app"), *isolated[1:])), "the service in an application domain"),
+                ((provider, (isolated[0].replace("isolated_app", "shell"), *isolated[1:])), "the service in the shell domain"),
+                ((provider, (isolated[0], "u0_a9013", isolated[2])), "the service under an application user"),
+                ((provider, (isolated[0], "shell", isolated[2])), "the service under the shell user"),
+                (((provider[0].replace("untrusted_app", "priv_app"), *provider[1:]), isolated), "a privileged application"),
+                (((provider[0].replace("untrusted_app", "platform_app"), *provider[1:]), isolated), "a platform application"),
+                (((provider[0].replace("untrusted_app", "system_app"), "system", provider[2]), isolated), "the system's"),
+                (((provider[0].replace("untrusted_app", "shell"), "shell", provider[2]), isolated), "the shell's"),
+                ((provider, isolated, (isolated[0].replace("isolated_app", "shell"), "shell", isolated[2])), "one more process of the service in the shell"),
+                (((provider[0], "u0_a125x", provider[2]), isolated), "a user that only starts like an application's"),
+                (((provider[0].replace("untrusted_app", "untrusted_appx"), *provider[1:]), isolated), "a domain that only starts like untrusted_app")]:
+            with self.assertRaises(Failure, msg=why):
+                judged(*broken)
+
+    def test_the_sampler_script_runs_the_tool_bounded_and_writes_nothing(self) -> None:
+        tokens = ["com.android.settings/com.android.settings.Settings", "org.x.second/android.app.Activity"]
+        script = runner.sampler_script(tokens)
+        self.assertTrue(script.startswith(runner.SAMPLER_MARK + "\n"))
+        self.assertIn(f"{runner.COMMAND} icons {' '.join(tokens)} >/dev/null 2>&1 &", script)
+        self.assertIn(f"[ $n -lt {runner.SAMPLER_ROUNDS} ] && kill -0 $p", script)
+        self.assertIn("/proc/$p/maps", script)
+        self.assertIn("/proc/$p/fd", script)
+        self.assertIn(f"grep -F ' {runner.RENDERER_PACKAGE}'", script)
+        self.assertIn('echo "N $n"', script)
+        self.assertIn('wait $p; echo "status=$?"', script)
+        self.assertEqual({"/dev/null"}, set(re.findall(r">+\s*([^\s&;|]+)", script)), "no file is written")
+        quoted = runner.sampler_script(["a.b/C$D"])
+        self.assertIn("'a.b/C$D'", quoted)
+        syntax = subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True, check=False)
+        self.assertEqual(0, syntax.returncode, syntax.stderr)
+        self.assertGreater(runner.SAMPLER_SECONDS, 30)
+
+    def test_an_audit_line_is_keyed_by_domain_and_names_its_path(self) -> None:
+        isolated = ('11-19 07:57:01.406  5609  5609 I auditd  : type=1400 audit(0.0:407): avc:  denied  { getattr } for  '
+                    'comm="onRenderService" path="/data/user/0/com.kernarium.icons" dev="ubdb3" ino=341464 '
+                    'scontext=u:r:isolated_app:s0:c512,c768 tcontext=u:object_r:app_data_file:s0:c125,c256,c512,c768 '
+                    'tclass=dir permissive=0 bug=b/120394782')
+        tagged = isolated.replace("I auditd  :", "W onRenderService:").replace(' comm="onRenderService"', "")
+        self.assertIsNone(runner.audit_key(isolated), "it is no denial of the shell")
+        key = runner.audit_key(isolated, runner.ISOLATED_CONTEXT)
+        self.assertEqual(("avc", "getattr", "u:r:isolated_app:s0:c512,c768",
+                          "u:object_r:app_data_file:s0:c125,c256,c512,c768", "dir", '"/data/user/0/com.kernarium.icons"'), key)
+        self.assertEqual(key, runner.audit_key(tagged, runner.ISOLATED_CONTEXT))
+        self.assertNotEqual(key, runner.audit_key(isolated.replace("path=\"/data/user/0/com.kernarium.icons\"", "path=\"/other\""),
+                                                  runner.ISOLATED_CONTEXT))
+        self.assertIsNone(runner.audit_key(isolated.replace("isolated_app", "untrusted_app"), runner.ISOLATED_CONTEXT))
+        report = runner.audit_report([isolated, tagged, isolated], runner.ISOLATED_CONTEXT)
+        self.assertEqual('u:r:isolated_app:s0 audit lines (reported, not judged): { getattr } dir '
+                         '"/data/user/0/com.kernarium.icons" -> u:object_r:app_data_file:s0:c125,c256,c512,c768 '
+                         '(b/120394782) x3', report)
+        self.assertEqual("u:r:isolated_app:s0 audit lines: none", runner.audit_report([], runner.ISOLATED_CONTEXT))
+        self.assertEqual("u:r:isolated_app:s0 audit lines: none", runner.audit_report(["unrelated"], runner.ISOLATED_CONTEXT))
+        other = isolated.replace("{ getattr }", "{ read }").replace("tclass=dir", "tclass=file").replace(" bug=b/120394782", "")
+        self.assertEqual(2, runner.audit_report([isolated, other], runner.ISOLATED_CONTEXT).count(" x1"))
+
     def test_the_resumed_component_is_read_whole(self) -> None:
         dump = ("  mResumedActivity: ActivityRecord{1a2b u0 org.x.a/.Main t14}\n"
                 "  topResumedActivity=ActivityRecord{3c4d u0 org.x.b/android.app.Activity t15 f}\n"
@@ -724,8 +1013,10 @@ class Steps(Fixture):
         with contextlib.redirect_stdout(io.StringIO()), \
                 unittest.mock.patch.object(runner.time, "sleep", lambda seconds: None), \
                 unittest.mock.patch.object(runner, "LAUNCH_SECONDS", 0.5), \
+                unittest.mock.patch.object(runner, "CALLER_SECONDS", 0.5), \
                 unittest.mock.patch.object(runner, "open_guest", lambda options, adb, private: (image, lambda: None)), \
-                unittest.mock.patch.object(runner.probe, "build_apk", self.build):
+                unittest.mock.patch.object(runner.probe, "build_apk", self.build), \
+                unittest.mock.patch.object(runner.probe, "build_caller_apk", self.build_caller):
             runner.run(options, "adb", pathlib.Path(tempfile.mkdtemp(prefix="uml-appshort-run-")), report)
         self.image = image
         return {name: status for name, status, _ in report.rows}
@@ -736,8 +1027,32 @@ class Steps(Fixture):
     def test_a_conforming_image_passes_every_step(self) -> None:
         statuses = self.run_steps(None)
         self.assertEqual({"PASS"}, set(statuses.values()), statuses)
-        self.assertEqual(12, len(statuses))
+        self.assertEqual(16, len(statuses))
         self.assertEqual(set(), self.image.files)
+        self.assertNotIn(probe.CALLER_PACKAGE, self.image.packages, "the caller is removed again")
+        self.assertNotIn(probe.package_of("bad"), self.image.packages)
+
+    def test_the_isolated_renderers_audit_lines_are_reported_and_not_judged(self) -> None:
+        for deviation, expected in ((None, "{ getattr } dir"), ("isolated-denies-more", "apk_data_file")):
+            with self.subTest(deviation=deviation):
+                image = ScriptedImage()
+                image.deviation = deviation
+                report = runner.Report()
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        unittest.mock.patch.object(runner.time, "sleep", lambda seconds: None), \
+                        unittest.mock.patch.object(runner, "LAUNCH_SECONDS", 0.5), \
+                        unittest.mock.patch.object(runner, "CALLER_SECONDS", 0.5), \
+                        unittest.mock.patch.object(runner, "open_guest", lambda options, adb, private: (image, lambda: None)), \
+                        unittest.mock.patch.object(runner.probe, "build_apk", self.build), \
+                        unittest.mock.patch.object(runner.probe, "build_caller_apk", self.build_caller):
+                    runner.run(types_namespace(), "adb", pathlib.Path(tempfile.mkdtemp(prefix="uml-appshort-run-")), report)
+                details = {name: (status, detail) for name, status, detail in report.rows}
+                status, detail = details["the command writes nothing and is denied nothing"]
+                self.assertEqual("PASS", status, detail)
+                self.assertIn("audit lines (reported, not judged)", detail)
+                self.assertIn(expected, detail)
+                self.assertIn("(b/120394782)", detail)
+                self.assertEqual({"PASS"}, {status for status, _ in details.values()}, details)
 
     def test_a_denial_from_before_the_window_is_not_the_commands(self) -> None:
         statuses = self.run_steps("old-denial")
@@ -750,6 +1065,9 @@ class Steps(Fixture):
         launch = "launch starts a launcher activity"
         refusals = "launch refuses all else, and runs nothing it is given"
         usage = "usage errors are status 64"
+        split = "the drawing is done in the renderer's two processes, not in the shell"
+        bad = "a bad icon costs only itself"
+        caller = "an ordinary application cannot use the renderer"
         clean = "the command writes nothing and is denied nothing"
         alias = "a launcher alias enabled for the user is listed, drawn and started"
         sets = "the digest follows the set of applications"
@@ -767,6 +1085,15 @@ class Steps(Fixture):
             "writes-file": clean, "denial": clean, "first-call-denial": clean, "repeat-denial": clean,
             "evicted-baseline": clean,
             "digest-constant": sets, "static-keys": sets, "builtin-icons-error": icons,
+            "tool-maps-apk": split, "tool-maps-builtin-apk": split, "tool-maps-framework-res": split, "tool-maps-overlay": split,
+            "tool-maps-target-dir": split, "tool-holds-data": split, "sampler-blind": split, "no-isolated-process": split,
+            "no-provider-process": split, "isolated-in-shell-domain": split, "isolated-wrong-domain": split,
+            "isolated-user-wrong": split, "provider-privileged": split, "provider-platform-user": split,
+            "provider-in-shell": split, "sampler-no-rounds": split, "sampler-garbage": split, "sampler-no-status": split,
+            "tool-fails-under-sampler": split, "sampler-fails": split,
+            "bad-icon-ok": bad, "bad-icon-spoils-batch": bad, "bad-icon-alone-ok": bad,
+            "renderer-silent": caller, "caller-allowed": caller, "caller-allowed-and-names-the-permission": caller, "caller-refused-for-nothing": caller,
+            "caller-no-answer": caller, "caller-not-started": caller,
         }
         for deviation, step in expected.items():
             with self.subTest(deviation=deviation):
@@ -783,4 +1110,4 @@ if __name__ == "__main__":
     if shutil.which("keytool") is None or shutil.which("jarsigner") is None:
         print("SKIP: no keytool and jarsigner on PATH")
         sys.exit(SKIP)
-    unittest.main(argv=[sys.argv[0], "-v"], exit=True)
+    unittest.main(argv=[sys.argv[0], "-v", *sys.argv[1:]], exit=True)

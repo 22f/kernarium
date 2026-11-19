@@ -273,10 +273,11 @@ uml_add_tooling_test(
 set_tests_properties(android17-app-shortcuts-command PROPERTIES
     SKIP_RETURN_CODE 77)
 
-# The launcher-application runner without a guest: the probe packages (manifests read back), the strict
-# parsers of the command's answers (each deviation of a header, a row, a label and an icon record), and every
-# step against a scripted guest that follows the contract and differs one way at a time. It skips (77)
-# where the host has no keytool and jarsigner.
+# The launcher-application runner without a guest: the probe packages (manifests read back, the bad icon and
+# the caller), the strict parsers of the command's answers (each deviation of a header, a row, a label and an
+# icon record, and of the sampler's answer), the judgement of what the tool's process holds and of the
+# renderer's two processes, and every step against a scripted guest that follows the contract and differs one
+# way at a time. It skips (77) where the host has no keytool and jarsigner.
 uml_add_tooling_test(
     NAME android17-app-shortcuts-runner
     COMMAND ${Python3_EXECUTABLE} -B

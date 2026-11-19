@@ -1273,13 +1273,19 @@ labels that are safe and within the bounds; Settings is listed as built in under
 application (`appsprobe_apk.py`: two launcher activities, one with a hostile label and one with a
 label over the bound, a launcher activity that is not exported, an exported one with no launcher
 filter and a launcher alias that the manifest disables; a second package whose label is a string
-resource and whose icon is an adaptive icon of a colour and a bitmap layer; both are test-only and
+resource and whose icon is an adaptive icon of a colour and a bitmap layer, and a third that is the
+second with a foreground that is no picture; all three are test-only and
 installed with `-t`, as the shell may change a component's state of a test-only package alone) with the escaped and the
 cut labels and none of the others; `icons` answers records whose length and SHA-256 check out,
 decoded (8-bit RGB or RGBA, every chunk's checksum checked) to pictures that are not blank and whose alpha flag is true, the second
 package's with its colour in the corners and its disc in the middle, `noicon` for the first,
 `missing` for what is not an entry, in the order asked, no built-in application's icon is `error`, and nine
-components are status 64; the alias
+components are status 64; the drawing is
+not in the shell (while `icons` runs over eight components the tool's process, sampled through
+`/proc`, maps and holds no package, overlay or resource-cache file and nothing of a target's own
+directory, and the renderer runs in two processes of its own, an ordinary application's and an isolated one's, as
+`untrusted_app` and `isolated_app`), an application's own call of the renderer's provider is refused for
+the shell-only permission, and the bad icon is `error` among seven good ones that are all `ok`; the alias
 is not listed until `pm enable` enables it for the user, and then listed, drawn and started; the
 digest is recomputed from the rows; `launch` makes the probe's activity the resumed one (and again when
 it is open) and refuses with status 2 and no output the not exported and no-filter activities, a
@@ -1287,7 +1293,8 @@ built-in application's other activity, a package that is not installed, a disabl
 every hostile argument, none of which runs (a marker file stays absent); usage errors are status
 64; the shell user's data directory is unchanged and no denial of the shell domain is logged
 from a time on the device's clock taken before the first call (only that window is read, so a line
-the log buffer has dropped cannot hide a new one); and the digest changes with an install, an update in place (whose icon keys alone
+the log buffer has dropped cannot hide a new one), and the isolated renderer's audit lines in that window
+are printed with the result without being judged; and the digest changes with an install, an update in place (whose icon keys alone
 change) and a disabled application, and returns to its earlier value when the application is
 removed. `android17-app-shortcuts-command` (tooling; skipped without a JDK) runs the command's
 grammar, the labels' escaping and bounds, the listing, digest and icon keys, every answer's
@@ -1308,8 +1315,9 @@ with a mutant for each rule, what its provider, worker, drawing and service must
 and its manifest and build file (an unprivileged, direct-boot-aware application with a guarded
 provider and an isolated service, and nothing else).
 `android17-app-shortcuts-runner` (tooling; skipped without keytool and
-jarsigner) runs the probe packages, the strict parsers and every step against a scripted guest
-that differs one way at a time; the Android calls need a built image.
+jarsigner) runs the probe packages (the bad icon and the caller that is an ordinary application), the strict
+parsers (the sampler's answer too), what the tool's process may hold and the domains the renderer's processes may run in,
+and every step against a scripted guest that differs one way at a time; the Android calls need a built image.
 `android17-sms-service` (tooling; skipped without a JDK) runs the text message
 service on a plain JVM: the PDUs it builds, read back with a parser of its own
 and the JDK's `UTF-16` decoder, the one Android applies to a UCS-2 message, which
