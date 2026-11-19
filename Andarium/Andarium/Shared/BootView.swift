@@ -211,6 +211,10 @@ struct BootView: View {
                 .padding(.horizontal, 4)
                 .accessibilityAddTraits(.isHeader)
 
+            if let pending = model.androidApps.open.pending, pending.stage == .starting {
+                AppOpenBootCard(request: pending.request, dimmed: dimmed)
+            }
+
             if model.slowStart.showing {
                 slowNotice(steps: steps, current: current)
             }
@@ -586,7 +590,7 @@ private struct EqualWidthRow: Layout {
 /// The boot screen's panels: a flat translucent fill over the dimmed
 /// display, which needs no backdrop sampling, and glass over Recovery's
 /// opaque screen.
-private struct BootPanel: ViewModifier {
+struct BootPanel: ViewModifier {
     let dimmed: Bool
     let radius: CGFloat
 

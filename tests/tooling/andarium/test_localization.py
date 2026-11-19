@@ -33,6 +33,7 @@ NOTE = "Browse the virtual machine’s storage."
 STORE_NOTE = "Rate the app from Info."
 PERMISSION = "Andarium records from the microphone only when you turn on Microphone."
 LANGS = ("ja", "zh-Hans", "zh-Hant")
+PHRASE = "Open ${target} in ${applicationName}"
 
 
 def load_script():
@@ -45,6 +46,11 @@ def load_script():
 
 def unit(value: str, state: str = "translated") -> dict:
     return {"stringUnit": {"state": state, "value": value}}
+
+
+def phrases(*values: str, state: str = "translated") -> dict:
+    """An App Shortcut's phrases in one language."""
+    return {"stringSet": {"state": state, "values": list(values)}}
 
 
 def entry(**values: str) -> dict:
@@ -84,6 +90,12 @@ class Tree:
                 ja="%@でデベロッパをフォロー", zh_Hans="在%@上关注开发者", zh_Hant="在%@上追蹤開發者")}),
             "StoreLink": catalog({"View in App Store": entry(
                 ja="App Storeで見る", zh_Hans="在App Store中查看", zh_Hant="在App Store中檢視")}),
+            "AppShortcuts": catalog({PHRASE: {"localizations": {
+                "en": phrases("Open ${target} in ${applicationName}", "Open an Android app in ${applicationName}"),
+                "ja": phrases("${applicationName}で${target}を開く", "${applicationName}でAndroidアプリを開く"),
+                "zh-Hans": phrases("在${applicationName}中打开${target}", "在${applicationName}中打开Android应用"),
+                "zh-Hant": phrases("在${applicationName}中打開${target}", "在${applicationName}中打開Android應用程式"),
+            }}}),
             "AndariumCore": catalog({"Paused": entry(ja="一時停止", zh_Hans="已暂停", zh_Hant="已暫停")}),
             "InfoPlist": catalog({"NSMicrophoneUsageDescription": {"localizations": {
                 "en": unit(PERMISSION), **{lang: unit(f"{lang}: 麦克风") for lang in LANGS}}}}),
@@ -198,6 +210,21 @@ class CheckTests(unittest.TestCase):
         plural = self.tree.string("Localizable", "%lld snapshots")["localizations"]["ja"]["variations"]["plural"]
         plural["many"] = plural.pop("other")
         self.assertFinds("plural variations without 'other'")
+
+    def test_app_shortcut_phrases_pass_and_each_is_checked(self) -> None:
+        self.assertEqual(self.problems(), [])
+        self.tree.string("AppShortcuts", PHRASE)["localizations"]["ja"] = phrases(
+            "${applicationName}で${target}を開く", "Open an Android app in ${applicationName}")
+        self.assertFinds("(ja/phrase 2): is an English form of the key")
+
+    def test_app_shortcut_phrases_not_marked_translated(self) -> None:
+        self.tree.string("AppShortcuts", PHRASE)["localizations"]["zh-Hant"] = phrases(
+            "在${applicationName}中打開${target}", "在${applicationName}中打開Android應用程式", state="new")
+        self.assertFinds("is in the state 'new'")
+
+    def test_app_shortcut_phrases_missing_a_language(self) -> None:
+        del self.tree.string("AppShortcuts", PHRASE)["localizations"]["zh-Hans"]
+        self.assertFinds("has no zh-Hans translation")
 
     def test_a_google_name_in_a_value(self) -> None:
         self.tree.string("Localizable", "Virtual machine")["localizations"]["zh-Hans"] = unit("Google 虚拟机")
@@ -437,7 +464,8 @@ class SyncTests(unittest.TestCase):
                 feedback: tuple[str, ...] = ("Send feedback",), tipjar: tuple[str, ...] = ("Buy me tokens",),
                 review: tuple[str, ...] = ("Review on the App Store",),
                 follow: tuple[str, ...] = ("Follow developer on %@",),
-                storelink: tuple[str, ...] = ("View in App Store",)) -> None:
+                storelink: tuple[str, ...] = ("View in App Store",),
+                shortcuts: tuple[str, ...] = (PHRASE,)) -> None:
         self.data.parent.mkdir(parents=True, exist_ok=True)
 
         def table(texts: tuple[str, ...]) -> list[dict]:
@@ -445,7 +473,11 @@ class SyncTests(unittest.TestCase):
 
         body = {"source": str(self.root / self.source), "tables": {
             "Localizable": table(keys), "JIT": table(jit), "Feedback": table(feedback), "TipJar": table(tipjar),
-            "Review": table(review), "FollowX": table(follow), "StoreLink": table(storelink)}, "version": 1}
+            "Review": table(review), "FollowX": table(follow), "StoreLink": table(storelink),
+            "AppShortcuts": [
+                {"key": key, "location": {"startingColumn": 1, "startingLine": 1},
+                 "values": [key, "Open an Android app in ${applicationName}"] if key == PHRASE else [key]}
+                for key in shortcuts]}, "version": 1}
         self.data.write_text(json.dumps(body), encoding="utf-8")
 
     def sync(self, *extra: str) -> list[str]:
@@ -562,6 +594,17 @@ class SyncTests(unittest.TestCase):
         problems = self.sync("--check", "--app-store")
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("FollowX: is out of step with the code: 1 to add ['A new row text']", problems[0])
+
+    def test_an_app_shortcut_phrase_of_the_arranged_build_is_in_step(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
+        self.assertEqual(self.sync("--check"), [])
+
+    def test_a_missing_app_shortcut_phrase_is_found(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of",
+                     shortcuts=(PHRASE, "Close ${target} in ${applicationName}"))
+        problems = self.sync("--check")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("AppShortcuts: is out of step with the code: 1 to add ['Close ${target} in ${applicationName}']", problems[0])
 
     def test_a_store_link_string_of_the_arranged_build_is_in_step(self) -> None:
         self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")

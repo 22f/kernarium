@@ -22,7 +22,7 @@ final class StoreNoticeUITests: XCTestCase {
     @MainActor
     private func launch(_ screen: String, _ arguments: String...) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-screen", screen] + arguments
+        app.launchArguments = previewTestLanguage + ["-screen", screen] + arguments
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20), "\(screen) did not open")
         return app
