@@ -1149,7 +1149,7 @@ anywhere is a blocker. The candidate must show:
   `userdata`, a newer release keeps an older instance's apps and data and an
   older release on a newer instance is refused.
 - **Hardware video** (a guest started with `--video`). `MediaCodecList` lists
-  the four `c2.v4l2.*` codecs with no SELinux or seccomp denial; the encoder
+  the five `c2.v4l2.*` codecs with no SELinux or seccomp denial; the encoder
   and decoder classes of the media CTS modules pass on both ABIs through the
   hardware codecs, which the host's video activity log confirms, and the
   software `c2.android.*` results do not regress. Run the decoder performance
