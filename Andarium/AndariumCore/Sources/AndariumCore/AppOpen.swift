@@ -1,0 +1,342 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+import Foundation
+
+/// Opening an Android app from a Home Screen icon, Shortcuts, Search or Siri.
+/// A request names one app; what happens next follows the Start button's own
+/// rules (`StartPlan`, `StartVerdict`) and Android's state, and is decided by
+/// the pure functions here so that every outcome is a row of a test.
+///
+/// The request lives in memory only. Nothing is stored that would make the
+/// next launch of Andarium open an app: iOS ending the process drops it.
+
+/// One request to open an app. A newer request replaces an older one.
+public struct AppOpenRequest: Equatable, Sendable, Identifiable {
+    /// Counts requests, so an answer meant for an older one is told from the
+    /// current one.
+    public let serial: Int
+    public let component: AndroidComponent
+    /// The app's name as the request knew it, for the cards and banners.
+    public let label: String
+
+    public var id: Int { serial }
+}
+
+/// Why a request waits at Home for the person.
+public enum AppOpenHold: Equatable, Sendable {
+    /// An update that did not finish: Home asks whether to try again or restore.
+    case update
+    /// The device has too little free space to start Android.
+    case space
+    /// A snapshot operation holds the guest's files; the request goes on when it ends.
+    case snapshot
+}
+
+/// Where a request is.
+public enum AppOpenStage: Equatable, Sendable {
+    /// Held until the person answers what Home asks, or what holds it ends.
+    case waiting(AppOpenHold, since: Date)
+    /// Android is starting for it.
+    case starting
+    /// Android is up: the app opens when Android is ready for it.
+    case opening
+}
+
+public struct PendingAppOpen: Equatable, Sendable {
+    public var request: AppOpenRequest
+    public var stage: AppOpenStage
+}
+
+/// What went wrong, in the shape of a banner over Android.
+public enum AppOpenFailure: Equatable, Sendable {
+    /// The app is not in Android (removed, disabled, or Android was erased).
+    case notInAndroid
+    /// Android did not open it in time; trying again may help.
+    case tookTooLong
+    /// Android is in recovery mode and runs no apps.
+    case recovery
+    /// Android's first-run setup is not finished; the app opens once it is.
+    case setupUnfinished
+
+    /// Whether the banner offers Try Again.
+    public var canRetry: Bool {
+        switch self {
+        case .tookTooLong, .setupUnfinished: true
+        case .notInAndroid, .recovery: false
+        }
+    }
+}
+
+public struct AppOpenBanner: Equatable, Sendable, Identifiable {
+    public let serial: Int
+    public let failure: AppOpenFailure
+    public let label: String
+    /// What Try Again asks again; nil where the banner offers no retry.
+    public let component: AndroidComponent?
+    public let shownAt: Date
+
+    public var id: Int { serial }
+}
+
+/// Why a request that Andarium will not carry out says so, where it says so.
+public enum AppOpenRefusal: Equatable, Sendable {
+    /// Android is in recovery mode: a banner says so.
+    case recovery
+    /// There is no virtual machine at all (it was erased): an alert says the
+    /// app is not in Android.
+    case noAndroid
+    /// This device cannot draw Android: the alert Start raises.
+    case needsNewerChip
+    /// The virtual machine cannot start with this Android: Home explains it.
+    case cannotStart
+    /// The run ended in failure: its own screen says so.
+    case runEnded
+}
+
+/// What is true of Andarium at the moment a request arrives.
+public struct AppOpenSituation: Equatable, Sendable {
+    public var phase: Phase
+    public var plan: StartPlan
+    /// The verdict Start would get at Home (`Lifecycle.startVerdict`).
+    public var verdict: StartVerdict
+    /// A snapshot operation holds the guest's files.
+    public var holdsGuestFiles: Bool
+    /// The guest is paused for want of space.
+    public var spacePaused: Bool
+
+    public init(phase: Phase, plan: StartPlan, verdict: StartVerdict, holdsGuestFiles: Bool, spacePaused: Bool) {
+        self.phase = phase
+        self.plan = plan
+        self.verdict = verdict
+        self.holdsGuestFiles = holdsGuestFiles
+        self.spacePaused = spacePaused
+    }
+}
+
+public enum AppOpenDecision: Equatable, Sendable {
+    /// Android runs: the app opens as soon as Android is ready for it.
+    case openNow
+    /// Android is off and the Start button would start it: start it.
+    case startAndroid
+    /// Android is starting already.
+    case alreadyStarting
+    case hold(AppOpenHold)
+    case refuse(AppOpenRefusal)
+}
+
+public enum AppOpenPlanner {
+    /// What a request does in a situation. The rows:
+    ///
+    /// - A normal run opens the app now, unless the guest is paused for space
+    ///   (the request waits for the person to resume it).
+    /// - Recovery runs no apps. A start under way is the one it is, and a boot
+    ///   into Recovery refuses when it ends.
+    /// - A failed run needs a new process; its screen says why.
+    /// - At Home the Start button's own rules apply. An unfinished update, a
+    ///   device without room and a snapshot operation wait for the person or
+    ///   for the operation; a guest that cannot start, a device that cannot
+    ///   draw Android, and no guest at all refuse; every other start starts.
+    public static func decide(_ situation: AppOpenSituation) -> AppOpenDecision {
+        switch situation.phase {
+        case .running(.normal):
+            return situation.spacePaused ? .hold(.space) : .openNow
+        case .running(.recovery):
+            return .refuse(.recovery)
+        case let .booting(kind):
+            return kind == .recovery ? .refuse(.recovery) : .alreadyStarting
+        case .failed:
+            return .refuse(.runEnded)
+        case .home:
+            break
+        }
+        switch situation.verdict {
+        case .noGuest:
+            return .refuse(.noAndroid)
+        case .needsNewerChip:
+            return .refuse(.needsNewerChip)
+        case .relaunchRequired:
+            return .refuse(.runEnded)
+        case .blocked:
+            return .refuse(.cannotStart)
+        case .lowSpace, .unfinishedUpdate, .allowed:
+            break
+        }
+        // An unfinished update is the person's to settle, even where Start
+        // could try it again: Home asks which way.
+        if case .unfinishedUpdate = situation.plan { return .hold(.update) }
+        switch situation.verdict {
+        case .lowSpace: return .hold(.space)
+        case .unfinishedUpdate: return .hold(.update)
+        default: return situation.holdsGuestFiles ? .hold(.snapshot) : .startAndroid
+        }
+    }
+}
+
+/// What the model does next, after the state has moved.
+public enum AppOpenEffect: Equatable, Sendable {
+    case none
+    /// Start Android as the Start button does, then open.
+    case startAndroid
+    /// Open the request's app (Android is up).
+    case open(AppOpenRequest)
+    /// Say it at Home, over the guest's absence: an alert.
+    case alert(AppOpenRefusal, label: String)
+}
+
+/// The pending request and the banner of the last failure, as one state that
+/// every event moves. The model feeds it the events and does what it answers.
+public struct AppOpenState: Equatable, Sendable {
+    public private(set) var pending: PendingAppOpen?
+    public private(set) var banner: AppOpenBanner?
+    private var serial = 0
+
+    /// How long a request waits at Home for the person before it is dropped.
+    public static let holdLimit: TimeInterval = 600
+    /// How long a banner stays, and the longer time of one with Try Again.
+    public static let bannerLimit: TimeInterval = 12
+    public static let retryBannerLimit: TimeInterval = 20
+
+    public init() {}
+
+    /// A new request. It replaces a pending one and the banner of an earlier failure.
+    public mutating func request(
+        _ component: AndroidComponent, label: String, in situation: AppOpenSituation, now: Date
+    ) -> AppOpenEffect {
+        serial += 1
+        banner = nil
+        let request = AppOpenRequest(serial: serial, component: component, label: label)
+        switch AppOpenPlanner.decide(situation) {
+        case .openNow:
+            pending = PendingAppOpen(request: request, stage: .opening)
+            return .open(request)
+        case .startAndroid:
+            pending = PendingAppOpen(request: request, stage: .starting)
+            return .startAndroid
+        case .alreadyStarting:
+            pending = PendingAppOpen(request: request, stage: .starting)
+            return .none
+        case let .hold(hold):
+            pending = PendingAppOpen(request: request, stage: .waiting(hold, since: now))
+            return .none
+        case let .refuse(refusal):
+            pending = nil
+            switch refusal {
+            case .recovery:
+                show(.recovery, for: request, now: now)
+                return .none
+            case .noAndroid:
+                return .alert(.noAndroid, label: label)
+            case .needsNewerChip:
+                return .alert(.needsNewerChip, label: label)
+            case .cannotStart, .runEnded:
+                return .none
+            }
+        }
+    }
+
+    /// The person answered what Home asked (Start, Update and start, Restore
+    /// then Start): a request that waited is starting now.
+    public mutating func personStarted() {
+        guard var pending, case .waiting = pending.stage else { return }
+        pending.stage = .starting
+        self.pending = pending
+    }
+
+    /// What held a request ended (a snapshot operation, or the pause for
+    /// space). The request is decided again in the new situation.
+    public mutating func releaseHold(
+        _ hold: AppOpenHold, in situation: AppOpenSituation, now: Date
+    ) -> AppOpenEffect {
+        guard let pending, case let .waiting(held, _) = pending.stage, held == hold else { return .none }
+        switch AppOpenPlanner.decide(situation) {
+        case .openNow:
+            self.pending?.stage = .opening
+            return .open(pending.request)
+        case .startAndroid:
+            self.pending?.stage = .starting
+            return .startAndroid
+        case .alreadyStarting:
+            self.pending?.stage = .starting
+            return .none
+        case let .hold(again):
+            self.pending?.stage = .waiting(again, since: now)
+            return .none
+        case let .refuse(refusal):
+            self.pending = nil
+            if refusal == .recovery { show(.recovery, for: pending.request, now: now) }
+            return .none
+        }
+    }
+
+    /// The boot reached Android. A request that was starting opens now, or,
+    /// when Android came up in Recovery, ends with the banner that says so.
+    public mutating func androidIsUp(recovery: Bool, now: Date) -> AppOpenEffect {
+        guard let pending, pending.stage == .starting else { return .none }
+        if recovery {
+            self.pending = nil
+            show(.recovery, for: pending.request, now: now)
+            return .none
+        }
+        self.pending?.stage = .opening
+        return .open(pending.request)
+    }
+
+    /// How opening the request ended. An answer for a request that was
+    /// replaced or dropped meanwhile changes nothing.
+    public mutating func opened(_ outcome: AndroidAppOpenOutcome, for request: AppOpenRequest, now: Date) {
+        guard pending?.request == request else { return }
+        pending = nil
+        switch outcome {
+        case .opened, .openedRenamed: break
+        case .notInAndroid: show(.notInAndroid, for: request, now: now)
+        case .failed: show(.tookTooLong, for: request, now: now)
+        }
+    }
+
+    /// Android's first-run setup was seen to be unfinished: the request ends
+    /// with a banner whose Try Again asks again.
+    public mutating func setupUnfinished(for request: AppOpenRequest, now: Date) {
+        guard pending?.request == request else { return }
+        pending = nil
+        show(.setupUnfinished, for: request, now: now)
+    }
+
+    /// "Don't open": the request is dropped; Android keeps starting.
+    public mutating func drop() {
+        pending = nil
+    }
+
+    /// The run ended or was stopped, or the guest was erased: nothing waits.
+    public mutating func runEnded() {
+        pending = nil
+    }
+
+    public mutating func dismissBanner() {
+        banner = nil
+    }
+
+    /// Drops a request that waited at Home for longer than `holdLimit`, and a
+    /// banner that has stayed its time. Returns whether anything went.
+    @discardableResult
+    public mutating func expire(now: Date) -> Bool {
+        var changed = false
+        if let pending, case let .waiting(_, since) = pending.stage, now.timeIntervalSince(since) >= Self.holdLimit {
+            self.pending = nil
+            changed = true
+        }
+        if let banner {
+            let limit = banner.failure.canRetry ? Self.retryBannerLimit : Self.bannerLimit
+            if now.timeIntervalSince(banner.shownAt) >= limit {
+                self.banner = nil
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    private mutating func show(_ failure: AppOpenFailure, for request: AppOpenRequest, now: Date) {
+        banner = AppOpenBanner(
+            serial: request.serial, failure: failure, label: request.label,
+            component: failure.canRetry ? request.component : nil, shownAt: now)
+    }
+}
