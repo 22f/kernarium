@@ -2033,6 +2033,9 @@ class HostObserver:
         if (self.nonce is None or slept or quick
                 or now - self.last_pull >= WATCH_PULL_EVERY):
             self.pull((now, wall))
+            # A sleep inside the turn is dealt with: the next turn measures
+            # from here, and does not take it for another.
+            self.last_mono, self.last_wall = clock.monotonic(), clock.time()
         self.verdict = None
         if self.nonce is None:
             return None
