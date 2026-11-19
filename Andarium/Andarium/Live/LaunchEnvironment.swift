@@ -139,6 +139,19 @@ nonisolated enum OldAppsProbeLaunch {
     }
 }
 
+/// A probe session with a played list of Android's apps in place of the
+/// image's `kernarium_apps` tool (`ANDARIUM_ANDROID_APPS_PROBE=1`): Settings >
+/// Apps > Add to Home Screen is reachable without a guest, and the cache and
+/// the App Shortcuts hold the made-up apps, so Apple's Shortcuts shows their
+/// tiles under Andarium.
+nonisolated enum AndroidAppsProbeLaunch {
+    static let environmentName = "ANDARIUM_ANDROID_APPS_PROBE"
+
+    static func requested(in environment: [String: String]) -> Bool {
+        InputProbeLaunch.requested(in: environment) && environment[environmentName] == "1"
+    }
+}
+
 /// A development launch's text message entrance (`ANDARIUM_TEXT_MESSAGES=1`).
 /// The application offers no text message until an accepted release image
 /// carries the service (`Capabilities.device`); tests and proof images switch
@@ -181,6 +194,7 @@ extension AppEntry {
             && !InputProbeLaunch.requested(in: environment)
             && !CompassReadoutLaunch.requested(in: environment)
             && environment[OldAppsProbeLaunch.environmentName] == nil
+            && environment[AndroidAppsProbeLaunch.environmentName] == nil
             && environment["XCTestConfigurationFilePath"] == nil
     }
 

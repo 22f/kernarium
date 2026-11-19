@@ -352,6 +352,11 @@ struct AppEntry {
             // What the first listing of a run does once Android's storage is up.
             Task { await model.refreshOldApps() }
         }
+        if AndroidAppsProbeLaunch.requested(in: environment) {
+            model.scriptedAndroidApps = ScriptedAndroidApps()
+            // What the first listing of a run does once Android's storage is up.
+            Task { await model.refreshAndroidApps() }
+        }
         return model
     }
 
