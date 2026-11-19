@@ -1347,6 +1347,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           adb_prop_unreadable_by_vendor_init: bool = False,
                           lineage_policy: str | None = None,
                           missing_mediaserver_audit: bool = False,
+                          missing_shell_density_audit: bool = False,
                           missing_virtio_console: bool = False,
                           unsupported_hvc: bool = False,
                           missing_mesa_gles: bool = False,
@@ -2335,6 +2336,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         ""
                         if missing_mediaserver_audit
                         else "(dontaudit mediaserver vendor_default_prop (file (read)))\n"
+                    )
+                    + (
+                        ""
+                        if missing_shell_density_audit
+                        else "(dontaudit shell qemu_sf_lcd_density_prop (file (read)))\n"
                     )
                     + (
                         "(allow fsck_untrusted self (capability (sys_admin)))\n"
@@ -4091,6 +4097,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("lineage-vold-relabelto", {"lineage_policy": "vold-relabelto"}),
             ("lineage-permissive-backuptool", {"lineage_policy": "permissive-backuptool"}),
             ("missing-mediaserver-audit", {"missing_mediaserver_audit": True}),
+            ("missing-shell-density-audit", {"missing_shell_density_audit": True}),
             ("missing-virtio-console", {"missing_virtio_console": True}),
             ("unsupported-hvc", {"unsupported_hvc": True}),
             ("missing-mesa-gles", {"missing_mesa_gles": True}),
@@ -4848,6 +4855,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "makes the domain backuptool permissive"),
             ("missing-mediaserver-audit-cause", {"missing_mediaserver_audit": True},
              "does not silence the denial of mediaserver reading vendor_default_prop"),
+            ("missing-shell-density-audit-cause", {"missing_shell_density_audit": True},
+             "does not silence the denial of the shell domain reading qemu_sf_lcd_density_prop"),
             ("adb-prop-unreadable-by-vendor-init-cause",
              {"adb_prop_unreadable_by_vendor_init": True},
              "names sys.kernarium.adb.host_connected, labelled kernarium_adb_host_prop, "

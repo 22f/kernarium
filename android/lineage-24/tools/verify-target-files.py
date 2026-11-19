@@ -4255,6 +4255,7 @@ def check_kernel_policy(
     )
     check_policy_relaxations((platform_policy, vendor_policy, system_ext_policy), build_variant)
     check_mediaserver_property_audit((platform_policy, vendor_policy, system_ext_policy))
+    check_shell_density_property_audit((platform_policy, vendor_policy, system_ext_policy))
     contexts = [
         line
         for name in PROPERTY_CONTEXT_FILES
@@ -5127,6 +5128,33 @@ def check_mediaserver_property_audit(policies: tuple[bytes, ...]) -> None:
     fail(
         "policy does not silence the denial of mediaserver reading vendor_default_prop "
         "(overlay/sepolicy/system_ext/private/mediaserver.te)"
+    )
+
+
+def check_shell_density_property_audit(policies: tuple[bytes, ...]) -> None:
+    """The shell user's read of the emulator's density property is silenced, as mediaserver's property read is.
+
+    kernarium_apps runs as the adb shell user. The resources code it uses reads
+    qemu.sf.lcd_density in a static initialiser and carries on without a value
+    when the shell domain may not read it. Without this rule every list and
+    icons call logs an audit denial that nothing needs to act on.
+    """
+    for policy in policies:
+        for match in CIL_DONTAUDIT_RULE.finditer(policy):
+            source, target, object_class, permissions = (
+                CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(index).decode())
+                for index in (1, 2, 3, 4)
+            )
+            if (
+                source == "shell"
+                and target == "qemu_sf_lcd_density_prop"
+                and object_class == "file"
+                and "read" in permissions.split()
+            ):
+                return
+    fail(
+        "policy does not silence the denial of the shell domain reading qemu_sf_lcd_density_prop "
+        "(overlay/sepolicy/system_ext/private/kernarium_apps.te)"
     )
 
 
