@@ -31,6 +31,9 @@ REPOSITORY = HERE.parents[2]
 LINEAGE = REPOSITORY / "android" / "lineage-24"
 APP = LINEAGE / "overlay" / "app_icons"
 SOURCES = APP / "src" / "com" / "kernarium" / "icons"
+PRODUCT_MAKEFILE = LINEAGE / "overlay" / "lineage_andarium.mk"
+BUILD_SCRIPT = LINEAGE / "build" / "build-aosp.sh"
+VERIFIER = LINEAGE / "tools" / "verify-target-files.py"
 TEST = HERE / "icon_renderer" / "com" / "kernarium" / "icons" / "IconProtocolTest.java"
 ANDROID = "{http://schemas.android.com/apk/res/android}"
 SKIP = 77
@@ -396,6 +399,53 @@ def manifest_problems(text: str) -> list[str]:
     return problems
 
 
+def wiring_problems(makefile: str, build: str, verifier: str) -> list[str]:
+    """Whether the image, its build and its verifier all carry the app."""
+    problems: list[str] = []
+    if not re.search(r"^PRODUCT_PACKAGES \+= KernariumIcons$", makefile, re.MULTILINE):
+        problems.append("lineage_andarium.mk does not install KernariumIcons")
+    if re.search(r"^PRODUCT_PACKAGES \+= KernariumIcons$", makefile, re.MULTILINE) and \
+            len(re.findall(r"^PRODUCT_PACKAGES \+= KernariumIcons$", makefile, re.MULTILINE)) != 1:
+        problems.append("lineage_andarium.mk installs KernariumIcons more than once")
+    if '[[ "$PRODUCT_PACKAGES" == *" KernariumIcons "* ]]' not in build:
+        problems.append("build-aosp.sh does not require KernariumIcons in the product")
+    if not re.search(r"^\s+check_icons_app\(", verifier, re.MULTILINE):
+        problems.append("verify-target-files.py has no check of the icon renderer")
+    if "def check_icons_app(" not in verifier:
+        problems.append("verify-target-files.py does not define check_icons_app")
+    if '"SYSTEM_EXT/app/KernariumIcons/KernariumIcons.apk"' not in verifier:
+        problems.append("verify-target-files.py does not require the app's package in the system_ext image")
+    return problems
+
+
+def check_wiring() -> list[str]:
+    makefile, build, verifier = (path.read_text(encoding="utf-8") for path in (PRODUCT_MAKEFILE, BUILD_SCRIPT, VERIFIER))
+    problems = wiring_problems(makefile, build, verifier)
+    mutations = (
+        ("product-line-removed", "PRODUCT_PACKAGES += KernariumIcons\n", "", "does not install KernariumIcons", 0),
+        ("product-line-doubled", "PRODUCT_PACKAGES += KernariumIcons\n", "PRODUCT_PACKAGES += KernariumIcons\nPRODUCT_PACKAGES += KernariumIcons\n",
+         "more than once", 0),
+        ("product-line-renamed", "PRODUCT_PACKAGES += KernariumIcons\n", "PRODUCT_PACKAGES += KernariumIcon\n", "does not install KernariumIcons", 0),
+        ("build-requirement-removed", '[[ "$PRODUCT_PACKAGES" == *" KernariumIcons "* ]]', "true", "does not require KernariumIcons", 1),
+        ("verifier-call-removed", "    check_icons_app(", "    skip_icons_app(", "has no check of the icon renderer", 2),
+        ("verifier-definition-removed", "def check_icons_app(", "def skip_icons_app(", "does not define check_icons_app", 2),
+        ("verifier-entry-removed", '"SYSTEM_EXT/app/KernariumIcons/KernariumIcons.apk"', '"SYSTEM_EXT/app/KernariumIcons/Other.apk"',
+         "does not require the app's package", 2),
+    )
+    texts = [makefile, build, verifier]
+    for name, old, new, expected, which in mutations:
+        if texts[which].count(old) < 1:
+            problems.append(f"wiring mutation {name}: the text to replace is absent")
+            continue
+        changed = list(texts)
+        changed[which] = texts[which].replace(old, new)
+        if not any(expected in problem for problem in wiring_problems(*changed)):
+            problems.append(f"wiring mutation {name} was not caught as '{expected}'")
+        else:
+            print(f"wiring mutation {name}: caught as '{expected}'")
+    return problems
+
+
 def check_app() -> int:
     """The app's files: headers, what the code must not touch, the manifest and the build file."""
     problems: list[str] = []
@@ -439,6 +489,7 @@ def check_app() -> int:
                       "overrides", "dex_preopt", "use_embedded_native_libs", "test_only"):
         if forbidden in code:
             problems.append(f"Android.bp has {forbidden}: the app is an ordinary, default-key application of system_ext")
+    problems += check_wiring()
     for problem in problems:
         print(f"FAIL: {problem}", file=sys.stderr)
     return 1 if problems else 0

@@ -481,6 +481,8 @@ fi
 	fail "the shell command that lists and switches Old app compatibility is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_apps "* ]] ||
 	fail "the shell command that lists the launcher applications with their icons and starts one is absent"
+[[ "$PRODUCT_PACKAGES" == *" KernariumIcons "* ]] ||
+	fail "the application that draws the launcher applications' icons for that command is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.android.hardware.wifi "* ]] ||
 	fail "the Wi-Fi HAL that the virtual Wi-Fi needs is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.google.cf.wpa_supplicant "* ]] ||
