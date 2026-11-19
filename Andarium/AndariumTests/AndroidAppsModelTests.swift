@@ -592,6 +592,68 @@ final class AndroidAppsModelTests {
         #expect(rig.index.offered.count == offers + 1 && rig.index.shortcutUpdates == tiles + 1)
     }
 
+    @Test func aSwitchTurnedOffBeforeTheOfferWasAcknowledgedIsWithdrawnAtTheNextLaunch() async throws {
+        let rig = try rig(phase: .running(.normal))
+        await rig.model.refreshAndroidApps()
+        // Search was off and the index was told so: the saved state is "withdrawn".
+        rig.model.setAndroidAppsInSearch(false)
+        #expect(await eventually { rig.index.withdrawn == 1 })
+        // The person turns it on; the offer is under way...
+        rig.index.holdsNextOffer = true
+        rig.model.setAndroidAppsInSearch(true)
+        #expect(await eventually { rig.index.events.last == "offer-started" })
+        // ...and the person turns it off again before the offer is acknowledged and the process ends.
+        rig.model.setAndroidAppsInSearch(false)
+        // The next launch: a fresh writer over the same saved preference.
+        AndroidAppsHub.shared.searchIndex = rig.index
+        await AndroidAppsHub.shared.writer.reconcile()
+        #expect(rig.index.withdrawn == 2, "Spotlight may hold what the lost offer wrote: the launch withdraws it")
+        // The abandoned offer ends with the test, not after it.
+        rig.index.letGo()
+        try await Task.sleep(for: .milliseconds(150))
+    }
+
+    @Test func aFullReindexThatDeletedAndFailedToInsertIsRepairedAtTheNextLaunch() async throws {
+        let rig = try rig(phase: .running(.normal))
+        await rig.model.refreshAndroidApps()
+        let query = AndroidAppQuery()
+        // The system asks for every app again; the index takes the delete and not the insert.
+        rig.index.accepts = false
+        var reported = false
+        do {
+            try await query.reindexAllEntities(indexDescription: CSSearchableIndexDescription())
+        } catch {
+            reported = true
+        }
+        #expect(reported, "the failure reaches the system, which asks again")
+        rig.index.accepts = true
+        let offers = rig.index.offered.count
+        await AndroidAppsHub.shared.writer.reconcile()
+        #expect(rig.index.offered.count == offers + 1, "the next launch offers the apps again: Spotlight holds none")
+    }
+
+    @Test func artworkThatArrivesWhileAFullReindexIsOfferedIsOfferedAgain() async throws {
+        let rig = try rig(phase: .running(.normal))
+        let app = AndroidApp(component: comet.component, label: "Comet Hop", builtIn: false, iconTag: "00000000000000aa")
+        try rig.state.store.apply(AndroidAppList(apps: [app], digest: "d"), at: Date())
+        rig.state.adoptCache()
+        await rig.model.syncAndroidAppsIndex()
+        // The system asks for every app again; the entities are made without a picture...
+        rig.index.holdsNextOffer = true
+        let query = AndroidAppQuery()
+        let reindexing = Task { try? await query.reindexAllEntities(indexDescription: CSSearchableIndexDescription()) }
+        #expect(await eventually { rig.index.events.last == "offer-started" })
+        // ...and the picture arrives while the offer is on its way.
+        let png = try #require(ScriptedAppIcons.png(for: app))
+        #expect(rig.state.store.setIcon(png, for: app))
+        rig.index.letGo()
+        _ = await reindexing.value
+        // What Spotlight holds has no picture, so the next pass offers the apps again.
+        let offers = rig.index.offered.count
+        await rig.model.syncAndroidAppsIndex()
+        #expect(rig.index.offered.count == offers + 1)
+    }
+
     // MARK: Erase and restore
 
     @Test func aTapDuringAnEraseStartsNothingAndWritesNothing() async throws {

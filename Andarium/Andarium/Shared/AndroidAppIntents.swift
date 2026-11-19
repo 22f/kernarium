@@ -77,13 +77,14 @@ nonisolated struct AndroidAppQuery: EnumerableEntityQuery, IndexedEntityQuery {
 
     /// The system asks for apps to be indexed again: through the one ordered
     /// path to the index, which judges the switch and the catalog as they are
-    /// then and offers only the apps that are listed.
+    /// then and offers only the apps that are listed. A write the index did not
+    /// take is thrown, so that the system asks again.
     func reindexEntities(for identifiers: [AndroidAppEntity.ID], indexDescription: CSSearchableIndexDescription) async throws {
-        await AndroidAppsHub.shared.writer.reindex(identifiers)
+        try await AndroidAppsHub.shared.writer.reindex(identifiers)
     }
 
     func reindexAllEntities(indexDescription: CSSearchableIndexDescription) async throws {
-        await AndroidAppsHub.shared.writer.reindex(nil)
+        try await AndroidAppsHub.shared.writer.reindex(nil)
     }
 }
 

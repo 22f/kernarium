@@ -372,8 +372,12 @@ final class AndroidAppsIndexWriter {
         judged = covering
     }
 
-    /// The system asks for some apps again (nil: all of them).
-    func reindex(_ identifiers: [String]?) async {
+    /// A write the index did not take: the system is told, and asks again.
+    struct IndexWriteFailed: Error {}
+
+    /// The system asks for some apps again (nil: all of them). A write the
+    /// index did not take is an error to the system.
+    func reindex(_ identifiers: [String]?) async throws {
         await acquire()
         defer { release() }
         guard hub.hostOffers, hub.preference.isOn else { return }
@@ -381,9 +385,19 @@ final class AndroidAppsIndexWriter {
         let index = hub.searchIndex
         if let identifiers {
             let wanted = Set(identifiers)
-            _ = await index.add(apps.filter { wanted.contains($0.id) }.map(AndroidAppEntity.init))
-        } else if await index.offer(apps.map(AndroidAppEntity.init)) {
-            hub.preference.keepIndexed("on:" + Self.key(of: apps, store: hub.store))
+            guard await index.add(apps.filter { wanted.contains($0.id) }.map(AndroidAppEntity.init)) else {
+                throw IndexWriteFailed()
+            }
+        } else {
+            // What is offered and the fingerprint recorded for it come from the
+            // same instant: artwork that arrives during the offer is not in it.
+            let wanted = "on:" + Self.key(of: apps, store: hub.store)
+            let entities = apps.map(AndroidAppEntity.init)
+            // From the delete on, what Spotlight holds is not known: an offer
+            // that fails or is cut short leaves the next reconcile to repair it.
+            hub.preference.keepIndexed(nil)
+            guard await index.offer(entities) else { throw IndexWriteFailed() }
+            hub.preference.keepIndexed(wanted)
         }
     }
 
@@ -399,7 +413,11 @@ final class AndroidAppsIndexWriter {
         let on = hub.preference.isOn
         let wanted = on ? "on:" + key : "off"
         guard wanted != hub.preference.indexed else { return }
-        let took = on ? await index.offer(apps.map(AndroidAppEntity.init)) : await index.withdraw()
+        let entities = on ? apps.map(AndroidAppEntity.init) : []
+        // Unknown from here to the acknowledgement: a launch that finds it so
+        // writes again, whichever way the switch is by then.
+        hub.preference.keepIndexed(nil)
+        let took = on ? await index.offer(entities) : await index.withdraw()
         if took { hub.preference.keepIndexed(wanted) }
     }
 
