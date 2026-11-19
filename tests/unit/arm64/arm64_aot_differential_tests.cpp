@@ -4733,8 +4733,9 @@ void prepare_arena(Arena &arena, const Case &c)
 	arena.fill(fill);
 }
 
-/* `c` run one instruction at a time by the engine: the state at the start
- * and after each instruction, with the arena hashed where `hash_memory`. */
+/* `c` run one instruction at a time by the engine: the state at the start,
+ * after each instruction and at each fault the run repairs, with the arena
+ * hashed where `hash_memory`. */
 struct Stepped final {
 	std::vector<Snapshot> states;
 	Result result;
@@ -4751,12 +4752,17 @@ Stepped run_stepped(Environment &env, Arena &arena, const Case &c, std::size_t c
 	const auto memory = [&]() -> std::uint64_t {
 		return hash_memory ? hash_bytes(arena.snapshot()) : 0;
 	};
-	out.states.push_back(snapshot_of(start.cpu, memory()));
-	env.executor.set_single_step(true);
-	out.result = run_from(env.executor, env.memory, env.generation, arena,
-		start.cpu, cap, [&](const arm64::CpuState &cpu) {
+	const auto record = [&](const arm64::CpuState &cpu) {
 		out.states.push_back(snapshot_of(cpu, memory()));
-	});
+	};
+	record(start.cpu);
+	env.executor.set_single_step(true);
+	/* A fault the run repairs (a page of the arena it gets) is a state of
+	 * the trace too: a memory copy or set commits the bytes before the page
+	 * that faults, and the state it stops in is neither before nor after the
+	 * instruction. */
+	out.result = run_from(env.executor, env.memory, env.generation, arena,
+		start.cpu, cap, record, false, record);
 	env.executor.set_single_step(false);
 	out.states.push_back(snapshot_of(out.result.cpu,
 		hash_memory ? hash_bytes(out.result.memory) : 0));
@@ -4765,7 +4771,8 @@ Stepped run_stepped(Environment &env, Arena &arena, const Case &c, std::size_t c
 
 /* The number of instructions after which `c`, run one at a time on the
  * engine, is in `target` (arena included), or SIZE_MAX if it is not within
- * `cap` of them. The arena is hashed only where the rest matches. */
+ * `cap` of them. A state at a fault the run repairs counts the instructions
+ * before it. The arena is hashed only where the rest matches. */
 [[nodiscard, gnu::noinline]] std::size_t step_to(Environment &env,
 	Arena &arena, const Case &c, std::size_t cap, const Snapshot &target)
 {
@@ -4789,7 +4796,7 @@ Stepped run_stepped(Environment &env, Arena &arena, const Case &c, std::size_t c
 		start.cpu, cap, [&](const arm64::CpuState &cpu) {
 		++steps;
 		look(cpu);
-	});
+	}, false, look);
 	env.executor.set_single_step(false);
 	return index;
 }
@@ -4934,6 +4941,122 @@ TraceTotals exits_lie_on_the_stepped_trace(
 		}
 	}
 	return t;
+}
+
+/* A memory copy or set that faults in the middle of its epilogue leaves the
+ * engine in a state between the start and the end of the instruction: the
+ * stage has committed the bytes before the page that faults and the registers
+ * hold the progress. The single-stepped run stops in the same state at the
+ * same fault, so it is a state of the stepped trace, and rewritten code
+ * returns the engine there as well. Every row of the fixture runs from its
+ * prologue, untagged and with tagged pointers: forward into a destination
+ * page that is unmapped or read-only and then into a second unmapped one, a
+ * source that runs into an unmapped page, and backward over an overlapping
+ * destination whose next page below faults. Each exit of rewritten code, each
+ * fault and the end must lie on the stepped trace; a trace without the
+ * states at faults fails this row on its first case, whatever sample the
+ * differential draws. */
+[[gnu::noinline]]
+void memory_copy_and_set_faults_lie_on_the_stepped_trace(
+	const LibraryImage &image)
+{
+	const auto bias = Fixture::bias;
+	Fixture step{4615, image}, got{4616, image};
+	SplitMix rng{41};
+	const auto base = arena_base(bias);
+	const auto page_at = [&](std::size_t page) {
+		return base + page * page_bytes;
+	};
+	const std::vector<std::uint8_t> plain(arena_pages + stack_pages, 2);
+	const auto with = [&](std::initializer_list<
+		std::pair<std::size_t, std::uint8_t>> changes) {
+		auto kinds = plain;
+		for (const auto &[page, kind] : changes)
+			kinds[page] = kind;
+		return kinds;
+	};
+	std::size_t cases = 0, fault_exits = 0;
+	aot::reset_stats();
+	const auto check_case = [&](std::size_t row, std::uint64_t destination,
+	                            std::uint64_t source, std::uint64_t count,
+	                            const std::vector<std::uint8_t> &kinds) {
+		auto c = make_case_from_seed(rng.next(), bias,
+			mops_at + row * mops_step, true, true, base);
+		enterable(c);
+		c.kinds = kinds;
+		const bool high = row == row_cpyf_high || row == row_cpy_high ||
+			row == row_set_high;
+		const unsigned d = high ? 17 : 0, n = high ? 16 : 2, s = high ? 15 : 1;
+		c.cpu.registers[d] = destination;
+		c.cpu.registers[n] = count;
+		if (row != row_set_zero)
+			c.cpu.registers[s] = mops_is_set(row) ? 0x5aULL : source;
+		const auto stepped = run_stepped(step.env, step.arena, c, 256, true);
+		require(stepped.result.finished);
+		require(!stepped.result.faults.empty());
+		const auto &trace = stepped.states;
+		std::size_t at = 0;
+		bool off = false;
+		const auto check = [&](const arm64::CpuState &cpu, const char *what) {
+			if (off)
+				return;
+			const auto now = snapshot_of(cpu,
+				hash_bytes(got.arena.snapshot()));
+			const auto found = find_on_trace(trace, at, now);
+			if (found != trace.size()) {
+				at = found;
+				return;
+			}
+			off = true;
+			describe("a MOPS fault exit is off the stepped trace", c);
+			std::fprintf(stderr, "  row %zu, %s, after trace state %zu of "
+				"%zu\n", row, what, at, trace.size());
+			print_difference("trace state", trace[at], now);
+		};
+		aot::set_enabled(true);
+		const auto have = drive(got.env, got.arena, c, aot_max_blocks,
+			[&](const arm64::CpuState &cpu) { check(cpu, "block exit"); },
+			[&](const arm64::CpuState &cpu) {
+				++fault_exits;
+				check(cpu, "fault");
+			});
+		aot::set_enabled(false);
+		check(have.cpu, "end");
+		require(!off);
+		require(same(stepped.result, have, c));
+		++cases;
+	};
+	for (const std::uint64_t tag : {0ULL, 0x5aULL << 56}) {
+		for (const std::uint8_t kind : {std::uint8_t{0}, std::uint8_t{1}}) {
+			for (std::size_t row = 0; row < mops_rows; ++row) {
+				/* Forward: 20 bytes in page 4, then page 5 (unmapped or
+				 * read-only) faults, then page 6 (unmapped) does. */
+				check_case(row, (page_at(4) + page_bytes - 20) | tag,
+					(page_at(1) + 0x40) | tag, page_bytes + 60,
+					with({{5, kind}, {6, 0}}));
+				/* The source: 20 bytes in page 2, then page 3 faults. A
+				 * read-only page reads, so only the unmapped one does. */
+				if (!mops_is_set(row) && kind == 0)
+					check_case(row, (page_at(7) + 0x20) | tag,
+						(page_at(2) + page_bytes - 20) | tag, 80,
+						with({{3, 0}}));
+			}
+			/* Backward: the destination is above the source, the bytes
+			 * of page 4 go first and page 3 faults. */
+			for (const auto row : {row_cpy, row_cpy_high})
+				check_case(row, (page_at(4) - 24) | tag,
+					(page_at(4) - 40) | tag, 80, with({{3, kind}}));
+		}
+	}
+	const auto st = aot::stats();
+	std::fprintf(stderr, "memory copy and set faults on the stepped trace: "
+		"%zu cases, %zu fault exits; enters %llu mops_fault %llu\n", cases,
+		fault_exits, static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.mops_fault));
+	require(cases == 44);
+	require(fault_exits >= cases);
+	require(st.enters > cases / 2);
+	require(st.mops_fault > cases / 2);
 }
 
 /* ---- An interrupt token flipped during a native loop -----------------------
@@ -5740,6 +5863,7 @@ int main(int argc, char **argv)
 			a_shootdown_reaches_a_native_loop(image);
 			memory_copy_and_set_match_the_engine(image);
 			memory_copy_and_set_started_at_the_epilogue(image);
+			memory_copy_and_set_faults_lie_on_the_stepped_trace(image);
 			structure_accesses_over_a_boundary_match_the_engine(image);
 			short_entries_are_left_to_the_engine(image);
 			admission_history_survives_changes_as_a_hint_only(image);
