@@ -111,6 +111,10 @@ final class AndroidAppsState {
     /// held waits for the model to have adopted what it restored.
     @ObservationIgnored var restoring = false
     @ObservationIgnored var releaseAfterRestore = false
+    /// A change (an install) was announced while a refresh was under way: the
+    /// refresh's owner makes one more after it, because what changed may have
+    /// come after the listing it captured.
+    @ObservationIgnored var refreshAgain = false
     /// The cache: the catalog, the icons, and the record kept per icon.
     @ObservationIgnored var store: AndroidAppStore
     /// The refresh under way, which a second asker joins.
@@ -207,6 +211,7 @@ final class AndroidAppsState {
         store.invalidateRefreshes()
         inFlight?.cancel()
         inFlight = nil
+        refreshAgain = false
         refreshing = false
         iconsLeft = 0
     }

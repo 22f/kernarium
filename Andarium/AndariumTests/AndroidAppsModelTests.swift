@@ -775,6 +775,23 @@ final class AndroidAppsModelTests {
         #expect(rig.state.apps.contains { $0.id == extra.id })
     }
 
+    @Test func anInstallThatLandsAfterTheListWasCapturedIsListedByTheRefreshThatFollows() async throws {
+        let rig = try rig(phase: .running(.normal))
+        rig.tool.delay = .milliseconds(40)
+        let first = Task { await rig.model.refreshAndroidApps() }
+        // The refresh has captured the list it will keep...
+        #expect(await eventually { rig.tool.listingsAsked >= 1 })
+        // ...and then an app is installed, and the install asks for a refresh after it.
+        let extra = AndroidApp(
+            component: try #require(AndroidComponent(packageName: "com.example.latecomer", activityClass: "com.example.latecomer.Main")),
+            label: "Latecomer", builtIn: false, iconTag: "0000000000000043")
+        rig.tool.install(extra)
+        await rig.model.refreshAndroidApps(afterAChange: true)
+        _ = await first.value
+        #expect(await eventually { rig.state.apps.contains { $0.id == extra.id } && !rig.state.refreshing })
+        #expect(AndroidAppsHub.shared.entities().contains { $0.id == extra.id })
+    }
+
     // MARK: How an open ends, more
 
     @Test func anImageWithoutTheToolEndsAnOpenWithItsOwnBannerAndWithdrawsTheApps() async throws {

@@ -48,17 +48,18 @@ extension AppModel {
 
     /// Brings the cache up to what Android lists now: asks whether the apps
     /// changed, lists them if they did and fetches the icons that are missing.
-    /// A refresh already under way is joined; with `afterAChange` it is waited
-    /// for and another follows, because what changed may have come after the
-    /// listing it made. Returns whether one was asked.
+    /// A refresh already under way is joined; with `afterAChange` another
+    /// follows it, made by the refresh's owner once it has cleared the one that
+    /// finished, because what changed may have come after the listing it
+    /// captured. Returns whether one was asked.
     @discardableResult
     func refreshAndroidApps(afterAChange: Bool = false) async -> Bool {
         let state = androidApps
         guard canAskAndroidApps, !state.unavailable, let tool = androidAppsSource?.androidAppsTool else { return false }
         if let running = state.inFlight {
+            if afterAChange { state.refreshAgain = true }
             _ = await running.value
-            guard afterAChange else { return true }
-            return await refreshAndroidApps()
+            return true
         }
         let run = session
         let flat = FlatteningAppsTool(base: tool)
@@ -87,6 +88,11 @@ extension AppModel {
             await syncAndroidAppsIndex()
         case .failed:
             break
+        }
+        // A change was announced while this refresh was under way: it is listed now.
+        if state.refreshAgain, session === run, state.owns(token) {
+            state.refreshAgain = false
+            return await refreshAndroidApps()
         }
         return true
     }
