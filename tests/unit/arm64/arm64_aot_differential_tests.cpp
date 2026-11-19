@@ -5079,6 +5079,7 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 		};
 		aot::set_enabled(true);
 		g_report_next_fault_as_continued = lie;
+		const auto before = aot::stats();
 		const auto have = drive(got.env, got.arena, c, aot_max_blocks,
 			[&](const arm64::CpuState &cpu) { check(cpu, "block exit", false); },
 			[&](const arm64::CpuState &cpu) {
@@ -5087,6 +5088,7 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 			});
 		aot::set_enabled(false);
 		check(have.cpu, "end", false);
+		const auto after = aot::stats();
 		if (lie) {
 			/* The check must refuse the wrong exit: a state only a fault
 			 * reaches is not a state a run is left in at an ordinary one. */
@@ -5101,6 +5103,10 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 		}
 		require(!off);
 		require(same(stepped.result, have, c));
+		/* This case, and not another, ran in rewritten code and took the
+		 * fault in the host routine of its epilogue. */
+		require(after.enters == before.enters + 1);
+		require(after.mops_fault == before.mops_fault + 1);
 		++cases;
 	};
 	for (const std::uint64_t tag : {0ULL, 0x5aULL << 56}) {
@@ -5133,8 +5139,9 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 	require(cases == 44);
 	require(fault_exits >= cases);
 	/* Each case is entered once, at its prologue, and faults once in the
-	 * host routine of the epilogue; a case the engine ran alone would pass
-	 * the trace check and say nothing about rewritten code. */
+	 * host routine of the epilogue (checked case by case); a case the engine
+	 * ran alone would pass the trace check and say nothing about rewritten
+	 * code. */
 	require(st.enters == cases);
 	require(st.mops_fault == cases);
 	/* The wrong exit: the first fault of each kind returned as an ordinary
