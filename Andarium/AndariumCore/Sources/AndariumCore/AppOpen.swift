@@ -270,7 +270,13 @@ public struct AppOpenState: Equatable, Sendable {
     public mutating func releaseHold(
         _ hold: AppOpenHold, in situation: AppOpenSituation, now: Date
     ) -> AppOpenEffect {
-        guard let pending, case let .waiting(held, _) = pending.stage, held == hold else { return .none }
+        guard let pending, case let .waiting(held, since) = pending.stage, held == hold else { return .none }
+        // The wait has its limit, whenever the expiry gets to it: a release that
+        // comes first finds the request over, not opened.
+        if now.timeIntervalSince(since) >= Self.holdLimit {
+            self.pending = nil
+            return .none
+        }
         switch AppOpenPlanner.decide(situation) {
         case .openNow:
             self.pending?.stage = .opening
