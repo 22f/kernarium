@@ -479,6 +479,8 @@ fi
 	fail "the script that moves an older guest to the on-screen keyboard default is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_oldapp "* ]] ||
 	fail "the shell command that lists and switches Old app compatibility is absent"
+[[ "$PRODUCT_PACKAGES" == *" kernarium_apps "* ]] ||
+	fail "the shell command that lists the launcher applications with their icons and starts one is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.android.hardware.wifi "* ]] ||
 	fail "the Wi-Fi HAL that the virtual Wi-Fi needs is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.google.cf.wpa_supplicant "* ]] ||

@@ -1389,6 +1389,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           time_zone_variant: str | None = None,
                           keyboard_default_variant: str | None = None,
                           oldswitch_variant: str | None = None,
+                          appshell_variant: str | None = None,
                           wallpaper_variant: str | None = None,
                           cas_hal_variant: str | None = None,
                           adbd_variant: str | None = None,
@@ -2121,6 +2122,35 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     archive.writestr("SYSTEM_EXT/framework/kernarium_oldapp.jar", b"not a jar")
                 elif oldswitch_variant != "missing-jar":
                     archive.writestr("SYSTEM_EXT/framework/kernarium_oldapp.jar", oldapp_jar.getvalue())
+                # The launcher-application shell command of Add to Home Screen: the tracked wrapper script, and
+                # a jar whose code holds the command's class.
+                apps_wrapper = (verifier.parents[1] / "overlay/app_shortcuts/kernarium_apps").read_text()
+                for variant, (old, new) in {
+                    "wrapper-no-classpath": ("export CLASSPATH=$base/framework/kernarium_apps.jar\n", ""),
+                    "wrapper-wrong-jar": ("framework/kernarium_apps.jar", "framework/other.jar"),
+                    "wrapper-wrong-class": ("com.kernarium.apps.Main", "com.kernarium.apps.Other"),
+                    "wrapper-no-exec": ("exec app_process", "app_process"),
+                }.items():
+                    if appshell_variant == variant:
+                        if old not in apps_wrapper:
+                            fail(f"the launcher-application wrapper lacks '{old}' for the {variant} variant")
+                        apps_wrapper = apps_wrapper.replace(old, new)
+                if appshell_variant != "missing-wrapper":
+                    archive.writestr("SYSTEM_EXT/bin/kernarium_apps", apps_wrapper)
+                apps_jar = io.BytesIO()
+                with zipfile.ZipFile(apps_jar, "w") as jar:
+                    jar.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+                    if appshell_variant != "jar-stripped":
+                        jar.writestr(
+                            "classes.dex",
+                            b"dex\n035\0"
+                            + (b"Lcom/kernarium/apps/Other;" if appshell_variant == "jar-without-class"
+                               else b"Lcom/kernarium/apps/Main;"),
+                        )
+                if appshell_variant == "jar-not-zip":
+                    archive.writestr("SYSTEM_EXT/framework/kernarium_apps.jar", b"not a jar")
+                elif appshell_variant != "missing-jar":
+                    archive.writestr("SYSTEM_EXT/framework/kernarium_apps.jar", apps_jar.getvalue())
                 # The device configuration of the host's keyboard and mouse: the tracked files.
                 for name, destination in input_device_files.items():
                     archive.writestr(destination, (verifier.parents[1] / "overlay/input" / name).read_text())
@@ -6111,6 +6141,24 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "kernarium_oldapp.jar is not a readable jar"),
             ("oldapp-jar-without-class", {"oldswitch_variant": "jar-without-class"},
              "holds code without the class com.kernarium.oldapp.Main"),
+            ("apps-command-missing-wrapper", {"appshell_variant": "missing-wrapper"},
+             "required entries are missing: .*SYSTEM_EXT/bin/kernarium_apps"),
+            ("apps-command-missing-jar", {"appshell_variant": "missing-jar"},
+             "required entries are missing: .*SYSTEM_EXT/framework/kernarium_apps.jar"),
+            ("apps-command-wrapper-no-classpath", {"appshell_variant": "wrapper-no-classpath"},
+             "kernarium_apps does not contain 'CLASSPATH=.base/framework/kernarium_apps.jar'"),
+            ("apps-command-wrapper-wrong-jar", {"appshell_variant": "wrapper-wrong-jar"},
+             "kernarium_apps does not contain 'CLASSPATH=.base/framework/kernarium_apps.jar'"),
+            ("apps-command-wrapper-wrong-class", {"appshell_variant": "wrapper-wrong-class"},
+             "kernarium_apps does not contain 'exec app_process .base/bin com.kernarium.apps.Main'"),
+            ("apps-command-wrapper-no-exec", {"appshell_variant": "wrapper-no-exec"},
+             "kernarium_apps does not contain 'exec app_process"),
+            ("apps-command-jar-not-zip", {"appshell_variant": "jar-not-zip"},
+             "kernarium_apps.jar is not a readable jar"),
+            ("apps-command-jar-without-class", {"appshell_variant": "jar-without-class"},
+             "holds code without the class com.kernarium.apps.Main"),
+            ("apps-command-jar-stripped", {"appshell_variant": "jar-stripped"},
+             "kernarium_apps.jar has no classes.dex and no preoptimized odex and vdex"),
             ("oldapp-missing-context", {"oldswitch_variant": "missing-context"},
              "is labelled default_prop, not kernarium_oldapp_prop"),
             ("oldapp-exact-context", {"oldswitch_variant": "exact-context"},

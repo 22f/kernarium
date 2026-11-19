@@ -272,6 +272,8 @@ REQUIRED_ENTRIES = {
     "SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc",
     "SYSTEM_EXT/bin/kernarium_oldapp",
     "SYSTEM_EXT/framework/kernarium_oldapp.jar",
+    "SYSTEM_EXT/bin/kernarium_apps",
+    "SYSTEM_EXT/framework/kernarium_apps.jar",
     "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl",
     "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc",
     "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc",
@@ -952,6 +954,19 @@ OLDAPP_WRAPPER_REQUIRED = (
     "base=/system_ext",
     f"exec app_process $base/bin {OLDAPP_CLASS}",
 )
+# The launcher-application command of Add to Home Screen (overlay/app_shortcuts) is the same kind of
+# shell tool: a wrapper script and a jar on system_ext. It keeps no property and no file, so it has no
+# policy of its own for the verifier to check.
+APPS_COMMAND = "kernarium_apps"
+APPS_WRAPPER = "SYSTEM_EXT/bin/kernarium_apps"
+APPS_JAR = "SYSTEM_EXT/framework/kernarium_apps.jar"
+APPS_CLASS = "com.kernarium.apps.Main"
+APPS_WRAPPER_REQUIRED = (
+    "#!/system/bin/sh",
+    "CLASSPATH=$base/framework/kernarium_apps.jar",
+    "base=/system_ext",
+    f"exec app_process $base/bin {APPS_CLASS}",
+)
 OLDAPP_PROPERTY_PREFIX = "persist.sys.kernarium.oldapp."
 OLDAPP_PROPERTY_TYPE = "kernarium_oldapp_prop"
 OLDAPP_SETTER = "shell"
@@ -1586,6 +1601,11 @@ def check_boot_policy(
     check_oldapp_switch(
         read_small(archive, infos[OLDAPP_WRAPPER]),
         read_small(archive, infos[OLDAPP_JAR]),
+        set(infos),
+    )
+    check_apps_command(
+        read_small(archive, infos[APPS_WRAPPER]),
+        read_small(archive, infos[APPS_JAR]),
         set(infos),
     )
     check_media_codecs_c2(read_small(archive, infos["VENDOR/etc/media_codecs_c2.xml"]))
@@ -4831,6 +4851,24 @@ def check_keyboard_default_policy(
 
 
 def check_oldapp_switch(wrapper: bytes, jar: bytes, packaged: set[str]) -> None:
+    check_shell_java_tool(
+        wrapper, jar, packaged, OLDAPP_COMMAND, OLDAPP_JAR, OLDAPP_CLASS, OLDAPP_WRAPPER_REQUIRED
+    )
+
+
+def check_apps_command(wrapper: bytes, jar: bytes, packaged: set[str]) -> None:
+    check_shell_java_tool(wrapper, jar, packaged, APPS_COMMAND, APPS_JAR, APPS_CLASS, APPS_WRAPPER_REQUIRED)
+
+
+def check_shell_java_tool(
+    wrapper: bytes,
+    jar: bytes,
+    packaged: set[str],
+    command: str,
+    jar_path: str,
+    main_class: str,
+    wrapper_required: tuple[str, ...],
+) -> None:
     """The shell command is a wrapper script that starts the Java tool's class from its jar, and
     the image carries the tool's code: in the jar, or preoptimized beside it."""
     text = "\n".join(
@@ -4838,29 +4876,29 @@ def check_oldapp_switch(wrapper: bytes, jar: bytes, packaged: set[str]) -> None:
         for line in wrapper.decode("utf-8", errors="strict").splitlines()
         if not line.lstrip().startswith("#") or line.startswith("#!")
     )
-    for token in OLDAPP_WRAPPER_REQUIRED:
+    for token in wrapper_required:
         if token not in text:
-            fail(f"/system_ext/bin/{OLDAPP_COMMAND} does not contain '{token}'")
+            fail(f"/system_ext/bin/{command} does not contain '{token}'")
     try:
         with zipfile.ZipFile(io.BytesIO(jar)) as archive:
             names = archive.namelist()
             dex = archive.read("classes.dex") if "classes.dex" in names else None
     except (zipfile.BadZipFile, OSError, zlib.error) as problem:
-        fail(f"{OLDAPP_JAR} is not a readable jar: {problem}")
+        fail(f"{jar_path} is not a readable jar: {problem}")
     if dex is not None:
-        if b"L" + OLDAPP_CLASS.replace(".", "/").encode() + b";" not in dex:
-            fail(f"{OLDAPP_JAR} holds code without the class {OLDAPP_CLASS}")
+        if b"L" + main_class.replace(".", "/").encode() + b";" not in dex:
+            fail(f"{jar_path} holds code without the class {main_class}")
         return
     # Dexpreopting may strip the code from the jar into the odex and vdex beside it: one such pair
     # must be packaged, or there is no code to start.
-    stem = PurePosixPath(OLDAPP_JAR)
+    stem = PurePosixPath(jar_path)
     for isa in sorted(APP_ISAS):
         pair = [f"{stem.parent}/oat/{isa}/{stem.stem}.{suffix}" for suffix in ("odex", "vdex")]
         if all(name in packaged for name in pair):
             return
     fail(
-        f"{OLDAPP_JAR} has no classes.dex and no preoptimized odex and vdex of it is packaged "
-        f"(framework/oat/<isa>/{stem.stem}.odex and .vdex): the command {OLDAPP_COMMAND} has no code"
+        f"{jar_path} has no classes.dex and no preoptimized odex and vdex of it is packaged "
+        f"(framework/oat/<isa>/{stem.stem}.odex and .vdex): the command {command} has no code"
     )
 
 
