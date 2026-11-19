@@ -400,9 +400,12 @@ final class AndroidAppsIndexWriter {
         let index = hub.searchIndex
         if let identifiers {
             let wanted = Set(identifiers)
-            guard await index.add(apps.filter { wanted.contains($0.id) }.map(AndroidAppEntity.init)) else {
-                throw IndexWriteFailed()
-            }
+            let entities = apps.filter { wanted.contains($0.id) }.map(AndroidAppEntity.init)
+            // An add changes what Spotlight holds whatever the saved state says
+            // ("off" included): from here it is not known, and the next
+            // reconcile writes what the switch says, offer or withdrawal.
+            if !entities.isEmpty { hub.preference.keepIndexed(nil) }
+            guard await index.add(entities) else { throw IndexWriteFailed() }
         } else {
             // What is offered and the fingerprint recorded for it come from the
             // same instant: artwork that arrives during the offer is not in it.

@@ -22,6 +22,11 @@ final class RecordingAppsIndex: AndroidAppsSearchIndexing {
     /// The next offer waits here until `letGo()`.
     var holdsNextOffer = false
     private var held: CheckedContinuation<Void, Never>?
+    /// The next withdrawal and the next selective add wait until `letGoWithdraw()` and `letGoAdd()`.
+    var holdsNextWithdraw = false
+    var holdsNextAdd = false
+    private var heldWithdraw: CheckedContinuation<Void, Never>?
+    private var heldAdd: CheckedContinuation<Void, Never>?
 
     func offer(_ entities: [AndroidAppEntity]) async -> Bool {
         if holdsNextOffer {
@@ -36,6 +41,11 @@ final class RecordingAppsIndex: AndroidAppsSearchIndexing {
     }
 
     func add(_ entities: [AndroidAppEntity]) async -> Bool {
+        if holdsNextAdd {
+            holdsNextAdd = false
+            events.append("add-started")
+            await withCheckedContinuation { heldAdd = $0 }
+        }
         guard accepts else { return false }
         added.append(entities.map(\.id))
         events.append("add")
@@ -43,6 +53,11 @@ final class RecordingAppsIndex: AndroidAppsSearchIndexing {
     }
 
     func withdraw() async -> Bool {
+        if holdsNextWithdraw {
+            holdsNextWithdraw = false
+            events.append("withdraw-started")
+            await withCheckedContinuation { heldWithdraw = $0 }
+        }
         guard accepts else { events.append("withdraw-failed"); return false }
         withdrawn += 1
         events.append("withdraw")
@@ -57,6 +72,16 @@ final class RecordingAppsIndex: AndroidAppsSearchIndexing {
     func letGo() {
         held?.resume()
         held = nil
+    }
+
+    func letGoWithdraw() {
+        heldWithdraw?.resume()
+        heldWithdraw = nil
+    }
+
+    func letGoAdd() {
+        heldAdd?.resume()
+        heldAdd = nil
     }
 }
 
@@ -630,6 +655,29 @@ final class AndroidAppsModelTests {
         let offers = rig.index.offered.count
         await AndroidAppsHub.shared.writer.reconcile()
         #expect(rig.index.offered.count == offers + 1, "the next launch offers the apps again: Spotlight holds none")
+    }
+
+    @Test func aSelectiveAddQueuedBehindAWithdrawalIsWithdrawnWhenTheSwitchEndsOff() async throws {
+        let rig = try rig(phase: .running(.normal))
+        await rig.model.refreshAndroidApps()
+        // Search goes off: the withdrawal is under way at the system and held there.
+        rig.index.holdsNextWithdraw = true
+        rig.model.setAndroidAppsInSearch(false)
+        #expect(await eventually { rig.index.events.last == "withdraw-started" })
+        // The system asks for the app again meanwhile (queued behind the withdrawal), and the person turns Search on.
+        let query = AndroidAppQuery()
+        let asking = Task { try? await query.reindexEntities(for: [comet.id], indexDescription: CSSearchableIndexDescription()) }
+        try await Task.sleep(for: .milliseconds(50))
+        rig.model.setAndroidAppsInSearch(true)
+        rig.index.holdsNextAdd = true
+        rig.index.letGoWithdraw()
+        #expect(await eventually { rig.index.events.last == "add-started" })
+        // The add is under way when the person turns Search off again.
+        rig.model.setAndroidAppsInSearch(false)
+        rig.index.letGoAdd()
+        _ = await asking.value
+        // Spotlight ends without the app: what the saved state said before the add is not what it holds now.
+        #expect(await eventually { rig.index.events.last == "withdraw" }, "\(rig.index.events)")
     }
 
     @Test func artworkThatArrivesWhileAFullReindexIsOfferedIsOfferedAgain() async throws {
