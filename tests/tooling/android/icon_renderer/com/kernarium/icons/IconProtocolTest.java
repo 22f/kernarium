@@ -254,6 +254,8 @@ public final class IconProtocolTest {
     // ---- The provider's hold on the isolated worker, over stand-ins.
 
     private static final IconWorkerCore.Limits LIMITS = new IconWorkerCore.Limits(800, 200, 300);
+    /** The same, with an idle time that no row waits for: an unbind that a row sees is the failure's, not the idle cleanup's. */
+    private static final IconWorkerCore.Limits LONG_IDLE = new IconWorkerCore.Limits(800, 200, 60_000);
     private static final long SLACK = 350;
 
     private static byte[] png(int length) {
@@ -274,6 +276,9 @@ public final class IconProtocolTest {
         final AtomicInteger binds = new AtomicInteger();
         final AtomicInteger unbinds = new AtomicInteger();
         final AtomicInteger renders = new AtomicInteger();
+        /** Unbinds that have begun and not returned, and binds that began while one of them had not returned. */
+        final AtomicInteger unbinding = new AtomicInteger();
+        final AtomicInteger boundDuringUnbind = new AtomicInteger();
         final AtomicInteger running = new AtomicInteger();
         final AtomicInteger mostRunning = new AtomicInteger();
         final List<IconWorkerCore.Listener> listeners = new ArrayList<>();
@@ -289,6 +294,8 @@ public final class IconProtocolTest {
         volatile boolean hangs;
         volatile boolean throwsOnRender;
         volatile long unbindMillis;
+        /** How long the platform's call to begin a bind takes, with the turn held. */
+        volatile long bindCallMillis;
         /** Time that passes while a bind connects, so that a bind may take what is left of a deadline. */
         volatile long clockJumpAtConnect;
         volatile long clockOffset;
@@ -324,8 +331,18 @@ public final class IconProtocolTest {
         };
         final IconWorkerCore.Link link = listener -> {
             binds.incrementAndGet();
+            if (unbinding.get() > 0) {
+                boundDuringUnbind.incrementAndGet();
+            }
             synchronized (listeners) {
                 listeners.add(listener);
+            }
+            if (bindCallMillis > 0) {
+                try {
+                    Thread.sleep(bindCallMillis);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
             }
             if (refuses) {
                 return null;
@@ -338,11 +355,14 @@ public final class IconProtocolTest {
             }
             return () -> {
                 unbinds.incrementAndGet();
+                unbinding.incrementAndGet();
                 died.countDown();
                 try {
                     Thread.sleep(unbindMillis);
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
+                } finally {
+                    unbinding.decrementAndGet();
                 }
             };
         };
@@ -472,7 +492,7 @@ public final class IconProtocolTest {
                 rig.alive = false;
                 check(ask(core).ok(), "the second is drawn by a new bind");
                 same(2, rig.binds.get(), "a binder that is not alive is bound again");
-                check(rig.unbinds.get() >= 1, "the dead bind is released");
+                waitFor(() -> rig.unbinds.get() >= 1, 3000, "the dead bind is released");
             } finally {
                 rig.shutdown();
             }
@@ -480,10 +500,10 @@ public final class IconProtocolTest {
         row("worker-failure-unbinds-and-the-next-request-binds-again", () -> {
             Rig rig = new Rig();
             try {
-                IconWorkerCore core = rig.core(LIMITS);
+                IconWorkerCore core = rig.core(LONG_IDLE);
                 rig.reply = IconWorkerCore.Reply.FAILED;
                 check(!ask(core).ok(), "a failed drawing is a failed reply");
-                same(1, rig.unbinds.get(), "the worker that failed is unbound");
+                waitFor(() -> rig.unbinds.get() == 1, 3000, "the worker that failed is unbound");
                 rig.reply = good();
                 check(ask(core).ok(), "the next");
                 same(2, rig.binds.get(), "a fresh bind");
@@ -494,10 +514,10 @@ public final class IconProtocolTest {
         row("worker-an-exception-is-a-failure", () -> {
             Rig rig = new Rig();
             try {
-                IconWorkerCore core = rig.core(LIMITS);
+                IconWorkerCore core = rig.core(LONG_IDLE);
                 rig.throwsOnRender = true;
                 check(!ask(core).ok(), "a worker that died");
-                same(1, rig.unbinds.get(), "unbound");
+                waitFor(() -> rig.unbinds.get() == 1, 3000, "unbound");
             } finally {
                 rig.shutdown();
             }
@@ -519,13 +539,13 @@ public final class IconProtocolTest {
         row("worker-hung-drawing-fails-at-the-deadline-and-unbinds", () -> {
             Rig rig = new Rig();
             try {
-                IconWorkerCore core = rig.core(LIMITS);
+                IconWorkerCore core = rig.core(LONG_IDLE);
                 rig.hangs = true;
                 Call call = new Call(core, 0).await();
                 check(!call.ok(), "a hung drawing is a failure");
                 check(call.millis >= LIMITS.deadlineMillis - 100 && call.millis <= LIMITS.deadlineMillis + SLACK,
                         "it ends at the deadline: " + call.millis + " ms");
-                same(1, rig.unbinds.get(), "the hung worker is unbound, which ends it");
+                waitFor(() -> rig.unbinds.get() == 1, 3000, "the hung worker is unbound, which ends it");
                 rig.hangs = false;
                 rig.died = new CountDownLatch(1);
                 check(ask(core).ok(), "the next request is drawn by a new worker");
@@ -553,21 +573,21 @@ public final class IconProtocolTest {
             }
         });
         row("worker-a-request-that-queued-past-its-deadline-never-draws", () -> {
-            // The first hangs until its deadline and its unbind is slow, so it keeps the turn for a long while; the
-            // second asked 100 ms in, has its deadline at 900 ms and is not served at all.
+            // The first asks the platform for its bind and that call takes 2 s, so the turn is held well past the second's
+            // deadline (asked 100 ms in, its deadline is at 900 ms): the second fails by then and is not served at all.
             Rig rig = new Rig();
             try {
                 IconWorkerCore core = rig.core(LIMITS);
-                rig.hangs = true;
-                rig.unbindMillis = 1200;
+                rig.bindCallMillis = 2000;
                 Call first = new Call(core, 0);
                 Call second = new Call(core, 100);
                 second.await();
                 check(!second.ok(), "the second fails");
                 check(second.millis <= LIMITS.deadlineMillis + SLACK,
                         "by its deadline, not when the turn came free: " + second.millis + " ms");
-                same(1, rig.renders.get(), "only the first was ever asked of the worker");
                 first.await();
+                same(0, rig.renders.get(), "nothing was ever drawn");
+                same(1, rig.binds.get(), "the second never asked for a bind");
             } finally {
                 rig.shutdown();
             }
@@ -603,13 +623,13 @@ public final class IconProtocolTest {
         row("worker-bind-timeout-fails-and-releases", () -> {
             Rig rig = new Rig();
             try {
-                IconWorkerCore core = rig.core(LIMITS);
+                IconWorkerCore core = rig.core(LONG_IDLE);
                 rig.connects = false;
                 Call call = new Call(core, 0).await();
                 check(!call.ok(), "a bind that never connects");
                 check(call.millis >= LIMITS.bindMillis - 50 && call.millis <= LIMITS.bindMillis + SLACK,
                         "it ends at the bind limit: " + call.millis + " ms");
-                same(1, rig.unbinds.get(), "the bind is released");
+                waitFor(() -> rig.unbinds.get() == 1, 3000, "the bind is released");
                 same(0, rig.renders.get(), "nothing was drawn");
             } finally {
                 rig.shutdown();
@@ -688,6 +708,49 @@ public final class IconProtocolTest {
                 }
             }
         });
+        row("worker-a-slow-unbind-does-not-spend-the-answer-s-time", () -> {
+            // A warm worker, a hung second drawing and an unbind that takes 1.2 s, with limits that leave room for it (as
+            // the product's 7 s does against the tool's 8 s): the error for the second icon comes at the deadline, not after
+            // the unbind, and the third icon is drawn by a new worker that is bound after the old one has ended.
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(new IconWorkerCore.Limits(3000, 500, 300));
+                check(ask(core).ok(), "the first icon binds the worker");
+                rig.hangs = true;
+                rig.unbindMillis = 1200;
+                Call second = new Call(core, 0).await();
+                check(!second.ok(), "the second drawing hangs");
+                check(second.millis <= 3000 + SLACK, "the error comes by the deadline, not after the unbind: " + second.millis + " ms");
+                rig.hangs = false;
+                Call third = new Call(core, 0).await();
+                check(third.ok(), "the third icon is drawn");
+                same(0, rig.boundDuringUnbind.get(), "no bind was made while the old worker was being ended");
+                same(2, rig.binds.get(), "by a worker bound afresh: the failed one is not reused");
+                waitFor(() -> rig.unbinds.get() == 1, 3000, "the failed worker is released");
+                Thread.sleep(100);
+                same(1, rig.unbinds.get(), "once");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-a-release-that-does-not-return-fails-the-next-request-by-its-deadline", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(LIMITS);
+                check(ask(core).ok(), "the first icon binds the worker");
+                rig.hangs = true;
+                rig.unbindMillis = 3000;
+                check(!ask(core).ok(), "the second drawing hangs");
+                rig.hangs = false;
+                Call third = new Call(core, 0).await();
+                check(!third.ok(), "the old worker is still being ended: the third has nothing to draw with");
+                check(third.millis <= LIMITS.deadlineMillis + SLACK, "it gives up by its own deadline: " + third.millis + " ms");
+                same(1, rig.binds.get(), "and binds nothing while the old worker is still being ended");
+                same(2, rig.renders.get(), "nothing was drawn for it");
+            } finally {
+                rig.shutdown();
+            }
+        });
         row("worker-a-bind-that-is-refused-is-a-failure", () -> {
             Rig rig = new Rig();
             try {
@@ -729,7 +792,7 @@ public final class IconProtocolTest {
                 rig.main.submit(stale).get();
                 same(0, rig.unbinds.get(), "a cleanup scheduled before the last request does not unbind its worker");
                 rig.main.submit(rig.lastPosted()).get();
-                same(1, rig.unbinds.get(), "the cleanup of the last request does");
+                waitFor(() -> rig.unbinds.get() == 1, 3000, "the cleanup of the last request does");
             } finally {
                 rig.shutdown();
             }

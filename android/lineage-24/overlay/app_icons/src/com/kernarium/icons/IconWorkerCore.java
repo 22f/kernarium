@@ -26,6 +26,11 @@ import java.util.concurrent.locks.ReentrantLock;
  * drawing, so that a worker that failed once is never trusted with another icon. Unbinding is what ends the isolated
  * process. One request at a time.
  *
+ * <p>Unbinding can take a while, so it is done on a thread of its own: the bind is detached first (nothing can reuse it)
+ * and released once, and neither the answer to the request that failed nor the platform's main thread waits for it. The
+ * next bind waits for that release (within its own deadline), so that a new bind never meets the worker that is being
+ * ended.
+ *
  * <p>One deadline covers a request from its arrival: the wait for its turn, the bind and the drawing. A request whose
  * deadline passed while it queued never starts drawing, and every request is answered before the shell tool's own limit
  * (its eight seconds) by the deadline's margin. The idle cleanup never waits for the worker's turn: it runs on the
@@ -136,6 +141,8 @@ final class IconWorkerCore {
     private long mGeneration;
     /** The idle cleanup scheduled by the last request. */
     private Runnable mIdle;
+    /** The release of the bind detached last: counted down when its unbind has returned; null when none is out. */
+    private CountDownLatch mReleasing;
 
     IconWorkerCore(Link link, Poster poster, Clock clock, Limits limits) {
         mLink = link;
@@ -224,6 +231,9 @@ final class IconWorkerCore {
             return current;
         }
         disconnect();
+        if (!released(deadline)) {
+            return null; // the earlier worker is still being ended: this request has no time left to wait for it
+        }
         final Connection connection = new Connection();
         mConnection = connection;
         mHandle = mLink.bind(connection);
@@ -239,13 +249,38 @@ final class IconWorkerCore {
         return connection.mSession;
     }
 
+    /** Whether no release of an earlier bind is out: waits for it, but not past the request's deadline. */
+    private boolean released(long deadline) throws InterruptedException {
+        CountDownLatch out = mReleasing;
+        if (out == null) {
+            return true;
+        }
+        if (!out.await(Math.max(left(deadline), 0), TimeUnit.MILLISECONDS)) {
+            return false;
+        }
+        mReleasing = null;
+        return true;
+    }
+
+    /** Detaches the bind from reuse and ends it, once, on a thread of its own. */
     private void disconnect() {
-        Handle handle = mHandle;
+        final Handle handle = mHandle;
         mHandle = null;
         mConnection = null;
-        if (handle != null) {
-            handle.unbind();
+        if (handle == null) {
+            return;
         }
+        final CountDownLatch done = new CountDownLatch(1);
+        mReleasing = done;
+        Thread release = new Thread(() -> {
+            try {
+                handle.unbind();
+            } finally {
+                done.countDown();
+            }
+        }, "kernarium_icons-unbind");
+        release.setDaemon(true);
+        release.start();
     }
 
     private void scheduleIdle() {
