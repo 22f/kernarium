@@ -226,6 +226,7 @@ def projects(texts: Texts) -> list[dict]:
             copyright="The Android Open Source Project",
             license="Apache License 2.0",
             spdx="Apache-2.0",
+            frameworks=["UmlArm64Aot"],
             licenses=["apache-2.0"],
         ),
         entry(
