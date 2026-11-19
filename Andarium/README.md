@@ -1390,7 +1390,14 @@ kernel's license files (never fetched; `--verify` compares the resource with
 them). A tooling test fails when the Andarium project embeds a framework, or an
 iOS device prefix contract declares a component, that no entry covers
 ([`docs/testing.md`](../docs/testing.md#andarium)). Adding a library therefore
-means adding its entry to the script's table and running it.
+means adding its entry to the script's table and running it. The machine code
+translated from the Android libraries (`UmlArm64Aot.framework`) carries its own
+notices: the generator reads the AOT artifact's `licences.json`
+(`--aot-artifact`, else the accepted artifact installed below
+`.build/android/aot`) and lists each distinct notice once as "Translated system
+libraries", a page opened from the page of Android Open Source Project, with the
+paragraph the application's code carries above its row, in an application that
+embeds the framework only.
 
 ## Languages
 
