@@ -716,6 +716,29 @@ final class AndroidAppsModelTests {
         #expect(!rig.state.restoring)
     }
 
+    @Test func aTapBetweenTheUnlockAndTheAdoptionOfARestoredGuestWaitsForTheAdoption() async throws {
+        let rig = try rig(phase: .home, plan: .normal)
+        let item = SnapshotSummary(
+            id: SnapshotID(), name: "Before", created: Date(), releaseID: "20261109-los24-r20", buildNumber: 1, diskGiB: 16,
+            restore: .asIs, kept: SnapshotFigure(bytes: 7_000_000_000), freesWhenDeleted: SnapshotFigure(bytes: 4096))
+        let fake = FakeSnapshotDriver(items: [item])
+        rig.model.snapshotDriver = fake
+        // The runtime has unlocked the guest's files and the result is on its way to the model: the tap lands now.
+        var atTheTap: AppOpenStage?
+        let component = comet.component
+        fake.atUnlock = { [weak model = rig.model] in
+            model?.requestAndroidApp(component, label: "Comet Hop")
+            atTheTap = model?.androidApps.open.pending?.stage
+        }
+        fake.onRestore = { rig.driver.plan = .update(from: "r1", to: "r2") }
+        let result = await rig.model.restoreSnapshot(item.id)
+        guard case .done = result else { Issue.record("the restore should be done: \(result)"); return }
+        if case .waiting(.snapshot, _)? = atTheTap {} else { Issue.record("the tap should wait for the adoption: \(String(describing: atTheTap))") }
+        #expect(rig.driver.begun.count == 1, "the held request starts Android once")
+        #expect(rig.driver.begunGuests.first?.usedBytes == 7_000_000_000, "with the guest the restore left, not the one before it")
+        #expect(rig.model.plan == .update(from: "r1", to: "r2"), "and under the plan the files now say")
+    }
+
     // MARK: Space and readiness
 
     @Test func aPauseForSpaceWhileAndroidIsMadeReadyMakesTheRequestWaitForTheAnswer() async throws {

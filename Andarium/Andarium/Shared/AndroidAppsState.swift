@@ -110,7 +110,6 @@ final class AndroidAppsState {
     /// A snapshot restore is under way, and the release of the requests it
     /// held waits for the model to have adopted what it restored.
     @ObservationIgnored var restoring = false
-    @ObservationIgnored var releaseAfterRestore = false
     /// A change (an install) was announced while a refresh was under way: the
     /// refresh's owner makes one more after it, because what changed may have
     /// come after the listing it captured.

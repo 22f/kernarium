@@ -122,9 +122,14 @@ public struct AppOpenSituation: Equatable, Sendable {
     /// A task that changes the guest (an erase, a create) is under way behind
     /// the busy overlay: the guest in hand is not the one the task leaves.
     public var guestBusy: Bool
+    /// A snapshot restore is under way, or has unlocked the guest's files
+    /// and not yet been adopted by the model: the guest and the plan in hand
+    /// are the ones before it.
+    public var restoring: Bool
 
     public init(
-        phase: Phase, plan: StartPlan, verdict: StartVerdict, holdsGuestFiles: Bool, spacePaused: Bool, guestBusy: Bool = false
+        phase: Phase, plan: StartPlan, verdict: StartVerdict, holdsGuestFiles: Bool, spacePaused: Bool, guestBusy: Bool = false,
+        restoring: Bool = false
     ) {
         self.phase = phase
         self.plan = plan
@@ -132,6 +137,7 @@ public struct AppOpenSituation: Equatable, Sendable {
         self.holdsGuestFiles = holdsGuestFiles
         self.spacePaused = spacePaused
         self.guestBusy = guestBusy
+        self.restoring = restoring
     }
 }
 
@@ -171,6 +177,9 @@ public enum AppOpenPlanner {
         case .home:
             // An erase or a create owns the guest: Start cannot be pressed under it either.
             if situation.guestBusy { return .refuse(.busy) }
+            // The verdict below is the restore's predecessor's: wait for the
+            // model to have adopted what the restore left, then decide again.
+            if situation.restoring { return .hold(.snapshot) }
         }
         switch situation.verdict {
         case .noGuest:

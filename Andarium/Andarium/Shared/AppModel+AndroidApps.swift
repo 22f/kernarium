@@ -153,7 +153,8 @@ extension AppModel {
     private var androidAppOpenSituation: AppOpenSituation {
         AppOpenSituation(
             phase: phase, plan: plan, verdict: lifecycle.startVerdict(.normal, host: host, plan: plan),
-            holdsGuestFiles: snapshotActivity.holdsGuestFiles, spacePaused: spacePause != nil, guestBusy: guestIsBusy)
+            holdsGuestFiles: snapshotActivity.holdsGuestFiles, spacePaused: spacePause != nil, guestBusy: guestIsBusy,
+            restoring: androidApps.restoring)
     }
 
     /// The guest is being erased (or another task works on its files behind
@@ -282,19 +283,16 @@ extension AppModel {
     /// that waited for it until the model has adopted the guest it restored and
     /// worked out what a start now is (`androidAppsRestoreFinished`).
     func androidAppsSnapshotOperationEnded() {
-        if androidApps.restoring {
-            androidApps.releaseAfterRestore = true
-        } else {
-            androidAppsHoldEnded(.snapshot)
-        }
+        guard !androidApps.restoring else { return }
+        androidAppsHoldEnded(.snapshot)
     }
 
-    /// The model adopted what the restore left; the held requests are decided now.
+    /// The model adopted what the restore left (or the restore ended without
+    /// changing anything); the requests held for it are decided now. A request
+    /// made while the restore was under way, unlock to adoption included, is
+    /// one of them.
     func androidAppsRestoreFinished() {
-        let state = androidApps
-        state.restoring = false
-        guard state.releaseAfterRestore else { return }
-        state.releaseAfterRestore = false
+        androidApps.restoring = false
         androidAppsHoldEnded(.snapshot)
     }
 
