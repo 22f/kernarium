@@ -16,21 +16,26 @@
  *   cross-rwx    A maps the page RWX at the same address, B maps it RX.
  *   ptrace-third B and C map the page RX. The kernel writes it for B (as a
  *                ptrace POKETEXT of a shared mapping does) and calls
- *                darwin_uml_vm_invalidate_code for B's generation only; C runs.
+ *                darwin_uml_vm_invalidate_code_frame, naming the frame, for
+ *                B's generation only; C runs.
  *   kernel-write-lazy-target
  *                B maps the page RX and runs it; the kernel writes the frame
  *                for a process A whose software page table has no entry for it
  *                yet (a table the kernel fills at faults) and calls
- *                darwin_uml_vm_invalidate_code for A's generation.
+ *                darwin_uml_vm_invalidate_code_frame for A's generation.
  *   kernel-write-data-alias
  *                The same, with A holding the frame read-write only: a
  *                process_vm_writev() into a writable view of a dual mapping.
  *   kernel-write-own-alias
  *                B maps the page RX and runs it, and RW at another address;
  *                the kernel writes the frame through the RW view and calls
- *                darwin_uml_vm_invalidate_code for B's generation at that
- *                address: a ptrace or process_vm_writev() into a dual-view
- *                JIT, or an AArch32 cacheflush() of its writable view.
+ *                darwin_uml_vm_invalidate_code_frame for B's generation at
+ *                that address: a ptrace or process_vm_writev() into a
+ *                dual-view JIT.
+ *   cacheflush-own-alias
+ *                The same write, told by address only, as an AArch32
+ *                cacheflush() of the writable view does
+ *                (darwin_uml_vm_invalidate_code).
  *   same-alias   Control: one process, the page RX at one address and RW at
  *                another; the store and the IC IVAU go to the RW alias.
  *   one-vcpu / two-vcpus: whether one engine object (one vCPU) runs both
@@ -50,7 +55,7 @@ using uml::testing::require;
 
 enum class Case {
 	cross_rw, cross_rwx, ptrace_third, kernel_lazy_target,
-	kernel_data_alias, kernel_own_alias, same_alias
+	kernel_data_alias, kernel_own_alias, cacheflush_own_alias, same_alias
 };
 
 [[nodiscard]] const char *name(Case c) noexcept
@@ -68,6 +73,8 @@ enum class Case {
 		return "kernel-write-data-alias";
 	case Case::kernel_own_alias:
 		return "kernel-write-own-alias";
+	case Case::cacheflush_own_alias:
+		return "cacheflush-own-alias";
 	case Case::same_alias:
 		return "same-alias";
 	}
@@ -141,6 +148,7 @@ bool run_case(uml::cpu::EngineKind kind, Case c, bool two_engines,
 				shared.descriptor(), PROT_READ | PROT_WRITE, false);
 			break;
 		case Case::kernel_own_alias:
+		case Case::cacheflush_own_alias:
 		case Case::same_alias:
 			b_alias = std::make_unique<Map>(b, alias_base,
 				shared.descriptor(), PROT_READ | PROT_WRITE, false);
@@ -169,10 +177,10 @@ bool run_case(uml::cpu::EngineKind kind, Case c, bool two_engines,
 				require(call(engine, a, shared_base) == 1);
 				/* The kernel's view of the frame, then the bridge
 				 * call flush_icache_user_page() makes for the
-				 * traced mm, B. */
+				 * traced mm, B, naming the frame. */
 				shared.put32(0, movz_x0(2));
-				require(darwin_uml_static_vm_invalidate_code_generation(
-					b, shared_base, 4) == 0);
+				require(darwin_uml_static_vm_invalidate_code_frame(
+					b, shared_base, 4, shared.descriptor(), 0) == 0);
 				third = call(engine, a, shared_base);
 			});
 			break;
@@ -180,13 +188,21 @@ bool run_case(uml::cpu::EngineKind kind, Case c, bool two_engines,
 		case Case::kernel_data_alias:
 			other_side([&](uml::cpu::CpuEngine &) {
 				/* The kernel's view of the frame, then the bridge
-				 * call for the mm it wrote through, A. */
+				 * call for the mm it wrote through, A, naming the
+				 * frame. */
 				shared.put32(0, movz_x0(2));
-				require(darwin_uml_static_vm_invalidate_code_generation(
-					a, shared_base, 4) == 0);
+				require(darwin_uml_static_vm_invalidate_code_frame(
+					a, shared_base, 4, shared.descriptor(), 0) == 0);
 			});
 			break;
 		case Case::kernel_own_alias:
+			other_side([&](uml::cpu::CpuEngine &) {
+				shared.put32(0, movz_x0(2));
+				require(darwin_uml_static_vm_invalidate_code_frame(
+					b, alias_base, 4, shared.descriptor(), 0) == 0);
+			});
+			break;
+		case Case::cacheflush_own_alias:
 			other_side([&](uml::cpu::CpuEngine &) {
 				shared.put32(0, movz_x0(2));
 				require(darwin_uml_static_vm_invalidate_code_generation(
@@ -251,7 +267,7 @@ int main(int argc, char **argv)
 		for (const auto c : {Case::same_alias, Case::cross_rw,
 			     Case::cross_rwx, Case::ptrace_third,
 			     Case::kernel_lazy_target, Case::kernel_data_alias,
-			     Case::kernel_own_alias})
+			     Case::kernel_own_alias, Case::cacheflush_own_alias})
 			for (const bool two : {false, true})
 				if (!run_case(kind, c, two, generation))
 					++stale;

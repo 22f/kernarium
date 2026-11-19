@@ -158,6 +158,15 @@ uml_add_unit_test(
     NAME platform-host-thermal
     COMMAND uml_host_thermal_tests)
 
+# The host's network path: the state every report replaces, which statuses are
+# an outage, and the system monitor's report at each start, until it ends.
+add_executable(uml_host_network_path_tests host_network_path_tests.cpp)
+target_link_libraries(uml_host_network_path_tests PRIVATE
+    UML::HostNetworkPathTestVariant)
+uml_add_unit_test(
+    NAME platform-host-network-path
+    COMMAND uml_host_network_path_tests)
+
 # The host GPU's fixed budget: what the limit leaves above the floor, the
 # guest's RAM where there is no limit, and when the process is short of the
 # floor.

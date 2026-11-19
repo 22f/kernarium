@@ -250,7 +250,9 @@ below apply to each of them.
   - device, simulator, app-container and CoreDevice identifiers. Tests
     synthesize their own;
   - email addresses other than the configured Git identity, which commits
-    and exported patches carry;
+    and exported patches carry (the one exception is the `From:` line of an
+    outside contributor's own patches under `dependencies/patches`, which
+    `repository-environment-portability` allows series by series);
   - the Apple Team ID and signing identities. They belong in the ignored
     `GuestHost/Config/Signing.local.xcconfig`, from its tracked `.example`;
   - private network addresses and ssh endpoints;

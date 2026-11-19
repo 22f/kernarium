@@ -189,6 +189,23 @@ void darwin_uml_static_vm_invalidate_code(unsigned long address);
 int darwin_uml_static_vm_synchronize_code(unsigned long address);
 int darwin_uml_static_vm_invalidate_code_generation(
 	unsigned long generation, unsigned long address, unsigned long length);
+/* darwin_uml_vm_invalidate_code_frame() for guest pages: Linux wrote
+ * [address, address + length), within one guest page of the generation, through
+ * its alias of the frame at `fd` and `offset`. The change is published at the
+ * holders of that frame, whatever the generation maps at `address` now. A
+ * negative `fd` names no frame. 0, or a negative value for a range or offset
+ * that is invalid. */
+int darwin_uml_static_vm_invalidate_code_frame(
+	unsigned long generation, unsigned long address, unsigned long length,
+	int fd, unsigned long long offset);
+/* darwin_uml_vm_invalidate_code_frames(): Linux wrote the whole guest pages
+ * [offset, offset + length) of the frame source `fd` through its own alias,
+ * for no process. The change is published at the x86 holders of those frames
+ * and returns at once while no x86 code may hold one; a negative `fd` names no
+ * frame. 0, or a negative value for an offset or length that is not whole
+ * pages. */
+int darwin_uml_static_vm_invalidate_code_frames(
+	int fd, unsigned long long offset, unsigned long long length);
 
 #if defined(DARWIN_UML_X86_64_GUEST) && DARWIN_UML_X86_64_GUEST
 /* The x86-64 guest's frame holders (darwin/memory/mmu/frame_accounting.hpp):

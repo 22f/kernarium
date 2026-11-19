@@ -71,6 +71,16 @@ final class SessionState {
     /// The side keys are open. The session owns it because a touch on the
     /// guest's display, which is another view, closes them.
     var sideKeysOpen = false
+    /// The edge the side keys are on, which they report as they appear and
+    /// move; nil where they are not on an edge (the key rail). The words that
+    /// send a person back to the keys name it.
+    var keysEdge: KeysEdge?
+    /// Android's screen reader in this session: what Android last said of it,
+    /// a change under way and the card that asks about it.
+    let reader = ScreenReaderSession()
+    /// The text message being written in the bar over Android, and how the
+    /// last send went. It lasts for this run.
+    let textMessage = TextMessageState()
 
     /// The address the preview shows, from the range reserved for examples.
     static let previewAddress = "198.51.100.23"
@@ -229,8 +239,11 @@ final class AppModel {
     var sessionPreset = SessionPreset()
     var session = SessionState() {
         // The new session shows no figures: the next reading is published
-        // whatever it draws.
-        didSet { statisticsGate.reset() }
+        // whatever it draws. The old one's reader ends, and with it the work it began.
+        didSet {
+            statisticsGate.reset()
+            if oldValue !== session { oldValue.reader.end() }
+        }
     }
     /// The release notes: Info's history and the ribbon above Start after an
     /// update.
@@ -448,6 +461,16 @@ final class AppModel {
     /// so a model built any other way (a test, the preview) never asks.
     @ObservationIgnored var reviewAsk: ReviewAsk?
     #endif
+    #if TESTFLIGHT_STORE_LINK
+    /// What the App Store notice asks of the build and of the system
+    /// (`StoreNoticeServices`); a test or the Simulator preview replaces it,
+    /// and the dismissal is read from the new record.
+    @ObservationIgnored var storeNoticeServices = StoreNoticeServices() {
+        didSet { storeNoticeDismissed = storeNoticeServices.record.isDismissed }
+    }
+    /// The card was put away. Info keeps its row.
+    var storeNoticeDismissed = StoreNoticeRecord().isDismissed
+    #endif
     #if FOLLOW_X
     /// The handle Follow developer on X opens, from Info.plist, which only a
     /// build that names one has; a test replaces it.
@@ -462,6 +485,27 @@ final class AppModel {
     #endif
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
     private var restoringUpdate = false
+    /// The sender of the last text message, kept until the virtual machine
+    /// is erased.
+    @ObservationIgnored var smsSender = GuestSms.SenderMemory()
+    /// Says what a text message came to aloud, for VoiceOver, and tells whether
+    /// the announcement was spoken to its end; a test collects the words and
+    /// reports the end itself.
+    @ObservationIgnored var textMessageAnnouncer: @MainActor (String, @escaping @MainActor @Sendable (Bool) -> Void) -> Void = {
+        VoiceOver.announce($0, finished: $1)
+    }
+    /// VoiceOver runs. A line counts as told only when VoiceOver has said it.
+    @ObservationIgnored var textMessageVoiceOver: @MainActor () -> Bool = { UIAccessibility.isVoiceOverRunning }
+    /// The scene is active: a line counts as told only while it is (the bar reports it).
+    @ObservationIgnored var textMessageSceneActive = true
+    /// The notice of a model with no guest (the preview): it lives in memory.
+    @ObservationIgnored let previewTextMessageNotice = TextMessageNotice(
+        directory: URL(fileURLWithPath: "/"), files: MemoryNoticeFiles())
+    /// Waits for Settings to go before the bar comes up over Android; a test
+    /// paces it by hand.
+    @ObservationIgnored var textMessageSleep: @MainActor (Duration) async -> Void = { duration in
+        try? await Task.sleep(for: duration)
+    }
     /// The guest is paused because the device is nearly out of space; the
     /// screen over the session asks what to do.
     var spacePause: SpacePause?
@@ -521,12 +565,13 @@ final class AppModel {
     /// The share sheet of a bug report is up over the session.
     var shareSheetUp = false
     /// The guest has the hardware keys unless something is over it that needs
-    /// them (Settings, a sheet, an alert, the share sheet): the sheet takes
-    /// the keys, and the guest takes them back when it goes. The pointer lock
+    /// them (Settings, the text message bar, a sheet, an alert, the share
+    /// sheet): the sheet takes the keys, and the guest takes them back when
+    /// it goes. The pointer lock
     /// goes with them.
     var guestHasKeys: Bool {
-        !sessionSettingsOpen && sheet == nil && alert == nil && legacyInstallQuestion == nil && !shareSheetUp
-            && !askingToTurnOffHeatLimit
+        !sessionSettingsOpen && !session.textMessage.isOpen && sheet == nil && alert == nil
+            && legacyInstallQuestion == nil && !shareSheetUp && !askingToTurnOffHeatLimit
     }
     /// An Android application captured the pointer and the guest should have
     /// the pointer lock; the scene's root asks iOS for it.
@@ -615,6 +660,30 @@ final class AppModel {
     /// How often the watcher looks while ADB over network is on: the address
     /// every time, the USB debugging setting every fifth. A test shortens it.
     var adbWatchInterval = Duration.seconds(2)
+    /// Whether VoiceOver is running; a test answers for it.
+    @ObservationIgnored var voiceOverRunning: @MainActor () -> Bool = { UIAccessibility.isVoiceOverRunning }
+    /// What VoiceOver is told of its own accord; a test collects it.
+    @ObservationIgnored var announcer: @MainActor (_ text: String, _ queued: Bool, _ highPriority: Bool) -> Void = {
+        VoiceOver.announce($0, queued: $1, priority: $2 ? .high : nil)
+    }
+    /// Says what a run is as it begins, at high priority (VoiceOver's own
+    /// speech of the element it lands on after the screen change would cut a
+    /// queued or default announcement off), and tells whether the sentence was
+    /// spoken to its end; a test collects the words and reports the end itself.
+    @ObservationIgnored var runStartAnnouncer: @MainActor (String, @escaping @MainActor @Sendable (Bool) -> Void) -> Void = {
+        VoiceOver.announce($0, priority: .high, finished: $1)
+    }
+    /// How long the card and the display wait for that sentence's end before
+    /// they go on without it, where VoiceOver never reports one. The sentence
+    /// takes about seven seconds at VoiceOver's default rate; the bound leaves
+    /// room for slower speech and longer languages.
+    @ObservationIgnored var runStartBound: Duration = .seconds(15)
+    /// The preview's mock guest screen reader, where no runtime is behind the
+    /// screens; nil in the application.
+    @ObservationIgnored var screenReaderStandIn: (any ScreenReaderStandIn)?
+    /// How often the loop reads while VoiceOver runs; a test shortens it.
+    @ObservationIgnored var screenReaderWatchInterval = Duration.seconds(3)
+    @ObservationIgnored var voiceOverObserver: NSObjectProtocol?
 
     // MARK: Statistics state
 
@@ -878,6 +947,8 @@ final class AppModel {
     func erase() {
         guard let driver, guest != nil else {
             lifecycle.erase()
+            smsSender.forget()
+            textMessageNotice.reset()
             plan = .firstStart
             forgetSnapshots()
             return
@@ -891,6 +962,8 @@ final class AppModel {
             self.persistTask?.cancel()
             try await driver.erase(progress: progress)
             self.lifecycle.erase()
+            self.smsSender.forget()
+            self.textMessageNotice.reset()
             self.forgetSnapshots()
             self.resizePreset = nil
             self.sheet = nil
@@ -1124,13 +1197,17 @@ final class AppModel {
     /// readings are independent, so the file browser's storage check never
     /// waits for the USB debugging one.
     func watchSettings() async {
+        let reader = settingsOpened()
+        defer { settingsClosed(reader) }
         while !Task.isCancelled {
             refreshAdbAddress()
             async let debugging: Void = refreshUsbDebugging()
             async let storage: Void = refreshStorage()
             // A listing that got no answer is asked again while Settings is open.
             async let oldApps: Void = listOldAppsOnce()
-            _ = await (debugging, storage, oldApps)
+            // The screen reader's switch follows a change made in Android meanwhile.
+            async let screenReader: Void = refreshScreenReader()
+            _ = await (debugging, storage, oldApps, screenReader)
             try? await Task.sleep(for: .seconds(3))
         }
     }
@@ -1670,6 +1747,11 @@ final class AppModel {
         let kind = bootTracker.recovery ? BootKind.recovery : started
         let firstStart = plan == .firstStart
         lifecycle.finishBoot(kind)
+        // The display lets touches through to Android's screen reader only
+        // while it is on, so a run under VoiceOver reads it as soon as Android
+        // is up and goes on reading; without VoiceOver Settings reads it when
+        // it opens. Whether to turn it on is the person's to say, on the card.
+        if kind != .recovery { screenReaderBootFinished() }
         if driver != nil {
             persistNow()
             // Android is up: the old apps are listed once, with Settings closed.
@@ -1704,6 +1786,7 @@ final class AppModel {
         abandonOperation()
         fileBrowser?.reset()
         endAdbOverNetwork()
+        endTextMessageSession()
         spacePause = nil
         graphicsNotice = GraphicsNotice()
         graphicsReclaim.reset()
@@ -1747,6 +1830,7 @@ final class AppModel {
         abandonOperation()
         fileBrowser?.reset()
         endAdbOverNetwork()
+        endTextMessageSession()
         spacePause = nil
         graphicsNotice = GraphicsNotice()
         graphicsReclaim.reset()

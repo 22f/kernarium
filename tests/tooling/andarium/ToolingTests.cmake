@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+# The staging script stages the accepted release, and with --unsigned-proof a
+# developer build's proof image, whose staged manifest (a golden file that
+# AndariumCore's SystemInfo reads too) says it is a proof.
 uml_add_tooling_test(
     NAME andarium-stage-system-image
     COMMAND ${Python3_EXECUTABLE} -B
@@ -119,9 +122,25 @@ uml_add_tooling_test(
     LABELS andarium
     TIMEOUT 180)
 
+# The App Store notice of TestFlight builds is built in by the TestFlight
+# configuration alone: the resolved build settings of each configuration, with an
+# identifier stated as the local file would hold it and with none, name its
+# identifier, compilation condition, Info.plist key and String Catalog table
+# only there, leave Review on the App Store to AppStore, and leave the preview
+# target to the command line's arrangement.
+uml_add_tooling_test(
+    NAME andarium-store-link-configuration
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_store_link_configuration.py
+        --root ${PROJECT_SOURCE_DIR}
+    LABELS andarium
+    TIMEOUT 300)
+
 # The release build refuses an embedded artifact that is behind the commit it
 # archives; the fixtures build a repository, a staged system and an application
 # with a kernel carrying a banner and a configuration, and change one thing each.
+# An unsigned proof image, in the staged or the packaged system, stops the
+# AppStore and TestFlight build phase and no other configuration's.
 uml_add_tooling_test(
     NAME andarium-embedded-artifacts
     COMMAND ${Python3_EXECUTABLE} -B

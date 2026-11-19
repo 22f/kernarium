@@ -70,8 +70,11 @@ struct BackupRowTests {
             #expect(switches.count == 1, "\(isOn)")
             #expect(switches.first?.accessibilityValue == (isOn ? "1" : "0"), "\(isOn)")
             #expect(switches.first?.accessibilityTraits.contains(.button) == true, "\(isOn)")
-            // The row's own text beside it, and the section's note under it.
-            #expect(labelled.contains { $0.accessibilityValue == nil && $0.accessibilityTraits.contains(.staticText) })
+            // The row's own text beside it is no second stop: the switch says it. The
+            // section's note is under it.
+            #expect(
+                !labelled.contains { $0.accessibilityValue == nil && $0.accessibilityTraits.contains(.staticText) },
+                "\(isOn)")
             #expect(all.contains("Backup"))
             #expect(all.contains { $0.hasPrefix("Puts the virtual machine’s apps and files in iCloud") })
         }

@@ -53,12 +53,13 @@ final class NoGoogleNoticeUITests: XCTestCase {
         XCTAssertTrue(panel.label.contains(reason), "the panel says \(panel.label)")
         XCTAssertTrue(
             labelled("The first-run setup may take a few minutes.", in: app).exists, "the boot's own note is not there")
-        XCTAssertTrue(app.staticTexts["First start"].exists, "this is not the first start's screen")
+        // The status line is one element with the elapsed time.
+        XCTAssertTrue(labelled("First start", in: app).exists, "this is not the first start's screen")
 
         // Android's first boot ends: the session replaces the screen, and the panel goes with it.
         XCTAssertTrue(
             panel.waitForNonExistence(timeout: 1500), "the panel stayed: the boot did not end, or the panel outlived it")
-        XCTAssertFalse(app.staticTexts["First start"].exists, "the boot screen stayed")
+        XCTAssertFalse(labelled("First start", in: app).exists, "the boot screen stayed")
     }
 
     #if FEEDBACK_MAIL

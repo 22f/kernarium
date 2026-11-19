@@ -139,6 +139,25 @@ nonisolated enum OldAppsProbeLaunch {
     }
 }
 
+/// A development launch's text message entrance (`ANDARIUM_TEXT_MESSAGES=1`).
+/// The application offers no text message until an accepted release image
+/// carries the service (`Capabilities.device`); tests and proof images switch
+/// it on with this setting. An App Store build compiles it out.
+nonisolated enum TextMessagesLaunch {
+    static let environmentName = "ANDARIUM_TEXT_MESSAGES"
+
+    static func requested(in environment: [String: String]) -> Bool {
+        environment[environmentName] == "1"
+    }
+
+    /// The device's capabilities for a launch with this environment.
+    static func capabilities(in environment: [String: String]) -> Capabilities {
+        var capabilities = Capabilities.device
+        if requested(in: environment) { capabilities.textMessages = true }
+        return capabilities
+    }
+}
+
 /// The development build's compass check (`ANDARIUM_COMPASS_READOUT=1`): the
 /// application prints the device motion sample the guest's field comes from,
 /// with iOS's own attitude and heading from it (`CompassReadout`).

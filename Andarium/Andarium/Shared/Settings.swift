@@ -8,9 +8,9 @@ import UniformTypeIdentifiers
 /// Settings while the guest runs, opened from the side keys. It slides up over
 /// the guest, which keeps running behind it: install an app from Files and
 /// browse the guest's files (the first sections, where the side keys' tip
-/// points), watch the stats, connect a computer with adb and make a bug
-/// report. An operation on the guest dismisses Settings and shows the
-/// full-screen progress, and then how it ended.
+/// points), watch the stats, connect a computer with adb, make a bug report
+/// and, last, turn Android's screen reader (TalkBack) on and off. An operation on the guest dismisses
+/// Settings and shows the full-screen progress, and then how it ended.
 struct SessionSettingsSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -41,8 +41,11 @@ struct SessionSettingsSheet: View {
                     #if !APP_STORE
                     if let probe = model.inputProbe { inputProbe(probe) }
                     #endif
-                    if normalSession, model.capabilities.adbOverNetwork { developer(session) }
+                    if normalSession, model.capabilities.adbOverNetwork || model.capabilities.textMessages {
+                        developer(session)
+                    }
                     if normalSession, model.capabilities.bugReport { diagnostics }
+                    if normalSession, model.capabilities.screenReader { accessibility(session) }
                 }
                 .task {
                     guard let target = model.sessionPreset.settingsScroll else { return }
@@ -178,6 +181,70 @@ struct SessionSettingsSheet: View {
         return model.capabilities.offersApkInstall(in: mode)
     }
 
+    // MARK: Accessibility
+
+    /// TalkBack, Android's screen reader, and Android's own Accessibility
+    /// page. The switch follows what Android reports, read while Settings is
+    /// open (`AppModel.watchSettings`), and the line under it says every state
+    /// the switch cannot: not read yet, no answer, no screen reader in the
+    /// image, a change under way or failed, a transfer that holds the channel.
+    private func accessibility(_ session: SessionState) -> some View {
+        let reader = session.reader
+        let row = model.screenReaderRow
+        let unavailable = row == .unavailable
+        return Section {
+            Toggle(isOn: Binding(get: { reader.isOn }, set: { model.setScreenReader($0) })) {
+                HStack(spacing: 12) {
+                    IconTile(symbol: "accessibility", color: unavailable ? .gray : .accentColor)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(ScreenReaderWords.name)
+                        if let line = row.line {
+                            Text(line)
+                                .font(.footnote)
+                                .foregroundStyle(row.isFailure ? Color.red : Color.secondary)
+                        }
+                        if case .failed(_, let reason) = row {
+                            Text(reason)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .disabled(!model.screenReaderCanChange)
+            .accessibilityIdentifier("settings-talkback")
+            if row.offersTryAgain {
+                Button(ScreenReaderWords.tryAgain) {
+                    switch row {
+                    case .failed(let on, _): model.setScreenReader(on)
+                    default: Task { await model.refreshScreenReader() }
+                    }
+                }
+                .accessibilityIdentifier("settings-talkback-try-again")
+            }
+            Button {
+                // Android's page opens on the virtual machine's screen, behind the sheet.
+                dismiss()
+                model.openAccessibilitySettings()
+            } label: {
+                HStack(spacing: 12) {
+                    IconTile(symbol: "slider.horizontal.3", color: reader.isOn ? .accentColor : .gray)
+                    Text(ScreenReaderWords.androidSettings)
+                        .foregroundStyle(reader.isOn ? Color.accentColor : Color.secondary)
+                    Spacer()
+                }
+            }
+            // VoiceOver can read Android's page only while the screen reader is on.
+            .disabled(!reader.isOn)
+            .accessibilityIdentifier("settings-accessibility-settings")
+        } header: {
+            Text(ScreenReaderWords.section)
+        } footer: {
+            Text(unavailable ? ScreenReaderWords.footerUnavailable : ScreenReaderWords.footer(session.keysEdge))
+        }
+        .id("accessibility")
+    }
+
     // MARK: File browser
 
     private var files: some View {
@@ -247,7 +314,24 @@ struct SessionSettingsSheet: View {
 
     // MARK: Developer
 
+    /// ADB over network with its footer, and, as a group of its own under that
+    /// footer, the entrance to the text message bar, so the footer describes
+    /// the toggle alone.
+    @ViewBuilder
     private func developer(_ session: SessionState) -> some View {
+        if model.capabilities.adbOverNetwork { adbOverNetwork(session) }
+        if model.offersTextMessage {
+            Section {
+                textMessageRow
+            } header: {
+                // The group stands alone only where there is no ADB section above it.
+                if !model.capabilities.adbOverNetwork { Text("Developer") }
+            }
+            .id(model.capabilities.adbOverNetwork ? "text-message" : "developer")
+        }
+    }
+
+    private func adbOverNetwork(_ session: SessionState) -> some View {
         Section {
             Toggle(isOn: Binding(get: { session.adb }, set: { model.setAdbOverNetwork($0) })) {
                 HStack(spacing: 12) {
@@ -279,6 +363,26 @@ struct SessionSettingsSheet: View {
                 Text("Lets a computer on the same network connect to the virtual machine with adb.")
             }
         }
+        .id("developer")
+    }
+
+    /// The entrance to the text message bar: Settings closes, as Install APK
+    /// does, and the bar comes up over Android.
+    private var textMessageRow: some View {
+        Button {
+            dismiss()
+            model.presentTextMessage()
+        } label: {
+            HStack(spacing: 12) {
+                IconTile(symbol: "message.fill")
+                Text(SmsMessages.row)
+                    .foregroundStyle(Color.accentColor)
+                Spacer(minLength: 0)
+            }
+        }
+        // The guest's one adb channel is busy with the transfer.
+        .disabled(model.fileBrowser?.busy == true)
+        .accessibilityIdentifier("settings-text-message")
     }
 
     /// The command to type on the computer, with a button that copies it.

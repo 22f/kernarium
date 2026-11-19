@@ -140,7 +140,7 @@ struct AppEntry {
         }
 
         let model = AppModel(
-            guest: guest, host: host, system: system, capabilities: .device,
+            guest: guest, host: host, system: system, capabilities: Self.deviceCapabilities(),
             createRequirementBytes: storage.createRequirementBytes
         )
         // An iPhone's guest follows the device's orientation; a harness launch
@@ -299,7 +299,7 @@ struct AppEntry {
         let system = SystemInfo(
             version: "", release: "probe", securityPatch: nil, kernel: "", architecture: "", appVersion: version)
         let model = AppModel(
-            guest: Guest.fresh(on: host), host: host, system: system, capabilities: .device,
+            guest: Guest.fresh(on: host), host: host, system: system, capabilities: Self.deviceCapabilities(),
             createRequirementBytes: 0
         )
         // The launch decides the setting for its own run.
@@ -394,6 +394,18 @@ struct AppEntry {
         return model.alert == nil
     }
     #endif
+
+    /// What the application offers on the device: the runtime's, with text
+    /// messages held back until a release image carries the service. A
+    /// development launch can switch them on (`TextMessagesLaunch`); an App
+    /// Store build has no such launch.
+    private static func deviceCapabilities() -> Capabilities {
+        #if APP_STORE
+        .device
+        #else
+        TextMessagesLaunch.capabilities(in: ProcessInfo.processInfo.environment)
+        #endif
+    }
 
     // MARK: Device
 

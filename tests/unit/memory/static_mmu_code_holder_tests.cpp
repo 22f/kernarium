@@ -24,9 +24,18 @@
  *                (darwin_uml_vm_invalidate_code): a process whose table has no
  *                entry for the page publishes to every generation, and one
  *                that maps it without execute still tells the holders.
+ *   named write the kernel names the frame it wrote
+ *                (darwin_uml_vm_invalidate_code_frame): the holders of that
+ *                frame hear of it, whatever the process maps at the address
+ *                and whether or not it has an entry for the page, and no other
+ *                generation does; a frame the kernel cannot name goes to every
+ *                generation.
+ *   remap        the target replaces the page the kernel pinned with another
+ *                frame before the write: the holders of the frame written
+ *                hear of it, and those of the frame mapped now do not.
  *   x86 beside   (x86-64 guest builds) one kernel write reaches an arm64 reader
  *                named in the word and an x86 holder of the frame, each by its
- *                own mechanism.
+ *                own mechanism, by address and by frame.
  *   overlap      a publisher has taken a frame's word and not yet published;
  *                a second synchronization of the frame meets an empty word
  *                (or a word of its own) and must still reach the first one's
@@ -514,6 +523,159 @@ void test_a_kernel_write_reaches_the_holders_whatever_the_target_maps()
 	kernel_write(true, 1091);
 }
 
+/* The same write with the frame named (darwin_uml_vm_invalidate_code_frame):
+ * the reader that translated the frame hears of it whether the target maps it
+ * without execute or has no entry for the page, and no other generation does:
+ * nothing goes to every generation, and no page is counted as absent. */
+void kernel_write_frame(bool target_maps_frame, unsigned long base)
+{
+	ScratchBacking backing{backing_name, page};
+	backing.put32(0, old_word);
+	const unsigned long reader = base, target = base + 1;
+	map_code(reader, backing);
+	require(darwin_uml_static_vm_activate(target) == 0);
+	if (target_maps_frame)
+		map(target, writer_address, backing, PROT_READ | PROT_WRITE, 0);
+	(void)fetch(reader);
+	const auto changes_before = code_changes(reader);
+	const auto before = holders::counters();
+
+	backing.put32(0, new_word);
+	require(darwin_uml_static_vm_invalidate_code_frame(
+		target, writer_address, 4, backing.descriptor(), 0) == 0);
+	require(code_changes(reader) > changes_before, target_maps_frame ?
+		"a named kernel write through a view without execute missed the "
+		"holder" : "a named kernel write for a process with no entry for the "
+		"page missed the holder");
+	const auto delta = since(before);
+	require(delta.absent_kernel_pages == 0,
+		"a named kernel write was counted as a write to an absent page");
+	require(delta.kernel_exchanges == 1 &&
+		delta.exchanges == delta.kernel_exchanges,
+		"the kernel path's take was not counted as the kernel's");
+	require(delta.all_publications == 0,
+		"a named kernel write went to every generation");
+	destroy(reader);
+	destroy(target);
+}
+
+/* A write that names no frame (the kernel cannot name it) is told to every
+ * generation, as a page the process has no entry for was. */
+void kernel_write_unnamed(unsigned long base)
+{
+	ScratchBacking backing{backing_name, page};
+	backing.put32(0, old_word);
+	const unsigned long reader = base, target = base + 1;
+	map_code(reader, backing);
+	require(darwin_uml_static_vm_activate(target) == 0);
+	(void)fetch(reader);
+	const auto changes_before = code_changes(reader);
+	const auto before = holders::counters();
+
+	backing.put32(0, new_word);
+	require(darwin_uml_static_vm_invalidate_code_frame(
+		target, writer_address, 4, -1, 0) == 0);
+	require(code_changes(reader) > changes_before,
+		"a kernel write that named no frame missed the holder");
+	const auto delta = since(before);
+	require(delta.absent_kernel_pages == 1 && delta.all_publications == 1,
+		"a kernel write that named no frame did not go to every generation");
+	destroy(reader);
+	destroy(target);
+}
+
+/* A named frame that nobody translated publishes nothing: a generation that
+ * translated another frame does not hear of it, whether the frame has a
+ * backing (a data mapping of it) or none (nothing has mapped it). */
+void kernel_write_frame_nobody_translated(bool backing_is_alive, unsigned long base)
+{
+	ScratchBacking bystander_backing{backing_name, page};
+	ScratchBacking written{backing_name, page};
+	bystander_backing.put32(0, old_word);
+	const unsigned long bystander = base, target = base + 1;
+	map_code(bystander, bystander_backing);
+	require(darwin_uml_static_vm_activate(target) == 0);
+	if (backing_is_alive)
+		map(target, writer_address, written, PROT_READ | PROT_WRITE, 0);
+	(void)fetch(bystander);
+	const auto changes_before = code_changes(bystander);
+	const auto before = holders::counters();
+
+	require(darwin_uml_static_vm_invalidate_code_frame(
+		target, writer_address, 4, written.descriptor(), 0) == 0);
+	require(code_changes(bystander) == changes_before,
+		"a named write to a frame nobody translated published a code change");
+	const auto delta = since(before);
+	require(delta.publications == 0 && delta.all_publications == 0,
+		"a named write to a frame nobody translated published");
+	destroy(bystander);
+	destroy(target);
+}
+
+/* The kernel pins a frame to write it. Between the pin and the write the
+ * target replaces what is mapped at the address with another frame, so the
+ * call meets a page that is not the frame written, and the reader named in
+ * the word of the frame the kernel did write must still hear of the write
+ * while the generation that translated the frame mapped now does not. The
+ * reader fetches once more after the replacement, so the replacement cannot
+ * account for what it hears. */
+void kernel_write_frame_after_a_remap(bool replacement_is_code, unsigned long base)
+{
+	ScratchBacking pinned{backing_name, page};
+	ScratchBacking other{backing_name, page};
+	pinned.put32(0, old_word);
+	other.put32(0, third_word);
+	const unsigned long reader = base, target = base + 1, bystander = base + 2;
+	map_code(reader, pinned);
+	map_code(bystander, other);
+	require(darwin_uml_static_vm_activate(target) == 0);
+	map(target, writer_address, pinned, PROT_READ | PROT_WRITE, 0);
+	require(fetch(reader) == old_word);
+	require(fetch(bystander) == third_word);
+	require(darwin_uml_static_vm_unmap_generation(target,
+		reinterpret_cast<void *>(writer_address), page) == 0);
+	if (replacement_is_code)
+		map(target, writer_address, other, PROT_READ | PROT_EXEC, 1);
+	else
+		map(target, writer_address, other, PROT_READ | PROT_WRITE, 0);
+	require(fetch(reader) == old_word);
+	const auto changes_before = code_changes(reader);
+	const auto bystander_before = code_changes(bystander);
+	const auto before = holders::counters();
+
+	pinned.put32(0, new_word);
+	require(darwin_uml_static_vm_invalidate_code_frame(
+		target, writer_address, 4, pinned.descriptor(), 0) == 0);
+	require(code_changes(reader) > changes_before, replacement_is_code ?
+		"a kernel write after the target replaced its page with code "
+		"missed the holder of the frame written" :
+		"a kernel write after the target replaced its page with data "
+		"missed the holder of the frame written");
+	require(code_changes(bystander) == bystander_before,
+		"a kernel write published the frame the target maps now");
+	const auto delta = since(before);
+	require(delta.kernel_exchanges == 1 && delta.all_publications == 0,
+		"a named kernel write after a remap was not narrow");
+	destroy(reader);
+	destroy(target);
+	destroy(bystander);
+}
+
+void test_a_named_kernel_write_reaches_the_holders_of_its_frame()
+{
+	kernel_write_frame(false, 1151);
+	kernel_write_frame(true, 1161);
+	kernel_write_unnamed(1171);
+	kernel_write_frame_nobody_translated(false, 1181);
+	kernel_write_frame_nobody_translated(true, 1191);
+}
+
+void test_a_kernel_write_after_the_target_remapped_reaches_the_holders()
+{
+	kernel_write_frame_after_a_remap(false, 1111);
+	kernel_write_frame_after_a_remap(true, 1121);
+}
+
 #if DARWIN_UML_X86_64_GUEST
 /* The kernel writes a frame that two translators hold, each in its own
  * generation: an arm64 reader, named in the frame's holder word, and an x86
@@ -559,6 +721,46 @@ void test_a_kernel_write_reaches_an_arm64_reader_and_an_x86_holder()
 	destroy(x86);
 	destroy(target);
 }
+
+/* The same, the frame named: the arm64 word is taken once as the kernel's and
+ * the x86 holders are told through the accounting, with nothing published to
+ * every generation. */
+void test_a_named_kernel_write_reaches_an_arm64_reader_and_an_x86_holder()
+{
+	ScratchBacking backing{backing_name, page};
+	backing.put32(0, old_word);
+	constexpr unsigned long arm = 1201, x86 = 1202, target = 1203;
+	map_code(arm, backing);
+	map_code(x86, backing);
+	map_code(target, backing);
+	require(darwin_uml_static_vm_activate(target) == 0);
+	(void)fetch(arm);
+	std::array<darwin_uml_static_frame_location, 16> owed{};
+	darwin_uml_static_frame_hold hold{};
+	const auto held = darwin_uml_static_vm_hold_code_frame(nullptr, x86,
+		code_address, owed.data(), owed.size(), &hold);
+	require(held == DARWIN_UML_STATIC_FRAME_SETTLED ||
+		held == DARWIN_UML_STATIC_FRAME_OWED,
+		"the x86 translator's registration was refused");
+	darwin_uml_static_vm_require_coherent_kernel_code_writes();
+	const auto arm_before = code_changes(arm);
+	const auto x86_before = code_changes(x86);
+	const auto before = holders::counters();
+
+	backing.put32(0, new_word);
+	require(darwin_uml_static_vm_invalidate_code_frame(
+		target, code_address, 4, backing.descriptor(), 0) == 0);
+	require(code_changes(arm) > arm_before,
+		"the arm64 reader named in the word missed a named kernel write");
+	require(code_changes(x86) > x86_before,
+		"the x86 holder of the frame missed a named kernel write");
+	const auto delta = since(before);
+	require(delta.kernel_exchanges == 1 && delta.all_publications == 0,
+		"the named kernel path's take widened because an x86 holder stood");
+	destroy(arm);
+	destroy(x86);
+	destroy(target);
+}
 #endif
 
 } // namespace
@@ -574,8 +776,11 @@ int main()
 	test_a_backing_without_a_leaf_publishes_to_every_generation();
 	test_a_publication_that_overlaps_an_unfinished_one_reaches_its_holders();
 	test_a_kernel_write_reaches_the_holders_whatever_the_target_maps();
+	test_a_named_kernel_write_reaches_the_holders_of_its_frame();
+	test_a_kernel_write_after_the_target_remapped_reaches_the_holders();
 #if DARWIN_UML_X86_64_GUEST
 	test_a_kernel_write_reaches_an_arm64_reader_and_an_x86_holder();
+	test_a_named_kernel_write_reaches_an_arm64_reader_and_an_x86_holder();
 #endif
 	std::puts("static-mmu-code-holder: ok");
 	return 0;

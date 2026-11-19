@@ -60,6 +60,12 @@ let package = Package(
             name: "AndariumReviewLogic",
             swiftSettings: [.define("APP_REVIEW")]
         ),
+        // The App Store notice's logic (TestFlight builds), for the package's tests
+        // only, by the same rule (a symlink to Andarium/Shared/StoreLink/Logic).
+        .target(
+            name: "AndariumStoreLinkLogic",
+            swiftSettings: [.define("TESTFLIGHT_STORE_LINK")]
+        ),
         // Follow developer on X's logic, for the package's tests only, by the same
         // rule (a symlink to Andarium/Shared/FollowX/Logic).
         .target(
@@ -79,7 +85,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AndariumCoreTests",
-            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic", "AndariumFollowXLogic", "AndariumICPLogic", "AndariumTipJarLogic", "AndariumReviewLogic"]
+            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic", "AndariumFollowXLogic", "AndariumICPLogic", "AndariumTipJarLogic", "AndariumReviewLogic", "AndariumStoreLinkLogic"]
         ),
     ]
 )

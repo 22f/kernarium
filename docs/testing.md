@@ -418,7 +418,8 @@ mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
-FEEDBACK_ADDRESS=feedback@example.com REVIEW_ID=id0000000000 FOLLOW_X_HANDLE=example_handle
+FEEDBACK_ADDRESS=feedback@example.com REVIEW_ID=id0000000000 STORE_LINK_ID=id0000000000
+FOLLOW_X_HANDLE=example_handle
 TIP_LITE=com.example.andarium.tip.lite TIP_PRO=com.example.andarium.tip.pro
 TIP_MAX=com.example.andarium.tip.max TIP_ULTRA=com.example.andarium.tip.ultra
 SHEET_DEVELOPER_NAME=example SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle
@@ -456,10 +457,18 @@ StoreKit's test session over `AndariumTests/TipJar.storekit`, example
 identifiers only, never the App Store), and `ReviewScreenTests`,
 `ReviewAskFlowTests` and `ReviewAskStoreTests` `REVIEW_ID`
 ([Review on the App Store](../Andarium/README.md#review-on-the-app-store); the
-system's rating prompt is never asked for). `HomeMenuTests` (Home's toolbar
+system's rating prompt is never asked for), and `StoreNoticeTests` `STORE_LINK_ID`
+([App Store notice](../Andarium/README.md#app-store-notice); the system's `open`
+is replaced, so no address opens). `HomeMenuTests` (Home's toolbar
 menu) exist with any of Send feedback, Review and Buy me tokens, and
 `HomePlainInfoTests` (the plain Info button) only with none
 ([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
+`GuestSmsTests`, `GuestSmsChannelTests` and `TextMessageNoticeTests` (`AndariumCoreTests`)
+read the golden bytes of the text message channel and its payload, which the guest
+service's tests read too, and run the exchange over socket pairs and a scripted
+system (deadline, cancellation); the hosted `TextMessageTests` play the bar over a
+fake driver: every state, the durable notice at each point where a session can end,
+and what VoiceOver has been told.
 `AndariumCoreTests` holds the tip sheet's states and the rating rule, counter
 and record as pure logic, and the state of the no-Google-apps notice (the panel
 on a first start and on the retry of a first Android boot that did not finish,
@@ -566,6 +575,34 @@ sent, a composer stand-in and the preview's bug report, and walks Send's
 question, Create bug report, the pages of the report's row and Send without
 bug report.
 
+`AndariumPreviewUITests` drives `AndariumPreview` in the Simulator
+(`xcodebuild test -scheme AndariumPreview`): the screens it lists pass the
+accessibility audit for element descriptions and traits once the sheet or card
+they open on is up; the switch for Android's screen reader, last in the
+session's Settings, shows off, on, not in the system image, couldn't check,
+turning on, didn't turn on and the file transfer that holds it; and under
+VoiceOver a card asks before the screen reader is turned on, at a first start
+too, starts with its title, and names the edge the side keys are on, as the
+Settings footer does after the keys are moved. The Simulator has no VoiceOver,
+so these tests drive the interface and read no speech. The hosted
+`TalkBackSwitchTests` run the model against a driver that can delay and fail
+(and fail after a partial write): overlapping reads and changes, an operation
+that the session's end cancels, or that answers after it, the card, the
+display's direct touch, the loop that reads, and what VoiceOver is told (once
+per event, with the way back; the run start's sentence at high priority, with
+the card and the display's focus waiting for its end, or for the bound; the
+news that the screen reader is on at high priority, said where something covers
+the display or after the person turned it on, and left to the display's own
+words where the display takes the focus at a start; the display with no value
+until Android has been read); a wait in them fails where what it waited
+for did not happen. `GuestDisplayAccessibilityTests` read the display's
+accessibility structure: one element with the screen reader off, and with it on
+a container of one direct-touch element that carries the words, covers the
+display and follows its layout. `ScreenReaderAdapterTests` run the adapter over
+a shell that answers as told, and `ScreenReaderShellTests` in `andarium-core`
+run the commands in a real shell with fake `am`, `pm` and `settings` tools that
+keep a store per user.
+
 The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
 `andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.
 `FoldSessionHostingTests` puts the real scene root in a window of each pose's
@@ -616,6 +653,10 @@ rejects the forbidden terms of each language and a token amount in the
 `TipJar` table, and requires the statement that a tip is voluntary, one-time
 and the features free; the bundle check also covers the developer header's
 keys and artwork),
+the App Store notice's build conditions (`andarium-store-link-configuration`: the
+resolved build settings of each configuration build it into TestFlight alone, and
+`AndariumCore`'s `StoreLinkTests` hold its address, its dismissal record and its
+visibility rule),
 document pickers' build conditions (`andarium-document-pickers`: the App Store
 configuration opens files in place, every other presents the copy-mode picker,
 and an in-place importer anywhere else is in an App Store branch or a named
@@ -839,6 +880,12 @@ storage layout (`android17-launcher-arguments`,
 where the Android CLI is built, runs the executable's own argument checks)
 ([storage](../android/lineage-24/README.md#static-disk-and-boot-contract),
 [block device](../darwin/device/block/README.md)).
+The target-files verifier also reads the compiled policy for the text message
+service ([README](../android/lineage-24/README.md#text-messages)): which types may
+create, bind or listen on vsock, who may reach the service's sockets and data, the
+services it finds, who may set adbd's listen address, and which seapp line selects
+its domain; the fixtures of `lineage24-target-files-fixtures` and
+`lineage24-builder-lane` each hold a policy that one of those checks must refuse.
 `lineage24-camera-app-contract` checks that the camera application's overlay,
 its patch series and the target-files verifier's constants name the same
 settings and values; what the application then does is the image's to show.
@@ -996,6 +1043,15 @@ packages, install times and processes, and `android17-oldapp-switch-command`
 (tooling; skipped without a JDK) runs the command's rule, listing, cleanup,
 lock file (on real files), writes and exit statuses on a plain JVM; the Android
 calls need a built image.
+`android17-sms-service` (tooling; skipped without a JDK) runs the text message
+service on a plain JVM: the PDUs it builds, read back with a parser of its own
+and the JDK's `UTF-16` decoder, the one Android applies to a UCS-2 message, which
+drops a leading byte order mark; the request's parser and the answers against the
+golden file the host's tests read too; the delivery record at each point where a
+request can end (a forced end, a failing file operation, a second process on its
+lock); and the host channel's server, frame and admission over stand-ins for the
+platform's socket classes. `Delivery` and `HostChannel` (the broadcasts, the inbox
+and the socket calls) need a built image.
 `android-vulkan-smoke` (integration) registers when `UML_ANDROID_VULKAN_SMOKE_RELEASE`
 names a release and runs the image's `kernarium_vk_ahb_import` in a guest: hardware
 buffers imported and read back, and the guest memory file descriptors
@@ -1049,7 +1105,12 @@ confirmed carrying before a restart or suspend; crashes and ANRs of
 NetworkStack, SystemUI and Settings, and illegal instructions, are read from
 the whole stream and fail the run, in the section whose window holds them or in
 none.
-The network joins again after a suspend and after a restart, and the boot script
+A suspend keeps the station: the network after the wake is the one before it,
+the guest's log shows no disconnect, a request a second after the wake succeeds
+and the connections the host holds into the guest carry data, also after Wi-Fi
+was turned off and on and through a stay with the emulator stopped; a suspend
+that lands inside the station's connect delay ends with a working network and a
+quiet guest console. The network joins again after a restart, and the boot script
 runs without SELinux denials; a joined network keeps its metered and
 Auto-connect settings, a forgotten one stays forgotten and Wi-Fi that is off
 stays off. A guest stopped when the Wi-Fi service lists the network, or when
@@ -1121,6 +1182,22 @@ Android sees (devices, keys, axes), what comes back (rumble, lights, the
 drivers' feature requests), hot plug, the relay's recovery, and reports the
 guest's cost per report and the relay's memory. `android17-gamepad-runner`
 (tooling) runs its wire, controllers and parsers without a guest.
+`android-sms-channel` and `android-sms-record` (integration) register when
+`UML_ANDROID_SMS_RELEASE` names the release and `UML_ANDROID_SMS_PROBE_APK` and
+`UML_ANDROID_SMS_VSOCKPROBE_DEX` the output of
+[`sms/build-apk.sh`](../tests/integration/android/sms/README.md): the runner plays
+the host application over a launcher forward to the service's port and sends the
+contract's frames. It checks that a request from the host is handed over and
+answered, that a delivery asked from adb (a forward to the port) is refused, that
+adbd refuses an `adb reverse` onto a vsock port, the service's domain and denials, every vsock listener
+of the guest, and that neither the shell nor an application can create a vsock
+socket; the record mode checks that no message is handed over twice across a
+crash, a reboot and fifty kills. `--mode proof` (a userdebug build) writes a
+pending record and traces the order of the record's writes; the variants without
+Messaging or without an SMS provider, the adbd topic and the kernel configuration
+are options of the runner (`--list-rows` names each row and what it needs).
+`android17-sms-runner` (tooling) runs its wire, record file, parsers and
+judgements without a guest.
 `android-oldapp` (integration) registers when `UML_ANDROID_OLDAPP_RELEASE`
 names a release built with the old-application layer
 ([README](../android/lineage-24/README.md#old-applications)): a probe application

@@ -313,7 +313,8 @@ struct OldAppsModelTests {
         model.start(.recovery)
         model.finishBoot(.recovery)
         let (bare, _, bareScripted) = booting(
-            capabilities: Capabilities(adbOverNetwork: false, apkInstall: false, bugReport: false, statistics: false, guestFiles: false))
+            capabilities: Capabilities(adbOverNetwork: false, apkInstall: false, bugReport: false, statistics: false, guestFiles: false,
+                textMessages: false, screenReader: false))
         bare.start(.normal)
         bare.finishBoot(.normal)
         try? await Task.sleep(for: .milliseconds(150))
