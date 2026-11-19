@@ -40,6 +40,9 @@ import release_artifact  # noqa: E402
 
 
 RELEASE_ID = "20261201-los24-r99"
+# The system partition digest the staged layout states, which the AOT blob of
+# the release binds to as well as to the manifest's digest.
+AOT_SYSTEM_SHA256 = "bb" * 32
 KERNEL_ID = "20261201-6.18.99-ks99"
 KERNEL_RELEASE = "6.18.99-gfeedface0000"
 DISK = b"disk-bytes" * 100
@@ -194,7 +197,13 @@ class Fixture:
     def layout(disk: bytes) -> dict:
         import hashlib
 
-        return {"schema_version": 2, "system_disk": {"size_bytes": len(disk), "sha256": hashlib.sha256(disk).hexdigest()}}
+        return {
+            "schema_version": 2,
+            "system_disk": {
+                "size_bytes": len(disk), "sha256": hashlib.sha256(disk).hexdigest(),
+                "partitions": [{"name": "system", "sha256": AOT_SYSTEM_SHA256}],
+            },
+        }
 
     def manifest(self, release_id: str = RELEASE_ID, trees=None) -> dict:
         trees = self.trees if trees is None else trees
@@ -633,20 +642,21 @@ class CheckTests(unittest.TestCase):
 AOT_DESCRIPTOR = release_artifact.ACCEPTED_DESCRIPTOR
 AOT_DIRECTORY = f"lineage24-mainline6.18-4k-{RELEASE_ID}"
 AOT_FRAMEWORK = "UmlArm64Aot"
-AOT_MANIFEST_SHA256 = "aa" * 32
-AOT_SYSTEM_SHA256 = "bb" * 32
 
 
-def aot_blob(release_id: str = RELEASE_ID, filler: int = 1) -> bytes:
+def aot_blob(
+    manifest_sha256: str, release_id: str = RELEASE_ID, filler: int = 1,
+    system_sha256: str = AOT_SYSTEM_SHA256,
+) -> bytes:
     """A blob with the header rewrite.py gives one, and bytes after it."""
     blob = bytearray(16384)
     struct.pack_into("<8sI", blob, 0, release_artifact.BLOB_MAGIC, 3)
     blob[release_artifact.BLOB_RELEASE_ID_OFFSET:
          release_artifact.BLOB_RELEASE_ID_OFFSET + len(release_id)] = release_id.encode()
     blob[release_artifact.BLOB_MANIFEST_SHA256_OFFSET:
-         release_artifact.BLOB_MANIFEST_SHA256_OFFSET + 32] = bytes.fromhex(AOT_MANIFEST_SHA256)
+         release_artifact.BLOB_MANIFEST_SHA256_OFFSET + 32] = bytes.fromhex(manifest_sha256)
     blob[release_artifact.BLOB_SYSTEM_SHA256_OFFSET:
-         release_artifact.BLOB_SYSTEM_SHA256_OFFSET + 32] = bytes.fromhex(AOT_SYSTEM_SHA256)
+         release_artifact.BLOB_SYSTEM_SHA256_OFFSET + 32] = bytes.fromhex(system_sha256)
     blob[8192:] = bytes([filler]) * (len(blob) - 8192)
     return bytes(blob)
 
@@ -664,7 +674,10 @@ class AotTests(unittest.TestCase):
         write(self.repo, "tools/aot/libraries.txt",
               "library /system/lib64/libz.so\nboot /system/framework/arm64/boot*.oat\n")
         commit(self.repo, "the AOT tools")
-        self.blob = aot_blob()
+        # What the runtime reads from the packaged system, as the blob of the release binds it.
+        self.identity = release_artifact.release_identity(self.fixture.app / "andarium-system")
+        self.bound = {key: self.identity[key] for key in release_artifact.RELEASE_KEYS}
+        self.blob = aot_blob(self.identity["release_manifest_sha256"])
 
     def accept(self, archives: str = "no", release_id: str = RELEASE_ID, install: bool = True) -> dict:
         """An artifact of the fixture's tools, installed beside the release, and the descriptor that accepts it."""
@@ -675,11 +688,7 @@ class AotTests(unittest.TestCase):
         write(directory, "manifest.json", json.dumps({"release_id": RELEASE_ID, "blob_bytes": len(self.blob)}))
         write(directory, "licences.json", json.dumps({"release_id": RELEASE_ID, "libraries": {}}))
         libraries, boot = release_artifact.library_list(self.repo)
-        identity = {
-            "release_id": RELEASE_ID, "release_manifest_sha256": AOT_MANIFEST_SHA256,
-            "system_partition_sha256": AOT_SYSTEM_SHA256,
-        }
-        description = release_artifact.write_description(directory, identity, libraries, boot, self.repo)
+        description = release_artifact.write_description(directory, self.bound, libraries, boot, self.repo)
         text = release_artifact.render_accepted(
             description, release_artifact.sha256_file(directory / "artifact.json"), archives)
         write(self.repo, AOT_DESCRIPTOR, text.replace(f"'{RELEASE_ID}'", f"'{release_id}'"))
@@ -768,8 +777,40 @@ class AotTests(unittest.TestCase):
 
     def test_another_blob_fails_and_no_decision_covers_it(self) -> None:
         self.accept("yes")
-        self.package_aot(aot_blob(filler=2))
+        self.package_aot(aot_blob(self.identity["release_manifest_sha256"], filler=2))
         self.fails(self.run_check(decision=f"aot-{RELEASE_ID}"), "is not the blob of the AOT artifact")
+
+    def test_a_blob_made_from_another_system_than_the_packaged_one_fails(self) -> None:
+        # The descriptor names this blob, but the packaged system is not the
+        # release it was made from: the runtime would run without it.
+        # (The release ID is the descriptor's: another one fails before this.)
+        for field, other in (("manifest", {"manifest_sha256": "cc" * 32}),
+                             ("system partition", {"system_sha256": "dd" * 32})):
+            with self.subTest(field=field):
+                arguments = {"manifest_sha256": self.identity["release_manifest_sha256"], **other}
+                self.blob = aot_blob(**arguments)
+                # The artifact binds the same release as its blob: only the packaged system differs.
+                self.bound = {"release_id": RELEASE_ID,
+                              "release_manifest_sha256": arguments["manifest_sha256"],
+                              "system_partition_sha256": arguments.get("system_sha256", AOT_SYSTEM_SHA256)}
+                self.accept("yes")
+                self.package_aot()
+                self.fails(self.run_check(), "was not made from the packaged system",
+                           "run without it")
+        # The same blob with the packaged system's own values passes, and says so.
+        self.blob = aot_blob(self.identity["release_manifest_sha256"])
+        self.bound = {key: self.identity[key] for key in release_artifact.RELEASE_KEYS}
+        self.accept("yes")
+        self.package_aot()
+        result = self.run_check()
+        self.passes(result)
+        self.assertIn("the packaged AOT blob is made from the packaged system", result.stdout)
+
+    def test_a_packaged_system_that_states_no_release_cannot_be_compared(self) -> None:
+        self.accept("yes")
+        self.package_aot()
+        (self.fixture.app / "andarium-system/guest/partition-layout.json").write_text("{}", encoding="utf-8")
+        self.fails(self.run_check(), "cannot be compared with the packaged system")
 
     def test_a_framework_without_a_text_section_fails(self) -> None:
         self.accept("yes")
@@ -810,7 +851,7 @@ class AotTests(unittest.TestCase):
     def test_an_installed_artifact_that_is_not_the_accepted_one_fails(self) -> None:
         self.accept("yes")
         directory = self.repo / ".build/android/aot" / AOT_DIRECTORY
-        (directory / "blob.bin").write_bytes(aot_blob(filler=3))
+        (directory / "blob.bin").write_bytes(aot_blob(self.identity["release_manifest_sha256"], filler=3))
         self.package_aot()
         self.fails(self.run_check(), "the installed AOT artifact is not the accepted one")
 

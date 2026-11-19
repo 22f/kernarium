@@ -49,6 +49,11 @@ AOT artifact (--aot):
     the product);
   - the packaged framework's code section is the blob the descriptor names
     (SHA-256), and the descriptor is for the accepted Android release;
+  - that blob names the packaged system: the release ID, the manifest digest
+    and the system partition digest in its header are the packaged system's own
+    (release-manifest.json and guest/partition-layout.json), the values the
+    runtime compares at launch, so an archive never carries a blob the
+    application would not run;
   - the artifact installed below .build/android/aot is the one the descriptor
     names, and every file its blob is a function of (tools/aot, the decode
     partitions, the library list) equals what it was built with: a changed
@@ -519,6 +524,28 @@ def check_android(repo, report, staged_root, app):
 # -------------------------------------------------------------------- AOT --
 
 
+def check_blob_release(report, app, blob):
+    """The packaged blob is the one the packaged system selects at launch:
+    the runtime runs the component only when the release the blob names (its
+    ID, manifest digest and system partition digest) is the release it boots,
+    which the staged system's own files state. Anything else would archive an
+    application that silently runs without it."""
+    try:
+        _, _, named = release_artifact.parse_blob_header(blob[:release_artifact.BLOB_HEADER_BYTES])
+        booted = release_artifact.release_identity(app / PACKAGED_SYSTEM)
+    except release_artifact.ArtifactError as error:
+        report.error("the packaged AOT blob cannot be compared with the packaged system", str(error))
+        return
+    differing = [key for key in release_artifact.RELEASE_KEYS if named[key] != booted[key]]
+    if differing:
+        report.error(
+            "the packaged AOT blob was not made from the packaged system, so the application would run without it",
+            f"{', '.join(differing)} differ between the blob's header and {PACKAGED_SYSTEM}",
+        )
+    else:
+        report.note("the packaged AOT blob is made from the packaged system")
+
+
 def check_aot(repo, report, app):
     descriptor_path = repo / release_artifact.ACCEPTED_DESCRIPTOR
     accepted = None
@@ -584,6 +611,7 @@ def check_aot(repo, report, app):
                 )
             else:
                 report.note(f"the packaged AOT framework is the blob of {label}")
+                check_blob_release(report, app, blob)
 
     installed = repo / INSTALLED_AOT / release_directory
     if not installed.is_dir():

@@ -199,7 +199,12 @@ def read_blob_header(blob: Path) -> tuple[bytes, int, dict]:
     """The magic, the layout version and the release the header names (ID,
     manifest digest, system partition digest) of a blob."""
     with open(blob, "rb") as handle:
-        header = handle.read(BLOB_HEADER_BYTES)
+        return parse_blob_header(handle.read(BLOB_HEADER_BYTES))
+
+
+def parse_blob_header(header: bytes) -> tuple[bytes, int, dict]:
+    """read_blob_header of a blob's first bytes, wherever they came from (the
+    code section of a packaged framework)."""
     if len(header) < BLOB_HEADER_BYTES:
         fail("blob.bin is shorter than its header")
     magic, version = struct.unpack_from("<8sI", header, 0)
