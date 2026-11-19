@@ -45,7 +45,15 @@ public enum AndroidAppReadiness {
     /// (`1`; `0` is unfinished and says so), and that home activity has
     /// resumed. Every question has to be asked and answered: a command that
     /// cannot be asked, fails, or answers anything else is "not yet".
-    public static func check(shell: any GuestShell, storageReady: () async -> Bool?) async -> State {
+    ///
+    /// The home activity's first resume is Android's own start being over (an
+    /// activity started before it is pushed behind it). Once a look of this
+    /// run saw it (`homeReached`), another app in front is the normal state of
+    /// a running Android and does not say the start is not over: that look is
+    /// not made again, and every other question still is.
+    public static func check(
+        shell: any GuestShell, storageReady: () async -> Bool?, homeReached: Bool = false
+    ) async -> State {
         guard let boot = try? await shell.run(bootCompletedCommand, limit: .seconds(5)), boot.exitCode == 0,
               boot.text.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
         else { return .notYet }
@@ -59,6 +67,7 @@ public enum AndroidAppReadiness {
         case "0": return .setupUnfinished
         default: return .notYet
         }
+        if homeReached { return .ready }
         guard let activities = try? await shell.run(resumedCommand, limit: .seconds(10)), activities.exitCode == 0,
               resumed(homePackage, in: activities.text)
         else { return .notYet }

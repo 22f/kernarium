@@ -230,7 +230,7 @@ extension AppModel {
             guard let self else { return }
             let run = session
             let source = androidAppsSource
-            let outcome = await source?.awaitAndroidReady() ?? .timedOut
+            let outcome = await source?.awaitAndroidReady(homeReached: state.homeReached) ?? .timedOut
             guard session === run, !Task.isCancelled, state.open.pending?.request == request else { return }
             switch outcome {
             case .setupUnfinished:
@@ -238,6 +238,8 @@ extension AppModel {
             case .timedOut:
                 state.open.opened(.failed, for: request, now: Date())
             case .ready:
+                // A look saw Home resumed (or this run had): the start is over for the run.
+                state.homeReached = true
                 // The wait took seconds: the run may have ended, or paused for space.
                 guard state.open.readyToLaunch(request, in: androidAppOpenSituation, now: Date()) else {
                     state.scheduleExpiry { }

@@ -931,13 +931,14 @@ final class LiveRuntime: RuntimeDriver {
     /// The guest is asked only while it is awake (a guest being resumed is not
     /// asked), and the wait counts the guest's running time, so the time the
     /// application spends in the background does not run it out.
-    func awaitAndroidReady() async -> AndroidAppReadiness.Outcome {
+    func awaitAndroidReady(homeReached: Bool) async -> AndroidAppReadiness.Outcome {
         let shell = AdbGuestShell(operations: operations)
         let clock = clock
         return await AndroidAppReadiness.wait(
             check: { [weak self] in
                 guard let self, pause.guestIsAwake else { return .notYet }
-                return await AndroidAppReadiness.check(shell: shell, storageReady: { await self.storageReady() })
+                return await AndroidAppReadiness.check(
+                    shell: shell, storageReady: { await self.storageReady() }, homeReached: homeReached)
             },
             now: { clock.now },
             sleep: { try? await Task.sleep(for: $0) })

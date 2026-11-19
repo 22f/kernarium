@@ -21,8 +21,10 @@ protocol AndroidAppsSource: AnyObject {
     /// Waits until Android is ready for an app to be opened: its boot complete,
     /// its storage up, its home screen resumed. The wait ends early when
     /// Android's own first-run setup is on the screen, and by itself after
-    /// `AndroidAppReadiness.limit` of the guest's running time.
-    func awaitAndroidReady() async -> AndroidAppReadiness.Outcome
+    /// `AndroidAppReadiness.limit` of the guest's running time. `homeReached`
+    /// says that this run already saw the home screen resumed: another app in
+    /// front is then the normal state, and the home screen is not waited for.
+    func awaitAndroidReady(homeReached: Bool) async -> AndroidAppReadiness.Outcome
 }
 
 /// The tool, with every icon made one the host drew itself: the picture is
@@ -110,6 +112,10 @@ final class AndroidAppsState {
     /// A snapshot restore is under way, and the release of the requests it
     /// held waits for the model to have adopted what it restored.
     @ObservationIgnored var restoring = false
+    /// A look of this run saw Android's home screen resumed: the start is over
+    /// and an app in front no longer keeps a request from opening. Lasts for
+    /// the run.
+    @ObservationIgnored var homeReached = false
     /// A change (an install) was announced while a refresh was under way: the
     /// refresh's owner makes one more after it, because what changed may have
     /// come after the listing it captured.
@@ -228,6 +234,7 @@ final class AndroidAppsState {
         listed = false
         failed = false
         unavailable = false
+        homeReached = false
         expiry?.cancel()
         expiry = nil
     }

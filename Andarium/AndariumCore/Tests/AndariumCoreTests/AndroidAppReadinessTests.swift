@@ -48,6 +48,32 @@ struct AndroidAppReadinessTests {
         #expect(state == .ready)
     }
 
+    @Test func anAppInFrontIsReadyOnceHomeWasSeenInTheRun() async {
+        let settings = """
+            topResumedActivity=ActivityRecord{7f u0 com.android.settings/.Settings t9}
+            ResumedActivity: ActivityRecord{7f u0 com.android.settings/.Settings t9}
+            """
+        // Before the run saw Home, an app in front does not say the start is over.
+        let before = AnswerShell(resumed: settings)
+        #expect(await AndroidAppReadiness.check(shell: before, storageReady: { true }, homeReached: false) == .notYet)
+        // After it, it is the normal state of a running Android, and Home's resume is not asked again.
+        let after = AnswerShell(resumed: settings)
+        #expect(await AndroidAppReadiness.check(shell: after, storageReady: { true }, homeReached: true) == .ready)
+        #expect(!after.asked.contains(AndroidAppReadiness.resumedCommand))
+        // Every other question is still asked and still answered.
+        let booting = AnswerShell(boot: "0", resumed: settings)
+        #expect(await AndroidAppReadiness.check(shell: booting, storageReady: { true }, homeReached: true) == .notYet)
+        let noStorage = AnswerShell(resumed: settings)
+        #expect(await AndroidAppReadiness.check(shell: noStorage, storageReady: { false }, homeReached: true) == .notYet)
+        let noHome = AnswerShell(home: "", resumed: settings)
+        #expect(await AndroidAppReadiness.check(shell: noHome, storageReady: { true }, homeReached: true) == .notYet)
+        let unfinished = AnswerShell(setup: "0", resumed: settings)
+        #expect(await AndroidAppReadiness.check(shell: unfinished, storageReady: { true }, homeReached: true) == .setupUnfinished)
+        let unknown = AnswerShell(setup: nil, resumed: settings)
+        unknown.set(AndroidAppReadiness.setupCommand, GuestShellOutput(text: "null\n", exitCode: 0))
+        #expect(await AndroidAppReadiness.check(shell: unknown, storageReady: { true }, homeReached: true) == .notYet)
+    }
+
     @Test func theSetupIsAskedForTheUserInTheForeground() {
         #expect(AndroidAppReadiness.setupCommand == "settings --user current get secure user_setup_complete")
     }

@@ -126,6 +126,13 @@ final class ScriptedAndroidApps: AndroidAppsSource {
     var readiness = AndroidAppReadiness.Outcome.ready
     var readyDelay = Duration.milliseconds(400)
     private(set) var readinessAsked = 0
+    /// Plays the production check's first-HOME gate: while an app is in
+    /// front (`homeInFront` false) Android is not ready for an open that
+    /// has to see Home resumed, and the wait runs out.
+    var requiresHomeResumed = false
+    var homeInFront = true
+    /// What each wait for readiness was told of the run having seen Home.
+    private(set) var homeReachedAsked: [Bool] = []
 
     init(tool: ScriptedAppsTool = ScriptedAppsTool()) {
         self.tool = tool
@@ -133,9 +140,11 @@ final class ScriptedAndroidApps: AndroidAppsSource {
 
     var androidAppsTool: (any AndroidAppsTool)? { tool }
 
-    func awaitAndroidReady() async -> AndroidAppReadiness.Outcome {
+    func awaitAndroidReady(homeReached: Bool) async -> AndroidAppReadiness.Outcome {
         readinessAsked += 1
+        homeReachedAsked.append(homeReached)
         try? await Task.sleep(for: readyDelay)
+        if requiresHomeResumed, !homeReached, !homeInFront { return .timedOut }
         return readiness
     }
 

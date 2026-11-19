@@ -769,6 +769,23 @@ final class AndroidAppsModelTests {
         #expect(rig.state.open.pending != nil)
     }
 
+    @Test func aSecondAppOpensWhileTheFirstIsInFrontWithoutWaitingForHomeAgain() async throws {
+        let rig = try rig(phase: .running(.normal))
+        rig.scripted.requiresHomeResumed = true
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually(3) { rig.tool.opened == [comet.component] })
+        // The first app is resumed now: Home is not the activity in front.
+        rig.scripted.homeInFront = false
+        rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
+        #expect(await eventually(3) { rig.tool.opened == [comet.component, inkleaf.component] }, "one launch of the second app")
+        #expect(rig.state.open.banner == nil, "no timeout")
+        // A new run has not seen Home: its first open waits for it, and an app in front keeps it from coming.
+        rig.model.androidAppsRunEnded()
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually(3) { rig.state.open.banner?.failure == .tookTooLong })
+        #expect(rig.tool.opened == [comet.component, inkleaf.component])
+    }
+
     @Test func aLaunchAlreadySentIsNotSentAgainByAPauseAndAResume() async throws {
         let rig = try rig(phase: .running(.normal))
         // The command is out and its reply is slow.

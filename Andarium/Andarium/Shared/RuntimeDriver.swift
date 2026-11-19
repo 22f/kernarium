@@ -285,7 +285,7 @@ extension RuntimeDriver {
     func isOldAppOpen(_ package: String) async -> Bool? { nil }
     /// A driver with no image to ask has no apps to offer and cannot open one.
     var androidAppsTool: (any AndroidAppsTool)? { nil }
-    func awaitAndroidReady() async -> AndroidAppReadiness.Outcome { .timedOut }
+    func awaitAndroidReady(homeReached: Bool) async -> AndroidAppReadiness.Outcome { .timedOut }
     /// A driver with no guest to read adds nothing.
     func guestStallFiles() async -> [BugReportArchive.Entry] { [] }
     /// A driver with no session record has nothing to tell.
