@@ -287,6 +287,10 @@ public final class IconProtocolTest {
         final Map<Runnable, ScheduledFuture<?>> futures = new IdentityHashMap<>();
         /** Whether a posted idle cleanup runs by itself after its delay (else the row runs it). */
         volatile boolean autoIdle = true;
+        /** When set, the first post parks the posting (request) thread here, still holding its turn, until released. */
+        volatile CountDownLatch parkFirstPost;
+        final CountDownLatch firstPostParked = new CountDownLatch(1);
+        final java.util.concurrent.atomic.AtomicBoolean firstPost = new java.util.concurrent.atomic.AtomicBoolean();
         volatile boolean connects = true;
         volatile boolean refuses;
         volatile long connectMillis = 20;
@@ -374,6 +378,15 @@ public final class IconProtocolTest {
                 }
                 if (autoIdle) {
                     futures.put(task, main.schedule(task, millis, TimeUnit.MILLISECONDS));
+                }
+                CountDownLatch park = parkFirstPost;
+                if (park != null && firstPost.compareAndSet(false, true)) {
+                    firstPostParked.countDown();
+                    try {
+                        park.await();
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
                 }
             }
 
@@ -790,6 +803,7 @@ public final class IconProtocolTest {
                 check(rig.removed.contains(stale), "the second removes the cleanup the first scheduled");
                 // The stale cleanup was dispatched already, as a late one can be: it must do nothing.
                 rig.main.submit(stale).get();
+                Thread.sleep(150); // an unbind is made on a thread of its own: give a wrong one the time to show
                 same(0, rig.unbinds.get(), "a cleanup scheduled before the last request does not unbind its worker");
                 rig.main.submit(rig.lastPosted()).get();
                 waitFor(() -> rig.unbinds.get() == 1, 3000, "the cleanup of the last request does");
@@ -815,6 +829,74 @@ public final class IconProtocolTest {
                 second.await();
                 check(second.ok(), "the request's connection was delivered: it took " + second.millis + " ms");
                 check(second.millis < 500, "without waiting for a timeout: " + second.millis + " ms");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-an-idle-cleanup-that-finds-the-turn-held-is-not-lost", () -> {
+            // The request that scheduled the cleanup is paused between posting it and unlocking; the idle delay expires
+            // and the cleanup is dispatched while that request still holds the turn. It must look again, not give up:
+            // when the turn is free the worker is unbound, once.
+            Rig rig = new Rig();
+            try {
+                rig.parkFirstPost = new CountDownLatch(1);
+                IconWorkerCore core = rig.core(LIMITS);
+                Call call = new Call(core, 0);
+                check(rig.firstPostParked.await(5, TimeUnit.SECONDS), "the request is paused after posting its cleanup");
+                Thread.sleep(LIMITS.idleMillis + 250); // the delay expires, the cleanup is dispatched and finds the turn held
+                same(0, rig.unbinds.get(), "the turn is held: nothing is unbound");
+                rig.parkFirstPost.countDown();
+                call.await();
+                check(call.ok(), "the request was answered");
+                waitFor(() -> rig.unbinds.get() == 1, 3000, "the cleanup was lost: the worker stays bound");
+                Thread.sleep(250);
+                same(1, rig.unbinds.get(), "exactly once");
+                check(ask(core).ok(), "and the next request binds again");
+                same(2, rig.binds.get(), "a new worker");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-a-cleanup-of-an-older-request-does-nothing-and-is-not-retried", () -> {
+            Rig rig = new Rig();
+            try {
+                rig.autoIdle = false;
+                IconWorkerCore core = rig.core(LIMITS);
+                check(ask(core).ok(), "the first");
+                Runnable stale = rig.lastPosted();
+                rig.drawMillis = 400;
+                Call second = new Call(core, 0);
+                waitFor(() -> rig.running.get() == 1, 3000, "the second is drawing, with the turn");
+                int posts = rig.posted.size();
+                rig.main.submit(stale).get(5, TimeUnit.SECONDS); // dispatched while a newer request holds the turn
+                same(posts, rig.posted.size(), "it is stale: it looks again for nothing");
+                same(0, rig.unbinds.get(), "and it unbinds nothing");
+                second.await();
+                check(second.ok(), "the second was answered by the worker it was using");
+                rig.main.submit(stale).get(); // and now that the turn is free
+                Thread.sleep(150); // an unbind is made on a thread of its own: give a wrong one the time to show
+                same(0, rig.unbinds.get(), "still nothing: its generation is not the current one");
+                rig.main.submit(rig.lastPosted()).get();
+                waitFor(() -> rig.unbinds.get() == 1, 3000, "the cleanup of the last request does unbind");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-a-cleanup-that-keeps-finding-the-turn-held-gives-up", () -> {
+            Rig rig = new Rig();
+            try {
+                rig.autoIdle = false;
+                rig.parkFirstPost = new CountDownLatch(1);
+                IconWorkerCore core = rig.core(LIMITS);
+                Call call = new Call(core, 0);
+                check(rig.firstPostParked.await(5, TimeUnit.SECONDS), "the request is paused after posting its cleanup");
+                for (int i = 0; i < IconWorkerCore.MAX_CLEANUP_RETRIES + 20; i++) {
+                    // bounded: a cleanup that waits for the turn would hold the main thread, and this with it
+                    rig.main.submit(rig.lastPosted()).get(5, TimeUnit.SECONDS);
+                }
+                same(1 + IconWorkerCore.MAX_CLEANUP_RETRIES, rig.posted.size(), "one cleanup and a bounded number of looks again");
+                rig.parkFirstPost.countDown();
+                call.await();
             } finally {
                 rig.shutdown();
             }

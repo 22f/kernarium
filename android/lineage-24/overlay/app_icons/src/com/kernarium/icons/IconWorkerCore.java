@@ -31,6 +31,11 @@ import java.util.concurrent.locks.ReentrantLock;
  * next bind waits for that release (within its own deadline), so that a new bind never meets the worker that is being
  * ended.
  *
+ * <p>An idle cleanup that finds the turn held does not wait for it; it looks again a little later (a bounded number of
+ * times), because the request that scheduled it holds the turn until it has returned and may not have unlocked yet, and
+ * nobody else would schedule another. A cleanup of an older request has nothing to look for: the newer request schedules
+ * its own.
+ *
  * <p>One deadline covers a request from its arrival: the wait for its turn, the bind and the drawing. A request whose
  * deadline passed while it queued never starts drawing, and every request is answered before the shell tool's own limit
  * (its eight seconds) by the deadline's margin. The idle cleanup never waits for the worker's turn: it runs on the
@@ -50,6 +55,10 @@ final class IconWorkerCore {
             this.idleMillis = idleMillis;
         }
     }
+
+    /** How long a cleanup that found the turn held waits before it looks again, and how many times it does. */
+    static final long CLEANUP_RETRY_MILLIS = 50;
+    static final int MAX_CLEANUP_RETRIES = 100;
 
     /** A request's whole time (its turn, the bind and the drawing), within the tool's 8 s; a bind; an idle worker. */
     static final Limits PRODUCTION = new Limits(7_000, 1_000, 5_000);
@@ -137,8 +146,8 @@ final class IconWorkerCore {
     private final ReentrantLock mTurn = new ReentrantLock(true);
     private Connection mConnection;
     private Handle mHandle;
-    /** Moves with every request: an idle cleanup scheduled before it is stale. */
-    private long mGeneration;
+    /** Moves with every request: an idle cleanup scheduled before it is stale. Written in the turn, read without it. */
+    private volatile long mGeneration;
     /** The idle cleanup scheduled by the last request. */
     private Runnable mIdle;
     /** The release of the bind detached last: counted down when its unbind has returned; null when none is out. */
@@ -284,21 +293,39 @@ final class IconWorkerCore {
     }
 
     private void scheduleIdle() {
-        final long generation = mGeneration;
         if (mHandle != null) {
-            mIdle = () -> {
-                if (!mTurn.tryLock()) {
-                    return; // a request holds the turn: it schedules the next cleanup itself
-                }
-                try {
-                    if (generation == mGeneration) { // else a request has come since this was scheduled
-                        disconnect();
-                    }
-                } finally {
-                    mTurn.unlock();
-                }
-            };
+            mIdle = new Cleanup(mGeneration);
             mPoster.postDelayed(mIdle, mLimits.idleMillis);
+        }
+    }
+
+    /** The idle cleanup one request schedules: it ends the worker unless a request has come since. */
+    private final class Cleanup implements Runnable {
+        private final long mScheduledIn;
+        /** Only the platform's main thread runs it. */
+        private int mRetries;
+
+        Cleanup(long generation) {
+            mScheduledIn = generation;
+        }
+
+        @Override
+        public void run() {
+            if (!mTurn.tryLock()) {
+                // Never wait for the turn here: this is the platform's main thread, which a pending bind's connection needs.
+                // A newer request schedules its own cleanup; the request that scheduled this one may not have unlocked yet.
+                if (mScheduledIn == mGeneration && mRetries++ < MAX_CLEANUP_RETRIES) {
+                    mPoster.postDelayed(this, CLEANUP_RETRY_MILLIS);
+                }
+                return;
+            }
+            try {
+                if (mScheduledIn == mGeneration) { // else a request has come since this was scheduled
+                    disconnect();
+                }
+            } finally {
+                mTurn.unlock();
+            }
         }
     }
 }
