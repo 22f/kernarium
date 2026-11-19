@@ -152,7 +152,8 @@ struct AppEntry {
             Tips.showAllTipsForTesting()
         } else if screen.hasPrefix("session") || screen.hasPrefix("settings") || screen.hasPrefix("files")
             || screen.hasPrefix("recovery") || screen.hasPrefix("boot")
-            || screen.hasPrefix("space-pause") || screen.hasPrefix("sms-") || Self.operationScreens.contains(screen) {
+            || screen.hasPrefix("space-pause") || screen.hasPrefix("sms-") || screen.hasPrefix("add-home")
+            || Self.operationScreens.contains(screen) {
             Tips.hideAllTipsForTesting()
         }
         try? Tips.configure([.displayFrequency(.immediate)])
@@ -161,7 +162,7 @@ struct AppEntry {
     func makeModel() -> AppModel {
         CaptureState.begin(screen: screen)
         applyColorScheme()
-        let lowSpace = lowSpace || ["create-low-space", "start-low-space", "home-low-space"].contains(screen)
+        let lowSpace = lowSpace || ["create-low-space", "start-low-space", "home-low-space", "add-home-wait-space"].contains(screen)
         let host = WhatsNewPreview.host(for: screen) ?? SnapshotPreview.host(for: screen)
             ?? PreviewData.host(lowSpace: lowSpace, device: device)
         var guest: Guest? = PreviewData.sampleGuest(on: host)
@@ -475,6 +476,8 @@ struct AppEntry {
         case "feedback-boot", "feedback-boot-filled", "feedback-boot-details", "feedback-boot-finished",
              "feedback-boot-removed":
             slowBoot(stage: 3, seconds: 197)
+        case let name where AddToHomePreview.handles(name):
+            AddToHomePreview.prepare(screen: name, model: model, freeze: freeze)
         default:
             break
         }
@@ -736,6 +739,7 @@ struct AppEntry {
             default: break
             }
         }
+        await AddToHomePreview.applyDeferred(screen: screen, model: model)
         switch screen {
         case "create", "create-low-space":
             model.sheet = .create

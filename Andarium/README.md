@@ -1334,6 +1334,42 @@ is on. `AndariumCore/Adb` speaks the protocol.
   the switch is when the listing taken as the file went again and the one after
   the install differ by an app: the card's detail gains two sentences. The
   switch is the person's choice per app; Andarium keeps nothing of it.
+- **Add to Home Screen** (Settings > Apps) puts an Android app's own icon and
+  name on the iOS Home Screen, through Apple's Shortcuts. An App Intent
+  (`OpenAndroidAppIntent`, `Shared/AndroidAppIntents.swift`) has one entity per
+  launchable app, `AndroidAppEntity`, identified by the `package/class` of its
+  launcher activity, so an icon made before Android was erased finds its app
+  again once the app is reinstalled. A held tile in Shortcuts adds the icon; the
+  row opens a chooser and a guide with Apple's Shortcuts button. There is no URL
+  scheme, extension or shared container: the intent runs in Andarium's process.
+  The list comes from the image's `kernarium_apps` tool
+  ([`android/lineage-24`](../android/lineage-24/README.md)) through
+  `AndroidAppsTool` and `AndroidAppRefresh` in `AndariumCore`, and is cached by
+  `AndroidAppStore` (catalog, icons, and a small record per icon that survives
+  an erase), so the tiles and the chooser answer while Android is off. The row
+  exists only in a normal session whose image has the tool. A Mac and a Vision
+  Pro have no Home Screen: there the intent runs, but the apps are no entities,
+  nothing is written to Spotlight and the tiles are not told of them. An icon
+  is stored only as a picture the host drew itself (`FlatteningAppsTool`), and a
+  label as the tool's own sanitising makes it, whatever the tool or the cache
+  file says.
+  A request from an icon follows the Start button's rules (`AppOpenPlanner`): a
+  running Android opens the app once `AndroidAppReadiness` says it is ready
+  (setup finished for the foreground user; for a request that began the boot or
+  arrived during it, the home screen's first resume observed, and once the boot
+  is over another app in front is no obstacle; a launch that was sent is never
+  sent again), a stopped one is started, and a
+  start that needs the person's answer (an unfinished update, too little space,
+  a restore under way) waits for it in a card above Home's notice; a request
+  during an erase is dropped. The request is in memory only and Don't open
+  drops it. A failure is a banner over Android. The switch on the chooser governs Spotlight (Search) only: every
+  write to the index takes one ordered path (`AndroidAppsIndexWriter`), judged
+  against the switch and the catalog as they are when it runs, and a launch
+  finishes a write that failed. The tiles, the entities and the Siri phrase do
+  not follow the switch. The feature is in every build configuration. Tests:
+  `AndariumCore`'s `AppOpen*`, `AndroidApp*` suites, the hosted
+  `AndroidApps*Tests` and the preview's `AddToHomeUITests`
+  (`-screen add-home-*`, `Preview/AddToHomePreview.swift`).
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB
@@ -1487,6 +1523,9 @@ nothing.
 session a scripted list of two made-up old apps in place of the image's command:
 `apps` lists them (one on and open), `refuse` also refuses every change, `none` is
 an image without the command.
+`ANDARIUM_ANDROID_APPS_PROBE=1`, with the probe, gives its session the played list of
+made-up Android apps that Add to Home Screen's preview screens use, in the cache and
+the App Shortcuts, so that Apple's Shortcuts shows their tiles under Andarium.
 `ANDARIUM_TEXT_MESSAGES=1` turns on the Text message entrance that the device
 application holds back until an accepted release image carries the service
 (`Capabilities.device`); tests and proof images use it.

@@ -15,6 +15,7 @@ text is the key. The strings live in:
   Andarium/Localization/Review.xcstrings        the text of Review on the App Store (table "Review"), carried by the builds that have it only
   Andarium/Localization/StoreLink.xcstrings     the texts of the App Store notice (table "StoreLink"), carried by the TestFlight builds that have it only
   Andarium/Localization/FollowX.xcstrings       the text of Follow developer on X (table "FollowX"), carried by the builds that have it only
+  Andarium/Localization/AppShortcuts.xcstrings  the phrases Siri and Search understand for Add to Home Screen (table "AppShortcuts")
   Andarium/AndariumCore/Sources/AndariumCore/Resources/Localizable.xcstrings
                                                 the words the model says
 
@@ -110,6 +111,7 @@ CATALOGS = {
     "Review": "Andarium/Localization/Review.xcstrings",
     "StoreLink": "Andarium/Localization/StoreLink.xcstrings",
     "FollowX": "Andarium/Localization/FollowX.xcstrings",
+    "AppShortcuts": "Andarium/Localization/AppShortcuts.xcstrings",
     "AndariumCore": CORE_CATALOG,
 }
 ENGLISH_ONLY = "Andarium/Localization/english-only.json"
@@ -138,6 +140,7 @@ SYNC_SOURCES = {
     "Review": ("Andarium/Andarium/",),
     "StoreLink": ("Andarium/Andarium/",),
     "FollowX": ("Andarium/Andarium/",),
+    "AppShortcuts": ("Andarium/Andarium/",),
     "AndariumCore": ("Andarium/AndariumCore/Sources/AndariumCore/",),
 }
 
@@ -247,6 +250,10 @@ def leaves(localization: dict, path: str = ""):
     """Every string unit of one language's localization: (where, unit, plural category or None)."""
     if "stringUnit" in localization:
         yield path, localization["stringUnit"], None
+    # An App Shortcut's phrases: one unit for each, in the state of the set.
+    string_set = localization.get("stringSet", {})
+    for index, value in enumerate(string_set.get("values", []), start=1):
+        yield f"/phrase {index}", {"state": string_set.get("state"), "value": value}, None
     for name, substitution in localization.get("substitutions", {}).items():
         yield from leaves(substitution, f"{path}/substitution {name}")
     for kind, cases in localization.get("variations", {}).items():

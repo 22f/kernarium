@@ -102,6 +102,14 @@ nonisolated struct AdbGuestShell: GuestShell {
     }
 }
 
+/// The image's `kernarium_apps` tool prints binary pictures: its answers are
+/// read as the bytes the shell sent.
+extension AdbGuestShell: GuestBinaryShell {
+    func runBinary(_ command: String, limit: Duration) async throws -> ShellResult {
+        try await operations.shell(command, limit: limit)
+    }
+}
+
 /// What a bug report has left in the guest, shared between the operation's
 /// thread and the cleanup that follows a cancel.
 nonisolated final class BugReportTrail: @unchecked Sendable {
