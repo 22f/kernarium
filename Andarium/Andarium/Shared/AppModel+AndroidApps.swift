@@ -304,7 +304,7 @@ extension AppModel {
     /// The person answered what Home asked (Start, Update and start): a
     /// request that waited is starting now.
     func androidAppsPersonStarted() {
-        androidApps.open.personStarted()
+        androidApps.open.personStarted(now: Date())
     }
 
     /// A snapshot operation ended. A restore holds the release of the requests

@@ -271,9 +271,15 @@ public struct AppOpenState: Equatable, Sendable {
     }
 
     /// The person answered what Home asked (Start, Update and start, Restore
-    /// then Start): a request that waited is starting now.
-    public mutating func personStarted() {
-        guard var pending, case .waiting = pending.stage else { return }
+    /// then Start): a request that waited is starting now. The wait has its
+    /// limit whenever the expiry gets to it: a Start that comes first finds the
+    /// request over, and starts Android without it.
+    public mutating func personStarted(now: Date) {
+        guard var pending, case let .waiting(_, since) = pending.stage else { return }
+        if now.timeIntervalSince(since) >= Self.holdLimit {
+            self.pending = nil
+            return
+        }
         pending.stage = .starting
         self.pending = pending
     }
