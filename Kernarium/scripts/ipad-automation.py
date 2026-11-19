@@ -519,15 +519,17 @@ def answered_without_heartbeat(options, timeout=60):
     return status == 0 or bool(MISSING_FILE.search(output))
 
 
-def device_answers(options, timeout=60):
-    """Whether the device answers a read: it gives its heartbeat, or says that
-    there is none to give. A connected device with no host to read answers.
-    Both reads are made within `timeout` in all."""
+def device_reply(options, timeout=60):
+    """(answered, state): whether the device answers a read, and the heartbeat
+    it gave. It answers by giving its heartbeat, or by saying that there is
+    none to give: a connected device with no host to read answers (with no
+    state). Both reads are made within `timeout` in all."""
     began = time.monotonic()
-    if host_state(options, timeout) is not None:
-        return True
+    state = host_state(options, timeout)
+    if state is not None:
+        return True, state
     return answered_without_heartbeat(
-        options, max(1, timeout - (time.monotonic() - began)))
+        options, max(1, timeout - (time.monotonic() - began))), None
 
 
 def liveness(state):
@@ -2148,6 +2150,8 @@ class Watch:
         self.pending = None
         self.cadence = Cadence(clock)
         self.blind_said = False
+        # The hosts the replacement in hand retired (see `replace`).
+        self.retired = set()
         self.restarts = 0
         self.restart_times = [t for t in self.record.data.get("restart_times", [])
                               if isinstance(t, (int, float))]
@@ -2380,7 +2384,7 @@ class Watch:
         expected = None
         # The hosts this watch ended: what the device's heartbeat may name
         # without being another start's host.
-        retired = {verdict.get("nonce"), verdict.get("record_nonce")}
+        retired = self.retired = {verdict.get("nonce"), verdict.get("record_nonce")}
         for number in range(1, WATCH_ATTEMPTS + 1):
             try:
                 with LaunchLock(options, self.stop.is_set):
@@ -2392,9 +2396,11 @@ class Watch:
                 self.say(f"{refusal}; looking again")
                 self.observer.reset()
                 return AGAIN
-            refused = isinstance(step, tuple)
-            if refused:
-                # Nothing was started, and nothing asked of the device.
+            refused = isinstance(step, tuple) and step[0] == "retry"
+            if isinstance(step, tuple):
+                # Nothing was started, and nothing asked of the device: a start
+                # refused before anything began, or one not made because the
+                # device could not be checked.
                 detail = step[1]
             elif isinstance(step, Launch):
                 retired.add(step.nonce)
@@ -2440,6 +2446,11 @@ class Watch:
             # for whatever refused it may pass; a host that ended with the
             # connection lost waits first for the device to answer.
             waited = None if refused else self.await_device(detail)
+            if waited == "foreign":
+                self.say("not starting again: the device's heartbeat names a "
+                         "host this watch did not start; looking again")
+                self.observer.reset(forget=True)
+                return AGAIN
             if waited == "timeout":
                 return self.give_up(
                     START_FAILED,
@@ -2460,7 +2471,8 @@ class Watch:
         "timeout", or "stopped" when the watch was told to end. A stop is
         looked for before each read, and no read is longer than
         WATCH_READ_WAIT or than what is left of the wait; an answer that comes
-        after the deadline is no answer."""
+        after the deadline is no answer. "foreign" when the device answers with
+        the heartbeat of a host outside `self.retired`."""
         options = self.options
         deadline = self.clock.monotonic() + WATCH_RECONNECT_WAIT
         announced = False
@@ -2470,10 +2482,16 @@ class Watch:
             left = deadline - self.clock.monotonic()
             if left <= 0:
                 return "timeout"
-            answered = device_answers(options, max(1, min(WATCH_READ_WAIT, left)))
+            answered, state = device_reply(
+                options, max(1, min(WATCH_READ_WAIT, left)))
             if self.clock.monotonic() >= deadline:
                 return "timeout"
             if answered:
+                # The read that finds the device answering may show a host
+                # another start made meanwhile.
+                named = state.get("nonce") if state else None
+                if named and named not in self.retired:
+                    return "foreign"
                 return None
             if not announced:
                 self.say(f"the device is not answering ({detail}); waiting up to "
@@ -2502,13 +2520,19 @@ class Watch:
                      "looking again")
             self.observer.reset(forget=True)
             return AGAIN
-        state = host_state(self.options, timeout=WATCH_READ_WAIT)
+        answered, state = device_reply(self.options, WATCH_READ_WAIT)
         named = state.get("nonce") if state else None
         if named and named not in retired:
             self.say(f"not starting again: the device's heartbeat names a host "
                      f"this watch did not start ({named[:8]}); looking again")
             self.observer.reset(forget=True)
             return AGAIN
+        if not answered:
+            # A read that failed says nothing of whether another host serves,
+            # so it is no permission to start; a device that says there is no
+            # heartbeat is a confirmed absence, and is.
+            return ("unverified", "the device did not answer the check that no "
+                    "other host serves")
         return self.start_attempt()
 
     def start_attempt(self):

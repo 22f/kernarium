@@ -1041,6 +1041,63 @@ class ReconnectTests(WatchTestCase):
         self.invoked(3)
         self.assertIsNone(watch.code, self.messages)
 
+    def test_a_host_the_reconnect_read_shows_is_followed_when_the_retry_check_fails(self) -> None:
+        # Rule (R2): a start from another state directory finishes while the
+        # watch waits for the device, so the read that finds the device
+        # answering shows that host. The watch follows it. The check made before
+        # a second start, which fails once here, is never what decides.
+        self.tune(HEARTBEAT_STALE=1, WATCH_RECONNECT_WAIT=15, WATCH_BACKOFF=(1, 1, 1))
+        self.device.scenarios([{"kind": "serve"},
+                               {"kind": "exit", "status": 70, "unreachable": True},
+                               {"kind": "serve"}, {"kind": "serve"}])
+        first = self.watch_over_host()
+        reached, resume = threading.Event(), threading.Event()
+        in_restart = threading.local()
+        failed = []
+        real_await = automation.Watch.await_device
+        real_restart = automation.Watch.restart
+        real_read = automation.host_state
+
+        def await_device(watch, detail):
+            reached.set()
+            if not resume.wait(20):
+                raise AssertionError("the manual start did not finish")
+            return real_await(watch, detail)
+
+        def restart(watch, *arguments):
+            in_restart.on = True
+            try:
+                return real_restart(watch, *arguments)
+            finally:
+                in_restart.on = False
+
+        def read(options, *arguments, **keywords):
+            if getattr(in_restart, "on", False) and not failed:
+                failed.append(1)
+                return None
+            return real_read(options, *arguments, **keywords)
+        with mock.patch.object(automation.Watch, "await_device", await_device), \
+                mock.patch.object(automation.Watch, "restart", restart), \
+                mock.patch.object(automation, "host_state", read):
+            self.device.control(first, "die")
+            self.assertTrue(reached.wait(20), self.messages)
+            self.device.unreachable(False)
+            self.device.wait(
+                lambda: self.device.silent_for() > automation.HEARTBEAT_STALE,
+                5, "the dead host's last beat is stale")
+            manual = self.options("start", "--wait", "15", *self.reports())
+            manual.state_dir = str(self.device.root / "other-state")
+            try:
+                with mock.patch.object(automation, "log", lambda message: None):
+                    self.assertEqual(automation.command_start(manual), 0)
+                human = automation.local_record(manual)["nonce"]
+            finally:
+                resume.set()
+            self.wait_record(state=automation.WATCHING, host=human)
+            self.invoked(3)
+        self.assertEqual(sum(self.device.alive(item["pid"])
+                             for item in self.device.invocations()), 1)
+
     def test_an_approval_failure_recorded_during_the_wait_is_not_retried_over(self) -> None:
         # Rule: whatever is latched while the watch waits is read again before
         # anything starts: a device that needs the owner gets no second start.
@@ -1062,7 +1119,7 @@ class DeviceAnswerTests(WatchTestCase):
     """What the watch calls the device answering, against the fake device."""
 
     def answers(self) -> bool:
-        return automation.device_answers(self.options("status"), timeout=20)
+        return automation.device_reply(self.options("status"), timeout=20)[0]
 
     def test_the_device_answers_with_a_heartbeat_or_with_only_the_files_absence(self) -> None:
         # Rule (R3): a connected device answers whether or not a host ever
@@ -1405,6 +1462,7 @@ class VerdictBoundaryTests(unittest.TestCase):
         self.patch(automation, "host_state",
                    lambda *args, **kwargs: dict(self.state))
         self.watch = automation.Watch(self.options, clock=self.clock)
+        self.watch.retired = {"same-launch"}
         scan = automation.LogScan(self.log)
         scan.read()
         self.watch.observer = automation.HostObserver(
@@ -1623,8 +1681,9 @@ class VerdictBoundaryTests(unittest.TestCase):
             [("retry", "lost")] * 2, records=foreign)
         self.assertEqual((result, started), (automation.AGAIN, 1))
         self.assertIsNone(self.watch.observer.beat)
-        # What the heartbeat shows of the hosts the watch retired, or of
-        # nothing, is no reason not to start.
+        # What the heartbeat shows of the hosts the watch retired is no reason
+        # not to start (a heartbeat that cannot be read at all is another
+        # matter: it is not permission either).
         self.state = dict(self.state, nonce="same-launch", time=10_000)
 
         def attempt():
@@ -1632,12 +1691,51 @@ class VerdictBoundaryTests(unittest.TestCase):
         result, started, _ = self.start_again(
             [("retry", "lost"), ("failed", "no")], records=attempt)
         self.assertEqual((result, started), (5, 2))
-        self.state = dict(self.state, nonce="same-launch", time=10_000)
+
+    def test_a_host_the_reconnect_read_shows_is_followed_not_started_beside(self) -> None:
+        # Rule (R2): the read that tells the watch the device answers may show
+        # the heartbeat of a host another start made while it waited. The watch
+        # goes back to observing it, whatever its later checks would say: the
+        # check before the second start is not even made.
+        reads = []
+
+        def read(options, timeout=60):
+            reads.append(1)
+            if len(reads) == 1:
+                return dict(self.state)   # the verdict's host, checked under the lock
+            if len(reads) == 2:
+                return dict(self.state, nonce="manual-host", time=10_500)
+            return None                   # a check that would fail
+        launches = [automation.Launch(mock.Mock(), self.log, f"launch-{number}")
+                    for number in range(2)]
+        with mock.patch.object(self.watch, "end_all", return_value=automation.ENDED), \
+                mock.patch.object(automation, "host_state", read), \
+                mock.patch.object(automation, "launch_host", side_effect=launches) as started, \
+                mock.patch.object(self.watch, "await_launch",
+                                  side_effect=[("retry", "lost")] * 2):
+            result = self.watch.replace(self.reason)
+        self.assertEqual((result, started.call_count), (automation.AGAIN, 1))
+        self.assertIsNone(self.watch.observer.beat)
+
+    def test_a_heartbeat_that_cannot_be_verified_is_not_permission_to_start(self) -> None:
+        # Rule (R2): before the second start the device's heartbeat is read. A
+        # read that fails (the tunnel dropped again) says nothing of whether
+        # another host serves, so it starts nothing: the watch waits for the
+        # device again, within its attempts. A device that answers that the
+        # heartbeat is not there is a confirmed absence, and the start is made.
         answers = iter([dict(self.state)])
         with mock.patch.object(automation, "host_state",
                                lambda *args, **kwargs: next(answers, None)):
-            result, started, _ = self.start_again(
-                [("retry", "lost"), ("failed", "no")])
+            result, started, waits = self.start_again([("retry", "lost")] * 4)
+        self.assertEqual((result, started), (5, 1))
+        self.assertEqual(len(waits), automation.WATCH_ATTEMPTS - 1)
+        self.assertEqual(self.watch.record.data["state"], automation.START_FAILED)
+        answers = iter([dict(self.state)])
+        with mock.patch.object(automation, "host_state",
+                               lambda *args, **kwargs: next(answers, None)), \
+                mock.patch.object(automation, "answered_without_heartbeat",
+                                  lambda *args, **kwargs: True):
+            result, started, _ = self.start_again([("retry", "lost"), ("failed", "no")])
         self.assertEqual((result, started), (5, 2))
 
     def test_a_refused_start_is_tried_again_after_the_backoff_alone(self) -> None:
