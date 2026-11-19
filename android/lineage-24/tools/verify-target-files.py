@@ -274,6 +274,8 @@ REQUIRED_ENTRIES = {
     "SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc",
     "SYSTEM_EXT/bin/kernarium_oldapp",
     "SYSTEM_EXT/framework/kernarium_oldapp.jar",
+    "SYSTEM_EXT/bin/kernarium_apps",
+    "SYSTEM_EXT/framework/kernarium_apps.jar",
     "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl",
     "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc",
     "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc",
@@ -320,6 +322,8 @@ REQUIRED_ENTRIES = {
     "VENDOR/overlay/KernariumPinnerOverlay.apk",
     # The service that delivers the host's text messages (overlay/sms).
     "SYSTEM_EXT/app/KernariumSms/KernariumSms.apk",
+    # The application that draws the launcher applications' icons for kernarium_apps (overlay/app_icons).
+    "SYSTEM_EXT/app/KernariumIcons/KernariumIcons.apk",
     *ABI_LIST_PROPERTY_FILES,
     *MESA_ELF_ENTRIES,
     *MESA_HAL_ENTRIES,
@@ -953,6 +957,19 @@ OLDAPP_WRAPPER_REQUIRED = (
     "CLASSPATH=$base/framework/kernarium_oldapp.jar",
     "base=/system_ext",
     f"exec app_process $base/bin {OLDAPP_CLASS}",
+)
+# The launcher-application command of Add to Home Screen (overlay/app_shortcuts) is the same kind of
+# shell tool: a wrapper script and a jar on system_ext. It keeps no property and no file, so it has no
+# policy of its own for the verifier to check.
+APPS_COMMAND = "kernarium_apps"
+APPS_WRAPPER = "SYSTEM_EXT/bin/kernarium_apps"
+APPS_JAR = "SYSTEM_EXT/framework/kernarium_apps.jar"
+APPS_CLASS = "com.kernarium.apps.Main"
+APPS_WRAPPER_REQUIRED = (
+    "#!/system/bin/sh",
+    "CLASSPATH=$base/framework/kernarium_apps.jar",
+    "base=/system_ext",
+    f"exec app_process $base/bin {APPS_CLASS}",
 )
 OLDAPP_PROPERTY_PREFIX = "persist.sys.kernarium.oldapp."
 OLDAPP_PROPERTY_TYPE = "kernarium_oldapp_prop"
@@ -1589,6 +1606,20 @@ def check_boot_policy(
         read_small(archive, infos[OLDAPP_WRAPPER]),
         read_small(archive, infos[OLDAPP_JAR]),
         set(infos),
+    )
+    check_apps_command(
+        read_small(archive, infos[APPS_WRAPPER]),
+        read_small(archive, infos[APPS_JAR]),
+        set(infos),
+    )
+    check_icons_app(
+        archive,
+        infos,
+        "\n".join(
+            read_small(archive, infos[name], PLATFORM_POLICY_LIMIT).decode("utf-8", errors="strict")
+            for name in SEAPP_CONTEXT_FILES
+            if name in infos
+        ),
     )
     check_media_codecs_c2(read_small(archive, infos["VENDOR/etc/media_codecs_c2.xml"]))
 
@@ -4237,6 +4268,7 @@ def check_kernel_policy(
     )
     check_policy_relaxations((platform_policy, vendor_policy, system_ext_policy), build_variant)
     check_mediaserver_property_audit((platform_policy, vendor_policy, system_ext_policy))
+    check_shell_density_property_audit((platform_policy, vendor_policy, system_ext_policy))
     contexts = [
         line
         for name in PROPERTY_CONTEXT_FILES
@@ -4833,6 +4865,24 @@ def check_keyboard_default_policy(
 
 
 def check_oldapp_switch(wrapper: bytes, jar: bytes, packaged: set[str]) -> None:
+    check_shell_java_tool(
+        wrapper, jar, packaged, OLDAPP_COMMAND, OLDAPP_JAR, OLDAPP_CLASS, OLDAPP_WRAPPER_REQUIRED
+    )
+
+
+def check_apps_command(wrapper: bytes, jar: bytes, packaged: set[str]) -> None:
+    check_shell_java_tool(wrapper, jar, packaged, APPS_COMMAND, APPS_JAR, APPS_CLASS, APPS_WRAPPER_REQUIRED)
+
+
+def check_shell_java_tool(
+    wrapper: bytes,
+    jar: bytes,
+    packaged: set[str],
+    command: str,
+    jar_path: str,
+    main_class: str,
+    wrapper_required: tuple[str, ...],
+) -> None:
     """The shell command is a wrapper script that starts the Java tool's class from its jar, and
     the image carries the tool's code: in the jar, or preoptimized beside it."""
     text = "\n".join(
@@ -4840,30 +4890,232 @@ def check_oldapp_switch(wrapper: bytes, jar: bytes, packaged: set[str]) -> None:
         for line in wrapper.decode("utf-8", errors="strict").splitlines()
         if not line.lstrip().startswith("#") or line.startswith("#!")
     )
-    for token in OLDAPP_WRAPPER_REQUIRED:
+    for token in wrapper_required:
         if token not in text:
-            fail(f"/system_ext/bin/{OLDAPP_COMMAND} does not contain '{token}'")
+            fail(f"/system_ext/bin/{command} does not contain '{token}'")
     try:
         with zipfile.ZipFile(io.BytesIO(jar)) as archive:
             names = archive.namelist()
             dex = archive.read("classes.dex") if "classes.dex" in names else None
     except (zipfile.BadZipFile, OSError, zlib.error) as problem:
-        fail(f"{OLDAPP_JAR} is not a readable jar: {problem}")
+        fail(f"{jar_path} is not a readable jar: {problem}")
     if dex is not None:
-        if b"L" + OLDAPP_CLASS.replace(".", "/").encode() + b";" not in dex:
-            fail(f"{OLDAPP_JAR} holds code without the class {OLDAPP_CLASS}")
+        if b"L" + main_class.replace(".", "/").encode() + b";" not in dex:
+            fail(f"{jar_path} holds code without the class {main_class}")
         return
     # Dexpreopting may strip the code from the jar into the odex and vdex beside it: one such pair
     # must be packaged, or there is no code to start.
-    stem = PurePosixPath(OLDAPP_JAR)
+    stem = PurePosixPath(jar_path)
     for isa in sorted(APP_ISAS):
         pair = [f"{stem.parent}/oat/{isa}/{stem.stem}.{suffix}" for suffix in ("odex", "vdex")]
         if all(name in packaged for name in pair):
             return
     fail(
-        f"{OLDAPP_JAR} has no classes.dex and no preoptimized odex and vdex of it is packaged "
-        f"(framework/oat/<isa>/{stem.stem}.odex and .vdex): the command {OLDAPP_COMMAND} has no code"
+        f"{jar_path} has no classes.dex and no preoptimized odex and vdex of it is packaged "
+        f"(framework/oat/<isa>/{stem.stem}.odex and .vdex): the command {command} has no code"
     )
+
+
+# The icon renderer (overlay/app_icons): the application that draws the launcher applications' icons for
+# kernarium_apps, so that no icon is drawn in the adb shell user's process. It is an ordinary application: in
+# app/ and not priv-app/, signed with the default key and not a platform one (so its seinfo is default and it
+# runs in untrusted_app), no sharedUserId, no permission asked, no activity, receiver or launcher entry, no
+# backup, direct-boot aware, and in the manifest one provider that only the holders of
+# ACCESS_CONTENT_PROVIDERS_EXTERNALLY (the shell user and the system) may use and one service that runs in an
+# isolated process and is not exported. The product gives it no SELinux rule of its own: its package selects
+# no seapp_contexts entry, and the platform's own entries put its two processes in an untrusted_app domain and
+# isolated_app. usesNonSdkApi lets the isolated process add the application's resource files the way the framework does.
+ICONS_PACKAGE = "com.kernarium.icons"
+ICONS_APK = "SYSTEM_EXT/app/KernariumIcons/KernariumIcons.apk"
+ICONS_APK_NAME = "KernariumIcons.apk"
+ICONS_PERMISSION = "android.permission.ACCESS_CONTENT_PROVIDERS_EXTERNALLY"
+APKCERTS = "META/apkcerts.txt"
+# The keys an application is signed with when the build gives it no certificate of its own, before and after release signing.
+DEFAULT_APP_KEYS = frozenset({"testkey", "releasekey"})
+ORDINARY_APP_DOMAIN = re.compile(r"untrusted_app(_\d+)?")
+ICONS_ABSENT_ATTRIBUTES = {
+    "manifest": ("sharedUserId", "sharedUserLabel"),
+    "application": ("debuggable", "persistent", "process", "sharedUserId", "testOnly", "backupAgent", "usesCleartextTraffic"),
+    "provider": ("readPermission", "writePermission", "grantUriPermissions", "multiprocess", "process", "enabled", "isolatedProcess"),
+    "service": ("permission", "process", "enabled", "externalService", "foregroundServiceType", "useAppZygote"),
+}
+
+
+def manifest_elements(manifest: bytes) -> list[tuple[str, dict[str, str | int | bool | None]]]:
+    """Every element of a compiled manifest in document order, with its attributes by name, typed as
+    manifest_element_attributes gives them."""
+    if len(manifest) < 8 or struct.unpack_from("<HH", manifest, 0)[0] != 0x0003:
+        raise ValueError("not a compiled XML file")
+    strings: list[str] = []
+    elements: list[tuple[str, dict[str, str | int | bool | None]]] = []
+    offset = struct.unpack_from("<H", manifest, 2)[0]
+    while offset + 8 <= len(manifest):
+        kind, header, size = struct.unpack_from("<HHI", manifest, offset)
+        if size < 8 or offset + size > len(manifest):
+            raise ValueError("truncated compiled XML chunk")
+        if kind == AXML_STRING_POOL:
+            strings = axml_strings(manifest, offset)
+        elif kind == AXML_START_ELEMENT:
+            body = offset + header
+            element = struct.unpack_from("<I", manifest, body + 4)[0]
+            if element >= len(strings):
+                raise ValueError("an element name outside the string pool")
+            attribute_start, attribute_size, count = struct.unpack_from("<HHH", manifest, body + 8)
+            attributes: dict[str, str | int | bool | None] = {}
+            for index in range(count):
+                position = body + attribute_start + index * attribute_size
+                name, _, _, data_type, data = struct.unpack_from("<IIHxBI", manifest, position + 4)
+                if name >= len(strings):
+                    raise ValueError("an attribute name outside the string pool")
+                if data_type == AXML_STRING_TYPE:
+                    if data >= len(strings):
+                        raise ValueError("an attribute value outside the string pool")
+                    attributes[strings[name]] = strings[data]
+                elif data_type in AXML_INTEGER_TYPES:
+                    attributes[strings[name]] = data
+                elif data_type == AXML_BOOLEAN_TYPE:
+                    attributes[strings[name]] = data != 0
+                else:
+                    attributes[strings[name]] = None
+            elements.append((strings[element], attributes))
+        offset += size
+    return elements
+
+
+def seapp_entry_names(entry: dict[str, str], name: str) -> bool:
+    """Whether an seapp_contexts entry's name field, a package or a prefix ending in * or :*, selects `name` (none selects all)."""
+    wanted = entry.get("name")
+    if wanted is None:
+        return True
+    if wanted.endswith("*"):
+        return name.startswith(wanted[:-1])
+    return wanted == name
+
+
+def seapp_applies(entry: dict[str, str], seinfo: str, name: str, target_sdk: int) -> tuple[int, int, int] | None:
+    """How specifically an seapp_contexts entry applies to the process of an ordinary installed application (not
+    privileged, not ephemeral, not started by run-as, not a system server, sdk sandbox or shared compute process) of this
+    seinfo, package and target SDK, as the key of its precedence (seinfo stated, name stated, the highest
+    minTargetSdkVersion), or None when a selector of the entry leaves it out."""
+    if any(entry.get(key) not in (None, "false") for key in
+           ("isSystemServer", "isEphemeralApp", "isPrivApp", "fromRunAs", "isIsolatedComputeApp", "isSdkSandboxNext",
+            "isSdkSandboxAudit")):
+        return None
+    if entry.get("seinfo") not in (None, seinfo) or not seapp_entry_names(entry, name):
+        return None
+    minimum = int(entry.get("minTargetSdkVersion", "0"))
+    if target_sdk < minimum or ("maxTargetSdkVersion" in entry and target_sdk > int(entry["maxTargetSdkVersion"])):
+        return None
+    return (1 if "seinfo" in entry else 0, 1 if "name" in entry else 0, minimum)
+
+
+def seapp_domain(entries: list[dict[str, str]], user: str, seinfo: str, name: str, target_sdk: int) -> str | None:
+    """The domain the platform picks for a process of this seapp user (_app or _isolated) of an application of this
+    seinfo, package and target SDK: the applicable entry of highest precedence, the earlier one of equals."""
+    best: tuple[tuple[int, int, int], dict[str, str]] | None = None
+    for entry in entries:
+        if entry.get("user") != user or "domain" not in entry:
+            continue
+        key = seapp_applies(entry, seinfo, name, target_sdk)
+        if key is not None and (best is None or key > best[0]):
+            best = (key, entry)
+    return best[1]["domain"] if best else None
+
+
+def seapp_app_domain(entries: list[dict[str, str]], seinfo: str, name: str, target_sdk: int) -> str | None:
+    """The domain of the process of an ordinary installed application (its own user id in the app range)."""
+    return seapp_domain(entries, "_app", seinfo, name, target_sdk)
+
+
+def seapp_isolated_domain(entries: list[dict[str, str]], seinfo: str, name: str, target_sdk: int) -> str | None:
+    """The domain of an isolated process of this application that does not share it with others."""
+    return seapp_domain(entries, "_isolated", seinfo, name, target_sdk)
+
+
+def manifest_component_class(package: str, name: object) -> str | None:
+    """The class a manifest names for a component: a name that starts with a dot, or has none, is the package's."""
+    if not isinstance(name, str) or not name:
+        return None
+    if name.startswith("."):
+        return package + name
+    return name if "." in name else f"{package}.{name}"
+
+
+def check_icons_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo], seapp_contexts: str) -> None:
+    """The icon renderer is the unprivileged, guarded application described above."""
+    for entry in sorted(infos):
+        parts = PurePosixPath(entry).parts
+        if "KernariumIcons" in parts and "priv-app" in parts:
+            fail(f"{entry}: the icon renderer is an ordinary application of app/, not a privileged one")
+    info = infos.get(ICONS_APK)
+    if info is None:
+        fail(f"{ICONS_APK} is missing: kernarium_apps has nothing to draw icons with")
+    try:
+        with zipfile.ZipFile(io.BytesIO(read_small(archive, info, 4 << 20))) as apk:
+            elements = manifest_elements(apk.read("AndroidManifest.xml"))
+    except (KeyError, OSError, ValueError, struct.error, IndexError, zipfile.BadZipFile) as problem:
+        fail(f"{ICONS_APK} has no readable manifest: {problem}")
+    names = [name for name, _ in elements]
+    if names[:1] != ["manifest"]:
+        fail(f"{ICONS_APK}: the manifest does not start with the manifest element")
+    first = {name: attributes for name, attributes in reversed(elements)}
+    if first["manifest"].get("package") != ICONS_PACKAGE:
+        fail(f"{ICONS_APK} is the package {first['manifest'].get('package')}, not {ICONS_PACKAGE}")
+    for kind in (*sorted(PERMISSION_REQUEST_ELEMENTS), "permission", "activity", "activity-alias", "receiver",
+                 "intent-filter", "uses-library", "uses-native-library", "meta-data", "grant-uri-permission", "path-permission"):
+        if kind in names:
+            fail(f"{ICONS_APK} has {kind}: the renderer asks for no permission and has no activity, receiver, filter or launcher entry")
+    for kind, wanted in (("application", 1), ("provider", 1), ("service", 1)):
+        if names.count(kind) != wanted:
+            fail(f"{ICONS_APK} has {names.count(kind)} {kind} elements, not {wanted}")
+    for kind, attributes in ICONS_ABSENT_ATTRIBUTES.items():
+        for attribute in attributes:
+            # By the key: a value that is a resource reference reads as no value, and is set all the same.
+            if attribute in first[kind] and not (attribute == "enabled" and first[kind][attribute] is True):
+                fail(f"{ICONS_APK}: the {kind} sets {attribute}")
+    application = first["application"]
+    for attribute, value in (("allowBackup", False), ("directBootAware", True), ("usesNonSdkApi", True)):
+        if application.get(attribute) is not value:
+            fail(f"{ICONS_APK}: the application's {attribute} is not {str(value).lower()}")
+    provider, service = first["provider"], first["service"]
+    for attribute, value in (("authorities", ICONS_PACKAGE), ("exported", True), ("permission", ICONS_PERMISSION),
+                             ("directBootAware", True)):
+        if provider.get(attribute) != value:
+            fail(f"{ICONS_APK}: the provider's {attribute} is {provider.get(attribute)!r}, not {value!r}: it is open only "
+                 f"to the holders of {ICONS_PERMISSION}")
+    for attribute, value in (("exported", False), ("isolatedProcess", True), ("directBootAware", True)):
+        if service.get(attribute) is not value:
+            fail(f"{ICONS_APK}: the service's {attribute} is {service.get(attribute)!r}, not {value!r}: it runs in an isolated process and is not exported")
+    for kind, component, wanted in (("provider", provider, "IconProvider"), ("service", service, "IconRenderService")):
+        found = manifest_component_class(ICONS_PACKAGE, component.get("name"))
+        if found != f"{ICONS_PACKAGE}.{wanted}":
+            fail(f"{ICONS_APK}: the {kind} is {found}, not {ICONS_PACKAGE}.{wanted}")
+    target = first.get("uses-sdk", {}).get("targetSdkVersion")
+    if not isinstance(target, int) or isinstance(target, bool):
+        fail(f"{ICONS_APK} has no integer targetSdkVersion: the domain of its process cannot be told")
+    if APKCERTS not in infos:
+        fail(f"{APKCERTS} is missing: the key of the icon renderer cannot be checked")
+    certificate = None
+    for line in read_small(archive, infos[APKCERTS]).decode("utf-8", errors="strict").splitlines():
+        fields = dict(re.findall(r'(\w+)="([^"]*)"', line))
+        if fields.get("name") == ICONS_APK_NAME:
+            certificate = fields
+    if certificate is None:
+        fail(f"{APKCERTS} has no line for {ICONS_APK_NAME}")
+    key = PurePosixPath(certificate.get("certificate", "")).name.removesuffix(".x509.pem")
+    if key not in DEFAULT_APP_KEYS or certificate.get("partition") != "system_ext":
+        fail(f"{ICONS_APK_NAME} is signed with {certificate.get('certificate')!r} on {certificate.get('partition')!r}: the renderer "
+             "takes the default key (never a platform key: its seinfo would be platform) and lives on system_ext")
+    entries = parse_seapp_contexts(seapp_contexts)
+    for entry in entries:
+        if "name" in entry and seapp_entry_names(entry, ICONS_PACKAGE) and entry["name"] != "":
+            fail(f"seapp_contexts select {entry.get('domain')} for the icon renderer by name ({entry['name']}): it has no policy of its own")
+    domain = seapp_app_domain(entries, "default", ICONS_PACKAGE, target)
+    if domain is None or ORDINARY_APP_DOMAIN.fullmatch(domain) is None:
+        fail(f"seapp_contexts put the icon renderer's provider in {domain}, not an untrusted_app domain")
+    isolated = seapp_isolated_domain(entries, "default", ICONS_PACKAGE, target)
+    if isolated != "isolated_app":
+        fail(f"seapp_contexts put the icon renderer's isolated service in {isolated}, not isolated_app")
 
 
 def check_oldapp_switch_policy(
@@ -5091,6 +5343,33 @@ def check_mediaserver_property_audit(policies: tuple[bytes, ...]) -> None:
     fail(
         "policy does not silence the denial of mediaserver reading vendor_default_prop "
         "(overlay/sepolicy/system_ext/private/mediaserver.te)"
+    )
+
+
+def check_shell_density_property_audit(policies: tuple[bytes, ...]) -> None:
+    """The shell user's read of the emulator's density property is silenced, as mediaserver's property read is.
+
+    kernarium_apps runs as the adb shell user. The resources code it uses reads
+    qemu.sf.lcd_density in a static initialiser and carries on without a value
+    when the shell domain may not read it. Without this rule every list and
+    icons call logs an audit denial that nothing needs to act on.
+    """
+    for policy in policies:
+        for match in CIL_DONTAUDIT_RULE.finditer(policy):
+            source, target, object_class, permissions = (
+                CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(index).decode())
+                for index in (1, 2, 3, 4)
+            )
+            if (
+                source == "shell"
+                and target == "qemu_sf_lcd_density_prop"
+                and object_class == "file"
+                and "read" in permissions.split()
+            ):
+                return
+    fail(
+        "policy does not silence the denial of the shell domain reading qemu_sf_lcd_density_prop "
+        "(overlay/sepolicy/system_ext/private/kernarium_apps.te)"
     )
 
 
