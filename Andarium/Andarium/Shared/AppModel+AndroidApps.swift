@@ -55,7 +55,11 @@ extension AppModel {
     @discardableResult
     func refreshAndroidApps(afterAChange: Bool = false) async -> Bool {
         let state = androidApps
-        guard canAskAndroidApps, !state.unavailable, let tool = androidAppsSource?.androidAppsTool else { return false }
+        guard canAskAndroidApps, !state.unavailable, let tool = androidAppsSource?.androidAppsTool else {
+            // A change announced while the guest is paused for space is listed once it resumes (`listTheChangeOwed`).
+            if afterAChange, !state.unavailable, case .running(.normal) = phase, spacePause != nil { state.refreshAgain = true }
+            return false
+        }
         if let running = state.inFlight {
             if afterAChange { state.refreshAgain = true }
             _ = await running.value

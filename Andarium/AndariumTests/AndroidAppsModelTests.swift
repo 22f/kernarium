@@ -982,6 +982,25 @@ final class AndroidAppsModelTests {
         #expect(AndroidAppsHub.shared.entities().contains { $0.id == extra.id })
     }
 
+    @Test func anInstallCommittedWhileAndroidIsPausedForSpaceIsListedOnceItResumes() async throws {
+        let rig = try rig(phase: .running(.normal))
+        await rig.model.refreshAndroidApps()
+        // No refresh is under way: Android pauses for space, and an install that was committed asks for a refresh.
+        rig.model.spacePause = SpacePause(freeBytes: 0, stage: .paused)
+        let extra = AndroidApp(
+            component: try #require(AndroidComponent(packageName: "com.example.latecomer", activityClass: "com.example.latecomer.Main")),
+            label: "Latecomer", builtIn: false, iconTag: "0000000000000043")
+        rig.tool.install(extra)
+        let asked = await rig.model.refreshAndroidApps(afterAChange: true)
+        #expect(!asked, "nothing is asked of a paused guest")
+        let listings = rig.tool.listingsAsked
+        // The person makes room and the guest resumes: the refresh that was owed is made.
+        rig.model.spacePause = nil
+        #expect(await eventually(3) { rig.state.apps.contains { $0.id == extra.id } && !rig.state.refreshing }, "the install is listed")
+        #expect(rig.tool.listingsAsked == listings + 1)
+        #expect(AndroidAppsHub.shared.entities().contains { $0.id == extra.id })
+    }
+
     // MARK: How an open ends, more
 
     @Test func anImageWithoutTheToolEndsAnOpenWithItsOwnBannerAndWithdrawsTheApps() async throws {
