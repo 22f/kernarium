@@ -147,6 +147,11 @@ PLT_CODE = (
     0xd61f0220,                                     # br x17
 )
 
+# The same stub in an .iplt section, as the linker makes them for the ifunc
+# targets of a static executable. It sits after every other function so the
+# functions before it keep their places.
+IPLT = DST_PAGE + 0x200
+
 
 # ---- instruction forms ----------------------------------------------------
 # One small function per form: the instructions of the form, then RET. The
@@ -543,8 +548,9 @@ def build() -> bytes:
         struct.pack_into("<I", text, address - TEXT, word)
     for index, word in enumerate(PLT_CODE):
         struct.pack_into("<I", text, PLT - TEXT + 4 * index, word)
+        struct.pack_into("<I", text, IPLT - TEXT + 4 * index, word)
     frame = eh_frame()
-    names = b"\0.text\0.plt\0.eh_frame\0.shstrtab\0"
+    names = b"\0.text\0.plt\0.iplt\0.eh_frame\0.shstrtab\0"
     size_load = EH_FRAME + len(frame)
     image = bytearray(size_load)
     image[TEXT:TEXT + len(text)] = text
@@ -561,11 +567,12 @@ def build() -> bytes:
     image += section(0, 0, 0, 0, 0, 0, 0)
     image += section(1, 1, 6, TEXT, TEXT, len(text), 4)
     image += section(7, 1, 6, PLT, PLT, 4 * len(PLT_CODE), 16)
-    image += section(12, 1, 2, EH_FRAME, EH_FRAME, len(frame), 8)
-    image += section(22, 3, 0, 0, shstr_offset, len(names), 1)
+    image += section(12, 1, 6, IPLT, IPLT, 4 * len(PLT_CODE), 16)
+    image += section(18, 1, 2, EH_FRAME, EH_FRAME, len(frame), 8)
+    image += section(28, 3, 0, 0, shstr_offset, len(names), 1)
     header = (b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8) +
               struct.pack("<HHIQQQIHHHHHH", 3, 183, 1, 0, 64, section_offset,
-                          0, 64, 56, 1, 64, 5, 4))
+                          0, 64, 56, 1, 64, 6, 5))
     program = struct.pack("<IIQQQQQQ", 1, 5, 0, 0, 0, size_load, size_load,
                           PAGE)
     image[0:len(header)] = header

@@ -22,9 +22,9 @@ blob and the framework are generated and never committed.
   names, and checks it again at build time; a tree whose tools differ from the
   artifact's fails the check.
 
-- `elf64.py` reads program headers and function ranges (`.eh_frame` and
-  `.plt`; for an OAT file, which has no unwind table, the function symbols of
-  its `.gnu_debugdata`).
+- `elf64.py` reads program headers and function ranges (`.eh_frame`, `.plt`
+  and `.iplt`; for an OAT file, which has no unwind table, the function symbols
+  of its `.gnu_debugdata`).
 - `a64decode.py` identifies an instruction exactly from
   `tests/unit/arm64/a64_instruction_decode_partitions.tsv`.
 - `asm.py` encodes the words the rewriter emits and resolves labels.

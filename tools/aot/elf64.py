@@ -130,13 +130,15 @@ class Elf:
         else:
             raise ElfError("no .eh_frame or .gnu_debugdata: functions cannot "
                            "be located")
-        # The PLT has no unwind entries: its stubs (adrp, ldr, add, br) are
-        # code like any other and the calls through them are the hottest
-        # indirect branches.
-        if ".plt" in self.sections:
-            plt_addr, _, plt_size = self.sections[".plt"]
-            if plt_size > 0:
-                found.append((plt_addr, plt_addr + plt_size))
+        # The PLT and the IPLT (the static executables' stubs for ifunc
+        # targets, as the dynamic linker has) have no unwind entries: their
+        # stubs (adrp, ldr, add, br) are code like any other and the calls
+        # through them are the hottest indirect branches.
+        for name in (".plt", ".iplt"):
+            if name in self.sections:
+                plt_addr, _, plt_size = self.sections[name]
+                if plt_size > 0:
+                    found.append((plt_addr, plt_addr + plt_size))
         found.sort()
         merged: list[Function] = []
         for begin, finish in found:
