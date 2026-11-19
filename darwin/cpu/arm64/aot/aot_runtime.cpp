@@ -1044,6 +1044,7 @@ Stats stats() noexcept
 	result.instance_page_bytes_peak = get(counters::instance_page_bytes_peak);
 	result.binder_bytes = get(counters::binder_bytes);
 	result.instance_page_bytes = get(counters::instance_page_bytes);
+	result.page_slots_filled = get(counters::page_slots_filled);
 	result.stack_min_free = get(counters::stack_min_free);
 	result.stack_size_at_min = get(counters::stack_size_at_min);
 	result.stack_kind_at_min = get(counters::stack_kind_at_min);
@@ -1136,6 +1137,13 @@ Binder::~Binder()
 	for (std::size_t at = 0; at < used_; ++at)
 		held += instances_[at].page_count;
 	counters::instance_page_bytes.fetch_sub(held, std::memory_order_relaxed);
+	/* So do the page slots it filled. */
+	std::size_t filled = 0;
+	if (pages_ != nullptr)
+		for (std::size_t at = 0; at < page_slots; ++at)
+			if (pages_[at].page != 0)
+				++filled;
+	counters::page_slots_filled.fetch_sub(filled, std::memory_order_relaxed);
 	const std::lock_guard guard{binders_lock()};
 	std::erase(binders(), this);
 #endif
