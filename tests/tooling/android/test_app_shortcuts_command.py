@@ -428,11 +428,30 @@ PLATFORM_RULES = [
     ("a base or split that cannot be added leaves the resources unopened; a library or overlay is skipped, as the framework does",
      lambda t: re.search(r"complete = cookie != 0 \|\| item\.kind == ResourcePaths\.Kind\.OVERLAY\s*"
                          r"\|\| item\.kind == ResourcePaths\.Kind\.LIBRARY;", t) is not None),
+    ("the system assets are built, without the framework's overlay idmaps, before the first AssetManager, and restored on failure",
+     lambda t: "systemAssetsWithoutIdmaps();" in t and "new AssetManager()" in t
+     and t.index("systemAssetsWithoutIdmaps();") < t.index("new AssetManager()")
+     and all(word in t for word in ('"/system/framework/framework-res.apk"', '"/system/framework/org.lineageos.platform-res.apk"',
+                                    '"sSystem"', '"sSystemApkAssets"', '"sSystemApkAssetsSet"', "field.set(null, null);",
+                                    "setApkAssets(all, false)"))
+     and "ApkAssets.loadFromPath(" in t),
     ("the start is run by ChildProcess", lambda t: "ChildProcess.run(AppsCommand.startArguments(" in t
      and "ProcessBuilder" not in t and "waitFor" not in t),
 ]
 
 PLATFORM_MUTATIONS = [
+    ("system-assets-left-to-the-framework",
+     "            systemAssetsWithoutIdmaps();\n            AssetManager assets = new AssetManager();",
+     "            AssetManager assets = new AssetManager();",
+     "the system assets are built, without the framework's overlay idmaps, before the first AssetManager, and restored on failure"),
+    ("system-assets-built-too-late",
+     "            systemAssetsWithoutIdmaps();\n            AssetManager assets = new AssetManager();",
+     "            AssetManager assets = new AssetManager();\n            systemAssetsWithoutIdmaps();",
+     "the system assets are built, without the framework's overlay idmaps, before the first AssetManager, and restored on failure"),
+    ("system-assets-failure-keeps-a-half-built-state",
+     "                        field.set(null, null);\n",
+     "",
+     "the system assets are built, without the framework's overlay idmaps, before the first AssetManager, and restored on failure"),
     ("foreground-user-substituted",
      "throw new PlatformException(\"the foreground user is not known\", problem);",
      "return android.os.UserHandle.myUserId();",

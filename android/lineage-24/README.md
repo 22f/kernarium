@@ -1043,8 +1043,15 @@ Screen, so the host asks the guest which applications have a launcher entry, wit
 their labels and icons, and has one started. The image carries one command for
 both, `kernarium_apps` (`overlay/app_shortcuts`, a Java tool that `app_process`
 starts, installed on system_ext like `kernarium_oldapp`). It runs as the adb shell
-user, holds no permission of its own, needs no policy rule and writes nothing: no
-file, property or setting.
+user, holds no permission of its own and writes nothing: no file, property or
+setting. It builds the framework's system assets itself, without the static
+overlays that target the framework (their idmaps come from `idmap2`, which the
+shell domain may not execute), and falls back to the framework's own
+initialisation when that is not possible. Reading any resources initialises the
+framework's display metrics, which read `qemu.sf.lcd_density`: `list` and
+`icons` draw one denial of the shell domain for it (`qemu_sf_lcd_density_prop`,
+read) until the policy lets the shell read that property; `digest` and `launch`
+draw none.
 
 - **Entries.** One entry is a launcher activity of the foreground user: enabled for
   that user (the package manager's own answer, so an alias the manifest disables

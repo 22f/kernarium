@@ -25,6 +25,7 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ParceledListSlice;
 import android.content.pm.ResolveInfo;
+import android.content.res.ApkAssets;
 import android.content.res.AssetManager;
 import android.content.res.Configuration;
 import android.content.res.Resources;
@@ -38,14 +39,18 @@ import android.os.Build;
 import android.os.LocaleList;
 import android.os.ServiceManager;
 import android.os.SystemClock;
+import android.util.ArraySet;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
 
 import org.xmlpull.v1.XmlPullParser;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -74,6 +79,10 @@ final class AndroidPlatform implements AppsCommand.Platform {
     /** The most elements an icon's XML resource may have, and the most drawables one XML resource may refer to. */
     private static final int MAX_XML_ELEMENTS = 4096;
     private static final int MAX_REFERENCES = 64;
+    /** The system assets the framework builds (AssetManager.FRAMEWORK_APK_PATH and LINEAGE_APK_PATH). */
+    private static final String FRAMEWORK_APK = "/system/framework/framework-res.apk";
+    private static final String PLATFORM_APK = "/system/framework/org.lineageos.platform-res.apk";
+    private static boolean sSystemAssetsBuilt;
 
     private final IPackageManager mPackageManager;
     private final Map<String, PackageInfo> mPackages = new HashMap<>();
@@ -263,6 +272,7 @@ final class AndroidPlatform implements AppsCommand.Platform {
         if (!cache.containsKey(application.packageName)) {
             List<ResourcePaths.Item> paths = resourcePaths(application);
             Resources resources = null;
+            systemAssetsWithoutIdmaps();
             AssetManager assets = new AssetManager();
             boolean complete = ResourcePaths.hasBase(paths);
             for (int i = 0; complete && i < paths.size(); i++) {
@@ -295,6 +305,58 @@ final class AndroidPlatform implements AppsCommand.Platform {
             cache.put(application.packageName, resources);
         }
         return cache.get(application.packageName);
+    }
+
+    /**
+     * Builds the framework's system assets (framework-res and the platform's own resources) before the first
+     * AssetManager asks for them, without the static overlays that target the framework. A process the zygote did not
+     * fork builds them on its first AssetManager and runs idmap2 to make those overlays' idmaps, which the shell domain
+     * may not execute: a denial on every run. The overlays change the framework's own values, not an application's
+     * label or icon. The assets and their order are the framework's; when any of its internals is not as written here
+     * nothing is kept of this and the framework's own initialisation runs at the first AssetManager, denial and all.
+     */
+    private static synchronized void systemAssetsWithoutIdmaps() {
+        if (sSystemAssetsBuilt) {
+            return;
+        }
+        sSystemAssetsBuilt = true;
+        Field system = null;
+        Field array = null;
+        Field set = null;
+        try {
+            system = AssetManager.class.getDeclaredField("sSystem");
+            array = AssetManager.class.getDeclaredField("sSystemApkAssets");
+            set = AssetManager.class.getDeclaredField("sSystemApkAssetsSet");
+            system.setAccessible(true);
+            array.setAccessible(true);
+            set.setAccessible(true);
+            if (system.get(null) != null) {
+                return; // already built
+            }
+            List<ApkAssets> assets = new ArrayList<>();
+            assets.add(ApkAssets.loadFromPath(FRAMEWORK_APK, ApkAssets.PROPERTY_SYSTEM));
+            if (new File(PLATFORM_APK).exists()) {
+                assets.add(ApkAssets.loadFromPath(PLATFORM_APK, ApkAssets.PROPERTY_SYSTEM));
+            }
+            ApkAssets[] all = assets.toArray(new ApkAssets[0]);
+            set.set(null, new ArraySet<ApkAssets>(assets));
+            array.set(null, all);
+            Constructor<AssetManager> constructor = AssetManager.class.getDeclaredConstructor(boolean.class);
+            constructor.setAccessible(true);
+            AssetManager manager = constructor.newInstance(true);
+            system.set(null, manager);
+            manager.setApkAssets(all, false);
+        } catch (Exception | LinkageError problem) {
+            for (Field field : new Field[] {system, array, set}) {
+                try {
+                    if (field != null) {
+                        field.set(null, null);
+                    }
+                } catch (Exception | LinkageError ignored) {
+                    // Nothing more can be done: the framework builds the assets over again.
+                }
+            }
+        }
     }
 
     /**
