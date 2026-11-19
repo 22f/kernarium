@@ -967,6 +967,36 @@ class ReconnectTests(WatchTestCase):
         self.invoked(2)
         self.assertEqual(self.record()["state"], automation.STOPPED)
 
+    def test_a_host_another_start_made_during_the_wait_is_not_started_beside(self) -> None:
+        # Rule (R2): the watch's own record cannot show a start made from
+        # another state directory for the same device. Before the second
+        # start it reads the device's own heartbeat, and one that names a host
+        # outside the attempts it retired sends it back to observing: the host
+        # is followed, and nothing is launched beside it.
+        self.tune(HEARTBEAT_STALE=1, WATCH_BACKOFF=(7, 0.1, 0.1))
+        self.device.scenarios([{"kind": "serve"},
+                               {"kind": "exit", "status": 70, "unreachable": True},
+                               {"kind": "serve"}, {"kind": "serve"}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
+        self.waiting()
+        self.device.unreachable(False)
+        self.device.wait(lambda: self.device.silent_for() > automation.HEARTBEAT_STALE,
+                         10, "the dead host's last beat is stale")
+        manual = self.options("start", "--wait", "15", *self.reports())
+        manual.state_dir = str(self.device.root / "other-state")
+        with mock.patch.object(automation, "log", lambda message: None):
+            self.assertEqual(automation.command_start(manual), 0)
+        human = automation.local_record(manual)["nonce"]
+        self.assertTrue(self.device.serving(human))
+        self.wait_record(state=automation.WATCHING, host=human)
+        self.invoked(3)
+        self.assertIsNone(watch.code, self.messages)
+        self.assertTrue(self.device.serving(human))
+        self.assertEqual(sum(self.device.alive(item["pid"])
+                             for item in self.device.invocations()), 1)
+
     def test_an_approval_failure_recorded_during_the_wait_is_not_retried_over(self) -> None:
         # Rule: whatever is latched while the watch waits is read again before
         # anything starts: a device that needs the owner gets no second start.
@@ -1512,6 +1542,34 @@ class VerdictBoundaryTests(unittest.TestCase):
         result, started, _ = self.start_again(
             [("retry", "lost")] * 2, records=latched)
         self.assertEqual((result, started), (4, 1))
+
+    def test_a_start_is_not_made_beside_a_host_the_watch_did_not_retire(self) -> None:
+        # Rule (R2): under the lock, before a second start, the device's own
+        # heartbeat is read. One that names a host outside the hosts this watch
+        # retired (the one that died, the last launch, the attempts it made)
+        # is a host another start made: no launch, and the watch looks again.
+        def foreign():
+            self.state = dict(self.state, nonce="manual-host", time=10_500)
+        result, started, _ = self.start_again(
+            [("retry", "lost")] * 2, records=foreign)
+        self.assertEqual((result, started), (automation.AGAIN, 1))
+        self.assertIsNone(self.watch.observer.beat)
+        # What the heartbeat shows of the hosts the watch retired, or of
+        # nothing, is no reason not to start.
+        self.state = dict(self.state, nonce="same-launch", time=10_000)
+
+        def attempt():
+            self.state = dict(self.state, nonce="launch-0", time=10_600)
+        result, started, _ = self.start_again(
+            [("retry", "lost"), ("failed", "no")], records=attempt)
+        self.assertEqual((result, started), (5, 2))
+        self.state = dict(self.state, nonce="same-launch", time=10_000)
+        answers = iter([dict(self.state)])
+        with mock.patch.object(automation, "host_state",
+                               lambda *args, **kwargs: next(answers, None)):
+            result, started, _ = self.start_again(
+                [("retry", "lost"), ("failed", "no")])
+        self.assertEqual((result, started), (5, 2))
 
     def test_a_refused_start_is_waited_for_like_a_lost_one(self) -> None:
         # Rule: a start refused before anything began (the report store has no

@@ -254,6 +254,10 @@ WATCH_RUNNER_WAIT = 90
 WATCH_ATTEMPTS = 4
 WATCH_BACKOFF = (5, 10, 20)
 WATCH_RECONNECT_WAIT = 180
+# A read of the device's heartbeat made while the watch replaces a host (or
+# waits for the device) is given this long, so that a stop is not held up by
+# one that never returns.
+WATCH_READ_WAIT = 20
 # More replacements than this in WATCH_STORM_WINDOW end the watch.
 WATCH_MAX_RESTARTS = 6
 WATCH_STORM_WINDOW = 3600
@@ -2335,11 +2339,14 @@ class Watch:
                            last_end={"reason": reason, "time": self.clock.time()})
         detail = ""
         expected = None
+        # The hosts this watch ended: what the device's heartbeat may name
+        # without being another start's host.
+        retired = {verdict.get("nonce"), verdict.get("record_nonce")}
         for number in range(1, WATCH_ATTEMPTS + 1):
             try:
                 with LaunchLock(options, self.stop.is_set):
                     step = (self.transition(verdict) if number == 1
-                            else self.restart(expected))
+                            else self.restart(expected, retired))
             except LaunchRefused as refusal:
                 if refusal.cancelled:
                     return self.stopped()
@@ -2350,6 +2357,7 @@ class Watch:
                 # Nothing was started.
                 detail = step[1]
             elif isinstance(step, Launch):
+                retired.add(step.nonce)
                 outcome = self.await_launch(step)
                 launched = (self.pending or {}).get("time", self.clock.time())
                 self.pending = None
@@ -2418,17 +2426,27 @@ class Watch:
             if host_state(options, timeout=max(1, min(60, int(left)))) is not None:
                 return None
 
-    def restart(self, expected):
+    def restart(self, expected, retired):
         """Under the launch lock, for an attempt after the first, once the
         device answered: the start is made again only if nothing changed what
         the first one rested on. A latch set meanwhile refuses it, and so does
         a start published since (its host is another launch's, not this
-        watch's to replace)."""
+        watch's to replace). A start from another state directory is not in
+        this one's record, so the device's own heartbeat is read as well: one
+        that names a host outside `retired` is another start's, and the watch
+        goes back to observing it."""
         if self.latch.read():
             return self.refuse_after_approval_failure()
         if local_record(self.options).get("nonce") != expected:
             self.say("not starting again: a start was published meanwhile; "
                      "looking again")
+            self.observer.reset(forget=True)
+            return AGAIN
+        state = host_state(self.options, timeout=WATCH_READ_WAIT)
+        named = state.get("nonce") if state else None
+        if named and named not in retired:
+            self.say(f"not starting again: the device's heartbeat names a host "
+                     f"this watch did not start ({named[:8]}); looking again")
             self.observer.reset(forget=True)
             return AGAIN
         return self.start_attempt()
