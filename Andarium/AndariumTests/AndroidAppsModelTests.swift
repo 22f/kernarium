@@ -8,15 +8,56 @@ import Testing
 @testable import Andarium
 
 /// What the application's index is told, in order, instead of the system's.
+/// A write can be held until the test lets it go, and made to fail.
 @MainActor
 final class RecordingAppsIndex: AndroidAppsSearchIndexing {
     private(set) var offered: [[String]] = []
+    private(set) var added: [[String]] = []
     private(set) var withdrawn = 0
     private(set) var shortcutUpdates = 0
+    /// Every write and every tile update, in the order the system took them.
+    private(set) var events: [String] = []
+    /// Whether the system takes what it is given.
+    var accepts = true
+    /// The next offer waits here until `letGo()`.
+    var holdsNextOffer = false
+    private var held: CheckedContinuation<Void, Never>?
 
-    func offer(_ entities: [AndroidAppEntity]) async { offered.append(entities.map(\.id)) }
-    func withdraw() async { withdrawn += 1 }
-    func shortcutsChanged() { shortcutUpdates += 1 }
+    func offer(_ entities: [AndroidAppEntity]) async -> Bool {
+        if holdsNextOffer {
+            holdsNextOffer = false
+            events.append("offer-started")
+            await withCheckedContinuation { held = $0 }
+        }
+        guard accepts else { events.append("offer-failed"); return false }
+        offered.append(entities.map(\.id))
+        events.append("offer")
+        return true
+    }
+
+    func add(_ entities: [AndroidAppEntity]) async -> Bool {
+        guard accepts else { return false }
+        added.append(entities.map(\.id))
+        events.append("add")
+        return true
+    }
+
+    func withdraw() async -> Bool {
+        guard accepts else { events.append("withdraw-failed"); return false }
+        withdrawn += 1
+        events.append("withdraw")
+        return true
+    }
+
+    func shortcutsChanged() {
+        shortcutUpdates += 1
+        events.append("tiles")
+    }
+
+    func letGo() {
+        held?.resume()
+        held = nil
+    }
 }
 
 /// Add to Home Screen as the model plays it: the list a refresh keeps and what
@@ -70,7 +111,8 @@ final class AndroidAppsModelTests {
         AndroidAppsHub.shared.searchIndex = index
         let state = model.androidApps
         state.store = AndroidAppsHub.shared.store
-        state.preference = AndroidAppSearchPreference(defaults: try #require(UserDefaults(suiteName: "andarium-apps-test-\(UUID().uuidString)")))
+        AndroidAppsHub.shared.preference = AndroidAppSearchPreference(
+            defaults: try #require(UserDefaults(suiteName: "andarium-apps-test-\(UUID().uuidString)")))
         state.searchOn = true
         state.adoptCache()
         return Rig(model: model, driver: driver, scripted: scripted, index: index, directory: directory)
@@ -115,7 +157,7 @@ final class AndroidAppsModelTests {
         await rig.model.refreshAndroidApps()
         let extra = AndroidApp(
             component: try #require(AndroidComponent(packageName: "com.example.newcomer", activityClass: "com.example.newcomer.Main")),
-            label: "Newcomer", builtIn: false, iconTag: "1")
+            label: "Newcomer", builtIn: false, iconTag: "0000000000000001")
         rig.tool.install(extra)
         await rig.model.refreshAndroidApps()
         #expect(rig.state.apps.contains { $0.id == extra.id })
@@ -135,10 +177,18 @@ final class AndroidAppsModelTests {
 
     @Test func anImageWithoutTheToolOffersNothing() async throws {
         let rig = try rig(phase: .running(.normal))
+        await rig.model.refreshAndroidApps()
+        #expect(!rig.state.apps.isEmpty)
+        // An earlier image listed apps; this one has no tool. What it listed is withdrawn everywhere.
         rig.tool.answer(listing: .unavailable, digest: .unavailable)
+        rig.state.invalidated()
         await rig.model.refreshAndroidApps()
         #expect(rig.state.unavailable)
         #expect(!rig.model.offersAddToHomeScreen)
+        #expect(rig.state.apps.isEmpty && rig.state.store.catalog() == nil)
+        #expect(AndroidAppsHub.shared.entities().isEmpty)
+        #expect(rig.index.offered.last == [], "Spotlight holds none of them")
+        #expect(rig.index.events.last != "offer-failed")
     }
 
     @Test func aRefreshThatGotNoAnswerKeepsWhatWasCached() async throws {
@@ -152,24 +202,25 @@ final class AndroidAppsModelTests {
         #expect(rig.state.listedAt != nil)
     }
 
-    // MARK: Search and Siri
+    // MARK: Search
 
     @Test func theSwitchWithdrawsTheAppsAndOffersThemAgain() async throws {
         let rig = try rig(phase: .running(.normal))
         await rig.model.refreshAndroidApps()
         rig.model.setAndroidAppsInSearch(false)
         #expect(await eventually { rig.index.withdrawn == 1 })
-        #expect(!rig.state.searchOn && !rig.state.preference.isOn)
+        #expect(!rig.state.searchOn && !AndroidAppsHub.shared.preference.isOn)
         // The list still reaches the shortcut tiles, which are the route to the Home Screen.
         #expect(AndroidAppsHub.shared.entities().count == rig.state.apps.count)
         rig.model.setAndroidAppsInSearch(true)
         #expect(await eventually { rig.index.offered.count == 2 })
-        #expect(rig.state.preference.isOn)
+        #expect(AndroidAppsHub.shared.preference.isOn)
     }
 
     @Test func aRefreshWhileTheSwitchIsOffOffersNothing() async throws {
         let rig = try rig(phase: .running(.normal))
         rig.state.searchOn = false
+        AndroidAppsHub.shared.preference.keep(false)
         rig.tool.install(try #require(ScriptedAndroidApps.installedApps.last))
         await rig.model.refreshAndroidApps()
         #expect(rig.index.offered.isEmpty && rig.index.withdrawn == 1)
@@ -419,5 +470,274 @@ final class AndroidAppsModelTests {
         let rig = try rig(phase: .running(.normal))
         rig.model.host.idiom = .mac
         #expect(!rig.model.offersAddToHomeScreen)
+    }
+
+    // MARK: Where the feature is not offered
+
+    @Test func aMacWritesNothingToSpotlightAndHasNoEntities() async throws {
+        let rig = try rig(phase: .running(.normal))
+        // The cache holds apps (a listing made when the hub was set up elsewhere), and the host offers none.
+        await rig.model.refreshAndroidApps()
+        let writes = rig.index.events.count
+        rig.model.host.idiom = .mac
+        AndroidAppsHub.shared.attach(rig.model)
+        #expect(!AndroidAppsHub.shared.hostOffers)
+        #expect(AndroidAppsHub.shared.entities().isEmpty)
+        let query = AndroidAppQuery()
+        #expect(try await query.allEntities().isEmpty)
+        #expect(try await query.suggestedEntities().isEmpty)
+        #expect(try await query.entities(for: [comet.id]).isEmpty)
+        await rig.model.syncAndroidAppsIndex()
+        try await query.reindexAllEntities(indexDescription: CSSearchableIndexDescription())
+        try await query.reindexEntities(for: [comet.id], indexDescription: CSSearchableIndexDescription())
+        #expect(rig.index.events.count == writes, "no index write, no tile update: \(rig.index.events)")
+        // And a refresh on such a host tells the system nothing.
+        rig.model.setAndroidAppsInSearch(false)
+        await rig.model.syncAndroidAppsIndex()
+        #expect(rig.index.events.count == writes)
+    }
+
+    // MARK: The switch is for Search only
+
+    @Test func theSwitchOffLeavesTheEntitiesAndTheTilesAndEmptiesSpotlight() async throws {
+        let rig = try rig(phase: .running(.normal))
+        rig.model.setAndroidAppsInSearch(false)
+        await rig.model.refreshAndroidApps()
+        #expect(rig.state.apps.count == ScriptedAndroidApps.sampleApps.count)
+        // Spotlight holds none and was never given any.
+        #expect(rig.index.offered.isEmpty)
+        #expect(rig.index.events.contains("withdraw"))
+        // The entities, and the parameters of the App Shortcut that are made of them, are as with the switch on.
+        #expect(AndroidAppsHub.shared.entities().count == rig.state.apps.count)
+        #expect(try await AndroidAppQuery().suggestedEntities().count == rig.state.apps.count)
+        #expect(rig.index.shortcutUpdates >= 1, "the tiles are told of the apps")
+        // An icon added while the switch is off reaches the tiles.
+        let before = rig.index.shortcutUpdates
+        rig.tool.install(AndroidApp(
+            component: try #require(AndroidComponent(packageName: "com.example.newcomer", activityClass: "com.example.newcomer.Main")),
+            label: "Newcomer", builtIn: false, iconTag: "0000000000000042"))
+        await rig.model.refreshAndroidApps()
+        #expect(rig.index.shortcutUpdates == before + 1)
+        #expect(rig.index.offered.isEmpty)
+        #expect(AndroidAppsHub.shared.entities().contains { $0.name == "Newcomer" })
+    }
+
+    @Test func theSystemsReindexAsksAreJudgedByTheSwitchAndOfferOnlyListedApps() async throws {
+        let rig = try rig(phase: .running(.normal))
+        await rig.model.refreshAndroidApps()
+        let query = AndroidAppQuery()
+        let off = CSSearchableIndexDescription()
+        // On: the listed app is added; an identifier the cache no longer lists is not.
+        let gone = "com.example.gone/com.example.gone.Main"
+        try await query.reindexEntities(for: [comet.id, gone], indexDescription: off)
+        #expect(rig.index.added.last == [comet.id])
+        // Off: nothing is added, whatever the system asks.
+        rig.model.setAndroidAppsInSearch(false)
+        let adds = rig.index.added.count
+        let offers = rig.index.offered.count
+        try await query.reindexEntities(for: [comet.id], indexDescription: off)
+        try await query.reindexAllEntities(indexDescription: off)
+        #expect(rig.index.added.count == adds && rig.index.offered.count == offers)
+    }
+
+    @Test func aWriteAskedBeforeTheSwitchWasTurnedOffNeverLandsAfterIt() async throws {
+        let rig = try rig(phase: .running(.normal))
+        rig.index.holdsNextOffer = true
+        // The refresh's offer is under way at the system and held there.
+        let refreshing = Task { await rig.model.refreshAndroidApps() }
+        #expect(await eventually { rig.index.events.contains("offer-started") })
+        rig.model.setAndroidAppsInSearch(false)
+        try await Task.sleep(for: .milliseconds(50))
+        rig.index.letGo()
+        await refreshing.value
+        #expect(await eventually { rig.index.events.last == "withdraw" })
+        // In order: the offer that was under way first, then the withdrawal; never an offer after it.
+        let writes = rig.index.events.filter { ["offer", "withdraw"].contains($0) }
+        #expect(writes == ["offer", "withdraw"], "\(rig.index.events)")
+    }
+
+    @Test func aWithdrawalThatFailedIsFinishedAtTheNextLaunch() async throws {
+        let rig = try rig(phase: .running(.normal))
+        await rig.model.refreshAndroidApps()
+        rig.index.accepts = false
+        rig.model.setAndroidAppsInSearch(false)
+        #expect(await eventually { rig.index.events.contains("withdraw-failed") })
+        #expect(rig.index.withdrawn == 0)
+        // The next launch reconciles Spotlight with the switch's last word.
+        rig.index.accepts = true
+        await AndroidAppsHub.shared.writer.reconcile()
+        #expect(rig.index.withdrawn == 1)
+        // And once it took, a launch writes nothing again.
+        let events = rig.index.events.count
+        await AndroidAppsHub.shared.writer.reconcile()
+        #expect(rig.index.events.count == events)
+    }
+
+    @Test func artworkThatArrivedAfterTheRowsIsToldToShortcutsAndSpotlight() async throws {
+        let rig = try rig(phase: .running(.normal))
+        let app = AndroidApp(component: comet.component, label: "Comet Hop", builtIn: false, iconTag: "00000000000000aa")
+        try rig.state.store.apply(AndroidAppList(apps: [app], digest: "d"), at: Date())
+        rig.state.adoptCache()
+        await rig.model.syncAndroidAppsIndex()
+        let offers = rig.index.offered.count
+        let tiles = rig.index.shortcutUpdates
+        // The same rows, and now a picture.
+        let png = try #require(ScriptedAppIcons.png(for: app))
+        #expect(rig.state.store.setIcon(png, for: app))
+        await rig.model.syncAndroidAppsIndex()
+        #expect(rig.index.offered.count == offers + 1)
+        #expect(rig.index.shortcutUpdates == tiles + 1)
+        // Nothing changed since: nothing is written.
+        await rig.model.syncAndroidAppsIndex()
+        #expect(rig.index.offered.count == offers + 1 && rig.index.shortcutUpdates == tiles + 1)
+    }
+
+    // MARK: Erase and restore
+
+    @Test func aTapDuringAnEraseStartsNothingAndWritesNothing() async throws {
+        let rig = try rig(phase: .home, plan: .normal)
+        rig.model.busy = BusyState(title: "Erasing virtual machine", detail: "Deleting.", progress: 0)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(rig.driver.begun.isEmpty, "no start races the erase")
+        #expect(rig.state.open.pending == nil && rig.state.open.banner == nil)
+        #expect(rig.model.alert == nil)
+        // The erase ends; the tap is not remembered and nothing starts by itself.
+        rig.model.busy = nil
+        rig.model.refreshPlan()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(rig.driver.begun.isEmpty && rig.state.open.pending == nil)
+        // A tap after the erase finds no virtual machine and says so as ever.
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(rig.state.open.pending?.stage == .starting)
+    }
+
+    @Test func aRequestHeldForARestoreStartsOnlyOnceTheRestoredGuestIsAdopted() async throws {
+        let rig = try rig(phase: .home, plan: .normal)
+        let item = SnapshotSummary(
+            id: SnapshotID(), name: "Before", created: Date(), releaseID: "20261109-los24-r20", buildNumber: 1, diskGiB: 16,
+            restore: .asIs, kept: SnapshotFigure(bytes: 7_000_000_000), freesWhenDeleted: SnapshotFigure(bytes: 4096))
+        let fake = FakeSnapshotDriver(items: [item])
+        rig.model.snapshotDriver = fake
+        fake.holding = .restore
+        let restoring = Task { await rig.model.restoreSnapshot(item.id) }
+        #expect(await eventually { fake.activity.operation == .restore })
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        guard case .waiting(.snapshot, _)? = rig.state.open.pending?.stage else {
+            Issue.record("the request should wait for the restore: \(String(describing: rig.state.open.pending))")
+            return
+        }
+        // The files say what a start is now (the restore left an update to apply).
+        fake.onRestore = { rig.driver.plan = .update(from: "r1", to: "r2") }
+        fake.release()
+        _ = await restoring.value
+        #expect(rig.driver.begun.count == 1, "the held request starts Android once")
+        #expect(rig.driver.begunGuests.first?.usedBytes == 7_000_000_000, "with the guest the restore left")
+        #expect(rig.model.plan == .update(from: "r1", to: "r2"), "and the plan the files now say")
+        #expect(rig.model.lifecycle.guest?.usedBytes == 7_000_000_000)
+    }
+
+    @Test func aRestoreThatRefusesStillReleasesTheHeldRequest() async throws {
+        let rig = try rig(phase: .home, plan: .normal)
+        let item = SnapshotSummary(
+            id: SnapshotID(), name: "Before", created: Date(), releaseID: "20261109-los24-r20", buildNumber: 1, diskGiB: 16,
+            restore: .asIs, kept: SnapshotFigure(bytes: 4096), freesWhenDeleted: SnapshotFigure(bytes: 4096))
+        let fake = FakeSnapshotDriver(items: [item])
+        rig.model.snapshotDriver = fake
+        fake.holding = .restore
+        fake.nextRefusal = .missing
+        let restoring = Task { await rig.model.restoreSnapshot(item.id) }
+        #expect(await eventually { fake.activity.operation == .restore })
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        fake.release()
+        _ = await restoring.value
+        #expect(rig.driver.begun.count == 1)
+        #expect(!rig.state.restoring)
+    }
+
+    // MARK: Space and readiness
+
+    @Test func aPauseForSpaceWhileAndroidIsMadeReadyMakesTheRequestWaitForTheAnswer() async throws {
+        let rig = try rig(phase: .running(.normal))
+        rig.scripted.readyDelay = .milliseconds(300)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(rig.state.open.pending?.stage == .opening)
+        rig.model.spacePause = SpacePause(freeBytes: 0, stage: .pausing)
+        guard case .waiting(.space, _)? = rig.state.open.pending?.stage else {
+            Issue.record("the request should wait for space: \(String(describing: rig.state.open.pending))")
+            return
+        }
+        try await Task.sleep(for: .milliseconds(450))
+        #expect(rig.tool.opened.isEmpty, "nothing is launched into a paused guest")
+        // The person makes room and the guest resumes: the request is decided again and opens.
+        rig.model.spacePause = nil
+        #expect(await eventually { rig.tool.opened == [comet.component] })
+    }
+
+    @Test func aRunThatPausedBeforeTheLaunchIsNotLaunchedInto() async throws {
+        let rig = try rig(phase: .running(.normal))
+        rig.scripted.readyDelay = .milliseconds(200)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        // The pause starts without the model's own hook (the readiness wait is what it raced).
+        rig.model.spacePause = SpacePause(freeBytes: 0, stage: .paused)
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(rig.tool.opened.isEmpty)
+        #expect(rig.state.open.pending != nil)
+    }
+
+    // MARK: Refresh ownership
+
+    @Test func anEraseDuringARefreshLeavesNothingOfIt() async throws {
+        let rig = try rig(phase: .running(.normal))
+        rig.tool.delay = .milliseconds(40)
+        let refreshing = Task { await rig.model.refreshAndroidApps() }
+        #expect(await eventually { rig.state.refreshing })
+        rig.model.androidAppsErased()
+        _ = await refreshing.value
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(rig.state.apps.isEmpty && rig.state.store.catalog() == nil)
+        #expect(!rig.state.refreshing && rig.state.iconsLeft == 0)
+        #expect(AndroidAppsHub.shared.entities().isEmpty)
+    }
+
+    @Test func aRefreshAfterAnInstallWaitsForTheOneUnderWayAndListsAgain() async throws {
+        let rig = try rig(phase: .running(.normal))
+        rig.tool.delay = .milliseconds(30)
+        let first = Task { await rig.model.refreshAndroidApps() }
+        #expect(await eventually { rig.state.inFlight != nil })
+        let extra = AndroidApp(
+            component: try #require(AndroidComponent(packageName: "com.example.newcomer", activityClass: "com.example.newcomer.Main")),
+            label: "Newcomer", builtIn: false, iconTag: "0000000000000042")
+        rig.tool.install(extra)
+        await rig.model.refreshAndroidApps(afterAChange: true)
+        _ = await first.value
+        #expect(rig.state.apps.contains { $0.id == extra.id })
+    }
+
+    // MARK: How an open ends, more
+
+    @Test func anImageWithoutTheToolEndsAnOpenWithItsOwnBannerAndWithdrawsTheApps() async throws {
+        let rig = try rig(phase: .running(.normal))
+        await rig.model.refreshAndroidApps()
+        rig.tool.answer(open: comet.component, .unavailable)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.state.open.banner?.failure == .toolMissing })
+        #expect(rig.state.open.banner?.component == nil, "no Try Again")
+        #expect(await eventually { rig.state.unavailable && rig.state.apps.isEmpty })
+        #expect(AndroidAppsHub.shared.entities().isEmpty)
+    }
+
+    @Test func aRenamedLauncherOpensOnlyWhereThePackageHadExactlyOne() async throws {
+        let rig = try rig(phase: .running(.normal))
+        await rig.model.refreshAndroidApps()
+        #expect(rig.state.store.record(forID: comet.id)?.launchers == 1)
+        // The app renamed its launcher activity: the tool no longer finds the saved one.
+        let renamed = AndroidApp(
+            component: try #require(AndroidComponent(packageName: comet.component.packageName, activityClass: "com.example.comethop.NewMain")),
+            label: "Comet Hop", builtIn: false, iconTag: "0000000000000099")
+        rig.tool.remove(comet.id)
+        rig.tool.install(renamed)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened.contains(renamed.component) })
+        #expect(rig.state.open.banner == nil)
     }
 }

@@ -13,12 +13,21 @@ private final class AnswerShell: GuestShell, @unchecked Sendable {
     private(set) var asked: [String] = []
     var reachable = true
 
-    init(boot: String = "1", home: String = "priority=0 preferredOrder=0\ncom.android.launcher3/.Launcher\n/x", setup: String? = "1") {
+    static let homeAnswer =
+        "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\ncom.android.launcher3/com.android.launcher3.uioverrides.QuickstepLauncher\n"
+    static let launcherResumed = """
+        ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)
+          topResumedActivity=ActivityRecord{1a2b3c u0 com.android.launcher3/.uioverrides.QuickstepLauncher t5}
+          ResumedActivity: ActivityRecord{1a2b3c u0 com.android.launcher3/.uioverrides.QuickstepLauncher t5}
+        """
+
+    init(boot: String = "1", home: String = homeAnswer, setup: String? = "1", resumed: String? = launcherResumed) {
         answers = [
             AndroidAppReadiness.bootCompletedCommand: GuestShellOutput(text: boot + "\n", exitCode: 0),
             AndroidAppReadiness.homeCommand: GuestShellOutput(text: home, exitCode: 0),
         ]
         if let setup { answers[AndroidAppReadiness.setupCommand] = GuestShellOutput(text: setup + "\n", exitCode: 0) }
+        if let resumed { answers[AndroidAppReadiness.resumedCommand] = GuestShellOutput(text: resumed + "\n", exitCode: 0) }
     }
 
     func set(_ command: String, _ output: GuestShellOutput?) { lock.withLock { answers[command] = output } }
@@ -39,12 +48,19 @@ struct AndroidAppReadinessTests {
         #expect(state == .ready)
     }
 
-    @Test func aSettingThatIsNotSetDoesNotHoldTheRequest() async {
-        let shell = AnswerShell(setup: nil)
-        shell.set(AndroidAppReadiness.setupCommand, GuestShellOutput(text: "null\n", exitCode: 0))
-        #expect(await AndroidAppReadiness.check(shell: shell, storageReady: { true }) == .ready)
-        shell.set(AndroidAppReadiness.setupCommand, GuestShellOutput(text: "", exitCode: 255))
-        #expect(await AndroidAppReadiness.check(shell: shell, storageReady: { true }) == .ready)
+    @Test func theSetupIsAskedForTheUserInTheForeground() {
+        #expect(AndroidAppReadiness.setupCommand == "settings --user current get secure user_setup_complete")
+    }
+
+    @Test func onlyAnAffirmativeSetupAnswerIsReady() async {
+        // A query that fails, says nothing, says null, or says anything but 1 or 0 is not "ready".
+        for answer in [("", 255), ("", 0), ("null\n", 0), ("2\n", 0), ("Error: no such user\n", 1), ("1\n", 1)] {
+            let shell = AnswerShell(setup: nil)
+            shell.set(AndroidAppReadiness.setupCommand, GuestShellOutput(text: answer.0, exitCode: answer.1))
+            #expect(await AndroidAppReadiness.check(shell: shell, storageReady: { true }) == .notYet, "\(answer)")
+        }
+        let unanswered = AnswerShell(setup: nil)
+        #expect(await AndroidAppReadiness.check(shell: unanswered, storageReady: { true }) == .notYet)
     }
 
     @Test func anUnfinishedSetupIsSaid() async {
@@ -61,6 +77,29 @@ struct AndroidAppReadinessTests {
         let down = AnswerShell()
         down.reachable = false
         #expect(await AndroidAppReadiness.check(shell: down, storageReady: { true }) == .notYet)
+    }
+
+    @Test func theHomeScreenMustHaveResumedAndItsResumeIsObserved() async {
+        // Another app, or nothing, resumed: not yet. The home activity resumed: ready.
+        let other = "topResumedActivity=ActivityRecord{1 u0 com.android.settings/.Settings t9}"
+        #expect(await AndroidAppReadiness.check(shell: AnswerShell(resumed: other), storageReady: { true }) == .notYet)
+        #expect(await AndroidAppReadiness.check(shell: AnswerShell(resumed: nil), storageReady: { true }) == .notYet)
+        // A package that only starts like the home's is not the home.
+        let lookalike = "ResumedActivity: ActivityRecord{1 u0 com.android.launcher3x/.Main t9}"
+        #expect(await AndroidAppReadiness.check(shell: AnswerShell(resumed: lookalike), storageReady: { true }) == .notYet)
+        // A line that is not about the resumed activity does not count: a stopped launcher is not resumed.
+        let stopped = "  * ActivityRecord{1 u0 com.android.launcher3/.Main t5} state=STOPPED"
+        #expect(await AndroidAppReadiness.check(shell: AnswerShell(resumed: stopped), storageReady: { true }) == .notYet)
+        // Also in the older form of the line.
+        let old = "  mResumedActivity: ActivityRecord{1 u0 com.android.launcher3/.Main t5}"
+        #expect(await AndroidAppReadiness.check(shell: AnswerShell(resumed: old), storageReady: { true }) == .ready)
+    }
+
+    @Test func theHomePackageIsTheLastLineOfTheResolveAnswer() {
+        #expect(AndroidAppReadiness.homePackage(in: AnswerShell.homeAnswer) == "com.android.launcher3")
+        #expect(AndroidAppReadiness.homePackage(in: "No activity found") == nil)
+        #expect(AndroidAppReadiness.homePackage(in: "") == nil)
+        #expect(AndroidAppReadiness.homePackage(in: "x; id/y") == nil)
     }
 
     @Test func theSetupIsOnlyAskedOnceTheRestHolds() async {
@@ -94,10 +133,10 @@ struct AndroidAppReadinessWaitTests {
         return (outcome, script.slept)
     }
 
-    @Test func readyEndsTheWaitAfterTheSettle() async {
+    @Test func readyEndsTheWaitAtOnceNothingIsSleptForAfterIt() async {
         let (outcome, slept) = await run([.notYet, .notYet, .ready])
         #expect(outcome == .ready)
-        #expect(slept == [AndroidAppReadiness.pollInterval, AndroidAppReadiness.pollInterval, AndroidAppReadiness.settle])
+        #expect(slept == [AndroidAppReadiness.pollInterval, AndroidAppReadiness.pollInterval])
     }
 
     @Test func anUnfinishedSetupEndsTheWaitAtOnce() async {
@@ -134,7 +173,7 @@ struct AndroidAppSearchPreferenceTests {
         return defaults
     }
 
-    @Test func searchAndSiriAreOnUntilTurnedOff() {
+    @Test func searchIsOnUntilTurnedOff() {
         let defaults = defaults()
         let preference = AndroidAppSearchPreference(defaults: defaults)
         #expect(preference.isOn)
@@ -142,5 +181,15 @@ struct AndroidAppSearchPreferenceTests {
         #expect(!AndroidAppSearchPreference(defaults: defaults).isOn)
         preference.keep(true)
         #expect(AndroidAppSearchPreference(defaults: defaults).isOn)
+    }
+
+    @Test func whatTheIndexWasLastMadeToHoldIsKept() {
+        let defaults = defaults()
+        let preference = AndroidAppSearchPreference(defaults: defaults)
+        #expect(preference.indexed == nil)
+        preference.keepIndexed("on:abc")
+        #expect(AndroidAppSearchPreference(defaults: defaults).indexed == "on:abc")
+        preference.keepIndexed(nil)
+        #expect(AndroidAppSearchPreference(defaults: defaults).indexed == nil)
     }
 }

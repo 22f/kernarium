@@ -148,7 +148,7 @@ struct AppOpenFailureBanner: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if banner.failure.canRetry {
-                    Button(AndroidAppsWords.tryAgainButton, action: retry)
+                    Button(AndroidAppsWords.tryAgain, action: retry)
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .padding(.top, 6)
@@ -175,6 +175,15 @@ struct AppOpenFailureBanner: View {
         .padding(.horizontal, 24)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("app-open-banner")
+        // The banner appears over the Android screen without the cursor moving
+        // to it: VoiceOver is told what it says, as the graphics notice does.
+        .onAppear { VoiceOver.announce(Self.announcement(for: banner)) }
+    }
+
+    /// What VoiceOver is told when the banner appears: its title and its text.
+    static func announcement(for banner: AppOpenBanner) -> String {
+        let words = AndroidAppsWords.banner(banner.failure, app: banner.label)
+        return "\(words.title). \(words.text)"
     }
 
     private var badge: String {
@@ -183,6 +192,7 @@ struct AppOpenFailureBanner: View {
         case .recovery: "wrench.and.screwdriver.fill"
         case .setupUnfinished: "gearshape.fill"
         case .notInAndroid: "questionmark"
+        case .toolMissing: "exclamationmark"
         }
     }
 }

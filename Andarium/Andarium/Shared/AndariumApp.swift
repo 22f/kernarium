@@ -51,8 +51,10 @@ final class AndariumProcess {
         AndroidAppsHub.shared.attach(model)
         // The tiles under Andarium in Shortcuts come from the cache, which
         // answers while Android is off: each launch tells the system to ask for
-        // them again, as a refresh does when the list changes.
-        if !model.androidApps.apps.isEmpty { AndroidAppsHub.shared.searchIndex.shortcutsChanged() }
+        // them again, and finishes a write to Spotlight that an earlier run did
+        // not (the switch's last word, a withdrawal that failed), through the
+        // one ordered path to the index.
+        Task { await AndroidAppsHub.shared.writer.reconcile() }
         #if TIP_JAR
         // From launch: a purchase the store delivers outside the sheet (an
         // approval, an interrupted purchase) is finished, whether or not the

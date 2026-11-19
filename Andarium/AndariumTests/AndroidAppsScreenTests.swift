@@ -198,7 +198,7 @@ final class AndroidAppsScreenTests {
         #expect(labelled("Android took too long.", in: controller.view) != nil)
         // Try Again asks again and the banner goes.
         fixture.scripted.tool.answer(open: comet.component, .opened)
-        let again = try #require(button("Try Again", in: controller.view))
+        let again = try #require(button("Try again", in: controller.view))
         #expect(again.accessibilityActivate())
         #expect(await eventually { fixture.scripted.tool.opened.count == 2 })
         #expect(await eventually { labelled("\u{201C}Comet Hop\u{201D} didn\u{2019}t open", in: controller.view) == nil })
@@ -216,7 +216,7 @@ final class AndroidAppsScreenTests {
             Issue.record("the banner was not found: is application accessibility on in this Simulator?")
             return
         }
-        #expect(button("Try Again", in: controller.view) == nil)
+        #expect(button("Try again", in: controller.view) == nil)
         let close = try #require(button("Dismiss", in: controller.view))
         #expect(close.accessibilityActivate())
         #expect(await eventually { fixture.model.androidApps.open.banner == nil })

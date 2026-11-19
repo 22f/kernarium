@@ -33,6 +33,8 @@ public struct AndroidAppsCommands: AndroidAppsTool {
     private static let usageStatus = 64
     /// The tool's status for a launch it refuses.
     private static let refusedStatus = 2
+    /// The tool's status for a failure whose reason it does not give.
+    private static let failureStatus = 1
 
     /// A listing is under 900 KiB, an icon answer under 800 KiB.
     static let longestListing = 900 * 1_024
@@ -104,9 +106,10 @@ public struct AndroidAppsCommands: AndroidAppsTool {
         switch header(lines) {
         case .unknownVersion: return .unavailable
         case .malformed: return .failed
-        case let .known(fields, _):
-            guard let digest = fields["digest"], isHex(digest, length: 64) else { return .failed }
-            return .digest(digest)
+        case let .known(fields, rest):
+            // The header block is the whole answer, and all of it is required.
+            guard rest.isEmpty, let block = requiredBlock(fields) else { return .failed }
+            return .digest(block.digest)
         }
     }
 
@@ -125,13 +128,12 @@ public struct AndroidAppsCommands: AndroidAppsTool {
         case .malformed: return .failed
         case let .known(fields, remaining): (block, rest) = (fields, remaining)
         }
-        guard let digest = block["digest"], isHex(digest, length: 64), let count = Int(block["count"] ?? ""),
-              (0...AndroidAppLimits.mostApps).contains(count)
-        else { return .failed }
+        guard let header = requiredBlock(block) else { return .failed }
+        let (digest, count) = (header.digest, header.count)
         var rows = rest
         guard rows.first == "rows" else { return .failed }
         rows = rows.dropFirst()
-        guard rows.last == "end\t\(count)" else { return .failed }
+        guard let last = rows.last, counted("end", in: last) == count else { return .failed }
         rows = rows.dropLast()
         guard rows.count == count else { return .failed }
         var seen = Set<AndroidComponent>()
@@ -165,7 +167,9 @@ public struct AndroidAppsCommands: AndroidAppsTool {
     public static func parseIcons(_ result: ShellResult, asked: [AndroidComponent]) -> [AndroidAppIconAnswer]? {
         guard status(of: result) == .ok, result.stdout.count <= longestIconAnswer else { return nil }
         var reader = ByteReader(result.stdout)
-        guard reader.line() == "\(commandName) \(supportedVersion)", reader.line() == "icons\t\(asked.count)" else { return nil }
+        guard reader.line() == "\(commandName) \(supportedVersion)", let opening = reader.line(),
+              counted("icons", in: opening) == asked.count
+        else { return nil }
         var answers: [AndroidAppIconAnswer] = []
         for component in asked {
             guard let line = reader.line() else { return nil }
@@ -187,17 +191,24 @@ public struct AndroidAppsCommands: AndroidAppsTool {
                 return nil
             }
         }
-        guard reader.line() == "end\t\(asked.count)", reader.atEnd else { return nil }
+        guard let closing = reader.line(), counted("end", in: closing) == asked.count, reader.atEnd else { return nil }
         return answers
     }
 
     public static func parseLaunch(_ result: ShellResult, component: AndroidComponent) -> AndroidAppOpenAnswer {
         switch result.exitCode {
         case 0:
-            let lines = result.text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
-            return lines == ["launched\t\(component.identifier)"] ? .opened : .failed
+            // One line, `launched`, the component and whatever a later version
+            // appends, ended by its line feed: an answer cut short is no answer.
+            guard let lines = textLines(result.stdout, longest: 4_096), lines.count == 1 else { return .failed }
+            let fields = lines[0].split(separator: "\t", omittingEmptySubsequences: false)
+            return fields.count >= 2 && fields[0] == "launched" && fields[1] == Substring(component.identifier) ? .opened : .failed
         case refusedStatus:
             return .notFound
+        case failureStatus:
+            return .startFailed
+        case commandNotFound, usageStatus:
+            return .unavailable
         default:
             return .failed
         }
@@ -238,7 +249,9 @@ public struct AndroidAppsCommands: AndroidAppsTool {
         while index < lines.count {
             let parts = lines[index].split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
             guard parts.count == 2 else { break }
-            guard fields.updateValue(String(parts[1]), forKey: String(parts[0])) == nil else { return .malformed }
+            // A value is its first field: a later version may append more.
+            let value = parts[1].split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+            guard fields.updateValue(String(value), forKey: String(parts[0])) == nil else { return .malformed }
             index += 1
         }
         return .known(fields, lines[index...])
@@ -257,6 +270,32 @@ public struct AndroidAppsCommands: AndroidAppsTool {
 
     private static func isHex(_ text: String, length: Int) -> Bool {
         text.utf8.count == length && text.utf8.allSatisfy { ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102) }
+    }
+
+    /// A decimal number of digits only, no sign and no space.
+    private static func decimal(_ text: String) -> Int? {
+        guard !text.isEmpty, text.utf8.count <= 9, text.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }) else { return nil }
+        return Int(text)
+    }
+
+    /// The header block every answer of `digest` and `list` begins with, each
+    /// of its lines required and well formed (the digest, the count and
+    /// `skipped` and `user` as numbers, and the `locales` line, which may be
+    /// empty). Keys it does not know are ignored.
+    private static func requiredBlock(_ fields: [String: String]) -> (digest: String, count: Int)? {
+        guard let digest = fields["digest"], isHex(digest, length: 64),
+              let count = fields["count"].flatMap(decimal), (0...AndroidAppLimits.mostApps).contains(count),
+              fields["skipped"].flatMap(decimal) != nil, fields["locales"] != nil, fields["user"].flatMap(decimal) != nil
+        else { return nil }
+        return (digest, count)
+    }
+
+    /// The number of a line `key<TAB>N`, with any fields a later version
+    /// appends ignored.
+    private static func counted(_ key: String, in line: String) -> Int? {
+        let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+        guard fields.count >= 2, fields[0] == Substring(key) else { return nil }
+        return decimal(String(fields[1]))
     }
 
     private static let pngSignature = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])

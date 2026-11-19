@@ -144,7 +144,7 @@ final class ScriptedAndroidApps: AndroidAppsSource {
     private nonisolated static func make(_ package: String, _ label: String, builtIn: Bool = false) -> AndroidApp {
         AndroidApp(
             component: AndroidComponent(packageName: package, activityClass: package + ".MainActivity")!,
-            label: label, builtIn: builtIn, iconTag: "1")
+            label: label, builtIn: builtIn, iconTag: "0000000000000001")
     }
 
     /// What the person installed.

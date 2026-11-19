@@ -30,45 +30,63 @@ extension AppModel {
         return androidAppsSource?.androidAppsTool != nil
     }
 
+    /// The host has a Home Screen to add to. A Mac and a Vision Pro have
+    /// none: nothing of this feature is offered there, neither the row nor the
+    /// entities, the Spotlight index or the shortcut tiles.
+    var hostOffersAddToHomeScreen: Bool {
+        host.idiom != .mac && !ProcessInfo.processInfo.isiOSAppOnVision
+    }
+
     /// Settings' Apps section offers Add to Home Screen: Android runs, and its
-    /// image has a list of apps to offer. A Mac and a Vision Pro have no Home
-    /// Screen to add to.
+    /// image has a list of apps to offer.
     var offersAddToHomeScreen: Bool {
         guard case .running(.normal) = phase, androidAppsSource != nil, !androidApps.unavailable else { return false }
-        return host.idiom != .mac && !ProcessInfo.processInfo.isiOSAppOnVision
+        return hostOffersAddToHomeScreen
     }
 
     // MARK: The list
 
     /// Brings the cache up to what Android lists now: asks whether the apps
     /// changed, lists them if they did and fetches the icons that are missing.
-    /// A refresh already under way is joined. Returns whether one was asked.
+    /// A refresh already under way is joined; with `afterAChange` it is waited
+    /// for and another follows, because what changed may have come after the
+    /// listing it made. Returns whether one was asked.
     @discardableResult
-    func refreshAndroidApps() async -> Bool {
+    func refreshAndroidApps(afterAChange: Bool = false) async -> Bool {
         let state = androidApps
         guard canAskAndroidApps, !state.unavailable, let tool = androidAppsSource?.androidAppsTool else { return false }
         if let running = state.inFlight {
             _ = await running.value
-            return true
+            guard afterAChange else { return true }
+            return await refreshAndroidApps()
         }
         let run = session
         let flat = FlatteningAppsTool(base: tool)
         let store = state.store
-        let before = state.apps
+        let token = state.begin()
         let task = Task.detached {
             await AndroidAppRefresh.run(tool: flat, store: store) { catalog, left in
-                Task { @MainActor in state.progressed(catalog, iconsLeft: left) }
+                Task { @MainActor in
+                    // The progress of a refresh that was ended is not heard.
+                    if state.owns(token) { state.progressed(catalog, iconsLeft: left) }
+                }
             }
         }
         state.inFlight = task
-        state.begin()
         let result = await task.value
-        // The run ended meanwhile: its session, and its refresh, are gone.
-        guard session === run, state.inFlight == task else { return true }
+        // The run ended or the cache changed meanwhile: that refresh is gone.
+        guard session === run, state.owns(token), state.inFlight == task else { return true }
         state.inFlight = nil
         state.finished(result)
-        if case .refreshed = result, state.apps != before {
+        switch result {
+        case .refreshed:
             await syncAndroidAppsIndex()
+        case .unavailable:
+            // The image has no tool: what an earlier image listed is not offered.
+            state.withdrawCatalog()
+            await syncAndroidAppsIndex()
+        case .failed:
+            break
         }
         return true
     }
@@ -100,23 +118,19 @@ extension AppModel {
     }
 
     /// Tells the system what Android's apps are now: the tiles in Shortcuts, and
-    /// Spotlight (Search and Siri) while the switch is on.
+    /// Spotlight while the switch is on, through the one ordered path to the
+    /// index (`AndroidAppsIndexWriter`), which judges it as it runs.
     func syncAndroidAppsIndex() async {
-        let index = AndroidAppsHub.shared.searchIndex
-        index.shortcutsChanged()
-        if androidApps.searchOn {
-            await index.offer(androidApps.apps.map(AndroidAppEntity.init))
-        } else {
-            await index.withdraw()
-        }
+        await AndroidAppsHub.shared.writer.reconcile()
     }
 
-    /// The Search and Siri switch.
+    /// The Search switch. It governs Spotlight only: the tiles, the entities
+    /// and the Siri phrase do not follow it.
     func setAndroidAppsInSearch(_ on: Bool) {
         let state = androidApps
         guard state.searchOn != on else { return }
         state.searchOn = on
-        state.preference.keep(on)
+        AndroidAppsHub.shared.preference.keep(on)
         Task { await syncAndroidAppsIndex() }
     }
 
@@ -133,7 +147,14 @@ extension AppModel {
     private var androidAppOpenSituation: AppOpenSituation {
         AppOpenSituation(
             phase: phase, plan: plan, verdict: lifecycle.startVerdict(.normal, host: host, plan: plan),
-            holdsGuestFiles: snapshotActivity.holdsGuestFiles, spacePaused: spacePause != nil)
+            holdsGuestFiles: snapshotActivity.holdsGuestFiles, spacePaused: spacePause != nil, guestBusy: guestIsBusy)
+    }
+
+    /// The guest is being erased (or another task works on its files behind
+    /// the overlay): a start would race it.
+    private var guestIsBusy: Bool {
+        guard let busy else { return false }
+        return busy.result == nil
     }
 
     /// A request to open `component`, from an App Intent or Try Again. The
@@ -190,7 +211,8 @@ extension AppModel {
     }
 
     /// Android is up for a request: waits until it is ready for the app, then
-    /// opens it. The run ending, or another request, ends the wait.
+    /// opens it. The run ending, a pause for space, or another request, ends the
+    /// wait; the situation is looked at again right before the launch.
     private func beginOpeningAndroidApp(_ request: AppOpenRequest) {
         let state = androidApps
         state.opening?.cancel()
@@ -206,16 +228,32 @@ extension AppModel {
             case .timedOut:
                 state.open.opened(.failed, for: request, now: Date())
             case .ready:
+                // The wait took seconds: the run may have ended, or paused for space.
+                guard state.open.readyToLaunch(request, in: androidAppOpenSituation, now: Date()) else {
+                    state.scheduleExpiry { }
+                    return
+                }
                 let result: AndroidAppOpenOutcome
                 if let tool = source?.androidAppsTool {
-                    result = await tool.open(request.component)
+                    let launchers = state.store.record(forID: request.component.identifier)?.launchers
+                    result = await tool.open(request.component, launchersWhenSeen: launchers)
                 } else {
                     result = .failed
                 }
                 guard session === run, !Task.isCancelled else { return }
                 state.open.opened(result, for: request, now: Date())
-                // An app that is gone means the cached list is old.
-                if result == .notInAndroid { state.invalidated(); Task { await self.refreshAndroidApps() } }
+                switch result {
+                case .notInAndroid:
+                    // An app that is gone means the cached list is old.
+                    state.invalidated()
+                    Task { await self.refreshAndroidApps() }
+                case .toolMissing:
+                    // The image has no tool: nothing it listed is offered.
+                    state.withdrawCatalog()
+                    Task { await self.syncAndroidAppsIndex() }
+                case .opened, .openedRenamed, .failed:
+                    break
+                }
             }
             state.scheduleExpiry { }
         }
@@ -232,6 +270,36 @@ extension AppModel {
     /// request that waited is starting now.
     func androidAppsPersonStarted() {
         androidApps.open.personStarted()
+    }
+
+    /// A snapshot operation ended. A restore holds the release of the requests
+    /// that waited for it until the model has adopted the guest it restored and
+    /// worked out what a start now is (`androidAppsRestoreFinished`).
+    func androidAppsSnapshotOperationEnded() {
+        if androidApps.restoring {
+            androidApps.releaseAfterRestore = true
+        } else {
+            androidAppsHoldEnded(.snapshot)
+        }
+    }
+
+    /// The model adopted what the restore left; the held requests are decided now.
+    func androidAppsRestoreFinished() {
+        let state = androidApps
+        state.restoring = false
+        guard state.releaseAfterRestore else { return }
+        state.releaseAfterRestore = false
+        androidAppsHoldEnded(.snapshot)
+    }
+
+    /// The guest was paused for want of space: a request that was being opened
+    /// waits for the person's answer, as one made during the pause does.
+    func androidAppsSpacePaused() {
+        let state = androidApps
+        guard state.open.spacePaused(now: Date()) else { return }
+        state.opening?.cancel()
+        state.opening = nil
+        state.scheduleExpiry { }
     }
 
     /// What held a request ended: a snapshot operation, or the pause for space.

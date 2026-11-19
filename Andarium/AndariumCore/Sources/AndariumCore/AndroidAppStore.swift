@@ -32,12 +32,19 @@ public struct AndroidAppRecord: Equatable, Sendable, Codable, Identifiable {
     public var label: String
     public var builtIn: Bool
     public var seen: Date
+    /// How many launcher activities the app's package had in the listing that
+    /// last held this one; nil where that is not known. An icon whose activity
+    /// is gone follows the package to its one other launcher only where this
+    /// is 1 (the app renamed its launcher): with more, which of them the icon
+    /// was for is not known.
+    public var launchers: Int?
 
-    public init(id: String, label: String, builtIn: Bool, seen: Date) {
+    public init(id: String, label: String, builtIn: Bool, seen: Date, launchers: Int? = nil) {
         self.id = id
         self.label = label
         self.builtIn = builtIn
         self.seen = seen
+        self.launchers = launchers
     }
 
     public var component: AndroidComponent? { AndroidComponent(identifier: id) }
@@ -62,6 +69,11 @@ public final class AndroidAppStore: @unchecked Sendable {
     private var loaded = false
     private var catalogCache: AndroidAppCatalog?
     private var recordCache: [String: AndroidAppRecord] = [:]
+    private var generation = 0
+    private var artwork = 0
+
+    /// The most a catalog file and a records file may hold before they are read.
+    static let largestFile = 4 * 1_024 * 1_024
 
     private let fileManager = FileManager.default
 
@@ -118,19 +130,47 @@ public final class AndroidAppStore: @unchecked Sendable {
         lock.withLock { list.apps.filter { iconData(for: $0) == nil && !declaresNoIcon($0) } }
     }
 
+    /// Whether a picture is kept for the app as listed: a look at the file,
+    /// not a read of it, for a figure over a whole catalog.
+    public func hasIcon(of app: AndroidApp) -> Bool {
+        lock.withLock { fileManager.fileExists(atPath: iconDirectory.appendingPathComponent(iconFileName(for: app)).path) }
+    }
+
     /// Whether Android said the app declares no icon, as listed.
     public func declaresNoIcon(of app: AndroidApp) -> Bool {
         lock.withLock { declaresNoIcon(app) }
     }
+
+    /// Changes whenever a picture is kept or told to be none, so that what is
+    /// published to the system (the artwork of the tiles and of Search) can be
+    /// told from what was published before.
+    public var artworkRevision: Int { lock.withLock { artwork } }
+
+    // MARK: Refresh ownership
+
+    /// A refresh takes the generation when it starts and hands it back with
+    /// every change it makes; a change of a generation that is no longer the
+    /// store's is refused. Stopping the run, an erase, a restored snapshot and
+    /// `invalidateRefreshes` end the generation of a refresh that is under way.
+    public var refreshGeneration: Int { lock.withLock { generation } }
+
+    public func invalidateRefreshes() {
+        lock.withLock { generation += 1 }
+    }
+
+    /// A change of a refresh that was ended.
+    public struct StaleRefresh: Error, Equatable {}
 
     // MARK: Writing
 
     /// Keeps a listing. Icons of apps no longer listed, or listed with a new
     /// tag, are removed; the records learn every listed app's name. A listing
     /// that is the same as the stored one (digest and apps) changes nothing
-    /// but the time it was taken.
-    public func apply(_ list: AndroidAppList, at date: Date) throws {
+    /// but the time it was taken. With a `generation`, a listing of a refresh
+    /// that ended meanwhile is refused (`StaleRefresh`).
+    public func apply(_ list: AndroidAppList, at date: Date, generation expected: Int? = nil) throws {
         try lock.withLock {
+            guard expected == nil || expected == generation else { throw StaleRefresh() }
             loadIfNeeded()
             try prepareDirectories()
             let apps = Array(list.apps.prefix(AndroidAppLimits.mostApps))
@@ -143,47 +183,67 @@ public final class AndroidAppStore: @unchecked Sendable {
                     try? fileManager.removeItem(at: iconDirectory.appendingPathComponent(file))
                 }
             }
+            var launchers: [String: Int] = [:]
+            for app in apps { launchers[app.component.packageName, default: 0] += 1 }
             for app in apps {
-                recordCache[app.id] = AndroidAppRecord(id: app.id, label: app.label, builtIn: app.builtIn, seen: date)
+                recordCache[app.id] = AndroidAppRecord(
+                    id: app.id, label: app.label, builtIn: app.builtIn, seen: date,
+                    launchers: launchers[app.component.packageName])
             }
             trimRecords()
             try writeRecords()
         }
     }
 
-    /// Keeps one app's icon (PNG data) as listed. An empty or enormous
-    /// picture is not kept.
-    public func setIcon(_ data: Data, for app: AndroidApp) {
+    /// Keeps one app's icon (PNG data) as listed. A picture that is not a
+    /// whole PNG of a size worth keeping is not kept. Returns whether it was
+    /// (a refresh that ended meanwhile keeps nothing).
+    @discardableResult
+    public func setIcon(_ data: Data, for app: AndroidApp, generation expected: Int? = nil) -> Bool {
         lock.withLock {
-            guard !data.isEmpty, data.count <= AndroidAppLimits.largestIcon else { return }
-            guard (try? prepareDirectories()) != nil else { return }
-            try? data.write(to: iconDirectory.appendingPathComponent(iconFileName(for: app)), options: .atomic)
+            guard expected == nil || expected == generation else { return false }
+            guard Self.isWholePNG(data) else { return false }
+            guard (try? prepareDirectories()) != nil else { return false }
+            guard (try? data.write(to: iconDirectory.appendingPathComponent(iconFileName(for: app)), options: .atomic)) != nil
+            else { return false }
+            artwork += 1
+            return true
         }
     }
 
     /// Keeps that Android said the app declares no icon, so it is not asked for again.
-    public func markNoIcon(for app: AndroidApp) {
+    @discardableResult
+    public func markNoIcon(for app: AndroidApp, generation expected: Int? = nil) -> Bool {
         lock.withLock {
-            guard (try? prepareDirectories()) != nil else { return }
-            try? Data().write(to: iconDirectory.appendingPathComponent(noIconFileName(for: app)), options: .atomic)
+            guard expected == nil || expected == generation else { return false }
+            guard (try? prepareDirectories()) != nil else { return false }
+            guard (try? Data().write(to: iconDirectory.appendingPathComponent(noIconFileName(for: app)), options: .atomic)) != nil
+            else { return false }
+            artwork += 1
+            return true
         }
     }
 
     /// The listing is the one the store has: only the time it was taken changes.
-    public func touch(at date: Date) {
+    @discardableResult
+    public func touch(at date: Date, generation expected: Int? = nil) -> Bool {
         lock.withLock {
+            guard expected == nil || expected == generation else { return false }
             loadIfNeeded()
-            guard var catalog = catalogCache else { return }
+            guard var catalog = catalogCache else { return false }
             catalog.listedAt = date
-            guard (try? write(catalog, to: catalogFile)) != nil else { return }
+            guard (try? write(catalog, to: catalogFile)) != nil else { return false }
             catalogCache = catalog
+            return true
         }
     }
 
     /// What was listed may not be what the disk now has (a snapshot or an
-    /// update was restored): the next refresh lists again, whatever the digest.
+    /// update was restored): the next refresh lists again, whatever the digest,
+    /// and a refresh under way is no longer the store's.
     public func invalidate() {
         lock.withLock {
+            generation += 1
             loadIfNeeded()
             guard var catalog = catalogCache, catalog.digest != nil else { return }
             catalog.digest = nil
@@ -195,9 +255,11 @@ public final class AndroidAppStore: @unchecked Sendable {
     /// Android was erased or reset: its apps are none. The records stay.
     public func erase() {
         lock.withLock {
+            generation += 1
             loadIfNeeded()
             try? fileManager.removeItem(at: catalogDirectory)
             catalogCache = nil
+            artwork += 1
         }
     }
 
@@ -205,11 +267,13 @@ public final class AndroidAppStore: @unchecked Sendable {
     /// who wants the leftovers gone).
     public func eraseRecords() {
         lock.withLock {
+            generation += 1
             loadIfNeeded()
             try? fileManager.removeItem(at: catalogDirectory)
             try? fileManager.removeItem(at: recordsFile)
             catalogCache = nil
             recordCache = [:]
+            artwork += 1
         }
     }
 
@@ -218,15 +282,64 @@ public final class AndroidAppStore: @unchecked Sendable {
     private func loadIfNeeded() {
         guard !loaded else { return }
         loaded = true
-        if let data = try? Data(contentsOf: catalogFile),
-           let decoded = try? JSONDecoder.store.decode(AndroidAppCatalog.self, from: data),
-           decoded.schema == AndroidAppCatalog.currentSchema {
-            catalogCache = decoded
+        if let data = readBounded(catalogFile), let decoded = try? JSONDecoder.store.decode(AndroidAppCatalog.self, from: data) {
+            catalogCache = Self.validated(decoded)
         }
-        if let data = try? Data(contentsOf: recordsFile),
-           let decoded = try? JSONDecoder.store.decode([AndroidAppRecord].self, from: data) {
-            recordCache = Dictionary(decoded.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        if let data = readBounded(recordsFile), let decoded = try? JSONDecoder.store.decode([AndroidAppRecord].self, from: data) {
+            let records = decoded.compactMap(Self.validated)
+            recordCache = Dictionary(records.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            trimRecords()
         }
+    }
+
+    /// The file's bytes, unless it is larger than a file of the store can be.
+    private func readBounded(_ url: URL) -> Data? {
+        guard let size = (try? fileManager.attributesOfItem(atPath: url.path))?[.size] as? Int, size <= Self.largestFile
+        else { return nil }
+        return try? Data(contentsOf: url)
+    }
+
+    /// A catalog read from disk is held to what a listing is: the current
+    /// schema, at most `mostApps` apps, each with an icon key of the tool's
+    /// shape and an identifier no other has, and each name made again what the
+    /// screens are allowed to show. Anything else is not read.
+    static func validated(_ catalog: AndroidAppCatalog) -> AndroidAppCatalog? {
+        guard catalog.schema == AndroidAppCatalog.currentSchema, catalog.apps.count <= AndroidAppLimits.mostApps else { return nil }
+        var seen = Set<String>()
+        var apps: [AndroidApp] = []
+        for app in catalog.apps {
+            guard isIconKey(app.iconTag), seen.insert(app.id).inserted else { return nil }
+            var kept = app
+            kept.label = AndroidAppText.label(app.label, fallback: app.component.packageName)
+            apps.append(kept)
+        }
+        var checked = catalog
+        checked.apps = apps
+        return checked
+    }
+
+    private static func validated(_ record: AndroidAppRecord) -> AndroidAppRecord? {
+        guard let component = record.component else { return nil }
+        var kept = record
+        kept.label = AndroidAppText.label(record.label, fallback: component.packageName)
+        if let launchers = kept.launchers, !(1...AndroidAppLimits.mostApps).contains(launchers) { kept.launchers = nil }
+        return kept
+    }
+
+    private static func isIconKey(_ text: String) -> Bool {
+        text.utf8.count == 16 && text.utf8.allSatisfy { ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102) }
+    }
+
+    /// A PNG that is all there: the signature, the header chunk first and the
+    /// end chunk last, and of a size the store keeps. A truncated file or
+    /// bytes that are no picture are not artwork.
+    public static func isWholePNG(_ data: Data) -> Bool {
+        let signature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        let end: [UInt8] = [0, 0, 0, 0, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]
+        guard data.count >= 8 + 25 + 12, data.count <= AndroidAppLimits.largestIcon else { return false }
+        let bytes = Array(data)
+        return Array(bytes[0..<8]) == signature && Array(bytes[12..<16]) == Array("IHDR".utf8)
+            && Array(bytes[(bytes.count - 12)...]) == end
     }
 
     private func prepareDirectories() throws {
@@ -253,8 +366,14 @@ public final class AndroidAppStore: @unchecked Sendable {
         for record in oldest { recordCache[record.id] = nil }
     }
 
+    /// The picture kept for the app as listed, when it is a whole PNG; a file
+    /// that cannot be read, or was cut short, is no picture.
     private func iconData(for app: AndroidApp) -> Data? {
-        try? Data(contentsOf: iconDirectory.appendingPathComponent(iconFileName(for: app)))
+        let url = iconDirectory.appendingPathComponent(iconFileName(for: app))
+        guard let size = (try? fileManager.attributesOfItem(atPath: url.path))?[.size] as? Int,
+              size <= AndroidAppLimits.largestIcon, let data = try? Data(contentsOf: url), Self.isWholePNG(data)
+        else { return nil }
+        return data
     }
 
     private func declaresNoIcon(_ app: AndroidApp) -> Bool {
@@ -305,21 +424,27 @@ public enum AndroidAppRefresh {
     /// few to an ask, each stored as it arrives. `progress` is told after the
     /// listing and after each batch of icons, with how many are still to come.
     /// An unchanged digest with every icon in hand asks for nothing more.
+    ///
+    /// A refresh owns the store only while it is the current one: it takes the
+    /// store's generation at its start and hands it back with each change, so
+    /// a refresh that the run ending, an erase or a restore ended stores
+    /// nothing, whatever the tool still answers, and tells nothing.
     public static func run(
         tool: any AndroidAppsTool, store: AndroidAppStore, now: Date = Date(),
         progress: @Sendable (AndroidAppCatalog, _ iconsLeft: Int) -> Void = { _, _ in }
     ) async -> Result {
+        let generation = store.refreshGeneration
         let remote = await tool.digest(limit: AndroidAppLimits.digestLimit)
         switch remote {
         case .unavailable: return .unavailable
         case .failed: return .failed
         case .digest: break
         }
+        guard !Task.isCancelled, store.refreshGeneration == generation else { return .failed }
         if case let .digest(digest) = remote, let kept = store.catalog(), kept.digest == digest {
             // Nothing that is cached is out of date; an icon that never arrived is still owed.
-            store.touch(at: now)
-            guard let catalog = store.catalog() else { return .failed }
-            await fetchIcons(tool: tool, store: store, catalog: catalog, progress: progress)
+            guard store.touch(at: now, generation: generation), let catalog = store.catalog() else { return .failed }
+            await fetchIcons(tool: tool, store: store, generation: generation, catalog: catalog, progress: progress)
             return .refreshed(catalog)
         }
         switch await tool.list(limit: AndroidAppLimits.listLimit) {
@@ -328,16 +453,17 @@ public enum AndroidAppRefresh {
         case .failed:
             return .failed
         case let .apps(list):
+            guard !Task.isCancelled else { return .failed }
             let sorted = AndroidAppList(apps: list.apps.sorted(by: AndroidAppText.inOrder), digest: list.digest)
-            do { try store.apply(sorted, at: now) } catch { return .failed }
+            do { try store.apply(sorted, at: now, generation: generation) } catch { return .failed }
             guard let catalog = store.catalog() else { return .failed }
-            await fetchIcons(tool: tool, store: store, catalog: catalog, progress: progress)
+            await fetchIcons(tool: tool, store: store, generation: generation, catalog: catalog, progress: progress)
             return .refreshed(catalog)
         }
     }
 
     private static func fetchIcons(
-        tool: any AndroidAppsTool, store: AndroidAppStore, catalog: AndroidAppCatalog,
+        tool: any AndroidAppsTool, store: AndroidAppStore, generation: Int, catalog: AndroidAppCatalog,
         progress: @Sendable (AndroidAppCatalog, Int) -> Void
     ) async {
         let list = AndroidAppList(apps: catalog.apps, digest: catalog.digest)
@@ -345,31 +471,36 @@ public enum AndroidAppRefresh {
         progress(catalog, missing.count)
         // `error` and `missing` are asked again at the next refresh. A batch the
         // tool gave no answer to (it ran out of time) is asked again in
-        // smaller batches, and an icon it answered `deferred` (it ran out of
-        // time on the one before) a few more times, all within this refresh.
+        // halves, down to one app, and only a silence at one app counts
+        // against the refresh: after `silentAsksBeforeGivingUp` of them in a
+        // row it stops asking for icons (the next refresh asks again). An
+        // icon the tool answered `deferred` (it ran out of time on the one
+        // before) is asked a few more times, all within this refresh.
         var size = AndroidAppLimits.iconsPerAsk
-        var emptyInARow = 0
+        var silentAtOne = 0
         var asked: [String: Int] = [:]
         while !missing.isEmpty {
-            if Task.isCancelled { break }
+            if Task.isCancelled || store.refreshGeneration != generation { break }
             let batch = Array(missing.prefix(size))
             missing.removeFirst(batch.count)
             let answers = await tool.icons(of: batch, limit: AndroidAppLimits.iconLimit)
+            if Task.isCancelled || store.refreshGeneration != generation { break }
             if answers.isEmpty {
-                emptyInARow += 1
-                if emptyInARow >= AndroidAppLimits.silentAsksBeforeGivingUp { break }
                 if batch.count > 1 {
                     size = max(1, batch.count / 2)
                     missing.insert(contentsOf: batch, at: 0)
+                } else {
+                    silentAtOne += 1
+                    if silentAtOne >= AndroidAppLimits.silentAsksBeforeGivingUp { break }
                 }
                 progress(catalog, missing.count)
                 continue
             }
-            emptyInARow = 0
+            silentAtOne = 0
             for app in batch {
                 switch answers[app.id] {
-                case let .png(data, _)?: store.setIcon(data, for: app)
-                case .noIcon?: store.markNoIcon(for: app)
+                case let .png(data, _)?: store.setIcon(data, for: app, generation: generation)
+                case .noIcon?: store.markNoIcon(for: app, generation: generation)
                 case .deferred?:
                     asked[app.id, default: 0] += 1
                     if asked[app.id, default: 0] <= AndroidAppLimits.deferredRetries { missing.append(app) }

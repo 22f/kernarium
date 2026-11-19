@@ -17,6 +17,23 @@ public struct AndroidComponent: Hashable, Sendable, Codable {
         self.activityClass = activityClass
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case packageName, activityClass
+    }
+
+    /// A component read from a file follows the same grammar as one built
+    /// from the tool's answer: a file that says otherwise is not read.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let package = try container.decode(String.self, forKey: .packageName)
+        let activity = try container.decode(String.self, forKey: .activityClass)
+        guard let component = Self(packageName: package, activityClass: activity) else {
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "not a component of an app"))
+        }
+        self = component
+    }
+
     /// The component an identifier names (`package/class`), or nil.
     public init?(identifier: String) {
         let parts = identifier.split(separator: "/", omittingEmptySubsequences: false)
@@ -143,9 +160,15 @@ public enum AndroidAppIconAnswer: Equatable, Sendable {
 public enum AndroidAppOpenAnswer: Equatable, Sendable {
     /// The app's launcher activity was started.
     case opened
-    /// The activity is not in Android: the app was removed, disabled or
-    /// replaced.
+    /// The tool refused: the activity is not in Android (the app was removed,
+    /// disabled or replaced).
     case notFound
+    /// The tool could not start it and does not say why (the activity manager
+    /// reported an error, the activity class is gone): the listing tells.
+    case startFailed
+    /// The image has no such tool, or one that does not take the command: an
+    /// image older than the feature. Asking again cannot help.
+    case unavailable
     /// The virtual machine could not be asked, or did not answer in time.
     case failed
 }
@@ -159,6 +182,8 @@ public enum AndroidAppOpenOutcome: Equatable, Sendable {
     case openedRenamed(AndroidComponent)
     case notInAndroid
     case failed
+    /// The image cannot open apps this way (an older one).
+    case toolMissing
 }
 
 /// Where the guest's list of apps and the way to open one come from: the
@@ -179,28 +204,45 @@ public protocol AndroidAppsTool: Sendable {
 }
 
 extension AndroidAppsTool {
-    /// Opens an app. An answer that the activity is not there is followed up
-    /// once: if the app's package now has exactly one launcher activity, that
-    /// is the app (it renamed its launcher), opened in place of the old one;
-    /// two or none, or a package that is gone, is an app that is not in
-    /// Android and is never guessed at.
+    /// Opens an app. An answer that the activity is not there, or a start that
+    /// failed for a reason the tool does not give, is followed up once by
+    /// listing the apps again, to learn why:
+    ///
+    /// - the app's package has one launcher activity now and had exactly one
+    ///   in the last listing that held the saved activity (`launchersWhenSeen`),
+    ///   so the app renamed its launcher: that activity is opened in place of
+    ///   the old one;
+    /// - any other case where the saved activity is not listed is an app that
+    ///   is not in Android (removed, disabled, or one of several launchers
+    ///   that went), and nothing else is opened in its place;
+    /// - a start that failed while the activity is still listed is a failure.
     public func open(
-        _ component: AndroidComponent, listLimit: Duration = AndroidAppLimits.listLimit,
-        openLimit: Duration = AndroidAppLimits.openLimit
+        _ component: AndroidComponent, launchersWhenSeen: Int? = nil,
+        listLimit: Duration = AndroidAppLimits.listLimit, openLimit: Duration = AndroidAppLimits.openLimit
     ) async -> AndroidAppOpenOutcome {
-        switch await open(component, limit: openLimit) {
+        let answer = await open(component, limit: openLimit)
+        switch answer {
         case .opened:
             return .opened
         case .failed:
             return .failed
-        case .notFound:
-            guard case let .apps(list) = await self.list(limit: listLimit) else { return .failed }
-            let sameApp = list.apps.filter { $0.component.packageName == component.packageName }
-            guard sameApp.count == 1, let only = sameApp.first, only.component != component else { return .notInAndroid }
-            switch await open(only.component, limit: openLimit) {
-            case .opened: return .openedRenamed(only.component)
-            case .notFound: return .notInAndroid
-            case .failed: return .failed
+        case .unavailable:
+            return .toolMissing
+        case .notFound, .startFailed:
+            switch await self.list(limit: listLimit) {
+            case .unavailable, .failed:
+                return .failed
+            case let .apps(list):
+                if answer == .startFailed, list.apps.contains(where: { $0.component == component }) { return .failed }
+                let sameApp = list.apps.filter { $0.component.packageName == component.packageName }
+                guard launchersWhenSeen == 1, sameApp.count == 1, let only = sameApp.first, only.component != component
+                else { return .notInAndroid }
+                switch await open(only.component, limit: openLimit) {
+                case .opened: return .openedRenamed(only.component)
+                case .notFound: return .notInAndroid
+                case .unavailable: return .toolMissing
+                case .startFailed, .failed: return .failed
+                }
             }
         }
     }
@@ -222,28 +264,94 @@ public enum AndroidAppLimits {
     /// refresh stops asking for icons (the next one asks again).
     public static let deferredRetries = 2
     public static let silentAsksBeforeGivingUp = 3
-    /// The longest name the screens are given: a label is the app's own text,
-    /// which the tool bounds at 80 characters.
-    public static let longestLabel = 200
+    /// The longest name the screens are given, as the tool bounds one: 80
+    /// Unicode scalars and 320 UTF-8 bytes (a longer one ends in an ellipsis).
+    public static let longestLabelScalars = 80
+    public static let longestLabelBytes = 320
+    /// How much of a label's raw text is looked at, before any other work.
+    public static let longestRawLabel = 1_024
     /// The largest icon picture kept, in bytes (the tool's own is 96 KiB).
     public static let largestIcon = 128 * 1_024
-    /// The most records of icons kept across an erase.
-    public static let mostRecords = 1_000
+    /// The most records of icons kept across an erase: one for each app a
+    /// listing may hold.
+    public static let mostRecords = mostApps
 }
 
 /// What an app's own text is made into before a screen, a title or an icon's
-/// name shows it: control characters are spaces, the bidirectional controls
-/// (which would reorder a title the name is quoted in) are dropped, the ends
-/// are trimmed and an enormous one is cut.
+/// name shows it, by the rule the tool applies to a label (`kernarium_apps`,
+/// section 5), here applied again because the answer is untrusted: control
+/// characters, line and paragraph separators and every space character are
+/// spaces, a run of spaces is one and the ends are trimmed; every invisible
+/// format character is dropped (the bidirectional marks and controls, zero
+/// width characters, the byte order mark, tags) but the two joiners that emoji
+/// and some scripts need; noncharacters are U+FFFD; and a long label is cut at
+/// a Unicode scalar, to 80 scalars and 320 bytes, with an ellipsis. The cut is
+/// made before any grapheme work, so a run of combining marks is bounded too.
 public enum AndroidAppText {
     public static func label(_ text: String, fallback: String) -> String {
-        let plain = String(String.UnicodeScalarView(text.unicodeScalars.compactMap {
-            if isBidirectionalControl($0) { return nil }
-            return $0.properties.generalCategory == .control || isBlankLookalike($0) ? " " : $0
-        }))
-        let trimmed = plain.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return fallback }
-        return String(trimmed.prefix(AndroidAppLimits.longestLabel))
+        let cleaned = clean(text)
+        return cleaned.isEmpty ? clean(fallback) : cleaned
+    }
+
+    private static let ellipsis: Unicode.Scalar = "\u{2026}"
+
+    private static func clean(_ text: String) -> String {
+        var kept: [Unicode.Scalar] = []
+        var bytes = 0
+        var spacePending = false
+        var overlong = false
+        var looked = 0
+        for scalar in text.unicodeScalars {
+            looked += 1
+            if looked > AndroidAppLimits.longestRawLabel {
+                overlong = true
+                break
+            }
+            guard let mapped = mapped(scalar) else { continue }
+            if mapped == " " {
+                spacePending = !kept.isEmpty
+                continue
+            }
+            if spacePending {
+                kept.append(" ")
+                bytes += 1
+                spacePending = false
+            }
+            kept.append(mapped)
+            bytes += String(mapped).utf8.count
+        }
+        guard !kept.isEmpty else { return "" }
+        let cut = overlong || kept.count > AndroidAppLimits.longestLabelScalars || bytes > AndroidAppLimits.longestLabelBytes
+        guard cut else { return String(String.UnicodeScalarView(kept)) }
+        // Room for the ellipsis: it is one scalar and three bytes.
+        var head: [Unicode.Scalar] = []
+        var used = 0
+        for scalar in kept {
+            let size = String(scalar).utf8.count
+            guard head.count < AndroidAppLimits.longestLabelScalars - 1,
+                  used + size <= AndroidAppLimits.longestLabelBytes - 3
+            else { break }
+            head.append(scalar)
+            used += size
+        }
+        while head.last == " " { head.removeLast() }
+        head.append(ellipsis)
+        return String(String.UnicodeScalarView(head))
+    }
+
+    /// The scalar as it is kept, a space for what is one, or nil for what goes.
+    private static func mapped(_ scalar: Unicode.Scalar) -> Unicode.Scalar? {
+        switch scalar.properties.generalCategory {
+        case .control, .lineSeparator, .paragraphSeparator, .spaceSeparator:
+            return " "
+        case .format:
+            return scalar.value == 0x200C || scalar.value == 0x200D ? scalar : nil
+        default:
+            break
+        }
+        if isBlankLookalike(scalar) { return " " }
+        if scalar.properties.isNoncharacterCodePoint { return "\u{FFFD}" }
+        return scalar
     }
 
     /// The characters that draw nothing but are no format character, so a
@@ -255,12 +363,6 @@ public enum AndroidAppText {
         case 0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800: true
         default: false
         }
-    }
-
-    /// The embedding, override and isolate controls (U+202A to U+202E and
-    /// U+2066 to U+2069).
-    private static func isBidirectionalControl(_ scalar: Unicode.Scalar) -> Bool {
-        (0x202A...0x202E).contains(scalar.value) || (0x2066...0x2069).contains(scalar.value)
     }
 
     /// Alphabetical by label as the person reads it, the identifier settling a tie.

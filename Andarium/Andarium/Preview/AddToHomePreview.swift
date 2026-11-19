@@ -13,7 +13,7 @@ enum AddToHomePreview {
     private static let settingsScreens: Set<String> = [
         "add-home-row", "add-home-page", "add-home-page-refreshing", "add-home-page-loading",
         "add-home-page-failed", "add-home-page-empty", "add-home-page-search-none",
-        "add-home-page-search-off", "add-home-guide",
+        "add-home-page-search-off", "add-home-page-search", "add-home-page-failed-empty", "add-home-guide",
     ]
     /// A request to open an app, and where it is.
     private static let requestScreens: Set<String> = [
@@ -32,22 +32,29 @@ enum AddToHomePreview {
     /// Sets the model up for a screen: the played tool, a cache of its own, and
     /// the state the screen starts in.
     static func prepare(screen: String, model: AppModel, freeze: Bool) {
-        let scripted = ScriptedAndroidApps()
+        // The screen of the Search section has a short list, so that the foot of the page is in view.
+        let scripted = screen == "add-home-page-search"
+            ? ScriptedAndroidApps(tool: ScriptedAppsTool(apps: Array(ScriptedAndroidApps.sampleApps.prefix(3))))
+            : ScriptedAndroidApps()
         model.scriptedAndroidApps = scripted
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("andarium-add-home-\(UUID().uuidString)", isDirectory: true)
         AndroidAppsHub.shared.configure(directory: directory)
         let state = model.androidApps
         state.store = AndroidAppsHub.shared.store
-        state.preference = AndroidAppSearchPreference(defaults: UserDefaults(suiteName: "andarium-add-home-preview") ?? .standard)
-        state.preference.keep(screen != "add-home-page-search-off")
-        state.searchOn = state.preference.isOn
+        AndroidAppsHub.shared.preference = AndroidAppSearchPreference(
+            defaults: UserDefaults(suiteName: "andarium-add-home-preview") ?? .standard)
+        AndroidAppsHub.shared.preference.keep(screen != "add-home-page-search-off")
+        state.searchOn = AndroidAppsHub.shared.preference.isOn
         state.adoptCache()
         AndroidAppsHub.shared.searchIndex = SilentAppsIndex()
 
         if screen == "add-home-page-loading" {
             // The list never comes, and there is none remembered.
             scripted.tool.delay = .seconds(3600)
+        } else if screen == "add-home-page-failed-empty" {
+            // Android does not answer and nothing is remembered.
+            scripted.tool.answer(listing: .failed, digest: .failed)
         } else {
             remember(scripted, in: state)
         }
@@ -147,7 +154,8 @@ enum AddToHomePreview {
 /// The preview takes nothing of the system's index.
 @MainActor
 final class SilentAppsIndex: AndroidAppsSearchIndexing {
-    func offer(_ entities: [AndroidAppEntity]) async {}
-    func withdraw() async {}
+    func offer(_ entities: [AndroidAppEntity]) async -> Bool { true }
+    func add(_ entities: [AndroidAppEntity]) async -> Bool { true }
+    func withdraw() async -> Bool { true }
     func shortcutsChanged() {}
 }

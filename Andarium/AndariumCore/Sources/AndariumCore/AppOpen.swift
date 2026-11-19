@@ -57,12 +57,14 @@ public enum AppOpenFailure: Equatable, Sendable {
     case recovery
     /// Android's first-run setup is not finished; the app opens once it is.
     case setupUnfinished
+    /// The image has no tool that opens apps (an older image): trying again cannot help.
+    case toolMissing
 
     /// Whether the banner offers Try Again.
     public var canRetry: Bool {
         switch self {
         case .tookTooLong, .setupUnfinished: true
-        case .notInAndroid, .recovery: false
+        case .notInAndroid, .recovery, .toolMissing: false
         }
     }
 }
@@ -78,6 +80,15 @@ public struct AppOpenBanner: Equatable, Sendable, Identifiable {
     public let shownAt: Date
 
     public var id: Int { serial }
+
+    public init(serial: Int, failure: AppOpenFailure, label: String, app: AndroidComponent, component: AndroidComponent?, shownAt: Date) {
+        self.serial = serial
+        self.failure = failure
+        self.label = label
+        self.app = app
+        self.component = component
+        self.shownAt = shownAt
+    }
 }
 
 /// Why a request that Andarium will not carry out says so, where it says so.
@@ -93,6 +104,9 @@ public enum AppOpenRefusal: Equatable, Sendable {
     case cannotStart
     /// The run ended in failure: its own screen says so.
     case runEnded
+    /// An erase or another task that changes the guest is under way at Home:
+    /// nothing starts under it, and the request is dropped.
+    case busy
 }
 
 /// What is true of Andarium at the moment a request arrives.
@@ -105,13 +119,19 @@ public struct AppOpenSituation: Equatable, Sendable {
     public var holdsGuestFiles: Bool
     /// The guest is paused for want of space.
     public var spacePaused: Bool
+    /// A task that changes the guest (an erase, a create) is under way behind
+    /// the busy overlay: the guest in hand is not the one the task leaves.
+    public var guestBusy: Bool
 
-    public init(phase: Phase, plan: StartPlan, verdict: StartVerdict, holdsGuestFiles: Bool, spacePaused: Bool) {
+    public init(
+        phase: Phase, plan: StartPlan, verdict: StartVerdict, holdsGuestFiles: Bool, spacePaused: Bool, guestBusy: Bool = false
+    ) {
         self.phase = phase
         self.plan = plan
         self.verdict = verdict
         self.holdsGuestFiles = holdsGuestFiles
         self.spacePaused = spacePaused
+        self.guestBusy = guestBusy
     }
 }
 
@@ -149,7 +169,8 @@ public enum AppOpenPlanner {
         case .failed:
             return .refuse(.runEnded)
         case .home:
-            break
+            // An erase or a create owns the guest: Start cannot be pressed under it either.
+            if situation.guestBusy { return .refuse(.busy) }
         }
         switch situation.verdict {
         case .noGuest:
@@ -230,7 +251,7 @@ public struct AppOpenState: Equatable, Sendable {
                 return .alert(.noAndroid, label: label)
             case .needsNewerChip:
                 return .alert(.needsNewerChip, label: label)
-            case .cannotStart, .runEnded:
+            case .cannotStart, .runEnded, .busy:
                 return .none
             }
         }
@@ -292,6 +313,41 @@ public struct AppOpenState: Equatable, Sendable {
         case .opened, .openedRenamed: break
         case .notInAndroid: show(.notInAndroid, for: request, now: now)
         case .failed: show(.tookTooLong, for: request, now: now)
+        case .toolMissing: show(.toolMissing, for: request, now: now)
+        }
+    }
+
+    /// The guest was paused for want of space while Android was being made
+    /// ready for the request: it waits for the person's answer like one that
+    /// arrived during the pause, and the wait is bounded by `holdLimit`.
+    /// Returns whether a request that was opening now waits.
+    @discardableResult
+    public mutating func spacePaused(now: Date) -> Bool {
+        guard var pending, pending.stage == .opening else { return false }
+        pending.stage = .waiting(.space, since: now)
+        self.pending = pending
+        return true
+    }
+
+    /// Right before the launch is sent: the request is decided again in the
+    /// situation of that moment, because Android's readiness was waited for
+    /// over seconds in which the run could have ended or paused. True where
+    /// the launch may go.
+    public mutating func readyToLaunch(_ request: AppOpenRequest, in situation: AppOpenSituation, now: Date) -> Bool {
+        guard pending?.request == request, pending?.stage == .opening else { return false }
+        switch AppOpenPlanner.decide(situation) {
+        case .openNow:
+            return true
+        case .hold(.space):
+            pending?.stage = .waiting(.space, since: now)
+            return false
+        case .refuse(.recovery):
+            pending = nil
+            show(.recovery, for: request, now: now)
+            return false
+        case .hold, .startAndroid, .alreadyStarting, .refuse:
+            pending = nil
+            return false
         }
     }
 

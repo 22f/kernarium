@@ -3,7 +3,9 @@
 import AndariumCore
 import AppIntents
 import CoreSpotlight
+import CryptoKit
 import Foundation
+import ImageIO
 import Observation
 import UIKit
 
@@ -23,10 +25,12 @@ protocol AndroidAppsSource: AnyObject {
     func awaitAndroidReady() async -> AndroidAppReadiness.Outcome
 }
 
-/// The tool, with the pictures iOS would draw badly made safe: an icon with
-/// transparent pixels is drawn on white before it is kept, because iOS paints a
-/// transparent Home Screen icon black. The listing and the launching are the
-/// tool's.
+/// The tool, with every icon made one the host drew itself: the picture is
+/// decoded whole, at the size the tool says it has, and kept as a PNG this
+/// process rendered on an opaque white square, whatever the tool said of its
+/// alpha. iOS paints a transparent Home Screen icon black, and a picture that
+/// does not decode is no icon (it is asked for again, not kept). The listing
+/// and the launching are the tool's.
 nonisolated struct FlatteningAppsTool: AndroidAppsTool {
     let base: any AndroidAppsTool
 
@@ -39,24 +43,35 @@ nonisolated struct FlatteningAppsTool: AndroidAppsTool {
     func icons(of apps: [AndroidApp], limit: Duration) async -> [String: AndroidAppIconAnswer] {
         var answers = await base.icons(of: apps, limit: limit)
         for (id, answer) in answers {
-            guard case let .png(data, hasAlpha) = answer, hasAlpha else { continue }
+            guard case let .png(data, _) = answer else { continue }
             answers[id] = Self.flattened(data).map { .png($0, hasAlpha: false) } ?? .error
         }
         return answers
     }
 
-    /// The picture on an opaque white square; nil where it cannot be read.
+    /// The most pixels on a side of a picture the host decodes: the tool's largest size.
+    static let largestSide = 192
+
+    /// The picture, decoded whole, drawn on an opaque white square of its own
+    /// size and made a PNG again; nil where it is not a whole, square picture
+    /// of a size the tool makes.
     static func flattened(_ data: Data) -> Data? {
-        guard let image = UIImage(data: data), image.size.width > 0, image.size.height > 0 else { return nil }
+        guard AndroidAppStore.isWholePNG(data),
+              let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) == 1,
+              CGImageSourceGetStatus(source) == .statusComplete,
+              let decoded = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary),
+              CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete,
+              decoded.width == decoded.height, (1...largestSide).contains(decoded.width)
+        else { return nil }
+        let side = CGFloat(decoded.width)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = true
-        let pixels = CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
-        let renderer = UIGraphicsImageRenderer(size: pixels, format: format)
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format)
         return renderer.image { context in
             UIColor.white.setFill()
-            context.fill(CGRect(origin: .zero, size: pixels))
-            image.draw(in: CGRect(origin: .zero, size: pixels))
+            context.fill(CGRect(x: 0, y: 0, width: side, height: side))
+            UIImage(cgImage: decoded, scale: 1, orientation: .up).draw(in: CGRect(x: 0, y: 0, width: side, height: side))
         }.pngData()
     }
 }
@@ -86,10 +101,16 @@ final class AndroidAppsState {
     private(set) var iconRevision = 0
     /// The request to open an app and the banner of how the last one ended.
     var open = AppOpenState()
-    /// Whether Android's apps are offered to Search and Siri (the Spotlight index).
+    /// Whether Android's apps are offered to Search (the Spotlight index): the
+    /// switch, as the hub keeps it.
     var searchOn = true
-    /// Where the switch is kept.
-    @ObservationIgnored var preference = AndroidAppSearchPreference()
+    /// A refresh's own number: the progress of a refresh that stop, erase or a
+    /// newer one ended does not reach the screens.
+    @ObservationIgnored private(set) var refreshToken = 0
+    /// A snapshot restore is under way, and the release of the requests it
+    /// held waits for the model to have adopted what it restored.
+    @ObservationIgnored var restoring = false
+    @ObservationIgnored var releaseAfterRestore = false
     /// The cache: the catalog, the icons, and the record kept per icon.
     @ObservationIgnored var store: AndroidAppStore
     /// The refresh under way, which a second asker joins.
@@ -113,7 +134,7 @@ final class AndroidAppsState {
 
     init(store: AndroidAppStore = AndroidAppsHub.shared.store) {
         self.store = store
-        searchOn = preference.isOn
+        searchOn = AndroidAppsHub.shared.preference.isOn
         adoptCache()
     }
 
@@ -127,10 +148,15 @@ final class AndroidAppsState {
     var installed: [AndroidApp] { apps.filter { !$0.builtIn } }
     var builtIn: [AndroidApp] { apps.filter(\.builtIn) }
 
-    func begin() {
+    /// A refresh starts: the number its progress and its end are told by.
+    func begin() -> Int {
+        refreshToken &+= 1
         refreshing = true
         failed = false
+        return refreshToken
     }
+
+    func owns(_ token: Int) -> Bool { refreshToken == token }
 
     /// A catalog is in the store (the listing, then each batch of icons).
     func progressed(_ catalog: AndroidAppCatalog, iconsLeft left: Int) {
@@ -163,19 +189,27 @@ final class AndroidAppsState {
         iconsLeft = 0
     }
 
+    /// The refresh under way is no longer anyone's: it stops, its progress is
+    /// not heard, and the store refuses what it still writes.
+    private func endRefreshUnderWay() {
+        refreshToken &+= 1
+        store.invalidateRefreshes()
+        inFlight?.cancel()
+        inFlight = nil
+        refreshing = false
+        iconsLeft = 0
+    }
+
     /// The run is over: nothing is under way, and what this run listed is not
     /// known of the next. The cached list stays.
     func runEnded() {
-        inFlight?.cancel()
-        inFlight = nil
+        endRefreshUnderWay()
         first?.cancel()
         first = nil
         opening?.cancel()
         opening = nil
         open.runEnded()
         open.dismissBanner()
-        refreshing = false
-        iconsLeft = 0
         listed = false
         failed = false
         unavailable = false
@@ -192,10 +226,22 @@ final class AndroidAppsState {
     }
 
     /// The disk may not be what was listed (a restored snapshot or update):
-    /// the next refresh lists again.
+    /// the next refresh lists again, and a refresh under way is no longer the store's.
     func invalidated() {
+        endRefreshUnderWay()
         store.invalidate()
         listed = false
+    }
+
+    /// The image has no tool (and none will answer this run): what an earlier
+    /// image listed is not offered. The records stay.
+    func withdrawCatalog() {
+        endRefreshUnderWay()
+        unavailable = true
+        listed = true
+        store.erase()
+        adoptCache()
+        iconRevision &+= 1
     }
 
     /// Sleeps until the earliest time a waiting request or a banner runs out,
@@ -227,14 +273,17 @@ final class AndroidAppsState {
     }
 }
 
-/// How the app list reaches Spotlight (Search and Siri) and the App Shortcuts,
-/// so a test can watch it without the system's index.
+/// How the app list reaches Spotlight (Search) and the App Shortcuts, so a test
+/// can watch it without the system's index. Each write says whether the system
+/// took it, so that one that did not is tried again.
 @MainActor
 protocol AndroidAppsSearchIndexing: AnyObject {
-    /// Offers these apps to Search and Siri, in place of what was offered.
-    func offer(_ entities: [AndroidAppEntity]) async
-    /// Takes every app back out of Search and Siri.
-    func withdraw() async
+    /// Offers these apps to Search, in place of what was offered.
+    func offer(_ entities: [AndroidAppEntity]) async -> Bool
+    /// Adds these apps to what is offered (the system asked for them again).
+    func add(_ entities: [AndroidAppEntity]) async -> Bool
+    /// Takes every app back out of Search.
+    func withdraw() async -> Bool
     /// Tells the system that the apps the shortcut tiles are made of changed.
     func shortcutsChanged()
 }
@@ -242,15 +291,34 @@ protocol AndroidAppsSearchIndexing: AnyObject {
 /// The system's index.
 @MainActor
 final class SpotlightAppsIndex: AndroidAppsSearchIndexing {
-    func offer(_ entities: [AndroidAppEntity]) async {
+    func offer(_ entities: [AndroidAppEntity]) async -> Bool {
         let index = CSSearchableIndex.default()
-        try? await index.deleteAppEntities(ofType: AndroidAppEntity.self)
-        guard !entities.isEmpty else { return }
-        try? await index.indexAppEntities(entities)
+        do {
+            try await index.deleteAppEntities(ofType: AndroidAppEntity.self)
+            if !entities.isEmpty { try await index.indexAppEntities(entities) }
+            return true
+        } catch {
+            return false
+        }
     }
 
-    func withdraw() async {
-        try? await CSSearchableIndex.default().deleteAppEntities(ofType: AndroidAppEntity.self)
+    func add(_ entities: [AndroidAppEntity]) async -> Bool {
+        guard !entities.isEmpty else { return true }
+        do {
+            try await CSSearchableIndex.default().indexAppEntities(entities)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func withdraw() async -> Bool {
+        do {
+            try await CSSearchableIndex.default().deleteAppEntities(ofType: AndroidAppEntity.self)
+            return true
+        } catch {
+            return false
+        }
     }
 
     func shortcutsChanged() {
@@ -258,15 +326,125 @@ final class SpotlightAppsIndex: AndroidAppsSearchIndexing {
     }
 }
 
+/// The one path every write to Spotlight takes: the refresh, the switch, the
+/// launch's reconcile and the system's own reindex requests queue behind one
+/// another, and each is judged against the preference and the catalog as they
+/// are when it runs, not as they were when it was asked. An app is offered
+/// only while it is listed; the switch off keeps every app out; a write that
+/// did not succeed is tried again by the next call (the launch makes one).
+/// Where the host has no Home Screen to add to, nothing is written at all.
+@MainActor
+final class AndroidAppsIndexWriter {
+    private unowned let hub: AndroidAppsHub
+    private var held = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var asked = 0
+    private var judged = 0
+    private var tilesKey: String
+
+    init(hub: AndroidAppsHub) {
+        self.hub = hub
+        tilesKey = Self.key(of: [], store: hub.store)
+    }
+
+    /// Makes Spotlight and the shortcut tiles what the catalog and the switch
+    /// say now. A call whose answer an earlier, later-started pass already
+    /// gave is not judged again.
+    func reconcile() async {
+        asked += 1
+        let mine = asked
+        await acquire()
+        defer { release() }
+        guard judged < mine else { return }
+        let covering = asked
+        await judge()
+        judged = covering
+    }
+
+    /// The system asks for some apps again (nil: all of them).
+    func reindex(_ identifiers: [String]?) async {
+        await acquire()
+        defer { release() }
+        guard hub.hostOffers, hub.preference.isOn else { return }
+        let apps = hub.listedApps()
+        let index = hub.searchIndex
+        if let identifiers {
+            let wanted = Set(identifiers)
+            _ = await index.add(apps.filter { wanted.contains($0.id) }.map(AndroidAppEntity.init))
+        } else if await index.offer(apps.map(AndroidAppEntity.init)) {
+            hub.preference.keepIndexed("on:" + Self.key(of: apps, store: hub.store))
+        }
+    }
+
+    private func judge() async {
+        guard hub.hostOffers else { return }
+        let index = hub.searchIndex
+        let apps = hub.listedApps()
+        let key = Self.key(of: apps, store: hub.store)
+        if key != tilesKey {
+            tilesKey = key
+            index.shortcutsChanged()
+        }
+        let on = hub.preference.isOn
+        let wanted = on ? "on:" + key : "off"
+        guard wanted != hub.preference.indexed else { return }
+        let took = on ? await index.offer(apps.map(AndroidAppEntity.init)) : await index.withdraw()
+        if took { hub.preference.keepIndexed(wanted) }
+    }
+
+    /// What the system is told of: each app's identifier, name, icon key and
+    /// whether its picture is there. It changes when the artwork does though
+    /// the rows are the same.
+    static func key(of apps: [AndroidApp], store: AndroidAppStore) -> String {
+        var hasher = SHA256()
+        for app in apps {
+            hasher.update(data: Data("\(app.id)\t\(app.label)\t\(app.iconTag)\t\(store.hasIcon(of: app) ? 1 : 0)\n".utf8))
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func acquire() async {
+        guard held else { held = true; return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    private func release() {
+        if waiters.isEmpty { held = false } else { waiters.removeFirst().resume() }
+    }
+}
+
 /// What the App Intent, its entity and its queries share with the application:
 /// the cache (which answers while Android is off, and in a process the system
 /// started for a query, before any screen or model exists), the model a
-/// request goes to, and the index.
+/// request goes to, the switch for Search, and the index.
 nonisolated final class AndroidAppsHub: @unchecked Sendable {
     static let shared = AndroidAppsHub()
 
     private let lock = NSLock()
     private var kept: AndroidAppStore?
+    private var preferenceKept = AndroidAppSearchPreference()
+    private var hostOffersKept = AndroidAppsHub.processOffersAddToHomeScreen
+    private var writerKept: AndroidAppsIndexWriter?
+
+    /// The host has a Home Screen to add to (an iPhone or an iPad): a Mac and
+    /// a Vision Pro run the application but have none, so nothing of this
+    /// feature is offered there.
+    static var processOffersAddToHomeScreen: Bool {
+        let info = ProcessInfo.processInfo
+        return !info.isiOSAppOnMac && !info.isiOSAppOnVision
+    }
+
+    /// Whether the apps are entities, in Spotlight and in the tiles.
+    var hostOffers: Bool {
+        get { lock.withLock { hostOffersKept } }
+        set { lock.withLock { hostOffersKept = newValue } }
+    }
+
+    /// The switch for Search, as it is kept.
+    var preference: AndroidAppSearchPreference {
+        get { lock.withLock { preferenceKept } }
+        set { lock.withLock { preferenceKept = newValue } }
+    }
 
     /// The cache, in the application's support folder unless a launch put it elsewhere.
     var store: AndroidAppStore {
@@ -281,7 +459,10 @@ nonisolated final class AndroidAppsHub: @unchecked Sendable {
     /// Puts the cache somewhere else (an isolated test guest, a hosted test,
     /// the preview). Done before the first use; a model made afterwards adopts it.
     func configure(directory: URL) {
-        lock.withLock { kept = AndroidAppStore(directory: directory) }
+        lock.withLock {
+            kept = AndroidAppStore(directory: directory)
+            writerKept = nil
+        }
     }
 
     static func defaultDirectory() -> URL {
@@ -303,6 +484,7 @@ nonisolated final class AndroidAppsHub: @unchecked Sendable {
 
     @MainActor func attach(_ model: AppModel?) {
         lock.withLock { attachedModel = model }
+        if let model { hostOffers = model.hostOffersAddToHomeScreen }
     }
 
     /// Where the apps are offered to the system; a test or the preview puts another.
@@ -315,11 +497,30 @@ nonisolated final class AndroidAppsHub: @unchecked Sendable {
                 return index
             }
         }
-        set { lock.withLock { indexKept = newValue } }
+        set {
+            lock.withLock {
+                indexKept = newValue
+                writerKept = nil
+            }
+        }
+    }
+
+    /// The one ordered path to the index.
+    @MainActor var writer: AndroidAppsIndexWriter {
+        if let writer = lock.withLock({ writerKept }) { return writer }
+        let writer = AndroidAppsIndexWriter(hub: self)
+        lock.withLock { writerKept = writer }
+        return writer
+    }
+
+    /// The apps of the cache, the ones the system is told of: none where the
+    /// host offers none.
+    func listedApps() -> [AndroidApp] {
+        hostOffers ? (store.catalog()?.apps ?? []) : []
     }
 
     /// The entities of the cache, as the query answers.
     func entities() -> [AndroidAppEntity] {
-        (store.catalog()?.apps ?? []).map(AndroidAppEntity.init)
+        listedApps().map(AndroidAppEntity.init)
     }
 }

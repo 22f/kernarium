@@ -1338,16 +1338,24 @@ is on. `AndariumCore/Adb` speaks the protocol.
   `AndroidAppsTool` and `AndroidAppRefresh` in `AndariumCore`, and is cached by
   `AndroidAppStore` (catalog, icons, and a small record per icon that survives
   an erase), so the tiles and the chooser answer while Android is off. The row
-  exists only in a normal session whose image has the tool, and not on a Mac or
-  a Vision Pro, which have no Home Screen; the intent is there on all of them.
+  exists only in a normal session whose image has the tool. A Mac and a Vision
+  Pro have no Home Screen: there the intent runs, but the apps are no entities,
+  nothing is written to Spotlight and the tiles are not told of them. An icon
+  is stored only as a picture the host drew itself (`FlatteningAppsTool`), and a
+  label as the tool's own sanitising makes it, whatever the tool or the cache
+  file says.
   A request from an icon follows the Start button's rules (`AppOpenPlanner`): a
-  running Android opens the app once `AndroidAppReadiness` says it is ready, a
-  stopped one is started, and a start that needs the person's answer (an
-  unfinished update, too little space) waits for it in a card above Home's
-  notice. The request is in memory only and Don't open drops it. A failure is a
-  banner over Android. The Search and Siri switch on the chooser governs the
-  Spotlight index only; the Shortcuts tiles stay, since they are the route to the
-  Home Screen. The feature is in every build configuration. Tests:
+  running Android opens the app once `AndroidAppReadiness` says it is ready
+  (setup finished for the foreground user, the home screen's first resume
+  observed), a stopped one is started, and a start that needs the person's
+  answer (an unfinished update, too little space, a restore under way) waits for
+  it in a card above Home's notice; a request during an erase is dropped. The
+  request is in memory only and Don't open drops it. A failure is a banner over
+  Android. The switch on the chooser governs Spotlight (Search) only: every
+  write to the index takes one ordered path (`AndroidAppsIndexWriter`), judged
+  against the switch and the catalog as they are when it runs, and a launch
+  finishes a write that failed. The tiles, the entities and the Siri phrase do
+  not follow the switch. The feature is in every build configuration. Tests:
   `AndariumCore`'s `AppOpen*`, `AndroidApp*` suites, the hosted
   `AndroidApps*Tests` and the preview's `AddToHomeUITests`
   (`-screen add-home-*`, `Preview/AddToHomePreview.swift`).

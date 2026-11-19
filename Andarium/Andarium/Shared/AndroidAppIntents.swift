@@ -59,7 +59,9 @@ nonisolated struct AndroidAppQuery: EnumerableEntityQuery, IndexedEntityQuery {
     }
 
     func entities(for identifiers: [AndroidAppEntity.ID]) async throws -> [AndroidAppEntity] {
-        let store = AndroidAppsHub.shared.store
+        let hub = AndroidAppsHub.shared
+        guard hub.hostOffers else { return [] }
+        let store = hub.store
         let catalog = store.catalog()
         return identifiers.compactMap { id in
             if let app = catalog?.app(withID: id) { return AndroidAppEntity(app) }
@@ -73,20 +75,16 @@ nonisolated struct AndroidAppQuery: EnumerableEntityQuery, IndexedEntityQuery {
         AndroidAppsHub.shared.entities()
     }
 
+    /// The system asks for apps to be indexed again: through the one ordered
+    /// path to the index, which judges the switch and the catalog as they are
+    /// then and offers only the apps that are listed.
     func reindexEntities(for identifiers: [AndroidAppEntity.ID], indexDescription: CSSearchableIndexDescription) async throws {
-        guard await AndroidAppsHub.searchIsOn else { return }
-        try await CSSearchableIndex.default().indexAppEntities(entities(for: identifiers))
+        await AndroidAppsHub.shared.writer.reindex(identifiers)
     }
 
     func reindexAllEntities(indexDescription: CSSearchableIndexDescription) async throws {
-        guard await AndroidAppsHub.searchIsOn else { return }
-        try await CSSearchableIndex.default().indexAppEntities(AndroidAppsHub.shared.entities())
+        await AndroidAppsHub.shared.writer.reindex(nil)
     }
-}
-
-extension AndroidAppsHub {
-    /// The Search and Siri switch, as it is kept.
-    @MainActor static var searchIsOn: Bool { AndroidAppSearchPreference().isOn }
 }
 
 /// The error a request that names nothing Android could open ends with.

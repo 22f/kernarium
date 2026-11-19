@@ -98,7 +98,7 @@ final class AddToHomeUITests: XCTestCase {
     }
 
     @MainActor
-    func testTheSearchSearchOptionsAreAtTheFootAndOnByDefault() {
+    func testTheSearchSwitchIsAtTheFootAndOnByDefault() {
         let app = launch("add-home-page")
         let toggle = element(app, "android-apps-search-switch")
         var swipes = 0
@@ -106,10 +106,19 @@ final class AddToHomeUITests: XCTestCase {
             app.swipeUp()
             swipes += 1
         }
-        XCTAssertTrue(toggle.exists, "the chooser has no Search and Siri switch")
-        XCTAssertEqual(toggle.label, "Show Android apps")
-        XCTAssertEqual(toggle.value as? String, "1", "Search and Siri are on by default")
-        XCTAssertTrue(app.staticTexts["Search and Siri"].exists)
+        XCTAssertTrue(toggle.exists, "the chooser has no Search switch")
+        XCTAssertEqual(toggle.label, "Show in Search")
+        XCTAssertEqual(toggle.value as? String, "1", "Search is on by default")
+        XCTAssertTrue(app.staticTexts["Android apps appear in Search while this is on. Shortcuts and Siri still list them."].exists)
+    }
+
+    @MainActor
+    func testTheSearchSectionIsInViewOfAShortList() {
+        let app = launch("add-home-page-search")
+        let toggle = element(app, "android-apps-search-switch")
+        XCTAssertTrue(toggle.waitForExistence(timeout: 20))
+        XCTAssertTrue(toggle.isHittable, "the switch for Search is in view without scrolling")
+        XCTAssertTrue(app.staticTexts["Android apps appear in Search while this is on. Shortcuts and Siri still list them."].exists)
     }
 
     @MainActor
@@ -138,7 +147,7 @@ final class AddToHomeUITests: XCTestCase {
         // No list yet and none remembered: only the note.
         app = launch("add-home-page-loading")
         XCTAssertTrue(element(app, "android-apps-refreshing").waitForExistence(timeout: 20))
-        XCTAssertTrue(app.staticTexts["Updating from Android\u{2026}"].exists)
+        XCTAssertTrue(app.staticTexts["Reading apps from Android\u{2026}"].exists)
         app.terminate()
 
         // Android did not answer: the remembered list and Try again.
@@ -146,6 +155,13 @@ final class AddToHomeUITests: XCTestCase {
         XCTAssertTrue(element(app, "android-apps-remembered").waitForExistence(timeout: 20))
         XCTAssertTrue(app.buttons["Try again"].exists)
         XCTAssertTrue(app.buttons[cometLabel].exists, "the remembered list is kept when Android does not answer")
+        app.terminate()
+
+        // Android did not answer and no list is remembered: the title says the apps could not be read.
+        app = launch("add-home-page-failed-empty")
+        XCTAssertTrue(app.staticTexts["Couldn\u{2019}t read Android\u{2019}s apps"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["Try again"].exists)
+        XCTAssertFalse(app.staticTexts["No Android apps yet"].exists, "Android has apps; only the reading failed")
         app.terminate()
 
         // Android lists no app.
@@ -231,7 +247,7 @@ final class AddToHomeUITests: XCTestCase {
         let banner = element(app, "app-open-banner")
         XCTAssertTrue(banner.waitForExistence(timeout: 20))
         XCTAssertTrue(app.staticTexts["\u{201C}Comet Hop\u{201D} isn\u{2019}t in Android"].exists)
-        XCTAssertFalse(app.buttons["Try Again"].exists, "an app that is gone has no Try Again")
+        XCTAssertFalse(app.buttons["Try again"].exists, "an app that is gone has no Try again")
         app.buttons["Dismiss"].tap()
         let closed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: banner)
         wait(for: [closed], timeout: 5)
@@ -239,7 +255,7 @@ final class AddToHomeUITests: XCTestCase {
 
         app = launch("add-home-banner-slow")
         XCTAssertTrue(app.staticTexts["\u{201C}Comet Hop\u{201D} didn\u{2019}t open"].waitForExistence(timeout: 20))
-        XCTAssertTrue(app.buttons["Try Again"].exists)
+        XCTAssertTrue(app.buttons["Try again"].exists)
         app.terminate()
 
         app = launch("add-home-banner-recovery")
@@ -248,7 +264,7 @@ final class AddToHomeUITests: XCTestCase {
 
         app = launch("add-home-banner-setup")
         XCTAssertTrue(app.staticTexts["Android is still being set up"].waitForExistence(timeout: 20))
-        XCTAssertTrue(app.buttons["Try Again"].exists)
+        XCTAssertTrue(app.buttons["Try again"].exists)
     }
 
     @MainActor
@@ -257,7 +273,7 @@ final class AddToHomeUITests: XCTestCase {
         let alert = app.alerts.firstMatch
         XCTAssertTrue(alert.waitForExistence(timeout: 20))
         XCTAssertTrue(alert.staticTexts["\u{201C}Comet Hop\u{201D} isn\u{2019}t in Android"].exists)
-        XCTAssertTrue(alert.staticTexts.matching(NSPredicate(format: "label CONTAINS 'The virtual machine was erased'")).firstMatch.exists)
+        XCTAssertTrue(alert.staticTexts.matching(NSPredicate(format: "label CONTAINS 'There is no virtual machine'")).firstMatch.exists)
     }
 
     // MARK: Accessibility

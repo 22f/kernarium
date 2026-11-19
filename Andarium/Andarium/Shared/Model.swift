@@ -428,7 +428,7 @@ final class AppModel {
         didSet {
             snapshots.activityChanged(from: oldValue, to: snapshotActivity)
             // A request to open an Android app that waited for it goes on.
-            if oldValue.holdsGuestFiles, !snapshotActivity.holdsGuestFiles { androidAppsHoldEnded(.snapshot) }
+            if oldValue.holdsGuestFiles, !snapshotActivity.holdsGuestFiles { androidAppsSnapshotOperationEnded() }
         }
     }
     /// What the snapshot screens show and do (`SnapshotsModel`).
@@ -526,7 +526,10 @@ final class AppModel {
     /// screen over the session asks what to do.
     var spacePause: SpacePause? {
         // The pause for space that held a request to open an Android app is over.
-        didSet { if oldValue != nil, spacePause == nil { androidAppsHoldEnded(.space) } }
+        didSet {
+            if oldValue != nil, spacePause == nil { androidAppsHoldEnded(.space) }
+            if oldValue == nil, spacePause != nil { androidAppsSpacePaused() }
+        }
     }
     var alert: AppAlert?
     /// What a Files picker's failure says, over Settings (`documentPickerFailed`).
@@ -1547,6 +1550,8 @@ final class AppModel {
                 } else {
                     Task { await self.refreshOldApps() }
                 }
+                // The app is in Android's list now: the apps Andarium offers follow it.
+                Task { await self.refreshAndroidApps(afterAChange: true) }
                 // 100% for a moment, then the result. Nothing is left to stop, so
                 // the Cancel that came back for an app's data goes.
                 update(BusyUpdate(progress: 1, cancellable: false))

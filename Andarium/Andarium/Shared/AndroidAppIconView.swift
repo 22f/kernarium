@@ -5,22 +5,29 @@ import SwiftUI
 import UIKit
 
 /// The pictures of Android's apps the screens draw, read from the cache and
-/// kept until an icon arrives or the list changes.
+/// kept until an icon arrives or the list changes. The most kept is a screen
+/// or two of rows, so a list of a thousand apps scrolled through does not hold
+/// a thousand decoded pictures; the system may drop them sooner under pressure.
 @MainActor
 enum AndroidAppImages {
+    static let mostKept = 120
     private static var revision = -1
-    private static var cache: [String: UIImage] = [:]
+    private static let cache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = mostKept
+        return cache
+    }()
 
     /// The app's icon, or nil where the cache has none (the app declares no
     /// icon, or it has not arrived yet).
     static func image(forID id: String, in state: AndroidAppsState) -> UIImage? {
         if revision != state.iconRevision {
-            cache.removeAll()
+            cache.removeAllObjects()
             revision = state.iconRevision
         }
-        if let image = cache[id] { return image }
+        if let image = cache.object(forKey: id as NSString) { return image }
         guard let data = state.store.icon(forID: id), let image = UIImage(data: data) else { return nil }
-        cache[id] = image
+        cache.setObject(image, forKey: id as NSString)
         return image
     }
 }

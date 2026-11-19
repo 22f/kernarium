@@ -35,7 +35,7 @@ struct AddToHomeScreenRow: View {
 /// icon, installed ones first, then the ones built into Android. A tap on an
 /// app leads to the guide that adds its icon to the Home Screen through Apple's
 /// Shortcuts. The list is the cache's, shown at once while Android is asked for
-/// a fresher one, and the Search and Siri switch is at the foot.
+/// a fresher one, and the switch for Search is at the foot.
 struct AddToHomeScreenPage: View {
     @Environment(AppModel.self) private var model
     @State private var query: String
@@ -158,7 +158,7 @@ struct AddToHomeScreenPage: View {
         }
     }
 
-    // MARK: Search and Siri
+    // MARK: Search
 
     private func searchSection(_ state: AndroidAppsState) -> some View {
         Section {
@@ -169,8 +169,6 @@ struct AddToHomeScreenPage: View {
                 }
             }
             .accessibilityIdentifier("android-apps-search-switch")
-        } header: {
-            Text(AndroidAppsWords.searchHeader)
         } footer: {
             Text(AndroidAppsWords.searchFooter)
         }
@@ -192,7 +190,7 @@ struct AddToHomeScreenPage: View {
             .accessibilityIdentifier("android-apps-refreshing")
         } else if state.failed {
             ContentUnavailableView {
-                Label(AndroidAppsWords.emptyTitle, systemImage: "apps.iphone")
+                Label(AndroidAppsWords.failedTitle, systemImage: "apps.iphone")
             } description: {
                 Text(OldAppsWords.failed)
             } actions: {

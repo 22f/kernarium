@@ -19,14 +19,14 @@ nonisolated enum AndroidAppsWords {
     static let searchPrompt = String(localized: "Search Android apps")
     static let installed = String(localized: "Installed")
     static let builtIn = String(localized: "Built into Android")
-    static let refreshing = String(localized: "Updating from Android\u{2026}")
+    static let refreshing = String(localized: "Reading apps from Android\u{2026}")
     static let tryAgain = String(localized: "Try again")
     static let emptyTitle = String(localized: "No Android apps yet")
+    static let failedTitle = String(localized: "Couldn\u{2019}t read Android\u{2019}s apps")
     static let emptyText = String(localized: "Android has no app with an icon to add.")
     static let noResultsText = String(localized: "No app in Android has this name.")
-    static let searchHeader = String(localized: "Search and Siri")
-    static let searchSwitch = String(localized: "Show Android apps")
-    static let searchFooter = String(localized: "Android apps are found by Search and Siri. Turn this off to keep them out.")
+    static let searchSwitch = String(localized: "Show in Search")
+    static let searchFooter = String(localized: "Android apps appear in Search while this is on. Shortcuts and Siri still list them.")
 
     static func noResults(_ query: String) -> String {
         String(localized: "No Results for \u{201C}\(query)\u{201D}")
@@ -35,7 +35,7 @@ nonisolated enum AndroidAppsWords {
     /// The note under a list that is the last one Android gave, when Android
     /// did not answer this time.
     static func remembered(_ date: String) -> String {
-        String(localized: "From the last time Android ran, \(date).")
+        String(localized: "Android didn\u{2019}t answer. Showing the list from \(date).")
     }
 
     /// What VoiceOver reads for an app of the list: the command it leads to.
@@ -46,7 +46,7 @@ nonisolated enum AndroidAppsWords {
     // MARK: Adding one app
 
     static let androidApp = String(localized: "Android app")
-    static let inShortcuts = String(localized: "In Apple\u{2019}s Shortcuts")
+    static let inShortcuts = String(localized: "In the Shortcuts app")
     static let step1 = String(localized: "Open Shortcuts")
     static let step1Detail = String(localized: "It opens on Andarium\u{2019}s page.")
     static let step2Detail = String(localized: "Its tile has the app\u{2019}s own icon.")
@@ -54,7 +54,7 @@ nonisolated enum AndroidAppsWords {
     static let step3Detail = String(localized: "The icon and name are already filled in.")
     static let step4 = String(localized: "Tap the check mark")
     static let step4Detail = String(localized: "The icon appears on your Home Screen.")
-    static let linkCaption = String(localized: "Apple\u{2019}s button: opens Shortcuts on Andarium\u{2019}s page.")
+    static let linkCaption = String(localized: "Opens Andarium\u{2019}s page in Shortcuts.")
 
     static func step2(_ app: String) -> String {
         String(localized: "Touch and hold \u{201C}\(app)\u{201D}")
@@ -76,7 +76,7 @@ nonisolated enum AndroidAppsWords {
 
     static let openingDetail = String(localized: "It opens as soon as Android has started.")
     static let dontOpen = String(localized: "Don\u{2019}t open")
-    static let waitingUpdateText = String(localized: "Choose how to continue the update below. The app opens once Android has started.")
+    static let waitingUpdateText = String(localized: "Choose what to do with the unfinished update below. The app opens once Android has started.")
 
     static func openingTitle(_ app: String) -> String {
         String(localized: "Opening \u{201C}\(app)\u{201D}")
@@ -105,10 +105,8 @@ nonisolated enum AndroidAppsWords {
     static let tookTooLongText = String(localized: "Android took too long. Try again, or open it from Android\u{2019}s home screen.")
     static let recoveryTitle = String(localized: "Android is in recovery mode")
     static let setupTitle = String(localized: "Android is still being set up")
-    static let setupText = String(localized: "Finish setting up Android, then try again.")
     static let noAndroidText = String(
-        localized: "The virtual machine was erased. The icon works again once the app is installed in a new Android.")
-    static let tryAgainButton = String(localized: "Try Again")
+        localized: "There is no virtual machine. The icon works again once the app is installed in a new virtual machine.")
     static let dismiss = String(localized: "Dismiss")
 
     static func notInAndroidTitle(_ app: String) -> String {
@@ -118,6 +116,17 @@ nonisolated enum AndroidAppsWords {
     static func tookTooLongTitle(_ app: String) -> String {
         String(localized: "\u{201C}\(app)\u{201D} didn\u{2019}t open")
     }
+
+    static func setupText(_ app: String) -> String {
+        String(localized: "Finish setting up Android, then open \u{201C}\(app)\u{201D} again.")
+    }
+
+    static func toolMissingTitle(_ app: String) -> String {
+        String(localized: "Android can\u{2019}t open \u{201C}\(app)\u{201D} from an icon")
+    }
+
+    static let toolMissingText = String(
+        localized: "This version of Android is too old for Home Screen icons. Update Android in Andarium, then use the icon again.")
 
     static func recoveryText(_ app: String) -> String {
         String(localized: "Restart Android normally to open \u{201C}\(app)\u{201D}.")
@@ -129,7 +138,8 @@ nonisolated enum AndroidAppsWords {
         case .notInAndroid: (notInAndroidTitle(app), notInAndroidText)
         case .tookTooLong: (tookTooLongTitle(app), tookTooLongText)
         case .recovery: (recoveryTitle, recoveryText(app))
-        case .setupUnfinished: (setupTitle, setupText)
+        case .setupUnfinished: (setupTitle, setupText(app))
+        case .toolMissing: (toolMissingTitle(app), toolMissingText)
         }
     }
 }

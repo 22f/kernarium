@@ -121,6 +121,30 @@ struct AndroidAppsCommandsTests {
         #expect(AndroidAppsCommands.parseDigest(shellResult("kernarium_apps 1\ndigest\t\(digest)\ndigest\t\(digest)\n")) == .failed)
     }
 
+    @Test func aDigestAnswerNeedsItsWholeHeaderBlock() {
+        let whole = "kernarium_apps 1\ndigest\t\(digest)\ncount\t3\nskipped\t0\nlocales\ten-US\nuser\t0\n"
+        #expect(AndroidAppsCommands.parseDigest(shellResult(whole)) == .digest(digest))
+        for missing in ["count", "skipped", "locales", "user"] {
+            let text = whole.split(separator: "\n").filter { !$0.hasPrefix(missing + "\t") }.joined(separator: "\n") + "\n"
+            #expect(AndroidAppsCommands.parseDigest(shellResult(text)) == .failed, "no \(missing) line")
+        }
+        // The digest alone is no answer, nor is a count that is not a number, nor a line that is not part of it.
+        #expect(AndroidAppsCommands.parseDigest(shellResult("kernarium_apps 1\ndigest\t\(digest)\n")) == .failed)
+        #expect(AndroidAppsCommands.parseDigest(shellResult(whole.replacingOccurrences(of: "count\t3", with: "count\tmany"))) == .failed)
+        #expect(AndroidAppsCommands.parseDigest(shellResult(whole.replacingOccurrences(of: "user\t0", with: "user\t-1"))) == .failed)
+        #expect(AndroidAppsCommands.parseDigest(shellResult(whole + "garbage\n")) == .failed)
+    }
+
+    @Test func aFieldALaterVersionAppendsToAHeaderLineIsIgnoredFieldByField() {
+        let text = "kernarium_apps 1\ndigest\t\(digest)\tmore\ncount\t3\tmore\tand more\nskipped\t0\tx\nlocales\ten-US\ty\nuser\t0\tz\n"
+        #expect(AndroidAppsCommands.parseDigest(shellResult(text)) == .digest(digest))
+        let row = row("com.example.comet", "com.example.comet.Main", "Comet Hop")
+        let list = text.replacingOccurrences(of: "count\t3", with: "count\t1") + "rows\n\(row)\nend\t1\textra\n"
+        guard case let .apps(parsed) = AndroidAppsCommands.parseListing(shellResult(list)) else { Issue.record("not a listing"); return }
+        #expect(parsed.apps.count == 1)
+        #expect(parsed.digest == digest)
+    }
+
     @Test func anImageWithoutTheToolOrWithAnotherVersionOffersNothing() {
         #expect(AndroidAppsCommands.parseDigest(ShellResult(stderr: Data("kernarium_apps: inaccessible or not found".utf8), exitCode: 127)) == .unavailable)
         #expect(AndroidAppsCommands.parseDigest(shellResult("", exit: 64)) == .unavailable)
@@ -193,6 +217,11 @@ struct AndroidAppsCommandsTests {
         for (name, text) in cases {
             #expect(AndroidAppsCommands.parseListing(shellResult(text)) == .failed, "\(name)")
         }
+        // Every line of the header block is required in a listing too.
+        for missing in ["skipped", "locales", "user"] {
+            let text = listing(rows: [good]).split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.hasPrefix(missing + "\t") }.joined(separator: "\n")
+            #expect(AndroidAppsCommands.parseListing(shellResult(text)) == .failed, "no \(missing) line")
+        }
         // Bytes that are not UTF-8.
         var broken = Data(listing(rows: [good]).utf8)
         broken.append(contentsOf: [0xFF, 0xFE, 0x0A])
@@ -250,6 +279,14 @@ struct AndroidAppsCommandsTests {
             AndroidComponent(packageName: "com.example.b", activityClass: "com.example.b.Main")!,
         ])
         #expect(answers == [.png(good, hasAlpha: false), .error, .error, .error])
+    }
+
+    @Test func aFieldALaterVersionAppendsToTheCountLinesOfAnIconAnswerIsIgnored() {
+        let a = png(side: 192)
+        var out = Data("kernarium_apps 1\nicons\t1\tmore\n".utf8)
+        out.append(record(comet.identifier, data: a))
+        out.append(Data("end\t1\tmore\n".utf8))
+        #expect(AndroidAppsCommands.parseIcons(ShellResult(stdout: out, exitCode: 0), asked: [comet]) == [.png(a, hasAlpha: false)])
     }
 
     @Test func everyBrokenFramingOfAnIconAnswerDiscardsAllOfIt() {
@@ -311,13 +348,23 @@ struct AndroidAppsCommandsTests {
         let launched = shellResult("launched\t\(comet.identifier)\n")
         #expect(AndroidAppsCommands.parseLaunch(launched, component: comet) == .opened)
         #expect(AndroidAppsCommands.parseLaunch(ShellResult(stderr: Data("kernarium_apps: refused: not a launcher activity".utf8), exitCode: 2), component: comet) == .notFound)
-        for status in [1, 64, 127, 255] {
-            #expect(AndroidAppsCommands.parseLaunch(ShellResult(exitCode: status), component: comet) == .failed, "\(status)")
-        }
+        // Exit 1 is a start that failed for a reason the tool does not give; 127 and 64 an image without the tool.
+        #expect(AndroidAppsCommands.parseLaunch(ShellResult(exitCode: 1), component: comet) == .startFailed)
+        #expect(AndroidAppsCommands.parseLaunch(ShellResult(exitCode: 127), component: comet) == .unavailable)
+        #expect(AndroidAppsCommands.parseLaunch(ShellResult(exitCode: 64), component: comet) == .unavailable)
+        #expect(AndroidAppsCommands.parseLaunch(ShellResult(exitCode: 255), component: comet) == .failed)
         #expect(AndroidAppsCommands.parseLaunch(ShellResult(exitCode: nil), component: comet) == .failed)
         // Exit 0 with another component's answer, or none, is no proof the one asked for started.
         #expect(AndroidAppsCommands.parseLaunch(shellResult("launched\t\(hop.identifier)\n"), component: comet) == .failed)
         #expect(AndroidAppsCommands.parseLaunch(shellResult(""), component: comet) == .failed)
+    }
+
+    @Test func aLaunchAcknowledgementWithoutItsLineFeedIsNoAcknowledgement() {
+        #expect(AndroidAppsCommands.parseLaunch(shellResult("launched\t\(comet.identifier)"), component: comet) == .failed)
+        #expect(AndroidAppsCommands.parseLaunch(shellResult("launched\t\(comet.identifier)\n\n"), component: comet) == .failed)
+        #expect(AndroidAppsCommands.parseLaunch(shellResult("launched\t\(comet.identifier)\r\n"), component: comet) == .failed)
+        // A field a later version appends is ignored.
+        #expect(AndroidAppsCommands.parseLaunch(shellResult("launched\t\(comet.identifier)\tnew\n"), component: comet) == .opened)
     }
 
     // MARK: Through a shell
