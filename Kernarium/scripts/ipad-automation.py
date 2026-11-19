@@ -506,26 +506,38 @@ MISSING_FILE = re.compile(r"no such file|NSCocoaErrorDomain Code=260|does not ex
                           re.IGNORECASE)
 
 
-def answered_without_heartbeat(options, timeout=60):
-    """Whether the device answered a read of the heartbeat file with no
-    heartbeat in it: the file is not there (no host ever wrote one, or its
-    container was cleared), or it is not a heartbeat. A device that is not
-    connected says something else."""
+def second_read(options, timeout=60):
+    """(answered, state): a second copy of the heartbeat file, made after the
+    first gave nothing, and what it tells. A copy that works gives the
+    heartbeat in it (none when it is not a heartbeat). The device answers with
+    no heartbeat when the file is not there (no host ever wrote one, or its
+    container was cleared). A device that is not connected says something
+    else."""
     with tempfile.TemporaryDirectory() as scratch:
+        local = pathlib.Path(scratch) / "state.json"
         status, output = devicectl(
             ["copy", "from", "--source", f"{CHANNEL}/state.json",
-             "--destination", str(pathlib.Path(scratch) / "state.json"),
-             *container_args(options)], options.device, timeout)
-    return status == 0 or bool(MISSING_FILE.search(output))
+             "--destination", str(local), *container_args(options)],
+            options.device, timeout)
+        state = None
+        if status == 0:
+            try:
+                state = json.loads(local.read_text())
+            except (OSError, ValueError):
+                state = None
+    if status == 0:
+        return True, state if isinstance(state, dict) else None
+    return bool(MISSING_FILE.search(output)), None
 
 
 def device_reply(options, timeout=60, clock=CLOCK, until=None, cancelled=None):
     """(answered, state): whether the device answers a read, and the heartbeat
-    it gave. It answers by giving its heartbeat, or by saying that there is
-    none to give: a connected device with no host to read answers (with no
-    state). Both reads are made within `timeout` in all, and none begins at or
-    after `until` (on `clock`) or once `cancelled()` says the caller was told to
-    end: the second read is not made, and the device is not taken to answer."""
+    it gave, from whichever read worked. It answers by giving its heartbeat, or
+    by saying that there is none to give: a connected device with no host to
+    read answers (with no state). Both reads are made within `timeout` in all,
+    and none begins at or after `until` (on `clock`) or once `cancelled()` says
+    the caller was told to end: the second read is not made, and the device is
+    not taken to answer."""
     began = clock.monotonic()
     state = host_state(options, timeout)
     if state is not None:
@@ -536,7 +548,7 @@ def device_reply(options, timeout=60, clock=CLOCK, until=None, cancelled=None):
         left = min(left, until - now)
     if left <= 0 or (cancelled is not None and cancelled()):
         return False, None
-    return answered_without_heartbeat(options, left), None
+    return second_read(options, left)
 
 
 def liveness(state):

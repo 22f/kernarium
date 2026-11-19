@@ -1435,6 +1435,11 @@ class FastClock(ManualClock):
         self.advance(seconds)
 
 
+# The reads that VerdictBoundaryTests.setUp replaces, for the rows that want the
+# real second copy.
+REAL_SECOND_READ = automation.second_read
+
+
 class VerdictBoundaryTests(unittest.TestCase):
     """The policy's boundaries after a verdict, as the reviewer's final probe
     drew them, on a clock that costs nothing: a host that stopped beating is
@@ -1455,8 +1460,8 @@ class VerdictBoundaryTests(unittest.TestCase):
         self.patch(automation, "log", lambda _: None)
         # No test of the policy asks a device: whatever a read that failed
         # leaves unsaid stays unsaid.
-        self.patch(automation, "answered_without_heartbeat",
-                   lambda *args, **kwargs: False)
+        self.patch(automation, "second_read",
+                   lambda *args, **kwargs: (False, None))
         self.patch(automation, "local_record", lambda _: dict(self.record))
         self.patch(automation, "recorded_supervisor", lambda _: None)
         self.patch(automation, "host_state",
@@ -1717,6 +1722,29 @@ class VerdictBoundaryTests(unittest.TestCase):
         self.assertEqual((result, started.call_count), (automation.AGAIN, 1))
         self.assertIsNone(self.watch.observer.beat)
 
+    def test_a_heartbeat_the_second_copy_returns_is_checked_like_the_first(self) -> None:
+        # Rule (R2): the check before a second start reads the heartbeat; when
+        # that copy fails and the second copy of the file works, what the second
+        # copy holds is the device's answer. A manual host's heartbeat in it is
+        # a host the watch did not retire: no launch, and the watch looks again.
+        manual = dict(self.state, nonce="manual-host", time=10_500)
+        copies = []
+
+        def devicectl(args, device, timeout=60):
+            copies.append(args)
+            Path(args[args.index("--destination") + 1]).write_text(json.dumps(manual))
+            return 0, ""
+        answers = iter([dict(self.state)])
+        with mock.patch.object(automation, "host_state",
+                               lambda *args, **kwargs: next(answers, None)), \
+                mock.patch.object(automation, "second_read", REAL_SECOND_READ), \
+                mock.patch.object(automation, "devicectl", devicectl):
+            result, started, _ = self.start_again(
+                [("retry", "lost")] * automation.WATCH_ATTEMPTS)
+        self.assertEqual(len(copies), 1)
+        self.assertEqual((result, started), (automation.AGAIN, 1))
+        self.assertIsNone(self.watch.observer.beat)
+
     def test_a_heartbeat_that_cannot_be_verified_is_not_permission_to_start(self) -> None:
         # Rule (R2): before the second start the device's heartbeat is read. A
         # read that fails (the tunnel dropped again) says nothing of whether
@@ -1733,8 +1761,8 @@ class VerdictBoundaryTests(unittest.TestCase):
         answers = iter([dict(self.state)])
         with mock.patch.object(automation, "host_state",
                                lambda *args, **kwargs: next(answers, None)), \
-                mock.patch.object(automation, "answered_without_heartbeat",
-                                  lambda *args, **kwargs: True):
+                mock.patch.object(automation, "second_read",
+                                  lambda *args, **kwargs: (True, None)):
             result, started, _ = self.start_again([("retry", "lost"), ("failed", "no")])
         self.assertEqual((result, started), (5, 2))
 
@@ -1934,9 +1962,9 @@ class VerdictBoundaryTests(unittest.TestCase):
         def fallback(options, timeout=60):
             copies.append(("fallback", self.clock.monotonic() - began, timeout))
             self.clock.advance(timeout)
-            return False
+            return False, None
         with mock.patch.object(automation, "host_state", primary), \
-                mock.patch.object(automation, "answered_without_heartbeat", fallback):
+                mock.patch.object(automation, "second_read", fallback):
             result = self.watch.await_device("the tunnel dropped")
         return result, copies
 
