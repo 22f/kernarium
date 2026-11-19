@@ -694,11 +694,13 @@ starts the next only once the old one is shown to be dead (three reads in a row
 that all worked and all showed the same beat), and otherwise replaces nothing
 and ends with a status and state of its own that `status` reports (approval the
 device may have asked for, a heartbeat it cannot read, a remainder of the old
-host that is not shown gone). The refusal for approval stays in the state
-directory until a host serves, and a device with no host to read is the first
-`start`'s job. A command in flight when its host is replaced is not repeated,
-and its sender gets status 3. Run it in a terminal, detached with
-`watch --detach`, or as a job manager's job (`watch --print-launchd-job
+host that is not shown gone). A replacement start that the device's connection
+drops under, before its runner came up or after its test started, is made again
+once the device answers (four starts in all). The refusal for approval stays in
+the state directory until a host serves, and a device with no host to read is
+the first `start`'s job. A command in flight when its host is replaced is not
+repeated, and its sender gets status 3. Run it in a terminal, detached
+with `watch --detach`, or as a job manager's job (`watch --print-launchd-job
 <label>` prints a launchd job that launchd never restarts, and creates nothing:
 make its log directory first; launchd must be able to open the job file and the
 log, so both belong on a volume with ownership enabled, and `--launchd-log`

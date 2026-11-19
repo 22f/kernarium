@@ -54,7 +54,7 @@ SCALED = {
     "WATCH_ATTEMPTS": 4, "WATCH_BACKOFF": (0.05, 0.05, 0.05),
     "WATCH_COMMAND_WAIT": 30, "WATCH_ALIVE_FRESH": 2.0, "WATCH_END_WAIT": 20,
     "SUPERVISOR_TERM_WAIT": 5, "CHILD_TERM_WAIT": 1, "FOREIGN_SETTLE": 0.6, "SEND_LIVENESS_EVERY": 0.5,
-    "WATCH_UNKNOWN_LIMIT": 4.0,
+    "WATCH_UNKNOWN_LIMIT": 4.0, "WATCH_RECONNECT_WAIT": 6.0,
 }
 SECONDS = 3 * 3600
 # A `start` that is killed between spawning the supervisor and publishing its
@@ -843,6 +843,147 @@ class FailureTests(WatchTestCase):
         self.assertEqual(watch.end(), 0)
 
 
+class ReconnectTests(WatchTestCase):
+    """The device's connection drops while a replacement starts. Nothing the
+    device was asked can be unanswered when the runner never came up, or when
+    the test that serves had started (it runs only after the runner initialized
+    for UI testing), so the watch waits, bounded, for the device to answer and
+    tries again within its attempt bound. A runner that was up and had not
+    started the test may have asked for an approval: that stays the owner's."""
+
+    def waiting(self) -> dict:
+        """The watch record once the watch says it waits for the device."""
+        def held():
+            record = self.record()
+            return record if str(record.get("detail", "")).startswith(
+                "waiting for device connection") else None
+        return self.device.wait(held, 20, "the watch waits for the device")
+
+    def assert_lock_free(self) -> None:
+        descriptor = os.open(self.device.state_dir / self.device.udid / "launch.lock",
+                             os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+
+    def test_a_start_the_tunnel_dropped_under_is_retried_once_the_device_answers(self) -> None:
+        # Rule: the replacement's xcodebuild ended with the device gone before
+        # any runner came up, so nothing was asked of the device. The watch
+        # waits for the device to answer, outside the launch lock, then starts
+        # the replacement again: no start-failed, no latch.
+        self.device.scenarios([{"kind": "serve"},
+                               {"kind": "exit", "status": 70, "unreachable": True},
+                               {"kind": "serve"}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
+        self.waiting()
+        self.assert_lock_free()
+        self.assertIsNone(watch.code, self.messages)
+        self.device.unreachable(False)
+        second = self.watching(restarts=1)
+        self.assertEqual(self.nonces()[0], first)
+        self.assertEqual(self.nonces()[-1], second)
+        self.invoked(3)
+        self.assertIsNone(watch.code, self.messages)
+        self.assertIsNone(automation.ApprovalLatch(self.options("status")).read())
+        self.assertTrue(self.device.serving(second))
+
+    def test_a_connection_lost_after_the_test_started_is_retried_not_latched(self) -> None:
+        # Rule: "Test Case ... testServe started" is printed only once the
+        # runner initialized for UI testing, so a connection lost after it left
+        # the device asked for nothing. The first runner of the replacement
+        # came up and the loss ended it: still no latch, and a second start.
+        self.device.scenarios([{"kind": "serve"},
+                               {"kind": "lost-during-start", "test": True},
+                               {"kind": "serve"}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
+        second = self.watching(restarts=1)
+        self.invoked(3)
+        self.assertIsNone(watch.code, self.messages)
+        self.assertIsNone(automation.ApprovalLatch(self.options("status")).read())
+        self.assertNotIn(second, [item["nonce"] for item in self.device.invocations()[:2]])
+
+    def test_a_runner_up_that_lost_its_connection_before_the_test_started_needs_the_owner(self) -> None:
+        # Rule (the safety control): the replacement's runner came up and the
+        # connection was lost before the test that serves started. Whether the
+        # device asked for an approval is not known: latched "possible", exit
+        # 4, and no second start.
+        self.device.scenarios([{"kind": "serve"},
+                               {"kind": "lost-during-start"},
+                               {"kind": "serve"}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
+        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL, self.messages)
+        self.invoked(2)
+        latch = automation.ApprovalLatch(self.options("status")).read()
+        self.assertEqual(latch["kind"], "possible")
+        self.assertEqual(self.record()["state"], automation.NEEDS_APPROVAL)
+
+    def test_connection_losses_during_a_replacement_end_at_the_attempt_bound(self) -> None:
+        # Rule: the retries are the watch's own attempts, not an extra loop:
+        # WATCH_ATTEMPTS starts of the replacement in all, then start-failed.
+        self.device.scenarios([{"kind": "serve"},
+                               {"kind": "lost-during-start", "test": True}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
+        self.assertEqual(watch.join(), automation.EXIT_WATCH_GAVE_UP, self.messages)
+        self.invoked(1 + automation.WATCH_ATTEMPTS)
+        self.assertEqual(self.record()["state"], automation.START_FAILED)
+        self.assertIn("lost", self.record()["detail"])
+        self.assertIsNone(automation.ApprovalLatch(self.options("status")).read())
+
+    def test_the_wait_for_the_device_is_bounded(self) -> None:
+        # Rule: a device that does not answer within WATCH_RECONNECT_WAIT ends
+        # the watch with start-failed; nothing else is started.
+        self.tune(WATCH_RECONNECT_WAIT=1.5)
+        self.device.scenarios([{"kind": "serve"},
+                               {"kind": "exit", "status": 70, "unreachable": True},
+                               {"kind": "serve"}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
+        self.assertEqual(watch.join(), automation.EXIT_WATCH_GAVE_UP, self.messages)
+        self.invoked(2)
+        record = self.record()
+        self.assertEqual(record["state"], automation.START_FAILED)
+        self.assertIn("did not answer within", record["detail"])
+        self.assertIsNone(automation.ApprovalLatch(self.options("status")).read())
+
+    def test_a_stop_during_the_wait_ends_the_watch_and_starts_nothing(self) -> None:
+        self.device.scenarios([{"kind": "serve"},
+                               {"kind": "exit", "status": 70, "unreachable": True},
+                               {"kind": "serve"}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
+        self.waiting()
+        self.assertEqual(watch.end(), 0, self.messages)
+        self.invoked(2)
+        self.assertEqual(self.record()["state"], automation.STOPPED)
+
+    def test_an_approval_failure_recorded_during_the_wait_is_not_retried_over(self) -> None:
+        # Rule: whatever is latched while the watch waits is read again before
+        # anything starts: a device that needs the owner gets no second start.
+        self.device.scenarios([{"kind": "serve"},
+                               {"kind": "exit", "status": 70, "unreachable": True},
+                               {"kind": "serve"}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
+        self.waiting()
+        automation.ApprovalLatch(self.options("status")).set(
+            "observed", "n" * 32, "a.log", "the approval was not given")
+        self.device.unreachable(False)
+        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL, self.messages)
+        self.invoked(2)
+
+
 class OneWatchTests(WatchTestCase):
     def test_a_second_watch_for_the_device_refuses(self) -> None:
         # Rule: one watch per device and state directory.
@@ -1304,6 +1445,164 @@ class VerdictBoundaryTests(unittest.TestCase):
             self.assertEqual(self.watch.replace(self.reason), 5)
         self.assertEqual(started.call_count, 1)
         self.assert_lock_free()
+
+    def start_again(self, outcomes, device="answers", records=None):
+        """`replace` with launches that each end as `outcomes` say; `device`
+        is what the wait for the device returns, run with the lock checked
+        free. The launches started, and what the watch returned."""
+        launches = [automation.Launch(mock.Mock(), self.log, f"launch-{number}")
+                    for number in range(len(outcomes))]
+        waits = []
+
+        def await_device(detail):
+            self.assert_lock_free()
+            waits.append(detail)
+            if records is not None:
+                records()
+            return None if device == "answers" else device
+        with mock.patch.object(self.watch, "end_all", return_value=automation.ENDED), \
+                mock.patch.object(automation, "launch_host",
+                                  side_effect=launches) as started, \
+                mock.patch.object(self.watch, "await_launch", side_effect=outcomes), \
+                mock.patch.object(self.watch, "await_device", await_device):
+            result = self.watch.replace(self.reason)
+        self.assert_lock_free()
+        return result, started.call_count, waits
+
+    def test_a_start_that_ended_with_the_device_gone_is_started_again_after_it_answers(self) -> None:
+        # Rule: the second start is made after the wait for the device, and the
+        # wait is made with the launch lock free.
+        result, started, waits = self.start_again(
+            [("retry", "the tunnel dropped"), ("failed", "the second start failed")])
+        self.assertEqual((result, started), (5, 2))
+        self.assertEqual(waits, ["the tunnel dropped"])
+        self.assertIn("the second start failed", self.watch.record.data["detail"])
+
+    def test_the_starts_after_a_lost_device_end_at_the_attempt_bound(self) -> None:
+        result, started, waits = self.start_again(
+            [("retry", "lost")] * automation.WATCH_ATTEMPTS)
+        self.assertEqual((result, started), (5, automation.WATCH_ATTEMPTS))
+        self.assertEqual(len(waits), automation.WATCH_ATTEMPTS - 1)
+        self.assertEqual(self.watch.record.data["state"], automation.START_FAILED)
+        self.assertIn("did not succeed", self.watch.record.data["detail"])
+
+    def test_a_device_that_does_not_answer_or_a_stop_ends_the_waiting(self) -> None:
+        result, started, _ = self.start_again([("retry", "lost")] * 2, "timeout")
+        self.assertEqual((result, started), (5, 1))
+        self.assertEqual(self.watch.record.data["state"], automation.START_FAILED)
+        self.assertIn("did not answer within", self.watch.record.data["detail"])
+        result, started, _ = self.start_again([("retry", "lost")] * 2, "stopped")
+        self.assertEqual((result, started), (0, 1))
+
+    def test_a_start_is_not_made_again_over_what_changed_while_the_watch_waited(self) -> None:
+        # Rule: the launch lock was free during the wait. A start published
+        # meanwhile is another launch's host: the watch looks again. An
+        # approval latched meanwhile is the owner's: exit 4. Neither starts a
+        # host.
+        def published():
+            self.record["nonce"] = "another-launch"
+        result, started, _ = self.start_again(
+            [("retry", "lost")] * 2, records=published)
+        self.assertEqual((result, started), (automation.AGAIN, 1))
+        self.record["nonce"] = "same-launch"
+
+        def latched():
+            self.watch.latch.set("observed", "n" * 32, self.log,
+                                 "the approval was not given")
+        result, started, _ = self.start_again(
+            [("retry", "lost")] * 2, records=latched)
+        self.assertEqual((result, started), (4, 1))
+
+    def test_a_refused_start_is_waited_for_like_a_lost_one(self) -> None:
+        # Rule: a start refused before anything began (the report store has no
+        # room, the device is not there) shares the attempt bound and the wait.
+        waits = []
+
+        def await_device(detail):
+            waits.append(detail)
+        with mock.patch.object(self.watch, "end_all", return_value=automation.ENDED), \
+                mock.patch.object(
+                    automation, "launch_host",
+                    side_effect=automation.LaunchRefused("no room")) as started, \
+                mock.patch.object(self.watch, "await_device", await_device):
+            self.assertEqual(self.watch.replace(self.reason), 5)
+        self.assertEqual(started.call_count, automation.WATCH_ATTEMPTS)
+        self.assertEqual(waits, ["no room"] * (automation.WATCH_ATTEMPTS - 1))
+        self.assertIn("no room", self.watch.record.data["detail"])
+
+    def test_the_wait_for_the_device_is_a_hard_bound(self) -> None:
+        reads = []
+
+        def unreadable(options, timeout=60):
+            reads.append(timeout)
+        with mock.patch.object(automation, "host_state", unreadable), \
+                mock.patch.object(automation, "WATCH_RECONNECT_WAIT", 5), \
+                mock.patch.object(automation, "WATCH_PULL_EVERY", 1):
+            began = self.clock.monotonic()
+            self.assertEqual(self.watch.await_device("lost"), "timeout")
+        waited = self.clock.monotonic() - began
+        self.assertGreaterEqual(waited, 5)
+        self.assertLessEqual(waited, 5 + 1)
+        # No read after the first may outlast what is left of the bound.
+        self.assertTrue(len(reads) > 1 and all(timeout <= 5 for timeout in reads[1:]),
+                        reads)
+        self.assertEqual(self.watch.record.data["state"], automation.RESTARTING)
+        self.assertIn("waiting for device connection", self.watch.record.data["detail"])
+        answers = iter([None, None, None, dict(self.state)])
+        with mock.patch.object(automation, "host_state",
+                               lambda options, timeout=60: next(answers)):
+            self.assertIsNone(self.watch.await_device("lost"))
+        # A device that answers at once costs no wait at all.
+        before = self.clock.monotonic()
+        self.assertIsNone(self.watch.await_device("lost"))
+        self.assertEqual(self.clock.monotonic(), before)
+        stopped = threading.Event()
+        stopped.set()
+        self.watch.stop = stopped
+        with mock.patch.object(automation, "host_state", return_value=None):
+            self.assertEqual(self.watch.await_device("lost"), "stopped")
+
+    def finished(self, lines, unreadable=False, device_answers=True):
+        """What `finish` says of a launch whose xcodebuild exited, with a log of
+        `lines`."""
+        log = Path(self.tmp.name) / "launch.log"
+        text = "\n".join(lines) + "\n"
+        log.write_text(text)
+        launch = automation.Launch(mock.Mock(), log, "new-launch")
+        with mock.patch.object(automation, "end_host", return_value=automation.ENDED), \
+                mock.patch.object(automation, "host_state", return_value=(
+                    dict(self.state) if device_answers else None)):
+            return self.watch.finish(launch, automation.LogScan(log), "exited",
+                                     unreadable)
+
+    LOST = [line.replace("{stamp}", "2026-11-19 18:41:25.158").replace("{pid}", "123")
+            for line in LOST_BLOCK]
+    UP = "2026-11-19 18:44:44.641673+0900 KernariumAutomation-Runner[1:2] [Default] Running tests..."
+    STARTED = "Test Case '-[KernariumAutomation.AutomationHost testServe]' started."
+
+    def test_a_launch_that_asked_nothing_and_lost_the_device_is_told_to_retry(self) -> None:
+        # Rule: no runner came up, or the test that serves started: nothing
+        # was asked of the device that is unanswered. With the connection lost
+        # (or a read that failed, or a device that does not answer now) it is
+        # started again; with none of those it is a plain failure.
+        self.assertEqual(self.finished(self.LOST)[0], "retry")
+        self.assertEqual(self.finished([self.UP, self.STARTED, *self.LOST])[0], "retry")
+        self.assertEqual(self.finished(["xcodebuild: error"], unreadable=True)[0], "retry")
+        self.assertEqual(self.finished(["xcodebuild: error"], device_answers=False)[0],
+                         "retry")
+        self.assertEqual(self.finished(["xcodebuild: error"])[0], "failed")
+        self.assertEqual(self.finished([self.UP, self.STARTED])[0], "failed")
+        self.assertIsNone(self.watch.latch.read())
+
+    def test_a_runner_up_before_the_test_started_and_the_device_lost_is_the_owners(self) -> None:
+        # The safety control: whatever else is true, a runner that came up and
+        # whose test never started may have asked for an approval.
+        for unreadable in (False, True):
+            outcome = self.finished([self.UP, *self.LOST], unreadable=unreadable,
+                                    device_answers=not unreadable)
+            self.assertEqual(outcome[0], "approval")
+            self.assertEqual(self.watch.latch.read()["kind"], "possible")
+            self.watch.latch.clear()
 
     def test_a_finished_snapshot_followed_only_by_failed_reads_ends_unknown(self) -> None:
         # Rule (R3, the reviewer's final probe): one snapshot that says the host
@@ -3013,6 +3312,38 @@ class LogSignalTests(unittest.TestCase):
     def test_a_runner_started_again_is_counted(self) -> None:
         self.assertEqual(self.scan(self.RUNNER).runner_up, 1)
         self.assertEqual(self.scan(self.RUNNER, "x", self.RUNNER).runner_up, 2)
+
+    TEST_STARTED = "Test Case '-[KernariumAutomation.AutomationHost testServe]' started."
+
+    def test_the_test_that_serves_starting_is_told_for_the_first_runner_only(self) -> None:
+        # Rule: xcodebuild prints the line when the test that serves starts,
+        # which happens after the runner initialized. Only the line itself
+        # counts, and only for the first runner: a runner started again never
+        # runs that test, so the line after the second runner says nothing.
+        self.assertFalse(self.scan(self.RUNNER).test_started)
+        self.assertTrue(self.scan(self.RUNNER, self.TEST_STARTED).test_started)
+        self.assertFalse(self.scan(self.TEST_STARTED).test_started)
+        self.assertFalse(self.scan(self.RUNNER, self.RUNNER, self.TEST_STARTED).test_started)
+        self.assertFalse(self.scan(self.RUNNER, "x " + self.TEST_STARTED).test_started)
+        self.assertFalse(self.scan(
+            self.RUNNER, "Test Case '-[KernariumAutomation.AutomationHost testOther]' "
+            "started.").test_started)
+
+    def test_a_launch_whose_test_started_is_no_approval_risk(self) -> None:
+        # Rule: its runner initialized, so it asked the device for nothing
+        # that nobody gave; a launch whose runner is silent still may have.
+        scan = self.scan(self.RUNNER, self.TEST_STARTED)
+        self.assertIsNone(self.risk(scan, served=False))
+        self.assertEqual(self.risk(self.scan(self.RUNNER), served=False)[0], "possible")
+
+    def test_a_runner_started_again_after_the_test_started_is_still_a_risk(self) -> None:
+        # Rule: what the first runner did says nothing of the next one: it is
+        # an approval risk unless its log shows it initialized.
+        scan = self.scan(self.RUNNER, self.TEST_STARTED, self.RUNNER)
+        self.assertEqual(self.risk(scan, served=False)[0], "possible")
+        self.assertIn("started the runner again", self.risk(scan, served=False)[2])
+        scan = self.scan(self.RUNNER, self.TEST_STARTED, self.RUNNER, *self.INITIALIZED[3:8])
+        self.assertIsNone(self.risk(scan, served=False))
 
     INITIALIZED = (
         "2026-11-13 23:38:22.997307+0900 KernariumAutomation-Runner[11111:2222222] "

@@ -122,7 +122,8 @@ what it could not establish and ends with a status of its own.
   runner died and whose restart notice and "Executed 0 tests" the log does not
   show (a relaunch that initialized is no risk, and the host is replaced at
   once; a log that ends before it says is not shown), or one of a launch that
-  never served. That is recorded (the
+  never served and whose test (`testServe`, which runs only after the runner
+  initialized for UI testing) never started. That is recorded (the
   file approval.json in the state directory) before anything is ended and read
   again after, and the watch ends with status 4 and the state needs-approval,
   which `status` reports. It starts nothing again until a host serves: a
@@ -131,15 +132,20 @@ what it could not establish and ends with a status of its own.
   XCTest initialized the runner for UI testing, so a serving host has its
   approval; the next runner after it dies may not.
 - A replacement serves when a heartbeat with its own new nonce advances. One
-  that was started and does not serve ends the watch; the watch never starts a
-  second host after one death. A launch whose runner never came up (xcodebuild
-  ended, or the runner did not come up in --wait) ends it with status 5 and
-  start-failed, and no latch. Only a start that was refused before anything
-  started (device not connected, report slots short) is retried, 3 times after
-  5, 10 and 20 s. No built host, or a run file that lets Xcode record the
-  screen, ends it at once with the state cannot-start; more than 6 replacements
-  (--max-restarts) in an hour, counted across a watch that ended
-  mid-replacement too, end it with restart-storm.
+  that was started and does not serve ends the watch; the watch starts no
+  second host after one death, except after a start that asked nothing of the
+  device: one refused before anything started (device not connected, report
+  slots short), and one that ended with the device's connection lost or
+  unreadable before its runner came up or after its test started (a runner
+  that came up and lost the connection before the test started may have asked
+  for an approval, and is the owner's). The watch waits up to 180 s for the
+  device to answer, then starts again: 4 starts in all, 5, 10 and 20 s apart.
+  Any other launch whose runner never came up (xcodebuild ended, or the runner
+  did not come up in --wait), and a device that does not answer in that time,
+  end the watch with status 5 and start-failed, and no latch. No built host, or
+  a run file that lets Xcode record the screen, ends it at once with the state
+  cannot-start; more than 6 replacements (--max-restarts) in an hour, counted
+  across a watch that ended mid-replacement too, end it with restart-storm.
 
 Status 6: another watch holds this device's lock. `status` shows the watch and
 its last end. A watch also waits for a host that a `start` is still bringing up,
@@ -239,11 +245,15 @@ WATCH_STALL = 15
 # runner that is up and neither serves nor says why within this is ended, and
 # what it may have asked of the device is not known.
 WATCH_RUNNER_WAIT = 90
-# Attempts to start a host that is refused before anything starts (the device
-# is not connected, the report store has no room), and the pauses between
-# them. Nothing started means nothing was asked of the device.
+# Attempts to start a host that does not come to anything the device could
+# have been asked for: one that is refused before anything starts (the device
+# is not connected, the report store has no room) and one that ended with the
+# device's connection lost before its runner came up or after its test started;
+# and the pauses between them. Between two attempts the watch waits up to
+# WATCH_RECONNECT_WAIT for the device to answer again.
 WATCH_ATTEMPTS = 4
 WATCH_BACKOFF = (5, 10, 20)
+WATCH_RECONNECT_WAIT = 180
 # More replacements than this in WATCH_STORM_WINDOW end the watch.
 WATCH_MAX_RESTARTS = 6
 WATCH_STORM_WINDOW = 3600
@@ -270,6 +280,11 @@ SUPERVISOR_TERM_WAIT = 30
 FOREIGN_SETTLE = 2.0
 # xcodebuild's own lines: the runner is up, and XCTest gave up on the prompt.
 RUNNER_UP_LINE = "Running tests..."
+# xcodebuild's line for the start of the test that serves. The test runs only
+# after the runner initialized for UI testing, so the device's approval was
+# held or given by then.
+TEST_STARTED_LINE = ("Test Case '-[KernariumAutomation.AutomationHost testServe]' "
+                     "started.")
 APPROVAL_TIMEOUT_LINE = "Timed out while enabling automation mode"
 INIT_FAILURE_LINE = "Failed to initialize for UI testing"
 # What xcodebuild prints when the runner it started again after the first one
@@ -1651,6 +1666,8 @@ class LogScan:
         # restart notice), "initialized" (and the totals of a run of no tests)
         # or "failed" (XCTest's initialization failure).
         self.relaunches = []
+        # The first runner's test that serves started: it initialized.
+        self.test_started = False
         self.approval_failure = None
         # What the approval failure says went wrong, for the record.
         self.approval_cause = None
@@ -1714,6 +1731,8 @@ class LogScan:
                 self.relaunches[-1] = "restarted"
             elif text.startswith(NO_TESTS_LINE) and self.relaunches[-1] == "restarted":
                 self.relaunches[-1] = "initialized"
+        if line.strip() == TEST_STARTED_LINE and self.runner_up == 1:
+            self.test_started = True
         if INIT_FAILURE_LINE in line:
             if self.relaunches:
                 self.relaunches[-1] = "failed"
@@ -2238,19 +2257,22 @@ class Watch:
         initialization: one started again after the host served whose log
         does not show it initialized (the restart notice, then the totals of
         a run of no tests; a log cut before that says nothing, and nothing is
-        not taken for safe), or one of a launch that never served. A runner
-        started again that initialized is no risk: the system still held the
-        approval, and a new host serves without the owner."""
+        not taken for safe), or one of a launch that never served and whose
+        test never started. A runner started again that initialized is no
+        risk: the system still held the approval, and a new host serves
+        without the owner. The first runner of a launch whose test started is
+        no risk either: that test runs only after the runner initialized."""
         found = None
         for nonce, scan, served in scans:
             scan.read()
             if scan.approval_failure:
                 return "observed", nonce, scan.describe(), scan.path
-            if found is None and (scan.unconfirmed_relaunches() if served
+            initialized = served or scan.test_started
+            if found is None and (scan.unconfirmed_relaunches() if initialized
                                   else scan.runner_up):
                 found = ("possible", nonce,
-                         f"{scan.runner_text(served)}, so the device may have "
-                         "asked for an approval nobody gave", scan.path)
+                         f"{scan.runner_text(initialized)}, so the device may "
+                         "have asked for an approval nobody gave", scan.path)
         return found
 
     def replace(self, reason):
@@ -2262,48 +2284,135 @@ class Watch:
         lock a `start` takes: recheck the verdict, record what the device may
         have been asked, end what is left of the host, start the next one. A
         started host that does not serve ends the watch: it is not tried
-        again."""
+        again, with one exception. A start that was refused before anything
+        began, or that ended with the device's connection lost or unreadable
+        and nothing asked of the device (its runner never came up, or its test
+        had started), is tried again after the device answers again: up to
+        WATCH_ATTEMPTS starts in all, each under the lock, and the wait for the
+        device, up to WATCH_RECONNECT_WAIT, outside it."""
         options = self.options
         verdict = dict(self.observer.verdict or {})
         self.say(f"the host stopped serving: {reason}")
         self.record.update(state=RESTARTING, detail=reason,
                            last_end={"reason": reason, "time": self.clock.time()})
+        detail = ""
+        expected = None
+        for number in range(1, WATCH_ATTEMPTS + 1):
+            try:
+                with LaunchLock(options, self.stop.is_set):
+                    step = (self.transition(verdict) if number == 1
+                            else self.restart(expected))
+            except LaunchRefused as refusal:
+                if refusal.cancelled:
+                    return self.stopped()
+                self.say(f"{refusal}; looking again")
+                self.observer.reset()
+                return AGAIN
+            if isinstance(step, tuple):
+                # Nothing was started.
+                detail = step[1]
+            elif isinstance(step, Launch):
+                outcome = self.await_launch(step)
+                launched = (self.pending or {}).get("time", self.clock.time())
+                self.pending = None
+                self.record.update(pending=None)
+                kind = outcome[0]
+                if kind == "served":
+                    self.observer = outcome[1]
+                    self.adopted = True
+                    self.restarts += 1
+                    self.restart_times = self.recent_restarts() + [launched]
+                    self.say(f"the replacement serves (restart {self.restarts})")
+                    self.record.update(
+                        state=WATCHING, detail="", host=step.nonce,
+                        restarts=self.restarts, restart_times=self.restart_times,
+                        alive_at=self.clock.time())
+                    return None
+                if kind == "stopped":
+                    return self.stopped()
+                if kind == "approval":
+                    return self.give_up(NEEDS_APPROVAL, outcome[1], EXIT_NEEDS_APPROVAL)
+                if kind == "remainder":
+                    return self.give_up(REMAINDER, outcome[1], EXIT_WATCH_REMAINDER)
+                if kind != "retry":
+                    return self.give_up(START_FAILED, outcome[1], EXIT_WATCH_GAVE_UP)
+                detail = outcome[1]
+            else:
+                return step
+            # What is left of this attempt is ended, and the device was asked
+            # for nothing: the one failure that is tried again.
+            expected = local_record(options).get("nonce")
+            self.say(f"attempt {number} of {WATCH_ATTEMPTS} started no host: {detail}")
+            self.record.update(detail=f"attempt {number} started no host: {detail}")
+            if number == WATCH_ATTEMPTS:
+                break
+            waited = self.await_device(detail)
+            if waited == "timeout":
+                return self.give_up(
+                    START_FAILED,
+                    f"the device did not answer within {WATCH_RECONNECT_WAIT} s "
+                    f"after attempt {number} ({detail})", EXIT_WATCH_GAVE_UP)
+            if waited == "stopped" or self.clock.wait(
+                    self.stop, WATCH_BACKOFF[number - 1]):
+                return self.stopped()
+        return self.give_up(
+            START_FAILED, f"{WATCH_ATTEMPTS} attempts to start a host did not "
+            f"succeed; the last: {detail}", EXIT_WATCH_GAVE_UP)
+
+    def await_device(self, detail):
+        """Outside the launch lock: waits until the device answers a read of
+        its heartbeat file, or WATCH_RECONNECT_WAIT has passed. None once it
+        answers, else "timeout", or "stopped" when the watch was told to end."""
+        options = self.options
+        if host_state(options) is not None:
+            return None
+        self.say(f"the device is not answering ({detail}); waiting up to "
+                 f"{WATCH_RECONNECT_WAIT} s for the connection to return")
+        self.record.update(state=RESTARTING,
+                           detail=f"waiting for device connection: {detail}")
+        deadline = self.clock.monotonic() + WATCH_RECONNECT_WAIT
+        while True:
+            if self.clock.wait(self.stop, WATCH_PULL_EVERY):
+                return "stopped"
+            left = deadline - self.clock.monotonic()
+            if left <= 0:
+                return "timeout"
+            if host_state(options, timeout=max(1, min(60, int(left)))) is not None:
+                return None
+
+    def restart(self, expected):
+        """Under the launch lock, for an attempt after the first, once the
+        device answered: the start is made again only if nothing changed what
+        the first one rested on. A latch set meanwhile refuses it, and so does
+        a start published since (its host is another launch's, not this
+        watch's to replace)."""
+        if self.latch.read():
+            return self.refuse_after_approval_failure()
+        if local_record(self.options).get("nonce") != expected:
+            self.say("not starting again: a start was published meanwhile; "
+                     "looking again")
+            self.observer.reset()
+            return AGAIN
+        return self.start_attempt()
+
+    def start_attempt(self):
+        """Under the launch lock: one start. A Launch; ("retry", why) when
+        nothing was started and trying again may help; else what `replace`
+        returns."""
         try:
-            with LaunchLock(options, self.stop.is_set):
-                launch = self.transition(verdict)
+            return launch_host(
+                self.options, cancelled=self.stop.is_set, locked=True,
+                record=lambda nonce, path: self.note_pending(nonce, path, True))
         except LaunchRefused as refusal:
             if refusal.cancelled:
                 return self.stopped()
-            self.say(f"{refusal}; looking again")
-            self.observer.reset()
-            return AGAIN
-        if not isinstance(launch, Launch):
-            return launch
-        outcome = self.await_launch(launch)
-        launched = (self.pending or {}).get("time", self.clock.time())
-        self.pending = None
-        self.record.update(pending=None)
-        kind = outcome[0]
-        if kind == "served":
-            self.observer = outcome[1]
-            self.adopted = True
-            self.restarts += 1
-            self.restart_times = self.recent_restarts() + [launched]
-            self.say(f"the replacement serves (restart {self.restarts})")
-            self.record.update(
-                state=WATCHING, detail="", host=launch.nonce, restarts=self.restarts,
-                restart_times=self.restart_times, alive_at=self.clock.time())
-            return None
-        if kind == "stopped":
-            return self.stopped()
-        if kind == "approval":
-            return self.give_up(NEEDS_APPROVAL, outcome[1], EXIT_NEEDS_APPROVAL)
-        if kind == "remainder":
-            return self.give_up(REMAINDER, outcome[1], EXIT_WATCH_REMAINDER)
-        return self.give_up(START_FAILED, outcome[1], EXIT_WATCH_GAVE_UP)
+            if refusal.permanent:
+                return self.give_up(CANNOT_START, str(refusal), EXIT_WATCH_GAVE_UP)
+            return ("retry", str(refusal))
 
     def transition(self, verdict):
-        """Under the launch lock: a Launch, or what `replace` returns."""
+        """Under the launch lock: retires the dead host and makes the first
+        start; what `start_attempt` returns, or what `replace` returns."""
         options = self.options
         observer = self.observer
         why = self.recheck(verdict)
@@ -2351,28 +2460,7 @@ class Watch:
                 f"{len(recent)} replacements in the last {WATCH_STORM_WINDOW // 60} "
                 f"minutes, and the bound is {options.max_restarts}; the host ended "
                 "again", EXIT_WATCH_GAVE_UP)
-        detail = ""
-        for number in range(1, WATCH_ATTEMPTS + 1):
-            try:
-                return launch_host(
-                    options, cancelled=self.stop.is_set, locked=True,
-                    record=lambda nonce, path: self.note_pending(nonce, path, True))
-            except LaunchRefused as refusal:
-                if refusal.cancelled:
-                    return self.stopped()
-                if refusal.permanent:
-                    return self.give_up(CANNOT_START, str(refusal), EXIT_WATCH_GAVE_UP)
-                detail = str(refusal)
-            # Nothing was started, so nothing was asked of the device: this
-            # is the one failure that is tried again.
-            self.say(f"attempt {number} of {WATCH_ATTEMPTS} was refused: {detail}")
-            self.record.update(detail=f"attempt {number} refused: {detail}")
-            if number < WATCH_ATTEMPTS and self.clock.wait(
-                    self.stop, WATCH_BACKOFF[number - 1]):
-                return self.stopped()
-        return self.give_up(
-            START_FAILED, f"{WATCH_ATTEMPTS} attempts to start a host were "
-            f"refused; the last: {detail}", EXIT_WATCH_GAVE_UP)
+        return self.start_attempt()
 
     def end_all(self, verdict, remainder):
         """Ends what is left of the host the verdict names and of the last
@@ -2407,12 +2495,14 @@ class Watch:
         deadline = self.clock.monotonic() + options.wait
         runner_up_at = None
         first = None
+        unreadable = False
         while True:
             if self.stop.is_set():
                 return self.finish(launch, scan, "stopped")
             scan.read()
             started = self.clock.monotonic()
             state = host_state(options)
+            unreadable = unreadable or state is None
             ended = self.clock.monotonic()
             scan.read()
             if scan.approval_failure:
@@ -2427,7 +2517,7 @@ class Watch:
                         options, launch.nonce, state, launch.process, scan,
                         self.clock, self.progress, seen=(started, ended)))
             if launch.process.poll() is not None:
-                return self.finish(launch, scan, "exited")
+                return self.finish(launch, scan, "exited", unreadable)
             now = self.clock.monotonic()
             if scan.runner_up and runner_up_at is None:
                 runner_up_at = now
@@ -2436,11 +2526,14 @@ class Watch:
                 return self.finish(launch, scan, "overdue")
             self.clock.wait(self.stop, WATCH_POLL)
 
-    def finish(self, launch, scan, why):
+    def finish(self, launch, scan, why, unreadable=False):
         """A launch ended without a serving host. What it may have asked of
         the device is recorded first (a runner that came up and said nothing
-        counts), then what is left of it is ended, then its log is read once
-        more. Only a launch whose runner never came up is a plain failure."""
+        counts, unless its test started), then what is left of it is ended,
+        then its log is read once more. Only a launch whose runner never came
+        up, or whose test started, is no risk; one of those that ended with the
+        device's connection lost or unreadable ("unreadable": a read of its
+        heartbeat failed while it started) is told so as ("retry", why)."""
         scan.read()
         scans = [(launch.nonce, scan, False)]
         risk = self.approval_risk(scans)
@@ -2462,8 +2555,14 @@ class Watch:
         if after:
             return ("approval", self.approval_text(after, launch))
         if why == "exited":
-            return ("failed", "xcodebuild ended before the runner came up "
-                    f"({scan.describe()}); log {launch.log_path}")
+            ended = ("after its test started" if scan.test_started
+                     else "before the runner came up")
+            detail = (f"xcodebuild ended {ended} ({scan.describe()}); "
+                      f"log {launch.log_path}")
+            if (scan.connection_lost or unreadable
+                    or host_state(self.options) is None):
+                return ("retry", detail)
+            return ("failed", detail)
         return ("failed", f"the runner did not come up within {self.options.wait} s; "
                 f"log {launch.log_path}")
 
