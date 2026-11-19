@@ -69,6 +69,10 @@ nonisolated struct FlatteningAppsTool: AndroidAppsTool {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = true
+        // 8 bits of sRGB whatever the display: the extended range a wide-colour
+        // device draws in by default is 16 bits a channel, and a PNG of that is
+        // not one the store keeps (`AndroidAppLimits.largestIcon`).
+        format.preferredRange = .standard
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format)
         return renderer.image { context in
             UIColor.white.setFill()

@@ -2,6 +2,7 @@
 
 import AndariumCore
 import Foundation
+import ImageIO
 import Testing
 import UIKit
 @testable import Andarium
@@ -106,6 +107,32 @@ struct FlatteningAppsToolTests {
         guard case let .png(data, hasAlpha)? = result[comet.id] else { Issue.record("no picture: \(result)"); return }
         #expect(!hasAlpha && isFullyOpaque(data))
         #expect(pixel(data, 10, 10) == [0, 0, 255, 255])
+    }
+
+    @Test func aFlattenedPictureIsEightBitsAChannelAndWithinTheStoresBound() async throws {
+        // A picture as full of detail as an icon gets: its flattened PNG is 8 bits a
+        // channel (not the display's extended range) and one the store keeps.
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let noisy = UIGraphicsImageRenderer(size: CGSize(width: 192, height: 192), format: format).image { context in
+            for y in stride(from: 0, to: 192, by: 4) {
+                for x in stride(from: 0, to: 192, by: 4) {
+                    UIColor(
+                        red: CGFloat((x * 7 + y * 3) % 256) / 255, green: CGFloat((x * 11 + y * 5) % 256) / 255,
+                        blue: CGFloat((x * 13 + y * 17) % 256) / 255, alpha: 1).setFill()
+                    context.fill(CGRect(x: x, y: y, width: 4, height: 4))
+                }
+            }
+        }.pngData()!
+        let comet = app("comet")
+        let result = await answers([comet.id: .png(noisy, hasAlpha: true)])
+        guard case let .png(data, _)? = result[comet.id] else { Issue.record("no picture: \(result)"); return }
+        let source = try #require(CGImageSourceCreateWithData(data as CFData, nil))
+        let properties = try #require(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        #expect(properties[kCGImagePropertyDepth] as? Int == 8)
+        #expect(data.count <= AndroidAppLimits.largestIcon, "\(data.count) bytes")
+        #expect(AndroidAppStore.isWholePNG(data))
     }
 
     @Test func aPictureThatDoesNotDecodeWholeIsAnErrorAndAskedForAgain() async throws {

@@ -131,7 +131,9 @@ public struct AndroidAppsCommands: AndroidAppsTool {
         guard let header = requiredBlock(block) else { return .failed }
         let (digest, count) = (header.digest, header.count)
         var rows = rest
-        guard rows.first == "rows" else { return .failed }
+        // The marker is its first field: a later version may append more.
+        guard let marker = rows.first, marker.split(separator: "\t", omittingEmptySubsequences: false).first == "rows"
+        else { return .failed }
         rows = rows.dropFirst()
         guard let last = rows.last, counted("end", in: last) == count else { return .failed }
         rows = rows.dropLast()
@@ -248,7 +250,7 @@ public struct AndroidAppsCommands: AndroidAppsTool {
         var index = 1
         while index < lines.count {
             let parts = lines[index].split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2 else { break }
+            guard parts.count == 2, parts[0] != "rows" else { break }
             // A value is its first field: a later version may append more.
             let value = parts[1].split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
             guard fields.updateValue(String(value), forKey: String(parts[0])) == nil else { return .malformed }

@@ -145,6 +145,18 @@ struct AndroidAppsCommandsTests {
         #expect(parsed.digest == digest)
     }
 
+    @Test func theRowsMarkerIsItsFirstFieldWhateverFollowsIt() {
+        let empty = listing(rows: []).replacingOccurrences(of: "rows\n", with: "rows\textra\tmore\n")
+        #expect(AndroidAppsCommands.parseListing(shellResult(empty)) == .apps(AndroidAppList(apps: [], digest: digest)))
+        let one = listing(rows: [row("com.example.comet", "com.example.comet.Main", "Comet Hop")])
+            .replacingOccurrences(of: "rows\n", with: "rows\textra\n")
+        guard case let .apps(parsed) = AndroidAppsCommands.parseListing(shellResult(one)) else { Issue.record("not a listing"); return }
+        #expect(parsed.apps.count == 1)
+        // A line that only starts with the letters is not the marker.
+        let other = listing(rows: []).replacingOccurrences(of: "rows\n", with: "rowsy\n")
+        #expect(AndroidAppsCommands.parseListing(shellResult(other)) == .failed)
+    }
+
     @Test func anImageWithoutTheToolOrWithAnotherVersionOffersNothing() {
         #expect(AndroidAppsCommands.parseDigest(ShellResult(stderr: Data("kernarium_apps: inaccessible or not found".utf8), exitCode: 127)) == .unavailable)
         #expect(AndroidAppsCommands.parseDigest(shellResult("", exit: 64)) == .unavailable)
