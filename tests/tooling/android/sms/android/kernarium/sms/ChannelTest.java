@@ -19,6 +19,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.FileDescriptor;
 import java.io.IOException;
 import java.net.SocketAddress;
+import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -488,6 +489,8 @@ public final class ChannelTest {
         final FileDescriptor listener = new FileDescriptor();
         final List<ErrnoException> bindFailures = new ArrayList<>();
         final List<ErrnoException> acceptFailures = new ArrayList<>();
+        /** A failure of the other kinds, thrown by the next accept that is polled ready. */
+        Exception acceptOther;
         /** The address each accept was given to fill. */
         final List<SocketAddress> acceptAddresses = new ArrayList<>();
         SocketAddress bound;
@@ -516,10 +519,16 @@ public final class ChannelTest {
 
         /** Like libjavacore's accept: a VmSocketAddress it is given is filled with the peer's port and CID. */
         @Override
-        public FileDescriptor accept(FileDescriptor fd, SocketAddress peer) throws ErrnoException {
+        public FileDescriptor accept(FileDescriptor fd, SocketAddress peer) throws ErrnoException, SocketException {
             calls.add("accept");
             acceptAddresses.add(peer);
             if (!acceptFailures.isEmpty()) throw acceptFailures.remove(0);
+            if (acceptOther != null) {
+                final Exception failure = acceptOther;
+                acceptOther = null;
+                if (failure instanceof SocketException) throw (SocketException) failure;
+                throw (RuntimeException) failure;
+            }
             final Sock sock = queued.poll();
             if (sock == null) throw new ErrnoException("accept", OsConstants.EAGAIN);
             if (sock.libraryRefuses) {
@@ -554,7 +563,8 @@ public final class ChannelTest {
             for (StructPollfd p : fds) {
                 p.revents = 0;
                 if (p.fd == listener) {
-                    if ((p.events & OsConstants.POLLIN) != 0 && (!queued.isEmpty() || !acceptFailures.isEmpty())) {
+                    if ((p.events & OsConstants.POLLIN) != 0
+                            && (!queued.isEmpty() || !acceptFailures.isEmpty() || acceptOther != null)) {
                         p.revents = (short) OsConstants.POLLIN;
                     }
                 } else {
@@ -777,6 +787,65 @@ public final class ChannelTest {
         Os.backend = null;
     }
 
+    /**
+     * The hidden overload of accept is reached by reflection. Its failures come out as they went in, and when it
+     * cannot be found every connection is refused with nothing read, however the host asks.
+     */
+    private static void hiddenAccept() throws Exception {
+        final byte[] request = frame("frame-request-first-number");
+        final World world = new World();
+        Os.backend = world;
+        final Handling handling = new Handling();
+        final List<String> log = new ArrayList<>();
+        final Pauses pauses = new Pauses();
+        final Server server = new Server(new VsockListener(log::add, pauses, "acceptThatIsNotThere"), handling,
+                log::add, System::nanoTime, 1);
+        same(Arrays.asList("host channel: cannot read a peer's CID: NoSuchMethodException"), log,
+                "a hidden method that cannot be found is logged once, when it is looked for");
+        for (int i = 0; i < 3; ++i) {
+            final int callsBefore = world.calls.size();
+            final World.Sock host = new World.Sock();
+            host.cid = OsConstants.VMADDR_CID_HOST;
+            host.incoming = request;
+            host.ends = false; // a request that was admitted would be dispatched
+            world.queued.add(host);
+            server.serveOne();
+            final List<String> calls = new ArrayList<>(world.calls.subList(callsBefore, world.calls.size()));
+            check(!calls.contains("read") && !calls.contains("write") && host.closed && host.shutdown,
+                    "with no hidden accept, the host's connection " + i + " is refused unread: " + calls);
+        }
+        check(handling.payloads.isEmpty(), "and nothing is dispatched");
+        check(world.acceptAddresses.size() == 3 && world.acceptAddresses.stream().allMatch(a -> a == null),
+                "the public accept, which fills no address, took them: " + world.acceptAddresses);
+        same(Arrays.asList("host channel: cannot read a peer's CID: NoSuchMethodException",
+                "listening on vsock port 5560", "refused a connection with no peer address: IOException"), log,
+                "each is refused for having no peer address, the line is rate limited");
+
+        // The failures of the hidden accept come out as they went in, not wrapped.
+        final World failing = new World();
+        Os.backend = failing;
+        final List<String> failingLog = new ArrayList<>();
+        final VsockListener listener = new VsockListener(failingLog::add, new Pauses());
+        check(failingLog.isEmpty(), "the real name is found, and nothing is logged: " + failingLog);
+        failing.acceptOther = new IllegalStateException("scripted");
+        failing.queued.add(new World.Sock());
+        try {
+            listener.accept();
+            check(false, "a RuntimeException of the accept comes out");
+        } catch (IllegalStateException e) {
+            same("scripted", e.getMessage(), "a RuntimeException of the accept comes out as it was thrown");
+        }
+        failing.acceptOther = new SocketException("scripted");
+        final World.Sock after = new World.Sock();
+        after.cid = OsConstants.VMADDR_CID_HOST;
+        failing.queued.add(after);
+        final int socketsBefore = failing.sockets;
+        check(listener.accept() != null, "after a SocketException the listener listens again and accepts");
+        same(socketsBefore + 1, failing.sockets, "with a new listener");
+        check(failingLog.contains("host channel: accept failed: SocketException"), "and said so: " + failingLog);
+        Os.backend = null;
+    }
+
     public static void main(String[] args) throws Exception {
         golden = Golden.load();
         admission();
@@ -785,6 +854,7 @@ public final class ChannelTest {
         order();
         emptyResult();
         glue();
+        hiddenAccept();
         System.exit(Checks.finish());
     }
 }

@@ -1034,8 +1034,10 @@ drops a leading byte order mark; the request's parser and the answers against th
 golden file the host's tests read too; the delivery record at each point where a
 request can end (a forced end, a failing file operation, a second process on its
 lock); and the host channel's server, frame and admission over stand-ins for the
-platform's socket classes. `Delivery` and `HostChannel` (the broadcasts, the inbox
-and the socket calls) need a built image.
+platform's socket classes. The stand-ins make public only what the platform's
+public API has, and a row lists it, so that a call of a hidden member fails there
+as it does in the image build. `Delivery` and `HostChannel` (the broadcasts, the
+inbox and the socket calls) need a built image.
 `android-vulkan-smoke` (integration) registers when `UML_ANDROID_VULKAN_SMOKE_RELEASE`
 names a release and runs the image's `kernarium_vk_ahb_import` in a guest: hardware
 buffers imported and read back, and the guest memory file descriptors

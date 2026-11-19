@@ -8,6 +8,12 @@ import android.system.StructPollfd;
 import android.system.VmSocketAddress;
 import java.io.FileDescriptor;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.net.SocketException;
 import java.util.function.Consumer;
 
 /**
@@ -16,7 +22,11 @@ import java.util.function.Consumer;
  * compile it against stand-ins and run the server's tests over it. Which peer may be served is the
  * server's rule (CID 2); this class reports the peer's CID and never decides. The CID is the one that
  * accept fills into the address it is given: libjavacore converts an AF_VSOCK address there only, and
- * Os.getpeername throws for it.
+ * Os.getpeername throws for it. The overload of Os.accept that takes a SocketAddress is @hide, and the
+ * public one fills an InetSocketAddress only, so the hidden one is found by reflection, once. The service
+ * is signed with the platform key, which the platform exempts from the hidden-API restrictions. When the
+ * method cannot be found, the public accept takes every connection and gives none a peer address, and the
+ * server refuses each of them, so nothing is read and the failure is logged.
  *
  * <p>A bind that fails is tried again every second and never ends the service; an accept that fails for
  * any reason but EINTR, EAGAIN or ECONNABORTED closes the listener, waits a second and listens again.
@@ -33,12 +43,29 @@ final class VsockListener implements Server.Listener {
 
     private final Consumer<String> log;
     private final Sleeper sleeper;
+    /** Os.accept(FileDescriptor, SocketAddress), or null when it cannot be called. */
+    private Method acceptWithAddress;
     private FileDescriptor listening;
     private boolean complained;
 
     VsockListener(Consumer<String> log, Sleeper sleeper) {
+        this(log, sleeper, "accept");
+    }
+
+    /** {@code acceptName} is the hidden method's name: a test names one that is not there. */
+    VsockListener(Consumer<String> log, Sleeper sleeper, String acceptName) {
         this.log = log;
         this.sleeper = sleeper;
+        try {
+            final Method method = Os.class.getDeclaredMethod(acceptName, FileDescriptor.class, SocketAddress.class);
+            if (!Modifier.isStatic(method.getModifiers()) || method.getReturnType() != FileDescriptor.class) {
+                throw new NoSuchMethodException(acceptName);
+            }
+            method.setAccessible(true);
+            acceptWithAddress = method;
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            log.accept("host channel: cannot read a peer's CID: " + e.getClass().getSimpleName());
+        }
     }
 
     @Override
@@ -49,7 +76,7 @@ final class VsockListener implements Server.Listener {
                 if (!readable(listening, -1)) continue;
                 // An address that accept leaves alone keeps the CID it starts with, which no peer has.
                 final VmSocketAddress peer = new VmSocketAddress(0, OsConstants.VMADDR_CID_ANY);
-                final FileDescriptor fd = Os.accept(listening, peer);
+                final FileDescriptor fd = acceptFrom(peer);
                 if (fd == null) continue;
                 return new Peer(fd, peer.getSvmCid());
             } catch (ErrnoException e) {
@@ -64,6 +91,26 @@ final class VsockListener implements Server.Listener {
             closeListener();
             pause(WAKE_MILLIS);
         }
+    }
+
+    /** Accepts into the address when the hidden overload is there; otherwise the public one, which fills none. */
+    private FileDescriptor acceptFrom(VmSocketAddress peer) throws ErrnoException, SocketException {
+        if (acceptWithAddress != null) {
+            try {
+                return (FileDescriptor) acceptWithAddress.invoke(null, listening, peer);
+            } catch (InvocationTargetException e) {
+                final Throwable cause = e.getCause();
+                if (cause instanceof ErrnoException) throw (ErrnoException) cause;
+                if (cause instanceof SocketException) throw (SocketException) cause;
+                if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+                if (cause instanceof Error) throw (Error) cause;
+                throw new IllegalStateException(cause);
+            } catch (IllegalAccessException e) {
+                acceptWithAddress = null;
+                log.accept("host channel: cannot read a peer's CID: " + e.getClass().getSimpleName());
+            }
+        }
+        return Os.accept(listening, (InetSocketAddress) null);
     }
 
     private void listen() throws IOException {

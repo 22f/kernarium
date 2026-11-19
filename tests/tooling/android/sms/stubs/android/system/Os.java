@@ -6,10 +6,17 @@ package android.system;
 
 import java.io.FileDescriptor;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.net.SocketException;
 
-/** The calls the glue makes, each handed to the test's {@link Backend}. */
+/**
+ * The calls the glue makes, each handed to the test's {@link Backend}. What is public here is the platform's
+ * public API, with its signatures, and nothing else: the service is compiled against the platform's stubs, which
+ * leave out everything @hide. A hidden member is declared without {@code public}, so that code outside
+ * android.system cannot call it (javac refuses, as the image's compile does) and reflection still finds it.
+ * test_sms_service.py holds the list of what is public.
+ */
 public final class Os {
     private Os() {}
 
@@ -50,8 +57,15 @@ public final class Os {
         backend.listen(fd, backlog);
     }
 
-    public static FileDescriptor accept(FileDescriptor fd, SocketAddress peer) throws ErrnoException, SocketException {
-        return backend.accept(fd, peer);
+    /** The public overload: the platform fills an InetSocketAddress only; null asks for no address. */
+    public static FileDescriptor accept(FileDescriptor fd, InetSocketAddress peerAddress)
+            throws ErrnoException, SocketException {
+        return backend.accept(fd, peerAddress);
+    }
+
+    /** @hide on the platform: the overload that fills a VmSocketAddress. Reached by reflection only. */
+    static FileDescriptor accept(FileDescriptor fd, SocketAddress peerAddress) throws ErrnoException, SocketException {
+        return backend.accept(fd, peerAddress);
     }
 
     /**
