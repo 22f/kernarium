@@ -75,8 +75,18 @@ enum AddToHomePreview {
             return
         }
 
-        // A request: its readiness takes as long as the screen needs.
-        scripted.readyDelay = screen == "add-home-pill" || freeze ? .seconds(3600) : .milliseconds(1800)
+        // A request: its readiness takes as long as the screen needs. A banner
+        // is the end of its screen, so it comes at once; a screen that rests in
+        // a state holds it, and a flow plays out only when the run is played.
+        state.holdsForever = freeze
+        switch screen {
+        case "add-home-flow-cold", "add-home-flow-warm", "add-home-flow-gone":
+            scripted.readyDelay = freeze ? .seconds(3600) : .milliseconds(1800)
+        case "add-home-banner-gone", "add-home-banner-slow", "add-home-banner-setup":
+            scripted.readyDelay = .milliseconds(300)
+        default:
+            scripted.readyDelay = .seconds(3600)
+        }
         switch screen {
         case "add-home-boot":
             model.requestAndroidApp(app.component)

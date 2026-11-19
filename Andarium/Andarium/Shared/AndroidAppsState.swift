@@ -100,6 +100,9 @@ final class AndroidAppsState {
     @ObservationIgnored var opening: Task<Void, Never>?
     /// The wait for the next request or banner to run out.
     @ObservationIgnored var expiry: Task<Void, Never>?
+    /// The preview keeps a waiting request and a banner as they are, for a
+    /// screen that must stay still.
+    @ObservationIgnored var holdsForever = false
     /// The first refresh waits this long after Android's storage is up, so it
     /// does not compete with the end of the boot.
     @ObservationIgnored var startDelay = Duration.seconds(5)
@@ -211,6 +214,7 @@ final class AndroidAppsState {
     }
 
     private func nextDeadline() -> Date? {
+        guard !holdsForever else { return nil }
         var deadlines: [Date] = []
         if let pending = open.pending, case let .waiting(_, since) = pending.stage {
             deadlines.append(since.addingTimeInterval(AppOpenState.holdLimit))
