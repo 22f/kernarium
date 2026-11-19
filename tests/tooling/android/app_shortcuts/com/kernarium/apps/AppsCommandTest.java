@@ -163,16 +163,16 @@ public final class AppsCommandTest {
     }
 
     private static Entry app(String packageName, String activity) {
-        return new Entry(packageName, activity, false, true, true, true, 10, 1_000, 0x7f010000, "", null);
+        return new Entry(packageName, activity, false, true, true, true, 10, 1_000, 0, 0x7f010000, "", null);
     }
 
     private static Entry builtin(String packageName, String activity) {
-        return new Entry(packageName, activity, true, true, true, true, 10, 1_000, 0x7f010000, "", null);
+        return new Entry(packageName, activity, true, true, true, true, 10, 1_000, 0, 0x7f010000, "", null);
     }
 
     private static Entry entry(String packageName, String activity, boolean builtin, boolean exported,
             boolean enabled, boolean permitted, long version, long updated, int icon) {
-        return new Entry(packageName, activity, builtin, exported, enabled, permitted, version, updated, icon, "", null);
+        return new Entry(packageName, activity, builtin, exported, enabled, permitted, version, updated, 0, icon, "", null);
     }
 
     /** What one run of the command gave. */
@@ -554,8 +554,11 @@ public final class AppsCommandTest {
             check(!base.equals(Listing.of(0, Arrays.asList("fr-FR"), fake.entries).digest), "Android's language changes it");
             check(!base.equals(Listing.of(10, fake.locales, fake.entries).digest), "another foreground user changes it");
             check(!base.equals(Listing.of(0, fake.locales, withReplaced(fake.entries, 0,
-                    new Entry("com.a.app", "com.a.app.Main", false, true, true, true, 10, 1_000, 0x7f010000, "overlay", null))).digest),
+                    new Entry("com.a.app", "com.a.app.Main", false, true, true, true, 10, 1_000, 0, 0x7f010000, "overlay", null))).digest),
                     "an overlay, split or library coming or going changes it");
+            check(!base.equals(Listing.of(0, fake.locales, withReplaced(fake.entries, 0,
+                    new Entry("com.a.app", "com.a.app.Main", false, true, true, true, 10, 1_000, 5_000, 0x7f010000, "", null))).digest),
+                    "the image's build, for a built-in application that was never updated, changes it");
         });
         row("digest-follows-the-whole-locale-list", () -> {
             Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"));
@@ -580,8 +583,14 @@ public final class AppsCommandTest {
             check(!key.equals(Listing.iconKey(entry("com.a.app", "com.a.app.Main", false, true, true, true, 10, 1_000, 5))), "icon resource");
             check(!key.equals(Listing.iconKey(app("com.a.app", "com.a.app.Other"))), "component");
             check(!key.equals(Listing.iconKey(builtin("com.a.app", "com.a.app.Main"))), "built-in flag");
-            check(!key.equals(Listing.iconKey(new Entry("com.a.app", "com.a.app.Main", false, true, true, true, 10, 1_000,
+            check(!key.equals(Listing.iconKey(new Entry("com.a.app", "com.a.app.Main", false, true, true, true, 10, 1_000, 0,
                     0x7f010000, "split", null))), "the files the resources come from");
+            Entry never = new Entry("com.a.app", "com.a.app.Main", true, true, true, true, 10, 1_000, 5_000, 0x7f010000, "", null);
+            Entry next = new Entry("com.a.app", "com.a.app.Main", true, true, true, true, 10, 1_000, 6_000, 0x7f010000, "", null);
+            check(!Listing.iconKey(never).equals(Listing.iconKey(next)),
+                    "the image's build is an input of its own: the update time may be equal across two images");
+            check(!Listing.iconKey(never).equals(Listing.iconKey(builtin("com.a.app", "com.a.app.Main"))),
+                    "a built-in application that was never updated and one that was are different inputs");
             same(2, Listing.RENDER_VERSION, "the renderer's version (the icons are drawn for fixed inputs since 2)");
         });
         row("locale-line", () -> {
@@ -1220,24 +1229,27 @@ public final class AppsCommandTest {
         return file;
     }
 
+    /** A JVM's own kill, which is a real SIGKILL there (on the target libcore it is not: AndroidPlatform sends one by pid). */
+    private static final ChildProcess.Kill JDK_KILL = Process::destroyForcibly;
+
     private static void children() {
         row("child-output-is-drained", () -> {
             // 330 kB of output and status 3: a parent that does not read while it waits stalls the child on a full pipe.
             ChildProcess.Result result = ChildProcess.run(sh("i=0; while [ $i -lt 30000 ]; do echo 0123456789; i=$((i+1)); done; exit 3"),
-                    4_000, 4096);
+                    4_000, 4096, JDK_KILL);
             same(3, result.exit, "the child's status");
             same(4096, result.output.length(), "the first bytes are kept and no more");
             check(result.output.startsWith("0123456789\n"), "the output is the child's");
         });
         row("child-output-merges-error", () -> {
-            ChildProcess.Result result = ChildProcess.run(sh("echo out; echo err >&2"), 4_000, 4096);
+            ChildProcess.Result result = ChildProcess.run(sh("echo out; echo err >&2"), 4_000, 4096, JDK_KILL);
             same(0, result.exit, "status");
             check(result.output.contains("out") && result.output.contains("err"), "both streams: " + show(result.output));
         });
         row("child-deadline-terminates-and-reaps", () -> {
             java.io.File pid = pidFile();
             try {
-                ChildProcess.run(sh("echo $$ > \"$1\"; exec sleep 60", pid.getPath()), 600, 4096);
+                ChildProcess.run(sh("echo $$ > \"$1\"; exec sleep 60", pid.getPath()), 600, 4096, JDK_KILL);
                 throw new Mismatch("a child past the deadline is a failure");
             } catch (PlatformException late) {
                 same("cmd activity start-activity did not finish", late.getMessage(), "the reason is fixed");
@@ -1248,7 +1260,7 @@ public final class AppsCommandTest {
             java.io.File pid = pidFile();
             long begin = System.nanoTime();
             try {
-                ChildProcess.run(sh("trap '' TERM; echo $$ > \"$1\"; while :; do sleep 1; done", pid.getPath()), 600, 4096);
+                ChildProcess.run(sh("trap '' TERM; echo $$ > \"$1\"; while :; do sleep 1; done", pid.getPath()), 600, 4096, JDK_KILL);
                 throw new Mismatch("a child past the deadline is a failure");
             } catch (PlatformException late) {
                 check(late.getMessage() != null, "failed");
@@ -1257,12 +1269,65 @@ public final class AppsCommandTest {
             check(!alive(pid), "SIGKILL ended it");
             check(tookMillis < 600 + 2 * ChildProcess.GRACE_MILLIS + 2_000, "bounded: " + tookMillis + " ms");
         });
+        row("child-kill-is-asked-only-when-termination-did-not-end-it", () -> {
+            int[] asked = new int[1];
+            ChildProcess.Kill counting = process -> {
+                asked[0]++;
+                process.destroyForcibly();
+            };
+            java.io.File pid = pidFile();
+            try {
+                ChildProcess.run(sh("echo $$ > \"$1\"; exec sleep 60", pid.getPath()), 600, 4096, counting, 300);
+            } catch (PlatformException late) {
+                check(late.getMessage() != null, "the deadline");
+            }
+            same(0, asked[0], "SIGTERM ended it: no kill");
+            java.io.File stubborn = pidFile();
+            try {
+                ChildProcess.run(sh("trap '' TERM; echo $$ > \"$1\"; while :; do sleep 1; done", stubborn.getPath()), 600, 4096, counting, 300);
+            } catch (PlatformException late) {
+                check(late.getMessage() != null, "the deadline");
+            }
+            same(1, asked[0], "it ignored SIGTERM: one kill");
+            check(!alive(stubborn), "and it is gone");
+        });
+        row("child-that-survives-the-kill-is-reported", () -> {
+            // A kill that does not work, as destroyForcibly is not one on the target libcore: the final wait says so.
+            java.io.File pid = pidFile();
+            try {
+                ChildProcess.run(sh("trap '' TERM; echo $$ > \"$1\"; while :; do sleep 1; done", pid.getPath()), 600, 4096,
+                        process -> { }, 300);
+                throw new Mismatch("a child that is still alive is a failure");
+            } catch (PlatformException still) {
+                same("cmd activity start-activity could not be ended", still.getMessage(), "the reason is fixed");
+            } finally {
+                String text = new String(java.nio.file.Files.readAllBytes(pid.toPath()), StandardCharsets.US_ASCII).trim();
+                boolean survivor = alive(pid);
+                new ProcessBuilder("kill", "-9", text).start().waitFor();
+                check(survivor, "the child was alive when the run said so");
+            }
+        });
+        row("child-kill-that-throws-leaves-the-wait-to-decide", () -> {
+            java.io.File pid = pidFile();
+            try {
+                ChildProcess.run(sh("trap '' TERM; echo $$ > \"$1\"; while :; do sleep 1; done", pid.getPath()), 600, 4096,
+                        process -> {
+                            throw new IllegalStateException("no such field");
+                        }, 300);
+                throw new Mismatch("a child that is still alive is a failure");
+            } catch (PlatformException still) {
+                same("cmd activity start-activity could not be ended", still.getMessage(), "the reason is fixed");
+            } finally {
+                String text = new String(java.nio.file.Files.readAllBytes(pid.toPath()), StandardCharsets.US_ASCII).trim();
+                new ProcessBuilder("kill", "-9", text).start().waitFor();
+            }
+        });
         row("child-is-reaped-when-the-run-is-interrupted", () -> {
             java.io.File pid = pidFile();
             Throwable[] ended = new Throwable[1];
             Thread runner = new Thread(() -> {
                 try {
-                    ChildProcess.run(sh("echo $$ > \"$1\"; exec sleep 60", pid.getPath()), 30_000, 4096);
+                    ChildProcess.run(sh("echo $$ > \"$1\"; exec sleep 60", pid.getPath()), 30_000, 4096, JDK_KILL);
                 } catch (Throwable problem) {
                     ended[0] = problem;
                 }
@@ -1280,7 +1345,7 @@ public final class AppsCommandTest {
         });
         row("child-that-cannot-start-fails", () -> {
             try {
-                ChildProcess.run(Arrays.asList("/nonexistent/kernarium-apps-test"), 1_000, 4096);
+                ChildProcess.run(Arrays.asList("/nonexistent/kernarium-apps-test"), 1_000, 4096, JDK_KILL);
                 throw new Mismatch("no such program");
             } catch (java.io.IOException expected) {
                 check(true, "an exception, not a result");
@@ -1292,6 +1357,8 @@ public final class AppsCommandTest {
     private static final class FakeGraph implements SourceBound.Graph {
         final Map<Integer, SourceBound.Node> nodes = new HashMap<>();
         final List<Integer> asked = new ArrayList<>();
+        /** The XML files a parser was opened on. */
+        final List<Integer> parsed = new ArrayList<>();
 
         FakeGraph with(int id, SourceBound.Node node) {
             nodes.put(id, node);
@@ -1305,8 +1372,23 @@ public final class AppsCommandTest {
             if (node == null) {
                 throw new java.io.IOException("no resource " + id);
             }
-            return node;
+            if (node.kind != SourceBound.Node.XML) {
+                return node;
+            }
+            return SourceBound.Node.xml(node.bytes, () -> {
+                parsed.add(id);
+                return node.references.read();
+            });
         }
+    }
+
+    /** An XML resource of 100 bytes that refers to the given resources. */
+    private static SourceBound.Node xml(int... references) {
+        return xmlOf(100, references);
+    }
+
+    private static SourceBound.Node xmlOf(long bytes, int... references) {
+        return SourceBound.Node.xml(bytes, () -> references);
     }
 
     private static boolean within(FakeGraph graph, int root) throws Exception {
@@ -1337,39 +1419,39 @@ public final class AppsCommandTest {
         });
         row("source-bound-layers-add-up", () -> {
             int none = SourceBound.DENSITY_NONE;
-            FakeGraph adaptive = new FakeGraph().with(1, SourceBound.Node.xml(2, 3))
-                    .with(2, SourceBound.Node.other()).with(3, SourceBound.Node.xml(4)).with(4, SourceBound.Node.bitmap(432, 432, none));
+            FakeGraph adaptive = new FakeGraph().with(1, xml(2, 3))
+                    .with(2, SourceBound.Node.other()).with(3, xml(4)).with(4, SourceBound.Node.bitmap(432, 432, none));
             check(within(adaptive, 1), "an adaptive icon with a colour background and a bitmap foreground");
-            FakeGraph big = new FakeGraph().with(1, SourceBound.Node.xml(2, 3, 4, 5, 6))
+            FakeGraph big = new FakeGraph().with(1, xml(2, 3, 4, 5, 6))
                     .with(2, SourceBound.Node.bitmap(4096, 2048, none)).with(3, SourceBound.Node.bitmap(4096, 2048, none))
                     .with(4, SourceBound.Node.bitmap(4096, 2048, none)).with(5, SourceBound.Node.bitmap(4096, 2048, none))
                     .with(6, SourceBound.Node.bitmap(10, 10, none));
             check(!within(big, 1), "four bitmaps of 8 Mpixels are 32 Mpixels and the fifth thing tips it over");
-            FakeGraph fits = new FakeGraph().with(1, SourceBound.Node.xml(2, 3, 4))
+            FakeGraph fits = new FakeGraph().with(1, xml(2, 3, 4))
                     .with(2, SourceBound.Node.bitmap(4096, 2048, none)).with(3, SourceBound.Node.bitmap(4096, 2048, none))
                     .with(4, SourceBound.Node.bitmap(4096, 2048, none));
             check(within(fits, 1), "three of them (24 Mpixels) are within the total");
-            FakeGraph exact = new FakeGraph().with(1, SourceBound.Node.xml(2, 3))
+            FakeGraph exact = new FakeGraph().with(1, xml(2, 3))
                     .with(2, SourceBound.Node.bitmap(4096, 4096, none)).with(3, SourceBound.Node.bitmap(4096, 4096, none));
             check(within(exact, 1), "two of 16 Mpixels are exactly the total");
-            FakeGraph over = new FakeGraph().with(1, SourceBound.Node.xml(2, 3, 4))
+            FakeGraph over = new FakeGraph().with(1, xml(2, 3, 4))
                     .with(2, SourceBound.Node.bitmap(4096, 4096, none)).with(3, SourceBound.Node.bitmap(4096, 4096, none))
                     .with(4, SourceBound.Node.bitmap(1, 1, none));
             check(!within(over, 1), "one pixel more than the total");
         });
         row("source-bound-walk-is-bounded", () -> {
-            FakeGraph cycle = new FakeGraph().with(1, SourceBound.Node.xml(2)).with(2, SourceBound.Node.xml(1, 2, 1));
-            check(within(cycle, 1), "a cycle ends");
+            FakeGraph cycle = new FakeGraph().with(1, xml(2)).with(2, xml(1, 2, 1));
+            check(!within(cycle, 1), "a cycle is over the bound (the framework would not end on it either)");
             same(Arrays.asList(1, 2), cycle.asked, "each resource is looked at once");
             FakeGraph chain = new FakeGraph();
             for (int id = 1; id <= 10; id++) {
-                chain.with(id, SourceBound.Node.xml(id + 1));
+                chain.with(id, xml(id + 1));
             }
             chain.with(11, SourceBound.Node.other());
             check(!within(chain, 1), "a chain deeper than 6 is over");
             FakeGraph shallow = new FakeGraph();
             for (int id = 1; id <= 7; id++) {
-                shallow.with(id, id == 7 ? SourceBound.Node.other() : SourceBound.Node.xml(id + 1));
+                shallow.with(id, id == 7 ? SourceBound.Node.other() : xml(id + 1));
             }
             check(within(shallow, 1), "a chain of exactly the depth is within");
             FakeGraph wide = new FakeGraph();
@@ -1378,7 +1460,7 @@ public final class AppsCommandTest {
                 ids[i] = 100 + i;
                 wide.with(ids[i], SourceBound.Node.bitmap(10, 10, SourceBound.DENSITY_NONE));
             }
-            wide.with(1, SourceBound.Node.xml(ids));
+            wide.with(1, xml(ids));
             check(!within(wide, 1), "the root and 32 files are 33 resources, over 32");
             FakeGraph many = new FakeGraph();
             int[] some = new int[31];
@@ -1386,8 +1468,66 @@ public final class AppsCommandTest {
                 some[i] = 100 + i;
                 many.with(some[i], SourceBound.Node.bitmap(10, 10, SourceBound.DENSITY_NONE));
             }
-            many.with(1, SourceBound.Node.xml(some));
+            many.with(1, xml(some));
             check(within(many, 1), "the root and 31 files are exactly 32 resources, within");
+        });
+        row("source-bound-charges-every-use", () -> {
+            int none = SourceBound.DENSITY_NONE;
+            // The framework decodes a bitmap that two layers refer to twice: it counts twice.
+            FakeGraph twice = new FakeGraph().with(1, xml(2, 2)).with(2, SourceBound.Node.bitmap(4096, 4096, none));
+            check(within(twice, 1), "two uses of a 16 Mpixel bitmap are exactly the total");
+            same(Arrays.asList(1, 2), twice.asked, "the file is measured once, however often it is used");
+            FakeGraph thrice = new FakeGraph().with(1, xml(2, 2, 2)).with(2, SourceBound.Node.bitmap(4096, 4096, none));
+            check(!within(thrice, 1), "three uses are 48 Mpixels");
+            FakeGraph nested = new FakeGraph().with(1, xml(2, 3)).with(2, xml(4)).with(3, xml(4, 4, 4, 4))
+                    .with(4, SourceBound.Node.bitmap(4096, 2048, none));
+            check(!within(nested, 1), "five uses of an 8 Mpixel bitmap through two layers are over 32 Mpixels");
+            FakeGraph repeats = new FakeGraph();
+            int[] same32 = new int[32];
+            Arrays.fill(same32, 2);
+            repeats.with(1, xml(same32)).with(2, SourceBound.Node.bitmap(10, 10, none));
+            check(!within(repeats, 1), "the root and 32 uses of one file are 33 uses");
+            // A resource used twice side by side is not a cycle.
+            FakeGraph siblings = new FakeGraph().with(1, xml(2, 2)).with(2, xml(3)).with(3, SourceBound.Node.bitmap(10, 10, none));
+            check(within(siblings, 1), "the same layer twice");
+        });
+        row("source-bound-file-kinds-follow-the-framework", () -> {
+            // ResourcesImpl.loadDrawableForCookie: XML only when the name ends in ".xml", every other file an image.
+            same(SourceBound.XML_FILE, SourceBound.fileKind(true, "res/drawable/a.xml", true), "an XML file");
+            same(SourceBound.IMAGE_FILE, SourceBound.fileKind(true, "res/drawable/a.XML", true), "the name is compared as it is");
+            same(SourceBound.IMAGE_FILE, SourceBound.fileKind(true, "res/drawable/a.png", true), "a PNG");
+            same(SourceBound.IMAGE_FILE, SourceBound.fileKind(true, "res/raw/huge", true), "a file with no extension");
+            same(SourceBound.IMAGE_FILE, SourceBound.fileKind(true, "res/a.bin", true), "a file of an extension nobody knows");
+            same(SourceBound.IMAGE_FILE, SourceBound.fileKind(true, "res/xml/a.xml.png", true), "only the end of the name counts");
+            same(SourceBound.NOT_A_FILE, SourceBound.fileKind(true, "a string that names no file", false), "a string");
+            same(SourceBound.NOT_A_FILE, SourceBound.fileKind(false, null, false), "a colour or a number");
+            same(SourceBound.NOT_A_FILE, SourceBound.fileKind(false, "res/drawable/a.png", true), "a value that is not a string");
+        });
+        row("source-bound-unknown-cost-is-an-error", () -> {
+            check(!within(new FakeGraph().with(1, SourceBound.Node.unknown()), 1), "a file of a cost that cannot be established");
+            check(!within(new FakeGraph().with(1, xml(2)).with(2, SourceBound.Node.unknown()), 1), "one a layer refers to");
+        });
+        row("source-bound-xml-is-checked-before-it-is-opened", () -> {
+            int none = SourceBound.DENSITY_NONE;
+            long one = SourceBound.MAX_XML_BYTES;
+            FakeGraph over = new FakeGraph().with(1, xmlOf(one + 1, 2)).with(2, SourceBound.Node.bitmap(10, 10, none));
+            check(!within(over, 1), "an XML file one byte over the budget");
+            check(over.parsed.isEmpty(), "no parser is opened on it");
+            FakeGraph exact = new FakeGraph().with(1, xmlOf(one, 2)).with(2, SourceBound.Node.bitmap(10, 10, none));
+            check(within(exact, 1), "one of exactly the budget");
+            same(Arrays.asList(1), exact.parsed, "it is opened once");
+            FakeGraph unknown = new FakeGraph().with(1, xmlOf(0, 2)).with(2, SourceBound.Node.bitmap(10, 10, none));
+            check(!within(unknown, 1), "a length that could not be established");
+            check(unknown.parsed.isEmpty(), "no parser is opened on it");
+            // The total of every use: four of the budget are the total, five are over.
+            FakeGraph four = new FakeGraph().with(1, xmlOf(one, 2, 3, 4)).with(2, xmlOf(one)).with(3, xmlOf(one)).with(4, xmlOf(one));
+            check(within(four, 1), "four XML files of the budget are exactly the total");
+            FakeGraph five = new FakeGraph().with(1, xmlOf(one, 2, 3, 4, 5)).with(2, xmlOf(one)).with(3, xmlOf(one))
+                    .with(4, xmlOf(one)).with(5, xmlOf(one));
+            check(!within(five, 1), "five are over");
+            FakeGraph again = new FakeGraph().with(1, xmlOf(one, 2, 2, 2, 2)).with(2, xmlOf(one));
+            check(!within(again, 1), "one file used four times is five reads");
+            same(Arrays.asList(1, 2), again.parsed, "but its parser is opened once");
         });
         row("source-bound-colours-are-free", () -> {
             // A vector with many named colours is not a big icon: only the files count towards the bound.
@@ -1397,12 +1537,12 @@ public final class AppsCommandTest {
                 ids[i] = 1000 + i;
                 colours.with(ids[i], SourceBound.Node.other());
             }
-            colours.with(1, SourceBound.Node.xml(ids));
+            colours.with(1, xml(ids));
             check(within(colours, 1), "a hundred colours");
         });
         row("source-bound-unreadable-is-an-error", () -> {
             try {
-                within(new FakeGraph().with(1, SourceBound.Node.xml(2)), 1);
+                within(new FakeGraph().with(1, xml(2)), 1);
                 throw new Mismatch("a resource that cannot be read");
             } catch (java.io.IOException expected) {
                 check(true, "thrown");
@@ -1428,8 +1568,9 @@ public final class AppsCommandTest {
                     new String[] {"/o/legacy.apk", "/o/both.idmap"},
                     new String[] {"/o/both.idmap", "/o/new.idmap"});
             same(Arrays.asList("BASE /data/app/a/base.apk", "SPLIT /data/app/a/split_one.apk", "SPLIT /data/app/a/split_two.apk",
-                    "LIBRARY /data/app/lib/lib.apk", "OVERLAY /o/legacy.apk", "OVERLAY /o/both.idmap", "OVERLAY /o/new.idmap"),
-                    describe(items), "base, splits, libraries (APKs only), overlays (legacy first, each once)");
+                    "LIBRARY /data/app/lib/lib.apk", "OVERLAY /o/both.idmap", "OVERLAY /o/new.idmap", "OVERLAY /o/legacy.apk"),
+                    describe(items), "base, splits, libraries (APKs only), overlay paths in their order, then the legacy "
+                    + "directories that are missing (each once)");
             check(ResourcePaths.hasBase(items), "it can be opened");
             same(Arrays.asList("BASE /data/app/a/private.apk", "SPLIT /data/app/a/private_split.apk"),
                     describe(ResourcePaths.of(null, "/data/app/a/private.apk", null, new String[] {"/data/app/a/private_split.apk"},

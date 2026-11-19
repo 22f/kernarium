@@ -328,7 +328,10 @@ class ScriptedImage:
                             and self.component_enabled(candidate)
                             and (not candidate.get("permission") or self.deviation == "guarded-icon")):
                         found = candidate
-            if found is None or not self.packages[package].enabled:
+            if found is not None and self.deviation == "builtin-icons-error" and self.packages[package].builtin \
+                    and package != SETTINGS:
+                out += f"icon\t{token}\terror\t0\t0\t-\t0\t0\t-\n".encode()
+            elif found is None or not self.packages[package].enabled:
                 out += f"icon\t{token}\tmissing\t0\t0\t-\t0\t0\t-\n".encode()
             elif found["icon"] is None:
                 out += f"icon\t{token}\tnoicon\t0\t0\t-\t0\t0\t-\n".encode()
@@ -344,6 +347,8 @@ class ScriptedImage:
                     data = gray_png(192)
                 if self.deviation == "icon-corrupt":
                     data = corrupt_png(192)
+                if self.deviation == "icon-bad-crc":
+                    data = data[:-1] + bytes([data[-1] ^ 1])   # the IEND chunk's checksum; the record's SHA-256 follows the data
                 flag = "1" if self.deviation == "icon-alpha-claimed" else "0"
                 size = 128 if self.deviation == "icon-size" else 192
                 sha = hashlib.sha256(data).hexdigest()
@@ -376,6 +381,8 @@ class ScriptedImage:
                 err += "second line\n"
             return "", 2, err
         self.resumed = f"{package}/{found['target']}" if found["alias"] else f"{package}/{activity}"
+        if self.deviation == "resumed-superstring":
+            self.resumed += "Other"   # a component whose name only starts with the wanted one
         self.launches += 1
         err = "kernarium_apps: noise\n" if self.deviation == "launch-again-noisy" and self.launches == 2 else ""
         return f"launched\t{token}\n", 0, err
@@ -625,6 +632,23 @@ class Parsers(unittest.TestCase):
         self.assertEqual((255, 255, 255, 255), runner.pixel(rows, channels, 12, 12))
         self.assertEqual(3, runner.decode_png(make_png(24, alpha=False))[2])
 
+    def test_the_png_chunk_checksums_are_checked(self) -> None:
+        good = make_png(24)
+        for position in (20, len(good) - 1, len(good) - 30):   # in the header, the end chunk's checksum, the pixel data
+            damaged = bytearray(good)
+            damaged[position] ^= 1
+            with self.assertRaises(Failure):
+                runner.decode_png(bytes(damaged))
+        with self.assertRaises(Failure):
+            runner.decode_png(good[:-6])
+
+    def test_the_resumed_component_is_read_whole(self) -> None:
+        dump = ("  mResumedActivity: ActivityRecord{1a2b u0 org.x.a/.Main t14}\n"
+                "  topResumedActivity=ActivityRecord{3c4d u0 org.x.b/android.app.Activity t15 f}\n"
+                "  ResumedActivity: ActivityRecord{5e6f u10 org.x.c/org.x.c.Deep t9}\n  noise ResumedActivity\n")
+        self.assertEqual(["org.x.a/org.x.a.Main", "org.x.b/android.app.Activity", "org.x.c/org.x.c.Deep"],
+                         runner.resumed_components(dump))
+
 
 class Steps(Fixture):
     def run_steps(self, deviation: str | None) -> dict[str, str]:
@@ -665,13 +689,14 @@ class Steps(Fixture):
             "label-uncut": header, "label-bidi": header, "list-no-end": header, "digest-unsalted": header,
             "hidden-listed": rows, "label-resource-unread": rows, "label-unresolved": rows, "guarded-listed": rows,
             "icon-sha": icons, "icon-size": icons, "icon-corner": icons, "icons-no-end": icons, "icons-order": icons,
-            "guarded-icon": icons, "icon-gray": icons, "icon-corrupt": icons, "icon-alpha-claimed": icons, "icon-resource-flat": icons,
+            "guarded-icon": icons, "icon-gray": icons, "icon-corrupt": icons, "icon-bad-crc": icons, "icon-alpha-claimed": icons, "icon-resource-flat": icons,
             "launch-not-resumed": launch, "launch-again-noisy": launch, "home-ignored": launch,
+            "resumed-superstring": launch,
             "alias-manifest-flag": alias, "alias-disabled-listed": rows,
             "launch-hidden": refusals, "guarded-launched": refusals, "injection": refusals, "refusal-multiline": refusals, "disabled-launch": refusals,
             "usage-status": usage,
             "writes-file": clean, "denial": clean, "first-call-denial": clean,
-            "digest-constant": sets, "static-keys": sets,
+            "digest-constant": sets, "static-keys": sets, "builtin-icons-error": icons,
         }
         for deviation, step in expected.items():
             with self.subTest(deviation=deviation):

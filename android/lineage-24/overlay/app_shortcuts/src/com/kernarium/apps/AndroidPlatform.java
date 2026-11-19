@@ -44,6 +44,7 @@ import android.util.TypedValue;
 import org.xmlpull.v1.XmlPullParser;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -123,16 +124,15 @@ final class AndroidPlatform implements AppsCommand.Platform {
             // activity it returns is enabled for the user, and ActivityInfo.isEnabled() (the manifest's flag
             // and the application's) would drop an alias that is disabled in the manifest and enabled since.
             boolean builtIn = (application.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
-            long updated = packageInfo.lastUpdateTime;
-            if (builtIn && (application.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0) {
-                // A built-in application that was never updated takes its update time from its APK's file
-                // time, one fixed date in every image, and the resource fingerprint names paths and not
-                // content: the image's own build time is what changes the icon key across an image update.
-                updated = Math.max(updated, Build.TIME);
-            }
+            // A built-in application that was never updated has an update time that is its APK's file time (one
+            // fixed date in every image) or the wall time of the first boot that scanned it, and the resource
+            // fingerprint names paths and not content: the image's own build time is an input of its own.
+            long imageBuild = builtIn && (application.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0
+                    ? Build.TIME : 0;
             result.add(new Entry(info.packageName, info.name, builtIn,
                     info.exported, true, permitted(info.permission), packageInfo.getLongVersionCode(),
-                    updated, info.getIconResource(), ResourcePaths.fingerprint(paths), info));
+                    packageInfo.lastUpdateTime, imageBuild, info.getIconResource(), ResourcePaths.fingerprint(paths),
+                    info));
         }
         return result;
     }
@@ -253,10 +253,10 @@ final class AndroidPlatform implements AppsCommand.Platform {
     /**
      * The application's own resources, every file its effective resource path names (the base, its splits, its
      * shared libraries and the overlays enabled for the user, as the framework adds them for the application
-     * itself): in the system's configuration, for the label; in a fixed configuration at the icon density, for the
-     * icon. One per application and use. Null when the base, a split or a library cannot be added (the label is
-     * then the package name and the icon an error); an overlay that cannot be added is skipped, as the framework
-     * does.
+     * itself): in the fixed configuration with the system's locale list, for the label; in the same configuration
+     * with a fixed locale, for the icon. One per application and use. Null when the base or a split cannot be
+     * added (the label is then the package name and the icon an error); a shared library or an overlay that cannot
+     * be added is skipped, as the framework does.
      */
     private Resources resources(ApplicationInfo application, boolean icon) throws PlatformException {
         Map<String, Resources> cache = icon ? mIconResources : mLabelResources;
@@ -279,20 +279,16 @@ final class AndroidPlatform implements AppsCommand.Platform {
                         cookie = assets.addAssetPath(item.path);
                         break;
                 }
-                complete = cookie != 0 || item.kind == ResourcePaths.Kind.OVERLAY;
+                complete = cookie != 0 || item.kind == ResourcePaths.Kind.OVERLAY
+                        || item.kind == ResourcePaths.Kind.LIBRARY;
             }
             if (complete) {
                 DisplayMetrics metrics = new DisplayMetrics();
                 metrics.setToDefaults();
-                Configuration configuration;
-                if (icon) {
-                    metrics.densityDpi = ICON_DENSITY;
-                    metrics.density = ICON_DENSITY / (float) DisplayMetrics.DENSITY_DEFAULT;
-                    configuration = iconConfiguration();
-                } else {
-                    configuration = new Configuration(configuration());
-                }
-                resources = new Resources(assets, metrics, configuration);
+                metrics.densityDpi = ICON_DENSITY;
+                metrics.density = ICON_DENSITY / (float) DisplayMetrics.DENSITY_DEFAULT;
+                resources = new Resources(assets, metrics,
+                        fixedConfiguration(icon ? new LocaleList(ICON_LOCALE) : configuration().getLocales()));
             } else {
                 assets.close();
             }
@@ -302,15 +298,16 @@ final class AndroidPlatform implements AppsCommand.Platform {
     }
 
     /**
-     * What an icon is drawn for: the highest density, day mode, a fixed locale, and no other qualifier
-     * (screen size, orientation...), whatever the device's own state. One resource id is then one picture
-     * for a package version, so the icon key needs no configuration in it.
+     * What a label is read for and an icon is drawn for: the highest density, day mode, the given locales, and no
+     * other qualifier (screen size, orientation...), whatever the device's own state. A label then depends on the
+     * system's locale list alone, which the digest covers, and one icon resource id is one picture for a package
+     * version, so neither the digest nor the icon key needs a configuration in it.
      */
-    private static Configuration iconConfiguration() {
+    private static Configuration fixedConfiguration(LocaleList locales) {
         Configuration configuration = new Configuration();
         configuration.densityDpi = ICON_DENSITY;
         configuration.uiMode = Configuration.UI_MODE_TYPE_NORMAL | Configuration.UI_MODE_NIGHT_NO;
-        configuration.setLocales(new LocaleList(ICON_LOCALE));
+        configuration.setLocales(locales);
         return configuration;
     }
 
@@ -334,7 +331,7 @@ final class AndroidPlatform implements AppsCommand.Platform {
     @Override
     public AppsCommand.StartResult start(int user, Component component) throws Exception {
         ChildProcess.Result result = ChildProcess.run(AppsCommand.startArguments(user, component),
-                AppsCommand.START_SECONDS * 1000L, OUTPUT_LIMIT);
+                AppsCommand.START_SECONDS * 1000L, OUTPUT_LIMIT, new KillByPid());
         return new AppsCommand.StartResult(result.exit, result.output);
     }
 
@@ -344,69 +341,94 @@ final class AndroidPlatform implements AppsCommand.Platform {
     }
 
     /**
+     * SIGKILL for a child that SIGTERM did not end. This libcore's {@code Process.destroyForcibly()} is
+     * {@code destroy()} (SIGTERM) again and the class has no {@code pid()}, so the pid is read from the child's
+     * own field and {@code android.os.Process.killProcess} sends the signal (the child is the shell user's own, and
+     * it has not been reaped, so the pid is still its). A failure here is not reported: the wait that follows says
+     * whether the child is gone.
+     */
+    private static final class KillByPid implements ChildProcess.Kill {
+        @Override
+        public void kill(Process process) throws Exception {
+            java.lang.reflect.Field field = process.getClass().getDeclaredField("pid");
+            field.setAccessible(true);
+            android.os.Process.killProcess(field.getInt(process));
+        }
+    }
+
+    /**
      * {@link SourceBound.Graph} over an application's resources: which resource is an image file (its size from
-     * the file's header, a bounds-only decode), which an XML file (the resources its attributes refer to), and
-     * which is neither.
+     * the file's header, a bounds-only decode), which an XML file (its uncompressed length, then the resources its
+     * attributes refer to), which is no file (a colour, a number, a string that names no file) and which cannot be
+     * read. A resource is judged by its value, as the framework judges what it is asked to load, and not by the name
+     * of its type or of its file: {@link SourceBound#fileKind}.
      */
     private static final class ResourceGraph implements SourceBound.Graph {
+        /** The resource's value cannot be read, so what it costs cannot be established. */
+        private static final int UNKNOWN = -1;
+
         private final Resources mResources;
 
         ResourceGraph(Resources resources) {
             mResources = resources;
         }
 
-        /** Whether the resource is a drawable or a mipmap, the kinds that are files worth looking into (not a colour or a string). */
-        private boolean fileResource(int id) {
+        /**
+         * The kind of file the resource's value is ({@link SourceBound#fileKind}; {@code value} is then its value:
+         * the path), or {@link #UNKNOWN} when the value cannot be read.
+         */
+        private int classify(int id, TypedValue value) {
             try {
-                String type = mResources.getResourceTypeName(id);
-                return "drawable".equals(type) || "mipmap".equals(type);
-            } catch (Resources.NotFoundException absent) {
+                mResources.getValueForDensity(id, ICON_DENSITY, value, true);
+            } catch (Resources.NotFoundException unreadable) {
+                return UNKNOWN;
+            }
+            if (value.type == TypedValue.TYPE_REFERENCE) {
+                return UNKNOWN;
+            }
+            boolean string = value.type == TypedValue.TYPE_STRING && value.string != null;
+            return SourceBound.fileKind(string, string ? value.string.toString() : null, string && opens(id));
+        }
+
+        /** Whether the resource's value names a file of the package that opens (the framework opens it the same way). */
+        private boolean opens(int id) {
+            try {
+                mResources.openRawResource(id, new TypedValue()).close();
+                return true;
+            } catch (Resources.NotFoundException | IOException none) {
                 return false;
             }
         }
 
         @Override
-        public SourceBound.Node node(int id) throws Exception {
-            if (!fileResource(id)) {
-                return SourceBound.Node.other();
-            }
+        public SourceBound.Node node(final int id) throws Exception {
             TypedValue value = new TypedValue();
-            try {
-                mResources.getValueForDensity(id, ICON_DENSITY, value, true);
-            } catch (Resources.NotFoundException absent) {
-                return SourceBound.Node.other(); // loading the icon itself says so, for the one that matters
+            switch (classify(id, value)) {
+                case SourceBound.NOT_A_FILE:
+                    return SourceBound.Node.other();
+                case SourceBound.XML_FILE:
+                    // The length first: the framework reads the whole file into memory when it opens a parser.
+                    long length;
+                    try (InputStream in = mResources.openRawResource(id, new TypedValue())) {
+                        length = in.available();
+                    }
+                    return SourceBound.Node.xml(length, () -> references(id));
+                case SourceBound.IMAGE_FILE:
+                    BitmapFactory.Options options = new BitmapFactory.Options();
+                    options.inJustDecodeBounds = true;
+                    try (InputStream in = mResources.openRawResource(id, new TypedValue())) {
+                        BitmapFactory.decodeStream(in, null, options);
+                    }
+                    return SourceBound.Node.bitmap(options.outWidth, options.outHeight, value.density);
+                default:
+                    return SourceBound.Node.unknown();
             }
-            if (value.type != TypedValue.TYPE_STRING || value.string == null) {
-                return SourceBound.Node.other();
-            }
-            String path = value.string.toString().toLowerCase(Locale.ROOT);
-            if (path.endsWith(".xml")) {
-                return SourceBound.Node.xml(references(id));
-            }
-            if (isImage(path)) {
-                BitmapFactory.Options options = new BitmapFactory.Options();
-                options.inJustDecodeBounds = true;
-                try (InputStream in = mResources.openRawResource(id, new TypedValue())) {
-                    BitmapFactory.decodeStream(in, null, options);
-                }
-                return SourceBound.Node.bitmap(options.outWidth, options.outHeight, value.density);
-            }
-            return SourceBound.Node.other();
         }
 
-        private static boolean isImage(String path) {
-            for (String extension : new String[] {".png", ".webp", ".jpg", ".jpeg", ".gif", ".bmp", ".heic", ".heif",
-                    ".avif"}) {
-                if (path.endsWith(extension)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        /** The resources an XML resource's attributes refer to (@drawable, @mipmap, @color...). */
+        /** The files an XML resource's attributes refer to (@drawable, @mipmap, a colour state list...), each use of one. */
         private int[] references(int id) throws Exception {
             List<Integer> found = new ArrayList<>();
+            TypedValue scratch = new TypedValue();
             XmlResourceParser parser = mResources.getXml(id);
             try {
                 int elements = 0;
@@ -419,7 +441,7 @@ final class AndroidPlatform implements AppsCommand.Platform {
                     }
                     for (int i = 0; i < parser.getAttributeCount(); i++) {
                         int reference = parser.getAttributeResourceValue(i, 0);
-                        if (reference != 0 && fileResource(reference)) {
+                        if (reference != 0 && classify(reference, scratch) != SourceBound.NOT_A_FILE) {
                             if (found.size() >= MAX_REFERENCES) {
                                 throw new PlatformException("an icon's XML resource refers to too much");
                             }

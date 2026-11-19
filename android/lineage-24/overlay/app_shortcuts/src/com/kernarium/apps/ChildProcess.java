@@ -28,12 +28,24 @@ import java.util.concurrent.TimeUnit;
  * status and the first bytes of its output. The output is read while the process runs, so that a chatty
  * child cannot fill the pipe and stall; the whole run has one deadline; and the child is terminated and
  * reaped, in a {@code finally}, however the run ends (a deadline, an interrupt, a failure after the spawn).
+ * A child that is still alive after the kill is a failure of its own: the run says so and does not claim
+ * to have ended it.
  */
 final class ChildProcess {
     /** How long the output is read on after the process has ended (a descendant may hold the pipe open). */
     static final long DRAIN_MILLIS = 2_000;
     /** How long a terminated child is given to end, once with SIGTERM and once with SIGKILL. */
     static final long GRACE_MILLIS = 2_000;
+
+    /**
+     * The kill for a child that SIGTERM did not end. It is the platform's: on the target libcore
+     * {@code Process.destroyForcibly()} calls {@code destroy()} (SIGTERM) again and the class has no
+     * {@code pid()}, so the platform sends SIGKILL by the child's pid. Whether the child is gone is judged by
+     * waiting for it, not by what this call says.
+     */
+    interface Kill {
+        void kill(Process process) throws Exception;
+    }
 
     /** How the child ended and its first output (standard output and error together). */
     static final class Result {
@@ -48,9 +60,18 @@ final class ChildProcess {
 
     private ChildProcess() {}
 
-    /** Runs {@code argv}; keeps at most {@code keep} bytes of output; fails when it is not over after {@code limitMillis}. */
-    static Result run(List<String> argv, long limitMillis, int keep) throws Exception {
+    /**
+     * Runs {@code argv}; keeps at most {@code keep} bytes of output; fails when it is not over after
+     * {@code limitMillis}, or when a child that had to be ended is still alive after {@code kill}.
+     */
+    static Result run(List<String> argv, long limitMillis, int keep, Kill kill) throws Exception {
+        return run(argv, limitMillis, keep, kill, GRACE_MILLIS);
+    }
+
+    /** As {@link #run(List, long, int, Kill)}, with the grace given to a terminated child (a test shortens it). */
+    static Result run(List<String> argv, long limitMillis, int keep, Kill kill, long graceMillis) throws Exception {
         Process process = null;
+        boolean ended = true;
         try {
             process = new ProcessBuilder(argv).redirectErrorStream(true).start();
             process.getOutputStream().close();
@@ -70,7 +91,10 @@ final class ChildProcess {
             return new Result(process.exitValue(), text);
         } finally {
             if (process != null) {
-                terminate(process);
+                ended = terminate(process, kill, graceMillis);
+            }
+            if (!ended) {
+                throw new PlatformException("cmd activity start-activity could not be ended");
             }
         }
     }
@@ -92,25 +116,39 @@ final class ChildProcess {
         }
     }
 
-    /** The child ended, or SIGKILL has been sent and waited for (a bounded time each). The streams are closed. */
-    private static void terminate(Process process) {
+    /**
+     * Ends the child, if it is running: SIGTERM and a wait, then the kill and a wait (a bounded time each).
+     * Returns whether the child is gone. The streams are closed.
+     */
+    private static boolean terminate(Process process, Kill kill, long graceMillis) {
         try {
             if (process.isAlive()) {
                 process.destroy();
-                if (!process.waitFor(GRACE_MILLIS, TimeUnit.MILLISECONDS)) {
-                    process.destroyForcibly();
-                    process.waitFor(GRACE_MILLIS, TimeUnit.MILLISECONDS);
+                if (!process.waitFor(graceMillis, TimeUnit.MILLISECONDS)) {
+                    kill(process, kill);
+                    process.waitFor(graceMillis, TimeUnit.MILLISECONDS);
                 }
             }
+            return !process.isAlive();
         } catch (InterruptedException interrupted) {
-            process.destroyForcibly();
+            kill(process, kill);
             Thread.currentThread().interrupt();
+            return !process.isAlive();
         } finally {
             try {
                 process.getInputStream().close();
             } catch (IOException ignored) {
                 // Nothing more to do with it.
             }
+        }
+    }
+
+    /** One attempt to kill; its failure is not the answer, the wait that follows is. */
+    private static void kill(Process process, Kill kill) {
+        try {
+            kill.kill(process);
+        } catch (Exception | LinkageError failed) {
+            // The child is waited for next: whether it is gone says whether the kill worked.
         }
     }
 }

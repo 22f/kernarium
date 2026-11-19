@@ -350,6 +350,11 @@ def decode_png(data: bytes) -> tuple[int, int, int, list[bytes]]:
     while offset + 12 <= len(data):
         length = struct.unpack(">I", data[offset:offset + 4])[0]
         kind = data[offset + 4:offset + 8]
+        if offset + 12 + length > len(data):
+            raise fail(f"the PNG's {kind!r} chunk runs past the end of the data")
+        stored = struct.unpack(">I", data[offset + 8 + length:offset + 12 + length])[0]
+        if zlib.crc32(kind + data[offset + 8:offset + 8 + length]) & 0xFFFFFFFF != stored:
+            raise fail(f"the PNG's {kind!r} chunk has a wrong checksum")
         if kind == b"IDAT":
             compressed += data[offset + 8:offset + 8 + length]
         if kind == b"IEND":
@@ -617,12 +622,17 @@ def check_icons(guest) -> str:
     built_in = [row.token for row in listed.rows if row.builtin]
     totals: dict[str, int] = {}
     kinds = {"adaptive": 0, "legacy": 0}
+    failed: list[str] = []
     for start in range(0, len(built_in), MAX_ICONS):
         for record in icons_of(guest, built_in[start:start + MAX_ICONS]):
             totals[record.status] = totals.get(record.status, 0) + 1
             if record.status == "ok":
                 kinds[record.kind] += 1
                 check_picture(record)
+            elif record.status == "error":
+                failed.append(record.token)
+    if failed:
+        raise fail(f"the icons of {len(failed)} built-in applications came back error: {failed[:8]}")
     if totals.get("ok", 0) == 0:
         raise fail(f"no built-in application's icon was rendered: {totals}")
     if kinds["adaptive"] == 0:
@@ -653,18 +663,30 @@ def check_icons(guest) -> str:
             "probe has the colour in its corners and the disc in its middle; noicon, missing and the order asked")
 
 
+RESUMED_ACTIVITY = re.compile(r"ResumedActivity[=:] *ActivityRecord\{\S+ u\d+ (\S+)[^}]*\}")
+
+
+def resumed_components(dump: str) -> list[str]:
+    """The whole components (package/class, the short form `package/.Class` expanded) the dump names as resumed."""
+    found = []
+    for line in dump.splitlines():
+        match = RESUMED_ACTIVITY.search(line) if "ResumedActivity" in line else None
+        if match:
+            package, _, name = match.group(1).partition("/")
+            found.append(f"{package}/{package + name if name.startswith('.') else name}")
+    return found
+
+
 def resumed(guest, token: str, seconds: float | None = None, alternatives: tuple[str, ...] = ()) -> bool:
-    """Whether the component becomes the resumed activity within the time (an alias may show as the activity it
-    stands for: name that one in `alternatives`)."""
+    """Whether the component becomes the resumed activity within the time: the whole component, not a part of its
+    name (an alias may show as the activity it stands for: name that class in `alternatives`)."""
     seconds = LAUNCH_SECONDS if seconds is None else seconds
     package = token.split("/")[0]
-    names = (token.split("/")[1], *alternatives)
+    wanted = {token, *(f"{package}/{name}" for name in alternatives)}
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        dump = guest.run("dumpsys activity activities", timeout=60).text
-        for line in dump.splitlines():
-            if "ResumedActivity" in line and package in line and any(name in line for name in names):
-                return True
+        if wanted & set(resumed_components(guest.run("dumpsys activity activities", timeout=60).text)):
+            return True
         time.sleep(1)
     return False
 
@@ -676,7 +698,7 @@ def go_home(guest, package: str, seconds: float | None = None) -> None:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         dump = guest.run("dumpsys activity activities", timeout=60).text
-        if not any("ResumedActivity" in line and package in line for line in dump.splitlines()):
+        if not any(component.partition("/")[0] == package for component in resumed_components(dump)):
             return
         time.sleep(1)
     raise fail(f"{package} is still the resumed application {seconds:g} s after the home key")

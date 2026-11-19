@@ -168,13 +168,15 @@ final class Listing {
     }
 
     /**
-     * 16 hex characters that change when the app's icon may: its version, install time, icon resource, the files
-     * its resources come from and the renderer. The icon is drawn for fixed inputs (density, night mode, locale),
+     * 16 hex characters that change when the app's icon may: its version, update time, the image's build time (for
+     * a built-in application that was never updated), icon resource, the files its resources come from and the
+     * renderer. The icon is drawn for fixed inputs (density, night mode, locale),
      * so one key is one picture.
      */
     static String iconKey(Entry entry) {
         String text = "kernarium_apps-icon-" + RENDER_VERSION + '\0' + entry.packageName + '\0' + entry.activity
-                + '\0' + entry.versionCode + '\0' + entry.lastUpdateMillis + '\0' + entry.iconResource + '\0'
+                + '\0' + entry.versionCode + '\0' + entry.lastUpdateMillis + '\0' + entry.imageBuildMillis + '\0'
+                + entry.iconResource + '\0'
                 + (entry.builtin ? '1' : '0') + '\0' + entry.resources;
         return sha256Hex(text.getBytes(StandardCharsets.UTF_8)).substring(0, 16);
     }

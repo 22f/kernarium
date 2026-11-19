@@ -22,8 +22,9 @@ import java.util.List;
 /**
  * The APK files an application's resources are read from, in the order the framework's own resource
  * loading adds them (LoadedApk and ResourcesManager): the base package, its splits, its shared libraries
- * (only those that are APKs) and its runtime overlays (the legacy resource directories first, then the
- * overlay paths, each once). The platform gives the facts as {@code ApplicationInfo} holds them for the user.
+ * (only those that are APKs) and its runtime overlays (the overlay paths in their order, then the legacy
+ * resource directories that are not among them, each once: ResourcesManager's order, which is the overlays'
+ * priority). The platform gives the facts as {@code ApplicationInfo} holds them for the user.
  */
 final class ResourcePaths {
     enum Kind {
@@ -71,7 +72,7 @@ final class ResourcePaths {
             }
         }
         List<String> overlays = new ArrayList<>();
-        for (String[] group : new String[][] {resourceDirs, overlayPaths}) {
+        for (String[] group : new String[][] {overlayPaths, resourceDirs}) {
             if (group != null) {
                 for (String overlay : group) {
                     if (present(overlay) && !overlays.contains(overlay)) {

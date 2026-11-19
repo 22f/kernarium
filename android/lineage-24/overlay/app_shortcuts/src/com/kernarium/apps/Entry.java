@@ -32,6 +32,12 @@ final class Entry {
     final boolean permitted;
     final long versionCode;
     final long lastUpdateMillis;
+    /**
+     * The image's build time for a built-in application that was never updated, else 0. Such an application's update
+     * time is its APK's file time (one fixed date in every image) or the wall time of the first boot that scanned
+     * it, so neither says which image its artwork comes from: the build is an input of the icon key of its own.
+     */
+    final long imageBuildMillis;
     /** The icon resource of the activity, else of the application; 0 when neither declares one. */
     final int iconResource;
     /** A fingerprint of the APK files the application's resources come from (splits, libraries, overlays), for the icon key. */
@@ -39,8 +45,8 @@ final class Entry {
     final Object source;
 
     Entry(String packageName, String activity, boolean builtin, boolean exported, boolean enabled,
-            boolean permitted, long versionCode, long lastUpdateMillis, int iconResource, String resources,
-            Object source) {
+            boolean permitted, long versionCode, long lastUpdateMillis, long imageBuildMillis, int iconResource,
+            String resources, Object source) {
         this.packageName = packageName;
         this.activity = activity;
         this.builtin = builtin;
@@ -49,6 +55,7 @@ final class Entry {
         this.permitted = permitted;
         this.versionCode = versionCode;
         this.lastUpdateMillis = lastUpdateMillis;
+        this.imageBuildMillis = imageBuildMillis;
         this.iconResource = iconResource;
         this.resources = resources;
         this.source = source;

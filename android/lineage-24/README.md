@@ -1054,10 +1054,11 @@ file, property or setting.
   the one place that says what the tool lists, takes and passes to a process.
 - **Commands.** `digest` prints a header block whose digest changes with the set
   of entries, their versions and update times (a built-in application that was never
-  updated takes the image's build time, since its files carry one fixed time), the
-  foreground user and Android's language (it opens no application's resources); `list` prints the
-  block and one row per entry with the label in Android's current language, a
-  built-in flag and an icon key; `icons` answers one PNG record (192 by 192, adaptive
+  updated also carries the image's build time, an input of its own: its files carry one
+  fixed time), the foreground user and Android's language (it opens no application's
+  resources); `list` prints the
+  block and one row per entry with the label in Android's language list (read for one
+  fixed configuration, so the list is its only input), a built-in flag and an icon key; `icons` answers one PNG record (192 by 192, adaptive
   icons composed from their layers with no mask, drawn for a fixed density, day mode
   and locale so that a key is one picture) for each of up to eight components, with
   its length and SHA-256; labels and icons come from the application's effective
@@ -1072,7 +1073,9 @@ file, property or setting.
   package name and costs no other entry; at most 8 entries per
   package, 1024 rows, 8 icons per call, 96 KiB per PNG, 20 s before no further icon is
   started and 8 s for one icon's render (an icon's source is bounded from its
-  files' headers before it is inflated); every answer is under 1 MiB, and a command
+  files' headers before it is inflated: every use of a bitmap is charged, an XML
+  resource's length is checked before its parser is opened, and a file whose cost
+  cannot be established is an error); every answer is under 1 MiB, and a command
   that fails prints nothing on standard output and one line of the tool's own words
   on standard error. A question without an answer (the foreground user, a
   permission, the configuration) fails the command: there is no substitute.
