@@ -2,14 +2,27 @@
 //
 // What the shell tool (kernarium_apps) and the icon renderer (KernariumIcons) agree on, on a plain JVM: the shell
 // user's uid, the shape of a request (the resource id and the files, in the order the framework adds them), a
-// path's rules, the sizes and bounds, and the layers' outset and alpha rule.
+// path's rules, the sizes and bounds, and the layers' outset and alpha rule; and the provider's hold on the isolated
+// worker (IconWorkerCore) over stand-ins for the platform's bind, its main thread and a worker that answers, hangs or
+// dies: one deadline for a request from its arrival, a failed or slow worker unbound, an idle worker unbound without
+// ever making the main thread wait for the turn of a request.
 // Each row prints "ok <name>" or "FAIL <name>: why"; the last line is PASS when no row failed.
-// test_icon_renderer.py compiles and runs it, and runs it again on a copy of IconProtocol with one rule removed
-// at a time, where the rows named there must fail.
+// test_icon_renderer.py compiles and runs it, and runs it again on a copy of IconProtocol or IconWorkerCore with one
+// rule removed at a time, where the rows named there must fail.
 
 package com.kernarium.icons;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class IconProtocolTest {
     private static final class Mismatch extends RuntimeException {
@@ -73,6 +86,7 @@ public final class IconProtocolTest {
         paths();
         sizes();
         drawing();
+        worker();
         System.out.println(failures == 0 ? "PASS" : "FAILED " + failures);
         System.exit(failures == 0 ? 0 : 1);
     }
@@ -234,6 +248,452 @@ public final class IconProtocolTest {
             check(IconProtocol.hasAlpha(new int[] {0xFF000000, 0xFEFFFFFF}), "one pixel barely transparent");
             check(IconProtocol.hasAlpha(new int[] {0x80FF0000}), "a half transparent pixel");
             check(IconProtocol.hasAlpha(new int[] {0x01FFFFFF}), "an almost invisible one");
+        });
+    }
+
+    // ---- The provider's hold on the isolated worker, over stand-ins.
+
+    private static final IconWorkerCore.Limits LIMITS = new IconWorkerCore.Limits(800, 200, 300);
+    private static final long SLACK = 350;
+
+    private static byte[] png(int length) {
+        return new byte[length];
+    }
+
+    private static IconWorkerCore.Reply good() {
+        return new IconWorkerCore.Reply(IconProtocol.STATUS_OK, 192, true, false, png(100));
+    }
+
+    /** The platform as a worker sees it: a bind that connects on a "main" thread, a worker and a poster. */
+    private static final class Rig {
+        final ScheduledExecutorService main = Executors.newSingleThreadScheduledExecutor(task -> {
+            Thread thread = new Thread(task, "main-stand-in");
+            thread.setDaemon(true);
+            return thread;
+        });
+        final AtomicInteger binds = new AtomicInteger();
+        final AtomicInteger unbinds = new AtomicInteger();
+        final AtomicInteger renders = new AtomicInteger();
+        final AtomicInteger running = new AtomicInteger();
+        final AtomicInteger mostRunning = new AtomicInteger();
+        final List<IconWorkerCore.Listener> listeners = new ArrayList<>();
+        final List<Runnable> posted = new ArrayList<>();
+        final List<Runnable> removed = new ArrayList<>();
+        final Map<Runnable, ScheduledFuture<?>> futures = new IdentityHashMap<>();
+        /** Whether a posted idle cleanup runs by itself after its delay (else the row runs it). */
+        volatile boolean autoIdle = true;
+        volatile boolean connects = true;
+        volatile boolean refuses;
+        volatile long connectMillis = 20;
+        volatile long drawMillis = 20;
+        volatile boolean hangs;
+        volatile boolean throwsOnRender;
+        volatile long unbindMillis;
+        /** Time that passes while a bind connects, so that a bind may take what is left of a deadline. */
+        volatile long clockJumpAtConnect;
+        volatile long clockOffset;
+        volatile boolean alive = true;
+        volatile IconWorkerCore.Reply reply = good();
+        /** Counted down by an unbind: a hung worker dies with its process. */
+        volatile CountDownLatch died = new CountDownLatch(1);
+        final IconWorkerCore.Session session = new IconWorkerCore.Session() {
+            @Override
+            public IconWorkerCore.Reply render(int resource, int[] kinds, String[] paths) throws Exception {
+                renders.incrementAndGet();
+                int now = running.incrementAndGet();
+                mostRunning.accumulateAndGet(now, Math::max);
+                try {
+                    if (throwsOnRender) {
+                        throw new IllegalStateException("the worker died");
+                    }
+                    if (hangs) {
+                        died.await();
+                        throw new IllegalStateException("the worker's process ended");
+                    }
+                    Thread.sleep(drawMillis);
+                    return reply;
+                } finally {
+                    running.decrementAndGet();
+                }
+            }
+
+            @Override
+            public boolean alive() {
+                return alive;
+            }
+        };
+        final IconWorkerCore.Link link = listener -> {
+            binds.incrementAndGet();
+            synchronized (listeners) {
+                listeners.add(listener);
+            }
+            if (refuses) {
+                return null;
+            }
+            if (connects) {
+                main.schedule(() -> {
+                    clockOffset += clockJumpAtConnect;
+                    listener.connected(session);
+                }, connectMillis, TimeUnit.MILLISECONDS);
+            }
+            return () -> {
+                unbinds.incrementAndGet();
+                died.countDown();
+                try {
+                    Thread.sleep(unbindMillis);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            };
+        };
+        final IconWorkerCore.Poster poster = new IconWorkerCore.Poster() {
+            @Override
+            public void postDelayed(Runnable task, long millis) {
+                synchronized (posted) {
+                    posted.add(task);
+                }
+                if (autoIdle) {
+                    futures.put(task, main.schedule(task, millis, TimeUnit.MILLISECONDS));
+                }
+            }
+
+            @Override
+            public void remove(Runnable task) {
+                synchronized (removed) {
+                    removed.add(task);
+                }
+                ScheduledFuture<?> future = futures.get(task);
+                if (future != null) {
+                    future.cancel(false);
+                }
+            }
+        };
+
+        IconWorkerCore core(IconWorkerCore.Limits limits) {
+            return new IconWorkerCore(link, poster, () -> System.nanoTime() / 1_000_000 + clockOffset, limits);
+        }
+
+        Runnable lastPosted() {
+            synchronized (posted) {
+                return posted.get(posted.size() - 1);
+            }
+        }
+
+        void shutdown() {
+            died.countDown();
+            main.shutdownNow();
+        }
+    }
+
+    /** The result of one request run on a thread of its own: what it answered and how long it took. */
+    private static final class Call {
+        volatile IconWorkerCore.Reply reply;
+        volatile long millis = -1;
+        final Thread thread;
+
+        Call(IconWorkerCore core, long startAfterMillis) {
+            thread = new Thread(() -> {
+                try {
+                    Thread.sleep(startAfterMillis);
+                    long begin = System.nanoTime();
+                    reply = core.render(0x7f010000, new int[] {0}, new String[] {"/a/base.apk"});
+                    millis = (System.nanoTime() - begin) / 1_000_000;
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }, "request");
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        Call await() throws InterruptedException {
+            thread.join(10_000);
+            check(millis >= 0, "the request did not end");
+            return this;
+        }
+
+        boolean ok() {
+            return reply.ok();
+        }
+    }
+
+    private static IconWorkerCore.Reply ask(IconWorkerCore core) {
+        return core.render(0x7f010000, new int[] {0}, new String[] {"/a/base.apk"});
+    }
+
+    private static void waitFor(java.util.function.BooleanSupplier condition, long millis, String what) throws Exception {
+        long end = System.nanoTime() + millis * 1_000_000;
+        while (!condition.getAsBoolean()) {
+            check(System.nanoTime() < end, what);
+            Thread.sleep(10);
+        }
+    }
+
+    private static void worker() {
+        row("worker-answers-and-keeps-a-good-worker", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(LIMITS);
+                IconWorkerCore.Reply first = ask(core);
+                check(first.ok() && first.size == 192 && first.adaptive && !first.alpha && first.png.length == 100, "the reply's fields");
+                check(ask(core).ok(), "the second request");
+                same(1, rig.binds.get(), "one bind for two requests");
+                same(2, rig.renders.get(), "two draws");
+                same(0, rig.unbinds.get(), "a good worker stays bound");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-rebinds-a-dead-binder", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(LIMITS);
+                check(ask(core).ok(), "the first");
+                rig.alive = false;
+                check(ask(core).ok(), "the second is drawn by a new bind");
+                same(2, rig.binds.get(), "a binder that is not alive is bound again");
+                check(rig.unbinds.get() >= 1, "the dead bind is released");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-failure-unbinds-and-the-next-request-binds-again", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(LIMITS);
+                rig.reply = IconWorkerCore.Reply.FAILED;
+                check(!ask(core).ok(), "a failed drawing is a failed reply");
+                same(1, rig.unbinds.get(), "the worker that failed is unbound");
+                rig.reply = good();
+                check(ask(core).ok(), "the next");
+                same(2, rig.binds.get(), "a fresh bind");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-an-exception-is-a-failure", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(LIMITS);
+                rig.throwsOnRender = true;
+                check(!ask(core).ok(), "a worker that died");
+                same(1, rig.unbinds.get(), "unbound");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-reply-over-the-bound-is-not-passed-on", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(LIMITS);
+                rig.reply = new IconWorkerCore.Reply(IconProtocol.STATUS_OK, 192, true, false, png(IconProtocol.MAX_PNG_BYTES));
+                check(ask(core).ok(), "a PNG of exactly the bound");
+                rig.reply = new IconWorkerCore.Reply(IconProtocol.STATUS_OK, 192, true, false, png(IconProtocol.MAX_PNG_BYTES + 1));
+                check(!ask(core).ok(), "a PNG one byte over the bound");
+                rig.reply = new IconWorkerCore.Reply(IconProtocol.STATUS_OK, 192, true, false, null);
+                check(!ask(core).ok(), "no PNG");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-hung-drawing-fails-at-the-deadline-and-unbinds", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(LIMITS);
+                rig.hangs = true;
+                Call call = new Call(core, 0).await();
+                check(!call.ok(), "a hung drawing is a failure");
+                check(call.millis >= LIMITS.deadlineMillis - 100 && call.millis <= LIMITS.deadlineMillis + SLACK,
+                        "it ends at the deadline: " + call.millis + " ms");
+                same(1, rig.unbinds.get(), "the hung worker is unbound, which ends it");
+                rig.hangs = false;
+                rig.died = new CountDownLatch(1);
+                check(ask(core).ok(), "the next request is drawn by a new worker");
+                same(2, rig.binds.get(), "a new bind");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-one-deadline-covers-the-wait-for-the-turn", () -> {
+            // Two overlapping draws of 500 ms with a deadline of 800 ms: the second request can start at about 500 ms
+            // and cannot end by 800 ms (its own deadline is at about 850 ms), so it fails by then and not at 1000 ms.
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(LIMITS);
+                rig.drawMillis = 500;
+                Call first = new Call(core, 0);
+                Call second = new Call(core, 50);
+                first.await();
+                second.await();
+                check(first.ok(), "the first is drawn");
+                check(!second.ok(), "the second cannot end within its deadline and fails");
+                check(second.millis <= LIMITS.deadlineMillis + SLACK, "it failed by its deadline: " + second.millis + " ms");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-a-request-that-queued-past-its-deadline-never-draws", () -> {
+            // The first hangs until its deadline and its unbind is slow, so it keeps the turn for a long while; the
+            // second asked 100 ms in, has its deadline at 900 ms and is not served at all.
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(LIMITS);
+                rig.hangs = true;
+                rig.unbindMillis = 1200;
+                Call first = new Call(core, 0);
+                Call second = new Call(core, 100);
+                second.await();
+                check(!second.ok(), "the second fails");
+                check(second.millis <= LIMITS.deadlineMillis + SLACK,
+                        "by its deadline, not when the turn came free: " + second.millis + " ms");
+                same(1, rig.renders.get(), "only the first was ever asked of the worker");
+                first.await();
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-a-deadline-that-has-passed-starts-nothing", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(new IconWorkerCore.Limits(0, 200, 300));
+                check(!ask(core).ok(), "no time at all");
+                same(0, rig.renders.get(), "nothing is drawn");
+                same(0, rig.binds.get(), "nothing is bound");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-requests-draw-one-at-a-time", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(new IconWorkerCore.Limits(3000, 200, 300));
+                rig.drawMillis = 60;
+                List<Call> calls = new ArrayList<>();
+                for (int i = 0; i < 4; i++) {
+                    calls.add(new Call(core, i * 5));
+                }
+                for (Call call : calls) {
+                    check(call.await().ok(), "each is drawn");
+                }
+                same(1, rig.mostRunning.get(), "never two draws at once");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-bind-timeout-fails-and-releases", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(LIMITS);
+                rig.connects = false;
+                Call call = new Call(core, 0).await();
+                check(!call.ok(), "a bind that never connects");
+                check(call.millis >= LIMITS.bindMillis - 50 && call.millis <= LIMITS.bindMillis + SLACK,
+                        "it ends at the bind limit: " + call.millis + " ms");
+                same(1, rig.unbinds.get(), "the bind is released");
+                same(0, rig.renders.get(), "nothing was drawn");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-bind-is-capped-by-the-deadline", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(new IconWorkerCore.Limits(300, 3000, 300));
+                rig.connects = false;
+                Call call = new Call(core, 0).await();
+                check(!call.ok(), "a bind that never connects");
+                check(call.millis <= 300 + SLACK, "the bind wait is the deadline's what is left: " + call.millis + " ms");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-a-bind-that-takes-the-rest-of-the-deadline-draws-nothing", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(LIMITS);
+                rig.clockJumpAtConnect = LIMITS.deadlineMillis;
+                check(!ask(core).ok(), "the bind used the whole deadline");
+                same(0, rig.renders.get(), "nothing is drawn after it");
+                same(0, rig.unbinds.get(), "the worker that connected is not blamed");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-a-bind-that-is-refused-is-a-failure", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(LIMITS);
+                rig.refuses = true;
+                Call refused = new Call(core, 0).await();
+                check(!refused.ok(), "no bind");
+                check(refused.millis < LIMITS.bindMillis - 50, "it is seen at once, not after the bind limit: " + refused.millis + " ms");
+                same(0, rig.renders.get(), "nothing drawn");
+                rig.refuses = false;
+                check(ask(core).ok(), "the next request binds");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-an-idle-worker-is-unbound", () -> {
+            Rig rig = new Rig();
+            try {
+                IconWorkerCore core = rig.core(LIMITS);
+                check(ask(core).ok(), "a request");
+                same(0, rig.unbinds.get(), "not at once");
+                waitFor(() -> rig.unbinds.get() == 1, 3000, "the idle worker was never unbound");
+                check(ask(core).ok(), "a request after the idle cleanup");
+                same(2, rig.binds.get(), "binds again");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-idle-cleanup-leaves-a-request-that-has-come-since", () -> {
+            Rig rig = new Rig();
+            try {
+                rig.autoIdle = false;
+                IconWorkerCore core = rig.core(LIMITS);
+                check(ask(core).ok(), "the first");
+                Runnable stale = rig.lastPosted();
+                check(ask(core).ok(), "the second");
+                check(rig.removed.contains(stale), "the second removes the cleanup the first scheduled");
+                // The stale cleanup was dispatched already, as a late one can be: it must do nothing.
+                rig.main.submit(stale).get();
+                same(0, rig.unbinds.get(), "a cleanup scheduled before the last request does not unbind its worker");
+                rig.main.submit(rig.lastPosted()).get();
+                same(1, rig.unbinds.get(), "the cleanup of the last request does");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-idle-cleanup-never-holds-the-main-thread-for-a-request", () -> {
+            // A cleanup that has been dispatched runs on the main thread while a request waits for its bind to connect:
+            // the connection is delivered on that same thread, so the cleanup must not wait for the request's turn.
+            Rig rig = new Rig();
+            try {
+                rig.autoIdle = false;
+                IconWorkerCore core = rig.core(new IconWorkerCore.Limits(2000, 600, 300));
+                check(ask(core).ok(), "the first");
+                Runnable cleanup = rig.lastPosted();
+                rig.alive = false; // the worker died: the next request binds again
+                rig.connectMillis = 100;
+                Call second = new Call(core, 0);
+                waitFor(() -> rig.binds.get() == 2, 3000, "the second request never bound");
+                rig.alive = true;
+                rig.main.submit(cleanup); // dispatched on the main thread before the connection arrives
+                second.await();
+                check(second.ok(), "the request's connection was delivered: it took " + second.millis + " ms");
+                check(second.millis < 500, "without waiting for a timeout: " + second.millis + " ms");
+            } finally {
+                rig.shutdown();
+            }
+        });
+        row("worker-production-limits-nest-in-the-tools", () -> {
+            check(IconWorkerCore.PRODUCTION.deadlineMillis < 8_000, "the whole request ends before the tool's 8 s");
+            check(IconWorkerCore.PRODUCTION.bindMillis + 1_000 <= IconWorkerCore.PRODUCTION.deadlineMillis,
+                    "a bind leaves the drawing most of the deadline");
+            same(5_000L, IconWorkerCore.PRODUCTION.idleMillis, "an idle worker is kept five seconds");
+            same(1_000L, IconWorkerCore.PRODUCTION.bindMillis, "a bind may take a second");
+            same(7_000L, IconWorkerCore.PRODUCTION.deadlineMillis, "a request has seven seconds");
         });
     }
 }

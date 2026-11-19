@@ -38,6 +38,8 @@ TEST = HERE / "icon_renderer" / "com" / "kernarium" / "icons" / "IconProtocolTes
 ANDROID = "{http://schemas.android.com/apk/res/android}"
 SKIP = 77
 GLUE = ("IconDrawing.java", "IconProvider.java", "IconRenderService.java", "IconWorker.java")
+#: The files that need no platform: shared with the shell tool or run on a JVM here.
+PLATFORM_FREE = ("IconProtocol.java", "IconWorkerCore.java")
 
 # One rule of IconProtocol removed per entry: (name, the text that is replaced, its replacement, the rows that must fail).
 PROTOCOL_MUTATIONS = [
@@ -83,6 +85,58 @@ PROTOCOL_MUTATIONS = [
     ("kinds-reordered", "KIND_LIBRARY = 2;", "KIND_LIBRARY = 3;", {"protocol-names-are-the-contract"}),
 ]
 
+# One rule of IconWorkerCore removed per entry: (name, the text that is replaced, its replacement, the rows that must fail).
+LOCK_FOREVER = "mTurn.tryLock(Long.MAX_VALUE / 4, TimeUnit.MILLISECONDS)"
+NO_LOCK = ("new ReentrantLock(true) {\n        @Override\n        public boolean tryLock(long time, TimeUnit unit) {\n            return true;\n        }\n\n"
+           "        @Override\n        public boolean tryLock() {\n            return true;\n        }\n\n"
+           "        @Override\n        public void unlock() {\n        }\n    };\n")
+WORKER_MUTATIONS = [
+    ("turn-waits-without-a-deadline", "mTurn.tryLock(left(deadline), TimeUnit.MILLISECONDS)", LOCK_FOREVER,
+     {"worker-a-request-that-queued-past-its-deadline-never-draws"}),
+    ("no-turn-at-all", "new ReentrantLock(true);\n", NO_LOCK, {"worker-requests-draw-one-at-a-time"}),
+    ("queued-request-starts-after-its-deadline",
+     "            if (left(deadline) <= 0) {\n                return answer; // the deadline passed while it queued: nothing is started\n            }\n", "",
+     {"worker-a-deadline-that-has-passed-starts-nothing"}),
+    ("bind-eats-the-deadline-unchecked",
+     "            if (left(deadline) <= 0) {\n                return answer; // the bind took the rest; the worker is bound and idle\n            }\n", "",
+     {"worker-a-bind-that-takes-the-rest-of-the-deadline-draws-nothing"}),
+    ("drawing-gets-more-than-what-is-left", "answer = transact(session, resource, kinds, paths, left(deadline));",
+     "answer = transact(session, resource, kinds, paths, mLimits.deadlineMillis);",
+     {"worker-one-deadline-covers-the-wait-for-the-turn"}),
+    ("hung-drawing-is-waited-for", "transaction.join(millis);", "transaction.join(millis + 3_000);",
+     {"worker-hung-drawing-fails-at-the-deadline-and-unbinds"}),
+    ("bind-wait-ignores-the-deadline", "Math.min(mLimits.bindMillis, left(deadline))", "mLimits.bindMillis",
+     {"worker-bind-is-capped-by-the-deadline"}),
+    ("bind-wait-is-longer", "connection.mConnected.await(wait, TimeUnit.MILLISECONDS)",
+     "connection.mConnected.await(wait + 2_000, TimeUnit.MILLISECONDS)", {"worker-bind-timeout-fails-and-releases"}),
+    ("bind-timeout-keeps-the-bind", "        if (wait <= 0 || !connection.mConnected.await(wait, TimeUnit.MILLISECONDS)) {\n            disconnect();\n",
+     "        if (wait <= 0 || !connection.mConnected.await(wait, TimeUnit.MILLISECONDS)) {\n",
+     {"worker-bind-timeout-fails-and-releases"}),
+    ("refused-bind-is-used", "        if (mHandle == null) {\n            disconnect();\n            return null;\n        }\n",
+     "", {"worker-a-bind-that-is-refused-is-a-failure"}),
+    ("failed-worker-is-kept", "if (asked && !answer.ok()) {", "if (false) {",
+     {"worker-failure-unbinds-and-the-next-request-binds-again", "worker-an-exception-is-a-failure",
+      "worker-hung-drawing-fails-at-the-deadline-and-unbinds"}),
+    ("dead-binder-is-trusted", "if (current != null && current.alive()) {", "if (current != null) {",
+     {"worker-rebinds-a-dead-binder"}),
+    ("oversized-reply-is-passed-on", " || reply.png.length > IconProtocol.MAX_PNG_BYTES", "",
+     {"worker-reply-over-the-bound-is-not-passed-on"}),
+    ("reply-without-a-png-is-passed-on", " || reply.png == null", "", {"worker-reply-over-the-bound-is-not-passed-on"}),
+    ("idle-cleanup-waits-for-the-turn", "                if (!mTurn.tryLock()) {\n                    return; // a request holds the turn: it schedules the next cleanup itself\n                }\n",
+     "                mTurn.lock();\n", {"worker-idle-cleanup-never-holds-the-main-thread-for-a-request"}),
+    ("idle-cleanup-ignores-a-newer-request", "if (generation == mGeneration) {", "if (true) {",
+     {"worker-idle-cleanup-leaves-a-request-that-has-come-since"}),
+    ("generation-does-not-move", "            mGeneration++;\n", "", {"worker-idle-cleanup-leaves-a-request-that-has-come-since"}),
+    ("old-cleanup-is-not-removed", "                mPoster.remove(mIdle);\n", "", {"worker-idle-cleanup-leaves-a-request-that-has-come-since"}),
+    ("idle-worker-is-never-scheduled", "            mPoster.postDelayed(mIdle, mLimits.idleMillis);\n", "", {"worker-an-idle-worker-is-unbound"}),
+    ("idle-time-changed", "PRODUCTION = new Limits(7_000, 1_000, 5_000);", "PRODUCTION = new Limits(7_000, 1_000, 6_000);",
+     {"worker-production-limits-nest-in-the-tools"}),
+    ("deadline-past-the-tools", "PRODUCTION = new Limits(7_000, 1_000, 5_000);", "PRODUCTION = new Limits(9_000, 1_000, 5_000);",
+     {"worker-production-limits-nest-in-the-tools"}),
+    ("bind-limit-changed", "PRODUCTION = new Limits(7_000, 1_000, 5_000);", "PRODUCTION = new Limits(7_000, 1_500, 5_000);",
+     {"worker-production-limits-nest-in-the-tools"}),
+]
+
 # What the app's code must and must not do, as text (it cannot run on a JVM): file -> [(message, test of the
 # comment-free text)]. Each has a mutant below: (name, file, text replaced, replacement, the message that must be reported).
 def order(text: str, *parts: str) -> bool:
@@ -111,24 +165,23 @@ RULES = {
                                                   "XmlPull", "ZipFile", "java.io.File", "Bitmap", "Canvas", "Drawable"))),
     ],
     "IconWorker.java": [
-        ("a worker that failed is unbound, so that its process ends and it is never trusted with another icon",
-         lambda t: re.search(r"if \(!good\) \{\s*disconnect\(\);", t) is not None
-         and "STATUS_OK" in t and "answer.getInt(IconProtocol.KEY_STATUS, IconProtocol.STATUS_ERROR) == IconProtocol.STATUS_OK" in t),
-        ("a bind and a drawing are bounded, and an idle worker is unbound",
-         lambda t: "mConnected.await(BIND_MILLIS, TimeUnit.MILLISECONDS)" in t and "transaction.join(RENDER_MILLIS)" in t
-         and "mMain.postDelayed(mIdle, IDLE_MILLIS)" in t and "transaction.setDaemon(true)" in t
-         and 0 < int(re.search(r"RENDER_MILLIS = ([\d_]+);", t).group(1).replace("_", "")) < 8000
-         and 0 < int(re.search(r"BIND_MILLIS = ([\d_]+);", t).group(1).replace("_", "")) <= 2000
-         and 0 < int(re.search(r"IDLE_MILLIS = ([\d_]+);", t).group(1).replace("_", "")) <= 10000),
-        ("a drawing that did not end in time is an error, not waited for",
-         lambda t: re.search(r"if \(transaction\.isAlive\(\) \|\| !done\[0\]\) \{\s*return answer;", t) is not None),
-        ("one transaction for one request: nothing is asked again of a worker that failed",
-         lambda t: t.count("worker.transact(") == 1 and "retry" not in t.lower() and "while (" not in t and "for (int" not in t),
-        ("the reply is capped before it is passed on",
-         lambda t: "png == null || png.length > IconProtocol.MAX_PNG_BYTES" in t and "reply.readException();" in t),
-        ("a worker is bound by the class of the service in this package, and a dead binder is rebound",
+        ("a worker is bound by the class of the service in this package, and a dead binder is not trusted",
          lambda t: "new Intent().setClassName(IconProtocol.PACKAGE, IconProtocol.SERVICE_CLASS)" in t
-         and "current.isBinderAlive()" in t and "Context.BIND_AUTO_CREATE" in t),
+         and "mWorker.isBinderAlive()" in t and "Context.BIND_AUTO_CREATE" in t),
+        ("one transaction for one request: nothing is asked again of a worker",
+         lambda t: t.count("mWorker.transact(") == 1 and "retry" not in t.lower() and "while (" not in t and "for (int" not in t),
+        ("the reply is an exception header, then the fields; the parcels are the transaction's own and recycled by it",
+         lambda t: "reply.readException();" in t and re.search(r"finally \{\s*data\.recycle\(\);[^}]*reply\.recycle\(\);", t) is not None),
+        ("the idle cleanup runs on the main looper and the limits are the product's",
+         lambda t: "new Handler(Looper.getMainLooper())" in t and "IconWorkerCore.PRODUCTION" in t
+         and "main.removeCallbacks(task)" in t and "main.postDelayed(task, millis)" in t),
+        ("a bind that failed is released", lambda t: re.search(r"if \(!bound\) \{\s*handle\.unbind\(\);", t) is not None
+         and "mContext.unbindService(connection)" in t),
+        ("a failed reply is the error status and nothing else",
+         lambda t: re.search(r"if \(!reply\.ok\(\)\) \{\s*return failed\(\);", t) is not None
+         and "answer.putInt(IconProtocol.KEY_STATUS, IconProtocol.STATUS_ERROR);" in t),
+        ("the rules of the hold are IconWorkerCore's: this class has no timing of its own",
+         lambda t: all(word not in t for word in ("Thread", "CountDownLatch", "synchronized", "postDelayed(mIdle", "join("))),
         ("it opens and parses nothing of an application's files",
          lambda t: all(word not in t for word in ("AssetManager", "Resources", "ApkAssets", "PackageManager", "BitmapFactory",
                                                   "XmlPull", "ZipFile", "java.io.File", "Bitmap", "Canvas", "Drawable"))),
@@ -192,35 +245,38 @@ MUTATIONS = [
     ("provider-opens-resources", "IconProvider.java",
      "    private IconWorker mWorker;", "    private IconWorker mWorker;\n    private android.content.res.Resources mResources;",
      "it opens and parses nothing of an application's files"),
-    ("worker-keeps-a-failed-process", "IconWorker.java",
-     "            if (!good) {\n                disconnect();\n            }", "            if (!good && false) {\n                disconnect();\n            }",
-     "a worker that failed is unbound, so that its process ends and it is never trusted with another icon"),
-    ("worker-waits-for-a-hung-drawing", "IconWorker.java",
-     "transaction.join(RENDER_MILLIS);", "transaction.join();",
-     "a bind and a drawing are bounded, and an idle worker is unbound"),
-    ("worker-render-limit-past-the-tools", "IconWorker.java",
-     "RENDER_MILLIS = 6_500;", "RENDER_MILLIS = 9_000;", "a bind and a drawing are bounded, and an idle worker is unbound"),
-    ("worker-never-idles-out", "IconWorker.java",
-     "mMain.postDelayed(mIdle, IDLE_MILLIS)", "mMain.postDelayed(mIdle, Long.MAX_VALUE / 4)",
-     "a bind and a drawing are bounded, and an idle worker is unbound"),
-    ("worker-bind-unbounded", "IconWorker.java",
-     "mConnected.await(BIND_MILLIS, TimeUnit.MILLISECONDS)", "mConnected.await(1, TimeUnit.DAYS)",
-     "a bind and a drawing are bounded, and an idle worker is unbound"),
-    ("worker-answers-after-a-timeout", "IconWorker.java",
-     "if (transaction.isAlive() || !done[0]) {\n                return answer; // finally ends the worker\n            }",
-     "if (!done[0]) {\n                return answer; // finally ends the worker\n            }",
-     "a drawing that did not end in time is an error, not waited for"),
-    ("worker-asks-again", "IconWorker.java",
-     "                    worker.transact(IconRenderService.TRANSACTION_RENDER, sent, received, 0);\n                    done[0] = true;",
-     "                    worker.transact(IconRenderService.TRANSACTION_RENDER, sent, received, 0);\n"
-     "                    worker.transact(IconRenderService.TRANSACTION_RENDER, sent, received, 0);\n                    done[0] = true;",
-     "one transaction for one request: nothing is asked again of a worker that failed"),
-    ("worker-passes-an-over-bound-reply", "IconWorker.java",
-     "png == null || png.length > IconProtocol.MAX_PNG_BYTES", "png == null",
-     "the reply is capped before it is passed on"),
     ("worker-trusts-a-dead-binder", "IconWorker.java",
-     "if (mBound && current != null && current.isBinderAlive()) {", "if (mBound && current != null) {",
-     "a worker is bound by the class of the service in this package, and a dead binder is rebound"),
+     "return mWorker.isBinderAlive();", "return true;",
+     "a worker is bound by the class of the service in this package, and a dead binder is not trusted"),
+    ("worker-binds-another-class", "IconWorker.java",
+     "setClassName(IconProtocol.PACKAGE, IconProtocol.SERVICE_CLASS)", "setClassName(IconProtocol.PACKAGE, \"com.kernarium.icons.Other\")",
+     "a worker is bound by the class of the service in this package, and a dead binder is not trusted"),
+    ("worker-asks-again", "IconWorker.java",
+     "                mWorker.transact(IconRenderService.TRANSACTION_RENDER, data, reply, 0);\n",
+     "                mWorker.transact(IconRenderService.TRANSACTION_RENDER, data, reply, 0);\n"
+     "                mWorker.transact(IconRenderService.TRANSACTION_RENDER, data, reply, 0);\n",
+     "one transaction for one request: nothing is asked again of a worker"),
+    ("worker-reads-no-exception-header", "IconWorker.java",
+     "                reply.readException();\n", "",
+     "the reply is an exception header, then the fields; the parcels are the transaction's own and recycled by it"),
+    ("worker-leaks-its-parcels", "IconWorker.java",
+     "                data.recycle(); // this thread's own parcels: it ends when the worker answers or dies\n                reply.recycle();\n", "",
+     "the reply is an exception header, then the fields; the parcels are the transaction's own and recycled by it"),
+    ("worker-has-limits-of-its-own", "IconWorker.java",
+     "IconWorkerCore.PRODUCTION", "new IconWorkerCore.Limits(60_000, 60_000, 60_000)",
+     "the idle cleanup runs on the main looper and the limits are the product's"),
+    ("worker-cleans-up-on-a-thread-of-its-own", "IconWorker.java",
+     "new Handler(Looper.getMainLooper())", "new Handler(Looper.myLooper())",
+     "the idle cleanup runs on the main looper and the limits are the product's"),
+    ("worker-keeps-a-failed-bind", "IconWorker.java",
+     "                handle.unbind(); // a failed bind is still released\n", "",
+     "a bind that failed is released"),
+    ("worker-passes-a-failed-reply", "IconWorker.java",
+     "        if (!reply.ok()) {\n            return failed();\n        }\n", "",
+     "a failed reply is the error status and nothing else"),
+    ("worker-waits-on-its-own", "IconWorker.java",
+     "    private final IconWorkerCore mCore;", "    private final IconWorkerCore mCore;\n    private final Object lock = new Object();\n    void waitHere() throws InterruptedException {\n        synchronized (lock) {\n            lock.wait(1);\n        }\n    }",
+     "the rules of the hold are IconWorkerCore's: this class has no timing of its own"),
     ("service-draws-before-checking", "IconRenderService.java",
      "IconProtocol.validRequest(resource, kinds, paths)\n                    ? IconDrawing.render(resource, kinds, paths) : null;",
      "IconDrawing.render(resource, kinds, paths);",
@@ -452,7 +508,7 @@ def check_app() -> int:
     """The app's files: headers, what the code must not touch, the manifest and the build file."""
     problems: list[str] = []
     files = {path.relative_to(APP).as_posix(): path.read_text(encoding="utf-8") for path in sorted(APP.rglob("*")) if path.is_file()}
-    expected_files = {"Android.bp", "AndroidManifest.xml", *(f"src/com/kernarium/icons/{name}" for name in (*GLUE, "IconProtocol.java"))}
+    expected_files = {"Android.bp", "AndroidManifest.xml", *(f"src/com/kernarium/icons/{name}" for name in (*GLUE, *PLATFORM_FREE))}
     if set(files) != expected_files:
         problems.append(f"the app's files are {sorted(files)}, not {sorted(expected_files)}")
     for name, text in files.items():
@@ -465,9 +521,10 @@ def check_app() -> int:
             for forbidden in APP_FORBIDDEN:
                 if forbidden in code:
                     problems.append(f"{name} uses {forbidden}: the app writes nothing, runs nothing and opens no network")
-    protocol = strip_comments(files["src/com/kernarium/icons/IconProtocol.java"])
-    if re.search(r"^\s*import\s+(android|java\.io|java\.net)", protocol, re.MULTILINE):
-        problems.append("IconProtocol imports the platform, files or the network: it is shared with the shell tool and runs on a JVM")
+    for name in PLATFORM_FREE:
+        free = strip_comments(files[f"src/com/kernarium/icons/{name}"])
+        if re.search(r"^\s*import\s+(android|java\.io|java\.net)", free, re.MULTILINE):
+            problems.append(f"{name} imports the platform, files or the network: it runs on a JVM")
     sources = {name: files[f"src/com/kernarium/icons/{name}"] for name in GLUE}
     if check_glue(sources):
         problems.append("the app's code breaks a rule it must keep")
@@ -497,13 +554,13 @@ def check_app() -> int:
     return 1 if problems else 0
 
 
-def compile_and_run(javac: str, java: str, scratch: pathlib.Path, protocol: pathlib.Path) -> tuple[int, str]:
+def compile_and_run(javac: str, java: str, scratch: pathlib.Path, sources: list[pathlib.Path]) -> tuple[int, str]:
     classes = scratch / "classes"
     if classes.exists():
         shutil.rmtree(classes)
     classes.mkdir(parents=True)
     compiled = subprocess.run(
-        [javac, "-Xlint:all", "-Werror", "-encoding", "UTF-8", "-d", str(classes), str(protocol), str(TEST)],
+        [javac, "-Xlint:all", "-Werror", "-encoding", "UTF-8", "-d", str(classes), *map(str, sources), str(TEST)],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240, check=False)
     if compiled.returncode != 0:
         return -1, f"javac:\n{compiled.stdout}"
@@ -524,10 +581,10 @@ def main() -> int:
     if javac is None or java is None:
         print("SKIP: no JDK (javac and java) on PATH")
         return SKIP
-    protocol = SOURCES / "IconProtocol.java"
+    sources = {name: SOURCES / name for name in PLATFORM_FREE}
     with tempfile.TemporaryDirectory(prefix="uml-icon-renderer-") as directory:
         scratch = pathlib.Path(directory)
-        status, output = compile_and_run(javac, java, scratch / "base", protocol)
+        status, output = compile_and_run(javac, java, scratch / "base", list(sources.values()))
         print(output, end="")
         if status != 0 or not output.rstrip().endswith("PASS"):
             print("FAIL: the protocol's test", file=sys.stderr)
@@ -535,18 +592,19 @@ def main() -> int:
         rows = set(re.findall(r"^ok ([a-z0-9-]+)", output, re.MULTILINE))
 
         def mutate(mutation: tuple) -> tuple[bool, str]:
-            name, old, new, must_fail = mutation
+            file, name, old, new, must_fail = mutation
             unknown = must_fail - rows
             if unknown:
                 return False, f"FAIL: mutation {name} names rows that do not exist: {sorted(unknown)}"
-            text = protocol.read_text(encoding="utf-8")
+            text = sources[file].read_text(encoding="utf-8")
             if text.count(old) != 1:
-                return False, f"FAIL: mutation {name}: the text to replace occurs {text.count(old)} times in IconProtocol.java"
+                return False, f"FAIL: mutation {name}: the text to replace occurs {text.count(old)} times in {file}"
             copy = scratch / f"src-{name}"
             copy.mkdir()
-            target = copy / "IconProtocol.java"
+            target = copy / file
             target.write_text(text.replace(old, new), encoding="utf-8")
-            mutant_status, mutant_output = compile_and_run(javac, java, scratch / f"run-{name}", target)
+            others = [path for other, path in sources.items() if other != file]
+            mutant_status, mutant_output = compile_and_run(javac, java, scratch / f"run-{name}", [target, *others])
             shutil.rmtree(copy)
             if mutant_status == -1:
                 return False, f"FAIL: mutation {name} does not compile:\n{mutant_output}"
@@ -557,7 +615,8 @@ def main() -> int:
 
         workers = max(1, min(3, (os.cpu_count() or 1) - 1))
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(mutate, PROTOCOL_MUTATIONS))
+            results = list(pool.map(mutate, [("IconProtocol.java", *m) for m in PROTOCOL_MUTATIONS]
+                                + [("IconWorkerCore.java", *m) for m in WORKER_MUTATIONS]))
         failures = 0
         for caught, line in results:
             print(line, file=sys.stdout if caught else sys.stderr)
