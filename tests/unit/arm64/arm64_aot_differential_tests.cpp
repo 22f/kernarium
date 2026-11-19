@@ -5065,8 +5065,11 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 		static_cast<unsigned long long>(st.mops_fault));
 	require(cases == 44);
 	require(fault_exits >= cases);
-	require(st.enters > cases / 2);
-	require(st.mops_fault > cases / 2);
+	/* Each case is entered once, at its prologue, and faults once in the
+	 * host routine of the epilogue; a case the engine ran alone would pass
+	 * the trace check and say nothing about rewritten code. */
+	require(st.enters == cases);
+	require(st.mops_fault == cases);
 }
 
 /* ---- An interrupt token flipped during a native loop -----------------------
