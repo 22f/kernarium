@@ -519,17 +519,24 @@ def answered_without_heartbeat(options, timeout=60):
     return status == 0 or bool(MISSING_FILE.search(output))
 
 
-def device_reply(options, timeout=60):
+def device_reply(options, timeout=60, clock=CLOCK, until=None, cancelled=None):
     """(answered, state): whether the device answers a read, and the heartbeat
     it gave. It answers by giving its heartbeat, or by saying that there is
     none to give: a connected device with no host to read answers (with no
-    state). Both reads are made within `timeout` in all."""
-    began = time.monotonic()
+    state). Both reads are made within `timeout` in all, and none begins at or
+    after `until` (on `clock`) or once `cancelled()` says the caller was told to
+    end: the second read is not made, and the device is not taken to answer."""
+    began = clock.monotonic()
     state = host_state(options, timeout)
     if state is not None:
         return True, state
-    return answered_without_heartbeat(
-        options, max(1, timeout - (time.monotonic() - began))), None
+    now = clock.monotonic()
+    left = timeout - (now - began)
+    if until is not None:
+        left = min(left, until - now)
+    if left <= 0 or (cancelled is not None and cancelled()):
+        return False, None
+    return answered_without_heartbeat(options, left), None
 
 
 def liveness(state):
@@ -1523,6 +1530,11 @@ def launch_host(options, cancelled=None, guard=None, record=None, locked=False):
         refusal = guard() if guard is not None else None
         if refusal is not None:
             raise refusal
+        # The preflight lists the device's reports, which can take longer than
+        # a stop allows: a launch told to end does not begin it.
+        if cancelled is not None and cancelled():
+            raise LaunchRefused("the launch was cancelled before the host started",
+                                cancelled=True)
         # Before anything starts: a kill during the session must leave a report.
         if not check_report_slots(collection_options(options, f"{name}-launch"),
                                   REPORT_PROCESSES):
@@ -2483,7 +2495,10 @@ class Watch:
             if left <= 0:
                 return "timeout"
             answered, state = device_reply(
-                options, max(1, min(WATCH_READ_WAIT, left)))
+                options, min(WATCH_READ_WAIT, left), clock=self.clock,
+                until=deadline, cancelled=self.stop.is_set)
+            if self.stop.is_set():
+                return "stopped"
             if self.clock.monotonic() >= deadline:
                 return "timeout"
             if answered:
@@ -2520,7 +2535,14 @@ class Watch:
                      "looking again")
             self.observer.reset(forget=True)
             return AGAIN
-        answered, state = device_reply(self.options, WATCH_READ_WAIT)
+        if self.stop.is_set():
+            return self.stopped()
+        answered, state = device_reply(
+            self.options, WATCH_READ_WAIT, clock=self.clock,
+            cancelled=self.stop.is_set)
+        if self.stop.is_set():
+            # Told to end while the check read: nothing more is begun.
+            return self.stopped()
         named = state.get("nonce") if state else None
         if named and named not in retired:
             self.say(f"not starting again: the device's heartbeat names a host "

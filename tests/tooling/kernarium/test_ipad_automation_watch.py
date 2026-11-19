@@ -1914,6 +1914,80 @@ class VerdictBoundaryTests(unittest.TestCase):
         self.assertEqual(record["state"], automation.NEEDS_APPROVAL)
         self.assertEqual(self.watch.latch.read()["kind"], "possible")
 
+    def copies_while_waiting_for_the_device(self, stop_from=None):
+        """`await_device` against a device whose every copy takes as long as it
+        is allowed and fails (the fallback copy of "no heartbeat" included).
+        With `stop_from`, the watch is told to end during the first primary copy
+        that begins at or after that many seconds. The result, and each copy as
+        (kind, seconds from the start at which it began, its timeout)."""
+        began = self.clock.monotonic()
+        copies = []
+
+        def primary(options, timeout=60):
+            at = self.clock.monotonic() - began
+            copies.append(("heartbeat", at, timeout))
+            if stop_from is not None and at >= stop_from:
+                self.watch.stop.set()
+            self.clock.advance(timeout)
+            return None
+
+        def fallback(options, timeout=60):
+            copies.append(("fallback", self.clock.monotonic() - began, timeout))
+            self.clock.advance(timeout)
+            return False
+        with mock.patch.object(automation, "host_state", primary), \
+                mock.patch.object(automation, "answered_without_heartbeat", fallback):
+            result = self.watch.await_device("the tunnel dropped")
+        return result, copies
+
+    def test_no_copy_begins_at_or_after_the_reconnect_deadline(self) -> None:
+        # Rule (R4): the fallback copy that asks whether the file is simply not
+        # there is made inside the same budget as the copy before it. A budget
+        # the first copy used up leaves none for it, and it is not given a second
+        # more.
+        result, copies = self.copies_while_waiting_for_the_device()
+        self.assertEqual(result, "timeout")
+        for kind, at, timeout in copies:
+            self.assertLess(at, automation.WATCH_RECONNECT_WAIT, (kind, at, timeout))
+            self.assertLessEqual(at + timeout, automation.WATCH_RECONNECT_WAIT + 1e-6,
+                                 (kind, at, timeout))
+
+    def test_a_stop_during_the_last_copy_is_a_stop_not_a_timeout(self) -> None:
+        result, copies = self.copies_while_waiting_for_the_device(stop_from=170)
+        self.assertEqual(result, "stopped")
+        stopped_at = [at for kind, at, _ in copies if kind == "heartbeat"][-1]
+        # No copy of any kind begins after the stop.
+        self.assertEqual([kind for kind, at, _ in copies if at > stopped_at
+                          or (at == stopped_at and kind == "fallback")], [], copies[-3:])
+
+    def test_a_stop_during_the_check_before_a_second_start_starts_nothing(self) -> None:
+        # Rule (R4): the check before a second start reads the device; a stop
+        # that arrives during that read ends the watch there: no start, and
+        # nothing begun after it that could take longer than `stop --force`
+        # waits.
+        reads = []
+
+        def read(options, timeout=60):
+            reads.append(self.watch.stop.is_set())
+            if len(reads) == 1:
+                return dict(self.state)    # the verdict's host, checked under the lock
+            self.watch.stop.set()
+            self.clock.advance(timeout)
+            return dict(self.state)
+        launches = [automation.Launch(mock.Mock(), self.log, f"launch-{number}")
+                    for number in range(2)]
+        with mock.patch.object(self.watch, "end_all", return_value=automation.ENDED), \
+                mock.patch.object(automation, "host_state", read), \
+                mock.patch.object(automation, "launch_host", side_effect=launches) as started, \
+                mock.patch.object(self.watch, "await_device", lambda detail: None), \
+                mock.patch.object(self.watch, "await_launch",
+                                  side_effect=[("retry", "lost")] * 2):
+            began = self.clock.monotonic()
+            result = self.watch.replace(self.reason)
+        self.assertEqual((result, started.call_count), (0, 1))
+        self.assertLess(self.clock.monotonic() - began, automation.WATCH_END_WAIT / 2)
+        self.assertEqual(self.watch.record.data["state"], automation.STOPPED)
+
     def finished(self, lines, unreadable=False, device_answers=True):
         """What `finish` says of a launch whose xcodebuild exited, with a log of
         `lines`."""
@@ -2969,6 +3043,20 @@ class LaunchTests(WatchTestCase):
         self.invoked(1)
         self.assertEqual(self.record()["state"], automation.STOPPED)
         self.assertEqual(len(list((self.device.state_dir / self.device.udid).glob("host-*.log"))), 1)
+
+    def test_a_stop_before_the_report_preflight_starts_no_preflight(self) -> None:
+        # Rule (R4): the preflight lists the device's reports, which can take
+        # longer than `stop --force` waits; a launch told to end before it
+        # begins does not make it.
+        calls = []
+        self.patch(automation, "check_report_slots",
+                   lambda options, processes: calls.append(1) or True)
+        with self.assertRaises(automation.LaunchRefused) as raised:
+            automation.launch_host(self.options("start", *self.reports()),
+                                   cancelled=lambda: True)
+        self.assertTrue(raised.exception.cancelled)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.device.invocations(), [])
 
     def test_the_host_record_is_whole_before_the_supervisor_starts(self) -> None:
         # Rule (R4): host.json is written atomically, and before the
