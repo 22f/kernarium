@@ -551,7 +551,9 @@ afterwards.
 The product carries Messaging and TelephonyProvider and declares
 `android.hardware.telephony.messaging` and `config_sms_capable` (the SMS role
 needs both), but not `android.hardware.telephony`: there is no radio, SIM or
-SMS sending.
+SMS sending. Without TeleService, TelephonyProvider requests
+`MANAGE_APP_OPS_MODES` itself (route `p0034`), which its one-time-code check
+needs to reassert the SMS application's app-ops.
 
 ### Networking
 

@@ -1269,8 +1269,10 @@ drops a leading byte order mark; the request's parser and the answers against th
 golden file the host's tests read too; the delivery record at each point where a
 request can end (a forced end, a failing file operation, a second process on its
 lock); and the host channel's server, frame and admission over stand-ins for the
-platform's socket classes. `Delivery` and `HostChannel` (the broadcasts, the inbox
-and the socket calls) need a built image.
+platform's socket classes. The stand-ins make public only what the platform's
+public API has, and a row lists it, so that a call of a hidden member fails there
+as it does in the image build. `Delivery` and `HostChannel` (the broadcasts, the
+inbox and the socket calls) need a built image.
 `android-vulkan-smoke` (integration) registers when `UML_ANDROID_VULKAN_SMOKE_RELEASE`
 names a release and runs the image's `kernarium_vk_ahb_import` in a guest: hardware
 buffers imported and read back, and the guest memory file descriptors
@@ -1415,6 +1417,14 @@ crash, a reboot and fifty kills. `--mode proof` (a userdebug build) writes a
 pending record and traces the order of the record's writes; the variants without
 Messaging or without an SMS provider, the adbd topic and the kernel configuration
 are options of the runner (`--list-rows` names each row and what it needs).
+`--mode delivery` is the smallest check of a built image and needs no probe, root
+or registration, but the SMS provider (it refuses `--variant no-provider`): D1 and
+then D2 send a plain message and messages with a one-time code, each handed over,
+answered and stored as exactly one new inbox row, and `com.android.phone`, waited
+for, keeps its pid; D3 reads the service's log: it listens, nothing was refused,
+and the platform warned of no hidden-API access and denied no vsock socket.
+With `--proof-image` it boots an unsigned proof image
+(manifest schema 0), which no installed-release reader takes, on a fresh instance.
 `android17-sms-runner` (tooling) runs its wire, record file, parsers and
 judgements without a guest.
 `android-oldapp` (integration) registers when `UML_ANDROID_OLDAPP_RELEASE`

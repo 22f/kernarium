@@ -539,6 +539,8 @@ PRODUCT_PACKAGES += KernariumPinnerOverlay
 # TelephonyProvider stores the messages. The product declares
 # android.hardware.telephony.messaging and config_sms_capable, which the SMS
 # role needs, and no telephony: nothing in the guest can send a message.
+# TelephonyProvider requests MANAGE_APP_OPS_MODES itself (route p0034), which
+# TeleService otherwise brings to their shared uid.
 PRODUCT_PACKAGES += KernariumSms messaging TelephonyProvider
 
 # Once boot completes, a script saves the virtual Wi-Fi network (VirtWifi, open)

@@ -29,7 +29,7 @@ final class Server implements Runnable {
 
     /** One accepted connection. Every wait ends at the deadline it is given, with an IOException. */
     interface Conn {
-        /** The peer's CID; throws when the peer is not a vsock address. */
+        /** The peer's CID, as the accept reported it; throws when the accept reported none. */
         int peerCid() throws Exception;
 
         /** Reads 1 to {@code length} bytes; 0 at the end of the stream. */
@@ -55,6 +55,7 @@ final class Server implements Runnable {
     private final LongSupplier clock;
     private final long retryMillis;
     private long refusals;
+    private long unaddressed;
 
     Server(Listener listener, Handler handler, Consumer<String> log, LongSupplier clock, long retryMillis) {
         this.listener = listener;
@@ -95,7 +96,12 @@ final class Server implements Runnable {
         try {
             cid = conn.peerCid();
         } catch (Exception e) {
-            return; // not a vsock peer: fail closed, nothing read, nothing written
+            // No peer address: fail closed, nothing read, nothing written. Logged for the first connection, then
+            // one in 256, so that a connection that never gets served is never silent.
+            if (unaddressed++ % 256 == 0) {
+                log.accept("refused a connection with no peer address: " + e.getClass().getSimpleName());
+            }
+            return;
         }
         if (cid != HOST_CID) {
             if (refusals++ % 256 == 0) log.accept("refused a connection from CID " + Integer.toUnsignedString(cid));
