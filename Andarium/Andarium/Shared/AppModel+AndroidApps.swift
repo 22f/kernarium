@@ -259,7 +259,13 @@ extension AppModel {
                 let result: AndroidAppOpenOutcome
                 if let tool = source?.androidAppsTool {
                     let launchers = state.store.record(forID: request.component.identifier)?.launchers
-                    result = await tool.open(request.component, launchersWhenSeen: launchers)
+                    // A renamed launcher's replacement is a command not yet sent when the apps are listed
+                    // again: it goes only where the request, the run and the pause still allow it.
+                    result = await tool.open(request.component, launchersWhenSeen: launchers) {
+                        await MainActor.run {
+                            state.open.mayReplaceLaunch(request, in: self.androidAppOpenSituation, now: Date())
+                        }
+                    }
                 } else {
                     result = .failed
                 }

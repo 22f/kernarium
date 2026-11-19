@@ -329,6 +329,8 @@ public struct AppOpenState: Equatable, Sendable {
     /// replaced or dropped meanwhile changes nothing.
     public mutating func opened(_ outcome: AndroidAppOpenOutcome, for request: AppOpenRequest, now: Date) {
         guard pending?.request == request else { return }
+        // A request taken back to waiting (`mayReplaceLaunch`) has no answer: its replacement launch was never sent.
+        if case .waiting? = pending?.stage { return }
         pending = nil
         switch outcome {
         case .opened, .openedRenamed: break
@@ -358,6 +360,22 @@ public struct AppOpenState: Equatable, Sendable {
     /// the launch may go.
     public mutating func readyToLaunch(_ request: AppOpenRequest, in situation: AppOpenSituation, now: Date) -> Bool {
         guard pending?.request == request, pending?.stage == .opening else { return false }
+        return decideLaunch(of: request, in: situation, now: now)
+    }
+
+    /// Right before a replacement launch is sent: the first command of a
+    /// launch in flight was answered (the activity was not found), the apps
+    /// were listed again to learn why, and the launch of the app's renamed
+    /// activity is a command that has not been sent. The request is decided
+    /// again as `readyToLaunch` decides it, because the listing took seconds:
+    /// a pause for space takes it back to waiting, a run that ended or a
+    /// request that replaced it ends it. True where the command may go.
+    public mutating func mayReplaceLaunch(_ request: AppOpenRequest, in situation: AppOpenSituation, now: Date) -> Bool {
+        guard pending?.request == request, pending?.stage == .launching else { return false }
+        return decideLaunch(of: request, in: situation, now: now)
+    }
+
+    private mutating func decideLaunch(of request: AppOpenRequest, in situation: AppOpenSituation, now: Date) -> Bool {
         switch AppOpenPlanner.decide(situation) {
         case .openNow:
             // The launch goes out now; from here its reply is waited for.

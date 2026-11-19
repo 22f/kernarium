@@ -89,6 +89,13 @@ private final class FakeTool: AndroidAppsTool, @unchecked Sendable {
     }
 }
 
+private final class AskCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func add() { lock.withLock { count += 1 } }
+}
+
 struct AndroidComponentTests {
     @Test func theIdentifierIsThePackageAndTheClass() {
         let c = component("com.example.app", "com.example.app.Main$Launcher")
@@ -712,6 +719,28 @@ struct AndroidAppOpenTests {
         tool.opens[new] = .opened
         #expect(await tool.open(old, launchersWhenSeen: 1) == .openedRenamed(new))
         #expect(tool.openAsks == [old, new])
+    }
+
+    @Test func aReplacementLaunchIsSentOnlyWhereTheAskerStillWantsIt() async {
+        let old = component("com.example.comet", "com.example.OldMain")
+        let new = component("com.example.comet", "com.example.NewMain")
+        let tool = FakeTool(.apps(AndroidAppList(apps: [app("com.example.comet", "Comet", activity: "com.example.NewMain")], digest: nil)))
+        tool.opens[old] = .notFound
+        tool.opens[new] = .opened
+        // Asked once, after the listing and before the replacement; an answer of no sends nothing.
+        let asked = AskCounter()
+        #expect(await tool.open(old, launchersWhenSeen: 1, mayReplace: { asked.add(); return false }) == .failed)
+        #expect(asked.value == 1)
+        #expect(tool.openAsks == [old], "the first command was sent; the replacement was not")
+        #expect(tool.listAsks == 1)
+        #expect(await tool.open(old, launchersWhenSeen: 1, mayReplace: { asked.add(); return true }) == .openedRenamed(new))
+        #expect(asked.value == 2)
+        #expect(tool.openAsks == [old, old, new])
+        // A launch that needs no replacement never asks.
+        let direct = component("com.example.direct")
+        tool.opens[direct] = .opened
+        #expect(await tool.open(direct, launchersWhenSeen: 1, mayReplace: { asked.add(); return false }) == .opened)
+        #expect(asked.value == 2)
     }
 
     @Test func anIconIsNeverGivenAnotherLauncherOfAPackageThatHadTwoOrWhoseCountIsUnknown() async {

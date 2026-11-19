@@ -216,9 +216,16 @@ extension AndroidAppsTool {
     ///   is not in Android (removed, disabled, or one of several launchers
     ///   that went), and nothing else is opened in its place;
     /// - a start that failed while the activity is still listed is a failure.
+    ///
+    /// The apps are listed over seconds, and the replacement activity's launch
+    /// is a command that has not been sent: `mayReplace` is asked right before
+    /// it goes out, and where it answers false nothing is sent and the outcome
+    /// is `.failed`, which the asker, having withheld the launch, does not take
+    /// as an answer. A command already sent is never withheld.
     public func open(
         _ component: AndroidComponent, launchersWhenSeen: Int? = nil,
-        listLimit: Duration = AndroidAppLimits.listLimit, openLimit: Duration = AndroidAppLimits.openLimit
+        listLimit: Duration = AndroidAppLimits.listLimit, openLimit: Duration = AndroidAppLimits.openLimit,
+        mayReplace: (@Sendable () async -> Bool)? = nil
     ) async -> AndroidAppOpenOutcome {
         let answer = await open(component, limit: openLimit)
         switch answer {
@@ -237,6 +244,7 @@ extension AndroidAppsTool {
                 let sameApp = list.apps.filter { $0.component.packageName == component.packageName }
                 guard launchersWhenSeen == 1, sameApp.count == 1, let only = sameApp.first, only.component != component
                 else { return .notInAndroid }
+                if let mayReplace, !(await mayReplace()) { return .failed }
                 switch await open(only.component, limit: openLimit) {
                 case .opened: return .openedRenamed(only.component)
                 case .notFound: return .notInAndroid

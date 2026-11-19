@@ -1009,4 +1009,29 @@ final class AndroidAppsModelTests {
         #expect(await eventually { rig.tool.opened.contains(renamed.component) })
         #expect(rig.state.open.banner == nil)
     }
+
+    @Test func aReplacementLaunchNotYetSentWaitsForTheSpaceNoticeToClear() async throws {
+        let rig = try rig(phase: .running(.normal))
+        await rig.model.refreshAndroidApps()
+        let renamed = AndroidApp(
+            component: try #require(AndroidComponent(packageName: comet.component.packageName, activityClass: "com.example.comethop.NewMain")),
+            label: "Comet Hop", builtIn: false, iconTag: "0000000000000099")
+        rig.tool.remove(comet.id)
+        rig.tool.install(renamed)
+        rig.tool.delay = .milliseconds(300)
+        let listings = rig.tool.listingsAsked
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        // The first command was refused and the apps are listed again to learn why...
+        #expect(await eventually(3) { rig.tool.listingsAsked == listings + 1 })
+        // ...when Android is low on space, the pause does not take, and the space notice stays.
+        rig.model.spacePause = SpacePause(freeBytes: 0, stage: .pausing)
+        try await Task.sleep(for: .milliseconds(450))
+        #expect(rig.tool.opened == [comet.component], "no replacement launch is sent under the notice")
+        #expect(rig.state.open.banner == nil)
+        // The person makes room and the notice clears: the request is decided again and opens the renamed app.
+        rig.tool.delay = .milliseconds(1)
+        rig.model.spacePause = nil
+        #expect(await eventually(3) { rig.tool.opened.contains(renamed.component) })
+        #expect(rig.state.open.banner == nil)
+    }
 }
