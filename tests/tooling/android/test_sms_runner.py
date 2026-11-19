@@ -14,11 +14,13 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import base64
 import contextlib
 import importlib.util
 import io
 from pathlib import Path
 import re
+import shlex
 import shutil
 import socket
 import struct
@@ -280,6 +282,20 @@ u:r:system_app:s0              system         950    300   10000   1000 0       
         self.assertFalse(runner.cap_eff_bit(status, 9))
         self.assertIsNone(runner.cap_eff_bit("Name:\tadbd\n", 10))
 
+    def test_the_phone_process_through_a_message(self) -> None:
+        self.assertIsNone(runner.phone_problem("1878\n", "1878\r\n", 0, 0))
+        self.assertIsNone(runner.phone_problem("1878", "1878", 2, 2))
+        self.assertIn("not running before", runner.phone_problem("", "1878", 0, 0))
+        self.assertIn("was pid 1878 before the message and is 2041 after it",
+                      runner.phone_problem("1878", "2041", 0, 0))
+        self.assertIn("is gone after it", runner.phone_problem("1878", "", 0, 0))
+        self.assertIn("gained 1 line(s)", runner.phone_problem("1878", "1878", 0, 1))
+        crash = ("11-18 20:10:40 E AndroidRuntime: FATAL EXCEPTION: main\n"
+                 "11-18 20:10:40 E AndroidRuntime: Process: com.android.phone, PID: 9\n"
+                 "11-18 20:10:41 E AndroidRuntime: Process: com.example.other, PID: 10\n")
+        self.assertEqual(runner.crash_lines_naming(crash, runner.PHONE), 1)
+        self.assertEqual(runner.crash_lines_naming("", runner.PHONE), 0)
+
     def test_the_kernel_configuration(self) -> None:
         accepted = "CONFIG_VSOCKETS=y\nCONFIG_VIRTIO_VSOCKETS=y\n# CONFIG_VHOST_VSOCK is not set\nCONFIG_OTHER=y\n"
         self.assertEqual(runner.kernel_config_problems(accepted + "CONFIG_X=y\n", accepted), [])
@@ -352,13 +368,13 @@ class CatalogueTests(unittest.TestCase):
         self.assertEqual(sorted(row.name for row in runner.ROWS), sorted(runner.ROW_FUNCTIONS))
         self.assertEqual(len({row.name for row in runner.ROWS}), len(runner.ROWS))
         for row in runner.ROWS:
-            self.assertIn(row.mode, ("channel", "record", "proof"))
+            self.assertIn(row.mode, ("delivery", "channel", "record", "proof"))
             self.assertTrue(row.needs is None or row.needs in runner.NEEDS, row.name)
 
     def test_the_designs_rows_are_here_or_named_elsewhere(self) -> None:
         names = {row.name for row in runner.ROWS}
         covered = {c for row in runner.ROWS for c in row.covers}
-        for wanted in ("G1", "G2a", "G2b", "G2c", "G2d", "G2e", "G3", "G4", "G5", "G6", "G7", "G8", "G9",
+        for wanted in ("D1", "D2", "G1", "G2a", "G2b", "G2c", "G2d", "G2e", "G3", "G4", "G5", "G6", "G7", "G8", "G9",
                        "I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8"):
             self.assertIn(wanted, names)
         for wanted in ("H1", "H2", "H3", "H4", "H5", "H7", "H8", "H10", "H11", "H13"):
@@ -367,6 +383,15 @@ class CatalogueTests(unittest.TestCase):
         elsewhere = " ".join(names for names, _ in runner.ELSEWHERE)
         for wanted in ("B1", "H12", "U6"):
             self.assertIn(wanted, elsewhere)
+
+    def test_the_delivery_mode_needs_no_probe_and_no_extras(self) -> None:
+        run, skipped = runner.plan_rows("delivery", set())
+        self.assertEqual([row.name for row in run], ["D1", "D2", "D3"])
+        self.assertEqual(skipped, [])
+        options = runner.build_parser().parse_args(["--mode", "delivery", "--proof-image", "--release", "x"])
+        self.assertTrue(options.proof_image)
+        self.assertEqual(runner.available_needs(options), {"stock-adbd"})
+        self.assertFalse(runner.build_parser().parse_args([]).proof_image)
 
     def test_what_a_run_without_the_extras_skips(self) -> None:
         run, skipped = runner.plan_rows("channel", {"stock-adbd"})
@@ -542,10 +567,14 @@ class StartFailureTests(unittest.TestCase):
 
     MARKER = "sms-start-failure-test"
 
-    def start_and_fail(self, forward: object = 12345, **patched: object) -> list[subprocess.Popen]:
-        """Runs start_guest with the launcher's steps replaced; returns the spawned children left running."""
+    def start_and_fail(self, forward: object = 12345, proof_image: bool = False, succeed: bool = False,
+                       **patched: object) -> list[subprocess.Popen]:
+        """Runs start_guest with the launcher's steps replaced; returns the spawned children left running.
+        A proof image has no installed-release identity: nothing of it may be read, planned or recorded. With
+        ``succeed`` the boot completes, start_guest returns a Guest, and ``self.mocks`` holds what it called."""
         boot = runner.boot_android
         children: list[subprocess.Popen] = []
+        self.mocks: dict[str, mock.Mock] = {}
         real_popen = subprocess.Popen
 
         def spawn(command, *args, **kwargs):
@@ -555,7 +584,7 @@ class StartFailureTests(unittest.TestCase):
             return process
 
         options = SimpleNamespace(instance=None, release=None, emulator=None, adb_port=5599, cpus=2,
-                                  memory="2G", boot_timeout=5)
+                                  memory="2G", boot_timeout=5, proof_image=proof_image)
         steps = {
             "wait_for_adb": mock.DEFAULT,
             "wait_for_boot_completed": True,
@@ -568,14 +597,19 @@ class StartFailureTests(unittest.TestCase):
                 emulator="fake", release="fake")))
             stack.enter_context(mock.patch.object(boot, "resolve_executable", return_value=sys.executable))
             stack.enter_context(mock.patch.object(boot, "release_path", return_value=directory))
-            stack.enter_context(mock.patch.object(boot.android_instance, "read_release", return_value=object()))
-            stack.enter_context(mock.patch.object(boot, "plan_start", return_value=object()))
-            stack.enter_context(mock.patch.object(boot.android_instance, "apply"))
-            stack.enter_context(mock.patch.object(boot.android_instance, "booted"))
-            stack.enter_context(mock.patch.object(boot, "data_capacity", return_value=1))
+            unread = AssertionError("a proof image's identity was read")
+            for name, owner in (("read_release", boot.android_instance), ("plan_start", boot),
+                                ("apply", boot.android_instance), ("booted", boot.android_instance),
+                                ("data_capacity", boot)):
+                if proof_image:
+                    self.mocks[name] = stack.enter_context(mock.patch.object(owner, name, side_effect=unread))
+                else:
+                    self.mocks[name] = stack.enter_context(mock.patch.object(
+                        owner, name, return_value=1 if name == "data_capacity" else object()))
             stack.enter_context(mock.patch.object(boot, "disconnect_adb"))
-            stack.enter_context(mock.patch.object(boot, "emulator_command", return_value=[
-                sys.executable, "-c", f"import time; time.sleep(120)  # {self.MARKER}"]))
+            self.mocks["emulator_command"] = stack.enter_context(mock.patch.object(
+                boot, "emulator_command", return_value=[
+                    sys.executable, "-c", f"import time; time.sleep(120)  # {self.MARKER}"]))
             if isinstance(forward, BaseException):
                 stack.enter_context(mock.patch.object(runner, "vsock_forward_port", side_effect=forward))
             else:
@@ -589,11 +623,19 @@ class StartFailureTests(unittest.TestCase):
                     stack.enter_context(mock.patch.object(boot, name, return_value=effect))
             stack.enter_context(mock.patch.object(runner.subprocess, "Popen", side_effect=spawn))
             try:
-                runner.start_guest(options, "adb", directory)
+                if succeed:
+                    with mock.patch.object(runner.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+                        # (the settle after the boot is not waited for)
+                        self.assertIsInstance(runner.start_guest(options, "adb", directory), runner.Guest)
+                    self.instance_made = (directory / "instance").is_dir()
+                else:
+                    runner.start_guest(options, "adb", directory)
             except (runner.Failure, runner.boot_android.LauncherError):
-                pass
+                if succeed:
+                    raise
             else:
-                self.fail("start_guest returned although the step failed")
+                if not succeed:
+                    self.fail("start_guest returned although the step failed")
             finally:
                 alive = [child for child in children if child.poll() is None]
                 for child in alive:
@@ -601,6 +643,27 @@ class StartFailureTests(unittest.TestCase):
                 for child in children:
                     child.wait(timeout=10)
         return alive
+
+    def test_a_proof_image_starts_without_an_installed_identity(self) -> None:
+        for name, patched in {"Android never boots": {"wait_for_boot_completed": False},
+                              "adb never answers": {"wait_for_adb": runner.boot_android.LauncherError("injected")}
+                              }.items():
+            with self.subTest(name):
+                self.assertEqual([], self.start_and_fail(proof_image=True, **patched))
+
+    def test_a_successful_proof_boot_records_nothing_of_an_installation(self) -> None:
+        """The control is the installed release, which reads its identity, asks for its capacity and records the
+        boot: the same boot of a proof image does none of it, and still makes the instance directory."""
+        # The guest that start_guest returns owns the emulator it started: the caller stops it, here the harness.
+        self.assertEqual(1, len(self.start_and_fail(succeed=True)))
+        for name in ("read_release", "plan_start", "apply", "booted", "data_capacity"):
+            self.assertTrue(self.mocks[name].called, f"the installed release does not call {name}")
+        self.assertEqual(self.mocks["emulator_command"].call_args.args[4], 1)
+        self.assertEqual(1, len(self.start_and_fail(proof_image=True, succeed=True)))
+        for name in ("read_release", "plan_start", "apply", "booted", "data_capacity"):
+            self.assertFalse(self.mocks[name].called, f"a proof image called {name}")
+        self.assertIsNone(self.mocks["emulator_command"].call_args.args[4])
+        self.assertTrue(self.instance_made, "the fresh instance's directory must exist for the emulator")
 
     def test_a_failure_after_the_spawn_leaves_no_emulator(self) -> None:
         boot = runner.boot_android
@@ -614,6 +677,175 @@ class StartFailureTests(unittest.TestCase):
             with self.subTest(name):
                 alive = self.start_and_fail(**patched)
                 self.assertEqual([], alive, "the emulator it spawned was left running")
+
+
+class DeliveryRowTests(unittest.TestCase):
+    """D1 and D2 over a fake guest whose inbox and phone process the test scripts, and a fake host that stores
+    what it is sent: what the rows accept and what they fail, without a guest."""
+
+    SENDER = "+15550100"
+    PLAIN = "sms-check plain 000102"
+
+    class Guest:
+        forward_port = 0
+
+        def __init__(self, pids: list[str], crash_buffer: str = "") -> None:
+            self.rows: list[tuple[int, str, str]] = []
+            self.pids, self.crash_buffer = list(pids), crash_buffer
+            self.commands: list[str] = []
+
+        def alive(self) -> None:
+            pass
+
+        def inbox_ids(self, sender: str, text: str) -> set[int]:
+            return {number for number, who, what in self.rows if (who, what) == (sender, text)}
+
+        def shell(self, command: str, timeout: float = 0, check: bool = True) -> str:
+            self.commands.append(command)
+            return self.pids.pop(0) if len(self.pids) > 1 else self.pids[0]
+
+        def logcat(self, *arguments: str) -> str:
+            return self.crash_buffer
+
+    class Host:
+        """Answers handed-over and stores ``copies`` rows for each message, as a service that stores it."""
+
+        def __init__(self, guest: "DeliveryRowTests.Guest", copies: int = 1) -> None:
+            self.guest, self.copies = guest, copies
+
+        def answer(self, payload: bytes, seconds: float = 0) -> object:
+            fields = payload.decode().split(".")
+            sender, text = base64.b64decode(fields[3]).decode(), base64.b64decode(fields[4]).decode()
+            for _ in range(self.copies):
+                number = max((row[0] for row in self.guest.rows), default=0) + 1
+                self.guest.rows.append((number, sender, text))
+            return runner.Answer("handed-over", fields[2], "1")
+
+    def run_row(self, row, guest: "DeliveryRowTests.Guest", copies: int = 1) -> None:
+        run = runner.Run(SimpleNamespace(variant="messaging"), guest, {})
+        run.host = self.Host(guest, copies)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(runner.time, "sleep"))
+            stack.enter_context(mock.patch.object(runner.os, "urandom", side_effect=lambda count: bytes(range(count))))
+            stack.enter_context(mock.patch.object(runner, "INBOX_SECONDS", 0.05))
+            stack.enter_context(mock.patch.object(runner, "PHONE_WAIT_SECONDS", 0.05))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            row(run)
+
+    def test_the_inbox_query_selects_ids_and_names_no_body_in_its_output(self) -> None:
+        command = runner.inbox_ids_command("+1555", "it's 123")
+        self.assertIn("--projection _id ", command)
+        self.assertNotIn("body:", command)
+        self.assertNotIn("--projection _id:", command)
+        self.assertEqual(shlex.split(command)[-1], "address='+1555' AND body='it''s 123'")
+        self.assertEqual(runner.parse_inbox_ids("Row: 0 _id=12\nRow: 1 _id=7\n"), {12, 7})
+        self.assertEqual(runner.parse_inbox_ids("No result found.\n"), set())
+
+    def test_exactly_one_new_row(self) -> None:
+        self.assertIsNone(runner.new_row_problem(set(), {4}))
+        self.assertIsNone(runner.new_row_problem({1, 2}, {1, 2, 3}))
+        self.assertIn("0 new", runner.new_row_problem({1, 2}, {1, 2}))
+        self.assertIn("0 new", runner.new_row_problem(set(), set()))
+        self.assertIn("2 new", runner.new_row_problem({1}, {1, 2, 3}))
+
+    def test_the_options_that_cannot_qualify_are_refused(self) -> None:
+        parse = runner.build_parser().parse_args
+        self.assertIn("SMS provider", runner.option_problem(parse(["--mode", "delivery", "--variant", "no-provider"])))
+        self.assertIsNone(runner.option_problem(parse(["--mode", "delivery"])))
+        self.assertIsNone(runner.option_problem(parse(["--mode", "delivery", "--variant", "no-messaging"])))
+        self.assertIsNone(runner.option_problem(parse(["--mode", "record", "--variant", "no-provider"])))
+        self.assertIn("--proof-image", runner.option_problem(parse(["--proof-image"])))
+        self.assertIn("--proof-image", runner.option_problem(
+            parse(["--proof-image", "--release", "x", "--instance", "y"])))
+        self.assertIsNone(runner.option_problem(parse(["--proof-image", "--release", "x"])))
+        with mock.patch.object(sys, "argv", ["run_android_sms.py", "--mode", "delivery", "--variant", "no-provider"]), \
+                contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(runner.main(), 2)
+        self.assertIn("SMS provider", error.getvalue())
+
+    def test_d1_needs_one_new_row(self) -> None:
+        self.run_row(runner.row_d1, self.Guest(["100"]))
+        old = self.Guest(["100"])
+        old.rows = [(1, self.SENDER, self.PLAIN), (2, self.SENDER, self.PLAIN)]
+        self.run_row(runner.row_d1, old)  # old matching rows are not a delivery, and a new one is
+        self.assertEqual(len(old.rows), 3)
+        old = self.Guest(["100"])
+        old.rows = [(1, self.SENDER, self.PLAIN)]
+        with self.assertRaisesRegex(runner.Failure, "0 new inbox rows"):
+            self.run_row(runner.row_d1, old, copies=0)
+        with self.assertRaisesRegex(runner.Failure, "2 new inbox rows"):
+            self.run_row(runner.row_d1, self.Guest(["100"]), copies=2)
+        with self.assertRaisesRegex(runner.Failure, "0 new inbox rows"):
+            self.run_row(runner.row_d1, self.Guest(["100"]), copies=0)
+
+    def test_d2_waits_for_the_phone_process_and_fails_plainly_without_it(self) -> None:
+        self.run_row(runner.row_d2, self.Guest(["", "", "100", "100\n"]))
+        with self.assertRaisesRegex(runner.Failure, r"com.android.phone running: pidof says '' \(after"):
+            self.run_row(runner.row_d2, self.Guest([""]))
+        with self.assertRaisesRegex(runner.Failure, "was pid 100 before the message and is 200 after it"):
+            self.run_row(runner.row_d2, self.Guest(["100", "100", "200"]))
+        guest = self.Guest(["100"])
+        buffers = ["", "E AndroidRuntime: Process: com.android.phone, PID: 100\n"]
+        guest.logcat = lambda *arguments: buffers.pop(0) if len(buffers) > 1 else buffers[0]  # type: ignore
+        with self.assertRaisesRegex(runner.Failure, "gained 1 line"):
+            self.run_row(runner.row_d2, guest)
+
+    def test_d2_checks_each_message_for_one_new_row(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "a message with a one-time code: 2 new inbox rows"):
+            self.run_row(runner.row_d2, self.Guest(["100"]), copies=2)
+        with self.assertRaisesRegex(runner.Failure, "a message with a one-time code: 0 new inbox rows"):
+            self.run_row(runner.row_d2, self.Guest(["100"]), copies=0)
+
+    LISTENING = ("11-18 20:09:43.609  1402  1480 I AndariumSms: listening on vsock port 5560\n"
+                 "11-18 20:09:43.603  1402  1402 I AndariumSms: record in /x, labelled u:object_r:y:s0\n")
+    START_UP_DENIALS = (
+        "11-18 20:09:44.100  1402  1402 I auditd  : type=1400 audit(0.0:9): avc:  denied  { find } for pid=1402 "
+        "name=gpu scontext=u:r:kernarium_sms:s0 tcontext=u:object_r:gpu_service:s0 tclass=service_manager "
+        "permissive=0\n"
+        "11-18 20:09:44.200  1402  1402 I auditd  : type=1400 audit(0.0:10): avc:  denied  { search } for "
+        "name=\"data\" scontext=u:r:kernarium_sms:s0 tcontext=u:object_r:system_data_file:s0 tclass=dir "
+        "permissive=0\n")
+
+    def test_what_the_service_log_must_and_must_not_show(self) -> None:
+        problems = runner.service_log_problems
+        self.assertEqual(problems(self.LISTENING, self.START_UP_DENIALS, "1402"), [])
+        self.assertIn("never logged that it listens", problems("", "", "1402")[0])
+        refused = self.LISTENING + ("11-18 20:10:00.000  1402  1480 I AndariumSms: refused a connection with no "
+                                    "peer address: IOException\n")
+        self.assertEqual(problems(refused, "", "1402"),
+                         ["the service logged 'refused a connection with no peer address: IOException'"])
+        cid = self.LISTENING + "11-18 20:10:00.000  1402  1480 I AndariumSms: refused a connection from CID 1\n"
+        self.assertEqual(len(problems(cid, "", "1402")), 1)
+        failed = self.LISTENING + ("11-18 20:10:00.000  1402  1480 I AndariumSms: host channel: cannot read a "
+                                   "peer's CID: NoSuchMethodException\n")
+        self.assertIn("host channel: cannot read a peer's CID", problems(failed, "", "1402")[0])
+        vsock = ("11-18 20:10:00.000  1402  1480 I auditd  : type=1400 audit(0.0:11): avc:  denied  { accept } for "
+                 "scontext=u:r:kernarium_sms:s0 tcontext=u:r:kernarium_sms:s0 tclass=vsock_socket permissive=0\n")
+        self.assertEqual(problems(self.LISTENING, vsock, "1402"), ["SELinux denied the service a vsock socket"])
+        hidden = ("11-18 20:09:43.700  1402  1402 W d.kernarium.sms: Accessing hidden method "
+                  "Landroid/system/Os;->accept(Ljava/io/FileDescriptor;Ljava/net/SocketAddress;)"
+                  "Ljava/io/FileDescriptor; (unsupported, reflection, denied)\n")
+        self.assertIn("hidden-API access by the service", problems(self.LISTENING, hidden, "1402")[0])
+        self.assertEqual(problems(self.LISTENING, hidden, "999"), [], "another process's warning is not the service's")
+        other = hidden.replace("Landroid/system/Os;->accept", "Landroid/app/Activity;->x")
+        self.assertEqual(problems(self.LISTENING, other, "1402"), [])
+
+    def test_d3_reads_the_service_and_its_process(self) -> None:
+        guest = self.Guest(["100"])
+        guest.pid = lambda: 1402  # type: ignore[method-assign]
+        guest.service_log = lambda: self.LISTENING  # type: ignore[method-assign]
+        guest.logcat = lambda *arguments: self.START_UP_DENIALS  # type: ignore[method-assign]
+        self.run_row(runner.row_d3, guest)
+        guest.service_log = lambda: ""  # type: ignore[method-assign]
+        with self.assertRaisesRegex(runner.Failure, "never logged that it listens"):
+            self.run_row(runner.row_d3, guest)
+        guest.pid = lambda: None  # type: ignore[method-assign]
+        with self.assertRaisesRegex(runner.Failure, "is not running"):
+            self.run_row(runner.row_d3, guest)
+
+    def test_delivery_runs_d1_before_d2(self) -> None:
+        rows, _ = runner.plan_rows("delivery", set())
+        self.assertEqual([row.name for row in rows], ["D1", "D2", "D3"])
 
 
 class ProbeSourceTests(unittest.TestCase):
