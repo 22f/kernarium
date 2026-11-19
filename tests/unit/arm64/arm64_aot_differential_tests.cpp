@@ -607,11 +607,12 @@ struct Trace final {
 	}
 };
 
-/* A row that plays a wrong exit sets this: the next fault of a run through
- * rewritten code is returned as an ordinary exit (as the end of a budget
- * would), the instruction runs again at the same address and takes the fault
- * then. */
-bool g_report_next_fault_as_continued = false;
+/* A row that plays a wrong exit sets `g_faults_to_report_as_continued`: the
+ * next faults of a run through rewritten code (SIZE_MAX: every one) are
+ * returned as ordinary exits, as the end of a budget would, the instruction
+ * runs again at the same address and takes the fault then. */
+std::size_t g_faults_to_report_as_continued = 0;
+std::size_t g_faults_reported_as_continued = 0;
 
 /* run_once, through the ahead-of-time step while it is switched on, as the
  * engine's entry would choose (GadgetExecutor::aot_selected). */
@@ -624,9 +625,11 @@ bool g_report_next_fault_as_continued = false;
 		executor.run_aot_block(cpu, memory, generation, executed) :
 		executor.run_block(cpu, memory, generation, executed);
 	executor.end_execution();
-	if (g_report_next_fault_as_continued && event == EngineEvent::memory_fault &&
-	    aot_runtime::enabled()) {
-		g_report_next_fault_as_continued = false;
+	if (g_faults_to_report_as_continued != 0 &&
+	    event == EngineEvent::memory_fault && aot_runtime::enabled()) {
+		if (g_faults_to_report_as_continued != SIZE_MAX)
+			--g_faults_to_report_as_continued;
+		++g_faults_reported_as_continued;
 		return {EngineEvent::continued, executed};
 	}
 	return {event, executed};
@@ -1091,7 +1094,8 @@ void randomize_fp_state(Case &c)
 	const auto ref_ended = drive(ref, ref_arena, c, 300000,
 		[&](const arm64::CpuState &cpu) { record(cpu, false); },
 		[&](const arm64::CpuState &cpu) { record(cpu, true); });
-	record(ref_ended.cpu, false);
+	if (ref_ended.last != EngineEvent::memory_fault)
+		record(ref_ended.cpu, false);
 	aot::set_enabled(true);
 	std::size_t at = 0;
 	std::size_t exits = 0;
@@ -1130,7 +1134,15 @@ void randomize_fp_state(Case &c)
 	const auto ended = drive(test, test_arena, c, 4000,
 		[&](const arm64::CpuState &cpu) { check(cpu, false); },
 		[&](const arm64::CpuState &cpu) { check(cpu, true); });
-	check(ended.cpu, false);
+	/* A run that ends at a fault ends in the state of that fault. */
+	check(ended.cpu, ended.last == EngineEvent::memory_fault);
+	/* A run that is done took the faults of the reference: one that takes
+	 * fewer has left the path, whatever its exits say. */
+	if (!reported && ended.done() && ended.faults != ref_ended.faults) {
+		reported = true;
+		std::fprintf(stderr, "the AOT run took %zu faults, the reference "
+			"%zu\n", ended.faults.size(), ref_ended.faults.size());
+	}
 	aot::set_enabled(false);
 	g_log.enabled = false;
 	for (std::size_t i = g_log.blocks.size() > 6 ? g_log.blocks.size() - 6 : 0;
@@ -4818,8 +4830,11 @@ Stepped run_stepped(Environment &env, Arena &arena, const Case &c, std::size_t c
 		record(cpu, false);
 	}, false, [&](const arm64::CpuState &cpu) { record(cpu, true); });
 	env.executor.set_single_step(false);
-	out.states.push(snapshot_of(out.result.cpu,
-		hash_memory ? hash_bytes(out.result.memory) : 0), false);
+	/* A run that ends at a fault ends in the state recorded for it, which is
+	 * not also an instruction boundary. */
+	if (out.result.last != EngineEvent::memory_fault)
+		out.states.push(snapshot_of(out.result.cpu,
+			hash_memory ? hash_bytes(out.result.memory) : 0), false);
 	return out;
 }
 
@@ -4987,7 +5002,8 @@ TraceTotals exits_lie_on_the_stepped_trace(
 			},
 			[&](const arm64::CpuState &cpu) { check(cpu, "fault", true); });
 		aot::set_enabled(false);
-		check(got.cpu, "end", false);
+		/* A run that ends at a fault ends in the state of that fault. */
+		check(got.cpu, "end", got.last == EngineEvent::memory_fault);
 		require(!off);
 		require(same(want, got, c));
 		t.exits += exits;
@@ -5037,10 +5053,12 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 	};
 	std::size_t cases = 0, fault_exits = 0;
 	aot::reset_stats();
+	enum class Lie { none, once, every };
+	std::size_t terminal_cases = 0;
 	const auto check_case = [&](std::size_t row, std::uint64_t destination,
 	                            std::uint64_t source, std::uint64_t count,
 	                            const std::vector<std::uint8_t> &kinds,
-	                            bool lie = false) {
+	                            bool terminal = false, Lie lie = Lie::none) {
 		auto c = make_case_from_seed(rng.next(), bias,
 			mops_at + row * mops_step, true, true, base);
 		enterable(c);
@@ -5053,11 +5071,15 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 		if (row != row_set_zero)
 			c.cpu.registers[s] = mops_is_set(row) ? 0x5aULL : source;
 		const auto stepped = run_stepped(step.env, step.arena, c, 256, true);
-		require(stepped.result.finished);
+		/* A terminal case ends at a fault no page repairs. */
+		require(terminal ? !stepped.result.finished &&
+			stepped.result.last == EngineEvent::memory_fault :
+			stepped.result.finished);
 		require(!stepped.result.faults.empty());
 		const auto &trace = stepped.states;
 		std::size_t at = 0;
 		bool off = false;
+		const char *blamed = "";
 		const auto check = [&](const arm64::CpuState &cpu, const char *what,
 		                       bool fault) {
 			if (off)
@@ -5070,7 +5092,8 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 				return;
 			}
 			off = true;
-			if (lie)
+			blamed = what;
+			if (lie != Lie::none)
 				return;
 			describe("a MOPS exit is off the stepped trace", c);
 			std::fprintf(stderr, "  row %zu, %s, after trace state %zu of "
@@ -5078,27 +5101,37 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 			print_difference("trace state", trace[at], now);
 		};
 		aot::set_enabled(true);
-		g_report_next_fault_as_continued = lie;
+		g_faults_to_report_as_continued = lie == Lie::once ? 1 :
+			lie == Lie::every ? SIZE_MAX : 0;
+		g_faults_reported_as_continued = 0;
 		const auto before = aot::stats();
-		const auto have = drive(got.env, got.arena, c, aot_max_blocks,
+		const auto have = drive(got.env, got.arena, c,
+			lie == Lie::none ? aot_max_blocks : 4000,
 			[&](const arm64::CpuState &cpu) { check(cpu, "block exit", false); },
 			[&](const arm64::CpuState &cpu) {
 				++fault_exits;
 				check(cpu, "fault", true);
 			});
 		aot::set_enabled(false);
-		check(have.cpu, "end", false);
+		/* A run that ends at a fault ends in the state of that fault. */
+		check(have.cpu, "end", have.last == EngineEvent::memory_fault);
 		const auto after = aot::stats();
-		if (lie) {
-			/* The check must refuse the wrong exit: a state only a fault
-			 * reaches is not a state a run is left in at an ordinary one. */
-			require(!g_report_next_fault_as_continued);
-			if (!off) {
+		const auto replaced = g_faults_reported_as_continued;
+		g_faults_to_report_as_continued = 0;
+		if (lie != Lie::none) {
+			/* The check must refuse the wrong exit, at that exit and not at
+			 * the fault the retry takes: a state only a fault reaches is not
+			 * one a run is left in by an ordinary exit. */
+			require(replaced == 1 || (lie == Lie::every && replaced > 1));
+			if (!off || std::strcmp(blamed, "block exit") != 0) {
 				describe("an ordinary exit at a state only a fault reaches "
-					"was taken for a state of the stepped trace", c);
-				std::fprintf(stderr, "  row %zu\n", row);
+					"was not refused", c);
+				std::fprintf(stderr, "  row %zu, %s, %s\n", row,
+					lie == Lie::once ? "the first fault" : "every fault",
+					off ? blamed : "accepted");
 			}
 			require(off);
+			require(std::strcmp(blamed, "block exit") == 0);
 			return;
 		}
 		require(!off);
@@ -5107,7 +5140,7 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 		 * fault in the host routine of its epilogue. */
 		require(after.enters == before.enters + 1);
 		require(after.mops_fault == before.mops_fault + 1);
-		++cases;
+		++(terminal ? terminal_cases : cases);
 	};
 	for (const std::uint64_t tag : {0ULL, 0x5aULL << 56}) {
 		for (const std::uint8_t kind : {std::uint8_t{0}, std::uint8_t{1}}) {
@@ -5144,16 +5177,38 @@ void memory_copy_and_set_faults_lie_on_the_stepped_trace(
 	 * code. */
 	require(st.enters == cases);
 	require(st.mops_fault == cases);
-	/* The wrong exit: the first fault of each kind returned as an ordinary
-	 * exit. */
-	check_case(row_cpyf, page_at(4) + page_bytes - 20, page_at(1) + 0x40,
-		page_bytes + 60, with({{5, 0}, {6, 0}}), true);
-	check_case(row_set, page_at(4) + page_bytes - 20, 0, page_bytes + 60,
-		with({{5, 0}, {6, 0}}), true);
-	check_case(row_cpyf, page_at(7) + 0x20, page_at(2) + page_bytes - 20, 80,
-		with({{3, 0}}), true);
-	check_case(row_cpy, page_at(4) - 24, page_at(4) - 40, 80,
-		with({{3, 0}}), true);
+	/* Runs that end at a fault no page repairs: the destination or the source
+	 * runs past the last page of the arena. The state of that fault is the
+	 * end of the run and not also an instruction boundary. */
+	const auto top = page_at(arena_pages + stack_pages);
+	for (const std::uint64_t tag : {0ULL, 0x5aULL << 56}) {
+		for (std::size_t row = 0; row < mops_rows; ++row) {
+			check_case(row, (top - 100) | tag, (page_at(1) + 0x40) | tag,
+				page_bytes, plain, true);
+			if (!mops_is_set(row))
+				check_case(row, (page_at(4) + 0x40) | tag, (top - 50) | tag,
+					page_bytes, plain, true);
+		}
+	}
+	require(terminal_cases == 22);
+	/* The wrong exit: the first fault, and every fault, returned as an
+	 * ordinary exit, for faults a page repairs and for the one that ends a
+	 * run. */
+	for (const auto lie : {Lie::once, Lie::every}) {
+		check_case(row_cpyf, page_at(4) + page_bytes - 20, page_at(1) + 0x40,
+			page_bytes + 60, with({{5, 0}, {6, 0}}), false, lie);
+		check_case(row_set, page_at(4) + page_bytes - 20, 0, page_bytes + 60,
+			with({{5, 0}, {6, 0}}), false, lie);
+		check_case(row_cpyf, page_at(7) + 0x20, page_at(2) + page_bytes - 20,
+			80, with({{3, 0}}), false, lie);
+		check_case(row_cpy, page_at(4) - 24, page_at(4) - 40, 80,
+			with({{3, 0}}), false, lie);
+		check_case(row_set, top - 100, 0, page_bytes, plain, true, lie);
+		check_case(row_cpyf, top - 100, page_at(1) + 0x40, page_bytes, plain,
+			true, lie);
+		check_case(row_cpyf, page_at(4) + 0x40, top - 50, page_bytes, plain,
+			true, lie);
+	}
 }
 
 /* ---- An interrupt token flipped during a native loop -----------------------
