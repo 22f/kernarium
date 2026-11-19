@@ -718,12 +718,14 @@ void warm_pages(StaticGuestMemory &memory, unsigned long generation,
 		arena, std::move(c), blocks, observer, false, on_fault);
 }
 
+/* The case of a report, its fields in the order `--case` reads them
+ * (seed:pc_offset:faulting:tbi). */
 void describe(const char *what, const Case &c)
 {
-	std::fprintf(stderr, "%s: seed %llx pc_offset %llx tbi %d faulting %d\n",
+	std::fprintf(stderr, "%s: seed %llx pc_offset %llx faulting %d tbi %d\n",
 		what, static_cast<unsigned long long>(c.seed),
 		static_cast<unsigned long long>(c.pc_offset),
-		c.cpu.tbi_enabled ? 1 : 0, c.faulting ? 1 : 0);
+		c.faulting ? 1 : 0, c.cpu.tbi_enabled ? 1 : 0);
 }
 
 /* Whether two runs ended in the same state, without a report. */
