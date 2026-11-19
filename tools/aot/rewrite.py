@@ -173,12 +173,15 @@ BASE_COPY_CLASSES = {
     "condcmp_imm", "dp_3src",
 }
 
+RESERVED_CORNER_CLASSES = BASE_COPY_CLASSES | {"floatcmp"}
+
 
 def reserved_corner(cls: str, word: int) -> bool:
-    """Whether `word`, an encoding of the data-processing class `cls`, is one
-    the architecture leaves unallocated by a rule on its fields that the
-    instruction tables do not express (a 32-bit operation naming a bit
-    position of 32 or more, a bitmask no value has). The engine raises an
+    """Whether `word`, an encoding of the data-processing class `cls` or of
+    the floating-point compare, is one the architecture leaves unallocated by
+    a rule on its fields that the instruction tables do not express (a 32-bit
+    operation naming a bit position of 32 or more, a bitmask no value has,
+    a register in a field that must be zero). The engine raises an
     illegal instruction at such a word: copied, the host would raise it
     instead and end the emulator. A word like it is found as data inside the
     code of a method (a literal pool), where code can still be entered."""
@@ -199,6 +202,9 @@ def reserved_corner(cls: str, word: int) -> bool:
         return not sf and (word >> 10) & 32 != 0
     if cls == "addsub_ext":
         return ((word >> 22) & 3) != 0 or ((word >> 10) & 7) > 4
+    if cls == "floatcmp":
+        # The forms that compare with zero (opcode2 bit 3) have no Rm.
+        return (word >> 3) & 1 != 0 and (word >> 16) & 31 != 0
     if cls == "log_imm":
         n = (word >> 22) & 1
         imms = (word >> 10) & 63
@@ -209,6 +215,149 @@ def reserved_corner(cls: str, word: int) -> bool:
             return True
         levels = (1 << length) - 1
         return imms & levels == levels
+    return False
+
+
+# Reserved forms of the classes the rewriter copies or translates field by
+# field, which the instruction tables list as allocated: a size, Q, opcode,
+# immediate or scale the architecture leaves unallocated for that form, and a
+# multiply-high that names a register where the architecture wants the zero
+# register. The engine raises an illegal instruction at each; copied, the host
+# would raise it instead and end the emulator. Each pattern is bits 31 to 10
+# of the word (1 and 0 fixed, x free; Rn and Rd take no part), as the engine
+# answered for every word of the class that the rewriter would otherwise copy.
+# A load of a pair into one register is the rule of `_memory`.
+RESERVED_FORMS = {
+    "asimdall": (
+        "x0xxxxxx1xxxxxxxxxxxxx",
+        "xxxxxxxx11xxxxxxxxxxxx",
+    ),
+    "asimddiff": (
+        "xxxxxxxx00xxxxxx1xx1xx",
+        "xxxxxxxx01xxxxxx111xxx",
+        "xxxxxxxx10xxxxxx111xxx",
+        "xxxxxxxx11xxxxxx0xxxxx",
+        "xxxxxxxx11xxxxxxx0xxxx",
+        "xxxxxxxx11xxxxxxxx0xxx",
+    ),
+    "asimdelem": (
+        "xxxxxxxx00xxxxxxxxxxxx",
+        "x0xxxxxx11xxxxxxxxxxxx",
+        "xxxxxxxx11xxxxxxxx1xxx",
+        "xxxxxxxx11xxxxxxxxx0xx",
+        "xxxxxxxx11xxxxxx11xxxx",
+        "xxxxxxxx111xxxxxxxxxxx",
+    ),
+    "asimdext": (
+        "x0xxxxxxxxxxxxxxx1xxxx",
+    ),
+    "asimdins": (
+        "x0xxxxxxxxxxx000xxxxxx",
+        "x0xxxxxxxxxxxx00xx10xx",
+        "xxxxxxxxxxxx0000xxxxxx",
+        "xx0xxxxxxxxxx000xx10xx",
+    ),
+    "asimdmisc": (
+        "xx0xxxxxx1xxxxxx0x01xx",
+        "x0xxxxxxx1xxxxx11xxxxx",
+        "xxxxxxxx1xxxxxxx0x01xx",
+        "x0xxxxxx11xxxxxxxxxxxx",
+        "xx1xxxxx1xxxxxxx000xxx",
+        "xxxxxxxx11xxxxxx0x0xxx",
+        "xxxxxxxx11xxxxxx0xx0xx",
+        "xxxxxxxx11xxxxx1x1x0xx",
+        "xxxxxxxx11xxxxx10xxxxx",
+    ),
+    "asimdperm": (
+        "x0xxxxxx11xxxxxxxxxxxx",
+    ),
+    "asimdsame": (
+        "xxxxxxxx00xxxxxx10110x",
+        "x0xxxxxxx1xxxxxx11xxxx",
+        "x0xxxxxx11xxxxxxxxx0xx",
+        "x0xxxxxx11xxxxxxxxxx0x",
+        "x0xxxxxx11xxxxxxxx1xxx",
+        "x0xxxxxx11xxxxxxx1xxxx",
+        "x0xxxxxx11xxxxxx1xxxxx",
+        "x01xxxxxx1xxxxxx1xx11x",
+        "xx1xxxxx1xxxxxxx1xx11x",
+        "xxxxxxxx11xxxxxx000x0x",
+        "xxxxxxxx11xxxxxx00x00x",
+        "xxxxxxxx11xxxxxx011xxx",
+        "xxxxxxxx11xxxxxx1001xx",
+        "xx0xxxxx11xxxxxx1x10xx",
+        "xxxxxxxx11xxxxxx101x0x",
+        "xx1xxxxxx1xxxxxx10x11x",
+        "xx1xxxxx11xxxxxx101xxx",
+    ),
+    "asimdshf": (
+        "x0xxxxxxxx00xxxx11xxxx",
+        "x0xxxxxxx1xxxxxxxxxxxx",
+        "xxxxxxxxx000xxxx11xxxx",
+        "xxxxxxxxx1xxxxxx10xxxx",
+    ),
+    "asisddiff": (
+        "xxxxxxxx00xxxxxxxxxxxx",
+        "xxxxxxxx11xxxxxxxxxxxx",
+    ),
+    "asisdelem": (
+        "xxxxxxxx00xxxxxxxxxxxx",
+        "xxxxxxxx11xxxxxxxx1xxx",
+        "xxxxxxxx11xxxxxx11xxxx",
+        "xxxxxxxx111xxxxxxxxxxx",
+    ),
+    "asisdmisc": (
+        "xxxxxxxx11xxxxx10xxxxx",
+    ),
+    "asisdone": (
+        "xxxxxxxxxxxx0000xxxxxx",
+    ),
+    "asisdsame": (
+        "xxxxxxxx00xxxxxx10xxxx",
+        "xxxxxxxx11xxxxxx101xxx",
+    ),
+    "asisdshf": (
+        "xxxxxxxxx000xxxx11xxxx",
+        "xxxxxxxxx1xxxxxx10xxxx",
+    ),
+    "dp_3src": (
+        "xxxxxxxxx1xxxxxxx0xxxx",
+        "xxxxxxxxx1xxxxxxxx0xxx",
+        "xxxxxxxxx1xxxxxxxxx0xx",
+        "xxxxxxxxx1xxxxxxxxxx0x",
+        "xxxxxxxxx1xxxxxxxxxxx0",
+    ),
+    "float2fix": (
+        "0xxxxxxxxxxxxxxx0xxxxx",
+    ),
+}
+
+
+def _compile_forms(forms):
+    compiled = {}
+    for cls, patterns in forms.items():
+        rows = []
+        for pattern in patterns:
+            assert len(pattern) == 22, pattern
+            mask = value = 0
+            for bit, char in zip(range(31, 9, -1), pattern):
+                if char != "x":
+                    mask |= 1 << bit
+                    value |= int(char) << bit
+            rows.append((mask, value))
+        compiled[cls] = tuple(rows)
+    return compiled
+
+
+_RESERVED_FORMS = _compile_forms(RESERVED_FORMS)
+
+
+def reserved_form(cls: str, word: int) -> bool:
+    """Whether `word`, an encoding of class `cls`, is a reserved form of
+    RESERVED_FORMS."""
+    for mask, value in _RESERVED_FORMS.get(cls, ()):
+        if word & mask == value:
+            return True
     return False
 
 
@@ -715,7 +864,8 @@ class Library:
         self._site_key = f"{cls}:{mnemonic}"
         if mnemonic == "UNALLOCATED":
             return self._step(offset, "unallocated")
-        if cls in BASE_COPY_CLASSES and reserved_corner(cls, word):
+        if (cls in RESERVED_CORNER_CLASSES and reserved_corner(cls, word)) \
+                or reserved_form(cls, word):
             return self._step(offset, "reserved")
         if cls == "branch_imm":
             return self._branch_imm(offset, word, mnemonic == "BL")
@@ -1116,7 +1266,9 @@ class Library:
             operands = [self._resolve(rt, False)]
             if pair:
                 operands.append(self._resolve(rt2, False))
-        if pair and load and not vector and rt == rt2 and rt != 31:
+        if pair and load and rt == rt2:
+            # Unpredictable, and the engine rejects it, the zero register
+            # twice and a vector register twice included.
             return self._step(offset, "pair-same-register")
         if wb_mode != "none" and any(o == base_g for o in operands):
             return self._step(offset, "writeback-overlap")

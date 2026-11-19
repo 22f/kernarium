@@ -382,6 +382,34 @@ class ReservedWordTests(unittest.TestCase):
         ("extr x0, x1, x2, #40", 0x93c2a020),
         ("add x0, x1, w2, uxtw #4", 0x8b225020),
         ("orr w0, w1, w2, lsl #31", 0x2a027c20),
+        # One bit from a reserved form of the classes below.
+        ("add vector, 4H", 0x0e608400),
+        ("saddlv", 0x0e303800),
+        ("saddw", 0x0e201000),
+        ("smlal by element", 0x0f402000),
+        ("ext", 0x2e000000),
+        ("dup element", 0x0e010400),
+        ("rev16", 0x0e201800),
+        ("uzp1", 0x0e401800),
+        ("cmgt", 0x0e203400),
+        ("sshll", 0x0f08a400),
+        ("sqdmlal scalar", 0x5e609000),
+        ("sqdmlal scalar by element", 0x5f403000),
+        ("sqxtn scalar", 0x5e614800),
+        ("dup scalar", 0x5e010400),
+        ("sqdmulh scalar", 0x5e60b400),
+        ("scvtf scalar by immediate", 0x5f18e400),
+        ("madd", 0x9b000000),
+        ("smulh", 0x9b407c00),
+        ("scvtf s0, w0, #32", 0x1e028000),
+        ("fcmpe s0, #0.0", 0x1e202018),
+        ("fcmpe s0, s1", 0x1e212010),
+        ("ldp s0, s1, [x0]", 0x2d400400),
+        ("ldnp s0, s1, [x0]", 0x2c400400),
+        ("ldp s0, s1, [x0], #0", 0x2cc00400),
+        ("ldp s0, s1, [x0, #0]!", 0x2dc00400),
+        ("ldp w0, wzr, [sp]", 0x29407c00),
+        ("ldp x0, x1, [x2]", 0xa9400440),
     ]
     # The same forms with a field the architecture does not allow.
     RESERVED = [
@@ -397,6 +425,34 @@ class ReservedWordTests(unittest.TestCase):
         ("32-bit logical immediate with N set", 0x12401c20),
         ("logical immediate of all ones", 0x12007c20),
         ("logical immediate with no element", 0x1200fc20),
+        # The Advanced SIMD, multiply-high and fixed-point classes: the
+        # engine rejects a reserved size, Q, opcode or scale like these, and
+        # the tables do not tell them from the allocated forms.
+        ("add vector, 2D with Q clear", 0x0ee08400),
+        ("across lanes, reserved size", 0x0eb03800),
+        ("three different, reserved size", 0x0e209000),
+        ("by element, reserved size", 0x0f002000),
+        ("ext with Q clear and imm4 bit 3", 0x2e004000),
+        ("copy, reserved imm5", 0x0e000400),
+        ("two-register misc, reserved size", 0x0e601800),
+        ("permute, 2D with Q clear", 0x0ec01800),
+        ("three same, reserved opcode", 0x0e20b400),
+        ("shift by immediate, reserved immh", 0x0f08e400),
+        ("scalar three different, reserved size", 0x5e209000),
+        ("scalar by element, reserved size", 0x5f003000),
+        ("scalar two-register misc, reserved size", 0x5ee14800),
+        ("scalar copy, reserved imm5", 0x5e000400),
+        ("scalar three same, reserved size", 0x5e20b400),
+        ("scalar shift by immediate, reserved immh", 0x5f08e400),
+        ("smulh with Ra not the zero register", 0x9b400000),
+        ("32-bit fixed-point convert, scale of 0", 0x1e020000),
+        ("fcmpe against zero with Rm named", 0x1e212018),
+        ("ldp s0, s0, [x0]", 0x2d400000),
+        ("ldnp s0, s0, [x0]", 0x2c400000),
+        ("ldp s0, s0, [x0], #0", 0x2cc00000),
+        ("ldp s0, s0, [x0, #0]!", 0x2dc00000),
+        ("ldp wzr, wzr, [sp]", 0x29407fff),
+        ("ldp x1, x1, [x2]", 0xa9400441),
     ]
     # Words the tables list as unallocated by name, in a class the rewriter
     # otherwise copies (found as the data of a literal pool).
@@ -421,7 +477,8 @@ class ReservedWordTests(unittest.TestCase):
             with self.subTest(text):
                 _, steps = self.classify(word)
                 self.assertEqual(len(steps), 1, text)
-                self.assertIn(steps[0][1], ("unallocated", "reserved"))
+                self.assertIn(steps[0][1], ("unallocated", "reserved",
+                                            "pair-same-register"))
 
     def test_words_the_tables_name_unallocated_are_left_to_the_engine(self
                                                                       ) -> None:

@@ -640,6 +640,63 @@ def pair_functions() -> tuple[tuple[int, int], ...]:
                  for index in range(len(pair_forms())))
 
 
+# ---- reserved forms -------------------------------------------------------
+# One reserved encoding of each class the rewriter copies or translates field
+# by field and whose reserved forms its instruction tables do not tell from
+# allocated ones, and a RET: the engine raises an illegal instruction at each
+# word, so the rewriter leaves it to the engine. The differential test starts
+# cases at every row and asks the engine about every word.
+RESERVED_AT = DST_PAGE + 0xc00
+RESERVED_STEP = 8
+
+
+def reserved_rows() -> list[tuple[str, int]]:
+    return [
+        ("add_vector_2d_q0", 0x0ee08400),
+        ("asimdall", 0x0eb03800),
+        ("asimddiff", 0x0e209000),
+        ("asimdelem", 0x0f002000),
+        ("asimdext", 0x2e004000),
+        ("asimdins", 0x0e000400),
+        ("asimdmisc", 0x0e601800),
+        ("asimdperm", 0x0ec01800),
+        ("asimdsame", 0x0e20b400),
+        ("asimdshf", 0x0f08e400),
+        ("asisddiff", 0x5e209000),
+        ("asisdelem", 0x5f003000),
+        ("asisdmisc", 0x5ee14800),
+        ("asisdone", 0x5e000400),
+        ("asisdsame", 0x5e20b400),
+        ("asisdshf", 0x5f08e400),
+        ("dp_3src", 0x9b400000),
+        ("float2fix", 0x1e020000),
+        ("floatcmp_zero_rm", 0x1e212018),
+        # A load of a pair into one register: LDP S0, S0, [x0]; its
+        # non-temporal, pre-index and post-index forms; and the general ones,
+        # one naming the zero register twice.
+        ("ldp_vector_same", 0x2d400000),
+        ("ldnp_vector_same", 0x2c400000),
+        ("ldp_post_vector_same", 0x2cc00000),
+        ("ldp_pre_vector_same", 0x2dc00000),
+        ("ldp_zero_zero", 0x29407fff),
+        ("ldp_x1_x1", 0xa9400441),
+    ]
+
+
+def reserved_code() -> dict[int, int]:
+    code: dict[int, int] = {}
+    for index, (_, word) in enumerate(reserved_rows()):
+        base = RESERVED_AT + index * RESERVED_STEP
+        code[base] = word
+        code[base + 4] = RET
+    return code
+
+
+def reserved_functions() -> tuple[tuple[int, int], ...]:
+    return tuple((RESERVED_AT + index * RESERVED_STEP, RESERVED_STEP)
+                 for index in range(len(reserved_rows())))
+
+
 def eh_frame() -> bytes:
     # CIE: version 1, "zR", code alignment 4, data alignment -8, return
     # address x30, pointers are pc-relative signed 32-bit.
@@ -649,7 +706,8 @@ def eh_frame() -> bytes:
     out = bytearray(struct.pack("<I", len(cie_body)) + cie_body)
     for start, size in (FUNCTIONS + form_functions() + edge_functions() +
                         hammer_functions() + mops_functions() +
-                        simd_functions() + pair_functions()):
+                        simd_functions() + pair_functions() +
+                        reserved_functions()):
         position = len(out)
         field = EH_FRAME + position + 8
         body = struct.pack("<Iii", position + 4, start - field, size)
@@ -684,6 +742,12 @@ def build() -> bytes:
         struct.pack_into("<I", text, address - TEXT, word)
     if PAIRS_AT + len(pair_forms()) * PAIR_SIZE > SYMBOL_ONLY:
         raise ValueError("the pair forms run into the symbol-only routine")
+    if RESERVED_AT + len(reserved_rows()) * RESERVED_STEP > SYMBOL_ONLY:
+        raise ValueError("the reserved forms run into the symbol-only routine")
+    if PAIRS_AT + len(pair_forms()) * PAIR_SIZE > RESERVED_AT:
+        raise ValueError("the pair forms run into the reserved forms")
+    for address, word in reserved_code().items():
+        struct.pack_into("<I", text, address - TEXT, word)
     for index, word in enumerate(PLT_CODE):
         struct.pack_into("<I", text, PLT - TEXT + 4 * index, word)
         struct.pack_into("<I", text, IPLT - TEXT + 4 * index, word)
