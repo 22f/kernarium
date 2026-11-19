@@ -192,8 +192,8 @@ final class AndroidPlatform implements AppsCommand.Platform {
     }
 
     @Override
-    public AppsCommand.Renderer openRenderer() throws Exception {
-        return new ProviderRenderer(this);
+    public AppsCommand.Renderer openRenderer(int user) throws Exception {
+        return new ProviderRenderer(user);
     }
 
     /** The files an application's resources come from, for the user the application info describes. */
@@ -385,45 +385,17 @@ final class AndroidPlatform implements AppsCommand.Platform {
 
     /**
      * The icon renderer (KernariumIcons) as the adb shell user reaches it: its content provider, held through the
-     * activity manager the way the {@code content} command holds one (the provider is open to the shell user alone).
-     * The provider hands each icon to a service in an isolated process, which opens the application's files and
-     * draws; this process only names the files and receives a PNG, which the command checks. A provider that died
-     * costs the icon in flight: the next is asked of a fresh hold, once; when none can be had the renderer is gone.
+     * activity manager the way the {@code content} command holds one (the provider is open to the shell user alone),
+     * for the user the command listed the applications for. The provider hands each icon to a service in an isolated
+     * process, which opens the application's files and draws; this process only names the files and receives a PNG,
+     * which the command checks. {@link ProviderLink} holds the rules: whose provider it is, the one user, a provider
+     * that died, and a hold that stays closed.
      */
     private static final class ProviderRenderer implements AppsCommand.Renderer {
-        private static final String RENDERER_GONE = "the icon renderer is not available";
+        private final ProviderLink mLink;
 
-        private final int mUser;
-        private final IBinder mToken = new Binder();
-        private IContentProvider mProvider;
-
-        ProviderRenderer(AndroidPlatform platform) throws PlatformException {
-            mUser = platform.currentUser();
-            acquire();
-        }
-
-        private void acquire() throws PlatformException {
-            try {
-                ContentProviderHolder holder = ActivityManager.getService().getContentProviderExternal(
-                        IconProtocol.AUTHORITY, mUser, mToken, AppsCommand.NAME);
-                if (holder == null || holder.provider == null) {
-                    throw new PlatformException(RENDERER_GONE);
-                }
-                mProvider = holder.provider;
-            } catch (PlatformException none) {
-                throw none;
-            } catch (Exception | LinkageError problem) {
-                throw new PlatformException(RENDERER_GONE, problem);
-            }
-        }
-
-        private void release() {
-            mProvider = null;
-            try {
-                ActivityManager.getService().removeContentProviderExternalAsUser(IconProtocol.AUTHORITY, mToken, mUser);
-            } catch (Exception | LinkageError ignored) {
-                // The command ends with its process, and the hold with it.
-            }
+        ProviderRenderer(int user) throws PlatformException {
+            mLink = new ProviderLink(new ActivityManagerTransport(), user);
         }
 
         @Override
@@ -452,33 +424,85 @@ final class AndroidPlatform implements AppsCommand.Platform {
                 }
                 paths[i] = items.get(i).path;
             }
-            Bundle request = new Bundle();
-            request.putInt(IconProtocol.KEY_RESOURCE, entry.iconResource);
-            request.putIntArray(IconProtocol.KEY_KINDS, kinds);
-            request.putStringArray(IconProtocol.KEY_PATHS, paths);
-            Bundle answer;
-            try {
-                answer = mProvider.call(new AttributionSource(android.os.Process.myUid(), "com.android.shell", null),
-                        IconProtocol.AUTHORITY, IconProtocol.METHOD_RENDER, null, request);
-            } catch (DeadObjectException dead) {
-                release();
-                try {
-                    acquire();
-                } catch (PlatformException unreachable) {
-                    throw new AppsCommand.RendererGone(RENDERER_GONE, unreachable);
-                }
-                throw new PlatformException("the icon renderer died");
-            }
-            if (answer == null || answer.getInt(IconProtocol.KEY_STATUS, IconProtocol.STATUS_ERROR) != IconProtocol.STATUS_OK) {
-                throw new PlatformException("the icon could not be drawn");
-            }
-            return new Icon(answer.getInt(IconProtocol.KEY_SIZE), answer.getBoolean(IconProtocol.KEY_ADAPTIVE),
-                    answer.getBoolean(IconProtocol.KEY_ALPHA), answer.getByteArray(IconProtocol.KEY_PNG));
+            return mLink.render(entry.iconResource, kinds, paths);
         }
 
         @Override
         public void close() {
-            release();
+            mLink.close();
+        }
+    }
+
+    /** The provider held and given back through the activity manager, under a token of this hold's own. */
+    private static final class ActivityManagerTransport implements ProviderLink.Transport {
+        private final IBinder mToken = new Binder();
+
+        @Override
+        public ProviderLink.Holding acquire(int user) throws Exception {
+            ContentProviderHolder holder = ActivityManager.getService().getContentProviderExternal(
+                    IconProtocol.AUTHORITY, user, mToken, AppsCommand.NAME);
+            if (holder == null) {
+                return null;
+            }
+            if (holder.provider == null) {
+                release(user);
+                return null;
+            }
+            return new HeldProvider(holder);
+        }
+
+        @Override
+        public void release(int user) {
+            try {
+                ActivityManager.getService().removeContentProviderExternalAsUser(IconProtocol.AUTHORITY, mToken, user);
+            } catch (Exception | LinkageError ignored) {
+                // The command ends with its process, and the hold with it.
+            }
+        }
+    }
+
+    /** What the activity manager gave: the provider and, in {@code info}, who it is. */
+    private static final class HeldProvider implements ProviderLink.Holding {
+        private final ContentProviderHolder mHolder;
+
+        HeldProvider(ContentProviderHolder holder) {
+            mHolder = holder;
+        }
+
+        @Override
+        public String packageName() {
+            return mHolder.info == null ? null : mHolder.info.packageName;
+        }
+
+        @Override
+        public String className() {
+            return mHolder.info == null ? null : mHolder.info.name;
+        }
+
+        @Override
+        public boolean system() {
+            return mHolder.info != null && mHolder.info.applicationInfo != null
+                    && (mHolder.info.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+        }
+
+        @Override
+        public Icon render(int resource, int[] kinds, String[] paths) throws Exception {
+            Bundle request = new Bundle();
+            request.putInt(IconProtocol.KEY_RESOURCE, resource);
+            request.putIntArray(IconProtocol.KEY_KINDS, kinds);
+            request.putStringArray(IconProtocol.KEY_PATHS, paths);
+            Bundle answer;
+            try {
+                answer = mHolder.provider.call(new AttributionSource(android.os.Process.myUid(), "com.android.shell", null),
+                        IconProtocol.AUTHORITY, IconProtocol.METHOD_RENDER, null, request);
+            } catch (DeadObjectException dead) {
+                throw new ProviderLink.ProviderDied(dead);
+            }
+            if (answer == null || answer.getInt(IconProtocol.KEY_STATUS, IconProtocol.STATUS_ERROR) != IconProtocol.STATUS_OK) {
+                return null;
+            }
+            return new Icon(answer.getInt(IconProtocol.KEY_SIZE), answer.getBoolean(IconProtocol.KEY_ADAPTIVE),
+                    answer.getBoolean(IconProtocol.KEY_ALPHA), answer.getByteArray(IconProtocol.KEY_PNG));
         }
     }
 }

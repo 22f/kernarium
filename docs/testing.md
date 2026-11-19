@@ -1300,8 +1300,9 @@ removed. `android17-app-shortcuts-command` (tooling; skipped without a JDK) runs
 grammar, the labels' escaping and bounds, the listing, digest and icon keys, every answer's
 framing read back by a parser of its own, the icon records, the launch's refusals and argument
 vector, how a start's output is read, the child process (real processes: output drained,
-deadline, termination and reaping), the icon source's bound, the resource files' order and the
-statuses on a plain JVM, then again with one rule removed at a time (the escaping, a bound, the
+deadline, termination and reaping), the renderer's hold (whose provider it takes, the one user for
+every acquisition, a provider that died, a hold that stays closed, a call that is never answered),
+the icon source's bound, the resource files' order and the statuses on a plain JVM, then again with one rule removed at a time (the escaping, a bound, the
 launch refusal, the grammar, the digest's inputs, the PNG checks, the deadlines, the reaping),
 where the rows it names must fail; it also checks the image's wiring, that the sources write
 and open nothing, and, as text with a mutant for each, what the Android glue must not do (a
@@ -1310,7 +1311,8 @@ configuration for an icon or a label, a built-in application's icon key without 
 file measured by its extension, a kill that is not a SIGKILL by pid).
 `android17-icon-renderer` (tooling; skipped without a JDK) runs what the icon renderer
 (`KernariumIcons`) shares with the command (the shell user's uid, the shape of a request, a path's
-rules, the sizes and bounds) on a plain JVM, then again with one rule removed at a time, and checks as text,
+rules, the sizes and bounds) and the provider's worker (one deadline over a request's queue, bind and
+drawing; an idle cleanup that never blocks a bind; a worker that failed is never reused) over stand-ins for the platform, on a plain JVM, then again with one rule removed at a time, and checks as text,
 with a mutant for each rule, what its provider, worker, drawing and service must do and must not touch,
 and its manifest and build file (an unprivileged, direct-boot-aware application with a guarded
 provider and an isolated service, and nothing else).

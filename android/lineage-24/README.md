@@ -1070,9 +1070,13 @@ that read, so no call draws a denial and the shell domain gains no permission.
   runtime overlays and draws the icon (a fixed density, day mode and locale, so
   that a key is one picture); the PNG comes back to the tool through the provider. The shell
   user cannot bind a service, so the tool reaches the provider through the activity
-  manager. A worker that dies or hangs costs the one icon (it is `error`, never
-  retried at a smaller size) and the next icon is drawn by a fresh one. An image
-  without the renderer fails `icons` with status 1 and one line, and the tool's
+  manager, for the user it listed the applications for, and takes only the image's own
+  provider (package, exact class, system application), checked at every acquisition.
+  A worker that dies or hangs costs the one icon (it is `error`, never
+  retried at a smaller size) and the next icon is drawn by a fresh one; a provider
+  that does not answer a call is no renderer at all. An image
+  without the renderer, or with another package's provider for its authority, fails
+  `icons` with status 1 and one line, and the tool's
   other commands are unaffected. Each start of the isolated process leaves one
   audit record, AOSP's own and tagged with its bug note: a denied `getattr` of the
   application's data directory, which has no effect. `check_icons_app` in
@@ -1107,9 +1111,9 @@ that read, so no call draws a denial and the shell domain gains no permission.
   the cut needs; one that cannot be read or does not fit in memory is listed under its
   package name and costs no other entry; at most 8 entries per
   package, 1024 rows, 8 icons per call, 96 KiB per PNG, 20 s before no further icon is
-  started and 8 s for one icon's render (the renderer ends its worker first, so a drawing that
+  started and 7 s for one icon's request in the renderer (its queue, bind and drawing together: a drawing that
   hangs or exhausts memory, which its isolated process contains, is `error` for that icon
-  alone); every answer is under 1 MiB, and a command
+  alone) within 8 s of the tool's own, after which the renderer is taken as not there; every answer is under 1 MiB, and a command
   that fails prints nothing on standard output and one line of the tool's own words
   on standard error. A question without an answer (the foreground user, a
   permission, the configuration) fails the command: there is no substitute.

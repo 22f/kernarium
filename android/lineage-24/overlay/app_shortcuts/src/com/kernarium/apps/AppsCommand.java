@@ -60,10 +60,10 @@ final class AppsCommand {
     /** After this long {@code icons} starts no further icon: the rest are answered {@code deferred}. */
     static final long ICON_DEADLINE_MILLIS = 20_000;
     /**
-     * How long one icon's render (all its sizes) may take, from the request to the renderer to its answer: after
-     * this it is an {@code error}, nothing of it is printed, and no further icon is started (the rest are
-     * {@code deferred}: the stuck render may still hold the renderer). The renderer gives up sooner on its own
-     * (a bound of its own on the isolated process), so this is the tool's last word.
+     * How long one icon's render (all its sizes) may take, from the request to the renderer to its answer. The
+     * renderer's provider answers within its own bound (a draw that takes too long is its reply of an error for that
+     * icon), so a call that is unanswered after this means there is no renderer to talk to: the command fails with
+     * the fixed reason and prints nothing, as it does for a renderer that is not there.
      */
     static final long ICON_RENDER_MILLIS = 8_000;
     /** How long {@code cmd activity start-activity} may take. */
@@ -89,10 +89,12 @@ final class AppsCommand {
         String label(Entry entry) throws Exception;
 
         /**
-         * The icon renderer, held for one {@code icons} command; throws a {@link PlatformException} when there is none
-         * (the image lacks it or it cannot be reached). Icons are drawn there and nowhere in this process.
+         * The icon renderer, held for one {@code icons} command and for {@code user}, the user the applications were
+         * listed for (the foreground user may be another by the time it is asked); throws a {@link PlatformException}
+         * when there is none (the image lacks it, another package answers for it, or it cannot be reached). Icons are
+         * drawn there and nowhere in this process.
          */
-        Renderer openRenderer() throws Exception;
+        Renderer openRenderer(int user) throws Exception;
 
         /** Runs {@link #startArguments} and returns how it ended and what it printed (at most a few KiB). */
         StartResult start(int user, Component component) throws Exception;
@@ -320,10 +322,9 @@ final class AppsCommand {
         long begin = platform.nowMillis();
         int user = platform.currentUser();
         List<Entry> reported = platform.launcherActivities(user);
-        try (Renderer renderer = platform.openRenderer()) {
+        try (Renderer renderer = platform.openRenderer(user)) {
             answer.line("kernarium_apps " + FORMAT_VERSION);
             answer.line("icons\t" + components.size());
-            boolean stuck = false;
             for (Component component : components) {
                 if (platform.nowMillis() - begin > ICON_DEADLINE_MILLIS) {
                     answer.nonImage(component, "deferred");
@@ -334,14 +335,11 @@ final class AppsCommand {
                     answer.nonImage(component, "missing");
                 } else if (entry.iconResource == 0) {
                     answer.nonImage(component, "noicon");
-                } else if (stuck) {
-                    answer.nonImage(component, "deferred");
                 } else {
                     Render render = renderWithin(platform, renderer, entry);
-                    if (render.gone) {
-                        throw new PlatformException("the icon renderer is not available");
+                    if (render.gone || render.unanswered) {
+                        throw new PlatformException(ProviderLink.UNAVAILABLE);
                     }
-                    stuck = render.timedOut;
                     if (render.icon == null) {
                         answer.nonImage(component, "error");
                     } else {
@@ -355,12 +353,12 @@ final class AppsCommand {
     }
 
     /**
-     * What one icon's render came to: the icon (checked), or none (an error), whether it was still running when its
-     * time was up, and whether the renderer is gone.
+     * What one icon's render came to: the icon (checked), or none (an error), whether the renderer had not answered
+     * when the time was up, and whether the renderer is gone.
      */
     private static final class Render {
         Icon icon;
-        boolean timedOut;
+        boolean unanswered;
         boolean gone;
     }
 
@@ -393,7 +391,7 @@ final class AppsCommand {
         Render render = new Render();
         if (worker.isAlive()) {
             worker.interrupt();
-            render.timedOut = true; // whatever it makes later is not read
+            render.unanswered = true; // whatever it makes later is not read
         } else {
             render.icon = made[0];
             render.gone = gone[0];

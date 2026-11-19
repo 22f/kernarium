@@ -138,6 +138,10 @@ public final class AppsCommandTest {
         boolean noRenderer;
         int opened;
         int closed;
+        /** The user the renderer was opened for. */
+        int openedFor = -1;
+        /** The foreground user once the applications were listed: a user switch in the middle of the command. */
+        int switchAfterListing = -1;
         AppsCommand.StartResult startResult = new AppsCommand.StartResult(0, "Starting: Intent { }\n");
         final List<List<String>> started = new ArrayList<>();
         long clock;
@@ -159,7 +163,11 @@ public final class AppsCommandTest {
         @Override
         public List<Entry> launcherActivities(int forUser) throws Exception {
             check(forUser == user, "the listing is asked for the foreground user");
-            return new ArrayList<>(entries);
+            List<Entry> listed = new ArrayList<>(entries);
+            if (switchAfterListing >= 0) {
+                user = switchAfterListing;
+            }
+            return listed;
         }
 
         @Override
@@ -179,11 +187,12 @@ public final class AppsCommandTest {
         }
 
         @Override
-        public AppsCommand.Renderer openRenderer() throws Exception {
+        public AppsCommand.Renderer openRenderer(int forUser) throws Exception {
             if (noRenderer) {
                 throw new PlatformException("the icon renderer is not available");
             }
             opened++;
+            openedFor = forUser;
             return new AppsCommand.Renderer() {
                 @Override
                 public Icon render(Entry entry) throws Exception {
@@ -215,6 +224,92 @@ public final class AppsCommandTest {
         public long renderLimitMillis() {
             return renderLimit;
         }
+    }
+
+    /** The activity manager as {@link ProviderLink} meets it: every acquisition and release, with the user. */
+    private static final class LinkTransport implements ProviderLink.Transport {
+        /** "acquire 10" and "release 10", in order. */
+        final List<String> log = Collections.synchronizedList(new ArrayList<>());
+        /** What each acquisition answers, in order; the last one repeats. */
+        final List<ProviderLink.Holding> answers = new ArrayList<>();
+        RuntimeException failure;
+        /** An acquisition waits here when set: a slow answer of the activity manager. */
+        volatile java.util.concurrent.CountDownLatch gate;
+        volatile java.util.concurrent.CountDownLatch inside;
+        int asked;
+
+        @Override
+        public ProviderLink.Holding acquire(int user) throws Exception {
+            log.add("acquire " + user);
+            java.util.concurrent.CountDownLatch waiting = gate;
+            if (waiting != null) {
+                inside.countDown();
+                waiting.await();
+            }
+            if (failure != null) {
+                throw failure;
+            }
+            ProviderLink.Holding answer = answers.get(Math.min(asked++, answers.size() - 1));
+            return answer;
+        }
+
+        @Override
+        public void release(int user) {
+            log.add("release " + user);
+        }
+
+        int count(String kind) {
+            int n = 0;
+            synchronized (log) {
+                for (String line : log) {
+                    if (line.startsWith(kind)) {
+                        n++;
+                    }
+                }
+            }
+            return n;
+        }
+    }
+
+    /** A provider as the activity manager resolved it, and what it does with a request. */
+    private static class LinkHolding implements ProviderLink.Holding {
+        String packageName = IconProtocol.PACKAGE;
+        String className = IconProtocol.PROVIDER_CLASS;
+        boolean system = true;
+        /** What a request gives: an icon, null for an answer that is not an ok, or an exception. */
+        IconSource answer = entry -> new Icon(192, true, false, png(192, 300, 1));
+        int asked;
+
+        @Override
+        public String packageName() {
+            return packageName;
+        }
+
+        @Override
+        public String className() {
+            return className;
+        }
+
+        @Override
+        public boolean system() {
+            return system;
+        }
+
+        @Override
+        public Icon render(int resource, int[] kinds, String[] paths) throws Exception {
+            asked++;
+            return answer.icon(null);
+        }
+    }
+
+    private static LinkTransport transportOf(ProviderLink.Holding... answers) {
+        LinkTransport transport = new LinkTransport();
+        transport.answers.addAll(Arrays.asList(answers));
+        return transport;
+    }
+
+    private static Icon ask(ProviderLink link) throws Exception {
+        return link.render(0x7f010000, new int[] {IconProtocol.KIND_BASE}, new String[] {"/system/app/A/A.apk"});
     }
 
     private static Entry app(String packageName, String activity) {
@@ -1057,7 +1152,7 @@ public final class AppsCommandTest {
             same("kernarium_apps: icons failed: the icon renderer is not available\n", result.err, "one fixed line");
             same(Arrays.asList("com.a.app", "com.gone.app"), fake.rendered, "nothing is asked of a renderer that is gone");
         });
-        row("icons-render-time-limit", () -> {
+        row("icons-an-unanswered-render-means-there-is-no-renderer", () -> {
             Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"), app("com.b.app", "com.b.app.Main"),
                     entry("com.c.app", "com.c.app.Main", false, true, true, true, 1, 1, 0),
                     entry("com.hidden.app", "com.hidden.app.Main", false, false, true, true, 1, 1, 1));
@@ -1070,14 +1165,248 @@ public final class AppsCommandTest {
                 return icon(192, png(192, 100, 1));
             };
             long begin = System.nanoTime();
-            List<IconRecord> records = parseIcons(run(fake, "icons", "com.a.app/com.a.app.Main", "com.b.app/com.b.app.Main",
-                    "com.c.app/com.c.app.Main", "com.hidden.app/com.hidden.app.Main"));
+            Result result = run(fake, "icons", "com.a.app/com.a.app.Main", "com.b.app/com.b.app.Main",
+                    "com.c.app/com.c.app.Main", "com.hidden.app/com.hidden.app.Main");
             long tookMillis = (System.nanoTime() - begin) / 1_000_000;
-            same(Arrays.asList("error", "deferred", "noicon", "missing"), statuses(records),
-                    "the stuck one is an error, no other render is started, the answers that need none are given");
-            check(tookMillis < 1500, "the command did not wait for the stuck render: " + tookMillis + " ms");
-            same(Arrays.asList("com.a.app"), fake.rendered, "only the stuck render was started");
+            same(1, result.status, "a provider that never answers is a renderer that is not there: exit status");
+            same(0, result.out.length, "nothing is printed");
+            same("kernarium_apps: icons failed: the icon renderer is not available\n", result.err, "one fixed line");
+            check(tookMillis < 1500, "the command did not wait for the render that was never answered: " + tookMillis + " ms");
+            same(Arrays.asList("com.a.app"), fake.rendered, "nothing is asked after it");
+            same(1, fake.closed, "the renderer is released");
             never.countDown();
+        });
+        row("icons-a-reported-timeout-of-one-draw-is-that-icons-error", () -> {
+            Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"), app("com.slow.app", "com.slow.app.Main"),
+                    app("com.c.app", "com.c.app.Main"));
+            fake.renderLimit = 5_000;
+            fake.icons = entry -> {
+                if (entry.packageName.equals("com.slow.app")) {
+                    Thread.sleep(300); // the provider took its time, then answered: this draw timed out
+                    throw new PlatformException("the icon could not be drawn");
+                }
+                return icon(192, png(192, 300, 1));
+            };
+            Result result = run(fake, "icons", "com.a.app/com.a.app.Main", "com.slow.app/com.slow.app.Main", "com.c.app/com.c.app.Main");
+            same(Arrays.asList("ok", "error", "ok"), statuses(parseIcons(result)), "an answered timeout costs that icon alone");
+            same(Arrays.asList("com.a.app", "com.slow.app", "com.c.app"), fake.rendered, "the rest are still drawn");
+        });
+        row("icons-the-renderer-is-opened-for-the-listed-user", () -> {
+            Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"));
+            fake.user = 0;
+            fake.switchAfterListing = 10;
+            parseIcons(run(fake, "icons", "com.a.app/com.a.app.Main"));
+            same(0, fake.openedFor, "the renderer's user is the one the applications were listed for, not the foreground by now");
+            same(10, fake.user, "(the foreground user did change)");
+        });
+        row("link-the-user-is-one-for-acquiring-reacquiring-and-releasing", () -> {
+            LinkHolding first = new LinkHolding();
+            first.answer = entry -> {
+                throw new ProviderLink.ProviderDied(new RuntimeException("dead"));
+            };
+            LinkTransport transport = transportOf(first, new LinkHolding());
+            ProviderLink link = new ProviderLink(transport, 10);
+            try {
+                ask(link);
+                check(false, "the death of the provider costs the icon in flight");
+            } catch (PlatformException died) {
+                same("the icon renderer died", died.getMessage(), "the icon's error");
+            }
+            check(ask(link) != null, "the next icon is asked of a fresh hold");
+            link.close();
+            same(Arrays.asList("acquire 10", "release 10", "acquire 10", "release 10"), transport.log,
+                    "every hold is for the user the command was opened for, and given back for it");
+        });
+        row("link-takes-the-images-provider-only", () -> {
+            String[][] strangers = {{"com.example.thief", IconProtocol.PROVIDER_CLASS}, {IconProtocol.PACKAGE, "com.kernarium.icons.OtherProvider"},
+                {IconProtocol.PACKAGE, "com.kernarium.icons.IconProvider2"}, {null, IconProtocol.PROVIDER_CLASS},
+                {IconProtocol.PACKAGE, null}, {"", ""}};
+            for (String[] stranger : strangers) {
+                LinkHolding holding = new LinkHolding();
+                holding.packageName = stranger[0];
+                holding.className = stranger[1];
+                LinkTransport transport = transportOf(holding);
+                try {
+                    new ProviderLink(transport, 10);
+                    check(false, "an answerer that is not the image's provider is not taken: " + Arrays.toString(stranger));
+                } catch (PlatformException refused) {
+                    same(ProviderLink.UNAVAILABLE, refused.getMessage(), "the fixed reason");
+                }
+                same(Arrays.asList("acquire 10", "release 10"), transport.log, "it is released unread");
+                same(0, holding.asked, "nothing is asked of it");
+            }
+            LinkHolding installed = new LinkHolding();
+            installed.system = false;
+            LinkTransport transport = transportOf(installed);
+            try {
+                new ProviderLink(transport, 10);
+                check(false, "the provider's package is not a system application: an installed package that took the name");
+            } catch (PlatformException refused) {
+                same(ProviderLink.UNAVAILABLE, refused.getMessage(), "the fixed reason");
+            }
+            same(Arrays.asList("acquire 10", "release 10"), transport.log, "released");
+            LinkHolding unreadable = new LinkHolding() {
+                @Override
+                public String packageName() {
+                    throw new IllegalStateException("no info");
+                }
+            };
+            LinkTransport unknown = transportOf(unreadable);
+            try {
+                new ProviderLink(unknown, 10);
+                check(false, "an answerer that cannot be identified is not taken");
+            } catch (PlatformException refused) {
+                same(ProviderLink.UNAVAILABLE, refused.getMessage(), "the fixed reason");
+            }
+            same(Arrays.asList("acquire 10", "release 10"), unknown.log, "released");
+            LinkTransport nothing = transportOf((ProviderLink.Holding) null);
+            try {
+                new ProviderLink(nothing, 10);
+                check(false, "no provider is no renderer");
+            } catch (PlatformException refused) {
+                same(ProviderLink.UNAVAILABLE, refused.getMessage(), "the fixed reason");
+            }
+            same(Arrays.asList("acquire 10"), nothing.log, "there was nothing to release");
+            LinkTransport failing = transportOf(new LinkHolding());
+            failing.failure = new IllegalStateException("user 10 may not open provider com.kernarium.icons");
+            try {
+                new ProviderLink(failing, 10);
+                check(false, "a framework failure is no renderer");
+            } catch (PlatformException refused) {
+                same(ProviderLink.UNAVAILABLE, refused.getMessage(), "the fixed reason, not the framework's words");
+            }
+        });
+        row("link-checks-who-answers-on-every-acquisition", () -> {
+            LinkHolding first = new LinkHolding();
+            first.answer = entry -> {
+                throw new ProviderLink.ProviderDied(new RuntimeException("dead"));
+            };
+            LinkHolding impostor = new LinkHolding();
+            impostor.packageName = "com.example.thief";
+            LinkTransport transport = transportOf(first, impostor);
+            ProviderLink link = new ProviderLink(transport, 10);
+            try {
+                ask(link);
+                check(false, "the death costs the icon");
+            } catch (AppsCommand.RendererGone gone) {
+                same(ProviderLink.UNAVAILABLE, gone.getMessage(), "the new answerer is not the provider: the renderer is gone");
+            }
+            same(0, impostor.asked, "nothing is asked of the new answerer");
+            same(Arrays.asList("acquire 10", "release 10", "acquire 10", "release 10"), transport.log, "and it is released");
+            link.close();
+            same(4, transport.log.size(), "close has nothing left to give back");
+        });
+        row("link-a-provider-that-died-costs-one-icon", () -> {
+            LinkHolding first = new LinkHolding();
+            first.answer = entry -> {
+                throw new ProviderLink.ProviderDied(new RuntimeException("dead"));
+            };
+            LinkHolding second = new LinkHolding();
+            LinkTransport transport = transportOf(first, second);
+            ProviderLink link = new ProviderLink(transport, 0);
+            try {
+                ask(link);
+                check(false, "the icon in flight is lost");
+            } catch (PlatformException died) {
+                same("the icon renderer died", died.getMessage(), "fixed words");
+            }
+            check(ask(link) != null, "the next icon is drawn");
+            same(1, second.asked, "by the fresh hold");
+            LinkTransport gone = transportOf(first);
+            ProviderLink alone = new ProviderLink(gone, 0);
+            gone.answers.add(null);
+            try {
+                ask(alone);
+                check(false, "the provider is not there again");
+            } catch (AppsCommand.RendererGone lost) {
+                same(ProviderLink.UNAVAILABLE, lost.getMessage(), "the renderer is gone, with the fixed reason");
+            }
+        });
+        row("link-an-answer-that-is-not-an-ok-keeps-the-hold", () -> {
+            LinkHolding holding = new LinkHolding();
+            holding.answer = entry -> null;
+            LinkTransport transport = transportOf(holding);
+            ProviderLink link = new ProviderLink(transport, 0);
+            try {
+                ask(link);
+                check(false, "an error answer is an error");
+            } catch (PlatformException error) {
+                same("the icon could not be drawn", error.getMessage(), "the icon's error");
+            }
+            holding.answer = entry -> new Icon(192, true, false, png(192, 300, 1));
+            check(ask(link) != null, "the next icon is drawn by the same hold");
+            same(Arrays.asList("acquire 0"), transport.log, "no release and no new acquisition");
+            link.close();
+            same(Arrays.asList("acquire 0", "release 0"), transport.log, "released once at the end");
+        });
+        row("link-close-is-final-and-release-is-idempotent", () -> {
+            LinkTransport transport = transportOf(new LinkHolding());
+            ProviderLink link = new ProviderLink(transport, 0);
+            link.close();
+            link.close();
+            same(Arrays.asList("acquire 0", "release 0"), transport.log, "one release for one hold");
+            try {
+                ask(link);
+                check(false, "a closed link draws nothing");
+            } catch (AppsCommand.RendererGone gone) {
+                same(ProviderLink.UNAVAILABLE, gone.getMessage(), "fixed reason");
+            }
+            same(2, transport.log.size(), "and takes no hold again");
+        });
+        row("link-an-abandoned-call-takes-no-hold-after-close", () -> {
+            java.util.concurrent.CountDownLatch inCall = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+            LinkHolding first = new LinkHolding();
+            first.answer = entry -> {
+                inCall.countDown();
+                release.await();
+                throw new ProviderLink.ProviderDied(new RuntimeException("dead"));
+            };
+            LinkTransport transport = transportOf(first, new LinkHolding());
+            ProviderLink link = new ProviderLink(transport, 0);
+            Throwable[] ended = new Throwable[1];
+            Thread call = new Thread(() -> {
+                try {
+                    ask(link);
+                } catch (Throwable problem) {
+                    ended[0] = problem;
+                }
+            });
+            call.start();
+            check(inCall.await(5, java.util.concurrent.TimeUnit.SECONDS), "the call is in flight");
+            link.close();
+            release.countDown();
+            call.join(5_000);
+            check(!call.isAlive(), "the abandoned call ended");
+            check(ended[0] instanceof AppsCommand.RendererGone, "it ended without drawing: " + ended[0]);
+            same(Arrays.asList("acquire 0", "release 0"), transport.log,
+                    "one hold, one release: the death delivered after close takes no hold and gives none back");
+        });
+        row("link-a-hold-that-arrives-after-close-is-given-back", () -> {
+            LinkHolding first = new LinkHolding();
+            first.answer = entry -> {
+                throw new ProviderLink.ProviderDied(new RuntimeException("dead"));
+            };
+            LinkTransport transport = transportOf(first, new LinkHolding());
+            ProviderLink link = new ProviderLink(transport, 0);
+            transport.gate = new java.util.concurrent.CountDownLatch(1);
+            transport.inside = new java.util.concurrent.CountDownLatch(1);
+            Throwable[] ended = new Throwable[1];
+            Thread call = new Thread(() -> {
+                try {
+                    ask(link);
+                } catch (Throwable problem) {
+                    ended[0] = problem;
+                }
+            });
+            call.start();
+            check(transport.inside.await(5, java.util.concurrent.TimeUnit.SECONDS), "the new hold is being asked for");
+            link.close();
+            transport.gate.countDown();
+            call.join(5_000);
+            check(!call.isAlive(), "the abandoned call ended");
+            check(ended[0] instanceof AppsCommand.RendererGone, "it ended without drawing: " + ended[0]);
+            same(transport.count("acquire"), transport.count("release"), "every hold was given back: " + transport.log);
         });
         row("icons-deadline-defers-the-rest", () -> {
             Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"), app("com.b.app", "com.b.app.Main"),
