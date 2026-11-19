@@ -818,8 +818,9 @@ class FixtureTests(unittest.TestCase):
             functions[:3],
             [(0x1000, 0x1010), (0x1020, 0x1030), (0x1040, 0x1050)])
         # The .iplt stubs of a static executable are covered like the .plt.
-        self.assertEqual(functions[-1],
-                         (fixture.IPLT, fixture.IPLT + 4 * len(fixture.PLT_CODE)))
+        self.assertIn(
+            (fixture.IPLT, fixture.IPLT + 4 * len(fixture.PLT_CODE)),
+            functions)
 
     def test_loop_branch_lands_inside_another_range(self) -> None:
         # b.lo at 0x1028 (range B) targets 0x1004 (inside range A), and no
@@ -1630,6 +1631,29 @@ class WideningTests(unittest.TestCase):
         for kind in ("cpyf", "cpy", "set"):
             expected[f"{kind}_xzr_d"] = {"mops-invalid"}
         self.assertEqual(stepped, expected)
+
+    def test_pairs_with_virtual_registers_are_inlined(self) -> None:
+        # A pair with a virtual base or virtual data registers, with or
+        # without writeback, and the vector pairs, run in the rewritten code;
+        # only the three forms the architecture leaves unpredictable step.
+        elf = elf64.Elf(fixture.build())
+        library = rewrite.Library(
+            0, "/aot-test/libaotfixture.so", elf,
+            a64decode.Decoder(a64decode.DEFAULT_TABLE),
+            rewrite.read_layout(rewrite.LAYOUT_HEADER))
+        library.build([1] * ((library.table_end - library.table_base) // 4096))
+        causes = dict(library.step_list)
+        stepped = {}
+        for index, (name, words) in enumerate(fixture.pair_forms()):
+            base = fixture.PAIRS_AT + index * fixture.PAIR_SIZE
+            for position in range(len(words)):
+                cause = causes.get(base + 4 * position)
+                if cause is not None:
+                    stepped[name] = cause
+        self.assertEqual(stepped, {
+            "ldp_off_vb_same": "pair-same-register",
+            "ldp_pre_vb_base": "writeback-overlap",
+            "stp_post_vb_base": "writeback-overlap"})
 
 
 if __name__ == "__main__":

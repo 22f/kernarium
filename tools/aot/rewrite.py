@@ -1120,12 +1120,6 @@ class Library:
         if wb_mode != "none" and any(o == base_g for o in operands):
             return self._step(offset, "writeback-overlap")
         base_virtual = base_g in VIRTUAL
-        virtual_operands = [o for o in operands if o in VIRTUAL]
-        if pair and base_virtual and virtual_operands and wb_mode != "none":
-            return self._step(offset, "pair-virtual-writeback")
-        if pair and len(virtual_operands) == 2 and virtual_operands[0] == \
-                virtual_operands[1]:
-            return self._step(offset, "pair-same-virtual")
         # ---- the effective address, in a host register
         census_start = len(asm._w)
         if literal is not None:
