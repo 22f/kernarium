@@ -40,6 +40,17 @@ uml_add_tooling_test(
     LABELS android;audit
     TIMEOUT 300)
 
+# TalkBack, eSpeak NG and libsonic are pinned in the metadata and in the
+# dependency manifest alike, and a checkout is accepted only at its pin and
+# its series' tree.
+uml_add_tooling_test(
+    NAME lineage24-accessibility-source-contract
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_accessibility_source_contract.py
+        --source-root ${PROJECT_SOURCE_DIR}
+    LABELS android;audit
+    TIMEOUT 120)
+
 uml_add_tooling_test(
     NAME lineage24-mesa-venus-port-generator
     COMMAND ${Python3_EXECUTABLE} -B
@@ -82,17 +93,17 @@ uml_add_tooling_test(
     LABELS android;audit
     TIMEOUT 60)
 
-# The accessibility artifact is staged only when its files match its
-# description, as the filegroups the product imports.
+# The TalkBack the image builds is the package Andarium's screen-reader switch
+# names, installed where the target-files verifier requires it.
 uml_add_tooling_test(
-    NAME lineage24-accessibility-artifact
+    NAME lineage24-accessibility-package
     COMMAND ${Python3_EXECUTABLE} -B
-        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_stage_accessibility_artifact.py
-    LABELS android
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_accessibility_package.py
+    LABELS android;audit
     TIMEOUT 60)
 
-# The accessibility applications' licence modules name what each APK holds, for
-# the image's NOTICE, with the text of every copyleft kind they name.
+# The licence modules of the series that build TalkBack and eSpeak NG name what
+# each holds, for the image's NOTICE, with the text of every copyleft kind.
 uml_add_tooling_test(
     NAME lineage24-accessibility-licenses
     COMMAND ${Python3_EXECUTABLE} -B
@@ -297,6 +308,18 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_video_suspend_runner.py
     LABELS android
     TIMEOUT 30)
+
+# The start_guest of the thermal, keyboard and mouse, gamepad, camera, Wi-Fi
+# network and orientation runners (the compass and old-application runners
+# start through the orientation runner's) against a stand-in emulator and an
+# adb that does nothing: a start that fails or is interrupted stops the
+# emulator it launched, and a guest that booted is returned running.
+uml_add_tooling_test(
+    NAME android17-runner-start-failure
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_runner_start_failure.py
+    LABELS android
+    TIMEOUT 180)
 
 # The gamepad runner without a guest: the host's end of the wire against the
 # golden frames and the C++ header, the controller families against the

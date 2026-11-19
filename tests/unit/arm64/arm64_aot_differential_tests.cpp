@@ -1858,7 +1858,11 @@ struct ForeignWriter final {
 	ForeignWriter(const ForeignWriter &) = delete;
 	ForeignWriter &operator=(const ForeignWriter &) = delete;
 
-	enum class Route { store_and_synchronize, kernel_write };
+	/* `kernel_write` names the address written (an AArch32 cacheflush);
+	 * `kernel_write_frame` names the frame the kernel holds, as a ptrace or
+	 * process_vm_writev() store does. */
+	enum class Route { store_and_synchronize, kernel_write,
+		kernel_write_frame };
 
 	/* The page of `image` is stored, and the change published by `route`. */
 	void change(const LibraryImage &image, Route route)
@@ -1869,6 +1873,10 @@ struct ForeignWriter final {
 			require(darwin_uml_static_vm_activate(generation) == 0);
 			std::atomic_thread_fence(std::memory_order_seq_cst);
 			require(darwin_uml_static_vm_synchronize_code(view) == 0);
+		} else if (route == Route::kernel_write_frame) {
+			require(darwin_uml_static_vm_invalidate_code_frame(generation,
+				view, page_bytes, frame.backing.descriptor(),
+				page_offset) == 0);
 		} else {
 			require(darwin_uml_static_vm_invalidate_code_generation(
 				generation, view, page_bytes) == 0);
@@ -1890,7 +1898,8 @@ struct ForeignWriter final {
  * code compared by hashing it, and a page it was told by the table of
  * verdicts is the same (which fetches nothing of its own beyond the
  * registration), each for the guest's store with its code synchronization
- * and for the kernel's write.
+ * and for the kernel's write, which names the address written or the frame
+ * the kernel holds.
  *
  * The same rows run with the writer's view in the executing generation
  * itself: a generation that holds the frame is told of a change made
@@ -1974,19 +1983,27 @@ void another_generations_change_reaches_native_code(
 	using View = ForeignWriter::View;
 	std::fprintf(stderr, "foreign and own-generation changes: ");
 	/* The first five arms write through a view of another generation, the
-	 * last five through a view of the executing guest's own. */
-	for (const auto arm_of_ten : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}) {
-		const bool own_generation = arm_of_ten >= 5;
-		const auto arm = arm_of_ten % 5;
+	 * next five through a view of the executing guest's own; the last six
+	 * are the kernel's writes of those that name the frame they hold, three
+	 * for each. */
+	for (const auto arm_of_sixteen : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+		     12, 13, 14, 15}) {
+		const bool named = arm_of_sixteen >= 10;
+		const bool own_generation = named ? arm_of_sixteen >= 13 :
+			arm_of_sixteen >= 5;
+		const auto arm = named ? std::array{1, 3, 4}[arm_of_sixteen % 3] :
+			arm_of_sixteen % 5;
 		const auto writer_generation = [&](const SharedGuest &g) {
 			return own_generation ? g.env.generation : generation++;
 		};
-		const auto route = arm % 2 == 0 && arm < 4 ?
+		const auto route = named ? Route::kernel_write_frame :
+			arm % 2 == 0 && arm < 4 ?
 			Route::store_and_synchronize : Route::kernel_write;
 		const auto view_kind = arm == 2 || arm == 3 ? View::executable :
 			arm == 4 ? View::unmapped : View::cannot_execute;
 		const std::string name = std::string{own_generation ? "own " : ""} +
-			std::string{route == Route::kernel_write ?
+			std::string{route == Route::kernel_write_frame ?
+			"named kernel write" : route == Route::kernel_write ?
 			"kernel write" : "store and synchronization"} + (
 			view_kind == View::executable ? " through an executable view" :
 			view_kind == View::unmapped ? " through a view nothing maps" :

@@ -98,14 +98,14 @@ struct RootView: View {
     @Environment(AppModel.self) private var model
     let entry: AppEntry
 
-    /// What VoiceOver says as a run begins; other screens speak for
-    /// themselves from their first element.
+    /// What VoiceOver is told as a run begins (`AppModel.announceRunStart`);
+    /// other screens speak for themselves from their first element.
     static func spoken(_ phase: Phase) -> String? {
         switch phase {
         case .running(.normal):
             String(localized: "Android is running. The side keys on the screen edge have Back, Home and Settings.")
         case .running(.recovery):
-            String(localized: "Recovery is running. The side keys\u{2019} volume keys move, and Power chooses.")
+            String(localized: "Recovery is running. The side keys have Up and Down to move, and Power to choose.")
         case .home, .booting, .failed:
             nil
         }
@@ -157,7 +157,7 @@ struct RootView: View {
         // A new screen replaces the old one under VoiceOver's cursor: it
         // starts again at the top, and hears what the run now is.
         .onChange(of: model.phase) { _, phase in
-            VoiceOver.screenChanged(Self.spoken(phase))
+            model.announceRunStart(phase)
         }
         .animation(.easeInOut(duration: 0.2), value: model.busy != nil)
         .animation(.easeInOut(duration: 0.2), value: model.spacePause != nil)

@@ -22,8 +22,8 @@ systems and DAX never carry the bit. A run of PTEs sent as one host call
 is keyed by its protection, so a run never mixes the two kinds.
 
 The bridge keeps its declarations and gains a meaning for bit 1 of
-guest_code, so the ABI version is 27 and the fingerprint is unchanged.
-A host that ignores the bit stays correct.
+guest_code, so the ABI version is 29 (the topics before it end at 28) and
+the fingerprint is unchanged. A host that ignores the bit stays correct.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
@@ -46,7 +46,7 @@ index fad1abac06375c29246c39c7e0d22b714a0a38ee..8d650259a53c4ac2976c7a0c9b5fac23
 +	DEFINE(UM_PROT_GUEST_IMMUTABLE, 32);
  }
 diff --git a/arch/um/kernel/tlb.c b/arch/um/kernel/tlb.c
-index 7ce5ae0fe9820ab0e84bdfab11d201634b1bd0d5..32e48c448287038a11e8481ecc83e34a05fbad01 100644
+index 4b3b6019b6650d789f8f339311f3b874e799383c..d0a1b2d9e9680ef987e8635138e76b6ac119e6fc 100644
 --- a/arch/um/kernel/tlb.c
 +++ b/arch/um/kernel/tlb.c
 @@ -3,8 +3,11 @@
@@ -259,20 +259,20 @@ index 66322482ae2fc166561d4fd0bc3f3651d3a7e76c..7733cd06d22a11c0ed81004a43c6e6e7
  }
  
 diff --git a/arch/um/os-Darwin/uml_darwin_abi_identity.h b/arch/um/os-Darwin/uml_darwin_abi_identity.h
-index f9e50b7ee00cb39e57bae199a6980c02b45c8ad6..a703692f1d8ce18e7912fc4a16538e533fdd5d2c 100644
+index e6a4ad31b7cfb3c1c9f4c51a055aa65d74712798..1101f7902ea4f8b0fa476b2fa4ecd36b71d87cbf 100644
 --- a/arch/um/os-Darwin/uml_darwin_abi_identity.h
 +++ b/arch/um/os-Darwin/uml_darwin_abi_identity.h
 @@ -3,7 +3,7 @@
  #ifndef UML_DARWIN_ABI_IDENTITY_H
  #define UML_DARWIN_ABI_IDENTITY_H
  
--#define DARWIN_UML_ABI_VERSION 26U
-+#define DARWIN_UML_ABI_VERSION 27U
- #define DARWIN_UML_ABI_FINGERPRINT 0x1d7ce579d497fc37ULL
+-#define DARWIN_UML_ABI_VERSION 28U
++#define DARWIN_UML_ABI_VERSION 29U
+ #define DARWIN_UML_ABI_FINGERPRINT 0x3d09b8eeee7ea3c2ULL
  
  #endif
 diff --git a/arch/um/os-Darwin/uml_darwin_memory.h b/arch/um/os-Darwin/uml_darwin_memory.h
-index 0a955f3eb4b7ce9f02b7c6f32ad22a54b6f3e46e..a006b184a647b2028155c622de031bbd945f1d3c 100644
+index cb7f8f8ab934a29447e8227225373fd62ded07ab..d10cbcc4e291cd0882bac98e9d0e9043ec6dc839 100644
 --- a/arch/um/os-Darwin/uml_darwin_memory.h
 +++ b/arch/um/os-Darwin/uml_darwin_memory.h
 @@ -6,6 +6,12 @@

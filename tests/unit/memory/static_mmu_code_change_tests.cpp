@@ -778,6 +778,81 @@ void test_a_kernel_write_to_a_page_nobody_maps_moves_every_epoch()
 	require(darwin_uml_static_vm_destroy(writer) == 0);
 }
 
+/* The kernel's write that names the frame it holds
+ * (darwin_uml_vm_invalidate_code_frame) moves that frame's stamp, version and
+ * epoch, as a write that names an address does: through the writer's view of
+ * the frame whether or not it can execute, and, where the writer maps another
+ * frame at the address by now, through the frame's record, which exists where
+ * some mapping executes the frame. A frame that nothing maps executable has
+ * no record to move, and the write makes none. A write that cannot name its
+ * frame (a negative descriptor) moves no record and every epoch. */
+void test_a_named_kernel_write_moves_the_stamp_of_its_frame()
+{
+	namespace testing = uml::memory::testing;
+	constexpr unsigned long reader = 521, writer = 522;
+	constexpr unsigned long base = 0x200'0000, view = 0x210'0000;
+	ScratchBacking backing{backing_name, 2 * page};
+	map(reader, base, backing, 0, 1, rx, 3);
+	map(writer, view, backing, 0, 2, rw, 0);
+	require(darwin_uml_static_vm_activate(reader) == 0);
+	void *handle = nullptr;
+	darwin_uml_static_code_page_stamp before{}, after{};
+	require(darwin_uml_static_vm_code_page(reader, base, &handle, &before) ==
+		DARWIN_UML_STATIC_TRANSLATED);
+
+	/* The writer's view of the frame cannot execute. */
+	require(darwin_uml_static_vm_invalidate_code_frame(writer, view, 4,
+		backing.descriptor(), 0) == 0);
+	require(darwin_uml_static_vm_code_page_stamp(handle, &after) == 0);
+	require(after.identity == before.identity &&
+		after.version == before.version + 1 &&
+		after.epoch == before.epoch + 1,
+		"a named write through a view that cannot execute left the stamp "
+		"of its frame where it was");
+
+	/* The writer maps the other frame at the address by now: the write
+	 * names the first, which the writer does not map. */
+	unmap(writer, view, 2);
+	map(writer, view, backing, page, 1, rw, 0);
+	require(darwin_uml_static_vm_invalidate_code_frame(writer, view, 4,
+		backing.descriptor(), 0) == 0);
+	require(darwin_uml_static_vm_code_page_stamp(handle, &after) == 0);
+	require(after.version == before.version + 2 &&
+		after.epoch == before.epoch + 2,
+		"a named write for a frame the writer no longer maps left its "
+		"epoch where it was");
+
+	/* The frame named is the second, which nothing maps as code: no stamp
+	 * moves and no record is made. */
+	testing::reset_allocation_attempt_counts();
+	require(darwin_uml_static_vm_invalidate_code_frame(writer, view, 4,
+		backing.descriptor(), page) == 0);
+	require(darwin_uml_static_vm_invalidate_code_frame(writer, view + page,
+		4, backing.descriptor(), page) == 0);
+	require(testing::allocation_attempt_count(
+		testing::AllocationSite::records) == 0 &&
+		testing::allocation_attempt_count(
+		testing::AllocationSite::code_record) == 0,
+		"a named write to a frame no executable mapping holds made a record");
+	require(darwin_uml_static_vm_code_page_stamp(handle, &after) == 0);
+	require(after.version == before.version + 2 &&
+		after.epoch == before.epoch + 2,
+		"a write to another frame moved the stamp of this one");
+
+	/* A frame Linux cannot name moves the epoch of every page and no
+	 * version. */
+	require(darwin_uml_static_vm_invalidate_code_frame(writer, view, 4, -1,
+		0) == 0);
+	require(darwin_uml_static_vm_code_page_stamp(handle, &after) == 0);
+	require(after.identity == before.identity &&
+		after.version == before.version + 2 &&
+		after.epoch != before.epoch + 2 &&
+		(after.flags & DARWIN_UML_STATIC_STAMP_NEVER_SHARE) == 0,
+		"a write that named no frame left the epochs where they were");
+	require(darwin_uml_static_vm_destroy(reader) == 0);
+	require(darwin_uml_static_vm_destroy(writer) == 0);
+}
+
 /* The count of publications that name no frame rides in the high bits of
  * every reported epoch, in a field of its own. At its limit the field would
  * wrap to the value it had before any such write, so a stamp reports
@@ -967,6 +1042,7 @@ int main()
 	test_a_stamp_carries_the_epoch_and_the_mapping_fact();
 	test_a_publication_through_a_view_that_cannot_execute_moves_the_stamp();
 	test_a_kernel_write_to_a_page_nobody_maps_moves_every_epoch();
+	test_a_named_kernel_write_moves_the_stamp_of_its_frame();
 	test_the_count_of_unnamed_publications_fails_closed_at_its_limit();
 	test_a_kernel_write_publishes_once_x86_code_may_run();
 	/* Every generation of every row is gone: no record counts a mapping. */

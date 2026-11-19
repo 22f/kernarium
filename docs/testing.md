@@ -418,7 +418,8 @@ mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
-FEEDBACK_ADDRESS=feedback@example.com REVIEW_ID=id0000000000 FOLLOW_X_HANDLE=example_handle
+FEEDBACK_ADDRESS=feedback@example.com REVIEW_ID=id0000000000 STORE_LINK_ID=id0000000000
+FOLLOW_X_HANDLE=example_handle
 TIP_LITE=com.example.andarium.tip.lite TIP_PRO=com.example.andarium.tip.pro
 TIP_MAX=com.example.andarium.tip.max TIP_ULTRA=com.example.andarium.tip.ultra
 SHEET_DEVELOPER_NAME=example SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle
@@ -456,7 +457,9 @@ StoreKit's test session over `AndariumTests/TipJar.storekit`, example
 identifiers only, never the App Store), and `ReviewScreenTests`,
 `ReviewAskFlowTests` and `ReviewAskStoreTests` `REVIEW_ID`
 ([Review on the App Store](../Andarium/README.md#review-on-the-app-store); the
-system's rating prompt is never asked for). `HomeMenuTests` (Home's toolbar
+system's rating prompt is never asked for), and `StoreNoticeTests` `STORE_LINK_ID`
+([App Store notice](../Andarium/README.md#app-store-notice); the system's `open`
+is replaced, so no address opens). `HomeMenuTests` (Home's toolbar
 menu) exist with any of Send feedback, Review and Buy me tokens, and
 `HomePlainInfoTests` (the plain Info button) only with none
 ([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
@@ -586,10 +589,19 @@ so these tests drive the interface and read no speech. The hosted
 (and fail after a partial write): overlapping reads and changes, an operation
 that the session's end cancels, or that answers after it, the card, the
 display's direct touch, the loop that reads, and what VoiceOver is told (once
-per event, with the way back); a wait in them fails where what it waited for did
-not happen. `ScreenReaderAdapterTests` run the adapter over a shell that answers
-as told, and `ScreenReaderShellTests` in `andarium-core` run the commands in a
-real shell with fake `am`, `pm` and `settings` tools that keep a store per user.
+per event, with the way back; the run start's sentence at high priority, with
+the card and the display's focus waiting for its end, or for the bound; the
+news that the screen reader is on at high priority, said where something covers
+the display or after the person turned it on, and left to the display's own
+words where the display takes the focus at a start; the display with no value
+until Android has been read); a wait in them fails where what it waited
+for did not happen. `GuestDisplayAccessibilityTests` read the display's
+accessibility structure: one element with the screen reader off, and with it on
+a container of one direct-touch element that carries the words, covers the
+display and follows its layout. `ScreenReaderAdapterTests` run the adapter over
+a shell that answers as told, and `ScreenReaderShellTests` in `andarium-core`
+run the commands in a real shell with fake `am`, `pm` and `settings` tools that
+keep a store per user.
 
 The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
 `andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.
@@ -641,6 +653,10 @@ rejects the forbidden terms of each language and a token amount in the
 `TipJar` table, and requires the statement that a tip is voluntary, one-time
 and the features free; the bundle check also covers the developer header's
 keys and artwork),
+the App Store notice's build conditions (`andarium-store-link-configuration`: the
+resolved build settings of each configuration build it into TestFlight alone, and
+`AndariumCore`'s `StoreLinkTests` hold its address, its dismissal record and its
+visibility rule),
 document pickers' build conditions (`andarium-document-pickers`: the App Store
 configuration opens files in place, every other presents the copy-mode picker,
 and an in-place importer anywhere else is in an App Store branch or a named
@@ -795,7 +811,7 @@ blocker in every one of them.
   a shootdown by another thread while rewritten code loops, and another
   address space of the guest that changes the bytes of a frame whose page
   rewritten code has run, by a store and code synchronization and by the
-  kernel's write. The runs use the
+  kernel's write, which names the address or the frame it holds. The runs use the
   product's code layout; `UML_AOT_COUNT_RETIRED=ON` rewrites the libraries to
   count each instruction an entry runs, which checks the budget's bound
   exactly (`arm64-aot-tools` builds that layout on the generated library in
@@ -1308,7 +1324,12 @@ confirmed carrying before a restart or suspend; crashes and ANRs of
 NetworkStack, SystemUI and Settings, and illegal instructions, are read from
 the whole stream and fail the run, in the section whose window holds them or in
 none.
-The network joins again after a suspend and after a restart, and the boot script
+A suspend keeps the station: the network after the wake is the one before it,
+the guest's log shows no disconnect, a request a second after the wake succeeds
+and the connections the host holds into the guest carry data, also after Wi-Fi
+was turned off and on and through a stay with the emulator stopped; a suspend
+that lands inside the station's connect delay ends with a working network and a
+quiet guest console. The network joins again after a restart, and the boot script
 runs without SELinux denials; a joined network keeps its metered and
 Auto-connect settings, a forgotten one stays forgotten and Wi-Fi that is off
 stays off. A guest stopped when the Wi-Fi service lists the network, or when

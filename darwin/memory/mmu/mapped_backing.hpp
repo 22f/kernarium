@@ -81,7 +81,8 @@ public:
 	[[nodiscard]] static bool load_code_page_stamp(
 		const void *handle, RecordStamp &stamp) noexcept;
 	/* A publication that names no frame, to every generation: a kernel
-	 * write whose target page its address space does not map. Moves the
+	 * write whose target page its address space does not map, or whose
+	 * frame Linux cannot name. Moves the
 	 * epoch of every page at once, for good: the count stops at its limit,
 	 * where every stamp reports never-share. */
 	static void note_unnamed_publication() noexcept;

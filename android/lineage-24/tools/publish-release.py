@@ -289,16 +289,6 @@ def main() -> None:
         str(outer_root / "kernel/common/abi/identity.env"),
     ])
 
-    # The accessibility artifact the build staged is the accepted one, built
-    # from this tree's pins, series, archives, builder and toolchain.
-    accessibility_stager = android_root / "tools/stage-accessibility-artifact.py"
-    run([
-        sys.executable, "-B", str(accessibility_stager),
-        "--repo-root", str(outer_root),
-        "--artifact", str(aosp_source / "vendor/kernarium/accessibility"),
-        "--check",
-    ])
-
     run([
         str(android_root / "tools/verify-aosp-patches.py"),
         "--android-root",
@@ -332,14 +322,6 @@ def main() -> None:
         temporary_parent=signing_work,
     )
     run(["unzip", "-q", str(signed_archive), "-d", str(signing_work / "signed-target-files")])
-    # Signing rewrites the APKs' signatures and nothing else: the signed
-    # target files carry the accepted accessibility artifact's APKs.
-    run([
-        sys.executable, "-B", str(accessibility_stager),
-        "--repo-root", str(outer_root),
-        "--artifact", str(aosp_source / "vendor/kernarium/accessibility"),
-        "--check", "--target-files", str(signing_work / "signed-target-files"),
-    ])
     # Re-signing must keep the precompiled first-boot artifacts valid.
     run([
         sys.executable, "-B", str(android_root / "tools/precompile-first-boot-apps.py"),

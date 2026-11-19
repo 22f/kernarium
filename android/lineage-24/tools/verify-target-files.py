@@ -18,6 +18,7 @@ import zipfile
 import zlib
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -1886,13 +1887,54 @@ def check_easter_egg(infos: dict[str, zipfile.ZipInfo]) -> None:
         )
 
 
-# TalkBack and eSpeak NG, the accessibility artifact's APKs: Andarium's Settings
-# turns TalkBack on and off, and eSpeak NG is the only speech engine it can speak
-# with (overlay/accessibility/Android.bp).
+# TalkBack and eSpeak NG, which the image builds from source (external/talkback
+# and external/espeak-ng): Andarium's Settings turns TalkBack on and off, and
+# eSpeak NG is the only speech engine it can speak with.
 ACCESSIBILITY_APKS = {
     "TalkBack": re.compile(r"PRODUCT/app/TalkBack/TalkBack\.apk"),
     "eSpeakNG": re.compile(r"PRODUCT/app/eSpeakNG/eSpeakNG\.apk"),
 }
+
+
+# TalkBack and eSpeak NG hold no network access and no Google service permission, so the built
+# APKs request only the permissions the build is known to need and every other request is refused,
+# in all three request spellings (the verifier does not enumerate what to refuse: a permission that
+# a library manifest adds or a platform release introduces is a finding). TalkBack's list is its
+# manifests' requests after the series left the network and Google ones out
+# (dependencies/patches/talkback) and the one request that androidx core's manifest adds to every
+# application that embeds it: the signature permission that guards its unexported receivers, named
+# after the installed package (the installed TalkBack declares it too, as the image's package dump
+# shows). eSpeak NG requests none. A name that is a resource reference cannot be read here, so it
+# is refused as well.
+ACCESSIBILITY_PERMISSIONS = {
+    "TalkBack": {
+        "android.permission.USE_FINGERPRINT": "fingerprint-sensor gestures",
+        "android.permission.READ_PHONE_STATE": "call state, which pauses speech during a call",
+        "android.permission.VIBRATE": "haptic feedback (the screen reader and the braille keyboard)",
+        "android.permission.WAKE_LOCK": "keeps the screen on while reading continuously",
+        "android.permission.MODIFY_AUDIO_SETTINGS": "audio levels while it speaks",
+        "android.permission.RECORD_AUDIO": "voice commands and voice input",
+        "android.permission.QUERY_ALL_PACKAGES": "the names of the installed applications",
+        "android.permission.RECEIVE_BOOT_COMPLETED": "starts with the system",
+        "android.permission.FOREGROUND_SERVICE": "its foreground notification",
+        "android.permission.POST_NOTIFICATIONS": "its notifications on Android 13 and later",
+        "android.permission.BLUETOOTH_CONNECT": "connects to a Bluetooth braille display",
+        "android.permission.BLUETOOTH_SCAN": "finds a Bluetooth braille display",
+        "android.permission.BLUETOOTH": "braille display up to Android 11 (maxSdkVersion 30)",
+        "android.permission.BLUETOOTH_ADMIN": "braille display up to Android 11 (maxSdkVersion 30)",
+        "android.permission.ACCESS_COARSE_LOCATION": "Bluetooth scan up to Android 11 (maxSdkVersion 30)",
+        "android.permission.ACCESS_FINE_LOCATION": "Bluetooth scan up to Android 11 (maxSdkVersion 30)",
+        "com.android.talkback.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION": (
+            "androidx core's guard for its unexported receivers, named after the package"
+        ),
+    },
+    "eSpeakNG": {},
+}
+
+
+def accessibility_refused_permissions(module: str, requested: set[str]) -> list[str]:
+    """The requested permissions that TalkBack or eSpeak NG ("TalkBack", "eSpeakNG") may not hold."""
+    return sorted(requested - ACCESSIBILITY_PERMISSIONS[module].keys())
 
 
 def check_accessibility(infos: dict[str, zipfile.ZipInfo]) -> None:
@@ -1900,8 +1942,8 @@ def check_accessibility(infos: dict[str, zipfile.ZipInfo]) -> None:
     for module, pattern in ACCESSIBILITY_APKS.items():
         if not any(pattern.fullmatch(name) for name in infos):
             fail(
-                f"{module}.apk is missing from the image: the accessibility artifact supplies TalkBack "
-                "and eSpeak NG (build-aosp.sh --accessibility-artifact)"
+                f"{module}.apk is missing from the image: the image build supplies TalkBack "
+                "and eSpeak NG (external/talkback and external/espeak-ng)"
             )
 
 
@@ -2445,6 +2487,7 @@ ATTR_NAME = 0x01010003
 AXML_STRING_POOL = 0x0001
 AXML_START_ELEMENT = 0x0102
 AXML_RESOURCE_MAP = 0x0180
+AXML_REFERENCE_TYPE = 0x01
 AXML_STRING_TYPE = 0x03
 AXML_UTF8_POOL = 0x100
 AXML_INTEGER_TYPES = (0x10, 0x11)
@@ -2540,10 +2583,15 @@ def manifest_requested_permissions(manifest: bytes) -> set[str]:
                 for index in range(count):
                     position = body + attribute_start + index * attribute_size
                     name, raw, _, data_type, data = struct.unpack_from("<IIHxBI", manifest, position + 4)
-                    if name < len(resource_ids) and resource_ids[name] == ATTR_NAME and data_type == AXML_STRING_TYPE:
-                        if data >= len(strings):
-                            raise ValueError("a permission name outside the string pool")
-                        requested.add(strings[data])
+                    if name < len(resource_ids) and resource_ids[name] == ATTR_NAME:
+                        if data_type == AXML_STRING_TYPE:
+                            if data >= len(strings):
+                                raise ValueError("a permission name outside the string pool")
+                            requested.add(strings[data])
+                        elif data_type == AXML_REFERENCE_TYPE:
+                            # The name is a resource, which this tool does not resolve: listed
+                            # by its id, so that a check against a list of permissions refuses it.
+                            requested.add(f"@resource 0x{data:08x}")
         offset += size
     return requested
 
@@ -2620,9 +2668,10 @@ def check_application_manifests(
     for an application that requests ENTER_TRADE_IN_MODE, and the privapp allowlist's entry for
     a package that is not installed grants nothing, so the request is what the check looks for,
     in every variant (a userdebug build never enters it, but the product list is one list), in
-    every APK but the shell's (TRADE_IN_MODE_REQUESTERS). The
-    check reads every APK of the image partitions; APKs inside an APEX payload are compressed
-    EROFS and out of its reach.
+    every APK but the shell's (TRADE_IN_MODE_REQUESTERS). TalkBack and eSpeak NG request no
+    permission beyond the ones the build is known to need (ACCESSIBILITY_PERMISSIONS), in
+    every variant. The check reads every APK of the image partitions; APKs inside an APEX payload
+    are compressed EROFS and out of its reach.
     """
     for entry in sorted(infos):
         info = infos[entry]
@@ -2650,6 +2699,16 @@ def check_application_manifests(
                 "unprovisioned first boot and restart adbd twice; the product must not carry "
                 "an application that can start it (DeviceDiagnostics is excluded)"
             )
+        for module, pattern in ACCESSIBILITY_APKS.items():
+            refused = accessibility_refused_permissions(module, requested) if pattern.fullmatch(entry) else []
+            if refused:
+                fail(
+                    f"{entry} requests {', '.join(refused)}: TalkBack and eSpeak NG hold no "
+                    "network access and no Google service permission, and request only the "
+                    "permissions the build is known to need (ACCESSIBILITY_PERMISSIONS; the "
+                    "TalkBack series, dependencies/patches/talkback, leaves the others out of "
+                    "the manifests)"
+                )
 
 
 # The AOSP example HALs the product keeps, each packaged as the vendor APEX that Cuttlefish
@@ -5051,12 +5110,13 @@ def property_label(name: str, contexts: list[str]) -> str | None:
     return best[1] if best else None
 
 
-@functools.lru_cache(maxsize=8)
+@functools.lru_cache(maxsize=16)
 def cil_attribute_sets(
-    policy: bytes,
+    policy: bytes, exact: bool = False
 ) -> tuple[tuple[tuple[str, frozenset[str]], ...], tuple[tuple[str, list[object]], ...]]:
-    """The attributes a policy defines, without version suffixes: those whose set is a list of
-    names, with the names, and those whose set is an expression, as nested lists of names."""
+    """The attributes a policy defines, without version suffixes unless |exact|: those whose set is a list
+    of names, with the names, and those whose set is an expression, as nested lists of names."""
+    version = (lambda name: name) if exact else (lambda name: CIL_PLATFORM_VERSION_SUFFIX.sub("", name))
     lists = []
     expressions = []
     for match in CIL_TYPE_ATTRIBUTE_SET.finditer(policy):
@@ -5065,13 +5125,13 @@ def cil_attribute_sets(
             if token == "(":
                 stack.append([])
             elif token != ")":
-                stack[-1].append(CIL_PLATFORM_VERSION_SUFFIX.sub("", token))
+                stack[-1].append(version(token))
             elif len(stack) > 1:
                 closed = stack.pop()
                 stack[-1].append(closed)
         if len(stack) != 1 or len(stack[0]) != 1 or not isinstance(stack[0][0], list):
             continue
-        attribute = CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode())
+        attribute = version(match.group(1).decode())
         members = stack[0][0]
         if all(isinstance(member, str) for member in members) and not (
             members and members[0] in CIL_SET_OPERATORS
@@ -5196,6 +5256,16 @@ VSOCK_TYPES_WITHOUT_LISTEN = frozenset({
     "aisealhostservice", "hal_graphics_composer_default", "libcuttlefish_rild", "storageproxyd_system",
     "tombstone_transmit",
 })
+# The one grant on the service's sockets that is not the service's: the platform's own rule
+# (allow dumpstate domain (vsock_socket (getattr))), the vsock instance of its getattr rule for every socket
+# class. Over the attribute domain it reaches the service as it reaches every domain. getattr is the permission
+# to stat a socket and to read its local and peer address from a descriptor already held: no read, write,
+# connect, bind, listen or accept, and no data. Only that rule is accepted, as the policy writes it (the source
+# and target tokens, not the types a version suffix maps them to), and only from the platform's policy.
+SMS_PLATFORM_VSOCK_GRANT = (b"dumpstate", b"domain", frozenset({"getattr"}))
+# The ordinary application domains: what the service holds beyond the reviewed list is only what every one of
+# them holds.
+SMS_ORDINARY_APP_DOMAINS = frozenset({"untrusted_app", "platform_app", "priv_app", "system_app"})
 # The domains that manage every application's data directories, and so reach the service's: the platform's own
 # rules through the attributes of an application data type. The first image build with the service shows the
 # set; a holder that is not named here fails the check until someone has looked at it.
@@ -5216,12 +5286,14 @@ SEAPP_CONTEXT_FILES = (
 
 
 class CilSets:
-    """The members of the types and attributes of a set of policies, with every set expression expanded."""
+    """The members of the types and attributes of a set of policies, with every set expression expanded.
+    The names have their platform version suffixes removed, except with |exact|: then a type that carries
+    one is its own type, and a compatibility mapping gives membership only where a set lists it."""
 
-    def __init__(self, policies: tuple[bytes, ...]) -> None:
+    def __init__(self, policies: tuple[bytes, ...], exact: bool = False) -> None:
         self.definitions: dict[str, list[object]] = {}
         for policy in policies:
-            lists, expressions = cil_attribute_sets(policy)
+            lists, expressions = cil_attribute_sets(policy, exact)
             for attribute, members in lists:
                 self.definitions.setdefault(attribute, []).append(sorted(members))
             for attribute, members in expressions:
@@ -5340,22 +5412,55 @@ def seapp_context_for(entries: list[dict[str, str]], user: str, seinfo: str, nam
     return best[2] if best else None
 
 
+class SmsRule(NamedTuple):
+    """An allow rule as the text-message check reads it: the types its source and target stand for (a target of
+    None is the rule's own domain), its permissions, the source and target as the policy writes them, and
+    whether it stands in the platform's policy."""
+
+    sources: frozenset[str]
+    targets: frozenset[str] | None
+    permissions: frozenset[str]
+    source: bytes
+    target: bytes
+    from_platform: bool
+
+
 def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_contexts: str) -> None:
     """Only the host can cause a text message to be delivered: of the types that may create, bind or listen
     on a vsock socket exactly the reviewed ones and the service's may, whatever attribute grants it; nothing
-    else holds the service's sockets or its data; the service finds only the services it needs; its
+    else holds the service's sockets or its data, except the platform's own getattr for dumpstate
+    (SMS_PLATFORM_VSOCK_GRANT); the service holds nothing beyond what every ordinary application domain holds
+    (SMS_ORDINARY_APP_DOMAINS) and the reviewed list (it finds only the services it needs); its
     package selects its domain and no other package does; and the shell cannot move adbd's own listener.
-    Every grant counts, through attributes and set expressions."""
+    Every grant counts, through attributes and set expressions. The first policy is the platform's."""
     sets = CilSets(policies)
     if not sets.members("appdomain") or not sets.members("coredomain"):
         fail("the policy lists no type for appdomain or coredomain: the check could not tell who runs applications")
-    vsock = cil_domain_rules(policies, sets, "vsock_socket")
+
+    def rules_of(object_class: str) -> list[SmsRule]:
+        """The allow rules of a class, in the order of the policies, the platform's first."""
+        wanted = object_class.encode()
+        return [
+            SmsRule(
+                sets.members(cil_type_name(source)),
+                None if target == b"self" else sets.members(cil_type_name(target)),
+                frozenset(permission.decode() for permission in permissions),
+                source,
+                target,
+                index == 0,
+            )
+            for index, policy in enumerate(policies)
+            for source, target, rule_class, permissions in cil_rules(policy, CIL_ALLOW_RULE)
+            if rule_class == wanted
+        ]
+
+    vsock = rules_of("vsock_socket")
 
     def holders(wanted: set[str]) -> set[str]:
         found: set[str] = set()
-        for sources, targets, permissions in vsock:
-            if wanted & permissions:
-                found |= sources if targets is None else sources & targets
+        for rule in vsock:
+            if wanted & rule.permissions:
+                found |= rule.sources if rule.targets is None else rule.sources & rule.targets
         return found
 
     creators = holders({"create", "bind", "listen"})
@@ -5377,36 +5482,45 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
     if creators & shut_out:
         fail(f"{sorted(creators & shut_out)} may create, bind or listen on a vsock socket")
 
-    everything = (sets.members("appdomain"), sets.members("coredomain"), sets.universe)
+    exact = CilSets(policies, exact=True)
 
-    def specific(sources: frozenset[str]) -> bool:
-        """A rule for the service alone, or for a group of its own: not one that every application or
-        core domain has."""
-        return SMS_DOMAIN in sources and not any(sources >= group for group in everything)
+    def specific(rule: SmsRule) -> bool:
+        """The service's own rule, not one it inherits. The service inherits a rule when the platform's policy
+        gives it to every ordinary application domain through that one rule, one source set holding all four
+        and the service, each by its own name (a type that differs from one of them by a version suffix is
+        another type); a rule that names the service without all four, and every such rule of another
+        policy file (ours), is its own and must be on the reviewed list."""
+        return SMS_DOMAIN in rule.sources and not (
+            rule.from_platform and exact.members(rule.source.decode()) >= SMS_ORDINARY_APP_DOMAINS | {SMS_DOMAIN}
+        )
 
-    # The service's sockets: nothing but the service holds a permission on them, and what the service holds
-    # on the sockets of other types is only what every application domain holds.
-    for sources, targets, permissions in vsock:
-        if targets is not None and SMS_DOMAIN in targets and sources - {SMS_DOMAIN}:
-            fail(f"{sorted(sources - {SMS_DOMAIN})} hold {sorted(permissions)} on a vsock socket of {SMS_DOMAIN}")
-        if targets is not None and SMS_DOMAIN not in targets and specific(sources):
-            fail(f"{SMS_DOMAIN} holds {sorted(permissions)} on the vsock sockets of {sorted(targets)}: only what "
-                 "every application domain holds is allowed")
+    # The service's sockets: nothing but the service holds a permission on them (the platform's grant to
+    # dumpstate apart), and what the service holds on the sockets of other types is only what every ordinary
+    # application domain holds.
+    for rule in vsock:
+        if rule.from_platform and (rule.source, rule.target, rule.permissions) == SMS_PLATFORM_VSOCK_GRANT:
+            continue
+        if rule.targets is not None and SMS_DOMAIN in rule.targets and rule.sources - {SMS_DOMAIN}:
+            fail(f"{sorted(rule.sources - {SMS_DOMAIN})} hold {sorted(rule.permissions)} on a vsock socket of "
+                 f"{SMS_DOMAIN}")
+        if rule.targets is not None and rule.targets - {SMS_DOMAIN} and specific(rule):
+            fail(f"{SMS_DOMAIN} holds {sorted(rule.permissions)} on the vsock sockets of "
+                 f"{sorted(rule.targets - {SMS_DOMAIN})}: only what every ordinary application domain holds is allowed")
 
     attributes = cil_types_and_attributes(policies, SMS_DOMAIN)
     for attribute in ("coredomain", "appdomain", "unconstrained_vsock_violators"):
         if attribute not in attributes:
             fail(f"{SMS_DOMAIN} is not in {attribute}")
     found: set[str] = set()
-    for sources, targets, permissions in cil_domain_rules(policies, sets, "service_manager"):
-        if targets is not None and "find" in permissions and specific(sources):
-            found |= targets
+    for rule in rules_of("service_manager"):
+        if rule.targets is not None and "find" in rule.permissions and specific(rule):
+            found |= rule.targets
     if found - SMS_SERVICES:
         fail(f"{SMS_DOMAIN} may find {sorted(found - SMS_SERVICES)}; it needs only {sorted(SMS_SERVICES)}")
     for object_class in ("file", "dir", "lnk_file", "sock_file", "fifo_file", "chr_file", "blk_file"):
-        for sources, targets, permissions in cil_domain_rules(policies, sets, object_class):
-            if targets is not None and "system_app_data_file" in targets and specific(sources):
-                fail(f"{SMS_DOMAIN} has a rule on system_app_data_file ({sorted(permissions)}): "
+        for rule in rules_of(object_class):
+            if rule.targets is not None and "system_app_data_file" in rule.targets and specific(rule):
+                fail(f"{SMS_DOMAIN} has a rule on system_app_data_file ({sorted(rule.permissions)}): "
                      "its data has a type of its own")
 
     # Who may touch the service's data, through any attribute it carries.

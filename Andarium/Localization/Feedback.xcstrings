@@ -513,7 +513,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "アーカイブ、表示されません"
+            "value" : "アーカイブ（表示されません）"
           }
         },
         "zh-Hans" : {
@@ -743,7 +743,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "破損しています、表示されません"
+            "value" : "破損しているため表示されません"
           }
         },
         "zh-Hans" : {
@@ -916,7 +916,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "空"
+            "value" : "空白"
           }
         }
       }
@@ -927,7 +927,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "暗号化されています、表示されません"
+            "value" : "暗号化されているため表示されません"
           }
         },
         "zh-Hans" : {
@@ -1410,7 +1410,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "非対応の形式です、表示されません"
+            "value" : "非対応の形式のため表示されません"
           }
         },
         "zh-Hans" : {
@@ -1433,7 +1433,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "テキストではありません、表示されません"
+            "value" : "テキストではないため表示されません"
           }
         },
         "zh-Hans" : {
@@ -1502,7 +1502,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "最初の%lld件のファイルのみ表示しています。"
+            "value" : "最初の%lld個のファイルのみ表示しています。"
           }
         },
         "zh-Hans" : {
@@ -1617,7 +1617,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "画像、表示されません"
+            "value" : "画像（表示されません）"
           }
         },
         "zh-Hans" : {
@@ -2514,7 +2514,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "大きすぎます、表示されません"
+            "value" : "大きすぎるため表示されません"
           }
         },
         "zh-Hans" : {
@@ -2526,7 +2526,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "過大，不顯示"
+            "value" : "太大，不顯示"
           }
         }
       }
@@ -2681,13 +2681,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "没有错误报告，问题很可能无法得到修复。只有当你的消息不是在报告问题（例如建议或提问），或者你不想附上错误报告时，才在不附带错误报告的情况下发送。"
+            "value" : "没有错误报告，问题很可能无法得到修复。请仅在你的反馈不是报告问题（例如提出建议或提问），或你不想附上错误报告时，才不附带错误报告发送。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "沒有錯誤報告，問題很可能無法修復。只有當你的訊息不是在回報問題（例如建議或提問），或是你不想附上錯誤報告時，才在不附帶錯誤報告的情況下傳送。"
+            "value" : "沒有錯誤報告，問題很可能無法修復。請僅在你的回饋不是回報問題（例如提出建議或提問），或你不想附上錯誤報告時，才不附帶錯誤報告傳送。"
           }
         }
       }

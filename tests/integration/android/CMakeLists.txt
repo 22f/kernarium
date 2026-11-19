@@ -234,7 +234,7 @@ endif()
 # of android/lineage-24, and the validation of routes p0029 and p0033): with the
 # internet checks failing, the network stays enabled and joined, validated, and
 # shows only Android's Wi-Fi mark, also when a sign-in or block page answers the
-# probe; it joins again after a suspend and after a restart; a joined network
+# probe; a suspend keeps the station and a restart joins it again; a joined network
 # keeps its settings, a forgotten one stays forgotten and Wi-Fi that is off
 # stays off. With previous releases named, the data disk of each is booted by the
 # release under test: one that a release left with the network disabled is

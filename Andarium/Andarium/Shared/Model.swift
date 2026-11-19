@@ -461,6 +461,16 @@ final class AppModel {
     /// so a model built any other way (a test, the preview) never asks.
     @ObservationIgnored var reviewAsk: ReviewAsk?
     #endif
+    #if TESTFLIGHT_STORE_LINK
+    /// What the App Store notice asks of the build and of the system
+    /// (`StoreNoticeServices`); a test or the Simulator preview replaces it,
+    /// and the dismissal is read from the new record.
+    @ObservationIgnored var storeNoticeServices = StoreNoticeServices() {
+        didSet { storeNoticeDismissed = storeNoticeServices.record.isDismissed }
+    }
+    /// The card was put away. Info keeps its row.
+    var storeNoticeDismissed = StoreNoticeRecord().isDismissed
+    #endif
     #if FOLLOW_X
     /// The handle Follow developer on X opens, from Info.plist, which only a
     /// build that names one has; a test replaces it.
@@ -653,9 +663,21 @@ final class AppModel {
     /// Whether VoiceOver is running; a test answers for it.
     @ObservationIgnored var voiceOverRunning: @MainActor () -> Bool = { UIAccessibility.isVoiceOverRunning }
     /// What VoiceOver is told of its own accord; a test collects it.
-    @ObservationIgnored var announcer: @MainActor (_ text: String, _ queued: Bool) -> Void = {
-        VoiceOver.announce($0, queued: $1)
+    @ObservationIgnored var announcer: @MainActor (_ text: String, _ queued: Bool, _ highPriority: Bool) -> Void = {
+        VoiceOver.announce($0, queued: $1, priority: $2 ? .high : nil)
     }
+    /// Says what a run is as it begins, at high priority (VoiceOver's own
+    /// speech of the element it lands on after the screen change would cut a
+    /// queued or default announcement off), and tells whether the sentence was
+    /// spoken to its end; a test collects the words and reports the end itself.
+    @ObservationIgnored var runStartAnnouncer: @MainActor (String, @escaping @MainActor @Sendable (Bool) -> Void) -> Void = {
+        VoiceOver.announce($0, priority: .high, finished: $1)
+    }
+    /// How long the card and the display wait for that sentence's end before
+    /// they go on without it, where VoiceOver never reports one. The sentence
+    /// takes about seven seconds at VoiceOver's default rate; the bound leaves
+    /// room for slower speech and longer languages.
+    @ObservationIgnored var runStartBound: Duration = .seconds(15)
     /// The preview's mock guest screen reader, where no runtime is behind the
     /// screens; nil in the application.
     @ObservationIgnored var screenReaderStandIn: (any ScreenReaderStandIn)?
@@ -737,9 +759,9 @@ final class AppModel {
     /// What is kept of the option across launches; nil where the launch
     /// decided it.
     var heatLimitToKeep: Bool? { heatLimitDecidedByLaunch ? nil : heatLimitOn }
-    /// The thermal policy holds the device hot (iOS's serious or critical
-    /// state, the policy's hold after it included), whether or not Android is
-    /// told. Settings' footnote reads it.
+    /// The thermal policy holds the device hot (iOS's critical state, the
+    /// policy's hold after it included), whether or not Android is told.
+    /// Settings' footnote reads it.
     private(set) var deviceIsHot = false
     /// The alert that asks to turn the limit off is up, over the notice.
     private(set) var askingToTurnOffHeatLimit = false

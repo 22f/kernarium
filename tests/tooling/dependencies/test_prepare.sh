@@ -92,32 +92,6 @@ expect_failure 'archive download hash mismatch' \
 [ -z "$(find "$TEST_ROOT/rejected-archive-cache/archives" -type f -print)" ] ||
 	fail "rejected archive left a published or temporary payload"
 
-# --pin-archives is the one mode that builds online, for one product, with the
-# pinned toolchain named, and only over prepared sources; every refusal comes
-# before a download.
-mkdir -p "$TEST_ROOT/no-network-tools"
-cat >"$TEST_ROOT/no-network-tools/curl" <<'EOF_NO_CURL'
-#!/bin/sh
-: >"$UML_PIN_NETWORK_MARKER"
-exit 1
-EOF_NO_CURL
-chmod +x "$TEST_ROOT/no-network-tools/curl"
-PIN_ENV="PATH=$TEST_ROOT/no-network-tools:$PATH UML_PIN_NETWORK_MARKER=$TEST_ROOT/pin-network-marker"
-expect_diagnostic "--pin-archives is for the andarium-accessibility product" \
-	env $PIN_ENV "$PREPARE" --pin-archives "$TEST_ROOT/pinned.tsv"
-expect_diagnostic "--pin-archives requires JAVA_HOME and ANDROID_HOME" \
-	env -u JAVA_HOME -u ANDROID_HOME $PIN_ENV "$PREPARE" --product andarium-accessibility \
-		--pin-archives "$TEST_ROOT/pinned.tsv"
-expect_diagnostic "cannot be combined with other preparation modes" \
-	env JAVA_HOME=/jdk ANDROID_HOME=/sdk $PIN_ENV "$PREPARE" --product andarium-accessibility --verify \
-		--pin-archives "$TEST_ROOT/pinned.tsv"
-expect_diagnostic "the andarium-accessibility sources are not prepared" \
-	env JAVA_HOME=/jdk ANDROID_HOME=/sdk $PIN_ENV "$PREPARE" --product andarium-accessibility \
-		--root "$TEST_ROOT/no-pin-sources" --cache "$TEST_ROOT/no-pin-cache" \
-		--pin-archives "$TEST_ROOT/pinned.tsv"
-[ ! -e "$TEST_ROOT/pin-network-marker" ] && [ ! -e "$TEST_ROOT/pinned.tsv" ] ||
-	fail "a refused --pin-archives reached the network or wrote a list"
-
 CACHE="$TEST_ROOT/cache"
 METADATA="$TEST_ROOT/metadata"
 UPSTREAM="$TEST_ROOT/upstream"

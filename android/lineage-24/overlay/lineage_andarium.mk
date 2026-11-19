@@ -368,8 +368,9 @@ PRODUCT_PACKAGES_EXCLUDE += \
     sleep
 
 # TalkBack, Android's screen reader, and eSpeak NG, its voice: the image's
-# only speech engine. Both are prebuilt APKs of the accessibility artifact
-# (accessibility/Android.bp).
+# only speech engine. Both are built from source, from the pinned trees that
+# prepare-sources.sh materializes at external/talkback and external/espeak-ng
+# (third_party/accessibility).
 PRODUCT_PACKAGES += \
     TalkBack \
     eSpeakNG

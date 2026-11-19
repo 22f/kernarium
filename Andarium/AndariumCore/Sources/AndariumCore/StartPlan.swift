@@ -11,7 +11,9 @@ public enum StartBlock: Equatable, Sendable {
     /// The data uses a newer layout than this build can migrate.
     case newerDataLayout
     /// The guest's files do not match the Android in this build: another
-    /// system disk under the same release, or data nothing recorded.
+    /// system disk under the same release, data nothing recorded, or an
+    /// unsigned proof meeting data of another system (or the data a proof
+    /// created meeting another system).
     case mismatch
 }
 

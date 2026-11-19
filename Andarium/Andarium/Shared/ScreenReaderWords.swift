@@ -86,7 +86,7 @@ nonisolated enum ScreenReaderWords {
     static var displayLabel: String { String(localized: "Android screen") }
     static var displayHintDirect: String { String(localized: "Touches go to Android.") }
     static var displayHintOff: String {
-        String(localized: "Turn on Android\u{2019}s screen reader in Settings, under the side keys.")
+        String(localized: "Open Settings from the side keys to turn on Android\u{2019}s screen reader.")
     }
 
     /// What the display says of the screen reader, from the session's state.
