@@ -180,6 +180,18 @@ public final class AndroidAppStore: @unchecked Sendable {
         }
     }
 
+    /// What was listed may not be what the disk now has (a snapshot or an
+    /// update was restored): the next refresh lists again, whatever the digest.
+    public func invalidate() {
+        lock.withLock {
+            loadIfNeeded()
+            guard var catalog = catalogCache, catalog.digest != nil else { return }
+            catalog.digest = nil
+            guard (try? write(catalog, to: catalogFile)) != nil else { return }
+            catalogCache = catalog
+        }
+    }
+
     /// Android was erased or reset: its apps are none. The records stay.
     public func erase() {
         lock.withLock {

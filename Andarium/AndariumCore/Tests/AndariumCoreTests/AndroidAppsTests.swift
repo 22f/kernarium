@@ -126,6 +126,24 @@ struct AndroidAppTextTests {
 }
 
 struct AndroidAppStoreTests {
+    @Test func invalidatingMakesTheNextRefreshListAgain() async throws {
+        let directory = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AndroidAppStore(directory: directory)
+        let comet = app("com.example.comet", "Comet Hop")
+        let tool = FakeTool(.apps(AndroidAppList(apps: [comet], digest: "d1")))
+        tool.icons[comet.id] = .noIcon
+        _ = await AndroidAppRefresh.run(tool: tool, store: store, now: Date(timeIntervalSince1970: 1))
+        _ = await AndroidAppRefresh.run(tool: tool, store: store, now: Date(timeIntervalSince1970: 2))
+        #expect(tool.listAsks == 1)
+        store.invalidate()
+        #expect(store.catalog()?.digest == nil)
+        #expect(store.catalog()?.apps == [comet])
+        _ = await AndroidAppRefresh.run(tool: tool, store: store, now: Date(timeIntervalSince1970: 3))
+        #expect(tool.listAsks == 2)
+        #expect(AndroidAppStore(directory: directory).catalog()?.digest == "d1")
+    }
+
     @Test func aListingIsKeptAndReadBackByAnotherStore() throws {
         let directory = makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
