@@ -109,6 +109,12 @@ struct AppEntry {
         }
 
         let locations = GuestLocations(directory: Self.guestDirectory(instance: launch.instance))
+        #if !APP_STORE
+        // An isolated test guest keeps its own list of Android's apps, beside its disks.
+        if launch.instance != nil {
+            AndroidAppsHub.shared.configure(directory: locations.directory.appendingPathComponent("AndroidApps", isDirectory: true))
+        }
+        #endif
         let storage = TwoDiskStorage(
             locations: locations,
             release: carried?.identity ?? ReleaseIdentity(

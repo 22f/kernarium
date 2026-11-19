@@ -30,6 +30,12 @@ struct SessionPreset: Equatable {
     var settingsScroll: String?
     /// Settings opens on the Old app compatibility page (the preview).
     var oldAppsPage = false
+    /// Settings opens on the Add to Home Screen page (the preview), and on the
+    /// guide of the app with this identifier when one is stated.
+    var addToHomePage = false
+    var addToHomeGuide: String?
+    /// The text the Add to Home Screen page's search starts with (the preview).
+    var addToHomeQuery: String?
     var powerMenu = false
     var leftEdge = false
     var guestScreen: GuestScreen = .home
@@ -419,13 +425,23 @@ final class AppModel {
     /// What the snapshot driver is doing, which it sets around each
     /// operation: the controls of a screen follow `snapshotGate`.
     var snapshotActivity = SnapshotActivity() {
-        didSet { snapshots.activityChanged(from: oldValue, to: snapshotActivity) }
+        didSet {
+            snapshots.activityChanged(from: oldValue, to: snapshotActivity)
+            // A request to open an Android app that waited for it goes on.
+            if oldValue.holdsGuestFiles, !snapshotActivity.holdsGuestFiles { androidAppsHoldEnded(.snapshot) }
+        }
     }
     /// What the snapshot screens show and do (`SnapshotsModel`).
     let snapshots = SnapshotsModel()
+    /// Android's apps, the cache of them and the request to open one
+    /// (`AppModel+AndroidApps.swift`).
+    let androidApps = AndroidAppsState()
     /// Home's notice after a snapshot was restored, until the guest starts or
     /// the person puts it away.
-    var restoredSnapshot: RestoredSnapshotNotice?
+    var restoredSnapshot: RestoredSnapshotNotice? {
+        // The data is what the snapshot held: the apps may differ from the cache's list.
+        didSet { if restoredSnapshot != nil { androidApps.invalidated() } }
+    }
     /// A long task the screens wait for.
     var busy: BusyState? {
         didSet { if busy == nil { busyOverSheet = false } }
@@ -508,7 +524,10 @@ final class AppModel {
     }
     /// The guest is paused because the device is nearly out of space; the
     /// screen over the session asks what to do.
-    var spacePause: SpacePause?
+    var spacePause: SpacePause? {
+        // The pause for space that held a request to open an Android app is over.
+        didSet { if oldValue != nil, spacePause == nil { androidAppsHoldEnded(.space) } }
+    }
     var alert: AppAlert?
     /// What a Files picker's failure says, over Settings (`documentPickerFailed`).
     var documentPickerProblem: AppAlert?
@@ -936,6 +955,8 @@ final class AppModel {
         defer { restoringUpdate = false }
         do {
             try await driver.restoreUpdate()
+            // The data is what the update started from: its apps may differ.
+            androidApps.invalidated()
         } catch {
             alert = AppAlert(title: String(localized: "The virtual machine could not be restored"), message: error.localizedDescription)
         }
@@ -951,6 +972,7 @@ final class AppModel {
             textMessageNotice.reset()
             plan = .firstStart
             forgetSnapshots()
+            androidAppsErased()
             return
         }
         runBusy(
@@ -965,6 +987,7 @@ final class AppModel {
             self.smsSender.forget()
             self.textMessageNotice.reset()
             self.forgetSnapshots()
+            self.androidAppsErased()
             self.resizePreset = nil
             self.sheet = nil
             self.refreshPlan()
@@ -1660,6 +1683,10 @@ final class AppModel {
     /// configuration leaves this out.
     @ObservationIgnored
     var scriptedOldApps: (any OldAppsSource)?
+    /// Android's apps and the way to open one that a preview or a UI test's
+    /// probe session plays in place of the runtime's (`ScriptedAndroidApps`).
+    @ObservationIgnored
+    var scriptedAndroidApps: (any AndroidAppsSource)?
     /// A UI test's probe session makes the preview's bug report (`playBugReport`) though a runtime is
     /// there: its guest is none. The App Store configuration leaves this out.
     @ObservationIgnored
@@ -1701,6 +1728,8 @@ final class AppModel {
         guard !snapshotActivity.holdsGuestFiles else { return }
         switch lifecycle.start(mode, host: host, plan: plan) {
         case let .allowed(kind):
+            // A request to open an Android app that waited for this answer starts with it.
+            androidAppsPersonStarted()
             #if APP_REVIEW
             reviewAsk?.runBegan()
             #endif
@@ -1765,6 +1794,9 @@ final class AppModel {
                 guest?.usedBytes = UInt64(2.1 * Double(Limits.bytesPerGiB))
             }
         }
+        // A request to open an Android app that started this boot opens now,
+        // and the app list is brought up to date once.
+        androidAppsBootFinished(recovery: kind == .recovery)
     }
 
     func powerOff() {
@@ -1783,6 +1815,7 @@ final class AppModel {
     /// The runtime's run returned: the guest powered off, or stopped for a
     /// reason the failure screen reports.
     func runEnded(_ end: RunEnd, uptimeSeconds: Int?) {
+        androidAppsRunEnded()
         abandonOperation()
         fileBrowser?.reset()
         endAdbOverNetwork()
@@ -1827,6 +1860,7 @@ final class AppModel {
     /// Android's own Restart boots the guest again in place. ADB and the
     /// install list belong to the run that ended.
     func restart() {
+        androidAppsRunEnded()
         abandonOperation()
         fileBrowser?.reset()
         endAdbOverNetwork()
@@ -1891,6 +1925,7 @@ final class AppModel {
 
     func factoryReset() {
         lifecycle.factoryReset()
+        androidApps.invalidated()
         // Only the preview knows the data is empty; on a device the data
         // disk stays and Android sets itself up again by itself.
         if driver == nil { plan = .firstStart }

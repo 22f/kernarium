@@ -116,7 +116,7 @@ enum PermissionPrompt: Identifiable, Equatable {
 /// its run. The Simulator preview has no driver, and the model then plays the
 /// same steps against mock data.
 @MainActor
-protocol RuntimeDriver: AnyObject, OldAppsSource {
+protocol RuntimeDriver: AnyObject, OldAppsSource, AndroidAppsSource {
     func create(_ guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws -> Guest
     /// Deletes the guest and everything it stored, its choices included.
     func erase(progress: @escaping @Sendable (Double) -> Void) async throws
@@ -283,6 +283,9 @@ extension RuntimeDriver {
     func listOldApps(limit: Duration?) async -> OldAppListing { .unavailable }
     func setOldApp(_ package: String, on: Bool) async -> OldAppWrite { .failed }
     func isOldAppOpen(_ package: String) async -> Bool? { nil }
+    /// A driver with no image to ask has no apps to offer and cannot open one.
+    var androidAppsTool: (any AndroidAppsTool)? { nil }
+    func awaitAndroidReady() async -> AndroidAppReadiness.Outcome { .timedOut }
     /// A driver with no guest to read adds nothing.
     func guestStallFiles() async -> [BugReportArchive.Entry] { [] }
     /// A driver with no session record has nothing to tell.

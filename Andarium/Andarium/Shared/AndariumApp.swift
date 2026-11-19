@@ -47,6 +47,8 @@ final class AndariumProcess {
         SendFeedbackStaging().sweep()
         #endif
         model = entry.makeModel()
+        // An App Intent that runs in this process hands its request to this model.
+        AndroidAppsHub.shared.attach(model)
         #if TIP_JAR
         // From launch: a purchase the store delivers outside the sheet (an
         // approval, an interrupted purchase) is finished, whether or not the
