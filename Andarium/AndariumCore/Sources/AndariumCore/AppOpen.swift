@@ -71,6 +71,8 @@ public struct AppOpenBanner: Equatable, Sendable, Identifiable {
     public let serial: Int
     public let failure: AppOpenFailure
     public let label: String
+    /// The app the request was for, whose icon the banner draws.
+    public let app: AndroidComponent
     /// What Try Again asks again; nil where the banner offers no retry.
     public let component: AndroidComponent?
     public let shownAt: Date
@@ -336,7 +338,7 @@ public struct AppOpenState: Equatable, Sendable {
 
     private mutating func show(_ failure: AppOpenFailure, for request: AppOpenRequest, now: Date) {
         banner = AppOpenBanner(
-            serial: request.serial, failure: failure, label: request.label,
+            serial: request.serial, failure: failure, label: request.label, app: request.component,
             component: failure.canRetry ? request.component : nil, shownAt: now)
     }
 }
