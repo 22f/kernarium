@@ -312,8 +312,11 @@ final class AndroidPlatform implements AppsCommand.Platform {
      * AssetManager asks for them, without the static overlays that target the framework. A process the zygote did not
      * fork builds them on its first AssetManager and runs idmap2 to make those overlays' idmaps, which the shell domain
      * may not execute: a denial on every run. The overlays change the framework's own values, not an application's
-     * label or icon. The assets and their order are the framework's; when any of its internals is not as written here
-     * nothing is kept of this and the framework's own initialisation runs at the first AssetManager, denial and all.
+     * label or icon. The assets and their order are the framework's. The manager is published last, once it holds its
+     * assets; when anything fails on the way (an exception, a framework that is not as written here, an allocation
+     * failure) the statics are put back as they were found and the framework's own initialisation runs at the first
+     * AssetManager, denial and all. An allocation failure is also passed on, for the caller's own recovery, and the
+     * next call tries again.
      */
     private static synchronized void systemAssetsWithoutIdmaps() {
         if (sSystemAssetsBuilt) {
@@ -323,6 +326,9 @@ final class AndroidPlatform implements AppsCommand.Platform {
         Field system = null;
         Field array = null;
         Field set = null;
+        Object previousArray = null;
+        Object previousSet = null;
+        boolean touched = false;
         try {
             system = AssetManager.class.getDeclaredField("sSystem");
             array = AssetManager.class.getDeclaredField("sSystemApkAssets");
@@ -333,29 +339,43 @@ final class AndroidPlatform implements AppsCommand.Platform {
             if (system.get(null) != null) {
                 return; // already built
             }
+            previousArray = array.get(null);
+            previousSet = set.get(null);
             List<ApkAssets> assets = new ArrayList<>();
             assets.add(ApkAssets.loadFromPath(FRAMEWORK_APK, ApkAssets.PROPERTY_SYSTEM));
             if (new File(PLATFORM_APK).exists()) {
                 assets.add(ApkAssets.loadFromPath(PLATFORM_APK, ApkAssets.PROPERTY_SYSTEM));
             }
             ApkAssets[] all = assets.toArray(new ApkAssets[0]);
-            set.set(null, new ArraySet<ApkAssets>(assets));
-            array.set(null, all);
             Constructor<AssetManager> constructor = AssetManager.class.getDeclaredConstructor(boolean.class);
             constructor.setAccessible(true);
+            // setApkAssets reads the two statics, so they are set first; the manager is published after it has its assets.
+            touched = true;
+            set.set(null, new ArraySet<ApkAssets>(assets));
+            array.set(null, all);
             AssetManager manager = constructor.newInstance(true);
-            system.set(null, manager);
             manager.setApkAssets(all, false);
+            system.set(null, manager);
         } catch (Exception | LinkageError problem) {
-            for (Field field : new Field[] {system, array, set}) {
-                try {
-                    if (field != null) {
-                        field.set(null, null);
-                    }
-                } catch (Exception | LinkageError ignored) {
-                    // Nothing more can be done: the framework builds the assets over again.
-                }
-            }
+            restoreSystemAssets(touched, array, previousArray, set, previousSet);
+        } catch (Error problem) {
+            restoreSystemAssets(touched, array, previousArray, set, previousSet);
+            sSystemAssetsBuilt = false;
+            throw problem;
+        }
+    }
+
+    /** Puts the two statics the bootstrap changed back as they were found (nothing is changed before {@code touched}). */
+    private static void restoreSystemAssets(boolean touched, Field array, Object previousArray, Field set,
+            Object previousSet) {
+        if (!touched) {
+            return;
+        }
+        try {
+            set.set(null, previousSet);
+            array.set(null, previousArray);
+        } catch (Exception | LinkageError ignored) {
+            // Nothing more can be done: the framework builds the assets over again.
         }
     }
 

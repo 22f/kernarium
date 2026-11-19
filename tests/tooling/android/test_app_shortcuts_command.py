@@ -432,9 +432,17 @@ PLATFORM_RULES = [
      lambda t: "systemAssetsWithoutIdmaps();" in t and "new AssetManager()" in t
      and t.index("systemAssetsWithoutIdmaps();") < t.index("new AssetManager()")
      and all(word in t for word in ('"/system/framework/framework-res.apk"', '"/system/framework/org.lineageos.platform-res.apk"',
-                                    '"sSystem"', '"sSystemApkAssets"', '"sSystemApkAssetsSet"', "field.set(null, null);",
+                                    '"sSystem"', '"sSystemApkAssets"', '"sSystemApkAssetsSet"',
+                                    "set.set(null, previousSet);", "array.set(null, previousArray);",
                                     "setApkAssets(all, false)"))
      and "ApkAssets.loadFromPath(" in t),
+    ("the system AssetManager is published last, and any failure, an allocation failure too, puts the statics back",
+     lambda t: "manager.setApkAssets(all, false);" in t and "system.set(null, manager);" in t
+     and t.index("manager.setApkAssets(all, false);") < t.index("system.set(null, manager);")
+     and re.search(r"catch \(Exception \| LinkageError problem\) \{\s*restoreSystemAssets\(touched,", t) is not None
+     and re.search(r"catch \(Error problem\) \{\s*restoreSystemAssets\(touched,[^;]*;\s*"
+                   r"sSystemAssetsBuilt = false;\s*throw problem;", t) is not None
+     and re.search(r"if \(!touched\) \{\s*return;", t) is not None),
     ("the start is run by ChildProcess", lambda t: "ChildProcess.run(AppsCommand.startArguments(" in t
      and "ProcessBuilder" not in t and "waitFor" not in t),
 ]
@@ -449,9 +457,21 @@ PLATFORM_MUTATIONS = [
      "            AssetManager assets = new AssetManager();\n            systemAssetsWithoutIdmaps();",
      "the system assets are built, without the framework's overlay idmaps, before the first AssetManager, and restored on failure"),
     ("system-assets-failure-keeps-a-half-built-state",
-     "                        field.set(null, null);\n",
+     "        } catch (Exception | LinkageError problem) {\n            restoreSystemAssets(touched, array, previousArray, set, previousSet);\n        } catch (Error problem) {",
+     "        } catch (Exception | LinkageError problem) {\n        } catch (Error problem) {",
+     "the system AssetManager is published last, and any failure, an allocation failure too, puts the statics back"),
+    ("system-assets-published-before-they-have-their-assets",
+     "            manager.setApkAssets(all, false);\n            system.set(null, manager);",
+     "            system.set(null, manager);\n            manager.setApkAssets(all, false);",
+     "the system AssetManager is published last, and any failure, an allocation failure too, puts the statics back"),
+    ("system-assets-allocation-failure-left-half-built",
+     "        } catch (Error problem) {\n            restoreSystemAssets(touched, array, previousArray, set, previousSet);\n            sSystemAssetsBuilt = false;\n            throw problem;\n        }",
+     "        }",
+     "the system AssetManager is published last, and any failure, an allocation failure too, puts the statics back"),
+    ("system-assets-restored-before-they-were-touched",
+     "        if (!touched) {\n            return;\n        }\n",
      "",
-     "the system assets are built, without the framework's overlay idmaps, before the first AssetManager, and restored on failure"),
+     "the system AssetManager is published last, and any failure, an allocation failure too, puts the statics back"),
     ("foreground-user-substituted",
      "throw new PlatformException(\"the foreground user is not known\", problem);",
      "return android.os.UserHandle.myUserId();",
