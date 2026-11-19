@@ -2394,7 +2394,6 @@ class Watch:
                 outcome = self.await_launch(step)
                 launched = (self.pending or {}).get("time", self.clock.time())
                 self.pending = None
-                self.record.update(pending=None)
                 kind = outcome[0]
                 if kind == "served":
                     self.observer = outcome[1]
@@ -2402,11 +2401,15 @@ class Watch:
                     self.restarts += 1
                     self.restart_times = self.recent_restarts() + [launched]
                     self.say(f"the replacement serves (restart {self.restarts})")
+                    # One write: the pending record is what lets a watch that
+                    # ends before it adopts the host count it, so it is
+                    # cleared in the update that counts it, not before.
                     self.record.update(
-                        state=WATCHING, detail="", host=step.nonce,
+                        state=WATCHING, detail="", host=step.nonce, pending=None,
                         restarts=self.restarts, restart_times=self.restart_times,
                         alive_at=self.clock.time())
                     return None
+                self.record.update(pending=None)
                 if kind == "stopped":
                     return self.stopped()
                 if kind == "approval":

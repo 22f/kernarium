@@ -3242,6 +3242,33 @@ class CountingTests(WatchTestCase):
         self.assertEqual(seen[0][1]["replacement"], True)
         self.assertIsNone(self.record()["pending"])
 
+    def test_the_pending_replacement_is_cleared_in_the_update_that_counts_it(self) -> None:
+        # Rule (R5): a watch killed between two writes of its record must leave
+        # a replacement that serves counted or still pending, never neither:
+        # with the clearance written first, the next watch adopted the host
+        # with nothing to count it from, and a bound of one was a second host
+        # late. The record is read after each of the watch's writes.
+        snapshots = []
+        real = automation.WatchRecord.update
+
+        def update(record, **fields):
+            real(record, **fields)
+            snapshots.append(automation.read_watch_record(self.options("status")))
+        self.patch(automation.WatchRecord, "update", update)
+        first = self.watch_over_host()
+        self.device.control(first, "die")
+        self.watching(restarts=1)
+        pending = None
+        for snapshot in snapshots:
+            if snapshot.get("pending"):
+                pending = snapshot["pending"]
+            elif pending is not None:
+                self.assertIn(pending["time"], snapshot.get("restart_times", []),
+                              snapshot)
+                self.assertEqual(snapshot.get("restarts"), 1)
+                return
+        self.fail("the pending replacement was never cleared")
+
     def test_a_pending_replacement_of_another_host_is_not_counted(self) -> None:
         self.tune(HEARTBEAT_STALE=30)
         automation.WatchRecord(self.options("status")).update(
