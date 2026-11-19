@@ -797,7 +797,9 @@ AArch32 JIT tests exist only on macOS). A guest `SIGILL` is a correctness
 blocker in every one of them.
 
 - `arm64-aot-differential` exists only in a build configured with
-  `UML_AOT_IMAGE`, `UML_AOT_FSCK_EROFS` and `UML_AOT_DIAGNOSTICS`. It runs
+  `UML_AOT_IMAGE`, `UML_AOT_FSCK_EROFS` and `UML_AOT_DIAGNOSTICS`, and so does
+  `arm64-aot-reporter`: a unit tree configured without them has neither row,
+  and its `check-unit` says nothing about ahead-of-time code. It runs
   functions of every rewritten library through the gadget engine with and
   without ahead-of-time code and requires the same guest state, memory,
   ending event and exception syndrome, and the same registers, flags, vector
