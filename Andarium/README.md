@@ -1346,12 +1346,13 @@ is on. `AndariumCore/Adb` speaks the protocol.
   file says.
   A request from an icon follows the Start button's rules (`AppOpenPlanner`): a
   running Android opens the app once `AndroidAppReadiness` says it is ready
-  (setup finished for the foreground user, the home screen's first resume
-  observed), a stopped one is started, and a start that needs the person's
-  answer (an unfinished update, too little space, a restore under way) waits for
-  it in a card above Home's notice; a request during an erase is dropped. The
-  request is in memory only and Don't open drops it. A failure is a banner over
-  Android. The switch on the chooser governs Spotlight (Search) only: every
+  (setup finished for the foreground user; the home screen's first resume
+  observed once in the run, after which another app in front is no obstacle;
+  a launch that was sent is never sent again), a stopped one is started, and a
+  start that needs the person's answer (an unfinished update, too little space,
+  a restore under way) waits for it in a card above Home's notice; a request
+  during an erase is dropped. The request is in memory only and Don't open
+  drops it. A failure is a banner over Android. The switch on the chooser governs Spotlight (Search) only: every
   write to the index takes one ordered path (`AndroidAppsIndexWriter`), judged
   against the switch and the catalog as they are when it runs, and a launch
   finishes a write that failed. The tiles, the entities and the Siri phrase do
