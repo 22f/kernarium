@@ -3,16 +3,18 @@
 // The launcher-application shell command (android/lineage-24/overlay/app_shortcuts) against a fake
 // platform, on a plain JVM: the component grammar, the label's escaping and bounds, the listing's
 // rule (order, filters, bounds, digest and icon keys), the framing of every answer read back by a
-// parser of the test's own, the icon records (statuses, size steps, the PNG bound, the deadline),
-// the launch's refusals and the argument vector that reaches the process, how a start's output is read, the
-// child process's drain, deadline and reaping (real processes), the icon source's bound, the resource files'
-// order, and the exit statuses.
+// parser of the test's own, the icon records (statuses, what is checked of the renderer's answer, a renderer
+// that is missing, gone or fails one icon, the deadlines), the launch's refusals and the argument vector that
+// reaches the process, how a start's output is read, the child process's drain, deadline and reaping (real
+// processes), the resource files' order, and the exit statuses.
 // Each row prints "ok <name>" or "FAIL <name>: why"; the last line is PASS when no row failed.
 // The package is the command's, so that the test reaches what the command keeps to itself.
 // test_app_shortcuts_command.py compiles and runs it, and runs it again on sources with one rule
 // removed at a time, where the rows named there must fail.
 
 package com.kernarium.apps;
+
+import com.kernarium.icons.IconProtocol;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintWriter;
@@ -26,6 +28,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.zip.CRC32;
 
 public final class AppsCommandTest {
     private static int failures;
@@ -76,18 +79,51 @@ public final class AppsCommandTest {
     // The fake platform and the answers' reader.
 
     private static final byte[] PNG_HEAD = AppsCommand.PNG_SIGNATURE;
+    /** The signature and the IHDR chunk: the least a PNG can be checked by. */
+    private static final int PNG_HEADER_BYTES = 33;
+    private static final int IHDR = 0x49484452;
 
-    /** A PNG-looking byte string of exactly {@code length} bytes (the commands check the signature, not the image). */
-    private static byte[] png(int length, int seed) {
+    /**
+     * A PNG-looking byte string of exactly {@code length} bytes (at least the 33 of the signature and the header)
+     * whose header says {@code width} by {@code height}, {@code depth} bits, colour type {@code colour}, the
+     * compression, filter and interlace methods given, with the chunk's length and type and its CRC as asked: the
+     * tool checks the header, not the image.
+     */
+    private static byte[] pngOf(int width, int height, int depth, int colour, int compression, int filter, int interlace,
+            int chunkLength, int chunkType, boolean validCrc, int length, int seed) {
         byte[] bytes = new byte[length];
         for (int i = 0; i < length; i++) {
             bytes[i] = i < PNG_HEAD.length ? PNG_HEAD[i] : (byte) (seed + i * 31);
         }
+        put(bytes, 8, chunkLength);
+        put(bytes, 12, chunkType);
+        put(bytes, 16, width);
+        put(bytes, 20, height);
+        bytes[24] = (byte) depth;
+        bytes[25] = (byte) colour;
+        bytes[26] = (byte) compression;
+        bytes[27] = (byte) filter;
+        bytes[28] = (byte) interlace;
+        CRC32 crc = new CRC32();
+        crc.update(bytes, 12, 17);
+        put(bytes, 29, (int) crc.getValue() ^ (validCrc ? 0 : 1));
         return bytes;
     }
 
+    private static void put(byte[] bytes, int at, int value) {
+        bytes[at] = (byte) (value >>> 24);
+        bytes[at + 1] = (byte) (value >>> 16);
+        bytes[at + 2] = (byte) (value >>> 8);
+        bytes[at + 3] = (byte) value;
+    }
+
+    /** An 8-bit RGBA PNG of {@code size} by {@code size}, {@code length} bytes long. */
+    private static byte[] png(int size, int length, int seed) {
+        return pngOf(size, size, 8, 6, 0, 0, 0, 13, IHDR, true, length, seed);
+    }
+
     private interface IconSource {
-        Icon icon(Entry entry, int size) throws Exception;
+        Icon icon(Entry entry) throws Exception;
     }
 
     private static class Fake implements AppsCommand.Platform {
@@ -97,13 +133,18 @@ public final class AppsCommandTest {
         Map<String, String> labels = new HashMap<>();
         Set<String> labelFails = new HashSet<>();
         Set<String> labelOutOfMemory = new HashSet<>();
-        IconSource icons = (entry, size) -> new Icon(size, true, false, png(300, 1));
+        IconSource icons = entry -> new Icon(192, true, false, png(192, 300, 1));
+        /** The renderer is missing: opening it fails with the platform's reason. */
+        boolean noRenderer;
+        int opened;
+        int closed;
         AppsCommand.StartResult startResult = new AppsCommand.StartResult(0, "Starting: Intent { }\n");
         final List<List<String>> started = new ArrayList<>();
         long clock;
         long clockStep;
         long renderLimit = AppsCommand.ICON_RENDER_MILLIS;
-        final List<Integer> iconSizes = new ArrayList<>();
+        /** The packages whose icons were asked of the renderer, in order. */
+        final List<String> rendered = new ArrayList<>();
 
         Fake with(Entry... more) {
             entries.addAll(Arrays.asList(more));
@@ -138,9 +179,23 @@ public final class AppsCommandTest {
         }
 
         @Override
-        public Icon icon(Entry entry, int size) throws Exception {
-            iconSizes.add(size);
-            return icons.icon(entry, size);
+        public AppsCommand.Renderer openRenderer() throws Exception {
+            if (noRenderer) {
+                throw new PlatformException("the icon renderer is not available");
+            }
+            opened++;
+            return new AppsCommand.Renderer() {
+                @Override
+                public Icon render(Entry entry) throws Exception {
+                    rendered.add(entry.packageName);
+                    return icons.icon(entry);
+                }
+
+                @Override
+                public void close() {
+                    closed++;
+                }
+            };
         }
 
         @Override
@@ -301,11 +356,11 @@ public final class AppsCommandTest {
                 at[0] += record.length;
                 same((int) '\n', (int) bytes[at[0]++], "LF after the data");
                 same(Listing.sha256Hex(record.data), record.sha, "digest of the data");
-                check(AppsCommand.isPng(record.data), "PNG signature");
+                check(Arrays.equals(Arrays.copyOf(record.data, 8), AppsCommand.PNG_SIGNATURE), "PNG signature");
                 same(record.width, record.height, "square");
                 check(record.kind.equals("adaptive") || record.kind.equals("legacy"), "kind");
                 check(record.alpha.equals("0") || record.alpha.equals("1"), "alpha flag");
-                check(record.length <= AppsCommand.MAX_PNG_BYTES, "within the PNG bound");
+                check(record.length <= IconProtocol.MAX_PNG_BYTES, "within the PNG bound");
             } else {
                 same("0", String.valueOf(record.length), "no data");
                 same("0", String.valueOf(record.width), "no width");
@@ -591,7 +646,7 @@ public final class AppsCommandTest {
                     "the image's build is an input of its own: the update time may be equal across two images");
             check(!Listing.iconKey(never).equals(Listing.iconKey(builtin("com.a.app", "com.a.app.Main"))),
                     "a built-in application that was never updated and one that was are different inputs");
-            same(2, Listing.RENDER_VERSION, "the renderer's version (the icons are drawn for fixed inputs since 2)");
+            same(3, Listing.RENDER_VERSION, "the renderer's version (the icons are drawn by the renderer app since 3)");
         });
         row("locale-line", () -> {
             same("en-US,ja-JP", Listing.localeLine(Arrays.asList("en-US", "ja-JP")), "tags joined");
@@ -721,11 +776,91 @@ public final class AppsCommandTest {
         });
     }
 
+    /** What the renderer's answers are, good and bad: (name, icon). */
+    private static final class Case {
+        final String name;
+        final Icon icon;
+
+        Case(String name, Icon icon) {
+            this.name = name;
+            this.icon = icon;
+        }
+    }
+
+    private static Icon icon(int size, byte[] png) {
+        return new Icon(size, true, false, png);
+    }
+
+    /** Answers a renderer may give: they pass. */
+    private static List<Case> goodAnswers() {
+        List<Case> good = new ArrayList<>();
+        for (int size : new int[] {192, 128, 96}) {
+            good.add(new Case("size " + size, icon(size, png(size, 300, 1))));
+        }
+        good.add(new Case("the shortest PNG: the signature and the header", icon(192, png(192, 33, 1))));
+        good.add(new Case("the longest PNG", icon(192, png(192, IconProtocol.MAX_PNG_BYTES, 1))));
+        good.add(new Case("RGB without an alpha claim", icon(192, pngOf(192, 192, 8, 2, 0, 0, 0, 13, IHDR, true, 300, 1))));
+        good.add(new Case("RGBA with the alpha claim", new Icon(192, false, true, png(192, 300, 1))));
+        good.add(new Case("RGBA without it", new Icon(192, false, false, png(192, 300, 1))));
+        return good;
+    }
+
+    /** Answers a renderer must not be believed on, each with one defect: (name, icon). */
+    private static List<Case> badAnswers() {
+        List<Case> bad = new ArrayList<>();
+        bad.add(new Case("no icon", null));
+        bad.add(new Case("size 64", icon(64, png(64, 300, 1))));
+        bad.add(new Case("size 193", icon(193, png(193, 300, 1))));
+        bad.add(new Case("size 0", icon(0, png(0, 300, 1))));
+        bad.add(new Case("size 256", icon(256, png(256, 300, 1))));
+        bad.add(new Case("no PNG", icon(192, null)));
+        bad.add(new Case("an empty PNG", icon(192, new byte[0])));
+        bad.add(new Case("a PNG one byte short of the header", icon(192, Arrays.copyOf(png(192, 300, 1), PNG_HEADER_BYTES - 1))));
+        bad.add(new Case("a PNG of 20 bytes", icon(192, Arrays.copyOf(png(192, 300, 1), 20))));
+        bad.add(new Case("a PNG one byte over the bound", icon(192, png(192, IconProtocol.MAX_PNG_BYTES + 1, 1))));
+        bad.add(new Case("a text that is not a PNG", icon(192, "GIF89a not a png at all, but long enough to hold a header".getBytes(StandardCharsets.US_ASCII))));
+        for (int at : new int[] {0, 1, 7}) {
+            byte[] broken = png(192, 300, 1);
+            broken[at] ^= 1;
+            bad.add(new Case("byte " + at + " of the signature", icon(192, broken)));
+        }
+        bad.add(new Case("an IHDR chunk of 12 bytes", icon(192, pngOf(192, 192, 8, 6, 0, 0, 0, 12, IHDR, true, 300, 1))));
+        bad.add(new Case("an IHDR chunk of 14 bytes", icon(192, pngOf(192, 192, 8, 6, 0, 0, 0, 14, IHDR, true, 300, 1))));
+        bad.add(new Case("another chunk first", icon(192, pngOf(192, 192, 8, 6, 0, 0, 0, 13, 0x49444154, true, 300, 1))));
+        bad.add(new Case("a damaged header checksum", icon(192, pngOf(192, 192, 8, 6, 0, 0, 0, 13, IHDR, false, 300, 1))));
+        bad.add(new Case("a width that is not the size", icon(192, pngOf(191, 192, 8, 6, 0, 0, 0, 13, IHDR, true, 300, 1))));
+        bad.add(new Case("a height that is not the size", icon(192, pngOf(192, 191, 8, 6, 0, 0, 0, 13, IHDR, true, 300, 1))));
+        bad.add(new Case("a smaller size than asked", icon(192, png(128, 300, 1))));
+        bad.add(new Case("a larger size than the answer says", icon(128, png(192, 300, 1))));
+        bad.add(new Case("a width of 2^32 - 192", icon(192, pngOf(-192, 192, 8, 6, 0, 0, 0, 13, IHDR, true, 300, 1))));
+        for (int depth : new int[] {1, 4, 16}) {
+            bad.add(new Case(depth + " bits", icon(192, pngOf(192, 192, depth, 6, 0, 0, 0, 13, IHDR, true, 300, 1))));
+        }
+        for (int colour : new int[] {0, 3, 4}) {
+            bad.add(new Case("colour type " + colour, icon(192, pngOf(192, 192, 8, colour, 0, 0, 0, 13, IHDR, true, 300, 1))));
+        }
+        bad.add(new Case("another compression method", icon(192, pngOf(192, 192, 8, 6, 1, 0, 0, 13, IHDR, true, 300, 1))));
+        bad.add(new Case("another filter method", icon(192, pngOf(192, 192, 8, 6, 0, 1, 0, 13, IHDR, true, 300, 1))));
+        bad.add(new Case("an interlaced picture", icon(192, pngOf(192, 192, 8, 6, 0, 0, 1, 13, IHDR, true, 300, 1))));
+        bad.add(new Case("an unknown interlace method", icon(192, pngOf(192, 192, 8, 6, 0, 0, 255, 13, IHDR, true, 300, 1))));
+        bad.add(new Case("an alpha claim for a picture that has none", new Icon(192, true, true,
+                pngOf(192, 192, 8, 2, 0, 0, 0, 13, IHDR, true, 300, 1))));
+        return bad;
+    }
+
+    private static String statusOf(Icon icon) throws Exception {
+        Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"));
+        fake.icons = entry -> icon;
+        return parseIcons(run(fake, "icons", "com.a.app/com.a.app.Main")).get(0).status;
+    }
+
     private static void icons() {
         row("icons-record-framing", () -> {
             Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"), app("com.b.app", "com.b.app.Main"));
-            fake.icons = (entry, size) -> new Icon(size, entry.packageName.equals("com.a.app"), entry.packageName.equals("com.b.app"),
-                    png(entry.packageName.equals("com.a.app") ? 1000 : 2000, size));
+            fake.icons = entry -> {
+                boolean a = entry.packageName.equals("com.a.app");
+                return new Icon(a ? 192 : 128, a, !a, png(a ? 192 : 128, a ? 1000 : 2000, 7));
+            };
             Result result = run(fake, "icons", "com.a.app/com.a.app.Main", "com.b.app/com.b.app.Main");
             List<IconRecord> records = parseIcons(result);
             same(2, records.size(), "two records in the order asked");
@@ -735,10 +870,15 @@ public final class AppsCommandTest {
             same("adaptive", records.get(0).kind, "adaptive");
             same("0", records.get(0).alpha, "opaque");
             same(1000, records.get(0).length, "length");
+            same(128, records.get(1).width, "the size the renderer answered");
+            same(128, records.get(1).height, "square");
             same("legacy", records.get(1).kind, "legacy");
             same("1", records.get(1).alpha, "alpha");
+            same(2000, records.get(1).length, "length");
             same(0, result.err.length(), "nothing on stderr");
-            same(Arrays.asList(192, 192), fake.iconSizes, "each icon rendered once at the first size");
+            same(Arrays.asList("com.a.app", "com.b.app"), fake.rendered, "each icon asked of the renderer once");
+            same(1, fake.opened, "one renderer for the command");
+            same(1, fake.closed, "released");
         });
         row("icons-order-is-the-order-asked", () -> {
             Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"), app("com.b.app", "com.b.app.Main"));
@@ -751,18 +891,18 @@ public final class AppsCommandTest {
                     entry("com.noicon.app", "com.noicon.app.Main", false, true, true, true, 1, 1, 0),
                     app("com.throws.app", "com.throws.app.Main"), app("com.notpng.app", "com.notpng.app.Main"),
                     app("com.badsize.app", "com.badsize.app.Main"), app("com.null.app", "com.null.app.Main"));
-            fake.icons = (entry, size) -> {
+            fake.icons = entry -> {
                 switch (entry.packageName) {
                     case "com.throws.app":
                         throw new OutOfMemoryError("a hostile icon");
                     case "com.notpng.app":
-                        return new Icon(size, false, false, "GIF89a not a png".getBytes(StandardCharsets.US_ASCII));
+                        return new Icon(192, false, false, "GIF89a not a png".getBytes(StandardCharsets.US_ASCII));
                     case "com.badsize.app":
-                        return new Icon(size + 1, false, false, png(100, 1));
+                        return new Icon(193, false, false, png(193, 100, 1));
                     case "com.null.app":
                         return null;
                     default:
-                        return new Icon(size, false, false, png(100, 1));
+                        return new Icon(192, false, false, png(192, 100, 1));
                 }
             };
             List<IconRecord> records = parseIcons(run(fake, "icons", "com.ok.app/com.ok.app.Main",
@@ -779,27 +919,65 @@ public final class AppsCommandTest {
             List<IconRecord> records = parseIcons(run(fake, "icons", "com.hidden.app/com.hidden.app.Main",
                     "com.off.app/com.off.app.Main", "com.perm.app/com.perm.app.Main"));
             same(Arrays.asList("missing", "missing", "missing"), statuses(records), "no icon of what cannot be launched");
-            same(0, fake.iconSizes.size(), "nothing rendered");
+            same(0, fake.rendered.size(), "nothing rendered");
         });
-        row("icons-size-steps", () -> {
-            Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"));
-            fake.icons = (entry, size) -> new Icon(size, true, false, png(size == 192 ? 98305 : 5000, 1));
-            List<IconRecord> records = parseIcons(run(fake, "icons", "com.a.app/com.a.app.Main"));
-            same("ok", records.get(0).status, "a smaller one fits");
-            same(128, records.get(0).width, "the next size");
-            same(Arrays.asList(192, 128), fake.iconSizes, "192 then 128");
-            Fake all = new Fake().with(app("com.a.app", "com.a.app.Main"));
-            all.icons = (entry, size) -> new Icon(size, true, false, png(98305, 1));
-            same(Arrays.asList("error"), statuses(parseIcons(run(all, "icons", "com.a.app/com.a.app.Main"))), "none fits");
-            same(Arrays.asList(192, 128, 96), all.iconSizes, "every size tried, no other");
+        row("png-check-accepts-what-a-renderer-may-send", () -> {
+            for (Case answer : goodAnswers()) {
+                String problem = PngCheck.problem(answer.icon);
+                check(problem == null, answer.name + " is refused: " + problem);
+            }
         });
-        row("icons-png-bound-is-exact", () -> {
-            Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"));
-            fake.icons = (entry, size) -> new Icon(size, true, false, png(AppsCommand.MAX_PNG_BYTES, 1));
-            List<IconRecord> records = parseIcons(run(fake, "icons", "com.a.app/com.a.app.Main"));
-            same("ok", records.get(0).status, "98304 bytes are within the bound");
-            same(192, records.get(0).width, "at the first size");
-            same(98304, records.get(0).length, "length");
+        row("png-check-refuses-what-a-renderer-must-not-be-believed-on", () -> {
+            for (Case answer : badAnswers()) {
+                check(PngCheck.problem(answer.icon) != null, "accepted: " + answer.name);
+            }
+        });
+        row("png-check-refuses-a-short-answer-without-failing", () -> {
+            // Every length from nothing to the header's last byte: the answer is refused, not read past its end.
+            byte[] full = png(192, 300, 1);
+            for (int length = 0; length < PNG_HEADER_BYTES; length++) {
+                check(PngCheck.problem(icon(192, Arrays.copyOf(full, length))) != null, "a PNG of " + length + " bytes");
+            }
+            check(PngCheck.problem(icon(192, Arrays.copyOf(full, PNG_HEADER_BYTES))) == null, "the header alone");
+        });
+        row("png-check-length-bounds-are-exact", () -> {
+            check(PngCheck.problem(icon(192, png(192, IconProtocol.MAX_PNG_BYTES, 1))) == null, "98304 bytes");
+            check(PngCheck.problem(icon(192, png(192, IconProtocol.MAX_PNG_BYTES + 1, 1))) != null, "98305 bytes");
+            check(PngCheck.problem(icon(192, png(192, PNG_HEADER_BYTES, 1))) == null, "33 bytes");
+            check(PngCheck.problem(icon(192, png(192, PNG_HEADER_BYTES + 1, 1))) == null, "34 bytes");
+            same(33, PngCheck.HEADER_BYTES, "the header's length");
+        });
+        row("icons-answer-is-checked", () -> {
+            for (Case answer : goodAnswers()) {
+                same("ok", statusOf(answer.icon), "the command takes: " + answer.name);
+            }
+            for (Case answer : badAnswers()) {
+                same("error", statusOf(answer.icon), "the command refuses: " + answer.name);
+            }
+        });
+        row("icons-bad-answer-costs-that-icon-alone", () -> {
+            Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"), app("com.bad.app", "com.bad.app.Main"),
+                    app("com.c.app", "com.c.app.Main"));
+            fake.icons = entry -> entry.packageName.equals("com.bad.app")
+                    ? icon(192, pngOf(192, 192, 8, 6, 0, 0, 1, 13, IHDR, true, 300, 1)) : icon(192, png(192, 300, 1));
+            Result result = run(fake, "icons", "com.a.app/com.a.app.Main", "com.bad.app/com.bad.app.Main", "com.c.app/com.c.app.Main");
+            same(Arrays.asList("ok", "error", "ok"), statuses(parseIcons(result)), "the others are drawn");
+            same(Arrays.asList("com.a.app", "com.bad.app", "com.c.app"), fake.rendered, "each asked once, none again");
+        });
+        row("icons-a-worker-that-failed-costs-that-icon-alone", () -> {
+            Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"), app("com.dies.app", "com.dies.app.Main"),
+                    app("com.c.app", "com.c.app.Main"));
+            fake.icons = entry -> {
+                if (entry.packageName.equals("com.dies.app")) {
+                    throw new PlatformException("the icon could not be drawn");
+                }
+                return icon(192, png(192, 300, 1));
+            };
+            Result result = run(fake, "icons", "com.a.app/com.a.app.Main", "com.dies.app/com.dies.app.Main", "com.c.app/com.c.app.Main");
+            same(Arrays.asList("ok", "error", "ok"), statuses(parseIcons(result)), "the rest of the batch is drawn");
+            same(Arrays.asList("com.a.app", "com.dies.app", "com.c.app"), fake.rendered,
+                    "the failed icon is asked once: not again, and not at a smaller size");
+            same(1, fake.opened, "one hold of the renderer");
         });
         row("icons-failing-render-is-silent", () -> {
             Throwable[] failures = {new OutOfMemoryError("a hostile bitmap"), new StackOverflowError(),
@@ -812,7 +990,7 @@ public final class AppsCommandTest {
                 got = new ArrayList<>();
                 for (Throwable failure : failures) {
                     Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"));
-                    fake.icons = (entry, size) -> {
+                    fake.icons = entry -> {
                         throw sneaky(failure);
                     };
                     Result result = run(fake, "icons", "com.a.app/com.a.app.Main");
@@ -825,17 +1003,71 @@ public final class AppsCommandTest {
             same(Arrays.asList("error", "error", "error", "error"), got, "an exception or an error is that icon's error");
             same(0, captured.size(), "no stack trace of a dying worker reaches the process's stderr");
         });
+        row("icons-renderer-missing-fails-the-command", () -> {
+            Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"));
+            fake.noRenderer = true;
+            Result result = run(fake, "icons", "com.a.app/com.a.app.Main");
+            same(1, result.status, "exit status");
+            same(0, result.out.length, "no stdout");
+            same("kernarium_apps: icons failed: the icon renderer is not available\n", result.err, "one fixed line");
+            Fake none = new Fake().with(entry("com.noicon.app", "com.noicon.app.Main", false, true, true, true, 1, 1, 0));
+            none.noRenderer = true;
+            Result nothingToDraw = run(none, "icons", "com.gone.app/com.gone.app.Main", "com.noicon.app/com.noicon.app.Main");
+            same(1, nothingToDraw.status, "a renderer that is not there is seen at once, whatever is asked");
+            same(0, nothingToDraw.out.length, "no stdout");
+            Fake others = new Fake().with(app("com.a.app", "com.a.app.Main"));
+            others.noRenderer = true;
+            same(0, run(others, "list").status, "list does not need it");
+            same(0, run(others, "digest").status, "digest does not need it");
+            same(0, others.opened, "and does not ask for it");
+        });
+        row("icons-renderer-is-released", () -> {
+            Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"));
+            parseIcons(run(fake, "icons", "com.a.app/com.a.app.Main"));
+            same(1, fake.closed, "after an answer");
+            Fake failing = new Fake().with(app("com.a.app", "com.a.app.Main"));
+            failing.icons = entry -> {
+                throw new IllegalStateException("x");
+            };
+            parseIcons(run(failing, "icons", "com.a.app/com.a.app.Main"));
+            same(1, failing.closed, "after an icon that failed");
+            Fake gone = new Fake().with(app("com.a.app", "com.a.app.Main"));
+            gone.icons = entry -> {
+                throw new AppsCommand.RendererGone("gone", null);
+            };
+            same(1, run(gone, "icons", "com.a.app/com.a.app.Main").status, "gone");
+            same(1, gone.closed, "after the renderer was lost");
+            Fake late = new Fake().with(app("com.a.app", "com.a.app.Main"));
+            late.clockStep = 40_000;
+            parseIcons(run(late, "icons", "com.a.app/com.a.app.Main"));
+            same(1, late.closed, "after the deadline");
+        });
+        row("icons-renderer-lost-mid-batch-fails-the-command", () -> {
+            Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"), app("com.gone.app", "com.gone.app.Main"),
+                    app("com.c.app", "com.c.app.Main"));
+            fake.icons = entry -> {
+                if (entry.packageName.equals("com.gone.app")) {
+                    throw new AppsCommand.RendererGone("the icon renderer is not available", new RuntimeException("dead"));
+                }
+                return icon(192, png(192, 300, 1));
+            };
+            Result result = run(fake, "icons", "com.a.app/com.a.app.Main", "com.gone.app/com.gone.app.Main", "com.c.app/com.c.app.Main");
+            same(1, result.status, "exit status");
+            same(0, result.out.length, "nothing of the first icon is printed: the answer is whole or not at all");
+            same("kernarium_apps: icons failed: the icon renderer is not available\n", result.err, "one fixed line");
+            same(Arrays.asList("com.a.app", "com.gone.app"), fake.rendered, "nothing is asked of a renderer that is gone");
+        });
         row("icons-render-time-limit", () -> {
             Fake fake = new Fake().with(app("com.a.app", "com.a.app.Main"), app("com.b.app", "com.b.app.Main"),
                     entry("com.c.app", "com.c.app.Main", false, true, true, true, 1, 1, 0),
                     entry("com.hidden.app", "com.hidden.app.Main", false, false, true, true, 1, 1, 1));
             fake.renderLimit = 200;
             java.util.concurrent.CountDownLatch never = new java.util.concurrent.CountDownLatch(1);
-            fake.icons = (entry, size) -> {
+            fake.icons = entry -> {
                 if (entry.packageName.equals("com.a.app")) {
                     never.await();
                 }
-                return new Icon(size, false, false, png(100, 1));
+                return icon(192, png(192, 100, 1));
             };
             long begin = System.nanoTime();
             List<IconRecord> records = parseIcons(run(fake, "icons", "com.a.app/com.a.app.Main", "com.b.app/com.b.app.Main",
@@ -844,7 +1076,7 @@ public final class AppsCommandTest {
             same(Arrays.asList("error", "deferred", "noicon", "missing"), statuses(records),
                     "the stuck one is an error, no other render is started, the answers that need none are given");
             check(tookMillis < 1500, "the command did not wait for the stuck render: " + tookMillis + " ms");
-            same(Arrays.asList(192), fake.iconSizes, "only the stuck render was started");
+            same(Arrays.asList("com.a.app"), fake.rendered, "only the stuck render was started");
             never.countDown();
         });
         row("icons-deadline-defers-the-rest", () -> {
@@ -894,7 +1126,7 @@ public final class AppsCommandTest {
                 fake.with(app(packageName, activity));
                 arguments.add(packageName + "/" + activity);
             }
-            fake.icons = (entry, size) -> new Icon(size, true, true, png(AppsCommand.MAX_PNG_BYTES, 2));
+            fake.icons = entry -> new Icon(192, true, true, png(192, IconProtocol.MAX_PNG_BYTES, 2));
             Result result = run(fake, arguments.toArray(new String[0]));
             same(8, parseIcons(result).size(), "eight records");
             check(result.out.length < 800 * 1024, "under 800 KiB: " + result.out.length);
@@ -1191,13 +1423,12 @@ public final class AppsCommandTest {
             same(1, AppsCommand.FORMAT_VERSION, "format version");
             same("kernarium_apps", AppsCommand.NAME, "name");
             same(8, AppsCommand.MAX_ICONS, "components per icons");
-            same(98304, AppsCommand.MAX_PNG_BYTES, "PNG bound");
+            same(98304, IconProtocol.MAX_PNG_BYTES, "PNG bound");
             same(20_000L, AppsCommand.ICON_DEADLINE_MILLIS, "deadline");
             same(8_000L, AppsCommand.ICON_RENDER_MILLIS, "one icon's render");
             check(AppsCommand.ICON_DEADLINE_MILLIS + AppsCommand.ICON_RENDER_MILLIS <= 30_000, "the whole icons command in the host's 30 s");
+            check(AppsCommand.ICON_RENDER_MILLIS > 6_500, "the tool's last word comes after the renderer's own bound");
             same(1024, Listing.MAX_ROWS, "rows");
-            same(32, SourceBound.MAX_RESOURCES, "resources one icon may reach");
-            same(6, SourceBound.MAX_DEPTH, "depth of the chain one icon may reach");
             same(8, Listing.MAX_PER_PACKAGE, "per package");
             same(80, LabelText.MAX_CODE_POINTS, "label code points");
             same(320, LabelText.MAX_BYTES, "label bytes");
@@ -1427,213 +1658,7 @@ public final class AppsCommandTest {
         });
     }
 
-    /** A graph of resources by id, for the source bound's rows. */
-    private static final class FakeGraph implements SourceBound.Graph {
-        final Map<Integer, SourceBound.Node> nodes = new HashMap<>();
-        final List<Integer> asked = new ArrayList<>();
-        /** The XML files a parser was opened on. */
-        final List<Integer> parsed = new ArrayList<>();
-
-        FakeGraph with(int id, SourceBound.Node node) {
-            nodes.put(id, node);
-            return this;
-        }
-
-        @Override
-        public SourceBound.Node node(int id) throws Exception {
-            asked.add(id);
-            SourceBound.Node node = nodes.get(id);
-            if (node == null) {
-                throw new java.io.IOException("no resource " + id);
-            }
-            if (node.kind != SourceBound.Node.XML) {
-                return node;
-            }
-            return SourceBound.Node.xml(node.bytes, () -> {
-                parsed.add(id);
-                return node.references.read();
-            });
-        }
-    }
-
-    /** An XML resource of 100 bytes that refers to the given resources. */
-    private static SourceBound.Node xml(int... references) {
-        return xmlOf(100, references);
-    }
-
-    private static SourceBound.Node xmlOf(long bytes, int... references) {
-        return SourceBound.Node.xml(bytes, () -> references);
-    }
-
-    private static boolean within(FakeGraph graph, int root) throws Exception {
-        return SourceBound.within(graph, root, 640);
-    }
-
     private static void sources() {
-        row("source-bound-one-bitmap", () -> {
-            int none = SourceBound.DENSITY_NONE;
-            check(within(new FakeGraph().with(1, SourceBound.Node.bitmap(4096, 4096, none)), 1), "4096 x 4096 never scaled is 16 Mi pixels");
-            check(!within(new FakeGraph().with(1, SourceBound.Node.bitmap(4097, 4096, none)), 1), "one column more is over");
-            check(!within(new FakeGraph().with(1, SourceBound.Node.bitmap(20_000, 20_000, none)), 1), "a bitmap of 400 Mpixels");
-            check(!within(new FakeGraph().with(1, SourceBound.Node.bitmap(Integer.MAX_VALUE, Integer.MAX_VALUE, 0)), 1),
-                    "dimensions that overflow a product");
-            check(within(new FakeGraph().with(1, SourceBound.Node.bitmap(192, 192, 640)), 1), "an icon as drawn");
-            check(within(new FakeGraph().with(1, SourceBound.Node.other()), 1), "a colour");
-            check(within(new FakeGraph(), 0), "no resource");
-        });
-        row("source-bound-follows-the-density", () -> {
-            // The framework scales an image resource to the density it is loaded for: a file with no density
-            // (the default, 160) at 640 is four times as wide and four times as tall.
-            check(within(new FakeGraph().with(1, SourceBound.Node.bitmap(1024, 1024, 0)), 1), "1024 x 1024 at 160 becomes 4096 x 4096");
-            check(!within(new FakeGraph().with(1, SourceBound.Node.bitmap(1025, 1024, 0)), 1), "one column more is over");
-            check(!within(new FakeGraph().with(1, SourceBound.Node.bitmap(2048, 2048, 160)), 1), "declared 160 is the default");
-            check(within(new FakeGraph().with(1, SourceBound.Node.bitmap(2048, 2048, 320)), 1), "xhdpi at 640 is twice");
-            check(within(new FakeGraph().with(1, SourceBound.Node.bitmap(4096, 4096, SourceBound.DENSITY_NONE)), 1),
-                    "nodpi is not scaled");
-        });
-        row("source-bound-layers-add-up", () -> {
-            int none = SourceBound.DENSITY_NONE;
-            FakeGraph adaptive = new FakeGraph().with(1, xml(2, 3))
-                    .with(2, SourceBound.Node.other()).with(3, xml(4)).with(4, SourceBound.Node.bitmap(432, 432, none));
-            check(within(adaptive, 1), "an adaptive icon with a colour background and a bitmap foreground");
-            FakeGraph big = new FakeGraph().with(1, xml(2, 3, 4, 5, 6))
-                    .with(2, SourceBound.Node.bitmap(4096, 2048, none)).with(3, SourceBound.Node.bitmap(4096, 2048, none))
-                    .with(4, SourceBound.Node.bitmap(4096, 2048, none)).with(5, SourceBound.Node.bitmap(4096, 2048, none))
-                    .with(6, SourceBound.Node.bitmap(10, 10, none));
-            check(!within(big, 1), "four bitmaps of 8 Mpixels are 32 Mpixels and the fifth thing tips it over");
-            FakeGraph fits = new FakeGraph().with(1, xml(2, 3, 4))
-                    .with(2, SourceBound.Node.bitmap(4096, 2048, none)).with(3, SourceBound.Node.bitmap(4096, 2048, none))
-                    .with(4, SourceBound.Node.bitmap(4096, 2048, none));
-            check(within(fits, 1), "three of them (24 Mpixels) are within the total");
-            FakeGraph exact = new FakeGraph().with(1, xml(2, 3))
-                    .with(2, SourceBound.Node.bitmap(4096, 4096, none)).with(3, SourceBound.Node.bitmap(4096, 4096, none));
-            check(within(exact, 1), "two of 16 Mpixels are exactly the total");
-            FakeGraph over = new FakeGraph().with(1, xml(2, 3, 4))
-                    .with(2, SourceBound.Node.bitmap(4096, 4096, none)).with(3, SourceBound.Node.bitmap(4096, 4096, none))
-                    .with(4, SourceBound.Node.bitmap(1, 1, none));
-            check(!within(over, 1), "one pixel more than the total");
-        });
-        row("source-bound-walk-is-bounded", () -> {
-            FakeGraph cycle = new FakeGraph().with(1, xml(2)).with(2, xml(1, 2, 1));
-            check(!within(cycle, 1), "a cycle is over the bound (the framework would not end on it either)");
-            same(Arrays.asList(1, 2), cycle.asked, "each resource is looked at once");
-            FakeGraph chain = new FakeGraph();
-            for (int id = 1; id <= 10; id++) {
-                chain.with(id, xml(id + 1));
-            }
-            chain.with(11, SourceBound.Node.other());
-            check(!within(chain, 1), "a chain deeper than 6 is over");
-            FakeGraph shallow = new FakeGraph();
-            for (int id = 1; id <= 7; id++) {
-                shallow.with(id, id == 7 ? SourceBound.Node.other() : xml(id + 1));
-            }
-            check(within(shallow, 1), "a chain of exactly the depth is within");
-            FakeGraph wide = new FakeGraph();
-            int[] ids = new int[32];
-            for (int i = 0; i < ids.length; i++) {
-                ids[i] = 100 + i;
-                wide.with(ids[i], SourceBound.Node.bitmap(10, 10, SourceBound.DENSITY_NONE));
-            }
-            wide.with(1, xml(ids));
-            check(!within(wide, 1), "the root and 32 files are 33 resources, over 32");
-            FakeGraph many = new FakeGraph();
-            int[] some = new int[31];
-            for (int i = 0; i < some.length; i++) {
-                some[i] = 100 + i;
-                many.with(some[i], SourceBound.Node.bitmap(10, 10, SourceBound.DENSITY_NONE));
-            }
-            many.with(1, xml(some));
-            check(within(many, 1), "the root and 31 files are exactly 32 resources, within");
-        });
-        row("source-bound-charges-every-use", () -> {
-            int none = SourceBound.DENSITY_NONE;
-            // The framework decodes a bitmap that two layers refer to twice: it counts twice.
-            FakeGraph twice = new FakeGraph().with(1, xml(2, 2)).with(2, SourceBound.Node.bitmap(4096, 4096, none));
-            check(within(twice, 1), "two uses of a 16 Mpixel bitmap are exactly the total");
-            same(Arrays.asList(1, 2), twice.asked, "the file is measured once, however often it is used");
-            FakeGraph thrice = new FakeGraph().with(1, xml(2, 2, 2)).with(2, SourceBound.Node.bitmap(4096, 4096, none));
-            check(!within(thrice, 1), "three uses are 48 Mpixels");
-            FakeGraph nested = new FakeGraph().with(1, xml(2, 3)).with(2, xml(4)).with(3, xml(4, 4, 4, 4))
-                    .with(4, SourceBound.Node.bitmap(4096, 2048, none));
-            check(!within(nested, 1), "five uses of an 8 Mpixel bitmap through two layers are over 32 Mpixels");
-            FakeGraph repeats = new FakeGraph();
-            int[] same32 = new int[32];
-            Arrays.fill(same32, 2);
-            repeats.with(1, xml(same32)).with(2, SourceBound.Node.bitmap(10, 10, none));
-            check(!within(repeats, 1), "the root and 32 uses of one file are 33 uses");
-            // A resource used twice side by side is not a cycle.
-            FakeGraph siblings = new FakeGraph().with(1, xml(2, 2)).with(2, xml(3)).with(3, SourceBound.Node.bitmap(10, 10, none));
-            check(within(siblings, 1), "the same layer twice");
-        });
-        row("source-bound-file-kinds-follow-the-framework", () -> {
-            // ResourcesImpl.loadDrawableForCookie: XML only when the name ends in ".xml", every other file an image.
-            same(SourceBound.XML_FILE, SourceBound.fileKind(true, "res/drawable/a.xml", true), "an XML file");
-            same(SourceBound.IMAGE_FILE, SourceBound.fileKind(true, "res/drawable/a.XML", true), "the name is compared as it is");
-            same(SourceBound.IMAGE_FILE, SourceBound.fileKind(true, "res/drawable/a.png", true), "a PNG");
-            same(SourceBound.IMAGE_FILE, SourceBound.fileKind(true, "res/raw/huge", true), "a file with no extension");
-            same(SourceBound.IMAGE_FILE, SourceBound.fileKind(true, "res/a.bin", true), "a file of an extension nobody knows");
-            same(SourceBound.IMAGE_FILE, SourceBound.fileKind(true, "res/xml/a.xml.png", true), "only the end of the name counts");
-            same(SourceBound.NOT_A_FILE, SourceBound.fileKind(true, "a string that names no file", false), "a string");
-            same(SourceBound.NOT_A_FILE, SourceBound.fileKind(false, null, false), "a colour or a number");
-            same(SourceBound.NOT_A_FILE, SourceBound.fileKind(false, "res/drawable/a.png", true), "a value that is not a string");
-        });
-        row("source-bound-unknown-cost-is-an-error", () -> {
-            check(!within(new FakeGraph().with(1, SourceBound.Node.unknown()), 1), "a file of a cost that cannot be established");
-            check(!within(new FakeGraph().with(1, xml(2)).with(2, SourceBound.Node.unknown()), 1), "one a layer refers to");
-        });
-        row("source-bound-xml-is-checked-before-it-is-opened", () -> {
-            int none = SourceBound.DENSITY_NONE;
-            long one = SourceBound.MAX_XML_BYTES;
-            FakeGraph over = new FakeGraph().with(1, xmlOf(one + 1, 2)).with(2, SourceBound.Node.bitmap(10, 10, none));
-            check(!within(over, 1), "an XML file one byte over the budget");
-            check(over.parsed.isEmpty(), "no parser is opened on it");
-            FakeGraph exact = new FakeGraph().with(1, xmlOf(one, 2)).with(2, SourceBound.Node.bitmap(10, 10, none));
-            check(within(exact, 1), "one of exactly the budget");
-            same(Arrays.asList(1), exact.parsed, "it is opened once");
-            FakeGraph unknown = new FakeGraph().with(1, xmlOf(0, 2)).with(2, SourceBound.Node.bitmap(10, 10, none));
-            check(!within(unknown, 1), "a length that could not be established");
-            check(unknown.parsed.isEmpty(), "no parser is opened on it");
-            // The total of every use: four of the budget are the total, five are over.
-            FakeGraph four = new FakeGraph().with(1, xmlOf(one, 2, 3, 4)).with(2, xmlOf(one)).with(3, xmlOf(one)).with(4, xmlOf(one));
-            check(within(four, 1), "four XML files of the budget are exactly the total");
-            FakeGraph five = new FakeGraph().with(1, xmlOf(one, 2, 3, 4, 5)).with(2, xmlOf(one)).with(3, xmlOf(one))
-                    .with(4, xmlOf(one)).with(5, xmlOf(one));
-            check(!within(five, 1), "five are over");
-            FakeGraph again = new FakeGraph().with(1, xmlOf(one, 2, 2, 2, 2)).with(2, xmlOf(one));
-            check(!within(again, 1), "one file used four times is five reads");
-            same(Arrays.asList(1, 2), again.parsed, "but its parser is opened once");
-        });
-        row("source-bound-colours-are-free", () -> {
-            // A vector with many named colours is not a big icon: only the files count towards the bound.
-            FakeGraph colours = new FakeGraph();
-            int[] ids = new int[100];
-            for (int i = 0; i < ids.length; i++) {
-                ids[i] = 1000 + i;
-                colours.with(ids[i], SourceBound.Node.other());
-            }
-            colours.with(1, xml(ids));
-            check(within(colours, 1), "a hundred colours");
-        });
-        row("source-bound-unreadable-is-an-error", () -> {
-            try {
-                within(new FakeGraph().with(1, xml(2)), 1);
-                throw new Mismatch("a resource that cannot be read");
-            } catch (java.io.IOException expected) {
-                check(true, "thrown");
-            }
-            try {
-                within(new FakeGraph().with(1, SourceBound.Node.bitmap(0, 0, 0)), 1);
-                throw new Mismatch("a bitmap with no size");
-            } catch (java.io.IOException expected) {
-                check(true, "thrown");
-            }
-            try {
-                within(new FakeGraph().with(1, SourceBound.Node.bitmap(-1, -1, 0)), 1);
-                throw new Mismatch("a bitmap whose bounds could not be read");
-            } catch (java.io.IOException expected) {
-                check(true, "thrown");
-            }
-        });
         row("resource-paths-follow-the-framework", () -> {
             List<ResourcePaths.Item> items = ResourcePaths.of("/data/app/a/base.apk", "/data/app/a/private.apk",
                     new String[] {"/data/app/a/split_one.apk", "", null, "/data/app/a/split_two.apk"},

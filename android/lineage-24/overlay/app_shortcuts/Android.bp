@@ -23,11 +23,17 @@ package {
 // kernarium_oldapp it is a Java tool started through app_process, as the
 // platform's own `content` is, so it is installed on system_ext with its wrapper
 // script, runs only as the adb shell user, holds no permission of its own and
-// writes nothing: no file, no property, no setting.
+// writes nothing: no file, no property, no setting. It draws no icon: it names
+// each application's files to the icon renderer (KernariumIcons, app_icons) and
+// checks the PNG that comes back, so no application file is opened or decoded in
+// this process. IconProtocol, shared with that app, is the request vocabulary.
 java_binary {
     name: "kernarium_apps",
     wrapper: "kernarium_apps",
-    srcs: ["src/**/*.java"],
+    srcs: [
+        "src/**/*.java",
+        ":kernarium_icon_protocol",
+    ],
     platform_apis: true,
     system_ext_specific: true,
 }

@@ -4,21 +4,24 @@
 
 android/lineage-24/overlay/app_shortcuts is a Java tool that the image runs through app_process as the adb
 shell user (Andarium's Add to Home Screen lists the launcher applications and starts one through it). Its
-grammar, the label escaping, the listing's rule and bounds, the framing of every answer, the icon records, the
-launch's refusals and the exit statuses do not touch the platform: AppsCommandTest.java drives them against a
-fake platform. The sources compile here without the Android glue (AndroidPlatform and Main, which need the
-framework); the Android calls are compiled by the build host's request and exercised by the runner on an image.
+grammar, the label escaping, the listing's rule and bounds, the framing of every answer, the icon records, what is
+checked of the renderer's answer, the launch's refusals and the exit statuses do not touch the platform:
+AppsCommandTest.java drives them against a fake platform. The sources compile here without the Android glue
+(AndroidPlatform and Main, which need the framework), and with IconProtocol, which the tool shares with the icon
+renderer app (test_icon_renderer.py has the renderer); the Android calls are compiled by the build host's request and
+exercised by the runner on an image.
 
 The test also runs the Java rows on copies of the sources with one rule removed at a time (the escaping, a bound,
-the launch refusal, the grammar, the digest's inputs, the PNG checks, the deadlines, the child process's drain
-and reaping, the icon source's bound), and requires the rows named here to fail: a row that cannot tell the rule
-from its absence is no row. The Android glue (AndroidPlatform) cannot run on a JVM: what it must not do (take a
-substitute for a lookup that failed, read the manifest's enabled flag, use the wall clock, draw an icon for the
-device's own configuration for an icon or a label, add resource files its own way, leave the image's build time
-out of a built-in application's icon key, measure a file by its extension, kill a child by anything but its pid)
-is checked on its text, and each of those checks has its own mutant. The Java rows run on a 64 MiB heap, so that a
-label of megabytes does not fit a copy of itself (the cleaning's bound is a row). Skipped (status 77) where the
-host has no JDK.
+the launch refusal, the grammar, the digest's inputs, each check of the renderer's PNG, a renderer that is missing
+or gone, the deadlines, the child process's drain and reaping), and requires the rows named here to fail: a row that
+cannot tell the rule from its absence is no row. The Android glue (AndroidPlatform) cannot run on a JVM: what it must
+not do (take a substitute for a lookup that failed, read the manifest's enabled flag, use the wall clock, read a label
+for the device's own configuration, add resource files its own way, leave the image's build time out of a built-in
+application's icon key, kill a child by anything but its pid, draw or decode anything of an application's) and how it
+must reach the renderer (the provider held for the foreground user and released, a dead provider asked for again
+once, the request that is the resource id and the files and nothing else) is checked on its text, and each of those
+checks has its own mutant. The Java rows run on a 64 MiB heap, so that a label of megabytes does not fit a copy of
+itself (the cleaning's bound is a row). Skipped (status 77) where the host has no JDK.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ REPOSITORY = HERE.parents[2]
 LINEAGE = REPOSITORY / "android" / "lineage-24"
 TOOL = LINEAGE / "overlay" / "app_shortcuts"
 SOURCES = TOOL / "src"
+PROTOCOL = LINEAGE / "overlay" / "app_icons" / "src" / "com" / "kernarium" / "icons" / "IconProtocol.java"
 TEST = HERE / "app_shortcuts" / "com" / "kernarium" / "apps" / "AppsCommandTest.java"
 ANDROID_GLUE = ("AndroidPlatform.java", "Main.java")
 PACKAGE_DIR = pathlib.Path("com") / "kernarium" / "apps"
@@ -165,22 +169,118 @@ MUTATIONS = [
      "        Collections.sort(eligible, ORDER);\n",
      "",
      {"listing-order-and-filter", "digest-follows-the-set"}),
-    ("png-bound-removed", "AppsCommand.java",
-     "if (icon.png.length <= MAX_PNG_BYTES) {",
-     "if (true) {",
-     {"icons-size-steps"}),
-    ("png-bound-off-by-one", "AppsCommand.java",
-     "if (icon.png.length <= MAX_PNG_BYTES) {",
-     "if (icon.png.length < MAX_PNG_BYTES) {",
-     {"icons-png-bound-is-exact"}),
-    ("png-signature-unchecked", "AppsCommand.java",
-     "if (icon == null || icon.size != size || !isPng(icon.png)) {",
-     "if (icon == null || icon.size != size) {",
-     {"icons-statuses"}),
-    ("icon-size-unchecked", "AppsCommand.java",
-     "if (icon == null || icon.size != size || !isPng(icon.png)) {",
-     "if (icon == null || !isPng(icon.png)) {",
-     {"icons-statuses"}),
+    ("renderer-answer-unchecked", "AppsCommand.java",
+     "made[0] = PngCheck.problem(icon) == null ? icon : null;",
+     "made[0] = icon;",
+     {"icons-answer-is-checked", "icons-statuses", "icons-bad-answer-costs-that-icon-alone"}),
+    ("png-check-size-unchecked", "PngCheck.java",
+     "        if (!sized) {\n            return \"a size that was not asked for\";\n        }\n",
+     "",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-size-set-widened", "PngCheck.java",
+     "sized |= icon.size == size;",
+     "sized |= icon.size == size || icon.size == 64;",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-length-bound-removed", "PngCheck.java",
+     "|| png.length > IconProtocol.MAX_PNG_BYTES) {",
+     "|| false) {",
+     {"png-check-length-bounds-are-exact", "png-check-refuses-what-a-renderer-must-not-be-believed-on"}),
+    ("png-check-length-bound-off-by-one", "PngCheck.java",
+     "|| png.length > IconProtocol.MAX_PNG_BYTES) {",
+     "|| png.length > IconProtocol.MAX_PNG_BYTES + 1) {",
+     {"png-check-length-bounds-are-exact"}),
+    ("png-check-header-length-not-checked", "PngCheck.java",
+     "png == null || png.length < HEADER_BYTES ||",
+     "png == null ||",
+     {"png-check-refuses-a-short-answer-without-failing"}),
+    ("png-check-null-png-not-checked", "PngCheck.java",
+     "png == null || png.length < HEADER_BYTES",
+     "png.length < HEADER_BYTES",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on"}),
+    ("png-check-signature-unchecked", "PngCheck.java",
+     "            if (png[i] != AppsCommand.PNG_SIGNATURE[i]) {",
+     "            if (false) {",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-signature-prefix-only", "PngCheck.java",
+     "i < AppsCommand.PNG_SIGNATURE.length; i++",
+     "i < AppsCommand.PNG_SIGNATURE.length - 1; i++",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-header-length-field-unchecked", "PngCheck.java",
+     "if (integer(png, 8) != 13 || integer(png, 12) != 0x49484452) {",
+     "if (integer(png, 12) != 0x49484452) {",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-header-type-unchecked", "PngCheck.java",
+     "if (integer(png, 8) != 13 || integer(png, 12) != 0x49484452) {",
+     "if (integer(png, 8) != 13) {",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-crc-unchecked", "PngCheck.java",
+     "if (crc.getValue() != (integer(png, 29) & 0xFFFFFFFFL)) {",
+     "if (false) {",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-crc-sign-extended", "PngCheck.java",
+     "if (crc.getValue() != (integer(png, 29) & 0xFFFFFFFFL)) {",
+     "if (crc.getValue() != integer(png, 29)) {",
+     {"png-check-accepts-what-a-renderer-may-send", "icons-answer-is-checked"}),
+    ("png-check-crc-over-too-little", "PngCheck.java",
+     "crc.update(png, 12, 17);",
+     "crc.update(png, 12, 16);",
+     {"png-check-accepts-what-a-renderer-may-send", "icons-answer-is-checked"}),
+    ("png-check-width-unchecked", "PngCheck.java",
+     "if (integer(png, 16) != icon.size || integer(png, 20) != icon.size) {",
+     "if (integer(png, 20) != icon.size) {",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-height-unchecked", "PngCheck.java",
+     "if (integer(png, 16) != icon.size || integer(png, 20) != icon.size) {",
+     "if (integer(png, 16) != icon.size) {",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-depth-unchecked", "PngCheck.java",
+     "if (depth != 8 || (colour != 2 && colour != 6)",
+     "if ((colour != 2 && colour != 6)",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-colour-type-unchecked", "PngCheck.java",
+     "|| (colour != 2 && colour != 6) ||",
+     "||",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-grey-with-alpha-accepted", "PngCheck.java",
+     "(colour != 2 && colour != 6)",
+     "(colour != 2 && colour != 6 && colour != 4)",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-compression-unchecked", "PngCheck.java",
+     "|| png[26] != 0 || png[27] != 0 || png[28] != 0) {",
+     "|| png[27] != 0 || png[28] != 0) {",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-filter-unchecked", "PngCheck.java",
+     "|| png[26] != 0 || png[27] != 0 || png[28] != 0) {",
+     "|| png[26] != 0 || png[28] != 0) {",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-interlace-unchecked", "PngCheck.java",
+     "|| png[26] != 0 || png[27] != 0 || png[28] != 0) {",
+     "|| png[26] != 0 || png[27] != 0) {",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("png-check-alpha-claim-unchecked", "PngCheck.java",
+     "if (colour == 2 && icon.hasAlpha) {",
+     "if (false) {",
+     {"png-check-refuses-what-a-renderer-must-not-be-believed-on", "icons-answer-is-checked"}),
+    ("renderer-gone-is-an-icon-error", "AppsCommand.java",
+     "                    if (render.gone) {\n                        throw new PlatformException(\"the icon renderer is not available\");\n                    }\n",
+     "",
+     {"icons-renderer-lost-mid-batch-fails-the-command", "icons-renderer-is-released"}),
+    ("renderer-not-released", "AppsCommand.java",
+     "try (Renderer renderer = platform.openRenderer()) {",
+     "{\n            Renderer renderer = platform.openRenderer();",
+     {"icons-renderer-is-released"}),
+    ("renderer-opened-after-the-listing-for-drawn-icons-only", "AppsCommand.java",
+     "        try (Renderer renderer = platform.openRenderer()) {\n            answer.line(\"kernarium_apps \" + FORMAT_VERSION);",
+     "        try (Renderer renderer = components.stream().allMatch(c -> find(reported, c) == null || find(reported, c).iconResource == 0)\n                ? null : platform.openRenderer()) {\n            answer.line(\"kernarium_apps \" + FORMAT_VERSION);",
+     {"icons-renderer-missing-fails-the-command"}),
+    ("failed-icon-is-asked-again", "AppsCommand.java",
+     "                Icon icon = renderer.render(entry);\n",
+     "                Icon icon;\n                try {\n                    icon = renderer.render(entry);\n                } catch (RendererGone lost) {\n                    throw lost;\n                } catch (Exception again) {\n                    icon = renderer.render(entry);\n                }\n",
+     {"icons-a-worker-that-failed-costs-that-icon-alone"}),
+    ("renderer-lost-is-an-icon-error", "AppsCommand.java",
+     "            } catch (RendererGone lost) {\n                gone[0] = true;\n            } catch (Throwable problem) {",
+     "            } catch (Throwable problem) {",
+     {"icons-renderer-lost-mid-batch-fails-the-command"}),
     ("icon-deadline-removed", "AppsCommand.java",
      "if (platform.nowMillis() - begin > ICON_DEADLINE_MILLIS) {",
      "if (false) {",
@@ -242,89 +342,9 @@ MUTATIONS = [
      "+ entry.lastUpdateMillis + '\\0'",
      {"icon-key-follows-the-icon", "digest-follows-the-set"}),
     ("render-version-not-bumped", "Listing.java",
+     "static final int RENDER_VERSION = 3;",
      "static final int RENDER_VERSION = 2;",
-     "static final int RENDER_VERSION = 1;",
      {"icon-key-follows-the-icon"}),
-    ("source-bitmap-bound-removed", "SourceBound.java",
-     "static final long MAX_BITMAP_PIXELS = 16L * 1024 * 1024;",
-     "static final long MAX_BITMAP_PIXELS = 16L * 1024 * 1024 * 1024;",
-     {"source-bound-one-bitmap", "source-bound-follows-the-density"}),
-    ("source-total-bound-removed", "SourceBound.java",
-     "static final long MAX_TOTAL_PIXELS = 32L * 1024 * 1024;",
-     "static final long MAX_TOTAL_PIXELS = 32L * 1024 * 1024 * 1024;",
-     {"source-bound-layers-add-up"}),
-    ("source-density-ignored", "SourceBound.java",
-     "if (node.density != DENSITY_NONE) {",
-     "if (false) {",
-     {"source-bound-follows-the-density"}),
-    ("source-resource-count-removed", "SourceBound.java",
-     "static final int MAX_RESOURCES = 32;",
-     "static final int MAX_RESOURCES = 3200;",
-     {"source-bound-walk-is-bounded"}),
-    ("source-depth-removed", "SourceBound.java",
-     "static final int MAX_DEPTH = 6;",
-     "static final int MAX_DEPTH = 600;",
-     {"source-bound-walk-is-bounded"}),
-    ("source-path-never-left", "SourceBound.java",
-     "            walk.path.remove(id);\n",
-     "",
-     {"source-bound-charges-every-use"}),
-    ("source-counts-colours", "SourceBound.java",
-     "            if (node.kind == Node.OTHER) {\n                return true; // a colour or a string costs nothing: only the files count towards the bound\n            }\n",
-     "",
-     {"source-bound-colours-are-free"}),
-    ("source-repeated-use-not-charged", "SourceBound.java",
-     "walk.pixels += pixels;",
-     "walk.pixels = Math.max(walk.pixels, pixels);",
-     {"source-bound-charges-every-use", "source-bound-layers-add-up"}),
-    ("source-repeated-use-not-counted", "SourceBound.java",
-     "++walk.uses > MAX_RESOURCES",
-     "walk.uses > MAX_RESOURCES",
-     {"source-bound-walk-is-bounded", "source-bound-charges-every-use"}),
-    ("source-measured-again-for-every-use", "SourceBound.java",
-     "            Node node = measured.get(id);\n            if (node == null) {\n                node = graph.node(id);\n                measured.put(id, node);\n            }\n            return node;",
-     "            return graph.node(id);",
-     {"source-bound-charges-every-use"}),
-    ("source-unknown-cost-is-free", "SourceBound.java",
-     "if (node.kind == Node.UNKNOWN) {\n                return false;",
-     "if (node.kind == Node.UNKNOWN) {\n                return true;",
-     {"source-bound-unknown-cost-is-an-error"}),
-    ("source-uses-not-counted-for-colours-only", "SourceBound.java",
-     "if (++walk.uses > MAX_RESOURCES) {\n                return false;\n            }",
-     "if (walk.uses++ > MAX_RESOURCES) {\n                return false;\n            }",
-     {"source-bound-walk-is-bounded"}),
-    ("source-xml-length-not-checked", "SourceBound.java",
-     "if (node.bytes <= 0 || node.bytes > MAX_XML_BYTES) {",
-     "if (false) {",
-     {"source-bound-xml-is-checked-before-it-is-opened"}),
-    ("source-xml-unknown-length-passes", "SourceBound.java",
-     "if (node.bytes <= 0 || node.bytes > MAX_XML_BYTES) {",
-     "if (node.bytes > MAX_XML_BYTES) {",
-     {"source-bound-xml-is-checked-before-it-is-opened"}),
-    ("source-xml-total-not-checked", "SourceBound.java",
-     "if (walk.xmlBytes > MAX_XML_TOTAL_BYTES) {",
-     "if (false) {",
-     {"source-bound-xml-is-checked-before-it-is-opened"}),
-    ("file-kind-xml-by-lower-case-name", "SourceBound.java",
-     "return path.endsWith(\".xml\") ? XML_FILE : IMAGE_FILE;",
-     "return path.toLowerCase(java.util.Locale.ROOT).endsWith(\".xml\") ? XML_FILE : IMAGE_FILE;",
-     {"source-bound-file-kinds-follow-the-framework"}),
-    ("file-kind-image-by-extension", "SourceBound.java",
-     "return path.endsWith(\".xml\") ? XML_FILE : IMAGE_FILE;",
-     "return path.endsWith(\".xml\") ? XML_FILE : (path.endsWith(\".png\") ? IMAGE_FILE : NOT_A_FILE);",
-     {"source-bound-file-kinds-follow-the-framework"}),
-    ("file-kind-of-a-value-that-does-not-open", "SourceBound.java",
-     "if (!stringValue || path == null || !opens) {",
-     "if (!stringValue || path == null) {",
-     {"source-bound-file-kinds-follow-the-framework"}),
-    ("file-kind-of-a-colour", "SourceBound.java",
-     "if (!stringValue || path == null || !opens) {",
-     "if (path == null || !opens) {",
-     {"source-bound-file-kinds-follow-the-framework"}),
-    ("source-unreadable-bitmap-passes", "SourceBound.java",
-     "if (node.width <= 0 || node.height <= 0) {",
-     "if (false) {",
-     {"source-bound-unreadable-is-an-error"}),
     ("resource-overlays-dropped", "ResourcePaths.java",
      "            items.add(new Item(Kind.OVERLAY, overlay));\n",
      "",
@@ -403,28 +423,46 @@ PLATFORM_RULES = [
     ("enabled is the resolver's answer, not the manifest flag", lambda t: "isEnabled(" not in t and ".enabled" not in t
      and re.search(r"info\.exported,\s*true,\s*permitted\(", t) is not None),
     ("the icon deadline uses the monotonic clock", lambda t: "SystemClock.elapsedRealtime()" in t and "currentTimeMillis" not in t),
-    ("the icon source is bounded before it is inflated",
-     lambda t: "SourceBound.within(" in t and t.index("SourceBound.within(") < t.index("getDrawableForDensity(")),
-    ("icons are drawn and labels are read for a fixed configuration and the digest's locales alone",
-     lambda t: "UI_MODE_NIGHT_NO" in t and "ICON_LOCALE" in t and "new Configuration(configuration())" not in t
-     and "configuration()" not in t.split("private static Configuration fixedConfiguration(LocaleList locales)")[1].split("\n    }\n")[0]
-     and "fixedConfiguration(icon ? new LocaleList(ICON_LOCALE) : configuration().getLocales())" in t),
+    ("labels are read for a fixed configuration and the digest's locales alone",
+     lambda t: "UI_MODE_NIGHT_NO" in t and "fixedConfiguration(configuration().getLocales())" in t
+     and "new Configuration(configuration())" not in t and "ICON_" not in t),
+    ("no icon is drawn, decoded or parsed in this process: no image, drawable, canvas or XML of an application is touched",
+     lambda t: all(word not in t for word in ("Bitmap", "Canvas", "Drawable", "getDrawable", "XmlResourceParser", "XmlPullParser",
+                                              "getXml(", "openRawResource", "BitmapFactory", "ImageDecoder", "TypedValue",
+                                              "getValueForDensity", "getResourceTypeName"))),
+    ("the icon renderer's provider is held for the foreground user, through the activity manager, and released",
+     lambda t: "ActivityManager.getService().getContentProviderExternal( IconProtocol.AUTHORITY, mUser, mToken, AppsCommand.NAME)" in flat(t)
+     and "removeContentProviderExternalAsUser(IconProtocol.AUTHORITY, mToken, mUser)" in t
+     and "mUser = platform.currentUser();" in t and "private final IBinder mToken = new Binder();" in t
+     and "public void close() { release();" in flat(t)),
+    ("a renderer that cannot be had is the fixed reason, whatever the holder says",
+     lambda t: 'RENDERER_GONE = "the icon renderer is not available"' in t
+     and re.search(r"if \(holder == null \|\| holder\.provider == null\) \{\s*throw new PlatformException\(RENDERER_GONE\);", t) is not None
+     and re.search(r"catch \(Exception \| LinkageError problem\) \{\s*throw new PlatformException\(RENDERER_GONE, problem\);", t) is not None),
+    ("the request is the icon's resource id and the files, and nothing else, as the renderer's protocol names them",
+     lambda t: all(word in t for word in ("request.putInt(IconProtocol.KEY_RESOURCE, entry.iconResource);",
+                                          "request.putIntArray(IconProtocol.KEY_KINDS, kinds);",
+                                          "request.putStringArray(IconProtocol.KEY_PATHS, paths);"))
+     and t.count("request.put") == 3 and "items.size() > IconProtocol.MAX_FILES" in t and "!ResourcePaths.hasBase(items)" in t
+     and 'mProvider.call(new AttributionSource(android.os.Process.myUid(), "com.android.shell", null), IconProtocol.AUTHORITY, '
+         "IconProtocol.METHOD_RENDER, null, request)" in flat(t)),
+    ("each kind of file is sent as its own kind",
+     lambda t: all(f"kinds[i] = IconProtocol.KIND_{kind};" in t for kind in ("SPLIT", "LIBRARY", "OVERLAY", "BASE"))
+     and all(f"case {kind}:" in t for kind in ("SPLIT", "LIBRARY", "OVERLAY"))),
+    ("the answer is the status, the size and the two flags, and the bytes, and an answer that is not ok is an error",
+     lambda t: "answer.getInt(IconProtocol.KEY_STATUS, IconProtocol.STATUS_ERROR) != IconProtocol.STATUS_OK" in t
+     and all(f"IconProtocol.KEY_{key}" in t for key in ("SIZE", "ADAPTIVE", "ALPHA", "PNG"))
+     and "answer == null" in t),
+    ("a provider that died costs the icon in flight; it is asked for again once and, when it is not there, the renderer is gone",
+     lambda t: re.search(r"catch \(DeadObjectException dead\) \{\s*release\(\);\s*try \{\s*acquire\(\);\s*\} "
+                         r"catch \(PlatformException unreachable\) \{\s*throw new AppsCommand\.RendererGone\(RENDERER_GONE, unreachable\);\s*\}\s*"
+                         r"throw new PlatformException\(\"the icon renderer died\"\);", t) is not None),
     ("a built-in application that was never updated carries the image's build time as an input of its key",
      lambda t: re.search(r"FLAG_SYSTEM\) != 0;", t) is not None
      and re.search(r"long imageBuild = builtIn && \(application\.flags & ApplicationInfo\.FLAG_UPDATED_SYSTEM_APP\) == 0\s*"
                    r"\? Build\.TIME : 0;", t) is not None
      and re.search(r"packageInfo\.lastUpdateTime, imageBuild, info\.getIconResource\(\)", t) is not None
      and "Math.max(" not in t),
-    ("a resource is judged by its value: every file the framework decodes is measured, whatever its type or name",
-     lambda t: all(word not in t for word in ("isImage(", "getResourceTypeName", "NOT_FILES", "toLowerCase("))
-     and "SourceBound.fileKind(string, string ? value.string.toString() : null, string && opens(id))" in t
-     and "case SourceBound.IMAGE_FILE:" in t and "default:\n                    return SourceBound.Node.unknown();" in t),
-    ("a file whose cost cannot be established is over the bound",
-     lambda t: re.search(r"catch \(Resources\.NotFoundException unreadable\) \{\s*return UNKNOWN;", t) is not None
-     and re.search(r"value\.type == TypedValue\.TYPE_REFERENCE\) \{\s*return UNKNOWN;", t) is not None),
-    ("an XML resource's length is read before a parser is opened",
-     lambda t: "SourceBound.Node.xml(length, () -> references(id))" in t and t.count("getXml(") == 1
-     and "in.available()" in t),
     ("a child that ignores termination is killed by its pid",
      lambda t: "android.os.Process.killProcess(field.getInt(process))" in t and 'getDeclaredField("pid")' in t
      and "destroyForcibly" not in t and "new KillByPid()" in t
@@ -506,23 +544,10 @@ PLATFORM_MUTATIONS = [
      "return SystemClock.elapsedRealtime();",
      "return System.currentTimeMillis();",
      "the icon deadline uses the monotonic clock"),
-    ("icon-source-unbounded",
-     "        if (!SourceBound.within(new ResourceGraph(resources), entry.iconResource, ICON_DENSITY)) {\n"
-     "            throw new PlatformException(\"the icon's source is over the bound\");\n        }\n",
-     "",
-     "the icon source is bounded before it is inflated"),
-    ("icon-drawn-for-the-device-configuration",
-     "        Configuration configuration = new Configuration();\n        configuration.densityDpi = ICON_DENSITY;",
-     "        Configuration configuration = new Configuration(configuration());\n        configuration.densityDpi = ICON_DENSITY;",
-     "icons are drawn and labels are read for a fixed configuration and the digest's locales alone"),
     ("label-read-for-the-device-configuration",
-     "fixedConfiguration(icon ? new LocaleList(ICON_LOCALE) : configuration().getLocales())",
-     "icon ? fixedConfiguration(new LocaleList(ICON_LOCALE)) : new Configuration(configuration())",
-     "icons are drawn and labels are read for a fixed configuration and the digest's locales alone"),
-    ("icon-drawn-for-the-system-locales",
-     "fixedConfiguration(icon ? new LocaleList(ICON_LOCALE) : configuration().getLocales())",
      "fixedConfiguration(configuration().getLocales())",
-     "icons are drawn and labels are read for a fixed configuration and the digest's locales alone"),
+     "new Configuration(configuration())",
+     "labels are read for a fixed configuration and the digest's locales alone"),
     ("image-build-left-out-of-the-icon-key",
      "packageInfo.lastUpdateTime, imageBuild, info.getIconResource()",
      "packageInfo.lastUpdateTime, 0, info.getIconResource()",
@@ -536,27 +561,6 @@ PLATFORM_MUTATIONS = [
      "                    ? Build.TIME : 0;",
      "long imageBuild = builtIn ? Build.TIME : 0;",
      "a built-in application that was never updated carries the image's build time as an input of its key"),
-    ("unreadable-value-is-free",
-     "} catch (Resources.NotFoundException unreadable) {\n                return UNKNOWN;",
-     "} catch (Resources.NotFoundException unreadable) {\n                return SourceBound.NOT_A_FILE;",
-     "a file whose cost cannot be established is over the bound"),
-    ("leftover-reference-is-free",
-     "if (value.type == TypedValue.TYPE_REFERENCE) {\n                return UNKNOWN;",
-     "if (value.type == TypedValue.TYPE_REFERENCE) {\n                return SourceBound.NOT_A_FILE;",
-     "a file whose cost cannot be established is over the bound"),
-    ("type-name-decides-what-is-a-file",
-     "            boolean string = value.type == TypedValue.TYPE_STRING && value.string != null;\n",
-     "            if (\"string\".equals(mResources.getResourceTypeName(id))) {\n                return SourceBound.NOT_A_FILE;\n            }\n"
-     "            boolean string = value.type == TypedValue.TYPE_STRING && value.string != null;\n",
-     "a resource is judged by its value: every file the framework decodes is measured, whatever its type or name"),
-    ("unknown-kind-is-not-a-file",
-     "                default:\n                    return SourceBound.Node.unknown();",
-     "                default:\n                    return SourceBound.Node.other();",
-     "a resource is judged by its value: every file the framework decodes is measured, whatever its type or name"),
-    ("xml-parsed-before-its-length-is-known",
-     "return SourceBound.Node.xml(length, () -> references(id));",
-     "final int[] eager = references(id);\n                return SourceBound.Node.xml(length, () -> eager);",
-     "an XML resource's length is read before a parser is opened"),
     ("kill-by-destroyForcibly",
      "android.os.Process.killProcess(field.getInt(process));",
      "process.destroyForcibly();",
@@ -585,6 +589,87 @@ PLATFORM_MUTATIONS = [
      "ChildProcess.run(AppsCommand.startArguments(user, component),",
      "new ProcessBuilder(AppsCommand.startArguments(user, component)).start().waitFor(); ChildProcess.run(AppsCommand.startArguments(user, component),",
      "the start is run by ChildProcess"),
+    ("renderer-reads-the-icon-in-the-shell",
+     "    private static final class ProviderRenderer implements AppsCommand.Renderer {",
+     "    private static android.graphics.Bitmap decoded(byte[] bytes) {\n        return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length);\n    }\n\n"
+     "    private static final class ProviderRenderer implements AppsCommand.Renderer {",
+     "no icon is drawn, decoded or parsed in this process: no image, drawable, canvas or XML of an application is touched"),
+    ("renderer-parses-xml-in-the-shell",
+     "    private static final class ProviderRenderer implements AppsCommand.Renderer {",
+     "    private static Object parsed(Resources resources, int id) throws Exception {\n        return resources.getXml(id);\n    }\n\n"
+     "    private static final class ProviderRenderer implements AppsCommand.Renderer {",
+     "no icon is drawn, decoded or parsed in this process: no image, drawable, canvas or XML of an application is touched"),
+    ("provider-held-for-another-user",
+     "IconProtocol.AUTHORITY, mUser, mToken, AppsCommand.NAME)",
+     "IconProtocol.AUTHORITY, 0, mToken, AppsCommand.NAME)",
+     "the icon renderer's provider is held for the foreground user, through the activity manager, and released"),
+    ("provider-never-released",
+     "removeContentProviderExternalAsUser(IconProtocol.AUTHORITY, mToken, mUser)",
+     "getContentProviderExternal(IconProtocol.AUTHORITY, mUser, mToken, AppsCommand.NAME)",
+     "the icon renderer's provider is held for the foreground user, through the activity manager, and released"),
+    ("renderer-close-does-not-release",
+     "        public void close() {\n            release();",
+     "        public void close() {\n            mProvider = null;",
+     "the icon renderer's provider is held for the foreground user, through the activity manager, and released"),
+    ("missing-provider-is-no-reason",
+     "if (holder == null || holder.provider == null) {\n                    throw new PlatformException(RENDERER_GONE);",
+     "if (holder == null || holder.provider == null) {\n                    throw new PlatformException(\"no provider\");",
+     "a renderer that cannot be had is the fixed reason, whatever the holder says"),
+    ("framework-failure-is-the-framework-message",
+     "throw new PlatformException(RENDERER_GONE, problem);",
+     "throw new PlatformException(String.valueOf(problem.getMessage()), problem);",
+     "a renderer that cannot be had is the fixed reason, whatever the holder says"),
+    ("null-holder-passes",
+     "if (holder == null || holder.provider == null) {",
+     "if (holder != null && holder.provider == null) {",
+     "a renderer that cannot be had is the fixed reason, whatever the holder says"),
+    ("request-leaves-out-the-resource",
+     "            request.putInt(IconProtocol.KEY_RESOURCE, entry.iconResource);\n", "",
+     "the request is the icon's resource id and the files, and nothing else, as the renderer's protocol names them"),
+    ("request-carries-the-label-too",
+     "            request.putIntArray(IconProtocol.KEY_KINDS, kinds);",
+     "            request.putIntArray(IconProtocol.KEY_KINDS, kinds);\n            request.putString(\"label\", entry.packageName);",
+     "the request is the icon's resource id and the files, and nothing else, as the renderer's protocol names them"),
+    ("request-unbounded",
+     "|| items.size() > IconProtocol.MAX_FILES", "",
+     "the request is the icon's resource id and the files, and nothing else, as the renderer's protocol names them"),
+    ("request-without-a-base-check",
+     "if (!ResourcePaths.hasBase(items) ||", "if (",
+     "the request is the icon's resource id and the files, and nothing else, as the renderer's protocol names them"),
+    ("request-called-as-another-package",
+     "\"com.android.shell\", null)", "\"android\", null)",
+     "the request is the icon's resource id and the files, and nothing else, as the renderer's protocol names them"),
+    ("overlays-sent-as-splits",
+     "                    case OVERLAY:\n                        kinds[i] = IconProtocol.KIND_OVERLAY;",
+     "                    case OVERLAY:\n                        kinds[i] = IconProtocol.KIND_SPLIT;",
+     "each kind of file is sent as its own kind"),
+    ("libraries-sent-as-overlays",
+     "                    case LIBRARY:\n                        kinds[i] = IconProtocol.KIND_LIBRARY;",
+     "                    case LIBRARY:\n                        kinds[i] = IconProtocol.KIND_OVERLAY;",
+     "each kind of file is sent as its own kind"),
+    ("an-answer-that-is-not-ok-is-taken",
+     "answer.getInt(IconProtocol.KEY_STATUS, IconProtocol.STATUS_ERROR) != IconProtocol.STATUS_OK",
+     "answer.getInt(IconProtocol.KEY_STATUS, IconProtocol.STATUS_OK) != IconProtocol.STATUS_OK",
+     "the answer is the status, the size and the two flags, and the bytes, and an answer that is not ok is an error"),
+    ("a-missing-answer-is-taken",
+     "answer == null ||", "",
+     "the answer is the status, the size and the two flags, and the bytes, and an answer that is not ok is an error"),
+    ("a-dead-provider-is-not-released",
+     "            } catch (DeadObjectException dead) {\n                release();",
+     "            } catch (DeadObjectException dead) {\n                mProvider = null;",
+     "a provider that died costs the icon in flight; it is asked for again once and, when it is not there, the renderer is gone"),
+    ("a-dead-provider-is-not-asked-for-again",
+     "                try {\n                    acquire();\n                } catch (PlatformException unreachable) {",
+     "                try {\n                    mProvider = mProvider;\n                } catch (RuntimeException unreachable) {",
+     "a provider that died costs the icon in flight; it is asked for again once and, when it is not there, the renderer is gone"),
+    ("a-provider-that-is-not-there-again-is-an-icon-error",
+     "throw new AppsCommand.RendererGone(RENDERER_GONE, unreachable);",
+     "throw new PlatformException(RENDERER_GONE, unreachable);",
+     "a provider that died costs the icon in flight; it is asked for again once and, when it is not there, the renderer is gone"),
+    ("a-dead-provider-is-no-error-for-the-icon",
+     "                throw new PlatformException(\"the icon renderer died\");\n",
+     "                return null;\n",
+     "a provider that died costs the icon in flight; it is asked for again once and, when it is not there, the renderer is gone"),
 ]
 
 
@@ -623,6 +708,11 @@ def failed_rows(output: str) -> set[str]:
 def strip_comments(text: str) -> str:
     """Java source without its comments (the glue has no string with a slash pair in it)."""
     return re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", text, flags=re.S))
+
+
+def flat(text: str) -> str:
+    """The text with every run of white space one space: a rule on a statement does not depend on its line breaks."""
+    return re.sub(r"\s+", " ", text)
 
 
 def platform_problems(text: str) -> list[str]:
@@ -667,6 +757,10 @@ def check_sources() -> int:
             problems.append(f"{name} opens a FileOutputStream: only Main writes, to the descriptor of stdout")
         if "ProcessBuilder" in text and name != "ChildProcess.java":
             problems.append(f"{name} starts a process: only ChildProcess does")
+        for imported in re.findall(r"^import\s+(?:static\s+)?([\w.]+)", strip_comments(text), re.MULTILINE):
+            if imported.startswith(("android.graphics", "android.media", "org.xmlpull", "javax.xml", "org.w3c")) \
+                    or imported in ("android.util.Xml", "android.content.res.XmlResourceParser", "android.util.TypedValue"):
+                problems.append(f"{name} imports {imported}: an icon is drawn, decoded and parsed by the renderer app and nowhere in this tool")
     main = java_files["Main.java"]
     if re.findall(r"new FileOutputStream\((.*?)\)", main) != ["FileDescriptor.out"]:
         problems.append("Main writes anything but the descriptor of stdout")
@@ -686,7 +780,7 @@ def check_sources() -> int:
             problems.append(f"the start passes {flag}: it takes no extra, data or flag from outside")
     bp = (TOOL / "Android.bp").read_text(encoding="utf-8")
     for expected in ('java_binary {', 'name: "kernarium_apps"', 'wrapper: "kernarium_apps"',
-                     'srcs: ["src/**/*.java"]', 'platform_apis: true', 'system_ext_specific: true'):
+                     '"src/**/*.java",', '":kernarium_icon_protocol",', 'platform_apis: true', 'system_ext_specific: true'):
         if expected not in bp:
             problems.append(f"Android.bp lacks {expected}")
     code = "\n".join(line for line in bp.splitlines() if not line.lstrip().startswith("//"))
@@ -736,7 +830,7 @@ def main() -> int:
     package_dir = SOURCES / PACKAGE_DIR
     sources = sorted(path for path in package_dir.glob("*.java") if path.name not in ANDROID_GLUE)
     expected = {"AppsCommand.java", "ChildProcess.java", "Component.java", "Entry.java", "Icon.java", "LabelText.java",
-                "Listing.java", "PlatformException.java", "ResourcePaths.java", "SourceBound.java", "StartOutcome.java"}
+                "Listing.java", "PlatformException.java", "PngCheck.java", "ResourcePaths.java", "StartOutcome.java"}
     if {path.name for path in sources} != expected:
         print(f"FAIL: the platform-free sources are {sorted(path.name for path in sources)}, not {sorted(expected)}",
               file=sys.stderr)
@@ -747,7 +841,7 @@ def main() -> int:
             return 1
     with tempfile.TemporaryDirectory(prefix="uml-app-shortcuts-") as directory:
         scratch = pathlib.Path(directory)
-        status, output = compile_and_run(javac, java, scratch / "base", sources)
+        status, output = compile_and_run(javac, java, scratch / "base", [*sources, PROTOCOL])
         print(output, end="")
         if status != 0 or not output.rstrip().endswith("PASS"):
             print("FAIL: the command's test", file=sys.stderr)
@@ -762,6 +856,7 @@ def main() -> int:
                 return False, f"FAIL: mutation {name} names rows that do not exist: {sorted(unknown)}"
             copy = scratch / f"src-{name}"
             shutil.copytree(package_dir, copy)
+            shutil.copy(PROTOCOL, copy / PROTOCOL.name)
             target = copy / source
             text = target.read_text(encoding="utf-8")
             if text.count(old) != 1:

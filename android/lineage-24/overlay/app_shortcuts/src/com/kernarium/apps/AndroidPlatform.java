@@ -17,6 +17,9 @@
 package com.kernarium.apps;
 
 import android.app.ActivityManager;
+import android.app.ContentProviderHolder;
+import android.content.AttributionSource;
+import android.content.IContentProvider;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
@@ -29,40 +32,35 @@ import android.content.res.ApkAssets;
 import android.content.res.AssetManager;
 import android.content.res.Configuration;
 import android.content.res.Resources;
-import android.content.res.XmlResourceParser;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import android.graphics.Canvas;
-import android.graphics.drawable.AdaptiveIconDrawable;
-import android.graphics.drawable.Drawable;
+import android.os.Binder;
 import android.os.Build;
+import android.os.Bundle;
+import android.os.DeadObjectException;
+import android.os.IBinder;
 import android.os.LocaleList;
 import android.os.ServiceManager;
 import android.os.SystemClock;
 import android.util.ArraySet;
 import android.util.DisplayMetrics;
-import android.util.TypedValue;
 
-import org.xmlpull.v1.XmlPullParser;
-
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
+
+import com.kernarium.icons.IconProtocol;
 
 /**
  * {@link AppsCommand.Platform} on Android, for a process that runs as the adb shell user: the package
- * manager through its binder interface (the foreground user's applications), the labels and icons
- * from each application's own resources (the shell user may read any application's package), and
- * {@code cmd activity start-activity} for the start. Nothing is written.
+ * manager through its binder interface (the foreground user's applications), the labels from each
+ * application's own resources (the shell user may read any application's package; that reads string
+ * tables only, no image or XML file), the icons from the renderer app (KernariumIcons: no icon is drawn
+ * in this process), and {@code cmd activity start-activity} for the start. Nothing is written.
  *
  * <p>No question has a substitute answer: when the foreground user, a permission, the system's
  * configuration or a package's facts cannot be had, the command fails (status 1); a package that is gone
@@ -70,15 +68,8 @@ import java.util.Map;
  */
 final class AndroidPlatform implements AppsCommand.Platform {
     private static final int OUTPUT_LIMIT = 4096;
-    /** The density icons are loaded for: the largest, so that the best bitmap the application has is the one used. */
-    private static final int ICON_DENSITY = DisplayMetrics.DENSITY_XXXHIGH;
-    /** An adaptive icon's layers are drawn 108 dp for the 72 dp window the launcher shows: a quarter more on each side. */
-    private static final float LAYER_OUTSET = 0.25f;
-    /** The locale icons are drawn for. Fixed, with the density and the night mode, so that one resource id is one picture. */
-    private static final Locale ICON_LOCALE = Locale.US;
-    /** The most elements an icon's XML resource may have, and the most drawables one XML resource may refer to. */
-    private static final int MAX_XML_ELEMENTS = 4096;
-    private static final int MAX_REFERENCES = 64;
+    /** The density labels are read for: the largest, with day mode and no other qualifier (see fixedConfiguration). */
+    private static final int LABEL_DENSITY = DisplayMetrics.DENSITY_XXXHIGH;
     /** The system assets the framework builds (AssetManager.FRAMEWORK_APK_PATH and LINEAGE_APK_PATH). */
     private static final String FRAMEWORK_APK = "/system/framework/framework-res.apk";
     private static final String PLATFORM_APK = "/system/framework/org.lineageos.platform-res.apk";
@@ -88,7 +79,6 @@ final class AndroidPlatform implements AppsCommand.Platform {
     private final Map<String, PackageInfo> mPackages = new HashMap<>();
     private final Map<String, Boolean> mPermissions = new HashMap<>();
     private final Map<String, Resources> mLabelResources = new HashMap<>();
-    private final Map<String, Resources> mIconResources = new HashMap<>();
     private Configuration mConfiguration;
 
     AndroidPlatform() throws PlatformException {
@@ -197,59 +187,13 @@ final class AndroidPlatform implements AppsCommand.Platform {
         if (resource == 0) {
             return null;
         }
-        Resources resources = resources(application, false);
+        Resources resources = resources(application);
         return resources == null ? null : resources.getText(resource, null);
     }
 
     @Override
-    public Icon icon(Entry entry, int size) throws Exception {
-        ActivityInfo info = (ActivityInfo) entry.source;
-        Resources resources = resources(info.applicationInfo, true);
-        if (resources == null) {
-            throw new PlatformException("the application's resources cannot be opened");
-        }
-        if (!SourceBound.within(new ResourceGraph(resources), entry.iconResource, ICON_DENSITY)) {
-            throw new PlatformException("the icon's source is over the bound");
-        }
-        Drawable drawable = resources.getDrawableForDensity(entry.iconResource, ICON_DENSITY, null);
-        if (drawable == null) {
-            throw new PlatformException("the icon is not a drawable");
-        }
-        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
-        try {
-            Canvas canvas = new Canvas(bitmap);
-            boolean adaptive = drawable instanceof AdaptiveIconDrawable;
-            if (adaptive) {
-                // The layers over the window the launcher shows, with no mask: iOS puts its own on.
-                AdaptiveIconDrawable icon = (AdaptiveIconDrawable) drawable;
-                int outset = Math.round(size * LAYER_OUTSET);
-                for (Drawable layer : new Drawable[] {icon.getBackground(), icon.getForeground()}) {
-                    if (layer != null) {
-                        layer.setBounds(-outset, -outset, size + outset, size + outset);
-                        layer.draw(canvas);
-                    }
-                }
-            } else {
-                drawable.setBounds(0, 0, size, size);
-                drawable.draw(canvas);
-            }
-            int[] pixels = new int[size * size];
-            bitmap.getPixels(pixels, 0, size, 0, 0, size, size);
-            boolean hasAlpha = false;
-            for (int pixel : pixels) {
-                if ((pixel >>> 24) != 0xFF) {
-                    hasAlpha = true;
-                    break;
-                }
-            }
-            ByteArrayOutputStream png = new ByteArrayOutputStream();
-            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, png)) {
-                throw new PlatformException("the icon could not be encoded");
-            }
-            return new Icon(size, adaptive, hasAlpha, png.toByteArray());
-        } finally {
-            bitmap.recycle();
-        }
+    public AppsCommand.Renderer openRenderer() throws Exception {
+        return new ProviderRenderer(this);
     }
 
     /** The files an application's resources come from, for the user the application info describes. */
@@ -262,13 +206,12 @@ final class AndroidPlatform implements AppsCommand.Platform {
     /**
      * The application's own resources, every file its effective resource path names (the base, its splits, its
      * shared libraries and the overlays enabled for the user, as the framework adds them for the application
-     * itself): in the fixed configuration with the system's locale list, for the label; in the same configuration
-     * with a fixed locale, for the icon. One per application and use. Null when the base or a split cannot be
-     * added (the label is then the package name and the icon an error); a shared library or an overlay that cannot
-     * be added is skipped, as the framework does.
+     * itself): in the fixed configuration with the system's locale list, for the label. One per application. Null
+     * when the base or a split cannot be added (the label is then the package name); a shared library or an overlay
+     * that cannot be added is skipped, as the framework does.
      */
-    private Resources resources(ApplicationInfo application, boolean icon) throws PlatformException {
-        Map<String, Resources> cache = icon ? mIconResources : mLabelResources;
+    private Resources resources(ApplicationInfo application) throws PlatformException {
+        Map<String, Resources> cache = mLabelResources;
         if (!cache.containsKey(application.packageName)) {
             List<ResourcePaths.Item> paths = resourcePaths(application);
             Resources resources = null;
@@ -295,10 +238,9 @@ final class AndroidPlatform implements AppsCommand.Platform {
             if (complete) {
                 DisplayMetrics metrics = new DisplayMetrics();
                 metrics.setToDefaults();
-                metrics.densityDpi = ICON_DENSITY;
-                metrics.density = ICON_DENSITY / (float) DisplayMetrics.DENSITY_DEFAULT;
-                resources = new Resources(assets, metrics,
-                        fixedConfiguration(icon ? new LocaleList(ICON_LOCALE) : configuration().getLocales()));
+                metrics.densityDpi = LABEL_DENSITY;
+                metrics.density = LABEL_DENSITY / (float) DisplayMetrics.DENSITY_DEFAULT;
+                resources = new Resources(assets, metrics, fixedConfiguration(configuration().getLocales()));
             } else {
                 assets.close();
             }
@@ -380,14 +322,13 @@ final class AndroidPlatform implements AppsCommand.Platform {
     }
 
     /**
-     * What a label is read for and an icon is drawn for: the highest density, day mode, the given locales, and no
-     * other qualifier (screen size, orientation...), whatever the device's own state. A label then depends on the
-     * system's locale list alone, which the digest covers, and one icon resource id is one picture for a package
-     * version, so neither the digest nor the icon key needs a configuration in it.
+     * What a label is read for: the highest density, day mode, the given locales, and no other qualifier (screen
+     * size, orientation...), whatever the device's own state. A label then depends on the system's locale list
+     * alone, which the digest covers, so the digest needs no configuration in it.
      */
     private static Configuration fixedConfiguration(LocaleList locales) {
         Configuration configuration = new Configuration();
-        configuration.densityDpi = ICON_DENSITY;
+        configuration.densityDpi = LABEL_DENSITY;
         configuration.uiMode = Configuration.UI_MODE_TYPE_NORMAL | Configuration.UI_MODE_NIGHT_NO;
         configuration.setLocales(locales);
         return configuration;
@@ -443,106 +384,101 @@ final class AndroidPlatform implements AppsCommand.Platform {
     }
 
     /**
-     * {@link SourceBound.Graph} over an application's resources: which resource is an image file (its size from
-     * the file's header, a bounds-only decode), which an XML file (its uncompressed length, then the resources its
-     * attributes refer to), which is no file (a colour, a number, a string that names no file) and which cannot be
-     * read. A resource is judged by its value, as the framework judges what it is asked to load, and not by the name
-     * of its type or of its file: {@link SourceBound#fileKind}.
+     * The icon renderer (KernariumIcons) as the adb shell user reaches it: its content provider, held through the
+     * activity manager the way the {@code content} command holds one (the provider is open to the shell user alone).
+     * The provider hands each icon to a service in an isolated process, which opens the application's files and
+     * draws; this process only names the files and receives a PNG, which the command checks. A provider that died
+     * costs the icon in flight: the next is asked of a fresh hold, once; when none can be had the renderer is gone.
      */
-    private static final class ResourceGraph implements SourceBound.Graph {
-        /** The resource's value cannot be read, so what it costs cannot be established. */
-        private static final int UNKNOWN = -1;
+    private static final class ProviderRenderer implements AppsCommand.Renderer {
+        private static final String RENDERER_GONE = "the icon renderer is not available";
 
-        private final Resources mResources;
+        private final int mUser;
+        private final IBinder mToken = new Binder();
+        private IContentProvider mProvider;
 
-        ResourceGraph(Resources resources) {
-            mResources = resources;
+        ProviderRenderer(AndroidPlatform platform) throws PlatformException {
+            mUser = platform.currentUser();
+            acquire();
         }
 
-        /**
-         * The kind of file the resource's value is ({@link SourceBound#fileKind}; {@code value} is then its value:
-         * the path), or {@link #UNKNOWN} when the value cannot be read.
-         */
-        private int classify(int id, TypedValue value) {
+        private void acquire() throws PlatformException {
             try {
-                mResources.getValueForDensity(id, ICON_DENSITY, value, true);
-            } catch (Resources.NotFoundException unreadable) {
-                return UNKNOWN;
+                ContentProviderHolder holder = ActivityManager.getService().getContentProviderExternal(
+                        IconProtocol.AUTHORITY, mUser, mToken, AppsCommand.NAME);
+                if (holder == null || holder.provider == null) {
+                    throw new PlatformException(RENDERER_GONE);
+                }
+                mProvider = holder.provider;
+            } catch (PlatformException none) {
+                throw none;
+            } catch (Exception | LinkageError problem) {
+                throw new PlatformException(RENDERER_GONE, problem);
             }
-            if (value.type == TypedValue.TYPE_REFERENCE) {
-                return UNKNOWN;
-            }
-            boolean string = value.type == TypedValue.TYPE_STRING && value.string != null;
-            return SourceBound.fileKind(string, string ? value.string.toString() : null, string && opens(id));
         }
 
-        /** Whether the resource's value names a file of the package that opens (the framework opens it the same way). */
-        private boolean opens(int id) {
+        private void release() {
+            mProvider = null;
             try {
-                mResources.openRawResource(id, new TypedValue()).close();
-                return true;
-            } catch (Resources.NotFoundException | IOException none) {
-                return false;
+                ActivityManager.getService().removeContentProviderExternalAsUser(IconProtocol.AUTHORITY, mToken, mUser);
+            } catch (Exception | LinkageError ignored) {
+                // The command ends with its process, and the hold with it.
             }
         }
 
         @Override
-        public SourceBound.Node node(final int id) throws Exception {
-            TypedValue value = new TypedValue();
-            switch (classify(id, value)) {
-                case SourceBound.NOT_A_FILE:
-                    return SourceBound.Node.other();
-                case SourceBound.XML_FILE:
-                    // The length first: the framework reads the whole file into memory when it opens a parser.
-                    long length;
-                    try (InputStream in = mResources.openRawResource(id, new TypedValue())) {
-                        length = in.available();
-                    }
-                    return SourceBound.Node.xml(length, () -> references(id));
-                case SourceBound.IMAGE_FILE:
-                    BitmapFactory.Options options = new BitmapFactory.Options();
-                    options.inJustDecodeBounds = true;
-                    try (InputStream in = mResources.openRawResource(id, new TypedValue())) {
-                        BitmapFactory.decodeStream(in, null, options);
-                    }
-                    return SourceBound.Node.bitmap(options.outWidth, options.outHeight, value.density);
-                default:
-                    return SourceBound.Node.unknown();
+        public Icon render(Entry entry) throws Exception {
+            ActivityInfo info = (ActivityInfo) entry.source;
+            List<ResourcePaths.Item> items = resourcePaths(info.applicationInfo);
+            if (!ResourcePaths.hasBase(items) || items.size() > IconProtocol.MAX_FILES) {
+                throw new PlatformException("the application's resources cannot be opened");
             }
+            int[] kinds = new int[items.size()];
+            String[] paths = new String[items.size()];
+            for (int i = 0; i < kinds.length; i++) {
+                switch (items.get(i).kind) {
+                    case SPLIT:
+                        kinds[i] = IconProtocol.KIND_SPLIT;
+                        break;
+                    case LIBRARY:
+                        kinds[i] = IconProtocol.KIND_LIBRARY;
+                        break;
+                    case OVERLAY:
+                        kinds[i] = IconProtocol.KIND_OVERLAY;
+                        break;
+                    default:
+                        kinds[i] = IconProtocol.KIND_BASE;
+                        break;
+                }
+                paths[i] = items.get(i).path;
+            }
+            Bundle request = new Bundle();
+            request.putInt(IconProtocol.KEY_RESOURCE, entry.iconResource);
+            request.putIntArray(IconProtocol.KEY_KINDS, kinds);
+            request.putStringArray(IconProtocol.KEY_PATHS, paths);
+            Bundle answer;
+            try {
+                answer = mProvider.call(new AttributionSource(android.os.Process.myUid(), "com.android.shell", null),
+                        IconProtocol.AUTHORITY, IconProtocol.METHOD_RENDER, null, request);
+            } catch (DeadObjectException dead) {
+                release();
+                try {
+                    acquire();
+                } catch (PlatformException unreachable) {
+                    throw new AppsCommand.RendererGone(RENDERER_GONE, unreachable);
+                }
+                throw new PlatformException("the icon renderer died");
+            }
+            if (answer == null || answer.getInt(IconProtocol.KEY_STATUS, IconProtocol.STATUS_ERROR) != IconProtocol.STATUS_OK) {
+                throw new PlatformException("the icon could not be drawn");
+            }
+            return new Icon(answer.getInt(IconProtocol.KEY_SIZE), answer.getBoolean(IconProtocol.KEY_ADAPTIVE),
+                    answer.getBoolean(IconProtocol.KEY_ALPHA), answer.getByteArray(IconProtocol.KEY_PNG));
         }
 
-        /** The files an XML resource's attributes refer to (@drawable, @mipmap, a colour state list...), each use of one. */
-        private int[] references(int id) throws Exception {
-            List<Integer> found = new ArrayList<>();
-            TypedValue scratch = new TypedValue();
-            XmlResourceParser parser = mResources.getXml(id);
-            try {
-                int elements = 0;
-                for (int event = parser.next(); event != XmlPullParser.END_DOCUMENT; event = parser.next()) {
-                    if (event != XmlPullParser.START_TAG) {
-                        continue;
-                    }
-                    if (++elements > MAX_XML_ELEMENTS) {
-                        throw new PlatformException("an icon's XML resource is too large");
-                    }
-                    for (int i = 0; i < parser.getAttributeCount(); i++) {
-                        int reference = parser.getAttributeResourceValue(i, 0);
-                        if (reference != 0 && classify(reference, scratch) != SourceBound.NOT_A_FILE) {
-                            if (found.size() >= MAX_REFERENCES) {
-                                throw new PlatformException("an icon's XML resource refers to too much");
-                            }
-                            found.add(reference);
-                        }
-                    }
-                }
-            } finally {
-                parser.close();
-            }
-            int[] ids = new int[found.size()];
-            for (int i = 0; i < ids.length; i++) {
-                ids[i] = found.get(i);
-            }
-            return ids;
+        @Override
+        public void close() {
+            release();
         }
     }
 }

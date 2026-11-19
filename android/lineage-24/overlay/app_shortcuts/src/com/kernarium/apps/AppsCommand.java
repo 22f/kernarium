@@ -57,16 +57,13 @@ final class AppsCommand {
 
     /** The most components one {@code icons} takes. */
     static final int MAX_ICONS = 8;
-    /** The sizes an icon is rendered at, largest first: the next is tried when a PNG is over the bound. */
-    static final int[] ICON_SIZES = {192, 128, 96};
-    /** The largest PNG a record carries. */
-    static final int MAX_PNG_BYTES = 98304;
     /** After this long {@code icons} starts no further icon: the rest are answered {@code deferred}. */
     static final long ICON_DEADLINE_MILLIS = 20_000;
     /**
-     * How long one icon's render (all its sizes) may take: after this it is an {@code error}, nothing of it is
-     * printed, and no further icon is started (the rest are {@code deferred}: the stuck render may still hold the
-     * renderer).
+     * How long one icon's render (all its sizes) may take, from the request to the renderer to its answer: after
+     * this it is an {@code error}, nothing of it is printed, and no further icon is started (the rest are
+     * {@code deferred}: the stuck render may still hold the renderer). The renderer gives up sooner on its own
+     * (a bound of its own on the isolated process), so this is the tool's last word.
      */
     static final long ICON_RENDER_MILLIS = 8_000;
     /** How long {@code cmd activity start-activity} may take. */
@@ -91,8 +88,11 @@ final class AppsCommand {
         /** The activity's label in the system's current language, or null when it has none. */
         String label(Entry entry) throws Exception;
 
-        /** The activity's icon rendered to a PNG of the given size; throws when it cannot be. */
-        Icon icon(Entry entry, int size) throws Exception;
+        /**
+         * The icon renderer, held for one {@code icons} command; throws a {@link PlatformException} when there is none
+         * (the image lacks it or it cannot be reached). Icons are drawn there and nowhere in this process.
+         */
+        Renderer openRenderer() throws Exception;
 
         /** Runs {@link #startArguments} and returns how it ended and what it printed (at most a few KiB). */
         StartResult start(int user, Component component) throws Exception;
@@ -103,6 +103,28 @@ final class AppsCommand {
         /** How long one icon's render may take, all its sizes together. */
         default long renderLimitMillis() {
             return ICON_RENDER_MILLIS;
+        }
+    }
+
+    /** The renderer of one {@code icons} command. */
+    interface Renderer extends AutoCloseable {
+        /**
+         * The activity's icon at the largest size whose PNG is within the bound, as the renderer answers it (the tool
+         * checks the answer: {@link PngCheck}). Throws when it cannot be had, and a {@link RendererGone} when the
+         * renderer cannot be reached any more, which fails the command.
+         */
+        Icon render(Entry entry) throws Exception;
+
+        @Override
+        void close();
+    }
+
+    /** The renderer is gone and could not be reached again: nothing more can be drawn. */
+    static final class RendererGone extends Exception {
+        private static final long serialVersionUID = 1L;
+
+        RendererGone(String reason, Throwable cause) {
+            super(reason, cause);
         }
     }
 
@@ -298,51 +320,65 @@ final class AppsCommand {
         long begin = platform.nowMillis();
         int user = platform.currentUser();
         List<Entry> reported = platform.launcherActivities(user);
-        answer.line("kernarium_apps " + FORMAT_VERSION);
-        answer.line("icons\t" + components.size());
-        boolean stuck = false;
-        for (Component component : components) {
-            if (platform.nowMillis() - begin > ICON_DEADLINE_MILLIS) {
-                answer.nonImage(component, "deferred");
-                continue;
-            }
-            Entry entry = find(reported, component);
-            if (entry == null) {
-                answer.nonImage(component, "missing");
-            } else if (entry.iconResource == 0) {
-                answer.nonImage(component, "noicon");
-            } else if (stuck) {
-                answer.nonImage(component, "deferred");
-            } else {
-                Render render = renderWithin(platform, entry);
-                stuck = render.timedOut;
-                if (render.icon == null) {
-                    answer.nonImage(component, "error");
+        try (Renderer renderer = platform.openRenderer()) {
+            answer.line("kernarium_apps " + FORMAT_VERSION);
+            answer.line("icons\t" + components.size());
+            boolean stuck = false;
+            for (Component component : components) {
+                if (platform.nowMillis() - begin > ICON_DEADLINE_MILLIS) {
+                    answer.nonImage(component, "deferred");
+                    continue;
+                }
+                Entry entry = find(reported, component);
+                if (entry == null) {
+                    answer.nonImage(component, "missing");
+                } else if (entry.iconResource == 0) {
+                    answer.nonImage(component, "noicon");
+                } else if (stuck) {
+                    answer.nonImage(component, "deferred");
                 } else {
-                    answer.image(component, render.icon);
+                    Render render = renderWithin(platform, renderer, entry);
+                    if (render.gone) {
+                        throw new PlatformException("the icon renderer is not available");
+                    }
+                    stuck = render.timedOut;
+                    if (render.icon == null) {
+                        answer.nonImage(component, "error");
+                    } else {
+                        answer.image(component, render.icon);
+                    }
                 }
             }
+            answer.line("end\t" + components.size());
+            return EXIT_OK;
         }
-        answer.line("end\t" + components.size());
-        return EXIT_OK;
     }
 
-    /** What one icon's render came to: the icon, or none (an error), and whether it was still running when its time was up. */
+    /**
+     * What one icon's render came to: the icon (checked), or none (an error), whether it was still running when its
+     * time was up, and whether the renderer is gone.
+     */
     private static final class Render {
         Icon icon;
         boolean timedOut;
+        boolean gone;
     }
 
     /**
      * The render of one icon in a worker thread that the command waits for no longer than the limit: a render
      * that does not end in time is abandoned (the thread is a daemon and the process ends with the answer), and
-     * nothing of it is used.
+     * nothing of it is used. What the renderer answers is checked before it is used: an answer that does not pass is
+     * an error for that icon alone.
      */
-    private static Render renderWithin(Platform platform, Entry entry) {
+    private static Render renderWithin(Platform platform, Renderer renderer, Entry entry) {
         final Icon[] made = new Icon[1];
+        final boolean[] gone = new boolean[1];
         Thread worker = new Thread(() -> {
             try {
-                made[0] = render(platform, entry);
+                Icon icon = renderer.render(entry);
+                made[0] = PngCheck.problem(icon) == null ? icon : null;
+            } catch (RendererGone lost) {
+                gone[0] = true;
             } catch (Throwable problem) {
                 made[0] = null;
             }
@@ -360,38 +396,9 @@ final class AppsCommand {
             render.timedOut = true; // whatever it makes later is not read
         } else {
             render.icon = made[0];
+            render.gone = gone[0];
         }
         return render;
-    }
-
-    /**
-     * The icon at the largest size whose PNG is within the bound, or null when none can be had. A failure of
-     * the platform's render (an exception, or an error such as running out of memory) reaches the worker in
-     * {@link #renderWithin}, which catches it: the icon is then an error.
-     */
-    private static Icon render(Platform platform, Entry entry) throws Exception {
-        for (int size : ICON_SIZES) {
-            Icon icon = platform.icon(entry, size);
-            if (icon == null || icon.size != size || !isPng(icon.png)) {
-                return null;
-            }
-            if (icon.png.length <= MAX_PNG_BYTES) {
-                return icon;
-            }
-        }
-        return null;
-    }
-
-    static boolean isPng(byte[] data) {
-        if (data == null || data.length < PNG_SIGNATURE.length) {
-            return false;
-        }
-        for (int i = 0; i < PNG_SIGNATURE.length; i++) {
-            if (data[i] != PNG_SIGNATURE[i]) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private static int launch(Platform platform, Component component, Answer answer, PrintWriter err)

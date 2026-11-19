@@ -39,7 +39,7 @@ final class Listing {
     /** The most rows a listing carries. */
     static final int MAX_ROWS = 1024;
     /** Changes when the way an icon is rendered does, so that the host fetches every icon again. */
-    static final int RENDER_VERSION = 2;
+    static final int RENDER_VERSION = 3;
 
     final int user;
     final String locales;
