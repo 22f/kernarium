@@ -359,7 +359,7 @@ class Library:
         self._site_key = ""
         # Per function, cleared as each is emitted: the cold stubs it needs.
         self.fn_start = 0
-        self.fn_mm: list[tuple[int, str, int]] = []
+        self.fn_mm: list[tuple[int, str, int, bool]] = []
         self.fn_xu: set[int] = set()
         self.fn_xb: set[int] = set()
         # The exit-by-branch stubs already emitted, by target: (label, the
@@ -367,8 +367,9 @@ class Library:
         # reach instead of emitting its own.
         self.xb_emitted: dict[int, tuple[str, int]] = {}
         # The refill routines the cold miss stubs enter: (kind, bytes,
-        # chunk of the entry table).
-        self.refill_used: set[tuple[str, int, int]] = set()
+        # chunk of the entry table, whether the probe left the address of
+        # the first byte rather than the last).
+        self.refill_used: set[tuple[str, int, int, bool]] = set()
         self.fn_pg: set[int] = set()
         self.fn_ma: list[int] = []
         self.fn_st: list[int] = []
@@ -1129,6 +1130,13 @@ class Library:
         if wb_mode != "none" and any(o == base_g for o in operands):
             return self._step(offset, "writeback-overlap")
         base_virtual = base_g in VIRTUAL
+        # A stack access with an immediate offset inside one aligned 16-byte
+        # granule cannot cross a page (AOT code runs with a 16-byte aligned
+        # SP: _sp_aligned_after): the page of its first byte is the page of
+        # its last, so the probe needs no last-byte address.
+        short = (base_g == "sp" and literal is None and regoff is None and
+                 total > 1 and
+                 (0 if wb_mode == "post" else imm) % 16 + total <= 16)
         # ---- the effective address, in a host register
         census_start = len(asm._w)
         if literal is not None:
@@ -1177,13 +1185,15 @@ class Library:
         if literal is None and base_g != "sp":
             asm.word(A.ubfx(T0, ea, 0, 56))
         entry = 0 if load else 16
-        self.fn_mm.append((offset, "LOAD" if load else "STORE", total))
+        self.fn_mm.append((offset, "LOAD" if load else "STORE", total, short))
         asm.word(A.ubfx(T2, T0, 12, 14))
         asm.word(A.add_reg(T2, TLB, T2, shift=0, amount=5))
         asm.word(A.ldp_x(T1, T2, T2, entry))
-        if total > 1:
+        if total > 1 and not short:
             asm.word(A.add_reg(T2, T2, T0))
             asm.word(A.add_imm(T0, T0, total - 1))
+        elif short and pair:
+            asm.word(A.add_reg(T2, T2, T0))
         asm.word(A.eor_reg(T1, T1, T0, shift=1, amount=12))
         asm.cbz(T1, self.lab("MM", offset), sf=1, nz=True)
         self.tag("mem.probe", census_start)
@@ -1222,7 +1232,7 @@ class Library:
                     self._load_guest(T1, guest_rt)
             elif guest_rt == "zr":
                 host_rt = 31
-            if total > 1:
+            if total > 1 and not short:
                 asm.word((size << 30) | (0b111 << 27) | (vector << 26) |
                          (0b01 << 24) | (mem_opc << 22) | (T2 << 5) | host_rt)
             else:
@@ -1304,7 +1314,7 @@ class Library:
         census_start = len(asm._w)
         asm.word(A.ubfx(T0, host_base, 0, 56))
         entry = 0 if load else 16
-        self.fn_mm.append((offset, "LOAD" if load else "STORE", total))
+        self.fn_mm.append((offset, "LOAD" if load else "STORE", total, False))
         asm.word(A.ubfx(T2, T0, 12, 14))
         asm.word(A.add_reg(T2, TLB, T2, shift=0, amount=5))
         asm.word(A.ldp_x(T1, T2, T2, entry))
@@ -1370,7 +1380,7 @@ class Library:
             asm.word(A.add_imm(T0, T0, n - 1))
         asm.word(A.eor_reg(T1, T1, T0, shift=1, amount=12))
         asm.cbz(T1, self.lab("MM", offset), sf=1, nz=True)
-        self.fn_mm.append((offset, "STORE" if write else "LOAD", n))
+        self.fn_mm.append((offset, "STORE" if write else "LOAD", n, False))
 
     def _ordered(self, offset: int, word: int) -> bool:
         """LDAR and STLR of a byte, halfword, word or doubleword."""
@@ -1567,15 +1577,16 @@ class Library:
             self.tag("gate", before)
             self.stats.words["gate"] += 1
         before = len(asm._w)
-        for offset, kind, total in self.fn_mm:
+        for offset, kind, total, first in self.fn_mm:
             # The thunk gets the instruction's slot in the entry table in T1
             # and the access in the routine it enters.
             asm.label(self.lab("MM", offset))
             slot = offset - self.table_base
             asm.word(A.movz(T1, slot & 0xffff))
             chunk = slot >> 16
-            self.refill_used.add((kind, total, chunk))
-            asm.b(f"REFILL_{kind}_{total}" + (f"_{chunk}" if chunk else ""))
+            self.refill_used.add((kind, total, chunk, first))
+            asm.b(f"REFILL_{kind}_{total}" + ("F" if first else "") +
+                  (f"_{chunk}" if chunk else ""))
         self.tag("stub.mm", before)
         before = len(asm._w)
         for offset in self.fn_st:
@@ -1954,7 +1965,8 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
 def emit_refill_stubs(asm: A.Assembler, library: "Library") -> None:
     """The routines a cold miss stub enters, after the functions that name
     them: REFILL_<kind>_<bytes> with T0 = the address the probe formed (an
-    access of more than one byte leaves the address of its last byte) and
+    access of more than one byte leaves the address of its last byte; the
+    entry REFILL_<kind>_<bytes>F is for a probe that left the first) and
     T1 = the instruction's slot in this library's entry table. The thunk asks
     the host to fill the TLB entry; when that succeeds the instruction
     restarts from its entry (no state of the instruction was changed before
@@ -1963,22 +1975,32 @@ def emit_refill_stubs(asm: A.Assembler, library: "Library") -> None:
     exist."""
     for kind, access in (("LOAD", 0), ("STORE", 1)):
         for total in REFILL_TOTALS:
-            chunks = sorted(chunk for used_kind, used_total, chunk
-                            in library.refill_used
-                            if (used_kind, used_total) == (kind, total))
-            if not chunks:
+            chunks = {first: sorted(chunk for used_kind, used_total, chunk,
+                                    used_first in library.refill_used
+                                    if (used_kind, used_total, used_first) ==
+                                    (kind, total, first))
+                      for first in (False, True)}
+            if not chunks[False] and not chunks[True]:
                 continue
+            if chunks[True]:
+                # A probe that found no last-byte address (an access in one
+                # aligned granule) leaves the address of the first byte; the
+                # host is given the last, as every other probe leaves it.
+                asm.label(f"REFILL_{kind}_{total}F")
+                asm.word(A.add_imm(T0, T0, total - 1))
             asm.label(f"REFILL_{kind}_{total}")
             asm.word(A.movz(T2, access | (total << 8)))
             asm.b("REFILL")
             # A site names its slot in 16 bits; the thunk of a later 64 KiB
             # of the table supplies the rest.
-            for chunk in chunks:
-                if chunk == 0:
-                    continue
-                asm.label(f"REFILL_{kind}_{total}_{chunk}")
-                asm.word(A.movk(T1, chunk, 1))
-                asm.b(f"REFILL_{kind}_{total}")
+            for first in (False, True):
+                suffix = "F" if first else ""
+                for chunk in chunks[first]:
+                    if chunk == 0:
+                        continue
+                    asm.label(f"REFILL_{kind}_{total}{suffix}_{chunk}")
+                    asm.word(A.movk(T1, chunk, 1))
+                    asm.b(f"REFILL_{kind}_{total}{suffix}")
 
 
 def emit_mops_thunks(asm: A.Assembler, library: "Library") -> None:

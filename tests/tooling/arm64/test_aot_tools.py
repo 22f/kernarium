@@ -866,6 +866,49 @@ class FixtureTests(unittest.TestCase):
         self.assertNotIn(0x1008, self.library.charge)
 
 
+class StackAccessProbeTests(unittest.TestCase):
+    """An SP access with an immediate offset inside one aligned 16-byte
+    granule has no last-byte address: its probe is shorter, a scalar's access
+    adds the host delta itself, and the cold miss stub enters the routine that
+    gives the host the last byte as every other probe does."""
+
+    @staticmethod
+    def words(word: int) -> tuple[int, int, "rewrite.Library"]:
+        library = library_of([word, RET], [(0, 8)])
+        unit_words(library)
+        assert library.stats.steps == 0, hex(word)
+        census = library.stats.census
+        return census["mem.probe"] // 4, census["mem.access"] // 4, library
+
+    def test_a_scalar_inside_the_granule_saves_two_words(self) -> None:
+        for short, long_, kind, total in (
+                (0xf94007e0, 0xf840c3e0, "LOAD", 8),    # ldr x0,[sp,#8] / ldur x0,[sp,#12]
+                (0x3dc007e0, 0x3cc083e0, "LOAD", 16),   # ldr q0,[sp,#16] / ldur q0,[sp,#8]
+                (0xf90007e0, 0xf800c3e0, "STORE", 8)):  # str x0,[sp,#8] / stur x0,[sp,#12]
+            probe_short, access_short, library = self.words(short)
+            probe_long, access_long, other = self.words(long_)
+            self.assertEqual((probe_long + access_long) -
+                             (probe_short + access_short), 2, hex(short))
+            self.assertEqual(library.refill_used, {(kind, total, 0, True)})
+            self.assertEqual(other.refill_used, {(kind, total, 0, False)})
+
+    def test_a_pair_inside_the_granule_saves_one_word(self) -> None:
+        for short, long_ in ((0xa94107e0, 0xa94087e0),   # ldp x0,x1,[sp,#16] / [sp,#8]
+                             (0xa90107e0, 0xa90087e0)):  # stp x0,x1,[sp,#16] / [sp,#8]
+            probe_short, access_short, _ = self.words(short)
+            probe_long, access_long, _ = self.words(long_)
+            self.assertEqual((probe_long + access_long) -
+                             (probe_short + access_short), 1, hex(short))
+
+    def test_other_bases_keep_the_long_probe(self) -> None:
+        # The same offsets on a plain base register are not in a granule the
+        # SP's alignment proves.
+        probe_sp, access_sp, _ = self.words(0xf94007e0)       # ldr x0,[sp,#8]
+        probe_plain, access_plain, _ = self.words(0xf9400420)  # ldr x0,[x1,#8]
+        self.assertGreater(probe_plain + access_plain,
+                           probe_sp + access_sp + 2)
+
+
 class HintAndFloatingPointTests(unittest.TestCase):
     """What the rewriter inlines must be what the engine runs natively."""
 
