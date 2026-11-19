@@ -22,6 +22,8 @@ struct SessionSettingsSheet: View {
     @State private var detent: PresentationDetent
     /// The Old app compatibility page is pushed.
     @State private var oldAppsOpen = false
+    /// The Add to Home Screen page is pushed.
+    @State private var addToHomeOpen = false
 
     init(large: Bool) {
         _detent = State(initialValue: large ? .large : .medium)
@@ -58,6 +60,11 @@ struct SessionSettingsSheet: View {
                     try? await Task.sleep(for: .milliseconds(400))
                     oldAppsOpen = true
                 }
+                .task {
+                    guard model.sessionPreset.addToHomePage else { return }
+                    try? await Task.sleep(for: .milliseconds(400))
+                    addToHomeOpen = true
+                }
             }
             .listSectionSpacing(.compact)
             .endingAboveFilesBar(filesBarHeight)
@@ -74,6 +81,9 @@ struct SessionSettingsSheet: View {
                 }
             }
             .navigationDestination(isPresented: $oldAppsOpen) { OldAppsPage() }
+            .navigationDestination(isPresented: $addToHomeOpen) {
+                AddToHomeScreenPage(query: model.sessionPreset.addToHomeQuery ?? "")
+            }
         }
         #if FEEDBACK_MAIL
         .sendFeedbackSheet(model)
@@ -309,6 +319,8 @@ struct SessionSettingsSheet: View {
             .disabled(model.fileBrowser?.busy == true)
             // Offered only when the last listing found an app it can apply to.
             if model.session.oldApps.offered { OldAppsRow { oldAppsOpen = true } }
+            // Offered while Android runs and its image lists apps.
+            if model.offersAddToHomeScreen { AddToHomeScreenRow { addToHomeOpen = true } }
         }
     }
 

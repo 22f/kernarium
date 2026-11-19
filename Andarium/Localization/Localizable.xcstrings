@@ -1,6 +1,28 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "%@" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@"
+          }
+        }
+      }
+    },
     "%@ %@" : {
       "localizations" : {
         "ja" : {
@@ -1394,6 +1416,28 @@
         }
       }
     },
+    "A tap on the icon opens “%@” in Android, and starts Android first if it isn’t running." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アイコンをタップするとAndroidで“%@”が開きます。Androidが実行中でなければ先に起動します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "轻点图标会在Android中打开“%@”；如果Android未运行，会先启动它。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "點一下圖像會在Android中打開「%@」；如果Android未執行，會先啟動它。"
+          }
+        }
+      }
+    },
     "A version of this app signed by someone else is installed. Uninstall it in the virtual machine first." : {
       "localizations" : {
         "ja" : {
@@ -1523,6 +1567,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "新增名稱"
+          }
+        }
+      }
+    },
+    "Add to Home Screen" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ホーム画面に追加"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加到主屏幕"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入主畫面"
+          }
+        }
+      }
+    },
+    "Add “%@” to Home Screen" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”をホーム画面に追加"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "将“%@”添加到主屏幕"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "將「%@」加入主畫面"
           }
         }
       }
@@ -1932,6 +2020,28 @@
         }
       }
     },
+    "Android" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android"
+          }
+        }
+      }
+    },
     "Android already received this message." : {
       "localizations" : {
         "ja" : {
@@ -1950,6 +2060,72 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Android先前已收到這則簡訊。"
+          }
+        }
+      }
+    },
+    "Android App" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidアプリ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android應用程式"
+          }
+        }
+      }
+    },
+    "Android app" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidアプリ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android應用程式"
+          }
+        }
+      }
+    },
+    "Android apps appear in Search while this is on. They stay available in Shortcuts and Siri when it’s off." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オンの間は、Androidアプリが検索に表示されます。オフにしても、“ショートカット”とSiriでは引き続き使えます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "开启时，Android应用会出现在搜索中。关闭后，仍可在“快捷指令”和Siri中使用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "開啟時，Android應用程式會出現在「搜尋」中。關閉後，仍可在「捷徑」和Siri中使用。"
           }
         }
       }
@@ -2066,6 +2242,28 @@
         }
       }
     },
+    "Android didn’t answer. Showing the list from %@." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidが応答しませんでした。%@の一覧を表示しています。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android没有响应，当前显示%@的列表。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android沒有回應，目前顯示%@的列表。"
+          }
+        }
+      }
+    },
     "Android didn’t confirm the message. Send it again to ask whether it arrived; it won’t arrive twice." : {
       "localizations" : {
         "ja" : {
@@ -2132,6 +2330,50 @@
         }
       }
     },
+    "Android has no app with an icon to add." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidには、追加できるアイコン付きのアプリがありません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android中没有可添加的带图标应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android中沒有具有圖像、可加入的應用程式。"
+          }
+        }
+      }
+    },
+    "Android is in recovery mode" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidはリカバリモードです"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android处于恢复模式"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android處於復原模式"
+          }
+        }
+      }
+    },
     "Android is paused for lack of space." : {
       "localizations" : {
         "ja" : {
@@ -2172,6 +2414,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Android正在執行。螢幕邊緣的側邊按鍵有「返回」、「主畫面」和「設定」。"
+          }
+        }
+      }
+    },
+    "Android is still being set up" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidはまだセットアップ中です"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android仍在设置中"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android仍在設定中"
           }
         }
       }
@@ -2304,6 +2568,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Android畫面"
+          }
+        }
+      }
+    },
+    "Android took too long. Try again, or open it from Android’s home screen." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidの応答に時間がかかりすぎました。もう一度試すか、Androidのホーム画面から開いてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android响应时间过长。请重试，或从Android主屏幕打开。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android回應時間過長。請再試一次，或從Android主畫面打開。"
           }
         }
       }
@@ -2635,6 +2921,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "另一個快照操作正在進行。請稍後再試一次。"
+          }
+        }
+      }
+    },
+    "App" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アプリ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "應用程式"
           }
         }
       }
@@ -2978,6 +3286,28 @@
         }
       }
     },
+    "Built into Android" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidに内蔵"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android内置"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android內建"
+          }
+        }
+      }
+    },
     "Camera" : {
       "localizations" : {
         "ja" : {
@@ -3154,6 +3484,28 @@
         }
       }
     },
+    "Can’t open “%@”" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”を開けません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法打开“%@”"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法打開「%@」"
+          }
+        }
+      }
+    },
     "Capabilities" : {
       "comment" : "Home section: what the virtual machine may use of this device (location, microphone, haptics).",
       "localizations" : {
@@ -3308,6 +3660,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在檢查…"
+          }
+        }
+      }
+    },
+    "Choose what to do with the unfinished update below. The app opens once Android has started." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下で未完了のアップデートへの対応を選んでください。Androidの起動後にアプリが開きます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在下方选择如何处理未完成的更新。Android启动后会打开该应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "請在下方選擇如何處理未完成的更新。Android啟動後會打開該應用程式。"
           }
         }
       }
@@ -3638,6 +4012,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "無法打開此檔案夾"
+          }
+        }
+      }
+    },
+    "Couldn’t read Android’s apps" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのアプリを読み込めません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法读取Android的应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法讀取Android的應用程式"
           }
         }
       }
@@ -4283,6 +4679,28 @@
         }
       }
     },
+    "Don’t open" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "開かない"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不打开"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不要打開"
+          }
+        }
+      }
+    },
     "Down" : {
       "localizations" : {
         "ja" : {
@@ -4662,6 +5080,28 @@
         }
       }
     },
+    "Finish setting up Android, then open “%@” again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのセットアップを完了してから、“%@”をもう一度開いてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请先完成Android的设置，然后再打开“%@”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "請先完成Android的設定，然後再打開「%@」。"
+          }
+        }
+      }
+    },
     "First start" : {
       "localizations" : {
         "ja" : {
@@ -4769,6 +5209,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此%@的可用空間"
+          }
+        }
+      }
+    },
+    "Free up space on this %@, then tap Start. The app opens once Android has started." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この%@の空き容量を増やしてから“起動”をタップしてください。Androidの起動後にアプリが開きます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请释放此%@上的空间，然后轻点“启动”。Android启动后会打开该应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "請釋出此%@上的空間，然後點一下「啟動」。Android啟動後會打開該應用程式。"
           }
         }
       }
@@ -5175,6 +5637,28 @@
         }
       }
     },
+    "Home Screen" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ホーム画面"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "主屏幕"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "主畫面"
+          }
+        }
+      }
+    },
     "Hotter, and the battery drains faster" : {
       "comment" : "The line under the choice Full frame rate in the When hot menu: what it costs.",
       "localizations" : {
@@ -5304,6 +5788,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "進行中"
+          }
+        }
+      }
+    },
+    "In the Shortcuts app" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“ショートカット”アプリで"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在“快捷指令”App中"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在「捷徑」App中"
           }
         }
       }
@@ -5438,6 +5944,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "仍要安裝此應用程式嗎？"
+          }
+        }
+      }
+    },
+    "Installed" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "インストール済み"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已安装"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已安裝"
           }
         }
       }
@@ -5663,6 +6191,72 @@
         }
       }
     },
+    "It may have been removed from Android. You can remove its icon from the Home Screen." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidから削除された可能性があります。ホーム画面からアイコンを削除できます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它可能已从Android中移除。你可以将它的图标从主屏幕移除。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它可能已從Android中移除。你可以將它的圖像從主畫面移除。"
+          }
+        }
+      }
+    },
+    "It opens as soon as Android has started." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidの起動が完了したらすぐに開きます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android启动完成后会立即打开。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android啟動完成後會立即打開。"
+          }
+        }
+      }
+    },
+    "It opens on Andarium’s page." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumのページが開きます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它会打开Andarium的页面。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它會打開Andarium的頁面。"
+          }
+        }
+      }
+    },
     "It was built for an Android version before 4.0. If it crashes, open Settings from the side keys and choose Old app compatibility." : {
       "comment" : "Two sentences added to the install card after Install anyway installed an app built for an Android before 4.0 that Old app compatibility lists. They follow the sentence that the app is installed and send the reader to Andarium's Settings through the side keys; it is not Android's Settings app.",
       "localizations" : {
@@ -5727,6 +6321,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "其儲存空間尚未就緒。檔案稍後會顯示在此處。"
+          }
+        }
+      }
+    },
+    "Its tile has the app’s own icon." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "タイルにはアプリ自身のアイコンが表示されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "方块会显示该应用自己的图标。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "方塊會顯示該應用程式自己的圖像。"
           }
         }
       }
@@ -6468,6 +7084,28 @@
         }
       }
     },
+    "New Shortcut" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新規ショートカット"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新建快捷指令"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新增捷徑"
+          }
+        }
+      }
+    },
     "New virtual machine" : {
       "localizations" : {
         "ja" : {
@@ -6512,6 +7150,28 @@
         }
       }
     },
+    "No Android apps yet" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidアプリはまだありません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "还没有Android应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "尚無Android應用程式"
+          }
+        }
+      }
+    },
     "No app built for Android before 4.0 is installed." : {
       "comment" : "Shown on the Old app compatibility page when the virtual machine has no app the feature can apply to.",
       "localizations" : {
@@ -6531,6 +7191,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "未安裝為Android 4.0之前的版本開發的應用程式。"
+          }
+        }
+      }
+    },
+    "No app in Android has this name." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この名前のアプリはAndroidにありません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android中没有这个名称的应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android中沒有這個名稱的應用程式。"
           }
         }
       }
@@ -6599,6 +7281,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "尚無讀數"
+          }
+        }
+      }
+    },
+    "No Results for “%@”" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”の検索結果なし"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未找到“%@”的相关结果"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有「%@」的結果"
           }
         }
       }
@@ -7157,6 +7861,50 @@
         }
       }
     },
+    "Open ${target}" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "${target}を開く"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开${target}"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打開${target}"
+          }
+        }
+      }
+    },
+    "Open Android App" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidアプリを開く"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开Android应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打開Android應用程式"
+          }
+        }
+      }
+    },
     "Open Settings" : {
       "comment" : "A button that opens Andarium's page in the iOS Settings app.",
       "localizations" : {
@@ -7202,6 +7950,94 @@
         }
       }
     },
+    "Open Shortcuts" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“ショートカット”を開く"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开“快捷指令”"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打開「捷徑」"
+          }
+        }
+      }
+    },
+    "Opening “%@”" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”を開きます"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在打开“%@”"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在打開「%@」"
+          }
+        }
+      }
+    },
+    "Opening “%@”…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”を開いています…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在打开“%@”…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在打開「%@」…"
+          }
+        }
+      }
+    },
+    "Opens an app in Android." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidでアプリを開きます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在Android中打开应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在Android中打開應用程式。"
+          }
+        }
+      }
+    },
     "Opens Andarium’s page in Settings." : {
       "comment" : "VoiceOver hint of the network notice's Open Settings button.",
       "localizations" : {
@@ -7221,6 +8057,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "在「設定」中開啟Andarium的頁面。"
+          }
+        }
+      }
+    },
+    "Opens Andarium’s page in Shortcuts." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“ショートカット”でAndariumのページを開きます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在“快捷指令”中打开Andarium的页面。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在「捷徑」中打開Andarium的頁面。"
           }
         }
       }
@@ -7560,6 +8418,28 @@
         }
       }
     },
+    "Reading apps from Android…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidからアプリを読み込み中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在从Android读取应用…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在從Android讀取應用程式…"
+          }
+        }
+      }
+    },
     "Ready to share" : {
       "localizations" : {
         "ja" : {
@@ -7850,6 +8730,28 @@
         }
       }
     },
+    "Restart Android normally to open “%@”." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”を開くには、Androidを通常どおり再起動してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请正常重启Android以打开“%@”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "請正常重新啟動Android以打開「%@」。"
+          }
+        }
+      }
+    },
     "Restarting" : {
       "localizations" : {
         "ja" : {
@@ -8044,6 +8946,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "儲存"
+          }
+        }
+      }
+    },
+    "Search Android apps" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidアプリを検索"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "搜索Android应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "搜尋Android應用程式"
           }
         }
       }
@@ -8403,6 +9327,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "分享"
+          }
+        }
+      }
+    },
+    "Shortcuts" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ショートカット"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快捷指令"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "捷徑"
+          }
+        }
+      }
+    },
+    "Show in Search" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "検索で表示"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在搜索中显示"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "顯示於「搜尋」"
           }
         }
       }
@@ -9535,6 +10503,28 @@
         }
       }
     },
+    "Tap Add to Home Screen" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“ホーム画面に追加”をタップ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "轻点“添加到主屏幕”"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "點一下「加入主畫面」"
+          }
+        }
+      }
+    },
     "Tap for Back, Home and Settings. Hold Power for the power menu. Drag to move." : {
       "localizations" : {
         "ja" : {
@@ -9553,6 +10543,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "點一下可使用「返回」、「主畫面」和「設定」。按住「電源」可打開電源選單。拖移可移動。"
+          }
+        }
+      }
+    },
+    "Tap the check mark" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "チェックマークをタップ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "轻点勾号"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "點一下勾選符號"
           }
         }
       }
@@ -9773,6 +10785,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "將取消擴充至%@。"
+          }
+        }
+      }
+    },
+    "The icon and name are already filled in." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アイコンと名前は設定済みです。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "图标和名称已经填好。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "圖像和名稱已經填好。"
+          }
+        }
+      }
+    },
+    "The icon appears on your Home Screen." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ホーム画面にアイコンが表示されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "图标会出现在主屏幕上。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "圖像會出現在主畫面上。"
           }
         }
       }
@@ -11119,6 +12175,28 @@
         }
       }
     },
+    "There is no virtual machine. The icon works again once the app is installed in a new virtual machine." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンがありません。新しい仮想マシンにアプリをインストールすると、アイコンが再び使えるようになります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "没有虚拟机。在新虚拟机中安装该应用后，图标即可再次使用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "沒有虛擬機器。在新虛擬機器中安裝該應用程式後，圖像即可再次使用。"
+          }
+        }
+      }
+    },
     "There is not enough free space on this %@. Free up space in Settings › General › %@ Storage and try again." : {
       "localizations" : {
         "en" : {
@@ -11636,6 +12714,28 @@
         }
       }
     },
+    "This isn’t an Android app that Andarium can open." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "これはAndariumで開けるAndroidアプリではありません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这不是Andarium可以打开的Android应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "這不是Andarium可以打開的Android應用程式。"
+          }
+        }
+      }
+    },
     "This snapshot is from %@, newer than this app’s %@. Update Andarium to restore it." : {
       "localizations" : {
         "en" : {
@@ -11796,6 +12896,28 @@
         }
       }
     },
+    "This version of Android is too old to open apps directly. Update Andarium, then open the app again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このバージョンのAndroidは古いため、アプリを直接開けません。Andariumをアップデートしてから、もう一度開いてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此版本的Android太旧，无法直接打开应用。请更新Andarium，然后再打开该应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此版本的Android太舊，無法直接打開應用程式。請更新Andarium，然後再打開該應用程式。"
+          }
+        }
+      }
+    },
     "To come back to VoiceOver, touch the side keys on the left edge." : {
       "localizations" : {
         "ja" : {
@@ -11926,6 +13048,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "等待Android確認的簡訊過多。請先重新啟動Android，再傳送新簡訊。"
+          }
+        }
+      }
+    },
+    "Touch and hold “%@”" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”を長押し"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "按住“%@”"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "按住「%@」"
           }
         }
       }
@@ -12827,6 +13971,28 @@
         }
       }
     },
+    "“%@” didn’t open" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”を開けませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”未能打开"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」未能打開"
+          }
+        }
+      }
+    },
     "“%@” is already in %@" : {
       "localizations" : {
         "en" : {
@@ -12874,6 +14040,72 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "「%@」正在執行，現在將會關閉。"
+          }
+        }
+      }
+    },
+    "“%@” is waiting" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”が待機中です"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”正在等待"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」正在等待"
+          }
+        }
+      }
+    },
+    "“%@” is waiting for space" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”が空き容量を待っています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”正在等待可用空间"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」正在等待可用空間"
+          }
+        }
+      }
+    },
+    "“%@” isn’t in Android" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”はAndroidにありません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android中没有“%@”"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android中沒有「%@」"
           }
         }
       }

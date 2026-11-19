@@ -234,6 +234,11 @@ struct HomeView: View {
     @ViewBuilder
     private var notices: some View {
         @Bindable var model = model
+        // An app an icon, Shortcuts, Search or Siri asked to open waits for the
+        // answer the notices below ask: the card says which, above them.
+        if let pending = model.androidApps.open.pending, case let .waiting(hold, _) = pending.stage, hold != .snapshot {
+            AppOpenWaitingCard(request: pending.request, hold: hold)
+        }
         // The App Store notice of a TestFlight build comes first: it is
         // dismissible and says nothing about the virtual machine, and the
         // person has it before the notices that do.

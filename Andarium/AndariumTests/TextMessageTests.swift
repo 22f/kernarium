@@ -1149,6 +1149,13 @@ struct TextMessageTests {
         #expect(!good.labels.contains { $0.localizedCaseInsensitiveContains("check") }, "the check is an element: \(good.labels)")
     }
 
+    /// The bar where the session puts it (`TextMessageBarOverlay`): at the bottom of the screen,
+    /// so a line that makes it taller grows it upward and what is at its foot stays. Drawn alone in
+    /// a hosting view, a view is centred, and a taller bar moves everything in it by half its growth.
+    private func placedAsTheSessionPlacesIt<Content: View>(_ bar: Content) -> some View {
+        bar.frame(maxHeight: .infinity, alignment: .bottom)
+    }
+
     /// Send is where it was while the message goes, disabled and labelled Sending: the
     /// element VoiceOver focus is on stays in the tree.
     @Test func sendStaysInPlaceDisabledAndSayingSendingWhileAMessageGoes() async throws {
@@ -1156,13 +1163,13 @@ struct TextMessageTests {
         defer { rig.cleanUp() }
         rig.model.openTextMessage()
         rig.model.setTextMessageText("123456")
-        let idle = try await draw(TextMessageBar().environment(rig.model))
+        let idle = try await draw(placedAsTheSessionPlacesIt(TextMessageBar()).environment(rig.model))
         let before = try #require(idle.traits.first { $0.label == SmsMessages.send })
         #expect(before.traits.contains(.button) && !before.traits.contains(.notEnabled))
         let beforeY = try #require(idle.frames.first { $0.label == SmsMessages.send }?.y)
         rig.model.sendTextMessage()
         #expect(await eventually { rig.answers.pending == 1 })
-        let during = try await draw(TextMessageBar().environment(rig.model))
+        let during = try await draw(placedAsTheSessionPlacesIt(TextMessageBar()).environment(rig.model))
         #expect(!during.labels.contains(SmsMessages.send), "Send went while the message goes")
         let sending = try #require(during.traits.first { $0.label == SmsMessages.sending })
         #expect(sending.traits.contains(.button) && sending.traits.contains(.notEnabled))
