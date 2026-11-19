@@ -301,7 +301,9 @@ public struct AppOpenState: Equatable, Sendable {
             self.pending?.stage = .starting
             return .none
         case let .hold(again):
-            self.pending?.stage = .waiting(again, since: now)
+            // A hold that changes kind (a snapshot operation that leaves too
+            // little room) is the same wait: its limit counts from the first.
+            self.pending?.stage = .waiting(again, since: since)
             return .none
         case let .refuse(refusal):
             self.pending = nil
