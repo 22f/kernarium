@@ -61,6 +61,19 @@ uml_add_tooling_test(
     LABELS audit;package
     TIMEOUT 60)
 
+# The archive switch of the AOT component (cmake/UmlAotArchives.cmake): an
+# explicit artifact in an App Store runtime is a configure error unless the
+# accepted descriptor says yes, and darwin/cpu/CMakeLists.txt calls the gate.
+uml_add_tooling_test(
+    NAME aot-archive-switch-gates-explicit-artifacts
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/cmake/test_aot_archive_switch.py
+        --cmake ${CMAKE_COMMAND}
+        --module ${PROJECT_SOURCE_DIR}/cmake/UmlAotArchives.cmake
+        --cpu-lists ${PROJECT_SOURCE_DIR}/darwin/cpu/CMakeLists.txt
+    LABELS audit;package
+    TIMEOUT 120)
+
 # The memory layer's executable-mapping count audit (darwin/memory/
 # count_audit.hpp) belongs to the diagnostics compilation of the AOT runtime.
 # The production compilation of the static MMU holds none of it in any

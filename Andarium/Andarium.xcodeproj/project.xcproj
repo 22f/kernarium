@@ -182,12 +182,19 @@
           "script": "\"$SRCROOT/../Kernarium/scripts/embed-device-framework.sh\" \"$SRCROOT/../.build/kernarium-xcframeworks/KosmicKrisp.xcframework\"\n",
         }, {
           "kind": "script",
+          "name": "Embed UmlArm64Aot (when packaged)",
+          "run-on-every-build": true,
+          "shell": "/bin/sh",
+          "script": "\"$SRCROOT/../Kernarium/scripts/embed-device-framework.sh\" --optional \"$SRCROOT/../.build/kernarium-xcframeworks/UmlArm64Aot.xcframework\"\n",
+        }, {
+          "kind": "script",
           "name": "Check embedded artifacts",
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": [
             "case \"$CONFIGURATION\" in AppStore|TestFlight) ;; *) exit 0 ;; esac",
-            "/usr/bin/env python3 -B \"$SRCROOT/../scripts/check-embedded-artifacts.py\" --app \"$TARGET_BUILD_DIR/$WRAPPER_NAME\" --android-release --kernel android",
+            "/usr/bin/env python3 -B \"$SRCROOT/../scripts/check-embedded-artifacts.py\" --app \"$TARGET_BUILD_DIR/$WRAPPER_NAME\" --android-release --kernel android --aot &&",
+            "/usr/bin/env python3 -B \"$SRCROOT/../scripts/check-no-aot-diagnostics.py\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
         }, {

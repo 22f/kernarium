@@ -86,8 +86,10 @@ WIDE16_FUNCTION = 32768
 # The farthest an entry of a page may lie from its anchor: 65535 words.
 ENTRY16_REACH = 4 * 65535
 # The version of the layout the magic names (see the runtime's blob_version):
-# 2 adds the count of libraries the rewriter left to the engine.
-BLOB_VERSION = 2
+# 2 adds the count of libraries the rewriter left to the engine, 3 the
+# digests of the release's manifest and system partition beside its ID, which
+# bind the blob to the system a launch boots.
+BLOB_VERSION = 3
 HEADER_SIZE = 256
 LIB_RECORD_SIZE = 256
 
@@ -2270,10 +2272,16 @@ def build_unit(job: tuple) -> dict:
 
 def build_blob(units: list[dict], layout: dict[str, int],
                release_id: str, count_retired: bool = False,
-               refused: list[dict] | None = None) -> tuple[bytes, dict]:
+               refused: list[dict] | None = None, *, manifest_sha256: str,
+               system_sha256: str) -> tuple[bytes, dict]:
     """Place the units after the header and ENTER; add the digest hash.
-    `refused` names the libraries left to the engine; the header carries
-    their count for the runtime's diagnostics."""
+    The header names the release the libraries were read from: its ID, the
+    SHA-256 of its manifest and that of its system partition (hex). `refused`
+    names the libraries left to the engine; the header carries their count
+    for the runtime's diagnostics."""
+    for digest in (manifest_sha256, system_sha256):
+        if len(bytes.fromhex(digest)) != 32:
+            raise ValueError("a release digest is not a SHA-256")
     refused = refused or []
     units = sorted(units, key=lambda unit: unit["index"])
     enter_asm = A.Assembler()
@@ -2333,6 +2341,8 @@ def build_blob(units: list[dict], layout: dict[str, int],
                      HEADER_SIZE, len(units), record_at, enter_at, hash_at,
                      slots, len(refused))
     struct.pack_into("96s", blob, 0x30, release_id.encode()[:96])
+    struct.pack_into("32s32s", blob, 0x90, bytes.fromhex(manifest_sha256),
+                     bytes.fromhex(system_sha256))
     for unit, base in zip(units, bases):
         name = unit["path"].encode()
         if len(name) > 95:
@@ -2350,6 +2360,8 @@ def build_blob(units: list[dict], layout: dict[str, int],
             base + unit["hashes_at"])
     manifest = {
         "release_id": release_id,
+        "release_manifest_sha256": manifest_sha256,
+        "system_partition_sha256": system_sha256,
         # The libraries left to the engine because their entry table cannot
         # be formed (the header carries the count).
         "refused": refused,
@@ -2423,6 +2435,11 @@ def main(argv: list[str] | None = None) -> int:
                         "fixture.py), not part of the release; it has no "
                         "licence notice; repeatable")
     parser.add_argument("--release-id", required=True)
+    parser.add_argument("--release-manifest-sha256", required=True,
+                        help="the SHA-256 of the release's manifest (hex)")
+    parser.add_argument("--system-partition-sha256", required=True,
+                        help="the SHA-256 of the release's system partition "
+                        "(hex)")
     parser.add_argument("--out", type=pathlib.Path, required=True,
                         help="output directory (blob.bin, manifest.json)")
     parser.add_argument("--count-retired", action="store_true",
@@ -2464,7 +2481,9 @@ def main(argv: list[str] | None = None) -> int:
     blob, manifest = build_blob(
         units, layout, arguments.release_id, count,
         [{"path": unit["path"], "reason": unit["refused"]}
-         for unit in refused])
+         for unit in refused],
+        manifest_sha256=arguments.release_manifest_sha256,
+        system_sha256=arguments.system_partition_sha256)
     manifest["skipped"] = skipped
     arguments.out.mkdir(parents=True, exist_ok=True)
     # The notice of each library as the image states it: generated output

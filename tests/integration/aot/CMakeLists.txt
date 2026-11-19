@@ -2,9 +2,11 @@
 
 # The ahead-of-time component against a running Android guest: workloads of
 # the covered library families and the guest probe, with the component off
-# and on (run_aot_guest.py). It needs the framework (UML_AOT_IMAGE) and boots
+# and on (run_aot_guest.py). It needs a framework generated from the image
+# (UML_AOT_IMAGE), whose libraries it builds its probe against, and boots
 # Android twice with the macOS launcher, so it exists only where both are.
-if(TARGET uml_arm64_aot_framework AND TARGET uml-darwin-android17)
+if(UML_AOT_IMAGE AND TARGET uml_arm64_aot_framework AND
+   TARGET uml-darwin-android17)
     get_property(_uml_aot_root GLOBAL PROPERTY UML_AOT_IMAGE_ROOT)
     set(_uml_aot_probe_args)
 
