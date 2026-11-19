@@ -2456,9 +2456,11 @@ void cross_library_branches(const LibraryImage &image,
 		static_cast<unsigned long long>(st.cross_hits),
 		static_cast<unsigned long long>(st.cross_misses));
 	require(compared > 20);
-	/* A branch into the other library stays in rewritten code only where
-	 * the binder holds both instances. */
-	require(st.cross_hits > 0 || aot::instance_capacity() < 2);
+	/* The generated code answers every branch whose target page is
+	 * verified itself, so the host's lookup is called only for a branch
+	 * it cannot answer: a host lookup that finds a target is a disagreement
+	 * between the two. */
+	require(st.cross_hits == 0);
 	require(st.poisoned == 0);
 }
 
@@ -3024,12 +3026,65 @@ void edge_into_another_instance(const LibraryImage &image)
 		require(same(want, have, c));
 		const auto st = aot::stats();
 		std::fprintf(stderr, "edge into another instance (page %s): %llu "
-			"entries, %llu cross misses\n", differs ? "differs" : "matches",
+			"entries, %llu host hits, %llu host misses\n",
+			differs ? "differs" : "matches",
 			static_cast<unsigned long long>(st.enters),
+			static_cast<unsigned long long>(st.cross_hits),
 			static_cast<unsigned long long>(st.cross_misses));
-		require(st.cross_misses >= 1);
+		/* The generated code answers a target it can reach, so a target
+		 * the host's lookup finds is a disagreement between the two. */
+		require(st.cross_hits == 0);
 		require(st.poisoned == 0);
 	}
+}
+
+/* An indirect branch into a second instance whose target page is verified
+ * is answered by the generated code, without a call to the host: the
+ * instruction at the target (add 100, return through x15) runs in the other
+ * unit's rewritten code and the host's lookup is never asked. */
+[[gnu::noinline]]
+void edge_into_a_verified_instance(const LibraryImage &image)
+{
+	constexpr std::uint64_t bias_b = 0x7165'0000'0000ULL;
+	const auto bias = Fixture::bias;
+	Environment ref{4470, bias, image};
+	Environment got{4471, bias, image};
+	ref.add_library(bias_b, image);
+	got.add_library(bias_b, image);
+	Arena ref_arena{ref.generation, arena_base(bias)};
+	Arena got_arena{got.generation, arena_base(bias)};
+	/* Run the target itself in the second instance: its page is verified
+	 * and the instance bound. */
+	const PageEdge target{"target", edge_target};
+	auto w = edge_case(target, 107, bias_b);
+	w.cpu.registers[15] = bias_b + stub_offset;
+	aot::set_enabled(true);
+	(void)drive_on(got.executor, got.memory, got.generation, bias_b,
+		got_arena, w, aot_max_blocks);
+	aot::set_enabled(false);
+	const PageEdge via_register{"reg", 0x3100};
+	auto c = edge_case(via_register, 109, bias);
+	c.cpu.registers[16] = bias_b + edge_target;
+	const auto want = drive_on(ref.executor, ref.memory, ref.generation,
+		bias, ref_arena, c, max_blocks);
+	require(want.finished);
+	require(want.cpu.registers[0] == 100U);
+	aot::reset_stats();
+	aot::set_enabled(true);
+	const auto have = drive_on(got.executor, got.memory, got.generation,
+		bias, got_arena, c, aot_max_blocks);
+	aot::set_enabled(false);
+	require(same(want, have, c));
+	const auto st = aot::stats();
+	std::fprintf(stderr, "edge into a verified instance: %llu entries, "
+		"%llu host lookups\n", static_cast<unsigned long long>(st.enters),
+		static_cast<unsigned long long>(st.cross_hits + st.cross_misses));
+	/* One entry carries the branch into the other unit and the code at the
+	 * target; the only host lookup is the return to the stub, which is no
+	 * library's address. */
+	require(st.enters == 1);
+	require(st.cross_hits == 0 && st.cross_misses == 1);
+	require(st.poisoned == 0);
 }
 
 /* A direct branch whose target lies below the first byte of the library, as
@@ -5730,6 +5785,7 @@ int main(int argc, char **argv)
 			edges_into_a_page_that_matches(image);
 			next_page_changes_after_its_neighbour_was_compared(image);
 			edge_into_another_instance(image);
+			edge_into_a_verified_instance(image);
 			atomics_are_shared_between_aot_and_engine(image);
 			cas_outcomes_and_permissions(image);
 			misaligned_cas_follows_the_profile(image);

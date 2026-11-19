@@ -822,6 +822,41 @@ class FixtureTests(unittest.TestCase):
             (fixture.IPLT, fixture.IPLT + 4 * len(fixture.PLT_CODE)),
             functions)
 
+    def test_a_unit_starts_with_its_indirect_branch_routine(self) -> None:
+        # The way in of a transfer from another library is the unit's first
+        # word (rewrite.py: XLIB).
+        self.library.build([1] * ((self.library.table_end -
+                                   self.library.table_base) // 4096))
+        asm = self.library.asm
+        first = asm.label_address("UNIT")
+        self.assertEqual(first, 0)
+        data = asm.resolve()
+        word = int.from_bytes(data[:4], "little")
+        target = asm.label_address("IND")
+        self.assertEqual(word, 0x14000000 | (target // 4))
+
+    def test_the_cross_library_routine_calls_nothing(self) -> None:
+        # The routine that finds the instance of an indirect branch's target
+        # runs no call and no vector instruction (it spills four registers
+        # and the flags on the host stack and keeps the vector registers).
+        self.library.build([1] * ((self.library.table_end -
+                                   self.library.table_base) // 4096))
+        asm = self.library.asm
+        data = asm.resolve()
+        begin, end = asm.label_address("XLIB"), asm.label_address("XLIB_SLOW")
+        self.assertLess(begin, end)
+        for at in range(begin, end, 4):
+            word = int.from_bytes(data[at:at + 4], "little")
+            self.assertNotEqual(word & 0xfffffc1f, 0xd63f0000, hex(at))  # blr
+            self.assertNotEqual(word & 0xfffffc1f, 0xd65f0000, hex(at))  # ret
+            # load and store pairs of vector registers and SIMD loads
+            self.assertFalse((word >> 27) & 7 == 5 and (word >> 26) & 1 and
+                             (word >> 25) & 1 == 0, hex(at))
+        # the slow path after it still calls the host
+        slow = [int.from_bytes(data[at:at + 4], "little") & 0xfffffc1f
+                for at in range(end, end + 300, 4)]
+        self.assertIn(0xd63f0000, slow)
+
     def test_loop_branch_lands_inside_another_range(self) -> None:
         # b.lo at 0x1028 (range B) targets 0x1004 (inside range A), and no
         # function entry lies on the cycle.
@@ -984,7 +1019,7 @@ class EntryTableTests(unittest.TestCase):
         self.assertEqual(census["table"], unit["table_region"])
         blob, manifest = rewrite.build_blob(
             [unit], self.layout, "entry-table-row", False, **RELEASE)
-        self.assertEqual(blob[:8], b"UMLAOT16")
+        self.assertEqual(blob[:8], b"UMLAOT17")
         self.assertEqual(struct.unpack_from("<I", blob, 8)[0],
                          rewrite.BLOB_VERSION)
         self.assertEqual(struct.unpack_from("<I", blob, 36)[0], 0)
@@ -1464,6 +1499,8 @@ class WideningTests(unittest.TestCase):
         "cmp x1, x2": (A.cmp_reg(1, 2), 0xeb02003f),
         "csel x1, x1, x26, ls": (A.csel(1, 1, 26, 9), 0x9a9a9021),
         "ccmp x28, #0, #4, lo": (A.ccmp_imm(28, 0, 4, 3), 0xfa403b84),
+        "ccmp x26, x28, #0, lo": (A.ccmp_reg(26, 28, 0, 3), 0xfa5c3340),
+        "ccmp x1, x2, #4, hs": (A.ccmp_reg(1, 2, 4, 2), 0xfa422024),
         "ldar w3, [x28]": (fixture.ordered(True, 2, 28, 3), 0x88dfff83),
         "stlrh w4, [x28]": (fixture.ordered(False, 1, 28, 4), 0x489fff84),
         "ldaddal x26, x27, [x28]":

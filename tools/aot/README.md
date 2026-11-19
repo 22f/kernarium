@@ -81,7 +81,7 @@ three to `artifact.json`.
 The entry table holds 16 bits per source word (the offset of the word's native
 code, in words, from its page's anchor) and one signed 32-bit anchor per text
 page, half the bytes of a 32-bit entry per word; the blob's magic is
-`UMLAOT16`. An indirect branch and a refill spend four words more to reach the
+`UMLAOT17`. An indirect branch and a refill spend four words more to reach the
 native code than a table of 32-bit entries would. A page that holds the end of
 a function of 32 KiB or more (its out-of-line stubs follow it, so its entries
 can lie further apart than 16 bits reach) is a row of branches, one per word,

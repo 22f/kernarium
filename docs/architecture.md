@@ -697,6 +697,11 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
 - Units: each library is a self-contained unit of the framework. Branches
   between libraries mapped in one address space stay in rewritten code when
   the target page is verified (below); any other target leaves to the engine.
+  An indirect branch to another library is answered by generated code: a
+  search of the table of verified instances (the cross table the runtime
+  publishes, sorted by address), a check of the target page's state, and a
+  jump to the target unit's own indirect-branch routine; it calls the host
+  only for a target it cannot answer.
 - Binding: the framework stores the SHA-256 of every guest page it stands
   for, whole and untruncated. A mapped text page authorizes native execution
   only after its own SHA-256 equals the stored one, made at the first entry
