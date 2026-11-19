@@ -3389,10 +3389,14 @@ void more_instances_than_the_binder_holds(const LibraryImage &image)
 	const std::size_t capacity = aot::instance_capacity();
 	const std::size_t copies = capacity + 6;
 	constexpr unsigned long generation = 4540;
-	const auto first_bias = 0x7300'0000'0000ULL;
+	/* Every copy stays below 2^47, the guest address limit (a copy beyond
+	 * it has a key the engine cannot cache): 16,390 copies at the largest
+	 * capacity reach 0x5006'0000'0000. */
+	const auto first_bias = 0x1000'0000'0000ULL;
 	const auto bias_of = [&](std::size_t index) {
 		return first_bias + index * 0x1'0000'0000ULL;
 	};
+	require(bias_of(copies) < (1ULL << 47));
 	std::vector<std::unique_ptr<Copy>> maps;
 	for (std::size_t i = 0; i < copies; ++i)
 		maps.push_back(std::make_unique<Copy>(generation, bias_of(i), image));
