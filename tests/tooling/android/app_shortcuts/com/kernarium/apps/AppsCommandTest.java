@@ -8,7 +8,7 @@
 // reaches the process, how a start's output is read, the child process's drain, deadline and reaping (real
 // processes), the resource files' order, and the exit statuses.
 // Each row prints "ok <name>" or "FAIL <name>: why"; the last line is PASS when no row failed.
-// A row that returns with a process of its own still there fails, and the process is ended by SIGKILL to its pid.
+// A row that returns with a process of its own still there fails, and the process is ended by SIGKILL through its handle.
 // The package is the command's, so that the test reaches what the command keeps to itself.
 // test_app_shortcuts_command.py compiles and runs it, and runs it again on sources with one rule
 // removed at a time, where the rows named there must fail.
@@ -93,29 +93,33 @@ public final class AppsCommandTest {
     }
 
     /**
-     * Ends every process this JVM started since {@code before} (a child that is still there, and what it started) by
-     * SIGKILL to its own pid, and waits until each is gone. Returns what it found, or null when there was nothing.
+     * The processes this JVM has started since {@code before} that are still there: its new children (each child
+     * first: with it gone, it starts nothing more) and what each of them started.
      */
-    private static String endStrays(Set<Long> before) {
-        List<ProcessHandle> strays = new ArrayList<>();
+    private static List<ProcessHandle> startedSince(Set<Long> before) {
+        List<ProcessHandle> started = new ArrayList<>();
         ProcessHandle.current().children().filter(child -> !before.contains(child.pid())).forEach(child -> {
-            strays.add(child); // the child first: with it gone, it starts nothing more
-            child.descendants().forEach(strays::add);
+            started.add(child);
+            child.descendants().forEach(started::add);
         });
-        if (strays.isEmpty()) {
-            return null;
-        }
-        StringBuilder found = new StringBuilder("left a process behind (ended by SIGKILL):");
-        for (ProcessHandle stray : strays) {
-            found.append(" pid ").append(stray.pid()).append(' ').append(stray.info().command().orElse("?"));
-            stray.destroyForcibly();
+        return started;
+    }
+
+    /**
+     * SIGKILL to each of the processes through the handle this JVM holds of it (which checks the process's start time:
+     * a pid that is read from somewhere is never signalled), and waits until each is gone, for ten seconds at most.
+     * Returns whether they all are.
+     */
+    private static boolean endAll(List<ProcessHandle> handles) {
+        for (ProcessHandle handle : handles) {
+            handle.destroyForcibly();
         }
         long deadline = System.nanoTime() + 10_000_000_000L;
         boolean gone = false;
         while (!gone && System.nanoTime() < deadline) {
             gone = true;
-            for (ProcessHandle stray : strays) {
-                gone &= !stray.isAlive();
+            for (ProcessHandle handle : handles) {
+                gone &= !handle.isAlive();
             }
             if (!gone) {
                 try {
@@ -126,7 +130,23 @@ public final class AppsCommandTest {
                 }
             }
         }
-        return gone ? found.toString() : found + "; not gone after the kill";
+        return gone;
+    }
+
+    /**
+     * Ends every process this JVM started since {@code before} (see {@link #endAll}). Returns what it found, or null
+     * when there was nothing.
+     */
+    private static String endStrays(Set<Long> before) {
+        List<ProcessHandle> strays = startedSince(before);
+        if (strays.isEmpty()) {
+            return null;
+        }
+        StringBuilder found = new StringBuilder("left a process behind (ended by SIGKILL):");
+        for (ProcessHandle stray : strays) {
+            found.append(" pid ").append(stray.pid()).append(' ').append(stray.info().command().orElse("?"));
+        }
+        return endAll(strays) ? found.toString() : found + "; not gone after the kill";
     }
 
     private static void check(boolean condition, String what) {
@@ -1894,6 +1914,13 @@ public final class AppsCommandTest {
         });
     }
 
+    /**
+     * A child that ignores SIGTERM and writes its pid to the file named by its first argument, as one process: the
+     * shell sets the trap and then becomes the sleep (exec keeps its pid and the ignored signal), so that it has no
+     * child of its own to outlive it when it is killed.
+     */
+    private static final String STUBBORN = "trap '' TERM; echo $$ > \"$1\"; exec sleep 600";
+
     /** A shell command line as the argument vector of a process. */
     private static List<String> sh(String script, String... arguments) {
         List<String> argv = new ArrayList<>(Arrays.asList("/bin/sh", "-c", script, "sh"));
@@ -1910,26 +1937,6 @@ public final class AppsCommandTest {
         check(!text.isEmpty(), "the child wrote its pid");
         java.util.Optional<ProcessHandle> handle = ProcessHandle.of(Long.parseLong(text));
         return handle.isPresent() && handle.get().isAlive();
-    }
-
-    /**
-     * Ends the child that wrote its pid to the file by a real SIGKILL to that pid (the kill command's), and waits until
-     * it is gone, so that the row can return. A file that is still empty gives no pid: {@link #row} finds the child.
-     */
-    private static void killByPid(java.io.File pidFile) throws Exception {
-        String text = new String(java.nio.file.Files.readAllBytes(pidFile.toPath()), StandardCharsets.US_ASCII).trim();
-        if (text.isEmpty()) {
-            return;
-        }
-        new ProcessBuilder("kill", "-9", text).start().waitFor();
-        long deadline = System.nanoTime() + 10_000_000_000L;
-        while (System.nanoTime() < deadline) {
-            java.util.Optional<ProcessHandle> handle = ProcessHandle.of(Long.parseLong(text));
-            if (!handle.isPresent() || !handle.get().isAlive()) {
-                return;
-            }
-            Thread.sleep(10);
-        }
     }
 
     private static java.io.File pidFile() throws Exception {
@@ -2026,7 +2033,7 @@ public final class AppsCommandTest {
             java.io.File pid = pidFile();
             long begin = System.nanoTime();
             try {
-                ChildProcess.run(sh("trap '' TERM; echo $$ > \"$1\"; while :; do sleep 1; done", pid.getPath()), 600, 4096, JDK_KILL);
+                ChildProcess.run(sh(STUBBORN, pid.getPath()), 600, 4096, JDK_KILL);
                 throw new Mismatch("a child past the deadline is a failure");
             } catch (PlatformException late) {
                 check(late.getMessage() != null, "failed");
@@ -2050,7 +2057,7 @@ public final class AppsCommandTest {
             same(0, asked[0], "SIGTERM ended it: no kill");
             java.io.File stubborn = pidFile();
             try {
-                ChildProcess.run(sh("trap '' TERM; echo $$ > \"$1\"; while :; do sleep 1; done", stubborn.getPath()), 600, 4096, counting, 300);
+                ChildProcess.run(sh(STUBBORN, stubborn.getPath()), 600, 4096, counting, 300);
             } catch (PlatformException late) {
                 check(late.getMessage() != null, "the deadline");
             }
@@ -2076,27 +2083,27 @@ public final class AppsCommandTest {
         });
         row("child-that-survives-the-kill-is-reported", () -> {
             // A kill that does not work, as destroyForcibly is not one on the target libcore: the final wait says so.
+            Set<Long> before = childPids();
             java.io.File pid = pidFile();
             try {
-                ChildProcess.run(sh("trap '' TERM; echo $$ > \"$1\"; while :; do sleep 1; done", pid.getPath()), 600, 4096,
+                ChildProcess.run(sh(STUBBORN, pid.getPath()), 600, 4096,
                         process -> { }, 300);
                 throw new Mismatch("a child that is still alive is a failure");
             } catch (PlatformException still) {
                 same("cmd activity start-activity could not be ended", still.getMessage(), "the reason is fixed");
             } finally {
-                boolean survivor;
-                try {
-                    survivor = alive(pid);
-                } finally {
-                    killByPid(pid);
-                }
+                // The child is this JVM's: it is ended through the handle it holds, and seen gone, before the row returns.
+                List<ProcessHandle> survivors = startedSince(before);
+                boolean survivor = !survivors.isEmpty() && survivors.get(0).isAlive();
+                check(endAll(survivors), "the survivor was ended");
                 check(survivor, "the child was alive when the run said so");
             }
         });
         row("child-kill-that-throws-leaves-the-wait-to-decide", () -> {
+            Set<Long> before = childPids();
             java.io.File pid = pidFile();
             try {
-                ChildProcess.run(sh("trap '' TERM; echo $$ > \"$1\"; while :; do sleep 1; done", pid.getPath()), 600, 4096,
+                ChildProcess.run(sh(STUBBORN, pid.getPath()), 600, 4096,
                         process -> {
                             throw new IllegalStateException("no such field");
                         }, 300);
@@ -2104,7 +2111,7 @@ public final class AppsCommandTest {
             } catch (PlatformException still) {
                 same("cmd activity start-activity could not be ended", still.getMessage(), "the reason is fixed");
             } finally {
-                killByPid(pid);
+                check(endAll(startedSince(before)), "the survivor was ended");
             }
         });
         row("child-is-reaped-when-the-run-is-interrupted", () -> {
