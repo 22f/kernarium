@@ -1351,11 +1351,9 @@ is on. `AndariumCore/Adb` speaks the protocol.
   `AndroidAppsTool` and `AndroidAppRefresh` in `AndariumCore`, and is cached by
   `AndroidAppStore` (catalog, icons, and a small record per icon that survives
   an erase), so the tiles and the chooser answer while Android is off. The row
-  exists only in a normal session whose image has the tool, and only from iOS 27,
-  where Shortcuts shows a tile for each app. A Mac, a Vision Pro and an iOS before
-  27 offer none of it: the intent runs, but the apps are no entities, nothing is
-  written to Spotlight and the tiles are not told of them
-  (`IPadAppHost.offersAddToHomeScreen`). An icon
+  exists only in a normal session whose image has the tool. A Mac and a Vision
+  Pro have no Home Screen: there the intent runs, but the apps are no entities,
+  nothing is written to Spotlight and the tiles are not told of them. An icon
   is stored only as a picture the host drew itself (`FlatteningAppsTool`), and a
   label as the tool's own sanitising makes it, whatever the tool or the cache
   file says.
@@ -1373,8 +1371,10 @@ is on. `AndariumCore/Adb` speaks the protocol.
   against the switch and the catalog as they are when it runs, and a launch
   finishes a write that failed. The tiles, the entities and the Siri phrase do
   not follow the switch. The system's own request to index the apps again
-  (`IndexedEntityQuery`) exists from iOS 27. The feature is in every build
-  configuration. Tests:
+  (`IndexedEntityQuery`) exists from iOS 27. Shortcuts shows a tile for each app
+  from iOS 27 only, so the host offers the feature from there
+  (`IPadAppHost.offersAddToHomeScreen`): an iOS 26 host is treated as a Mac or a
+  Vision Pro is. The feature is in every build configuration. Tests:
   `AndariumCore`'s `AppOpen*`, `AndroidApp*` suites, the hosted
   `AndroidApps*Tests` and the preview's `AddToHomeUITests`
   (`-screen add-home-*`, `Preview/AddToHomePreview.swift`).
