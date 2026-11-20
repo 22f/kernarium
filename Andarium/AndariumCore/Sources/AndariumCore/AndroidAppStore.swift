@@ -358,10 +358,13 @@ public final class AndroidAppStore: @unchecked Sendable {
         try write(recordCache.values.sorted { $0.id < $1.id }, to: recordsFile)
     }
 
-    /// The oldest records go first once there are more than the bound.
+    /// The oldest records go first once there are more than the bound, and the
+    /// records of the apps of the catalog go last, whatever their dates say.
     private func trimRecords() {
         guard recordCache.count > AndroidAppLimits.mostRecords else { return }
-        let oldest = recordCache.values.sorted { ($0.seen, $0.id) < ($1.seen, $1.id) }
+        let listed = Set(catalogCache?.apps.map(\.id) ?? [])
+        let oldest = recordCache.values.filter { !listed.contains($0.id) }
+            .sorted { ($0.seen, $0.id) < ($1.seen, $1.id) }
             .prefix(recordCache.count - AndroidAppLimits.mostRecords)
         for record in oldest { recordCache[record.id] = nil }
     }
@@ -429,19 +432,23 @@ public enum AndroidAppRefresh {
     /// store's generation at its start and hands it back with each change, so
     /// a refresh that the run ending, an erase or a restore ended stores
     /// nothing, whatever the tool still answers, and tells nothing.
+    ///
+    /// `forAnOpen` is the listing a host with no Home Screen takes before it opens an app by name:
+    /// the apps are listed whatever the digest says, and no icon is asked for.
     public static func run(
-        tool: any AndroidAppsTool, store: AndroidAppStore, now: Date = Date(),
+        tool: any AndroidAppsTool, store: AndroidAppStore, now: Date = Date(), forAnOpen: Bool = false,
         progress: @Sendable (AndroidAppCatalog, _ iconsLeft: Int) -> Void = { _, _ in }
     ) async -> Result {
         let generation = store.refreshGeneration
-        let remote = await tool.digest(limit: AndroidAppLimits.digestLimit)
+        var remote: AndroidAppDigestAnswer?
+        if !forAnOpen { remote = await tool.digest(limit: AndroidAppLimits.digestLimit) }
         switch remote {
-        case .unavailable: return .unavailable
-        case .failed: return .failed
-        case .digest: break
+        case .unavailable?: return .unavailable
+        case .failed?: return .failed
+        default: break
         }
         guard !Task.isCancelled, store.refreshGeneration == generation else { return .failed }
-        if case let .digest(digest) = remote, let kept = store.catalog(), kept.digest == digest {
+        if case let .digest(digest)? = remote, let kept = store.catalog(), kept.digest == digest {
             // Nothing that is cached is out of date; an icon that never arrived is still owed.
             guard store.touch(at: now, generation: generation), let catalog = store.catalog() else { return .failed }
             await fetchIcons(tool: tool, store: store, generation: generation, catalog: catalog, progress: progress)
@@ -457,7 +464,9 @@ public enum AndroidAppRefresh {
             let sorted = AndroidAppList(apps: list.apps.sorted(by: AndroidAppText.inOrder), digest: list.digest)
             do { try store.apply(sorted, at: now, generation: generation) } catch { return .failed }
             guard let catalog = store.catalog() else { return .failed }
-            await fetchIcons(tool: tool, store: store, generation: generation, catalog: catalog, progress: progress)
+            if !forAnOpen {
+                await fetchIcons(tool: tool, store: store, generation: generation, catalog: catalog, progress: progress)
+            }
             return .refreshed(catalog)
         }
     }
