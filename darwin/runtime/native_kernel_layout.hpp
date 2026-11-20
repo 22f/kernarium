@@ -164,19 +164,30 @@ struct NativeKernelPlacement final {
 [[nodiscard]] NativeKernelLayout reserve_process_native_window(
 	const NativeKernelLayout &geometry, WindowPlacement placement) noexcept;
 
-/* Reserves the process's heap region now, before the process's window.
+/* Reserves the process's heap region now, after the process's window.
  *
  * The kernel's mapping of its RAM takes its first block from the region, which
  * is a reservation of its own (HeapRegion) and is lazy: a process with little
  * address space (an iOS application without Extended Virtual Addressing) can
- * have no room for it once the window holds its share. Asked first, a refusal
- * leaves nothing of this run in the process, and a smaller guest tried next
- * finds the whole of the address space the window takes, where a window
- * reserved first would stay (it is never released while a guest may use it)
- * and take the heap's room with it. True when the region is reserved, now or
- * before; false, with a line on stderr, where the host has no room for it. The
+ * have no room for it once the window holds its share, and the host answers
+ * the kernel's first block with nothing, which ends the process. A run asks
+ * for it after the window, the order a kernel's own start has always had, so
+ * that no host's placement of a window is displaced by it; a refusal is then
+ * answered with release_unused_process_window. True when the region is
+ * reserved, now or before; false, with a line on stderr, where the host has no
+ * room for it. A refusal reserves nothing, and a later call tries again. The
  * caller holds the process address-space gate. */
 [[nodiscard]] bool reserve_process_heap() noexcept;
+
+/* Gives the process's window back to the host, whole, after a run that could
+ * not start: the reservation it took (or found, unused, from an earlier run
+ * that never started) holds nothing, and keeping it would keep address space
+ * that a smaller guest tried next needs for the heap region, which a refused
+ * run did not get. Nothing is released while a guest may use the window: the
+ * caller states that none does, as a handle whose guest is not waiting to be
+ * handed back, in a process whose guest is not spent. The caller holds the
+ * process address-space gate. */
+void release_unused_process_window() noexcept;
 
 /* Whether the host maps the guest's RAM in this layout's window. The kernel
  * maps its RAM over the reservation with one read-write mapping and, where the

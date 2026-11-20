@@ -76,19 +76,25 @@ never returns address space while the process lives: the first run reserves it
 once (`runtime::reserve_process_native_window`) and every later run takes the
 same window. Guest pages are mapped over it with `MAP_FIXED`, and releasing one
 hands its range back as a reservation, never with `munmap`, which would let an
-unrelated `mmap(NULL)` take the gap. Before the kernel starts, a run reserves
-the process's heap region (`runtime::reserve_process_heap`), whose first block
-the kernel's mapping takes, before its window, so that a refusal of either
-leaves nothing of the run and a smaller guest tried next has the room; it then
-maps its RAM in the window as the kernel will and hands the range back to the
-reservation (`runtime::native_guest_memory_mappable`). A host that will not
-reserve the region or the window or map the RAM ends the run with
-`-UML_EMULATOR_OUT_OF_MEMORY`, which leaves the process's guest unspent, where
-the kernel would end the process, and marks the run
-(`runtime/start_refusal.hpp`): the same status also comes from a failed
+unrelated `mmap(NULL)` take the gap. Before the kernel starts, a run checks the
+geometry of the guest's size and reserves its window, and then the process's
+heap region (`runtime::reserve_process_heap`), whose first block the kernel's
+mapping takes; no host's placement of the window is displaced by the region,
+and a size with no layout reserves nothing. A refused region gives back a window
+that held no guest (`runtime::release_unused_process_window`), so that a
+smaller guest tried next has its room; a region once reserved stays. The run
+then maps its RAM beyond the first 64 MiB of the window (the kernel image and
+its reserved prefix, where a signed text alias of an earlier guest is
+permanent) as the kernel will and hands the range back to the reservation
+(`runtime::native_guest_memory_mappable`); a refusal of that trial keeps the
+window and the region. A host that will not reserve the window or the region or
+map the RAM ends the run with `-UML_EMULATOR_OUT_OF_MEMORY`, which leaves the
+process's guest unspent, where the kernel would end the process, and marks the
+run (`runtime/start_refusal.hpp`): the same status also comes from a failed
 allocation of the library's own, so the Kernarium runtime returns its own
-result (`KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED`) only for a marked run. Guest RAM that a host-service view still
-borrows stays mapped until the last view is released. The linear physical window
+result (`KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED`) only for a marked run. Guest
+RAM that a host-service view still borrows stays mapped until the last view is
+released. The linear physical window
 is the anonymous RAM root; consumers borrow it or create non-copying Mach
 aliases, and disks stay file-backed.
 

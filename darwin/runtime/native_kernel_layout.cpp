@@ -228,6 +228,17 @@ NativeKernelLayout reserve_process_native_window(
 	return window;
 }
 
+void release_unused_process_window() noexcept
+{
+	std::lock_guard lock{process_window.mutex};
+	if (process_window.end == 0)
+		return;
+	munmap(reinterpret_cast<void *>(process_window.begin),
+		process_window.end - process_window.begin);
+	process_window.begin = 0;
+	process_window.end = 0;
+}
+
 ProcessNativeWindow process_native_window() noexcept
 {
 	std::lock_guard lock{process_window.mutex};

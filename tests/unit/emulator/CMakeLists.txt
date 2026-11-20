@@ -170,10 +170,11 @@ if(TARGET uml_network_provider)
 endif()
 uml_add_unit_test(NAME emulator-api COMMAND uml_emulator_api_tests)
 
-# A process with little address space: its heap region and its window are
+# A process with little address space: its window and its heap region are
 # reserved one after the other, a refusal of either leaves nothing of the run,
-# and a smaller guest tried next is started. A process of its own (the limit is
-# the system's, on the whole process).
+# and a smaller guest tried next is started; the heap region does not take the
+# address a window needs. A process of its own (the limit is the system's, on
+# the whole process).
 add_executable(uml_emulator_address_space_tests
     emulator_address_space_tests.cpp)
 target_link_libraries(uml_emulator_address_space_tests PRIVATE
@@ -189,6 +190,10 @@ uml_add_unit_test(NAME emulator-address-space-no-heap
     COMMAND uml_emulator_address_space_tests --no-room-for-the-heap)
 uml_add_unit_test(NAME emulator-address-space-ram-trial
     COMMAND uml_emulator_address_space_tests --ram-trial)
+uml_add_unit_test(NAME emulator-address-space-no-layout
+    COMMAND uml_emulator_address_space_tests --no-layout)
+uml_add_unit_test(NAME emulator-address-space-heap-and-window
+    COMMAND uml_emulator_address_space_tests --heap-and-window-addresses)
 
 add_executable(uml_native_4k_admission_tests native_4k_admission_tests.cpp)
 target_link_libraries(uml_native_4k_admission_tests PRIVATE

@@ -14,7 +14,7 @@
 #include "native_kernel_layout.hpp"
 #include "session_record.hpp"
 #include "stall_watch.hpp"
-#include "start_refusal.hpp"
+#include "runtime/start_refusal.hpp"
 #include "thread_fence.hpp"
 #include "virtual_jetsam.hpp"
 #include "x86_runtime_support.hpp"
@@ -677,23 +677,30 @@ public:
 		 * and removes it when the run returns, however the guest ended. */
 		const ::uml::device::GuestConsoleRun console_run{
 			!prepared.informational && prepared.host_console_directory};
-		/* The process's heap region is reserved before its window, so that a
-		 * refusal of either leaves nothing of this run behind and a smaller
-		 * guest, tried next, finds the room a window of this size would have
-		 * kept (reserve_process_heap). */
-		if (!prepared.informational &&
-		    !::uml::runtime::reserve_process_heap())
-			return refused_for_memory();
+		/* The geometry of the guest's size is checked, and the window it
+		 * needs reserved, before anything else is: a size the product has no
+		 * layout for reserves nothing. A host that has not the address space
+		 * or the memory limit for the guest's size says so here, before the
+		 * kernel starts, and the run fails with a result of its own: past
+		 * this point the kernel answers a refused mapping by ending the
+		 * process. */
 		const auto native_layout = run_native_kernel_layout(
 			prepared.guest_memory_bytes);
-		/* A host that has not the address space or the memory limit for
-		 * the guest's size says so here, before the kernel starts, and the
-		 * run fails with a result of its own: past this point the kernel
-		 * answers a refused mapping by ending the process. */
 		if (!native_layout.valid)
 			return native_layout.reservation_failed ?
 				refused_for_memory() :
 				-UML_EMULATOR_INVALID_ARGUMENT;
+		/* The kernel's first block of RAM comes from the process's heap
+		 * region, which the window may have left no room for. A refusal
+		 * gives the window back, which holds nothing of a guest that has not
+		 * started, so that a smaller guest tried next has the address space
+		 * the window took (release_unused_process_window). */
+		if (!prepared.informational &&
+		    !::uml::runtime::reserve_process_heap()) {
+			if (!restartable_ && !::uml::runtime::process_guest_spent())
+				::uml::runtime::release_unused_process_window();
+			return refused_for_memory();
+		}
 		if (!prepared.informational &&
 		    !::uml::runtime::native_guest_memory_mappable(
 			    guest_ram_trial_layout(native_layout),
