@@ -35,6 +35,7 @@ target_link_libraries(uml_runtime_context PRIVATE
     UML::Descriptor
     UML::RunRouting
     UML::HostEnvironment
+    UML::MemoryHeap
     uml_cpu_engine_factory
     uml_static_guest_memory)
 target_include_directories(uml_runtime_context PRIVATE

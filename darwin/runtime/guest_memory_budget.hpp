@@ -56,6 +56,7 @@
  */
 
 #include "../cpu/gadget_cache_budget.hpp"
+#include "../memory/heap_region_size.hpp"
 #include "../platform/gpu_budget.hpp"
 
 #include <algorithm>
@@ -124,12 +125,12 @@ inline constexpr std::uint64_t native_window_fixed_bytes =
 }
 
 /* What the process keeps free in its address space beside the window: the
- * mappings the host makes once the guest runs (a guest's service buffers, the
- * gadget cache, the graphics driver) go to whatever room the process has
- * outside the window first and to the run the window leaves after it, and a
- * process that finds none ends. */
+ * process's heap region (HeapRegion), which the guest's first mapping takes a
+ * block from and which a process with little address space finds a hole for
+ * only in the run the window leaves, and some room over for the mappings the
+ * host makes once the guest runs. A process that finds neither ends. */
 inline constexpr std::uint64_t address_space_reserve_bytes =
-	std::uint64_t{512} << 20;
+	::uml::memory::device_heap_region_bytes + (std::uint64_t{64} << 20);
 
 /* The default guest RAM of a new guest: a multiple of 512 MiB within this
  * range (default_guest_memory_mib). Its top is no cap on what is offered: it

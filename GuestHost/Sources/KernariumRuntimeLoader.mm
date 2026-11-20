@@ -653,8 +653,15 @@ uint32_t guestMemoryCeilingMiB()
             if (run)
                 addressSpace = *run > 0 ? *run : 1;
         }
-        return uml::runtime::guest_memory::process_guest_memory_ceiling_mib(
-            macosWindow, info.physicalMemory, addressSpace);
+        const uint32_t answer =
+            uml::runtime::guest_memory::process_guest_memory_ceiling_mib(
+                macosWindow, info.physicalMemory, addressSpace);
+        if (addressSpace != 0)
+            std::fprintf(stderr,
+                "Kernarium: the process has a run of %llu MiB of address "
+                "space; a guest may have up to %u MiB\n",
+                static_cast<unsigned long long>(addressSpace >> 20), answer);
+        return answer;
     }();
     return ceiling;
 }

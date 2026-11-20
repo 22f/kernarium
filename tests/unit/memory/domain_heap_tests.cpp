@@ -204,6 +204,22 @@ void release_returns_every_byte_to_the_region()
 	require(again == small, "a released range was not reused lowest first");
 }
 
+/* A host asks for the region before the first block: the reservation is made
+ * once, a block comes from it, and asking again changes nothing. */
+void the_region_can_be_reserved_before_the_first_block()
+{
+	auto &region = HeapRegion::instance();
+	require(region.reserve(), "the region was not reserved when asked for");
+	const auto base = region.base();
+	require(base != 0, "a reserved region has no base");
+	require(region.reserve() && region.base() == base,
+		"asking again moved or lost the region");
+	void *const block = region.take(host_page(), ScratchArena::vm_tag);
+	require(block != nullptr && region.contains(block),
+		"a block did not come from the reserved region");
+	region.give(block, host_page());
+}
+
 void a_released_range_stays_reserved()
 {
 	auto &region = HeapRegion::instance();
@@ -524,6 +540,8 @@ int main()
 			large_and_over_aligned_blocks_are_mappings_of_their_own},
 		{"release returns every byte to the region",
 			release_returns_every_byte_to_the_region},
+		{"the region can be reserved before the first block",
+			the_region_can_be_reserved_before_the_first_block},
 		{"a released range stays reserved",
 			a_released_range_stays_reserved},
 		{"the region throws when it has no room and recovers",

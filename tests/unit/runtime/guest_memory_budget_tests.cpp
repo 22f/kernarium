@@ -1083,15 +1083,18 @@ void theNativeWindowIsTheRamItsAllowanceAndTheFixedSpan()
 void theAddressSpaceBoundsTheRamByTheWindowItNeeds()
 {
 	constexpr std::uint64_t gib = 1024 * mib;
-	static_assert(budget::address_space_reserve_bytes == 512 * mib);
+	static_assert(budget::address_space_reserve_bytes == 1024 * mib + 64 * mib,
+		"the heap region's 1 GiB and a margin");
 	static_assert(budget::address_space_guest_memory_mib(0) ==
 		budget::guest_memory_range_maximum_mib,
 		"a host that cannot say has no bound");
-	static_assert(budget::address_space_guest_memory_mib(6 * gib) == 2240,
-		"2240 MiB needs 5440 MiB and 2304 MiB needs 5632 MiB and 44 KiB");
-	static_assert(budget::address_space_guest_memory_mib(5 * gib) == 1728,
-		"1792 MiB needs 4608 MiB and 44 KiB");
-	static_assert(budget::address_space_guest_memory_mib(4 * gib) == 1216);
+	static_assert(budget::address_space_guest_memory_mib(6 * gib) == 1984,
+		"1984 MiB needs 4992 MiB and 44 KiB, 2048 MiB needs 5120 MiB and "
+		"44 KiB, and 6 GiB less the reserve is 5056 MiB");
+	static_assert(budget::address_space_guest_memory_mib(5 * gib) == 1472,
+		"1536 MiB needs 4096 MiB and 44 KiB");
+	static_assert(budget::address_space_guest_memory_mib(4 * gib) == 896,
+		"960 MiB needs 3008 MiB and 44 KiB, the allowance being 1 GiB at least");
 	static_assert(budget::address_space_guest_memory_mib(2 * gib) == 0,
 		"not even the smallest guest fits");
 	static_assert(budget::address_space_guest_memory_mib(
@@ -1183,6 +1186,8 @@ void anAddressSpaceHoldsTheCeilingTheDefaultAndEverySizeOffered()
 	 * 2048 MiB at 6 vCPUs on a device with room, and 1536 MiB in a 5 GiB run. */
 	static_assert(budget::default_guest_memory_mib(3376 * mib, 6) == 2048);
 	static_assert(budget::default_guest_memory_mib(3376 * mib, 6,
+		budget::launch_memory_set, 1984) == 1536);
+	static_assert(budget::default_guest_memory_mib(3376 * mib, 6,
 		budget::launch_memory_set, 1792) == 1536);
 	static_assert(budget::default_guest_memory_mib(3376 * mib, 6,
 		budget::launch_memory_set, 2240) == 2048);
@@ -1195,7 +1200,7 @@ void anAddressSpaceHoldsTheCeilingTheDefaultAndEverySizeOffered()
 	static_assert(budget::process_guest_memory_ceiling_mib(false, 0,
 		64 * gib) == 9152);
 	static_assert(budget::process_guest_memory_ceiling_mib(false, 8192 * mib,
-		6 * gib) == 2240);
+		6 * gib) == 1984);
 	static_assert(budget::process_guest_memory_ceiling_mib(false, 8192 * mib,
 		0) == 8192, "an address space that was not measured bounds nothing");
 	static_assert(budget::process_guest_memory_ceiling_mib(false, 8192 * mib,

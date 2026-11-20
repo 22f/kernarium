@@ -78,8 +78,9 @@ same window. Guest pages are mapped over it with `MAP_FIXED`, and releasing one
 hands its range back as a reservation, never with `munmap`, which would let an
 unrelated `mmap(NULL)` take the gap. Before the kernel starts, a run maps its
 RAM in the window as the kernel will and hands the range back to the
-reservation (`runtime::native_guest_memory_mappable`): a host that will not
-reserve the window or map the RAM ends the run with
+reservation (`runtime::native_guest_memory_mappable`), after it has reserved
+the process's heap region, whose first block the kernel's mapping takes: a host
+that will not reserve the window or the region or map the RAM ends the run with
 `-UML_EMULATOR_OUT_OF_MEMORY`, which leaves the process's guest unspent, where
 the kernel would end the process. Guest RAM that a host-service view still
 borrows stays mapped until the last view is released. The linear physical window
@@ -193,8 +194,9 @@ layout tests against `runtime/native_kernel_layout.hpp`), and the host's RAM
 Mac and an iOS application on a Mac use; where the host sets no limit `G_max`
 is C. On an iOS device C is also held to the address space the process has: the
 system gives an application signed without Extended Virtual Addressing one run
-of a few GiB, and the guest's window (`native_window_bytes`) with the process's
-other mappings must fit in it. The loader measures the run once at launch
+of a few GiB, and the guest's window (`native_window_bytes`) and the process's
+heap region (1 GiB, `memory/heap_region_size.hpp`, which has no other hole of
+that size there) must fit in it. The loader measures the run once at launch
 (`platform/apple/os_address_space.hpp`) and `address_space_guest_memory_mib`
 turns it into the largest RAM that fits, which bounds C, the offered sizes and
 the defaults alike. A run starts exactly the sizes from 512 MiB through C in

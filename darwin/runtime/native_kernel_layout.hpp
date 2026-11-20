@@ -168,8 +168,9 @@ struct NativeKernelPlacement final {
  * maps its RAM over the reservation with one read-write mapping and, where the
  * host refuses it, can only exit, which ends the process; a refusal is known
  * here, before the kernel starts, and the run fails with a result of its own.
- * The host refuses it where the process does not have the address space or the
- * memory limit for it, and which of the two is the host's to say.
+ * The host refuses it where the process does not have the address space for
+ * it: for the window, for the process's heap region (reserved here, as the
+ * kernel's mapping would take its first block from it) or for the RAM itself.
  *
  * It makes that mapping, at the place and the size the kernel does, and gives
  * the range back to the window's reservation in place, so that the window is
