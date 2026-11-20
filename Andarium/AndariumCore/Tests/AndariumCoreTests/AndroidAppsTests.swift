@@ -224,6 +224,42 @@ struct AndroidAppStoreTests {
         #expect(AndroidAppStore(directory: directory).catalog()?.digest == "d1")
     }
 
+    @Test func aListingForAnOpenAsksNeitherTheDigestNorTheIconsAndAnyOtherRefreshAsksBoth() async throws {
+        let directory = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AndroidAppStore(directory: directory)
+        let comet = app("com.example.comet", "Comet Hop")
+        let tool = FakeTool(.apps(AndroidAppList(apps: [comet], digest: "d1")))
+        tool.icons[comet.id] = .noIcon
+        guard case .refreshed = await AndroidAppRefresh.run(tool: tool, store: store, now: Date(timeIntervalSince1970: 1), forAnOpen: true)
+        else {
+            Issue.record("the listing was not kept")
+            return
+        }
+        #expect(tool.listAsks == 1 && tool.digestAsks == 0 && store.catalog()?.apps == [comet])
+        // The apps are the same, and the next open lists them again.
+        _ = await AndroidAppRefresh.run(tool: tool, store: store, now: Date(timeIntervalSince1970: 2), forAnOpen: true)
+        #expect(tool.listAsks == 2 && tool.digestAsks == 0 && tool.askedIcons.isEmpty)
+        // Any other refresh asks the digest, and the icons that are missing.
+        _ = await AndroidAppRefresh.run(tool: tool, store: store, now: Date(timeIntervalSince1970: 3))
+        #expect(tool.listAsks == 2 && tool.digestAsks == 1, "the digest matched: nothing is listed")
+        #expect(tool.askedIcons == [comet.id], "the next refresh asks for what is missing")
+    }
+
+    @Test func theCurrentCatalogsRecordsAreKeptBeforeTheHistoryAtTheBound() throws {
+        let directory = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AndroidAppStore(directory: directory)
+        // A full history dated after the listing that follows (the clock went back).
+        let history = (0..<AndroidAppLimits.mostRecords).map { app("com.example.history\($0)", "History \($0)") }
+        try store.apply(AndroidAppList(apps: history, digest: "h"), at: Date(timeIntervalSince1970: 1_000))
+        let comet = app("com.example.comet", "Comet Hop")
+        try store.apply(AndroidAppList(apps: [comet], digest: "d1"), at: Date(timeIntervalSince1970: 1))
+        #expect(store.records().count == AndroidAppLimits.mostRecords)
+        #expect(store.record(forID: comet.id)?.launchers == 1, "the listed app's record is not the one to go")
+        #expect(AndroidAppStore(directory: directory).record(forID: comet.id)?.launchers == 1)
+    }
+
     @Test func aListingIsKeptAndReadBackByAnotherStore() throws {
         let directory = makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

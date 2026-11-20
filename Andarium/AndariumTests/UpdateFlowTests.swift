@@ -309,7 +309,14 @@ final class StubDriver: RuntimeDriver {
     }
     /// What Android's storage reads as; a test sets it as a boot would.
     var storage: Bool? = true
-    func storageReady() async -> Bool? { storage }
+    /// How many times the model asked, and a test can hold the answer back.
+    private(set) var storageReads = 0
+    var holdsStorageReads = false
+    func storageReady() async -> Bool? {
+        storageReads += 1
+        while holdsStorageReads, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(10)) }
+        return storage
+    }
     /// Each text message request the model handed over, in order.
     private(set) var smsSent: [GuestSmsRequest] = []
     /// How the stub answers a text message: a test sets it to hold the answer
