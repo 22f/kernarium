@@ -26,6 +26,10 @@ struct InProcessGpuOptions {
         uml::input::vnc::PointerMode::mouse};
     void* nativeView {};
     bool autoResizeGuest {true};
+    /* The refresh rate of the one mode the guest sees: 60, or 120 on the iOS
+     * native display of a device whose screen can show it
+     * (Display::refreshRate). */
+    std::uint32_t refreshRate {60};
     /* What the windowless display (DisplayMode::offscreen) presents into. */
     OffscreenDisplayOptions offscreen {};
     /* Where the display's keys and pointer go instead of the guest's

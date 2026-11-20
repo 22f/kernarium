@@ -333,10 +333,29 @@ void writeMonitorDescriptor(
     edid[offset + 5U + length] = '\n';
 }
 
+/* The pixel clock of the detailed timing, in tens of kilohertz as its two
+ * bytes state it, for a mode of `refreshRate` hertz with the blanking this
+ * device always uses. The blanking grows with the size, so the clock of a
+ * large mode at 120 Hz can pass the 16 bits (655.35 MHz). */
+std::uint64_t detailedTimingClock(
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t horizontalBlank,
+    std::uint32_t verticalBlank,
+    std::uint64_t refreshRate)
+{
+    return ((static_cast<std::uint64_t>(width) + horizontalBlank) *
+                (static_cast<std::uint64_t>(height) + verticalBlank) *
+                refreshRate +
+            5000U) /
+        10000U;
+}
+
 std::array<std::uint8_t, protocol::baseEdidSize> makeEdid(
     std::uint32_t width,
     std::uint32_t height,
-    std::uint32_t dotsPerInch)
+    std::uint32_t dotsPerInch,
+    std::uint32_t requestedRefreshRate)
 {
     std::array<std::uint8_t, protocol::baseEdidSize> edid {};
     constexpr std::array<std::uint8_t, 8> header {
@@ -382,11 +401,18 @@ std::array<std::uint8_t, protocol::baseEdidSize> makeEdid(
         1023U, std::max<std::uint32_t>(8U, horizontalBlank / 3U));
     constexpr std::uint32_t verticalSyncOffset = 3;
     constexpr std::uint32_t verticalSyncPulse = 5;
+    /* The one mode is 60 Hz, or 120 Hz when the display asks for it and the
+     * clock states it. A size whose 120 Hz clock does not fit is the 60 Hz
+     * mode, not a clamped clock that no longer says the rate. */
+    std::uint64_t refreshRate = 60U;
+    if (requestedRefreshRate == 120U &&
+        detailedTimingClock(
+            width, height, horizontalBlank, verticalBlank, 120U) <= 65535U) {
+        refreshRate = 120U;
+    }
     const auto clock = std::clamp<std::uint64_t>(
-        ((static_cast<std::uint64_t>(width) + horizontalBlank) *
-             (static_cast<std::uint64_t>(height) + verticalBlank) * 60U +
-            5000U) /
-            10000U,
+        detailedTimingClock(
+            width, height, horizontalBlank, verticalBlank, refreshRate),
         1U,
         65535U);
 
@@ -1040,7 +1066,8 @@ std::vector<std::uint8_t> VirtioGpuDevice::edid(
     information.header.flags &=
         protocol::gpuFlagFence | protocol::gpuFlagInfoRingIndex;
     information.size = protocol::baseEdidSize;
-    const auto base = makeEdid(width, height, dotsPerInch_);
+    const auto base = makeEdid(
+        width, height, dotsPerInch_, UML_GPU_DISPLAY.refreshRate());
     std::copy(base.begin(), base.end(), information.edid.begin());
     std::vector<std::uint8_t> bytes(sizeof(information));
     std::memcpy(bytes.data(), &information, sizeof(information));

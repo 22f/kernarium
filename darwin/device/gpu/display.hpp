@@ -108,6 +108,15 @@ public:
 
     [[nodiscard]] virtual std::uint32_t width() const noexcept = 0;
     [[nodiscard]] virtual std::uint32_t height() const noexcept = 0;
+    /* The refresh rate, in hertz, of the one mode the display lets the guest
+     * see (the EDID's detailed timing): 60, or 120 on a display that paces
+     * its presents from a display link at the rate the guest renders at
+     * (present_pacer.hpp). Any other value is the 60 Hz mode. The rate does
+     * not change while the display lives. */
+    [[nodiscard]] virtual std::uint32_t refreshRate() const noexcept
+    {
+        return 60;
+    }
     /* Native AppKit/UIKit surfaces publish resize readiness from the UI
      * thread. The transport drains and applies it on its GPU owner thread. */
     [[nodiscard]] virtual int resizeEventDescriptor() const noexcept
@@ -345,6 +354,7 @@ private:
         uml::input::vnc::PointerMode::mouse,
     std::uint32_t maximumDimension = protocol::maximumDisplayDimension,
     bool autoResizeGuest = true,
-    OffscreenDisplayOptions offscreen = {});
+    OffscreenDisplayOptions offscreen = {},
+    std::uint32_t refreshRate = 60);
 
 } // namespace uml::gpu

@@ -204,8 +204,11 @@ table in `KernariumHostFeatures.hpp` (the haptics bit becomes the hardware SKU
 `haptics`, which declares the guest's vibrator; the orientation bit, API 37,
 becomes `androidboot.kernarium.orientation=1`, which lists the guest's
 device-orientation sensor; the compass bit, API 38, becomes
-`androidboot.kernarium.compass=1`, which lists its magnetometer), and ignores
-the others; Kernarium sends none. The
+`androidboot.kernarium.compass=1`, which lists its magnetometer; the
+high-refresh bit, API 44, becomes `androidboot.kernarium.high_refresh=1` and
+also makes the display's one mode 120 Hz on an iOS device whose screen can show
+it, see [Display refresh rate](#display-refresh-rate)), and ignores the others;
+Kernarium sends none. The
 runtime validates the values (`KernariumAdbChannel.hpp`,
 `KernariumGuestTimeZone.hpp`). An Android guest has its own serial number and
 eth0 address, which the runtime keeps in `identity.json` beside the data disk
@@ -310,6 +313,18 @@ The Metal and Mesa shader cache policies are in
 the scene's geometry (windows, tiling, Slide Over, Full Screen Apps and
 rotation). Kernarium runs one guest per process and so has one window: its
 scene manifest does not support multiple scenes.
+
+### Display refresh rate
+
+The guest's display has one mode, 60 Hz. When the boot request carries
+`KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH` (runtime API 44) and the device's
+screen can show more than 60 frames a second, an Android guest gets one 120 Hz
+mode instead (the EDID's detailed timing; the 60 Hz bytes do not change, and a
+size whose pixel clock does not fit the EDID keeps 60), and the runtime tells
+the guest with `androidboot.kernarium.high_refresh=1`. A screen that cannot show
+120 drops the bit, with a line on stderr. A Mac keeps its 60 Hz mode. What the
+guest does with the property is in
+[`android/lineage-24/README.md`](../android/lineage-24/README.md).
 
 ### Microphone
 

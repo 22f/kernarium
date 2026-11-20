@@ -310,7 +310,8 @@ private:
                 options_.dotsPerInch,
                 options_.pointerMode,
                 options_.autoResizeGuest,
-                options_.offscreen);
+                options_.offscreen,
+                options_.refreshRate);
             /* A client that connects before this is not counted, which a
              * client of a display that was just made cannot tell. */
             display->setClientObserver(options_.clientObserver);

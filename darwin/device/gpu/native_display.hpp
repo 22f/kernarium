@@ -22,17 +22,27 @@ public:
             uml::input::vnc::PointerMode::mouse,
         std::uint32_t maximumDimension =
             protocol::maximumDisplayDimension,
-        bool autoResizeGuest = true);
+        bool autoResizeGuest = true,
+        std::uint32_t refreshRate = 60);
     /* A display over a state the caller made, such as the windowless one
      * (offscreen_display.hpp). */
     explicit NativeDisplay(std::shared_ptr<NativeDisplayStateCore> state);
     ~NativeDisplay() override;
+
+    /* The refresh rate a native display gives the guest when `requested` is
+     * asked of it: 120 when requested is 120 and this device's screen can show
+     * more than 60 frames a second (an iOS screen with a variable refresh
+     * rate), else 60. The one mode's rate is decided before the guest boots,
+     * so a caller that tells the guest about it asks here first. */
+    [[nodiscard]] static std::uint32_t supportedRefreshRate(
+        std::uint32_t requested) noexcept;
 
     NativeDisplay(const NativeDisplay&) = delete;
     NativeDisplay& operator=(const NativeDisplay&) = delete;
 
     [[nodiscard]] std::uint32_t width() const noexcept override;
     [[nodiscard]] std::uint32_t height() const noexcept override;
+    [[nodiscard]] std::uint32_t refreshRate() const noexcept override;
     [[nodiscard]] int resizeEventDescriptor() const noexcept override;
     [[nodiscard]] bool drainResizeEvent() override;
     [[nodiscard]] bool guestScanoutChanged(

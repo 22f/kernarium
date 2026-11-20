@@ -53,6 +53,7 @@
 #include "gpu/frame_tap.hpp"
 #endif
 #include "gpu/in_process_service.hpp"
+#include "gpu/native_display.hpp"
 #include "gpu/protocol.hpp"
 #include "input/virtio/hardware_input.hpp"
 #include "input/virtio/hardware_input_run.hpp"
@@ -2421,6 +2422,19 @@ int runtimeRun(
                     "Kernarium: ignoring unknown host features 0x%x\n",
                     unknown);
             request.hostFeatures = boot->android_host_features & ~unknown;
+            /* The one 120 Hz mode is advertised only by a screen that can
+             * show it: a request on any other keeps the 60 Hz display, and
+             * the guest is not told of a mode it will not find. */
+            if ((request.hostFeatures &
+                 KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH) != 0 &&
+                uml::gpu::NativeDisplay::supportedRefreshRate(120U) != 120U) {
+                std::fputs(
+                    "Kernarium: this screen has no 120 Hz mode: keeping "
+                    "60 Hz\n",
+                    stderr);
+                request.hostFeatures &=
+                    ~KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH;
+            }
         }
         /* The identity a request states is kept as given: a value that is not
          * valid fails the run, since the caller wants exactly that one. */
@@ -2628,6 +2642,12 @@ int runtimeRun(
                     static_cast<unsigned long long>(cameraReserve >> 20),
                     static_cast<unsigned long long>(deviceMemoryLimit >> 20));
 #endif
+            std::uint32_t displayRefreshRate = 60;
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+            if ((request.hostFeatures &
+                 KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH) != 0)
+                displayRefreshRate = 120;
+#endif
             /* The display outlives the guest: the GPU service keeps the view and
              * the frame mirror, and hands each boot its own connection. */
             uml::gpu::InProcessGpuService gpuService(
@@ -2638,6 +2658,7 @@ int runtimeRun(
                     .dotsPerInch = dotsPerInch,
                     .nativeView = (__bridge void*)view,
                     .autoResizeGuest = boot->auto_resize_guest != 0,
+                    .refreshRate = displayRefreshRate,
                     .sharedMemoryRegions = sharedMemoryRegions,
                     .deviceMemoryLimit = deviceMemoryLimit,
                 });

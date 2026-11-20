@@ -25,6 +25,11 @@ public:
 
     [[nodiscard]] virtual std::uint32_t width() const noexcept = 0;
     [[nodiscard]] virtual std::uint32_t height() const noexcept = 0;
+    /* The display's refresh rate (Display::refreshRate). */
+    [[nodiscard]] virtual std::uint32_t refreshRate() const noexcept
+    {
+        return 60;
+    }
     [[nodiscard]] virtual bool guestScanoutChanged(
         std::uint32_t width,
         std::uint32_t height) noexcept = 0;

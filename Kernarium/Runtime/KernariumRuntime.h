@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 43U
+#define KERNARIUM_RUNTIME_API_VERSION 44U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -72,6 +72,14 @@ enum {
      * orientation that navigation applications take their heading from;
      * without the bit it lists none and declares none. */
     KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS = 1u << 2,
+    /* The application asks for a 120 Hz display (runtime API 44), on a device
+     * whose screen can show it. The runtime then advertises one 120 Hz mode in
+     * place of the 60 Hz one and paces its presents to the guest's rate (a
+     * screen that cannot show more than 60 keeps the 60 Hz mode), and the
+     * guest then runs the 120 Hz configuration of Android's frame scheduler;
+     * without the bit the display and the guest are what they have always
+     * been. */
+    KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH = 1u << 3,
 };
 
 /* What the camera does for an Android guest this run (runtime API 37), the

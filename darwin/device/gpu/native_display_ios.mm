@@ -17,6 +17,25 @@
 namespace uml::gpu {
 namespace {
 
+/* The window scene a view's display link belongs to: the view's own, or the
+ * application's active (else first) one when the view is not in a window yet.
+ * Main thread. */
+[[nodiscard]] UIWindowScene* displaySceneFor(UIView* view) noexcept
+{
+    if (view.window.windowScene != nil)
+        return view.window.windowScene;
+    UIWindowScene* first = nil;
+    for (UIScene* scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class])
+            continue;
+        if (scene.activationState == UISceneActivationStateForegroundActive)
+            return (UIWindowScene*)scene;
+        if (first == nil)
+            first = (UIWindowScene*)scene;
+    }
+    return first;
+}
+
 NSString* const resizeWillBeginNotification =
     @"org.linux-um-darwin.guest-display-resize-will-begin";
 NSString* const resizeDidEndNotification =
@@ -33,10 +52,17 @@ struct NativeDisplayState final :
         std::uint32_t width,
         std::uint32_t height,
         std::uint32_t maximumDimension,
-        bool autoResizeGuest)
+        bool autoResizeGuest,
+        std::uint32_t refreshRate)
         : NativeDisplayStateCore(
               width, height, maximumDimension, autoResizeGuest)
+        , modeRate(refreshRate)
     {
+    }
+
+    [[nodiscard]] std::uint32_t refreshRate() const noexcept override
+    {
+        return modeRate;
     }
 
     void attachView(void* nativeView);
@@ -50,6 +76,10 @@ struct NativeDisplayState final :
     void publishGuestSize(DisplaySize size) noexcept;
     void requestRedraw() noexcept;
     void shutdown() noexcept override;
+
+    /* The rate of the one mode the guest sees: 60, or 120 when the screen
+     * can show it (NativeDisplay::supportedRefreshRate). */
+    const std::uint32_t modeRate;
 
     id<MTKViewDelegate> delegate;
     id resizeWillBeginObserver;
@@ -359,6 +389,22 @@ void NativeDisplayState::shutdown() noexcept
     });
 }
 
+std::uint32_t NativeDisplay::supportedRefreshRate(
+    std::uint32_t requested) noexcept
+{
+    if (requested != 120U)
+        return 60U;
+    __block NSInteger maximum = 60;
+    const auto read = ^{
+        maximum = displaySceneFor(nil).screen.maximumFramesPerSecond;
+    };
+    if ([NSThread isMainThread])
+        read();
+    else
+        dispatch_sync(dispatch_get_main_queue(), read);
+    return maximum > 60 ? 120U : 60U;
+}
+
 NativeDisplay::NativeDisplay(
     std::uint32_t width,
     std::uint32_t height,
@@ -366,10 +412,15 @@ NativeDisplay::NativeDisplay(
     void* nativeView,
     uml::input::vnc::PointerMode,
     std::uint32_t maximumDimension,
-    bool autoResizeGuest)
+    bool autoResizeGuest,
+    std::uint32_t refreshRate)
 {
     auto state = std::make_shared<NativeDisplayState>(
-        width, height, maximumDimension, autoResizeGuest);
+        width,
+        height,
+        maximumDimension,
+        autoResizeGuest,
+        supportedRefreshRate(refreshRate));
     state->attachView(nativeView);
     state_ = std::move(state);
 }
