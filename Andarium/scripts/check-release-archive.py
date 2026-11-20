@@ -22,7 +22,9 @@ archive, and no other build is checked. The application must:
     kernel built elsewhere, are not host code), and no linker debug map in an
     embedded framework (the executable's is stripped when Xcode archives);
   - carry no test bundle and none of the frameworks and libraries that run
-    one (XCTest, XCUIAutomation, Swift Testing); and
+    one (XCTest, XCUIAutomation, Swift Testing, and the other test libraries of
+    the SDK's developer directory), embedded or not: a load command of an
+    executable or framework that names one is refused as well; and
   - link no test-support library (AndariumCoreTestSupport and its like): the
     code only tests and the probe tools use.
 """
@@ -79,7 +81,13 @@ GUEST_SECTIONS = {("__TEXT", "__uml_elf"), ("__TEXT", "__uml_boot_base"), ("__TE
 TEST_SUPPORT = re.compile(
     r"^(?:.*\.xctest|XC[A-Za-z]*\.framework|libXC[A-Za-z]*\.dylib"
     r"|_?Testing(?:_[A-Za-z0-9]+)?\.framework|lib_?Testing[A-Za-z0-9_]*\.dylib"
+    # The other frameworks of the SDK's developer directory, which holds no
+    # library an application ships.
+    r"|(?:AppIntentsTesting|Evaluations|StoreKitTest)\.framework"
     r"|[A-Za-z0-9_]*TestSupport[A-Za-z0-9_]*\.framework|lib[A-Za-z0-9_]*TestSupport[A-Za-z0-9_]*\.dylib)$")
+# Where a platform keeps its developer libraries: no application loads one from
+# there, whatever its name.
+DEVELOPER_LIBRARIES = re.compile(r"/Developer/(?:Library/(?:Private)?Frameworks|usr/lib)/")
 # The test-support library that only tests and the probe tool link
 # (Andarium/AndariumCore/Package.swift), by its name as it appears in a linked
 # binary: the module name, in Swift's mangled names and in plain text.
@@ -90,6 +98,9 @@ FAT_MAGIC = 0xCAFEBABE
 CPU_TYPE_ARM64 = 0x0100000C
 LC_SEGMENT_64 = 0x19
 LC_SYMTAB = 0x2
+# The load commands that name a library the code needs: load, weak, re-export,
+# upward and lazy.
+LOAD_DYLIB_COMMANDS = {0xC, 0x80000018, 0x8000001F, 0x80000023, 0x20}
 N_STAB = 0xE0
 N_OSO = 0x66
 
@@ -239,12 +250,41 @@ def build_host_traces(path: Path, debug_map: bool) -> list[str]:
     return found
 
 
-def linked_test_support(path: Path) -> list[str]:
-    """The test-support libraries whose code is in one Mach-O file."""
+def loaded_libraries(data: bytes, base: int) -> list[str]:
+    """The install names of the libraries the load commands of a Mach-O name."""
+    names = []
+    count = struct.unpack_from("<I", data, base + 16)[0]
+    position = base + 32
+    for _ in range(count):
+        command, size = struct.unpack_from("<II", data, position)
+        if size < 8:
+            break
+        if command in LOAD_DYLIB_COMMANDS:
+            offset = struct.unpack_from("<I", data, position + 8)[0]
+            end = data.find(b"\0", position + offset, position + size)
+            raw = data[position + offset:end if end > 0 else position + size]
+            names.append(raw.decode("utf-8", "replace"))
+        position += size
+    return names
+
+
+def is_test_library(install_name: str) -> bool:
+    """Whether a library is one that only tests load: by a component of its
+    install name, or by the developer directory it is loaded from."""
+    return bool(DEVELOPER_LIBRARIES.search(install_name)) or any(
+        TEST_SUPPORT.match(part) for part in install_name.split("/"))
+
+
+def test_support_links(path: Path) -> list[str]:
+    """How one Mach-O file links test support: a load command that names a test
+    library, and a test-support library whose code is in the file."""
     code = host_code(path)
     if code is None:
         return []
-    return [name.decode() for name in TEST_SUPPORT_LIBRARIES if name in code[0]]
+    data, base = code
+    found = [f"loads {name}, which only tests load" for name in loaded_libraries(data, base) if is_test_library(name)]
+    found.extend(f"links {name.decode()}, which only tests link" for name in TEST_SUPPORT_LIBRARIES if name in data)
+    return found
 
 
 def executables_of(bundle: Path) -> list[Path]:
@@ -303,8 +343,7 @@ def main() -> int:
         # The application's own executable is stripped when Xcode archives it.
         problems.extend(
             f"{name}: {trace}" for trace in build_host_traces(binary, debug_map=binary.parent != app))
-        problems.extend(
-            f"{name}: links {library}, which only tests link" for library in linked_test_support(binary))
+        problems.extend(f"{name}: {link}" for link in test_support_links(binary))
     problems.extend(
         f"{path}: a test bundle or test framework; archive the application without its tests"
         for path in test_support(app))

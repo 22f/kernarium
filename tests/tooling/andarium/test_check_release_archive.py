@@ -146,6 +146,22 @@ class Libraries(Fixtures):
         return output
 
     @classmethod
+    def stub(cls, name: str, install_name: str) -> Path:
+        """A library of one function that installs itself as `install_name`."""
+        return cls.build(f"stub-{name}", f"int stub_{name.replace('-', '_')}(void) {{ return 1; }}\n",
+                         f"-Wl,-install_name,{install_name}")
+
+    @classmethod
+    def build_loading(cls, name: str, *stubs: Path) -> Path:
+        """A library that links the `stubs`, so that its load commands name their install names."""
+        output = cls.libraries / f"lib{name}.dylib"
+        if not output.exists():
+            (cls.libraries / f"{name}.c").write_text(CLEAN, encoding="utf-8")
+            tool([*SDK, "-dynamiclib", str(cls.libraries / f"{name}.c"), *map(str, stubs), "-o", str(output),
+                  f"-Wl,-install_name,@rpath/{output.name}"])
+        return output
+
+    @classmethod
     def build_with_debug_map(cls, name: str, directory: str | None = None) -> Path:
         """A library linked from an object compiled with -g: the linker keeps a
         debug map whose N_OSO entry names the object file, which sits in a
@@ -276,6 +292,12 @@ class TestBundles(Libraries):
         ("Frameworks/Testing.framework", True),
         ("Frameworks/_Testing_Foundation.framework", True),
         ("Frameworks/AndariumCoreTestSupport.framework", True),
+        ("Frameworks/AppIntentsTesting.framework", True),
+        ("Frameworks/Evaluations.framework", True),
+        ("Frameworks/StoreKitTest.framework", True),
+        ("Frameworks/XCTestSupport.framework", True),
+        ("Frameworks/libXCTestBundleInject.dylib", False),
+        ("Frameworks/lib_TestingInterop.dylib", False),
         ("Frameworks/libXCTestSwiftSupport.dylib", False),
         ("Frameworks/libAndariumCoreTestSupport.dylib", False),
     )
@@ -299,6 +321,38 @@ class TestBundles(Libraries):
         (app / "Frameworks" / "Support.framework").mkdir()
         (app / "PlugIns").mkdir()
         self.passes(app)
+
+
+class LoadedTestLibraries(Libraries):
+    """No load command names a library that only tests load, whatever is embedded."""
+
+    INSTALL_NAMES = (
+        "@rpath/Testing.framework/Testing",
+        "@rpath/_Testing_Foundation.framework/_Testing_Foundation",
+        "@rpath/XCTest.framework/XCTest",
+        "@rpath/AppIntentsTesting.framework/AppIntentsTesting",
+        "@rpath/libXCTestSwiftSupport.dylib",
+        "@rpath/lib_TestingInterop.dylib",
+        "@rpath/AndariumCoreTestSupport.framework/AndariumCoreTestSupport",
+        # The developer directory of a platform holds only developer libraries.
+        "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/Library/Frameworks/Some.framework/Some",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/usr/lib/libSome.dylib",
+    )
+
+    def test_a_load_command_for_a_test_library_is_refused_with_no_copy_embedded(self) -> None:
+        clean = self.build("clean", CLEAN)
+        for index, install_name in enumerate(self.INSTALL_NAMES):
+            loading = self.build_loading(f"loading{index}", self.stub(f"test{index}", install_name))
+            self.assertIn(install_name.encode(), loading.read_bytes())
+            with self.subTest(install_name):
+                self.refuses(self.bundle(loading), f"Andarium: loads {install_name}")
+                self.refuses(self.bundle(clean, framework=loading), f"Runtime.framework/Runtime: loads {install_name}")
+
+    def test_the_load_commands_of_a_clean_library_pass(self) -> None:
+        # The system's libraries and an embedded framework of the application's own.
+        own = self.stub("own", "@rpath/Runtime.framework/Runtime")
+        loading = self.build_loading("loading-clean", own)
+        self.passes(self.bundle(loading, framework=self.build("clean", CLEAN)))
 
 
 class LinkedTestSupport(Libraries):

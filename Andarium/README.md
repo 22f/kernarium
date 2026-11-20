@@ -249,8 +249,9 @@ the iPad harness reads, as Debug does. A launch that sets no `ANDARIUM_` or
   link); a home, volume or temporary-directory path in the host code of the
   executable or of an embedded framework (the guest's sections are not host
   code); the linker's debug map in an embedded framework; a test bundle or
-  the frameworks that run tests (XCTest, XCUIAutomation, Swift Testing); and a
-  linked test-support library (`AndariumCoreTestSupport`).
+  the frameworks that run tests (XCTest, XCUIAutomation, Swift Testing and the
+  SDK's other test frameworks), embedded or only named by a load command; and
+  a linked test-support library (`AndariumCoreTestSupport`).
 
 An archive is made after the steps of [Build](#build), with
 `xcodebuild -project Andarium/Andarium.xcodeproj -scheme Andarium archive`.
