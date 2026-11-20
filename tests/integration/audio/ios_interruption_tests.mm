@@ -1469,9 +1469,10 @@ void backgroundReturnWaitsForTheRoute()
     const auto text = lines.finish();
     check(StderrCapture::count(text, "Audio output unavailable (") == 0,
         "a route that returns is not reported as a failure of the output");
-    check(StderrCapture::count(text, "Audio muted: the output route is not "
-                                     "available") == 1,
-        "the wait for the route is said once");
+    const auto saidRoute = StderrCapture::count(
+        text, "Audio muted: the output route is not available");
+    check(saidRoute == 1, "the wait for the route is said once",
+        std::to_string(saidRoute) + " times in: " + text);
 }
 
 // The same, with the route back before the app returns: the engine that
