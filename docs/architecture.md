@@ -377,7 +377,9 @@ runtime framework, links none at launch, and loads exactly one guest flavour for
 the process lifetime.
 
 The macOS product builds at a 27.0 minimum and the iOS device and iOS Simulator
-products at 26.0 (`cmake/toolchains/Apple.cmake`). Code that reaches an iOS API
+products at 26.0 (`cmake/toolchains/Apple.cmake`); the iPad applications that
+also run on a Mac name that 27.0 in their `LSMinimumSystemVersion`, which the
+App Store would otherwise take from the iOS minimum. Code that reaches an iOS API
 newer than 26.0 sits behind an availability check with the earlier API as its
 fallback, and a floor-driven fallback names the release that introduced the
 API. Apple products consume accepted kernel bundles

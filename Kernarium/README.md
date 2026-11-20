@@ -2,7 +2,8 @@
 
 Kernarium is the iOS application that runs one Linux or Android guest on the
 Darwin runtime. It targets the iOS device, whose slice also runs on an Apple
-silicon Mac in Designed for iPad mode, and the iOS Simulator, where the guest
+silicon Mac in Designed for iPad mode (macOS 27.0 and later:
+`LSMinimumSystemVersion`), and the iOS Simulator, where the guest
 renders on the CPU for UI tests
 ([`graphics.md`](../docs/graphics.md#ios-simulator-software-renderer)). Build,
 launch, and test commands are in

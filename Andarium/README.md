@@ -4,7 +4,9 @@ Andarium is the iOS application that runs one Android (LineageOS 24, Android
 17) guest on the Darwin runtime. Android ships inside the app; what the user
 creates, sizes and erases is the guest. [Kernarium](../Kernarium/README.md)
 stays the developer application for Linux guests and for Android bundles.
-Andarium also runs on an Apple silicon Mac in Designed for iPad mode, and it
+Andarium also runs on an Apple silicon Mac in Designed for iPad mode, whose
+minimum is macOS 27.0 (`LSMinimumSystemVersion`; the iOS minimum alone would
+map to macOS 26.0), and it
 builds for the iOS Simulator, where the guest renders on the CPU for UI tests
 ([`graphics.md`](../docs/graphics.md#ios-simulator-software-renderer)).
 
@@ -895,7 +897,8 @@ requires reopening Andarium.
   choice; a device has one when it has a built-in front camera, the rule the
   guest's layout follows, and the iPad app running on a Mac or on an Apple
   Vision Pro has none and looks for none (`CameraAvailability`; the system
-  answers for a Vision Pro from iOS 26.1). On an iPad, a
+  answers for a Vision Pro from iOS 26.1, and below it the hardware's name
+  does: `IPadAppHost`). On an iPad, a
   session that other apps share the screen with pauses the camera (black
   frames) and shows a notice that goes with the interruption. When a guest app
   opens a camera while the session is blocked, the runtime reports it
