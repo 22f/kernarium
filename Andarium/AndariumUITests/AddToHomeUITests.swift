@@ -67,52 +67,97 @@ final class AddToHomeUITests: XCTestCase {
 
     /// Shortcuts' own list of actions, searched for Andarium's. The action and its automatic shortcut
     /// are declared @available(iOS 27.0, *), so Shortcuts offers "Open Android App" from iOS 27 and
-    /// not before. Shortcuts runs in the Simulator's language, not the test's, so nothing here reads
-    /// a label of Shortcuts' own: the new shortcut's editor is opened by its URL, its search of
-    /// actions is the one search field, and the words searched are names that no language
-    /// translates ("Safari" proves the search works, "Android" is in Andarium's title in each of its
-    /// languages). A result is a button or a cell; the text that says nothing was found is neither.
-    /// The extracted metadata says the same of the build (`andarium-open-intent-availability`).
+    /// not before. The test runs Andarium once, which is when the system learns its actions, then
+    /// launches Shortcuts, which runs in the test's language, English. The new shortcut's editor is
+    /// opened by its URL; its search of actions is the search field that says "Action", or, from
+    /// iOS 27, the only one, behind the Editor button of the panel that describes a shortcut. The
+    /// words searched are "Safari", which proves the search works, and "Android". A result is a
+    /// button or a cell. Shortcuts offers Find for the app entity on every system, so "Android"
+    /// finds that one result before iOS 27 and Open with it from iOS 27. The extracted metadata
+    /// says the same of the build (`andarium-open-intent-availability`).
     func testShortcutsOffersOpenAndroidAppFromIOS27Only() throws {
         var offered = false
         if #available(iOS 27.0, *) { offered = true }
         continueAfterFailure = false
+        // The system learns what an app's actions are when the app first runs, and Shortcuts lists
+        // none of them before.
+        let own = XCUIApplication()
+        own.launch()
+        XCTAssertTrue(own.wait(for: .runningForeground, timeout: 60), "Andarium did not start")
+        sleep(10)
+        own.terminate()
         let shortcuts = XCUIApplication(bundleIdentifier: "com.apple.shortcuts")
         shortcuts.launch()
         func attachScreen(_ name: String) {
-            let attachment = XCTAttachment(string: shortcuts.debugDescription)
-            attachment.name = name
-            attachment.lifetime = .keepAlways
-            add(attachment)
+            let text = XCTAttachment(string: shortcuts.debugDescription)
+            text.name = name
+            text.lifetime = .keepAlways
+            add(text)
+            let picture = XCTAttachment(screenshot: shortcuts.screenshot())
+            picture.name = name + "-picture"
+            picture.lifetime = .keepAlways
+            add(picture)
+        }
+        // The search of actions: the one that says Action, or, once the editor is open, the only one
+        // (iOS 27 says Search; the list of shortcuts has a search of its own beside the panel that
+        // describes a shortcut, and none beside the editor).
+        var editorOpen = false
+        func actionsSearch() -> XCUIElement {
+            let named = shortcuts.searchFields.matching(NSPredicate(format: "placeholderValue CONTAINS[c] 'Action'")).firstMatch
+            return named.exists || !editorOpen ? named : shortcuts.searchFields.firstMatch
+        }
+        func waitForSearch(_ seconds: TimeInterval) -> Bool {
+            let found = NSPredicate { _, _ in actionsSearch().exists && actionsSearch().isHittable }
+            return XCTWaiter().wait(for: [expectation(for: found, evaluatedWith: nil)], timeout: seconds) == .completed
         }
         XCUIDevice.shared.system.open(try XCTUnwrap(URL(string: "shortcuts://create-shortcut")))
-        let search = shortcuts.searchFields.firstMatch
-        let found = search.waitForExistence(timeout: 40)
+        attachScreen("opened")
+        var found = waitForSearch(15)
+        if !found {
+            // Shortcuts' own introduction of what is new, then the panel that describes the shortcut,
+            // whose Editor button opens the editor with the actions beside it.
+            let proceed = shortcuts.buttons.matching(NSPredicate(format: "label ==[c] 'Continue'")).firstMatch
+            if proceed.waitForExistence(timeout: 3) { proceed.tap() }
+            let editor = shortcuts.buttons["Editor"]
+            if editor.waitForExistence(timeout: 20) { editor.tap() }
+            editorOpen = true
+            attachScreen("editor-toggled")
+            found = waitForSearch(40)
+        }
         attachScreen("editor")
         XCTAssertTrue(found, "the new shortcut's editor has no search of actions: \(shortcuts.debugDescription)")
-        search.tap()
+        actionsSearch().tap()
         func results(naming word: String) -> XCUIElementQuery {
             let rows = shortcuts.cells.matching(NSPredicate(format: "label CONTAINS[c] %@", word))
             let buttons = shortcuts.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", word))
             return rows.count > 0 ? rows : buttons
         }
         func forget(_ typed: String) {
-            search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: typed.count))
+            actionsSearch().typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: typed.count))
         }
-        search.typeText("Safari")
+        actionsSearch().typeText("Safari")
         let control = NSPredicate { _, _ in results(naming: "Safari").count > 0 }
         let proved = XCTWaiter().wait(for: [expectation(for: control, evaluatedWith: nil)], timeout: 40)
         attachScreen("search-control")
         XCTAssertEqual(proved, .completed, "the search of actions found no Safari: \(shortcuts.debugDescription)")
         forget("Safari")
-        search.typeText("Android")
+        actionsSearch().typeText("Android")
+        // Open is the result that Shortcuts adds to its own Find for the app entity.
+        func opens() -> Bool {
+            let found = results(naming: "Android")
+            return found.count >= 2 || found.matching(NSPredicate(format: "label CONTAINS[c] 'Open'")).count > 0
+        }
         if offered {
-            let present = NSPredicate { _, _ in results(naming: "Android").count > 0 }
+            let present = NSPredicate { _, _ in opens() }
             let outcome = XCTWaiter().wait(for: [expectation(for: present, evaluatedWith: nil)], timeout: 40)
             XCTAssertEqual(outcome, .completed, "Shortcuts does not offer Open Android App: \(shortcuts.debugDescription)")
         } else {
-            sleep(15)
-            XCTAssertEqual(results(naming: "Android").count, 0, "Shortcuts offers Open Android App: \(shortcuts.debugDescription)")
+            // Find is the control: Shortcuts lists the app's actions, and not Open among them.
+            let listed = NSPredicate { _, _ in results(naming: "Android").count > 0 }
+            let control = XCTWaiter().wait(for: [expectation(for: listed, evaluatedWith: nil)], timeout: 40)
+            XCTAssertEqual(control, .completed, "Shortcuts lists no action of Andarium's: \(shortcuts.debugDescription)")
+            sleep(5)
+            XCTAssertFalse(opens(), "Shortcuts offers Open Android App: \(shortcuts.debugDescription)")
         }
         attachScreen("search-android")
     }
