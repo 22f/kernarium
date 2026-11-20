@@ -28,6 +28,78 @@ protocol AndroidAppsSource: AnyObject {
     func awaitAndroidReady(homeReached: Bool) async -> AndroidAppReadiness.Outcome
 }
 
+/// The guest is asked for one listing at a time: the run's refresh, the
+/// chooser's, a launch's own look at the apps after a missing-app answer. A
+/// second asker waits its turn, in order, and the answer it gets is its own.
+/// A task that is cancelled while it waits (the run ended) leaves the queue
+/// at once and holds no turn.
+@MainActor
+final class ListingLane {
+    private var held = false
+    private var waiting: [(id: Int, turn: CheckedContinuation<Bool, Never>)] = []
+    private var issued = 0
+
+    /// Waits for the turn; false where the task was cancelled, and the turn is not held.
+    func enter() async -> Bool {
+        if Task.isCancelled { return false }
+        guard held else {
+            held = true
+            return true
+        }
+        issued += 1
+        let id = issued
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { waiting.append((id, $0)) }
+        } onCancel: {
+            Task { @MainActor in self.leaveQueue(id) }
+        }
+    }
+
+    func leave() {
+        if waiting.isEmpty {
+            held = false
+        } else {
+            waiting.removeFirst().turn.resume(returning: true)
+        }
+    }
+
+    private func leaveQueue(_ id: Int) {
+        guard let index = waiting.firstIndex(where: { $0.id == id }) else { return }
+        waiting.remove(at: index).turn.resume(returning: false)
+    }
+}
+
+/// The tool, with its digest and listing asked through the lane. The turn is
+/// held for one ask, and an ask whose task ended while it waited sends nothing.
+nonisolated struct OneListingAtATimeTool: AndroidAppsTool {
+    let base: any AndroidAppsTool
+    let lane: ListingLane
+
+    func digest(limit: Duration) async -> AndroidAppDigestAnswer {
+        guard await lane.enter() else { return .failed }
+        var answer = AndroidAppDigestAnswer.failed
+        if !Task.isCancelled { answer = await base.digest(limit: limit) }
+        await lane.leave()
+        return answer
+    }
+
+    func list(limit: Duration) async -> AndroidAppListing {
+        guard await lane.enter() else { return .failed }
+        var answer = AndroidAppListing.failed
+        if !Task.isCancelled { answer = await base.list(limit: limit) }
+        await lane.leave()
+        return answer
+    }
+
+    func icons(of apps: [AndroidApp], limit: Duration) async -> [String: AndroidAppIconAnswer] {
+        await base.icons(of: apps, limit: limit)
+    }
+
+    func open(_ component: AndroidComponent, limit: Duration) async -> AndroidAppOpenAnswer {
+        await base.open(component, limit: limit)
+    }
+}
+
 /// The tool, with every icon made one the host drew itself: the picture is
 /// decoded whole, at the size the tool says it has, and kept as a PNG this
 /// process rendered on an opaque white square, whatever the tool said of its
@@ -132,6 +204,19 @@ final class AndroidAppsState {
     @ObservationIgnored var inFlight: Task<AndroidAppRefresh.Result, Never>?
     /// The run's first refresh, asked again a few times if it got no answer.
     @ObservationIgnored var first: Task<Void, Never>?
+    /// Whose `first` is: each task made takes the next number, and only the
+    /// one that holds the current number clears the handle or goes on after a wait.
+    @ObservationIgnored private(set) var firstToken = 0
+    /// The run's first listing is still to be made: Android was paused for
+    /// space before the boot ended, or while the task waited, and the pause
+    /// ending starts it again. Cleared by the answer and by the run's end.
+    @ObservationIgnored var firstOwed = false
+    /// A request that began the boot needs the list: the first listing is not made to wait.
+    @ObservationIgnored var firstNeedsList = false
+    /// The request that began this boot (Start's own boot is no request's).
+    @ObservationIgnored var bootStartedBy: AppOpenRequest?
+    /// Whose turn it is to ask the guest for a listing.
+    @ObservationIgnored let listingLane = ListingLane()
     /// Android being made ready for the request, then the app being opened.
     @ObservationIgnored var opening: Task<Void, Never>?
     /// The wait for the next request or banner to run out.
@@ -139,11 +224,16 @@ final class AndroidAppsState {
     /// The preview keeps a waiting request and a banner as they are, for a
     /// screen that must stay still.
     @ObservationIgnored var holdsForever = false
-    /// The first refresh waits this long after Android's storage is up, so it
-    /// does not compete with the end of the boot.
-    @ObservationIgnored var startDelay = Duration.seconds(5)
+    /// The first refresh waits this long after Android reports its boot
+    /// complete, so that it starts nothing in the guest while the guest settles
+    /// from its boot.
+    @ObservationIgnored var startDelay = Duration.seconds(60)
     /// The first refresh's attempts wait twice as long as the one before.
     @ObservationIgnored var retryInterval = Duration.seconds(5)
+    /// How the first refresh waits: a test holds the wait and lets it go.
+    @ObservationIgnored var sleep: @MainActor (Duration) async -> Void = { duration in
+        try? await Task.sleep(for: duration)
+    }
     /// How many times the run's first refresh is asked.
     static let startAttempts = 5
 
@@ -184,6 +274,19 @@ final class AndroidAppsState {
 
     func owns(_ token: Int) -> Bool { refreshToken == token }
 
+    /// A task for the run's first listing starts: the number it holds.
+    func beginFirst() -> Int {
+        firstToken &+= 1
+        return firstToken
+    }
+
+    func ownsFirst(_ token: Int) -> Bool { firstToken == token }
+
+    /// The task that holds `token` ends: the handle is cleared only if it is still that task's.
+    func endFirst(_ token: Int) {
+        if firstToken == token { first = nil }
+    }
+
     /// A catalog is in the store (the listing, then each batch of icons).
     func progressed(_ catalog: AndroidAppCatalog, iconsLeft left: Int) {
         if apps != catalog.apps { apps = catalog.apps }
@@ -199,11 +302,13 @@ final class AndroidAppsState {
         case let .refreshed(catalog):
             progressed(catalog, iconsLeft: 0)
             listed = true
+            firstOwed = false
             unavailable = false
             failed = false
         case .unavailable:
             unavailable = true
             listed = true
+            firstOwed = false
         case .failed:
             failed = true
         }
@@ -233,6 +338,10 @@ final class AndroidAppsState {
         endRefreshUnderWay()
         first?.cancel()
         first = nil
+        firstToken &+= 1
+        firstOwed = false
+        firstNeedsList = false
+        bootStartedBy = nil
         opening?.cancel()
         opening = nil
         open.runEnded()
@@ -255,8 +364,12 @@ final class AndroidAppsState {
 
     /// The disk may not be what was listed (a restored snapshot or update):
     /// the next refresh lists again, and a refresh under way is no longer the store's.
+    /// A refresh that a change owed stays owed: the new listing it asks for may be kept
+    /// from being made (Android paused for space), and the change is still in the disk.
     func invalidated() {
+        let owed = refreshAgain
         endRefreshUnderWay()
+        refreshAgain = owed
         store.invalidate()
         listed = false
     }

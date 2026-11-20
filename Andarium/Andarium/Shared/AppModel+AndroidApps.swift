@@ -24,8 +24,13 @@ extension AppModel {
         return driver
     }
 
-    /// The tool can be asked now: a normal session, not paused for space.
-    var canAskAndroidApps: Bool {
+    /// The tool can be asked now, for the list: a normal session, not paused
+    /// for space, on a host that offers Add to Home Screen (a Mac or a Vision
+    /// Pro has no use for the list, so Android is not asked for it unprompted).
+    var canAskAndroidApps: Bool { hostOffersAddToHomeScreen && canReachAndroidAppsTool }
+
+    /// The tool can be reached now, whatever the host: a normal session, not paused for space.
+    private var canReachAndroidAppsTool: Bool {
         guard case .running(.normal) = phase, spacePause == nil else { return false }
         return androidAppsSource?.androidAppsTool != nil
     }
@@ -53,13 +58,19 @@ extension AppModel {
     /// A refresh already under way is joined; with `afterAChange` another
     /// follows it, made by the refresh's owner once it has cleared the one that
     /// finished, because what changed may have come after the listing it
-    /// captured. Returns whether one was asked.
+    /// captured. Returns whether one was asked. `forAnOpen` is the listing a
+    /// host with no Home Screen takes before it opens an app by name: whatever
+    /// the digest says, and no icons.
     @discardableResult
-    func refreshAndroidApps(afterAChange: Bool = false) async -> Bool {
+    func refreshAndroidApps(afterAChange: Bool = false, forAnOpen: Bool = false) async -> Bool {
         let state = androidApps
-        guard canAskAndroidApps, !state.unavailable, let tool = androidAppsSource?.androidAppsTool else {
+        guard forAnOpen ? canReachAndroidAppsTool : canAskAndroidApps, !state.unavailable,
+              let tool = androidAppsSource?.androidAppsTool
+        else {
             // A change announced while the guest is paused for space is listed once it resumes (`listTheChangeOwed`).
-            if afterAChange, !state.unavailable, case .running(.normal) = phase, spacePause != nil { state.refreshAgain = true }
+            if afterAChange, hostOffersAddToHomeScreen, !state.unavailable, case .running(.normal) = phase, spacePause != nil {
+                state.refreshAgain = true
+            }
             return false
         }
         if let running = state.inFlight {
@@ -68,11 +79,11 @@ extension AppModel {
             return true
         }
         let run = session
-        let flat = FlatteningAppsTool(base: tool)
+        let flat = FlatteningAppsTool(base: OneListingAtATimeTool(base: tool, lane: state.listingLane))
         let store = state.store
         let token = state.begin()
         let task = Task.detached {
-            await AndroidAppRefresh.run(tool: flat, store: store) { catalog, left in
+            await AndroidAppRefresh.run(tool: flat, store: store, forAnOpen: forAnOpen) { catalog, left in
                 Task { @MainActor in
                     // The progress of a refresh that was ended is not heard.
                     if state.owns(token) { state.progressed(catalog, iconsLeft: left) }
@@ -115,33 +126,87 @@ extension AppModel {
         Task { await refreshAndroidApps() }
     }
 
-    /// Android is up (the boot screen ends): the run lists the apps once, a few
-    /// seconds after its storage is up so that the end of the boot is not
-    /// slowed, and again a few times if it got no answer, each after twice the
-    /// wait of the one before; then the task ends, as it does at the first
-    /// answer, so that nothing keeps waking an idle run.
-    func refreshAndroidAppsAtStart() {
+    /// Android is up (the boot screen ends, which is Android's own report that
+    /// its boot completed): the run's first listing is owed. It is made
+    /// `startDelay` after that, so that the guest has settled and nothing is
+    /// started in it during the busiest part of the boot, and again a few times
+    /// if it got no answer, each after twice the wait of the one before; then
+    /// the task ends, as it does at the first answer, so that nothing keeps
+    /// waking an idle run. A listing made meanwhile (the chooser opened) is the
+    /// run's, and the wait asks nothing more. `listNeeded` says that the request
+    /// that began the boot needs the list, and the first ask is made at once,
+    /// with the request's app still opening. A host with no Home Screen asks
+    /// nothing here.
+    func refreshAndroidAppsAtStart(listNeeded: Bool = false) {
         let state = androidApps
-        guard state.first == nil, !state.listed, canAskAndroidApps else { return }
+        guard hostOffersAddToHomeScreen, !state.listed else { return }
+        state.firstOwed = true
+        state.firstNeedsList = listNeeded
+        startOwedFirstListing()
+    }
+
+    /// Starts the task that makes the run's first listing, if one is owed and
+    /// Android can be asked now: at the boot's end, and again when a pause for
+    /// space that kept it from starting, or from asking, is over. The task
+    /// belongs to one run and holds a number: after each wait it looks again
+    /// at whether it is still the owner, the run is still its own and the list
+    /// is still wanted, and it clears its handle only if the handle is its own.
+    private func startOwedFirstListing() {
+        let state = androidApps
+        guard state.firstOwed, !state.listed, state.first == nil, canAskAndroidApps else { return }
+        let run = session
+        let token = state.beginFirst()
+        let listNeeded = state.firstNeedsList
         state.first = Task { [weak self, weak state] in
-            for attempt in 0..<AndroidAppsState.startAttempts {
-                if let state {
-                    let wait = attempt == 0 ? state.startDelay : state.retryInterval * (1 << (attempt - 1))
-                    try? await Task.sleep(for: wait)
+            defer { state?.endFirst(token) }
+            // An ask made, or one that storage not being up kept from being made, is one of the
+            // attempts. An app being opened is not: it has Android's attention first, and the wait
+            // starts over without spending an attempt.
+            var attempt = 0
+            var holdingForAnOpen = false
+            while attempt < AndroidAppsState.startAttempts {
+                guard let state else { return }
+                let wait: Duration
+                if holdingForAnOpen {
+                    wait = state.retryInterval
+                } else if attempt == 0 {
+                    wait = listNeeded ? .zero : state.startDelay
+                } else {
+                    wait = state.retryInterval * (1 << (attempt - 1))
                 }
-                guard let self, let state, !Task.isCancelled, self.androidApps === state else { return }
-                // An app that is being opened has Android's attention first.
-                var opening = false
+                holdingForAnOpen = false
+                if wait > .zero { await state.sleep(wait) }
+                guard let self, self.ownsFirstListing(token, in: run) else { return }
+                if state.listed { break }
+                // Android paused for space: the listing stays owed, and the pause ending makes it.
+                guard self.canAskAndroidApps else { return }
+                // Except where the app is the reason the list is wanted (`listNeeded`).
                 switch state.open.pending?.stage {
-                case .opening?, .launching?: opening = true
+                case .opening?, .launching?:
+                    if !listNeeded {
+                        holdingForAnOpen = true
+                        continue
+                    }
                 default: break
                 }
                 let storageUp = if let driver = self.driver { await driver.storageReady() == true } else { true }
-                if !opening, storageUp { await self.refreshAndroidApps() }
+                guard self.ownsFirstListing(token, in: run) else { return }
                 if state.listed { break }
+                guard self.canAskAndroidApps else { return }
+                if storageUp { await self.refreshAndroidApps() }
+                guard self.ownsFirstListing(token, in: run) else { return }
+                if state.listed { break }
+                attempt += 1
             }
-            state?.first = nil
+            // Asked as often as it is asked: nothing is owed any more.
+            if let self, self.ownsFirstListing(token, in: run) { state?.firstOwed = false }
         }
+    }
+
+    /// The task holding `token` is still the run's first listing: not cancelled, the run
+    /// it began in still on, and no newer task or the run's end took its place.
+    private func ownsFirstListing(_ token: Int, in run: SessionState) -> Bool {
+        !Task.isCancelled && session === run && androidApps.ownsFirst(token)
     }
 
     /// Tells the system what Android's apps are now: the tiles in Shortcuts, and
@@ -215,6 +280,8 @@ extension AppModel {
         case .none:
             break
         case .startAndroid:
+            // This request began the boot; Start's own boot is no request's.
+            androidApps.bootStartedBy = androidApps.open.pending?.request
             startAndroidForRequest()
         case let .open(request):
             beginOpeningAndroidApp(request)
@@ -235,6 +302,7 @@ extension AppModel {
     private func startAndroidForRequest() {
         start(.normal)
         if case .booting = phase { return }
+        androidApps.bootStartedBy = nil
         androidApps.open.drop()
     }
 
@@ -257,6 +325,13 @@ extension AppModel {
             case .timedOut:
                 state.open.opened(.failed, for: request, now: Date())
             case .ready:
+                // A host with no Home Screen asks for the list only to open an app by name: each
+                // open takes one listing before it resolves, so that what it needs to know of a
+                // renamed launcher is on record (`launchersWhenSeen`).
+                if !hostOffersAddToHomeScreen {
+                    await refreshAndroidApps(forAnOpen: true)
+                    guard session === run, !Task.isCancelled, state.open.pending?.request == request else { return }
+                }
                 // The wait took seconds: the run may have ended, or paused for space.
                 guard state.open.readyToLaunch(request, in: androidAppOpenSituation, now: Date()) else {
                     state.scheduleExpiry { }
@@ -267,7 +342,8 @@ extension AppModel {
                     let launchers = state.store.record(forID: request.component.identifier)?.launchers
                     // A renamed launcher's replacement is a command not yet sent when the apps are listed
                     // again: it goes only where the request, the run and the pause still allow it.
-                    result = await tool.open(request.component, launchersWhenSeen: launchers) {
+                    let ordered = OneListingAtATimeTool(base: tool, lane: state.listingLane)
+                    result = await ordered.open(request.component, launchersWhenSeen: launchers) {
                         await MainActor.run {
                             state.open.mayReplaceLaunch(request, in: self.androidAppOpenSituation, now: Date())
                         }
@@ -281,7 +357,7 @@ extension AppModel {
                 case .notInAndroid:
                     // An app that is gone means the cached list is old.
                     state.invalidated()
-                    Task { await self.refreshAndroidApps() }
+                    Task { await self.refreshAndroidApps(afterAChange: true) }
                 case .toolMissing:
                     // The image has no tool: nothing it listed is offered.
                     state.withdrawCatalog()
@@ -297,6 +373,10 @@ extension AppModel {
     /// The boot reached Android: a request that was starting opens now.
     func androidAppsBootFinished(recovery: Bool) {
         let state = androidApps
+        // The request that began this boot, if it is still the one waiting for it.
+        let starter = state.bootStartedBy
+        state.bootStartedBy = nil
+        let startedByRequest = starter != nil && starter == state.open.pending?.request && state.open.pending?.stage == .starting
         // The wait for Home's first resume is for the request that began the
         // boot, or arrived while it ran, when the launcher may not be up yet.
         // The boot is over for every request that comes later (with some app
@@ -304,7 +384,12 @@ extension AppModel {
         if !recovery { state.bootRequest = state.open.pending?.stage == .starting ? state.open.pending?.request : nil }
         let effect = state.open.androidIsUp(recovery: recovery, now: Date())
         performAndroidAppEffect(effect)
-        if !recovery { refreshAndroidAppsAtStart() }
+        if !recovery {
+            // The request that began this boot, for an app the cached list does not
+            // name, needs the list: the wait for the guest to settle is not kept for it.
+            let needsList = starter.map { startedByRequest && state.store.catalog()?.app(withID: $0.component.identifier) == nil } ?? false
+            refreshAndroidAppsAtStart(listNeeded: needsList)
+        }
     }
 
     /// The person answered what Home asked (Start, Update and start): a
@@ -344,7 +429,10 @@ extension AppModel {
     func androidAppsHoldEnded(_ hold: AppOpenHold) {
         let effect = androidApps.open.releaseHold(hold, in: androidAppOpenSituation, now: Date())
         performAndroidAppEffect(effect)
-        if hold == .space { listTheChangeOwed() }
+        if hold == .space {
+            listTheChangeOwed()
+            startOwedFirstListing()
+        }
     }
 
     /// "Don't open": the request is dropped, and Android keeps starting.
