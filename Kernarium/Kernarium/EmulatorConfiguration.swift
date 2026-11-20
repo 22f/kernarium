@@ -276,9 +276,12 @@ struct EmulatorConfiguration: Equatable {
         let vCPUCount = environmentVCPUCount ?? min(
             max(storedVCPUCount, 1), maximumVCPUCount
         )
-        let storedGuestMemoryMiB = stored(
-            Key.guestMemoryMiB, defaultGuestMemory(vCPUCount)
-        )
+        // A zero is no size: an earlier version saved the size shown where
+        // none fit, so the default applies to it as to an absent key.
+        let storedMemoryMiB = stored(Key.guestMemoryMiB, 0)
+        let storedGuestMemoryMiB = storedMemoryMiB > 0
+            ? storedMemoryMiB
+            : defaultGuestMemory(vCPUCount)
         let gpuBudgetApplicationMiB = environmentInteger(
             environment[gpuBudgetApplicationEnvironmentKey],
             in: gpuBudgetParameterRangeMiB

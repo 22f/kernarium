@@ -1334,6 +1334,32 @@ struct KernariumTests {
         )
     }
 
+    /// A zero that an earlier version stored (it saved the size shown where no
+    /// size fit) is no size: the default applies, not the stepper's least.
+    @Test
+    func aZeroStoredByAnEarlierVersionIsNoSizeAndTheDefaultApplies() {
+        let (defaults, suiteName) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(0, forKey: "emulator.guestMemoryMiB")
+        #expect(
+            EmulatorConfiguration.load(
+                defaults: defaults,
+                physicalProcessorCount: 6,
+                guestMemoryBound: { _ in 8192 },
+                defaultGuestMemory: { _ in 2048 }
+            ).guestMemoryMiB == 2048
+        )
+        // Where no size fits it is still none.
+        #expect(
+            EmulatorConfiguration.load(
+                defaults: defaults,
+                physicalProcessorCount: 6,
+                guestMemoryBound: { _ in 0 },
+                defaultGuestMemory: { _ in 0 }
+            ).guestMemoryMiB == 0
+        )
+    }
+
     @Test
     func aStoredOrDefaultGuestMemoryAboveTheMaximumComesDownOnLoad() {
         let (defaults, suiteName) = isolatedDefaults()
