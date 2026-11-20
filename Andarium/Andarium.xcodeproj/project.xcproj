@@ -397,7 +397,6 @@
         "SWIFT_EMIT_LOC_STRINGS": "YES",
         "SWIFT_VERSION": "6.0",
         "TARGETED_DEVICE_FAMILY": "1,2",
-        "WHATS_NEW_TRACK": "BETA",
       },
     }, {
       "name": "AndariumPreviewUITests",

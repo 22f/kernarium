@@ -6,11 +6,6 @@
 // Release, AppStore and TestFlight read the ignored Developer.local.xcconfig
 // and carry Follow developer on X when it names a handle.
 //
-// The What's New notes have two tracks, each its own file of Shared: the beta
-// track (WhatsNew.json) for Debug, Release and TestFlight, and the App Store
-// track (WhatsNewAppStore.json) for AppStore. WHATS_NEW_TRACK names the one a
-// build bundles and reads (below).
-//
 // The app icon is DuskJade (Shared/DuskJade.icon) in every configuration but
 // TestFlight, which has DuskEmber (Shared/DuskEmber.icon) so that a TestFlight
 // build is told from the others in App Store Connect. APP_ICON_NAME names the
@@ -19,18 +14,7 @@
 
 #include "../../GuestHost/Config/Signing.xcconfig"
 
-SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(FOLLOW_X_CONDITION) $(WHATS_NEW_CONDITION)
-
-// The What's New notes a build bundles and reads. BETA is the track of Debug,
-// Release and TestFlight and APP_STORE the track of AppStore; the other
-// track's file is left out of the bundle, and the matching compilation
-// condition (WHATS_NEW_TRACK_BETA or WHATS_NEW_TRACK_APP_STORE) names the file
-// the loader reads. The one string table (WhatsNew.xcstrings) serves both.
-WHATS_NEW_TRACK = BETA
-WHATS_NEW_TRACK[config=AppStore] = APP_STORE
-WHATS_NEW_CONDITION = WHATS_NEW_TRACK_$(WHATS_NEW_TRACK)
-WHATS_NEW_ABSENT_BETA = WhatsNewAppStore.json
-WHATS_NEW_ABSENT_APP_STORE = WhatsNew.json
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(FOLLOW_X_CONDITION)
 
 // The app icon a build compiles (the target's ASSETCATALOG_COMPILER_APPICON_NAME),
 // and the document of the other icon, which the build leaves out. Only the
@@ -90,4 +74,4 @@ FOLLOW_X_ABSENT_ = FollowX.xcstrings
 FOLLOW_X_UNUSED_ = XLogoLocal.xcassets
 FOLLOW_X_UNUSED_local = XLogoGlyph.xcassets
 
-EXCLUDED_SOURCE_FILE_NAMES = $(FOLLOW_X_ABSENT_$(FOLLOW_X_HANDLE:identifier):default=) $(X_LOGO_ABSENT_$(FOLLOW_X_HANDLE:identifier):default=) $(FOLLOW_X_UNUSED_$(FOLLOW_X_LOGO_SOURCE:identifier):default=) $(WHATS_NEW_ABSENT_$(WHATS_NEW_TRACK)) $(APP_ICON_ABSENT_$(APP_ICON_NAME))
+EXCLUDED_SOURCE_FILE_NAMES = $(FOLLOW_X_ABSENT_$(FOLLOW_X_HANDLE:identifier):default=) $(X_LOGO_ABSENT_$(FOLLOW_X_HANDLE:identifier):default=) $(FOLLOW_X_UNUSED_$(FOLLOW_X_LOGO_SOURCE:identifier):default=) $(APP_ICON_ABSENT_$(APP_ICON_NAME))

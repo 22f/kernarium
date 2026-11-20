@@ -418,19 +418,10 @@ control out.
   `SnapshotWords` says every refusal, plan and figure in one place. A restore
   closes the sheet and Home says what happened, Start being next. The preview
   plays the same screens on mock snapshots (`-screen snapshots-…`).
-- **Release notes.** The notes have two tracks, each a file of `Shared`
-  that lists them per build: the beta track, `WhatsNew.json`, for Debug,
-  Release and TestFlight builds (from build 9: build 5, the first public
-  release, and builds 6 to 8 and 10 have none), and the App Store track,
-  `WhatsNewAppStore.json`, for AppStore builds (empty until the App Store
-  version has notes, and then keyed by its own builds). A build bundles and
-  reads its configuration's track alone (`WHATS_NEW_TRACK` in
-  `Config/Andarium.xcconfig` leaves the other's file out and picks the file
-  `WhatsNewTrack` loads, and any value but `BETA` or `APP_STORE` stops the
-  compile), which the bundle check of an AppStore or TestFlight build
-  requires; `andarium-whats-new-track` runs the loader's source under each
-  configuration's resolved condition and holds the icon settings. One string table, `Localization/WhatsNew.xcstrings`,
-  serves both.
+- **Release notes.** The notes are one file of `Shared`, `WhatsNew.json`, that
+  lists them per build, for every build (from build 9: build 5, the first
+  public release, and builds 6 to 8 and 10 have none). One string table,
+  `Localization/WhatsNew.xcstrings`, serves them.
   The first launch of an update that carries notes shows a ribbon above Start,
   on at most three launches, that opens them; a build shows the notes up to its
   own number and no later ones. An entry can name the devices it is for (more
@@ -438,8 +429,8 @@ control out.
   camera): the ribbon and its sheet announce only the entries the device meets.
   Info keeps every entry as written (`WhatsNewRules`, `WhatsNewStore`). A launch
   with a launch setting, or one a test runs, shows no ribbon and keeps no
-  record, and neither does a track with no notes, whose build also has no
-  What's New row in Info.
+  record, and neither does a launch whose notes cannot be read, which also has
+  no What's New row in Info.
 
 ## Runtime
 

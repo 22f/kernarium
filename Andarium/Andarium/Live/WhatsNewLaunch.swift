@@ -9,9 +9,9 @@ extension AppEntry {
     /// ribbon above Start and keeps their record in `defaults`; any other
     /// shows no ribbon and keeps none, so a harness never sees the ribbon and
     /// never uses it up. `vCPUs` is the guest's count, at which the device's
-    /// memory is measured for an entry's requirement. A track with no notes at all (the App
-    /// Store's, until its version has some) has nothing to announce or to have
-    /// seen: its launch lists none, shows no ribbon and keeps no record.
+    /// memory is measured for an entry's requirement. Notes that cannot be read
+    /// have nothing to announce or to have seen: the launch lists none, shows
+    /// no ribbon and keeps no record.
     @MainActor
     func announceWhatsNew(
         on model: AppModel, hasGuest: Bool, vCPUs: Int,

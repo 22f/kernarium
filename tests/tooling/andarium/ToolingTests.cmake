@@ -89,16 +89,13 @@ uml_add_tooling_test(
     LABELS andarium
     TIMEOUT 60)
 
-# Each configuration reads its own track of What's New notes: the target's resolved
-# build settings give the compilation conditions, the loader's own source is compiled
-# with them and run against a bundle that holds a different list in each track's file,
-# and a track value that names neither track stops the compile. The same settings
-# give each configuration's app icon, the exclusion of the other icon's document and
-# no other app icon asset.
+# Each configuration compiles its own app icon: the target's resolved build
+# settings name it, leave the other icon's document out of the build and include no
+# other app icon asset.
 uml_add_tooling_test(
-    NAME andarium-whats-new-track
+    NAME andarium-app-icon
     COMMAND ${Python3_EXECUTABLE} -B
-        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_whats_new_track.py
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_app_icon.py
         --root ${PROJECT_SOURCE_DIR}
     LABELS andarium
     TIMEOUT 180)

@@ -101,10 +101,9 @@ struct WhatsNewRulesTests {
         #expect(record == WhatsNewRecord(seenBuild: 6))
     }
 
-    /// The App Store track has no release until its version has notes: a list
-    /// with none announces nothing on any install. (The application keeps no
-    /// record for it either: `AppEntry.announceWhatsNew`.)
-    @Test func aTrackWithNoReleaseAnnouncesNothing() {
+    /// A list with no release announces nothing on any install. (The
+    /// application keeps no record for it either: `AppEntry.announceWhatsNew`.)
+    @Test func notesWithNoReleaseAnnounceNothing() {
         let installs: [(WhatsNewRecord?, Bool)] = [
             (nil, false), (nil, true), (WhatsNewRecord(seenBuild: 5), true),
             (WhatsNewRecord(seenBuild: 9, ribbonBuild: 12, ribbonLaunches: 2), true),
@@ -356,19 +355,19 @@ struct WhatsNewCatalogTests {
         }
     }
 
-    /// A track's file, where the application keeps it.
-    private func trackFile(_ name: String) -> URL {
+    /// The notes file, where the application keeps it.
+    private func notesFile() -> URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("Andarium/Shared/\(name)")
+            .deletingLastPathComponent().appendingPathComponent("Andarium/Shared/WhatsNew.json")
     }
 
     /// The application's own notes, read where they are, so a mistake in them
     /// fails `swift test` and does not wait for the hosted run: a release
     /// archive runs no test, and unreadable notes show no ribbon and an empty
-    /// Info. The beta track is the one of Debug, Release and TestFlight.
-    @Test func theBetaTracksBundledNotesDecode() throws {
-        let releases = try WhatsNewCatalog.decode(Data(contentsOf: trackFile("WhatsNew.json")))
+    /// Info.
+    @Test func theBundledNotesDecode() throws {
+        let releases = try WhatsNewCatalog.decode(Data(contentsOf: notesFile()))
         #expect(releases.map(\.build) == releases.map(\.build).sorted(by: >))
         #expect(releases.allSatisfy { !$0.entries.isEmpty })
         // Every device the notes name is one the code knows: that is what
@@ -377,13 +376,7 @@ struct WhatsNewCatalogTests {
         #expect(named.contains { $0.device == .pad })
     }
 
-    /// The App Store track is a list of releases like the beta track's, keyed
-    /// by the App Store builds; it is empty until the App Store version has
-    /// notes, and an empty list is a track.
-    @Test func theAppStoreTracksBundledNotesDecode() throws {
-        let releases = try WhatsNewCatalog.decode(Data(contentsOf: trackFile("WhatsNewAppStore.json")))
-        #expect(releases.map(\.build) == releases.map(\.build).sorted(by: >))
-        #expect(releases.allSatisfy { !$0.entries.isEmpty })
+    @Test func anEmptyListIsNotes() throws {
         #expect(try decode("[]").isEmpty)
     }
 

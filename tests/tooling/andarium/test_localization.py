@@ -30,7 +30,6 @@ SCRIPT = REPOSITORY / "Andarium/scripts/localization.py"
 BOUND_SECONDS = 120
 
 NOTE = "Browse the virtual machine’s storage."
-STORE_NOTE = "Rate the app from Info."
 PERMISSION = "Andarium records from the microphone only when you turn on Microphone."
 LANGS = ("ja", "zh-Hans", "zh-Hant")
 PHRASE = "Open ${target} in ${applicationName}"
@@ -96,8 +95,6 @@ class Tree:
             "WhatsNew": catalog({
                 NOTE: {"extractionState": "manual", **entry(
                     ja="ストレージを参照します。", zh_Hans="浏览存储空间。", zh_Hant="瀏覽儲存空間。")},
-                STORE_NOTE: {"extractionState": "manual", **entry(
-                    ja="情報から評価できます。", zh_Hans="可在信息中评价。", zh_Hant="可在資訊中評價。")},
             }),
         }
         self.english_only = {
@@ -105,9 +102,7 @@ class Tree:
             "english": [{"text": "JIT", "file": "Andarium/Andarium/Shared/Dev.swift", "reason": "development only"}],
         }
         self.sources = {"Andarium/Andarium/Shared/Dev.swift": 'Text(verbatim: "JIT")\n'}
-        # The beta track and the App Store track, each a file of its own.
         self.whats_new = [{"entries": [{"text": NOTE}]}]
-        self.whats_new_app_store = [{"entries": [{"text": STORE_NOTE}]}]
         self.project = (
             '{ "targets": [ {\n  "name": "Andarium",\n  "id": "A1",\n  "settings": {\n'
             f'    "INFOPLIST_KEY_NSMicrophoneUsageDescription": "{PERMISSION}"\n  }} }},\n'
@@ -118,9 +113,7 @@ class Tree:
         for name, relative in self.script.CATALOGS.items():
             self.put(relative, json.dumps(self.files[name], ensure_ascii=False, indent=2))
         self.put(self.script.ENGLISH_ONLY, json.dumps(self.english_only, indent=2))
-        beta, app_store = self.script.WHATS_NEW
-        self.put(beta, json.dumps(self.whats_new, ensure_ascii=False))
-        self.put(app_store, json.dumps(self.whats_new_app_store, ensure_ascii=False))
+        self.put(self.script.WHATS_NEW, json.dumps(self.whats_new, ensure_ascii=False))
         self.put(self.script.PROJECT, self.project)
         for relative, text in self.sources.items():
             self.put(relative, text)
@@ -405,30 +398,11 @@ class CheckTests(unittest.TestCase):
         self.tree.files["WhatsNew"]["strings"]["Removed note"] = entry(ja="a", zh_Hans="b", zh_Hant="c")
         self.assertFinds("is no note of")
 
-    def test_a_note_of_the_app_store_track_without_an_entry(self) -> None:
-        self.tree.whats_new_app_store[0]["entries"].append({"title": "Later", "points": ["An App Store point"]})
-        self.assertFinds("has no entry for the note 'An App Store point' of Andarium/Andarium/Shared/WhatsNewAppStore.json")
-
-    def test_an_entry_of_one_track_alone_is_a_note(self) -> None:
-        # The one table serves both tracks: a note of either keeps its entry.
-        self.assertEqual(self.problems(), [])
-        self.tree.whats_new_app_store = []
-        self.assertFinds(f"{STORE_NOTE!r} is no note of")
-        self.tree.whats_new_app_store = [{"entries": [{"text": STORE_NOTE}]}]
-        self.tree.whats_new = []
-        self.assertFinds(f"{NOTE!r} is no note of")
-
-    def test_an_empty_app_store_track_has_no_notes(self) -> None:
-        self.tree.whats_new_app_store = []
-        del self.tree.files["WhatsNew"]["strings"][STORE_NOTE]
-        self.assertEqual(self.problems(), [])
-
-    def test_a_missing_track_file(self) -> None:
+    def test_a_missing_notes_file(self) -> None:
         self.tree.write()
-        for relative in self.script.WHATS_NEW:
-            (self.tree.root / relative).unlink()
-            self.assertTrue(any(relative in problem and "is missing" in problem for problem in self.script.check(self.tree.root)))
-            self.tree.write()
+        relative = self.script.WHATS_NEW
+        (self.tree.root / relative).unlink()
+        self.assertTrue(any(relative in problem and "is missing" in problem for problem in self.script.check(self.tree.root)))
 
     def test_a_catalog_in_another_source_language(self) -> None:
         self.tree.files["AndariumCore"]["sourceLanguage"] = "de"

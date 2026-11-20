@@ -279,10 +279,7 @@ extension Decoder {
     }
 }
 
-/// The bundled notes: a JSON array of releases. A build bundles one of two
-/// tracks, each its own file (`WhatsNewTrack` in the application): the beta
-/// track's notes per beta build, or the App Store track's, which is empty
-/// until the App Store version has notes.
+/// The bundled notes: a JSON array of releases, one file for every build.
 public enum WhatsNewCatalog {
     public enum Problem: Error, Equatable, Sendable {
         case releaseBeforeNotes(build: Int)

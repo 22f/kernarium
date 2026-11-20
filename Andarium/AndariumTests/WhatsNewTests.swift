@@ -76,10 +76,9 @@ struct WhatsNewTests {
     private static let buildElevenIDsOnAnIPad = buildElevenIDs.filter { $0 != "haptics" }
     private static let buildNineIDs = ["file-browser", "more-memory", "stability-fixes"]
 
-    /// The beta track is what Debug, Release and TestFlight builds bundle, and
-    /// so what this test run has.
-    @Test func theBetaTracksBundledNotesDecodeAndStartWithBuildTwelve() throws {
-        let url = try #require(Bundle.main.url(forResource: WhatsNewTrack.beta.resource, withExtension: "json"))
+    /// The notes every build bundles, and so what this test run has.
+    @Test func theBundledNotesDecodeAndStartWithBuildTwelve() throws {
+        let url = try #require(Bundle.main.url(forResource: "WhatsNew", withExtension: "json"))
         let releases = try WhatsNewCatalog.decode(Data(contentsOf: url))
         #expect(releases.map(\.build) == [12, 11, 9])
         #expect(releases.map(\.version) == ["1.0 (12)", "1.0 (11)", "1.0 (9)"])
@@ -111,36 +110,16 @@ struct WhatsNewTests {
         #expect(nineFixes.place == nil && nineFixes.requirement == nil)
     }
 
-    /// A build bundles its own track's file and none of the other's, and
-    /// reads the one it bundles. The configuration decides (`WHATS_NEW_TRACK`),
-    /// and this run's is not an AppStore one.
-    @Test func aBuildBundlesAndReadsOnlyItsOwnTracksFile() {
-        #if WHATS_NEW_TRACK_APP_STORE
-        let own = WhatsNewTrack.appStore
-        #else
-        let own = WhatsNewTrack.beta
-        #endif
-        #expect(WhatsNewTrack.bundled == own)
-        #expect(own == .beta, "the tests run in a configuration of the beta track")
-        for track in WhatsNewTrack.allCases {
-            let bundled = Bundle.main.url(forResource: track.resource, withExtension: "json") != nil
-            #expect(bundled == (track == own), "\(track)")
-        }
-        #expect(Set(WhatsNewTrack.allCases.map(\.resource)).count == WhatsNewTrack.allCases.count)
-    }
-
-    /// Each track is read from its own file, whatever else the bundle holds.
-    @Test func eachTrackIsReadFromItsOwnFile() throws {
+    /// The notes are read from the bundle given, and from nothing else.
+    @Test func theNotesAreReadFromTheBundleGiven() throws {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("andarium-whatsnew-tracks-\(UUID().uuidString)")
+            .appendingPathComponent("andarium-whatsnew-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let note = #"[{"build": 14, "version": "1.0 (14)", "entries": [{"id": "a", "title": "A", "text": "T", "symbol": "star"}]}]"#
-        try Data(note.utf8).write(to: directory.appendingPathComponent("WhatsNewAppStore.json"))
-        try Data("[]".utf8).write(to: directory.appendingPathComponent("WhatsNew.json"))
+        try Data(note.utf8).write(to: directory.appendingPathComponent("WhatsNew.json"))
         let bundle = try #require(Bundle(url: directory))
-        #expect(WhatsNewCatalog.load(.appStore, from: bundle).map(\.build) == [14])
-        #expect(WhatsNewCatalog.load(.beta, from: bundle).isEmpty)
+        #expect(WhatsNewCatalog.load(from: bundle).map(\.build) == [14])
     }
 
     @Test func everyEntryHasWordsASymbolAndARequirementTheCodeKnows() {
@@ -365,10 +344,10 @@ struct WhatsNewTests {
         }
     }
 
-    /// The App Store track has no notes yet: an App Store build shows no
-    /// ribbon and no history, and keeps no record, whatever the install had.
-    /// (Info lists the history only when the model has releases.)
-    @Test func aTrackWithNoNotesShowsNothingAndKeepsNoRecord() {
+    /// Notes that cannot be read, or none: the launch shows no ribbon and no
+    /// history, and keeps no record, whatever the install had. (Info lists the
+    /// history only when the model has releases.)
+    @Test func noNotesShowNothingAndKeepNoRecord() {
         let installs: [(record: WhatsNewRecord?, hasGuest: Bool)] = [
             (nil, false), (nil, true), (WhatsNewRecord(seenBuild: 5), true), (WhatsNewRecord(seenBuild: 11), true),
         ]
