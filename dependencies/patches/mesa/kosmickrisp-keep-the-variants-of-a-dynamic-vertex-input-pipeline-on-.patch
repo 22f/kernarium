@@ -17,7 +17,13 @@ A variant is looked up by a key over the stripped NIR it is built from
 it that differs between runs of the same guest), the device and driver
 identity, the pipeline's lowered state, the hashes of its layouts and
 the vertex-input state. A hit builds the Metal pipelines from the stored
-MSL; a miss, as before, translates and then stores.
+MSL; a miss, as before, translates and then stores. What the compile
+reads has to be in the key: an immutable sampler's flags in the layout
+hash, and whether the depth attachment is an input attachment in the
+state hash, were not, and are now. The content hash of a deferred shader
+read back from a pipeline cache blob is never taken from the blob (the
+binary format is 3 and carries none): it is taken again from the NIR the
+shader holds, when its parent first asks for it.
 
 An entry is a small descriptor with the shaders' info and one name per
 MSL text, and the texts are separate entries named by the hash of their
@@ -27,10 +33,21 @@ checked for its magic, format, driver build, key, stage count, payload
 size and payload hash before it is read, a text for its header, both
 lengths, the name it echoes and the hash of its bytes, and a length or
 count is checked against what is there before anything is allocated
-from it. An entry that fails any check is removed and counts as a miss,
-so the variant is translated and stored again, and a text that is
-stored but damaged where the cache does not look is replaced by the
-next writer instead of kept.
+from it. What a shader's description holds is checked against what a
+writer writes before it is used for anything: stage bits, raster
+classes, the geometry records and their sizes, the sample count, and
+every field that reaches a Metal descriptor, which aborts the process on
+a value it does not take. A variant must also be one of its parent: its
+frames are the parent's stages, once each and read to their end, and the
+raster classes it owns are those the parent's state reaches. One load
+holds a bounded number of stored text bytes. An entry that fails any
+check is removed and counts as a miss, so the variant is translated and
+stored again, and a text that is stored but damaged where the cache does
+not look is replaced by the next writer instead of kept. The same
+description check serves the shaders of a guest's pipeline cache.
+
+disk_cache_put_nocopy frees the data it was given when it cannot make
+its job, as it documents.
 
 MESA_KK_VARIANT_CACHE=0 turns the cache off and MESA_KK_VARIANT_LOG=1
 logs each lookup, compile, load and store on stderr.
@@ -38,29 +55,43 @@ logs each lookup, compile, load and store on stderr.
 test_variant_entry covers the entry format and its readers without
 Metal, test_variant_disk_cache the driver: it runs boots against one
 cache directory, damages the entries between them in every way a file
-can be damaged, and has two threads record the same first draw.
+can be damaged, forges descriptors that are whole as bytes and wrong as
+shaders, and has two threads record the same first draw.
+test_descriptor_layout_hash covers the layout hash.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- src/kosmickrisp/vulkan/kk_device.h            |   4 +
- src/kosmickrisp/vulkan/kk_physical_device.c   |   3 +
- src/kosmickrisp/vulkan/kk_physical_device.h   |   6 +
- src/kosmickrisp/vulkan/kk_shader.c            | 770 ++++++++++++++--
- src/kosmickrisp/vulkan/kk_shader.h            |  21 +
- src/kosmickrisp/vulkan/kk_variant_entry.c     | 399 ++++++++
- src/kosmickrisp/vulkan/kk_variant_entry.h     | 179 ++++
- src/kosmickrisp/vulkan/meson.build            |   8 +
- .../vulkan/tests/test_variant_disk_cache.cpp  | 683 ++++++++++++++
- .../vulkan/tests/test_variant_entry.c         | 862 ++++++++++++++++++
- .../variant_disk_cache_shaders/cache.frag     |   4 +
- .../variant_disk_cache_shaders/cache.frag.h   |  18 +
- .../variant_disk_cache_shaders/cache.vert     |   4 +
- .../variant_disk_cache_shaders/cache.vert.h   |  33 +
- .../vulkan/tests/variant_disk_cache_state.c   |  16 +
- .../vulkan/tests/variant_disk_cache_state.h   |  21 +
- 16 files changed, 2934 insertions(+), 97 deletions(-)
+ src/kosmickrisp/bridge/mtl_device.h           |    4 +
+ src/kosmickrisp/bridge/mtl_device.m           |    9 +
+ src/kosmickrisp/bridge/stubs/mtl_device.c     |    6 +
+ src/kosmickrisp/vulkan/kk_cmd_draw.c          |    4 +-
+ .../vulkan/kk_descriptor_set_layout.c         |   19 +-
+ src/kosmickrisp/vulkan/kk_device.h            |    4 +
+ src/kosmickrisp/vulkan/kk_physical_device.c   |    3 +
+ src/kosmickrisp/vulkan/kk_physical_device.h   |    6 +
+ src/kosmickrisp/vulkan/kk_shader.c            | 1192 ++++++++++++++--
+ src/kosmickrisp/vulkan/kk_shader.h            |   27 +-
+ src/kosmickrisp/vulkan/kk_variant_entry.c     |  408 ++++++
+ src/kosmickrisp/vulkan/kk_variant_entry.h     |  191 +++
+ src/kosmickrisp/vulkan/meson.build            |   11 +
+ .../tests/descriptor_layout_hash_state.c      |   18 +
+ .../tests/descriptor_layout_hash_state.h      |   18 +
+ .../tests/test_descriptor_layout_hash.cpp     |  119 ++
+ .../vulkan/tests/test_variant_disk_cache.cpp  | 1270 +++++++++++++++++
+ .../vulkan/tests/test_variant_entry.c         | 1032 ++++++++++++++
+ .../variant_disk_cache_shaders/cache.frag     |    4 +
+ .../variant_disk_cache_shaders/cache.frag.h   |   18 +
+ .../variant_disk_cache_shaders/cache.vert     |    4 +
+ .../variant_disk_cache_shaders/cache.vert.h   |   33 +
+ .../vulkan/tests/variant_disk_cache_state.c   |  109 ++
+ .../vulkan/tests/variant_disk_cache_state.h   |   30 +
+ src/util/disk_cache.c                         |    3 +
+ 25 files changed, 4426 insertions(+), 116 deletions(-)
  create mode 100644 src/kosmickrisp/vulkan/kk_variant_entry.c
  create mode 100644 src/kosmickrisp/vulkan/kk_variant_entry.h
+ create mode 100644 src/kosmickrisp/vulkan/tests/descriptor_layout_hash_state.c
+ create mode 100644 src/kosmickrisp/vulkan/tests/descriptor_layout_hash_state.h
+ create mode 100644 src/kosmickrisp/vulkan/tests/test_descriptor_layout_hash.cpp
  create mode 100644 src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp
  create mode 100644 src/kosmickrisp/vulkan/tests/test_variant_entry.c
  create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.frag
@@ -70,6 +101,108 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c
  create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_state.h
 
+diff --git a/src/kosmickrisp/bridge/mtl_device.h b/src/kosmickrisp/bridge/mtl_device.h
+index 665c8c967fadb76704d933b5b8dd687d98239641..5440e4d6bc7cb44c25daaf7cb53af6bf8c730640 100644
+--- a/src/kosmickrisp/bridge/mtl_device.h
++++ b/src/kosmickrisp/bridge/mtl_device.h
+@@ -30,6 +30,10 @@ void mtl_device_get_architecture_name(mtl_device *dev, char buffer[256]);
+ uint32_t mtl_device_get_gpu_apple_family(mtl_device *dev);
+ uint64_t mtl_device_get_registry_id(mtl_device *dev);
+ bool mtl_device_supports_sample_count(mtl_device *dev, uint32_t sample_count);
++/* Whether a render pipeline may declare this maximum vertex amplification
++ * count: Metal aborts on a count the device does not support. */
++bool mtl_device_supports_vertex_amplification_count(mtl_device *dev,
++                                                    uint32_t count);
+ /* Whether Metal's API or shader validation layer wraps the device. */
+ bool mtl_device_is_validated(mtl_device *dev);
+ /* Whether the device can sample BC/S3TC, RGTC and BPTC compressed
+diff --git a/src/kosmickrisp/bridge/mtl_device.m b/src/kosmickrisp/bridge/mtl_device.m
+index ca5033d1a948fce03ccaae07503a3d00a6e8d8fe..6ddc15000a2afdd8835113f43955d6ac06d1c91d 100644
+--- a/src/kosmickrisp/bridge/mtl_device.m
++++ b/src/kosmickrisp/bridge/mtl_device.m
+@@ -71,6 +71,15 @@
+    }
+ }
+ 
++bool
++mtl_device_supports_vertex_amplification_count(mtl_device *dev, uint32_t count)
++{
++   @autoreleasepool {
++      id<MTLDevice> device = (id<MTLDevice>)dev;
++      return [device supportsVertexAmplificationCount:count];
++   }
++}
++
+ /* The validation layers hand out a wrapper of the GPU's own device:
+  * MTLDebugDevice for API validation, with or without shader validation
+  * beneath it, and MTLGPUDebugDevice for shader validation alone. */
+diff --git a/src/kosmickrisp/bridge/stubs/mtl_device.c b/src/kosmickrisp/bridge/stubs/mtl_device.c
+index e8db7cb1607fb994706e26c7969c5252db08726d..f3218f63a86b254996586ebed0a4c8005ed1e066 100644
+--- a/src/kosmickrisp/bridge/stubs/mtl_device.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_device.c
+@@ -59,6 +59,12 @@ mtl_device_supports_sample_count(mtl_device *dev, uint32_t sample_count)
+    return false;
+ }
+ 
++bool
++mtl_device_supports_vertex_amplification_count(mtl_device *dev, uint32_t count)
++{
++   return false;
++}
++
+ struct mtl_size
+ mtl_device_max_threads_per_threadgroup(mtl_device *dev)
+ {
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index a6990ae45ce762dbf5141e3593e39e7375c771ed..5c65ee826598b536ee5cc753c588882b672cc54c 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -2007,7 +2007,9 @@ kk_upload_geometry_params(struct kk_cmd_buffer *cmd,
+           input_primitives * params.count_buffer_stride > UINT32_MAX ||
+           (gsi->shape == POLY_GS_SHAPE_DYNAMIC_INDEXED &&
+            input_primitives * gsi->max_indices >
+-              UINT32_MAX / sizeof(uint32_t))) {
++              UINT32_MAX / sizeof(uint32_t)) ||
++          (gsi->shape == POLY_GS_SHAPE_STATIC_PER_INSTANCE &&
++           input_primitives * gsi->max_indices > UINT32_MAX)) {
+          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+          return 0;
+       }
+diff --git a/src/kosmickrisp/vulkan/kk_descriptor_set_layout.c b/src/kosmickrisp/vulkan/kk_descriptor_set_layout.c
+index 828830d07b8254d3a83de820b240b5c8d0cc662f..6ea4aae9fc00b0c9202a3275dad65fe23d4e8f28 100644
+--- a/src/kosmickrisp/vulkan/kk_descriptor_set_layout.c
++++ b/src/kosmickrisp/vulkan/kk_descriptor_set_layout.c
+@@ -306,13 +306,28 @@ kk_CreateDescriptorSetLayout(VkDevice device,
+       BLAKE3_UPDATE_VALUE(layout->binding[b].stride);
+       BLAKE3_UPDATE_VALUE(layout->binding[b].dynamic_buffer_index);
+ 
+-      if (layout->binding[b].immutable_samplers != NULL) {
++      /* What the compile reads of an immutable sampler is its flags (the
++       * non-seamless cube choice) and its YCbCr conversion; a binding with
++       * none and a binding with samplers that set nothing must not share a
++       * hash, nor two that differ in a flag. */
++      const bool has_immutable_samplers =
++         layout->binding[b].immutable_samplers != NULL;
++      BLAKE3_UPDATE_VALUE(has_immutable_samplers);
++      if (has_immutable_samplers) {
+          for (uint32_t i = 0; i < layout->binding[b].array_size; i++) {
+             const struct kk_sampler *sampler =
+                layout->binding[b].immutable_samplers[i];
+ 
++            const bool has_sampler = sampler != NULL;
++            BLAKE3_UPDATE_VALUE(has_sampler);
++            if (sampler == NULL)
++               continue;
++
++            const VkSamplerCreateFlags sampler_flags = sampler->vk.flags;
++            BLAKE3_UPDATE_VALUE(sampler_flags);
++
+             /* We zalloc the object, so it's safe to hash the whole thing */
+-            if (sampler != NULL && sampler->vk.ycbcr_conversion != NULL)
++            if (sampler->vk.ycbcr_conversion != NULL)
+                BLAKE3_UPDATE_VALUE(sampler->vk.ycbcr_conversion->state);
+          }
+       }
 diff --git a/src/kosmickrisp/vulkan/kk_device.h b/src/kosmickrisp/vulkan/kk_device.h
 index aa22e62eab1d2050878966b891fcb7bd383fab87..20a52f5a7f4ba24631a48e26e5388a583fa3d4b8 100644
 --- a/src/kosmickrisp/vulkan/kk_device.h
@@ -131,7 +264,7 @@ index 135850ac3f92676d765825272047218a46e29a14..2c09eeb75ec8cbcd562040ebe0d62685
  
  static inline uint32_t
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f019264471367ebe 100644
+index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..7c834fe9a93e264d6c4fd10a92bc4d461e6ce6c3 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
 @@ -13,6 +13,7 @@
@@ -173,7 +306,60 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
  
  static const nir_shader_compiler_options *
  kk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
-@@ -5101,6 +5111,30 @@ kk_precompile_library_stages(struct kk_device *dev, uint32_t shader_count,
+@@ -223,6 +233,16 @@ kk_hash_graphics_state(struct vk_physical_device *device,
+                           sizeof(state->mv->view_mask));
+    }
+ 
++   /* The fragment compile reads one thing of the input-attachment state:
++    * whether the depth attachment is also an input (it then forces a depth
++    * write).  Two pipelines that differ only there must not share a key. */
++   if (stages & (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)) {
++      const bool depth_is_input =
++         state->ial != NULL &&
++         state->ial->depth_att != MESA_VK_ATTACHMENT_NO_INDEX;
++      _mesa_blake3_update(&blake3_ctx, &depth_is_input, sizeof(depth_is_input));
++   }
++
+ done:
+    _mesa_blake3_update(&blake3_ctx, &enabled_features->nullDescriptor,
+                        sizeof(enabled_features->nullDescriptor));
+@@ -4574,6 +4594,15 @@ kk_new_render_pipeline_state(struct kk_device *device, struct kk_shader *vs,
+                              mtl_render_pipeline_state **state_out)
+ {
+    VkResult result = VK_SUCCESS;
++
++   /* An attachment the pass binds that the shader has no format for is a
++    * pipeline for another pass: the descriptor would declare a missing
++    * format, which no writer's shader does. */
++   u_foreach_bit(i, color_mask) {
++      if (vs->info.vs.rt_formats[i] == MTL_PIXEL_FORMAT_INVALID)
++         return VK_ERROR_INVALID_SHADER_NV;
++   }
++
+    const mesa_shader_stage vs_stage = kk_render_pipeline_vertex_stage(vs);
+ 
+    const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
+@@ -4651,7 +4680,6 @@ kk_new_render_pipeline_state(struct kk_device *device, struct kk_shader *vs,
+     * color_attachment_count entries.
+     */
+    u_foreach_bit(i, color_mask) {
+-      assert(vs->info.vs.rt_formats[i] != MTL_PIXEL_FORMAT_INVALID);
+       mtl_render_pipeline_descriptor_set_color_attachment_format(
+          pipeline_descriptor, i, vs->info.vs.rt_formats[i]);
+ 
+@@ -4819,7 +4847,10 @@ kk_shader_render_pipeline(struct kk_device *dev, struct kk_shader *vs,
+        (vs->msl_origin == NULL || !kk_regenerate_msl_forced()))
+       return vs->pipeline.gfx.render;
+ 
+-   assert((bound_color_mask & ~declared) == 0);
++   /* A pass binds only attachments the pipeline declares; a shader that
++    * declares fewer than the pass binds is refused, not given a descriptor. */
++   if (bound_color_mask & ~declared)
++      return NULL;
+ 
+    simple_mtx_lock(&attachment_variants_lock);
+    util_dynarray_foreach(&vs->attachment_variants,
+@@ -5101,6 +5132,30 @@ kk_precompile_library_stages(struct kk_device *dev, uint32_t shader_count,
     }
  }
  
@@ -204,7 +390,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
  static VkResult
  kk_defer_graphics_shaders(struct kk_device *dev, uint32_t shader_count,
                            struct vk_shader_compile_info *infos,
-@@ -5129,6 +5163,8 @@ kk_defer_graphics_shaders(struct kk_device *dev, uint32_t shader_count,
+@@ -5129,6 +5184,8 @@ kk_defer_graphics_shaders(struct kk_device *dev, uint32_t shader_count,
        shader->deferred_robustness = *compile->robustness;
        blob_init(&shader->deferred_nir);
        nir_serialize(&shader->deferred_nir, compile->nir, false);
@@ -213,7 +399,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
  
        if (shader->deferred_nir.out_of_memory) {
           kk_shader_destroy(&dev->vk, shader, pAllocator);
-@@ -6161,6 +6197,10 @@ struct kk_deferred_graphics_shader {
+@@ -6161,6 +6218,10 @@ struct kk_deferred_graphics_shader {
     mesa_shader_stage stage;
     struct vk_pipeline_robustness_state robustness;
     struct blob nir;
@@ -224,7 +410,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
  };
  
  struct kk_linked_graphics_pipeline {
-@@ -6191,6 +6231,12 @@ struct kk_linked_graphics_pipeline {
+@@ -6191,6 +6252,12 @@ struct kk_linked_graphics_pipeline {
  
        struct hash_table *variants;
        simple_mtx_t lock;
@@ -237,7 +423,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
     } dynamic;
  };
  
-@@ -6333,6 +6379,9 @@ kk_create_dynamic_vertex_input_pipeline(
+@@ -6333,6 +6400,9 @@ kk_create_dynamic_vertex_input_pipeline(
           &linked->dynamic.sources[linked->dynamic.shader_count++];
        source->stage = shader->info.stage;
        source->robustness = shader->deferred_robustness;
@@ -247,7 +433,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
        blob_init(&source->nir);
        blob_write_bytes(&source->nir, shader->deferred_nir.data,
                         shader->deferred_nir.size);
-@@ -6361,9 +6410,13 @@ fail:
+@@ -6361,9 +6431,13 @@ fail:
     return result;
  }
  
@@ -261,7 +447,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
     dev->linked_graphics_pipelines = _mesa_hash_table_create(
        NULL, kk_blake3_key_hash, kk_blake3_key_equal);
     if (dev->linked_graphics_pipelines == NULL)
-@@ -6482,8 +6535,8 @@ kk_shader_drop_msl(struct kk_shader *shader,
+@@ -6482,8 +6556,8 @@ kk_shader_drop_msl(struct kk_shader *shader,
  /* The Metal pipelines of a variant are built, and the MSL they were built
   * from is of no use again unless a render pass binds fewer colour attachments
   * than the pipeline declares (VK_EXT_dynamic_rendering_unused_attachments),
@@ -272,7 +458,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
   * the largest), so keep what compiles it again instead: the parent holds the
   * NIR, and the variant the vertex input and stride choice it was compiled for.
   */
-@@ -6556,6 +6609,32 @@ kk_new_render_pipeline_state_from_origin(struct kk_device *dev,
+@@ -6556,6 +6630,32 @@ kk_new_render_pipeline_state_from_origin(struct kk_device *dev,
     return result;
  }
  
@@ -305,7 +491,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
  static void
  kk_linked_graphics_pipeline_key(
     struct vk_device *vk_dev, uint32_t shader_count,
-@@ -6574,23 +6653,7 @@ kk_linked_graphics_pipeline_key(
+@@ -6574,23 +6674,7 @@ kk_linked_graphics_pipeline_key(
        stages |= mesa_to_vk_shader_stage(shaders[i]->stage);
     }
  
@@ -330,10 +516,46 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
     _mesa_blake3_final(&hash, key);
  }
  
-@@ -6621,6 +6684,54 @@ kk_dynamic_vertex_input_parent_key(
+@@ -6621,6 +6705,95 @@ kk_dynamic_vertex_input_parent_key(
     _mesa_blake3_final(&hash, key);
  }
  
++static void kk_variant_log(const char *event, const blake3_hash key,
++                           uint64_t us, size_t bytes, uint32_t stages,
++                           const char *reason);
++
++/* What a deferred stage computes, taken from the NIR it holds, for a stage that
++ * has no hash of that kind: one read back from a pipeline cache.  The bytes of
++ * a pipeline cache may be a guest's, and a hash that came with them says only
++ * what their writer wants the disk cache to believe, so the hash is computed
++ * here from the NIR that would be compiled and from nothing else.  The cost is
++ * a read of the NIR and a hash of it, paid once for the parent of each such
++ * pipeline and only when the variants are kept on disk. */
++static bool
++kk_deferred_content_hash_from_nir(struct kk_device *dev,
++                                  const struct kk_deferred_graphics_shader *source,
++                                  blake3_hash hash)
++{
++   const uint64_t start = os_time_get_nano();
++   const nir_shader_compiler_options *nir_options =
++      kk_get_nir_options(dev->vk.physical, source->stage, &source->robustness);
++   struct blob_reader reader;
++   blob_reader_init(&reader, source->nir.data, source->nir.size);
++   nir_shader *nir = nir_deserialize(NULL, nir_options, &reader);
++   if (nir == NULL || reader.overrun) {
++      ralloc_free(nir);
++      return false;
++   }
++
++   const bool ok = kk_nir_content_hash(nir, hash);
++   ralloc_free(nir);
++   if (ok) {
++      kk_variant_log("rehash", hash, (os_time_get_nano() - start) / 1000,
++                     source->nir.size, source->stage, NULL);
++   }
++   return ok;
++}
++
 +/* What compiles the variants of a dynamic vertex-input pipeline, in a form
 + * that means the same in another run: what each deferred stage computes, the
 + * pipeline state the compile lowers, and the contents of the descriptor set
@@ -349,6 +571,9 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
 +   struct vk_descriptor_set_layout *const *set_layouts, blake3_hash key)
 +{
 +   struct vk_device *vk_dev = &dev->vk;
++   if (kk_device_physical(dev)->variant_cache == NULL)
++      return false;
++
 +   struct mesa_blake3 hash;
 +   _mesa_blake3_init(&hash);
 +   static const char tag[] = "kosmickrisp dynamic vertex input pipeline";
@@ -361,13 +586,15 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
 +   for (uint32_t i = 0; i < linked->dynamic.shader_count; i++) {
 +      const struct kk_deferred_graphics_shader *source =
 +         &linked->dynamic.sources[i];
-+      if (!source->content_valid)
++      blake3_hash content_hash;
++      if (source->content_valid)
++         memcpy(content_hash, source->content_hash, sizeof(content_hash));
++      else if (!kk_deferred_content_hash_from_nir(dev, source, content_hash))
 +         return false;
 +      _mesa_blake3_update(&hash, &source->stage, sizeof(source->stage));
 +      _mesa_blake3_update(&hash, &source->robustness,
 +                          sizeof(source->robustness));
-+      _mesa_blake3_update(&hash, source->content_hash,
-+                          sizeof(source->content_hash));
++      _mesa_blake3_update(&hash, content_hash, sizeof(content_hash));
 +   }
 +   kk_update_pipeline_state_key(&hash, vk_dev, state, stages);
 +
@@ -385,7 +612,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
  static void
  kk_destroy_linked_graphics_pipeline(
     struct vk_device *vk_dev, void *linked_data,
-@@ -6711,6 +6822,9 @@ kk_link_graphics_pipeline(
+@@ -6711,6 +6884,9 @@ kk_link_graphics_pipeline(
  
        memcpy(linked->key, dynamic_key, sizeof(linked->key));
        linked->refcount = 1;
@@ -395,7 +622,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
  
        simple_mtx_lock(&dev->linked_graphics_pipelines_lock);
        dynamic_cached =
-@@ -6854,40 +6968,27 @@ kk_link_graphics_pipeline(
+@@ -6854,40 +7030,27 @@ kk_link_graphics_pipeline(
  }
  
  /* The text goes to the blob in the form the shader holds it, so a pipeline
@@ -448,13 +675,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
  {
     struct kk_shader *shader = container_of(vk_shader, struct kk_shader, vk);
  
-@@ -6898,38 +6999,41 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
-       blob_write_uint64(blob, shader->deferred_nir.size);
-       blob_write_bytes(blob, shader->deferred_nir.data,
-                        shader->deferred_nir.size);
-+      blob_write_uint8(blob, shader->deferred_content_valid);
-+      blob_write_bytes(blob, shader->deferred_content_hash,
-+                       sizeof(shader->deferred_content_hash));
+@@ -6901,35 +7064,35 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
        return !blob->out_of_memory;
     }
  
@@ -500,7 +721,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
                 return false;
           }
        }
-@@ -6938,50 +7042,41 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
+@@ -6938,67 +7101,266 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
     return !blob->out_of_memory;
  }
  
@@ -556,9 +777,222 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
  kk_msl_deserialize(struct blob_reader *blob, mesa_shader_stage stage,
 -                   struct kk_shader *shader)
 +                   struct kk_shader *shader, struct kk_msl_pool *pool)
++{
++   return kk_msl_data_deserialize(blob, &shader->msl_data[stage], pool);
++}
++
++/* What a stored shader's description (struct kk_shader_info) may hold.  The
++ * description is copied out of the blob as it is, and its fields then size
++ * loops, index arrays and fill Metal descriptors: the destructor walks the
++ * stage and raster-class masks, a draw copies as many geometry indices as the
++ * description says, and Metal aborts the process on a descriptor it finds
++ * invalid.  The blob may come from a pipeline cache a guest wrote or from a
++ * file on disk, so a value that no writer wrote is refused here, before the
++ * description is used for anything.
++ *
++ * `allow_children` is false for a shader that a vertex shader holds as one of
++ * its raster variants, which holds none of its own. */
++
++/* The pixel formats a colour attachment of a render pipeline can have: those
++ * of the formats the driver offers as colour attachments. */
++#define KK_ATTACHMENT_PIXEL_FORMAT_LIMIT 1024
++static once_flag kk_attachment_formats_once = ONCE_FLAG_INIT;
++static BITSET_WORD
++   kk_attachment_formats[BITSET_WORDS(KK_ATTACHMENT_PIXEL_FORMAT_LIMIT)];
++
++static void
++kk_attachment_formats_init(void)
++{
++   for (unsigned format = 0; format < PIPE_FORMAT_COUNT; format++) {
++      const struct kk_va_format *va_format = kk_get_va_format(format);
++      /* A8 is not offered as an attachment (kk_get_image_format_features). */
++      if (va_format != NULL && va_format->color &&
++          va_format->mtl_pixel_format != MTL_PIXEL_FORMAT_A8_UNORM &&
++          va_format->mtl_pixel_format < KK_ATTACHMENT_PIXEL_FORMAT_LIMIT)
++         BITSET_SET(kk_attachment_formats, va_format->mtl_pixel_format);
++   }
++}
++
++static bool
++kk_attachment_pixel_format_is_valid(uint32_t format)
++{
++   call_once(&kk_attachment_formats_once, kk_attachment_formats_init);
++   return format < KK_ATTACHMENT_PIXEL_FORMAT_LIMIT &&
++          BITSET_TEST(kk_attachment_formats, format);
++}
++
++static bool
++kk_vertex_format_is_valid(uint32_t format)
++{
++   return (format >= MTL_VERTEX_FORMAT_UCHAR2 &&
++           format <= MTL_VERTEX_FORMAT_UINT_1010102_NORMALIZED) ||
++          (format >= MTL_VERTEX_FORMAT_UCHAR &&
++           format <= MTL_VERTEX_FORMAT_FLOAT_RGB9E5);
++}
++
++/* The geometry stage's description of the draw it emulates.  The writer takes
++ * its mode from the output primitive of the geometry shader (or its
++ * decomposition), a shape poly_nir_lower_gs chose, one count word per vertex
++ * stream at most, and a number of indices that is the shader's output vertex
++ * count (at most maxGeometryOutputVertices, 1024) plus the restarts of the
++ * primitives, 1536 in the worst case.  A draw sizes buffers with these in 32
++ * bits and copies the static topology of a static-indexed output into an array
++ * of the topology's size, as many indices as the description says. */
++#define KK_GS_MAX_INDICES 2048
++
++static bool
++kk_gs_info_is_valid(const struct poly_gs_info *gsi)
  {
 -   return kk_msl_data_deserialize(blob, &shader->msl_data[stage]);
-+   return kk_msl_data_deserialize(blob, &shader->msl_data[stage], pool);
++   if ((unsigned)gsi->mode >= MESA_PRIM_PATCHES ||
++       (unsigned)gsi->shape > POLY_GS_SHAPE_STATIC_PER_INSTANCE ||
++       gsi->count_words > POLY_MAX_VERTEX_STREAMS ||
++       gsi->max_indices > KK_GS_MAX_INDICES)
++      return false;
++   return gsi->shape != POLY_GS_SHAPE_STATIC_INDEXED ||
++          gsi->max_indices <= ARRAY_SIZE(gsi->topology);
++}
++
++static bool
++kk_shader_info_is_valid(struct kk_device *dev, const struct kk_shader_info *info,
++                        bool allow_children)
++{
++   if ((unsigned)info->stage >= MESA_SHADER_STAGES)
++      return false;
++   if (info->stage != MESA_SHADER_VERTEX)
++      return true;
++
++   /* The class a variant twin is looked up by. */
++   if ((unsigned)info->vs.raster_variant_class >= KK_RASTER_VARIANT_COUNT)
++      return false;
++
++   /* The raster classes the vertex shader owns, and the stages of each. */
++   if (info->vs.raster_variant_mask) {
++      const uint32_t graphics_stages = BITFIELD_MASK(MESA_SHADER_FRAGMENT + 1);
++      if (!allow_children || info->deferred ||
++          (info->vs.raster_variant_mask &
++           ~BITFIELD_MASK(KK_RASTER_VARIANT_COUNT)) ||
++          !(info->vs.raster_variant_mask &
++            BITFIELD_BIT(info->vs.raster_variant_class)) ||
++          (info->vs.raster_variant_stages & ~graphics_stages) ||
++          !(info->vs.raster_variant_stages & BITFIELD_BIT(MESA_SHADER_VERTEX)))
++         return false;
++   }
++
++   /* The stages stored after the vertex shader, which the writer sets for the
++    * stages of the pipeline besides the vertex shader, in a pipeline that has
++    * a fragment shader (the render pipeline needs one) and whose tessellation
++    * stages come together.  A deferred shader has stored none.  The count of
++    * the bits is what the vertex shader's pre-render pipelines are sized by
++    * (three at most) and the bits themselves index its MSL. */
++   const uint32_t stage_bits = info->vs.additional_stages_bits;
++   if (info->deferred)
++      return stage_bits == 0 && info->vs.raster_variant_mask == 0;
++
++   const uint32_t tess_bits = BITFIELD_BIT(MESA_SHADER_TESS_CTRL) |
++                              BITFIELD_BIT(MESA_SHADER_TESS_EVAL);
++   const uint32_t allowed_bits = tess_bits |
++                                 BITFIELD_BIT(MESA_SHADER_GEOMETRY) |
++                                 BITFIELD_BIT(MESA_SHADER_FRAGMENT);
++   if ((stage_bits & ~allowed_bits) ||
++       !(stage_bits & BITFIELD_BIT(MESA_SHADER_FRAGMENT)) ||
++       ((stage_bits & tess_bits) != 0 && (stage_bits & tess_bits) != tess_bits))
++      return false;
++
++   /* The records a draw reads. */
++   if (!kk_gs_info_is_valid(&info->vs.geometry) ||
++       !kk_gs_info_is_valid(&info->vs.transform_feedback))
++      return false;
++
++   /* The primitives a draw decomposes by (a table lookup per primitive). */
++   if ((unsigned)info->vs.raster_primitive >= MESA_PRIM_COUNT ||
++       (unsigned)info->vs.line_raster_prim >= MESA_PRIM_COUNT)
++      return false;
++
++   /* The sample count of the render pipeline and of the pass a draw starts
++    * for it: one without a multisample state, otherwise one the device
++    * offers. */
++   if (info->vs.has_ms) {
++      const VkSampleCountFlags offered =
++         kk_device_physical(dev)->supported_sample_counts;
++      if (!util_is_power_of_two_nonzero(info->vs.sample_count) ||
++          info->vs.sample_count > KK_MAX_SAMPLES ||
++          !(offered & info->vs.sample_count))
++         return false;
++   } else if (info->vs.sample_count != 1) {
++      return false;
++   }
++
++   /* What reaches a Metal descriptor, which aborts the process on a value it
++    * does not take. */
++   if ((unsigned)info->vs.topology > MTL_PRIMITIVE_TOPOLOGY_CLASS_TRIANGLE)
++      return false;
++
++   for (uint32_t i = 0; i < MAX_DRAW_BUFFERS; i++) {
++      if (info->vs.rt_formats[i] != MTL_PIXEL_FORMAT_INVALID &&
++          !kk_attachment_pixel_format_is_valid(info->vs.rt_formats[i]))
++         return false;
++   }
++
++   if (info->vs.view_mask != 0 &&
++       !mtl_device_supports_vertex_amplification_count(
++          dev->mtl_handle, util_bitcount(info->vs.view_mask)))
++      return false;
++
++   if ((unsigned)info->vs.depth_compare_op > VK_COMPARE_OP_ALWAYS)
++      return false;
++#define KK_STENCIL_STATE_IS_VALID(state)                                       \
++   ((state).depth_fail <= VK_STENCIL_OP_DECREMENT_AND_WRAP &&                  \
++    (state).fail <= VK_STENCIL_OP_DECREMENT_AND_WRAP &&                        \
++    (state).pass <= VK_STENCIL_OP_DECREMENT_AND_WRAP &&                        \
++    (state).compare <= VK_COMPARE_OP_ALWAYS)
++   if (!KK_STENCIL_STATE_IS_VALID(info->vs.stencil_front) ||
++       !KK_STENCIL_STATE_IS_VALID(info->vs.stencil_back))
++      return false;
++#undef KK_STENCIL_STATE_IS_VALID
++
++   if (info->vs.metal_vertex_fetch) {
++      /* The attribute and buffer indices are those of Metal's argument table
++       * and vertex descriptor, which hold KK_MAX_NATIVE_VERTEX_ATTRIBS
++       * attributes and KK_MAX_NATIVE_VBUFS buffers after the fixed ones. */
++      const uint32_t buffers = info->vs.vertex_buffers_used;
++      if (buffers & ~BITFIELD_MASK(KK_MAX_NATIVE_VBUFS))
++         return false;
++
++      for (uint32_t i = 0; i < KK_MAX_ATTRIBS; i++) {
++         if (info->vs.vertex_attributes[i].format == MTL_VERTEX_FORMAT_INVALID)
++            continue;
++         if (i >= KK_MAX_NATIVE_VERTEX_ATTRIBS ||
++             !kk_vertex_format_is_valid(info->vs.vertex_attributes[i].format) ||
++             info->vs.vertex_attributes[i].buffer >= KK_MAX_NATIVE_VBUFS ||
++             !(buffers & BITFIELD_BIT(info->vs.vertex_attributes[i].buffer)))
++            return false;
++      }
++
++      /* A constant step takes a rate of zero and a per-vertex one a rate of
++       * one (kk_gather_metal_vertex_fetch). */
++      u_foreach_bit(b, buffers) {
++         const uint32_t rate = info->vs.vertex_layouts[b].step_rate;
++         switch (info->vs.vertex_layouts[b].step) {
++         case MTL_VERTEX_STEP_FUNCTION_CONSTANT:
++            if (rate != 0)
++               return false;
++            break;
++         case MTL_VERTEX_STEP_FUNCTION_PER_VERTEX:
++            if (rate != 1)
++               return false;
++            break;
++         case MTL_VERTEX_STEP_FUNCTION_PER_INSTANCE:
++            if (rate == 0)
++               return false;
++            break;
++         default:
++            return false;
++         }
++      }
++   }
++
++   return true;
  }
  
  static VkResult
@@ -567,21 +1001,41 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
                        const VkAllocationCallbacks *pAllocator,
 -                      struct vk_shader **shader_out, bool allow_line_variant)
 +                      struct vk_shader **shader_out, bool allow_line_variant,
-+                      struct kk_msl_pool *pool)
++                      struct kk_msl_pool *pool, bool *bad_info)
  {
     struct kk_device *dev = container_of(vk_dev, struct kk_device, vk);
  
-@@ -7031,56 +7126,64 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
+    struct kk_shader_info info;
+    blob_copy_bytes(blob, &info, sizeof(info));
+-   if (blob->overrun || (unsigned)info.stage >= MESA_SHADER_STAGES)
++   if (blob->overrun)
+       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+ 
+-   if (info.stage == MESA_SHADER_VERTEX && info.vs.raster_variant_mask) {
+-      const uint32_t graphics_stages = BITFIELD_MASK(MESA_SHADER_FRAGMENT + 1);
+-      if (!allow_line_variant || info.deferred ||
+-          (unsigned)info.vs.raster_variant_class >= KK_RASTER_VARIANT_COUNT ||
+-          (info.vs.raster_variant_mask & ~BITFIELD_MASK(KK_RASTER_VARIANT_COUNT)) ||
+-          !(info.vs.raster_variant_mask & BITFIELD_BIT(info.vs.raster_variant_class)) ||
+-          (info.vs.raster_variant_stages & ~graphics_stages) ||
+-          !(info.vs.raster_variant_stages & BITFIELD_BIT(MESA_SHADER_VERTEX)))
+-         return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
++   if (!kk_shader_info_is_valid(dev, &info, allow_line_variant)) {
++      if (bad_info != NULL)
++         *bad_info = true;
++      return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+    }
+ 
+    struct kk_shader *shader = vk_shader_zalloc(
+@@ -7031,56 +7393,62 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
           goto fail;
        }
  
-+      shader->deferred_content_valid = blob_read_uint8(blob) == 1;
-+      blob_copy_bytes(blob, shader->deferred_content_hash,
-+                      sizeof(shader->deferred_content_hash));
-+      if (blob->overrun) {
-+         result = VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
-+         goto fail;
-+      }
++      /* What the NIR computes is not in the blob: it is taken from the NIR
++       * when the disk cache of the variants asks for it
++       * (kk_deferred_content_hash_from_nir), because a value that came with
++       * the bytes is only what the writer of the bytes says it is. */
++      shader->deferred_content_valid = false;
 +
        *shader_out = &shader->vk;
        return VK_SUCCESS;
@@ -644,22 +1098,22 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
           if (result != VK_SUCCESS)
              goto fail;
        }
-@@ -7090,7 +7193,8 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
+@@ -7090,7 +7458,8 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
           u_foreach_bit(stage, shader->info.vs.raster_variant_stages) {
              struct vk_shader *child = NULL;
              result = kk_deserialize_shader_impl(vk_dev, blob, binary_version,
 -                                                pAllocator, &child, false);
 +                                                pAllocator, &child, false,
-+                                                pool);
++                                                pool, bad_info);
              if (result != VK_SUCCESS)
                 goto fail;
              struct kk_shader *raster = container_of(child, struct kk_shader, vk);
-@@ -7135,7 +7239,468 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+@@ -7135,7 +7504,592 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
                        struct vk_shader **shader_out)
  {
     return kk_deserialize_shader_impl(vk_dev, blob, binary_version, pAllocator,
 -                                     shader_out, true);
-+                                     shader_out, true, NULL);
++                                     shader_out, true, NULL, NULL);
 +}
 +
 +/* The variants of dynamic vertex-input pipelines, kept on disk.
@@ -960,10 +1414,95 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
 +   }
 +}
 +
++/* What a variant loaded for `parent` must agree with the parent on: the stages
++ * of the pipeline, and the raster classes its vertex shader owns, which the
++ * parent's own state decides (kk_compile_shaders_impl).  A shader that owns
++ * classes the draw would not look for, or that lacks one it would, is not a
++ * variant of this parent whatever its key says. */
++static bool
++kk_loaded_variant_matches_parent(
++   const struct kk_linked_graphics_pipeline *parent,
++   const struct kk_shader *vertex, uint32_t parent_stages)
++{
++   const struct vk_graphics_pipeline_state *parent_state =
++      &parent->dynamic.state;
++   struct vk_input_assembly_state ia = *parent_state->ia;
++   if (BITSET_TEST(parent_state->dynamic, MESA_VK_DYNAMIC_IA_PRIMITIVE_TOPOLOGY))
++      ia.primitive_topology = kk_vk_topology_class(ia.primitive_topology);
++   struct vk_graphics_pipeline_state canonical = *parent_state;
++   canonical.ia = &ia;
++
++   const bool fixed_primitive =
++      (parent_stages & (BITFIELD_BIT(MESA_SHADER_TESS_EVAL) |
++                        BITFIELD_BIT(MESA_SHADER_GEOMETRY))) != 0;
++   /* The final primitive of a pipeline with a tessellation or geometry shader
++    * is the shader's own, which only the shader says. */
++   const enum mesa_prim primitive =
++      fixed_primitive ? vertex->info.vs.raster_primitive
++                      : vk_topology_to_mesa(ia.primitive_topology);
++   if (vertex->info.vs.raster_primitive != primitive)
++      return false;
++
++   const uint32_t mask =
++      kk_raster_variant_mask(&canonical, primitive, fixed_primitive);
++   if (mask == 0 || vertex->info.vs.raster_variant_class != ffs(mask) - 1)
++      return false;
++
++   /* The writer stores the set of classes only when there is more than one. */
++   if (util_bitcount(mask) == 1) {
++      return vertex->info.vs.raster_variant_mask == 0 &&
++             vertex->info.vs.raster_variant_stages == 0;
++   }
++   return vertex->info.vs.raster_variant_mask == mask &&
++          vertex->info.vs.raster_variant_stages == parent_stages;
++}
++
++/* Whether a variant's shaders are ones the loader takes back: each shader's
++ * description is one the deserializer accepts and the variant agrees with its
++ * parent.  A variant that fails is not stored; its entry would only be read,
++ * refused and removed by every run after it. */
++static bool
++kk_variant_is_loadable(struct kk_device *dev,
++                       const struct kk_linked_graphics_pipeline *parent,
++                       const struct kk_linked_graphics_pipeline *variant)
++{
++   uint32_t parent_stages = 0;
++   for (uint32_t i = 0; i < parent->dynamic.shader_count; i++)
++      parent_stages |= BITFIELD_BIT(parent->dynamic.sources[i].stage);
++
++   uint32_t stages = 0;
++   for (uint32_t stage = 0; stage < MESA_SHADER_STAGES; stage++) {
++      const struct kk_shader *shader = variant->shaders[stage];
++      if (shader == NULL)
++         continue;
++      stages |= BITFIELD_BIT(stage);
++      if (shader->info.stage != stage || shader->info.deferred ||
++          !kk_shader_info_is_valid(dev, &shader->info, true))
++         return false;
++
++      for (uint32_t raster = 0; raster < KK_RASTER_VARIANT_COUNT; raster++) {
++         for (uint32_t child_stage = 0; child_stage < MESA_SHADER_STAGES;
++              child_stage++) {
++            const struct kk_shader *child =
++               shader->raster_variant_shaders[raster][child_stage];
++            if (child != NULL &&
++                !kk_shader_info_is_valid(dev, &child->info, false))
++               return false;
++         }
++      }
++   }
++
++   const struct kk_shader *vertex = variant->shaders[MESA_SHADER_VERTEX];
++   return stages == parent_stages && vertex != NULL &&
++          !vertex->info.vs.metal_vertex_fetch &&
++          kk_loaded_variant_matches_parent(parent, vertex, parent_stages);
++}
++
 +/* Stores a variant that was just translated.  The texts go first, so that the
 + * descriptor never names a text that was not queued before it. */
 +static void
 +kk_variant_cache_store(struct kk_device *dev,
++                       const struct kk_linked_graphics_pipeline *parent,
 +                       struct kk_linked_graphics_pipeline *variant,
 +                       const blake3_hash key)
 +{
@@ -971,6 +1510,11 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
 +   struct kk_variant_cache *cache = pdev->variant_cache;
 +   struct kk_instance *instance = kk_physical_device_instance(pdev);
 +   const uint64_t start = os_time_get_nano();
++
++   if (!kk_variant_is_loadable(dev, parent, variant)) {
++      kk_variant_log("skip", key, 0, 0, 0, "not loadable");
++      return;
++   }
 +
 +   kk_pack_variant_msl(variant);
 +
@@ -1033,11 +1577,14 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
 +   vk_free(&dev->vk.alloc, variant);
 +}
 +
-+/* Whether a variant was found on disk and built from it.  An entry that is
-+ * not what its key names, that holds what no writer wrote, or that Metal
-+ * cannot build, counts as absent, and the variant is translated again. */
++/* Whether a variant of `parent` was found on disk and built from it.  An
++ * entry that is not what its key names, that holds what no writer wrote or
++ * what is not a variant of this parent, or that Metal cannot build, counts as
++ * absent, and the variant is translated again. */
 +static bool
-+kk_variant_cache_load(struct kk_device *dev, const blake3_hash key,
++kk_variant_cache_load(struct kk_device *dev,
++                      const struct kk_linked_graphics_pipeline *parent,
++                      const blake3_hash key,
 +                      struct kk_linked_graphics_pipeline **variant_out)
 +{
 +   struct kk_physical_device *pdev = kk_device_physical(dev);
@@ -1054,6 +1601,10 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
 +      return false;
 +   }
 +
++   uint32_t parent_stages = 0;
++   for (uint32_t i = 0; i < parent->dynamic.shader_count; i++)
++      parent_stages |= BITFIELD_BIT(parent->dynamic.sources[i].stage);
++
 +   struct kk_msl_pool pool;
 +   kk_msl_pool_init(&pool, &kk_variant_disk_ops, cache);
 +   struct kk_linked_graphics_pipeline *variant = NULL;
@@ -1064,6 +1615,12 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
 +      &payload, &count);
 +   if (status != KK_VARIANT_OK)
 +      goto invalid;
++
++   /* A variant has the stages of its parent and one frame for each. */
++   if (count != parent->dynamic.shader_count) {
++      status = KK_VARIANT_BAD_COUNT;
++      goto invalid;
++   }
 +
 +   variant = vk_zalloc(&dev->vk.alloc, sizeof(*variant), 8,
 +                       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
@@ -1079,16 +1636,18 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
 +                                                &stage, &shader_reader);
 +      if (status != KK_VARIANT_OK)
 +         goto invalid;
-+      if (variant->shaders[stage] != NULL) {
++      if (!(parent_stages & BITFIELD_BIT(stage)) ||
++          variant->shaders[stage] != NULL) {
 +         status = KK_VARIANT_BAD_STAGE;
 +         goto invalid;
 +      }
 +
 +      struct vk_shader *loaded = NULL;
++      bool bad_info = false;
 +      if (kk_deserialize_shader_impl(&dev->vk, &shader_reader, 0,
-+                                     &dev->vk.alloc, &loaded, true,
-+                                     &pool) != VK_SUCCESS) {
-+         status = KK_VARIANT_BAD_TEXT;
++                                     &dev->vk.alloc, &loaded, true, &pool,
++                                     &bad_info) != VK_SUCCESS) {
++         status = bad_info ? KK_VARIANT_BAD_INFO : KK_VARIANT_BAD_TEXT;
 +         goto invalid;
 +      }
 +      struct kk_shader *shader = container_of(loaded, struct kk_shader, vk);
@@ -1097,12 +1656,31 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
 +         status = KK_VARIANT_BAD_STAGE;
 +         goto invalid;
 +      }
++
++      /* The shader is all of its frame. */
++      if (shader_reader.current != shader_reader.end) {
++         status = KK_VARIANT_BAD_SIZE;
++         goto invalid;
++      }
 +   }
 +   status = kk_variant_descriptor_close(&payload);
 +   if (status != KK_VARIANT_OK)
 +      goto invalid;
++
++   /* The parent has a vertex shader (a variant is made of its vertex input),
++    * and so has every variant of it. */
 +   if (variant->shaders[MESA_SHADER_VERTEX] == NULL) {
 +      status = KK_VARIANT_BAD_STAGE;
++      goto invalid;
++   }
++
++   /* A variant of a dynamic vertex-input pipeline fetches its vertices through
++    * the driver's own lowering, never through Metal's vertex descriptor
++    * (kk_vertex_input_is_metal_expressible refuses the dynamic state). */
++   const struct kk_shader *vertex = variant->shaders[MESA_SHADER_VERTEX];
++   if (vertex->info.vs.metal_vertex_fetch ||
++       !kk_loaded_variant_matches_parent(parent, vertex, parent_stages)) {
++      status = KK_VARIANT_BAD_INFO;
 +      goto invalid;
 +   }
 +
@@ -1124,7 +1702,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
  }
  
  void
-@@ -7240,10 +7805,21 @@ kk_resolve_dynamic_vertex_input_pipeline(struct kk_cmd_buffer *cmd)
+@@ -7240,10 +8194,22 @@ kk_resolve_dynamic_vertex_input_pipeline(struct kk_cmd_buffer *cmd)
  
     if (variant == NULL) {
        struct kk_linked_graphics_pipeline *candidate = NULL;
@@ -1134,7 +1712,8 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
 -         return result;
 +      blake3_hash disk_key;
 +      const bool on_disk = kk_variant_disk_key(dev, linked, key, disk_key);
-+      if (!on_disk || !kk_variant_cache_load(dev, disk_key, &candidate)) {
++      if (!on_disk ||
++          !kk_variant_cache_load(dev, linked, disk_key, &candidate)) {
 +         const uint64_t start = os_time_get_nano();
 +         VkResult result = kk_compile_dynamic_vertex_input_variant(
 +            dev, linked, vi, byte_strides, &candidate);
@@ -1145,13 +1724,28 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f0192644
 +                        (os_time_get_nano() - start) / 1000, 0,
 +                        linked->dynamic.shader_count, NULL);
 +         if (on_disk)
-+            kk_variant_cache_store(dev, candidate, disk_key);
++            kk_variant_cache_store(dev, linked, candidate, disk_key);
 +      }
  
        memcpy(candidate->key, key, sizeof(candidate->key));
        kk_variant_drop_msl(candidate, linked, vi, byte_strides);
+@@ -7297,8 +8263,12 @@ kk_cmd_select_line_raster_variant(struct kk_cmd_buffer *cmd)
+    if (owner->info.vs.raster_variant_mask) {
+       const enum kk_raster_variant variant =
+          kk_raster_variant_select(primitive, &dyn->rs);
+-      assert(owner->info.vs.raster_variant_mask & BITFIELD_BIT(variant));
+-      if (variant != owner->info.vs.raster_variant_class) {
++      /* The classes a shader owns are what its pipeline reaches; a shader read
++       * back from a guest's pipeline cache is only checked to own its own
++       * class.  A class it does not own keeps the owner's own shaders: never
++       * one that is not there. */
++      if (variant != owner->info.vs.raster_variant_class &&
++          (owner->info.vs.raster_variant_mask & BITFIELD_BIT(variant))) {
+          u_foreach_bit(stage, owner->info.vs.raster_variant_stages)
+             selected[stage] = owner->raster_variant_shaders[variant][stage];
+       }
 diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
-index f817df5a6789d8e388e7b4c8878e7cf1b61e73d6..ac83dfb6e8a8500aa1f45b564c6c0e915dd70826 100644
+index f817df5a6789d8e388e7b4c8878e7cf1b61e73d6..6135f56a37c13415016c1cebf6575268218ea272 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.h
 +++ b/src/kosmickrisp/vulkan/kk_shader.h
 @@ -23,6 +23,8 @@
@@ -1163,18 +1757,31 @@ index f817df5a6789d8e388e7b4c8878e7cf1b61e73d6..ac83dfb6e8a8500aa1f45b564c6c0e91
  #include "util/u_dynarray.h"
  
  struct kk_cmd_buffer;
-@@ -245,6 +247,10 @@ struct kk_shader {
+@@ -221,8 +223,8 @@ struct kk_pipeline_handles {
+ 
+ /* Layout of a serialized shader, in the pipeline cache identity: a blob of
+  * another layout is not offered to this driver.  2: MSL is serialized
+- * compressed. */
+-#define KK_SHADER_BINARY_FORMAT 2
++ * compressed.  3: a deferred shader holds no content hash. */
++#define KK_SHADER_BINARY_FORMAT 3
+ 
+ /* A Metal render pipeline trimmed to the colour attachments a render pass
+  * bound.  Only VK_EXT_dynamic_rendering_unused_attachments can bind fewer
+@@ -245,6 +247,12 @@ struct kk_shader {
                                              [MESA_SHADER_STAGES];
     struct vk_pipeline_robustness_state deferred_robustness;
     struct blob deferred_nir;
 +   /* What the deferred NIR computes (kk_nir_content_hash), the identity of the
-+    * shader the disk cache of its variants goes by. */
++    * shader the disk cache of its variants goes by.  Only a shader this driver
++    * compiled has it: one read back from a blob is not valid until it is taken
++    * again from its NIR. */
 +   bool deferred_content_valid;
 +   blake3_hash deferred_content_hash;
     /* MSL sources this shader registered in the device's MTLLibrary cache when
      * it was created as a graphics pipeline library, by stage.  A link that
      * regenerates the same source finds Metal's front-end compile already done.
-@@ -344,4 +350,19 @@ void kk_cmd_select_line_raster_variant(struct kk_cmd_buffer *cmd);
+@@ -344,4 +352,19 @@ void kk_cmd_select_line_raster_variant(struct kk_cmd_buffer *cmd);
  VkResult
  kk_resolve_dynamic_vertex_input_pipeline(struct kk_cmd_buffer *cmd);
  
@@ -1196,10 +1803,10 @@ index f817df5a6789d8e388e7b4c8878e7cf1b61e73d6..ac83dfb6e8a8500aa1f45b564c6c0e91
  #endif /* KK_SHADER_H */
 diff --git a/src/kosmickrisp/vulkan/kk_variant_entry.c b/src/kosmickrisp/vulkan/kk_variant_entry.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..86fe75286f28eaeff2dffae7137077d0bbb4bfd3
+index 0000000000000000000000000000000000000000..bb910cf2590d0e0bab0a6faea1af748bce15d2dd
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/kk_variant_entry.c
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,408 @@
 +/*
 + * Copyright 2026 Google LLC
 + * SPDX-License-Identifier: MIT
@@ -1269,6 +1876,8 @@ index 0000000000000000000000000000000000000000..86fe75286f28eaeff2dffae7137077d0
 +      return "stage";
 +   case KK_VARIANT_BAD_TEXT:
 +      return "text";
++   case KK_VARIANT_BAD_INFO:
++      return "info";
 +   case KK_VARIANT_NO_MEMORY:
 +      return "memory";
 +   }
@@ -1292,6 +1901,7 @@ index 0000000000000000000000000000000000000000..86fe75286f28eaeff2dffae7137077d0
 +   free(pool->held);
 +   pool->held = NULL;
 +   pool->held_count = pool->held_capacity = 0;
++   pool->held_bytes = 0;
 +}
 +
 +void
@@ -1402,6 +2012,11 @@ index 0000000000000000000000000000000000000000..86fe75286f28eaeff2dffae7137077d0
 +      return status;
 +   }
 +
++   if (header.stored_size > KK_VARIANT_MAX_LOAD_TEXT_BYTES - pool->held_bytes) {
++      free(entry);
++      return KK_VARIANT_BAD_SIZE;
++   }
++
 +   if (pool->held_count == pool->held_capacity) {
 +      const uint32_t capacity = pool->held_capacity ? pool->held_capacity * 2 : 16;
 +      void **held = realloc(pool->held, capacity * sizeof(*held));
@@ -1413,6 +2028,7 @@ index 0000000000000000000000000000000000000000..86fe75286f28eaeff2dffae7137077d0
 +      pool->held_capacity = capacity;
 +   }
 +   pool->held[pool->held_count++] = entry;
++   pool->held_bytes += header.stored_size;
 +
 +   *codec = header.codec;
 +   *code_size = header.code_size;
@@ -1601,10 +2217,10 @@ index 0000000000000000000000000000000000000000..86fe75286f28eaeff2dffae7137077d0
 +}
 diff --git a/src/kosmickrisp/vulkan/kk_variant_entry.h b/src/kosmickrisp/vulkan/kk_variant_entry.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..21e1396761bf65611ab7380b0c1827a13671d31a
+index 0000000000000000000000000000000000000000..16eb8f6ab8c36c1ae882db5752042e2a17413aa8
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/kk_variant_entry.h
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,191 @@
 +/*
 + * Copyright 2026 Google LLC
 + * SPDX-License-Identifier: MIT
@@ -1651,6 +2267,12 @@ index 0000000000000000000000000000000000000000..21e1396761bf65611ab7380b0c1827a1
 +/* The most a descriptor may hold; the real ones are a few KiB. */
 +#define KK_VARIANT_MAX_DESCRIPTOR_SIZE (16u << 20)
 +
++/* The most stored text one load may hold at once.  A descriptor names a text
++ * once for each reference, and a reference holds its own copy, so without a
++ * bound a descriptor of 16 MiB could make a load read many gigabytes.  The real
++ * variants hold well under a tenth of this. */
++#define KK_VARIANT_MAX_LOAD_TEXT_BYTES (64u << 20)
++
 +enum kk_variant_status {
 +   KK_VARIANT_OK = 0,
 +   /* Shorter than its header. */
@@ -1671,6 +2293,8 @@ index 0000000000000000000000000000000000000000..21e1396761bf65611ab7380b0c1827a1
 +   KK_VARIANT_BAD_STAGE,
 +   /* A text the descriptor names is missing or is not that text. */
 +   KK_VARIANT_BAD_TEXT,
++   /* A shader's own description holds a value no writer wrote. */
++   KK_VARIANT_BAD_INFO,
 +   KK_VARIANT_NO_MEMORY,
 +};
 +
@@ -1697,6 +2321,8 @@ index 0000000000000000000000000000000000000000..21e1396761bf65611ab7380b0c1827a1
 +   void **held;
 +   uint32_t held_count;
 +   uint32_t held_capacity;
++   /* The stored bytes of the texts held (KK_VARIANT_MAX_LOAD_TEXT_BYTES). */
++   uint64_t held_bytes;
 +   /* A text could not be stored for lack of memory. */
 +   bool failed;
 +};
@@ -1718,7 +2344,9 @@ index 0000000000000000000000000000000000000000..21e1396761bf65611ab7380b0c1827a1
 +/* Finds the text of the name.  The bytes stay valid until the pool is
 + * finished.  A text that is there but is not what its name says, or whose
 + * header cannot be what any writer wrote, is removed from the store so that
-+ * the next writer puts it back, and reported. */
++ * the next writer puts it back, and reported.  A text that would take the
++ * pool past its byte bound is reported as a bad size and left in the store: it
++ * is the descriptor that names too many. */
 +enum kk_variant_status
 +kk_msl_pool_get(struct kk_msl_pool *pool, const blake3_hash name,
 +                uint8_t *codec, uint32_t *code_size, const void **bytes,
@@ -1785,7 +2413,7 @@ index 0000000000000000000000000000000000000000..21e1396761bf65611ab7380b0c1827a1
 +
 +#endif /* KK_VARIANT_ENTRY_H */
 diff --git a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
-index a56c9d68c7c245d896c999cc7e378c56584e295d..843b2e5d4c99e8ff0c5aebe04fc4b52e8bc9f104 100644
+index a56c9d68c7c245d896c999cc7e378c56584e295d..18364786043374ea97cad2568fe4e560555a0c9b 100644
 --- a/src/kosmickrisp/vulkan/meson.build
 +++ b/src/kosmickrisp/vulkan/meson.build
 @@ -127,6 +127,8 @@ kk_files = files(
@@ -1797,7 +2425,7 @@ index a56c9d68c7c245d896c999cc7e378c56584e295d..843b2e5d4c99e8ff0c5aebe04fc4b52e
    'kk_sync.h',
    'kk_sync.c',
    'kk_wsi.h',
-@@ -502,6 +504,10 @@ if with_tests
+@@ -502,6 +504,13 @@ if with_tests
        ['dynamic_vertex_input_cache', ['test_dynamic_vertex_input_cache.cpp',
                                        'dynamic_vertex_input_cache_state.c'],
         120, [], []],
@@ -1805,10 +2433,13 @@ index a56c9d68c7c245d896c999cc7e378c56584e295d..843b2e5d4c99e8ff0c5aebe04fc4b52e
 +                              'dynamic_vertex_input_cache_state.c',
 +                              'variant_disk_cache_state.c'],
 +       600, [idep_mesautil, dep_thread], []],
++      ['descriptor_layout_hash', ['test_descriptor_layout_hash.cpp',
++                                  'descriptor_layout_hash_state.c'],
++       60, [], []],
        ['line_raster_cache', ['test_line_raster_cache.cpp',
                               'line_raster_cache_state.m'],
         120, [kk_metal_frameworks], ['-Wno-unused-function']],
-@@ -685,6 +691,8 @@ if with_tests
+@@ -685,6 +694,8 @@ if with_tests
      ['image_extent', ['kk_image_extent.c']],
      ['linear_layout', []],
      ['msl_pack', ['kk_msl_pack.c'], [idep_mesautil, kk_compression_dep]],
@@ -1817,12 +2448,185 @@ index a56c9d68c7c245d896c999cc7e378c56584e295d..843b2e5d4c99e8ff0c5aebe04fc4b52e
    ]
      test(
        'kosmickrisp_' + kk_source_test[0],
+diff --git a/src/kosmickrisp/vulkan/tests/descriptor_layout_hash_state.c b/src/kosmickrisp/vulkan/tests/descriptor_layout_hash_state.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef225382b5612243ad5935d072d836d46778c5c4
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/descriptor_layout_hash_state.c
+@@ -0,0 +1,18 @@
++/*
++ * Copyright 2026 Google LLC
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "descriptor_layout_hash_state.h"
++
++#include <string.h>
++
++#include "kosmickrisp/vulkan/kk_descriptor_set_layout.h"
++
++void
++kk_test_set_layout_hash(VkDescriptorSetLayout layout, uint8_t hash[32])
++{
++   const struct kk_descriptor_set_layout *set_layout =
++      kk_descriptor_set_layout_from_handle(layout);
++   memcpy(hash, set_layout->vk.blake3, 32);
++}
+diff --git a/src/kosmickrisp/vulkan/tests/descriptor_layout_hash_state.h b/src/kosmickrisp/vulkan/tests/descriptor_layout_hash_state.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..648ed51cac3151b075ef046bc78e13d99067947e
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/descriptor_layout_hash_state.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: MIT */
++#pragma once
++
++#include <stdint.h>
++
++#include <vulkan/vulkan.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* The hash the driver gives a descriptor set layout: what the variants kept
++ * on disk name their layouts by. */
++void kk_test_set_layout_hash(VkDescriptorSetLayout layout, uint8_t hash[32]);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/kosmickrisp/vulkan/tests/test_descriptor_layout_hash.cpp b/src/kosmickrisp/vulkan/tests/test_descriptor_layout_hash.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..07324355f9033e6648bff0acafd24ace99908cb5
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/test_descriptor_layout_hash.cpp
+@@ -0,0 +1,119 @@
++/*
++ * Copyright 2026 Google LLC
++ * SPDX-License-Identifier: MIT
++ *
++ * The variants of a dynamic vertex-input pipeline kept on disk name the
++ * descriptor set layouts they were compiled against by the layouts' hashes, so
++ * what the compile reads of a layout has to be in its hash.  An immutable
++ * sampler's flags are read: the non-seamless cube choice of the sampler a
++ * binding holds changes the MSL.  Two layouts that differ only in having
++ * immutable samplers, or in one flag of one, must not hash alike, and two that
++ * are built the same must.
++ */
++
++#define VK_NO_PROTOTYPES
++#include <vulkan/vulkan.h>
++#include "descriptor_layout_hash_state.h"
++
++#include <array>
++#include <cstdio>
++#include <cstring>
++
++#include "kk_test.h"
++
++int main()
++{
++   kk_test_device t;
++   kk_test_create_instance(&t, "descriptor-layout-hash");
++
++   VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT seamless{
++      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NON_SEAMLESS_CUBE_MAP_FEATURES_EXT};
++   seamless.nonSeamlessCubeMap = VK_TRUE;
++   VkPhysicalDeviceVulkan13Features features13{
++      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
++   features13.pNext = &seamless;
++   const char *extensions[] = {VK_EXT_NON_SEAMLESS_CUBE_MAP_EXTENSION_NAME};
++   kk_test_create_device(&t, &features13, nullptr, 1, extensions);
++   KK_LOAD_DEVICE_FUNCTIONS(t);
++   LOAD_D(vkCreateSampler);
++   LOAD_D(vkDestroySampler);
++   LOAD_D(vkCreateDescriptorSetLayout);
++   LOAD_D(vkDestroyDescriptorSetLayout);
++
++   const auto make_sampler = [&](VkSamplerCreateFlags flags) {
++      VkSamplerCreateInfo info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
++      info.flags = flags;
++      info.magFilter = VK_FILTER_NEAREST;
++      info.minFilter = VK_FILTER_NEAREST;
++      info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++      info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++      info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++      VkSampler sampler = VK_NULL_HANDLE;
++      require(vkCreateSampler(device, &info, nullptr, &sampler) == VK_SUCCESS,
++              "create sampler");
++      return sampler;
++   };
++   const VkSampler plain = make_sampler(0);
++   const VkSampler non_seamless =
++      make_sampler(VK_SAMPLER_CREATE_NON_SEAMLESS_CUBE_MAP_BIT_EXT);
++
++   /* One combined image sampler, with the immutable sampler `sampler` or
++    * without one. */
++   const auto make_layout = [&](const VkSampler *sampler) {
++      VkDescriptorSetLayoutBinding binding{};
++      binding.binding = 0;
++      binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
++      binding.descriptorCount = 1;
++      binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
++      binding.pImmutableSamplers = sampler;
++      VkDescriptorSetLayoutCreateInfo info{
++         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
++      info.bindingCount = 1;
++      info.pBindings = &binding;
++      VkDescriptorSetLayout layout = VK_NULL_HANDLE;
++      require(vkCreateDescriptorSetLayout(device, &info, nullptr, &layout) ==
++                 VK_SUCCESS,
++              "create layout");
++      return layout;
++   };
++   const VkDescriptorSetLayout none = make_layout(nullptr);
++   const VkDescriptorSetLayout with_plain = make_layout(&plain);
++   const VkDescriptorSetLayout with_plain_again = make_layout(&plain);
++   const VkDescriptorSetLayout with_non_seamless = make_layout(&non_seamless);
++
++   uint8_t hash_none[32], hash_plain[32], hash_plain_again[32],
++      hash_non_seamless[32];
++   kk_test_set_layout_hash(none, hash_none);
++   kk_test_set_layout_hash(with_plain, hash_plain);
++   kk_test_set_layout_hash(with_plain_again, hash_plain_again);
++   kk_test_set_layout_hash(with_non_seamless, hash_non_seamless);
++
++   unsigned failures = 0;
++   const auto row = [&](bool ok, const char *name) {
++      if (!ok) {
++         failures++;
++         fprintf(stderr, "FAIL %s\n", name);
++      }
++   };
++   row(memcmp(hash_plain, hash_plain_again, 32) == 0,
++       "layouts built the same hash alike");
++   row(memcmp(hash_none, hash_plain, 32) != 0,
++       "a binding with an immutable sampler and one without differ");
++   row(memcmp(hash_plain, hash_non_seamless, 32) != 0,
++       "immutable samplers that differ in a flag differ");
++   row(memcmp(hash_none, hash_non_seamless, 32) != 0,
++       "a binding without immutable samplers and one with differ");
++
++   for (VkDescriptorSetLayout layout :
++        {none, with_plain, with_plain_again, with_non_seamless})
++      vkDestroyDescriptorSetLayout(device, layout, nullptr);
++   vkDestroySampler(device, plain, nullptr);
++   vkDestroySampler(device, non_seamless, nullptr);
++   kk_test_destroy(&t);
++   if (failures != 0) {
++      fprintf(stderr, "descriptor layout hash FAILED (%u rows)\n", failures);
++      return 1;
++   }
++   std::puts("descriptor layout hash passed");
++   return 0;
++}
 diff --git a/src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp b/src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0e30a12c34f6ccf1fa1f0dc4f88507b116c9e1b1
+index 0000000000000000000000000000000000000000..048b97f45faae63ad05536175314c59801a34363
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp
-@@ -0,0 +1,683 @@
+@@ -0,0 +1,1270 @@
 +/*
 + * Copyright 2026 Google LLC
 + * SPDX-License-Identifier: MIT
@@ -2039,9 +2843,27 @@ index 0000000000000000000000000000000000000000..0e30a12c34f6ccf1fa1f0dc4f88507b1
 +      VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
 +   rendering.colorAttachmentCount = 1;
 +   rendering.pColorAttachmentFormats = &format;
++   /* The input-attachment phases build the pipeline with a depth attachment
++    * that is, or is not, also an input attachment, and nothing else
++    * different: the fragment compile reads just that of the state. */
++   const bool input_attachment = strncmp(phase, "ial-", 4) == 0;
++   uint32_t depth_input_index = 0;
++   VkRenderingInputAttachmentIndexInfo input_attachments{
++      VK_STRUCTURE_TYPE_RENDERING_INPUT_ATTACHMENT_INDEX_INFO};
++   VkPipelineDepthStencilStateCreateInfo depth_stencil{
++      VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
++   if (input_attachment) {
++      rendering.depthAttachmentFormat = VK_FORMAT_D32_SFLOAT;
++      input_attachments.colorAttachmentCount = 1;
++      input_attachments.pDepthInputAttachmentIndex =
++         strcmp(phase, "ial-depth") == 0 ? &depth_input_index : nullptr;
++      rendering.pNext = &input_attachments;
++   }
 +   VkGraphicsPipelineCreateInfo pipeline_info{
 +      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
 +   pipeline_info.pNext = &rendering;
++   if (input_attachment)
++      pipeline_info.pDepthStencilState = &depth_stencil;
 +   pipeline_info.stageCount = stages.size();
 +   pipeline_info.pStages = stages.data();
 +   pipeline_info.pVertexInputState = &vi;
@@ -2065,6 +2887,59 @@ index 0000000000000000000000000000000000000000..0e30a12c34f6ccf1fa1f0dc4f88507b1
 +      /* And the first again: the parent's own table answers. */
 +      require(record_variant(t, device, pipeline, 0) == a,
 +              "a variant resolved twice is one variant");
++   } else if (strcmp(phase, "cache") == 0) {
++      /* The same pipeline built again from the pipeline cache data of a
++       * first one: its shaders are read back by the driver's deserializer
++       * instead of compiled, and its variants must still be found under the
++       * keys the compiled pipeline stored them under.  The first parent goes
++       * first, so that the second pipeline links a parent of its own. */
++      LOAD_D(vkCreatePipelineCache);
++      LOAD_D(vkGetPipelineCacheData);
++      LOAD_D(vkDestroyPipelineCache);
++      vkDestroyPipeline(device, pipeline, nullptr);
++      pipeline = VK_NULL_HANDLE;
++
++      VkPipelineCacheCreateInfo cache_info{
++         VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
++      VkPipelineCache first_cache = VK_NULL_HANDLE;
++      require(vkCreatePipelineCache(device, &cache_info, nullptr,
++                                    &first_cache) == VK_SUCCESS,
++              "first pipeline cache");
++      VkPipeline first = VK_NULL_HANDLE;
++      require(vkCreateGraphicsPipelines(device, first_cache, 1,
++                                        &pipeline_info, nullptr, &first) ==
++                 VK_SUCCESS,
++              "pipeline into the first cache");
++      size_t data_size = 0;
++      require(vkGetPipelineCacheData(device, first_cache, &data_size,
++                                     nullptr) == VK_SUCCESS && data_size > 0,
++              "pipeline cache data size");
++      std::vector<uint8_t> data(data_size);
++      require(vkGetPipelineCacheData(device, first_cache, &data_size,
++                                     data.data()) == VK_SUCCESS,
++              "pipeline cache data");
++      vkDestroyPipeline(device, first, nullptr);
++      vkDestroyPipelineCache(device, first_cache, nullptr);
++
++      cache_info.initialDataSize = data_size;
++      cache_info.pInitialData = data.data();
++      VkPipelineCache second_cache = VK_NULL_HANDLE;
++      require(vkCreatePipelineCache(device, &cache_info, nullptr,
++                                    &second_cache) == VK_SUCCESS,
++              "second pipeline cache");
++      require(vkCreateGraphicsPipelines(device, second_cache, 1,
++                                        &pipeline_info, nullptr, &pipeline) ==
++                 VK_SUCCESS,
++              "pipeline from the cache data");
++      const struct kk_shader *a = record_variant(t, device, pipeline, 0);
++      const struct kk_shader *b = record_variant(t, device, pipeline, 1);
++      require(a != nullptr && b != nullptr && a != b, "two variants");
++      vkDestroyPipeline(device, pipeline, nullptr);
++      pipeline = VK_NULL_HANDLE;
++      vkDestroyPipelineCache(device, second_cache, nullptr);
++   } else if (input_attachment) {
++      require(record_variant(t, device, pipeline, 0) != nullptr,
++              "a variant of the input attachment pipeline");
 +   } else if (strcmp(phase, "race") == 0) {
 +      /* Two recorders miss the same key at the same time. */
 +      std::atomic<bool> go{false};
@@ -2087,7 +2962,8 @@ index 0000000000000000000000000000000000000000..0e30a12c34f6ccf1fa1f0dc4f88507b1
 +      return 2;
 +   }
 +
-+   vkDestroyPipeline(device, pipeline, nullptr);
++   if (pipeline != VK_NULL_HANDLE)
++      vkDestroyPipeline(device, pipeline, nullptr);
 +   vkDestroyPipelineLayout(device, layout, nullptr);
 +   for (auto module : modules)
 +      vkDestroyShaderModule(device, module, nullptr);
@@ -2108,6 +2984,7 @@ index 0000000000000000000000000000000000000000..0e30a12c34f6ccf1fa1f0dc4f88507b1
 +
 +struct event {
 +   std::string name, key, reason;
++   uint64_t us = 0;
 +};
 +
 +static std::vector<event>
@@ -2128,6 +3005,8 @@ index 0000000000000000000000000000000000000000..0e30a12c34f6ccf1fa1f0dc4f88507b1
 +            e.key = word.substr(4);
 +         else if (word.compare(0, 7, "reason=") == 0)
 +            e.reason = word.substr(7);
++         else if (word.compare(0, 3, "us=") == 0)
++            e.us = strtoull(word.c_str() + 3, nullptr, 10);
 +      }
 +      events.push_back(e);
 +   }
@@ -2145,6 +3024,15 @@ index 0000000000000000000000000000000000000000..0e30a12c34f6ccf1fa1f0dc4f88507b1
 +}
 +
 +static std::string self, root, log_path;
++
++/* KK_VARIANT_TEST_ROWS=<text> runs only the damage and forgery rows whose
++ * names contain the text. */
++static bool
++row_selected(const std::string &label)
++{
++   const char *only = getenv("KK_VARIANT_TEST_ROWS");
++   return only == nullptr || label.find(only) != std::string::npos;
++}
 +
 +/* Runs one boot of the driver; returns its events, or sets `ok` false when it
 + * did not end well. */
@@ -2246,6 +3134,90 @@ index 0000000000000000000000000000000000000000..0e30a12c34f6ccf1fa1f0dc4f88507b1
 +                           bytes.data() + D_HASH);
 +}
 +
++/* A descriptor's frames, and the descriptor made again from frames: the
++ * header's count, length and hash are made right, so that the checks the rows
++ * forge past are the ones behind them. */
++struct frame {
++   uint32_t stage;
++   std::vector<uint8_t> record;
++};
++typedef std::vector<frame> frames_t;
++
++static frames_t
++parse_frames(const std::vector<uint8_t> &bytes)
++{
++   frames_t frames;
++   size_t at = D_HEADER;
++   /* The blob writer aligns each 32-bit field to four bytes. */
++   while ((at = (at + 3) & ~(size_t)3) + 8 <= bytes.size()) {
++      uint32_t stage, length;
++      memcpy(&stage, bytes.data() + at, 4);
++      memcpy(&length, bytes.data() + at + 4, 4);
++      at += 8;
++      if (length > bytes.size() - at)
++         break;
++      frames.push_back(
++         {stage, std::vector<uint8_t>(bytes.begin() + at,
++                                      bytes.begin() + at + length)});
++      at += length;
++   }
++   return frames;
++}
++
++static std::vector<uint8_t>
++assemble(const std::vector<uint8_t> &original, const frames_t &frames)
++{
++   std::vector<uint8_t> bytes(original.begin(), original.begin() + D_HEADER);
++   for (const auto &f : frames) {
++      const uint32_t length = f.record.size();
++      bytes.resize((bytes.size() + 3) & ~(size_t)3, 0);
++      const uint8_t *stage = (const uint8_t *)&f.stage;
++      const uint8_t *size = (const uint8_t *)&length;
++      bytes.insert(bytes.end(), stage, stage + 4);
++      bytes.insert(bytes.end(), size, size + 4);
++      bytes.insert(bytes.end(), f.record.begin(), f.record.end());
++   }
++   put32(bytes, D_COUNT, frames.size());
++   put32(bytes, D_SIZE, bytes.size() - D_HEADER);
++   rehash(bytes);
++   return bytes;
++}
++
++static size_t
++driver(const char *name)
++{
++   const size_t value = kk_test_driver_value(name);
++   if (value == SIZE_MAX) {
++      fprintf(stderr, "the driver has no value named %s\n", name);
++      exit(2);
++   }
++   return value;
++}
++
++/* Sets a field of a stored shader's info, `index` elements of `element`
++ * bytes into the array it names. */
++static void
++set_field(std::vector<uint8_t> &record, const char *name, uint64_t value,
++          unsigned width, size_t offset_in_array = 0)
++{
++   const size_t at = driver(name) + offset_in_array;
++   if (at + width > record.size()) {
++      fprintf(stderr, "field %s is past the record\n", name);
++      exit(2);
++   }
++   memcpy(record.data() + at, &value, width);
++}
++
++static frame &
++frame_of(frames_t &frames, uint32_t stage)
++{
++   for (auto &f : frames)
++      if (f.stage == stage)
++         return f;
++   fprintf(stderr, "no frame for stage %u\n", stage);
++   exit(2);
++}
++
 +struct damage {
 +   const char *name;
 +   bool descriptors; /* all descriptors, or the first text only */
@@ -2263,6 +3235,8 @@ index 0000000000000000000000000000000000000000..0e30a12c34f6ccf1fa1f0dc4f88507b1
 +{
 +   const std::string label =
 +      std::string(row.name) + (!row.descriptors && all_texts ? " (all)" : "");
++   if (!row_selected(label))
++      return;
 +   fresh_cache();
 +   bool ok;
 +   auto cold = boot("draw", ok);
@@ -2339,6 +3313,355 @@ index 0000000000000000000000000000000000000000..0e30a12c34f6ccf1fa1f0dc4f88507b1
 +          label.c_str(),
 +          count(next, "compile"), count(next, "store"),
 +          reasons.c_str(), count(next, "miss"));
++}
++
++/* A descriptor that is whole in every way its header can tell - the hash
++ * holds, the lengths add up - and whose shaders say what no writer wrote.  The
++ * driver must refuse it as `reason` and translate and store the variant, never
++ * crash on it. */
++struct forgery {
++   const char *name;
++   const char *reason;
++   std::function<void(frames_t &)> edit;
++};
++
++static void
++forge_row(const forgery &row, struct disk_cache *cache,
++          const std::vector<entry_file> &cold_entries)
++{
++   const std::string label = std::string("forged: ") + row.name;
++   if (!row_selected(label))
++      return;
++   fresh_cache();
++   for (const auto &entry : cold_entries) {
++      std::vector<uint8_t> data = entry.data;
++      if (entry.descriptor) {
++         frames_t frames = parse_frames(data);
++         row.edit(frames);
++         data = assemble(data, frames);
++      }
++      disk_cache_put(cache, entry.key, data.data(), data.size(), nullptr);
++   }
++   disk_cache_wait_for_idle(cache);
++
++   bool ok;
++   auto next = boot("draw", ok);
++   ROW(ok, label.c_str());
++   ROW(count(next, "invalid", row.reason) == 2 &&
++          count(next, "invalid") == 2 && count(next, "load") == 0,
++       label.c_str());
++   ROW(count(next, "compile") == 2 && count(next, "store") == 2,
++       label.c_str());
++   auto healed = boot("draw", ok);
++   ROW(ok && count(healed, "compile") == 0 && count(healed, "invalid") == 0 &&
++          count(healed, "load") == 2,
++       label.c_str());
++   std::string reasons;
++   for (const auto &e : next)
++      if (e.name == "invalid")
++         reasons += (reasons.empty() ? "" : ",") + e.reason;
++   printf("  %-62s invalid %u/%s [%s] compile %u store %u -> %s\n",
++          label.c_str(), count(next, "invalid", row.reason), row.reason,
++          reasons.c_str(), count(next, "compile"), count(next, "store"),
++          ok && count(healed, "load") == 2 ? "healed" : "NOT healed");
++}
++
++static std::vector<forgery>
++forgeries()
++{
++   const uint32_t VERTEX = driver("MESA_SHADER_VERTEX");
++   const uint32_t TESS_CTRL = driver("MESA_SHADER_TESS_CTRL");
++   const uint32_t FRAGMENT = driver("MESA_SHADER_FRAGMENT");
++   const auto bit = [](uint32_t stage) { return 1u << stage; };
++   const auto vs_of = [VERTEX](frames_t &f) -> std::vector<uint8_t> & {
++      return frame_of(f, VERTEX).record;
++   };
++   const auto bits = [vs_of](uint32_t value) {
++      return [vs_of, value](frames_t &f) {
++         set_field(vs_of(f), "vs.additional_stages_bits", value, 4);
++      };
++   };
++   const uint32_t vertex_bit = bit(VERTEX);
++   const uint32_t fragment_bit = bit(FRAGMENT);
++   const uint32_t tess_bits =
++      bit(TESS_CTRL) | bit(driver("MESA_SHADER_TESS_EVAL"));
++   const uint32_t compute_bit = bit(driver("MESA_SHADER_COMPUTE"));
++   const uint32_t geometry_bit = bit(driver("MESA_SHADER_GEOMETRY"));
++   const uint32_t stages = driver("MESA_SHADER_STAGES");
++   const uint32_t static_indexed = driver("POLY_GS_SHAPE_STATIC_INDEXED");
++   const uint32_t patches = driver("MESA_PRIM_PATCHES");
++
++   std::vector<forgery> rows;
++   /* What the stage bits of the vertex shader decide: which texts follow it,
++    * how many pre-render pipelines it builds, and what is released with it. */
++   rows.push_back({"stage bits: none", "info", bits(0)});
++   rows.push_back({"stage bits: five or more", "info",
++                   bits(tess_bits | geometry_bit | fragment_bit | compute_bit)});
++   rows.push_back({"stage bits: the vertex bit", "info",
++                   bits(vertex_bit | fragment_bit)});
++   rows.push_back({"stage bits: the first bit past the stages", "info",
++                   bits((1u << stages) | fragment_bit)});
++   rows.push_back({"stage bits: the top bit", "info",
++                   bits(0x80000000u | fragment_bit)});
++   rows.push_back({"stage bits: no fragment stage", "info", bits(tess_bits)});
++   rows.push_back({"stage bits: tess control without tess evaluation", "info",
++                   bits(bit(TESS_CTRL) | fragment_bit)});
++
++   /* The geometry records a draw reads. */
++   rows.push_back({"geometry shape out of range", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.geometry.shape", 99, 4);
++                   }});
++   rows.push_back({"geometry static indexed, too many indices", "info",
++                   [vs_of, static_indexed](frames_t &f) {
++                      set_field(vs_of(f), "vs.geometry.shape",
++                                static_indexed, 4);
++                      set_field(vs_of(f), "vs.geometry.max_indices", 65, 4);
++                   }});
++   rows.push_back({"transform feedback shape out of range", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.transform_feedback.shape", 99,
++                                4);
++                   }});
++   rows.push_back({"transform feedback static indexed, 4G indices", "info",
++                   [vs_of, static_indexed](frames_t &f) {
++                      set_field(vs_of(f), "vs.transform_feedback.shape",
++                                static_indexed, 4);
++                      set_field(vs_of(f), "vs.transform_feedback.max_indices",
++                                0xffffffffu, 4);
++                   }});
++
++   /* What the geometry stage sizes its buffers by, in 32 bits, and the
++    * primitive it decomposes by. */
++   rows.push_back({"geometry mode out of range", "info", [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.geometry.mode", 99, 4);
++                   }});
++   rows.push_back({"geometry mode patches", "info",
++                   [vs_of, patches](frames_t &f) {
++                      set_field(vs_of(f), "vs.geometry.mode", patches, 4);
++                   }});
++   rows.push_back({"geometry count words, 4G bytes of them", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.geometry.count_words",
++                                0x40000000u, 4);
++                   }});
++   rows.push_back({"geometry count words, more than vertex streams", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.geometry.count_words", 5, 4);
++                   }});
++   rows.push_back({"geometry indices past the output vertex limit", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.geometry.max_indices", 4097, 4);
++                   }});
++   rows.push_back({"geometry indices, 1G of them for each primitive", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.geometry.max_indices",
++                                0x40000000u, 4);
++                   }});
++   rows.push_back({"transform feedback mode out of range", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.transform_feedback.mode", 99, 4);
++                   }});
++   rows.push_back({"transform feedback count words, 4G bytes of them", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.transform_feedback.count_words",
++                                0x40000000u, 4);
++                   }});
++   rows.push_back({"raster primitive out of range", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.raster_primitive", 99, 4);
++                   }});
++   rows.push_back({"line raster primitive out of range", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.line_raster_prim", 99, 4);
++                   }});
++
++   /* The sample count of a render pipeline and of the pass drawn for it. */
++   rows.push_back({"sample count without a multisample state", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.has_ms", 0, 1);
++                      set_field(vs_of(f), "vs.sample_count", 4, 4);
++                   }});
++   rows.push_back({"sample count the device does not offer", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.has_ms", 1, 1);
++                      set_field(vs_of(f), "vs.sample_count", 64, 4);
++                   }});
++   rows.push_back({"sample count not a power of two", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.has_ms", 1, 1);
++                      set_field(vs_of(f), "vs.sample_count", 3, 4);
++                   }});
++   rows.push_back({"sample count zero", "info", [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.has_ms", 1, 1);
++                      set_field(vs_of(f), "vs.sample_count", 0, 4);
++                   }});
++
++   /* The class a variant twin is looked up by. */
++   rows.push_back({"raster variant class out of range, no mask", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.raster_variant_class", 99, 4);
++                   }});
++
++   /* Fields that reach a Metal descriptor, which aborts the process on them. */
++   rows.push_back({"topology out of range", "info", [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.topology", 99, 4);
++                   }});
++   rows.push_back({"render target format not a Metal format", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.rt_formats", 9999, 4);
++                   }});
++   rows.push_back({"view mask above the device's amplification count", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.view_mask", 0xffffffffu, 4);
++                   }});
++   rows.push_back({"depth compare op out of range", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.depth_compare_op", 99, 4);
++                   }});
++   rows.push_back({"stencil op out of range", "info", [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.stencil_front.fail", 99, 1);
++                   }});
++   rows.push_back({"vertex buffer above the argument table", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.metal_vertex_fetch", 1, 1);
++                      set_field(vs_of(f), "vs.vertex_buffers_used", 1u << 28,
++                                4);
++                   }});
++   rows.push_back({"vertex attribute past Metal's last", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.metal_vertex_fetch", 1, 1);
++                      set_field(vs_of(f), "vs.vertex_attributes",
++                                driver("MTL_VERTEX_FORMAT_FLOAT4"), 2,
++                                31 * driver("sizeof vertex_attribute"));
++                   }});
++   rows.push_back({"vertex format not a Metal format", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.metal_vertex_fetch", 1, 1);
++                      set_field(vs_of(f), "vs.vertex_attributes", 999, 2);
++                   }});
++   rows.push_back({"vertex attribute names a buffer past the native ones",
++                   "info", [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.metal_vertex_fetch", 1, 1);
++                      set_field(vs_of(f), "vs.vertex_buffers_used", 1, 4);
++                      set_field(vs_of(f), "vs.vertex_attributes",
++                                driver("MTL_VERTEX_FORMAT_FLOAT4"), 2);
++                      set_field(vs_of(f), "vs.vertex_attributes",
++                                driver("KK_MAX_NATIVE_VBUFS"), 1,
++                                driver("vertex_attribute.buffer"));
++                   }});
++   rows.push_back({"vertex layout: a constant step with a rate", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.metal_vertex_fetch", 1, 1);
++                      set_field(vs_of(f), "vs.vertex_buffers_used", 1, 4);
++                      set_field(vs_of(f), "vs.vertex_layouts",
++                                driver("MTL_VERTEX_STEP_FUNCTION_CONSTANT"), 1,
++                                driver("vertex_layout.step"));
++                      set_field(vs_of(f), "vs.vertex_layouts", 7, 4,
++                                driver("vertex_layout.step_rate"));
++                   }});
++   rows.push_back({"vertex step function out of range", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.metal_vertex_fetch", 1, 1);
++                      set_field(vs_of(f), "vs.vertex_buffers_used", 1, 4);
++                      set_field(vs_of(f), "vs.vertex_layouts", 99, 1,
++                                driver("vertex_layout.step"));
++                   }});
++   rows.push_back({"Metal's own vertex fetch in a dynamic variant", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.metal_vertex_fetch", 1, 1);
++                   }});
++
++   /* The loader's own checks: which frames a descriptor may hold. */
++   rows.push_back({"frame repeated", "stage", [VERTEX](frames_t &f) {
++                      /* as many frames as the pipeline has stages, the
++                       * vertex shader twice and no fragment shader */
++                      f.erase(f.begin() + 1);
++                      f.push_back(frame_of(f, VERTEX));
++                   }});
++   rows.push_back({"frame names a stage the record is not", "stage",
++                   [VERTEX, TESS_CTRL](frames_t &f) {
++                      frame_of(f, VERTEX).stage = TESS_CTRL;
++                   }});
++   rows.push_back({"frame holds a deferred shader", "stage",
++                   [vs_of, VERTEX](frames_t &f) {
++                      std::vector<uint8_t> &record = vs_of(f);
++                      record.assign(driver("sizeof info"), 0);
++                      set_field(record, "info.stage", VERTEX, 4);
++                      set_field(record, "info.deferred", 1, 1);
++                      /* the robustness state, and a NIR of no bytes (its
++                       * size is a 64-bit word, which is read aligned) */
++                      record.resize(record.size() + driver("sizeof robustness"),
++                                    0);
++                      record.resize((record.size() + 7) & ~(size_t)7, 0);
++                      record.resize(record.size() + 8, 0);
++                   }});
++   rows.push_back({"frame holds bytes after its shader", "size",
++                   [FRAGMENT](frames_t &f) {
++                      std::vector<uint8_t> &record = frame_of(f, FRAGMENT).record;
++                      record.resize(record.size() + 4, 0);
++                   }});
++   rows.push_back({"no vertex frame", "count", [VERTEX](frames_t &f) {
++                      for (size_t i = 0; i < f.size(); i++)
++                         if (f[i].stage == VERTEX)
++                            f.erase(f.begin() + i--);
++                   }});
++   rows.push_back({"no fragment frame", "count", [FRAGMENT](frames_t &f) {
++                      for (size_t i = 0; i < f.size(); i++)
++                         if (f[i].stage == FRAGMENT)
++                            f.erase(f.begin() + i--);
++                   }});
++   rows.push_back({"a tess control frame beside the pipeline's two", "count",
++                   [FRAGMENT, TESS_CTRL](frames_t &f) {
++                      frame extra = frame_of(f, FRAGMENT);
++                      extra.stage = TESS_CTRL;
++                      set_field(extra.record, "info.stage", TESS_CTRL, 4);
++                      f.insert(f.begin() + 1, extra);
++                   }});
++   rows.push_back({"a tess control frame in place of the fragment one",
++                   "stage", [FRAGMENT, TESS_CTRL](frames_t &f) {
++                      frame &fragment = frame_of(f, FRAGMENT);
++                      fragment.stage = TESS_CTRL;
++                      set_field(fragment.record, "info.stage", TESS_CTRL, 4);
++                   }});
++
++   /* What a variant owns of the raster classes is what its parent reaches. */
++   rows.push_back({"raster class differs from the parent's", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.raster_variant_class",
++                                driver("KK_RASTER_LINE"), 4);
++                   }});
++   rows.push_back({"raster primitive differs from the parent's topology",
++                   "info", [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.raster_primitive",
++                                driver("MESA_PRIM_LINES"), 4);
++                   }});
++   rows.push_back({"raster mask differs from the parent's", "info",
++                   [vs_of, vertex_bit](frames_t &f) {
++                      const uint32_t base = driver("KK_RASTER_BASE");
++                      const uint32_t point = driver("KK_RASTER_POINT");
++                      const std::vector<uint8_t> original = vs_of(f);
++                      /* the owner holds the point class's vertex shader as
++                       * well as its own; the pipeline is a triangle list that
++                       * reaches the base class alone */
++                      std::vector<uint8_t> parent = original;
++                      set_field(parent, "vs.raster_variant_mask",
++                                (1u << base) | (1u << point), 4);
++                      set_field(parent, "vs.raster_variant_stages", vertex_bit,
++                                4);
++                      std::vector<uint8_t> child = original;
++                      set_field(child, "vs.raster_variant_class", point, 4);
++                      /* The records after the description are read aligned to
++                       * the bytes' address, and the child now follows the
++                       * parent: keep the child's alignment as it was written
++                       * by what the reader skips after the description. */
++                      const size_t info = driver("sizeof info");
++                      const size_t shift = (4 - ((parent.size() + info) & 3)) & 3;
++                      child.insert(child.begin() + info, shift, 0);
++                      parent.insert(parent.end(), child.begin(), child.end());
++                      vs_of(f) = parent;
++                   }});
++   return rows;
 +}
 +
 +int
@@ -2440,6 +3763,74 @@ index 0000000000000000000000000000000000000000..0e30a12c34f6ccf1fa1f0dc4f88507b1
 +         damage_row(row, cache, true);
 +   }
 +
++   /* Descriptors that are whole as bytes and wrong as shaders. */
++   {
++      fresh_cache();
++      auto cold3 = boot("draw", ok);
++      ROW(ok, "cold boot for the forged rows");
++      disk_cache_wait_for_idle(cache);
++      const auto cold_entries = list_entries(cache);
++      printf("variant disk cache forged descriptors:\n");
++      for (const auto &row : forgeries())
++         forge_row(row, cache, cold_entries);
++   }
++
++   /* The variants of a pipeline made from pipeline cache data, whose shaders
++    * the driver deserialized: the keys are those of the compiled pipeline,
++    * because the content hash is taken from the NIR the shaders hold. */
++   if (row_selected("pipeline cache")) {
++      fresh_cache();
++      auto cold4 = boot("draw", ok);
++      ROW(ok, "cold boot for the pipeline cache row");
++      auto cached = boot("cache", ok);
++      ROW(ok, "a pipeline built from pipeline cache data");
++      ROW(count(cached, "rehash") >= 1,
++          "the content hash of a deserialized shader is taken again");
++      ROW(count(cached, "load") == 2 && count(cached, "compile") == 0 &&
++             count(cached, "miss") == 0 && count(cached, "invalid") == 0,
++          "its variants are found under the compiled pipeline's keys");
++      uint64_t rehash_us = 0;
++      unsigned rehashes = 0;
++      for (const auto &e : cached)
++         if (e.name == "rehash") {
++            rehash_us += e.us;
++            rehashes++;
++         }
++      printf("  pipeline cache: rehash %u (%llu us in all), load %u, "
++             "compile %u\n", rehashes, (unsigned long long)rehash_us,
++             count(cached, "load"), count(cached, "compile"));
++   }
++
++   /* Two pipelines that differ only in whether the depth attachment is an
++    * input attachment compile differently, so they must not share a variant
++    * key: the second finds nothing under the first's. */
++   if (row_selected("input attachment")) {
++      fresh_cache();
++      auto plain = boot("ial-none", ok);
++      ROW(ok && count(plain, "miss") == 1 && count(plain, "compile") == 1 &&
++             count(plain, "store") == 1,
++          "a pipeline whose depth is no input attachment is translated");
++      auto depth = boot("ial-depth", ok);
++      ROW(ok && count(depth, "load") == 0 && count(depth, "compile") == 1 &&
++             count(depth, "miss") == 1,
++          "a pipeline whose depth is an input attachment finds no variant "
++          "of the other");
++      std::string plain_key, depth_key;
++      for (const auto &e : plain)
++         if (e.name == "miss")
++            plain_key = e.key;
++      for (const auto &e : depth)
++         if (e.name == "miss")
++            depth_key = e.key;
++      ROW(!plain_key.empty() && plain_key != depth_key,
++          "and the two variants are keyed apart");
++      auto again = boot("ial-depth", ok);
++      ROW(ok && count(again, "load") == 1 && count(again, "compile") == 0,
++          "each is found again under its own key");
++      printf("  input attachment: keys %s / %s, second boot load %u\n",
++             plain_key.c_str(), depth_key.c_str(), count(again, "load"));
++   }
++
 +   /* A text that holds another text: the other text's whole entry, put under
 +    * the first text's key.  Its own checks all pass; only its name does not. */
 +   {
@@ -2508,10 +3899,10 @@ index 0000000000000000000000000000000000000000..0e30a12c34f6ccf1fa1f0dc4f88507b1
 +}
 diff --git a/src/kosmickrisp/vulkan/tests/test_variant_entry.c b/src/kosmickrisp/vulkan/tests/test_variant_entry.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..392eea2f3ce11cd29dc0e8a5c2ba61f9d016bc76
+index 0000000000000000000000000000000000000000..137dbe9bc495ccb61a71dca29243df09051a9cfa
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/tests/test_variant_entry.c
-@@ -0,0 +1,862 @@
+@@ -0,0 +1,1032 @@
 +/*
 + * Copyright 2026 Google LLC
 + * SPDX-License-Identifier: MIT
@@ -3329,11 +4720,176 @@ index 0000000000000000000000000000000000000000..392eea2f3ce11cd29dc0e8a5c2ba61f9
 +      free(copy);
 +   }
 +
++   {
++      /* The entrypoint's last byte is its terminator.  A name without one
++       * would be read past its end by whatever looks the function up by it,
++       * so the record is refused whatever else is right with it.  The lengths
++       * take twelve bytes and the codec one, then comes "main_entrypoint". */
++      const unsigned terminator = 13 + strlen("main_entrypoint");
++      for (unsigned pooled_record = 0; pooled_record < 2; pooled_record++) {
++         const struct blob *source = pooled_record ? &pooled : &plain;
++         uint8_t *copy = malloc(source->size);
++         memcpy(copy, source->data, source->size);
++         ROW(copy[terminator] == '\0', "the entrypoint ends where expected");
++         copy[terminator] = 'x';
++         struct blob_reader reader;
++         blob_reader_init(&reader, copy, source->size);
++         struct msl_compile_data back;
++         memset(&back, 0, sizeof(back));
++         ROW(kk_msl_record_read(&reader, &back,
++                                pooled_record ? &reading : NULL) !=
++                KK_MSL_RECORD_OK,
++             pooled_record ? "entrypoint without a terminator, pooled"
++                           : "entrypoint without a terminator, plain");
++         kk_msl_finish(&back);
++         free(copy);
++      }
++   }
++
 +   blob_finish(&pooled);
 +   blob_finish(&plain);
 +   kk_msl_finish(&data);
 +   kk_msl_pool_finish(&reading);
 +   kk_msl_pool_finish(&pool);
++   table_clear(&table);
++}
++
++
++/* A text entry of the given header fields over `nbytes` of bytes, put under
++ * the name its own fields hash to.  The name is the hash of the codec, both
++ * lengths and the bytes (kk_msl_text_name), so a row that only changed a
++ * length would be refused by the hash and not by the length check it is meant
++ * for: here the hash holds, and the length check alone decides.  A stored
++ * length that claims more bytes than there are cannot be hashed; it is hashed
++ * over the bytes there are. */
++static void
++put_text_entry(struct table *table, uint32_t codec, uint32_t code_size,
++               uint32_t stored_field, size_t nbytes, uint32_t reserved,
++               blake3_hash name)
++{
++   uint8_t *bytes = malloc(nbytes ? nbytes : 1);
++   for (size_t i = 0; i < nbytes; i++)
++      bytes[i] = 'a' + (i * 7) % 23;
++   kk_msl_text_name(codec, code_size, bytes,
++                    stored_field < nbytes ? stored_field : nbytes, name);
++
++   uint8_t *entry = malloc(TEXT_HEADER + nbytes);
++   memset(entry, 0, TEXT_HEADER);
++   put32(entry, TEXT_MAGIC_OFF, 'K' | 'K' << 8 | 'V' << 16 | 'T' << 24);
++   put32(entry, TEXT_FORMAT_OFF, KK_VARIANT_FORMAT);
++   put32(entry, TEXT_CODEC_OFF, codec);
++   put32(entry, TEXT_CODE_OFF, code_size);
++   put32(entry, TEXT_STORED_OFF, stored_field);
++   put32(entry, TEXT_RESERVED_OFF, reserved);
++   memcpy(entry + TEXT_NAME_OFF, name, sizeof(blake3_hash));
++   memcpy(entry + TEXT_HEADER, bytes, nbytes);
++   free(bytes);
++   table_put(table, name, entry, TEXT_HEADER + nbytes);
++}
++
++static void
++text_size_row(const char *label, uint32_t codec, uint32_t code_size,
++              uint32_t stored_field, size_t nbytes, uint32_t reserved,
++              enum kk_variant_status expected)
++{
++   struct table table = {0};
++   struct kk_msl_pool pool;
++   kk_msl_pool_init(&pool, &ops, &table);
++   blake3_hash name;
++   put_text_entry(&table, codec, code_size, stored_field, nbytes, reserved,
++                  name);
++   uint8_t got_codec;
++   uint32_t got_code_size, got_stored_size;
++   const void *bytes;
++   const enum kk_variant_status status =
++      kk_msl_pool_get(&pool, name, &got_codec, &got_code_size, &bytes,
++                      &got_stored_size);
++   ROW(status == expected, label);
++   /* A text that is refused for what it holds is removed; a good one stays. */
++   ROW(table.removes == (expected == KK_VARIANT_OK ? 0u : 1u), label);
++   kk_msl_pool_finish(&pool);
++   table_clear(&table);
++}
++
++/* The lengths of a text entry, with the name made right for them. */
++static void
++text_size_rows(void)
++{
++   text_size_row("lengths: a good entry", KK_MSL_CODEC_STORED, 100, 100, 100, 0,
++                 KK_VARIANT_OK);
++   text_size_row("lengths: a good compressed entry", KK_MSL_CODEC_LZFSE, 100,
++                 40, 40, 0, KK_VARIANT_OK);
++   text_size_row("lengths: code length zero", KK_MSL_CODEC_STORED, 0, 100, 100,
++                 0, KK_VARIANT_BAD_COUNT);
++   text_size_row("lengths: code length over the cap", KK_MSL_CODEC_STORED,
++                 KK_MSL_MAX_CODE_SIZE + 1, 100, 100, 0, KK_VARIANT_BAD_COUNT);
++   text_size_row("lengths: codec past the codecs", KK_MSL_CODEC_COUNT, 100, 100,
++                 100, 0, KK_VARIANT_BAD_COUNT);
++   text_size_row("lengths: stored length zero", KK_MSL_CODEC_STORED, 100, 0, 0,
++                 0, KK_VARIANT_BAD_SIZE);
++   text_size_row("lengths: stored length above the code length",
++                 KK_MSL_CODEC_STORED, 50, 100, 100, 0, KK_VARIANT_BAD_SIZE);
++   text_size_row("lengths: stored length above the bytes the entry holds",
++                 KK_MSL_CODEC_STORED, 100, 100, 60, 0, KK_VARIANT_BAD_SIZE);
++   text_size_row("lengths: stored length below the bytes the entry holds",
++                 KK_MSL_CODEC_STORED, 100, 60, 100, 0, KK_VARIANT_BAD_SIZE);
++   text_size_row("lengths: reserved word set", KK_MSL_CODEC_STORED, 100, 100,
++                 100, 1, KK_VARIANT_BAD_FORMAT);
++}
++
++/* A descriptor names a text once for each reference, and each reference holds
++ * its own copy of the text it reads: the bytes of the texts one load holds are
++ * bounded, so a descriptor naming one large text many times cannot make a
++ * load read without end.  The bound refuses the descriptor's reference, not
++ * the text, which stays for the descriptors that name it fewer times. */
++static void
++budget_rows(void)
++{
++   struct table table = {0};
++   struct kk_msl_pool writing;
++   kk_msl_pool_init(&writing, &ops, &table);
++   const uint32_t text_size = 1u << 20;
++   uint8_t *bytes = malloc(text_size);
++   for (uint32_t i = 0; i < text_size; i++)
++      bytes[i] = 'a' + (i * 7) % 23;
++   blake3_hash name;
++   ROW(kk_msl_pool_put(&writing, KK_MSL_CODEC_STORED, text_size, bytes,
++                       text_size, name),
++       "a large text is stored");
++   free(bytes);
++
++   struct kk_msl_pool reading;
++   kk_msl_pool_init(&reading, &ops, &table);
++   const unsigned fit = KK_VARIANT_MAX_LOAD_TEXT_BYTES / text_size;
++   unsigned read = 0;
++   enum kk_variant_status status = KK_VARIANT_OK;
++   for (; read < fit + 2; read++) {
++      uint8_t codec;
++      uint32_t code_size, stored_size;
++      const void *held;
++      status = kk_msl_pool_get(&reading, name, &codec, &code_size, &held,
++                               &stored_size);
++      if (status != KK_VARIANT_OK)
++         break;
++   }
++   ROW(read == fit, "as many references as the bound allows are read");
++   ROW(status == KK_VARIANT_BAD_SIZE, "the next reference is refused");
++   ROW(table.removes == 0 && find(&table, name) != NULL,
++       "a text refused for the bound is left in the store");
++   ROW(reading.held_bytes == (uint64_t)fit * text_size,
++       "the bytes held are those of the references read");
++
++   /* A pool of its own reads it again. */
++   kk_msl_pool_finish(&reading);
++   kk_msl_pool_init(&reading, &ops, &table);
++   uint8_t codec;
++   uint32_t code_size, stored_size;
++   const void *held;
++   ROW(kk_msl_pool_get(&reading, name, &codec, &code_size, &held,
++                       &stored_size) == KK_VARIANT_OK,
++       "a new load reads the text again");
++   kk_msl_pool_finish(&reading);
++   kk_msl_pool_finish(&writing);
 +   table_clear(&table);
 +}
 +
@@ -3343,11 +4899,14 @@ index 0000000000000000000000000000000000000000..392eea2f3ce11cd29dc0e8a5c2ba61f9
 +run_group(const char *name, void (*group)(void))
 +{
 +   fflush(NULL);
++   const unsigned before = failures;
 +   pid_t pid = fork();
 +   if (pid == 0) {
 +      group();
 +      fflush(NULL);
-+      _exit(failures != 0 ? 1 : 0);
++      /* The rows of this group only: the earlier groups' failures are
++       * already counted. */
++      _exit(failures != before ? 1 : 0);
 +   }
 +   int status = 0;
 +   waitpid(pid, &status, 0);
@@ -3367,6 +4926,8 @@ index 0000000000000000000000000000000000000000..392eea2f3ce11cd29dc0e8a5c2ba61f9
 +   run_group("descriptor", descriptor_rows);
 +   run_group("text entries", text_rows);
 +   run_group("records", record_rows);
++   run_group("text lengths", text_size_rows);
++   run_group("text budget", budget_rows);
 +   if (failures != 0) {
 +      fprintf(stderr, "variant entries FAILED\n");
 +      return 1;
@@ -3459,10 +5020,10 @@ index 0000000000000000000000000000000000000000..012ba6f5bd421aa0f8f163ce8082b8f4
 +0x00010038}
 diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..0e6cf6d6976db3055dd2812501fb6eae9a35f1fe
+index 0000000000000000000000000000000000000000..b0145f9d94ee059b6bac250293c22104716d3df8
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,109 @@
 +/*
 + * Copyright 2026 Google LLC
 + * SPDX-License-Identifier: MIT
@@ -3470,6 +5031,11 @@ index 0000000000000000000000000000000000000000..0e6cf6d6976db3055dd2812501fb6eae
 +
 +#include "variant_disk_cache_state.h"
 +
++#include <stdint.h>
++#include <string.h>
++
++#include "kosmickrisp/bridge/mtl_format.h"
++#include "kosmickrisp/bridge/mtl_types.h"
 +#include "kosmickrisp/vulkan/kk_physical_device.h"
 +#include "kosmickrisp/vulkan/kk_shader.h"
 +
@@ -3479,14 +5045,104 @@ index 0000000000000000000000000000000000000000..0e6cf6d6976db3055dd2812501fb6eae
 +   struct kk_physical_device *pdev = kk_physical_device_from_handle(physical);
 +   return pdev->variant_cache != NULL ? pdev->variant_cache->disk : NULL;
 +}
++
++size_t
++kk_test_driver_value(const char *name)
++{
++   static const struct {
++      const char *name;
++      size_t value;
++   } values[] = {
++#define FIELD(label, member) {label, offsetof(struct kk_shader_info, member)}
++#define VALUE(label, value) {label, (size_t)(value)}
++      VALUE("sizeof info", sizeof(struct kk_shader_info)),
++      VALUE("sizeof robustness", sizeof(struct vk_pipeline_robustness_state)),
++      FIELD("info.stage", stage),
++      FIELD("info.deferred", deferred),
++      FIELD("vs.additional_stages_bits", vs.additional_stages_bits),
++      FIELD("vs.raster_variant_mask", vs.raster_variant_mask),
++      FIELD("vs.raster_variant_stages", vs.raster_variant_stages),
++      FIELD("vs.raster_variant_class", vs.raster_variant_class),
++      FIELD("vs.geometry.shape", vs.geometry.shape),
++      FIELD("vs.geometry.max_indices", vs.geometry.max_indices),
++      FIELD("vs.geometry.mode", vs.geometry.mode),
++      FIELD("vs.geometry.count_words", vs.geometry.count_words),
++      FIELD("vs.transform_feedback.mode", vs.transform_feedback.mode),
++      FIELD("vs.transform_feedback.count_words",
++            vs.transform_feedback.count_words),
++      FIELD("vs.sample_count", vs.sample_count),
++      FIELD("vs.has_ms", vs.has_ms),
++      FIELD("vs.raster_primitive", vs.raster_primitive),
++      FIELD("vs.line_raster_prim", vs.line_raster_prim),
++      FIELD("vs.transform_feedback.shape", vs.transform_feedback.shape),
++      FIELD("vs.transform_feedback.max_indices",
++            vs.transform_feedback.max_indices),
++      FIELD("vs.topology", vs.topology),
++      FIELD("vs.rt_formats", vs.rt_formats),
++      FIELD("vs.view_mask", vs.view_mask),
++      FIELD("vs.depth_compare_op", vs.depth_compare_op),
++      FIELD("vs.stencil_front.fail", vs.stencil_front.fail),
++      FIELD("vs.stencil_back.compare", vs.stencil_back.compare),
++      FIELD("vs.metal_vertex_fetch", vs.metal_vertex_fetch),
++      FIELD("vs.vertex_buffers_used", vs.vertex_buffers_used),
++      FIELD("vs.vertex_attributes", vs.vertex_attributes),
++      VALUE("sizeof vertex_attribute",
++            sizeof(((struct kk_shader_info *)0)->vs.vertex_attributes[0])),
++      FIELD("vs.vertex_layouts", vs.vertex_layouts),
++      VALUE("sizeof vertex_layout",
++            sizeof(((struct kk_shader_info *)0)->vs.vertex_layouts[0])),
++      VALUE("vertex_layout.step",
++            offsetof(struct kk_shader_info, vs.vertex_layouts[0].step) -
++               offsetof(struct kk_shader_info, vs.vertex_layouts)),
++      FIELD("vs.blend", vs.blend),
++      VALUE("sizeof blend",
++            sizeof(((struct kk_shader_info *)0)->vs.blend[0])),
++      VALUE("MESA_SHADER_VERTEX", MESA_SHADER_VERTEX),
++      VALUE("MESA_SHADER_TESS_CTRL", MESA_SHADER_TESS_CTRL),
++      VALUE("MESA_SHADER_TESS_EVAL", MESA_SHADER_TESS_EVAL),
++      VALUE("MESA_SHADER_GEOMETRY", MESA_SHADER_GEOMETRY),
++      VALUE("MESA_SHADER_FRAGMENT", MESA_SHADER_FRAGMENT),
++      VALUE("MESA_SHADER_COMPUTE", MESA_SHADER_COMPUTE),
++      VALUE("MESA_SHADER_STAGES", MESA_SHADER_STAGES),
++      VALUE("POLY_GS_SHAPE_STATIC_INDEXED", POLY_GS_SHAPE_STATIC_INDEXED),
++      VALUE("KK_RASTER_BASE", KK_RASTER_BASE),
++      VALUE("KK_RASTER_POINT", KK_RASTER_POINT),
++      VALUE("KK_RASTER_LINE", KK_RASTER_LINE),
++      VALUE("KK_RASTER_VARIANT_COUNT", KK_RASTER_VARIANT_COUNT),
++      VALUE("vertex_attribute.buffer",
++            offsetof(struct kk_shader_info, vs.vertex_attributes[0].buffer) -
++               offsetof(struct kk_shader_info, vs.vertex_attributes)),
++      VALUE("vertex_layout.step_rate",
++            offsetof(struct kk_shader_info, vs.vertex_layouts[0].step_rate) -
++               offsetof(struct kk_shader_info, vs.vertex_layouts)),
++      VALUE("KK_MAX_NATIVE_VBUFS", KK_MAX_NATIVE_VBUFS),
++      VALUE("MESA_PRIM_LINES", MESA_PRIM_LINES),
++      VALUE("MESA_PRIM_COUNT", MESA_PRIM_COUNT),
++      VALUE("MESA_PRIM_PATCHES", MESA_PRIM_PATCHES),
++      VALUE("MTL_VERTEX_FORMAT_FLOAT4", MTL_VERTEX_FORMAT_FLOAT4),
++      VALUE("MTL_VERTEX_STEP_FUNCTION_CONSTANT",
++            MTL_VERTEX_STEP_FUNCTION_CONSTANT),
++      VALUE("MTL_VERTEX_STEP_FUNCTION_PER_VERTEX",
++            MTL_VERTEX_STEP_FUNCTION_PER_VERTEX),
++#undef FIELD
++#undef VALUE
++   };
++   for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
++      if (strcmp(values[i].name, name) == 0)
++         return values[i].value;
++   }
++   return SIZE_MAX;
++}
 diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.h b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..b4751ff00fabf31aac438ff94a12b7444495699d
+index 0000000000000000000000000000000000000000..01e87403830676699e4f7dcc5a049c074cf182cc
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.h
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,30 @@
 +/* SPDX-License-Identifier: MIT */
 +#pragma once
++
++#include <stddef.h>
 +
 +#include <vulkan/vulkan.h>
 +
@@ -3503,6 +5159,27 @@ index 0000000000000000000000000000000000000000..b4751ff00fabf31aac438ff94a12b744
 +struct disk_cache *
 +kk_test_variant_disk_cache(VkPhysicalDevice physical);
 +
++/* Where the driver keeps a field of the serialized shader info
++ * (struct kk_shader_info, the first bytes of every stored shader), the size of
++ * a record's parts, and the value of an enumerator the rows forge, by name:
++ * "info.stage", "vs.view_mask", "sizeof info", "MESA_SHADER_FRAGMENT" and so
++ * on.  SIZE_MAX for a name the driver does not have. */
++size_t kk_test_driver_value(const char *name);
++
 +#ifdef __cplusplus
 +}
 +#endif
+diff --git a/src/util/disk_cache.c b/src/util/disk_cache.c
+index 3aaa4a8bf6661076789812634c0604d916983938..b8b2de9a37057eee1de8eb46f7045a468749911c 100644
+--- a/src/util/disk_cache.c
++++ b/src/util/disk_cache.c
+@@ -600,6 +600,9 @@ disk_cache_put_nocopy(struct disk_cache *cache, const cache_key key,
+       util_queue_fence_init(&dc_job->fence);
+       util_queue_add_job(&cache->cache_queue, dc_job, &dc_job->fence,
+                          cache_put, destroy_put_job_nocopy, dc_job->size);
++   } else {
++      /* The contract is that the callee frees data on every path. */
++      free(data);
+    }
+ }
+ 
