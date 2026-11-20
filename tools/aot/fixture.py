@@ -26,6 +26,7 @@ import struct
 import sys
 
 PAGE = 4096
+STT_OBJECT, STT_FUNC = 1, 2
 TEXT = 0x1000
 TEXT_PAGES = 4
 EH_FRAME = TEXT + TEXT_PAGES * PAGE
@@ -146,6 +147,28 @@ PLT_CODE = (
     0x91040210,                                     # add x16, x16, #0x100
     0xd61f0220,                                     # br x17
 )
+
+# A routine only a function symbol names, as the assembly of a crypto library
+# is: no unwind entry, a data word after its RET inside the symbol's size (a
+# round constant of SHA-256), and the symbols around it that name no range (no
+# size, a data object, an address that is no instruction's, an undefined one)
+# or one the unwind tables already give.
+SYMBOL_ONLY = DST_PAGE + 0xe00
+SYMBOL_CODE = (
+    0x91001c00,                                     # add x0, x0, #7
+    0x18000061,                                     # ldr w1, [the data word]
+    0x8b010000,                                     # add x0, x0, x1
+    RET,
+    0x428a2f98,                                     # the data word
+)
+SYMBOL_DATA = SYMBOL_ONLY + 4 * (len(SYMBOL_CODE) - 1)
+SYMBOLS_NO_RANGE = (DST_PAGE + 0xb00, DST_PAGE + 0xb40, DST_PAGE + 0xb82)
+
+
+# The same stub in an .iplt section, as the linker makes them for the ifunc
+# targets of a static executable. It sits after every other function so the
+# functions before it keep their places.
+IPLT = DST_PAGE + 0x200
 
 
 # ---- instruction forms ----------------------------------------------------
@@ -503,6 +526,177 @@ def simd_functions() -> tuple[tuple[int, int], ...]:
         for index in range(len(simd_warm_rows())))
 
 
+# ---- load and store pairs -------------------------------------------------
+# LDP and STP in every addressing mode, with virtual (x18, x24 to x28), plain
+# and zero registers as the base and as the data, the stack pointer as the
+# base, and the vector forms. They sit in the page the edges' target is in,
+# after it, one small function each, so the differential test starts cases
+# at them like at the other forms.
+
+PAIRS_AT = DST_PAGE + 0x300
+PAIR_SIZE = 0x14
+
+
+def pair(load: bool, mode: str, opc: int, vector: int, imm: int, rt: int,
+         rt2: int, rn: int) -> int:
+    """LDP/STP of Rt, Rt2 from [Rn] with a signed byte offset `imm`: mode is
+    "post", "off" (signed offset) or "pre"; opc 0, 1, 2 select 32-bit, ldpsw
+    (not used) and 64-bit, or 4, 8 and 16 bytes of a vector register."""
+    scale = ({0: 4, 1: 8, 2: 16} if vector else {0: 4, 2: 8})[opc]
+    index = {"post": 0b001, "off": 0b010, "pre": 0b011}[mode]
+    return (opc << 30) | (0b101 << 27) | (vector << 26) | (index << 23) | \
+        (int(load) << 22) | (((imm // scale) & 0x7f) << 15) | (rt2 << 10) | \
+        (rn << 5) | rt
+
+
+def pair_forms() -> list[tuple[str, list[int]]]:
+    out: list[tuple[str, list[int]]] = []
+    # The base: virtual (x25, x18), the stack pointer, plain. The data
+    # registers: virtual and virtual (the hot loop of toybox grep is
+    # `ldp x24, x28, [x25, #0x38]!`), virtual and plain, plain and virtual,
+    # two virtual ones that are not the same.
+    data = (("vv", 24, 28), ("vp", 24, 2), ("pv", 3, 28), ("v2", 18, 26))
+    for base_name, base, imm in (("vb", 25, 0x38), ("sp", 31, 0x30),
+                                 ("pb", 1, 0x38)):
+        for mode in ("pre", "post", "off"):
+            if mode == "off" and base != 25:
+                continue
+            for load in (True, False):
+                for name, rt, rt2 in data:
+                    if base == 1 and name not in ("vv",):
+                        continue
+                    out.append((f"{'ldp' if load else 'stp'}_{mode}_"
+                                f"{base_name}_{name}",
+                                [pair(load, mode, 2, 0, imm, rt, rt2, base)]))
+    # A stack pointer that the writeback leaves misaligned (an exit when it
+    # does), a negative offset, the 32-bit forms.
+    out.append(("ldp_pre_sp_vv_odd", [pair(True, "pre", 2, 0, 0x38, 24, 28,
+                                           31)]))
+    out.append(("stp_pre_sp_vv_odd", [pair(False, "pre", 2, 0, 0x38, 24, 28,
+                                           31)]))
+    out.append(("ldp_post_sp_vv_neg", [pair(True, "post", 2, 0, -0x30, 24, 28,
+                                            31)]))
+    out.append(("stp_pre_sp_vv_neg", [pair(False, "pre", 2, 0, -0x30, 24, 28,
+                                           31)]))
+    for load in (True, False):
+        tag = "ldp" if load else "stp"
+        out.append((f"{tag}_pre_vb_vv_w", [pair(load, "pre", 0, 0, 0x38, 24,
+                                                28, 25)]))
+        out.append((f"{tag}_post_vb_vp_w", [pair(load, "post", 0, 0, 0x38, 24,
+                                                 2, 25)]))
+    # Both data registers one virtual register (a store), zero registers.
+    for mode in ("pre", "post", "off"):
+        out.append((f"stp_{mode}_vb_same", [pair(False, mode, 2, 0, 0x38, 24,
+                                                 24, 25)]))
+        out.append((f"stp_{mode}_vb_zz", [pair(False, mode, 2, 0, 0x38, 31,
+                                               31, 25)]))
+        out.append((f"stp_{mode}_sp_same", [pair(False, mode, 2, 0, 0x30, 28,
+                                                 28, 31)]))
+    # The same load register twice and a data register equal to the base:
+    # the engine's own cases.
+    out.append(("ldp_off_vb_same", [pair(True, "off", 2, 0, 0x38, 24, 24,
+                                         25)]))
+    out.append(("ldp_pre_vb_base", [pair(True, "pre", 2, 0, 0x38, 25, 28,
+                                         25)]))
+    out.append(("stp_post_vb_base", [pair(False, "post", 2, 0, 0x38, 24, 25,
+                                          25)]))
+    # The stack pointer as the base with plain data registers: the offsets
+    # inside one aligned 16-byte granule (the stack-granule probe's short
+    # form) and those that leave it, 64-bit and 32-bit, a post-index pair, and
+    # a store of two zero registers.
+    for load in (True, False):
+        tag = "ldp" if load else "stp"
+        for mode, imm, opc in (("off", 0x10, 2), ("off", 0x18, 2),
+                               ("pre", 0x10, 2), ("pre", 0x18, 2),
+                               ("post", 0x20, 2), ("off", 0x18, 0),
+                               ("off", 0x1c, 0), ("pre", 0x1c, 0)):
+            out.append((f"{tag}_{mode}_sp_pp_{'x' if opc else 'w'}{imm:x}",
+                        [pair(load, mode, opc, 0, imm, 1, 2, 31)]))
+    out.append(("stp_off_sp_zz", [pair(False, "off", 2, 0, 0x10, 31, 31, 31)]))
+    # The vector pairs with a virtual base or the stack pointer.
+    for opc in (0, 1, 2):
+        for load in (True, False):
+            for mode, base in (("pre", 25), ("post", 31), ("off", 25)):
+                out.append((f"{'ldp' if load else 'stp'}_{mode}_"
+                            f"{'vb' if base == 25 else 'sp'}_q{opc}",
+                            [pair(load, mode, opc, 1, 0x30, 0, 1, base)]))
+    return out
+
+
+def pair_code() -> dict[int, int]:
+    code = {}
+    for index, (_, words) in enumerate(pair_forms()):
+        base = PAIRS_AT + index * PAIR_SIZE
+        if len(words) + 1 > (PAIR_SIZE - 4) // 4:
+            raise ValueError("a pair form is too long")
+        for position, word in enumerate(words):
+            code[base + 4 * position] = word
+        code[base + 4 * len(words)] = RET
+    return code
+
+
+def pair_functions() -> tuple[tuple[int, int], ...]:
+    return tuple((PAIRS_AT + index * PAIR_SIZE, PAIR_SIZE - 4)
+                 for index in range(len(pair_forms())))
+
+
+# ---- reserved forms -------------------------------------------------------
+# One reserved encoding of each class the rewriter copies or translates field
+# by field and whose reserved forms its instruction tables do not tell from
+# allocated ones, and a RET: the engine raises an illegal instruction at each
+# word, so the rewriter leaves it to the engine. The differential test starts
+# cases at every row and asks the engine about every word.
+RESERVED_AT = DST_PAGE + 0xc00
+RESERVED_STEP = 8
+
+
+def reserved_rows() -> list[tuple[str, int]]:
+    return [
+        ("add_vector_2d_q0", 0x0ee08400),
+        ("asimdall", 0x0eb03800),
+        ("asimddiff", 0x0e209000),
+        ("asimdelem", 0x0f002000),
+        ("asimdext", 0x2e004000),
+        ("asimdins", 0x0e000400),
+        ("asimdmisc", 0x0e601800),
+        ("asimdperm", 0x0ec01800),
+        ("asimdsame", 0x0e20b400),
+        ("asimdshf", 0x0f08e400),
+        ("asisddiff", 0x5e209000),
+        ("asisdelem", 0x5f003000),
+        ("asisdmisc", 0x5ee14800),
+        ("asisdone", 0x5e000400),
+        ("asisdsame", 0x5e20b400),
+        ("asisdshf", 0x5f08e400),
+        ("dp_3src", 0x9b400000),
+        ("float2fix", 0x1e020000),
+        ("floatcmp_zero_rm", 0x1e212018),
+        # A load of a pair into one register: LDP S0, S0, [x0]; its
+        # non-temporal, pre-index and post-index forms; and the general ones,
+        # one naming the zero register twice.
+        ("ldp_vector_same", 0x2d400000),
+        ("ldnp_vector_same", 0x2c400000),
+        ("ldp_post_vector_same", 0x2cc00000),
+        ("ldp_pre_vector_same", 0x2dc00000),
+        ("ldp_zero_zero", 0x29407fff),
+        ("ldp_x1_x1", 0xa9400441),
+    ]
+
+
+def reserved_code() -> dict[int, int]:
+    code: dict[int, int] = {}
+    for index, (_, word) in enumerate(reserved_rows()):
+        base = RESERVED_AT + index * RESERVED_STEP
+        code[base] = word
+        code[base + 4] = RET
+    return code
+
+
+def reserved_functions() -> tuple[tuple[int, int], ...]:
+    return tuple((RESERVED_AT + index * RESERVED_STEP, RESERVED_STEP)
+                 for index in range(len(reserved_rows())))
+
+
 def eh_frame() -> bytes:
     # CIE: version 1, "zR", code alignment 4, data alignment -8, return
     # address x30, pointers are pc-relative signed 32-bit.
@@ -512,7 +706,8 @@ def eh_frame() -> bytes:
     out = bytearray(struct.pack("<I", len(cie_body)) + cie_body)
     for start, size in (FUNCTIONS + form_functions() + edge_functions() +
                         hammer_functions() + mops_functions() +
-                        simd_functions()):
+                        simd_functions() + pair_functions() +
+                        reserved_functions()):
         position = len(out)
         field = EH_FRAME + position + 8
         body = struct.pack("<Iii", position + 4, start - field, size)
@@ -541,16 +736,49 @@ def build() -> bytes:
         struct.pack_into("<I", text, address - TEXT, word)
     for address, word in simd_code().items():
         struct.pack_into("<I", text, address - TEXT, word)
+    if PAIRS_AT + len(pair_forms()) * PAIR_SIZE > DST_PAGE + PAGE:
+        raise ValueError("the pair forms run out of their page")
+    for address, word in pair_code().items():
+        struct.pack_into("<I", text, address - TEXT, word)
+    if PAIRS_AT + len(pair_forms()) * PAIR_SIZE > SYMBOL_ONLY:
+        raise ValueError("the pair forms run into the symbol-only routine")
+    if RESERVED_AT + len(reserved_rows()) * RESERVED_STEP > SYMBOL_ONLY:
+        raise ValueError("the reserved forms run into the symbol-only routine")
+    if PAIRS_AT + len(pair_forms()) * PAIR_SIZE > RESERVED_AT:
+        raise ValueError("the pair forms run into the reserved forms")
+    for address, word in reserved_code().items():
+        struct.pack_into("<I", text, address - TEXT, word)
     for index, word in enumerate(PLT_CODE):
         struct.pack_into("<I", text, PLT - TEXT + 4 * index, word)
+        struct.pack_into("<I", text, IPLT - TEXT + 4 * index, word)
+    for index, word in enumerate(SYMBOL_CODE):
+        struct.pack_into("<I", text, SYMBOL_ONLY - TEXT + 4 * index, word)
     frame = eh_frame()
-    names = b"\0.text\0.plt\0.eh_frame\0.shstrtab\0"
+    names = (b"\0.text\0.plt\0.iplt\0.eh_frame\0.shstrtab\0.symtab\0"
+             b".strtab\0")
     size_load = EH_FRAME + len(frame)
     image = bytearray(size_load)
     image[TEXT:TEXT + len(text)] = text
     image[EH_FRAME:EH_FRAME + len(frame)] = frame
     shstr_offset = len(image)
     image += names
+    image += bytes(-len(image) % 8)
+    symbols = [struct.pack("<IBBHQQ", 0, 0, 0, 0, 0, 0)]
+    symbol_names = b"\0"
+    for name, kind, shndx, value, size in (
+            ("symbol_only", STT_FUNC, 1, SYMBOL_ONLY, 4 * len(SYMBOL_CODE)),
+            ("inside_loop_a", STT_FUNC, 1, LOOP_A, 0x10),
+            ("no_size", STT_FUNC, 1, SYMBOLS_NO_RANGE[0], 0),
+            ("object", STT_OBJECT, 1, SYMBOLS_NO_RANGE[1], 0x20),
+            ("misaligned", STT_FUNC, 1, SYMBOLS_NO_RANGE[2], 0x10),
+            ("undefined", STT_FUNC, 0, 0, 0x10)):
+        symbols.append(struct.pack("<IBBHQQ", len(symbol_names), kind, 0,
+                                   shndx, value, size))
+        symbol_names += name.encode() + b"\0"
+    symtab_offset = len(image)
+    image += b"".join(symbols)
+    strtab_offset = len(image)
+    image += symbol_names
     image += bytes(-len(image) % 8)
     section_offset = len(image)
 
@@ -561,11 +789,14 @@ def build() -> bytes:
     image += section(0, 0, 0, 0, 0, 0, 0)
     image += section(1, 1, 6, TEXT, TEXT, len(text), 4)
     image += section(7, 1, 6, PLT, PLT, 4 * len(PLT_CODE), 16)
-    image += section(12, 1, 2, EH_FRAME, EH_FRAME, len(frame), 8)
-    image += section(22, 3, 0, 0, shstr_offset, len(names), 1)
+    image += section(12, 1, 6, IPLT, IPLT, 4 * len(PLT_CODE), 16)
+    image += section(18, 1, 2, EH_FRAME, EH_FRAME, len(frame), 8)
+    image += section(28, 3, 0, 0, shstr_offset, len(names), 1)
+    image += section(38, 2, 0, 0, symtab_offset, 24 * len(symbols), 8)
+    image += section(46, 3, 0, 0, strtab_offset, len(symbol_names), 1)
     header = (b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8) +
               struct.pack("<HHIQQQIHHHHHH", 3, 183, 1, 0, 64, section_offset,
-                          0, 64, 56, 1, 64, 5, 4))
+                          0, 64, 56, 1, 64, 8, 5))
     program = struct.pack("<IIQQQQQQ", 1, 5, 0, 0, 0, size_load, size_load,
                           PAGE)
     image[0:len(header)] = header

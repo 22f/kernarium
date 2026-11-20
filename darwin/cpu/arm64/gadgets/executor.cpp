@@ -2,6 +2,9 @@
 #include "executor.hpp"
 #if UML_AOT
 #include "cpu/arm64/aot/aot_runtime.hpp"
+#if UML_AOT_DIAGNOSTICS
+#include "cpu/arm64/aot/aot_diagnostics.hpp"
+#endif
 #endif
 
 #include "cpu/arm64/aarch32/breakpoint_immediate.hpp"
@@ -3413,6 +3416,13 @@ GadgetExecutor::run_block_body(
 	const auto event =
 		arm64::gadgets::execute_preserving_native_fp_environment(
 			built.program, cpu, tlb_, executed);
+#if UML_AOT && UML_AOT_DIAGNOSTICS
+	if constexpr (Aot) {
+		const auto result = finish_block(*programs_, built, event, cpu, executed);
+		arm64::aot::diagnostics::note_engine_run(executed);
+		return result;
+	}
+#endif
 	return finish_block(*programs_, built, event, cpu, executed);
 }
 
@@ -3500,8 +3510,19 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 		aot_->retry_pc = 1;
 		aot_->shorts.fill(AotState::ShortSlot{});
 	}
-	if (cpu.pc == aot_->retry_pc)
+#if UML_AOT_DIAGNOSTICS
+	namespace diag = arm64::aot::diagnostics;
+	auto give_up = diag::EngineReason::no_progress;
+	unsigned finds = 0, entries = 0;
+#endif
+	if (cpu.pc == aot_->retry_pc) {
+#if UML_AOT_DIAGNOSTICS
+		diag::note_engine_dispatch(aot_->binder, generation, cpu.pc,
+			diag::EngineReason::retry);
+		diag::note_dispatch(0, 0);
+#endif
 		return std::nullopt;
+	}
 	aot_->retry_pc = 1;
 	/* The sequences are the ones run_block read: the lookups below
 	 * validate against them, the engine's ISB compares with them
@@ -3520,14 +3541,23 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 		if (cpu.exclusive_size != 0U || cpu.exclusive_key != 0U) {
 			arm64::aot::note_refusal(
 				arm64::aot::Refusal::exclusive_monitor);
+#if UML_AOT_DIAGNOSTICS
+			give_up = diag::EngineReason::exclusive_monitor;
+#endif
 			break;
 		}
 		if (!cpu.tbi_enabled) {
 			arm64::aot::note_refusal(arm64::aot::Refusal::tbi_disabled);
+#if UML_AOT_DIAGNOSTICS
+			give_up = diag::EngineReason::tbi_disabled;
+#endif
 			break;
 		}
 		if ((cpu.sp & 0xfU) != 0U) {
 			arm64::aot::note_refusal(arm64::aot::Refusal::sp_misaligned);
+#if UML_AOT_DIAGNOSTICS
+			give_up = diag::EngineReason::sp_misaligned;
+#endif
 			break;
 		}
 		/* FPCR.FIZ, AH and NEP change what an FP instruction computes
@@ -3537,18 +3567,34 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 		 * not loaded yet keeps its FPCR aside. */
 		if ((cpu.effective_fpcr() & arm64::fpcr_afp_controls) != 0U) {
 			arm64::aot::note_refusal(arm64::aot::Refusal::fp_environment);
+#if UML_AOT_DIAGNOSTICS
+			give_up = diag::EngineReason::fp_environment;
+#endif
 			break;
 		}
 		auto &shorty = aot_->shorts[(cpu.pc >> 2) % AotState::short_slots];
 		if (shorty.pc == cpu.pc && shorty.streak >= aot_short_streak &&
 		    ++shorty.skipped % aot_short_again != 0U) {
 			arm64::aot::note_refusal(arm64::aot::Refusal::short_entry);
+#if UML_AOT_DIAGNOSTICS
+			give_up = diag::EngineReason::short_entry;
+#endif
 			break;
 		}
+#if UML_AOT_DIAGNOSTICS
+		++finds;
+#endif
 		const auto hit = aot_->binder.find(memory, execution_context_,
 			generation, code_changes, cpu.pc);
-		if (hit.native == nullptr)
+		if (hit.native == nullptr) {
+#if UML_AOT_DIAGNOSTICS
+			give_up = diag::find_reason();
+#endif
 			break;
+		}
+#if UML_AOT_DIAGNOSTICS
+		++entries;
+#endif
 		const auto start = cpu.pc;
 		/* Rewritten code reads and writes the vector registers in place. */
 		cpu.access_fp_state();
@@ -3583,9 +3629,15 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 				if (event == ::uml::cpu::EngineEvent::memory_fault)
 					aot_->retry_pc = cpu.pc;
 				executed = total;
+#if UML_AOT_DIAGNOSTICS
+				diag::note_dispatch(finds, entries);
+#endif
 				return event;
 			}
 		} else if (cpu.pc == start && result.retired == 0) {
+#if UML_AOT_DIAGNOSTICS
+			give_up = diag::EngineReason::no_progress;
+#endif
 			break;
 		}
 		/* What run_block checks on entry is rechecked here before the
@@ -3602,11 +3654,20 @@ std::optional<::uml::cpu::EngineEvent> GadgetExecutor::run_aot(
 			break;
 	}
 	if (total == 0) {
-		if (cpu.pc == first)
+		if (cpu.pc == first) {
+#if UML_AOT_DIAGNOSTICS
+			diag::note_engine_dispatch(aot_->binder, generation, first,
+				give_up);
+			diag::note_dispatch(finds, entries);
+#endif
 			return std::nullopt;
+		}
 		total = 1;
 	}
 	executed = total;
+#if UML_AOT_DIAGNOSTICS
+	diag::note_dispatch(finds, entries);
+#endif
 	return ::uml::cpu::EngineEvent::continued;
 }
 #endif

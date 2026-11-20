@@ -173,12 +173,15 @@ BASE_COPY_CLASSES = {
     "condcmp_imm", "dp_3src",
 }
 
+RESERVED_CORNER_CLASSES = BASE_COPY_CLASSES | {"floatcmp"}
+
 
 def reserved_corner(cls: str, word: int) -> bool:
-    """Whether `word`, an encoding of the data-processing class `cls`, is one
-    the architecture leaves unallocated by a rule on its fields that the
-    instruction tables do not express (a 32-bit operation naming a bit
-    position of 32 or more, a bitmask no value has). The engine raises an
+    """Whether `word`, an encoding of the data-processing class `cls` or of
+    the floating-point compare, is one the architecture leaves unallocated by
+    a rule on its fields that the instruction tables do not express (a 32-bit
+    operation naming a bit position of 32 or more, a bitmask no value has,
+    a register in a field that must be zero). The engine raises an
     illegal instruction at such a word: copied, the host would raise it
     instead and end the emulator. A word like it is found as data inside the
     code of a method (a literal pool), where code can still be entered."""
@@ -199,6 +202,9 @@ def reserved_corner(cls: str, word: int) -> bool:
         return not sf and (word >> 10) & 32 != 0
     if cls == "addsub_ext":
         return ((word >> 22) & 3) != 0 or ((word >> 10) & 7) > 4
+    if cls == "floatcmp":
+        # The forms that compare with zero (opcode2 bit 3) have no Rm.
+        return (word >> 3) & 1 != 0 and (word >> 16) & 31 != 0
     if cls == "log_imm":
         n = (word >> 22) & 1
         imms = (word >> 10) & 63
@@ -209,6 +215,149 @@ def reserved_corner(cls: str, word: int) -> bool:
             return True
         levels = (1 << length) - 1
         return imms & levels == levels
+    return False
+
+
+# Reserved forms of the classes the rewriter copies or translates field by
+# field, which the instruction tables list as allocated: a size, Q, opcode,
+# immediate or scale the architecture leaves unallocated for that form, and a
+# multiply-high that names a register where the architecture wants the zero
+# register. The engine raises an illegal instruction at each; copied, the host
+# would raise it instead and end the emulator. Each pattern is bits 31 to 10
+# of the word (1 and 0 fixed, x free; Rn and Rd take no part), as the engine
+# answered for every word of the class that the rewriter would otherwise copy.
+# A load of a pair into one register is the rule of `_memory`.
+RESERVED_FORMS = {
+    "asimdall": (
+        "x0xxxxxx1xxxxxxxxxxxxx",
+        "xxxxxxxx11xxxxxxxxxxxx",
+    ),
+    "asimddiff": (
+        "xxxxxxxx00xxxxxx1xx1xx",
+        "xxxxxxxx01xxxxxx111xxx",
+        "xxxxxxxx10xxxxxx111xxx",
+        "xxxxxxxx11xxxxxx0xxxxx",
+        "xxxxxxxx11xxxxxxx0xxxx",
+        "xxxxxxxx11xxxxxxxx0xxx",
+    ),
+    "asimdelem": (
+        "xxxxxxxx00xxxxxxxxxxxx",
+        "x0xxxxxx11xxxxxxxxxxxx",
+        "xxxxxxxx11xxxxxxxx1xxx",
+        "xxxxxxxx11xxxxxxxxx0xx",
+        "xxxxxxxx11xxxxxx11xxxx",
+        "xxxxxxxx111xxxxxxxxxxx",
+    ),
+    "asimdext": (
+        "x0xxxxxxxxxxxxxxx1xxxx",
+    ),
+    "asimdins": (
+        "x0xxxxxxxxxxx000xxxxxx",
+        "x0xxxxxxxxxxxx00xx10xx",
+        "xxxxxxxxxxxx0000xxxxxx",
+        "xx0xxxxxxxxxx000xx10xx",
+    ),
+    "asimdmisc": (
+        "xx0xxxxxx1xxxxxx0x01xx",
+        "x0xxxxxxx1xxxxx11xxxxx",
+        "xxxxxxxx1xxxxxxx0x01xx",
+        "x0xxxxxx11xxxxxxxxxxxx",
+        "xx1xxxxx1xxxxxxx000xxx",
+        "xxxxxxxx11xxxxxx0x0xxx",
+        "xxxxxxxx11xxxxxx0xx0xx",
+        "xxxxxxxx11xxxxx1x1x0xx",
+        "xxxxxxxx11xxxxx10xxxxx",
+    ),
+    "asimdperm": (
+        "x0xxxxxx11xxxxxxxxxxxx",
+    ),
+    "asimdsame": (
+        "xxxxxxxx00xxxxxx10110x",
+        "x0xxxxxxx1xxxxxx11xxxx",
+        "x0xxxxxx11xxxxxxxxx0xx",
+        "x0xxxxxx11xxxxxxxxxx0x",
+        "x0xxxxxx11xxxxxxxx1xxx",
+        "x0xxxxxx11xxxxxxx1xxxx",
+        "x0xxxxxx11xxxxxx1xxxxx",
+        "x01xxxxxx1xxxxxx1xx11x",
+        "xx1xxxxx1xxxxxxx1xx11x",
+        "xxxxxxxx11xxxxxx000x0x",
+        "xxxxxxxx11xxxxxx00x00x",
+        "xxxxxxxx11xxxxxx011xxx",
+        "xxxxxxxx11xxxxxx1001xx",
+        "xx0xxxxx11xxxxxx1x10xx",
+        "xxxxxxxx11xxxxxx101x0x",
+        "xx1xxxxxx1xxxxxx10x11x",
+        "xx1xxxxx11xxxxxx101xxx",
+    ),
+    "asimdshf": (
+        "x0xxxxxxxx00xxxx11xxxx",
+        "x0xxxxxxx1xxxxxxxxxxxx",
+        "xxxxxxxxx000xxxx11xxxx",
+        "xxxxxxxxx1xxxxxx10xxxx",
+    ),
+    "asisddiff": (
+        "xxxxxxxx00xxxxxxxxxxxx",
+        "xxxxxxxx11xxxxxxxxxxxx",
+    ),
+    "asisdelem": (
+        "xxxxxxxx00xxxxxxxxxxxx",
+        "xxxxxxxx11xxxxxxxx1xxx",
+        "xxxxxxxx11xxxxxx11xxxx",
+        "xxxxxxxx111xxxxxxxxxxx",
+    ),
+    "asisdmisc": (
+        "xxxxxxxx11xxxxx10xxxxx",
+    ),
+    "asisdone": (
+        "xxxxxxxxxxxx0000xxxxxx",
+    ),
+    "asisdsame": (
+        "xxxxxxxx00xxxxxx10xxxx",
+        "xxxxxxxx11xxxxxx101xxx",
+    ),
+    "asisdshf": (
+        "xxxxxxxxx000xxxx11xxxx",
+        "xxxxxxxxx1xxxxxx10xxxx",
+    ),
+    "dp_3src": (
+        "xxxxxxxxx1xxxxxxx0xxxx",
+        "xxxxxxxxx1xxxxxxxx0xxx",
+        "xxxxxxxxx1xxxxxxxxx0xx",
+        "xxxxxxxxx1xxxxxxxxxx0x",
+        "xxxxxxxxx1xxxxxxxxxxx0",
+    ),
+    "float2fix": (
+        "0xxxxxxxxxxxxxxx0xxxxx",
+    ),
+}
+
+
+def _compile_forms(forms):
+    compiled = {}
+    for cls, patterns in forms.items():
+        rows = []
+        for pattern in patterns:
+            assert len(pattern) == 22, pattern
+            mask = value = 0
+            for bit, char in zip(range(31, 9, -1), pattern):
+                if char != "x":
+                    mask |= 1 << bit
+                    value |= int(char) << bit
+            rows.append((mask, value))
+        compiled[cls] = tuple(rows)
+    return compiled
+
+
+_RESERVED_FORMS = _compile_forms(RESERVED_FORMS)
+
+
+def reserved_form(cls: str, word: int) -> bool:
+    """Whether `word`, an encoding of class `cls`, is a reserved form of
+    RESERVED_FORMS."""
+    for mask, value in _RESERVED_FORMS.get(cls, ()):
+        if word & mask == value:
+            return True
     return False
 
 
@@ -354,7 +503,7 @@ class Library:
         self._site_key = ""
         # Per function, cleared as each is emitted: the cold stubs it needs.
         self.fn_start = 0
-        self.fn_mm: list[tuple[int, str, int]] = []
+        self.fn_mm: list[tuple[int, str, int, bool]] = []
         self.fn_xu: set[int] = set()
         self.fn_xb: set[int] = set()
         # The exit-by-branch stubs already emitted, by target: (label, the
@@ -362,8 +511,9 @@ class Library:
         # reach instead of emitting its own.
         self.xb_emitted: dict[int, tuple[str, int]] = {}
         # The refill routines the cold miss stubs enter: (kind, bytes,
-        # chunk of the entry table).
-        self.refill_used: set[tuple[str, int, int]] = set()
+        # chunk of the entry table, whether the probe left the address of
+        # the first byte rather than the last).
+        self.refill_used: set[tuple[str, int, int, bool]] = set()
         self.fn_pg: set[int] = set()
         self.fn_ma: list[int] = []
         self.fn_st: list[int] = []
@@ -714,7 +864,8 @@ class Library:
         self._site_key = f"{cls}:{mnemonic}"
         if mnemonic == "UNALLOCATED":
             return self._step(offset, "unallocated")
-        if cls in BASE_COPY_CLASSES and reserved_corner(cls, word):
+        if (cls in RESERVED_CORNER_CLASSES and reserved_corner(cls, word)) \
+                or reserved_form(cls, word):
             return self._step(offset, "reserved")
         if cls == "branch_imm":
             return self._branch_imm(offset, word, mnemonic == "BL")
@@ -1115,7 +1266,9 @@ class Library:
             operands = [self._resolve(rt, False)]
             if pair:
                 operands.append(self._resolve(rt2, False))
-        if pair and load and not vector and rt == rt2 and rt != 31:
+        if pair and load and rt == rt2:
+            # Unpredictable, and the engine rejects it, the zero register
+            # twice and a vector register twice included.
             return self._step(offset, "pair-same-register")
         if wb_mode != "none" and any(o == base_g for o in operands):
             return self._step(offset, "writeback-overlap")
@@ -1126,6 +1279,13 @@ class Library:
         if pair and len(virtual_operands) == 2 and virtual_operands[0] == \
                 virtual_operands[1]:
             return self._step(offset, "pair-same-virtual")
+        # A stack access with an immediate offset inside one aligned 16-byte
+        # granule cannot cross a page (AOT code runs with a 16-byte aligned
+        # SP: _sp_aligned_after): the page of its first byte is the page of
+        # its last, so the probe needs no last-byte address.
+        short = (base_g == "sp" and literal is None and regoff is None and
+                 total > 1 and
+                 (0 if wb_mode == "post" else imm) % 16 + total <= 16)
         # ---- the effective address, in a host register
         census_start = len(asm._w)
         if literal is not None:
@@ -1174,13 +1334,29 @@ class Library:
         if literal is None and base_g != "sp":
             asm.word(A.ubfx(T0, ea, 0, 56))
         entry = 0 if load else 16
-        self.fn_mm.append((offset, "LOAD" if load else "STORE", total))
-        asm.word(A.ubfx(T2, T0, 12, 14))
+        # A scalar of more than one byte is indexed by the page of its last
+        # byte and its tag compared with the page of its first, which T0 keeps
+        # for the access (register-offset form: the host delta of the entry
+        # plus the guest address): neighbouring pages have different direct
+        # slots, so an access that crosses a page finds the slot of the second
+        # page holding another page and misses, and the probe needs no add on
+        # T0 or the delta. A stack access in one granule needs no last byte at
+        # all. A pair adds the delta itself, so it keeps the first form.
+        flip = total > 1 and not pair and not short
+        first = short or flip
+        self.fn_mm.append((offset, "LOAD" if load else "STORE", total, first))
+        if flip:
+            asm.word(A.add_imm(T1, T0, total - 1))
+            asm.word(A.ubfx(T2, T1, 12, 14))
+        else:
+            asm.word(A.ubfx(T2, T0, 12, 14))
         asm.word(A.add_reg(T2, TLB, T2, shift=0, amount=5))
         asm.word(A.ldp_x(T1, T2, T2, entry))
-        if total > 1:
+        if pair and not short:
             asm.word(A.add_reg(T2, T2, T0))
             asm.word(A.add_imm(T0, T0, total - 1))
+        elif short and pair:
+            asm.word(A.add_reg(T2, T2, T0))
         asm.word(A.eor_reg(T1, T1, T0, shift=1, amount=12))
         asm.cbz(T1, self.lab("MM", offset), sf=1, nz=True)
         self.tag("mem.probe", census_start)
@@ -1219,13 +1395,9 @@ class Library:
                     self._load_guest(T1, guest_rt)
             elif guest_rt == "zr":
                 host_rt = 31
-            if total > 1:
-                asm.word((size << 30) | (0b111 << 27) | (vector << 26) |
-                         (0b01 << 24) | (mem_opc << 22) | (T2 << 5) | host_rt)
-            else:
-                asm.word((size << 30) | (0b111 << 27) | (vector << 26) |
-                         (mem_opc << 22) | (1 << 21) | (T0 << 16) |
-                         (0b011 << 13) | (0b10 << 10) | (T2 << 5) | host_rt)
+            asm.word((size << 30) | (0b111 << 27) | (vector << 26) |
+                     (mem_opc << 22) | (1 << 21) | (T0 << 16) |
+                     (0b011 << 13) | (0b10 << 10) | (T2 << 5) | host_rt)
             if guest_rt in VIRTUAL and load:
                 self._store_guest(T1, guest_rt)
         self.tag("mem.access", census_start)
@@ -1301,7 +1473,7 @@ class Library:
         census_start = len(asm._w)
         asm.word(A.ubfx(T0, host_base, 0, 56))
         entry = 0 if load else 16
-        self.fn_mm.append((offset, "LOAD" if load else "STORE", total))
+        self.fn_mm.append((offset, "LOAD" if load else "STORE", total, False))
         asm.word(A.ubfx(T2, T0, 12, 14))
         asm.word(A.add_reg(T2, TLB, T2, shift=0, amount=5))
         asm.word(A.ldp_x(T1, T2, T2, entry))
@@ -1367,7 +1539,7 @@ class Library:
             asm.word(A.add_imm(T0, T0, n - 1))
         asm.word(A.eor_reg(T1, T1, T0, shift=1, amount=12))
         asm.cbz(T1, self.lab("MM", offset), sf=1, nz=True)
-        self.fn_mm.append((offset, "STORE" if write else "LOAD", n))
+        self.fn_mm.append((offset, "STORE" if write else "LOAD", n, False))
 
     def _ordered(self, offset: int, word: int) -> bool:
         """LDAR and STLR of a byte, halfword, word or doubleword."""
@@ -1564,15 +1736,16 @@ class Library:
             self.tag("gate", before)
             self.stats.words["gate"] += 1
         before = len(asm._w)
-        for offset, kind, total in self.fn_mm:
+        for offset, kind, total, first in self.fn_mm:
             # The thunk gets the instruction's slot in the entry table in T1
             # and the access in the routine it enters.
             asm.label(self.lab("MM", offset))
             slot = offset - self.table_base
             asm.word(A.movz(T1, slot & 0xffff))
             chunk = slot >> 16
-            self.refill_used.add((kind, total, chunk))
-            asm.b(f"REFILL_{kind}_{total}" + (f"_{chunk}" if chunk else ""))
+            self.refill_used.add((kind, total, chunk, first))
+            asm.b(f"REFILL_{kind}_{total}" + ("F" if first else "") +
+                  (f"_{chunk}" if chunk else ""))
         self.tag("stub.mm", before)
         before = len(asm._w)
         for offset in self.fn_st:
@@ -1888,7 +2061,8 @@ def emit_exits(asm: A.Assembler, library: "Library") -> None:
 def emit_refill_stubs(asm: A.Assembler, library: "Library") -> None:
     """The routines a cold miss stub enters, after the functions that name
     them: REFILL_<kind>_<bytes> with T0 = the address the probe formed (an
-    access of more than one byte leaves the address of its last byte) and
+    access of more than one byte leaves the address of its last byte; the
+    entry REFILL_<kind>_<bytes>F is for a probe that left the first) and
     T1 = the instruction's slot in this library's entry table. The thunk asks
     the host to fill the TLB entry; when that succeeds the instruction
     restarts from its entry (no state of the instruction was changed before
@@ -1897,22 +2071,32 @@ def emit_refill_stubs(asm: A.Assembler, library: "Library") -> None:
     exist."""
     for kind, access in (("LOAD", 0), ("STORE", 1)):
         for total in REFILL_TOTALS:
-            chunks = sorted(chunk for used_kind, used_total, chunk
-                            in library.refill_used
-                            if (used_kind, used_total) == (kind, total))
-            if not chunks:
+            chunks = {first: sorted(chunk for used_kind, used_total, chunk,
+                                    used_first in library.refill_used
+                                    if (used_kind, used_total, used_first) ==
+                                    (kind, total, first))
+                      for first in (False, True)}
+            if not chunks[False] and not chunks[True]:
                 continue
+            if chunks[True]:
+                # A probe that found no last-byte address (an access in one
+                # aligned granule) leaves the address of the first byte; the
+                # host is given the last, as every other probe leaves it.
+                asm.label(f"REFILL_{kind}_{total}F")
+                asm.word(A.add_imm(T0, T0, total - 1))
             asm.label(f"REFILL_{kind}_{total}")
             asm.word(A.movz(T2, access | (total << 8)))
             asm.b("REFILL")
             # A site names its slot in 16 bits; the thunk of a later 64 KiB
             # of the table supplies the rest.
-            for chunk in chunks:
-                if chunk == 0:
-                    continue
-                asm.label(f"REFILL_{kind}_{total}_{chunk}")
-                asm.word(A.movk(T1, chunk, 1))
-                asm.b(f"REFILL_{kind}_{total}")
+            for first in (False, True):
+                suffix = "F" if first else ""
+                for chunk in chunks[first]:
+                    if chunk == 0:
+                        continue
+                    asm.label(f"REFILL_{kind}_{total}{suffix}_{chunk}")
+                    asm.word(A.movk(T1, chunk, 1))
+                    asm.b(f"REFILL_{kind}_{total}{suffix}")
 
 
 def emit_mops_thunks(asm: A.Assembler, library: "Library") -> None:

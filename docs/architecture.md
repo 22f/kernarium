@@ -774,7 +774,11 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   text, a remap or another address space can cost a declined entry and never
   run stale code.
 - Memory and atomics: an inline probe of the engine's TLB entry, refilled
-  through the executor on a miss; ordered accesses, the LSE atomic operations
+  through the executor on a miss (a scalar of more than one byte indexes the
+  entry by its last byte and compares the tag with its first, so a page
+  crossing misses; a stack access with an immediate offset inside one aligned
+  16-byte granule cannot cross a page and is probed by its first byte);
+  ordered accesses, the LSE atomic operations
   and compare-and-swap run as the host's own instruction on naturally aligned
   addresses. Advanced SIMD structure loads and stores (LD1 to LD4, ST1 to
   ST4, the lane forms and LDnR) run as the host's own instruction on the
@@ -801,7 +805,13 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   packaging and the Andarium archive phase on a binary that linked a
   diagnostics compilation of either), and
   in no build does a vCPU thread do file I/O or allocate while it is inside
-  rewritten code.
+  rewritten code. The report says why the gadget engine ran instead of
+  rewritten code (the engine's dispatches by refusal or find result, with the
+  instructions it ran on covered pages), why a memory probe refilled the TLB
+  (an empty slot, another page of the same slot, a page access of the other
+  kind, a page-crossing access), and how many lookups a dispatch made; the
+  executor's counters exist only in a diagnostics tree. A per-site refill
+  histogram goes to a second file when the environment names one.
 
 Build and tests: `tools/aot/README.md`.
 

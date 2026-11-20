@@ -855,7 +855,9 @@ blocker in every one of them.
   requires that a word it rejects as an illegal instruction in every state is
   one the rewriter leaves to it (the data a method's code holds, such as the
   literal pools of compiled Java, is full of reserved encodings, and code is
-  entered at any word); `--words-only 1` runs the scan alone.
+  entered at any word); `--words-only 1` runs the scan alone. The generated
+  library holds one such word of each class the rewriter copies field by
+  field, and a load of a vector pair into one register twice.
   Admission and retry decisions are performance hints: rows warm them and
   then change the text, restore it, and move the executor to another address
   space, and the result must stay the engine's. Entering rewritten code must
