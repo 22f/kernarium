@@ -923,6 +923,9 @@ class Simulation:
         self.last = 0.0
         self.counter = 4000
         self.holder = 77
+        self.holder_restarts = False    # the holder ends and init starts it again: another pid at every look
+        self.holder_looks = 0
+        self.holder_log = "11-20 10:00:00.000    77    77 I kernarium.sms.listener: listening on vsock port 5560\n"
         self.starts = 0
         self.rows: list[tuple[int, str, str]] = []
         self.step_log: list[str] = []
@@ -968,7 +971,13 @@ class SimulatedGuest:
         return self.sim.session()
 
     def holder_pid(self) -> int | None:
+        self.sim.holder_looks += 1
+        if self.sim.holder is not None and self.sim.holder_restarts:
+            return self.sim.holder + self.sim.holder_looks - 1
         return self.sim.holder
+
+    def logcat(self, *arguments: str) -> str:
+        return self.sim.holder_log if f"-s {runner.HOLDER_TAG}:I" in " ".join(arguments) else ""
 
     def service_log(self) -> str:
         return "".join(self.sim.step_log)
@@ -1115,6 +1124,23 @@ class OnDemandTests(unittest.TestCase):
         simulation = Simulation()
         simulation.holder = None  # type: ignore[assignment]
         with self.assertRaisesRegex(runner.Failure, "kernarium_sms_listener does not run"):
+            self.run_row(runner.row_n1, simulation)
+
+    def test_n1_wants_a_holder_that_stays_up_and_logs_no_error(self) -> None:
+        """The holder that ends at once and is started again by init shows as a process most of the time (the first
+        image of this change did, on a handoff socket it never listened on), so N1 looks twice, and reads its log."""
+        simulation = Simulation()
+        simulation.holder_restarts = True
+        with self.assertRaisesRegex(runner.Failure, r"pid 78 after \d+ s, was 77: it ends and init starts it again"):
+            self.run_row(runner.row_n1, simulation)
+        simulation = Simulation()
+        simulation.holder_log += ("11-20 10:00:01.000    77    77 E kernarium.sms.listener: "
+                                  "the handoff socket failed (events 0x10)\n")
+        with self.assertRaisesRegex(runner.Failure, "the holder logged an error: 'the handoff socket failed"):
+            self.run_row(runner.row_n1, simulation)
+        simulation = Simulation()
+        simulation.holder_log = ""
+        with self.assertRaisesRegex(runner.Failure, "never logged that it listens on the vsock port"):
             self.run_row(runner.row_n1, simulation)
 
     def test_n2_a_first_message_at_idle(self) -> None:

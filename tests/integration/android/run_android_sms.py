@@ -124,6 +124,9 @@ HANDOFF_LABEL = "u:object_r:kernarium_sms_socket:s0"
 WAKER = "kernarium_sms_wake"
 PHONE = "com.android.phone"
 PHONE_SETTLE_SECONDS = 5
+# How long the holder must keep its pid for N1: a holder that ends and is started again by init is a process at most
+# looks, and each start takes at least the holder's own second.
+HOLDER_STABLE_SECONDS = 5
 PHONE_WAIT_SECONDS = 30
 # A second delivery of one message lands soon after the first: the rows look again after this.
 INBOX_SETTLE_SECONDS = 3
@@ -1200,8 +1203,9 @@ def row_d3(run: Run) -> None:
 # ---- The idle rows: the service has a process only while messages are in flight.
 
 def row_n1(run: Run) -> None:
-    """After the settle, with nothing sent, the service has no process: the holder alone keeps the port. It is
-    the mode's first row: a message starts the service, and so does a ping."""
+    """After the settle, with nothing sent, the service has no process: the holder alone keeps the port, with one
+    pid for a few seconds and no error in its log. It is the mode's first row: a message starts the service, and
+    so does a ping."""
     guest = run.guest
     pid = guest.strict_pid()
     if pid is not None:
@@ -1209,7 +1213,16 @@ def row_n1(run: Run) -> None:
     holder = guest.holder_pid()
     if holder is None:
         raise Failure(f"{HOLDER} does not run")
-    run.note(f"no {PACKAGE} process at idle; the holder is pid {holder}")
+    time.sleep(HOLDER_STABLE_SECONDS)
+    again = guest.holder_pid()
+    if again != holder:
+        raise Failure(f"the holder is pid {again} after {HOLDER_STABLE_SECONDS} s, was {holder}: it ends and init "
+                      "starts it again")
+    problems = holder_log_problems(guest.logcat("-s", f"{HOLDER_TAG}:I"))
+    if problems:
+        raise Failure("; ".join(problems))
+    run.note(f"no {PACKAGE} process at idle; the holder is pid {holder}, stable for {HOLDER_STABLE_SECONDS} s, "
+             "and logs no error")
 
 
 def row_n2(run: Run) -> None:
