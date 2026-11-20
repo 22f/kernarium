@@ -31,25 +31,41 @@ protocol AndroidAppsSource: AnyObject {
 /// The guest is asked for one listing at a time: the run's refresh, the
 /// chooser's, a launch's own look at the apps after a missing-app answer. A
 /// second asker waits its turn, in order, and the answer it gets is its own.
+/// A task that is cancelled while it waits (the run ended) leaves the queue
+/// at once and holds no turn.
 @MainActor
 final class ListingLane {
     private var held = false
-    private var waiting: [CheckedContinuation<Void, Never>] = []
+    private var waiting: [(id: Int, turn: CheckedContinuation<Bool, Never>)] = []
+    private var issued = 0
 
-    func enter() async {
+    /// Waits for the turn; false where the task was cancelled, and the turn is not held.
+    func enter() async -> Bool {
+        if Task.isCancelled { return false }
         guard held else {
             held = true
-            return
+            return true
         }
-        await withCheckedContinuation { waiting.append($0) }
+        issued += 1
+        let id = issued
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { waiting.append((id, $0)) }
+        } onCancel: {
+            Task { @MainActor in self.leaveQueue(id) }
+        }
     }
 
     func leave() {
         if waiting.isEmpty {
             held = false
         } else {
-            waiting.removeFirst().resume()
+            waiting.removeFirst().turn.resume(returning: true)
         }
+    }
+
+    private func leaveQueue(_ id: Int) {
+        guard let index = waiting.firstIndex(where: { $0.id == id }) else { return }
+        waiting.remove(at: index).turn.resume(returning: false)
     }
 }
 
@@ -60,7 +76,7 @@ nonisolated struct OneListingAtATimeTool: AndroidAppsTool {
     let lane: ListingLane
 
     func digest(limit: Duration) async -> AndroidAppDigestAnswer {
-        await lane.enter()
+        guard await lane.enter() else { return .failed }
         var answer = AndroidAppDigestAnswer.failed
         if !Task.isCancelled { answer = await base.digest(limit: limit) }
         await lane.leave()
@@ -68,7 +84,7 @@ nonisolated struct OneListingAtATimeTool: AndroidAppsTool {
     }
 
     func list(limit: Duration) async -> AndroidAppListing {
-        await lane.enter()
+        guard await lane.enter() else { return .failed }
         var answer = AndroidAppListing.failed
         if !Task.isCancelled { answer = await base.list(limit: limit) }
         await lane.leave()

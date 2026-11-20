@@ -24,6 +24,7 @@ nonisolated final class ScriptedAppsTool: AndroidAppsTool, @unchecked Sendable {
     private var listingOverride: AndroidAppListing?
     private var digestOverride: AndroidAppDigestAnswer?
     private var delayValue = Duration.milliseconds(120)
+    private var holdsDigestsValue = false
 
     init(apps: [AndroidApp] = ScriptedAndroidApps.sampleApps) {
         current = apps
@@ -33,6 +34,12 @@ nonisolated final class ScriptedAppsTool: AndroidAppsTool, @unchecked Sendable {
     var delay: Duration {
         get { lock.withLock { delayValue } }
         set { lock.withLock { delayValue = newValue } }
+    }
+
+    /// While set, a digest is not answered (the guest does not reply), and no cancellation ends the wait.
+    var holdsDigests: Bool {
+        get { lock.withLock { holdsDigestsValue } }
+        set { lock.withLock { holdsDigestsValue = newValue } }
     }
 
     var apps: [AndroidApp] { lock.withLock { current } }
@@ -81,6 +88,9 @@ nonisolated final class ScriptedAppsTool: AndroidAppsTool, @unchecked Sendable {
             return (digestOverride ?? .digest("scripted-\(version)"), delayValue)
         }
         try? await Task.sleep(for: wait)
+        while lock.withLock({ holdsDigestsValue }) {
+            await Task { try? await Task.sleep(for: .milliseconds(10)) }.value
+        }
         lock.withLock { listingsNow -= 1 }
         return answer
     }

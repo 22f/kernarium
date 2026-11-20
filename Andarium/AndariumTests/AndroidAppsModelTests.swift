@@ -1333,6 +1333,95 @@ final class AndroidAppsModelTests {
         #expect(rig.tool.mostListingsAtOnce == 1, "the guest is asked for one listing at a time")
     }
 
+    @Test func aRetainedLauncherCountDoesNotStandInForAListingOfAnAppTheCatalogLacks() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.model.host.idiom = .mac
+        func twin(_ activity: String) throws -> AndroidApp {
+            AndroidApp(
+                component: try #require(AndroidComponent(packageName: "com.example.twin", activityClass: "com.example.twin." + activity)),
+                label: "Twin", builtIn: false, iconTag: "0000000000000001")
+        }
+        let main = try twin("Main")
+        let second = try twin("Second")
+        // The app is listed with two launchers, then uninstalled, and Android restarts.
+        rig.tool.install(main)
+        rig.tool.install(second)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened == [comet.component] && rig.state.open.pending == nil })
+        #expect(rig.state.store.record(forID: main.id)?.launchers == 2)
+        rig.tool.remove(main.id)
+        rig.tool.remove(second.id)
+        rig.model.androidAppsRunEnded()
+        // Another app is opened, so the current catalog omits it; the record of the old one is retained.
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened == [comet.component, comet.component] && rig.state.open.pending == nil })
+        #expect(rig.state.store.catalog()?.app(withID: main.id) == nil)
+        #expect(rig.state.store.record(forID: main.id)?.launchers == 2, "the retained record")
+        // It is reinstalled with one launcher and opened by name, then renames that launcher.
+        rig.tool.install(main)
+        rig.model.requestAndroidApp(main.component, label: "Twin")
+        #expect(await eventually { rig.tool.opened.last == main.component && rig.state.open.pending == nil })
+        #expect(rig.state.store.record(forID: main.id)?.launchers == 1, "its count is the catalog's now")
+        let renamed = try twin("Renamed")
+        rig.tool.remove(main.id)
+        rig.tool.install(renamed)
+        rig.model.requestAndroidApp(main.component, label: "Twin")
+        #expect(await eventually { rig.tool.opened.last == renamed.component }, "opened: \(rig.tool.opened)")
+        #expect(rig.state.open.banner == nil)
+    }
+
+    @Test func aLauncherCountTheRecordsLostIsRecoveredByAMatchingDigestOnAHostWithNoHomeScreen() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.model.host.idiom = .mac
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened == [comet.component] && rig.state.open.pending == nil })
+        // The records did not get written with the catalog: the store is read again without them.
+        try FileManager.default.removeItem(at: rig.directory.appendingPathComponent("records.json"))
+        rig.state.store = AndroidAppStore(directory: rig.directory)
+        #expect(rig.state.store.catalog()?.app(withID: comet.id) != nil)
+        #expect(rig.state.store.record(forID: comet.id) == nil)
+        // An open of the app asks the digest, which matches: the count is learnt again, with nothing listed.
+        let listings = rig.tool.listingsAsked
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened == [comet.component, comet.component] && rig.state.open.pending == nil })
+        #expect(rig.tool.listingsAsked == listings, "the digest matched")
+        #expect(rig.state.store.record(forID: comet.id)?.launchers == 1, "recovered")
+        // The app renames its only launcher, and the original intent still finds it.
+        let renamed = AndroidApp(
+            component: try #require(AndroidComponent(packageName: comet.component.packageName, activityClass: "com.example.comethop.Renamed")),
+            label: "Comet Hop", builtIn: false, iconTag: "0000000000000001")
+        rig.tool.remove(comet.id)
+        rig.tool.install(renamed)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened.last == renamed.component }, "opened: \(rig.tool.opened)")
+        #expect(rig.state.open.banner == nil)
+    }
+
+    @Test func aCancelledAskWaitingForTheLaneIsReleasedWhenTheRunEnds() async throws {
+        let rig = try rig(phase: .running(.normal))
+        let gone = try #require(AndroidComponent(packageName: "com.example.gone", activityClass: "com.example.gone.Main"))
+        defer {
+            rig.tool.holdsDigests = false
+            rig.stop()
+        }
+        // The run's catalog listing is under way, and the guest's reply to it is held.
+        rig.tool.holdsDigests = true
+        let catalog = Task { await rig.model.refreshAndroidApps() }
+        #expect(await eventually { rig.tool.digestsAsked == 1 })
+        // A launch of an app that is not there lists the apps to learn why: that ask waits its turn.
+        rig.model.requestAndroidApp(gone, label: "Gone")
+        #expect(await eventually { rig.tool.opened == [gone] })
+        try await Task.sleep(for: .milliseconds(100))
+        let launch = try #require(rig.state.opening)
+        // The run ends with the reply still held: the ask that waited is released at once.
+        rig.model.androidAppsRunEnded()
+        #expect(await ends(launch, within: 3), "the cancelled ask stayed in the queue")
+        rig.tool.holdsDigests = false
+        _ = await catalog.value
+    }
+
     @Test func theCachedListAndRecordsAnswerBeforeTheRunsFirstListing() async throws {
         let rig = try rig(phase: .running(.normal))
         defer { rig.stop() }

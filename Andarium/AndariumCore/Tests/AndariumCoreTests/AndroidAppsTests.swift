@@ -244,6 +244,25 @@ struct AndroidAppStoreTests {
         #expect(tool.askedIcons == [comet.id], "the next refresh with icons asks for what is missing")
     }
 
+    @Test func aMatchingDigestRecoversTheLauncherCountsOfTheCatalogItVerifies() async throws {
+        let directory = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AndroidAppStore(directory: directory)
+        let comet = app("com.example.comet", "Comet Hop")
+        let tool = FakeTool(.apps(AndroidAppList(apps: [comet], digest: "d1")))
+        tool.icons[comet.id] = .noIcon
+        _ = await AndroidAppRefresh.run(tool: tool, store: store, now: Date(timeIntervalSince1970: 1), withIcons: false)
+        #expect(store.record(forID: comet.id)?.launchers == 1)
+        // The records did not get written with the catalog: another store reads the catalog and none of them.
+        try FileManager.default.removeItem(at: directory.appendingPathComponent("records.json"))
+        let again = AndroidAppStore(directory: directory)
+        #expect(again.catalog()?.digest == "d1" && again.record(forID: comet.id) == nil)
+        _ = await AndroidAppRefresh.run(tool: tool, store: again, now: Date(timeIntervalSince1970: 2), withIcons: false)
+        #expect(tool.listAsks == 1, "the digest matched, so nothing is listed again")
+        #expect(again.record(forID: comet.id)?.launchers == 1, "the count is learnt from the catalog the digest verified")
+        #expect(AndroidAppStore(directory: directory).record(forID: comet.id)?.launchers == 1, "and kept")
+    }
+
     @Test func aListingIsKeptAndReadBackByAnotherStore() throws {
         let directory = makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

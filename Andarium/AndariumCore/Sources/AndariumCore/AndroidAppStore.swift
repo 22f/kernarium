@@ -225,6 +225,9 @@ public final class AndroidAppStore: @unchecked Sendable {
     }
 
     /// The listing is the one the store has: only the time it was taken changes.
+    /// The catalog is verified, so the records learn its launcher counts again
+    /// where they lack them or differ (a records file that was not written with
+    /// the catalog); a records write that fails now is tried again at the next.
     @discardableResult
     public func touch(at date: Date, generation expected: Int? = nil) -> Bool {
         lock.withLock {
@@ -234,8 +237,30 @@ public final class AndroidAppStore: @unchecked Sendable {
             catalog.listedAt = date
             guard (try? write(catalog, to: catalogFile)) != nil else { return false }
             catalogCache = catalog
+            if recoverLauncherCounts(from: catalog, at: date) { try? writeRecords() }
             return true
         }
+    }
+
+    /// Makes each listed app's record carry the launcher count the catalog gives it.
+    private func recoverLauncherCounts(from catalog: AndroidAppCatalog, at date: Date) -> Bool {
+        var launchers: [String: Int] = [:]
+        for app in catalog.apps { launchers[app.component.packageName, default: 0] += 1 }
+        var changed = false
+        for app in catalog.apps {
+            let count = launchers[app.component.packageName]
+            if var kept = recordCache[app.id] {
+                guard kept.launchers != count else { continue }
+                kept.launchers = count
+                recordCache[app.id] = kept
+            } else {
+                recordCache[app.id] = AndroidAppRecord(
+                    id: app.id, label: app.label, builtIn: app.builtIn, seen: date, launchers: count)
+            }
+            changed = true
+        }
+        if changed { trimRecords() }
+        return changed
     }
 
     /// What was listed may not be what the disk now has (a snapshot or an
