@@ -69,7 +69,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/kosmickrisp/vulkan/kk_device.h            |    4 +
  src/kosmickrisp/vulkan/kk_physical_device.c   |    3 +
  src/kosmickrisp/vulkan/kk_physical_device.h   |    6 +
- src/kosmickrisp/vulkan/kk_shader.c            | 1192 ++++++++++++++--
+ src/kosmickrisp/vulkan/kk_shader.c            | 1218 ++++++++++++++--
  src/kosmickrisp/vulkan/kk_shader.h            |   27 +-
  src/kosmickrisp/vulkan/kk_variant_entry.c     |  408 ++++++
  src/kosmickrisp/vulkan/kk_variant_entry.h     |  191 +++
@@ -77,16 +77,16 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  .../tests/descriptor_layout_hash_state.c      |   18 +
  .../tests/descriptor_layout_hash_state.h      |   18 +
  .../tests/test_descriptor_layout_hash.cpp     |  119 ++
- .../vulkan/tests/test_variant_disk_cache.cpp  | 1270 +++++++++++++++++
- .../vulkan/tests/test_variant_entry.c         | 1032 ++++++++++++++
+ .../vulkan/tests/test_variant_disk_cache.cpp  | 1293 +++++++++++++++++
+ .../vulkan/tests/test_variant_entry.c         | 1032 +++++++++++++
  .../variant_disk_cache_shaders/cache.frag     |    4 +
  .../variant_disk_cache_shaders/cache.frag.h   |   18 +
  .../variant_disk_cache_shaders/cache.vert     |    4 +
  .../variant_disk_cache_shaders/cache.vert.h   |   33 +
- .../vulkan/tests/variant_disk_cache_state.c   |  109 ++
+ .../vulkan/tests/variant_disk_cache_state.c   |  120 ++
  .../vulkan/tests/variant_disk_cache_state.h   |   30 +
  src/util/disk_cache.c                         |    3 +
- 25 files changed, 4426 insertions(+), 116 deletions(-)
+ 25 files changed, 4486 insertions(+), 116 deletions(-)
  create mode 100644 src/kosmickrisp/vulkan/kk_variant_entry.c
  create mode 100644 src/kosmickrisp/vulkan/kk_variant_entry.h
  create mode 100644 src/kosmickrisp/vulkan/tests/descriptor_layout_hash_state.c
@@ -264,7 +264,7 @@ index 135850ac3f92676d765825272047218a46e29a14..2c09eeb75ec8cbcd562040ebe0d62685
  
  static inline uint32_t
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..7c834fe9a93e264d6c4fd10a92bc4d461e6ce6c3 100644
+index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034cd55abf6b 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
 @@ -13,6 +13,7 @@
@@ -721,7 +721,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..7c834fe9a93e264d6c4fd10a92bc4d46
                 return false;
           }
        }
-@@ -6938,67 +7101,266 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
+@@ -6938,67 +7101,292 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
     return !blob->out_of_memory;
  }
  
@@ -802,7 +802,8 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..7c834fe9a93e264d6c4fd10a92bc4d46
 +
 +static void
 +kk_attachment_formats_init(void)
-+{
+ {
+-   return kk_msl_data_deserialize(blob, &shader->msl_data[stage]);
 +   for (unsigned format = 0; format < PIPE_FORMAT_COUNT; format++) {
 +      const struct kk_va_format *va_format = kk_get_va_format(format);
 +      /* A8 is not offered as an attachment (kk_get_image_format_features). */
@@ -839,11 +840,11 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..7c834fe9a93e264d6c4fd10a92bc4d46
 + * bits and copies the static topology of a static-indexed output into an array
 + * of the topology's size, as many indices as the description says. */
 +#define KK_GS_MAX_INDICES 2048
++#define KK_TESS_LOCAL_THREAD_LIMIT 1024
 +
 +static bool
 +kk_gs_info_is_valid(const struct poly_gs_info *gsi)
- {
--   return kk_msl_data_deserialize(blob, &shader->msl_data[stage]);
++{
 +   if ((unsigned)gsi->mode >= MESA_PRIM_PATCHES ||
 +       (unsigned)gsi->shape > POLY_GS_SHAPE_STATIC_PER_INSTANCE ||
 +       gsi->count_words > POLY_MAX_VERTEX_STREAMS ||
@@ -899,6 +900,13 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..7c834fe9a93e264d6c4fd10a92bc4d46
 +       ((stage_bits & tess_bits) != 0 && (stage_bits & tess_bits) != tess_bits))
 +      return false;
 +
++   /* The thread count of the compute pipeline of the tessellation control
++    * stage: one thread for each output control point of a patch (at most
++    * maxTessellationPatchSize, 32), and a threadgroup holds 1024 threads at
++    * most. */
++   if (info->vs.tess_local_thread_size > KK_TESS_LOCAL_THREAD_LIMIT)
++      return false;
++
 +   /* The records a draw reads. */
 +   if (!kk_gs_info_is_valid(&info->vs.geometry) ||
 +       !kk_gs_info_is_valid(&info->vs.transform_feedback))
@@ -938,6 +946,24 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..7c834fe9a93e264d6c4fd10a92bc4d46
 +       !mtl_device_supports_vertex_amplification_count(
 +          dev->mtl_handle, util_bitcount(info->vs.view_mask)))
 +      return false;
++
++   /* Metal's own blend state, which fills a blend descriptor for each of the
++    * attachments. */
++   if (info->vs.metal_blend) {
++      for (uint32_t i = 0; i < MAX_DRAW_BUFFERS; i++) {
++         if (info->vs.blend[i].source_rgb > MTL_BLEND_FACTOR_ONE_MINUS_BLEND_ALPHA ||
++             info->vs.blend[i].destination_rgb >
++                MTL_BLEND_FACTOR_ONE_MINUS_BLEND_ALPHA ||
++             info->vs.blend[i].source_alpha >
++                MTL_BLEND_FACTOR_ONE_MINUS_BLEND_ALPHA ||
++             info->vs.blend[i].destination_alpha >
++                MTL_BLEND_FACTOR_ONE_MINUS_BLEND_ALPHA ||
++             info->vs.blend[i].rgb_operation > MTL_BLEND_OPERATION_MAX ||
++             info->vs.blend[i].alpha_operation > MTL_BLEND_OPERATION_MAX ||
++             info->vs.blend[i].write_mask > 0xf)
++            return false;
++      }
++   }
 +
 +   if ((unsigned)info->vs.depth_compare_op > VK_COMPARE_OP_ALWAYS)
 +      return false;
@@ -1027,7 +1053,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..7c834fe9a93e264d6c4fd10a92bc4d46
     }
  
     struct kk_shader *shader = vk_shader_zalloc(
-@@ -7031,56 +7393,62 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
+@@ -7031,56 +7419,62 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
           goto fail;
        }
  
@@ -1098,7 +1124,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..7c834fe9a93e264d6c4fd10a92bc4d46
           if (result != VK_SUCCESS)
              goto fail;
        }
-@@ -7090,7 +7458,8 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
+@@ -7090,7 +7484,8 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
           u_foreach_bit(stage, shader->info.vs.raster_variant_stages) {
              struct vk_shader *child = NULL;
              result = kk_deserialize_shader_impl(vk_dev, blob, binary_version,
@@ -1108,7 +1134,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..7c834fe9a93e264d6c4fd10a92bc4d46
              if (result != VK_SUCCESS)
                 goto fail;
              struct kk_shader *raster = container_of(child, struct kk_shader, vk);
-@@ -7135,7 +7504,592 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+@@ -7135,7 +7530,592 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
                        struct vk_shader **shader_out)
  {
     return kk_deserialize_shader_impl(vk_dev, blob, binary_version, pAllocator,
@@ -1702,7 +1728,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..7c834fe9a93e264d6c4fd10a92bc4d46
  }
  
  void
-@@ -7240,10 +8194,22 @@ kk_resolve_dynamic_vertex_input_pipeline(struct kk_cmd_buffer *cmd)
+@@ -7240,10 +8220,22 @@ kk_resolve_dynamic_vertex_input_pipeline(struct kk_cmd_buffer *cmd)
  
     if (variant == NULL) {
        struct kk_linked_graphics_pipeline *candidate = NULL;
@@ -1729,7 +1755,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..7c834fe9a93e264d6c4fd10a92bc4d46
  
        memcpy(candidate->key, key, sizeof(candidate->key));
        kk_variant_drop_msl(candidate, linked, vi, byte_strides);
-@@ -7297,8 +8263,12 @@ kk_cmd_select_line_raster_variant(struct kk_cmd_buffer *cmd)
+@@ -7297,8 +8289,12 @@ kk_cmd_select_line_raster_variant(struct kk_cmd_buffer *cmd)
     if (owner->info.vs.raster_variant_mask) {
        const enum kk_raster_variant variant =
           kk_raster_variant_select(primitive, &dyn->rs);
@@ -2623,10 +2649,10 @@ index 0000000000000000000000000000000000000000..07324355f9033e6648bff0acafd24ace
 +}
 diff --git a/src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp b/src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..048b97f45faae63ad05536175314c59801a34363
+index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2af14857ae
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp
-@@ -0,0 +1,1270 @@
+@@ -0,0 +1,1293 @@
 +/*
 + * Copyright 2026 Google LLC
 + * SPDX-License-Identifier: MIT
@@ -3476,6 +3502,12 @@ index 0000000000000000000000000000000000000000..048b97f45faae63ad05536175314c598
 +                      set_field(vs_of(f), "vs.line_raster_prim", 99, 4);
 +                   }});
 +
++   /* The thread count of a tessellation control stage's compute pipeline. */
++   rows.push_back({"tessellation local thread size above a threadgroup",
++                   "info", [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.tess_local_thread_size", 4096, 4);
++                   }});
++
 +   /* The sample count of a render pipeline and of the pass drawn for it. */
 +   rows.push_back({"sample count without a multisample state", "info",
 +                   [vs_of](frames_t &f) {
@@ -3514,6 +3546,23 @@ index 0000000000000000000000000000000000000000..048b97f45faae63ad05536175314c598
 +   rows.push_back({"view mask above the device's amplification count", "info",
 +                   [vs_of](frames_t &f) {
 +                      set_field(vs_of(f), "vs.view_mask", 0xffffffffu, 4);
++                   }});
++   rows.push_back({"blend factor out of range", "info", [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.metal_blend", 1, 1);
++                      set_field(vs_of(f), "vs.blend", 99, 1,
++                                driver("blend.destination_rgb"));
++                   }});
++   rows.push_back({"blend operation out of range", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.metal_blend", 1, 1);
++                      set_field(vs_of(f), "vs.blend", 99, 1,
++                                driver("blend.alpha_operation"));
++                   }});
++   rows.push_back({"blend write mask above the colour channels", "info",
++                   [vs_of](frames_t &f) {
++                      set_field(vs_of(f), "vs.metal_blend", 1, 1);
++                      set_field(vs_of(f), "vs.blend", 0xff, 1,
++                                driver("blend.write_mask"));
 +                   }});
 +   rows.push_back({"depth compare op out of range", "info",
 +                   [vs_of](frames_t &f) {
@@ -5020,10 +5069,10 @@ index 0000000000000000000000000000000000000000..012ba6f5bd421aa0f8f163ce8082b8f4
 +0x00010038}
 diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..b0145f9d94ee059b6bac250293c22104716d3df8
+index 0000000000000000000000000000000000000000..2539267e5c672547799a4916d60b024fc04debd7
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,120 @@
 +/*
 + * Copyright 2026 Google LLC
 + * SPDX-License-Identifier: MIT
@@ -5070,6 +5119,7 @@ index 0000000000000000000000000000000000000000..b0145f9d94ee059b6bac250293c22104
 +      FIELD("vs.transform_feedback.mode", vs.transform_feedback.mode),
 +      FIELD("vs.transform_feedback.count_words",
 +            vs.transform_feedback.count_words),
++      FIELD("vs.tess_local_thread_size", vs.tess_local_thread_size),
 +      FIELD("vs.sample_count", vs.sample_count),
 +      FIELD("vs.has_ms", vs.has_ms),
 +      FIELD("vs.raster_primitive", vs.raster_primitive),
@@ -5095,6 +5145,16 @@ index 0000000000000000000000000000000000000000..b0145f9d94ee059b6bac250293c22104
 +            offsetof(struct kk_shader_info, vs.vertex_layouts[0].step) -
 +               offsetof(struct kk_shader_info, vs.vertex_layouts)),
 +      FIELD("vs.blend", vs.blend),
++      FIELD("vs.metal_blend", vs.metal_blend),
++      VALUE("blend.destination_rgb",
++            offsetof(struct kk_shader_info, vs.blend[0].destination_rgb) -
++               offsetof(struct kk_shader_info, vs.blend)),
++      VALUE("blend.alpha_operation",
++            offsetof(struct kk_shader_info, vs.blend[0].alpha_operation) -
++               offsetof(struct kk_shader_info, vs.blend)),
++      VALUE("blend.write_mask",
++            offsetof(struct kk_shader_info, vs.blend[0].write_mask) -
++               offsetof(struct kk_shader_info, vs.blend)),
 +      VALUE("sizeof blend",
 +            sizeof(((struct kk_shader_info *)0)->vs.blend[0])),
 +      VALUE("MESA_SHADER_VERTEX", MESA_SHADER_VERTEX),
