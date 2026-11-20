@@ -1046,7 +1046,8 @@ void endsAndBeginningsThatWaitTogetherAreActedOnInOrder()
     const auto polled = stream.untilPlayed(recoveryLimit);
     check(polled < recoveryLimit && activations.load() == mark + 1,
         "the sink resumes by one activation once that app has stopped",
-        std::to_string(polled.count()) + " ms");
+        std::to_string(polled.count()) + " ms, " +
+            std::to_string(activations.load() - mark) + " activations");
     stream.close();
 }
 
@@ -1775,10 +1776,11 @@ void aPlayerThatDidNotStartIsNotTakenForPlaying()
     otherAudioPlaying = false;
     Stream stream;
     afterStart = [](AVAudioEngine* engine) { [engine stop]; };
-    const auto queued = scheduledPeriods.load();
     (void)stream.open();
     stream.idle(1000ms);
     stream.forgetFailures();
+    // What the sink scheduled while it opened is not what a failed stream is handed afterwards.
+    const auto queued = scheduledPeriods.load();
     const auto seen = stream.window(100ms, 800ms);
     check(scheduledPeriods.load() == queued,
         "a player that is not playing is handed no periods", seen.text());
