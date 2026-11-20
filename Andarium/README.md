@@ -610,7 +610,9 @@ control out.
   stored smaller size is raised to it on load, and a device whose bound is
   lower offers the bound alone, and a bound of zero (the loader's answer where
   the process has no room for even the smallest window) offers none: the
-  System sheet leaves the memory row out. The runtime starts every size the picker
+  System sheet leaves the memory row out, and the guest shows zero for that
+  run alone: a save keeps the size the person had, and a guest set up there
+  takes the default once there is room. The runtime starts every size the picker
   offers: a start whose memory the loader refuses
   (`kernarium_runtime_loader_guest_memory_admitted`) ends before the run with
   that reason. `MemoryPolicy` holds those bounds, defaults

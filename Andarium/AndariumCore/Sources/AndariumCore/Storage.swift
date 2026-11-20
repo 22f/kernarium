@@ -269,7 +269,16 @@ public struct TwoDiskStorage: GuestStorage {
         try files.complete(release: release)
     }
 
+    /// Records the guest's choices. A memory of zero is not a choice: it is
+    /// what a launch with no room for any size shows for that run alone
+    /// (`MemoryPolicy.hasRoom`), so the size already kept stays, and a later
+    /// launch with room starts from it.
     public func save(_ guest: Guest) throws {
+        var guest = guest
+        if guest.memoryMiB <= 0,
+           let earlier = try? JSONDecoder().decode(Guest.self, from: Data(contentsOf: locations.settings)) {
+            guest.memoryMiB = earlier.memoryMiB
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try FileManager.default.createDirectory(at: locations.directory, withIntermediateDirectories: true)
