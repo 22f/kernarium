@@ -24,8 +24,9 @@ using CameraSourceHandle = std::shared_ptr<uml::platform::Camera>;
  * a process of its own, and the only way to interrupt a Mac session. Unset, the camera is deaf. */
 inline constexpr const char* syntheticControlVariable = "UML_SYNTHETIC_CAMERA_CONTROL";
 
-/* The cameras the synthetic camera presents. */
-enum class SyntheticProfile : std::uint8_t { phone, tablet, laptop };
+/* The cameras the synthetic camera presents. `phoneTurnedFront` is the phone whose front camera is mounted at 90 and
+ * turned half around by the host, as an iPhone's is (SyntheticCameraOptions::frontPresentedAt90). */
+enum class SyntheticProfile : std::uint8_t { phone, tablet, laptop, phoneTurnedFront };
 
 [[nodiscard]] bool syntheticCameraAvailable() noexcept;
 
