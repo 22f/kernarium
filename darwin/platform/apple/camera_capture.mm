@@ -523,6 +523,7 @@ std::vector<Entry> discover()
             for (std::size_t index = 0; index < angles->size(); ++index) entry.discovered.coordinatorAngles[index] = angleNumber((*angles)[index]);
             entry.mounting = presentedMountingOf(info.position, (*angles)[0]);
             info.sensorOrientation = entry.mounting.stated;
+            info.presentationTurn = entry.mounting.presentationTurn;
         }
 #endif
         entry.discovered.stated = std::uint16_t(entry.mounting.stated);

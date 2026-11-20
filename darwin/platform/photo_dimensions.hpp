@@ -48,21 +48,29 @@ using VideoFormatFacts = CameraCaptureFormat;
 // know, states 90 whatever the angle.
 [[nodiscard]] std::uint32_t sensorOrientationOf(CameraPosition position, double portraitAngle) noexcept;
 
+// The orientation a built-in front camera states: the angle Android's front cameras have.
+inline constexpr std::uint32_t frontCameraOrientation = 270;
+
 // How a camera is presented to the guest: the orientation stated for it, the clockwise turn the backend sets on its
-// video connection (the platform turns the buffers itself) and whether the camera imitates an earlier front camera.
+// video connection (the platform turns the buffers itself), whether the camera imitates an earlier front camera, and the
+// half turn the host applies to every picture of it (`presentationTurn`: the device turns the video, the backend the stills).
 //
-// A built-in front camera whose rotation coordinator states portrait 0 or 180 is mounted with its sensor's top at the
-// device's top, where earlier front cameras were mounted with it at the side (their portrait angle is 90). The
-// platform lets such a camera behave like those: its video connection turns buffers by a fixed angle and its photo
-// output turns its processed stills (the output's compensation, left on). The guest is told 90, the value of the
-// earlier front cameras, which Android's size convention (a landscape size for a portrait sensor mounted at the side)
-// takes; the video connection is turned by `portraitAngle - 90`, so that the buffers are upright where the earlier
-// cameras' are. Every other camera states sensorOrientationOf, is turned by 0 and imitates nothing; so does a camera
-// whose angle is not finite.
+// A built-in front camera states 270, the angle Android's front cameras have, and an app that takes it for granted (a
+// camera app on the legacy camera API, a face-scan library) turns the picture by it. Its own mounting is brought there:
+//  - a front camera whose rotation coordinator states portrait 0 or 180 is mounted with its sensor's top at the device's top,
+//    where earlier front cameras were mounted with it at the side (their portrait angle is 90). The platform lets such a
+//    camera behave like those: its video connection turns buffers by a fixed angle and its photo output turns its processed
+//    stills (the output's compensation, left on). The video connection is turned by `portraitAngle - 90`, so that the
+//    buffers are upright where the earlier cameras' are;
+//  - a front camera at 90, which an imitated one now is, is turned by 180 degrees by the host and states 270;
+//  - a front camera at 270 states it and is not turned.
+// Every other camera (a back or an external one, or a camera whose angle is not finite) states sensorOrientationOf, is
+// turned by 0 and imitates nothing. `presentationTurn` is only ever 0 or 180.
 struct PresentedMounting {
     std::uint32_t stated {};
     std::uint32_t connectionTurn {};
     bool emulatesEarlierFront {};
+    std::uint32_t presentationTurn {};
     friend bool operator==(const PresentedMounting&, const PresentedMounting&) = default;
 };
 [[nodiscard]] PresentedMounting presentedMountingOf(CameraPosition position, double portraitAngle) noexcept;

@@ -149,10 +149,12 @@ std::uint32_t sensorOrientationOf(CameraPosition position, double portraitAngle)
 
 PresentedMounting presentedMountingOf(CameraPosition position, double portraitAngle) noexcept
 {
-    const std::uint32_t stated = sensorOrientationOf(position, portraitAngle);
-    if (position != CameraPosition::front || !std::isfinite(portraitAngle) || (stated != 0 && stated != 180))
-        return {stated, 0, false};
-    return {90, (stated + 270) % 360, true};
+    const std::uint32_t own = sensorOrientationOf(position, portraitAngle);
+    if (position != CameraPosition::front || !std::isfinite(portraitAngle)) return {own, 0, false, 0};
+    // An imitated camera is at 90 once its connection has turned it; a camera at 90 is turned half around to state 270, the
+    // front cameras' own angle, and one at 270 is there already.
+    if (own == 0 || own == 180) return {frontCameraOrientation, (own + 270) % 360, true, 180};
+    return {frontCameraOrientation, 0, false, own == 90 ? 180u : 0u};
 }
 
 CompensationStep stillCompensationStep(bool imitatesEarlierFront, CameraFact supported, CameraFact enabled,
