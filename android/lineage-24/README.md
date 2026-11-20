@@ -321,12 +321,25 @@ sends, and keeps its severity when the host link drops.
 `Andarium/AndariumCore/Sources/AndariumCore/ThermalProtocol.swift` own the wire,
 which the golden frames in `tests/unit/andarium/fixtures` pin.
 
-From SEVERE on, Android holds the display's render rate to 30 Hz; the display
-mode does not change. The map is the vendor default display configuration
-(`/vendor/etc/displayconfig/default.xml`, from `overlay/config/`), which the
-display topic of route `p0007` makes a display with no map of its own use.
+From SEVERE on, Android holds the display's render rate to 30 Hz, and at
+MODERATE to 60 Hz; the display mode does not change. The host application sends
+MODERATE only while Low Power Mode holds a 120 Hz display to 60 Hz, so a run on
+a 60 Hz display never meets it. The map is the vendor default display
+configuration (`/vendor/etc/displayconfig/default.xml`, from `overlay/config/`),
+which the display topic of route `p0007` makes a display with no map of its own
+use.
 `tests/integration/android/run_android_thermal.py` drives the stream on a
 candidate image.
+
+### High-refresh display
+
+When the display the host shows is a 120 Hz mode, the launch passes
+`androidboot.kernarium.high_refresh=1` and the virtual display's one mode is
+120 Hz (its EDID). Android needs no other input: with one mode it renders at the
+mode's rate, picks a lower render rate for content that asks for one, and holds
+it to 60 Hz or 30 Hz at the thermal points above. Nothing in the image reads the
+property; the mode carries the rate. A 60 Hz host passes neither and behaves as
+before.
 
 ### Game controllers
 

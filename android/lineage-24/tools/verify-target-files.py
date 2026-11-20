@@ -3529,7 +3529,7 @@ THERMAL_FILE_CONTEXT = re.compile(
 # partitions, so a product copy would take the map away.
 DISPLAY_CONFIG_DEFAULT = "VENDOR/etc/displayconfig/default.xml"
 DISPLAY_CONFIG_SHADOW = "PRODUCT/etc/displayconfig/default.xml"
-DISPLAY_CONFIG_POINT = ("severe", "0", "30")
+DISPLAY_CONFIG_POINTS = (("moderate", "0", "60"), ("severe", "0", "30"))
 
 
 def check_single_hal_declaration(
@@ -4049,19 +4049,23 @@ def check_default_display_config(archive: zipfile.ZipFile, infos: dict[str, zipf
     if len(maps) != 1 or maps[0].tag != "refreshRateThrottlingMap" or maps[0].get("id") not in (None, "default"):
         fail(f"{DISPLAY_CONFIG_DEFAULT} must hold the one default refreshRateThrottlingMap")
     points = list(maps[0])
-    if len(points) != 1 or points[0].tag != "refreshRateThrottlingPoint":
-        fail(f"{DISPLAY_CONFIG_DEFAULT} must hold one refreshRateThrottlingPoint")
-    point = points[0]
-    refresh_rates = point.find("refreshRateRange")
-    found = (
-        (point.findtext("thermalStatus") or "").strip(),
-        (refresh_rates.findtext("minimum") or "").strip() if refresh_rates is not None else "",
-        (refresh_rates.findtext("maximum") or "").strip() if refresh_rates is not None else "",
-    )
-    if [child.tag for child in point] != ["thermalStatus", "refreshRateRange"] or found != DISPLAY_CONFIG_POINT:
+    if len(points) != len(DISPLAY_CONFIG_POINTS) or any(point.tag != "refreshRateThrottlingPoint" for point in points):
+        fail(f"{DISPLAY_CONFIG_DEFAULT} must hold the {len(DISPLAY_CONFIG_POINTS)} refreshRateThrottlingPoints")
+    found_points = []
+    for point in points:
+        refresh_rates = point.find("refreshRateRange")
+        found = (
+            (point.findtext("thermalStatus") or "").strip(),
+            (refresh_rates.findtext("minimum") or "").strip() if refresh_rates is not None else "",
+            (refresh_rates.findtext("maximum") or "").strip() if refresh_rates is not None else "",
+        )
+        if [child.tag for child in point] != ["thermalStatus", "refreshRateRange"]:
+            fail(f"{DISPLAY_CONFIG_DEFAULT} holds a point that is not a thermalStatus and a refreshRateRange")
+        found_points.append(found)
+    if tuple(found_points) != DISPLAY_CONFIG_POINTS:
         fail(
-            f"{DISPLAY_CONFIG_DEFAULT} must hold the severe point with the refresh rate range "
-            f"0 to 30 Hz: {found}"
+            f"{DISPLAY_CONFIG_DEFAULT} must hold the moderate point with the refresh rate range "
+            f"0 to 60 Hz and the severe point with 0 to 30 Hz: {found_points}"
         )
 
 

@@ -1402,6 +1402,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         good_display_config = (
             '<?xml version="1.0" encoding="utf-8"?>\n<!-- comment -->\n<displayConfiguration>\n'
             "  <thermalThrottling>\n    <refreshRateThrottlingMap>\n"
+            "      <refreshRateThrottlingPoint>\n        <thermalStatus>moderate</thermalStatus>\n"
+            "        <refreshRateRange>\n          <minimum>0</minimum>\n          <maximum>60</maximum>\n"
+            "        </refreshRateRange>\n      </refreshRateThrottlingPoint>\n"
             "      <refreshRateThrottlingPoint>\n        <thermalStatus>severe</thermalStatus>\n"
             "        <refreshRateRange>\n          <minimum>0</minimum>\n          <maximum>30</maximum>\n"
             "        </refreshRateRange>\n      </refreshRateThrottlingPoint>\n"
@@ -6149,22 +6152,28 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 display_config_path: good_display_config.replace(
                     "<refreshRateThrottlingMap>", '<refreshRateThrottlingMap id="other">').encode()}},
              "must hold the one default refreshRateThrottlingMap"),
-            ("display-config-with-a-second-point", {"entries": {
+            ("display-config-with-a-third-point", {"entries": {
                 display_config_path: good_display_config.replace(
                     "</refreshRateThrottlingMap>",
                     "<refreshRateThrottlingPoint><thermalStatus>critical</thermalStatus>"
                     "<refreshRateRange><minimum>0</minimum><maximum>20</maximum></refreshRateRange>"
                     "</refreshRateThrottlingPoint></refreshRateThrottlingMap>").encode()}},
-             "must hold one refreshRateThrottlingPoint"),
+             "must hold the 2 refreshRateThrottlingPoints"),
+            ("display-config-without-the-moderate-point", {"entries": {
+                display_config_path: good_display_config.replace("moderate", "severe").encode()}},
+             "must hold the moderate point with the refresh rate range 0 to 60 Hz"),
             ("display-config-critical-point", {"entries": {
                 display_config_path: good_display_config.replace("severe", "critical").encode()}},
-             "must hold the severe point with the refresh rate range 0 to 30 Hz"),
-            ("display-config-60-hz", {"entries": {
+             "must hold the moderate point with the refresh rate range 0 to 60 Hz"),
+            ("display-config-severe-at-60-hz", {"entries": {
                 display_config_path: good_display_config.replace("<maximum>30", "<maximum>60").encode()}},
-             "must hold the severe point with the refresh rate range 0 to 30 Hz"),
+             "must hold the moderate point with the refresh rate range 0 to 60 Hz"),
+            ("display-config-moderate-at-30-hz", {"entries": {
+                display_config_path: good_display_config.replace("<maximum>60", "<maximum>30").encode()}},
+             "must hold the moderate point with the refresh rate range 0 to 60 Hz"),
             ("display-config-minimum-30", {"entries": {
                 display_config_path: good_display_config.replace("<minimum>0", "<minimum>30").encode()}},
-             "must hold the severe point with the refresh rate range 0 to 30 Hz"),
+             "must hold the moderate point with the refresh rate range 0 to 60 Hz"),
             ("missing-gamepad-binary", {"entries": {gamepad_binary_path: None}}, "required entries are missing"),
             ("missing-gamepad-rc", {"entries": {gamepad_rc_path: None}}, "required entries are missing"),
             ("gamepad-service-disabled", {"entries": {
