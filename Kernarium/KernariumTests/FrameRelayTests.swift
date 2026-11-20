@@ -64,26 +64,23 @@ struct FrameRelayTests {
         #expect(shown == 1)
     }
 
-    /// A delivery that is still waiting for the main thread when the window is
-    /// disarmed holds the relay it came through. It must show nothing once the
-    /// display has been flushed.
+    /// A delivery that is still waiting for the main thread when the window lets go of the relay
+    /// (`GuestPictureInPicture.disarm` closes it) holds the relay it came through. It must show
+    /// nothing once the relay is closed.
     @Test
-    func aDeliveryPendingWhenTheWindowIsDisarmedShowsNothingAfterIt() async throws {
-        let window = GuestPictureInPicture.shared
-        window.arm(rate: (width: 64, framesPerSecond: 2))
-        let relay = try #require(window.relay)
-        let production = relay.handler
+    func aDeliveryPendingWhenTheRelayIsClosedShowsNothingAfterIt() throws {
+        var hops: [@Sendable () -> Void] = []
+        let relay = FrameRelay { hops.append($0) }
         var shown = 0
-        relay.handler = { frame in
-            shown += 1
-            production?(frame)
-        }
-
-        // The hop to the main thread cannot run before this test yields.
+        relay.handler = { _ in shown += 1 }
         relay.receive(try buffer(4))
-        window.disarm()
-        #expect(window.relay == nil)
-        try await Task.sleep(for: .milliseconds(200))
+        #expect(hops.count == 1)
+        relay.close()
+        hops.removeFirst()()
+        #expect(shown == 0)
+        // A frame after it goes nowhere either, and nothing is left to show.
+        relay.receive(try buffer(6))
+        hops.removeFirst()()
         #expect(shown == 0)
     }
 }

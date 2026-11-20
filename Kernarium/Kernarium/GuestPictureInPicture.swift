@@ -18,6 +18,18 @@ final class FrameRelay: @unchecked Sendable {
     /// Set on the main thread before the relay is given to the runtime.
     nonisolated(unsafe) var handler: (@MainActor (CVPixelBuffer) -> Void)?
 
+    /// The window let go of the relay. A delivery the runtime made before it
+    /// did may still be waiting on the main queue, and that block holds the
+    /// relay whatever the window does with it, so the relay itself forgets
+    /// where frames go and what it kept: the block then finds nothing to show.
+    /// Called on the main thread, which is where the block runs.
+    func close() {
+        lock.lock()
+        latest = nil
+        lock.unlock()
+        handler = nil
+    }
+
     init(
         hop: @escaping (@escaping @Sendable () -> Void) -> Void = {
             DispatchQueue.main.async(execute: $0)
@@ -181,8 +193,7 @@ final class GuestPictureInPicture: NSObject, PictureInPictureWindow {
     let layer = AVSampleBufferDisplayLayer()
     private var feed: (any PictureInPictureFeed)?
     private var pictureInPicture: AVPictureInPictureController?
-    /// The relay the runtime delivers frames through while the window is armed.
-    private(set) var relay: FrameRelay?
+    private var relay: FrameRelay?
     private var guestRunning = false
     private var armedRate: UInt32?
     private var starting = false
@@ -293,8 +304,7 @@ final class GuestPictureInPicture: NSObject, PictureInPictureWindow {
         }
     }
 
-    /// Internal for the tests, which arm and disarm without a window.
-    func arm(rate: (width: UInt32, framesPerSecond: UInt32)) {
+    private func arm(rate: (width: UInt32, framesPerSecond: UInt32)) {
         if armedRate == rate.framesPerSecond { return }
         let owner: FrameRelay
         if let relay {
@@ -321,8 +331,7 @@ final class GuestPictureInPicture: NSObject, PictureInPictureWindow {
         }
     }
 
-    /// Internal for the tests, as `arm` is.
-    func disarm() {
+    private func disarm() {
         guard armedRate != nil || relay != nil || pictureInPicture != nil else {
             return
         }
@@ -331,12 +340,9 @@ final class GuestPictureInPicture: NSObject, PictureInPictureWindow {
             _ = kernarium_runtime_loader_set_frame_sink(nil, nil, 0, 0)
             armedRate = nil
         }
-        // A delivery the runtime made before it let go may still be waiting
-        // on the main queue, and that block holds the relay whatever this
-        // window does with it. Its handler goes here, on the main thread the
-        // block runs on, so that it finds nothing to show once the display
-        // below is flushed.
-        relay?.handler = nil
+        // A delivery still waiting on the main queue holds the relay: it shows
+        // nothing once the relay is closed and the display below is flushed.
+        relay?.close()
         relay = nil
         feed?.flushRemovingDisplayedImage()
         format = nil
