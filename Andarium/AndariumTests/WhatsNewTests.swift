@@ -331,7 +331,7 @@ struct WhatsNewTests {
             #expect(model.whatsNew.pendingEntries.map(\.id)
                 == Self.buildTwelveIDs + Self.buildElevenIDsOnAnIPhone + ["file-browser", "stability-fixes"])
             // Info lists the notes as written.
-            #expect(model.whatsNew.releases.map(\.entries.count) == [2, 10, 3])
+            #expect(model.whatsNew.releases.map(\.entries.count) == [2, 9, 3])
         }
     }
 
