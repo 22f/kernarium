@@ -12,9 +12,21 @@
 
 #include <array>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
+
+/* The statistics structure is append-only: a field that an earlier runtime API
+ * had keeps its offset, and what a later API adds comes after the last one
+ * (the 120 Hz rate, API 44, is at the end). */
+static_assert(offsetof(kernarium_runtime_statistics, timestamp_ns) == 16U);
+static_assert(offsetof(kernarium_runtime_statistics, processor_time_ns) == 24U);
+static_assert(offsetof(kernarium_runtime_statistics, presented_frames) == 32U);
+static_assert(offsetof(kernarium_runtime_statistics, offered_frames) == 40U);
+static_assert(offsetof(kernarium_runtime_statistics, gpu_memory_used_bytes) == 80U);
+static_assert(offsetof(kernarium_runtime_statistics, display_refresh_hz) == 88U);
+static_assert(sizeof(kernarium_runtime_statistics) == 96U);
 
 namespace {
 

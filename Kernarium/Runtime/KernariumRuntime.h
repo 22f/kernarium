@@ -536,14 +536,6 @@ typedef struct kernarium_runtime_statistics {
     uint32_t boot_index;
     /* As guest_display_active: 1 on, 0 off, -1 unknown. */
     int32_t display_active;
-    /* The refresh rate the host granted the run's display (runtime API 44):
-     * 120 when the run was given the 120 Hz mode, 60 for the 60 Hz display, and
-     * 0 while there is no display. It is decided once, before the guest boots
-     * (ANDROID_HOST_HIGH_REFRESH), and the guest's own mode follows it only
-     * while a display size can state it. The application learns from it
-     * whether a run has the 120 Hz display, whatever it asked. */
-    uint32_t display_refresh_hz;
-    uint32_t reserved;
     /* When the CPU time was read, in nanoseconds of the steady clock, which
      * does not count the time the device sleeps. */
     uint64_t timestamp_ns;
@@ -578,6 +570,14 @@ typedef struct kernarium_runtime_statistics {
      * there is no budget: no GPU yet, or a runtime that gives its guest none. */
     uint64_t gpu_memory_budget_bytes;
     uint64_t gpu_memory_used_bytes;
+    /* The refresh rate the host granted the run's display (runtime API 44):
+     * 120 when the run was given the 120 Hz mode, 60 for the 60 Hz display, and
+     * 0 while there is no display. It is decided once, before the guest boots
+     * (ANDROID_HOST_HIGH_REFRESH), and the guest's own mode follows it only
+     * while a display size can state it. The application learns from it
+     * whether a run has the 120 Hz display, whatever it asked. */
+    uint32_t display_refresh_hz;
+    uint32_t reserved;
 } kernarium_runtime_statistics;
 /* Fills `statistics` (the caller sets struct_size) with the running guest's
  * host-side figures. Returns 0, -ENODEV with no guest running (before its
