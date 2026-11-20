@@ -2,6 +2,7 @@
 #include "uml/emulator.h"
 #include "emulator_test_support.hpp"
 #include "memory/domain_heap.hpp"
+#include "memory/shared_backing.hpp"
 #include "native_window_test_support.hpp"
 #include "require.hpp"
 #include "runtime/guest_memory_budget.hpp"
@@ -12,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mach/mach.h>
+#include <unistd.h>
 #include <sys/mman.h>
 #include <stdexcept>
 #include <string_view>
@@ -294,6 +296,127 @@ void test_the_refusal_belongs_to_the_run_of_its_handle()
 		"a refused run carries no mark");
 }
 
+constexpr std::uint8_t kept_text_marker = 0x7e;
+std::uintptr_t kept_text_address;
+std::size_t kept_text_length;
+
+/* The kernel of an informational run that the loader ends with its own
+ * failure: it has aliased the first of its signed text, which the host keeps
+ * for the life of the process, and cannot place the second. The text is a page
+ * of the window, mapped over its reservation as the loader maps it, and 126 is
+ * what the loader answers. */
+int kernel_that_keeps_text_and_fails(int, char *const[], char *const[])
+{
+	const auto window = uml::runtime::process_native_window();
+	const auto page = static_cast<std::size_t>(getpagesize());
+	const std::uintptr_t address = window.begin + 512 * page;
+	if (window.begin == 0 || address + page > window.end)
+		return 1;
+	void *const text = mmap(reinterpret_cast<void *>(address), page,
+		PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (text != reinterpret_cast<void *>(address))
+		return 2;
+	*static_cast<std::uint8_t *>(text) = kept_text_marker;
+	if (!uml::memory::keep_host_range(text, page))
+		return 3;
+	kept_text_address = address;
+	kept_text_length = page;
+	return 126;
+}
+
+bool kept_text_is_readable()
+{
+	std::uint8_t byte = 0;
+	vm_size_t size = 0;
+	return vm_read_overwrite(mach_task_self(), kept_text_address, 1,
+		       reinterpret_cast<vm_address_t>(&byte), &size) ==
+		KERN_SUCCESS && size == 1 && byte == kept_text_marker;
+}
+
+/* Nothing the host keeps in the window goes back with it: the signed text a
+ * load aliased cannot be replaced (iOS) and the loader records it as in place,
+ * so a window that holds any stays the process's. An informational run is the
+ * one that loads a kernel before the heap region is reserved, and the loader
+ * can fail it after the first of its text is kept. A later run refused its
+ * heap region leaves that text where it is, readable, and the refusal is not
+ * for good. */
+void test_a_refused_heap_keeps_the_text_a_load_kept()
+{
+	const auto loader = uml::testing::make_emulator(
+		kernel_that_keeps_text_and_fails);
+	const auto starter = uml::testing::make_emulator(counting_kernel);
+	require(uml::memory::HeapRegion::instance().base() == 0,
+		"the process's heap region was reserved before the runs");
+	const char *information[]{
+		"uml-test", "--execution-engine=gadgets", "--version"};
+	require(uml_emulator_run(loader.get(), 3, information, nullptr) == 126,
+		"the informational run did not end with the loader's failure");
+	require(kept_text_address != 0 && kept_text_is_readable(),
+		"the informational run did not keep its text");
+	rlimit limit{};
+	require(getrlimit(RLIMIT_AS, &limit) == 0,
+		"could not read the address space limit");
+	limit.rlim_cur = mapped_bytes() + window_bytes(1536) + 512 * mib;
+	require(setrlimit(RLIMIT_AS, &limit) == 0,
+		"could not limit the address space");
+	require(run_with_memory(starter.get(), "mem=1536M") ==
+			-UML_EMULATOR_OUT_OF_MEMORY && entries == 0,
+		"a process without room for its heap region started a guest");
+	require(uml::emulator::start_refused_for_memory(starter.get()),
+		"a refused heap region carries no mark of a refusal for memory");
+	require(uml::memory::host_range_kept(
+			reinterpret_cast<const void *>(kept_text_address),
+			kept_text_length),
+		"the host forgot the text a load kept");
+	require(kept_text_is_readable(),
+		"a refused heap region took the signed text a load had kept out of the "
+		"process, which the loader still records as in place");
+	const auto held = uml::runtime::process_native_window();
+	require(held.begin != 0 && kept_text_address >= held.begin &&
+			kept_text_address < held.end,
+		"the window that holds the text a load kept was given back");
+	limit.rlim_cur = mapped_bytes() +
+		uml::memory::HeapRegion::reservation() + 512 * mib;
+	require(setrlimit(RLIMIT_AS, &limit) == 0,
+		"could not raise the address space limit");
+	require(run_with_memory(starter.get(), "mem=1536M") == 0 && entries == 1,
+		"a guest refused for want of room for its heap region was not started "
+		"once the process had it");
+	require(kept_text_is_readable(),
+		"the text a load kept was lost to the run that started");
+}
+
+/* A window reserved for a larger guest, where the host places it, takes the
+ * place of the one the process holds and gives that back. The old window may
+ * hold text a load kept: it is left mapped, as a release leaves it. */
+void test_a_larger_window_keeps_the_text_a_load_kept()
+{
+	const auto loader = uml::testing::make_emulator(
+		kernel_that_keeps_text_and_fails);
+	const char *information[]{
+		"uml-test", "--execution-engine=gadgets", "--version"};
+	require(uml_emulator_run(loader.get(), 3, information, nullptr) == 126,
+		"the informational run did not end with the loader's failure");
+	require(kept_text_address != 0 && kept_text_is_readable(),
+		"the informational run did not keep its text");
+	const auto old_window = uml::runtime::process_native_window();
+	const auto geometry =
+		uml::runtime::native_kernel_placement(4096 * mib).geometry;
+	require(geometry.valid, "the larger guest has no layout");
+	require(geometry.window_end - geometry.window_start >
+			old_window.end - old_window.begin,
+		"the larger guest's window is not larger than the held one");
+	const auto layout = uml::runtime::reserve_process_native_window(
+		geometry, uml::runtime::WindowPlacement::anywhere);
+	require(layout.valid, "the larger window was not reserved");
+	const auto held = uml::runtime::process_native_window();
+	require(held.begin != old_window.begin && held.end > held.begin,
+		"the larger guest did not take a window of its own");
+	require(kept_text_is_readable(),
+		"a window replaced for a larger guest took the signed text a load had "
+		"kept in it out of the process");
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -318,6 +441,10 @@ int main(int argc, char **argv)
 			test_the_heap_region_does_not_take_the_windows_address();
 		else if (mode == "--two-handles")
 			test_the_refusal_belongs_to_the_run_of_its_handle();
+		else if (mode == "--kept-text")
+			test_a_refused_heap_keeps_the_text_a_load_kept();
+		else if (mode == "--kept-text-window-replaced")
+			test_a_larger_window_keeps_the_text_a_load_kept();
 		else
 			test_a_refused_heap_or_window_leaves_the_room_a_smaller_guest_needs();
 		return EXIT_SUCCESS;

@@ -159,7 +159,7 @@ struct NativeKernelPlacement final {
  * A window longer than the one held, which only a process whose guest is not
  * spent asks for, extends the reservation at its exact address or, where the
  * host places the window, takes a new one and releases the old, which holds
- * nothing. Only one run uses the window at a time (the caller holds the
+ * no guest; an old window that holds kept signed kernel text stays mapped. Only one run uses the window at a time (the caller holds the
  * process address-space gate). Invalid when the host will not reserve it. */
 [[nodiscard]] NativeKernelLayout reserve_process_native_window(
 	const NativeKernelLayout &geometry, WindowPlacement placement) noexcept;
@@ -181,13 +181,20 @@ struct NativeKernelPlacement final {
 
 /* Gives the process's window back to the host, whole, after a run that could
  * not start: the reservation it took (or found, unused, from an earlier run
- * that never started) holds nothing, and keeping it would keep address space
+ * that never started) holds no guest, and keeping it would keep address space
  * that a smaller guest tried next needs for the heap region, which a refused
  * run did not get. Nothing is released while a guest may use the window: the
  * caller states that none does, as a handle whose guest is not waiting to be
- * handed back, in a process whose guest is not spent. The caller holds the
- * process address-space gate. */
-void release_unused_process_window() noexcept;
+ * handed back, in a process whose guest is not spent.
+ *
+ * The rule is whole or not at all: a window that holds anything the host
+ * keeps (keep_signed_kernel_text, the signed text a load aliased, which no
+ * mapping can replace and the loader records as in place) is not released, and
+ * false is returned; the window stays the process's, as it is when no heap
+ * region is asked for. A window reserved for a larger guest, over one that
+ * holds such text, leaves the old one mapped for the same reason. The caller
+ * holds the process address-space gate. */
+bool release_unused_process_window() noexcept;
 
 /* Whether the host maps the guest's RAM in this layout's window. The kernel
  * maps its RAM over the reservation with one read-write mapping and, where the

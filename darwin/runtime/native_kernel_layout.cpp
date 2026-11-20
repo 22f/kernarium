@@ -4,6 +4,7 @@
 #include "host_environment.hpp"
 #include "memory/domain_heap.hpp"
 #include "memory/mmu/address_layout.hpp"
+#include "memory/shared_backing.hpp"
 
 #include <cstdio>
 #include <mutex>
@@ -218,9 +219,14 @@ NativeKernelLayout reserve_process_native_window(
 	if (!window.valid)
 		return {};
 	/* The new reservation is held first, so a failure above leaves the old
-	 * one. The old holds nothing: it was a window for a guest the process no
-	 * longer has, handed back or never booted. */
-	if (held)
+	 * one. The old holds no guest: it was a window for a guest the process no
+	 * longer has, handed back or never booted. Signed kernel text a load kept
+	 * in it stays mapped, as release_unused_process_window leaves it: the
+	 * window is not tracked any more, and what is kept in it is inert. */
+	if (held &&
+	    !::uml::memory::host_range_kept_within(
+		    reinterpret_cast<const void *>(process_window.begin),
+		    process_window.end - process_window.begin))
 		munmap(reinterpret_cast<void *>(process_window.begin),
 			process_window.end - process_window.begin);
 	process_window.begin = window.window_start;
@@ -228,15 +234,26 @@ NativeKernelLayout reserve_process_native_window(
 	return window;
 }
 
-void release_unused_process_window() noexcept
+bool release_unused_process_window() noexcept
 {
 	std::lock_guard lock{process_window.mutex};
 	if (process_window.end == 0)
-		return;
+		return true;
+	/* A window goes back whole or not at all. The signed kernel text a load
+	 * aliased and kept in it (an informational run loads a kernel before the
+	 * heap region is reserved, and the loader can fail after the first of its
+	 * text) is recorded as in place and no mapping can replace it on iOS, so a
+	 * window that holds any stays the process's, as it is when no heap region
+	 * is asked for. */
+	if (::uml::memory::host_range_kept_within(
+		    reinterpret_cast<const void *>(process_window.begin),
+		    process_window.end - process_window.begin))
+		return false;
 	munmap(reinterpret_cast<void *>(process_window.begin),
 		process_window.end - process_window.begin);
 	process_window.begin = 0;
 	process_window.end = 0;
+	return true;
 }
 
 ProcessNativeWindow process_native_window() noexcept

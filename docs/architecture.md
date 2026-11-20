@@ -81,8 +81,10 @@ geometry of the guest's size and reserves its window, and then the process's
 heap region (`runtime::reserve_process_heap`), whose first block the kernel's
 mapping takes; no host's placement of the window is displaced by the region,
 and a size with no layout reserves nothing. A refused region gives back a window
-that held no guest (`runtime::release_unused_process_window`), so that a
-smaller guest tried next has its room; a region once reserved stays. The run
+that held no guest and none of the signed kernel text a load kept
+(`runtime::release_unused_process_window`), so that a smaller guest tried next
+has its room; a window that holds kept text stays, and a region once reserved
+stays. The run
 then maps its RAM beyond the first 64 MiB of the window (the kernel image and
 its reserved prefix, where a signed text alias of an earlier guest is
 permanent) as the kernel will and hands the range back to the reservation

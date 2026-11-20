@@ -685,11 +685,13 @@ public:
 		 * region, which the window may have left no room for. A refusal
 		 * gives the window back, which holds nothing of a guest that has not
 		 * started, so that a smaller guest tried next has the address space
-		 * the window took (release_unused_process_window). */
+		 * the window took. It goes whole or not at all: signed kernel text an
+		 * informational run's load kept in it keeps the window
+		 * (release_unused_process_window). */
 		if (!prepared.informational &&
 		    !::uml::runtime::reserve_process_heap()) {
 			if (!restartable_ && !::uml::runtime::process_guest_spent())
-				::uml::runtime::release_unused_process_window();
+				(void)::uml::runtime::release_unused_process_window();
 			return refused_for_memory();
 		}
 		if (!prepared.informational &&
