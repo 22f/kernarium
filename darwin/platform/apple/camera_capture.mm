@@ -964,8 +964,9 @@ bool activate(AVCaptureDevice* device, const Anchor& anchor, const std::optional
 
 #if TARGET_OS_IOS
 // The photos of a camera whose stills the host turns are encoded with no colour profile, which a reader takes as sRGB, so its
-// capture stays in that colour space: selected here where the active format supports it, and checked on every photo
-// (turned_still.mm), which is refused when it states other colours.
+// capture stays in that colour space: selected here where the active format supports it (the session does not choose a
+// wide one over it, see AppleSession), and checked on every photo (turned_still.mm), which is refused when it states
+// other colours.
 void keepSrgbColourSpace(AVCaptureDevice* device)
 {
     NSError* error = nil;
@@ -994,6 +995,14 @@ public:
             multiCamera_ = true;
         } else {
             session_ = [[AVCaptureSession alloc] init];
+        }
+        // A session sets its devices to wide colour (Display P3) whenever it commits a configuration, and a device's own colour
+        // space selection does not hold against it. The stills of a camera the host turns are encoded with no colour profile, so
+        // their capture stays in sRGB (keepSrgbColourSpace), and the session leaves the colour spaces to the host.
+        for (const Entry& entry : entries) {
+            if (entry.mounting.presentationTurn != 180) continue;
+            session_.automaticallyConfiguresCaptureDeviceForWideColor = NO;
+            break;
         }
 #else
         session_ = [[AVCaptureSession alloc] init];
