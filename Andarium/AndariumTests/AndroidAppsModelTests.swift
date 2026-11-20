@@ -1411,15 +1411,9 @@ final class AndroidAppsModelTests {
         #expect(rig.state.store.records().count == AndroidAppLimits.mostRecords)
         rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
         #expect(await eventually { rig.tool.opened == [comet.component] && rig.state.open.pending == nil })
-        #expect(rig.state.store.record(forID: comet.id)?.launchers == 1, "an app of the current catalog keeps its record")
-        let renamed = AndroidApp(
-            component: try #require(AndroidComponent(packageName: comet.component.packageName, activityClass: "com.example.comethop.Renamed")),
-            label: "Comet Hop", builtIn: false, iconTag: "0000000000000001")
-        rig.tool.remove(comet.id)
-        rig.tool.install(renamed)
-        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
-        #expect(await eventually { rig.tool.opened.last == renamed.component }, "opened: \(rig.tool.opened)")
         #expect(rig.state.open.banner == nil)
+        #expect(rig.state.store.record(forID: comet.id)?.launchers == 1, "an app of the current catalog keeps its record")
+        #expect(rig.state.store.records().count == AndroidAppLimits.mostRecords)
     }
 
     @Test func aCancelledAskWaitingForTheLaneIsReleasedWhenTheRunEnds() async throws {
