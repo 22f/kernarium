@@ -165,6 +165,63 @@ private let runtimeFrameSink: kernarium_runtime_frame_sink = { context, buffer i
     relay.receive(Unmanaged<CVPixelBuffer>.fromOpaque(buffer).takeUnretainedValue())
 }
 
+/// The runtime's frame sink while the window is armed, and the relay it
+/// delivers through. `register` is how the sink reaches the runtime; a test
+/// replaces it to deliver frames as the runtime does.
+@MainActor
+final class FrameMirror {
+    typealias Register = (
+        kernarium_runtime_frame_sink?, UnsafeMutableRawPointer?, UInt32, UInt32
+    ) -> Int32
+
+    private let register: Register
+    private let deliver: @MainActor (CVPixelBuffer) -> Void
+    private var relay: FrameRelay?
+    private(set) var armedRate: UInt32?
+
+    init(
+        deliver: @escaping @MainActor (CVPixelBuffer) -> Void,
+        register: @escaping Register = { kernarium_runtime_loader_set_frame_sink($0, $1, $2, $3) }
+    ) {
+        self.deliver = deliver
+        self.register = register
+    }
+
+    /// Whether the runtime is delivering to the mirror, or a relay is left to let go.
+    var isHolding: Bool { armedRate != nil || relay != nil }
+
+    /// Asks the runtime for frames of at most `width` pixels at `framesPerSecond`;
+    /// the runtime's answer, 0 when it agreed.
+    func arm(width: UInt32, framesPerSecond: UInt32) -> Int32 {
+        if armedRate == framesPerSecond { return 0 }
+        let owner: FrameRelay
+        if let relay {
+            owner = relay
+        } else {
+            owner = FrameRelay()
+            owner.handler = deliver
+            relay = owner
+        }
+        let result = register(
+            runtimeFrameSink, Unmanaged.passUnretained(owner).toOpaque(), width, framesPerSecond
+        )
+        if result == 0 { armedRate = framesPerSecond }
+        return result
+    }
+
+    func disarm() {
+        if armedRate != nil {
+            // Returns only once no delivery is running, so the relay can go.
+            _ = register(nil, nil, 0, 0)
+            armedRate = nil
+        }
+        // A delivery still waiting on the main queue holds the relay: it shows
+        // nothing once the relay is closed.
+        relay?.close()
+        relay = nil
+    }
+}
+
 /// The window that keeps the guest running in the background: iOS shows the
 /// guest's display in a floating Picture in Picture window and keeps the
 /// process scheduled for as long as the user leaves it open.
@@ -193,9 +250,8 @@ final class GuestPictureInPicture: NSObject, PictureInPictureWindow {
     let layer = AVSampleBufferDisplayLayer()
     private var feed: (any PictureInPictureFeed)?
     private var pictureInPicture: AVPictureInPictureController?
-    private var relay: FrameRelay?
+    private lazy var mirror = FrameMirror { [weak self] buffer in self?.show(buffer) }
     private var guestRunning = false
-    private var armedRate: UInt32?
     private var starting = false
     private var format: CMVideoFormatDescription?
     private var formatSize = CMVideoDimensions(width: 0, height: 0)
@@ -305,23 +361,9 @@ final class GuestPictureInPicture: NSObject, PictureInPictureWindow {
     }
 
     private func arm(rate: (width: UInt32, framesPerSecond: UInt32)) {
-        if armedRate == rate.framesPerSecond { return }
-        let owner: FrameRelay
-        if let relay {
-            owner = relay
-        } else {
-            owner = FrameRelay()
-            owner.handler = { [weak self] buffer in self?.show(buffer) }
-            relay = owner
-        }
-        let result = kernarium_runtime_loader_set_frame_sink(
-            runtimeFrameSink,
-            Unmanaged.passUnretained(owner).toOpaque(),
-            rate.width,
-            rate.framesPerSecond
-        )
+        if mirror.armedRate == rate.framesPerSecond { return }
+        let result = mirror.arm(width: rate.width, framesPerSecond: rate.framesPerSecond)
         if result == 0 {
-            armedRate = rate.framesPerSecond
             print(
                 "Kernarium: picture in picture mirror \(rate.width) px, " +
                     "\(rate.framesPerSecond) fps"
@@ -332,18 +374,10 @@ final class GuestPictureInPicture: NSObject, PictureInPictureWindow {
     }
 
     private func disarm() {
-        guard armedRate != nil || relay != nil || pictureInPicture != nil else {
+        guard mirror.isHolding || pictureInPicture != nil else {
             return
         }
-        if armedRate != nil {
-            // Returns only once no delivery is running, so the relay can go.
-            _ = kernarium_runtime_loader_set_frame_sink(nil, nil, 0, 0)
-            armedRate = nil
-        }
-        // A delivery still waiting on the main queue holds the relay: it shows
-        // nothing once the relay is closed and the display below is flushed.
-        relay?.close()
-        relay = nil
+        mirror.disarm()
         feed?.flushRemovingDisplayedImage()
         format = nil
         if let resignObserver {
