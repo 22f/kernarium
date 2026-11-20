@@ -4,13 +4,26 @@ import AndariumCore
 import AVFoundation
 import Foundation
 
-extension ProcessInfo {
-    /// The application runs as an iPad app on an Apple Vision Pro. The system
-    /// answers from iOS 26.1; a system below it gives none, and the answer is
-    /// no.
-    nonisolated var runsAsIOSAppOnVision: Bool {
-        if #available(iOS 26.1, *) { return isiOSAppOnVision }
-        return false
+extension IPadAppHost {
+    /// This process, as the system and the hardware report it. The system
+    /// answers whether it is the iPad app on a Vision Pro from iOS 26.1
+    /// (`isiOSAppOnVision`); a system below it gives no answer, and the
+    /// hardware's name says (`IPadAppHost.init(isiOSAppOnMac:visionAnswer:machine:)`).
+    nonisolated static var system: IPadAppHost {
+        let info = ProcessInfo.processInfo
+        var answer: Bool?
+        if #available(iOS 26.1, *) { answer = info.isiOSAppOnVision }
+        return IPadAppHost(isiOSAppOnMac: info.isiOSAppOnMac, visionAnswer: answer, machine: hardwareMachine())
+    }
+
+    /// The hardware's own name: `uname`'s machine, which an iPad app on a
+    /// Vision Pro reads as the Vision Pro's.
+    private nonisolated static func hardwareMachine() -> String {
+        var name = utsname()
+        guard uname(&name) == 0 else { return "" }
+        return withUnsafeBytes(of: &name.machine) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
     }
 }
 
@@ -25,15 +38,20 @@ struct CameraPlatform {
 
     /// This process, as the system reports it.
     static var system: CameraPlatform {
-        let info = ProcessInfo.processInfo
-        return CameraPlatform(
-            isiOSAppOnMac: info.isiOSAppOnMac, isiOSAppOnVision: info.runsAsIOSAppOnVision,
-            hasFrontCamera: { SystemCameraSource.hasFrontCamera })
+        CameraPlatform(host: .system, hasFrontCamera: { SystemCameraSource.hasFrontCamera })
     }
 
     var hasCamera: Bool {
         CameraAvailability.isAvailable(
             hasFrontCamera: hasFrontCamera(), isiOSAppOnMac: isiOSAppOnMac, isiOSAppOnVision: isiOSAppOnVision)
+    }
+}
+
+extension CameraPlatform {
+    init(host: IPadAppHost, hasFrontCamera: @escaping () -> Bool) {
+        self.init(
+            isiOSAppOnMac: host.isiOSAppOnMac, isiOSAppOnVision: host.isiOSAppOnVision,
+            hasFrontCamera: hasFrontCamera)
     }
 }
 

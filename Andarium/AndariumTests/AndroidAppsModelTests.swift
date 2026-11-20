@@ -497,6 +497,22 @@ final class AndroidAppsModelTests {
         #expect(!rig.model.offersAddToHomeScreen)
     }
 
+    @Test func aVisionProOn26HasNoHomeScreenToAddTo() async throws {
+        let rig = try rig(phase: .running(.normal))
+        // visionOS 26.0 does not say it runs the iPad app; the hardware's name does.
+        rig.model.padAppHost = IPadAppHost(isiOSAppOnMac: false, visionAnswer: nil, machine: "RealityDevice14,1")
+        #expect(!rig.model.hostOffersAddToHomeScreen)
+        #expect(!rig.model.offersAddToHomeScreen)
+        // Nor are its apps entities or offered to Spotlight.
+        await rig.model.refreshAndroidApps()
+        let writes = rig.index.events.count
+        AndroidAppsHub.shared.attach(rig.model)
+        #expect(!AndroidAppsHub.shared.hostOffers)
+        #expect(AndroidAppsHub.shared.entities().isEmpty)
+        await rig.model.syncAndroidAppsIndex()
+        #expect(rig.index.events.count == writes, "nothing is offered to Spotlight: \(rig.index.events)")
+    }
+
     // MARK: Where the feature is not offered
 
     @Test func aMacWritesNothingToSpotlightAndHasNoEntities() async throws {

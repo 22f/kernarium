@@ -479,8 +479,7 @@ nonisolated final class AndroidAppsHub: @unchecked Sendable {
     /// a Vision Pro run the application but have none, so nothing of this
     /// feature is offered there.
     static var processOffersAddToHomeScreen: Bool {
-        let info = ProcessInfo.processInfo
-        return !info.isiOSAppOnMac && !info.runsAsIOSAppOnVision
+        IPadAppHost.system.hasHomeScreen
     }
 
     /// Whether the apps are entities, in Spotlight and in the tiles.

@@ -34,7 +34,7 @@ extension AppModel {
     /// none: nothing of this feature is offered there, neither the row nor the
     /// entities, the Spotlight index or the shortcut tiles.
     var hostOffersAddToHomeScreen: Bool {
-        host.idiom != .mac && !ProcessInfo.processInfo.runsAsIOSAppOnVision
+        host.idiom != .mac && padAppHost.hasHomeScreen
     }
 
     /// Settings' Apps section offers Add to Home Screen: Android runs, and its

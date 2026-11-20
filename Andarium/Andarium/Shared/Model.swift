@@ -122,6 +122,9 @@ final class AppModel {
         }
     }
     var host: HostDevice
+    /// Whether the iPad app runs on a Mac or on an Apple Vision Pro: this
+    /// process's, unless a test plays another.
+    var padAppHost = IPadAppHost.system
     /// The guest's files, when the runtime behind the screens can reach them.
     var fileBrowser: FileBrowserModel? {
         didSet { fileBrowser?.isAvailable = { [weak self] in self?.filesAvailable ?? false } }
