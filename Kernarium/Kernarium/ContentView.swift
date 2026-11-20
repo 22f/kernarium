@@ -53,8 +53,12 @@ struct ContentView: View {
                     .accessibilityHidden(guestViewMode != .serialConsole)
 
                 if let refusal = launcher.memoryRefusal {
-                    MemoryRefusalNotice(reason: refusal)
-                        .padding()
+                    MemoryRefusalNotice(
+                        reason: refusal,
+                        sizesOffered: EmulatorConfiguration
+                            .guestMemoryCeilingMiB > 0
+                    )
+                    .padding()
                 } else if let shortage = launcher.startShortage {
                     StartShortageNotice(shortage: shortage) {
                         launcher.retryStart()
@@ -482,17 +486,32 @@ private struct GuestEndedNotice: View {
 /// host's limit shrank, brings it.
 private struct MemoryRefusalNotice: View {
     let reason: String
+    /// Whether the settings offer a size to choose: false where the process
+    /// has no room for any virtual machine.
+    let sizesOffered: Bool
 
     var body: some View {
         GuestNoticeCard(
             systemName: "memorychip",
             title: "The virtual machine can\u{2019}t start",
-            message: reason + ". Choose another size in Emulator " +
-                "settings and relaunch Kernarium.",
+            message: MemoryRefusalText.message(
+                reason: reason, sizesOffered: sizesOffered),
             messageStyle: .primary
         )
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("memoryRefusalNotice")
+    }
+}
+
+/// What the notice for a refused size says: the reason, and where the settings
+/// offer a size, to choose another and relaunch. Where none is offered the
+/// reason stands alone.
+enum MemoryRefusalText {
+    static func message(reason: String, sizesOffered: Bool) -> String {
+        sizesOffered
+            ? reason + ". Choose another size in Emulator settings and " +
+                "relaunch Kernarium."
+            : reason + "."
     }
 }
 

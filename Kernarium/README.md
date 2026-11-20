@@ -67,7 +67,9 @@ notice when the limit leaves the GPU less than its floor; nothing refuses a
 launch for lack of memory. Only a guest RAM the runtime does not admit
 (`kernarium_runtime_loader_guest_memory_admitted`, the runtime's own rule) ends
 a start, before the run and with a notice that says why; the settings never
-offer such a size. The settings ask the loader
+offer such a size, and where the loader's bound is zero (the process has no
+room for even the smallest window) they offer no RAM stepper and the notice
+gives the reason alone. The settings ask the loader
 (`kernarium_runtime_loader_maximum_guest_memory_mib`) for the RAM bound and a
 new configuration's guest RAM
 (`kernarium_runtime_loader_default_guest_memory_mib` at the loaded vCPU count,

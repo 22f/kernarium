@@ -2,6 +2,7 @@
 
 import Darwin
 import Foundation
+import GuestHostCore
 import Testing
 import UIKit
 @testable import Kernarium
@@ -1237,6 +1238,49 @@ struct KernariumTests {
         #expect(
             differing.isEmpty,
             "differs at \(differing.prefix(5)) MiB, ceiling \(ceiling)"
+        )
+    }
+
+    /// Where the runtime says no size fits (a bound of zero) nothing is
+    /// offered: the maximum is zero, not the stepper's least, and a stored or
+    /// default size comes down to it, so the launch refuses it with the reason
+    /// of no room.
+    @Test
+    func aBoundOfZeroIsNoRoomAndOffersNoSize() {
+        let (defaults, suiteName) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let none = { (_: Int) in 0 }
+
+        #expect(
+            EmulatorConfiguration.load(
+                defaults: defaults,
+                physicalProcessorCount: 6,
+                guestMemoryBound: none,
+                defaultGuestMemory: none
+            ).guestMemoryMiB == 0
+        )
+        defaults.set(4096, forKey: "emulator.guestMemoryMiB")
+        let loaded = EmulatorConfiguration.load(
+            defaults: defaults,
+            physicalProcessorCount: 6,
+            guestMemoryBound: none
+        )
+        #expect(loaded.guestMemoryMiB == 0)
+        #expect(loaded.maximumGuestMemoryMiB(vCPUCount: 4, bound: none) == 0)
+        // The least size of the stepper is a size, not no room.
+        #expect(loaded.maximumGuestMemoryMiB(vCPUCount: 4, bound: { _ in 512 }) == 512)
+
+        // The refusal says why, and offers a size to choose only where the
+        // settings offer one.
+        let reason = MemoryRefusal.reason(memoryMiB: 0, ceilingMiB: 0)
+        #expect(reason == "this device has no room for the virtual machine\u{2019}s memory")
+        #expect(
+            MemoryRefusalText.message(reason: reason, sizesOffered: false)
+                == "this device has no room for the virtual machine\u{2019}s memory."
+        )
+        #expect(
+            MemoryRefusalText.message(reason: reason, sizesOffered: true)
+                == reason + ". Choose another size in Emulator settings and relaunch Kernarium."
         )
     }
 
