@@ -323,8 +323,10 @@ which the golden frames in `tests/unit/andarium/fixtures` pin.
 
 From SEVERE on, Android holds the display's render rate to 30 Hz, and at
 MODERATE to 60 Hz; the display mode does not change. The host application sends
-MODERATE only while Low Power Mode holds a 120 Hz display to 60 Hz, so a run on
-a 60 Hz display never meets it. The map is the vendor default display
+MODERATE only while a 120 Hz run is held to 60 Hz (Low Power Mode, or a screen
+that shows under 100 frames a second), so a 60 Hz run never meets it. The
+target-files verifier requires each point's range to be exactly one minimum
+and one maximum, and the thermal runner checks both ends of the vote. The map is the vendor default display
 configuration (`/vendor/etc/displayconfig/default.xml`, from `overlay/config/`),
 which the display topic of route `p0007` makes a display with no map of its own
 use.

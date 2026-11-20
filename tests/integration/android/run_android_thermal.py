@@ -192,6 +192,7 @@ class DisplayDump:
     status: int | None
     map_has_severe_cap: bool
     map_has_moderate_hold: bool
+    skin_vote_minimum: float | None
     skin_vote_maximum: float | None
     skin_vote: bool
 
@@ -200,15 +201,18 @@ def parse_display_dump(text: str) -> DisplayDump:
     """`dumpsys display`: the skin observer's status and map, and the vote it cast."""
     status = re.search(r"SkinThermalStatusObserver:\s+mStatus: (-?\d+)", text)
     map_match = re.search(r"mThermalThrottlingByDisplay: (\{.*\})", text)
-    # SurfaceControl.RefreshRateRange prints as "(min max)"; status 3 is SEVERE and status 2 MODERATE.
-    severe = bool(map_match and re.search(r"\b3=\([\d.]+ 30\.0\)", map_match[1]))
-    moderate = bool(map_match and re.search(r"\b2=\([\d.]+ 60\.0\)", map_match[1]))
+    # SurfaceControl.RefreshRateRange prints as "(min max)"; status 3 is SEVERE and status 2 MODERATE. Both
+    # endpoints are the contract: a point of 15 to 60 Hz holds the maximum and lets Android render at 15.
+    severe = bool(map_match and re.search(r"\b3=\(0(?:\.0)? 30\.0\)", map_match[1]))
+    moderate = bool(map_match and re.search(r"\b2=\(0(?:\.0)? 60\.0\)", map_match[1]))
     vote = re.search(r"PRIORITY_SKIN_TEMPERATURE -> (.*)", text)
-    maximum = None
+    minimum = maximum = None
     if vote:
+        found = re.search(r"mMinRefreshRate=(\S+?)[ ,}]", vote[1])
+        minimum = float(found[1]) if found else None
         found = re.search(r"mMaxRefreshRate=(\S+?)[ ,}]", vote[1])
         maximum = float(found[1]) if found else None
-    return DisplayDump(int(status[1]) if status else None, severe, moderate, maximum, vote is not None)
+    return DisplayDump(int(status[1]) if status else None, severe, moderate, minimum, maximum, vote is not None)
 
 
 def parse_render_rates(text: str) -> list[float]:
@@ -399,15 +403,18 @@ def check_headroom(guest: Guest, severity: int) -> None:
 
 def check_cap(guest: Guest, capped: bool, label: str, hold: float | None = None) -> None:
     """The vote, the render rate and the frame rates, together. `hold` is the maximum of a vote that is not
-    the 30 Hz cap and changes no frame rate here (MODERATE's 60 Hz on a display that shows 60)."""
+    the 30 Hz cap and changes no frame rate here (MODERATE's 60 Hz on a display that shows 60). A vote is
+    0 to its maximum: both endpoints are checked."""
     def vote() -> str | None:
         display = guest.display()
         if capped:
-            if not display.skin_vote or display.skin_vote_maximum != 30.0:
-                return f"the skin vote is {display.skin_vote_maximum}, not a 0 to 30 Hz render vote"
+            if not display.skin_vote or (display.skin_vote_minimum, display.skin_vote_maximum) != (0.0, 30.0):
+                return (f"the skin vote is {display.skin_vote_minimum} to {display.skin_vote_maximum}, "
+                        "not a 0 to 30 Hz render vote")
         elif hold is not None:
-            if not display.skin_vote or display.skin_vote_maximum != hold:
-                return f"the skin vote is {display.skin_vote_maximum}, not a 0 to {hold:g} Hz render vote"
+            if not display.skin_vote or (display.skin_vote_minimum, display.skin_vote_maximum) != (0.0, hold):
+                return (f"the skin vote is {display.skin_vote_minimum} to {display.skin_vote_maximum}, "
+                        f"not a 0 to {hold:g} Hz render vote")
         elif display.skin_vote:
             return f"a skin vote remains (maximum {display.skin_vote_maximum})"
         return None

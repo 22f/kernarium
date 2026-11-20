@@ -6174,6 +6174,20 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("display-config-minimum-30", {"entries": {
                 display_config_path: good_display_config.replace("<minimum>0", "<minimum>30").encode()}},
              "must hold the moderate point with the refresh rate range 0 to 60 Hz"),
+            # The first maximum is the right one and a second follows it: the point has exactly one
+            # minimum and one maximum, not whatever else the range element carries.
+            ("display-config-second-maximum", {"entries": {
+                display_config_path: good_display_config.replace(
+                    "<maximum>60</maximum>", "<maximum>60</maximum><maximum>90</maximum>").encode()}},
+             "holds a refreshRateRange that is not one minimum and one maximum"),
+            ("display-config-second-minimum", {"entries": {
+                display_config_path: good_display_config.replace(
+                    "<minimum>0</minimum>", "<minimum>0</minimum><minimum>15</minimum>", 1).encode()}},
+             "holds a refreshRateRange that is not one minimum and one maximum"),
+            ("display-config-range-without-a-maximum", {"entries": {
+                display_config_path: good_display_config.replace(
+                    "<maximum>60</maximum>", "", 1).encode()}},
+             "holds a refreshRateRange that is not one minimum and one maximum"),
             ("missing-gamepad-binary", {"entries": {gamepad_binary_path: None}}, "required entries are missing"),
             ("missing-gamepad-rc", {"entries": {gamepad_rc_path: None}}, "required entries are missing"),
             ("gamepad-service-disabled", {"entries": {

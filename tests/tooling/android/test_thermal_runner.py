@@ -142,6 +142,21 @@ class DisplayDumpTests(unittest.TestCase):
         text = DISPLAY_DUMP_IDLE.replace("3=(0.0 30.0)", "3=(0.0 60.0)")
         self.assertFalse(runner.parse_display_dump(text).map_has_severe_cap)
 
+    def test_a_point_whose_minimum_is_not_zero_is_no_cap_and_no_hold(self) -> None:
+        # The vote of 15 to 60 Hz still lets Android render at 15: both endpoints of a point are the contract.
+        moderate = DISPLAY_DUMP_IDLE.replace("2=(0.0 60.0)", "2=(15.0 60.0)")
+        self.assertFalse(runner.parse_display_dump(moderate).map_has_moderate_hold)
+        self.assertTrue(runner.parse_display_dump(moderate).map_has_severe_cap)
+        severe = DISPLAY_DUMP_IDLE.replace("3=(0.0 30.0)", "3=(15.0 30.0)")
+        self.assertFalse(runner.parse_display_dump(severe).map_has_severe_cap)
+        self.assertTrue(runner.parse_display_dump(severe).map_has_moderate_hold)
+
+    def test_the_vote_minimum_is_read(self) -> None:
+        self.assertEqual(runner.parse_display_dump(DISPLAY_DUMP_CAPPED).skin_vote_minimum, 0.0)
+        wrong = DISPLAY_DUMP_CAPPED.replace("mMinRefreshRate=0.0, mMaxRefreshRate=30.0", "mMinRefreshRate=15.0, mMaxRefreshRate=30.0")
+        self.assertEqual(runner.parse_display_dump(wrong).skin_vote_minimum, 15.0)
+        self.assertIsNone(runner.parse_display_dump(DISPLAY_DUMP_IDLE).skin_vote_minimum)
+
     def test_the_moderate_hold(self) -> None:
         self.assertTrue(runner.parse_display_dump(DISPLAY_DUMP_CAPPED).map_has_moderate_hold)
         self.assertTrue(runner.parse_display_dump(DISPLAY_DUMP_IDLE).map_has_moderate_hold)
@@ -204,8 +219,12 @@ class CapCheckTests(unittest.TestCase):
             runner.check_cap(guest, capped, label, hold)
 
     class Guest:
-        def __init__(self, capped: bool, clock: float, host: float | None, vote: float | None = None) -> None:
+        def __init__(
+            self, capped: bool, clock: float, host: float | None, vote: float | None = None,
+            vote_minimum: float = 0.0,
+        ) -> None:
             self.capped, self.clock, self.host, self.vote = capped, clock, host, vote
+            self.vote_minimum = vote_minimum
             self.frames: list[int] = []
 
         def alive(self) -> None:
@@ -213,7 +232,8 @@ class CapCheckTests(unittest.TestCase):
 
         def display(self):
             maximum = 30.0 if self.capped else self.vote
-            return runner.DisplayDump(3 if self.capped else 0, True, True, maximum, maximum is not None)
+            minimum = self.vote_minimum if maximum is not None else None
+            return runner.DisplayDump(3 if self.capped else 0, True, True, minimum, maximum, maximum is not None)
 
         def render_rates(self) -> list[float]:
             return [30.0] if self.capped else [59.99]
@@ -241,6 +261,14 @@ class CapCheckTests(unittest.TestCase):
                 self.check(self.Guest(False, 59.4, 60.0), False, "moderate", hold=60.0)
             with self.assertRaisesRegex(runner.Failure, "a skin vote remains"):
                 self.check(held, False, "light")
+
+    def test_a_vote_whose_minimum_is_not_zero_is_not_the_hold_or_the_cap(self) -> None:
+        # A 15 to 60 Hz vote has the maximum of the hold and still lets Android render at 15.
+        with mock.patch.object(runner, "STATE_SECONDS", 0.5):
+            with self.assertRaisesRegex(runner.Failure, "not a 0 to 60 Hz render vote"):
+                self.check(self.Guest(False, 59.4, 60.0, vote=60.0, vote_minimum=15.0), False, "moderate", hold=60.0)
+            with self.assertRaisesRegex(runner.Failure, "not a 0 to 30 Hz render vote"):
+                self.check(self.Guest(True, 29.7, 30.0, vote_minimum=15.0), True, "severe")
 
     def test_a_step_without_a_figure_fails_and_says_why(self) -> None:
         with self.assertRaisesRegex(runner.Failure, "severe: .*no full busy statistics window"):

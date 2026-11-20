@@ -4054,13 +4054,17 @@ def check_default_display_config(archive: zipfile.ZipFile, infos: dict[str, zipf
     found_points = []
     for point in points:
         refresh_rates = point.find("refreshRateRange")
-        found = (
-            (point.findtext("thermalStatus") or "").strip(),
-            (refresh_rates.findtext("minimum") or "").strip() if refresh_rates is not None else "",
-            (refresh_rates.findtext("maximum") or "").strip() if refresh_rates is not None else "",
-        )
         if [child.tag for child in point] != ["thermalStatus", "refreshRateRange"]:
             fail(f"{DISPLAY_CONFIG_DEFAULT} holds a point that is not a thermalStatus and a refreshRateRange")
+        # Exactly one minimum and one maximum, in that order, so that no reader of the range can take a
+        # value other than the one checked below.
+        if refresh_rates is None or [child.tag for child in refresh_rates] != ["minimum", "maximum"]:
+            fail(f"{DISPLAY_CONFIG_DEFAULT} holds a refreshRateRange that is not one minimum and one maximum")
+        found = (
+            (point.findtext("thermalStatus") or "").strip(),
+            (refresh_rates.findtext("minimum") or "").strip(),
+            (refresh_rates.findtext("maximum") or "").strip(),
+        )
         found_points.append(found)
     if tuple(found_points) != DISPLAY_CONFIG_POINTS:
         fail(
