@@ -1,0 +1,3508 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 22:35:02 +0900
+Subject: [PATCH] kosmickrisp: keep the variants of a dynamic vertex-input
+ pipeline on disk
+
+A dynamic vertex-input pipeline compiles a native variant for each
+vertex-input state at the first draw that uses it, and a guest that has
+run before compiles the same variants again: an Android boot translates
+a few hundred of them, and a guest context that is created again, an
+app started a second time, starts with an empty table. The MSL of a
+variant is a function of what it is built from, not of the process that
+built it, so the variants are now kept in Mesa's disk cache.
+
+A variant is looked up by a key over the stripped NIR it is built from
+(with the hash of the guest's SPIR-V zeroed, which is the only thing in
+it that differs between runs of the same guest), the device and driver
+identity, the pipeline's lowered state, the hashes of its layouts and
+the vertex-input state. A hit builds the Metal pipelines from the stored
+MSL; a miss, as before, translates and then stores.
+
+An entry is a small descriptor with the shaders' info and one name per
+MSL text, and the texts are separate entries named by the hash of their
+content, because most variants of a pipeline differ in one shader's text
+and share the rest. Nothing in an entry is trusted: the descriptor is
+checked for its magic, format, driver build, key, stage count, payload
+size and payload hash before it is read, a text for its header, both
+lengths, the name it echoes and the hash of its bytes, and a length or
+count is checked against what is there before anything is allocated
+from it. An entry that fails any check is removed and counts as a miss,
+so the variant is translated and stored again, and a text that is
+stored but damaged where the cache does not look is replaced by the
+next writer instead of kept.
+
+MESA_KK_VARIANT_CACHE=0 turns the cache off and MESA_KK_VARIANT_LOG=1
+logs each lookup, compile, load and store on stderr.
+
+test_variant_entry covers the entry format and its readers without
+Metal, test_variant_disk_cache the driver: it runs boots against one
+cache directory, damages the entries between them in every way a file
+can be damaged, and has two threads record the same first draw.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/kosmickrisp/vulkan/kk_device.h            |   4 +
+ src/kosmickrisp/vulkan/kk_physical_device.c   |   3 +
+ src/kosmickrisp/vulkan/kk_physical_device.h   |   6 +
+ src/kosmickrisp/vulkan/kk_shader.c            | 770 ++++++++++++++--
+ src/kosmickrisp/vulkan/kk_shader.h            |  21 +
+ src/kosmickrisp/vulkan/kk_variant_entry.c     | 399 ++++++++
+ src/kosmickrisp/vulkan/kk_variant_entry.h     | 179 ++++
+ src/kosmickrisp/vulkan/meson.build            |   8 +
+ .../vulkan/tests/test_variant_disk_cache.cpp  | 683 ++++++++++++++
+ .../vulkan/tests/test_variant_entry.c         | 862 ++++++++++++++++++
+ .../variant_disk_cache_shaders/cache.frag     |   4 +
+ .../variant_disk_cache_shaders/cache.frag.h   |  18 +
+ .../variant_disk_cache_shaders/cache.vert     |   4 +
+ .../variant_disk_cache_shaders/cache.vert.h   |  33 +
+ .../vulkan/tests/variant_disk_cache_state.c   |  16 +
+ .../vulkan/tests/variant_disk_cache_state.h   |  21 +
+ 16 files changed, 2934 insertions(+), 97 deletions(-)
+ create mode 100644 src/kosmickrisp/vulkan/kk_variant_entry.c
+ create mode 100644 src/kosmickrisp/vulkan/kk_variant_entry.h
+ create mode 100644 src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp
+ create mode 100644 src/kosmickrisp/vulkan/tests/test_variant_entry.c
+ create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.frag
+ create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.frag.h
+ create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.vert
+ create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.vert.h
+ create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c
+ create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_state.h
+
+diff --git a/src/kosmickrisp/vulkan/kk_device.h b/src/kosmickrisp/vulkan/kk_device.h
+index aa22e62eab1d2050878966b891fcb7bd383fab87..20a52f5a7f4ba24631a48e26e5388a583fa3d4b8 100644
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -240,6 +240,10 @@ struct kk_device {
+ 
+    uint64_t disabled_workarounds;
+    bool gpu_capture_enabled;
++
++   /* What the variants of dynamic vertex-input pipelines depend on besides
++    * their pipeline; the key of each starts from it (kk_shader.c). */
++   uint8_t variant_identity[32];
+ };
+ 
+ VK_DEFINE_HANDLE_CASTS(kk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index 728c665b043315c0e11c6d28aff31aef69a7cec9..20c1401d6879226a7e5548161aab0eb306e56a20 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -1283,6 +1283,8 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
+    if (result != VK_SUCCESS)
+       goto fail_disk_cache;
+ 
++   kk_variant_cache_create(pdev);
++
+    list_add(&pdev->vk.link, &instance->vk.physical_devices.list);
+ 
+    return VK_SUCCESS;
+@@ -1303,6 +1305,7 @@ kk_physical_device_destroy(struct vk_physical_device *vk_pdev)
+       container_of(vk_pdev, struct kk_physical_device, vk);
+ 
+    kk_finish_wsi(pdev);
++   kk_variant_cache_destroy(pdev);
+    kk_physical_device_free_disk_cache(pdev);
+    vk_physical_device_finish(&pdev->vk);
+    mtl_release(pdev->mtl_dev_handle);
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.h b/src/kosmickrisp/vulkan/kk_physical_device.h
+index 135850ac3f92676d765825272047218a46e29a14..2c09eeb75ec8cbcd562040ebe0d62685bb268426 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.h
++++ b/src/kosmickrisp/vulkan/kk_physical_device.h
+@@ -22,6 +22,7 @@
+ 
+ struct kk_instance;
+ struct kk_physical_device;
++struct kk_variant_cache;
+ 
+ struct kk_queue_family {
+    VkQueueFlags queue_flags;
+@@ -68,6 +69,11 @@ struct kk_physical_device {
+    uint8_t queue_family_count;
+ 
+    VkSampleCountFlags supported_sample_counts;
++
++   /* The disk cache of the variants of dynamic vertex-input pipelines
++    * (kk_shader.c), or NULL when the process has no cache location or the
++    * cache is off. */
++   struct kk_variant_cache *variant_cache;
+ };
+ 
+ static inline uint32_t
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..4bc7e7839f2604104d45c125f019264471367ebe 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -13,6 +13,7 @@
+ #include "kk_device.h"
+ #include "kk_format.h"
+ #include "kk_gpl.h"
++#include "kk_instance.h"
+ #include "kk_logic_op.h"
+ #include "kk_line_raster.h"
+ #include "kk_raster_edge.h"
+@@ -20,6 +21,7 @@
+ #include "kk_physical_device.h"
+ #include "kk_sampler.h"
+ #include "kk_shader_info.h"
++#include "kk_variant_entry.h"
+ 
+ #include "kosmickrisp/bridge/mtl_bridge.h"
+ #include "kosmickrisp/bridge/vk_to_mtl_map.h"
+@@ -37,14 +39,22 @@
+ 
+ #include "pipe/p_defines.h"
+ 
++#include "util/disk_cache.h"
++#include "util/hex.h"
++#include "util/u_debug.h"
++#include "util/os_time.h"
++
+ #include "vk_blend.h"
+ #include "vk_format.h"
+ #include "vk_graphics_state.h"
+ #include "vk_nir_convert_ycbcr.h"
+ #include "vk_pipeline.h"
+ 
++#include <pthread.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <sys/sysctl.h>
++#include <sys/time.h>
+ 
+ static const nir_shader_compiler_options *
+ kk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
+@@ -5101,6 +5111,30 @@ kk_precompile_library_stages(struct kk_device *dev, uint32_t shader_count,
+    }
+ }
+ 
++/* The hash of what a NIR shader computes: its serialization without names
++ * and debug information, and without the hash of the SPIR-V it came from,
++ * which is a property of how the guest wrote the shader.  The same shader of
++ * two runs differs in both, so a key made of the NIR as it is never finds an
++ * earlier run's variant.  Returns false when memory ran out. */
++static bool
++kk_nir_content_hash(nir_shader *nir, blake3_hash hash)
++{
++   blake3_hash source;
++   memcpy(source, nir->info.source_blake3, sizeof(source));
++   memset(nir->info.source_blake3, 0, sizeof(source));
++
++   struct blob stripped;
++   blob_init(&stripped);
++   nir_serialize(&stripped, nir, true);
++   memcpy(nir->info.source_blake3, source, sizeof(source));
++
++   const bool ok = !stripped.out_of_memory;
++   if (ok)
++      _mesa_blake3_compute(stripped.data, stripped.size, hash);
++   blob_finish(&stripped);
++   return ok;
++}
++
+ static VkResult
+ kk_defer_graphics_shaders(struct kk_device *dev, uint32_t shader_count,
+                           struct vk_shader_compile_info *infos,
+@@ -5129,6 +5163,8 @@ kk_defer_graphics_shaders(struct kk_device *dev, uint32_t shader_count,
+       shader->deferred_robustness = *compile->robustness;
+       blob_init(&shader->deferred_nir);
+       nir_serialize(&shader->deferred_nir, compile->nir, false);
++      shader->deferred_content_valid =
++         kk_nir_content_hash(compile->nir, shader->deferred_content_hash);
+ 
+       if (shader->deferred_nir.out_of_memory) {
+          kk_shader_destroy(&dev->vk, shader, pAllocator);
+@@ -6161,6 +6197,10 @@ struct kk_deferred_graphics_shader {
+    mesa_shader_stage stage;
+    struct vk_pipeline_robustness_state robustness;
+    struct blob nir;
++   /* What the NIR computes, free of how the guest wrote it
++    * (kk_nir_content_hash); valid when it could be taken. */
++   bool content_valid;
++   blake3_hash content_hash;
+ };
+ 
+ struct kk_linked_graphics_pipeline {
+@@ -6191,6 +6231,12 @@ struct kk_linked_graphics_pipeline {
+ 
+       struct hash_table *variants;
+       simple_mtx_t lock;
++
++      /* What a variant's disk key starts from: the pipeline's identity, free
++       * of pointers and of how the guest wrote its shaders
++       * (kk_dynamic_vertex_input_disk_base). */
++      bool has_disk_base;
++      blake3_hash disk_base;
+    } dynamic;
+ };
+ 
+@@ -6333,6 +6379,9 @@ kk_create_dynamic_vertex_input_pipeline(
+          &linked->dynamic.sources[linked->dynamic.shader_count++];
+       source->stage = shader->info.stage;
+       source->robustness = shader->deferred_robustness;
++      source->content_valid = shader->deferred_content_valid;
++      memcpy(source->content_hash, shader->deferred_content_hash,
++             sizeof(source->content_hash));
+       blob_init(&source->nir);
+       blob_write_bytes(&source->nir, shader->deferred_nir.data,
+                        shader->deferred_nir.size);
+@@ -6361,9 +6410,13 @@ fail:
+    return result;
+ }
+ 
++static void kk_variant_identity_init(struct kk_device *dev);
++
+ VkResult
+ kk_linked_graphics_pipeline_cache_init(struct kk_device *dev)
+ {
++   kk_variant_identity_init(dev);
++
+    dev->linked_graphics_pipelines = _mesa_hash_table_create(
+       NULL, kk_blake3_key_hash, kk_blake3_key_equal);
+    if (dev->linked_graphics_pipelines == NULL)
+@@ -6482,8 +6535,8 @@ kk_shader_drop_msl(struct kk_shader *shader,
+ /* The Metal pipelines of a variant are built, and the MSL they were built
+  * from is of no use again unless a render pass binds fewer colour attachments
+  * than the pipeline declares (VK_EXT_dynamic_rendering_unused_attachments),
+- * which needs a render pipeline of its own.  A variant is never serialized,
+- * and MSL is large (tens of KiB for the smallest shader, a third of a MiB for
++ * which needs a render pipeline of its own.  A variant is serialized once, when
++ * its disk cache stores it, and MSL is large (tens of KiB for the smallest shader, a third of a MiB for
+  * the largest), so keep what compiles it again instead: the parent holds the
+  * NIR, and the variant the vertex input and stride choice it was compiled for.
+  */
+@@ -6556,6 +6609,32 @@ kk_new_render_pipeline_state_from_origin(struct kk_device *dev,
+    return result;
+ }
+ 
++/* The part of a linked pipeline's key that is the pipeline state the compile
++ * reads, which is the same whether the shaders are named by the runtime or by
++ * what they compute. */
++static void
++kk_update_pipeline_state_key(struct mesa_blake3 *hash, struct vk_device *vk_dev,
++                             const struct vk_graphics_pipeline_state *state,
++                             VkShaderStageFlags stages)
++{
++   blake3_hash state_key;
++   kk_hash_graphics_state(vk_dev->physical, state, &vk_dev->enabled_features,
++                          stages, state_key);
++   _mesa_blake3_update(hash, state_key, sizeof(state_key));
++   _mesa_blake3_update(hash, state->dynamic, sizeof(state->dynamic));
++   _mesa_blake3_update(hash, &state->pipeline_flags,
++                       sizeof(state->pipeline_flags));
++
++   if (state->ia != NULL) {
++      uint8_t topology = state->ia->primitive_topology;
++      if (BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_IA_PRIMITIVE_TOPOLOGY))
++         topology = kk_vk_topology_class(topology);
++      _mesa_blake3_update(hash, &topology, sizeof(topology));
++   }
++   if (state->cal != NULL)
++      _mesa_blake3_update(hash, state->cal, sizeof(*state->cal));
++}
++
+ static void
+ kk_linked_graphics_pipeline_key(
+    struct vk_device *vk_dev, uint32_t shader_count,
+@@ -6574,23 +6653,7 @@ kk_linked_graphics_pipeline_key(
+       stages |= mesa_to_vk_shader_stage(shaders[i]->stage);
+    }
+ 
+-   blake3_hash state_key;
+-   kk_hash_graphics_state(vk_dev->physical, state, &vk_dev->enabled_features,
+-                          stages, state_key);
+-   _mesa_blake3_update(&hash, state_key, sizeof(state_key));
+-   _mesa_blake3_update(&hash, state->dynamic, sizeof(state->dynamic));
+-   _mesa_blake3_update(&hash, &state->pipeline_flags,
+-                       sizeof(state->pipeline_flags));
+-
+-   if (state->ia != NULL) {
+-      uint8_t topology = state->ia->primitive_topology;
+-      if (BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_IA_PRIMITIVE_TOPOLOGY))
+-         topology = kk_vk_topology_class(topology);
+-      _mesa_blake3_update(&hash, &topology, sizeof(topology));
+-   }
+-   if (state->cal != NULL)
+-      _mesa_blake3_update(&hash, state->cal, sizeof(*state->cal));
+-
++   kk_update_pipeline_state_key(&hash, vk_dev, state, stages);
+    _mesa_blake3_final(&hash, key);
+ }
+ 
+@@ -6621,6 +6684,54 @@ kk_dynamic_vertex_input_parent_key(
+    _mesa_blake3_final(&hash, key);
+ }
+ 
++/* What compiles the variants of a dynamic vertex-input pipeline, in a form
++ * that means the same in another run: what each deferred stage computes, the
++ * pipeline state the compile lowers, and the contents of the descriptor set
++ * layouts.  A variant's disk key adds the vertex input and the device
++ * (kk_variant_disk_key).  Returns false when the pipeline has no such
++ * identity, in which case its variants are not kept on disk.
++ */
++static bool
++kk_dynamic_vertex_input_disk_base(
++   struct kk_device *dev, const struct kk_linked_graphics_pipeline *linked,
++   uint32_t shader_count, struct vk_shader *const *shaders,
++   const struct vk_graphics_pipeline_state *state, uint32_t set_layout_count,
++   struct vk_descriptor_set_layout *const *set_layouts, blake3_hash key)
++{
++   struct vk_device *vk_dev = &dev->vk;
++   struct mesa_blake3 hash;
++   _mesa_blake3_init(&hash);
++   static const char tag[] = "kosmickrisp dynamic vertex input pipeline";
++   _mesa_blake3_update(&hash, tag, sizeof(tag));
++
++   VkShaderStageFlags stages = 0;
++   for (uint32_t i = 0; i < shader_count; i++)
++      stages |= mesa_to_vk_shader_stage(shaders[i]->stage);
++
++   for (uint32_t i = 0; i < linked->dynamic.shader_count; i++) {
++      const struct kk_deferred_graphics_shader *source =
++         &linked->dynamic.sources[i];
++      if (!source->content_valid)
++         return false;
++      _mesa_blake3_update(&hash, &source->stage, sizeof(source->stage));
++      _mesa_blake3_update(&hash, &source->robustness,
++                          sizeof(source->robustness));
++      _mesa_blake3_update(&hash, source->content_hash,
++                          sizeof(source->content_hash));
++   }
++   kk_update_pipeline_state_key(&hash, vk_dev, state, stages);
++
++   _mesa_blake3_update(&hash, &set_layout_count, sizeof(set_layout_count));
++   const blake3_hash none = {0};
++   for (uint32_t i = 0; i < set_layout_count; i++) {
++      const uint8_t *layout_hash =
++         set_layouts[i] != NULL ? set_layouts[i]->blake3 : none;
++      _mesa_blake3_update(&hash, layout_hash, sizeof(blake3_hash));
++   }
++   _mesa_blake3_final(&hash, key);
++   return true;
++}
++
+ static void
+ kk_destroy_linked_graphics_pipeline(
+    struct vk_device *vk_dev, void *linked_data,
+@@ -6711,6 +6822,9 @@ kk_link_graphics_pipeline(
+ 
+       memcpy(linked->key, dynamic_key, sizeof(linked->key));
+       linked->refcount = 1;
++      linked->dynamic.has_disk_base = kk_dynamic_vertex_input_disk_base(
++         dev, linked, shader_count, vk_shaders, state, set_layout_count,
++         set_layouts, linked->dynamic.disk_base);
+ 
+       simple_mtx_lock(&dev->linked_graphics_pipelines_lock);
+       dynamic_cached =
+@@ -6854,40 +6968,27 @@ kk_link_graphics_pipeline(
+ }
+ 
+ /* The text goes to the blob in the form the shader holds it, so a pipeline
+- * cache holds the compressed text and loading it compresses nothing:
+- *
+- *    u32 entrypoint length, u32 text length, u32 stored length, u8 codec,
+- *    the entrypoint, the stored bytes
+- *
+- * where the stored bytes are the text itself for KK_MSL_CODEC_STORED. */
++ * cache holds the compressed text and loading it compresses nothing.  A
++ * variant kept on disk holds the name of a text the disk cache keeps instead
++ * of the text (kk_msl_record_write).  `pool` is that disk cache, or NULL. */
+ static void
+-kk_msl_data_serialize(const struct msl_compile_data *data, struct blob *blob)
+-{
+-   uint32_t entrypoint_length = strlen(data->entrypoint_name) + 1;
+-   const void *bytes = data->packed != NULL ? (const void *)data->packed
+-                                            : (const void *)data->code;
+-   const uint32_t stored_length = kk_msl_resident_bytes(data);
+-   const uint32_t code_length = kk_msl_text_bytes(data);
+-   const uint8_t codec =
+-      data->packed != NULL ? data->codec : KK_MSL_CODEC_STORED;
+-   blob_write_uint32(blob, entrypoint_length);
+-   blob_write_uint32(blob, code_length);
+-   blob_write_uint32(blob, stored_length);
+-   blob_write_uint8(blob, codec);
+-   blob_write_bytes(blob, data->entrypoint_name, entrypoint_length);
+-   blob_write_bytes(blob, bytes, stored_length);
++kk_msl_data_serialize(const struct msl_compile_data *data, struct blob *blob,
++                      struct kk_msl_pool *pool)
++{
++   kk_msl_record_write(blob, data, pool);
+ }
+ 
+ static void
+ kk_msl_serialize(struct kk_shader *shader, mesa_shader_stage stage,
+-                 struct blob *blob)
++                 struct blob *blob, struct kk_msl_pool *pool)
+ {
+-   kk_msl_data_serialize(&shader->msl_data[stage], blob);
++   kk_msl_data_serialize(&shader->msl_data[stage], blob, pool);
+ }
+ 
+ static bool
+-kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
+-                    struct blob *blob)
++kk_shader_serialize_impl(struct vk_device *vk_dev,
++                         const struct vk_shader *vk_shader, struct blob *blob,
++                         struct kk_msl_pool *pool)
+ {
+    struct kk_shader *shader = container_of(vk_shader, struct kk_shader, vk);
+ 
+@@ -6898,38 +6999,41 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
+       blob_write_uint64(blob, shader->deferred_nir.size);
+       blob_write_bytes(blob, shader->deferred_nir.data,
+                        shader->deferred_nir.size);
++      blob_write_uint8(blob, shader->deferred_content_valid);
++      blob_write_bytes(blob, shader->deferred_content_hash,
++                       sizeof(shader->deferred_content_hash));
+       return !blob->out_of_memory;
+    }
+ 
+-   kk_msl_serialize(shader, shader->info.stage, blob);
++   kk_msl_serialize(shader, shader->info.stage, blob, pool);
+    if (shader->info.stage == MESA_SHADER_VERTEX) {
+       u_foreach_bit(stage, shader->info.vs.additional_stages_bits) {
+-         kk_msl_serialize(shader, stage, blob);
++         kk_msl_serialize(shader, stage, blob, pool);
+       }
+ 
+       if (shader->info.vs.transform_feedback_emulation)
+-         kk_msl_data_serialize(&shader->transform_feedback_pre_gs_msl, blob);
++         kk_msl_data_serialize(&shader->transform_feedback_pre_gs_msl, blob, pool);
+ 
+       if (shader->info.vs.line_raster_materialize)
+-         kk_msl_data_serialize(&shader->line_raster_materialize_msl, blob);
++         kk_msl_data_serialize(&shader->line_raster_materialize_msl, blob, pool);
+ 
+       if (shader->info.vs.line_raster_stipple || shader->info.vs.line_raster_procedural)
+-         kk_msl_data_serialize(&shader->line_stipple_prefix_msl, blob);
++         kk_msl_data_serialize(&shader->line_stipple_prefix_msl, blob, pool);
+ 
+       if (shader->info.vs.geometry_shader_emulation) {
+-         kk_msl_data_serialize(&shader->geometry_main_msl, blob);
++         kk_msl_data_serialize(&shader->geometry_main_msl, blob, pool);
+          if (shader->info.vs.geometry.count_words > 0 &&
+              !shader->info.vs.geometry.output_vertex_stride)
+-            kk_msl_data_serialize(&shader->geometry_count_msl, blob);
+-         kk_msl_data_serialize(&shader->geometry_pre_gs_msl, blob);
++            kk_msl_data_serialize(&shader->geometry_count_msl, blob, pool);
++         kk_msl_data_serialize(&shader->geometry_pre_gs_msl, blob, pool);
+       }
+ 
+       u_foreach_bit(variant, shader->info.vs.raster_variant_mask &
+                                ~BITFIELD_BIT(shader->info.vs.raster_variant_class)) {
+          u_foreach_bit(stage, shader->info.vs.raster_variant_stages) {
+-            if (!kk_shader_serialize(
++            if (!kk_shader_serialize_impl(
+                    vk_dev, &shader->raster_variant_shaders[variant][stage]->vk,
+-                   blob))
++                   blob, pool))
+                return false;
+          }
+       }
+@@ -6938,50 +7042,41 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
+    return !blob->out_of_memory;
+ }
+ 
++static bool
++kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
++                    struct blob *blob)
++{
++   return kk_shader_serialize_impl(vk_dev, vk_shader, blob, NULL);
++}
++
+ static VkResult
+ kk_msl_data_deserialize(struct blob_reader *blob,
+-                        struct msl_compile_data *data)
+-{
+-   const uint32_t entrypoint_length = blob_read_uint32(blob);
+-   const uint32_t code_length = blob_read_uint32(blob);
+-   const uint32_t stored_length = blob_read_uint32(blob);
+-   const uint8_t codec = blob_read_uint8(blob);
+-   /* Lengths a blob cannot hold are corrupt, and are refused before anything
+-    * is allocated for them. */
+-   if (blob->overrun || entrypoint_length == 0 ||
+-       entrypoint_length > blob->end - blob->current ||
+-       stored_length > blob->end - blob->current - entrypoint_length)
+-      return VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
+-
+-   data->entrypoint_name = ralloc_array(NULL, char, entrypoint_length);
+-   if (data->entrypoint_name == NULL)
++                        struct msl_compile_data *data,
++                        struct kk_msl_pool *pool)
++{
++   switch (kk_msl_record_read(blob, data, pool)) {
++   case KK_MSL_RECORD_OK:
++      return VK_SUCCESS;
++   case KK_MSL_RECORD_NO_MEMORY:
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
+-   blob_copy_bytes(blob, (void *)data->entrypoint_name, entrypoint_length);
+-   if (data->entrypoint_name[entrypoint_length - 1] != '\0')
+-      return VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
+-
+-   /* The compressed text stays compressed: it is decompressed only to build a
+-    * pipeline from it. */
+-   const void *bytes = blob_read_bytes(blob, stored_length);
+-   if (blob->overrun ||
+-       !kk_msl_adopt(data, codec, bytes, stored_length, code_length))
++   default:
+       return VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
+-
+-   return VK_SUCCESS;
++   }
+ }
+ 
+ static VkResult
+ kk_msl_deserialize(struct blob_reader *blob, mesa_shader_stage stage,
+-                   struct kk_shader *shader)
++                   struct kk_shader *shader, struct kk_msl_pool *pool)
+ {
+-   return kk_msl_data_deserialize(blob, &shader->msl_data[stage]);
++   return kk_msl_data_deserialize(blob, &shader->msl_data[stage], pool);
+ }
+ 
+ static VkResult
+ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
+                       uint32_t binary_version,
+                       const VkAllocationCallbacks *pAllocator,
+-                      struct vk_shader **shader_out, bool allow_line_variant)
++                      struct vk_shader **shader_out, bool allow_line_variant,
++                      struct kk_msl_pool *pool)
+ {
+    struct kk_device *dev = container_of(vk_dev, struct kk_device, vk);
+ 
+@@ -7031,56 +7126,64 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
+          goto fail;
+       }
+ 
++      shader->deferred_content_valid = blob_read_uint8(blob) == 1;
++      blob_copy_bytes(blob, shader->deferred_content_hash,
++                      sizeof(shader->deferred_content_hash));
++      if (blob->overrun) {
++         result = VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
++         goto fail;
++      }
++
+       *shader_out = &shader->vk;
+       return VK_SUCCESS;
+    }
+ 
+-   result = kk_msl_deserialize(blob, info.stage, shader);
++   result = kk_msl_deserialize(blob, info.stage, shader, pool);
+    if (result != VK_SUCCESS)
+       goto fail;
+ 
+    if (shader->info.stage == MESA_SHADER_VERTEX) {
+       u_foreach_bit(stage, shader->info.vs.additional_stages_bits) {
+-         result = kk_msl_deserialize(blob, stage, shader);
++         result = kk_msl_deserialize(blob, stage, shader, pool);
+          if (result != VK_SUCCESS)
+             goto fail;
+       }
+ 
+       if (shader->info.vs.transform_feedback_emulation) {
+          result = kk_msl_data_deserialize(
+-            blob, &shader->transform_feedback_pre_gs_msl);
++            blob, &shader->transform_feedback_pre_gs_msl, pool);
+          if (result != VK_SUCCESS)
+             goto fail;
+       }
+ 
+       if (shader->info.vs.line_raster_materialize) {
+          result = kk_msl_data_deserialize(
+-            blob, &shader->line_raster_materialize_msl);
++            blob, &shader->line_raster_materialize_msl, pool);
+          if (result != VK_SUCCESS)
+             goto fail;
+       }
+ 
+       if (shader->info.vs.line_raster_stipple || shader->info.vs.line_raster_procedural) {
+          result = kk_msl_data_deserialize(blob,
+-                                          &shader->line_stipple_prefix_msl);
++                                          &shader->line_stipple_prefix_msl, pool);
+          if (result != VK_SUCCESS)
+             goto fail;
+       }
+ 
+       if (shader->info.vs.geometry_shader_emulation) {
+-         result = kk_msl_data_deserialize(blob, &shader->geometry_main_msl);
++         result = kk_msl_data_deserialize(blob, &shader->geometry_main_msl, pool);
+          if (result != VK_SUCCESS)
+             goto fail;
+ 
+          if (shader->info.vs.geometry.count_words > 0 &&
+              !shader->info.vs.geometry.output_vertex_stride) {
+             result =
+-               kk_msl_data_deserialize(blob, &shader->geometry_count_msl);
++               kk_msl_data_deserialize(blob, &shader->geometry_count_msl, pool);
+             if (result != VK_SUCCESS)
+                goto fail;
+          }
+ 
+-         result = kk_msl_data_deserialize(blob, &shader->geometry_pre_gs_msl);
++         result = kk_msl_data_deserialize(blob, &shader->geometry_pre_gs_msl, pool);
+          if (result != VK_SUCCESS)
+             goto fail;
+       }
+@@ -7090,7 +7193,8 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
+          u_foreach_bit(stage, shader->info.vs.raster_variant_stages) {
+             struct vk_shader *child = NULL;
+             result = kk_deserialize_shader_impl(vk_dev, blob, binary_version,
+-                                                pAllocator, &child, false);
++                                                pAllocator, &child, false,
++                                                pool);
+             if (result != VK_SUCCESS)
+                goto fail;
+             struct kk_shader *raster = container_of(child, struct kk_shader, vk);
+@@ -7135,7 +7239,468 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+                       struct vk_shader **shader_out)
+ {
+    return kk_deserialize_shader_impl(vk_dev, blob, binary_version, pAllocator,
+-                                     shader_out, true);
++                                     shader_out, true, NULL);
++}
++
++/* The variants of dynamic vertex-input pipelines, kept on disk.
++ *
++ * Compiling a variant is most of what the first draw of a screen costs, and
++ * the same variants are compiled again by every process and every run: the
++ * in-memory table of a parent dies with it, and a new guest context makes a
++ * new parent.  So the MSL of a compiled variant and what describes it are
++ * stored in Mesa's disk cache, in an instance of its own beside the cache of
++ * the OpenGL driver above (the application sets the location and the size
++ * limit of both), and a later variant with the same key is built from them
++ * again instead of translated.  The entries are described in
++ * kk_variant_entry.h.
++ *
++ * The key of a variant is everything its translation depends on: the device
++ * (kk_variant_identity_init), the pipeline (kk_dynamic_vertex_input_disk_base)
++ * and the vertex input.  An entry is read only under the key it was written
++ * for by the same build of the driver, is checked in full before any of it is
++ * used, and when it fails a check, or Metal cannot build its pipelines, the
++ * variant is translated as it would be without the cache and stored over it.
++ * No behaviour depends on an entry surviving.
++ *
++ * MESA_KK_VARIANT_CACHE=0 turns the cache off.  MESA_KK_VARIANT_LOG=1 writes
++ * a line to stderr for each event: a variant loaded or missed, an entry found
++ * invalid, a variant translated or stored.
++ */
++#define KK_VARIANT_MAX_KNOWN_TEXTS 8192
++
++static bool
++kk_variant_log_enabled(void)
++{
++   static int enabled = -1;
++   int value = p_atomic_read(&enabled);
++   if (value < 0) {
++      const char *env = getenv("MESA_KK_VARIANT_LOG");
++      value = env != NULL && env[0] != '\0' && env[0] != '0';
++      p_atomic_set(&enabled, value);
++   }
++   return value;
++}
++
++static void
++kk_variant_log(const char *event, const blake3_hash key, uint64_t us,
++               size_t bytes, uint32_t stages, const char *reason)
++{
++   if (!kk_variant_log_enabled())
++      return;
++
++   struct timeval tv;
++   gettimeofday(&tv, NULL);
++   uint64_t tid = 0;
++   pthread_threadid_np(NULL, &tid);
++   fprintf(stderr,
++           "kkvar %s t=%ld.%06d key=%02x%02x%02x%02x us=%llu bytes=%zu "
++           "stages=%u tid=%llu%s%s\n",
++           event, (long)tv.tv_sec, (int)tv.tv_usec, key[0], key[1], key[2],
++           key[3], (unsigned long long)us, bytes, stages,
++           (unsigned long long)tid, reason != NULL ? " reason=" : "",
++           reason != NULL ? reason : "");
++}
++
++static void
++kk_variant_text_know(struct kk_variant_cache *cache, const blake3_hash name)
++{
++   simple_mtx_lock(&cache->lock);
++   if (cache->known->entries < KK_VARIANT_MAX_KNOWN_TEXTS &&
++       _mesa_set_search(cache->known, name) == NULL) {
++      uint8_t *copy = malloc(sizeof(blake3_hash));
++      if (copy != NULL) {
++         memcpy(copy, name, sizeof(blake3_hash));
++         _mesa_set_add(cache->known, copy);
++      }
++   }
++   simple_mtx_unlock(&cache->lock);
++}
++
++static void
++kk_variant_text_forget(struct kk_variant_cache *cache, const blake3_hash name)
++{
++   simple_mtx_lock(&cache->lock);
++   struct set_entry *entry = _mesa_set_search(cache->known, name);
++   if (entry != NULL) {
++      free((void *)entry->key);
++      _mesa_set_remove(cache->known, entry);
++   }
++   simple_mtx_unlock(&cache->lock);
++}
++
++static void
++kk_variant_cache_key(const struct kk_variant_cache *cache,
++                     const blake3_hash name, cache_key key)
++{
++   disk_cache_compute_key(cache->disk, name, sizeof(blake3_hash), key);
++}
++
++/* The store the texts of a variant are kept in: Mesa's disk cache. */
++static bool
++kk_variant_store_has(void *ctx, const blake3_hash name)
++{
++   struct kk_variant_cache *cache = ctx;
++   simple_mtx_lock(&cache->lock);
++   const bool known = _mesa_set_search(cache->known, name) != NULL;
++   simple_mtx_unlock(&cache->lock);
++   return known;
++}
++
++static void
++kk_variant_store_put(void *ctx, const blake3_hash name, void *data, size_t size)
++{
++   struct kk_variant_cache *cache = ctx;
++   cache_key key;
++   kk_variant_cache_key(cache, name, key);
++   kk_variant_text_know(cache, name);
++   disk_cache_put_nocopy(cache->disk, key, data, size, NULL);
++}
++
++static void *
++kk_variant_store_get(void *ctx, const blake3_hash name, size_t *size)
++{
++   struct kk_variant_cache *cache = ctx;
++   cache_key key;
++   kk_variant_cache_key(cache, name, key);
++   void *data = disk_cache_get(cache->disk, key, size);
++   if (data != NULL)
++      kk_variant_text_know(cache, name);
++   return data;
++}
++
++static void
++kk_variant_store_remove(void *ctx, const blake3_hash name)
++{
++   struct kk_variant_cache *cache = ctx;
++   cache_key key;
++   kk_variant_cache_key(cache, name, key);
++   kk_variant_text_forget(cache, name);
++   disk_cache_remove(cache->disk, key);
++}
++
++static const struct kk_variant_store_ops kk_variant_disk_ops = {
++   .has = kk_variant_store_has,
++   .put = kk_variant_store_put,
++   .get = kk_variant_store_get,
++   .remove = kk_variant_store_remove,
++};
++
++static void
++kk_variant_free_known(struct set_entry *entry)
++{
++   free((void *)entry->key);
++}
++
++void
++kk_variant_cache_create(struct kk_physical_device *pdev)
++{
++#ifdef ENABLE_SHADER_CACHE
++   if (!debug_get_bool_option("MESA_KK_VARIANT_CACHE", true))
++      return;
++
++   /* Entries of another build are never looked at: the cache of a build is
++    * its own. */
++   struct kk_instance *instance = kk_physical_device_instance(pdev);
++   struct mesa_blake3 hash;
++   _mesa_blake3_init(&hash);
++   const uint32_t format = KK_VARIANT_FORMAT;
++   _mesa_blake3_update(&hash, &format, sizeof(format));
++   _mesa_blake3_update(&hash, instance->driver_build_sha,
++                       sizeof(instance->driver_build_sha));
++   blake3_hash id;
++   _mesa_blake3_final(&hash, id);
++   char cache_id[BLAKE3_HEX_LEN];
++   mesa_bytes_to_hex(cache_id, id, BLAKE3_KEY_LEN);
++
++   struct disk_cache *disk = disk_cache_create("kosmickrisp-variants", cache_id, 0);
++   if (disk == NULL)
++      return;
++
++   struct kk_variant_cache *cache = calloc(1, sizeof(*cache));
++   if (cache != NULL) {
++      cache->disk = disk;
++      simple_mtx_init(&cache->lock, mtx_plain);
++      cache->known =
++         _mesa_set_create(NULL, kk_blake3_key_hash, kk_blake3_key_equal);
++   }
++   if (cache == NULL || cache->known == NULL) {
++      if (cache != NULL)
++         simple_mtx_destroy(&cache->lock);
++      free(cache);
++      disk_cache_destroy(disk);
++      return;
++   }
++   pdev->variant_cache = cache;
++#endif
++}
++
++void
++kk_variant_cache_destroy(struct kk_physical_device *pdev)
++{
++#ifdef ENABLE_SHADER_CACHE
++   struct kk_variant_cache *cache = pdev->variant_cache;
++   if (cache == NULL)
++      return;
++
++   /* Destroying the disk cache waits for the writes still queued. */
++   disk_cache_destroy(cache->disk);
++   _mesa_set_destroy(cache->known, kk_variant_free_known);
++   simple_mtx_destroy(&cache->lock);
++   free(cache);
++   pdev->variant_cache = NULL;
++#endif
++}
++
++/* Everything the variants of this device depend on besides their pipeline:
++ * the driver build, the Metal GPU and the system that picked the workarounds,
++ * the workarounds, the debug flags and the features the device enabled. */
++static void
++kk_variant_identity_init(struct kk_device *dev)
++{
++   struct kk_physical_device *pdev = kk_device_physical(dev);
++   struct kk_instance *instance = kk_physical_device_instance(pdev);
++
++   struct mesa_blake3 hash;
++   _mesa_blake3_init(&hash);
++   const uint32_t format = KK_VARIANT_FORMAT;
++   _mesa_blake3_update(&hash, &format, sizeof(format));
++   _mesa_blake3_update(&hash, instance->driver_build_sha,
++                       sizeof(instance->driver_build_sha));
++   _mesa_blake3_update(&hash, pdev->vk.properties.deviceName,
++                       strlen(pdev->vk.properties.deviceName) + 1);
++   _mesa_blake3_update(&hash, &pdev->info.gpu_apple_family,
++                       sizeof(pdev->info.gpu_apple_family));
++   _mesa_blake3_update(&hash, &pdev->info.supports_bc_compression,
++                       sizeof(pdev->info.supports_bc_compression));
++   _mesa_blake3_update(&hash, &pdev->info.supports_32bit_float_filtering,
++                       sizeof(pdev->info.supports_32bit_float_filtering));
++   char os_build[64] = {0};
++   size_t os_build_size = sizeof(os_build) - 1;
++   sysctlbyname("kern.osversion", os_build, &os_build_size, NULL, 0);
++   _mesa_blake3_update(&hash, os_build, sizeof(os_build));
++   _mesa_blake3_update(&hash, &dev->disabled_workarounds,
++                       sizeof(dev->disabled_workarounds));
++   const uint64_t debug_flags = kk_mesa_debug_flags;
++   _mesa_blake3_update(&hash, &debug_flags, sizeof(debug_flags));
++   _mesa_blake3_update(&hash, &dev->vk.enabled_features,
++                       sizeof(dev->vk.enabled_features));
++   blake3_hash identity;
++   _mesa_blake3_final(&hash, identity);
++   STATIC_ASSERT(sizeof(identity) == sizeof(dev->variant_identity));
++   memcpy(dev->variant_identity, identity, sizeof(identity));
++}
++
++static bool
++kk_variant_disk_key(const struct kk_device *dev,
++                    const struct kk_linked_graphics_pipeline *linked,
++                    const blake3_hash vi_key, blake3_hash key)
++{
++   if (kk_device_physical(dev)->variant_cache == NULL ||
++       !linked->dynamic.has_disk_base)
++      return false;
++
++   struct mesa_blake3 hash;
++   _mesa_blake3_init(&hash);
++   _mesa_blake3_update(&hash, dev->variant_identity,
++                       sizeof(dev->variant_identity));
++   _mesa_blake3_update(&hash, linked->dynamic.disk_base,
++                       sizeof(linked->dynamic.disk_base));
++   _mesa_blake3_update(&hash, vi_key, sizeof(blake3_hash));
++   _mesa_blake3_final(&hash, key);
++   return true;
++}
++
++/* The MSL of a variant leaves for the disk compressed, as it is in a pipeline
++ * cache. */
++static void
++kk_pack_variant_msl(struct kk_linked_graphics_pipeline *variant)
++{
++   struct kk_shader *group[MESA_SHADER_STAGES];
++   uint32_t count = 0;
++   for (uint32_t stage = 0; stage < MESA_SHADER_STAGES; stage++) {
++      if (variant->shaders[stage] != NULL)
++         group[count++] = variant->shaders[stage];
++   }
++   if (count > 0)
++      kk_pack_shaders_msl(group, count);
++
++   const struct kk_shader *vs = variant->shaders[MESA_SHADER_VERTEX];
++   if (vs == NULL)
++      return;
++   u_foreach_bit(raster, vs->info.vs.raster_variant_mask &
++                            ~BITFIELD_BIT(vs->info.vs.raster_variant_class)) {
++      count = 0;
++      for (uint32_t stage = 0; stage < MESA_SHADER_STAGES; stage++) {
++         struct kk_shader *child = vs->raster_variant_shaders[raster][stage];
++         if (child != NULL)
++            group[count++] = child;
++      }
++      if (count > 0)
++         kk_pack_shaders_msl(group, count);
++   }
++}
++
++/* Stores a variant that was just translated.  The texts go first, so that the
++ * descriptor never names a text that was not queued before it. */
++static void
++kk_variant_cache_store(struct kk_device *dev,
++                       struct kk_linked_graphics_pipeline *variant,
++                       const blake3_hash key)
++{
++   struct kk_physical_device *pdev = kk_device_physical(dev);
++   struct kk_variant_cache *cache = pdev->variant_cache;
++   struct kk_instance *instance = kk_physical_device_instance(pdev);
++   const uint64_t start = os_time_get_nano();
++
++   kk_pack_variant_msl(variant);
++
++   struct kk_msl_pool pool;
++   kk_msl_pool_init(&pool, &kk_variant_disk_ops, cache);
++   struct blob blob;
++   blob_init(&blob);
++   kk_variant_descriptor_begin(&blob);
++
++   uint32_t count = 0;
++   bool ok = true;
++   for (uint32_t stage = 0; stage < MESA_SHADER_STAGES && ok; stage++) {
++      const struct kk_shader *shader = variant->shaders[stage];
++      if (shader == NULL)
++         continue;
++
++      struct blob shader_blob;
++      blob_init(&shader_blob);
++      ok = kk_shader_serialize_impl(&dev->vk, &shader->vk, &shader_blob, &pool);
++      if (ok) {
++         kk_variant_descriptor_add_stage(&blob, stage, &shader_blob);
++         count++;
++      }
++      blob_finish(&shader_blob);
++   }
++
++   STATIC_ASSERT(sizeof(instance->driver_build_sha) == KK_VARIANT_BUILD_ID_SIZE);
++   ok = ok && !pool.failed && count > 0 &&
++        kk_variant_descriptor_end(&blob, instance->driver_build_sha, key, count);
++   kk_msl_pool_finish(&pool);
++   if (!ok) {
++      blob_finish(&blob);
++      return;
++   }
++
++   void *data = NULL;
++   size_t size = 0;
++   blob_finish_get_buffer(&blob, &data, &size);
++
++   /* The cache never replaces an entry that exists, and this one was not
++    * found usable, so a damaged or truncated file must go for the new one to
++    * land. */
++   cache_key cache_key;
++   kk_variant_cache_key(cache, key, cache_key);
++   disk_cache_remove(cache->disk, cache_key);
++   disk_cache_put_nocopy(cache->disk, cache_key, data, size, NULL);
++
++   kk_variant_log("store", key, (os_time_get_nano() - start) / 1000, size,
++                  count, NULL);
++}
++
++static void
++kk_variant_free_partial(struct kk_device *dev,
++                        struct kk_linked_graphics_pipeline *variant)
++{
++   for (uint32_t stage = 0; stage < MESA_SHADER_STAGES; stage++) {
++      if (variant->shaders[stage] != NULL)
++         kk_shader_destroy(&dev->vk, variant->shaders[stage], &dev->vk.alloc);
++   }
++   vk_free(&dev->vk.alloc, variant);
++}
++
++/* Whether a variant was found on disk and built from it.  An entry that is
++ * not what its key names, that holds what no writer wrote, or that Metal
++ * cannot build, counts as absent, and the variant is translated again. */
++static bool
++kk_variant_cache_load(struct kk_device *dev, const blake3_hash key,
++                      struct kk_linked_graphics_pipeline **variant_out)
++{
++   struct kk_physical_device *pdev = kk_device_physical(dev);
++   struct kk_variant_cache *cache = pdev->variant_cache;
++   struct kk_instance *instance = kk_physical_device_instance(pdev);
++   const uint64_t start = os_time_get_nano();
++
++   cache_key cache_key;
++   kk_variant_cache_key(cache, key, cache_key);
++   size_t size = 0;
++   uint8_t *data = disk_cache_get(cache->disk, cache_key, &size);
++   if (data == NULL) {
++      kk_variant_log("miss", key, 0, 0, 0, NULL);
++      return false;
++   }
++
++   struct kk_msl_pool pool;
++   kk_msl_pool_init(&pool, &kk_variant_disk_ops, cache);
++   struct kk_linked_graphics_pipeline *variant = NULL;
++   struct blob_reader payload;
++   uint32_t count = 0;
++   enum kk_variant_status status = kk_variant_descriptor_open(
++      data, size, instance->driver_build_sha, key, MESA_SHADER_STAGES,
++      &payload, &count);
++   if (status != KK_VARIANT_OK)
++      goto invalid;
++
++   variant = vk_zalloc(&dev->vk.alloc, sizeof(*variant), 8,
++                       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
++   if (variant == NULL) {
++      status = KK_VARIANT_NO_MEMORY;
++      goto invalid;
++   }
++
++   for (uint32_t i = 0; i < count; i++) {
++      uint32_t stage;
++      struct blob_reader shader_reader;
++      status = kk_variant_descriptor_next_stage(&payload, MESA_SHADER_STAGES,
++                                                &stage, &shader_reader);
++      if (status != KK_VARIANT_OK)
++         goto invalid;
++      if (variant->shaders[stage] != NULL) {
++         status = KK_VARIANT_BAD_STAGE;
++         goto invalid;
++      }
++
++      struct vk_shader *loaded = NULL;
++      if (kk_deserialize_shader_impl(&dev->vk, &shader_reader, 0,
++                                     &dev->vk.alloc, &loaded, true,
++                                     &pool) != VK_SUCCESS) {
++         status = KK_VARIANT_BAD_TEXT;
++         goto invalid;
++      }
++      struct kk_shader *shader = container_of(loaded, struct kk_shader, vk);
++      variant->shaders[stage] = shader;
++      if (shader->info.stage != stage || shader->info.deferred) {
++         status = KK_VARIANT_BAD_STAGE;
++         goto invalid;
++      }
++   }
++   status = kk_variant_descriptor_close(&payload);
++   if (status != KK_VARIANT_OK)
++      goto invalid;
++   if (variant->shaders[MESA_SHADER_VERTEX] == NULL) {
++      status = KK_VARIANT_BAD_STAGE;
++      goto invalid;
++   }
++
++   kk_msl_pool_finish(&pool);
++   free(data);
++   kk_variant_log("load", key, (os_time_get_nano() - start) / 1000, size,
++                  count, NULL);
++   *variant_out = variant;
++   return true;
++
++invalid:
++   if (variant != NULL)
++      kk_variant_free_partial(dev, variant);
++   kk_msl_pool_finish(&pool);
++   free(data);
++   disk_cache_remove(cache->disk, cache_key);
++   kk_variant_log("invalid", key, 0, size, 0, kk_variant_status_name(status));
++   return false;
+ }
+ 
+ void
+@@ -7240,10 +7805,21 @@ kk_resolve_dynamic_vertex_input_pipeline(struct kk_cmd_buffer *cmd)
+ 
+    if (variant == NULL) {
+       struct kk_linked_graphics_pipeline *candidate = NULL;
+-      VkResult result = kk_compile_dynamic_vertex_input_variant(
+-         dev, linked, vi, byte_strides, &candidate);
+-      if (result != VK_SUCCESS)
+-         return result;
++      blake3_hash disk_key;
++      const bool on_disk = kk_variant_disk_key(dev, linked, key, disk_key);
++      if (!on_disk || !kk_variant_cache_load(dev, disk_key, &candidate)) {
++         const uint64_t start = os_time_get_nano();
++         VkResult result = kk_compile_dynamic_vertex_input_variant(
++            dev, linked, vi, byte_strides, &candidate);
++         if (result != VK_SUCCESS)
++            return result;
++
++         kk_variant_log("compile", key,
++                        (os_time_get_nano() - start) / 1000, 0,
++                        linked->dynamic.shader_count, NULL);
++         if (on_disk)
++            kk_variant_cache_store(dev, candidate, disk_key);
++      }
+ 
+       memcpy(candidate->key, key, sizeof(candidate->key));
+       kk_variant_drop_msl(candidate, linked, vi, byte_strides);
+diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+index f817df5a6789d8e388e7b4c8878e7cf1b61e73d6..ac83dfb6e8a8500aa1f45b564c6c0e915dd70826 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.h
++++ b/src/kosmickrisp/vulkan/kk_shader.h
+@@ -23,6 +23,8 @@
+ 
+ #include "poly/nir/poly_nir.h"
+ 
++#include "util/set.h"
++#include "util/simple_mtx.h"
+ #include "util/u_dynarray.h"
+ 
+ struct kk_cmd_buffer;
+@@ -245,6 +247,10 @@ struct kk_shader {
+                                             [MESA_SHADER_STAGES];
+    struct vk_pipeline_robustness_state deferred_robustness;
+    struct blob deferred_nir;
++   /* What the deferred NIR computes (kk_nir_content_hash), the identity of the
++    * shader the disk cache of its variants goes by. */
++   bool deferred_content_valid;
++   blake3_hash deferred_content_hash;
+    /* MSL sources this shader registered in the device's MTLLibrary cache when
+     * it was created as a graphics pipeline library, by stage.  A link that
+     * regenerates the same source finds Metal's front-end compile already done.
+@@ -344,4 +350,19 @@ void kk_cmd_select_line_raster_variant(struct kk_cmd_buffer *cmd);
+ VkResult
+ kk_resolve_dynamic_vertex_input_pipeline(struct kk_cmd_buffer *cmd);
+ 
++struct kk_physical_device;
++
++/* The disk cache of the variants of dynamic vertex-input pipelines, created
++ * with a physical device and destroyed with it. */
++struct kk_variant_cache {
++   struct disk_cache *disk;
++   /* The names of the texts this process knows are stored, so that a variant
++    * whose texts earlier variants stored does not read their files again. */
++   simple_mtx_t lock;
++   struct set *known;
++};
++
++void kk_variant_cache_create(struct kk_physical_device *pdev);
++void kk_variant_cache_destroy(struct kk_physical_device *pdev);
++
+ #endif /* KK_SHADER_H */
+diff --git a/src/kosmickrisp/vulkan/kk_variant_entry.c b/src/kosmickrisp/vulkan/kk_variant_entry.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..86fe75286f28eaeff2dffae7137077d0bbb4bfd3
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/kk_variant_entry.c
+@@ -0,0 +1,399 @@
++/*
++ * Copyright 2026 Google LLC
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "kk_variant_entry.h"
++
++#include <stdlib.h>
++#include <string.h>
++
++#include "util/ralloc.h"
++
++#define KK_VARIANT_DESCRIPTOR_MAGIC                                            \
++   ((uint32_t)'K' | (uint32_t)'K' << 8 | (uint32_t)'V' << 16 |                 \
++    (uint32_t)'D' << 24)
++#define KK_VARIANT_TEXT_MAGIC                                                  \
++   ((uint32_t)'K' | (uint32_t)'K' << 8 | (uint32_t)'V' << 16 |                 \
++    (uint32_t)'T' << 24)
++
++struct kk_variant_descriptor_header {
++   uint32_t magic;
++   uint32_t format;
++   uint8_t build_id[KK_VARIANT_BUILD_ID_SIZE];
++   uint8_t key[sizeof(blake3_hash)];
++   uint32_t stage_count;
++   uint32_t payload_size;
++   uint8_t payload_hash[sizeof(blake3_hash)];
++};
++_Static_assert(sizeof(struct kk_variant_descriptor_header) == 96,
++               "the descriptor header has no padding");
++
++struct kk_variant_text_header {
++   uint32_t magic;
++   uint32_t format;
++   uint32_t codec;
++   uint32_t code_size;
++   uint32_t stored_size;
++   uint32_t reserved;
++   uint8_t name[sizeof(blake3_hash)];
++};
++_Static_assert(sizeof(struct kk_variant_text_header) == 56,
++               "the text header has no padding");
++
++const char *
++kk_variant_status_name(enum kk_variant_status status)
++{
++   switch (status) {
++   case KK_VARIANT_OK:
++      return "ok";
++   case KK_VARIANT_TRUNCATED:
++      return "truncated";
++   case KK_VARIANT_BAD_MAGIC:
++      return "magic";
++   case KK_VARIANT_BAD_FORMAT:
++      return "format";
++   case KK_VARIANT_BAD_BUILD:
++      return "build";
++   case KK_VARIANT_BAD_KEY:
++      return "key";
++   case KK_VARIANT_BAD_COUNT:
++      return "count";
++   case KK_VARIANT_BAD_SIZE:
++      return "size";
++   case KK_VARIANT_BAD_HASH:
++      return "hash";
++   case KK_VARIANT_BAD_STAGE:
++      return "stage";
++   case KK_VARIANT_BAD_TEXT:
++      return "text";
++   case KK_VARIANT_NO_MEMORY:
++      return "memory";
++   }
++   return "unknown";
++}
++
++void
++kk_msl_pool_init(struct kk_msl_pool *pool,
++                 const struct kk_variant_store_ops *ops, void *ctx)
++{
++   memset(pool, 0, sizeof(*pool));
++   pool->ops = ops;
++   pool->ctx = ctx;
++}
++
++void
++kk_msl_pool_finish(struct kk_msl_pool *pool)
++{
++   for (uint32_t i = 0; i < pool->held_count; i++)
++      free(pool->held[i]);
++   free(pool->held);
++   pool->held = NULL;
++   pool->held_count = pool->held_capacity = 0;
++}
++
++void
++kk_msl_text_name(uint8_t codec, uint32_t code_size, const void *bytes,
++                 uint32_t stored_size, blake3_hash name)
++{
++   const uint32_t fields[3] = {codec, code_size, stored_size};
++   struct mesa_blake3 hash;
++   _mesa_blake3_init(&hash);
++   _mesa_blake3_update(&hash, fields, sizeof(fields));
++   _mesa_blake3_update(&hash, bytes, stored_size);
++   _mesa_blake3_final(&hash, name);
++}
++
++static enum kk_variant_status
++check_text_entry(const uint8_t *entry, size_t size, const blake3_hash name,
++                 struct kk_variant_text_header *header)
++{
++   if (size < sizeof(*header))
++      return KK_VARIANT_TRUNCATED;
++   memcpy(header, entry, sizeof(*header));
++   if (header->magic != KK_VARIANT_TEXT_MAGIC)
++      return KK_VARIANT_BAD_MAGIC;
++   if (header->format != KK_VARIANT_FORMAT || header->reserved != 0)
++      return KK_VARIANT_BAD_FORMAT;
++   if (memcmp(header->name, name, sizeof(blake3_hash)) != 0)
++      return KK_VARIANT_BAD_KEY;
++   if (header->codec >= KK_MSL_CODEC_COUNT || header->code_size < 1 ||
++       header->code_size > KK_MSL_MAX_CODE_SIZE)
++      return KK_VARIANT_BAD_COUNT;
++   if (header->stored_size < 1 || header->stored_size > header->code_size ||
++       header->stored_size != size - sizeof(*header))
++      return KK_VARIANT_BAD_SIZE;
++
++   blake3_hash actual;
++   kk_msl_text_name(header->codec, header->code_size,
++                    entry + sizeof(*header), header->stored_size, actual);
++   if (memcmp(actual, name, sizeof(blake3_hash)) != 0)
++      return KK_VARIANT_BAD_HASH;
++   return KK_VARIANT_OK;
++}
++
++bool
++kk_msl_pool_put(struct kk_msl_pool *pool, uint8_t codec, uint32_t code_size,
++                const void *bytes, uint32_t stored_size, blake3_hash name)
++{
++   kk_msl_text_name(codec, code_size, bytes, stored_size, name);
++   if (pool->ops->has(pool->ctx, name))
++      return true;
++
++   /* A text the store holds counts only if it is a text a reader would take:
++    * a file the store accepted can still be damaged, and one a reader
++    * refuses would otherwise stay until a reader removed it. */
++   size_t existing_size = 0;
++   uint8_t *existing = pool->ops->get(pool->ctx, name, &existing_size);
++   if (existing != NULL) {
++      struct kk_variant_text_header existing_header;
++      const bool usable =
++         check_text_entry(existing, existing_size, name, &existing_header) ==
++         KK_VARIANT_OK;
++      free(existing);
++      if (usable)
++         return true;
++   }
++   pool->ops->remove(pool->ctx, name);
++
++   const size_t size = sizeof(struct kk_variant_text_header) + stored_size;
++   uint8_t *entry = malloc(size);
++   if (entry == NULL) {
++      pool->failed = true;
++      return false;
++   }
++   const struct kk_variant_text_header header = {
++      .magic = KK_VARIANT_TEXT_MAGIC,
++      .format = KK_VARIANT_FORMAT,
++      .codec = codec,
++      .code_size = code_size,
++      .stored_size = stored_size,
++   };
++   memcpy(entry, &header, sizeof(header));
++   memcpy(((struct kk_variant_text_header *)entry)->name, name,
++          sizeof(blake3_hash));
++   memcpy(entry + sizeof(header), bytes, stored_size);
++   pool->ops->put(pool->ctx, name, entry, size);
++   return true;
++}
++
++enum kk_variant_status
++kk_msl_pool_get(struct kk_msl_pool *pool, const blake3_hash name,
++                uint8_t *codec, uint32_t *code_size, const void **bytes,
++                uint32_t *stored_size)
++{
++   size_t size = 0;
++   uint8_t *entry = pool->ops->get(pool->ctx, name, &size);
++   if (entry == NULL) {
++      /* Missing, or a file the store itself refused: either way nothing good
++       * is under this name, and a bad file there would keep the next writer
++       * from putting the text back. */
++      pool->ops->remove(pool->ctx, name);
++      return KK_VARIANT_BAD_TEXT;
++   }
++
++   struct kk_variant_text_header header;
++   enum kk_variant_status status = check_text_entry(entry, size, name, &header);
++   if (status != KK_VARIANT_OK) {
++      free(entry);
++      pool->ops->remove(pool->ctx, name);
++      return status;
++   }
++
++   if (pool->held_count == pool->held_capacity) {
++      const uint32_t capacity = pool->held_capacity ? pool->held_capacity * 2 : 16;
++      void **held = realloc(pool->held, capacity * sizeof(*held));
++      if (held == NULL) {
++         free(entry);
++         return KK_VARIANT_NO_MEMORY;
++      }
++      pool->held = held;
++      pool->held_capacity = capacity;
++   }
++   pool->held[pool->held_count++] = entry;
++
++   *codec = header.codec;
++   *code_size = header.code_size;
++   *stored_size = header.stored_size;
++   *bytes = entry + sizeof(header);
++   return KK_VARIANT_OK;
++}
++
++void
++kk_msl_record_write(struct blob *blob, const struct msl_compile_data *data,
++                    struct kk_msl_pool *pool)
++{
++   const uint32_t entrypoint_length = strlen(data->entrypoint_name) + 1;
++   const void *bytes = data->packed != NULL ? (const void *)data->packed
++                                            : (const void *)data->code;
++   const uint32_t stored_length = kk_msl_resident_bytes(data);
++   const uint32_t code_length = kk_msl_text_bytes(data);
++   const uint8_t codec =
++      data->packed != NULL ? data->codec : KK_MSL_CODEC_STORED;
++   blob_write_uint32(blob, entrypoint_length);
++   blob_write_uint32(blob, code_length);
++   blob_write_uint32(blob, stored_length);
++   blob_write_uint8(blob, codec);
++   blob_write_bytes(blob, data->entrypoint_name, entrypoint_length);
++   if (pool == NULL) {
++      blob_write_bytes(blob, bytes, stored_length);
++      return;
++   }
++
++   blake3_hash name = {0};
++   kk_msl_pool_put(pool, codec, code_length, bytes, stored_length, name);
++   blob_write_bytes(blob, name, sizeof(name));
++}
++
++enum kk_msl_record_status
++kk_msl_record_read(struct blob_reader *blob, struct msl_compile_data *data,
++                   struct kk_msl_pool *pool)
++{
++   const uint32_t entrypoint_length = blob_read_uint32(blob);
++   const uint32_t code_length = blob_read_uint32(blob);
++   const uint32_t stored_length = blob_read_uint32(blob);
++   const uint8_t codec = blob_read_uint8(blob);
++   /* Lengths a blob cannot hold are corrupt, and are refused before anything
++    * is allocated for them. */
++   const size_t tail = pool != NULL ? sizeof(blake3_hash) : stored_length;
++   if (blob->overrun || entrypoint_length == 0 ||
++       entrypoint_length > blob->end - blob->current ||
++       tail > blob->end - blob->current - entrypoint_length)
++      return KK_MSL_RECORD_CORRUPT;
++
++   data->entrypoint_name = ralloc_array(NULL, char, entrypoint_length);
++   if (data->entrypoint_name == NULL)
++      return KK_MSL_RECORD_NO_MEMORY;
++   blob_copy_bytes(blob, (void *)data->entrypoint_name, entrypoint_length);
++   if (data->entrypoint_name[entrypoint_length - 1] != '\0')
++      return KK_MSL_RECORD_CORRUPT;
++
++   const void *bytes;
++   if (pool == NULL) {
++      /* The compressed text stays compressed: it is decompressed only to
++       * build a pipeline from it. */
++      bytes = blob_read_bytes(blob, stored_length);
++      if (blob->overrun)
++         return KK_MSL_RECORD_CORRUPT;
++   } else {
++      blake3_hash name;
++      blob_copy_bytes(blob, name, sizeof(name));
++      if (blob->overrun)
++         return KK_MSL_RECORD_CORRUPT;
++
++      uint8_t held_codec;
++      uint32_t held_code_size, held_stored_size;
++      const enum kk_variant_status status =
++         kk_msl_pool_get(pool, name, &held_codec, &held_code_size, &bytes,
++                         &held_stored_size);
++      if (status == KK_VARIANT_NO_MEMORY)
++         return KK_MSL_RECORD_NO_MEMORY;
++      /* The text is what its name says; the record must say the same of it. */
++      if (status != KK_VARIANT_OK || held_codec != codec ||
++          held_code_size != code_length || held_stored_size != stored_length)
++         return KK_MSL_RECORD_CORRUPT;
++   }
++
++   if (!kk_msl_adopt(data, codec, bytes, stored_length, code_length))
++      return KK_MSL_RECORD_CORRUPT;
++   return KK_MSL_RECORD_OK;
++}
++
++void
++kk_variant_descriptor_begin(struct blob *blob)
++{
++   const struct kk_variant_descriptor_header header = {0};
++   blob_write_bytes(blob, &header, sizeof(header));
++}
++
++void
++kk_variant_descriptor_add_stage(struct blob *blob, uint32_t stage,
++                                const struct blob *shader)
++{
++   blob_write_uint32(blob, stage);
++   blob_write_uint32(blob, shader->size);
++   blob_write_bytes(blob, shader->data, shader->size);
++}
++
++bool
++kk_variant_descriptor_end(struct blob *blob,
++                          const uint8_t build_id[KK_VARIANT_BUILD_ID_SIZE],
++                          const blake3_hash key, uint32_t stage_count)
++{
++   if (blob->out_of_memory || blob->size < sizeof(struct kk_variant_descriptor_header) ||
++       blob->size > KK_VARIANT_MAX_DESCRIPTOR_SIZE)
++      return false;
++
++   struct kk_variant_descriptor_header header = {
++      .magic = KK_VARIANT_DESCRIPTOR_MAGIC,
++      .format = KK_VARIANT_FORMAT,
++      .stage_count = stage_count,
++      .payload_size = blob->size - sizeof(header),
++   };
++   memcpy(header.build_id, build_id, sizeof(header.build_id));
++   memcpy(header.key, key, sizeof(header.key));
++   _mesa_blake3_compute((const uint8_t *)blob->data + sizeof(header),
++                        header.payload_size, header.payload_hash);
++   return blob_overwrite_bytes(blob, 0, &header, sizeof(header));
++}
++
++enum kk_variant_status
++kk_variant_descriptor_open(const void *data, size_t size,
++                           const uint8_t build_id[KK_VARIANT_BUILD_ID_SIZE],
++                           const blake3_hash key, uint32_t stage_limit,
++                           struct blob_reader *payload, uint32_t *stage_count)
++{
++   struct kk_variant_descriptor_header header;
++   if (size < sizeof(header))
++      return KK_VARIANT_TRUNCATED;
++   memcpy(&header, data, sizeof(header));
++
++   if (header.magic != KK_VARIANT_DESCRIPTOR_MAGIC)
++      return KK_VARIANT_BAD_MAGIC;
++   if (header.format != KK_VARIANT_FORMAT)
++      return KK_VARIANT_BAD_FORMAT;
++   if (memcmp(header.build_id, build_id, sizeof(header.build_id)) != 0)
++      return KK_VARIANT_BAD_BUILD;
++   if (memcmp(header.key, key, sizeof(blake3_hash)) != 0)
++      return KK_VARIANT_BAD_KEY;
++   if (header.stage_count < 1 || header.stage_count > stage_limit)
++      return KK_VARIANT_BAD_COUNT;
++   if (size > KK_VARIANT_MAX_DESCRIPTOR_SIZE ||
++       header.payload_size != size - sizeof(header))
++      return KK_VARIANT_BAD_SIZE;
++
++   blake3_hash hash;
++   _mesa_blake3_compute((const uint8_t *)data + sizeof(header),
++                        header.payload_size, hash);
++   if (memcmp(hash, header.payload_hash, sizeof(hash)) != 0)
++      return KK_VARIANT_BAD_HASH;
++
++   blob_reader_init(payload, (const uint8_t *)data + sizeof(header),
++                    header.payload_size);
++   *stage_count = header.stage_count;
++   return KK_VARIANT_OK;
++}
++
++enum kk_variant_status
++kk_variant_descriptor_next_stage(struct blob_reader *payload,
++                                 uint32_t stage_limit, uint32_t *stage,
++                                 struct blob_reader *shader)
++{
++   const uint32_t number = blob_read_uint32(payload);
++   const uint32_t length = blob_read_uint32(payload);
++   if (payload->overrun || number >= stage_limit ||
++       length > payload->end - payload->current)
++      return KK_VARIANT_BAD_STAGE;
++
++   blob_reader_init(shader, blob_read_bytes(payload, length), length);
++   *stage = number;
++   return KK_VARIANT_OK;
++}
++
++enum kk_variant_status
++kk_variant_descriptor_close(const struct blob_reader *payload)
++{
++   return payload->overrun || payload->current != payload->end
++             ? KK_VARIANT_BAD_SIZE
++             : KK_VARIANT_OK;
++}
+diff --git a/src/kosmickrisp/vulkan/kk_variant_entry.h b/src/kosmickrisp/vulkan/kk_variant_entry.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..21e1396761bf65611ab7380b0c1827a13671d31a
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/kk_variant_entry.h
+@@ -0,0 +1,179 @@
++/*
++ * Copyright 2026 Google LLC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef KK_VARIANT_ENTRY_H
++#define KK_VARIANT_ENTRY_H 1
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include "kk_msl_pack.h"
++#include "util/blob.h"
++#include "util/mesa-blake3.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* The entries the driver keeps on disk for the variants of a dynamic
++ * vertex-input pipeline (kk_shader.c).  A variant is the MSL of its shaders
++ * and the Metal pipelines built from it; only the MSL and what describes it
++ * is stored, so a variant read back is built again by Metal and is never code
++ * the host loads as it is.  Two kinds of entry exist:
++ *
++ *  - a descriptor, under the variant's key: a header, then for each stage the
++ *    stage's serialized shader with every text replaced by the name of the
++ *    text;
++ *  - a text, under its name: the compressed MSL of one Metal function.  Its
++ *    name is the hash of what it holds, so equal texts, which most of a
++ *    pipeline's variants share, are stored once.
++ *
++ * Everything read back is untrusted: the file may be damaged, or written by
++ * another build, or hold counts and lengths made up to run past it.  Reading
++ * checks each field against the bytes it has before it uses the field, and an
++ * entry that fails any check is reported as such and never half used: the
++ * caller translates the variant again and stores it over the bad entry.
++ */
++
++#define KK_VARIANT_FORMAT 1u
++#define KK_VARIANT_BUILD_ID_SIZE 16
++
++/* The most a descriptor may hold; the real ones are a few KiB. */
++#define KK_VARIANT_MAX_DESCRIPTOR_SIZE (16u << 20)
++
++enum kk_variant_status {
++   KK_VARIANT_OK = 0,
++   /* Shorter than its header. */
++   KK_VARIANT_TRUNCATED,
++   KK_VARIANT_BAD_MAGIC,
++   /* Written by another version of this layout. */
++   KK_VARIANT_BAD_FORMAT,
++   /* Written by another build of the driver. */
++   KK_VARIANT_BAD_BUILD,
++   /* Not the entry its key names. */
++   KK_VARIANT_BAD_KEY,
++   /* A count or a length no entry of this size can hold. */
++   KK_VARIANT_BAD_COUNT,
++   KK_VARIANT_BAD_SIZE,
++   /* The bytes are not the bytes whose hash the header holds. */
++   KK_VARIANT_BAD_HASH,
++   /* A stage's frame is not one a descriptor holds. */
++   KK_VARIANT_BAD_STAGE,
++   /* A text the descriptor names is missing or is not that text. */
++   KK_VARIANT_BAD_TEXT,
++   KK_VARIANT_NO_MEMORY,
++};
++
++const char *kk_variant_status_name(enum kk_variant_status status);
++
++/* What the entries are kept in: Mesa's disk cache in the driver, a table in
++ * the tests.  Entries are found by a 32-byte name; `data` given to put is
++ * malloc'd and the store owns it from then on; get returns a malloc'd copy.
++ * `has` is true only for a text the store already knows is good, because this
++ * process put it or read it and found it so; it never reads a file. */
++struct kk_variant_store_ops {
++   bool (*has)(void *ctx, const blake3_hash name);
++   void (*put)(void *ctx, const blake3_hash name, void *data, size_t size);
++   void *(*get)(void *ctx, const blake3_hash name, size_t *size);
++   void (*remove)(void *ctx, const blake3_hash name);
++};
++
++/* The texts of the shaders of one variant that are being written or read. */
++struct kk_msl_pool {
++   const struct kk_variant_store_ops *ops;
++   void *ctx;
++   /* The texts read, kept until the pool is finished: a text adopted from
++    * them is copied, so the pool may go once the shaders are built. */
++   void **held;
++   uint32_t held_count;
++   uint32_t held_capacity;
++   /* A text could not be stored for lack of memory. */
++   bool failed;
++};
++
++void kk_msl_pool_init(struct kk_msl_pool *pool,
++                      const struct kk_variant_store_ops *ops, void *ctx);
++void kk_msl_pool_finish(struct kk_msl_pool *pool);
++
++/* The name of a text: the hash of its codec, both lengths and its bytes. */
++void kk_msl_text_name(uint8_t codec, uint32_t code_size, const void *bytes,
++                      uint32_t stored_size, blake3_hash name);
++
++/* Stores the text under its name unless the store has it, and returns the
++ * name.  Returns false when memory ran out. */
++bool kk_msl_pool_put(struct kk_msl_pool *pool, uint8_t codec,
++                     uint32_t code_size, const void *bytes,
++                     uint32_t stored_size, blake3_hash name);
++
++/* Finds the text of the name.  The bytes stay valid until the pool is
++ * finished.  A text that is there but is not what its name says, or whose
++ * header cannot be what any writer wrote, is removed from the store so that
++ * the next writer puts it back, and reported. */
++enum kk_variant_status
++kk_msl_pool_get(struct kk_msl_pool *pool, const blake3_hash name,
++                uint8_t *codec, uint32_t *code_size, const void **bytes,
++                uint32_t *stored_size);
++
++/* One MSL text as a shader writes it:
++ *
++ *    u32 entrypoint length, u32 text length, u32 stored length, u8 codec,
++ *    the entrypoint, then
++ *       the stored bytes (the text itself for KK_MSL_CODEC_STORED), or, with
++ *       a pool, the 32-byte name of the text, which the pool holds.
++ */
++void kk_msl_record_write(struct blob *blob, const struct msl_compile_data *data,
++                         struct kk_msl_pool *pool);
++
++enum kk_msl_record_status {
++   KK_MSL_RECORD_OK = 0,
++   /* Lengths or bytes a record cannot hold, or a text the pool cannot give. */
++   KK_MSL_RECORD_CORRUPT,
++   KK_MSL_RECORD_NO_MEMORY,
++};
++
++enum kk_msl_record_status
++kk_msl_record_read(struct blob_reader *blob, struct msl_compile_data *data,
++                   struct kk_msl_pool *pool);
++
++/* A descriptor: a header, then `stage count` frames of
++ *
++ *    u32 stage, u32 length, the stage's serialized shader.
++ *
++ * The header holds the build of the driver and the key the entry was written
++ * for, the number of frames and the length and hash of everything after it.
++ */
++void kk_variant_descriptor_begin(struct blob *blob);
++void kk_variant_descriptor_add_stage(struct blob *blob, uint32_t stage,
++                                     const struct blob *shader);
++bool kk_variant_descriptor_end(struct blob *blob,
++                               const uint8_t build_id[KK_VARIANT_BUILD_ID_SIZE],
++                               const blake3_hash key, uint32_t stage_count);
++
++/* Checks the header against the entry's size, the build and the key it is
++ * wanted for, and its hash; on success `payload` reads the frames.
++ * `stage_limit` is one past the highest stage a frame may name. */
++enum kk_variant_status
++kk_variant_descriptor_open(const void *data, size_t size,
++                           const uint8_t build_id[KK_VARIANT_BUILD_ID_SIZE],
++                           const blake3_hash key, uint32_t stage_limit,
++                           struct blob_reader *payload,
++                           uint32_t *stage_count);
++
++/* Reads the next frame into `shader`, a reader of exactly its bytes. */
++enum kk_variant_status
++kk_variant_descriptor_next_stage(struct blob_reader *payload,
++                                 uint32_t stage_limit, uint32_t *stage,
++                                 struct blob_reader *shader);
++
++/* Nothing may follow the last frame. */
++enum kk_variant_status
++kk_variant_descriptor_close(const struct blob_reader *payload);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* KK_VARIANT_ENTRY_H */
+diff --git a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
+index a56c9d68c7c245d896c999cc7e378c56584e295d..843b2e5d4c99e8ff0c5aebe04fc4b52e8bc9f104 100644
+--- a/src/kosmickrisp/vulkan/meson.build
++++ b/src/kosmickrisp/vulkan/meson.build
+@@ -127,6 +127,8 @@ kk_files = files(
+   'kk_shader_info.h',
+   'kk_shader_info.c',
+   'kk_shader.c',
++  'kk_variant_entry.h',
++  'kk_variant_entry.c',
+   'kk_sync.h',
+   'kk_sync.c',
+   'kk_wsi.h',
+@@ -502,6 +504,10 @@ if with_tests
+       ['dynamic_vertex_input_cache', ['test_dynamic_vertex_input_cache.cpp',
+                                       'dynamic_vertex_input_cache_state.c'],
+        120, [], []],
++      ['variant_disk_cache', ['test_variant_disk_cache.cpp',
++                              'dynamic_vertex_input_cache_state.c',
++                              'variant_disk_cache_state.c'],
++       600, [idep_mesautil, dep_thread], []],
+       ['line_raster_cache', ['test_line_raster_cache.cpp',
+                              'line_raster_cache_state.m'],
+        120, [kk_metal_frameworks], ['-Wno-unused-function']],
+@@ -685,6 +691,8 @@ if with_tests
+     ['image_extent', ['kk_image_extent.c']],
+     ['linear_layout', []],
+     ['msl_pack', ['kk_msl_pack.c'], [idep_mesautil, kk_compression_dep]],
++    ['variant_entry', ['kk_variant_entry.c', 'kk_msl_pack.c'],
++     [idep_mesautil, kk_compression_dep]],
+   ]
+     test(
+       'kosmickrisp_' + kk_source_test[0],
+diff --git a/src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp b/src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e30a12c34f6ccf1fa1f0dc4f88507b116c9e1b1
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp
+@@ -0,0 +1,683 @@
++/*
++ * Copyright 2026 Google LLC
++ * SPDX-License-Identifier: MIT
++ *
++ * The variants of a dynamic vertex-input pipeline are kept in Mesa's disk
++ * cache, so that the first draw of a later run, or of another process, builds
++ * them from their stored MSL instead of translating them again.  What is read
++ * back is not trusted: a damaged, foreign or made-up entry is a miss, and the
++ * variant is translated and stored over it.
++ *
++ * The test runs the driver in child processes, each of them one "boot" of the
++ * driver with the same cache directory, and reads the driver's event log
++ * (MESA_KK_VARIANT_LOG) of each.  Between two children it damages the cache's
++ * entries in the ways a file can be damaged, or made, and expects the next
++ * child to translate and store again without any crash, and the one after it
++ * to find the repaired entries.  A last row has two threads record the same
++ * first draw, which both miss.
++ */
++
++#define VK_NO_PROTOTYPES
++#include <vulkan/vulkan.h>
++#include "dynamic_vertex_input_cache_state.h"
++#include "variant_disk_cache_state.h"
++
++#include <dirent.h>
++#include <sys/stat.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++#include <array>
++#include <atomic>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <fstream>
++#include <functional>
++#include <map>
++#include <sstream>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include "kk_test.h"
++
++extern "C" {
++#include "util/disk_cache.h"
++#include "util/mesa-blake3.h"
++}
++
++static const uint32_t vertex_spirv[] =
++#include "variant_disk_cache_shaders/cache.vert.h"
++;
++static const uint32_t fragment_spirv[] =
++#include "variant_disk_cache_shaders/cache.frag.h"
++;
++
++/* ---------------------------------------------------------------- child -- */
++
++struct child_state {
++   kk_test_device t;
++   VkDevice device;
++   VkPipeline pipeline;
++   VkCommandPool pool;
++};
++
++/* Records one draw with `pipeline` under the vertex-input state `variant`
++ * (0 or 1) on its own command pool, and returns the vertex shader the draw
++ * resolved.  Nothing is submitted: the variant is resolved when the draw is
++ * recorded. */
++static const struct kk_shader *
++record_variant(const kk_test_device &t, VkDevice device, VkPipeline pipeline,
++               unsigned variant)
++{
++   PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr = t.get_device_proc_addr;
++   LOAD_D(vkCreateCommandPool);
++   LOAD_D(vkDestroyCommandPool);
++   LOAD_D(vkAllocateCommandBuffers);
++   LOAD_D(vkBeginCommandBuffer);
++   LOAD_D(vkEndCommandBuffer);
++   LOAD_D(vkCmdBeginRendering);
++   LOAD_D(vkCmdEndRendering);
++   LOAD_D(vkCmdBindPipeline);
++   LOAD_D(vkCmdDraw);
++   LOAD_D(vkCmdSetViewport);
++   LOAD_D(vkCmdSetScissor);
++   LOAD_D(vkCmdSetVertexInputEXT);
++
++   VkCommandPoolCreateInfo pool_info{
++      VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
++   pool_info.queueFamilyIndex = t.queue_family;
++   VkCommandPool pool = VK_NULL_HANDLE;
++   require(vkCreateCommandPool(device, &pool_info, nullptr, &pool) ==
++              VK_SUCCESS,
++           "command pool");
++
++   VkCommandBufferAllocateInfo allocate{
++      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
++   allocate.commandPool = pool;
++   allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
++   allocate.commandBufferCount = 1;
++   VkCommandBuffer command = VK_NULL_HANDLE;
++   require(vkAllocateCommandBuffers(device, &allocate, &command) == VK_SUCCESS,
++           "command allocation");
++   VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
++   begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++   require(vkBeginCommandBuffer(command, &begin) == VK_SUCCESS, "begin");
++
++   const VkViewport viewport{0, 0, 8, 8, 0, 1};
++   const VkRect2D scissor{{0, 0}, {8, 8}};
++   VkVertexInputBindingDescription2EXT binding{
++      VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT};
++   binding.binding = 0;
++   binding.stride = variant == 0 ? 4 : 16;
++   binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
++   binding.divisor = 1;
++   VkVertexInputAttributeDescription2EXT attribute{
++      VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT};
++   attribute.location = 0;
++   attribute.binding = 0;
++   attribute.format = variant == 0 ? VK_FORMAT_R8G8B8A8_UNORM
++                                   : VK_FORMAT_R32G32B32A32_SFLOAT;
++   attribute.offset = 0;
++
++   VkRenderingInfo render{VK_STRUCTURE_TYPE_RENDERING_INFO};
++   render.renderArea.extent = {8, 8};
++   render.layerCount = 1;
++   vkCmdBeginRendering(command, &render);
++   vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
++   vkCmdSetViewport(command, 0, 1, &viewport);
++   vkCmdSetScissor(command, 0, 1, &scissor);
++   vkCmdSetVertexInputEXT(command, 1, &binding, 1, &attribute);
++   vkCmdDraw(command, 3, 1, 0, 0);
++   const struct kk_shader *resolved = kk_test_dynamic_vertex_input_shader(command);
++   require(resolved != nullptr, "resolved dynamic vertex-input shader");
++   vkCmdEndRendering(command);
++   require(vkEndCommandBuffer(command) == VK_SUCCESS, "end");
++   vkDestroyCommandPool(device, pool, nullptr);
++   return resolved;
++}
++
++static int
++child(const char *phase)
++{
++   /* The test environment turns the shader cache off for the other tests. */
++   unsetenv("MESA_SHADER_CACHE_DISABLE");
++
++   kk_test_device t;
++   VkResult result;
++   kk_test_create_instance(&t, "variant-disk-cache");
++   VkInstance instance = t.instance;
++   LOAD_I(vkGetPhysicalDeviceFeatures2);
++
++   VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vertex_input_features{
++      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT};
++   vertex_input_features.vertexInputDynamicState = VK_TRUE;
++   VkPhysicalDeviceVulkan13Features features13{
++      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
++   features13.pNext = &vertex_input_features;
++   features13.dynamicRendering = VK_TRUE;
++   const char *extensions[] = {
++      VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME};
++   kk_test_create_device(&t, &features13, nullptr, 1, extensions);
++   KK_LOAD_DEVICE_FUNCTIONS(t);
++
++   std::array<VkShaderModule, 2> modules{};
++   const std::array<const uint32_t *, 2> sources{vertex_spirv, fragment_spirv};
++   const std::array<size_t, 2> sizes{sizeof(vertex_spirv),
++                                     sizeof(fragment_spirv)};
++   for (unsigned i = 0; i < modules.size(); ++i)
++      modules[i] = kk_test_shader_module(&t, sources[i], sizes[i]);
++
++   VkPipelineLayoutCreateInfo layout_info{
++      VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
++   VkPipelineLayout layout = VK_NULL_HANDLE;
++   result = vkCreatePipelineLayout(device, &layout_info, nullptr, &layout);
++   require(result == VK_SUCCESS, "create layout", result);
++
++   const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
++      {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
++       VK_SHADER_STAGE_VERTEX_BIT, modules[0], "main", nullptr},
++      {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
++       VK_SHADER_STAGE_FRAGMENT_BIT, modules[1], "main", nullptr},
++   }};
++   VkPipelineVertexInputStateCreateInfo vi{
++      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
++   VkPipelineInputAssemblyStateCreateInfo ia{
++      VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
++   ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++   VkPipelineViewportStateCreateInfo vp{
++      VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
++   vp.viewportCount = vp.scissorCount = 1;
++   VkPipelineRasterizationStateCreateInfo rs{
++      VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
++   rs.lineWidth = 1.0f;
++   VkPipelineMultisampleStateCreateInfo ms{
++      VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
++   ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
++   VkPipelineColorBlendAttachmentState attachment{};
++   attachment.colorWriteMask = 15;
++   VkPipelineColorBlendStateCreateInfo cb{
++      VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
++   cb.attachmentCount = 1;
++   cb.pAttachments = &attachment;
++   const VkDynamicState dynamic_states[] = {
++      VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
++      VK_DYNAMIC_STATE_VERTEX_INPUT_EXT};
++   VkPipelineDynamicStateCreateInfo dynamic{
++      VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
++   dynamic.dynamicStateCount = 3;
++   dynamic.pDynamicStates = dynamic_states;
++   const VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
++   VkPipelineRenderingCreateInfo rendering{
++      VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
++   rendering.colorAttachmentCount = 1;
++   rendering.pColorAttachmentFormats = &format;
++   VkGraphicsPipelineCreateInfo pipeline_info{
++      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
++   pipeline_info.pNext = &rendering;
++   pipeline_info.stageCount = stages.size();
++   pipeline_info.pStages = stages.data();
++   pipeline_info.pVertexInputState = &vi;
++   pipeline_info.pInputAssemblyState = &ia;
++   pipeline_info.pViewportState = &vp;
++   pipeline_info.pRasterizationState = &rs;
++   pipeline_info.pMultisampleState = &ms;
++   pipeline_info.pColorBlendState = &cb;
++   pipeline_info.pDynamicState = &dynamic;
++   pipeline_info.layout = layout;
++   VkPipeline pipeline = VK_NULL_HANDLE;
++   result = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info,
++                                      nullptr, &pipeline);
++   require(result == VK_SUCCESS, "pipeline", result);
++
++   if (strcmp(phase, "draw") == 0) {
++      /* Two vertex-input states, so two variants of the one parent. */
++      const struct kk_shader *a = record_variant(t, device, pipeline, 0);
++      const struct kk_shader *b = record_variant(t, device, pipeline, 1);
++      require(a != nullptr && b != nullptr && a != b, "two variants");
++      /* And the first again: the parent's own table answers. */
++      require(record_variant(t, device, pipeline, 0) == a,
++              "a variant resolved twice is one variant");
++   } else if (strcmp(phase, "race") == 0) {
++      /* Two recorders miss the same key at the same time. */
++      std::atomic<bool> go{false};
++      const struct kk_shader *seen[2] = {nullptr, nullptr};
++      std::vector<std::thread> threads;
++      for (unsigned i = 0; i < 2; i++) {
++         threads.emplace_back([&, i] {
++            while (!go.load())
++               std::this_thread::yield();
++            seen[i] = record_variant(t, device, pipeline, 0);
++         });
++      }
++      go = true;
++      for (auto &thread : threads)
++         thread.join();
++      require(seen[0] != nullptr && seen[0] == seen[1],
++              "two recorders resolve one variant");
++   } else {
++      fprintf(stderr, "unknown phase %s\n", phase);
++      return 2;
++   }
++
++   vkDestroyPipeline(device, pipeline, nullptr);
++   vkDestroyPipelineLayout(device, layout, nullptr);
++   for (auto module : modules)
++      vkDestroyShaderModule(device, module, nullptr);
++   kk_test_destroy(&t);
++   return 0;
++}
++
++/* --------------------------------------------------------------- parent -- */
++
++static unsigned failures;
++#define ROW(condition, name)                                                   \
++   do {                                                                        \
++      if (!(condition)) {                                                      \
++         failures++;                                                           \
++         fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, name);        \
++      }                                                                        \
++   } while (0)
++
++struct event {
++   std::string name, key, reason;
++};
++
++static std::vector<event>
++read_events(const std::string &path)
++{
++   std::vector<event> events;
++   std::ifstream in(path);
++   std::string line;
++   while (std::getline(in, line)) {
++      if (line.compare(0, 6, "kkvar ") != 0)
++         continue;
++      std::istringstream words(line.substr(6));
++      event e;
++      std::string word;
++      words >> e.name;
++      while (words >> word) {
++         if (word.compare(0, 4, "key=") == 0)
++            e.key = word.substr(4);
++         else if (word.compare(0, 7, "reason=") == 0)
++            e.reason = word.substr(7);
++      }
++      events.push_back(e);
++   }
++   return events;
++}
++
++static unsigned
++count(const std::vector<event> &events, const char *name,
++      const char *reason = nullptr)
++{
++   unsigned n = 0;
++   for (const auto &e : events)
++      n += e.name == name && (reason == nullptr || e.reason == reason);
++   return n;
++}
++
++static std::string self, root, log_path;
++
++/* Runs one boot of the driver; returns its events, or sets `ok` false when it
++ * did not end well. */
++static std::vector<event>
++boot(const char *phase, bool &ok)
++{
++   unlink(log_path.c_str());
++   const std::string command =
++      "MESA_SHADER_CACHE_DIR='" + root + "' MESA_KK_VARIANT_LOG=1 '" + self +
++      "' " + phase + " >/dev/null 2>'" + log_path + "'";
++   const int status = system(command.c_str());
++   ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
++   return read_events(log_path);
++}
++
++static void
++fresh_cache()
++{
++   /* The entries only: the cache's index, which every process maps, stays. */
++   const std::string command =
++      "rm -rf '" + root + "'/mesa_shader_cache/[0-9a-f][0-9a-f]";
++   (void)system(command.c_str());
++}
++
++/* The entries the driver left: Mesa keeps one file for each, at
++ * <root>/mesa_shader_cache/<two hex digits>/<the key's other hex digits>. */
++struct entry_file {
++   std::string path;
++   cache_key key;
++   std::vector<uint8_t> data;
++   bool descriptor;
++};
++
++static std::vector<entry_file>
++list_entries(struct disk_cache *cache)
++{
++   std::vector<entry_file> entries;
++   const std::string top = root + "/mesa_shader_cache";
++   DIR *dir = opendir(top.c_str());
++   if (dir == nullptr)
++      return entries;
++   while (struct dirent *d = readdir(dir)) {
++      if (strlen(d->d_name) != 2)
++         continue;
++      DIR *sub = opendir((top + "/" + d->d_name).c_str());
++      if (sub == nullptr)
++         continue;
++      while (struct dirent *f = readdir(sub)) {
++         if (strlen(f->d_name) != 2 * sizeof(cache_key) - 2)
++            continue;
++         const std::string hex = std::string(d->d_name) + f->d_name;
++         entry_file entry;
++         entry.path = top + "/" + d->d_name + "/" + f->d_name;
++         for (unsigned i = 0; i < sizeof(cache_key); i++)
++            entry.key[i] = (uint8_t)strtoul(hex.substr(i * 2, 2).c_str(),
++                                            nullptr, 16);
++         size_t size = 0;
++         void *data = disk_cache_get(cache, entry.key, &size);
++         if (data == nullptr)
++            continue;
++         entry.data.assign((uint8_t *)data, (uint8_t *)data + size);
++         free(data);
++         uint32_t magic = 0;
++         if (size >= 4)
++            memcpy(&magic, entry.data.data(), 4);
++         if (magic == ('K' | 'K' << 8 | 'V' << 16 | 'D' << 24))
++            entry.descriptor = true;
++         else if (magic == ('K' | 'K' << 8 | 'V' << 16 | 'T' << 24))
++            entry.descriptor = false;
++         else
++            continue;
++         entries.push_back(entry);
++      }
++      closedir(sub);
++   }
++   closedir(dir);
++   return entries;
++}
++
++static void
++put32(std::vector<uint8_t> &bytes, size_t offset, uint32_t value)
++{
++   if (offset + 4 <= bytes.size())
++      memcpy(bytes.data() + offset, &value, 4);
++}
++
++/* Offsets in the entries' headers (kk_variant_entry.h). */
++enum {
++   D_FORMAT = 4, D_BUILD = 8, D_COUNT = 56, D_SIZE = 60, D_HASH = 64,
++   D_HEADER = 96,
++   T_FORMAT = 4, T_CODE = 12, T_STORED = 16, T_NAME = 24, T_HEADER = 56,
++};
++
++static void
++rehash(std::vector<uint8_t> &bytes)
++{
++   if (bytes.size() > D_HEADER)
++      _mesa_blake3_compute(bytes.data() + D_HEADER, bytes.size() - D_HEADER,
++                           bytes.data() + D_HASH);
++}
++
++struct damage {
++   const char *name;
++   bool descriptors; /* all descriptors, or the first text only */
++   /* the reason the driver gives for refusing the descriptor; null: the
++    * damaged entry is one Mesa itself refuses or that is simply gone */
++   const char *reason;
++   std::function<void(std::vector<uint8_t> &)> edit;
++   bool remove = false;
++   bool file_level = false;
++};
++
++/* `all_texts`: a text row damages every text entry rather than the first. */
++static void
++damage_row(const damage &row, struct disk_cache *cache, bool all_texts)
++{
++   const std::string label =
++      std::string(row.name) + (!row.descriptors && all_texts ? " (all)" : "");
++   fresh_cache();
++   bool ok;
++   auto cold = boot("draw", ok);
++   ROW(ok && count(cold, "compile") == 2 && count(cold, "store") == 2 &&
++          count(cold, "load") == 0,
++       "a cold boot translates and stores both variants");
++
++   disk_cache_wait_for_idle(cache);
++   auto entries = list_entries(cache);
++   unsigned touched = 0;
++   bool first_text = true;
++   for (auto &entry : entries) {
++      if (row.descriptors != entry.descriptor)
++         continue;
++      if (!row.descriptors && !all_texts) {
++         if (!first_text)
++            continue;
++         first_text = false;
++      }
++      touched++;
++      if (row.file_level) {
++         /* The file itself, below Mesa's own checks. */
++         if (row.remove) {
++            unlink(entry.path.c_str());
++         } else {
++            std::ofstream out(entry.path, std::ios::binary | std::ios::trunc);
++            out.write("short", 5);
++         }
++         continue;
++      }
++      if (row.remove) {
++         disk_cache_remove(cache, entry.key);
++         continue;
++      }
++      std::vector<uint8_t> edited = entry.data;
++      row.edit(edited);
++      disk_cache_remove(cache, entry.key);
++      disk_cache_put(cache, entry.key, edited.data(), edited.size(), nullptr);
++   }
++   disk_cache_wait_for_idle(cache);
++   ROW(touched > 0, label.c_str());
++
++   auto next = boot("draw", ok);
++   ROW(ok, label.c_str());
++   ROW(count(next, "compile") >= 1, label.c_str());
++   ROW(count(next, "store") == count(next, "compile"), label.c_str());
++   if (row.reason != nullptr) {
++      /* Each damaged descriptor is refused once.  A damaged text is refused by
++       * each variant that names it and finds it still damaged: both, or the
++       * one that loaded first, when the other found it already repaired. */
++      const unsigned refused = count(next, "invalid", row.reason);
++      const bool both = row.descriptors || all_texts;
++      if (both)
++         ROW(refused == 2 && count(next, "invalid") == 2 &&
++                count(next, "compile") == 2,
++             label.c_str());
++      else
++         ROW(refused >= 1 && refused <= 2 && count(next, "invalid") == refused,
++             label.c_str());
++   } else {
++      ROW(count(next, "invalid") + count(next, "miss") >= 1, label.c_str());
++   }
++
++   /* Repaired: the boot after finds every variant. */
++   auto healed = boot("draw", ok);
++   ROW(ok && count(healed, "compile") == 0 && count(healed, "invalid") == 0 &&
++          count(healed, "load") == 2,
++       label.c_str());
++   std::string reasons;
++   for (const auto &e : next)
++      if (e.name == "invalid")
++         reasons += (reasons.empty() ? "" : ",") + e.reason;
++   printf("  %-58s compile %u store %u invalid [%s] miss %u -> healed\n",
++          label.c_str(),
++          count(next, "compile"), count(next, "store"),
++          reasons.c_str(), count(next, "miss"));
++}
++
++int
++main(int argc, char **argv)
++{
++   if (argc >= 2)
++      return child(argv[1]);
++
++   self = argv[0];
++   char templ[] = "/tmp/kk-variant-cache-XXXXXX";
++   if (mkdtemp(templ) == nullptr)
++      return 2;
++   root = templ;
++   log_path = root + ".log";
++   setenv("MESA_SHADER_CACHE_DIR", root.c_str(), 1);
++   unsetenv("MESA_SHADER_CACHE_DISABLE");
++   /* The test reads and writes the entries through the driver's own cache
++    * object, the only one that has the cache's identity.  Its instance has no
++    * device and draws nothing. */
++   kk_test_device t;
++   kk_test_create_instance(&t, "variant-disk-cache-entries");
++   struct disk_cache *cache = kk_test_variant_disk_cache(t.physical);
++   require(cache != nullptr, "the driver's variant cache");
++
++   bool ok;
++   fresh_cache();
++   auto cold = boot("draw", ok);
++   ROW(ok, "cold boot");
++   ROW(count(cold, "miss") == 2 && count(cold, "compile") == 2 &&
++          count(cold, "store") == 2 && count(cold, "load") == 0,
++       "cold boot: both variants missed, translated and stored");
++   auto warm = boot("draw", ok);
++   ROW(ok, "warm boot");
++   ROW(count(warm, "load") == 2 && count(warm, "compile") == 0 &&
++          count(warm, "store") == 0 && count(warm, "invalid") == 0,
++       "warm boot: both variants loaded, none translated");
++
++   /* Texts are shared between variants: fewer text entries than variants'
++    * stages' texts would be if each variant held its own. */
++   disk_cache_wait_for_idle(cache);
++   {
++      auto entries = list_entries(cache);
++      unsigned descriptors = 0, texts = 0;
++      for (auto &e : entries)
++         (e.descriptor ? descriptors : texts)++;
++      ROW(descriptors == 2, "one descriptor per variant");
++      ROW(texts >= 1, "texts stored");
++      printf("  cold cache: %u descriptors, %u texts\n", descriptors, texts);
++   }
++
++   const damage rows[] = {
++      {"descriptor: another format", true, "format",
++       [](std::vector<uint8_t> &b) { put32(b, D_FORMAT, 99); }},
++      {"descriptor: foreign build id", true, "build",
++       [](std::vector<uint8_t> &b) { b[D_BUILD] ^= 1; }},
++      {"descriptor: payload hash mismatch", true, "hash",
++       [](std::vector<uint8_t> &b) { b[D_HASH] ^= 1; }},
++      {"descriptor: a payload byte flipped", true, "hash",
++       [](std::vector<uint8_t> &b) { b[D_HEADER + 20] ^= 1; }},
++      {"descriptor: stage count oversized", true, "count",
++       [](std::vector<uint8_t> &b) { put32(b, D_COUNT, 0xffffffffu); }},
++      {"descriptor: payload size oversized", true, "size",
++       [](std::vector<uint8_t> &b) { put32(b, D_SIZE, 0xffffffffu); }},
++      {"descriptor: truncated to half", true, "size",
++       [](std::vector<uint8_t> &b) { b.resize(b.size() / 2); }},
++      {"descriptor: a frame's length oversized (hash valid)", true, "stage",
++       [](std::vector<uint8_t> &b) {
++          put32(b, D_HEADER + 4, 0xffffffffu);
++          rehash(b);
++       }},
++      {"descriptor: a frame names no stage (hash valid)", true, "stage",
++       [](std::vector<uint8_t> &b) {
++          put32(b, D_HEADER, 99);
++          rehash(b);
++       }},
++      {"text: gone", false, "text", nullptr, true},
++      {"text: another format", false, "text",
++       [](std::vector<uint8_t> &b) { put32(b, T_FORMAT, 99); }},
++      {"text: length oversized", false, "text",
++       [](std::vector<uint8_t> &b) { put32(b, T_CODE, 0xffffffffu); }},
++      {"text: stored length oversized", false, "text",
++       [](std::vector<uint8_t> &b) { put32(b, T_STORED, 0xffffffffu); }},
++      {"text: name echoed wrong", false, "text",
++       [](std::vector<uint8_t> &b) { b[T_NAME] ^= 1; }},
++      {"text: a byte flipped (hash mismatch)", false, "text",
++       [](std::vector<uint8_t> &b) { b[T_HEADER + 3] ^= 1; }},
++      {"text: truncated below its header", false, "text",
++       [](std::vector<uint8_t> &b) { b.resize(20); }},
++      {"descriptor: file truncated (Mesa refuses it)", true, nullptr, nullptr,
++       false, true},
++      {"text: file truncated (Mesa refuses it)", false, "text", nullptr,
++       false, true},
++      {"descriptor: file deleted", true, nullptr, nullptr, true, true},
++   };
++   printf("variant disk cache rows:\n");
++   for (const auto &row : rows) {
++      damage_row(row, cache, false);
++      if (!row.descriptors && !row.file_level)
++         damage_row(row, cache, true);
++   }
++
++   /* A text that holds another text: the other text's whole entry, put under
++    * the first text's key.  Its own checks all pass; only its name does not. */
++   {
++      fresh_cache();
++      auto cold2 = boot("draw", ok);
++      ROW(ok, "cold boot");
++      disk_cache_wait_for_idle(cache);
++      auto entries = list_entries(cache);
++      const entry_file *first = nullptr, *second = nullptr;
++      for (auto &e : entries) {
++         if (e.descriptor)
++            continue;
++         if (first == nullptr)
++            first = &e;
++         else if (e.data != first->data)
++            second = &e;
++      }
++      ROW(first != nullptr && second != nullptr, "two different texts");
++      if (first != nullptr && second != nullptr) {
++         disk_cache_remove(cache, first->key);
++         disk_cache_put(cache, first->key, second->data.data(),
++                        second->data.size(), nullptr);
++         disk_cache_wait_for_idle(cache);
++         auto next = boot("draw", ok);
++         ROW(ok && count(next, "compile") >= 1 && count(next, "store") >= 1 &&
++                count(next, "invalid", "text") >= 1,
++             "a descriptor naming a text that holds another text");
++         auto healed = boot("draw", ok);
++         ROW(ok && count(healed, "compile") == 0 && count(healed, "load") == 2,
++             "a descriptor naming a text that holds another text, healed");
++         printf("  %-52s compile %u store %u invalid %u -> healed\n",
++                "text: holds another text", count(next, "compile"),
++                count(next, "store"), count(next, "invalid"));
++      }
++   }
++
++   /* Two recorders missing the same key. */
++   {
++      fresh_cache();
++      auto raced = boot("race", ok);
++      ROW(ok, "two recorders of the same first draw");
++      ROW(count(raced, "miss") >= 1 && count(raced, "miss") <= 2,
++          "both recorders look the variant up");
++      ROW(count(raced, "compile") >= 1 && count(raced, "compile") <= 2,
++          "at most one translation each");
++      ROW(count(raced, "store") == count(raced, "compile"),
++          "each translation is stored");
++      printf("  two recorders, one key: miss %u compile %u store %u\n",
++             count(raced, "miss"), count(raced, "compile"),
++             count(raced, "store"));
++      auto after = boot("draw", ok);
++      ROW(ok && count(after, "invalid") == 0 && count(after, "load") >= 1,
++          "what two recorders stored loads");
++   }
++
++   kk_test_destroy(&t);
++   fresh_cache();
++   rmdir(root.c_str());
++   unlink(log_path.c_str());
++   if (failures != 0) {
++      fprintf(stderr, "variant disk cache FAILED (%u rows)\n", failures);
++      return 1;
++   }
++   puts("variant disk cache passed");
++   return 0;
++}
+diff --git a/src/kosmickrisp/vulkan/tests/test_variant_entry.c b/src/kosmickrisp/vulkan/tests/test_variant_entry.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..392eea2f3ce11cd29dc0e8a5c2ba61f9d016bc76
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/test_variant_entry.c
+@@ -0,0 +1,862 @@
++/*
++ * Copyright 2026 Google LLC
++ * SPDX-License-Identifier: MIT
++ *
++ * The entries the driver keeps on disk for its dynamic vertex-input variants
++ * are read back from files the driver did not necessarily write: damaged by a
++ * crash, left by another build, or made up.  Every field of a descriptor, of a
++ * text entry and of a text record is checked against the bytes at hand before
++ * it is used.  Each row below damages one thing and expects the entry to be
++ * refused, with no read past the bytes it was given (the test is also run
++ * under the address and undefined-behaviour sanitizers) and, for a text, the
++ * bad entry removed so that the next writer puts a good one back.
++ */
++
++#include <signal.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++#include "kosmickrisp/vulkan/kk_variant_entry.h"
++#include "util/ralloc.h"
++
++static unsigned failures;
++
++#define ARRAY_SIZE_LOCAL(array) (sizeof(array) / sizeof((array)[0]))
++
++#define ROW(condition, name)                                                   \
++   do {                                                                        \
++      if (!(condition)) {                                                      \
++         failures++;                                                           \
++         fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, name);        \
++      }                                                                        \
++   } while (0)
++
++/* An in-memory store, with a count of what was written. */
++#define MAX_ENTRIES 32
++struct entry {
++   blake3_hash name;
++   void *data;
++   size_t size;
++   bool used;
++   /* What the driver's store keeps in its known set: put and read it. */
++   bool known;
++};
++struct table {
++   struct entry entries[MAX_ENTRIES];
++   unsigned puts;
++   unsigned removes;
++};
++
++static struct entry *
++find(struct table *table, const blake3_hash name)
++{
++   for (unsigned i = 0; i < MAX_ENTRIES; i++) {
++      if (table->entries[i].used &&
++          memcmp(table->entries[i].name, name, sizeof(blake3_hash)) == 0)
++         return &table->entries[i];
++   }
++   return NULL;
++}
++
++static bool
++table_has(void *ctx, const blake3_hash name)
++{
++   struct entry *entry = find(ctx, name);
++   return entry != NULL && entry->known;
++}
++
++static void
++table_put(void *ctx, const blake3_hash name, void *data, size_t size)
++{
++   struct table *table = ctx;
++   struct entry *entry = find(table, name);
++   if (entry != NULL) {
++      free(entry->data);
++   } else {
++      for (unsigned i = 0; i < MAX_ENTRIES && entry == NULL; i++) {
++         if (!table->entries[i].used)
++            entry = &table->entries[i];
++      }
++      if (entry == NULL)
++         abort();
++      memcpy(entry->name, name, sizeof(blake3_hash));
++      entry->used = true;
++   }
++   entry->data = data;
++   entry->size = size;
++   entry->known = true;
++   table->puts++;
++}
++
++static void *
++table_get(void *ctx, const blake3_hash name, size_t *size)
++{
++   struct entry *entry = find(ctx, name);
++   if (entry == NULL)
++      return NULL;
++   void *copy = malloc(entry->size ? entry->size : 1);
++   memcpy(copy, entry->data, entry->size);
++   *size = entry->size;
++   entry->known = true;
++   return copy;
++}
++
++static void
++table_remove(void *ctx, const blake3_hash name)
++{
++   struct table *table = ctx;
++   struct entry *entry = find(table, name);
++   if (entry == NULL)
++      return;
++   free(entry->data);
++   memset(entry, 0, sizeof(*entry));
++   table->removes++;
++}
++
++static const struct kk_variant_store_ops ops = {
++   .has = table_has,
++   .put = table_put,
++   .get = table_get,
++   .remove = table_remove,
++};
++
++static void
++table_clear(struct table *table)
++{
++   for (unsigned i = 0; i < MAX_ENTRIES; i++)
++      free(table->entries[i].data);
++   memset(table, 0, sizeof(*table));
++}
++
++/* Text that looks like generated MSL, of about `size` bytes. */
++static char *
++msl_like(unsigned size, unsigned seed)
++{
++   char *text = ralloc_strdup(NULL, "#include <metal_stdlib>\n");
++   for (unsigned i = 0; strlen(text) < size; i++) {
++      ralloc_asprintf_append(&text,
++                             "    t%u = t%u * float(%u.5e-01) + in.vary_%02u;\n",
++                             i, i / 2, (i * 7 + seed) % 97, i % 16);
++   }
++   return text;
++}
++
++static void
++make_data(struct msl_compile_data *data, unsigned size, unsigned seed,
++          const char *entrypoint)
++{
++   memset(data, 0, sizeof(*data));
++   data->code = msl_like(size, seed);
++   data->entrypoint_name = ralloc_strdup(NULL, entrypoint);
++   kk_msl_pack(data);
++}
++
++static const uint8_t build_id[KK_VARIANT_BUILD_ID_SIZE] = {
++   1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
++static const blake3_hash key = {
++   9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6,
++   7, 8, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4};
++
++#define STAGE_LIMIT 14u
++#define HEADER_SIZE 96u
++/* Offsets of the header's fields. */
++#define OFF_MAGIC 0
++#define OFF_FORMAT 4
++#define OFF_BUILD 8
++#define OFF_KEY 24
++#define OFF_COUNT 56
++#define OFF_SIZE 60
++#define OFF_HASH 64
++
++static void
++put32(uint8_t *bytes, unsigned offset, uint32_t value)
++{
++   memcpy(bytes + offset, &value, sizeof(value));
++}
++
++/* Builds the descriptor of a variant of `stages` shaders, each holding one
++ * text, through `pool`.  Returns it malloc'd. */
++static uint8_t *
++make_descriptor(struct kk_msl_pool *pool, unsigned stages, size_t *size)
++{
++   struct blob blob;
++   blob_init(&blob);
++   kk_variant_descriptor_begin(&blob);
++   for (unsigned i = 0; i < stages; i++) {
++      struct msl_compile_data data;
++      make_data(&data, 3000 + 500 * i, i, "main_entrypoint");
++      struct blob shader;
++      blob_init(&shader);
++      blob_write_uint32(&shader, 0x5a5a0000 + i);
++      kk_msl_record_write(&shader, &data, pool);
++      kk_variant_descriptor_add_stage(&blob, i == 0 ? 0 : 3 + i, &shader);
++      blob_finish(&shader);
++      kk_msl_finish(&data);
++   }
++   ROW(kk_variant_descriptor_end(&blob, build_id, key, stages), "descriptor end");
++   uint8_t *bytes = malloc(blob.size);
++   memcpy(bytes, blob.data, blob.size);
++   *size = blob.size;
++   blob_finish(&blob);
++   return bytes;
++}
++
++/* Reads a whole descriptor and its texts back; returns the first failure. */
++static enum kk_variant_status
++read_all(struct kk_msl_pool *pool, const uint8_t *bytes, size_t size,
++         unsigned expected_stages)
++{
++   struct blob_reader payload;
++   uint32_t count = 0;
++   enum kk_variant_status status = kk_variant_descriptor_open(
++      bytes, size, build_id, key, STAGE_LIMIT, &payload, &count);
++   if (status != KK_VARIANT_OK)
++      return status;
++   if (count != expected_stages)
++      return KK_VARIANT_BAD_COUNT;
++   for (uint32_t i = 0; i < count; i++) {
++      uint32_t stage;
++      struct blob_reader shader;
++      status = kk_variant_descriptor_next_stage(&payload, STAGE_LIMIT, &stage,
++                                                &shader);
++      if (status != KK_VARIANT_OK)
++         return status;
++      blob_read_uint32(&shader);
++      struct msl_compile_data data;
++      memset(&data, 0, sizeof(data));
++      enum kk_msl_record_status record = kk_msl_record_read(&shader, &data, pool);
++      if (record != KK_MSL_RECORD_OK) {
++         kk_msl_finish(&data);
++         return KK_VARIANT_BAD_TEXT;
++      }
++      char *scratch = NULL;
++      const char *text = kk_msl_text(&data, &scratch);
++      bool good = text != NULL && strstr(text, "metal_stdlib") != NULL &&
++                  strcmp(data.entrypoint_name, "main_entrypoint") == 0;
++      kk_msl_text_release(scratch);
++      kk_msl_finish(&data);
++      if (!good)
++         return KK_VARIANT_BAD_TEXT;
++   }
++   return kk_variant_descriptor_close(&payload);
++}
++
++/* Opens `bytes` damaged by `damage` and returns the status of reading it. */
++static enum kk_variant_status
++open_status(const uint8_t *bytes, size_t size, unsigned offset, uint32_t value,
++            bool whole_word)
++{
++   uint8_t *copy = malloc(size);
++   memcpy(copy, bytes, size);
++   if (whole_word)
++      put32(copy, offset, value);
++   else
++      copy[offset] ^= (uint8_t)value;
++   struct blob_reader payload;
++   uint32_t count;
++   enum kk_variant_status status = kk_variant_descriptor_open(
++      copy, size, build_id, key, STAGE_LIMIT, &payload, &count);
++   free(copy);
++   return status;
++}
++
++static void
++descriptor_rows(void)
++{
++   struct table table = {0};
++   struct kk_msl_pool pool;
++   kk_msl_pool_init(&pool, &ops, &table);
++   size_t size;
++   uint8_t *bytes = make_descriptor(&pool, 3, &size);
++   ROW(!pool.failed, "descriptor written");
++   ROW(table.puts == 3, "three distinct texts stored once each");
++
++   ROW(read_all(&pool, bytes, size, 3) == KK_VARIANT_OK,
++       "a descriptor reads back whole");
++
++   /* Truncated at every length. */
++   unsigned truncated_accepted = 0;
++   for (size_t length = 0; length < size; length++) {
++      if (read_all(&pool, bytes, length, 3) == KK_VARIANT_OK)
++         truncated_accepted++;
++   }
++   ROW(truncated_accepted == 0, "truncated at any length");
++   ROW(kk_variant_descriptor_open(bytes, 0, build_id, key, STAGE_LIMIT,
++                                  &(struct blob_reader){0},
++                                  &(uint32_t){0}) == KK_VARIANT_TRUNCATED,
++       "empty entry is truncated");
++   {
++      /* A descriptor of the size cap, and beyond it. */
++      struct blob_reader payload;
++      uint32_t count;
++      ROW(kk_variant_descriptor_open(bytes, KK_VARIANT_MAX_DESCRIPTOR_SIZE + 1,
++                                     build_id, key, STAGE_LIMIT, &payload,
++                                     &count) == KK_VARIANT_BAD_SIZE ||
++             kk_variant_descriptor_open(bytes, KK_VARIANT_MAX_DESCRIPTOR_SIZE + 1,
++                                        build_id, key, STAGE_LIMIT, &payload,
++                                        &count) == KK_VARIANT_BAD_COUNT,
++          "an entry beyond the cap is refused before it is read");
++   }
++
++   /* Every header field. */
++   ROW(open_status(bytes, size, OFF_MAGIC, 0x01, false) == KK_VARIANT_BAD_MAGIC,
++       "magic");
++   ROW(open_status(bytes, size, OFF_MAGIC, 0xffffffffu, true) == KK_VARIANT_BAD_MAGIC,
++       "magic, every bit");
++   ROW(open_status(bytes, size, OFF_FORMAT, KK_VARIANT_FORMAT + 1, true) ==
++          KK_VARIANT_BAD_FORMAT,
++       "wrong format");
++   ROW(open_status(bytes, size, OFF_FORMAT, 0xffffffffu, true) ==
++          KK_VARIANT_BAD_FORMAT,
++       "format, oversized");
++   ROW(open_status(bytes, size, OFF_FORMAT, 0, true) == KK_VARIANT_BAD_FORMAT,
++       "format, zero");
++   ROW(open_status(bytes, size, OFF_BUILD, 0x01, false) == KK_VARIANT_BAD_BUILD,
++       "foreign build id, first byte");
++   ROW(open_status(bytes, size, OFF_BUILD + KK_VARIANT_BUILD_ID_SIZE - 1, 0x80,
++                   false) == KK_VARIANT_BAD_BUILD,
++       "foreign build id, last byte");
++   ROW(open_status(bytes, size, OFF_KEY, 0x01, false) == KK_VARIANT_BAD_KEY,
++       "another variant's key");
++   ROW(open_status(bytes, size, OFF_KEY + 31, 0x01, false) == KK_VARIANT_BAD_KEY,
++       "another variant's key, last byte");
++   ROW(open_status(bytes, size, OFF_COUNT, 0, true) == KK_VARIANT_BAD_COUNT,
++       "no stages");
++   ROW(open_status(bytes, size, OFF_COUNT, STAGE_LIMIT + 1, true) ==
++          KK_VARIANT_BAD_COUNT,
++       "more stages than there are");
++   ROW(open_status(bytes, size, OFF_COUNT, 0xffffffffu, true) ==
++          KK_VARIANT_BAD_COUNT,
++       "stage count, oversized");
++   ROW(open_status(bytes, size, OFF_SIZE, 0, true) == KK_VARIANT_BAD_SIZE,
++       "payload size, zero");
++   ROW(open_status(bytes, size, OFF_SIZE, (uint32_t)(size - HEADER_SIZE) + 1,
++                   true) == KK_VARIANT_BAD_SIZE,
++       "payload size, one too many");
++   ROW(open_status(bytes, size, OFF_SIZE, (uint32_t)(size - HEADER_SIZE) - 1,
++                   true) == KK_VARIANT_BAD_SIZE,
++       "payload size, one too few");
++   ROW(open_status(bytes, size, OFF_SIZE, 0xffffffffu, true) == KK_VARIANT_BAD_SIZE,
++       "payload size, oversized");
++   ROW(open_status(bytes, size, OFF_HASH, 0x01, false) == KK_VARIANT_BAD_HASH,
++       "payload hash");
++   ROW(open_status(bytes, size, OFF_HASH + 31, 0x80, false) == KK_VARIANT_BAD_HASH,
++       "payload hash, last byte");
++   ROW(open_status(bytes, size, HEADER_SIZE + 20, 0x01, false) ==
++          KK_VARIANT_BAD_HASH,
++       "a payload byte flipped");
++   ROW(open_status(bytes, size, (unsigned)size - 1, 0x01, false) ==
++          KK_VARIANT_BAD_HASH,
++       "the last byte flipped");
++
++   /* A descriptor for another key or build is another entry's, whole. */
++   {
++      struct blob_reader payload;
++      uint32_t count;
++      blake3_hash other = {0};
++      ROW(kk_variant_descriptor_open(bytes, size, build_id, other, STAGE_LIMIT,
++                                     &payload, &count) == KK_VARIANT_BAD_KEY,
++          "wanted under another key");
++      uint8_t other_build[KK_VARIANT_BUILD_ID_SIZE] = {0};
++      ROW(kk_variant_descriptor_open(bytes, size, other_build, key,
++                                     STAGE_LIMIT, &payload,
++                                     &count) == KK_VARIANT_BAD_BUILD,
++          "wanted by another build");
++   }
++   free(bytes);
++
++   /* Frames that hold up under a valid header (their hash is of what is
++    * there): a stage the pipeline has no name for, a length that runs past
++    * the entry, bytes after the last frame, fewer frames than counted. */
++   struct {
++      const char *name;
++      enum kk_variant_status expected_next;
++      enum kk_variant_status expected_close;
++      unsigned stage;
++      uint32_t length;
++      unsigned extra_after;
++      unsigned counted;
++   } frames[] = {
++      {"stage beyond the stages", KK_VARIANT_BAD_STAGE, KK_VARIANT_OK, STAGE_LIMIT, 4, 0, 1},
++      {"stage, oversized", KK_VARIANT_BAD_STAGE, KK_VARIANT_OK, 0xffffffffu, 4, 0, 1},
++      {"frame length, oversized", KK_VARIANT_BAD_STAGE, KK_VARIANT_OK, 0, 0xffffffffu, 0, 1},
++      {"frame length, one past the entry", KK_VARIANT_BAD_STAGE, KK_VARIANT_OK, 0, 5, 0, 1},
++      {"bytes after the last frame", KK_VARIANT_OK, KK_VARIANT_BAD_SIZE, 0, 4, 3, 1},
++      {"fewer frames than counted", KK_VARIANT_OK, KK_VARIANT_OK, 0, 4, 0, 2},
++   };
++   for (unsigned i = 0; i < ARRAY_SIZE_LOCAL(frames); i++) {
++      struct blob blob;
++      blob_init(&blob);
++      kk_variant_descriptor_begin(&blob);
++      blob_write_uint32(&blob, frames[i].stage);
++      blob_write_uint32(&blob, frames[i].length);
++      blob_write_uint32(&blob, 0x11223344);
++      for (unsigned j = 0; j < frames[i].extra_after; j++)
++         blob_write_uint8(&blob, 0xee);
++      kk_variant_descriptor_end(&blob, build_id, key, frames[i].counted);
++      struct blob_reader payload;
++      uint32_t count;
++      enum kk_variant_status status = kk_variant_descriptor_open(
++         blob.data, blob.size, build_id, key, STAGE_LIMIT, &payload, &count);
++      ROW(status == KK_VARIANT_OK, frames[i].name);
++      if (status == KK_VARIANT_OK) {
++         uint32_t stage;
++         struct blob_reader shader;
++         status = kk_variant_descriptor_next_stage(&payload, STAGE_LIMIT,
++                                                   &stage, &shader);
++         ROW(status == frames[i].expected_next, frames[i].name);
++         if (status == KK_VARIANT_OK) {
++            if (frames[i].counted > 1) {
++               status = kk_variant_descriptor_next_stage(&payload, STAGE_LIMIT,
++                                                         &stage, &shader);
++               ROW(status != KK_VARIANT_OK, frames[i].name);
++            } else {
++               ROW(kk_variant_descriptor_close(&payload) ==
++                      frames[i].expected_close,
++                   frames[i].name);
++            }
++         }
++      }
++      blob_finish(&blob);
++   }
++
++   kk_msl_pool_finish(&pool);
++   table_clear(&table);
++}
++
++/* The text entry stored for the first text of a descriptor, and its name. */
++static void
++first_text(struct table *table, blake3_hash name)
++{
++   for (unsigned i = 0; i < MAX_ENTRIES; i++) {
++      if (table->entries[i].used) {
++         memcpy(name, table->entries[i].name, sizeof(blake3_hash));
++         return;
++      }
++   }
++   abort();
++}
++
++/* Reads the record of one text whose entry was damaged by `edit`; returns
++ * whether the record was refused and whether the entry was removed. */
++typedef void (*edit_fn)(uint8_t *entry, size_t size, uint32_t arg);
++
++static void
++text_row(const char *name, size_t cut, edit_fn edit, uint32_t arg)
++{
++   struct table table = {0};
++   struct kk_msl_pool pool;
++   kk_msl_pool_init(&pool, &ops, &table);
++   struct msl_compile_data data;
++   make_data(&data, 4000, 1, "main_entrypoint");
++   struct blob record;
++   blob_init(&record);
++   kk_msl_record_write(&record, &data, &pool);
++   kk_msl_finish(&data);
++
++   blake3_hash text;
++   first_text(&table, text);
++   struct entry *entry = find(&table, text);
++   if (cut != (size_t)-1) {
++      entry->size = cut < entry->size ? cut : entry->size;
++   }
++   if (edit != NULL)
++      edit(entry->data, entry->size, arg);
++
++   struct blob_reader reader;
++   blob_reader_init(&reader, record.data, record.size);
++   struct msl_compile_data back;
++   memset(&back, 0, sizeof(back));
++   struct kk_msl_pool reading;
++   kk_msl_pool_init(&reading, &ops, &table);
++   enum kk_msl_record_status status = kk_msl_record_read(&reader, &back, &reading);
++   ROW(status == KK_MSL_RECORD_CORRUPT, name);
++   ROW(table.removes == 1, name);
++   kk_msl_finish(&back);
++   kk_msl_pool_finish(&reading);
++   blob_finish(&record);
++   kk_msl_pool_finish(&pool);
++   table_clear(&table);
++}
++
++#define TEXT_MAGIC_OFF 0
++#define TEXT_FORMAT_OFF 4
++#define TEXT_CODEC_OFF 8
++#define TEXT_CODE_OFF 12
++#define TEXT_STORED_OFF 16
++#define TEXT_RESERVED_OFF 20
++#define TEXT_NAME_OFF 24
++#define TEXT_HEADER 56
++
++struct word_edit {
++   unsigned offset;
++   uint32_t value;
++};
++static struct word_edit current;
++
++static void
++edit_word(uint8_t *entry, size_t size, uint32_t arg)
++{
++   (void)arg;
++   if (current.offset + 4 <= size)
++      put32(entry, current.offset, current.value);
++}
++
++static void
++edit_flip(uint8_t *entry, size_t size, uint32_t arg)
++{
++   if (arg == 0xffffffffu)
++      arg = size - 1;
++   if (arg < size)
++      entry[arg] ^= 0x40;
++}
++
++static void
++text_word_row(const char *name, unsigned offset, uint32_t value)
++{
++   current.offset = offset;
++   current.value = value;
++   text_row(name, (size_t)-1, edit_word, 0);
++}
++
++static void
++text_rows(void)
++{
++   /* Truncated at every length the entry has. */
++   {
++      struct table table = {0};
++      struct kk_msl_pool pool;
++      kk_msl_pool_init(&pool, &ops, &table);
++      struct msl_compile_data data;
++      make_data(&data, 4000, 1, "main_entrypoint");
++      struct blob record;
++      blob_init(&record);
++      kk_msl_record_write(&record, &data, &pool);
++      kk_msl_finish(&data);
++      blake3_hash text;
++      first_text(&table, text);
++      const size_t full = find(&table, text)->size;
++      blob_finish(&record);
++      kk_msl_pool_finish(&pool);
++      table_clear(&table);
++      for (size_t cut = 0; cut < full; cut++)
++         text_row("text entry truncated", cut, NULL, 0);
++   }
++   text_word_row("text magic", TEXT_MAGIC_OFF, 0x12345678);
++   text_word_row("text format", TEXT_FORMAT_OFF, KK_VARIANT_FORMAT + 1);
++   text_word_row("text format, oversized", TEXT_FORMAT_OFF, 0xffffffffu);
++   text_word_row("text codec, unknown", TEXT_CODEC_OFF, KK_MSL_CODEC_COUNT);
++   text_word_row("text codec, oversized", TEXT_CODEC_OFF, 0xffffffffu);
++   text_word_row("text length, zero", TEXT_CODE_OFF, 0);
++   text_word_row("text length, oversized", TEXT_CODE_OFF, 0xffffffffu);
++   text_word_row("text length, over the cap", TEXT_CODE_OFF,
++                 KK_MSL_MAX_CODE_SIZE + 1);
++   text_word_row("stored length, zero", TEXT_STORED_OFF, 0);
++   text_word_row("stored length, oversized", TEXT_STORED_OFF, 0xffffffffu);
++   text_word_row("stored length, one more than the entry holds", TEXT_STORED_OFF,
++                 1);
++   text_word_row("reserved word", TEXT_RESERVED_OFF, 1);
++   text_word_row("text name echoed wrong", TEXT_NAME_OFF, 0x1);
++   text_row("text byte flipped", (size_t)-1, edit_flip, TEXT_HEADER + 7);
++   text_row("last text byte flipped", (size_t)-1, edit_flip, 0xffffffffu);
++   text_row("header byte flipped", (size_t)-1, edit_flip, TEXT_CODEC_OFF);
++
++   /* A text that is not there, and one that is another text under this name. */
++   {
++      struct table table = {0};
++      struct kk_msl_pool pool;
++      kk_msl_pool_init(&pool, &ops, &table);
++      struct msl_compile_data data;
++      make_data(&data, 4000, 1, "main_entrypoint");
++      struct blob record;
++      blob_init(&record);
++      kk_msl_record_write(&record, &data, &pool);
++      kk_msl_finish(&data);
++      blake3_hash text;
++      first_text(&table, text);
++      struct kk_msl_pool reading;
++      kk_msl_pool_init(&reading, &ops, &table);
++
++      /* A different valid text copied under the name: its name, header and
++       * bytes are all consistent with each other, but not with the name the
++       * record asks for. */
++      struct msl_compile_data other;
++      make_data(&other, 4000, 2, "main_entrypoint");
++      struct blob other_record;
++      blob_init(&other_record);
++      kk_msl_record_write(&other_record, &other, &pool);
++      kk_msl_finish(&other);
++      struct entry *mine = find(&table, text);
++      struct entry *theirs = NULL;
++      for (unsigned i = 0; i < MAX_ENTRIES; i++) {
++         if (table.entries[i].used && &table.entries[i] != mine)
++            theirs = &table.entries[i];
++      }
++      ROW(theirs != NULL, "a second text was stored");
++      if (theirs != NULL) {
++         uint8_t *copy = malloc(theirs->size);
++         memcpy(copy, theirs->data, theirs->size);
++         free(mine->data);
++         mine->data = copy;
++         mine->size = theirs->size;
++         struct blob_reader reader;
++         blob_reader_init(&reader, record.data, record.size);
++         struct msl_compile_data back;
++         memset(&back, 0, sizeof(back));
++         ROW(kk_msl_record_read(&reader, &back, &reading) == KK_MSL_RECORD_CORRUPT,
++             "a descriptor naming a text that holds another text");
++         ROW(find(&table, text) == NULL, "the mismatching text is removed");
++         kk_msl_finish(&back);
++      }
++
++      /* Missing. */
++      struct blob_reader reader;
++      blob_reader_init(&reader, record.data, record.size);
++      struct msl_compile_data back;
++      memset(&back, 0, sizeof(back));
++      const unsigned removes = table.removes;
++      ROW(kk_msl_record_read(&reader, &back, &reading) == KK_MSL_RECORD_CORRUPT,
++          "a descriptor naming a missing text");
++      (void)removes;
++      kk_msl_finish(&back);
++
++      /* Writing it again puts it back, once. */
++      const unsigned puts = table.puts;
++      struct msl_compile_data again;
++      make_data(&again, 4000, 1, "main_entrypoint");
++      struct blob again_record;
++      blob_init(&again_record);
++      kk_msl_record_write(&again_record, &again, &pool);
++      ROW(table.puts == puts + 1 && find(&table, text) != NULL,
++          "a removed text is put back");
++      blob_reader_init(&reader, again_record.data, again_record.size);
++      memset(&back, 0, sizeof(back));
++      ROW(kk_msl_record_read(&reader, &back, &reading) == KK_MSL_RECORD_OK,
++          "and reads");
++      kk_msl_finish(&back);
++
++      /* A text that is stored, and damaged where the store does not look, is
++       * replaced by the next writer rather than trusted. */
++      struct entry *stored = find(&table, text);
++      ROW(stored != NULL, "the text is stored");
++      if (stored != NULL) {
++         stored->known = false;
++         ((uint8_t *)stored->data)[stored->size - 1] ^= 1;
++         const unsigned damaged_puts = table.puts;
++         const unsigned damaged_removes = table.removes;
++         struct blob rewritten;
++         blob_init(&rewritten);
++         kk_msl_record_write(&rewritten, &again, &pool);
++         ROW(table.puts == damaged_puts + 1 &&
++                table.removes == damaged_removes + 1,
++             "a stored text that no reader would take is replaced");
++         blob_reader_init(&reader, rewritten.data, rewritten.size);
++         memset(&back, 0, sizeof(back));
++         ROW(kk_msl_record_read(&reader, &back, &reading) == KK_MSL_RECORD_OK,
++             "and what replaced it reads");
++         kk_msl_finish(&back);
++         blob_finish(&rewritten);
++
++         /* A stored text that is good is kept: the writer reads it, once,
++          * and writes nothing. */
++         stored = find(&table, text);
++         if (stored != NULL)
++            stored->known = false;
++         const unsigned good_puts = table.puts;
++         blob_init(&rewritten);
++         kk_msl_record_write(&rewritten, &again, &pool);
++         ROW(table.puts == good_puts, "a stored text that is good is not written again");
++         blob_finish(&rewritten);
++      }
++      kk_msl_finish(&again);
++      blob_finish(&again_record);
++      blob_finish(&other_record);
++      blob_finish(&record);
++      kk_msl_pool_finish(&reading);
++      kk_msl_pool_finish(&pool);
++      table_clear(&table);
++   }
++}
++
++/* The record of a text in a descriptor, and the same text written for a
++ * pipeline cache (no pool). */
++static void
++record_rows(void)
++{
++   struct table table = {0};
++   struct kk_msl_pool pool;
++   kk_msl_pool_init(&pool, &ops, &table);
++   struct msl_compile_data data;
++   make_data(&data, 6000, 3, "main_entrypoint");
++   ROW(data.packed != NULL, "the text is packed");
++
++   /* One text written twice is stored once. */
++   struct blob pooled;
++   blob_init(&pooled);
++   kk_msl_record_write(&pooled, &data, &pool);
++   kk_msl_record_write(&pooled, &data, &pool);
++   ROW(table.puts == 1, "equal texts are stored once");
++   ROW(pooled.size < 2 * (data.packed_size + 40),
++       "a pooled record holds the text's name, not its bytes");
++
++   /* Plain records are what a pipeline cache holds; reading them back is what
++    * it did before. */
++   struct blob plain;
++   blob_init(&plain);
++   kk_msl_record_write(&plain, &data, NULL);
++   {
++      struct blob_reader reader;
++      blob_reader_init(&reader, plain.data, plain.size);
++      struct msl_compile_data back;
++      memset(&back, 0, sizeof(back));
++      ROW(kk_msl_record_read(&reader, &back, NULL) == KK_MSL_RECORD_OK,
++          "a plain record reads");
++      char *a = NULL, *b = NULL;
++      const char *text_a = kk_msl_text(&data, &a);
++      const char *text_b = kk_msl_text(&back, &b);
++      ROW(text_a && text_b && strcmp(text_a, text_b) == 0, "and is the text");
++      kk_msl_text_release(a);
++      kk_msl_text_release(b);
++      kk_msl_finish(&back);
++   }
++
++   /* Truncated at every length, pooled and plain. */
++   struct kk_msl_pool reading;
++   kk_msl_pool_init(&reading, &ops, &table);
++   unsigned accepted = 0;
++   struct blob single;
++   blob_init(&single);
++   kk_msl_record_write(&single, &data, &pool);
++   const size_t record_size = single.size;
++   blob_finish(&single);
++   for (size_t length = 0; length < record_size; length++) {
++      struct blob_reader reader;
++      blob_reader_init(&reader, pooled.data, length);
++      struct msl_compile_data back;
++      memset(&back, 0, sizeof(back));
++      if (kk_msl_record_read(&reader, &back, &reading) == KK_MSL_RECORD_OK)
++         accepted++;
++      kk_msl_finish(&back);
++   }
++   ROW(accepted == 0, "pooled record truncated at any length");
++   accepted = 0;
++   for (size_t length = 0; length < plain.size; length++) {
++      struct blob_reader reader;
++      blob_reader_init(&reader, plain.data, length);
++      struct msl_compile_data back;
++      memset(&back, 0, sizeof(back));
++      if (kk_msl_record_read(&reader, &back, NULL) == KK_MSL_RECORD_OK)
++         accepted++;
++      kk_msl_finish(&back);
++   }
++   ROW(accepted == 0, "plain record truncated at any length");
++
++   /* Each of the record's own header fields. */
++   const struct {
++      const char *name;
++      unsigned offset;
++      uint32_t value;
++   } fields[] = {
++      {"entrypoint length, zero", 0, 0},
++      {"entrypoint length, oversized", 0, 0xffffffffu},
++      {"entrypoint length, longer than the record", 0, 100000},
++      {"text length, oversized", 4, 0xffffffffu},
++      {"text length, changed", 4, 123},
++      {"stored length, oversized", 8, 0xffffffffu},
++      {"stored length, changed", 8, 7},
++   };
++   for (unsigned i = 0; i < ARRAY_SIZE_LOCAL(fields); i++) {
++      uint8_t *copy = malloc(pooled.size);
++      memcpy(copy, pooled.data, pooled.size);
++      put32(copy, fields[i].offset, fields[i].value);
++      struct blob_reader reader;
++      blob_reader_init(&reader, copy, pooled.size);
++      struct msl_compile_data back;
++      memset(&back, 0, sizeof(back));
++      ROW(kk_msl_record_read(&reader, &back, &reading) != KK_MSL_RECORD_OK,
++          fields[i].name);
++      kk_msl_finish(&back);
++      free(copy);
++      /* The same field of a plain record. */
++      copy = malloc(plain.size);
++      memcpy(copy, plain.data, plain.size);
++      put32(copy, fields[i].offset, fields[i].value);
++      blob_reader_init(&reader, copy, plain.size);
++      memset(&back, 0, sizeof(back));
++      /* A plain record's compressed bytes are not looked into when it is
++       * read, only when the text is wanted: a length that still fits the
++       * record leaves a text that does not decompress. */
++      bool plain_refused =
++         kk_msl_record_read(&reader, &back, NULL) != KK_MSL_RECORD_OK;
++      if (!plain_refused) {
++         char *scratch = NULL;
++         plain_refused = kk_msl_text(&back, &scratch) == NULL;
++         kk_msl_text_release(scratch);
++      }
++      ROW(plain_refused, fields[i].name);
++      kk_msl_finish(&back);
++      free(copy);
++   }
++   {
++      /* The codec byte. */
++      uint8_t *copy = malloc(pooled.size);
++      memcpy(copy, pooled.data, pooled.size);
++      copy[12] = 0xff;
++      struct blob_reader reader;
++      blob_reader_init(&reader, copy, pooled.size);
++      struct msl_compile_data back;
++      memset(&back, 0, sizeof(back));
++      ROW(kk_msl_record_read(&reader, &back, &reading) != KK_MSL_RECORD_OK,
++          "codec, unknown");
++      kk_msl_finish(&back);
++      free(copy);
++   }
++
++   blob_finish(&pooled);
++   blob_finish(&plain);
++   kk_msl_finish(&data);
++   kk_msl_pool_finish(&reading);
++   kk_msl_pool_finish(&pool);
++   table_clear(&table);
++}
++
++/* Each group of rows runs in a process of its own, so that a reader that
++ * crashes on one of them is reported as that and does not hide the rest. */
++static void
++run_group(const char *name, void (*group)(void))
++{
++   fflush(NULL);
++   pid_t pid = fork();
++   if (pid == 0) {
++      group();
++      fflush(NULL);
++      _exit(failures != 0 ? 1 : 0);
++   }
++   int status = 0;
++   waitpid(pid, &status, 0);
++   if (WIFSIGNALED(status)) {
++      failures++;
++      fprintf(stderr, "FAIL group %s: killed by signal %d\n", name,
++              WTERMSIG(status));
++   } else if (WEXITSTATUS(status) != 0) {
++      failures++;
++      fprintf(stderr, "FAIL group %s: rows failed\n", name);
++   }
++}
++
++int
++main(void)
++{
++   run_group("descriptor", descriptor_rows);
++   run_group("text entries", text_rows);
++   run_group("records", record_rows);
++   if (failures != 0) {
++      fprintf(stderr, "variant entries FAILED\n");
++      return 1;
++   }
++   printf("variant entries passed\n");
++   return 0;
++}
+diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.frag b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.frag
+new file mode 100644
+index 0000000000000000000000000000000000000000..c56f39f96a2f7d5f22bf6c5c39b21618214b656b
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.frag
+@@ -0,0 +1,4 @@
++// SPDX-License-Identifier: MIT
++#version 450
++layout(location = 0) out vec4 color;
++void main() { color = vec4(1.0); }
+diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.frag.h b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.frag.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..9ffecbd4162f83eea23189a908e3ee1c24b6d077
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.frag.h
+@@ -0,0 +1,18 @@
++{0x07230203,0x00010600,0x000d000b,0x0000000c,
++0x00000000,0x00020011,0x00000001,0x0006000b,
++0x00000001,0x4c534c47,0x6474732e,0x3035342e,
++0x00000000,0x0003000e,0x00000000,0x00000001,
++0x0006000f,0x00000004,0x00000004,0x6e69616d,
++0x00000000,0x00000009,0x00030010,0x00000004,
++0x00000007,0x00040047,0x00000009,0x0000001e,
++0x00000000,0x00020013,0x00000002,0x00030021,
++0x00000003,0x00000002,0x00030016,0x00000006,
++0x00000020,0x00040017,0x00000007,0x00000006,
++0x00000004,0x00040020,0x00000008,0x00000003,
++0x00000007,0x0004003b,0x00000008,0x00000009,
++0x00000003,0x0004002b,0x00000006,0x0000000a,
++0x3f800000,0x0007002c,0x00000007,0x0000000b,
++0x0000000a,0x0000000a,0x0000000a,0x0000000a,
++0x00050036,0x00000002,0x00000004,0x00000000,
++0x00000003,0x000200f8,0x00000005,0x0003003e,
++0x00000009,0x0000000b,0x000100fd,0x00010038}
+diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.vert b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.vert
+new file mode 100644
+index 0000000000000000000000000000000000000000..b73449bd0b360bad2df94273ceec3941960fabeb
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.vert
+@@ -0,0 +1,4 @@
++// SPDX-License-Identifier: MIT
++#version 450
++layout(location = 0) in vec4 in_position;
++void main() { gl_Position = in_position; }
+diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.vert.h b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.vert.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..012ba6f5bd421aa0f8f163ce8082b8f43fe25400
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.vert.h
+@@ -0,0 +1,33 @@
++{0x07230203,0x00010600,0x000d000b,0x00000015,
++0x00000000,0x00020011,0x00000001,0x0006000b,
++0x00000001,0x4c534c47,0x6474732e,0x3035342e,
++0x00000000,0x0003000e,0x00000000,0x00000001,
++0x0007000f,0x00000000,0x00000004,0x6e69616d,
++0x00000000,0x0000000d,0x00000011,0x00030047,
++0x0000000b,0x00000002,0x00050048,0x0000000b,
++0x00000000,0x0000000b,0x00000000,0x00050048,
++0x0000000b,0x00000001,0x0000000b,0x00000001,
++0x00050048,0x0000000b,0x00000002,0x0000000b,
++0x00000003,0x00050048,0x0000000b,0x00000003,
++0x0000000b,0x00000004,0x00040047,0x00000011,
++0x0000001e,0x00000000,0x00020013,0x00000002,
++0x00030021,0x00000003,0x00000002,0x00030016,
++0x00000006,0x00000020,0x00040017,0x00000007,
++0x00000006,0x00000004,0x00040015,0x00000008,
++0x00000020,0x00000000,0x0004002b,0x00000008,
++0x00000009,0x00000001,0x0004001c,0x0000000a,
++0x00000006,0x00000009,0x0006001e,0x0000000b,
++0x00000007,0x00000006,0x0000000a,0x0000000a,
++0x00040020,0x0000000c,0x00000003,0x0000000b,
++0x0004003b,0x0000000c,0x0000000d,0x00000003,
++0x00040015,0x0000000e,0x00000020,0x00000001,
++0x0004002b,0x0000000e,0x0000000f,0x00000000,
++0x00040020,0x00000010,0x00000001,0x00000007,
++0x0004003b,0x00000010,0x00000011,0x00000001,
++0x00040020,0x00000013,0x00000003,0x00000007,
++0x00050036,0x00000002,0x00000004,0x00000000,
++0x00000003,0x000200f8,0x00000005,0x0004003d,
++0x00000007,0x00000012,0x00000011,0x00050041,
++0x00000013,0x00000014,0x0000000d,0x0000000f,
++0x0003003e,0x00000014,0x00000012,0x000100fd,
++0x00010038}
+diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e6cf6d6976db3055dd2812501fb6eae9a35f1fe
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c
+@@ -0,0 +1,16 @@
++/*
++ * Copyright 2026 Google LLC
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "variant_disk_cache_state.h"
++
++#include "kosmickrisp/vulkan/kk_physical_device.h"
++#include "kosmickrisp/vulkan/kk_shader.h"
++
++struct disk_cache *
++kk_test_variant_disk_cache(VkPhysicalDevice physical)
++{
++   struct kk_physical_device *pdev = kk_physical_device_from_handle(physical);
++   return pdev->variant_cache != NULL ? pdev->variant_cache->disk : NULL;
++}
+diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.h b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b4751ff00fabf31aac438ff94a12b7444495699d
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: MIT */
++#pragma once
++
++#include <vulkan/vulkan.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct disk_cache;
++
++/* The disk cache the driver keeps the variants of dynamic vertex-input
++ * pipelines in, or NULL when the driver keeps none.  An entry in the
++ * cache can only be read through a cache with the same identity, which only
++ * the driver knows. */
++struct disk_cache *
++kk_test_variant_disk_cache(VkPhysicalDevice physical);
++
++#ifdef __cplusplus
++}
++#endif
