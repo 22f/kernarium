@@ -58,8 +58,11 @@ struct ResolutionScreenTests {
         return [node] + children.flatMap { nodes(in: $0, depth: depth + 1) }
     }
 
+    /// The node labelled `label` that VoiceOver reaches: iOS 26 hosts a bar's button in a view that
+    /// has the label too and is no accessibility element, ahead of the element itself.
     private func node(labelled label: String, in root: UIView) -> NSObject? {
-        nodes(in: root).first { $0.accessibilityLabel == label }
+        let named = nodes(in: root).filter { $0.accessibilityLabel == label }
+        return named.first { $0.isAccessibilityElement || $0 is UIControl } ?? named.first
     }
 
     private func labels(in root: UIView) -> [String] {

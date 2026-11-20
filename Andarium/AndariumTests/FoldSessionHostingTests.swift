@@ -48,6 +48,14 @@ struct FoldSessionHostingTests {
             }
         }
 
+        /// The poses of `poses` whose sheet height can be tested on this system. A foldable phone
+        /// exists from iOS 27.1, and the sheet of an earlier system ignores a custom detent on the iPad
+        /// the tests run on, so the turned, bent pose, the one that asks for one, is left out below it.
+        static func keepingSheetHeights(_ poses: [Pose]) -> [Pose] {
+            if #available(iOS 27.1, *) { return poses }
+            return poses.filter { $0 != .turnedBook }
+        }
+
         var reading: FoldReading {
             switch self {
             case .cover:
@@ -1030,7 +1038,7 @@ struct FoldSessionHostingTests {
 
     /// A sheet is kept below the fold only while the device stands bent; flat,
     /// it is the system's, as on an iPad.
-    @Test(arguments: [Pose.turnedBook, Pose.turnedFlat, Pose.uprightFlat])
+    @Test(arguments: Pose.keepingSheetHeights([.turnedBook, .turnedFlat, .uprightFlat]))
     func aSheetRisesToTheFoldOnlyWhileTheDeviceStandsBent(_ pose: Pose) async throws {
         let model = steadyModel()
         model.fold = pose.reading

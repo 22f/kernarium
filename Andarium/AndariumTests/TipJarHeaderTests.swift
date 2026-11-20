@@ -373,7 +373,7 @@ struct TipJarHeaderTests {
     /// own detent, a height fitted to the conversation, gives way); in every other pose, flat, upright or
     /// on the cover, it keeps its own. The device here is a phone's window, and the shared presentation's
     /// height comes from the reading, so the sheet's height tells which presentation it has.
-    @Test(arguments: [FoldSessionHostingTests.Pose.turnedBook, .turnedFlat, .uprightBook, .uprightFlat, .cover])
+    @Test(arguments: FoldSessionHostingTests.Pose.keepingSheetHeights([.turnedBook, .turnedFlat, .uprightBook, .uprightFlat, .cover]))
     func turnedAndBentTheSheetRisesToTheFoldAndElsewhereKeepsItsOwnHeight(_ pose: FoldSessionHostingTests.Pose) async throws {
         let model = app()
         model.tipJarServices.sender = { Self.content() }

@@ -197,8 +197,8 @@ struct HomeMenuTests {
 
     /// What VoiceOver finds in the navigation bar: buttons labelled Info (the bar's button and
     /// the control inside it), which are the menu's control (a hint on a toolbar menu never
-    /// reaches it, so the label carries the meaning). On a Mac the control inside the bar's
-    /// button is named for its symbol, in lower case: "info".
+    /// reaches it, so the label carries the meaning). On a Mac, and before iOS 27, the control
+    /// inside the bar's button is named for its symbol, in lower case: "info".
     @Test func voiceOverFindsTheMenuAsTheInfoButton() async throws {
         let model = model()
         let (controller, lease) = try await host(model)
@@ -210,9 +210,10 @@ struct HomeMenuTests {
         try await Task.sleep(for: .milliseconds(500))
         let top = ToolbarProbe.elements(in: lease.window)
         let buttons = top.filter { $0.traits.contains(.button) && $0.top < 100 }
-        let onMac = ProcessInfo.processInfo.isiOSAppOnMac
+        var namedBySymbol = ProcessInfo.processInfo.isiOSAppOnMac
+        if #unavailable(iOS 27.0) { namedBySymbol = true }
         #expect(
-            !buttons.isEmpty && buttons.allSatisfy { onMac ? $0.label.lowercased() == "info" : $0.label == "Info" },
+            !buttons.isEmpty && buttons.allSatisfy { namedBySymbol ? $0.label.lowercased() == "info" : $0.label == "Info" },
             "the bar: \(top.map(\.description))")
     }
 

@@ -122,7 +122,7 @@ test's header holds the mechanics.
 | `guest-gbm-dmabuf` | `UML_GBM_DMABUF_PROBE_BINARY` | the virtio-gpu dma-buf contract |
 | `guest-drm-vblank` | `UML_DRM_FLIP_PROBE_BINARY` | Virtio-GPU's vblank pacing and the grid it keeps across idle gaps |
 | `guest-aarch32-kernel` | built from `tests/integration/aarch32/` | the kernel's AArch32 task support (needs `python3`, `as`, `ld` in the rootfs) |
-| `apple-audio-playback`, `-interruption`, `guest-virtio-sound-delay-host` | `UML_TEST_APPLE_AUDIO=ON` | the real macOS audio output, the iOS interruption behavior (which needs an iOS Simulator runtime, and runs in a simulator device it creates and deletes) and a guest's stream delay on the real output |
+| `apple-audio-playback`, `-interruption`, `-interruption-ios26`, `guest-virtio-sound-delay-host` | `UML_TEST_APPLE_AUDIO=ON` | the real macOS audio output, the iOS interruption behavior (which needs an iOS Simulator runtime, an iOS 27 one for the first row and an iOS 26 one for `-ios26`, which checks the earlier-API fallbacks; each runs in a simulator device it creates and deletes) and a guest's stream delay on the real output |
 
 The probe sources are built for the guest architecture; each header says how.
 The real microphone is checked by hand because granting access is the user's
@@ -428,10 +428,15 @@ the scheme without the filter also runs `AndariumUITests`). A row that asserts
 what an iPad app on a Mac does not do (accessibility activation of an alert's
 buttons, text that scales with the content size category, a menu's items as
 UIKit elements) is disabled there with its reason and shows as skipped. The
-scheme's Test action pins English, so the tests that read the application's
-words do not depend on the language of the device; `LocalizationTests` names a
-lost pin and looks each language up by name, and the language a `-testLanguage`
-run asks for fails only the tests that read the English words.
+tests run on an iOS 26 and an iOS 27 Simulator; a row that asserts what only
+iOS 27 does (an alert's preferred action, a toolbar button's inner label, a
+popover card's width and, from the foldable phone's iOS 27.1, a sheet's custom
+detent on the iPad) expects the earlier system's value or leaves that case out
+below it. The scheme's Test action pins English, so the tests that read the
+application's words do not depend on the language of the device;
+`LocalizationTests` names a lost pin and looks each language up by name, and
+the language a `-testLanguage` run asks for fails only the tests that read the
+English words.
 `SnapshotFileApiTests`
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
