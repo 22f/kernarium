@@ -233,7 +233,10 @@ the iPad harness reads, as Debug does. A launch that sets no `ANDARIUM_` or
   ship pending changes, by naming the release ID in `PENDING_INPUTS_DECISION`.
 - [Follow developer on X](#follow-developer-on-x) is carried by Release when
   the handle is in the ignored `Config/Developer.local.xcconfig` and the logo
-  in the ignored `Config/Local/`.
+  in the ignored `Config/Local/`. The same build phase of an archive runs
+  [`scripts/check-release-archive.py`](scripts/check-release-archive.py), which
+  refuses a handle that is not a handle of X and the placeholder of
+  `Developer.local.xcconfig.example` in any letter case; no handle is no link.
 
 An archive is made after the steps of [Build](#build), with
 `xcodebuild -project Andarium/Andarium.xcodeproj -scheme Andarium archive`.
@@ -260,7 +263,9 @@ whose ignored `Config/Developer.local.xcconfig` (from
 handle, never an address, as `//` starts an xcconfig comment; the code builds
 the address) and whose ignored `Config/Local/` directory holds `x-logo.svg`, a
 single-colour vector that `XLogoLocal.xcassets` links to. A build with the
-handle and without the logo fails its first build phase. A fork or a Debug
+handle and without the logo fails its first build phase, and an archive
+refuses a handle that is no handle of X and the example one
+(`scripts/check-release-archive.py`). A fork or a Debug
 build holds none of it (no row, handle, logo or `FollowX` strings table).
 Tests and captures turn the row on in a Debug build with
 `FOLLOW_X_HANDLE=example_handle` on the `xcodebuild` line, with a glyph drawn

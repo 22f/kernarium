@@ -617,7 +617,9 @@ a launch silencing haptics silences it, on both model paths of a launch, is
 held by the hosted `LaunchEnvironmentTests` and `CapabilitiesFlowTests`),
 the Acknowledgements resource (`andarium-acknowledgements`), the ignore rule that
 keeps every developer-owned `*.local.xcconfig` of Andarium out of Git
-(`andarium-local-config-ignore`) and the stand-in
+(`andarium-local-config-ignore`), what any archive of Release must satisfy
+beyond its embedded artifacts (`andarium-release-archive`: the profile link to
+X) and the stand-in
 debugger that serves the JIT's request for executable memory on a device
 (`andarium-ios-jit-debugger`). The JIT's region route has host tests that run
 on macOS (`arm64-jit-debugger-region`, `arm64-jit-debugger-request` for a

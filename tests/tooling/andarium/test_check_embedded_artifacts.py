@@ -21,6 +21,7 @@ import gzip
 import importlib.util
 import json
 import os
+import plistlib
 import re
 import shutil
 import struct
@@ -238,7 +239,14 @@ class Fixture:
         framework = app / "Frameworks" / f"{FRAMEWORK}.framework"
         framework.mkdir(parents=True)
         (framework / FRAMEWORK).write_bytes(macho({"__uml_elf": kernel_image(release, config, **builders)}))
+        self.write_info(app)
         return app
+
+    @staticmethod
+    def write_info(app: Path, **info: object) -> None:
+        """The application's Info.plist, as the build writes it: no profile link."""
+        with (app / "Info.plist").open("wb") as handle:
+            plistlib.dump({"CFBundleName": "Andarium", **info}, handle)
 
     def run(self, *arguments: str, decision: str | None = None, app: bool = True, python: str = sys.executable):
         environment = {key: value for key, value in os.environ.items() if key != "PENDING_INPUTS_DECISION"}
@@ -1041,6 +1049,37 @@ class BuildPhaseTests(unittest.TestCase):
                     self.assertIn("no AOT artifact is accepted", result.stderr)
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_phase_also_runs_the_release_archive_check(self) -> None:
+        self.assertIn('"$SRCROOT/scripts/check-release-archive.py"', self.script)
+        # Joined to the checks before it: a refusal of any one stops the archive.
+        lines = [line for line in self.script.splitlines() if "check-" in line]
+        self.assertEqual(len(lines), 3, lines)
+        for line in lines[:-1]:
+            self.assertTrue(line.rstrip().endswith("&&"), line)
+
+    def test_the_example_follow_handle_stops_a_release_archive_only(self) -> None:
+        # Debug builds, the Preview and an ordinary Release build keep a fixture
+        # handle usable; the archive refuses it.
+        fixture = Fixture(self.root)
+        fixture.write_info(fixture.app, AndariumFollowXHandle="Example_Handle")
+        for build in self.BUILDS:
+            with self.subTest(build):
+                result = self.run_phase(*build, fixture)
+                if build == self.CHECKED:
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("example handle", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stderr, "")
+
+    def test_an_archive_with_no_follow_handle_or_the_developers_own_passes(self) -> None:
+        fixture = Fixture(self.root)
+        for info in ({}, {"AndariumFollowXHandle": ""}, {"AndariumFollowXHandle": "a_developer"}):
+            fixture.write_info(fixture.app, **info)
+            with self.subTest(info):
+                result = self.run_phase(*self.CHECKED, fixture)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_the_accepted_release_passes_the_phase_in_every_build(self) -> None:
         fixture = Fixture(self.root)

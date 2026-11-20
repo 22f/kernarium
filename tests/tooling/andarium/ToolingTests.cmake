@@ -77,6 +77,17 @@ uml_add_tooling_test(
     LABELS andarium;android;package
     TIMEOUT 180)
 
+# What any archive of Release must satisfy beyond its embedded artifacts
+# (scripts/check-release-archive.py, run by the same build phase): a profile
+# link to X only with the developer's own handle. The fixtures are application
+# bundles that change one thing each.
+uml_add_tooling_test(
+    NAME andarium-release-archive
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_check_release_archive.py
+    LABELS andarium;package
+    TIMEOUT 120)
+
 # The Acknowledgements resource names a project and its license text for each
 # framework the application embeds and each library of its iOS device prefixes.
 uml_add_tooling_test(
