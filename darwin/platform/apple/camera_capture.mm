@@ -2366,9 +2366,15 @@ private:
             return guarded(camera, [&] {
                 const bool activated = activate(entry.device, *anchor, rate, true, ratioDone(camera));
 #if TARGET_OS_IOS
-                if (activated && entry.mounting.presentationTurn == 180 && !keepSrgbColourSpace(entry.device))
-                    std::fprintf(stderr, "Camera: camera %zu: the capture is not held in sRGB (colour space %ld): a photo that states no colours is refused\n",
-                                 camera, long(entry.device.activeColorSpace));
+                if (activated && entry.mounting.presentationTurn == 180) {
+                    // The session's own choice ends here, before the selection: while it is on, a device reads back the wide
+                    // colour space the session picks at once, whatever it is set to (commitConfiguration keeps it off while
+                    // the camera is in the session).
+                    session_.automaticallyConfiguresCaptureDeviceForWideColor = NO;
+                    if (!keepSrgbColourSpace(entry.device))
+                        std::fprintf(stderr, "Camera: camera %zu: the capture is not held in sRGB (colour space %ld): a photo that states no colours is refused\n",
+                                     camera, long(entry.device.activeColorSpace));
+                }
                 if (anchor->facts.pinnedRatio != CameraAspectRatio::none) ratioFacts = ratioFactsOf(entry.device, anchor->facts.pinnedRatio);
 #endif
                 return activated;
