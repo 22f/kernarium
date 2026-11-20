@@ -5783,6 +5783,16 @@ def check_sms_holder_policy(contexts: list[str], policies: tuple[bytes, ...], se
     if found != {"activity_service"}:
         fail(f"{SMS_WAKE} may find {sorted(found)}; it needs only ['activity_service']")
 
+    # The handoff socket: init makes it and binds it and does not listen on it, so the holder listens and accepts on it
+    # itself (a socket that is only bound polls as hung up and takes no connection).
+    own: set[str] = set()
+    for rule in rules_of("unix_stream_socket"):
+        if SMS_LISTENER in rule.sources and (rule.targets is None or SMS_LISTENER in rule.targets):
+            own |= rule.permissions
+    if {"accept", "listen"} - own:
+        fail(f"{SMS_LISTENER} may not {sorted({'accept', 'listen'} - own)} on its own unix socket: init binds the "
+             "handoff socket and does not listen on it, so the holder could not take the service's connection")
+
     # The handoff: the service alone connects to the holder's unix socket, writes its file and takes the descriptor.
     for rule in rules_of("unix_stream_socket"):
         if rule.targets is not None and SMS_LISTENER in rule.targets and "connectto" in rule.permissions \

@@ -512,7 +512,8 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         "(allow kernarium_sms kernarium_sms_listener (fd (use)))\n"
         "(allow kernarium_sms kernarium_sms_socket (sock_file (write)))\n"
         "(allow kernarium_sms kernarium_sms_listener (unix_stream_socket (connectto)))\n"
-        "(allow kernarium_sms_listener self (unix_stream_socket (accept getattr getopt read write)))\n"
+        # Init makes and binds the handoff socket and does not listen on it: the holder does.
+        "(allow kernarium_sms_listener self (unix_stream_socket (accept getattr getopt listen read write)))\n"
         "(allow init kernarium_sms_listener (unix_stream_socket (create bind listen)))\n"
         "(allow kernarium_sms_listener ctl_kernarium_sms_wake_prop (property_service (set)))\n"
         "(allow kernarium_sms_listener property_socket (sock_file (write)))\n"
@@ -626,6 +627,17 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         ext = ext.replace("(allow kernarium_sms kernarium_sms_listener (unix_stream_socket (connectto)))\n", "")
     elif variant == "handoff-file-written-by-another":
         ext += "(allow untrusted_app kernarium_sms_socket (sock_file (write)))\n"
+    elif variant == "handoff-holder-cannot-listen":
+        ext = ext.replace("(unix_stream_socket (accept getattr getopt listen read write))",
+                          "(unix_stream_socket (accept getattr getopt read write))")
+    elif variant == "handoff-holder-cannot-accept":
+        ext = ext.replace("(unix_stream_socket (accept getattr getopt listen read write))",
+                          "(unix_stream_socket (getattr getopt listen read write))")
+    elif variant == "handoff-holder-listens-by-its-own-name":
+        # The same right, spelt with the holder's own name as the target instead of self: still the holder's.
+        ext = ext.replace("(allow kernarium_sms_listener self (unix_stream_socket (accept getattr getopt listen read write)))",
+                          "(allow kernarium_sms_listener self (unix_stream_socket (accept getattr getopt read write)))\n"
+                          "(allow kernarium_sms_listener kernarium_sms_listener (unix_stream_socket (listen)))")
     elif variant == "handoff-service-cannot-write-the-file":
         ext = ext.replace("(allow kernarium_sms kernarium_sms_socket (sock_file (write)))\n", "")
     elif variant == "handoff-fd-use-by-another":
@@ -6602,6 +6614,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "kernarium_sms may not connect to the socket of kernarium_sms_listener"),
             ("sms-handoff-file-written-by-another", {"sms_policy_variant": "handoff-file-written-by-another"},
              "\\['untrusted_app'\\] may write kernarium_sms_socket: only kernarium_sms does"),
+            ("sms-handoff-holder-cannot-listen", {"sms_policy_variant": "handoff-holder-cannot-listen"},
+             "kernarium_sms_listener may not \\['listen'\\] on its own unix socket"),
+            ("sms-handoff-holder-cannot-accept", {"sms_policy_variant": "handoff-holder-cannot-accept"},
+             "kernarium_sms_listener may not \\['accept'\\] on its own unix socket"),
             ("sms-handoff-service-cannot-write-the-file", {"sms_policy_variant": "handoff-service-cannot-write-the-file"},
              "kernarium_sms may not write kernarium_sms_socket"),
             ("sms-handoff-fd-use-by-another", {"sms_policy_variant": "handoff-fd-use-by-another"},
@@ -7352,6 +7368,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         for label, options, appended in (
             ("oldapp-per-domain-reads", {"oldswitch_variant": "per-domain-reads"}, b""),
             ("oldapp-preoptimized-code", {"oldswitch_variant": "preopt-code"}, b""),
+            # The holder's right to listen on its own handoff socket, spelt with its own name as the target.
+            ("sms-handoff-holder-listens-by-its-own-name", {"sms_policy_variant": "handoff-holder-listens-by-its-own-name"}, b""),
             # The built text message application's manifest carries the <uses-sdk> the build injects, with the
             # platform's levels as numbers (the baseline) or as codenames, and a maximum level.
             ("sms-uses-sdk-codenames", {"sms_service_variant": "apk-uses-sdk-codenames"}, b""),
@@ -8247,7 +8265,7 @@ def verify_sms_holder(android_root: Path) -> None:
         "init_daemon_domain(kernarium_sms_listener)",
         "allow kernarium_sms_listener self:vsock_socket { create bind listen };",
         "allow init kernarium_sms_listener:unix_stream_socket { create bind listen };",
-        "allow kernarium_sms_listener self:unix_stream_socket { accept getattr getopt read write };",
+        "allow kernarium_sms_listener self:unix_stream_socket { accept getattr getopt listen read write };",
         "system_internal_prop(ctl_kernarium_sms_wake_prop)",
         "set_prop(kernarium_sms_listener, ctl_kernarium_sms_wake_prop)",
     ):

@@ -34,6 +34,8 @@ namespace {
 
 constexpr unsigned kPort = 5560;
 constexpr int kBacklog = 4;
+// The handoff socket takes one connection at a time, the service's.
+constexpr int kHandoffBacklog = 2;
 // The control property that starts the waker, a oneshot service of init (kernarium_sms_wake.sh).
 constexpr const char* kWakeProperty = "ctl.start";
 constexpr const char* kWakeService = "kernarium_sms_wake";
@@ -242,6 +244,13 @@ int main() {
     }
     fcntl(handoff, F_SETFD, FD_CLOEXEC);
     fcntl(handoff, F_SETFL, fcntl(handoff, F_GETFL) | O_NONBLOCK);
+    // Init creates and binds a stream socket and does not listen on it: that is the daemon's. A socket that is only
+    // bound polls as hung up and takes no connection, which would end the holder at once, in a loop.
+    if (listen(handoff, kHandoffBacklog) != 0) {
+        ALOGE("cannot listen on the handoff socket %s: errno %d", kHandoffSocket, errno);
+        sleep(1);
+        return 1;
+    }
     Holder holder{android::base::unique_fd(handoff)};
     const int status = holder.run();
     ALOGE("the holder stopped (status %d)", status);

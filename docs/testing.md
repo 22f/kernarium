@@ -1359,8 +1359,14 @@ platform's socket classes, serving the descriptor it is given and ending when th
 port has been quiet for the idle window. The stand-ins make public only what the
 platform's public API has, and a row lists it, so that a call of a hidden member
 fails there as it does in the image build. `Delivery` and `HostService` (the
-broadcasts, the inbox, the handoff and the socket calls) and the holder daemon
-(`overlay/sms/listener`) need a built image.
+broadcasts, the inbox, the handoff and the socket calls) need a built image.
+`android17-sms-holder` (tooling; skipped without `clang++`) compiles the holder
+daemon (`overlay/sms/listener/main.cpp`) as it is, with the flags of the image
+build, against stand-ins for the bionic pieces macOS lacks, and runs it on the
+host: the handoff socket as init makes it (bound and not listening, so the holder
+listens on it itself), the vsock port as a unix socket, the waker's property, the
+descriptor passed to the service alone (its user and domain checked), a second
+connection during a session, and the next wake after the session ends.
 `android-vulkan-smoke` (integration) registers when `UML_ANDROID_VULKAN_SMOKE_RELEASE`
 names a release and runs the image's `kernarium_vk_ahb_import` in a guest: hardware
 buffers imported and read back, and the guest memory file descriptors

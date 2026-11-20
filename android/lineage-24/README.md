@@ -521,7 +521,8 @@ connection waits and no session runs, it sets the control property that starts
 `kernarium_sms_wake`, a script in a second domain that asks the activity manager
 to start the service as the system user; the service then takes the listening
 socket from the holder over its unix socket (`/dev/socket/kernarium_sms`), which
-only the service's domain may connect to. `KernariumSms` (`overlay/sms/`) is a
+only the service's domain may connect to; init makes and binds that socket and
+does not listen on it, so the holder listens on it itself. `KernariumSms` (`overlay/sms/`) is a
 system application with one non-exported, non-persistent service in a third
 domain. It serves the connections from the host's CID 2 alone, ends 30 s after
 the last message, and with it its process: nothing of it is resident in between.
