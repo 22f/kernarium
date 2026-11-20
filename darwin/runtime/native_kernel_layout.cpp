@@ -104,6 +104,17 @@ NativeKernelPlacement native_kernel_placement(
 #endif
 }
 
+bool reserve_process_heap() noexcept
+{
+	if (::uml::memory::HeapRegion::instance().reserve())
+		return true;
+	std::fprintf(stderr,
+		"UML: cannot reserve the %llu-byte host heap region\n",
+		static_cast<unsigned long long>(
+			::uml::memory::HeapRegion::reservation()));
+	return false;
+}
+
 bool native_guest_memory_mappable(const NativeKernelLayout &layout,
 	std::size_t guest_memory) noexcept
 {
@@ -117,17 +128,6 @@ bool native_guest_memory_mappable(const NativeKernelLayout &layout,
 		~static_cast<std::uintptr_t>(DARWIN_UML_GUEST_PAGE_SIZE - 1U);
 	if (ram < guest_memory || ram > window)
 		return false;
-	/* The kernel's mapping of its RAM takes the first block from the
-	 * process's heap region, which a process with little address space may
-	 * find no room for once the window holds its share: asked here, the
-	 * failure ends the run with a result instead of the kernel's exit. */
-	if (!::uml::memory::HeapRegion::instance().reserve()) {
-		std::fprintf(stderr,
-			"UML: cannot reserve the %llu-byte host heap region\n",
-			static_cast<unsigned long long>(
-				::uml::memory::HeapRegion::reservation()));
-		return false;
-	}
 	if (ram <= guest_ram_trial_skip)
 		return true;
 	/* The host maps whole host pages: the span is the host pages the RAM

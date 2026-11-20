@@ -76,11 +76,13 @@ never returns address space while the process lives: the first run reserves it
 once (`runtime::reserve_process_native_window`) and every later run takes the
 same window. Guest pages are mapped over it with `MAP_FIXED`, and releasing one
 hands its range back as a reservation, never with `munmap`, which would let an
-unrelated `mmap(NULL)` take the gap. Before the kernel starts, a run maps its
-RAM in the window as the kernel will and hands the range back to the
-reservation (`runtime::native_guest_memory_mappable`), after it has reserved
-the process's heap region, whose first block the kernel's mapping takes: a host
-that will not reserve the window or the region or map the RAM ends the run with
+unrelated `mmap(NULL)` take the gap. Before the kernel starts, a run reserves
+the process's heap region (`runtime::reserve_process_heap`), whose first block
+the kernel's mapping takes, before its window, so that a refusal of either
+leaves nothing of the run and a smaller guest tried next has the room; it then
+maps its RAM in the window as the kernel will and hands the range back to the
+reservation (`runtime::native_guest_memory_mappable`). A host that will not
+reserve the region or the window or map the RAM ends the run with
 `-UML_EMULATOR_OUT_OF_MEMORY`, which leaves the process's guest unspent, where
 the kernel would end the process. Guest RAM that a host-service view still
 borrows stays mapped until the last view is released. The linear physical window

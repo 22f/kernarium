@@ -164,13 +164,24 @@ struct NativeKernelPlacement final {
 [[nodiscard]] NativeKernelLayout reserve_process_native_window(
 	const NativeKernelLayout &geometry, WindowPlacement placement) noexcept;
 
+/* Reserves the process's heap region now, before the process's window.
+ *
+ * The kernel's mapping of its RAM takes its first block from the region, which
+ * is a reservation of its own (HeapRegion) and is lazy: a process with little
+ * address space (an iOS application without Extended Virtual Addressing) can
+ * have no room for it once the window holds its share. Asked first, a refusal
+ * leaves nothing of this run in the process, and a smaller guest tried next
+ * finds the whole of the address space the window takes, where a window
+ * reserved first would stay (it is never released while a guest may use it)
+ * and take the heap's room with it. True when the region is reserved, now or
+ * before; false, with a line on stderr, where the host has no room for it. The
+ * caller holds the process address-space gate. */
+[[nodiscard]] bool reserve_process_heap() noexcept;
+
 /* Whether the host maps the guest's RAM in this layout's window. The kernel
  * maps its RAM over the reservation with one read-write mapping and, where the
  * host refuses it, can only exit, which ends the process; a refusal is known
  * here, before the kernel starts, and the run fails with a result of its own.
- * The host refuses it where the process does not have the address space for
- * it: for the window, for the process's heap region (reserved here, as the
- * kernel's mapping would take its first block from it) or for the RAM itself.
  *
  * It makes that mapping, at the place and the size the kernel does, and gives
  * the range back to the window's reservation in place, so that the window is

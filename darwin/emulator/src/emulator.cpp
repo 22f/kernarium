@@ -347,6 +347,9 @@ constexpr std::uintptr_t default_test_native_window_start = 0;
 #endif
 std::atomic<std::uintptr_t> test_native_kernel_window_start{
 	default_test_native_window_start};
+/* Where the pre-start RAM trial of a run is made, instead of in the run's
+ * window; 0 for the window. */
+std::atomic<std::uintptr_t> test_guest_ram_trial_start{0};
 #endif
 
 /* Where a run's native kernel window goes: the product's placement, or in the
@@ -374,6 +377,23 @@ std::atomic<std::uintptr_t> test_native_kernel_window_start{
 	}
 #endif
 	return ::uml::runtime::prepare_native_kernel_layout(guest_memory);
+}
+
+/* The layout the pre-start RAM trial is made in: the run's own. A test
+ * variant can make it elsewhere, where the host maps no RAM. */
+[[nodiscard]] ::uml::runtime::NativeKernelLayout guest_ram_trial_layout(
+	::uml::runtime::NativeKernelLayout layout) noexcept
+{
+#if UML_EMULATOR_TESTING
+	if (const auto start =
+		    test_guest_ram_trial_start.load(std::memory_order_acquire);
+	    start != 0) {
+		const auto length = layout.window_end - layout.window_start;
+		layout.window_start = start;
+		layout.window_end = start + length;
+	}
+#endif
+	return layout;
 }
 
 class ProcessAddressSpaceAdmission final {
@@ -456,6 +476,11 @@ void set_linked_kernel(const void *start, std::size_t size) noexcept
 void place_native_kernel_window(std::uintptr_t start) noexcept
 {
 	test_native_kernel_window_start.store(start, std::memory_order_release);
+}
+
+void place_guest_ram_trial(std::uintptr_t start) noexcept
+{
+	test_guest_ram_trial_start.store(start, std::memory_order_release);
 }
 
 void set_guest_hand_back_hook(GuestHandBackHook hook, void *context) noexcept
@@ -638,6 +663,13 @@ public:
 		 * and removes it when the run returns, however the guest ended. */
 		const ::uml::device::GuestConsoleRun console_run{
 			!prepared.informational && prepared.host_console_directory};
+		/* The process's heap region is reserved before its window, so that a
+		 * refusal of either leaves nothing of this run behind and a smaller
+		 * guest, tried next, finds the room a window of this size would have
+		 * kept (reserve_process_heap). */
+		if (!prepared.informational &&
+		    !::uml::runtime::reserve_process_heap())
+			return -UML_EMULATOR_OUT_OF_MEMORY;
 		const auto native_layout = run_native_kernel_layout(
 			prepared.guest_memory_bytes);
 		/* A host that has not the address space or the memory limit for
@@ -650,7 +682,8 @@ public:
 				-UML_EMULATOR_INVALID_ARGUMENT;
 		if (!prepared.informational &&
 		    !::uml::runtime::native_guest_memory_mappable(
-			    native_layout, prepared.guest_memory_bytes))
+			    guest_ram_trial_layout(native_layout),
+			    prepared.guest_memory_bytes))
 			return -UML_EMULATOR_OUT_OF_MEMORY;
 		const ::uml::runtime::NativeKernelLayoutScope layout_scope{
 			native_layout};
