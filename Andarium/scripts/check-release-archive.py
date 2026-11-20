@@ -14,7 +14,17 @@ archive, and no other build is checked. The application must:
     X (1 to 15 letters, digits and underscores), and the placeholder that
     Config/Developer.local.xcconfig.example names, in any letter case, are
     refused: a copy of the example that nobody edited would otherwise ship a
-    link to it.
+    link to it;
+  - keep nothing of the machine that built it in the host code of its
+    executable and of each embedded framework: no path under a home
+    directory, on a mounted volume or in a temporary build directory (the
+    guest's own sections, which carry a kernel built elsewhere, are not host
+    code), and no linker debug map in an embedded framework (the executable's
+    is stripped when Xcode archives);
+  - carry no test bundle and none of the frameworks and libraries that run
+    one (XCTest, XCUIAutomation, Swift Testing); and
+  - link no test-support library (AndariumCoreTestSupport and its like): the
+    code only tests and the probe tools use.
 """
 
 from __future__ import annotations
@@ -22,8 +32,10 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import os
 import plistlib
 import re
+import struct
 import sys
 from pathlib import Path
 
@@ -35,6 +47,44 @@ FOLLOW_X_HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}")
 # What Config/Developer.local.xcconfig.example names, and the handle the tests
 # and the screen captures state: no archive links to it.
 FOLLOW_X_EXAMPLE = "example_handle"
+
+
+# What a path names about the machine that built the code: the account whose
+# home directory held the checkout, the volume that held the checkout or the
+# dependency prefixes, and the build's temporary directories. A bare
+# "/Volumes/" or a format such as "/Volumes/%s" is no path of a build and does
+# not match.
+HOST_PATHS = (
+    ("a path under a home directory",
+     re.compile(rb"/Users/[A-Za-z0-9._-]+/[\x21-\x7e]*")),
+    ("a path on a mounted volume",
+     re.compile(rb"/Volumes/[A-Za-z0-9._ -]+/[\x21-\x7e]*")),
+    ("a path in a temporary build directory",
+     re.compile(rb"/(?:private/)?var/folders/[\x21-\x7e]+")),
+)
+# Sections that hold the guest, not the host: the Linux kernel image a runtime
+# carries, and the boot files of a Linux runtime.
+GUEST_SECTIONS = {("__TEXT", "__uml_elf"), ("__TEXT", "__uml_boot_base"), ("__TEXT", "__uml_boot_init")}
+
+# What runs tests: a test bundle, and the frameworks and libraries that load it
+# (XCTest, XCUIAutomation and the rest, Swift Testing), and a library of test
+# support. They are in an application that `xcodebuild test` hosted.
+TEST_SUPPORT = re.compile(
+    r"^(?:.*\.xctest|XC[A-Za-z]*\.framework|libXC[A-Za-z]*\.dylib"
+    r"|_?Testing(?:_[A-Za-z0-9]+)?\.framework|lib_?Testing[A-Za-z0-9_]*\.dylib"
+    r"|[A-Za-z0-9_]*TestSupport[A-Za-z0-9_]*\.framework|lib[A-Za-z0-9_]*TestSupport[A-Za-z0-9_]*\.dylib)$")
+# The test-support library that only tests and the probe tool link
+# (Andarium/AndariumCore/Package.swift), by its name as it appears in a linked
+# binary: the module name, in Swift's mangled names and in plain text.
+TEST_SUPPORT_LIBRARIES = (b"AndariumCoreTestSupport",)
+
+MACHO_64 = 0xFEEDFACF
+FAT_MAGIC = 0xCAFEBABE
+CPU_TYPE_ARM64 = 0x0100000C
+LC_SEGMENT_64 = 0x19
+LC_SYMTAB = 0x2
+N_STAB = 0xE0
+N_OSO = 0x66
 
 
 def emit(text: str, error: bool = False) -> None:
@@ -62,6 +112,168 @@ def follow_x_problems(info: dict) -> list[str]:
     return []
 
 
+def thin_offset(data: bytes) -> int | None:
+    """The offset of the arm64 slice of a Mach-O file; None for any other file."""
+    if len(data) < 8:
+        return None
+    if struct.unpack_from(">I", data, 0)[0] == FAT_MAGIC:
+        count = struct.unpack_from(">I", data, 4)[0]
+        for index in range(min(count, 16)):
+            cpu, _sub, offset, _size, _align = struct.unpack_from(">IIIII", data, 8 + 20 * index)
+            if cpu == CPU_TYPE_ARM64:
+                return offset
+        return None
+    return 0 if struct.unpack_from("<I", data, 0)[0] == MACHO_64 else None
+
+
+def guest_ranges(data: bytes, base: int) -> list[tuple[int, int]]:
+    """File ranges of the sections that hold the guest."""
+    found = []
+    count = struct.unpack_from("<I", data, base + 16)[0]
+    position = base + 32
+    for _ in range(count):
+        command, size = struct.unpack_from("<II", data, position)
+        if command == LC_SEGMENT_64:
+            sections = struct.unpack_from("<I", data, position + 64)[0]
+            entry = position + 72
+            for _ in range(sections):
+                name = data[entry:entry + 16].rstrip(b"\0").decode()
+                segment = data[entry + 16:entry + 32].rstrip(b"\0").decode()
+                length, offset = struct.unpack_from("<QI", data, entry + 40)
+                if (segment, name) in GUEST_SECTIONS:
+                    found.append((base + offset, base + offset + length))
+                entry += 80
+        position += size
+    return found
+
+
+def host_code(path: Path) -> tuple[bytes, int] | None:
+    """The bytes of one Mach-O file with the guest's sections blanked, and the
+    offset of its arm64 slice; None for a file that is not an arm64 Mach-O."""
+    data = path.read_bytes()
+    base = thin_offset(data[:4096])
+    if base is None:
+        return None
+    buffer = bytearray(data)
+    for start, end in guest_ranges(data, base):
+        buffer[start:end] = bytes(end - start)
+    return bytes(buffer), base
+
+
+def symbol_table(data: bytes, base: int) -> tuple[int, int, int, int] | None:
+    """The symbol table of a Mach-O: the offset and count of its struct
+    nlist_64 entries, and the offset and size of its string table."""
+    count = struct.unpack_from("<I", data, base + 16)[0]
+    position = base + 32
+    for _ in range(count):
+        command, size = struct.unpack_from("<II", data, position)
+        if command == LC_SYMTAB:
+            offset, symbols, strings, strings_size = struct.unpack_from("<IIII", data, position + 8)
+            return base + offset, symbols, base + strings, strings_size
+        position += size
+    return None
+
+
+def debug_stabs(data: bytes, base: int) -> tuple[int, int]:
+    """The debug stabs in a Mach-O's symbol table, and how many of them are
+    N_OSO, each of which names an object file."""
+    table = symbol_table(data, base)
+    if table is None:
+        return 0, 0
+    offset, symbols, _strings, _size = table
+    # struct nlist_64 is 16 bytes and n_type is its fifth.
+    kinds = data[offset + 4:offset + 16 * symbols:16]
+    return sum(1 for kind in kinds if kind & N_STAB), kinds.count(N_OSO)
+
+
+def without_debug_map(data: bytes, base: int) -> bytes:
+    """The Mach-O with the strings of its debug stabs blanked: the names of the
+    objects, sources and functions the linker recorded. A framework that
+    carries them fails for that, and Xcode strips them from the application's
+    own executable when it archives, so neither is a path the build host left
+    in the code."""
+    table = symbol_table(data, base)
+    if table is None:
+        return data
+    offset, symbols, strings, size = table
+    buffer = bytearray(data)
+    for entry in range(symbols):
+        string, kind = struct.unpack_from("<IB", data, offset + 16 * entry)
+        if kind & N_STAB and 0 < string < size:
+            end = data.find(b"\0", strings + string, strings + size)
+            if end > 0:
+                buffer[strings + string:end] = bytes(end - strings - string)
+    return bytes(buffer)
+
+
+def build_host_traces(path: Path, debug_map: bool) -> list[str]:
+    """What one Mach-O file keeps of the machine that built it. `debug_map`
+    says whether its debug stabs count: they do for a framework, whose binary
+    ships as linked. The strings of the stabs are never searched for a path: a
+    framework with a debug map fails on the map, and the application's own
+    executable loses it when Xcode archives."""
+    code = host_code(path)
+    if code is None:
+        return []
+    data, base = code
+    found = []
+    stabs, objects = debug_stabs(data, base) if debug_map else (0, 0)
+    if stabs:
+        found.append(
+            f"carries the linker's debug map ({stabs} stabs, {objects} N_OSO "
+            "object paths); strip -S it after dsymutil")
+    data = without_debug_map(data, base)
+    for label, pattern in HOST_PATHS:
+        paths = sorted({match.decode() for match in pattern.findall(data)})
+        if paths:
+            found.append(
+                f"names {label} ({len(paths)}): "
+                f"{paths[0][:80]}{' ...' if len(paths) > 1 else ''}")
+    return found
+
+
+def linked_test_support(path: Path) -> list[str]:
+    """The test-support libraries whose code is in one Mach-O file."""
+    code = host_code(path)
+    if code is None:
+        return []
+    return [name.decode() for name in TEST_SUPPORT_LIBRARIES if name in code[0]]
+
+
+def executables_of(bundle: Path) -> list[Path]:
+    """The executable of one bundle, if its Info.plist names one."""
+    try:
+        with (bundle / "Info.plist").open("rb") as handle:
+            name = plistlib.load(handle).get("CFBundleExecutable")
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return []
+    return [bundle / name] if isinstance(name, str) and (bundle / name).is_file() else []
+
+
+def executables(app: Path) -> list[Path]:
+    """The executables of the application and of its embedded frameworks."""
+    return [
+        binary
+        for bundle in [app, *sorted((app / "Frameworks").glob("*.framework"))]
+        for binary in executables_of(bundle)
+    ]
+
+
+def test_support(app: Path) -> list[str]:
+    """The test bundles, test frameworks and test-support libraries anywhere in
+    the application."""
+    found = []
+    for directory, directories, files in os.walk(app):
+        for name in list(directories):
+            if TEST_SUPPORT.match(name):
+                found.append(str((Path(directory) / name).relative_to(app)))
+                directories.remove(name)
+        found.extend(
+            str((Path(directory) / name).relative_to(app))
+            for name in files if TEST_SUPPORT.match(name))
+    return sorted(found)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("app", type=Path, help="the built application bundle")
@@ -76,6 +288,16 @@ def main() -> int:
         return 1
 
     problems = [f"{app.name}: {problem}" for problem in follow_x_problems(info)]
+    for binary in executables(app):
+        name = binary.relative_to(app)
+        # The application's own executable is stripped when Xcode archives it.
+        problems.extend(
+            f"{name}: {trace}" for trace in build_host_traces(binary, debug_map=binary.parent != app))
+        problems.extend(
+            f"{name}: links {library}, which only tests link" for library in linked_test_support(binary))
+    problems.extend(
+        f"{path}: a test bundle or test framework; archive the application without its tests"
+        for path in test_support(app))
     for problem in problems:
         emit(problem, error=True)
     if problems:

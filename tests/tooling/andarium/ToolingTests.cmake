@@ -92,8 +92,10 @@ uml_add_tooling_test(
 
 # What any archive of Release must satisfy beyond its embedded artifacts
 # (scripts/check-release-archive.py, run by the same build phase): a profile
-# link to X only with the developer's own handle. The fixtures are application
-# bundles that change one thing each.
+# link to X only with the developer's own handle, none of the build host's
+# paths or a linker debug map in the host code, no test bundle or test
+# framework, and no linked test-support library. The fixtures are application
+# bundles, some around small linked libraries, that change one thing each.
 uml_add_tooling_test(
     NAME andarium-release-archive
     COMMAND ${Python3_EXECUTABLE} -B

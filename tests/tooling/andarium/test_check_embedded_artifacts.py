@@ -1073,6 +1073,20 @@ class BuildPhaseTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stderr, "")
 
+    def test_a_build_host_path_stops_a_release_archive_only(self) -> None:
+        # The same phase holds the executable to the paths of the machine that built it.
+        fixture = Fixture(self.root)
+        fixture.write_info(fixture.app, CFBundleExecutable="Andarium")
+        (fixture.app / "Andarium").write_bytes(macho({"__text": b"/Users/NAME/work/file.c\0"}))
+        for build in self.BUILDS:
+            with self.subTest(build):
+                result = self.run_phase(*build, fixture)
+                if build == self.CHECKED:
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("names a path under a home directory", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_an_archive_with_no_follow_handle_or_the_developers_own_passes(self) -> None:
         fixture = Fixture(self.root)
         for info in ({}, {"AndariumFollowXHandle": ""}, {"AndariumFollowXHandle": "a_developer"}):

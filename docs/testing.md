@@ -620,7 +620,8 @@ keeps every developer-owned `*.local.xcconfig` of Andarium out of Git
 (`andarium-local-config-ignore`), the copy-mode document pickers
 (`andarium-document-pickers`), what any archive of Release must satisfy
 beyond its embedded artifacts (`andarium-release-archive`: the profile link to
-X) and the stand-in
+X, the build host's paths and debug map, test bundles and linked test
+support) and the stand-in
 debugger that serves the JIT's request for executable memory on a device
 (`andarium-ios-jit-debugger`). The JIT's region route has host tests that run
 on macOS (`arm64-jit-debugger-region`, `arm64-jit-debugger-request` for a

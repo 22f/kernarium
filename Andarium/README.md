@@ -241,7 +241,12 @@ the iPad harness reads, as Debug does. A launch that sets no `ANDARIUM_` or
   in the ignored `Config/Local/`. The same build phase of an archive runs
   [`scripts/check-release-archive.py`](scripts/check-release-archive.py), which
   refuses a handle that is not a handle of X and the placeholder of
-  `Developer.local.xcconfig.example` in any letter case; no handle is no link.
+  `Developer.local.xcconfig.example` in any letter case (no handle is no
+  link); a home, volume or temporary-directory path in the host code of the
+  executable or of an embedded framework (the guest's sections are not host
+  code); the linker's debug map in an embedded framework; a test bundle or
+  the frameworks that run tests (XCTest, XCUIAutomation, Swift Testing); and a
+  linked test-support library (`AndariumCoreTestSupport`).
 
 An archive is made after the steps of [Build](#build), with
 `xcodebuild -project Andarium/Andarium.xcodeproj -scheme Andarium archive`.
