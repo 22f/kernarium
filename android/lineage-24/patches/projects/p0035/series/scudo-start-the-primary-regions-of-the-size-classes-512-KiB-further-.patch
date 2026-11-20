@@ -19,15 +19,19 @@ step; only the 64-bit Android configurations set it, and a static_assert
 keeps all the offsets within an eighth of a region. The offset is part of
 RegionBeg, so the existing check that the mapped range ends within the
 region already accounts for it, and the existing random page offset is
-kept. The batch class keeps its capacity because exhausting it is fatal:
-after the regions are shuffled, its region starts half a step past its
-base whatever its slot, which still keeps its first blocks off those of
-the other classes. An application sees different addresses, and each
-other class's region now holds up to 16 MiB less: the class in the last
-slot maps 239.75 MiB instead of 255.75 MiB before its allocations fall
-back to a larger class and then to the secondary, so a process that
-holds about 240 MB in one size class can reach the secondary earlier.
-The 32-bit configuration uses the 32-bit primary and is not touched.
+kept. Exhausting the batch class is fatal, so it does not take the
+offset of its slot: after the regions are shuffled, its region starts
+half a step (256 KiB) past its base, which still keeps its first blocks
+off those of the other classes. It gives up one 256 KiB mapping step and
+can map 255.50 MiB instead of 255.75 MiB, which is more than its
+worst-case need of about 248 MiB. The half step assumes that the class
+offset is an even number of pages, as 512 KiB is. An application sees
+different addresses, and each other class's region now holds up to 16
+MiB less: the class in the last slot maps 239.75 MiB instead of 255.75
+MiB before its allocations fall back to a larger class and then to the
+secondary, so a process that holds about 240 MB in one size class can
+reach the secondary earlier. The 32-bit configuration uses the 32-bit
+primary and is not touched.
 ---
  config/custom_scudo_config.h    |  4 ++++
  standalone/allocator_config.def |  8 ++++++++
