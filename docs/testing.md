@@ -430,9 +430,9 @@ buttons, text that scales with the content size category, a menu's items as
 UIKit elements) is disabled there with its reason and shows as skipped. The
 tests run on an iOS 26 and an iOS 27 Simulator; a row that asserts what only
 iOS 27 does (an alert's preferred action, a toolbar button's inner label, a
-popover card's width and, from the foldable phone's iOS 27.1, a sheet's custom
-detent on the iPad) expects the earlier system's value or leaves that case out
-below it. The scheme's Test action pins English, so the tests that read the
+popover card's width, a sheet's custom detent on the iPad, the rows an iPad
+shows at once) expects the earlier system's value or leaves that case out below
+iOS 27; from iOS 27 it asserts the full value. The scheme's Test action pins English, so the tests that read the
 application's words do not depend on the language of the device;
 `LocalizationTests` names a lost pin and looks each language up by name, and
 the language a `-testLanguage` run asks for fails only the tests that read the

@@ -70,8 +70,12 @@ final class AddToHomeUITests: XCTestCase {
         XCTAssertTrue(comet.waitForExistence(timeout: 10), "no row for Comet Hop")
         // Every row reads as the command it leads to, and in the order it is shown.
         let rows = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Add \u{201C}'"))
-        // The rows on screen: an iPad shows eight on iOS 27 and seven on iOS 26, whose rows are taller.
-        XCTAssertGreaterThanOrEqual(rows.count, 7)
+        // The rows on screen: iOS 26's rows are taller, so an iPad shows seven of them where iOS 27 shows eight.
+        if #available(iOS 27.0, *) {
+            XCTAssertGreaterThanOrEqual(rows.count, 8)
+        } else {
+            XCTAssertGreaterThanOrEqual(rows.count, 7)
+        }
         let first = rows.element(boundBy: 0)
         XCTAssertEqual(first.label, cometLabel)
         let frames = (0..<min(rows.count, 8)).map { rows.element(boundBy: $0).frame.minY }
