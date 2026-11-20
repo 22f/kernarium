@@ -67,9 +67,12 @@ final class AddToHomeUITests: XCTestCase {
 
     /// Shortcuts' own list of actions, searched for Andarium's. The action and its automatic shortcut
     /// are declared @available(iOS 27.0, *), so Shortcuts offers "Open Android App" from iOS 27 and
-    /// not before. The search is proved first with an action every system has (Open App), so that an
-    /// absence is not a search that did not run. The extracted metadata says the same of the build
-    /// (`andarium-open-intent-availability`).
+    /// not before. Shortcuts runs in the Simulator's language, not the test's, so nothing here reads
+    /// a label of Shortcuts' own: the new shortcut's editor is opened by its URL, its search of
+    /// actions is the one search field, and the words searched are names that no language
+    /// translates ("Safari" proves the search works, "Android" is in Andarium's title in each of its
+    /// languages). A result is a button or a cell; the text that says nothing was found is neither.
+    /// The extracted metadata says the same of the build (`andarium-open-intent-availability`).
     func testShortcutsOffersOpenAndroidAppFromIOS27Only() throws {
         var offered = false
         if #available(iOS 27.0, *) { offered = true }
@@ -82,37 +85,36 @@ final class AddToHomeUITests: XCTestCase {
             attachment.lifetime = .keepAlways
             add(attachment)
         }
-        // The first launch may show what is new.
-        let next = shortcuts.buttons["Continue"]
-        if next.waitForExistence(timeout: 8) { next.tap() }
-        // A new shortcut, and its list of actions.
-        let create = shortcuts.buttons.matching(NSPredicate(
-            format: "label IN {'Add', 'New Shortcut', 'Create Shortcut', 'New'}")).firstMatch
-        XCTAssertTrue(create.waitForExistence(timeout: 30), "Shortcuts has no button for a new shortcut: \(shortcuts.debugDescription)")
-        create.tap()
-        let addAction = shortcuts.descendants(matching: .any).matching(NSPredicate(
-            format: "label CONTAINS[c] 'Add Action'")).firstMatch
-        XCTAssertTrue(addAction.waitForExistence(timeout: 20), "no Add Action: \(shortcuts.debugDescription)")
-        addAction.tap()
+        XCUIDevice.shared.system.open(try XCTUnwrap(URL(string: "shortcuts://create-shortcut")))
         let search = shortcuts.searchFields.firstMatch
-        XCTAssertTrue(search.waitForExistence(timeout: 20), "no search of actions: \(shortcuts.debugDescription)")
+        let found = search.waitForExistence(timeout: 40)
+        attachScreen("editor")
+        XCTAssertTrue(found, "the new shortcut's editor has no search of actions: \(shortcuts.debugDescription)")
         search.tap()
-        func result(_ name: String) -> XCUIElement {
-            shortcuts.descendants(matching: .any).matching(NSPredicate(
-                format: "label CONTAINS[c] %@", name)).firstMatch
+        func results(naming word: String) -> XCUIElementQuery {
+            let rows = shortcuts.cells.matching(NSPredicate(format: "label CONTAINS[c] %@", word))
+            let buttons = shortcuts.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", word))
+            return rows.count > 0 ? rows : buttons
         }
-        search.typeText("Open App")
-        XCTAssertTrue(result("Open App").waitForExistence(timeout: 30), "the search of actions found no Open App: \(shortcuts.debugDescription)")
+        func forget(_ typed: String) {
+            search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: typed.count))
+        }
+        search.typeText("Safari")
+        let control = NSPredicate { _, _ in results(naming: "Safari").count > 0 }
+        let proved = XCTWaiter().wait(for: [expectation(for: control, evaluatedWith: nil)], timeout: 40)
         attachScreen("search-control")
-        search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "Open App".count))
-        search.typeText("Open Android App")
+        XCTAssertEqual(proved, .completed, "the search of actions found no Safari: \(shortcuts.debugDescription)")
+        forget("Safari")
+        search.typeText("Android")
         if offered {
-            XCTAssertTrue(result("Open Android App").waitForExistence(timeout: 30), "Shortcuts does not offer Open Android App: \(shortcuts.debugDescription)")
+            let present = NSPredicate { _, _ in results(naming: "Android").count > 0 }
+            let outcome = XCTWaiter().wait(for: [expectation(for: present, evaluatedWith: nil)], timeout: 40)
+            XCTAssertEqual(outcome, .completed, "Shortcuts does not offer Open Android App: \(shortcuts.debugDescription)")
         } else {
             sleep(15)
-            XCTAssertFalse(result("Open Android App").exists, "Shortcuts offers Open Android App: \(shortcuts.debugDescription)")
+            XCTAssertEqual(results(naming: "Android").count, 0, "Shortcuts offers Open Android App: \(shortcuts.debugDescription)")
         }
-        attachScreen("search-open-android-app")
+        attachScreen("search-android")
     }
 
     func testTheRowTheChooserAndTheGuideOfTheBuiltApplication() throws {
