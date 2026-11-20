@@ -211,9 +211,102 @@ void installRouteHooks()
         method_getTypeEncoding(format));
 }
 
+// The observers of an engine's configuration changes that are registered, by
+// token, so that a test sees one that no owner removed. A token the sink kept
+// leaves the table when it is removed from the center; one it dropped stays,
+// registered for good.
+std::mutex observersLock;
+NSHashTable* engineObservers = [NSHashTable weakObjectsHashTable];
+
+[[nodiscard]] std::size_t registeredEngineObservers()
+{
+    const std::lock_guard guard(observersLock);
+    return engineObservers.count;
+}
+
+// How many of the next connections of a player to its engine raise, as one
+// does before iOS 27 when the engine's format has changed.
+std::atomic<int> connectsToRaise {};
+
+void raiseTheConnection()
+{
+    if (connectsToRaise.load() > 0) {
+        --connectsToRaise;
+        [NSException raise:NSInternalInconsistencyException
+                    format:@"the player could not be connected"];
+    }
+}
+
+void installObserverHooks()
+{
+    Method add = class_getInstanceMethod([NSNotificationCenter class],
+        @selector(addObserverForName:object:queue:usingBlock:));
+    using Add = id (*)(id, SEL, NSNotificationName, id, NSOperationQueue*,
+        void (^)(NSNotification*));
+    static const auto addOriginal =
+        reinterpret_cast<Add>(method_getImplementation(add));
+    method_setImplementation(add, imp_implementationWithBlock(
+        ^id(id center, NSNotificationName name, id object,
+            NSOperationQueue* queue, void (^block)(NSNotification*)) {
+          id token = addOriginal(center,
+              @selector(addObserverForName:object:queue:usingBlock:), name,
+              object, queue, block);
+          if (token != nil &&
+              [name isEqualToString:AVAudioEngineConfigurationChangeNotification]) {
+              const std::lock_guard guard(observersLock);
+              [engineObservers addObject:token];
+          }
+          return token;
+        }));
+
+    Method remove = class_getInstanceMethod(
+        [NSNotificationCenter class], @selector(removeObserver:));
+    using Remove = void (*)(id, SEL, id);
+    static const auto removeOriginal =
+        reinterpret_cast<Remove>(method_getImplementation(remove));
+    method_setImplementation(remove,
+        imp_implementationWithBlock(^(id center, id observer) {
+          if (observer != nil) {
+              const std::lock_guard guard(observersLock);
+              [engineObservers removeObject:observer];
+          }
+          removeOriginal(center, @selector(removeObserver:), observer);
+        }));
+
+    // Both connections: the one that reports its failure (iOS 27) and the one
+    // that raises it.
+    Method connect = class_getInstanceMethod(
+        [AVAudioEngine class], @selector(connect:to:format:));
+    using Connect = void (*)(id, SEL, AVAudioNode*, AVAudioNode*, AVAudioFormat*);
+    static const auto connectOriginal =
+        reinterpret_cast<Connect>(method_getImplementation(connect));
+    method_setImplementation(connect, imp_implementationWithBlock(
+        ^(id engine, AVAudioNode* from, AVAudioNode* to, AVAudioFormat* format) {
+          raiseTheConnection();
+          connectOriginal(
+              engine, @selector(connect:to:format:), from, to, format);
+        }));
+    Method reporting = class_getInstanceMethod(
+        [AVAudioEngine class], @selector(connect:to:format:error:));
+    if (reporting != nullptr) {
+        using Reporting = BOOL (*)(id, SEL, AVAudioNode*, AVAudioNode*,
+            AVAudioFormat*, NSError* __autoreleasing*);
+        static const auto reportingOriginal =
+            reinterpret_cast<Reporting>(method_getImplementation(reporting));
+        method_setImplementation(reporting, imp_implementationWithBlock(
+            ^BOOL(id engine, AVAudioNode* from, AVAudioNode* to,
+                AVAudioFormat* format, NSError* __autoreleasing* error) {
+              raiseTheConnection();
+              return reportingOriginal(engine,
+                  @selector(connect:to:format:error:), from, to, format, error);
+            }));
+    }
+}
+
 void installHooks()
 {
     installRouteHooks();
+    installObserverHooks();
     Method hint = class_getInstanceMethod([AVAudioSession class],
         @selector(secondaryAudioShouldBeSilencedHint));
     method_setImplementation(hint, imp_implementationWithBlock(^BOOL(id) {
@@ -1698,6 +1791,42 @@ void aPlayerThatDidNotStartIsNotTakenForPlaying()
         "the failure is reported");
 }
 
+// A connection that raises while the sink makes the engine that replaces one
+// that lost its route. The engine's observer is registered before the
+// connection, and it must still end with the sink.
+void aConnectionThatRaisesLeavesNoObserverBehind()
+{
+    StderrCapture lines;
+    routeComesBack();
+    otherAudioPlaying = false;
+    const auto registered = registeredEngineObservers();
+    {
+        Stream stream;
+        check(stream.open(), "the stream opens before the connection raises");
+        const auto seen = stream.window(300ms, 600ms);
+        check(seen.playing(), "the stream plays before the connection raises",
+            seen.text());
+        stream.reset();
+        routeGoesDown();
+        postEngineChanges();
+        stream.idle(300ms);
+        routeComesBack();
+        connectsToRaise = 1;
+        (void)stream.open();
+        stream.idle(500ms);
+        check(connectsToRaise.load() == 0,
+            "the connection of the engine that replaced the lost one raised");
+        stream.close();
+    }
+    connectsToRaise = 0;
+    const auto left = registeredEngineObservers();
+    check(left == registered,
+        "no observer of an engine outlives the sink",
+        std::to_string(left) + " registered, " + std::to_string(registered) +
+            " before");
+    (void)lines.finish();
+}
+
 // The guest resumes before the app is active, and the system would not
 // activate the session yet: the stream plays muted and the sink asks again
 // every second, then plays.
@@ -1785,6 +1914,7 @@ int main()
         routeLostDuringTheHandback();
         aStreamThatFailedForGoodStaysFailed();
         aPlayerThatDidNotStartIsNotTakenForPlaying();
+        aConnectionThatRaisesLeavesNoObserverBehind();
         refusedActivationAtStartIsTriedAgain();
         aSessionThatNeverActivatesIsReported();
     }

@@ -307,13 +307,21 @@ struct Output final {
     output.engine = [[AVAudioEngine alloc] init];
     output.observer = observeEngine(output.engine, number, notifications);
     output.player = [[AVAudioPlayerNode alloc] init];
-    [output.engine attachNode:output.player];
-    if (format != nil && outputRouteUp(output.engine)) {
-        NSError* error = nil;
-        if (connectPlayer(output.engine, output.player, format, &error)) {
-            [output.engine prepare];
-            output.connected = true;
+    @try {
+        [output.engine attachNode:output.player];
+        if (format != nil && outputRouteUp(output.engine)) {
+            NSError* error = nil;
+            if (connectPlayer(output.engine, output.player, format, &error)) {
+                [output.engine prepare];
+                output.connected = true;
+            }
         }
+    } @catch (NSException*) {
+        // Before iOS 27 a connection that fails raises. The pair is returned
+        // as it is, unconnected, with its observer: an exception that left
+        // here would drop the observer's token, and the registration would
+        // outlive every owner that could remove it.
+        output.connected = false;
     }
     return output;
 }
