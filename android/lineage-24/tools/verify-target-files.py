@@ -855,9 +855,10 @@ RECLAIM_APPS = (
     ("com.android.providers.telephony", ("com.android.phone",)),
     ("com.kernarium.icons", ("com.kernarium.icons",)),
 )
+RECLAIM_KILL = 'cmd activity kill --user 0 "$pkg"'
 RECLAIM_SCRIPT_REQUIRED = (
     "dumpsys activity lru",
-    'cmd activity kill --user 0 "$pkg"',
+    RECLAIM_KILL,
     RECLAIM_SETTLE,
 )
 RECLAIM_SCRIPT_FORBIDDEN = (
@@ -872,6 +873,10 @@ RECLAIM_SCRIPT_FORBIDDEN = (
     "set-inactive",
     "stop-app",
 )
+# Outside the one reviewed kill, the script runs nothing that ends a process (a command word, not part
+# of a dotted name), and it assigns the list once.
+RECLAIM_OTHER_KILL = re.compile(r"(?<![\w.])(?:kill|pkill|killall|am)(?![\w.])|force-stop")
+RECLAIM_LIST_ASSIGNMENT = re.compile(r"\breclaim_list\s*\+?=")
 RECLAIM_LIST = re.compile(r"^reclaim_list='\n(.*?)^'$", re.MULTILINE | re.DOTALL)
 RECLAIM_TRANSITION = re.compile(
     rb"^\(typetransition init(?:_[0-9]+)? kernarium_reclaim_boot_apps_exec process "
@@ -4628,6 +4633,15 @@ def check_reclaim_boot_apps(rc_payload: str, script: bytes) -> None:
                 f"{executable} contains '{token}': it may only kill the cached processes of "
                 "the reviewed list, which keeps alarms, jobs and bindings"
             )
+    kills = code.count(RECLAIM_KILL)
+    if kills != 1:
+        fail(f"{executable} holds the reviewed kill {kills} times, not once")
+    other = RECLAIM_OTHER_KILL.search(code.replace(RECLAIM_KILL, "").replace(RECLAIM_SETTLE, ""))
+    if other is not None:
+        fail(
+            f"{executable} contains '{other.group(0)}': it may only kill the cached processes of "
+            "the reviewed list, with the one reviewed command"
+        )
     listed = RECLAIM_LIST.search(text)
     if listed is None:
         fail(f"{executable} has no reclaim_list block")
@@ -4641,6 +4655,9 @@ def check_reclaim_boot_apps(rc_payload: str, script: bytes) -> None:
             f"{executable} lists {entries}, not the reviewed packages {RECLAIM_APPS}: "
             "a change to the list is a reviewed change to this verifier too"
         )
+    assignments = len(RECLAIM_LIST_ASSIGNMENT.findall(code))
+    if assignments != 1:
+        fail(f"{executable} assigns reclaim_list {assignments} times, not once: the list is the reviewed block")
 
 
 def check_reclaim_boot_apps_policy(system_ext_policy: bytes, system_ext_file_contexts: bytes) -> None:

@@ -43,43 +43,92 @@ note() {
     log -t "$tag" -p i "$*"
 }
 
+# The shell's globbing and word splitting must not touch what the listing says.
+set -f
+nl='
+'
+
+# One row of the listing, for example
+#   "#29: cch  + 5 CEM  --------- 1587:.adservices/u0a104" or
+#   "# 9: cch  +15 CEM  --------- 1583:com.android.localtransport/1000".
+# Sets label (the adjustment), row_name (the complete process name, which may itself hold
+# a colon: "<package>:<name>") and row_user0 (set for a process of user 0: a system uid
+# is printed bare, an application as u0a<n> and an isolated process as u0i<n>).
+parse_row() {
+    row_name=""
+    row_user0=""
+    set -- $1
+    if [ "$1" = "#" ]; then
+        label=$3
+    else
+        label=$2
+    fi
+    for field in "$@"; do
+        case "$field" in
+            [0-9]*:*/*)
+                pid=${field%%:*}
+                case "$pid" in *[!0-9]*) continue ;; esac
+                rest=${field#*:}
+                row_name=${rest%/*}
+                uid=${rest##*/}
+                case "$uid" in
+                    u0a*|u0i*) row_user0=1 ;;
+                    ""|*[!0-9]*) ;;
+                    *) row_user0=1 ;;
+                esac
+                return
+                ;;
+        esac
+    done
+}
+
 sleep "$settle"
 
-lru=$(dumpsys activity lru 2>/dev/null)
-if [ -z "$lru" ]; then
-    note "no process list: nothing reclaimed"
-    exit 1
-fi
-
-echo "$reclaim_list" | while read -r pkg processes; do
-    [ -n "$pkg" ] || continue
+failed=0
+IFS=$nl
+for entry in $reclaim_list; do
+    unset IFS
+    set -- $entry
+    pkg=$1
+    shift
+    processes=$*
+    # The decision is made from a listing taken for this package, not from one taken before the
+    # earlier packages were handled.
+    lru=$(dumpsys activity lru 2>/dev/null </dev/null)
+    if [ -z "$lru" ]; then
+        note "$pkg left alone: no process list"
+        failed=1
+        continue
+    fi
     cached=""
     busy=""
     kept=""
     for proc in $processes; do
-        line=$(echo "$lru" | grep -F ":$proc/")
-        [ -n "$line" ] || continue
-        set -- $line
-        # "#29: cch ..." and "# 9: cch ..."
-        if [ "$1" = "#" ]; then
-            label=$3
-        else
-            label=$2
-        fi
-        case "$label" in
-            cch*) cached="$cached $proc" ;;
-            svc|svcb|prev|home) busy="$busy $proc:$label" ;;
-            *) kept="$kept $proc:$label" ;;
-        esac
+        IFS=$nl
+        for line in $lru; do
+            unset IFS
+            parse_row "$line"
+            # The whole process name, of user 0, and every row that has it.
+            [ "$row_name" = "$proc" ] && [ -n "$row_user0" ] || continue
+            case "$label" in
+                cch*) cached="$cached $proc" ;;
+                svc|svcb|prev|home) busy="$busy $proc:$label" ;;
+                *) kept="$kept $proc:$label" ;;
+            esac
+        done
+        unset IFS
     done
     if [ -n "$busy" ]; then
         note "$pkg left alone, not cached:$busy"
     elif [ -z "$cached" ]; then
         note "$pkg has no cached process (kept:${kept:- none})"
     else
-        out=$(cmd activity kill --user 0 "$pkg" 2>&1)
+        out=$(cmd activity kill --user 0 "$pkg" 2>&1 </dev/null)
         rc=$?
-        note "$pkg killed cached$cached (kept:${kept:- none}) rc=$rc $out"
+        # The command says nothing of whether a process ended: a process that left the cached
+        # state since the listing is not touched, and neither is one that is not the activity
+        # manager's to end.
+        note "$pkg asked to end cached$cached (kept:${kept:- none}) rc=$rc $out"
     fi
 done
-exit 0
+exit "$failed"

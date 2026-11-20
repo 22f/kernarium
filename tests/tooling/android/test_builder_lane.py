@@ -2183,9 +2183,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 ).read_text()
                 for variant, (old, new) in {
                     "no-kill": ('cmd activity kill --user 0 "$pkg"', "true"),
-                    "kill-all": ("exit 0\n", "cmd activity kill-all\nexit 0\n"),
-                    "force-stop": ("exit 0\n", 'cmd activity force-stop "$pkg"\nexit 0\n'),
-                    "kill-9": ("exit 0\n", "kill -9 1234\nexit 0\n"),
+                    "kill-all": ("tag=kernarium_reclaim_boot_apps\n", "tag=kernarium_reclaim_boot_apps\ncmd activity kill-all\n"),
+                    "force-stop": ("tag=kernarium_reclaim_boot_apps\n", 'tag=kernarium_reclaim_boot_apps\ncmd activity force-stop "$pkg"\n'),
+                    "kill-9": ("tag=kernarium_reclaim_boot_apps\n", "tag=kernarium_reclaim_boot_apps\nkill -9 1234\n"),
+                    "pkill": ("tag=kernarium_reclaim_boot_apps\n", 'tag=kernarium_reclaim_boot_apps\npkill -f "$pkg"\n'),
+                    "kill-pid": ("tag=kernarium_reclaim_boot_apps\n", "tag=kernarium_reclaim_boot_apps\nkill -TERM 1234\n"),
+                    "am-command": ("tag=kernarium_reclaim_boot_apps\n", 'tag=kernarium_reclaim_boot_apps\nam kill "$pkg"\n'),
+                    "second-kill": ("tag=kernarium_reclaim_boot_apps\n", 'tag=kernarium_reclaim_boot_apps\ncmd activity kill --user 0 "$pkg"\n'),
+                    "second-list": ("tag=kernarium_reclaim_boot_apps\n", 'reclaim_list="$reclaim_list\ncom.example.app com.example.app"\ntag=kernarium_reclaim_boot_apps\n'),
                     "extra-package": ("com.android.rkpdapp com.android.rkpdapp\n",
                                       "com.android.rkpdapp com.android.rkpdapp\ncom.example.app com.example.app\n"),
                     "missing-package": ("com.stevesoltys.seedvault com.stevesoltys.seedvault\n", ""),
@@ -4519,6 +4524,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("reclaim-kill-all", {"reclaim_variant": "kill-all"}),
             ("reclaim-force-stop", {"reclaim_variant": "force-stop"}),
             ("reclaim-kill-9", {"reclaim_variant": "kill-9"}),
+            ("reclaim-pkill", {"reclaim_variant": "pkill"}),
+            ("reclaim-kill-pid", {"reclaim_variant": "kill-pid"}),
+            ("reclaim-am-command", {"reclaim_variant": "am-command"}),
+            ("reclaim-second-kill", {"reclaim_variant": "second-kill"}),
+            ("reclaim-second-list", {"reclaim_variant": "second-list"}),
             ("reclaim-extra-package", {"reclaim_variant": "extra-package"}),
             ("reclaim-missing-package", {"reclaim_variant": "missing-package"}),
             ("reclaim-missing-messaging", {"reclaim_variant": "missing-messaging"}),
@@ -5602,6 +5612,16 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "contains 'force-stop': it may only kill the cached processes"),
             ("reclaim-kill-9-cause", {"reclaim_variant": "kill-9"},
              "contains 'kill -9': it may only kill the cached processes"),
+            ("reclaim-pkill-cause", {"reclaim_variant": "pkill"},
+             "contains 'pkill': it may only kill the cached processes"),
+            ("reclaim-kill-pid-cause", {"reclaim_variant": "kill-pid"},
+             "contains 'kill': it may only kill the cached processes"),
+            ("reclaim-am-command-cause", {"reclaim_variant": "am-command"},
+             "contains 'am': it may only kill the cached processes"),
+            ("reclaim-second-kill-cause", {"reclaim_variant": "second-kill"},
+             "holds the reviewed kill 2 times, not once"),
+            ("reclaim-second-list-cause", {"reclaim_variant": "second-list"},
+             "assigns reclaim_list 2 times, not once"),
             ("reclaim-extra-package-cause", {"reclaim_variant": "extra-package"},
              "lists .*com.example.app.*not the reviewed packages"),
             ("reclaim-missing-package-cause", {"reclaim_variant": "missing-package"},
@@ -7884,9 +7904,15 @@ def verify_reclaim_boot_apps(android_root: Path) -> None:
     product = (android_root / "overlay/lineage_andarium.mk").read_text()
     if len(re.findall(r"^PRODUCT_PACKAGES \+= kernarium_reclaim_boot_apps_script$", product, re.M)) != 1:
         fail("lineage_andarium.mk does not add the reclaim script to PRODUCT_PACKAGES exactly once")
-    verifier.check_reclaim_boot_apps((tools / "kernarium_reclaim_boot_apps.rc").read_text(), script.read_bytes())
+    reclaim_rc = (tools / "kernarium_reclaim_boot_apps.rc").read_text()
+    verifier.check_reclaim_boot_apps(reclaim_rc, script.read_bytes())
+    script_text = script.read_text()
+    packages = [entry[0] for entry in verifier.RECLAIM_APPS]
 
-    lru = "\n".join((
+    def listing(*rows: str) -> str:
+        return "\n".join(("ACTIVITY MANAGER LRU PROCESSES (dumpsys activity lru)", "  Other:", *rows)) + "\n"
+
+    base = "\n".join((
         "ACTIVITY MANAGER LRU PROCESSES (dumpsys activity lru)",
         "  Activities:",
         "  #30: fg       TOP  LCMNFUATI 1155:com.android.launcher3/u0a86 act:activities|recents",
@@ -7896,10 +7922,10 @@ def verify_reclaim_boot_apps(android_root: Path) -> None:
         "  #28: vis      BFGS LCMNFUATI 1321:android.ext.services/u0a104",
         # cached, one digit index
         "  # 9: cch  +15 CEM  --------- 1583:com.android.localtransport/1000",
-        # a started service: `kill` would take it, so the package is left alone
+        # a started service: the activity manager would end it, so the package is left alone
         "  #20: svc      SVC  --------- 1800:com.android.rkpdapp/u0a121",
         "  #21: cch  + 5 CEM  --------- 1840:com.android.statementservice/u0a89",
-        # not cached and `kill` leaves it: nothing to reclaim
+        # not cached and the activity manager leaves it: nothing to reclaim
         "  #22: prcp + 1 IMPB -------TI 1632:com.stevesoltys.seedvault/u0a85",
         # not listed
         "  #23: cch  + 5 CEM  --------- 1999:com.example.unlisted/u0a200",
@@ -7911,78 +7937,178 @@ def verify_reclaim_boot_apps(android_root: Path) -> None:
         # the icon renderer's provider, cached after the last listing; its isolated worker is another process
         "  #33: cch  + 9 CEM  --------- 1900:com.kernarium.icons/u0a30",
         "  #34: cch  +10 CEM  --------- 1901:com.kernarium.icons:IconRenderService/u0i1",
-    ))
-    with tempfile.TemporaryDirectory(prefix="reclaim-script-") as temporary:
-        stubs = Path(temporary)
-        calls = stubs / "calls"
-        for name, body in {
-            "dumpsys": f'[ "$*" = "activity lru" ] || exit 2\ncat {stubs}/lru\n',
-            "cmd": f'echo "cmd $*" >> {calls}\necho Killed\n',
-            "log": f'echo "log $*" >> {calls}\n',
-            "sleep": f'echo "sleep $*" >> {calls}\n',
-        }.items():
-            (stubs / name).write_text("#!/bin/sh\n" + body)
-            (stubs / name).chmod(0o755)
-        (stubs / "lru").write_text(lru + "\n")
-        env = {"PATH": f"{stubs}:/usr/bin:/bin"}
-        result = subprocess.run(["/bin/sh", str(script)], env=env, capture_output=True, text=True)
-        if result.returncode != 0:
-            fail(f"the reclaim script exited {result.returncode}: {result.stderr}")
-        recorded = calls.read_text().splitlines()
-        if recorded[0] != "sleep 120":
-            fail(f"the reclaim script does not wait 120 s first: {recorded[:1]}")
-        kills = [line for line in recorded if line.startswith("cmd ")]
-        expected = [
-            "cmd activity kill --user 0 android.ext.services",
-            "cmd activity kill --user 0 com.android.localtransport",
-            "cmd activity kill --user 0 com.android.statementservice",
-            "cmd activity kill --user 0 com.android.messaging",
-            "cmd activity kill --user 0 com.android.providers.telephony",
-            "cmd activity kill --user 0 com.kernarium.icons",
-        ]
-        if kills != expected:
-            fail(f"the reclaim script killed {kills}, not {expected}")
-        text = "\n".join(recorded)
-        for needle in (
+    )) + "\n"
+    # (name, listings, expected kills, log lines). The listings are what `dumpsys activity lru` answers to the 1st,
+    # 2nd, ... call; the last one answers every later call.
+    scenarios = (
+        ("the cached processes of the listed packages", [base], [
+            "android.ext.services", "com.android.localtransport", "com.android.statementservice",
+            "com.android.messaging", "com.android.providers.telephony", "com.kernarium.icons"], [
             "com.android.rkpdapp left alone, not cached: com.android.rkpdapp:svc",
             "com.stevesoltys.seedvault has no cached process (kept: com.stevesoltys.seedvault:prcp)",
-            "android.ext.services killed cached .adservices (kept: android.ext.services:vis)",
+            "android.ext.services asked to end cached .adservices (kept: android.ext.services:vis)",
             "com.android.federatedcompute.services has no cached process (kept: none)",
-            "com.android.messaging killed cached com.android.messaging (kept: none)",
-            "com.android.providers.telephony killed cached com.android.phone (kept: none)",
-            "com.kernarium.icons killed cached com.kernarium.icons (kept: none)",
-        ):
-            if needle not in text:
-                fail(f"the reclaim script did not log '{needle}': {text}")
-        # An icon renderer that a listing holds (the shell tool's hold on its provider keeps the process above
-        # cached) is left alone, and Messaging in the foreground is too.
-        (stubs / "lru").write_text("\n".join((
-            "ACTIVITY MANAGER LRU PROCESSES (dumpsys activity lru)",
-            "  Other:",
+            "com.android.messaging asked to end cached com.android.messaging (kept: none)",
+            "com.android.providers.telephony asked to end cached com.android.phone (kept: none)",
+            "com.kernarium.icons asked to end cached com.kernarium.icons (kept: none)"]),
+        # An icon renderer that a listing holds (the shell tool's hold on its provider keeps the process above cached)
+        # is left alone, and Messaging in the foreground is too.
+        ("a held renderer and a foreground Messaging", [listing(
             "  #33: fg       FGS  --------- 1900:com.kernarium.icons/u0a30",
             "  #34: cch  +10 CEM  --------- 1901:com.kernarium.icons:IconRenderService/u0i1",
-            "  #35: fg       TOP  LCMNFUATI 1870:com.android.messaging/u0a95 act:activities|recents",
-        )) + "\n")
-        calls.unlink()
-        result = subprocess.run(["/bin/sh", str(script)], env=env, capture_output=True, text=True)
-        if result.returncode != 0:
-            fail(f"the reclaim script exited {result.returncode}: {result.stderr}")
-        recorded = calls.read_text().splitlines()
-        if any(line.startswith("cmd ") for line in recorded):
-            fail(f"the reclaim script killed a held renderer or the foreground application: {recorded}")
-        text = "\n".join(recorded)
-        for needle in (
+            "  #35: fg       TOP  LCMNFUATI 1870:com.android.messaging/u0a95 act:activities|recents")], [], [
             "com.kernarium.icons has no cached process (kept: com.kernarium.icons:fg)",
-            "com.android.messaging has no cached process (kept: com.android.messaging:fg)",
-        ):
-            if needle not in text:
-                fail(f"the reclaim script did not log '{needle}': {text}")
+            "com.android.messaging has no cached process (kept: com.android.messaging:fg)"]),
+        # The process name is compared whole: another application's private process is named
+        # <its package>:<name>, and it neither makes the provider's process look busy nor cached.
+        ("another application's private process named like the provider's, in the foreground, listed first", [listing(
+            "  #40: fg       SVC  --------- 2300:com.example.app:com.android.phone/u0a200",
+            "  #32: cch  + 8 CEM  --------- 1860:com.android.phone/1001")], ["com.android.providers.telephony"], [
+            "com.android.providers.telephony asked to end cached com.android.phone (kept: none)"]),
+        ("another application's private process named like the provider's, cached, listed first", [listing(
+            "  #40: cch  + 5 CEM  --------- 2300:com.example.app:com.android.phone/u0a200",
+            "  #32: prev     LAST --------I 1860:com.android.phone/1001")], [], [
+            "com.android.providers.telephony left alone, not cached: com.android.phone:prev"]),
+        # Only user 0's rows count: the kill is for user 0.
+        ("another user's cached Messaging listed before user 0's previous Messaging", [listing(
+            "  #40: cch  + 5 CEM  --------- 2400:com.android.messaging/u10a86",
+            "  #26: prev     LAST --------I 1870:com.android.messaging/u0a95")], [], [
+            "com.android.messaging left alone, not cached: com.android.messaging:prev"]),
+        ("another user's previous Messaging listed before user 0's cached Messaging", [listing(
+            "  #40: prev     LAST --------I 2400:com.android.messaging/u10a86",
+            "  #26: cch  + 7 CEM  --------- 1870:com.android.messaging/u0a95")], ["com.android.messaging"], [
+            "com.android.messaging asked to end cached com.android.messaging (kept: none)"]),
+        # Every row of the process counts: one that is not cached keeps the package, whatever comes first.
+        ("two user 0 rows of a process, the cached one first", [listing(
+            "  #40: cch  + 5 CEM  --------- 2500:com.android.messaging/u0a99",
+            "  #26: svc      SVC  --------- 1870:com.android.messaging/u0a95")], [], [
+            "com.android.messaging left alone, not cached: com.android.messaging:svc"]),
+        # A package or a process name that only starts or ends like a listed one is not that process.
+        ("processes whose names start or end like a listed process", [listing(
+            "  #40: cch  + 5 CEM  --------- 2600:com.android.messaging.demo/u0a97",
+            "  #41: cch  + 5 CEM  --------- 2601:org.example.com.android.messaging/u0a98",
+            "  #42: cch  + 5 CEM  --------- 2602:com.android.phone.helper/u0a99",
+            "  #43: cch  + 5 CEM  --------- 2603:x.com.android.phone/u0a99")], [], [
+            "com.android.messaging has no cached process (kept: none)",
+            "com.android.providers.telephony has no cached process (kept: none)"]),
+        # Each package is decided from a listing made for it: Messaging is cached in the first listing and the
+        # previous app in every later one.
+        ("a process that leaves the cached state after the first listing", [listing(
+            "  #31: cch  + 7 CEM  --------- 1870:com.android.messaging/u0a95",
+            "  #32: cch  + 8 CEM  --------- 1860:com.android.phone/1001"), listing(
+            "  #31: prev     LAST --------I 1870:com.android.messaging/u0a95",
+            "  #32: cch  + 8 CEM  --------- 1860:com.android.phone/1001")], ["com.android.providers.telephony"], [
+            "com.android.messaging left alone, not cached: com.android.messaging:prev"]),
         # No process list, no kills.
-        (stubs / "lru").write_text("")
-        calls.unlink()
-        result = subprocess.run(["/bin/sh", str(script)], env=env, capture_output=True, text=True)
-        if result.returncode == 0 or any(line.startswith("cmd ") for line in calls.read_text().splitlines()):
-            fail("the reclaim script acts without a process list")
+        ("no process list", [""], [], [f"{package} left alone: no process list" for package in packages]),
+    )
+
+    def run_reclaim(text: str, listings: list[str]) -> tuple[int, list[str], list[str], list[str], int]:
+        """The script on stub tools. dumpsys answers each call with the next listing; cmd records the kill it is
+        asked for and log what the script says. A tool that ends a process and that the script has no business
+        with is a stub that records the call and fails, first in PATH, and the shell's own kill is a function: a
+        mutated script never runs the host's tools."""
+        with tempfile.TemporaryDirectory(prefix="reclaim-script-") as temporary:
+            stubs = Path(temporary)
+            calls = stubs / "calls"
+            for number, answer in enumerate(listings, 1):
+                (stubs / f"lru.{number}").write_text(answer)
+            bodies = {
+                "dumpsys": (
+                    '[ "$*" = "activity lru" ] || exit 2\n'
+                    f'echo "dumpsys $*" >> {calls}\n'
+                    f'n=$(cat {stubs}/count 2>/dev/null || echo 0); n=$((n + 1)); echo $n > {stubs}/count\n'
+                    f'last={len(listings)}; [ $n -le $last ] || n=$last\n'
+                    f'cat {stubs}/lru.$n\n'),
+                "cmd": f'echo "cmd $*" >> {calls}\necho Killed\n',
+                "log": f'echo "log $*" >> {calls}\n',
+                "sleep": f'echo "sleep $*" >> {calls}\n',
+            }
+            for name in ("kill", "pkill", "killall", "pidof", "ps", "am", "toybox", "toolbox"):
+                bodies[name] = f'echo "FORBIDDEN {name} $*" >> {calls}\nexit 99\n'
+            for name, body in bodies.items():
+                (stubs / name).write_text("#!/bin/sh\n" + body)
+                (stubs / name).chmod(0o755)
+            wrapper = (f'kill() {{ echo "FORBIDDEN kill $*" >> {calls}; return 99; }}; . "$1"')
+            (stubs / "script.sh").write_text(text)
+            result = subprocess.run(["/bin/sh", "-c", wrapper, "sh", str(stubs / "script.sh")],
+                                    env={"PATH": f"{stubs}:/usr/bin:/bin"}, capture_output=True, text=True,
+                                    input="", cwd=temporary)
+            recorded = calls.read_text().splitlines() if calls.exists() else []
+            kills = [line.split()[-1] for line in recorded if line.startswith("cmd activity kill --user 0 ")]
+            other = [line for line in recorded if line.startswith("cmd ") and not line.startswith("cmd activity kill --user 0 ")]
+            forbidden = [line for line in recorded if line.startswith("FORBIDDEN")] + other
+            listings_taken = sum(1 for line in recorded if line.startswith("dumpsys "))
+            return result.returncode, kills, recorded, forbidden, listings_taken
+
+    def reclaim_problem(text: str, first_only: bool = False) -> str | None:
+        """What the script does wrong on the scenarios (all of them, one line each; with first_only up to the first
+        scenario that goes wrong), or None."""
+        problems = []
+        for name, listings, expected, needles in scenarios:
+            if first_only and problems:
+                break
+            code, kills, recorded, forbidden, taken = run_reclaim(text, listings)
+            joined = "\n".join(recorded)
+            if forbidden:
+                problems.append(f"{name}: the script ran something outside the reviewed kill: {forbidden}")
+            if recorded[:1] != ["sleep 120"]:
+                problems.append(f"{name}: the script does not wait 120 s first: {recorded[:1]}")
+            if kills != list(expected):
+                problems.append(f"{name}: the script killed {kills}, not {expected}")
+            if name == "no process list":
+                if code == 0:
+                    problems.append(f"{name}: the script exits 0 without a process list")
+            elif code != 0:
+                problems.append(f"{name}: the script exited {code}")
+            for needle in needles:
+                if needle not in joined:
+                    problems.append(f"{name}: the script did not log '{needle}'")
+            if "killed cached" in joined:
+                problems.append(f"{name}: the script claims a kill that only the activity manager can say happened")
+            # One listing for each package, taken for it.
+            if taken != len(packages):
+                problems.append(f"{name}: the script took {taken} listings for {len(packages)} packages")
+        return "\n  ".join(problems) or None
+
+    problem = reclaim_problem(script_text)
+    if problem:
+        fail(f"the reclaim script:\n  {problem}")
+
+    # Every mutation of the script that the review named must fail the verifier or a scenario above. A fix that no
+    # test would notice losing is not held.
+    kill_line = 'out=$(cmd activity kill --user 0 "$pkg" 2>&1 </dev/null)'
+    mutations = {
+        "an extra pkill by pattern": (kill_line, 'pkill -0 -f "^never-$pkg-x$"\n        ' + kill_line),
+        "an extra kill of the pid of a package": (kill_line, 'kill -TERM $(pidof "$pkg")\n        ' + kill_line),
+        "an extra am command": (kill_line, 'am kill "$pkg"\n        ' + kill_line),
+        "a second assignment to the list": (
+            "tag=kernarium_reclaim_boot_apps\n",
+            'reclaim_list="$reclaim_list\ncom.example.extra com.example.extra"\ntag=kernarium_reclaim_boot_apps\n'),
+        "a process name matched by its end": (
+            '[ "$row_name" = "$proc" ]', '[ "${row_name%"$proc"}" != "$row_name" ]'),
+        "a process name matched by its start": (
+            '[ "$row_name" = "$proc" ]', '[ "${row_name#"$proc"}" != "$row_name" ]'),
+        "rows of every user": ('[ -n "$row_user0" ]', "true"),
+        "the first row of a process decides": (
+            '                *) kept="$kept $proc:$label" ;;\n            esac\n',
+            '                *) kept="$kept $proc:$label" ;;\n            esac\n            break\n'),
+        "a log line that claims a kill": ("asked to end cached", "killed cached"),
+        "one listing for every package": (
+            "lru=$(dumpsys activity lru 2>/dev/null </dev/null)",
+            '[ -n "$lru" ] || lru=$(dumpsys activity lru 2>/dev/null </dev/null)'),
+    }
+    for title, (old, new) in mutations.items():
+        if old not in script_text:
+            fail(f"the reclaim script lacks '{old}' for the mutation '{title}'")
+        mutated = script_text.replace(old, new, 1)
+        try:
+            verifier.check_reclaim_boot_apps(reclaim_rc, mutated.encode())
+            caught = reclaim_problem(mutated, first_only=True)
+        except (SystemExit, Exception) as problem_found:  # the verifier's fail() raises its own error
+            caught = f"the verifier: {problem_found}"
+        if not caught:
+            fail(f"neither the verifier nor the scenarios notice: {title}")
 
 
 def verify_time_zone(android_root: Path) -> None:
