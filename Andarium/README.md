@@ -1359,10 +1359,20 @@ is on. `AndariumCore/Adb` speaks the protocol.
   ([`android/lineage-24`](../android/lineage-24/README.md)) through
   `AndroidAppsTool` and `AndroidAppRefresh` in `AndariumCore`, and is cached by
   `AndroidAppStore` (catalog, icons, and a small record per icon that survives
-  an erase), so the tiles and the chooser answer while Android is off. The row
-  exists only in a normal session whose image has the tool. A Mac and a Vision
-  Pro have no Home Screen: there the intent runs, but the apps are no entities,
-  nothing is written to Spotlight and the tiles are not told of them. An icon
+  an erase), so the tiles and the chooser answer while Android is off. The
+  automatic listing of a run is its first: it is made 60 s after Android
+  reports its boot complete, so that nothing starts in the guest while it
+  settles, and again when a pause for space that kept it from being made is
+  over. Earlier asks come from opening the chooser, from an installed app, from
+  a launch that found its app missing, and, at once and with its app still
+  opening, from the request that began the boot for an app the cached list does
+  not name. The row is offered in a normal session until a listing finds that
+  the image has no tool. A Mac and a Vision Pro have no Home Screen: there the
+  intent runs, but the apps are no entities, nothing is written to Spotlight,
+  the tiles are not told of them, and Android is asked only when an app is
+  opened by name: every open takes one listing, with no icons, before it
+  resolves the app, and a launch that found its app missing lists again to
+  learn why. The guest is asked for one listing at a time. An icon
   is stored only as a picture the host drew itself (`FlatteningAppsTool`), and a
   label as the tool's own sanitising makes it, whatever the tool or the cache
   file says.

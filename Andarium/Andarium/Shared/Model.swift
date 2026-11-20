@@ -1851,7 +1851,7 @@ final class AppModel {
             }
         }
         // A request to open an Android app that started this boot opens now,
-        // and the app list is brought up to date once.
+        // and the app list is brought up to date once the guest has settled.
         androidAppsBootFinished(recovery: kind == .recovery)
     }
 
