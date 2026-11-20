@@ -55,6 +55,16 @@ uml_add_tooling_test(
     LABELS andarium
     TIMEOUT 60)
 
+# The developer-owned local settings of Andarium stay ignored whatever their
+# name, and the tracked examples stay visible to Git.
+uml_add_tooling_test(
+    NAME andarium-local-config-ignore
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_local_config_ignore.py
+        --root ${PROJECT_SOURCE_DIR}
+    LABELS andarium
+    TIMEOUT 60)
+
 # The release build refuses an embedded artifact that is behind the commit it
 # archives; the fixtures build a repository, a staged system and an application
 # with a kernel carrying a banner and a configuration, and change one thing each.

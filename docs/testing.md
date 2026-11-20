@@ -615,7 +615,9 @@ device slice it packages), the application's own touch feedback
 (`andarium-interface-feedback`: no view plays it around the one modifier; that
 a launch silencing haptics silences it, on both model paths of a launch, is
 held by the hosted `LaunchEnvironmentTests` and `CapabilitiesFlowTests`),
-the Acknowledgements resource (`andarium-acknowledgements`) and the stand-in
+the Acknowledgements resource (`andarium-acknowledgements`), the ignore rule that
+keeps every developer-owned `*.local.xcconfig` of Andarium out of Git
+(`andarium-local-config-ignore`) and the stand-in
 debugger that serves the JIT's request for executable memory on a device
 (`andarium-ios-jit-debugger`). The JIT's region route has host tests that run
 on macOS (`arm64-jit-debugger-region`, `arm64-jit-debugger-request` for a
