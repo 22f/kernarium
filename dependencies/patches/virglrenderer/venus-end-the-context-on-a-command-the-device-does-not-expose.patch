@@ -166,10 +166,10 @@ index 9343e4d77c5433eff6aeca41c135622bed6ac74f..3e538229d5aa79f25ef2b0aa8fae18cf
  
  /* Look up the entry points of the extensions the renderer enabled for its own
 diff --git a/src/venus/vkr_host_copy.c b/src/venus/vkr_host_copy.c
-index e3b11f5ac96e76806d89f14cfedfa20132d1d38b..914ebffe3a2426b1b0ddc66bcca832efad4b97ea 100644
+index 684778357b8ded360b4ad03a410b66b66f1921e8..9ec75160b4a0669ed9dfe4a9ba01ffc46aa53348 100644
 --- a/src/venus/vkr_host_copy.c
 +++ b/src/venus/vkr_host_copy.c
-@@ -668,7 +668,7 @@ vkr_host_copy_footprint(const struct vkr_host_copy_target *target,
+@@ -704,7 +704,7 @@ vkr_host_copy_footprint(const struct vkr_host_copy_target *target,
     }
  
     if (target->flags & VK_HOST_IMAGE_COPY_MEMCPY_BIT) {
