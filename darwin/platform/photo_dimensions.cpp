@@ -157,6 +157,34 @@ PresentedMounting presentedMountingOf(CameraPosition position, double portraitAn
     return {frontCameraOrientation, 0, false, own == 90 ? 180u : 0u};
 }
 
+CameraRegion regionBeforeTurn(const CameraRegion& region, std::uint32_t turn) noexcept
+{
+    CameraRegion before = region;
+    switch (turn) {
+    case 90:
+        // The point (x, y) of the picture is (1 - y, x) of the turned one.
+        before.x = region.y;
+        before.y = 1.0f - region.x - region.width;
+        before.width = region.height;
+        before.height = region.width;
+        break;
+    case 180:
+        before.x = 1.0f - region.x - region.width;
+        before.y = 1.0f - region.y - region.height;
+        break;
+    case 270:
+        // The point (x, y) of the picture is (y, 1 - x) of the turned one.
+        before.x = 1.0f - region.y - region.height;
+        before.y = region.x;
+        before.width = region.height;
+        before.height = region.width;
+        break;
+    default:
+        break;
+    }
+    return before;
+}
+
 CompensationStep stillCompensationStep(bool imitatesEarlierFront, CameraFact supported, CameraFact enabled,
                                        CameraReading reading) noexcept
 {

@@ -1254,9 +1254,14 @@ public:
                 [device setExposureTargetBias:std::clamp(settings.exposureBiasStops, device.minExposureTargetBias,
                                                          device.maxExposureTargetBias)
                             completionHandler:nil];
+            // A region is in the picture the camera delivers, which its video connection has turned (the square front
+            // camera's): the point of interest is in the device's own, so it is mapped back through that turn.
+            const auto pointOf = [&](const CameraRegion& region) {
+                const CameraRegion own = regionBeforeTurn(region, entry.mounting.connectionTurn);
+                return CGPointMake(own.x + own.width / 2, own.y + own.height / 2);
+            };
             if (settings.aeRegion && settings.aeRegion->weight > 0 && device.exposurePointOfInterestSupported)
-                device.exposurePointOfInterest = CGPointMake(settings.aeRegion->x + settings.aeRegion->width / 2,
-                                                             settings.aeRegion->y + settings.aeRegion->height / 2);
+                device.exposurePointOfInterest = pointOf(*settings.aeRegion);
             // Focus. The point of interest comes first: the device takes it up when the
             // focus mode is set. A new trigger runs one scan in any mode (the device
             // locks where it ends). Otherwise a manual lens goes to the distance only
@@ -1267,8 +1272,7 @@ public:
             // back.
             if (info.autofocus) {
                 if (settings.afRegion && settings.afRegion->weight > 0 && device.focusPointOfInterestSupported)
-                    device.focusPointOfInterest = CGPointMake(settings.afRegion->x + settings.afRegion->width / 2,
-                                                              settings.afRegion->y + settings.afRegion->height / 2);
+                    device.focusPointOfInterest = pointOf(*settings.afRegion);
                 const bool scan = settings.focusTriggerSerial != running.focusSerial;
                 const bool move = settings.focusDistanceSerial != running.focusDistanceSerial ||
                     (force && settings.focusDistanceSerial != 0);

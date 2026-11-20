@@ -2202,6 +2202,55 @@ void aFrontCameraStates270AndIsTurnedHalfAroundUnlessItAlreadyIs()
         }
 }
 
+// A metering or focus region of the picture the guest sees is the same area of the picture before the host turned it: each
+// layer that turned the picture maps the guest's region back through its own turn, the device through the camera's half
+// turn and the backend through its video connection's quarter turn.
+void aRegionIsMappedBackThroughATurnOfThePicture()
+{
+    const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-6f; };
+    const auto same = [&](const CameraRegion& a, const CameraRegion& b) {
+        return near(a.x, b.x) && near(a.y, b.y) && near(a.width, b.width) && near(a.height, b.height) && a.weight == b.weight;
+    };
+    const CameraRegion region {0.25f, 0.5f, 0.125f, 0.25f, 7};
+    require(same(regionBeforeTurn(region, 0), region), "no turn leaves a region as it is");
+    // 180: the area opposite, of the same size.
+    require(same(regionBeforeTurn(region, 180), {0.625f, 0.25f, 0.125f, 0.25f, 7}), "a half turn mirrors both axes");
+    // 90 clockwise: the picture's left edge is the turned picture's top, read from the bottom. The region's top-left corner
+    // (0.25, 0.5) of the turned picture is, before the turn, (y, 1 - x - width) = (0.5, 0.625) with the sides swapped.
+    require(same(regionBeforeTurn(region, 90), {0.5f, 0.625f, 0.25f, 0.125f, 7}), "a quarter turn clockwise swaps the sides");
+    require(same(regionBeforeTurn(region, 270), {0.25f, 0.25f, 0.25f, 0.125f, 7}), "and a quarter turn the other way");
+    for (const std::uint32_t turn : {45u, 360u, 1u, 450u}) require(same(regionBeforeTurn(region, turn), region), "a turn that is no quarter turn is none");
+
+    // The turns compose: mapping back through 90 and then 90 again is mapping back through 180, and so on; four make none.
+    CameraRegion walked = region;
+    for (int step = 0; step < 4; ++step) walked = regionBeforeTurn(walked, 90);
+    require(same(walked, region), "four quarter turns are none");
+    require(same(regionBeforeTurn(regionBeforeTurn(region, 90), 90), regionBeforeTurn(region, 180)), "two quarter turns are a half turn");
+    require(same(regionBeforeTurn(regionBeforeTurn(region, 90), 270), region), "a quarter turn and its inverse are none");
+    require(same(regionBeforeTurn(regionBeforeTurn(region, 180), 180), region), "a half turn twice is none");
+
+    // The centre of the region, which is what the platform's points of interest take, goes where the point does: the turned
+    // picture's point (u, v) is the picture's (v, 1 - u) after a quarter turn clockwise.
+    const auto centre = [](const CameraRegion& r) { return std::pair<float, float>(r.x + r.width / 2, r.y + r.height / 2); };
+    const auto [cx, cy] = centre(region);
+    require(near(centre(regionBeforeTurn(region, 90)).first, cy) && near(centre(regionBeforeTurn(region, 90)).second, 1 - cx), "its centre");
+    require(near(centre(regionBeforeTurn(region, 270)).first, 1 - cy) && near(centre(regionBeforeTurn(region, 270)).second, cx), "likewise");
+    require(near(centre(regionBeforeTurn(region, 180)).first, 1 - cx) && near(centre(regionBeforeTurn(region, 180)).second, 1 - cy), "and for 180");
+
+    // A whole-frame region is the whole frame, and a region inside the picture stays inside and one outside stays outside:
+    // the mapping validates nothing and invalidates nothing.
+    for (const std::uint32_t turn : {0u, 90u, 180u, 270u}) {
+        require(same(regionBeforeTurn({0, 0, 1, 1, 1}, turn), {0, 0, 1, 1, 1}), "the whole picture");
+        const auto inside = regionBeforeTurn({0.1f, 0.2f, 0.3f, 0.4f, 1}, turn);
+        require(inside.x >= 0 && inside.y >= 0 && inside.x + inside.width <= 1.0001f && inside.y + inside.height <= 1.0001f, "inside stays inside");
+        const auto outside = regionBeforeTurn({1.5f, 0.2f, 0.3f, 0.4f, 1}, turn);
+        require(outside.x < 0 || outside.y < 0 || outside.x + outside.width > 1.0f || outside.y + outside.height > 1.0f, "outside stays outside");
+        const auto huge = regionBeforeTurn({60000.0f, 60000.0f, 60000.0f, 60000.0f, 9}, turn);
+        require(std::isfinite(huge.x) && std::isfinite(huge.y) && std::isfinite(huge.width) && std::isfinite(huge.height) && huge.weight == 9,
+                "the largest value the wire carries stays a number");
+    }
+}
+
 // A square format that lists dynamic aspect ratios is described by the crop the device is pinned at: 3x4 where the video
 // connection is turned a quarter turn, else 4x3, a landscape frame of N x 3N/4 either way, with the landscape 4:3 photo
 // sizes it lists. A format that lists none is as listed. One that cannot be described is dropped, never offered in
@@ -2814,6 +2863,7 @@ int main()
     everyGeneratedFrontTableKeepsNothingAboveTheLimit();
     aCameraStatesThePlatformsMountingAndAFrontCameraStates270();
     aFrontCameraStates270AndIsTurnedHalfAroundUnlessItAlreadyIs();
+    aRegionIsMappedBackThroughATurnOfThePicture();
     aSquareFormatThatListsRatiosIsDescribedByItsPinnedCrop();
     aCamerasLastUseSurvivesTheNextSessionsDiscovery();
     aCameraThatImitatesAnEarlierOneKeepsItsPhotoConnectionAngle();

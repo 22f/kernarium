@@ -1071,6 +1071,27 @@ void testAFrontCameraWithAHalfTurnIsWrittenTurned()
         }
     }
 
+    // The guest's metering and focus regions are in the picture it is given: the platform is told the area of its own
+    // picture, which is the opposite one.
+    {
+        Rig rig(options);
+        rig.create(1, 1, videoKind);
+        rig.setVideo(1, 640, 480);
+        rig.attach(1, 1, nv12Size(640, 480));
+        rig.queue(1, 1);
+        const auto wire = [](std::uint32_t x, std::uint32_t y, std::uint32_t width, std::uint32_t height, std::uint32_t weight) {
+            std::vector<std::uint8_t> region(regionPayloadSize);
+            const std::uint32_t words[5] = {x, y, width, height, weight};
+            std::memcpy(region.data(), words, sizeof(words));
+            return region;
+        };
+        rig.setOk(1, {{VIRTIO_VIDEO_CAMERA_CID_AE_REGION, 0, wire(16384, 32768, 16384, 8192, 5)}});
+        const auto applied = rig.camera->appliedSettings(1);
+        require(applied.aeRegion && applied.aeRegion->weight == 5 && applied.aeRegion->x == 0.5f && applied.aeRegion->y == 0.375f &&
+                    applied.aeRegion->width == 0.25f && applied.aeRegion->height == 0.125f,
+                "the metering region reaches the platform mapped back");
+    }
+
     // A back camera, and a front camera that states 270 as it is, are not turned: the marker reads as it was written.
     for (const bool presented : {true, false}) {
         RigOptions plain;

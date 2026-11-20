@@ -75,6 +75,15 @@ struct PresentedMounting {
 };
 [[nodiscard]] PresentedMounting presentedMountingOf(CameraPosition position, double portraitAngle) noexcept;
 
+// A metering or focus region from a picture that is another picture turned clockwise by `turn` (0, 90, 180 or 270),
+// as the same area of that other picture. Both are in fractions of their own sides, with the origin at the top left, so a
+// quarter turn swaps the region's width and height. The guest's regions refer to the picture it is given, which the host
+// has turned: each layer that turned a picture (the device by the camera's `presentationTurn`, the backend by its video
+// connection's turn) maps the regions back through its own turn before they go on. A turn that is not a quarter turn is
+// none. The weight is carried over, and a region outside its picture stays outside it (a value is never made valid by
+// the mapping), as one inside stays inside.
+[[nodiscard]] CameraRegion regionBeforeTurn(const CameraRegion& region, std::uint32_t turn) noexcept;
+
 // The angle set on the photo output's connection: 0 for every camera, as before; none for a camera that imitates an
 // earlier front camera, whose connection keeps its default (only its mirroring is turned off). The angle changes the
 // Exif tag alone and the host drops the platform's Exif.
