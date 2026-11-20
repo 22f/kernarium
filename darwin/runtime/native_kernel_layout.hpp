@@ -183,11 +183,14 @@ struct NativeKernelPlacement final {
  * host refuses it, can only exit, which ends the process; a refusal is known
  * here, before the kernel starts, and the run fails with a result of its own.
  *
- * It makes that mapping, at the place and the size the kernel does, and gives
- * the range back to the window's reservation in place, so that the window is
- * whole and protectionless as before and nothing is freed. The span the kernel
- * image and its reserved prefix take is left alone: the kernel maps it by
- * other calls, and a signed text alias of an earlier guest in it is permanent.
+ * It makes that mapping, at the place the kernel does and for the RAM beyond a
+ * fixed prefix, and gives the range back to the window's reservation in place,
+ * so that the window is whole and protectionless as before and nothing is
+ * freed. The prefix (64 MiB, a margin above the kernel image and its reserved
+ * prefix, which the kernel maps by other calls) is left alone, because a
+ * signed text alias of an earlier guest in it is permanent; the kernel's own
+ * suffix begins below it, so the trial does not promise that span, nor the
+ * kernel's later metadata allocations or the wiring of the suffix's tail.
  * The caller holds the process address-space gate and has not yet started the
  * guest. A guest too large for the window is not mappable. */
 [[nodiscard]] bool native_guest_memory_mappable(const NativeKernelLayout &layout,

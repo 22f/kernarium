@@ -62,8 +62,18 @@ struct ProcessWindow final {
 
 /* The span at the start of the window that the mapping trial leaves alone: the
  * signed kernel image and the reserved physical prefix after it, which the
- * kernel maps by other calls. The image is a few tens of MiB; guest RAM is at
- * least 512 MiB. */
+ * kernel maps by other calls. The image is below 25 MiB in every accepted
+ * kernel; guest RAM is at least 512 MiB.
+ *
+ * The kernel's own suffix mapping begins earlier than this (at 32 MiB for the
+ * Android kernel), so the trial does not try the span from there to this
+ * bound: a signed text alias of an earlier guest may lie in the image's span,
+ * the trial must not map over it, and the bound is a margin above every
+ * accepted image rather than the kernel's own start. The trial promises that
+ * the host maps the RAM beyond this bound in one read-write mapping; it does
+ * not promise the span below it, the kernel's later metadata allocations, the
+ * wiring of the suffix's tail, or the optional alias the kernel logs and
+ * continues without. */
 constexpr std::size_t guest_ram_trial_skip = 64U << 20;
 
 /* Makes [begin, begin + length) the window's protectionless reservation again:
