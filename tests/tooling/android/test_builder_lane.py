@@ -6545,8 +6545,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             # The holder of port 5560 and the waker (overlay/sms/listener): the holder alone creates, binds and listens
             # on the vsock socket and never accepts, reads, writes or connects; the service alone accepts on it, and
             # makes none; neither daemon is the framework's client but the waker, for one call; init alone enters
-            # their domains; the handoff and the control property that starts the waker are the service's and the
-            # holder's alone.
+            # their domains; the handoff is the service's alone and the control property that starts the waker is the
+            # holder's and init's alone.
             ("sms-service-creates-vsock", {"sms_policy_variant": "service-creates-vsock"},
              "unreviewed: \\['kernarium_sms'\\]"),
             ("sms-service-accepts-on-its-own", {"sms_policy_variant": "service-accepts-on-its-own"},

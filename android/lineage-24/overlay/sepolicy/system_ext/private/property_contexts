@@ -24,5 +24,6 @@ persist.sys.kernarium.keyboard_default    u:object_r:kernarium_keyboard_default_
 # shell domain sets it (kernarium_oldapp_prop.te).
 persist.sys.kernarium.oldapp.    u:object_r:kernarium_oldapp_prop:s0
 
-# Starts the script that starts the text message service. Only its holder sets it (kernarium_sms_listener.te).
+# Starts the script that starts the text message service. Its holder sets it, and init, which owns the property
+# service, and no other domain (kernarium_sms_listener.te).
 ctl.start$kernarium_sms_wake    u:object_r:ctl_kernarium_sms_wake_prop:s0

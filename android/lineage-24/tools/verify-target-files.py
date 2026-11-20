@@ -5809,7 +5809,7 @@ def check_sms_holder_policy(contexts: list[str], policies: tuple[bytes, ...], se
     if users - {SMS_DOMAIN} - SMS_PLATFORM_FD_USERS:
         fail(f"{sorted(users - {SMS_DOMAIN} - SMS_PLATFORM_FD_USERS)} may use the descriptors of {SMS_LISTENER}")
 
-    # The control property that starts the waker is the holder's alone.
+    # The control property that starts the waker is the holder's to set, and init's (the platform lets init set every property).
     label = property_label(SMS_WAKE_PROPERTY, contexts)
     if label != SMS_WAKE_PROPERTY_TYPE:
         fail(f"the property contexts label {SMS_WAKE_PROPERTY} {label}, not {SMS_WAKE_PROPERTY_TYPE}")
@@ -5849,7 +5849,7 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
     (SMS_ORDINARY_APP_DOMAINS) and the reviewed list (it finds only the services it needs); the holder never
     accepts, reads, writes or connects a vsock socket and is not the framework's client; init alone enters the
     holder's and the waker's domains, the handoff socket is the service's alone to connect to, and the control
-    property that starts the waker is the holder's alone to set; the package selects the service's domain and
+    property that starts the waker is set by the holder and by init only; the package selects the service's domain and
     no other package does; and the shell cannot move adbd's own listener. Every grant counts, through
     attributes and set expressions. The first policy is the platform's."""
     sets = CilSets(policies)
