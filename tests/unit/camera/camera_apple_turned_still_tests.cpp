@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // A still of a camera presented half around, on a pixel buffer standing in for the photo: the hardware encoder's JPEG is
-// the photo turned half around, a JFIF image of the photo's size with the colour profile of the photo in it, and a photo
-// that cannot be turned is refused with a fixed word. A host without a hardware JPEG encoder skips the encodes.
+// the photo turned half around, a JFIF image of the photo's size with no colour profile (as the platform's own files had
+// none: a reader takes sRGB), and a photo that cannot be turned, or whose colours are not sRGB, is refused with a fixed
+// word. A host without a hardware JPEG encoder skips the encodes.
 #include "apple/turned_still.hpp"
 #include "require.hpp"
 #include "video_encoder.hpp"
@@ -40,10 +41,15 @@ private:
 constexpr std::size_t kWidth = 120;
 constexpr std::size_t kHeight = 96;
 
+// The colour the photo states: its primaries and, besides them, an object or an ICC profile of its colour space.
+enum class Primaries { none, bt709, p3 };
+
 struct Tags {
     bool matrix601 = true;
     bool matrix709 = false;
-    bool colour = true;
+    Primaries primaries = Primaries::bt709;
+    bool p3Space = false;   // kCVImageBufferCGColorSpaceKey: Display P3
+    bool p3Profile = false; // kCVImageBufferICCProfileKey: Display P3
 };
 
 // The upper half of the picture ramps up along x (16 to 254) and the lower half is flat grey; the left half of the
@@ -71,9 +77,20 @@ Owned<CVPixelBufferRef> photoOf(std::size_t width, std::size_t height, OSType fo
     CVPixelBufferUnlockBaseAddress(pixels, 0);
     if (tags.matrix601) CVBufferSetAttachment(pixels, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVAttachmentMode_ShouldPropagate);
     if (tags.matrix709) CVBufferSetAttachment(pixels, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
-    if (tags.colour) {
-        CVBufferSetAttachment(pixels, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_P3_D65, kCVAttachmentMode_ShouldPropagate);
+    if (tags.primaries != Primaries::none) {
+        CVBufferSetAttachment(pixels, kCVImageBufferColorPrimariesKey,
+                              tags.primaries == Primaries::p3 ? kCVImageBufferColorPrimaries_P3_D65 : kCVImageBufferColorPrimaries_ITU_R_709_2,
+                              kCVAttachmentMode_ShouldPropagate);
         CVBufferSetAttachment(pixels, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+    }
+    if (tags.p3Space) {
+        Owned<CGColorSpaceRef> p3(CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3));
+        CVBufferSetAttachment(pixels, kCVImageBufferCGColorSpaceKey, p3.get(), kCVAttachmentMode_ShouldPropagate);
+    }
+    if (tags.p3Profile) {
+        Owned<CGColorSpaceRef> p3(CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3));
+        Owned<CFDataRef> icc(CGColorSpaceCopyICCData(p3.get()));
+        CVBufferSetAttachment(pixels, kCVImageBufferICCProfileKey, icc.get(), kCVAttachmentMode_ShouldPropagate);
     }
     return buffer;
 }
@@ -125,7 +142,7 @@ std::vector<std::pair<std::uint8_t, std::vector<std::uint8_t>>> segmentsOf(const
     return segments;
 }
 
-void aPhotoIsTurnedHalfAroundAndKeepsItsProfile()
+void aPhotoIsTurnedHalfAroundWithNoProfile()
 {
     const auto photo = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, {});
     const auto turned = turnedStillOf(photo.get(), 90);
@@ -133,14 +150,7 @@ void aPhotoIsTurnedHalfAroundAndKeepsItsProfile()
     require(turned.jpeg.size() > 4 && turned.jpeg[0] == 0xff && turned.jpeg[1] == 0xd8, "a JPEG");
     const auto segments = segmentsOf(turned.jpeg);
     require(segments.size() >= 2 && segments[0].first == 0xe0 && std::memcmp(segments[0].second.data(), "JFIF", 4) == 0, "it starts with the JFIF segment");
-    require(segments[1].first == 0xe2 && segments[1].second.size() > 14 && std::memcmp(segments[1].second.data(), "ICC_PROFILE", 11) == 0,
-            "the colour profile follows it");
-
-    Owned<CFDataRef> data(CFDataCreate(nullptr, turned.jpeg.data(), CFIndex(turned.jpeg.size())));
-    Owned<CGImageSourceRef> source(CGImageSourceCreateWithData(data.get(), nullptr));
-    Owned<CFDictionaryRef> properties(CGImageSourceCopyPropertiesAtIndex(source.get(), 0, nullptr));
-    require(properties.get() != nullptr && CFDictionaryGetValue(properties.get(), kCGImagePropertyProfileName) != nullptr,
-            "ImageIO reads a colour profile from the file");
+    for (const auto& segment : segments) require(segment.first != 0xe2, "no colour profile: the file is read as sRGB, as the platform's own were");
 
     const auto rgba = decode(turned.jpeg, kWidth, kHeight);
     // The flat grey is now in the upper half, and the ramp in the lower half falls from left to right.
@@ -153,8 +163,12 @@ void aPhotoIsTurnedHalfAroundAndKeepsItsProfile()
     // The quality is the caller's.
     const auto rough = turnedStillOf(photo.get(), 10);
     require(rough.failure == TurnedStillFailure::none && rough.jpeg.size() < turned.jpeg.size(), "a lower quality is a smaller file");
-    std::printf("  %zux%zu photo: %zu bytes at quality 90, %zu at 10, profile of %zu bytes\n", kWidth, kHeight, turned.jpeg.size(),
-                rough.jpeg.size(), segments[1].second.size() - 14);
+    // A photo that states no colour at all is as the platform's own files were: untagged, and delivered.
+    Tags bare;
+    bare.primaries = Primaries::none;
+    const auto plain = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, bare);
+    require(turnedStillOf(plain.get(), 90).failure == TurnedStillFailure::none, "a photo that states no colour is delivered untagged");
+    std::printf("  %zux%zu photo: %zu bytes at quality 90, %zu at 10, no profile\n", kWidth, kHeight, turned.jpeg.size(), rough.jpeg.size());
 }
 
 void aPhotoThatCannotBeTurnedIsRefused()
@@ -169,13 +183,24 @@ void aPhotoThatCannotBeTurnedIsRefused()
     bt709.matrix709 = true;
     const auto other = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, bt709);
     require(turnedStillOf(other.get(), 90).failure == TurnedStillFailure::notBt601, "a BT.709 photo is refused: a JPEG would state BT.601");
-    Tags bare;
-    bare.matrix601 = false;
-    bare.colour = false;
-    const auto plain = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, bare);
-    require(turnedStillOf(plain.get(), 90).failure == TurnedStillFailure::noProfile, "a photo that states no colour has no profile to keep");
+    // The colours are sRGB or the photo is not delivered: other primaries, a wide-gamut colour space object or profile.
+    Tags p3;
+    p3.primaries = Primaries::p3;
+    const auto widePrimaries = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, p3);
+    require(turnedStillOf(widePrimaries.get(), 90).failure == TurnedStillFailure::notSrgb, "Display P3 primaries are refused");
+    Tags space;
+    space.matrix601 = true;
+    space.primaries = Primaries::none;
+    space.p3Space = true;
+    const auto wideSpace = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, space);
+    require(turnedStillOf(wideSpace.get(), 90).failure == TurnedStillFailure::notSrgb, "so is a Display P3 colour space object");
+    Tags profile;
+    profile.primaries = Primaries::none;
+    profile.p3Profile = true;
+    const auto wideProfile = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, profile);
+    require(turnedStillOf(wideProfile.get(), 90).failure == TurnedStillFailure::notSrgb, "and a Display P3 profile");
     for (const auto failure : {TurnedStillFailure::noPixels, TurnedStillFailure::unsupportedFormat, TurnedStillFailure::notBt601,
-                               TurnedStillFailure::noProfile, TurnedStillFailure::noEncoder, TurnedStillFailure::timedOut, TurnedStillFailure::failed})
+                               TurnedStillFailure::notSrgb, TurnedStillFailure::noEncoder, TurnedStillFailure::timedOut, TurnedStillFailure::failed})
         require(!turnedStillFailureName(failure).empty() && turnedStillFailureName(failure) != "unknown");
 }
 
@@ -188,6 +213,6 @@ int main()
         std::puts("no hardware JPEG encoder on this host; the encodes are skipped");
         return 0;
     }
-    aPhotoIsTurnedHalfAroundAndKeepsItsProfile();
+    aPhotoIsTurnedHalfAroundWithNoProfile();
     return 0;
 }

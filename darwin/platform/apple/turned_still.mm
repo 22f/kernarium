@@ -2,7 +2,6 @@
 #include "turned_still.hpp"
 
 #include "nv12_transform.hpp"
-#include "photo_dimensions.hpp"
 #include "video_encoder.hpp"
 
 #import <CoreGraphics/CoreGraphics.h>
@@ -42,24 +41,24 @@ private:
     bool ok_ {};
 };
 
-// The photo's colour as an ICC profile: the one it carries, or the one its colour attachments describe. Empty where it
-// states none.
-std::vector<std::uint8_t> colourProfileOf(CVPixelBufferRef photo)
+// Whether the photo states colours that are not sRGB, by its primaries or by a colour space object or an ICC profile it
+// carries: a file with no profile is read as sRGB, so such a photo would show the wrong colours. A photo that states no
+// colour at all is the capture's own sRGB (the device's colour space is selected, camera_capture.mm).
+bool statesOtherColours(CVPixelBufferRef photo)
 {
-    Cf<CFTypeRef> stated(CVBufferCopyAttachment(photo, kCVImageBufferICCProfileKey, nullptr));
-    Cf<CFDataRef> data;
-    if (stated && CFGetTypeID(stated.get()) == CFDataGetTypeID() && CFDataGetLength(static_cast<CFDataRef>(stated.get())) > 0) {
-        data.reset(static_cast<CFDataRef>(stated.release()));
-    } else {
-        Cf<CFDictionaryRef> attachments(CVBufferCopyAttachments(photo, kCVAttachmentMode_ShouldPropagate));
-        if (!attachments) return {};
-        Cf<CGColorSpaceRef> space(CVImageBufferCreateColorSpaceFromAttachments(attachments.get()));
-        if (!space) return {};
-        data.reset(CGColorSpaceCopyICCData(space.get()));
+    Cf<CFTypeRef> primaries(CVBufferCopyAttachment(photo, kCVImageBufferColorPrimariesKey, nullptr));
+    // The primaries of sRGB are BT.709's.
+    if (primaries && !CFEqual(primaries.get(), kCVImageBufferColorPrimaries_ITU_R_709_2)) return true;
+    Cf<CFTypeRef> object(CVBufferCopyAttachment(photo, kCVImageBufferCGColorSpaceKey, nullptr));
+    if (object && CFGetTypeID(object.get()) == CGColorSpaceGetTypeID() &&
+        CGColorSpaceIsWideGamutRGB(static_cast<CGColorSpaceRef>(const_cast<void*>(object.get()))))
+        return true;
+    Cf<CFTypeRef> profile(CVBufferCopyAttachment(photo, kCVImageBufferICCProfileKey, nullptr));
+    if (profile && CFGetTypeID(profile.get()) == CFDataGetTypeID()) {
+        Cf<CGColorSpaceRef> space(CGColorSpaceCreateWithICCData(static_cast<CFDataRef>(profile.get())));
+        if (!space || CGColorSpaceIsWideGamutRGB(space.get())) return true;
     }
-    if (!data) return {};
-    const auto* bytes = CFDataGetBytePtr(data.get());
-    return std::vector<std::uint8_t>(bytes, bytes + CFDataGetLength(data.get()));
+    return false;
 }
 
 bool statesAnotherMatrix(CVPixelBufferRef photo)
@@ -85,8 +84,7 @@ TurnedStill turnedStillOf(CVPixelBufferRef photo, std::uint32_t jpegQuality)
         CVPixelBufferGetPlaneCount(photo) != 2 || width == 0 || height == 0 || ((width | height) & 1) != 0 || width > 0xffff || height > 0xffff)
         return fail(TurnedStillFailure::unsupportedFormat);
     if (statesAnotherMatrix(photo)) return fail(TurnedStillFailure::notBt601);
-    const std::vector<std::uint8_t> profile = colourProfileOf(photo);
-    if (profile.empty()) return fail(TurnedStillFailure::noProfile);
+    if (statesOtherColours(photo)) return fail(TurnedStillFailure::notSrgb);
 
     auto encoder = makeVideoEncoder();
     if (!encoder) return fail(TurnedStillFailure::noEncoder);
@@ -136,9 +134,7 @@ TurnedStill turnedStillOf(CVPixelBufferRef photo, std::uint32_t jpegQuality)
     }
     if (!drained) return fail(TurnedStillFailure::timedOut);
     if (errored || image.empty()) return fail(TurnedStillFailure::failed);
-    auto withProfile = jpegWithColourProfile(image, profile);
-    if (!withProfile) return fail(TurnedStillFailure::failed);
-    result.jpeg = std::move(*withProfile);
+    result.jpeg = std::move(image);
     return result;
 }
 

@@ -962,6 +962,24 @@ bool activate(AVCaptureDevice* device, const Anchor& anchor, const std::optional
     return ok;
 }
 
+#if TARGET_OS_IOS
+// The photos of a camera whose stills the host turns are encoded with no colour profile, which a reader takes as sRGB, so its
+// capture stays in that colour space: selected here where the active format supports it, and checked on every photo
+// (turned_still.mm), which is refused when it states other colours.
+void keepSrgbColourSpace(AVCaptureDevice* device)
+{
+    NSError* error = nil;
+    if (![device lockForConfiguration:&error]) return;
+    @try {
+        if (device.activeColorSpace != AVCaptureColorSpace_sRGB &&
+            [device.activeFormat.supportedColorSpaces containsObject:@(AVCaptureColorSpace_sRGB)])
+            device.activeColorSpace = AVCaptureColorSpace_sRGB;
+    } @catch (NSException*) {
+    }
+    [device unlockForConfiguration];
+}
+#endif
+
 class AppleCamera;
 
 class AppleSession final : public CameraSession {
@@ -2337,6 +2355,7 @@ private:
             return guarded(camera, [&] {
                 const bool activated = activate(entry.device, *anchor, rate, true, ratioDone(camera));
 #if TARGET_OS_IOS
+                if (activated && entry.mounting.presentationTurn == 180) keepSrgbColourSpace(entry.device);
                 if (anchor->facts.pinnedRatio != CameraAspectRatio::none) ratioFacts = ratioFactsOf(entry.device, anchor->facts.pinnedRatio);
 #endif
                 return activated;

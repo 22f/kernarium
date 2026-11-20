@@ -513,61 +513,6 @@ void aFailureIsNamedInFixedWords()
             "a failure that says nothing is stage none, unknown and no error");
 }
 
-// A JPEG's segments as (marker, payload size), up to the start of the scan.
-std::vector<std::pair<std::uint8_t, std::size_t>> segmentsOf(const std::vector<std::uint8_t>& jpeg)
-{
-    std::vector<std::pair<std::uint8_t, std::size_t>> segments;
-    for (std::size_t at = 2; at + 4 <= jpeg.size() && jpeg[at] == 0xff && jpeg[at + 1] != 0xda;) {
-        const std::size_t length = (std::size_t(jpeg[at + 2]) << 8) | jpeg[at + 3];
-        segments.emplace_back(jpeg[at + 1], length - 2);
-        at += 2 + length;
-    }
-    return segments;
-}
-
-void aColourProfileIsPlacedBehindTheJfifSegmentInChunks()
-{
-    const std::vector<std::uint8_t> jfif {0xff, 0xd8, 0xff, 0xe0, 0x00, 0x06, 'J', 'F', 'I', 'F', 0xff, 0xdb, 0x00, 0x04, 1, 2, 0xff, 0xda, 9, 9, 0xff, 0xd9};
-    std::vector<std::uint8_t> profile(65519 * 2 + 100);
-    for (std::size_t i = 0; i < profile.size(); ++i) profile[i] = std::uint8_t(i * 31 + i / 251);
-
-    const auto with = jpegWithColourProfile(jfif, profile);
-    require(with.has_value());
-    const auto segments = segmentsOf(*with);
-    require(segments.size() == 5, "the JFIF segment, three profile chunks and the table");
-    require(segments[0].first == 0xe0 && segments[1].first == 0xe2 && segments[2].first == 0xe2 && segments[3].first == 0xe2 &&
-            segments[4].first == 0xdb, "the profile follows the JFIF segment");
-    require(segments[1].second == 14 + 65519 && segments[2].second == 14 + 65519 && segments[3].second == 14 + 100);
-    // The chunks are numbered and add up to the profile.
-    std::vector<std::uint8_t> joined;
-    std::size_t at = 2 + 2 + 6;
-    for (std::uint8_t number = 1; number <= 3; ++number) {
-        require((*with)[at] == 0xff && (*with)[at + 1] == 0xe2);
-        const std::size_t length = ((std::size_t((*with)[at + 2]) << 8) | (*with)[at + 3]) - 2;
-        require(std::string(reinterpret_cast<const char*>(with->data() + at + 4), 11) == "ICC_PROFILE" && (*with)[at + 15] == 0);
-        require((*with)[at + 16] == number && (*with)[at + 17] == 3, "chunk number and count");
-        joined.insert(joined.end(), with->begin() + std::ptrdiff_t(at + 18), with->begin() + std::ptrdiff_t(at + 4 + length));
-        at += 4 + length;
-    }
-    require(joined == profile, "the chunks are the profile, in order");
-    require(std::equal(with->begin() + std::ptrdiff_t(at), with->end(), jfif.begin() + 10), "the rest of the file is as it was");
-    require(std::equal(with->begin(), with->begin() + 10, jfif.begin()), "and so is the start");
-
-    // Without a JFIF segment the profile follows the start of image.
-    const std::vector<std::uint8_t> bare {0xff, 0xd8, 0xff, 0xdb, 0x00, 0x04, 1, 2, 0xff, 0xda, 9, 9, 0xff, 0xd9};
-    const auto small = jpegWithColourProfile(bare, std::vector<std::uint8_t>(40, 7));
-    require(small.has_value());
-    const auto smallSegments = segmentsOf(*small);
-    require(smallSegments.size() == 2 && smallSegments[0] == std::pair<std::uint8_t, std::size_t> {0xe2, 14 + 40} && smallSegments[1].first == 0xdb);
-
-    // Data that is not a JPEG, no profile, or too much of it, yields nothing.
-    require(!jpegWithColourProfile(std::vector<std::uint8_t> {1, 2, 3, 4, 5}, std::vector<std::uint8_t>(10, 1)));
-    require(!jpegWithColourProfile(bare, {}));
-    require(!jpegWithColourProfile(std::vector<std::uint8_t> {0xff, 0xd8}, std::vector<std::uint8_t>(10, 1)));
-    require(!jpegWithColourProfile(bare, std::vector<std::uint8_t>(std::size_t(65519) * 255 + 1, 1)));
-    require(jpegWithColourProfile(bare, std::vector<std::uint8_t>(std::size_t(65519) * 255, 1)).has_value());
-}
-
 } // namespace
 
 int main()
@@ -597,6 +542,5 @@ int main()
     aRatioWithAnOddSideTakesAnEvenMultiple();
     aStreamTheFormatJustCoversIsDeliveredAsItIs();
     aFailureIsNamedInFixedWords();
-    aColourProfileIsPlacedBehindTheJfifSegmentInChunks();
     return 0;
 }

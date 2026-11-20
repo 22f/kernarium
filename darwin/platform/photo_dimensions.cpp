@@ -413,40 +413,6 @@ bool takeJpegFile(std::span<const std::uint8_t> file, std::uint64_t maximumBytes
     return true;
 }
 
-std::optional<std::vector<std::uint8_t>> jpegWithColourProfile(std::span<const std::uint8_t> jpeg, std::span<const std::uint8_t> profile)
-{
-    constexpr std::size_t chunkBytes = 65519;  // a segment's 65535 bytes less its length, the tag and the chunk's numbers
-    static constexpr char tag[12] = {'I', 'C', 'C', '_', 'P', 'R', 'O', 'F', 'I', 'L', 'E', '\0'};
-    if (jpeg.size() < 4 || jpeg[0] != 0xff || jpeg[1] != 0xd8 || profile.empty()) return std::nullopt;
-    const std::size_t chunks = (profile.size() + chunkBytes - 1) / chunkBytes;
-    if (chunks > 255) return std::nullopt;
-    // Behind the JFIF segment, which readers expect first, if the file starts with one.
-    std::size_t at = 2;
-    if (jpeg[2] == 0xff && jpeg[3] == 0xe0) {
-        if (jpeg.size() < 6) return std::nullopt;
-        at = 2 + 2 + ((std::size_t(jpeg[4]) << 8) | jpeg[5]);
-        if (at > jpeg.size()) return std::nullopt;
-    }
-    std::vector<std::uint8_t> result;
-    result.reserve(jpeg.size() + profile.size() + chunks * 18);
-    result.insert(result.end(), jpeg.begin(), jpeg.begin() + std::ptrdiff_t(at));
-    for (std::size_t chunk = 0; chunk < chunks; ++chunk) {
-        const std::size_t from = chunk * chunkBytes;
-        const std::size_t size = std::min(chunkBytes, profile.size() - from);
-        const std::size_t length = 2 + sizeof(tag) + 2 + size;
-        result.push_back(0xff);
-        result.push_back(0xe2);
-        result.push_back(std::uint8_t(length >> 8));
-        result.push_back(std::uint8_t(length));
-        result.insert(result.end(), tag, tag + sizeof(tag));
-        result.push_back(std::uint8_t(chunk + 1));
-        result.push_back(std::uint8_t(chunks));
-        result.insert(result.end(), profile.begin() + std::ptrdiff_t(from), profile.begin() + std::ptrdiff_t(from + size));
-    }
-    result.insert(result.end(), jpeg.begin() + std::ptrdiff_t(at), jpeg.end());
-    return result;
-}
-
 FrameSize deliveredFrameSize(std::uint32_t formatWidth, std::uint32_t formatHeight, std::uint32_t width,
                              std::uint32_t height) noexcept
 {

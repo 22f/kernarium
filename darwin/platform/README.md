@@ -138,9 +138,12 @@ interface to the wire.
   `CameraInfo::presentationTurn` 180): the camera device turns each frame of its
   video in the stream write, and a still is taken as an uncompressed full-range
   4:2:0 photo that the backend turns and encodes itself in the hardware JPEG
-  encoder at the guest's quality, with the photo's colour profile
-  (`turned_still.hpp`). A photo that cannot be turned, and a Bayer still of such
-  a camera, is refused with a recorded reason and never passed on unturned. The
+  encoder at the guest's quality (`turned_still.hpp`). The file has no colour
+  profile, as the platform's own stills have none (a reader takes sRGB): the
+  device's capture colour space is selected as sRGB, and a photo that states
+  other primaries or a wide-gamut colour space is refused. A photo that cannot be
+  turned, and a Bayer still of such a camera, is refused with a recorded reason
+  and never passed on unturned. The
   guest's metering and focus regions are mapped back through the turn, and
   through the connection's turn where there is one. A built-in front camera
   mounted with its sensor's top at the device's top (portrait 0 or 180) is

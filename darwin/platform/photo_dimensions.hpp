@@ -422,13 +422,6 @@ inline constexpr unsigned stillAttemptLimit = 2;
 [[nodiscard]] bool takeJpegFile(std::span<const std::uint8_t> file, std::uint64_t maximumBytes, bool wanted,
                                 std::vector<std::uint8_t>& out);
 
-// A JPEG with a colour profile in it: the ICC profile `profile` as the APP2 segments the format defines (the profile cut
-// into chunks of at most 65519 bytes, each marked with its number and the count), placed behind the JFIF segment, or the
-// start of image where there is none. The file is otherwise as it was. Nothing for data that is not a JPEG or a profile
-// that is empty or too large to number (255 chunks).
-[[nodiscard]] std::optional<std::vector<std::uint8_t>> jpegWithColourProfile(std::span<const std::uint8_t> jpeg,
-                                                                              std::span<const std::uint8_t> profile);
-
 // ---------------------------------------------------------------------------
 // Video sizes
 // ---------------------------------------------------------------------------
