@@ -40,15 +40,25 @@ aborts the process. A reply that carries no blob is what the specification
 describes and what the existing codec already reads, so the guest learns the
 size it needs and its buffer is left alone.
 
+vkCreatePipelineBinariesKHR refuses an import whose keys claim a size other
+than a key's. The codec decodes keySize as a plain field beside a key array
+that always holds VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR bytes, so the field says
+nothing about how many key bytes arrived, and a driver that reads keySize
+bytes reads past the decoded key. The driver refuses the same sizes itself;
+the renderer does not rely on that, and refuses the whole call before
+forwarding it, with VK_ERROR_VALIDATION_FAILED, so no object is made for any
+of its binaries.
+
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  src/venus/vkr_common.c   |   1 +
  src/venus/vkr_common.h   |   3 +
  src/venus/vkr_context.c  |   1 +
  src/venus/vkr_device.c   |   3 +
- src/venus/vkr_pipeline.c | 173 +++++++++++++++++++++++++++++++++++++++
- src/venus/vkr_pipeline.h |  10 +++
- 6 files changed, 191 insertions(+)
+ src/venus/vkr_pipeline.c | 204 +++++++++++++++++++++++++++++++++++++++
+ src/venus/vkr_pipeline.h |  10 ++
+ 6 files changed, 222 insertions(+)
 
 diff --git a/src/venus/vkr_common.c b/src/venus/vkr_common.c
 index fc526b6f2877fb983f5cc5d64105ef7138c5671c..7a4436330a70f4c42ca08b39f46e72912e8f1132 100644
@@ -110,13 +120,34 @@ index 0711db10d5a38eca6a049a654a5c86b7861cad40..9343e4d77c5433eff6aeca41c135622b
           vkr_log("Unhandled vkr_object(%p) with VkObjectType(%u)", obj,
                   (uint32_t)obj->type);
 diff --git a/src/venus/vkr_pipeline.c b/src/venus/vkr_pipeline.c
-index d0d6f8364bf6c109bc31e5d01940853ce42669cc..2de45dfe961ac34d07bca680c924c909c82cea5a 100644
+index d0d6f8364bf6c109bc31e5d01940853ce42669cc..38225e305103ce4aeb6d12f4654091aaef547c60 100644
 --- a/src/venus/vkr_pipeline.c
 +++ b/src/venus/vkr_pipeline.c
-@@ -199,6 +199,163 @@ vkr_dispatch_vkGetRayTracingShaderGroupStackSizeKHR(
+@@ -199,6 +199,194 @@ vkr_dispatch_vkGetRayTracingShaderGroupStackSizeKHR(
                                                          args->group, args->groupShader);
  }
  
++/* A key says how much of key[] is valid in keySize, and the codec decodes that
++ * field as a plain number beside a key array of exactly
++ * VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR bytes: whatever keySize the guest wrote,
++ * only that many key bytes arrive.  The registry marks keySize
++ * noautovalidity, so nothing else bounds it, and a driver that trusts it
++ * reads, and may copy, bytes past the end of the decoded key.
++ *
++ * The driver this renderer serves names a binary by one 32-byte hash, which
++ * fills the whole key array, so it refuses every other size itself.  Refuse it
++ * here as well, before the call is forwarded, so that the renderer never hands
++ * a driver a key that claims more bytes than it decoded. */
++static bool
++vkr_pipeline_binary_keys_are_sized(const VkPipelineBinaryKeysAndDataKHR *import)
++{
++   for (uint32_t i = 0; i < import->binaryCount; i++) {
++      if (import->pPipelineBinaryKeys[i].keySize != VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR)
++         return false;
++   }
++   return true;
++}
++
 +static void
 +vkr_dispatch_vkCreatePipelineBinariesKHR(
 +   struct vn_dispatch_context *dispatch,
@@ -127,6 +158,16 @@ index d0d6f8364bf6c109bc31e5d01940853ce42669cc..2de45dfe961ac34d07bca680c924c909
 +   struct vkr_device *dev = vkr_device_from_handle(args->device);
 +   struct vn_device_proc_table *vk = &dev->proc_table;
 +   struct object_array arr;
++
++   /* VK_ERROR_VALIDATION_FAILED is the result a command gives when the
++    * implementation detects invalid usage, and the driver gives the same one
++    * for a key it refuses.  The whole call is refused: no object is made for
++    * any of its binaries. */
++   if (args->pCreateInfo->pKeysAndDataInfo &&
++       !vkr_pipeline_binary_keys_are_sized(args->pCreateInfo->pKeysAndDataInfo)) {
++      args->ret = VK_ERROR_VALIDATION_FAILED;
++      return;
++   }
 +
 +   /* The count is an in-out parameter, and the driver asks how many binaries
 +    * a pipeline has before it names any, so a query carries no handles and
@@ -277,7 +318,7 @@ index d0d6f8364bf6c109bc31e5d01940853ce42669cc..2de45dfe961ac34d07bca680c924c909
  void
  vkr_context_init_shader_module_dispatch(struct vkr_context *ctx)
  {
-@@ -247,3 +404,19 @@ vkr_context_init_pipeline_dispatch(struct vkr_context *ctx)
+@@ -247,3 +435,19 @@ vkr_context_init_pipeline_dispatch(struct vkr_context *ctx)
     dispatch->dispatch_vkGetRayTracingShaderGroupStackSizeKHR =
        vkr_dispatch_vkGetRayTracingShaderGroupStackSizeKHR;
  }
