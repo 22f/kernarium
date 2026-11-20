@@ -18,9 +18,11 @@ archive, and no other build is checked. The application must:
   - keep nothing of the machine that built it in the host code of its
     executable and of each embedded framework: no path under a home
     directory, on a mounted volume or in a temporary build directory, whatever
-    the account or volume is called (the guest's own sections, which carry a
-    kernel built elsewhere, are not host code), and no linker debug map in an
-    embedded framework (the executable's is stripped when Xcode archives);
+    the account or volume is called (only a printf conversion, a regular
+    expression or a placeholder such as <user> is no name; the guest's own
+    sections, which carry a kernel built elsewhere, are not host code), and no
+    linker debug map in an embedded framework (the executable's is stripped when
+    Xcode archives);
   - carry no test bundle and none of the frameworks and libraries that run
     one (XCTest, XCUIAutomation, Swift Testing, and the other test libraries of
     the SDK's developer directory), embedded or not: a load command of an
@@ -63,12 +65,31 @@ FOLLOW_X_EXAMPLE = "example_handle"
 # "/Volumes/" or a format such as "/Volumes/%s" is no path of a build and does
 # not match.
 # The name of an account or a volume is any run of the characters a path
-# component can hold (spaces, parentheses and non-ASCII bytes included), up to
-# the limit of a component. It does not start with a blank or with a character
-# of a pattern or a placeholder ([ < { $ * \\ ^ ? ( + | @), and is not a printf
-# conversion: a regular expression such as /Users/[^/\s"']+ or a template
-# such as /Users/<name>/Library names no account.
-NAME = rb"(?!%[0-9.*lhzjtqL-]*[A-Za-z@])[^\x00-\x1f\x7f/ \[<{$*\\^?(+|@][^\x00-\x1f\x7f/]{0,254}"
+# component can hold (spaces, brackets, parentheses and non-ASCII bytes
+# included), up to the limit of a component, that does not start with a blank.
+# A literal name is a path wherever it begins: a disk called "[CI] Build SSD" is
+# a build location. What is no name is what a tool carries as a pattern or a
+# template, and only what is recognizable as one:
+#   - a printf conversion: %s, %@, %1$s, %-8.3ld;
+#   - a regular expression: a character class that is negated or has a
+#     quantifier ([^/\s"']+, [a-z]+, [0-9]{1,3}), a group that holds an escape
+#     class or a wildcard ((\w+), (.*)), an escape class or a wildcard with a
+#     quantifier (\w+, .*);
+#   - a placeholder: <user>, {volume}, $USER, ${HOME}, one of a few words in
+#     any letter case, and the whole name.
+# The application's own redaction (SessionRecord) carries /Users/[^/\s"']+.
+_QUANTIFIER = rb"(?:[+*?]|\{[0-9]+(?:,[0-9]*)?\})"
+_PLACEHOLDER = rb"(?:user|username|account|name|volume|disk|home|id|uuid|path|dir|directory|prefix)"
+NOT_A_NAME = (
+    rb"%(?:[0-9]+\$)?[0-9.*lhzjtqL-]*[A-Za-z@]"
+    rb"|\[\^[^\]\x00]{1,64}\]"
+    rb"|\[[^\]\x00]{1,64}\]" + _QUANTIFIER +
+    rb"|\((?:\?:)?[^)\x00]{0,64}(?:\\[wWsSdD]|\.[*+]|\[\^)[^)\x00]{0,64}\)"
+    rb"|\\[wWsSdD]" + _QUANTIFIER +
+    rb"|\.[*+?]"
+    rb"|(?i:<" + _PLACEHOLDER + rb">|\{" + _PLACEHOLDER + rb"\}|\$\{?" + _PLACEHOLDER + rb"\}?)(?=/)"
+)
+NAME = rb"(?!" + NOT_A_NAME + rb")[^\x00-\x1f\x7f/ ][^\x00-\x1f\x7f/]{0,254}"
 HOST_PATHS = (
     ("a path under a home directory",
      re.compile(rb"/Users/" + NAME + rb"/[\x21-\x7e\x80-\xff]*")),

@@ -113,6 +113,8 @@ HARMLESS_PATHS = (
     '  "/Volumes/", "/Volumes/%s", "/Volumes/%s/lib", "/Users/%s/Library", "/var/folders/", "/tmp/mesa_%s",\n'
     # Patterns and templates, as a tool's own help or matching code carries them.
     '  "/Users/[^/\\\\s\\"\']+", "/Users/<name>/Library", "/Users/$USER/Library", "/Volumes/{volume}/data",\n'
+    '  "/Users/${USER}/x", "/Volumes/[^/]+/x", "/Users/(\\\\w+)/x", "/Users/\\\\w+/x", "/Users/.*/x",\n'
+    '  "/Users/<user>/x", "/Users/%1$s/x", "/Volumes/%@/x",\n'
     '  "/nonexistent/share/locale",\n'
     "};\n"
 )
@@ -243,6 +245,13 @@ class HostTraces(Libraries):
         for index, (kind, name) in enumerate((
             ("volume", "Build (CI)"), ("volume", "ビルド"), ("volume", "Build Data"),
             ("volume", "Build [2] & Co."), ("home", "Jane Doe"), ("home", "名前"), ("home", "o'brien (work)"),
+            # A literal name that merely begins with a bracket, a brace, a
+            # parenthesis or @ is a path: a disk called "[CI] Build SSD" is a
+            # realistic build location. Only a recognizable pattern or
+            # placeholder (below) is no path.
+            ("volume", "[CI] Build SSD"), ("volume", "(Backup) Disk"), ("volume", "{CI} Disk"),
+            ("volume", "@Build Disk"), ("volume", "{CI}"), ("home", "(work) jane"), ("home", "{jane} home"),
+            ("home", "@jane"), ("home", "[ci] runner"), ("home", "<jane> home"), ("home", "$jane"),
         )):
             root = "Volumes" if kind == "volume" else "Users"
             named = self.build(f"named{index}", f'const char *fixture(void) {{ return "/{root}/{name}/prefix/lib"; }}\n')
@@ -250,6 +259,13 @@ class HostTraces(Libraries):
             with self.subTest(kind=kind, name=name):
                 self.refuses(self.bundle(named), f"names a path on {label}" if kind == "volume" else f"names a path under {label}")
                 self.refuses(self.bundle(clean, framework=named), "Runtime.framework/Runtime: names a path")
+
+    def test_a_compiled_source_path_on_a_bracketed_volume_is_refused(self) -> None:
+        # A framework's compiled __FILE__ string on a disk called "[CI] Build SSD".
+        source = self.build("bracketed", 'const char *fixture(void) { return "/Volumes/[CI] Build SSD/checkout/source.c"; }\n')
+        clean = self.build("clean", CLEAN)
+        self.refuses(self.bundle(clean, framework=source),
+                     "Runtime.framework/Runtime: names a path on a mounted volume (1): /Volumes/[CI] Build SSD/checkout/source.c")
 
     def test_a_temporary_directory_path_is_refused(self) -> None:
         temporary, clean = self.build("temporary", TEMPORARY_PATH), self.build("clean", CLEAN)
