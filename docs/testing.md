@@ -1327,7 +1327,8 @@ vector, how a start's output is read, the child process (real processes: output 
 deadline, termination and reaping; each row ends every process it started by SIGKILL through its
 handle before it returns, and every JVM runs as the leader of a process group of its own that is
 ended by SIGKILL to the group before the leader is reaped, also on a timeout or an interrupt, and
-fails the test when a process of it was still alive), the renderer's hold (whose provider it takes, the one user for
+fails the test when a process of it was still alive; a row whose processes could not be listed is an
+error of the run, never a catch of a mutant), the renderer's hold (whose provider it takes, the one user for
 every acquisition, a provider that died, a hold that stays closed, a call that is never answered),
 the icon source's bound, the resource files' order and the statuses on a plain JVM, then again with one rule removed at a time (the escaping, a bound, the
 launch refusal, the grammar, the digest's inputs, the PNG checks, the deadlines, the reaping),

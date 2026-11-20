@@ -820,7 +820,9 @@ class GroupError(RuntimeError):
 
 def _ps(arguments: list[str], limit: float) -> str:
     """The output of one ps, asked again (at most three times, within `limit` seconds) when it fails or does not
-    answer; a ps that keeps failing is an error (GroupError) and never an empty listing."""
+    answer; a ps that keeps failing is an error (GroupError) and never an empty listing. Known, and left: the
+    attempts are counted and each is bounded, but their sum (and the half second a short `limit` is raised to) is not
+    under one deadline shared with the sweep."""
     end = time.monotonic() + limit
     failure = ""
     for attempt in range(3):
@@ -905,19 +907,23 @@ def sweep_group(group: int, pipe: _Pipe, settle: float) -> list[str]:
     """What is left of a group whose leader has ended and is not reaped: one line for each process, ended.
 
     A process that ends by itself within the grace (a `sleep 1` whose shell was killed) is no leftover. The deciding
-    look is taken after the grace, or earlier when the group is empty, for nothing joins an empty group. Every scan
-    is bounded and the sweep ends before its own deadline; a scan that fails raises (GroupError). What is still
+    look is a scan that starts after the grace, or any scan that finds the group empty, for nothing joins an empty
+    group. Every scan is bounded (its time and the retries' are not under one deadline of the sweep: a scan is
+    milliseconds, and the sweep ends before its own hard end) ; a scan that fails raises (GroupError). What is still
     there is ended by SIGKILL to the group, whose leader still holds its number, and then seen gone.
     """
     grace_end = time.monotonic() + settle
     hard_end = grace_end + SWEEP_SLACK
     while True:
+        # The look that decides is one that starts after the grace: a snapshot that was taken before it and came back
+        # after it says what was there then, and what it shows may have ended by itself since.
+        deciding = time.monotonic() >= grace_end
         members = live_members(group, min(5.0, hard_end - time.monotonic()))
         if not members:
             return []
-        if time.monotonic() >= grace_end:
+        if deciding:
             break
-        pipe.pump(min(0.1, grace_end - time.monotonic()))
+        pipe.pump(min(0.1, max(0.0, grace_end - time.monotonic())))
     left = [f"pid {pid}: {describe(pid, min(5.0, hard_end - time.monotonic()))}" for pid in members]
     while members:
         signal_group(group)
@@ -949,6 +955,9 @@ def run_owned(argv: list[str], timeout: float, settle: float = 5.0) -> tuple[int
     process = None
     pipe = None
     problems: list[str] = []
+    # Known, and left: a signal that lands in the main thread between the fork inside Popen and the registration below
+    # (the Python handler runs between two bytecodes) loses the child before it is owned. That is a window of a few
+    # bytecodes, and the JVM then ends by itself within its own limits.
     try:
         with _OWNED_LOCK:
             if _STOPPED:
@@ -1002,7 +1011,8 @@ def check_leftover_detection() -> int:
     Each case's fixture writes its own pid, and the result is judged by asking the kernel about that pid, not by what
     the check reports. A shell that leaves a process that ignores SIGTERM behind is reported and the process ended; a
     process that ends by itself within the grace is not reported, after the sweep waited for it (so it was in the
-    group that the sweep looks at); a timeout and a listing that fails end the group too.
+    group that the sweep looks at), nor when the scan that saw it comes back after the grace is over; a timeout and
+    a listing that fails end the group too.
     """
     stubborn = 'echo $$ > "$1"; trap "" TERM; exec sleep 600'  # one process: exec keeps the pid and the ignored signal
     # A leader that ends when the process it left has written its pid (so the pid is there whatever the check does).
@@ -1052,6 +1062,30 @@ def check_leftover_detection() -> int:
             print("FAIL: a run that outlasts its timeout does not raise", file=sys.stderr)
             return 1
 
+        late = fixture("late")
+        real_live = globals()["live_members"]
+        pending = [True]
+
+        def late_scan(group: int, limit: float) -> list[int]:
+            members = real_live(group, limit)
+            if members and pending:
+                pending.clear()
+                time.sleep(2.2)  # a snapshot of the group that comes back after the grace is over
+            return members
+
+        globals()["live_members"] = late_scan
+        try:
+            status, _, problems = run_owned(
+                ["/bin/sh", "-c", 'sleep 1 </dev/null >/dev/null 2>&1 & echo $! > "$1"; exit 0', "sh", str(late)],
+                30, settle=2.0)
+        finally:
+            globals()["live_members"] = real_live
+        pid = pid_of(late)
+        if status != 0 or problems or pid is None or not _gone(pid):
+            print(f"FAIL: a scan that came back late decided what is left, though its process had ended by itself "
+                  f"(status {status}, pid {pid}): {problems}", file=sys.stderr)
+            return 1
+
         blind = fixture("blind")
         real_ps = globals()["_ps"]
 
@@ -1094,6 +1128,40 @@ def compile_and_run(javac: str, java: str, scratch: pathlib.Path,
 
 def failed_rows(output: str) -> set[str]:
     return {m.group(1) for m in re.finditer(r"^FAIL ([a-z0-9-]+)", output, re.MULTILINE)}
+
+
+def unchecked_rows(output: str) -> set[str]:
+    """The rows that could not check their processes (their listing failed every attempt): an error of the run."""
+    return {m.group(1) for m in re.finditer(r"^ERROR ([a-z0-9-]+): could not be checked", output, re.MULTILINE)}
+
+
+def judge_mutant(name: str, source: str, must_fail: set[str], status: int, output: str) -> tuple[bool, str]:
+    """(caught, the line to print) for one mutant's run. A row that could not be checked is an error of the run and
+    never a catch, whatever the other rows say: the run did not look at everything it is there to look at."""
+    unchecked = unchecked_rows(output)
+    if unchecked:
+        return False, (f"FAIL: mutation {name} ({source}): the rows {sorted(unchecked)} could not check their processes "
+                       f"(an error of the run, not a catch; the end of its output:\n{output[-1500:]})")
+    missed = must_fail - failed_rows(output)
+    if status == 0 or missed:
+        return False, (f"FAIL: mutation {name} ({source}) was not caught by {sorted(missed) or 'any row'} "
+                       f"(status {status}; the end of its output:\n{output[-1500:]})")
+    return True, f"mutation {name}: caught by {sorted(failed_rows(output) & must_fail)}"
+
+
+def check_judging() -> int:
+    """A mutant that a row seems to catch is not credited when a row could not check its processes (the control: a
+    behaviour-preserving mutant whose only failure is a listing that failed every attempt)."""
+    must = {"row-a"}
+    caught = judge_mutant("m", "S.java", must, 1, "ok row-b\nFAIL row-a: wrong\nFAILED 1\n")
+    errored = judge_mutant("m", "S.java", must, 1, "ERROR row-a: could not be checked: the processes of this JVM could "
+                           "not be listed (java.lang.RuntimeException: Cannot allocate memory)\nFAILED 1\n")
+    errored_too = judge_mutant("m", "S.java", must, 1, "FAIL row-a: wrong\nERROR row-b: could not be checked: x\nFAILED 2\n")
+    if not caught[0] or errored[0] or errored_too[0] or "could not check their processes" not in errored[1]:
+        print(f"FAIL: a mutant is credited with a row that could not check its processes: {caught} {errored} {errored_too}",
+              file=sys.stderr)
+        return 1
+    return 0
 
 
 def strip_comments(text: str) -> str:
@@ -1233,7 +1301,7 @@ def run() -> int:
     if javac is None or java is None:
         print("SKIP: no JDK (javac and java) on PATH")
         return SKIP
-    if check_leftover_detection() != 0:
+    if check_judging() != 0 or check_leftover_detection() != 0:
         return 1
     package_dir = SOURCES / PACKAGE_DIR
     sources = sorted(path for path in package_dir.glob("*.java") if path.name not in ANDROID_GLUE)
@@ -1252,8 +1320,10 @@ def run() -> int:
         scratch = pathlib.Path(directory)
         status, output, left = compile_and_run(javac, java, scratch / "base", [*sources, PROTOCOL])
         print(output, end="")
-        if status != 0 or not output.rstrip().endswith("PASS"):
-            print("FAIL: the command's test", file=sys.stderr)
+        if status != 0 or not output.rstrip().endswith("PASS") or unchecked_rows(output):
+            print("FAIL: the command's test" + (f" (rows that could not check their processes: "
+                                               f"{sorted(unchecked_rows(output))})" if unchecked_rows(output) else ""),
+                  file=sys.stderr)
             return 1
         if left:
             print("FAIL: the command's test left processes behind (ended):\n  " + "\n  ".join(left), file=sys.stderr)
@@ -1282,11 +1352,7 @@ def run() -> int:
             if left:
                 return False, (f"FAIL: mutation {name} ({source}) left processes behind (ended):\n  "
                                + "\n  ".join(left))
-            missed = must_fail - failed_rows(mutant_output)
-            if mutant_status == 0 or missed:
-                return False, (f"FAIL: mutation {name} ({source}) was not caught by {sorted(missed) or 'any row'} "
-                               f"(status {mutant_status}; the end of its output:\n{mutant_output[-1500:]})")
-            return True, f"mutation {name}: caught by {sorted(failed_rows(mutant_output) & must_fail)}"
+            return judge_mutant(name, source, must_fail, mutant_status, mutant_output)
 
         # The mutants are independent processes: a few at a time keeps the whole under the test's timeout.
         workers = max(1, min(3, (os.cpu_count() or 1) - 1))

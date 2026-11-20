@@ -48,51 +48,99 @@ public final class AppsCommandTest {
         void run() throws Exception;
     }
 
+    /**
+     * A listing of processes that failed every time it was asked: what a row has to say of its processes cannot be
+     * checked. That is an error of the run, not a failure of the row (see {@link #outcome}).
+     */
+    private static final class ListingFailed extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        ListingFailed(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    /** How a row ended: "ok", "FAIL" (it failed) or "ERROR" (its processes could not be checked), and the text. */
+    private static final class Outcome {
+        final String kind;
+        final String text;
+
+        Outcome(String kind, String text) {
+            this.kind = kind;
+            this.text = text;
+        }
+    }
+
     private static void row(String name, Row body) {
         current = name;
+        Outcome outcome = outcome(body);
+        if (outcome.kind.equals("ok")) {
+            System.out.println("ok " + name);
+        } else {
+            failures++;
+            System.out.println(outcome.kind + " " + name + ": " + outcome.text);
+        }
+    }
+
+    /**
+     * Runs a row's body and sees to its processes. However the body ended, a process it started and left is ended
+     * here, and the row fails on it: a row that stops halfway (a check that throws before its own clean-up) must not
+     * leave a child that ignores SIGTERM. Whatever this does fails the row and never the run: the rows after it still
+     * print. When the processes cannot be listed (every attempt failed) the row is an ERROR, which the driver does not
+     * read as a failure that a mutant may be credited with: the row has not been checked.
+     */
+    private static Outcome outcome(Row body) {
         List<String> problems = new ArrayList<>();
-        Set<Long> before = null;
+        String unchecked = null;
+        Set<Long> before = new HashSet<>(); // a JVM has no child between two rows, so none is the baseline when it cannot be listed
         try {
             before = childPids();
-        } catch (Throwable thrown) {
-            problems.add("could not list the processes of this JVM: " + thrown);
+        } catch (ListingFailed failed) {
+            unchecked = failed.getMessage();
         }
         try {
             body.run();
+        } catch (ListingFailed failed) {
+            unchecked = failed.getMessage();
         } catch (Mismatch mismatch) {
             problems.add(String.valueOf(mismatch.getMessage()));
         } catch (Throwable thrown) {
             problems.add(String.valueOf(thrown));
         }
-        // However the body ended, a process it started and left is ended here, and the row fails on it: a row that
-        // stops halfway (a check that throws before its own clean-up) must not leave a child that ignores SIGTERM.
-        // Whatever this does fails the row and never the run: the rows after it still print.
-        if (before != null) {
-            try {
-                String stray = endStrays(before);
-                if (stray != null) {
-                    problems.add(stray);
-                }
-            } catch (Throwable thrown) {
-                problems.add("could not end the processes it started: " + thrown);
+        try {
+            String stray = endStrays(before);
+            if (stray != null) {
+                problems.add(stray);
             }
+        } catch (ListingFailed failed) {
+            unchecked = failed.getMessage();
+        } catch (Throwable thrown) {
+            problems.add("could not end the processes it started: " + thrown);
         }
-        if (problems.isEmpty()) {
-            System.out.println("ok " + name);
-        } else {
-            failures++;
-            System.out.println("FAIL " + name + ": " + String.join("; ", problems));
+        if (unchecked != null) {
+            return new Outcome("ERROR", "could not be checked: " + unchecked
+                    + (problems.isEmpty() ? "" : "; its own result: " + String.join("; ", problems)));
         }
+        return problems.isEmpty() ? new Outcome("ok", "") : new Outcome("FAIL", String.join("; ", problems));
     }
+
+    private static final int LISTING_ATTEMPTS = 200;
 
     /**
      * The result of a listing of processes, asked again when it fails: the JDK lists the system's processes into a
      * buffer that it sizes first, and fails ("Cannot allocate memory") when processes are being created meanwhile, as
-     * they are on a loaded host. A listing that keeps failing is the failure.
+     * they are on a loaded host. A listing that keeps failing is a {@link ListingFailed}. The attempts are counted and
+     * not timed: the time one listing takes is not under a deadline shared with the kill that follows (ten seconds,
+     * {@link #endAll}); a listing is milliseconds, and a host on which it is not has failed the run already.
      */
     private static List<ProcessHandle> listing(java.util.function.Supplier<java.util.stream.Stream<ProcessHandle>> ask) {
-        RuntimeException failed = null;
-        for (int attempt = 0; attempt < 200; attempt++) {
+        return listing(ask, LISTING_ATTEMPTS);
+    }
+
+    private static List<ProcessHandle> listing(java.util.function.Supplier<java.util.stream.Stream<ProcessHandle>> ask,
+            int attempts) {
+        RuntimeException failed = new RuntimeException("no attempt was made");
+        for (int attempt = 0; attempt < attempts; attempt++) {
             try {
                 return ask.get().collect(java.util.stream.Collectors.toList());
             } catch (RuntimeException problem) {
@@ -105,7 +153,7 @@ public final class AppsCommandTest {
                 }
             }
         }
-        throw failed;
+        throw new ListingFailed("the processes of this JVM could not be listed (" + failed + ")", failed);
     }
 
     /** The pids of the processes this JVM has started and that are still there. */
@@ -122,6 +170,9 @@ public final class AppsCommandTest {
      * first: with it gone, it starts nothing more) and what each of them started.
      */
     private static List<ProcessHandle> startedSince(Set<Long> before) {
+        // Known, and left: a child that exits and whose pid is reused between the first listing and the one of its
+        // descendants would put the new owner's children on the list. The rows' fixtures are single processes, so no
+        // descendant is expected, and the window is two listings wide.
         List<ProcessHandle> started = new ArrayList<>();
         for (ProcessHandle child : listing(() -> ProcessHandle.current().children())) {
             if (!before.contains(child.pid())) {
@@ -138,6 +189,8 @@ public final class AppsCommandTest {
      * Returns whether they all are.
      */
     private static boolean endAll(List<ProcessHandle> handles) {
+        // Known, and left: the JDK's forcible end checks the process's start time and then signals, as two steps; the
+        // test cannot make it one (the Process objects stay inside ChildProcess.run, which does not change).
         for (ProcessHandle handle : handles) {
             handle.destroyForcibly();
         }
@@ -1966,6 +2019,23 @@ public final class AppsCommandTest {
         return handle.isPresent() && handle.get().isAlive();
     }
 
+    /**
+     * Whether the child that wrote its pid to the file is among {@code started} and alive: the pid it recorded is
+     * compared with the handles', so the observation is of that child and not of any new one. A file that is still
+     * empty is a failure of the fixture. Nothing is signalled: the handles are what ends it ({@link #endAll}).
+     */
+    private static boolean survivorAmong(List<ProcessHandle> started, java.io.File pidFile) throws Exception {
+        String text = new String(java.nio.file.Files.readAllBytes(pidFile.toPath()), StandardCharsets.US_ASCII).trim();
+        check(!text.isEmpty(), "the child wrote its pid");
+        long recorded = Long.parseLong(text);
+        for (ProcessHandle handle : started) {
+            if (handle.pid() == recorded) {
+                return handle.isAlive();
+            }
+        }
+        return false;
+    }
+
     private static java.io.File pidFile() throws Exception {
         java.io.File file = java.io.File.createTempFile("kernarium-apps-pid", ".txt");
         file.deleteOnExit();
@@ -2121,9 +2191,78 @@ public final class AppsCommandTest {
             } finally {
                 // The child is this JVM's: it is ended through the handle it holds, and seen gone, before the row returns.
                 List<ProcessHandle> survivors = startedSince(before);
-                boolean survivor = !survivors.isEmpty() && survivors.get(0).isAlive();
-                check(endAll(survivors), "the survivor was ended");
+                boolean survivor;
+                Mismatch unidentified = null;
+                try {
+                    survivor = survivorAmong(survivors, pid);
+                } catch (Mismatch refused) {
+                    survivor = false;
+                    unidentified = refused;
+                }
+                boolean ended = endAll(survivors);
+                if (unidentified != null) {
+                    throw unidentified;
+                }
+                check(ended, "the survivor was ended");
                 check(survivor, "the child was alive when the run said so");
+            }
+        });
+        row("a-row-whose-processes-cannot-be-listed-is-an-error-and-no-failure", () -> {
+            // A listing that fails every time is ListingFailed; a row that meets it is ERROR (which the driver does not
+            // credit a mutant with) and not FAIL; a row that fails is FAIL; one that passes is ok.
+            same("ok", outcome(() -> { }).kind, "a row that passes");
+            same("FAIL", outcome(() -> {
+                throw new Mismatch("wrong");
+            }).kind, "a row that fails");
+            Outcome unchecked = outcome(() -> {
+                throw new ListingFailed("injected", new RuntimeException("Cannot allocate memory"));
+            });
+            same("ERROR", unchecked.kind, "a row whose processes cannot be listed");
+            check(unchecked.text.startsWith("could not be checked: injected"), "it says so: " + unchecked.text);
+            int[] asked = new int[1];
+            boolean exhausted = false;
+            try {
+                listing(() -> {
+                    asked[0]++;
+                    throw new RuntimeException("Cannot allocate memory");
+                }, 3);
+            } catch (ListingFailed expected) {
+                exhausted = true;
+            }
+            check(exhausted, "a listing that fails every attempt is a ListingFailed");
+            same(3, asked[0], "it was asked as often as it may be");
+            asked[0] = 0;
+            same(0, listing(() -> {
+                if (asked[0]++ < 2) {
+                    throw new RuntimeException("Cannot allocate memory");
+                }
+                return java.util.stream.Stream.empty();
+            }, 3).size(), "a listing that fails and then answers is the answer");
+        });
+        row("child-survivor-is-told-by-its-recorded-pid", () -> {
+            // The observation of a survivor is of the child that wrote its pid, not of any new child: an empty pid file
+            // identifies nothing, and a pid that is not a new live child of this JVM's is no survivor.
+            Set<Long> before = childPids();
+            java.io.File empty = pidFile();
+            java.io.File recorded = pidFile();
+            Process other = new ProcessBuilder(sh("exec sleep 600")).start();
+            try {
+                List<ProcessHandle> started = startedSince(before);
+                same(1, started.size(), "one new child");
+                boolean refused = false;
+                try {
+                    survivorAmong(started, empty);
+                } catch (Mismatch expected) {
+                    refused = true;
+                }
+                check(refused, "an empty pid file identifies no survivor");
+                java.nio.file.Files.write(recorded.toPath(), (ProcessHandle.current().pid() + "\n").getBytes(StandardCharsets.US_ASCII));
+                same(false, survivorAmong(started, recorded), "a pid that is not a new child of this JVM is no survivor");
+                java.nio.file.Files.write(recorded.toPath(), (other.pid() + "\n").getBytes(StandardCharsets.US_ASCII));
+                same(true, survivorAmong(started, recorded), "the recorded pid of a live new child is the survivor");
+            } finally {
+                other.destroyForcibly();
+                other.waitFor();
             }
         });
         row("child-kill-that-throws-leaves-the-wait-to-decide", () -> {
