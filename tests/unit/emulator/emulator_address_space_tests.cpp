@@ -6,7 +6,7 @@
 #include "require.hpp"
 #include "runtime/guest_memory_budget.hpp"
 #include "runtime/native_kernel_layout.hpp"
-#include "runtime/start_refusal.hpp"
+#include "start_refusal.hpp"
 #include "testing.hpp"
 
 #include <cstdio>
@@ -101,17 +101,17 @@ void test_a_refused_heap_or_window_leaves_the_room_a_smaller_guest_needs()
 		"a refused run kept the window it reserved");
 	require(entries == 0, "a guest the process could not hold entered its "
 		"kernel");
-	require(uml::runtime::start_refused_for_memory(),
+	require(uml::emulator::start_refused_for_memory(emulator.get()),
 		"a run the host refused for want of memory carries no mark that says "
 		"so");
 	require(run_with_memory(emulator.get(), "mem=1536M") == 0 && entries == 1,
 		"a refused run took the room a smaller guest needed");
-	require(!uml::runtime::start_refused_for_memory(),
+	require(!uml::emulator::start_refused_for_memory(emulator.get()),
 		"a run that started carries the mark of the refused run before it");
 	require(run_with_memory(emulator.get(), "mem=2176M") ==
 			-UML_EMULATOR_OUT_OF_MEMORY && entries == 1,
 		"the larger guest was started once the smaller one had been");
-	require(uml::runtime::start_refused_for_memory(),
+	require(uml::emulator::start_refused_for_memory(emulator.get()),
 		"the second refusal carries no mark");
 	/* A run that fails for another reason clears what the refusal before it
 	 * left: the number a failed allocation of the library's own returns is the
@@ -119,7 +119,7 @@ void test_a_refused_heap_or_window_leaves_the_room_a_smaller_guest_needs()
 	require(uml_emulator_run(emulator.get(), -1, nullptr, nullptr) ==
 			-UML_EMULATOR_INVALID_ARGUMENT,
 		"a run with a negative argument count was not refused");
-	require(!uml::runtime::start_refused_for_memory(),
+	require(!uml::emulator::start_refused_for_memory(emulator.get()),
 		"a run that failed for another reason kept the mark of a refusal");
 }
 
@@ -140,7 +140,7 @@ void test_a_refused_heap_leaves_no_window_behind()
 	require(run_with_memory(emulator.get(), "mem=1536M") ==
 			-UML_EMULATOR_OUT_OF_MEMORY && entries == 0,
 		"a process without room for its heap region started a guest");
-	require(uml::runtime::start_refused_for_memory(),
+	require(uml::emulator::start_refused_for_memory(emulator.get()),
 		"a refused heap region carries no mark of a refusal for memory");
 	require(uml::runtime::process_native_window().begin == 0,
 		"a refused heap region left the guest's window in the process");
@@ -153,7 +153,7 @@ void test_a_refused_heap_leaves_no_window_behind()
 	require(run_with_memory(emulator.get(), "mem=1536M") == 0 && entries == 1,
 		"a guest refused for want of room for its heap region was not started "
 		"once the process had it");
-	require(!uml::runtime::start_refused_for_memory(),
+	require(!uml::emulator::start_refused_for_memory(emulator.get()),
 		"the run that started carries the mark of the refusal before it");
 }
 
@@ -169,7 +169,7 @@ void test_a_refused_ram_trial_ends_the_run_before_its_kernel()
 	require(run_with_memory(emulator.get(), "mem=1536M") ==
 			-UML_EMULATOR_OUT_OF_MEMORY && entries == 0,
 		"a host that maps no RAM for the guest started it");
-	require(uml::runtime::start_refused_for_memory(),
+	require(uml::emulator::start_refused_for_memory(emulator.get()),
 		"a refused RAM trial carries no mark of a refusal for memory");
 	uml::emulator::testing::place_guest_ram_trial(0);
 	require(run_with_memory(emulator.get(), "mem=1536M") == 0 && entries == 1,
@@ -190,7 +190,7 @@ void test_a_size_without_a_layout_reserves_nothing()
 		"a run that had no layout reserved the heap region");
 	require(uml::runtime::process_native_window().begin == 0,
 		"a run that had no layout reserved a window");
-	require(!uml::runtime::start_refused_for_memory(),
+	require(!uml::emulator::start_refused_for_memory(emulator.get()),
 		"a run with no layout is marked as refused for want of memory");
 }
 
@@ -255,6 +255,45 @@ void test_the_heap_region_does_not_take_the_windows_address()
 		"the heap region overlaps the window");
 }
 
+/* The refusal belongs to the run of the handle that was refused: a run of
+ * another handle, refused or not, changes nothing about it, in either order
+ * of their runs. */
+void test_the_refusal_belongs_to_the_run_of_its_handle()
+{
+	const auto first = uml::testing::make_emulator(counting_kernel);
+	const auto second = uml::testing::make_emulator(counting_kernel);
+	rlimit limit{};
+	require(getrlimit(RLIMIT_AS, &limit) == 0,
+		"could not read the address space limit");
+	limit.rlim_cur = mapped_bytes() + window_bytes(2176) + 512 * mib;
+	require(setrlimit(RLIMIT_AS, &limit) == 0,
+		"could not limit the address space");
+	/* The first handle is refused, then the second fails for another reason:
+	 * the first keeps what its run was. */
+	require(run_with_memory(first.get(), "mem=2176M") ==
+			-UML_EMULATOR_OUT_OF_MEMORY,
+		"the first guest was not refused");
+	require(uml_emulator_run(second.get(), -1, nullptr, nullptr) ==
+			-UML_EMULATOR_INVALID_ARGUMENT,
+		"a run with a negative argument count was not refused");
+	require(uml::emulator::start_refused_for_memory(first.get()),
+		"another handle's run took the refusal from the handle that had it");
+	require(!uml::emulator::start_refused_for_memory(second.get()),
+		"a run that failed for another reason is marked as refused for memory");
+	/* The first handle's run fails for another reason, then the second is
+	 * refused: the first does not take the refusal. */
+	require(uml_emulator_run(first.get(), -1, nullptr, nullptr) ==
+			-UML_EMULATOR_INVALID_ARGUMENT,
+		"a run with a negative argument count was not refused");
+	require(run_with_memory(second.get(), "mem=2176M") ==
+			-UML_EMULATOR_OUT_OF_MEMORY,
+		"the second guest was not refused");
+	require(!uml::emulator::start_refused_for_memory(first.get()),
+		"another handle's refusal was taken for a run that had none");
+	require(uml::emulator::start_refused_for_memory(second.get()),
+		"a refused run carries no mark");
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -277,6 +316,8 @@ int main(int argc, char **argv)
 			test_a_size_without_a_layout_reserves_nothing();
 		else if (mode == "--heap-and-window-addresses")
 			test_the_heap_region_does_not_take_the_windows_address();
+		else if (mode == "--two-handles")
+			test_the_refusal_belongs_to_the_run_of_its_handle();
 		else
 			test_a_refused_heap_or_window_leaves_the_room_a_smaller_guest_needs();
 		return EXIT_SUCCESS;

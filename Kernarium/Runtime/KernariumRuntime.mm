@@ -64,11 +64,11 @@
 #include "block/ubd_path.hpp"
 #include "gpu_budget_plan.hpp"
 #include "options.hpp"
+#include "start_refusal.hpp"
 #include "runtime/execution_engine.hpp"
 #include "runtime/guest_memory_budget.hpp"
 #include "runtime/memory_pressure_response.hpp"
 #include "runtime/session_record.hpp"
-#include "runtime/start_refusal.hpp"
 #include "uml/emulator.h"
 #include "uml_slirp_net.h"
 
@@ -1698,7 +1698,7 @@ public:
 
     bool startRefusedForMemory() noexcept override
     {
-        return uml::runtime::start_refused_for_memory();
+        return uml::emulator::start_refused_for_memory(emulator_);
     }
 
     bool runEnd(kernarium::restart::RunEnd& end) override

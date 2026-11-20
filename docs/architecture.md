@@ -90,9 +90,10 @@ permanent) as the kernel will and hands the range back to the reservation
 window and the region. A host that will not reserve the window or the region or
 map the RAM ends the run with `-UML_EMULATOR_OUT_OF_MEMORY`, which leaves the
 process's guest unspent, where the kernel would end the process, and marks the
-run (`runtime/start_refusal.hpp`): the same status also comes from a failed
-allocation of the library's own, so the Kernarium runtime returns its own
-result (`KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED`) only for a marked run. Guest
+run of that handle (`emulator/src/start_refusal.hpp`): the same status also
+comes from a failed allocation of the library's own, so the Kernarium runtime
+returns its own result (`KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED`) for a
+marked run of its handle alone, whatever another handle's run did. Guest
 RAM that a host-service view still borrows stays mapped until the last view is
 released. The linear physical window
 is the anonymous RAM root; consumers borrow it or create non-copying Mach

@@ -194,6 +194,8 @@ uml_add_unit_test(NAME emulator-address-space-no-layout
     COMMAND uml_emulator_address_space_tests --no-layout)
 uml_add_unit_test(NAME emulator-address-space-heap-and-window
     COMMAND uml_emulator_address_space_tests --heap-and-window-addresses)
+uml_add_unit_test(NAME emulator-address-space-two-handles
+    COMMAND uml_emulator_address_space_tests --two-handles)
 
 add_executable(uml_native_4k_admission_tests native_4k_admission_tests.cpp)
 target_link_libraries(uml_native_4k_admission_tests PRIVATE

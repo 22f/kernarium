@@ -14,7 +14,7 @@
 #include "native_kernel_layout.hpp"
 #include "session_record.hpp"
 #include "stall_watch.hpp"
-#include "runtime/start_refusal.hpp"
+#include "start_refusal.hpp"
 #include "thread_fence.hpp"
 #include "virtual_jetsam.hpp"
 #include "x86_runtime_support.hpp"
@@ -380,15 +380,6 @@ std::atomic<std::uintptr_t> test_guest_ram_trial_start{0};
 	return ::uml::runtime::prepare_native_kernel_layout(guest_memory);
 }
 
-/* The result of a run the host refused for want of memory before its kernel
- * started, with the mark that says so (runtime/start_refusal.hpp): the same
- * number also comes from a failed allocation of the library's own. */
-[[nodiscard]] int refused_for_memory() noexcept
-{
-	::uml::runtime::note_start_refused_for_memory();
-	return -UML_EMULATOR_OUT_OF_MEMORY;
-}
-
 /* The layout the pre-start RAM trial is made in: the run's own. A test
  * variant can make it elsewhere, where the host maps no RAM. */
 [[nodiscard]] ::uml::runtime::NativeKernelLayout guest_ram_trial_layout(
@@ -566,10 +557,10 @@ public:
 	[[nodiscard]] int run(int argc, const char *const argv[],
 			      const char *const envp[])
 	{
-		/* The mark of the last run is gone before anything of this one can
-		 * fail, so that a result this run returns for another reason never
-		 * reads as a refusal for memory. */
-		::uml::runtime::clear_start_refusal();
+		/* The mark of the last run of this handle is gone before anything of
+		 * this one can fail, so that a result this run returns for another
+		 * reason never reads as a refusal for memory. */
+		start_refused_for_memory_.store(false, std::memory_order_release);
 		if (argc < 0 || (argc != 0 && argv == nullptr))
 			return -UML_EMULATOR_INVALID_ARGUMENT;
 		if (kernel_view_.empty())
@@ -1208,6 +1199,13 @@ public:
 		return run_end_;
 	}
 
+	/* Whether this handle's last run was refused for want of memory before
+	 * its kernel started (start_refusal.hpp). */
+	[[nodiscard]] bool start_refused_for_memory() const noexcept
+	{
+		return start_refused_for_memory_.load(std::memory_order_acquire);
+	}
+
 #if UML_EMULATOR_TESTING
 	/* The lifecycle calls that have announced themselves and not ended. */
 	[[nodiscard]] unsigned int lifecycle_calls() const noexcept
@@ -1706,6 +1704,19 @@ private:
 	 * Clearing this on success prevents an old handle from releasing a later
 	 * guest belonging to another handle. */
 	bool power_off_pending_{};
+	/* Set where a run is refused for want of memory before its kernel starts,
+	 * and cleared when the next run of the handle begins. */
+	std::atomic_bool start_refused_for_memory_{false};
+
+	/* The result of a run refused for want of memory before its kernel
+	 * started, with the mark that says so: the same number also comes from a
+	 * failed allocation of the library's own. */
+	[[nodiscard]] int refused_for_memory() noexcept
+	{
+		start_refused_for_memory_.store(true, std::memory_order_release);
+		return -UML_EMULATOR_OUT_OF_MEMORY;
+	}
+
 	/* How the handle's most recent run ended, for uml_emulator_get_run_end. */
 	mutable std::mutex run_end_mutex_;
 	uml_emulator_run_end run_end_ {
@@ -1724,6 +1735,16 @@ struct uml_emulator {
 
 	uml::emulator::Emulator implementation;
 };
+
+namespace uml::emulator {
+
+bool start_refused_for_memory(const uml_emulator *emulator) noexcept
+{
+	return emulator != nullptr &&
+		emulator->implementation.start_refused_for_memory();
+}
+
+} // namespace uml::emulator
 
 #if UML_EMULATOR_TESTING
 namespace uml::emulator::testing {
