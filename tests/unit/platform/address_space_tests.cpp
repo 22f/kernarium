@@ -150,6 +150,32 @@ void onlyAProcessTheSystemLimitsIsMeasured()
 	require(!platform::os_limited_free_address_run(0).has_value());
 }
 
+/* A process the system limits is measured over the span the system gives it:
+ * a process that states a highest address of an application signed without
+ * Extended Virtual Addressing has a figure, the widest run its own map holds
+ * below it, and the figure is a reservation that fits. (No test process is
+ * limited by the system: the highest address is stated.) */
+std::uint64_t limitedProcessHighestAddress() noexcept { return 454 * gib; }
+std::uint64_t entitledProcessHighestAddress() noexcept { return 512 * gib; }
+std::uint64_t processWhoseSystemSaysNothing() noexcept { return 0; }
+
+void aLimitedProcessIsMeasuredOverItsOwnSpan()
+{
+	const auto measured = platform::os_limited_free_address_run(
+		48 * gib, limitedProcessHighestAddress);
+	require(measured.has_value(), "a limited process was not measured");
+	require(*measured == *platform::os_largest_free_address_run(48 * gib, 454 * gib),
+		"the measure is not the widest run of the span the system gives");
+	require(*measured > 0, "a process has address space free in 48 to 454 GiB");
+	/* Only a process the system limits is measured. */
+	require(!platform::os_limited_free_address_run(
+		48 * gib, entitledProcessHighestAddress).has_value(),
+		"a process with Extended Virtual Addressing was measured");
+	require(!platform::os_limited_free_address_run(
+		48 * gib, processWhoseSystemSaysNothing).has_value(),
+		"a process the system says nothing of was measured");
+}
+
 } // namespace
 
 int main()
@@ -168,6 +194,8 @@ int main()
 			aReservationNeverGrowsTheRunItWasTakenFrom},
 		{"only-a-process-the-system-limits-is-measured",
 			onlyAProcessTheSystemLimitsIsMeasured},
+		{"a-limited-process-is-measured-over-its-own-span",
+			aLimitedProcessIsMeasuredOverItsOwnSpan},
 	};
 	return uml::testing::runNamedTests(tests);
 }

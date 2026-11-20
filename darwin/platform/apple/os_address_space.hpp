@@ -94,6 +94,19 @@ inline constexpr std::uint64_t unlimited_address_space_bytes =
 	return widest;
 }
 
+/* The highest address this process may map (task_vm_info's max_address), or
+ * zero where the system does not answer. */
+[[nodiscard]] inline std::uint64_t os_max_address() noexcept
+{
+	task_vm_info_data_t info{};
+	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+	if (task_info(mach_task_self(), TASK_VM_INFO,
+		    reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS ||
+	    count < TASK_VM_INFO_COUNT)
+		return 0;
+	return info.max_address;
+}
+
 /* What the system gives this process, where the system limits it
  * (address_space_is_limited): the widest run of address space it has free from
  * `floor` up to the highest address it may map, which is the largest
@@ -106,18 +119,20 @@ inline constexpr std::uint64_t unlimited_address_space_bytes =
  * process, an application with Extended Virtual Addressing. Their address space
  * is theirs to use as it was before this was measured.
  *
+ * `max_address` names where the process's highest address comes from, the
+ * system's own answer by default: a test states one, since no test process is
+ * limited by the system.
+ *
  * Header-only and free of the rest of the platform, so the application, which
  * does not link the runtime, reads the figure the way the runtime does. */
 [[nodiscard]] inline std::optional<std::uint64_t> os_limited_free_address_run(
-	std::uint64_t floor) noexcept
+	std::uint64_t floor,
+	std::uint64_t (*max_address)() noexcept = os_max_address) noexcept
 {
-	task_vm_info_data_t info{};
-	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
-	if (task_info(mach_task_self(), TASK_VM_INFO,
-		    reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS ||
-	    count < TASK_VM_INFO_COUNT || !address_space_is_limited(info.max_address))
+	const std::uint64_t highest = max_address();
+	if (!address_space_is_limited(highest))
 		return std::nullopt;
-	return os_largest_free_address_run(floor, info.max_address);
+	return os_largest_free_address_run(floor, highest);
 }
 
 } // namespace uml::platform
