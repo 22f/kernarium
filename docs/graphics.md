@@ -670,6 +670,22 @@ it suspends while it holds a file lock, and a cache write can be in flight at
 the suspension. The database and single-file formats lock their files and stay
 off.
 
+KosmicKrisp keeps the variants of its dynamic vertex-input pipelines in the same
+cache, so a first draw that finds one builds its Metal pipelines from the
+stored MSL instead of translating the shaders again, in a later process as well
+as in a later boot. An entry is a small descriptor and the MSL texts it names;
+texts are stored once under the hash of their content, and most variants share
+all but one. The key is the stripped NIR the variant is built from, the device
+and driver identity, the pipeline's lowered state and layout hashes, and the
+vertex-input state. A missing entry, one of another build, one that is
+truncated or damaged, one that is not what its key names, one that holds a
+shader description no writer wrote, and one that is not a variant of the
+pipeline asking for it are each a miss: the variant is translated and stored
+again, and an entry's lengths and counts are checked before they are used. No
+behavior depends on a variant entry surviving. `MESA_KK_VARIANT_CACHE=0` turns
+the variant cache off and `MESA_KK_VARIANT_LOG=1` logs each lookup; the apps and
+emulators set neither.
+
 ## Validation
 
 Use `check-gpu` for native GPU ownership and VNC checks and
