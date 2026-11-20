@@ -351,6 +351,18 @@ struct LifecycleTests {
                 .hasSuffix("Virtual machine ended: runtime result -2"))
     }
 
+    @Test func lowerMemoryIsAdvisedOnlyWhereASmallerSizeIsOffered() {
+        let refused = RunEnd(result: -101, memoryRefusedMiB: 2048)
+        #expect(refused.canLowerMemory(leastOfferedMiB: 1536))
+        // The size the ruler starts at cannot be lowered, and neither can one
+        // below it (a device whose ruler holds a single size).
+        #expect(!refused.canLowerMemory(leastOfferedMiB: 2048))
+        #expect(!refused.canLowerMemory(leastOfferedMiB: 2560))
+        // An end that names no refused memory has nothing to lower.
+        #expect(!RunEnd(result: -2).canLowerMemory(leastOfferedMiB: 1536))
+        #expect(!RunEnd(result: -5, stoppedByUser: true).canLowerMemory(leastOfferedMiB: 1536))
+    }
+
     @Test func cleanPowerOffAllowsAnotherStartAndFailureRequiresRelaunch() {
         var life = Lifecycle(guest: Guest.fresh(on: ipad))
         #expect(life.start(.normal, host: ipad) == .allowed(.normal))

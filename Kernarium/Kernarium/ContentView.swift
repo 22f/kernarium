@@ -64,7 +64,8 @@ struct ContentView: View {
                     GuestEndedNotice(
                         end: GuestRunEnd(
                             result: result,
-                            requested: launcher.stopRequested
+                            requested: launcher.stopRequested,
+                            memoryMiB: launcher.runMemoryMiB
                         )
                     )
                         .padding()
@@ -401,8 +402,17 @@ struct GuestRunEnd: Equatable {
     /// leaves a process another run may start in, and the person who asked for
     /// the stop did not meet an error.
     var requested = false
+    /// The guest memory the run asked for, in MiB, where it is known.
+    var memoryMiB: Int?
 
     private var shutDown: Bool { result == 0 || requested }
+
+    /// Whether the settings offer a size below the run's, so that choosing a
+    /// smaller one can be done. A size not known is taken to be above them.
+    private var canLowerMemory: Bool {
+        guard let memoryMiB else { return true }
+        return memoryMiB > EmulatorConfiguration.guestMemoryRangeMiB.lowerBound
+    }
 
     /// The runtime stopped a guest that restarted itself again and again
     /// within seconds of booting. A guest that restarts once in a while is
@@ -426,9 +436,11 @@ struct GuestRunEnd: Equatable {
     var message: String {
         let relaunch = "Relaunch Kernarium to start it again."
         if hostRefusedMemory {
-            return "This device could not give the virtual machine the memory " +
-                "it asked for. Choose a smaller size in Emulator settings. " +
-                relaunch
+            let cause = "This device could not give the virtual machine the " +
+                "memory it asked for. "
+            return canLowerMemory
+                ? cause + "Choose a smaller size in Emulator settings. " + relaunch
+                : cause + relaunch
         }
         if restartedInALoop {
             return "The guest restarted itself again and again within " +
@@ -916,6 +928,8 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
     /// The application asked the run to stop, which is how a run the person
     /// ended ends.
     private(set) var stopRequested = false
+    /// The guest memory the run in hand asked for, in MiB.
+    private(set) var runMemoryMiB: Int?
     private var thermalObserver: NSObjectProtocol?
     /// The host's stop of the run in hand, from when it begins until its
     /// thread has returned (`RunStop`).
@@ -1062,6 +1076,7 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
         ) == 0 {
             gpuBudgetWarning = GPUBudgetWarning(plan: plan)
         }
+        runMemoryMiB = configuration.guestMemoryMiB
         let stop = runBegan()
         let size = GuestInputCoordinateSpace.boundedDisplaySize(
             geometry.pixelSize

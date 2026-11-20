@@ -166,6 +166,14 @@ public struct RunEnd: Equatable, Sendable {
 
     public var poweredOff: Bool { result == 0 && !restartedInALoop && startFailure == nil }
 
+    /// Whether a size below the refused one is offered, so that the advice to
+    /// lower the memory can be followed. `leastOfferedMiB` is the bottom of
+    /// the memory ruler (`MemoryPolicy.minimumMiB`).
+    public func canLowerMemory(leastOfferedMiB: Int) -> Bool {
+        guard let memoryRefusedMiB else { return false }
+        return memoryRefusedMiB > leastOfferedMiB
+    }
+
     public var phase: Phase { poweredOff ? .home : .failed }
 
     /// The lines the failure screen offers to copy, in the person's language.

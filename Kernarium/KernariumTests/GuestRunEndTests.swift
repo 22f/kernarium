@@ -56,6 +56,22 @@ struct GuestRunEndTests {
             refused.message.hasSuffix("Relaunch Kernarium to start it again.")
         )
         #expect(refused.systemName == "memorychip")
+        // The advice to choose a smaller size is given only where the
+        // settings offer one: a run at the least size keeps its title and the
+        // cause, and takes the relaunch alone.
+        let least = GuestRunEnd(
+            result: Int32(KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED),
+            memoryMiB: EmulatorConfiguration.guestMemoryRangeMiB.lowerBound
+        )
+        #expect(least.hostRefusedMemory)
+        #expect(least.title == "The virtual machine can\u{2019}t start")
+        #expect(!least.message.contains("smaller size"))
+        #expect(least.message.hasSuffix("Relaunch Kernarium to start it again."))
+        let above = GuestRunEnd(
+            result: Int32(KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED),
+            memoryMiB: EmulatorConfiguration.guestMemoryRangeMiB.lowerBound + 64
+        )
+        #expect(above.message.contains("smaller size"))
         // Another status, and a stop the application asked for, are not it.
         #expect(!GuestRunEnd(result: -4).hostRefusedMemory)
         // The library's own out-of-memory status, which a failed allocation
