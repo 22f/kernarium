@@ -96,8 +96,7 @@ nonisolated enum CompassSource {
 /// app's azimuth with iOS's own. The field and the gravity are in the device's
 /// frame and the attitude's matrix is Core Motion's rotation matrix, all as
 /// delivered; `mount` is the interface orientation the guest's sensors are
-/// given now. It adds no interface, permission or usage string, and an App
-/// Store build compiles it out.
+/// given now. It adds no interface, permission or usage string.
 nonisolated final class CompassReadout: @unchecked Sendable {
     /// The mount the guest's sensors have now (`MotionSensors.update`).
     private static let mount = OSAllocatedUnfairLock(initialState: MotionSample.Axes.portrait)

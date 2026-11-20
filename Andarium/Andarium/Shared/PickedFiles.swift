@@ -8,7 +8,7 @@ import Foundation
 /// folder lives as long as anything holds a pick of it: the install or the
 /// import that uses the files, and what its retry needs, and it is removed
 /// when the last holder lets go. A process that ended first leaves it to the
-/// next launch's sweep. A pick of the open-in-place importers has none.
+/// next launch's sweep.
 nonisolated final class PickedFolder: @unchecked Sendable {
     /// The one folder of the temporary directory that holds every pick's.
     static var directory: URL {

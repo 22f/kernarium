@@ -362,8 +362,7 @@ struct AppEntry {
 
     /// What the application offers on the device: the runtime's, with text
     /// messages held back until a release image carries the service. A
-    /// development launch can switch them on (`TextMessagesLaunch`); an App
-    /// Store build has no such launch.
+    /// development launch can switch them on (`TextMessagesLaunch`).
     private static func deviceCapabilities() -> Capabilities {
         TextMessagesLaunch.capabilities(in: ProcessInfo.processInfo.environment)
     }

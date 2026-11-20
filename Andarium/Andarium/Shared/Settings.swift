@@ -132,7 +132,7 @@ struct SessionSettingsSheet: View {
         .presentationDetents([.medium, .large], selection: $detent)
         .presentationBackground(Color(.systemGroupedBackground))
         .presentationBackgroundInteraction(.enabled(upThrough: .medium))
-        // Every other build takes a copy of the file (`CopyDocumentPicker`).
+        // The picker takes a copy of the file (`CopyDocumentPicker`).
         .documentCopyPicker(isPresented: $importing, types: InstallRefusal.pickerTypes) { result in
             switch result {
             case .success(let picked):

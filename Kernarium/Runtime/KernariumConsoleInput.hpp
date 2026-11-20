@@ -91,8 +91,7 @@ public:
     }
 
     /* Writes all of `buffer`. Returns 0, or ECANCELED once the input is
-     * stopped, ENOTCONN once the end is closed, or the socket's error. An App
-     * Store runtime has no console input. */
+     * stopped, ENOTCONN once the end is closed, or the socket's error. */
     [[nodiscard]] int send(const void* buffer, std::size_t length) noexcept
     {
         if (length == 0U)
