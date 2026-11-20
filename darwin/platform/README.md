@@ -140,8 +140,12 @@ interface to the wire.
   4:2:0 photo that the backend turns and encodes itself in the hardware JPEG
   encoder at the guest's quality (`turned_still.hpp`). The file has no colour
   profile, as the platform's own stills have none (a reader takes sRGB): the
-  device's capture colour space is selected as sRGB, and a photo that states
-  other primaries or a wide-gamut colour space is refused. A photo that cannot be
+  device's capture colour space is selected as sRGB, and the photo is delivered
+  only when what it states is BT.709's or sRGB's (BT.709 primaries with an sRGB
+  or BT.709 transfer, by its attachments, colour space or ICC profile); a photo
+  that states less is taken as sRGB only where the selection took effect. The
+  session's own wide-colour choice is the host's only while such a camera is in
+  the session. A photo that cannot be
   turned, and a Bayer still of such a camera, is refused with a recorded reason
   and never passed on unturned. The
   guest's metering and focus regions are mapped back through the turn, and
