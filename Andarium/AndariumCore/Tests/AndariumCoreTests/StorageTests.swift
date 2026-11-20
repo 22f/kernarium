@@ -509,6 +509,36 @@ struct NoRoomMemoryIsNotKeptTests {
         #expect(later.memoryMiB == 3072)
     }
 
+    /// A record that cannot be read, or decoded, is not "nothing stored": the
+    /// save of a memory of zero fails with the error and the record stays as it
+    /// is, for the size in it is the person's.
+    @Test func aRecordThatCannotBeReadIsNotReplacedByTheZeroOfALaunchWithNoRoom() async throws {
+        let (storage, root) = try makeStorage()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try await storage.create(Guest(cores: 4, memoryMiB: 3072, capacityGiB: 8))
+        let file = storage.locations.settings
+        let shown = LaunchOverrides().applied(to: try #require(try storage.load()), on: device(none))
+        #expect(shown.memoryMiB == 0)
+
+        // Denied.
+        let record = try Data(contentsOf: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
+        #expect(throws: (any Error).self) { try storage.save(shown) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        #expect(try Data(contentsOf: file) == record)
+        #expect(try #require(try storage.load()).memoryMiB == 3072)
+
+        // Not a record.
+        let garbage = Data("{ not a record".utf8)
+        try garbage.write(to: file)
+        #expect(throws: (any Error).self) { try storage.save(shown) }
+        #expect(try Data(contentsOf: file) == garbage)
+
+        // A size to keep needs no reading, and is saved as it is.
+        try storage.save(Guest(cores: 4, memoryMiB: 2048, capacityGiB: 8))
+        #expect(try #require(try storage.load()).memoryMiB == 2048)
+    }
+
     @Test func aGuestSetUpWithNoRoomTakesTheDefaultOnceThereIsRoom() async throws {
         let (storage, root) = try makeStorage()
         defer { try? FileManager.default.removeItem(at: root) }
