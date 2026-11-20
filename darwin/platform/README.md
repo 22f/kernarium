@@ -142,7 +142,8 @@ interface to the wire.
   profile, as the platform's own stills have none (a reader takes sRGB): the
   device's capture colour space is selected as sRGB, and the photo is delivered
   only when what it states is BT.709's or sRGB's (BT.709 primaries with an sRGB
-  or BT.709 transfer, by its attachments, colour space or ICC profile); a photo
+  or BT.709 transfer, by its attachments, colour space or ICC profile, the
+  colour space Core Video makes of those attachments included); a photo
   that states less is taken as sRGB only where the selection took effect. The
   session's own wide-colour choice is the host's only while such a camera is in
   the session. A photo that cannot be

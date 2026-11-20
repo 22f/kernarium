@@ -43,19 +43,41 @@ private:
 
 // The colours a photo states, by its attachments, the colour space object it carries and its ICC profile. A photo is read
 // as sRGB when it has no profile, so what matters is whether what it states is sRGB: BT.709 primaries (sRGB's too) with an
-// sRGB or BT.709 transfer, which are the colour spaces kCGColorSpaceSRGB and kCGColorSpaceITUR_709 and the explicit
-// attachments of the same. A colour space made of an ICC profile compares equal to the named one it is the profile of.
+// sRGB or BT.709 transfer. Those are the explicit attachments, the colour spaces kCGColorSpaceSRGB and kCGColorSpaceITUR_709,
+// and the two spaces Core Video itself makes of those attachments, which are equal to neither named space. A colour space made
+// of an ICC profile is equal to the one it is the profile of.
 struct StatedColours {
     bool other {};       // something it states is not that
     bool primaries {};   // its primaries are stated, and are
     bool transfer {};    // its transfer is stated, and is
 };
 
+// The colour space Core Video makes of BT.709 primaries over this transfer function.
+Cf<CGColorSpaceRef> coreVideoSpaceOf(CFStringRef transfer)
+{
+    const void* keys[] = {kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey};
+    const void* values[] = {kCVImageBufferColorPrimaries_ITU_R_709_2, transfer};
+    Cf<CFDictionaryRef> attachments(CFDictionaryCreate(nullptr, keys, values, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
+    return Cf<CGColorSpaceRef>(attachments ? CVImageBufferCreateColorSpaceFromAttachments(attachments.get()) : nullptr);
+}
+
+// Whether the space is one of those that state sRGB's colours: equal to it, or made of the same ICC profile.
 bool isSrgbOrBt709Space(CGColorSpaceRef space)
 {
-    Cf<CGColorSpaceRef> srgb(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
-    Cf<CGColorSpaceRef> bt709(CGColorSpaceCreateWithName(kCGColorSpaceITUR_709));
-    return (srgb && CFEqual(space, srgb.get())) || (bt709 && CFEqual(space, bt709.get()));
+    const Cf<CGColorSpaceRef> statesSrgb[] = {
+        Cf<CGColorSpaceRef>(CGColorSpaceCreateWithName(kCGColorSpaceSRGB)),
+        Cf<CGColorSpaceRef>(CGColorSpaceCreateWithName(kCGColorSpaceITUR_709)),
+        coreVideoSpaceOf(kCVImageBufferTransferFunction_ITU_R_709_2),
+        coreVideoSpaceOf(kCVImageBufferTransferFunction_sRGB),
+    };
+    const Cf<CFDataRef> profile(CGColorSpaceCopyICCData(space));
+    for (const auto& known : statesSrgb) {
+        if (!known) continue;
+        if (CFEqual(space, known.get())) return true;
+        const Cf<CFDataRef> knownProfile(CGColorSpaceCopyICCData(known.get()));
+        if (profile && knownProfile && CFEqual(profile.get(), knownProfile.get())) return true;
+    }
+    return false;
 }
 
 StatedColours statedColours(CVPixelBufferRef photo)

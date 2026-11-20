@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <vector>
 
 using namespace uml::platform;
@@ -45,7 +46,9 @@ constexpr std::size_t kHeight = 96;
 // profile, each of which may be another colour space than sRGB.
 enum class Primaries { none, bt709, p3, smpteC };
 enum class Transfer { asPrimaries, none, bt709, srgb, linear };
-enum class Space { none, srgb, bt709, p3, smpteC, linear };
+// coreVideo... are the colour spaces Core Video makes from attachments: it gives BT.709 primaries over the BT.709 transfer
+// a space of its own that is neither of the named spaces, and the same primaries over the sRGB transfer another.
+enum class Space { none, srgb, bt709, p3, smpteC, linear, coreVideo709, coreVideoSrgb, coreVideoLinear, coreVideoP3 };
 
 struct Tags {
     bool matrix601 = true;
@@ -56,9 +59,26 @@ struct Tags {
     Space profile = Space::none;                 // kCVImageBufferICCProfileKey
 };
 
+// The colour space Core Video derives from a buffer that carries these primaries and this transfer function.
+Owned<CGColorSpaceRef> coreVideoSpaceOf(CFStringRef primaries, CFStringRef transfer)
+{
+    Owned<CVPixelBufferRef> scratch;
+    require(CVPixelBufferCreate(nullptr, 16, 16, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, nullptr, scratch.put()) == kCVReturnSuccess, "a scratch buffer");
+    CVBufferSetAttachment(scratch.get(), kCVImageBufferColorPrimariesKey, primaries, kCVAttachmentMode_ShouldPropagate);
+    CVBufferSetAttachment(scratch.get(), kCVImageBufferTransferFunctionKey, transfer, kCVAttachmentMode_ShouldPropagate);
+    Owned<CFDictionaryRef> attachments(CVBufferCopyAttachments(scratch.get(), kCVAttachmentMode_ShouldPropagate));
+    Owned<CGColorSpaceRef> space(CVImageBufferCreateColorSpaceFromAttachments(attachments.get()));
+    require(space.get() != nullptr, "Core Video derives a colour space");
+    return space;
+}
+
 Owned<CGColorSpaceRef> colourSpaceOf(Space space)
 {
     switch (space) {
+    case Space::coreVideo709: return coreVideoSpaceOf(kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferTransferFunction_ITU_R_709_2);
+    case Space::coreVideoSrgb: return coreVideoSpaceOf(kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferTransferFunction_sRGB);
+    case Space::coreVideoLinear: return coreVideoSpaceOf(kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferTransferFunction_Linear);
+    case Space::coreVideoP3: return coreVideoSpaceOf(kCVImageBufferColorPrimaries_P3_D65, kCVImageBufferTransferFunction_sRGB);
     case Space::srgb: return Owned<CGColorSpaceRef>(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
     case Space::bt709: return Owned<CGColorSpaceRef>(CGColorSpaceCreateWithName(kCGColorSpaceITUR_709));
     case Space::p3: return Owned<CGColorSpaceRef>(CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3));
@@ -218,6 +238,29 @@ void aPhotoIsTurnedHalfAroundWithNoProfile()
     delivered("an sRGB ICC profile alone", tags);
     tags.profile = Space::bt709;
     delivered("a BT.709 ICC profile", tags);
+    // The colour spaces Core Video makes of BT.709 primaries over either permitted transfer, attached as the object or as its
+    // ICC profile, state the same colours as the attachments do: delivered, whatever the capture's colour space was.
+    int notDelivered = 0;
+    for (const Space derived : {Space::coreVideo709, Space::coreVideoSrgb}) {
+        for (const bool asObject : {true, false}) {
+            for (const bool stated : {true, false}) {
+                tags = {};
+                tags.primaries = stated ? Primaries::bt709 : Primaries::none;
+                tags.transfer = !stated ? Transfer::none : derived == Space::coreVideoSrgb ? Transfer::srgb : Transfer::bt709;
+                (asObject ? tags.space : tags.profile) = derived;
+                for (const bool capture : {true, false}) {
+                    const auto photo = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, tags);
+                    const std::string what = std::string("Core Video's space for BT.709 primaries over the ") + (derived == Space::coreVideoSrgb ? "sRGB" : "BT.709") +
+                        " transfer, as " + (asObject ? "an object" : "an ICC profile") + (stated ? ", beside the attachments" : ", alone") +
+                        (capture ? ", capture sRGB" : ", capture not sRGB") + ", is delivered";
+                    const TurnedStillFailure failure = turnedStillOf(photo.get(), 90, 0, capture).failure;
+                    std::printf("  %s: %s\n", what.c_str(), failure == TurnedStillFailure::none ? "delivered" : std::string(turnedStillFailureName(failure)).c_str());
+                    if (failure != TurnedStillFailure::none) ++notDelivered;
+                }
+            }
+        }
+    }
+    require(notDelivered == 0, "every colour space Core Video makes of BT.709 primaries over a permitted transfer is delivered");
     std::printf("  %zux%zu photo: %zu bytes at quality 90, %zu at 10, no profile\n", kWidth, kHeight, turned.jpeg.size(), rough.jpeg.size());
 }
 
@@ -295,6 +338,32 @@ void aPhotoThatCannotBeTurnedIsRefused()
     tags.profile = Space::srgb;
     tags.space = Space::smpteC;
     refused("one colour space that is not sRGB's decides, whatever the others say", tags);
+    // The spaces Core Video makes of other colours are refused as the named ones are, and one of BT.709's does not excuse a
+    // contradicting attachment beside it.
+    for (const Space other : {Space::coreVideoLinear, Space::coreVideoP3}) {
+        tags = {};
+        tags.primaries = Primaries::none;
+        tags.space = other;
+        refused("a colour space object Core Video makes of linear or Display P3 colours is refused", tags);
+        tags = {};
+        tags.primaries = Primaries::none;
+        tags.profile = other;
+        refused("and so is its ICC profile", tags);
+    }
+    tags = {};
+    tags.primaries = Primaries::p3;
+    tags.transfer = Transfer::srgb;
+    tags.space = Space::coreVideoSrgb;
+    refused("BT.709's colour space beside Display P3 primaries is a contradiction", tags);
+    tags = {};
+    tags.primaries = Primaries::none;
+    tags.space = Space::coreVideo709;
+    tags.profile = Space::p3;
+    refused("so is its object beside a Display P3 profile", tags);
+    tags = {};
+    tags.transfer = Transfer::linear;
+    tags.profile = Space::coreVideo709;
+    refused("and its profile beside a linear transfer", tags);
 
     // A photo that states no colours is taken as the capture's own sRGB only where the capture is held in sRGB.
     Tags bare;
