@@ -85,10 +85,35 @@ public final class AppsCommandTest {
         }
     }
 
+    /**
+     * The result of a listing of processes, asked again when it fails: the JDK lists the system's processes into a
+     * buffer that it sizes first, and fails ("Cannot allocate memory") when processes are being created meanwhile, as
+     * they are on a loaded host. A listing that keeps failing is the failure.
+     */
+    private static List<ProcessHandle> listing(java.util.function.Supplier<java.util.stream.Stream<ProcessHandle>> ask) {
+        RuntimeException failed = null;
+        for (int attempt = 0; attempt < 200; attempt++) {
+            try {
+                return ask.get().collect(java.util.stream.Collectors.toList());
+            } catch (RuntimeException problem) {
+                failed = problem;
+                try {
+                    Thread.sleep(5);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+        throw failed;
+    }
+
     /** The pids of the processes this JVM has started and that are still there. */
     private static Set<Long> childPids() {
         Set<Long> pids = new HashSet<>();
-        ProcessHandle.current().children().forEach(child -> pids.add(child.pid()));
+        for (ProcessHandle child : listing(() -> ProcessHandle.current().children())) {
+            pids.add(child.pid());
+        }
         return pids;
     }
 
@@ -98,10 +123,12 @@ public final class AppsCommandTest {
      */
     private static List<ProcessHandle> startedSince(Set<Long> before) {
         List<ProcessHandle> started = new ArrayList<>();
-        ProcessHandle.current().children().filter(child -> !before.contains(child.pid())).forEach(child -> {
-            started.add(child);
-            child.descendants().forEach(started::add);
-        });
+        for (ProcessHandle child : listing(() -> ProcessHandle.current().children())) {
+            if (!before.contains(child.pid())) {
+                started.add(child);
+                started.addAll(listing(child::descendants));
+            }
+        }
         return started;
     }
 

@@ -819,15 +819,25 @@ class GroupError(RuntimeError):
 
 
 def _ps(arguments: list[str], limit: float) -> str:
-    """The output of one ps; a ps that fails or does not answer is an error and not an empty listing."""
-    try:
-        done = subprocess.run(["ps", *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True, errors="replace", timeout=max(0.5, limit), check=False)
-    except (subprocess.TimeoutExpired, OSError) as problem:
-        raise GroupError(f"ps {' '.join(arguments)}: {problem}") from problem
-    if done.returncode != 0:
-        raise GroupError(f"ps {' '.join(arguments)} exited {done.returncode}: {done.stderr.strip()}")
-    return done.stdout
+    """The output of one ps, asked again (at most three times, within `limit` seconds) when it fails or does not
+    answer; a ps that keeps failing is an error (GroupError) and never an empty listing."""
+    end = time.monotonic() + limit
+    failure = ""
+    for attempt in range(3):
+        try:
+            done = subprocess.run(["ps", *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True, errors="replace",
+                                  timeout=max(0.5, end - time.monotonic()), check=False)
+        except (subprocess.TimeoutExpired, OSError) as problem:
+            failure = str(problem)
+        else:
+            if done.returncode == 0:
+                return done.stdout
+            failure = f"exited {done.returncode}: {done.stderr.strip()}"
+        if time.monotonic() >= end:
+            break
+        time.sleep(0.1)
+    raise GroupError(f"ps {' '.join(arguments)}: {failure}")
 
 
 def live_members(group: int, limit: float) -> list[int]:
