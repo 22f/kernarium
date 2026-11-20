@@ -131,7 +131,7 @@ final class AndroidAppsModelTests {
         scripted.readyDelay = .milliseconds(1)
         model.scriptedAndroidApps = scripted
         // The host the rows are about is an iPhone of iOS 27, whatever system the tests run on.
-        model.padAppHost = IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false)
+        model.playedPadAppHost = IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false)
         AndroidAppsHub.shared.configure(directory: directory)
         AndroidAppsHub.shared.attach(model)
         let index = RecordingAppsIndex()
@@ -502,7 +502,7 @@ final class AndroidAppsModelTests {
     /// Nothing of Add to Home Screen is offered to `host`: no row, and the apps are neither entities
     /// nor written to Spotlight.
     private func expectNothingOffered(to host: IPadAppHost, _ rig: Rig) async {
-        rig.model.padAppHost = host
+        rig.model.playedPadAppHost = host
         #expect(!rig.model.hostOffersAddToHomeScreen)
         #expect(!rig.model.offersAddToHomeScreen)
         await rig.model.refreshAndroidApps()

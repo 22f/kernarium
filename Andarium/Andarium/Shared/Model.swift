@@ -122,9 +122,15 @@ final class AppModel {
         }
     }
     var host: HostDevice
-    /// Whether the iPad app runs on a Mac or on an Apple Vision Pro: this
-    /// process's, unless a test plays another.
-    var padAppHost = IPadAppHost.system
+    /// Whether the iPad app runs on a Mac or on an Apple Vision Pro, and what
+    /// its system offers: this process's.
+    private let processPadAppHost = IPadAppHost.system
+    var padAppHost: IPadAppHost {
+        #if !APP_STORE
+        if let playedPadAppHost { return playedPadAppHost }
+        #endif
+        return processPadAppHost
+    }
     /// The guest's files, when the runtime behind the screens can reach them.
     var fileBrowser: FileBrowserModel? {
         didSet { fileBrowser?.isAvailable = { [weak self] in self?.filesAvailable ?? false } }
@@ -1695,6 +1701,10 @@ final class AppModel {
     /// probe session plays in place of the runtime's (`ScriptedAndroidApps`).
     @ObservationIgnored
     var scriptedAndroidApps: (any AndroidAppsSource)?
+    /// The iPad-app host a test plays in place of this process's
+    /// (`padAppHost`). The App Store configuration leaves this out.
+    @ObservationIgnored
+    var playedPadAppHost: IPadAppHost?
     /// A UI test's probe session makes the preview's bug report (`playBugReport`) though a runtime is
     /// there: its guest is none. The App Store configuration leaves this out.
     @ObservationIgnored
