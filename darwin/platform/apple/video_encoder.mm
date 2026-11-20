@@ -316,6 +316,8 @@ struct AssemblyConfig {
     bool separateParameterSets {};
     bool parameterSetsWithEveryKeyFrame {true};
     unsigned temporalLayers {1};
+    // JPEG: the largest image returned (VideoEncodeSettings::maximumJpegBytes); zero: no bound.
+    std::uint64_t maximumJpegBytes {};
     // What decides the level the parameter sets state, in place of the one
     // VideoToolbox wrote (levels::restateLevel). A zero floor leaves them as
     // written.
@@ -455,6 +457,9 @@ private:
         if (!block) return result;
         const std::size_t total = CMBlockBufferGetDataLength(block);
         if (total == 0) return result;
+        // An image past the bound is not copied: not even into a scratch buffer, and no larger copy of it is made.
+        const bool jpeg = config_.codec == VideoCodec::jpeg;
+        if (jpeg && config_.maximumJpegBytes != 0 && total > config_.maximumJpegBytes) return result;
         char* pointer = nullptr;
         std::size_t contiguous = 0;
         std::vector<std::uint8_t> copy;
@@ -482,9 +487,11 @@ private:
         frame.kind = EncodedVideoFrameKind::frame;
         if (config_.codec == VideoCodec::jpeg) {
             frame.type = VideoFrameType::key;
-            frame.bytes.reserve(total + sizeof(kJfifSegment));
             const bool jfif = total >= 4 && data[2] == 0xff && data[3] == 0xe0;
             if (total < 4 || data[0] != 0xff || data[1] != 0xd8) return result;
+            // The JFIF segment the encoder leaves out is part of the image the caller bounds.
+            if (config_.maximumJpegBytes != 0 && total + (jfif ? 0 : sizeof(kJfifSegment)) > config_.maximumJpegBytes) return result;
+            frame.bytes.reserve(total + sizeof(kJfifSegment));
             frame.bytes.insert(frame.bytes.end(), data, data + 2);
             if (!jfif) frame.bytes.insert(frame.bytes.end(), std::begin(kJfifSegment), std::end(kJfifSegment));
             frame.bytes.insert(frame.bytes.end(), data + 2, data + total);
@@ -1111,6 +1118,7 @@ private:
         assembly.separateParameterSets = settings.separateParameterSets;
         assembly.parameterSetsWithEveryKeyFrame = settings.parameterSetsWithEveryKeyFrame;
         assembly.temporalLayers = settings.temporalLayers;
+        assembly.maximumJpegBytes = settings.maximumJpegBytes;
         assembly.levelPolicy = levels::makePolicy(settings, plan_.reorders, !plan_.lowLatency);
         if (settings.hdr) assembly.hdrSei = hdrSeiUnit(*settings.hdr);
         std::uint64_t epoch = 0;

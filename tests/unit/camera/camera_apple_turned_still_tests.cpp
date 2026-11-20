@@ -145,7 +145,7 @@ std::vector<std::pair<std::uint8_t, std::vector<std::uint8_t>>> segmentsOf(const
 void aPhotoIsTurnedHalfAroundWithNoProfile()
 {
     const auto photo = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, {});
-    const auto turned = turnedStillOf(photo.get(), 90);
+    const auto turned = turnedStillOf(photo.get(), 90, 0);
     require(turned.failure == TurnedStillFailure::none, "the photo is turned and encoded");
     require(turned.jpeg.size() > 4 && turned.jpeg[0] == 0xff && turned.jpeg[1] == 0xd8, "a JPEG");
     const auto segments = segmentsOf(turned.jpeg);
@@ -161,44 +161,75 @@ void aPhotoIsTurnedHalfAroundWithNoProfile()
     require(std::abs(redness(rgba, kWidth, 20, 40)) < 25, "and the left has none");
 
     // The quality is the caller's.
-    const auto rough = turnedStillOf(photo.get(), 10);
+    const auto rough = turnedStillOf(photo.get(), 10, 0);
     require(rough.failure == TurnedStillFailure::none && rough.jpeg.size() < turned.jpeg.size(), "a lower quality is a smaller file");
     // A photo that states no colour at all is as the platform's own files were: untagged, and delivered.
     Tags bare;
     bare.primaries = Primaries::none;
     const auto plain = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, bare);
-    require(turnedStillOf(plain.get(), 90).failure == TurnedStillFailure::none, "a photo that states no colour is delivered untagged");
+    require(turnedStillOf(plain.get(), 90, 0).failure == TurnedStillFailure::none, "a photo that states no colour is delivered untagged");
     std::printf("  %zux%zu photo: %zu bytes at quality 90, %zu at 10, no profile\n", kWidth, kHeight, turned.jpeg.size(), rough.jpeg.size());
+}
+
+// The size bound is the encoder's: a file past it is an error and its bytes are not copied out.
+void aFileOverTheBoundIsNotDelivered()
+{
+    // Noise at the top quality is the largest file the encoder makes of a picture this size.
+    Owned<CVPixelBufferRef> noisy;
+    constexpr std::size_t width = 504, height = 378;
+    require(CVPixelBufferCreate(nullptr, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, nullptr, noisy.put()) == kCVReturnSuccess);
+    require(CVPixelBufferLockBaseAddress(noisy.get(), 0) == kCVReturnSuccess);
+    std::uint32_t seed = 12345;
+    for (std::size_t plane = 0; plane < 2; ++plane) {
+        auto* base = static_cast<std::uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(noisy.get(), plane));
+        const std::size_t stride = CVPixelBufferGetBytesPerRowOfPlane(noisy.get(), plane);
+        const std::size_t rows = plane == 0 ? height : height / 2;
+        const std::size_t bytes = plane == 0 ? width : width;
+        for (std::size_t y = 0; y < rows; ++y)
+            for (std::size_t x = 0; x < bytes; ++x) {
+                seed = seed * 1664525u + 1013904223u;
+                base[y * stride + x] = std::uint8_t(seed >> 24);
+            }
+    }
+    CVPixelBufferUnlockBaseAddress(noisy.get(), 0);
+    CVBufferSetAttachment(noisy.get(), kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVAttachmentMode_ShouldPropagate);
+    const auto whole = turnedStillOf(noisy.get(), 100, 0);
+    require(whole.failure == TurnedStillFailure::none && whole.jpeg.size() > 100000, "the noisy picture makes a large file");
+    const std::uint64_t exact = whole.jpeg.size();
+    require(turnedStillOf(noisy.get(), 100, exact).failure == TurnedStillFailure::none, "a file at the bound is delivered");
+    const auto over = turnedStillOf(noisy.get(), 100, exact - 1);
+    require(over.failure == TurnedStillFailure::failed && over.jpeg.empty(), "a file one byte over is not");
+    require(turnedStillOf(noisy.get(), 100, exact / 2).failure == TurnedStillFailure::failed, "nor is one far over");
 }
 
 void aPhotoThatCannotBeTurnedIsRefused()
 {
-    require(turnedStillOf(nullptr, 90).failure == TurnedStillFailure::noPixels, "no photo");
+    require(turnedStillOf(nullptr, 90, 0).failure == TurnedStillFailure::noPixels, "no photo");
     const auto video = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, {});
-    require(turnedStillOf(video.get(), 90).failure == TurnedStillFailure::unsupportedFormat, "video range is not turned");
+    require(turnedStillOf(video.get(), 90, 0).failure == TurnedStillFailure::unsupportedFormat, "video range is not turned");
     const auto odd = photoOf(kWidth + 1, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, {});
-    require(turnedStillOf(odd.get(), 90).failure == TurnedStillFailure::unsupportedFormat, "an odd side is not");
+    require(turnedStillOf(odd.get(), 90, 0).failure == TurnedStillFailure::unsupportedFormat, "an odd side is not");
     Tags bt709;
     bt709.matrix601 = false;
     bt709.matrix709 = true;
     const auto other = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, bt709);
-    require(turnedStillOf(other.get(), 90).failure == TurnedStillFailure::notBt601, "a BT.709 photo is refused: a JPEG would state BT.601");
+    require(turnedStillOf(other.get(), 90, 0).failure == TurnedStillFailure::notBt601, "a BT.709 photo is refused: a JPEG would state BT.601");
     // The colours are sRGB or the photo is not delivered: other primaries, a wide-gamut colour space object or profile.
     Tags p3;
     p3.primaries = Primaries::p3;
     const auto widePrimaries = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, p3);
-    require(turnedStillOf(widePrimaries.get(), 90).failure == TurnedStillFailure::notSrgb, "Display P3 primaries are refused");
+    require(turnedStillOf(widePrimaries.get(), 90, 0).failure == TurnedStillFailure::notSrgb, "Display P3 primaries are refused");
     Tags space;
     space.matrix601 = true;
     space.primaries = Primaries::none;
     space.p3Space = true;
     const auto wideSpace = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, space);
-    require(turnedStillOf(wideSpace.get(), 90).failure == TurnedStillFailure::notSrgb, "so is a Display P3 colour space object");
+    require(turnedStillOf(wideSpace.get(), 90, 0).failure == TurnedStillFailure::notSrgb, "so is a Display P3 colour space object");
     Tags profile;
     profile.primaries = Primaries::none;
     profile.p3Profile = true;
     const auto wideProfile = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, profile);
-    require(turnedStillOf(wideProfile.get(), 90).failure == TurnedStillFailure::notSrgb, "and a Display P3 profile");
+    require(turnedStillOf(wideProfile.get(), 90, 0).failure == TurnedStillFailure::notSrgb, "and a Display P3 profile");
     for (const auto failure : {TurnedStillFailure::noPixels, TurnedStillFailure::unsupportedFormat, TurnedStillFailure::notBt601,
                                TurnedStillFailure::notSrgb, TurnedStillFailure::noEncoder, TurnedStillFailure::timedOut, TurnedStillFailure::failed})
         require(!turnedStillFailureName(failure).empty() && turnedStillFailureName(failure) != "unknown");
@@ -214,5 +245,6 @@ int main()
         return 0;
     }
     aPhotoIsTurnedHalfAroundWithNoProfile();
+    aFileOverTheBoundIsNotDelivered();
     return 0;
 }

@@ -69,7 +69,7 @@ bool statesAnotherMatrix(CVPixelBufferRef photo)
 
 } // namespace
 
-TurnedStill turnedStillOf(CVPixelBufferRef photo, std::uint32_t jpegQuality)
+TurnedStill turnedStillOf(CVPixelBufferRef photo, std::uint32_t jpegQuality, std::uint64_t maximumBytes)
 {
     TurnedStill result;
     const auto fail = [&](TurnedStillFailure failure) {
@@ -98,6 +98,7 @@ TurnedStill turnedStillOf(CVPixelBufferRef photo, std::uint32_t jpegQuality)
     // converts nothing for JPEG.
     settings.color = {VideoColorPrimaries::unspecified, VideoTransferFunction::unspecified, VideoMatrixCoefficients::bt601, true};
     settings.jpegQuality = std::clamp<std::uint32_t>(jpegQuality, 1, 100);
+    settings.maximumJpegBytes = maximumBytes;
     if (encoder->configure(settings) != VideoEncodeStatus::ok) return fail(TurnedStillFailure::noEncoder);
     auto frame = encoder->acquireFrame();
     if (!frame || frame->planeCount() < 2) return fail(TurnedStillFailure::noEncoder);

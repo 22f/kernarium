@@ -131,6 +131,8 @@ struct RigOptions {
     /* The working storage a source holds for each pixel of a still it makes, where a test is to state it (the synthetic
      * source's is 11 bytes). */
     std::optional<std::uint32_t> workingBytes;
+    /* The working storage a source holds besides that while it turns a still of a camera presented half around. */
+    std::optional<std::uint32_t> turnedWorkingBytes;
     /* The RAW size the host declares for its first camera, where a test is to state it. */
     std::optional<uml::platform::CameraStillSize> rawStillSize;
     /* The application's statement of each camera's SENSOR_ORIENTATION, where a test is to state it. */
@@ -216,9 +218,14 @@ public:
     std::uint64_t now() const noexcept override { return host->now(); }
     std::unique_ptr<Nv12Transformer> makeFrameTransformer() const override { return host->makeFrameTransformer(); }
     std::optional<std::uint32_t> workingBytes;
+    std::optional<std::uint32_t> turnedWorkingBytes;
     std::uint32_t stillWorkingBytesPerPixel() const noexcept override
     {
         return workingBytes ? *workingBytes : host->stillWorkingBytesPerPixel();
+    }
+    std::uint32_t turnedStillWorkingBytesPerPixel() const noexcept override
+    {
+        return turnedWorkingBytes ? *turnedWorkingBytes : host->turnedStillWorkingBytesPerPixel();
     }
 
     class Session final : public CameraSession {
@@ -342,6 +349,7 @@ struct Rig final {
         };
         watched = std::make_shared<WatchedCamera>(camera);
         watched->workingBytes = rigOptions.workingBytes;
+        watched->turnedWorkingBytes = rigOptions.turnedWorkingBytes;
         watched->rawStillSize = rigOptions.rawStillSize;
         device = std::make_unique<VirtioCameraDevice>(watched, std::move(options));
         device->setGuestMapper([this](std::uint64_t offset, std::size_t size) {
@@ -3699,6 +3707,28 @@ void testStillsAreAdmittedInTheOrderTheyAsked()
     require(rig.done(second) && rig.done(third) && rig.result(second).base.flags == 0 && rig.result(third).base.flags == 0, "all are delivered");
 }
 
+// A still the host turns half around and encodes holds the encoder's buffers beside the file: the capture of a camera whose
+// pictures are presented half around costs the more for them, and the same capture of a camera that is not turned costs no more.
+void testATurnedStillHoldsTheEncodersBuffersBesideItsFile()
+{
+    // The budget is the 12.7 MP ceiling with no working storage and no RAW: 38.1 MB, where one 2016x1512 JPEG capture is 9.1 MB
+    // and the encoder's four bytes a pixel add 12.2 MB to a turned one.
+    const auto run = [](bool presented, std::uint32_t turnedBytes) {
+        RigOptions options;
+        options.use = {1, false, 0};
+        options.workingBytes = 0;
+        options.turnedWorkingBytes = turnedBytes;
+        options.frontPresentedAt90 = presented;
+        Rig rig(options);
+        stillStream(rig, 1, 1, 2016, 1512, 4);
+        for (unsigned index = 1; index <= 4; ++index) (void)rig.queue(1, index, 100 + index);
+        return rig.camera->stillsTaken();
+    };
+    require(run(true, 0) == 4, "four 9.1 MB captures fit the budget while the encoder's buffers are not counted");
+    require(run(true, 4) == 1, "a turned still's buffers are counted: one capture of 21.3 MB fits, and the rest wait");
+    require(run(false, 4) == 4, "a camera that is not turned is charged no more");
+}
+
 // A capture that costs more than the device admits at all is refused before it starts, and is not admitted as the first.
 void testACaptureBeyondTheWholeBudgetIsRefusedBeforeItStarts()
 {
@@ -4454,6 +4484,7 @@ int main()
     testAWaitingCaptureThatGrowsBeyondTheWholeBudgetIsRefused();
     testAResultsPayloadIsFreedBeforeTheNextCaptureStarts();
     testStillsAreAdmittedInTheOrderTheyAsked();
+    testATurnedStillHoldsTheEncodersBuffersBesideItsFile();
     testACaptureBeyondTheWholeBudgetIsRefusedBeforeItStarts();
     testBlackPicturesHoldNothingOfTheirOwn();
     testAStillThatFailsSaysWhy();

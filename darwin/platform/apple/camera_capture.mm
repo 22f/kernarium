@@ -3018,6 +3018,7 @@ public:
     std::unique_ptr<Nv12Transformer> makeFrameTransformer() const override { return makeAcceleratedNv12Transformer(); }
 
     std::uint32_t stillWorkingBytesPerPixel() const noexcept override { return systemCameraStillWorkingBytesPerPixel; }
+    std::uint32_t turnedStillWorkingBytesPerPixel() const noexcept override { return systemCameraTurnedStillWorkingBytesPerPixel; }
 
     std::unique_ptr<CameraSession> openSession(CameraSessionDelegate& delegate) override
     {
@@ -3266,20 +3267,14 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
     const uml::platform::PhotoReadings readings;
 #endif
     if (readings.orientation && *readings.orientation >= 1 && *readings.orientation <= 8) _exifOrientation = uint8_t(*readings.orientation);
-    auto turned = uml::platform::turnedStillOf(photo.pixelBuffer, _jpegQuality);
+    // The same bound as a photo's own file (takeJpegFile), kept by the encoder: a file larger than the guest's buffer is
+    // not copied out of it, and none of the host's copies of it is made.
+    auto turned = uml::platform::turnedStillOf(photo.pixelBuffer, _jpegQuality, _maximumBytes);
     if (turned.failure != uml::platform::TurnedStillFailure::none) {
         _turnFailure = turned.failure;
         std::fprintf(stderr, "Camera: camera %zu: the photo could not be turned half around: %s\n", _camera,
                      std::string(uml::platform::turnedStillFailureName(turned.failure)).c_str());
         noteStillFailure(_result.failure, uml::platform::CameraStillStage::missingData);
-        return;
-    }
-    // The same bound as a photo's own file (takeJpegFile): a file larger than the guest's buffer is not passed on.
-    if (_maximumBytes != 0 && turned.jpeg.size() > _maximumBytes) {
-        std::fprintf(stderr, "Camera: the photo's file is %lu bytes, more than the %llu a %ux%u photo may take\n",
-                     static_cast<unsigned long>(turned.jpeg.size()), static_cast<unsigned long long>(_maximumBytes), _jpegSize.width,
-                     _jpegSize.height);
-        _result.failure.stage = uml::platform::CameraStillStage::fileSize;
         return;
     }
     _result.jpeg = std::move(turned.jpeg);

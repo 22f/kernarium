@@ -1371,7 +1371,7 @@ public:
     }
 
     /* What a group's capture holds while it is with the host
-     * (`jpegCaptureBytes`, `rawCaptureBytes`), for the sizes of its pictures. */
+     * (`jpegCaptureBytes`, `rawCaptureBytes`), for the sizes of its pictures and the camera's working storage. */
     [[nodiscard]] std::uint64_t costOf(const Group& group, const Runtime& runtime) const
     {
         bool jpeg = false, raw = false;
@@ -1391,7 +1391,10 @@ public:
             const auto& size = runtime.description.info.rawStillSize;
             rawPixels = size.width != 0 ? std::uint64_t(size.width) * size.height : limits.maximumStillPixels;
         }
-        return (jpeg ? jpegCaptureBytes(jpegPixels, options.use.stillWorkingBytesPerPixel) : 0) +
+        // The still of a camera whose pictures the host presents half around is turned and encoded by the host, which holds
+        // its encoder's buffers besides.
+        const std::uint32_t turned = runtime.description.info.presentationTurn == 180 ? host->turnedStillWorkingBytesPerPixel() : 0;
+        return (jpeg ? jpegCaptureBytes(jpegPixels, options.use.stillWorkingBytesPerPixel + turned) : 0) +
             (raw ? rawCaptureBytes(rawPixels) : 0);
     }
 

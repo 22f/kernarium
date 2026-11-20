@@ -82,7 +82,9 @@ application's statements (the sensor orientation, the rotation that
     buffer for the size asked (`maximumJpegBytes`; a larger file fails the
     capture before it is copied, and the pre-copy check, the device and the
     count use one bound); a RAW capture and the working storage of the
-    platform camera's source (`Camera::stillWorkingBytesPerPixel`) are counted.
+    platform camera's source (`Camera::stillWorkingBytesPerPixel`) are counted,
+    and for a camera whose pictures the host presents half around its encoder's
+    buffers besides (`Camera::turnedStillWorkingBytesPerPixel`).
     RAW is counted wherever a lens the guest sees can make a RAW still in the
     run. A capture that does not fit waits, and none starts while an older one
     waits. A capture that costs more than the whole budget fails before it
@@ -109,8 +111,11 @@ application's statements (the sensor orientation, the rotation that
   system camera's own
   processing storage while it makes a picture is counted as working bytes for
   each pixel of a JPEG still (`systemCameraStillWorkingBytesPerPixel`), a figure
-  measured on one device with headroom, and the ceiling holds it. The platform
-  camera's peak is not otherwise measured.
+  measured on one device with headroom, and the ceiling holds it. The encoder's
+  buffers while the host turns a front still half around are counted as the
+  same kind of figure (`systemCameraTurnedStillWorkingBytesPerPixel`), added to
+  the capture of a turned camera only; the largest such capture is inside the
+  ceiling. The platform camera's peak is not otherwise measured.
 - **Frames.** Video buffers hold NV12, BT.709 full range, rows at the 16-byte
   pitch of `raw_pitch.hpp`. The device crops (centred, to the stream's aspect),
   rotates and scales with the platform camera's transformer

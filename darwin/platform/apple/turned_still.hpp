@@ -38,7 +38,7 @@ enum class TurnedStillFailure : std::uint8_t {
     case TurnedStillFailure::notSrgb: return "the photo's colours are not sRGB";
     case TurnedStillFailure::noEncoder: return "no hardware JPEG encoder takes the photo";
     case TurnedStillFailure::timedOut: return "the JPEG encoder did not finish in time";
-    case TurnedStillFailure::failed: return "the JPEG encoder failed";
+    case TurnedStillFailure::failed: return "the JPEG encoder failed or its file passed the size bound";
     }
     return "unknown";
 }
@@ -50,7 +50,9 @@ struct TurnedStill {
 };
 
 // Turns `photo` (full-range 4:2:0 in two planes, with BT.601 or no matrix stated, and sRGB or no colour stated) half around
-// and encodes it at `jpegQuality` (1 to 100) in the hardware encoder. The photo is only read. The encoder lives for this call.
-[[nodiscard]] TurnedStill turnedStillOf(CVPixelBufferRef photo, std::uint32_t jpegQuality);
+// and encodes it at `jpegQuality` (1 to 100) in the hardware encoder. The file may not pass `maximumBytes` (zero: no
+// bound): the encoder fails a larger one before its bytes are copied out, so none of the host's copies of a file that is
+// not passed on is ever made. The photo is only read. The encoder lives for this call.
+[[nodiscard]] TurnedStill turnedStillOf(CVPixelBufferRef photo, std::uint32_t jpegQuality, std::uint64_t maximumBytes);
 
 } // namespace uml::platform
