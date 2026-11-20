@@ -1492,23 +1492,34 @@ guest's cost per report and the relay's memory. `android17-gamepad-runner`
 `UML_ANDROID_SMS_VSOCKPROBE_DEX` the output of
 [`sms/build-apk.sh`](../tests/integration/android/sms/README.md): the runner plays
 the host application over a launcher forward to the service's port and sends the
-contract's frames. It checks that a request from the host is handed over and
-answered, that a delivery asked from adb (a forward to the port) is refused, that
-adbd refuses an `adb reverse` onto a vsock port, the service's domain and denials, every vsock listener
-of the guest, and that neither the shell nor an application can create a vsock
-socket; the record mode checks that no message is handed over twice across a
-crash, a reboot and fifty kills. `--mode proof` (a userdebug build) writes a
-pending record and traces the order of the record's writes; the variants without
-Messaging or without an SMS provider, the adbd topic and the kernel configuration
-are options of the runner (`--list-rows` names each row and what it needs).
-`--mode delivery` is the smallest check of a built image and needs no probe, root
-or registration, but the SMS provider (it refuses `--variant no-provider`): D1 and
-then D2 send a plain message and messages with a one-time code, each handed over,
-answered and stored as exactly one new inbox row, and `com.android.phone`, waited
-for, keeps its pid; D3 reads the service's log: it listens, nothing was refused,
-and the platform warned of no hidden-API access and denied no vsock socket.
-With `--proof-image` it boots an unsigned proof image
-(manifest schema 0), which no installed-release reader takes, on a fresh instance.
+contract's frames. The service runs only while messages are in flight, behind a
+holder that keeps the port from boot, so the rows judge both: at idle the service
+has no process and the holder runs (N1, first in the mode); a request is handed
+over and answered, and a delivery asked from adb (a forward to the port) is
+refused; adbd refuses an `adb reverse` onto a vsock port, with the service
+running and with it disabled and stopped; the holder's domain and user, the
+service's domain and that it is not persistent, every denial of the path, and
+every vsock listener of the guest; neither the shell nor an application can create
+a vsock socket, and the shell cannot connect to the handoff socket (N5). The record
+mode checks that no message is handed over twice across a crash, a reboot and fifty
+kills, and each restart is the next request's. `--mode proof` (a userdebug build)
+writes a pending record and traces the order of the record's writes; the variants
+without Messaging or without an SMS provider, the adbd topic and the kernel
+configuration are options of the runner (`--list-rows` names each row and what it
+needs). `--mode delivery` is the smallest check of a built image and needs no
+probe, root or registration, but the SMS provider (it refuses `--variant
+no-provider`): after N1, D1 and then D2 send a plain message and messages with a
+one-time code, each handed over, answered and stored as exactly one new inbox row,
+and `com.android.phone`, waited for, keeps its pid; D3 reads the logs of the service
+and the holder: the port is held and served, nothing was refused, the platform
+warned of no hidden-API access and SELinux denied nothing of the path. N2 sends a
+first message with no session running and notes the wake latency; N3 waits for the
+process to end after the idle window and for the next request to start another
+beside the same holder; N4 sends requests from one second before to one second
+after the window's end and expects each handed over once; N6 does so with the
+screen off and no wake lock held. With `--proof-image` it boots an unsigned proof
+image (manifest schema 0), which no installed-release reader takes, on a fresh
+instance.
 `android17-sms-runner` (tooling) runs its wire, record file, parsers and
 judgements without a guest.
 `android-oldapp` (integration) registers when `UML_ANDROID_OLDAPP_RELEASE`

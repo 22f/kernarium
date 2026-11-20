@@ -200,7 +200,12 @@ LOG = """\
 
 EPOCH = """\
 1731758405.250  1000  1100 I AndariumSms: record in /data/user_de/0/android.kernarium.sms/files, labelled u:object_r:kernarium_sms_data_file:s0
-1731758405.300  1000  1100 I AndariumSms: listening on vsock port 5560
+1731758405.300  1000  1100 I AndariumSms: serving the host's requests
+"""
+
+# The holder's own tag, from boot: the line that says it holds the port.
+HOLDER_EPOCH = """\
+1731758405.300   700   700 I kernarium.sms.listener: listening on vsock port 5560
 1731758406.000   900   900 I OtherTag: listening on vsock port 5560
 """
 
@@ -220,11 +225,13 @@ class ReaderTests(unittest.TestCase):
 
     def test_epoch_lines_and_the_boot_order(self) -> None:
         self.assertEqual([when for when, _ in runner.epoch_lines(EPOCH, "AndariumSms")], [1731758405.25, 1731758405.3])
-        self.assertIsNone(runner.check_boot_order(EPOCH, EVENTS))
-        late = "1731758430.000  1000  1100 I AndariumSms: listening on vsock port 5560\n"
+        # H7 keys on the holder, which starts with the boot; the service starts with the first message.
+        self.assertIsNone(runner.check_boot_order(HOLDER_EPOCH, EVENTS))
+        late = "1731758430.000   700   700 I kernarium.sms.listener: listening on vsock port 5560\n"
         self.assertIn("after the boot finished", runner.check_boot_order(late, EVENTS))
-        self.assertIn("no 'listening", runner.check_boot_order("", EVENTS))
-        self.assertIn("no boot_progress_enable_screen", runner.check_boot_order(EPOCH, ""))
+        self.assertIn("the holder logged no 'listening", runner.check_boot_order("", EVENTS))
+        self.assertIn("the holder logged no 'listening", runner.check_boot_order(EPOCH, EVENTS))
+        self.assertIn("no boot_progress_enable_screen", runner.check_boot_order(HOLDER_EPOCH, ""))
 
     def test_the_record_place(self) -> None:
         self.assertIsNone(runner.check_record_location(EPOCH))
@@ -239,20 +246,28 @@ u:r:adbd:s0                    shell          300      1   10000   1000 0       
 u:r:traced:s0                  traced         310      1   10000   1000 0                   0 S traced
 u:r:kernarium_gamepad:s0       nobody         320      1   10000   1000 0                   0 S kernarium_gamepad
 u:r:hal_thermal_default:s0     system         330      1   10000   1000 0                   0 S thermal
-u:r:kernarium_sms:s0           system         900    300   10000   1000 0                   0 S android.kernarium.sms
+u:r:kernarium_sms_listener:s0  nobody         340      1   10000   1000 0                   0 S kernarium_sms_listener
 u:r:system_app:s0              system         950    300   10000   1000 0                   0 S com.android.settings
 """
 
+    # The service runs only while a session does: its line is in the listing then, and not at idle.
+    SERVICE = "u:r:kernarium_sms:s0           system         900    300   10000   1000 0                   0 S android.kernarium.sms\n"
+
     def test_the_listener_inventory(self) -> None:
-        self.assertEqual([p.name for p in runner.parse_ps(self.PS)][-2:], ["android.kernarium.sms", "com.android.settings"])
+        self.assertEqual([p.name for p in runner.parse_ps(self.PS)][-2:], ["kernarium_sms_listener", "com.android.settings"])
+        # The holder is required; the service is allowed and not required: at idle there is no process of it.
         self.assertEqual(runner.inventory_problems(self.PS), [])
+        self.assertEqual(runner.inventory_problems(self.PS + self.SERVICE), [])
         extra = self.PS + "u:r:virtualizationservice:s0   system   960  1  1 1 0 0 S virtmgr\n"
         self.assertIn("virtmgr (pid 960) runs in virtualizationservice, which may use vsock",
                       runner.inventory_problems(extra))
         self.assertIn("a crosvm process runs (pid 961)",
                       runner.inventory_problems(self.PS + "u:r:crosvm:s0  system  961  1  1 1 0 0 S crosvm\n"))
-        self.assertIn("no process runs in kernarium_sms",
-                      runner.inventory_problems(self.PS.replace("kernarium_sms:s0", "system_app:s0")))
+        self.assertIn("no process runs in kernarium_sms_listener",
+                      runner.inventory_problems(self.PS.replace("kernarium_sms_listener:s0", "system_app:s0")))
+        # The service may not create a vsock socket any more, so a domain list that names it is not the policy's.
+        self.assertNotIn("kernarium_sms", runner.VSOCK_TYPES)
+        self.assertIn("kernarium_sms_listener", runner.VSOCK_TYPES & runner.RUNNING_VSOCK_TYPES)
 
     def test_the_port_inventory(self) -> None:
         self.assertEqual(runner.port_problems(set(range(5555, 5561))), [])
@@ -307,6 +322,12 @@ u:r:system_app:s0              system         950    300   10000   1000 0       
 
 def answer(kind: str, detail: str = "") -> object:
     return runner.Answer(kind, ID, detail)
+
+
+def hidden_line(pid: str) -> str:
+    return (f"11-18 20:09:43.700  {pid}  {pid} W d.kernarium.sms: Accessing hidden method "
+            "Landroid/system/Os;->accept(Ljava/io/FileDescriptor;Ljava/net/SocketAddress;)"
+            "Ljava/io/FileDescriptor; (unsupported, reflection, denied)\n")
 
 
 class JudgementTests(unittest.TestCase):
@@ -375,7 +396,7 @@ class CatalogueTests(unittest.TestCase):
         names = {row.name for row in runner.ROWS}
         covered = {c for row in runner.ROWS for c in row.covers}
         for wanted in ("D1", "D2", "G1", "G2a", "G2b", "G2c", "G2d", "G2e", "G3", "G4", "G5", "G6", "G7", "G8", "G9",
-                       "I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8"):
+                       "I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8", "N1", "N2", "N3", "N4", "N5", "N6"):
             self.assertIn(wanted, names)
         for wanted in ("H1", "H2", "H3", "H4", "H5", "H7", "H8", "H10", "H11", "H13"):
             self.assertIn(wanted, covered)
@@ -386,7 +407,8 @@ class CatalogueTests(unittest.TestCase):
 
     def test_the_delivery_mode_needs_no_probe_and_no_extras(self) -> None:
         run, skipped = runner.plan_rows("delivery", set())
-        self.assertEqual([row.name for row in run], ["D1", "D2", "D3"])
+        # N1 runs before anything is sent: a message starts the service, and a ping would too.
+        self.assertEqual([row.name for row in run], ["N1", "D1", "D2", "D3", "N2", "N3", "N4", "N6"])
         self.assertEqual(skipped, [])
         options = runner.build_parser().parse_args(["--mode", "delivery", "--proof-image", "--release", "x"])
         self.assertTrue(options.proof_image)
@@ -396,6 +418,9 @@ class CatalogueTests(unittest.TestCase):
     def test_what_a_run_without_the_extras_skips(self) -> None:
         run, skipped = runner.plan_rows("channel", {"stock-adbd"})
         self.assertEqual([row.name for row, _ in skipped], ["G2e", "G7", "H9"])
+        self.assertEqual([row.name for row in run][:2], ["N1", "G1"], "N1 comes before the first request")
+        self.assertIn("N5", [row.name for row in run])
+        self.assertNotIn("N3", [row.name for row in run])
         self.assertIn("G9", [row.name for row in run])
         self.assertIn("H6", [row.name for row in run])
         run, skipped = runner.plan_rows("channel", {"adbd-topic", "kernel-config", "g7"})
@@ -796,7 +821,7 @@ class DeliveryRowTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.Failure, "a message with a one-time code: 0 new inbox rows"):
             self.run_row(runner.row_d2, self.Guest(["100"]), copies=0)
 
-    LISTENING = ("11-18 20:09:43.609  1402  1480 I AndariumSms: listening on vsock port 5560\n"
+    LISTENING = ("11-18 20:09:43.609  1402  1480 I AndariumSms: serving the host's requests\n"
                  "11-18 20:09:43.603  1402  1402 I AndariumSms: record in /x, labelled u:object_r:y:s0\n")
     START_UP_DENIALS = (
         "11-18 20:09:44.100  1402  1402 I auditd  : type=1400 audit(0.0:9): avc:  denied  { find } for pid=1402 "
@@ -809,7 +834,14 @@ class DeliveryRowTests(unittest.TestCase):
     def test_what_the_service_log_must_and_must_not_show(self) -> None:
         problems = runner.service_log_problems
         self.assertEqual(problems(self.LISTENING, self.START_UP_DENIALS, "1402"), [])
-        self.assertIn("never logged that it listens", problems("", "", "1402")[0])
+        self.assertIn("never logged that it serves", problems("", "", "1402")[0])
+        # The end of a session at idle is not a failure of the channel, and a later session's pid is the service's too.
+        idle = self.LISTENING + ("11-18 20:10:30.000  1402  1480 I AndariumSms: host channel: idle for 30 s, ending "
+                                 "the session\n")
+        self.assertEqual(problems(idle, "", "1402"), [])
+        later = hidden_line("2210")
+        self.assertIn("hidden-API access by the service", problems(self.LISTENING, later, {"1402", "2210"})[0])
+        self.assertEqual(problems(self.LISTENING, later, {"1402"}), [])
         refused = self.LISTENING + ("11-18 20:10:00.000  1402  1480 I AndariumSms: refused a connection with no "
                                     "peer address: IOException\n")
         self.assertEqual(problems(refused, "", "1402"),
@@ -822,6 +854,14 @@ class DeliveryRowTests(unittest.TestCase):
         vsock = ("11-18 20:10:00.000  1402  1480 I auditd  : type=1400 audit(0.0:11): avc:  denied  { accept } for "
                  "scontext=u:r:kernarium_sms:s0 tcontext=u:r:kernarium_sms:s0 tclass=vsock_socket permissive=0\n")
         self.assertEqual(problems(self.LISTENING, vsock, "1402"), ["SELinux denied the service a vsock socket"])
+        # The handoff is the service's and the holder's alone: a denial of it, of the holder or of the waker is a failure.
+        handoff = vsock.replace("tclass=vsock_socket", "tclass=sock_file")
+        self.assertEqual(problems(self.LISTENING, handoff, "1402"), ["SELinux denied the service the handoff (sock_file)"])
+        holder = vsock.replace("scontext=u:r:kernarium_sms:s0", "scontext=u:r:kernarium_sms_listener:s0")
+        self.assertEqual(problems(self.LISTENING, holder, "1402"), ["SELinux denied kernarium_sms_listener vsock_socket"])
+        waker = vsock.replace("scontext=u:r:kernarium_sms:s0", "scontext=u:r:kernarium_sms_wake:s0").replace(
+            "vsock_socket", "binder")
+        self.assertEqual(problems(self.LISTENING, waker, "1402"), ["SELinux denied kernarium_sms_wake binder"])
         hidden = ("11-18 20:09:43.700  1402  1402 W d.kernarium.sms: Accessing hidden method "
                   "Landroid/system/Os;->accept(Ljava/io/FileDescriptor;Ljava/net/SocketAddress;)"
                   "Ljava/io/FileDescriptor; (unsupported, reflection, denied)\n")
@@ -830,22 +870,469 @@ class DeliveryRowTests(unittest.TestCase):
         other = hidden.replace("Landroid/system/Os;->accept", "Landroid/app/Activity;->x")
         self.assertEqual(problems(self.LISTENING, other, "1402"), [])
 
-    def test_d3_reads_the_service_and_its_process(self) -> None:
+    HOLDER_LOG = "11-18 20:09:30.000   700   700 I kernarium.sms.listener: listening on vsock port 5560\n"
+
+    def test_d3_reads_the_service_and_the_holder_without_needing_a_process(self) -> None:
         guest = self.Guest(["100"])
-        guest.pid = lambda: 1402  # type: ignore[method-assign]
+        logs = {"-s kernarium.sms.listener:I": self.HOLDER_LOG}
         guest.service_log = lambda: self.LISTENING  # type: ignore[method-assign]
-        guest.logcat = lambda *arguments: self.START_UP_DENIALS  # type: ignore[method-assign]
-        self.run_row(runner.row_d3, guest)
+        guest.logcat = lambda *arguments: logs.get(" ".join(arguments), self.START_UP_DENIALS)  # type: ignore[method-assign]
+        self.run_row(runner.row_d3, guest)  # no process of the service: it ended at idle, and its log is the evidence
         guest.service_log = lambda: ""  # type: ignore[method-assign]
-        with self.assertRaisesRegex(runner.Failure, "never logged that it listens"):
+        with self.assertRaisesRegex(runner.Failure, "never logged that it serves"):
             self.run_row(runner.row_d3, guest)
-        guest.pid = lambda: None  # type: ignore[method-assign]
-        with self.assertRaisesRegex(runner.Failure, "is not running"):
+        guest.service_log = lambda: self.LISTENING  # type: ignore[method-assign]
+        logs["-s kernarium.sms.listener:I"] = ""
+        with self.assertRaisesRegex(runner.Failure, "the holder never logged that it listens"):
+            self.run_row(runner.row_d3, guest)
+        logs["-s kernarium.sms.listener:I"] = self.HOLDER_LOG + (
+            "11-18 20:09:31.000   700   700 E kernarium.sms.listener: cannot listen on vsock port 5560: errno 98\n")
+        with self.assertRaisesRegex(runner.Failure, "the holder logged an error"):
             self.run_row(runner.row_d3, guest)
 
     def test_delivery_runs_d1_before_d2(self) -> None:
         rows, _ = runner.plan_rows("delivery", set())
-        self.assertEqual([row.name for row in rows], ["D1", "D2", "D3"])
+        names = [row.name for row in rows]
+        self.assertLess(names.index("D1"), names.index("D2"))
+        self.assertLess(names.index("D2"), names.index("D3"))
+
+
+class Clock:
+    """The clock the rows' waits advance: a row that waits out a 30 s window takes no time."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class Simulation:
+    """The guest of the on-demand service, as the rows see it: the holder always runs, and the service has a
+    process only from a request until its idle window and its two seconds' linger have passed. Every request
+    starts it when it has none (after the wake's delay), records one step line and one inbox row for a message,
+    and restarts the window. The knobs break one thing each."""
+
+    def __init__(self, idle: float = 30.0, wake: float = 0.5) -> None:
+        self.clock = Clock()
+        self.idle, self.wake, self.linger = idle, wake, 2.0
+        self.pid: int | None = None
+        self.last = 0.0
+        self.counter = 4000
+        self.holder = 77
+        self.starts = 0
+        self.rows: list[tuple[int, str, str]] = []
+        self.step_log: list[str] = []
+        self.commands: list[str] = []
+        self.keep_running = False       # the service never ends (a persistent one)
+        self.hand_over_copies = 1       # step lines and inbox rows a message gets
+        self.answer_kind = "handed-over"
+        self.screen_off = False
+        self.wake_locks = ""
+        self.property_output: dict[str, str] = {}
+
+    def session(self) -> int | None:
+        if self.pid is not None and not self.keep_running and self.clock.now - self.last >= self.idle + self.linger:
+            self.pid = None
+        return self.pid
+
+    def touch(self) -> None:
+        # A request after the window's end is not accepted by the session that is ending: the holder starts another.
+        over = self.session() is not None and not self.keep_running and self.clock.now - self.last >= self.idle
+        if self.session() is None or over:
+            self.clock.sleep(self.wake)
+            self.counter += 1
+            self.pid = self.counter
+            self.starts += 1
+        self.last = self.clock.now
+
+
+class SimulatedGuest:
+    serial = "127.0.0.1:5578"
+    forward_port = 0
+    private = Path("/nonexistent")
+
+    def __init__(self, simulation: Simulation) -> None:
+        self.sim = simulation
+
+    def alive(self) -> None:
+        pass
+
+    def strict_pid(self) -> int | None:
+        return self.sim.session()
+
+    def pid(self) -> int | None:
+        return self.sim.session()
+
+    def holder_pid(self) -> int | None:
+        return self.sim.holder
+
+    def service_log(self) -> str:
+        return "".join(self.sim.step_log)
+
+    def inbox_ids(self, sender: str, text: str) -> set[int]:
+        return {number for number, who, what in self.sim.rows if (who, what) == (sender, text)}
+
+    def inbox(self) -> str:
+        return "".join(f"Row: {number} address={who}, body={what}\n" for number, who, what in self.sim.rows)
+
+    def adb_run(self, *arguments: str, timeout: float = 0) -> SimpleNamespace:
+        self.sim.commands.append("adb " + " ".join(arguments))
+        return SimpleNamespace(returncode=0, stdout="")
+
+    def shell(self, command: str, timeout: float = 0, check: bool = True) -> str:
+        self.sim.commands.append(command)
+        for needle, output in self.sim.property_output.items():
+            if needle in command:
+                return output
+        if "keyevent KEYCODE_SLEEP" in command:
+            self.sim.screen_off = True
+        if "keyevent KEYCODE_WAKEUP" in command:
+            self.sim.screen_off = False
+        if command.startswith("dumpsys power"):
+            return (f"  mWakefulness={'Asleep' if self.sim.screen_off else 'Awake'}\n"
+                    f"Wake Locks: size={len(self.sim.wake_locks.splitlines())}\n{self.sim.wake_locks}")
+        if command.startswith("ps -A -Z"):
+            listing = PS_AT_IDLE if self.sim.holder else PS_AT_IDLE.replace("kernarium_sms_listener:s0", "system_app:s0")
+            return listing + (SERVICE_PS_LINE.format(pid=self.sim.session()) if self.sim.session() else "")
+        return ""
+
+
+PS_AT_IDLE = """\
+LABEL                          USER           PID   PPID     VSZ    RSS WCHAN            ADDR S NAME
+u:r:init:s0                    root             1      0   10000   1000 0                   0 S init
+u:r:kernarium_sms_listener:s0  nobody          77      1   10000   1000 0                   0 S kernarium_sms_listener
+"""
+SERVICE_PS_LINE = "u:r:kernarium_sms:s0           system        {pid}    300   10000   1000 0                   0 S android.kernarium.sms\n"
+
+
+class SimulatedHost:
+    def __init__(self, simulation: Simulation) -> None:
+        self.sim = simulation
+
+    def exchange(self, payload: bytes, seconds: float = 0) -> object:
+        self.sim.touch()
+        return runner.Exchange("answered", runner.answer_bytes("refused-version"))
+
+    def answer(self, payload: bytes, seconds: float = 0) -> object:
+        fields = payload.decode().split(".")
+        sender, text = base64.b64decode(fields[3]).decode(), base64.b64decode(fields[4]).decode()
+        self.sim.touch()
+        if self.sim.answer_kind == "handed-over":
+            for _ in range(self.sim.hand_over_copies):
+                self.sim.step_log.append(f"11-18 20:09:43.609  1402  1480 I AndariumSms: step 1 of {fields[2][:8]}\n")
+                self.sim.rows.append((len(self.sim.rows) + 1, sender, text))
+        self.sim.clock.sleep(0.05)
+        return runner.Answer(self.sim.answer_kind, fields[2], "1")
+
+
+class OnDemandTests(unittest.TestCase):
+    """What the service's on-demand life adds: the readers of its process, its socket and its wake locks, and the
+    rows N1 to N6, G2e, G4 and G5 over a simulated guest."""
+
+    def run_row(self, row, simulation: Simulation, **options: object) -> "runner.Run":
+        guest = SimulatedGuest(simulation)
+        run = runner.Run(SimpleNamespace(variant="messaging", vsockprobe_dex=Path("/x/vsockprobe.dex"), **options),
+                         guest, {})
+        run.host = SimulatedHost(simulation)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(runner.time, "monotonic", simulation.clock.monotonic))
+            stack.enter_context(mock.patch.object(runner.time, "sleep", simulation.clock.sleep))
+            stack.enter_context(mock.patch.object(runner.os, "urandom", side_effect=self.unique_bytes))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            row(run)
+        self.run = run
+        return run
+
+    counter = 0
+
+    def unique_bytes(self, count: int) -> bytes:
+        """Different bytes at every call, so that each message of a row has an identifier and a text of its own."""
+        self.counter += 1
+        return (self.counter.to_bytes(4, "big") + bytes(count))[:count]  # the first four bytes name a message in a log
+
+    # ---- the readers
+
+    def test_the_end_of_the_window_is_judged(self) -> None:
+        self.assertIsNone(runner.idle_timing_problem(32.5))
+        self.assertIsNone(runner.idle_timing_problem(27.0))
+        self.assertIsNone(runner.idle_timing_problem(45.0))
+        self.assertIn("after only 12.0 s", runner.idle_timing_problem(12.0))
+        self.assertIn("46.0 s after the last request", runner.idle_timing_problem(46.0))
+
+    def test_the_service_is_not_persistent(self) -> None:
+        listed = "  PID mappings:\n    PID #4000: ProcessRecord{abc 4000:android.kernarium.sms/1000}\n"
+        self.assertIsNone(runner.persistent_problem(listed, "    flags=[ SYSTEM HAS_CODE ALLOW_CLEAR_USER_DATA ]\n"))
+        self.assertIn("persistent", runner.persistent_problem(listed + "      persistent=true\n", ""))
+        self.assertIn("persistent", runner.persistent_problem("  *PERS* UID 1000 ProcessRecord{abc}\n", ""))
+        self.assertIn("persistent", runner.persistent_problem(listed, "    flags=[ SYSTEM PERSISTENT HAS_CODE ]\n"))
+
+    def test_the_holder_and_the_service_processes(self) -> None:
+        self.assertEqual(runner.holder_problems(PS_AT_IDLE), [])
+        self.assertIn("no process runs in kernarium_sms_listener",
+                      runner.holder_problems(PS_AT_IDLE.replace("kernarium_sms_listener:s0", "system_app:s0"))[0])
+        self.assertIn("runs as root, not nobody",
+                      runner.holder_problems(PS_AT_IDLE.replace("nobody ", "root   "))[0])
+        self.assertEqual(len(runner.holder_problems(PS_AT_IDLE + PS_AT_IDLE.splitlines()[-1] + "\n")), 1)
+        self.assertIsNone(runner.service_process_problem(PS_AT_IDLE + SERVICE_PS_LINE.format(pid=9)))
+        self.assertIn("not u:r:kernarium_sms:s0, system",
+                      runner.service_process_problem(PS_AT_IDLE + SERVICE_PS_LINE.format(pid=9).replace(
+                          "kernarium_sms:s0", "system_app:s0")))
+        self.assertIn("no process", runner.service_process_problem(PS_AT_IDLE))
+
+    def test_the_handoff_socket_listing(self) -> None:
+        good = "srw-rw---- 1 system system u:object_r:kernarium_sms_socket:s0 0 2026-11-20 10:00 /dev/socket/kernarium_sms\n"
+        self.assertIsNone(runner.socket_listing_problem(good))
+        for wrong in (good.replace("srw-rw----", "srw-rw-rw-"), good.replace("system system", "shell shell"),
+                      good.replace("kernarium_sms_socket", "device"), "ls: No such file or directory\n"):
+            self.assertIsNotNone(runner.socket_listing_problem(wrong), wrong)
+
+    def test_the_wake_locks(self) -> None:
+        none = "Wake Locks: size=0\n"
+        self.assertEqual(runner.wakelock_problems(none, {4001, 77}), [])
+        other = "Wake Locks: size=1\n  PARTIAL_WAKE_LOCK 'RILJ' ACQ=-3s (uid=1001 pid=611 ws=null)\n"
+        self.assertEqual(runner.wakelock_problems(other, {4001, 77}), [])
+        ours = "Wake Locks: size=1\n  PARTIAL_WAKE_LOCK 'x' ACQ=-1s (uid=1000 pid=4001 ws=null)\n"
+        self.assertEqual(len(runner.wakelock_problems(ours, {4001, 77})), 1)
+        named = "Wake Locks: size=1\n  PARTIAL_WAKE_LOCK 'AndariumSms:deliver' ACQ=-1s (uid=1000 pid=500 ws=null)\n"
+        self.assertEqual(len(runner.wakelock_problems(named, {4001, 77})), 1)
+        self.assertEqual(runner.wakefulness("  mWakefulness=Asleep\n"), "Asleep")
+        self.assertEqual(runner.wakefulness("  mWakefulness=Awake\n"), "Awake")
+        self.assertIsNone(runner.wakefulness("nothing"))
+
+    # ---- N1 to N6
+
+    def test_n1_wants_no_process_and_the_holder(self) -> None:
+        simulation = Simulation()
+        self.run_row(runner.row_n1, simulation)
+        self.assertEqual(simulation.starts, 0, "N1 sends nothing: a ping would start the service")
+        simulation.pid, simulation.last, simulation.keep_running = 4001, simulation.clock.now, True
+        with self.assertRaisesRegex(runner.Failure, r"runs \(pid 4001\) at idle"):
+            self.run_row(runner.row_n1, simulation)
+        simulation = Simulation()
+        simulation.holder = None  # type: ignore[assignment]
+        with self.assertRaisesRegex(runner.Failure, "kernarium_sms_listener does not run"):
+            self.run_row(runner.row_n1, simulation)
+
+    def test_n2_a_first_message_at_idle(self) -> None:
+        simulation = Simulation()
+        simulation.touch()  # a session from an earlier row: N2 waits for it to end
+        run = self.run_row(runner.row_n2, simulation)
+        self.assertEqual(simulation.starts, 2)
+        self.assertEqual(len(simulation.rows), 1)
+        self.assertTrue(any("answered in 0.5" in note for note in run.notes), run.notes)
+        simulation = Simulation()
+        simulation.keep_running = True
+        simulation.touch()
+        with mock.patch.object(runner, "GONE_SECONDS", 5):
+            with self.assertRaisesRegex(runner.Failure, "the service ending: it still runs"):
+                self.run_row(runner.row_n2, simulation)
+        simulation = Simulation()
+        simulation.hand_over_copies = 2
+        with self.assertRaisesRegex(runner.Failure, "2 new inbox rows"):
+            self.run_row(runner.row_n2, simulation)
+
+    def test_n3_the_process_ends_and_the_next_request_starts_another(self) -> None:
+        simulation = Simulation()
+        run = self.run_row(runner.row_n3, simulation)
+        self.assertEqual(simulation.starts, 2)
+        self.assertTrue(any("ended" in note for note in run.notes), run.notes)
+        early = Simulation(idle=5)
+        with self.assertRaisesRegex(runner.Failure, "after only"):
+            self.run_row(runner.row_n3, early)
+        resident = Simulation()
+        resident.keep_running = True
+        with self.assertRaisesRegex(runner.Failure, "the service ending: it still runs"):
+            self.run_row(runner.row_n3, resident)
+        moved = Simulation()
+        original = moved.touch
+
+        def restart_holder() -> None:
+            original()
+            moved.holder = 78
+
+        moved.touch = restart_holder  # type: ignore[method-assign]
+        with self.assertRaisesRegex(runner.Failure, "the holder was pid 77 and is pid 78"):
+            self.run_row(runner.row_n3, moved)
+
+    def test_n4_requests_around_the_end_of_the_window(self) -> None:
+        simulation = Simulation()
+        run = self.run_row(runner.row_n4, simulation)
+        self.assertEqual(len(simulation.rows), len(runner.BOUNDARY_OFFSETS) + 1)
+        self.assertEqual(len(simulation.step_log), len(simulation.rows), "one step line for each message")
+        self.assertGreaterEqual(simulation.starts, 3, "some requests found the process gone")
+        self.assertTrue(any("offset +1.0" in note for note in run.notes), run.notes)
+        twice = Simulation()
+        twice.hand_over_copies = 2
+        with self.assertRaisesRegex(runner.Failure, r"2 step-1 lines|2 new inbox rows"):
+            self.run_row(runner.row_n4, twice)
+        refusing = Simulation()
+        refusing.answer_kind = "not-handed-over"
+        with self.assertRaisesRegex(runner.Failure, "answer"):
+            self.run_row(runner.row_n4, refusing)
+
+    def test_n5_the_shell_cannot_reach_the_handoff(self) -> None:
+        listing = ("srw-rw---- 1 system system u:object_r:kernarium_sms_socket:s0 0 2026-11-20 10:00 "
+                   "/dev/socket/kernarium_sms\n")
+        simulation = Simulation()
+        simulation.property_output = {"VsockProbe unix": "connect: errno=13 EACCES\n", "ls -lZ": listing}
+        self.run_row(runner.row_n5, simulation)
+        self.assertEqual(simulation.starts, 0)
+        self.assertTrue(any("VsockProbe unix /dev/socket/kernarium_sms" in command for command in simulation.commands))
+        for output, problem in (("connect: ok\n", "connected to"), ("connect: errno=2 ENOENT\n", "errno=2"),
+                                ("socket: errno=13 EACCES\n", "older vsockprobe.dex")):
+            simulation = Simulation()
+            simulation.property_output = {"VsockProbe unix": output, "ls -lZ": listing}
+            with self.assertRaisesRegex(runner.Failure, problem):
+                self.run_row(runner.row_n5, simulation)
+        simulation = Simulation()
+        simulation.property_output = {"VsockProbe unix": "connect: errno=13 EACCES\n",
+                                      "ls -lZ": listing.replace("srw-rw----", "srw-rw-rw-")}
+        with self.assertRaisesRegex(runner.Failure, "the handoff socket"):
+            self.run_row(runner.row_n5, simulation)
+
+    def test_n6_a_message_while_the_screen_is_off(self) -> None:
+        simulation = Simulation()
+        run = self.run_row(runner.row_n6, simulation)
+        self.assertFalse(simulation.screen_off, "the screen is switched on again")
+        self.assertIn("input keyevent KEYCODE_SLEEP", simulation.commands)
+        self.assertTrue(any("screen off" in note for note in run.notes), run.notes)
+        locked = Simulation()
+        locked.touch()
+        locked.wake_locks = f"  PARTIAL_WAKE_LOCK 'x' ACQ=-1s (uid=1000 pid={locked.pid + 1} ws=null)\n"
+        with self.assertRaisesRegex(runner.Failure, "wake lock"):
+            self.run_row(runner.row_n6, locked)
+        self.assertFalse(locked.screen_off, "the screen is switched on again after a failure too")
+        stuck = Simulation()
+        stuck.property_output = {"dumpsys power": "  mWakefulness=Awake\n"}
+        with mock.patch.object(runner, "SCREEN_SECONDS", 3):
+            with self.assertRaisesRegex(runner.Failure, "the screen turning off: it is awake"):
+                self.run_row(runner.row_n6, stuck)
+
+    # ---- the rows that changed
+
+    def test_g2e_runs_its_second_pass_with_the_service_stopped(self) -> None:
+        class Reverse(SimulatedGuest):
+            def adb_run(self, *arguments: str, timeout: float = 0) -> SimpleNamespace:
+                self.sim.commands.append("adb " + " ".join(arguments))
+                if arguments[:1] == ("reverse",) and "--list" not in arguments and "--remove" not in arguments:
+                    refused = arguments[1].startswith(("vsock", "acceptfd"))
+                    return SimpleNamespace(returncode=1 if refused else 0, stdout="refused" if refused else "")
+                return SimpleNamespace(returncode=0, stdout="")
+
+            def shell(self, command: str, timeout: float = 0, check: bool = True) -> str:
+                if command == "echo adbd-works":
+                    return "adbd-works\n"
+                if command.startswith("pm disable-user"):
+                    self.sim.pid = None  # disabling the package ends its process, which nothing restarts
+                return super().shell(command, timeout, check)
+
+        def go(simulation: Simulation) -> list[str]:
+            guest = Reverse(simulation)
+            run = runner.Run(SimpleNamespace(variant="messaging"), guest, {})
+            run.host = SimulatedHost(simulation)
+            run.ping = lambda: True  # type: ignore[method-assign]
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(runner.time, "monotonic", simulation.clock.monotonic))
+                stack.enter_context(mock.patch.object(runner.time, "sleep", simulation.clock.sleep))
+                stack.enter_context(mock.patch.object(runner.os, "urandom", side_effect=lambda count: bytes(range(count))))
+                runner.row_g2e(run)
+            return simulation.commands
+
+        simulation = Simulation()
+        simulation.touch()  # the service runs when the row starts, as after the rows before it
+        commands = go(simulation)
+        disabled = commands.index(f"pm disable-user {runner.PACKAGE}")
+        attempts = [index for index, command in enumerate(commands) if command.startswith("adb reverse vsock:5560 tcp:")]
+        self.assertEqual(len(attempts), 2, "one pass before the package is disabled and one after")
+        self.assertLess(attempts[0], disabled)
+        self.assertLess(disabled, attempts[1])
+        self.assertIn(f"pm enable {runner.PACKAGE}", commands[disabled:])
+        # A package whose process survives the disabling is the old pass that never ran with the service stopped.
+        resident = Simulation()
+        resident.touch()
+        resident.keep_running = True
+
+        class Survives(Reverse):
+            def shell(self, command: str, timeout: float = 0, check: bool = True) -> str:
+                if command.startswith("pm disable-user"):
+                    return SimulatedGuest.shell(self, command, timeout, check)
+                return super().shell(command, timeout, check)
+
+        guest = Survives(resident)
+        run = runner.Run(SimpleNamespace(variant="messaging"), guest, {})
+        run.host = SimulatedHost(resident)
+        run.ping = lambda: True  # type: ignore[method-assign]
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(runner.time, "monotonic", resident.clock.monotonic))
+            stack.enter_context(mock.patch.object(runner.time, "sleep", resident.clock.sleep))
+            stack.enter_context(mock.patch.object(runner.os, "urandom", side_effect=lambda count: bytes(range(count))))
+            with self.assertRaisesRegex(runner.Failure, "the service stopped: it still runs"):
+                runner.row_g2e(run)
+        self.assertIn(f"pm enable {runner.PACKAGE}", resident.commands, "the package is enabled again after a failure")
+
+    def test_g4_the_holder_from_boot_and_a_service_that_is_not_persistent(self) -> None:
+        epoch = HOLDER_EPOCH + EPOCH
+        events = EVENTS
+
+        class Guest4(SimulatedGuest):
+            def logcat(self, *arguments: str) -> str:
+                joined = " ".join(arguments)
+                if "boot_progress_enable_screen" in joined:
+                    return events
+                if f"-s {runner.HOLDER_TAG}:I" in joined:
+                    return HOLDER_EPOCH
+                if "-s AndariumSms:I" in joined:
+                    return EPOCH
+                return ""
+
+            def shell(self, command: str, timeout: float = 0, check: bool = True) -> str:
+                if command.startswith("dumpsys activity processes"):
+                    return self.sim.property_output.get("persistent", "    PID #4001: ProcessRecord{x 4001:android.kernarium.sms/1000}\n")
+                if command.startswith("dumpsys package"):
+                    return "    flags=[ SYSTEM HAS_CODE ]\n"
+                return super().shell(command, timeout, check)
+
+        def go(simulation: Simulation) -> None:
+            guest = Guest4(simulation)
+            run = runner.Run(SimpleNamespace(variant="messaging", vsockprobe_dex=Path("/x")), guest, {})
+            run.host = SimulatedHost(simulation)
+            run.vectors = {"request-first-number": "x"}
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(runner.time, "monotonic", simulation.clock.monotonic))
+                stack.enter_context(mock.patch.object(runner.time, "sleep", simulation.clock.sleep))
+                stack.enter_context(mock.patch.object(runner, "golden_request", lambda vectors, name: SimpleNamespace(
+                    identifier="00112233" + "0" * 24)))
+                runner.row_g4(run)
+
+        simulation = Simulation()
+        simulation.step_log.append("11-16 12:00:01.001  1000  1200 I AndariumSms: step 1 of 00112233\n")
+        go(simulation)
+        self.assertEqual(simulation.starts, 1, "G4 starts a session to look at it")
+        persistent = Simulation()
+        persistent.step_log = list(simulation.step_log)
+        persistent.property_output = {"persistent": "  *PERS* UID 1000 ProcessRecord{x}\n"}
+        with self.assertRaisesRegex(runner.Failure, "persistent"):
+            go(persistent)
+        nobody = Simulation()
+        nobody.step_log = list(simulation.step_log)
+        nobody.holder = None  # type: ignore[assignment]
+        with self.assertRaisesRegex(runner.Failure, "kernarium_sms_listener"):
+            go(nobody)
+
+    def test_g5_reports_the_session_and_the_holder(self) -> None:
+        simulation = Simulation()
+        simulation.property_output = {"dumpsys meminfo": "        TOTAL    18432    1000\n"}
+        run = self.run_row(runner.row_g5, simulation)
+        self.assertEqual(simulation.starts, 1, "the session's cost needs a session")
+        self.assertTrue(any("18432 kB" in note and "session" in note for note in run.notes), run.notes)
+        self.assertTrue(any("holder" in note for note in run.notes), run.notes)
+        simulation = Simulation()
+        with self.assertRaisesRegex(runner.Failure, "shows no total"):
+            self.run_row(runner.row_g5, simulation)
 
 
 class ProbeSourceTests(unittest.TestCase):
@@ -858,7 +1345,7 @@ class ProbeSourceTests(unittest.TestCase):
         for name in ("RECEIVE_SMS", "MANAGE_VIRTUAL_MACHINE", "BROADCAST_SMS", "Telephony.SMS_RECEIVED",
                      ".CommandReceiver", ".ReceivedReceiver", 'android:debuggable="true"'):
             self.assertIn(name, manifest)
-        for name in ('"vsock"', '"vm"', '"reset"', "vsock.txt", "vm.txt", "socket: errno="):
+        for name in ('"vsock"', '"vm"', '"reset"', "vsock.txt", "vm.txt", "socket: errno=", '"unix"', "connect: errno="):
             self.assertIn(name, "".join(path.read_text() for path in sources))
         javac = jdk_tool("javac")
         if javac is None:
