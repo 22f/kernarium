@@ -26,13 +26,20 @@ import unittest
 SOURCE = "Andarium/Andarium/Shared/AndroidAppIntents.swift"
 DECLARATIONS = ("struct OpenAndroidAppIntent", "struct AndroidAppShortcuts")
 ACTION = "OpenAndroidAppIntent"
-FIRST_VERSION = (27, 0)
+# The iOS release that introduces the action: exactly it, since a later one
+# would leave that release without the action.
+FIRST_VERSION = (27,)
+GATE = re.compile(r"@available\(iOS 27\.0, \*\)")
 WILDCARD = "LNPlatformNameWildcard"
 IOS = "LNPlatformNameIOS"
 
 
 def version(text: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in text.split("."))
+    """The numbers of `text` without trailing zeros, so that 27, 27.0 and 27.0.0 are one."""
+    numbers = [int(part) for part in text.split(".")]
+    while numbers and numbers[-1] == 0:
+        numbers.pop()
+    return tuple(numbers)
 
 
 def availability_problem(annotations: dict | None) -> str | None:
@@ -43,8 +50,8 @@ def availability_problem(annotations: dict | None) -> str | None:
     if ios is None:
         return "names no iOS version, so every iOS offers it"
     introduced = ios.get("introducedVersion", "")
-    if not re.fullmatch(r"\d+(\.\d+)*", introduced) or version(introduced) < FIRST_VERSION:
-        return f"introduces it on iOS {introduced!r}, before 27.0"
+    if not re.fullmatch(r"\d+(\.\d+)*", introduced) or version(introduced) != FIRST_VERSION:
+        return f"introduces it on iOS {introduced!r}, not 27.0"
     if WILDCARD not in annotations:
         return "drops the wildcard, which keeps it on the other platforms"
     return None
@@ -73,12 +80,26 @@ def metadata_problems(actions_data: dict) -> list[str]:
 
 
 def source_problems(text: str) -> list[str]:
+    """Each declaration is preceded, as an attribute line and not in a comment, by the gate."""
     problems = []
+    lines = text.splitlines()
     for declaration in DECLARATIONS:
-        match = re.search(rf"^((?:@\w[^\n]*\n|///[^\n]*\n)*)(?:nonisolated )?{declaration}\b", text, re.M)
-        if match is None:
+        index = next(
+            (i for i, line in enumerate(lines) if re.match(rf"(?:nonisolated )?{declaration}\b", line)),
+            None,
+        )
+        if index is None:
             problems.append(f"{SOURCE} has no {declaration}")
-        elif "@available(iOS 27.0, *)" not in match.group(1):
+            continue
+        gated = False
+        for line in reversed(lines[:index]):
+            stripped = line.strip()
+            if stripped.startswith("//"):
+                continue
+            if not stripped.startswith("@"):
+                break
+            gated = gated or GATE.fullmatch(stripped) is not None
+        if not gated:
             problems.append(f"{declaration} is not @available(iOS 27.0, *)")
     return problems
 
@@ -121,6 +142,37 @@ class Fixtures(unittest.TestCase):
 
     def test_a_missing_action_or_shortcut_is_reported(self) -> None:
         self.assertEqual(len(metadata_problems({})), 2)
+
+    def test_a_later_ios_27_version_leaves_ios_27_0_without_the_action(self) -> None:
+        later = {IOS: {"introducedVersion": "27.1"}, WILDCARD: {"introducedVersion": "*"}}
+        problems = metadata_problems(extraction(later))
+        self.assertEqual(len(problems), 2, problems)
+        self.assertTrue(all("27.1" in problem for problem in problems), problems)
+
+    def test_27_written_other_ways_is_still_27_0(self) -> None:
+        for written in ("27", "27.0", "27.0.0"):
+            annotations = {IOS: {"introducedVersion": written}, WILDCARD: {"introducedVersion": "*"}}
+            self.assertEqual(metadata_problems(extraction(annotations)), [], written)
+
+    def test_an_annotation_in_a_comment_gates_nothing(self) -> None:
+        commented = (
+            "/// Opens. @available(iOS 27.0, *)\nstruct OpenAndroidAppIntent: OpenIntent {}\n"
+            "// @available(iOS 27.0, *)\nnonisolated struct AndroidAppShortcuts: AppShortcutsProvider {}\n"
+        )
+        self.assertEqual(len(source_problems(commented)), 2)
+        doc_only = (
+            "/// @available(iOS 27.0, *)\nstruct OpenAndroidAppIntent: OpenIntent {}\n"
+            "@available(iOS 27.0, *)\nnonisolated struct AndroidAppShortcuts: AppShortcutsProvider {}\n"
+        )
+        self.assertEqual(len(source_problems(doc_only)), 1)
+
+    def test_other_versions_and_platforms_do_not_gate_it(self) -> None:
+        for annotation in ("@available(iOS 26.0, *)", "@available(macOS 27.0, *)", "@available(iOS 27.1, *)"):
+            text = (
+                f"{annotation}\nstruct OpenAndroidAppIntent: OpenIntent {{}}\n"
+                "@available(iOS 27.0, *)\nnonisolated struct AndroidAppShortcuts: AppShortcutsProvider {}\n"
+            )
+            self.assertEqual(len(source_problems(text)), 1, annotation)
 
     def test_the_declarations_are_checked_in_the_source(self) -> None:
         gated = (
