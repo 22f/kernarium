@@ -602,24 +602,21 @@ struct LegacyApkInstallAlertTests {
     }
 
     /// What VoiceOver's double tap does to `element`: the element is asked to activate, and a control
-    /// that declines it is tapped. Before iOS 27 the label is on the text inside a button, and the
-    /// views around it up to the alert answer in its place.
-    private func activate(_ element: UIView) {
-        if #available(iOS 27.0, *) {
-            if !element.accessibilityActivate(), let control = element as? UIControl {
-                control.sendActions(for: .touchUpInside)
-            }
-            return
-        }
+    /// that declines it is tapped. Whether it took the activation is the result: an element that is
+    /// no control and declines it has not been activated, whatever it did. Before iOS 27 the label is
+    /// on the text inside a button, and the views around it up to the alert answer in its place.
+    private func activate(_ element: UIView) -> Bool {
         var candidate: UIView? = element
         while let view = candidate {
-            if view.accessibilityActivate() { return }
+            if view.accessibilityActivate() { return true }
             if let control = view as? UIControl {
                 control.sendActions(for: .touchUpInside)
-                return
+                return true
             }
+            guard #unavailable(iOS 27.0) else { return false }
             candidate = view.superview
         }
+        return false
     }
 
     /// Raises the question for a file Android refuses for its version, with the real screens up.
@@ -689,7 +686,7 @@ struct LegacyApkInstallAlertTests {
             let title = installAnyway ? "Install anyway" : "Cancel"
             let button = try #require(control(labelled: title, in: shown.view), "\(title) is not on the alert")
             // What VoiceOver does with a double tap; a control that declines it is tapped.
-            activate(button)
+            try #require(activate(button), "\(title) takes no activation")
             try #require(await eventually { model.legacyInstallQuestion == nil }, "\(title) answered nothing")
             if installAnyway {
                 try #require(await eventually { model.busy?.result != nil })
@@ -755,7 +752,7 @@ struct LegacyApkInstallAlertTests {
         // The alert is on screen before its buttons are built.
         try #require(await eventually { control(labelled: "Cancel", in: shown.view) != nil }, "no Cancel on the alert")
         let cancel = try #require(control(labelled: "Cancel", in: shown.view))
-        activate(cancel)
+        try #require(activate(cancel), "Cancel takes no activation")
         try #require(await eventually { alert(over: controller) == nil && model.busy == nil })
         #expect(driver.installAttempts == [false])
     }
