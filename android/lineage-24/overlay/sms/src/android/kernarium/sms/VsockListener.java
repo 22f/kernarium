@@ -15,6 +15,7 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.net.SocketException;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 /**
  * The host channel's listening socket: vsock port 5560, on any CID, one connection at a time. It is the
@@ -30,6 +31,12 @@ import java.util.function.Consumer;
  *
  * <p>A bind that fails is tried again every second and never ends the service; an accept that fails for
  * any reason but EINTR, EAGAIN or ECONNABORTED closes the listener, waits a second and listens again.
+ *
+ * <p>The other mode takes a listening descriptor it is given (the one the holder of port 5560 passes to the
+ * service) and never calls socket, bind or listen, and never closes the descriptor, which is its owner's. It
+ * ends the session instead of recovering: accept returns null once nothing has come for the idle window,
+ * counted from the call, and on any failure but EINTR, EAGAIN or ECONNABORTED. The holder keeps the port, so a
+ * connection that arrives after the session has ended waits in its queue for the next one.
  */
 final class VsockListener implements Server.Listener {
     static final int PORT = 5560;
@@ -43,6 +50,10 @@ final class VsockListener implements Server.Listener {
 
     private final Consumer<String> log;
     private final Sleeper sleeper;
+    /** Given a descriptor: the idle window in nanoseconds and the clock it is counted on; 0 and null otherwise. */
+    private final long idleNanos;
+    private final LongSupplier clock;
+    private final boolean given;
     /** Os.accept(FileDescriptor, SocketAddress), or null when it cannot be called. */
     private Method acceptWithAddress;
     private FileDescriptor listening;
@@ -54,8 +65,28 @@ final class VsockListener implements Server.Listener {
 
     /** {@code acceptName} is the hidden method's name: a test names one that is not there. */
     VsockListener(Consumer<String> log, Sleeper sleeper, String acceptName) {
+        this(null, 0, null, log, sleeper, acceptName);
+    }
+
+    /** The listener over a descriptor it is given, which ends its session after {@code idleMillis} with nothing to accept. */
+    static VsockListener given(FileDescriptor listening, long idleMillis, Consumer<String> log, LongSupplier clock) {
+        return given(listening, idleMillis, log, clock, "accept");
+    }
+
+    static VsockListener given(FileDescriptor listening, long idleMillis, Consumer<String> log, LongSupplier clock,
+            String acceptName) {
+        if (listening == null || idleMillis <= 0 || clock == null) throw new IllegalArgumentException("no descriptor or window");
+        return new VsockListener(listening, idleMillis * 1_000_000L, clock, log, null, acceptName);
+    }
+
+    private VsockListener(FileDescriptor listening, long idleNanos, LongSupplier clock, Consumer<String> log,
+            Sleeper sleeper, String acceptName) {
         this.log = log;
         this.sleeper = sleeper;
+        this.listening = listening;
+        this.idleNanos = idleNanos;
+        this.clock = clock;
+        this.given = listening != null;
         try {
             final Method method = Os.class.getDeclaredMethod(acceptName, FileDescriptor.class, SocketAddress.class);
             if (!Modifier.isStatic(method.getModifiers()) || method.getReturnType() != FileDescriptor.class) {
@@ -70,6 +101,7 @@ final class VsockListener implements Server.Listener {
 
     @Override
     public Server.Conn accept() throws IOException {
+        if (given) return acceptGiven();
         for (;;) {
             if (listening == null) listen();
             try {
@@ -90,6 +122,40 @@ final class VsockListener implements Server.Listener {
             }
             closeListener();
             pause(WAKE_MILLIS);
+        }
+    }
+
+    /**
+     * The next connection on the descriptor this listener was given, or null when the session is over: nothing came
+     * for the idle window (which starts with this call), the thread was interrupted, or the accept failed in a way
+     * that no wait mends. The waits are a second at most, and the descriptor stays open.
+     */
+    private Server.Conn acceptGiven() {
+        final long deadline = clock.getAsLong() + idleNanos;
+        for (;;) {
+            if (Thread.currentThread().isInterrupted()) return null;
+            final long left = deadline - clock.getAsLong();
+            if (left <= 0) {
+                log.accept("host channel: idle for " + idleNanos / 1_000_000_000L + " s, ending the session");
+                return null;
+            }
+            try {
+                if (!readable(listening, (int) Math.min(WAKE_MILLIS, Math.max(1, left / 1_000_000L)))) continue;
+                // An address that accept leaves alone keeps the CID it starts with, which no peer has.
+                final VmSocketAddress peer = new VmSocketAddress(0, OsConstants.VMADDR_CID_ANY);
+                final FileDescriptor fd = acceptFrom(peer);
+                if (fd == null) continue;
+                return new Peer(fd, peer.getSvmCid());
+            } catch (ErrnoException e) {
+                if (e.errno == OsConstants.EINTR || e.errno == OsConstants.EAGAIN
+                        || e.errno == OsConstants.ECONNABORTED) {
+                    continue;
+                }
+                log.accept("host channel: accept failed, errno " + e.errno);
+            } catch (IOException | RuntimeException e) {
+                log.accept("host channel: accept failed: " + e.getClass().getSimpleName());
+            }
+            return null;
         }
     }
 
