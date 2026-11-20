@@ -460,6 +460,9 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
     # The platform's own rule for dumpstate, the vsock instance of its getattr rule for every socket class:
     # over the attribute domain it reaches the service's sockets, and every Android 17 platform policy has it.
     plat += "(allow dumpstate domain (vsock_socket (getattr)))\n"
+    # The platform's own rule for init, which owns the property service: it may set every property type, ours among
+    # them (the system_ext policy lists the type in property_type, as the compiler writes it).
+    plat += "(allow init property_type (property_service (set)))\n"
     # What the platform gives the application domains through groups of them: each group is the application
     # domains but the isolated, sandboxed and ephemeral ones, as the compiler writes the platform's rules.
     # The service is an application domain, so it inherits them, and they are accepted; a variant takes one
@@ -490,6 +493,7 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         "(type kernarium_sms)\n(type kernarium_sms_data_file)\n"
         "(type kernarium_sms_listener)\n(type kernarium_sms_listener_exec)\n(type kernarium_sms_socket)\n"
         "(type kernarium_sms_wake)\n(type kernarium_sms_wake_exec)\n(type ctl_kernarium_sms_wake_prop)\n"
+        "(typeattributeset property_type (ctl_kernarium_sms_wake_prop))\n"
         "(typeattributeset domain (kernarium_sms kernarium_sms_listener kernarium_sms_wake))\n"
         "(typeattributeset data_file_type (kernarium_sms_data_file))\n"
         "(typeattributeset core_data_file_type (kernarium_sms_data_file))\n"
@@ -841,7 +845,7 @@ SMS_APK_ENTRY = "SYSTEM_EXT/app/KernariumSms/KernariumSms.apk"
 SMS_ATTRIBUTE_IDS = {
     "allowBackup": 0x01010280, "persistent": 0x0101000D, "sharedUserId": 0x0101000B, "enabled": 0x0101000E,
     "permission": 0x01010006, "isolatedProcess": 0x010103A9, "directBootAware": 0x01010505,
-    "foregroundServiceType": 0x01010599, "useAppZygote": 0x0101059E,
+    "foregroundServiceType": 0x01010599, "useAppZygote": 0x0101059E, "maxSdkVersion": 0x01010271,
 }
 
 
@@ -905,8 +909,16 @@ def sms_service_fixture(verifier: Path, variant: str | None) -> dict[str, bytes 
     manifest = {"package": "android.kernarium.sms", "sharedUserId": "android.uid.system"}
     application = {"label": "Andarium SMS", "allowBackup": False}
     service = {"name": ".HostService", "exported": False}
+    # The build injects <uses-sdk> into every packaged manifest (the manifest fixer of the Soong application rule): the
+    # SDK levels of the platform it was built with, which a platform application takes as codenames or numbers.
+    uses_sdk = {"minSdkVersion": 37, "targetSdkVersion": 37}
     top, inside, services, children = [], [], [service], []
     edits = {
+        "apk-uses-sdk-codenames": lambda: uses_sdk.update(minSdkVersion="CANARY", targetSdkVersion="CANARY"),
+        "apk-uses-sdk-max": lambda: uses_sdk.update(maxSdkVersion=40),
+        "apk-uses-sdk-twice": lambda: top.append(element("uses-sdk", tuple(uses_sdk.items()))),
+        "apk-uses-sdk-named": lambda: uses_sdk.update(name="android.permission.INTERNET"),
+        "apk-uses-sdk-permission": lambda: uses_sdk.update(permission="android.permission.DUMP"),
         "apk-other-package": lambda: manifest.update(package="android.kernarium.other"),
         "apk-no-shared-user": lambda: manifest.pop("sharedUserId"),
         "apk-persistent": lambda: application.update(persistent=True),
@@ -940,7 +952,7 @@ def sms_service_fixture(verifier: Path, variant: str | None) -> dict[str, bytes 
     components = tuple(element("service", tuple(item.items()), tuple(children) if index == 0 else ())
                        for index, item in enumerate([] if variant == "apk-no-service" else services)) + tuple(inside)
     tree = element("manifest", tuple(manifest.items()), (
-        *top, element("application", tuple(application.items()), components)))
+        element("uses-sdk", tuple(uses_sdk.items())), *top, element("application", tuple(application.items()), components)))
     package = io.BytesIO()
     with zipfile.ZipFile(package, "w") as apk:
         apk.writestr("AndroidManifest.xml", binary_xml.encode_manifest(tree, ids))
@@ -6600,7 +6612,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "label ctl.start\\$kernarium_sms_wake ctl_start_prop, not ctl_kernarium_sms_wake_prop"),
             ("sms-wake-property-by-another", {"sms_policy_variant": "wake-property-by-another"},
              "\\['shell'\\] may set ctl.start\\$kernarium_sms_wake, labelled ctl_kernarium_sms_wake_prop: only "
-             "kernarium_sms_listener does"),
+             "kernarium_sms_listener does, and init"),
             ("sms-wake-property-through-attribute", {"sms_policy_variant": "wake-property-through-attribute"},
              "\\['shell'\\] may set ctl.start\\$kernarium_sms_wake"),
             ("sms-wake-property-by-nobody", {"sms_policy_variant": "wake-property-by-nobody"},
@@ -6681,6 +6693,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "has \\['provider'\\]: the application has one service"),
             ("sms-apk-asks-a-permission", {"sms_service_variant": "apk-asks-a-permission"},
              "has \\['uses-permission'\\]: the application has one service"),
+            ("sms-apk-uses-sdk-twice", {"sms_service_variant": "apk-uses-sdk-twice"},
+             "has 2 uses-sdk elements, not at most 1"),
+            ("sms-apk-uses-sdk-named", {"sms_service_variant": "apk-uses-sdk-named"},
+             "the uses-sdk element sets \\['name'\\]: it carries SDK levels and nothing else"),
+            ("sms-apk-uses-sdk-permission", {"sms_service_variant": "apk-uses-sdk-permission"},
+             "the uses-sdk element sets \\['permission'\\]: it carries SDK levels and nothing else"),
             ("sms-apk-service-filter", {"sms_service_variant": "apk-service-filter"},
              "has \\['action', 'intent-filter'\\]: the application has one service"),
             ("missing-location-feature", {"missing_location_feature": "android.hardware.location"},
@@ -7334,6 +7352,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         for label, options, appended in (
             ("oldapp-per-domain-reads", {"oldswitch_variant": "per-domain-reads"}, b""),
             ("oldapp-preoptimized-code", {"oldswitch_variant": "preopt-code"}, b""),
+            # The built text message application's manifest carries the <uses-sdk> the build injects, with the
+            # platform's levels as numbers (the baseline) or as codenames, and a maximum level.
+            ("sms-uses-sdk-codenames", {"sms_service_variant": "apk-uses-sdk-codenames"}, b""),
+            ("sms-uses-sdk-max", {"sms_service_variant": "apk-uses-sdk-max"}, b""),
             # A byte that is no UTF-8 in a rule that no check looks at (a type of no check, a
             # permission none compares) is no reason to refuse the policy: the checks decode what
             # they compare, when they compare it.

@@ -539,7 +539,10 @@ and the service holds a permission on the holder's vsock sockets, the service
 only accept, read, write and shutdown, and the holder only the creation of its
 socket, none on the service's own. The waker holds no vsock socket and the holder
 no binder, service lookup or file; init alone enters their domains, and the
-control property that starts the waker is the holder's alone to set. The
+control property that starts the waker is set by the holder and by init, which
+owns the property service, and by nothing else. The compiled manifest of the
+service names SDK levels in a `uses-sdk` element, which the build adds, and no
+activity, receiver, provider, filter or permission request. The
 platform's own `getattr` for `dumpstate` stats a socket and carries no data. Of
 the data, only the platform's managers of application data reach it. For the
 services it may find, `system_app_data_file` and the vsock sockets of other types,

@@ -5541,6 +5541,8 @@ SMS_INIT_SERVICES = {
                    ("class main", "user nobody", "socket kernarium_sms stream 0660 system system")),
     SMS_WAKE: ("/system_ext/bin/kernarium_sms_wake.sh", ("user system", "group system", "oneshot", "disabled")),
 }
+# What the build's <uses-sdk> may carry in the text message application's manifest: SDK levels.
+SMS_USES_SDK_ATTRIBUTES = frozenset({"minSdkVersion", "targetSdkVersion", "maxSdkVersion"})
 SMS_WAKE_COMMAND = "exec cmd activity start-service --user 0 -n android.kernarium.sms/.HostService >/dev/null 2>&1"
 # The property the holder sets to start the waker, and the type that keeps every other domain from setting it.
 SMS_WAKE_PROPERTY = "ctl.start$kernarium_sms_wake"
@@ -5818,8 +5820,10 @@ def check_sms_holder_policy(contexts: list[str], policies: tuple[bytes, ...], se
                 setters |= sets.members(cil_type_name(source))
     if SMS_LISTENER not in setters:
         fail(f"{SMS_LISTENER} may not set {SMS_WAKE_PROPERTY}, labelled {label}: it could not start the waker")
-    if setters != {SMS_LISTENER}:
-        fail(f"{sorted(setters - {SMS_LISTENER})} may set {SMS_WAKE_PROPERTY}, labelled {label}: only {SMS_LISTENER} does")
+    # init owns the property service, and the platform lets it set every property type (allow init property_type).
+    if setters - {SMS_LISTENER, "init"}:
+        fail(f"{sorted(setters - {SMS_LISTENER, 'init'})} may set {SMS_WAKE_PROPERTY}, labelled {label}: only "
+             f"{SMS_LISTENER} does, and init, which owns the property service")
 
 
 class SmsRule(NamedTuple):
@@ -6055,10 +6059,17 @@ def check_sms_service_files(archive: zipfile.ZipFile, infos: dict[str, zipfile.Z
         if names.count(kind) != wanted:
             fail(f"{SMS_APK} has {names.count(kind)} {kind} elements, not {wanted}: the application has one service "
                  "and nothing else")
-    allowed = {"manifest", "application", "service"}
+    # The build injects one <uses-sdk> into every packaged manifest (the SDK levels of the platform it is built with);
+    # it is the only element beside the manifest, the application and its service, and it carries nothing but levels.
+    if names.count("uses-sdk") > 1:
+        fail(f"{SMS_APK} has {names.count('uses-sdk')} uses-sdk elements, not at most 1")
+    allowed = {"manifest", "application", "service", "uses-sdk"}
     if set(names) - allowed:
         fail(f"{SMS_APK} has {sorted(set(names) - allowed)}: the application has one service, no activity, receiver, "
              "provider, filter or permission request, so that nothing but the holder's wake reaches it")
+    if "uses-sdk" in first and set(first["uses-sdk"]) - SMS_USES_SDK_ATTRIBUTES:
+        fail(f"{SMS_APK}: the uses-sdk element sets {sorted(set(first['uses-sdk']) - SMS_USES_SDK_ATTRIBUTES)}: it "
+             "carries SDK levels and nothing else")
     application = first["application"]
     if "persistent" in application:
         fail(f"{SMS_APK}: the application sets persistent: nothing may run between messages")
