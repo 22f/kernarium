@@ -619,6 +619,17 @@ struct LegacyApkInstallAlertTests {
         return false
     }
 
+    /// The views from `element` up to the window, as a failure names them.
+    private func chain(_ element: UIView) -> String {
+        var parts: [String] = []
+        var candidate: UIView? = element
+        while let view = candidate {
+            parts.append("\(type(of: view))(label \(view.accessibilityLabel ?? "nil"), element \(view.isAccessibilityElement), control \(view is UIControl))")
+            candidate = view.superview
+        }
+        return parts.joined(separator: " < ")
+    }
+
     /// Raises the question for a file Android refuses for its version, with the real screens up.
     private func raise(
         _ model: AppModel, _ driver: StubDriver, over controller: AndariumHostingController<some View>
@@ -686,7 +697,7 @@ struct LegacyApkInstallAlertTests {
             let title = installAnyway ? "Install anyway" : "Cancel"
             let button = try #require(control(labelled: title, in: shown.view), "\(title) is not on the alert")
             // What VoiceOver does with a double tap; a control that declines it is tapped.
-            try #require(activate(button), "\(title) takes no activation")
+            try #require(activate(button), "\(title) takes no activation: \(chain(button))")
             try #require(await eventually { model.legacyInstallQuestion == nil }, "\(title) answered nothing")
             if installAnyway {
                 try #require(await eventually { model.busy?.result != nil })
@@ -752,7 +763,7 @@ struct LegacyApkInstallAlertTests {
         // The alert is on screen before its buttons are built.
         try #require(await eventually { control(labelled: "Cancel", in: shown.view) != nil }, "no Cancel on the alert")
         let cancel = try #require(control(labelled: "Cancel", in: shown.view))
-        try #require(activate(cancel), "Cancel takes no activation")
+        try #require(activate(cancel), "Cancel takes no activation: \(chain(cancel))")
         try #require(await eventually { alert(over: controller) == nil && model.busy == nil })
         #expect(driver.installAttempts == [false])
     }
