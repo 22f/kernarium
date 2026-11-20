@@ -63,7 +63,7 @@ enum Cmd : std::uint32_t {
     getImageMemoryRequirements2 = 144, getBufferMemoryRequirements2 = 145,
     cmdBeginRenderPass2 = 168,
     setReplyCommandStream = 178, getImageDrmFormatModifierProperties = 187,
-    importSemaphoreResource = 246, transitionImageLayout = 296,
+    importSemaphoreResource = 246, copyImageToImage = 295, transitionImageLayout = 296,
     copyImageToMemory = 297, copyMemoryToImage = 298,
     cmdCopyMemoryToImage = 356, cmdCopyImageToMemory = 357,
     cmdCopyQueryPoolResultsToMemory = 360,

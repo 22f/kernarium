@@ -13,6 +13,12 @@
 // fault on its standard error. The parent passes when every child exits with
 // status 0.
 //
+// Fresh memory from a fresh page is zero, which hides a reply that carries a
+// byte the renderer never wrote. A row that looks for one sets `fillsMemory`,
+// and its child runs with MALLOC_FILL_SPACE, which fills each block Guard
+// Malloc hands out with a pattern, so a byte nobody wrote shows as the
+// pattern. The fill slows every allocation, so the other rows go without it.
+//
 // An object the renderer fails to free leaves nothing for Guard Malloc to
 // fault on, so a row that names one is run a second time under the leak
 // checker (leaks --atExit), which examines the process when the row, the
@@ -57,7 +63,7 @@ namespace uml::gpu::testing::venus {
 
 constexpr std::uint32_t replyResourceId = 900;
 constexpr std::uint64_t replySize = 16384;       // one host page
-constexpr std::size_t replyBytesKept = 256;
+constexpr std::size_t replyBytesKept = 1024;
 
 // The renderer says why it refuses a command; the log makes a failure here
 // read as one.
@@ -170,6 +176,9 @@ struct Row {
     bool leakChecked = false;  // also run under the leak checker
     // How this row's device comes up, when not as the suite's does.
     std::function<void(Stream&)> setup = {};
+    // Run the child with each fresh block filled with a pattern, for a row that
+    // asserts a reply holds only what was written.
+    bool fillsMemory = false;
 };
 
 inline void requireAnswered(const Answer& answer, Cmd command, std::int32_t result, const char* what)
@@ -281,7 +290,7 @@ inline int runChild(const Suite& suite, const char* name)
 
 // Starts this binary as the child for one row, under Guard Malloc, and returns
 // its wait status.
-[[nodiscard]] inline int runChildUnderGuardMalloc(const char* name)
+[[nodiscard]] inline int runChildUnderGuardMalloc(const char* name, bool fillsMemory)
 {
     std::vector<std::string> variables;
     for (char** entry = environ; *entry != nullptr; ++entry) {
@@ -291,6 +300,8 @@ inline int runChild(const Suite& suite, const char* name)
         variables.push_back(text);
     }
     variables.push_back(std::string("DYLD_INSERT_LIBRARIES=") + guardMalloc);
+    if (fillsMemory)
+        variables.push_back("MALLOC_FILL_SPACE=1");
     std::vector<char*> environment;
     for (std::string& text : variables)
         environment.push_back(text.data());
@@ -434,7 +445,7 @@ inline int main(int argc, char** argv, const Suite& suite)
     for (const Row& row : suite.rows) {
         if (only != nullptr && std::strcmp(only, row.name) != 0)
             continue;
-        const int status = runChildUnderGuardMalloc(row.name);
+        const int status = runChildUnderGuardMalloc(row.name, row.fillsMemory);
         if (WIFSIGNALED(status)) {
             std::fprintf(stderr, "row %s: FAILED, the child ended with signal %d\n",
                 row.name, WTERMSIG(status));

@@ -30,11 +30,18 @@
 //  - a pipeline create info that chains a library which is the null handle.
 //  - a host image copy (VK_EXT_host_image_copy) of a region the image cannot
 //    hold: a mip level, an aspect, an offset or an extent the image does not
-//    have, or a row length or image height that makes the region reach
-//    further than the memory the guest sent. The command is answered with
-//    VK_ERROR_OUT_OF_HOST_MEMORY, as for a region whose footprint cannot be
-//    stated, and the renderer logs why. A region the image holds is copied,
-//    and read back as it was written.
+//    have (a chroma plane's extent is the subsampled one), or a row length or
+//    image height that makes the region reach further than the memory the
+//    guest sent. The command is answered with VK_ERROR_OUT_OF_HOST_MEMORY, as
+//    for a region whose footprint cannot be stated, and the renderer logs
+//    why. So is an image-to-image copy whose source or destination does not
+//    hold its region, whose sides differ in layers or bytes, or that names the
+//    null image. A region the image holds is copied, whatever the image is (a
+//    smaller mip, layers, a compressed format, a depth or stencil aspect, a 3D
+//    image, a plane), and read back as it was written; padding the driver
+//    leaves is returned as zeros, not as what the renderer's memory held.
+//  - the commands that copy between device memory and an image with no info,
+//    which the registry allows and the driver ignores, are served.
 //
 // A row that expects the renderer to refuse names the line it logs, so that a
 // driver that refuses the same request is not mistaken for the renderer.
@@ -66,6 +73,7 @@ enum Id : std::uint64_t {
     imageId = 10, bufferId = 20, memoryId = 30, imageMemoryId = 31,
     poolId = 40, commandBufferId = 41, moduleId = 50, layoutId = 51,
     pipelineId = 60, otherPipelineId = 61, binaryId = 70,
+    otherImageId = 11, otherImageMemoryId = 32,
 };
 constexpr std::uint32_t extent = 16;
 constexpr std::uint64_t memorySize = 64 * 1024;
@@ -139,15 +147,15 @@ void encodeBuffer(Stream& s, std::uint64_t id, bool reply = false)
 
 void encodeImage(Stream& s, std::uint64_t id, VkFormat format = VK_FORMAT_R8G8B8A8_UNORM,
     std::uint32_t mipLevels = 1, VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-    std::uint32_t arrayLayers = 1)
+    std::uint32_t arrayLayers = 1, VkImageType type = VK_IMAGE_TYPE_2D, std::uint32_t depth = 1)
 {
     s.command(createImage);
     s.u64(deviceId);
     s.ptr(true);
     s.u32(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO); s.u64(0);
     s.u32(0);
-    s.u32(VK_IMAGE_TYPE_2D); s.u32(format);
-    s.u32(extent); s.u32(extent); s.u32(1);
+    s.u32(type); s.u32(format);
+    s.u32(extent); s.u32(extent); s.u32(depth);
     s.u32(mipLevels); s.u32(arrayLayers);
     s.u32(VK_SAMPLE_COUNT_1_BIT); s.u32(VK_IMAGE_TILING_OPTIMAL);
     s.u32(usage);
@@ -456,6 +464,7 @@ struct HostCopy {
     std::int32_t offset = 0;
     std::uint32_t width = 4;
     std::uint32_t height = 4;
+    std::uint32_t depth = 1;
     std::uint32_t memoryBytes = 4 * 4 * texelBytes;
 };
 
@@ -463,7 +472,7 @@ void encodeSubresourceRegion(Stream& s, const HostCopy& copy)
 {
     s.u32(copy.aspect); s.u32(copy.mipLevel); s.u32(0); s.u32(copy.layers);
     s.u32(static_cast<std::uint32_t>(copy.offset)); s.u32(0); s.u32(0);
-    s.u32(copy.width); s.u32(copy.height); s.u32(1);
+    s.u32(copy.width); s.u32(copy.height); s.u32(copy.depth);
 }
 
 void encodeCopyImageToMemory(Stream& s, std::uint64_t image, const HostCopy& copy)
@@ -498,14 +507,25 @@ void encodeCopyMemoryToImage(Stream& s, std::uint64_t image, const HostCopy& cop
     encodeSubresourceRegion(s, copy);
 }
 
+// What the image of a host copy is: the format, the mip levels, the layers,
+// and the aspects its layout transition names.
+struct HostImage {
+    VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+    VkImageType type = VK_IMAGE_TYPE_2D;
+    std::uint32_t depth = 1;
+    std::uint32_t mipLevels = 1;
+    std::uint32_t arrayLayers = 1;
+    VkImageAspectFlags aspects = VK_IMAGE_ASPECT_COLOR_BIT;
+};
+
 // The image, made ready for a host copy: its memory bound and its layout
 // general.
 void encodeHostCopyImage(Stream& s, std::uint64_t image, std::uint64_t memory,
-    std::uint32_t arrayLayers = 1)
+    const HostImage& spec = {})
 {
-    constexpr std::uint32_t mipLevels = 1;
-    encodeImage(s, image, VK_FORMAT_R8G8B8A8_UNORM, mipLevels,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_HOST_TRANSFER_BIT, arrayLayers);
+    encodeImage(s, image, spec.format, spec.mipLevels,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_HOST_TRANSFER_BIT, spec.arrayLayers,
+        spec.type, spec.depth);
     s.command(getImageMemoryRequirements);
     s.u64(deviceId); s.u64(image); s.ptr(true);
     encodeMemory(s, memory);
@@ -516,7 +536,37 @@ void encodeHostCopyImage(Stream& s, std::uint64_t image, std::uint64_t memory,
     s.u32(VK_STRUCTURE_TYPE_HOST_IMAGE_LAYOUT_TRANSITION_INFO); s.ptr(false);
     s.u64(image);
     s.u32(VK_IMAGE_LAYOUT_UNDEFINED); s.u32(VK_IMAGE_LAYOUT_GENERAL);
-    s.u32(VK_IMAGE_ASPECT_COLOR_BIT); s.u32(0); s.u32(mipLevels); s.u32(0); s.u32(arrayLayers);
+    s.u32(spec.aspects); s.u32(0); s.u32(spec.mipLevels); s.u32(0); s.u32(spec.arrayLayers);
+}
+
+// vkCopyImageToImage of one region, from the source image to the destination
+// image, each with its own mip level, layers and offset.
+struct ImageCopy {
+    VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    std::uint64_t src = imageId;
+    std::uint64_t dst = otherImageId;
+    std::uint32_t srcMip = 0, dstMip = 0;
+    std::uint32_t srcLayers = 1, dstLayers = 1;
+    std::int32_t srcOffset = 0, dstOffset = 0;
+    std::uint32_t width = 4, height = 4;
+};
+
+void encodeCopyImageToImage(Stream& s, const ImageCopy& copy)
+{
+    s.command(copyImageToImage, true);
+    s.u64(deviceId);
+    s.ptr(true);
+    s.u32(VK_STRUCTURE_TYPE_COPY_IMAGE_TO_IMAGE_INFO); s.ptr(false);
+    s.u32(0);                                   // flags
+    s.u64(copy.src); s.u32(VK_IMAGE_LAYOUT_GENERAL);
+    s.u64(copy.dst); s.u32(VK_IMAGE_LAYOUT_GENERAL);
+    s.u32(1); s.arraySize(1);                   // one region
+    s.u32(VK_STRUCTURE_TYPE_IMAGE_COPY_2); s.ptr(false);
+    s.u32(copy.aspect); s.u32(copy.srcMip); s.u32(0); s.u32(copy.srcLayers);
+    s.u32(static_cast<std::uint32_t>(copy.srcOffset)); s.u32(0); s.u32(0);
+    s.u32(copy.aspect); s.u32(copy.dstMip); s.u32(0); s.u32(copy.dstLayers);
+    s.u32(static_cast<std::uint32_t>(copy.dstOffset)); s.u32(0); s.u32(0);
+    s.u32(copy.width); s.u32(copy.height); s.u32(1);
 }
 
 // ---------------------------------------------------------------- rows
@@ -610,11 +660,10 @@ Row keyStageRefusedRow(const char* name, const char* line, std::function<void(St
     }, false, setupOf(pipelineBinaryDevice())};
 }
 
-// The region of a host copy, from memory the test chooses, with the image
-// already made ready.
-std::function<void(Session&)> hostCopyImageReady(std::uint32_t arrayLayers = 1)
+// The image of a host copy, already made ready.
+std::function<void(Session&)> hostCopyImageReady(const HostImage& image = {})
 {
-    return makes([arrayLayers](Stream& s) { encodeHostCopyImage(s, imageId, imageMemoryId, arrayLayers); });
+    return makes([image](Stream& s) { encodeHostCopyImage(s, imageId, imageMemoryId, image); });
 }
 
 // The data a copy of this region has: its bytes, which are not what the
@@ -631,10 +680,10 @@ std::vector<std::uint8_t> patternOf(std::size_t bytes)
 // VK_ERROR_OUT_OF_HOST_MEMORY, the renderer says why, and the context lives on:
 // the next copy, of a region the image holds, is served.
 Row hostCopyRefusedRow(const char* name, const char* line, bool toMemory, const HostCopy& copy,
-    std::uint32_t arrayLayers = 1)
+    const HostImage& image = {}, const HostCopy& valid = {})
 {
     return {name, [=](Session& session) {
-        hostCopyImageReady(arrayLayers)(session);
+        hostCopyImageReady(image)(session);
         Stream s;
         if (toMemory)
             encodeCopyImageToMemory(s, imageId, copy);
@@ -645,11 +694,88 @@ Row hostCopyRefusedRow(const char* name, const char* line, bool toMemory, const 
         require(rendererSaid(line), "the renderer did not refuse the region itself");
 
         Stream next;
-        encodeCopyMemoryToImage(next, imageId, {}, patternOf(HostCopy{}.memoryBytes));
+        encodeCopyMemoryToImage(next, imageId, valid, patternOf(valid.memoryBytes));
         requireAnswered(session.ask(next), copyMemoryToImage, VK_SUCCESS,
             "the context did not serve a copy after a refused region");
     }, false, setupOf(hostCopyDevice())};
 }
+
+// A region the image holds is copied into it and read back, and the renderer
+// refuses nothing. `compare` asks for the bytes to come back as they went in,
+// which holds for what the driver stores as given.
+Row hostCopyServedRow(const char* name, const HostImage& image, const HostCopy& copy, bool compare = true)
+{
+    return {name, [=](Session& session) {
+        hostCopyImageReady(image)(session);
+        const std::vector<std::uint8_t> data = patternOf(copy.memoryBytes);
+        Stream write;
+        encodeCopyMemoryToImage(write, imageId, copy, data);
+        requireAnswered(session.ask(write), copyMemoryToImage, VK_SUCCESS, "a copy into the image was refused");
+        Stream read;
+        encodeCopyImageToMemory(read, imageId, copy);
+        const Answer answer = session.ask(read);
+        requireAnswered(answer, copyImageToMemory, VK_SUCCESS, "a copy out of the image was refused");
+        if (compare) {
+            require(std::equal(data.begin(), data.end(), answer.raw.begin() + 16),
+                "what a copy out of the image returned is not what was copied into it");
+        }
+        require(!rendererSaid("host image copy:"), "the renderer refused a region the image holds");
+    }, false, setupOf(hostCopyDevice())};
+}
+
+// An image-to-image copy the renderer refuses: it is answered with
+// VK_ERROR_OUT_OF_HOST_MEMORY, the renderer says why, and the context lives
+// on and serves the next request.
+Row imageToImageRefusedRow(const char* name, const char* line, const ImageCopy& copy,
+    const HostImage& source = {}, const HostImage& destination = {})
+{
+    return {name, [=](Session& session) {
+        makes([&](Stream& s) {
+            encodeHostCopyImage(s, imageId, imageMemoryId, source);
+            encodeHostCopyImage(s, otherImageId, otherImageMemoryId, destination);
+        })(session);
+        Stream s;
+        encodeCopyImageToImage(s, copy);
+        requireAnswered(session.ask(s), copyImageToImage, VK_ERROR_OUT_OF_HOST_MEMORY,
+            "an image-to-image copy the images cannot hold was not refused");
+        require(rendererSaid(line), "the renderer did not refuse the copy itself");
+
+        Stream next;
+        encodeBuffer(next, bufferId, true);
+        requireAnswered(session.ask(next), createBuffer, VK_SUCCESS,
+            "the context did not serve a request after a refused image-to-image copy");
+    }, false, setupOf(hostCopyDevice())};
+}
+
+// A command that sends no info, where the registry lets it, is served: the
+// driver ignores it, so the renderer must not read it.
+Row noInfoServedRow(const char* name, Cmd command)
+{
+    return {name, [=](Session& session) {
+        recordingCommandBuffer()(session);
+        Stream s;
+        s.command(command);
+        s.u64(commandBufferId);
+        s.ptr(false);                           // pCopyMemoryInfo, which is optional
+        require(session.send(s), "a copy command with no info was not served");
+        require(!rendererSaid(nullHandleLine), "the renderer refused a copy command with no info");
+        Stream next;
+        encodeBuffer(next, bufferId, true);
+        requireAnswered(session.ask(next), createBuffer, VK_SUCCESS,
+            "the context did not serve a request after a copy command with no info");
+    }, false, setupOf(addressCommandsDevice())};
+}
+
+// The multi-planar formats the host offers host image transfer for.
+constexpr HostImage planar420 {.format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
+    .aspects = VK_IMAGE_ASPECT_PLANE_0_BIT | VK_IMAGE_ASPECT_PLANE_1_BIT};
+constexpr HostImage planar422 {.format = VK_FORMAT_G8_B8R8_2PLANE_422_UNORM,
+    .aspects = VK_IMAGE_ASPECT_PLANE_0_BIT | VK_IMAGE_ASPECT_PLANE_1_BIT};
+constexpr HostImage planar3 {.format = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM,
+    .aspects = VK_IMAGE_ASPECT_PLANE_0_BIT | VK_IMAGE_ASPECT_PLANE_1_BIT | VK_IMAGE_ASPECT_PLANE_2_BIT};
+// A region of the first plane, which a context serves after a refusal.
+constexpr HostCopy planar420Valid {.aspect = VK_IMAGE_ASPECT_PLANE_0_BIT, .memoryBytes = 4 * 4};
+constexpr HostCopy planar422Valid = planar420Valid;
 
 constexpr const char* mipLine = "is past the image's";
 constexpr const char* aspectLine = "is not one aspect of the image";
@@ -805,8 +931,13 @@ const std::vector<Row>& rows()
         hostCopyRefusedRow("host-copy-to-memory-past-the-last-mip-level", mipLine, true, {.mipLevel = 5}),
         hostCopyRefusedRow("host-copy-to-memory-of-an-aspect-the-image-lacks", aspectLine, true,
             {.aspect = VK_IMAGE_ASPECT_DEPTH_BIT}),
-        hostCopyRefusedRow("host-copy-to-memory-of-two-aspects", aspectLine, true,
-            {.aspect = VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_DEPTH_BIT}),
+        // Both bits are aspects of the image, so only the test that a region
+        // names one aspect refuses it; so does no aspect at all, which the test
+        // of the format's aspects lets through.
+        hostCopyRefusedRow("host-copy-to-memory-of-two-planes", aspectLine, true,
+            {.aspect = VK_IMAGE_ASPECT_PLANE_0_BIT | VK_IMAGE_ASPECT_PLANE_1_BIT, .memoryBytes = 16},
+            planar420, {.aspect = VK_IMAGE_ASPECT_PLANE_0_BIT, .memoryBytes = 16}),
+        hostCopyRefusedRow("host-copy-to-memory-of-no-aspect", aspectLine, true, {.aspect = 0}),
         hostCopyRefusedRow("host-copy-to-memory-past-the-width", outsideLine, true,
             {.width = 2 * extent, .memoryBytes = 2 * extent * 4 * texelBytes}),
         hostCopyRefusedRow("host-copy-to-memory-from-a-negative-offset", outsideLine, true, {.offset = -1}),
@@ -815,7 +946,8 @@ const std::vector<Row>& rows()
         hostCopyRefusedRow("host-copy-to-memory-with-an-oversized-row-length", reachLine, true,
             {.rowLength = hugeRowLength}),
         hostCopyRefusedRow("host-copy-to-memory-with-an-oversized-image-height", reachLine, true,
-            {.layers = 2, .imageHeight = hugeRowLength, .memoryBytes = 4 * 4 * texelBytes * 2}, 2),
+            {.layers = 2, .imageHeight = hugeRowLength, .memoryBytes = 4 * 4 * texelBytes * 2},
+            {.arrayLayers = 2}),
         hostCopyRefusedRow("host-copy-from-memory-past-the-last-mip-level", mipLine, false, {.mipLevel = 5}),
         hostCopyRefusedRow("host-copy-from-memory-of-an-aspect-the-image-lacks", aspectLine, false,
             {.aspect = VK_IMAGE_ASPECT_STENCIL_BIT}),
@@ -824,7 +956,27 @@ const std::vector<Row>& rows()
         hostCopyRefusedRow("host-copy-from-memory-with-an-oversized-row-length", reachLine, false,
             {.rowLength = hugeRowLength}),
         hostCopyRefusedRow("host-copy-from-memory-with-an-oversized-image-height", reachLine, false,
-            {.layers = 2, .imageHeight = hugeRowLength, .memoryBytes = 4 * 4 * texelBytes * 2}, 2),
+            {.layers = 2, .imageHeight = hugeRowLength, .memoryBytes = 4 * 4 * texelBytes * 2},
+            {.arrayLayers = 2}),
+
+        // A chroma plane is as large as its subsampling leaves it: half the
+        // image across and down in a 4:2:0 format, half across in 4:2:2.
+        hostCopyRefusedRow("host-copy-to-memory-past-the-420-chroma-plane", outsideLine, true,
+            {.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT, .width = extent, .height = extent,
+                .memoryBytes = extent * extent * 2},
+            planar420, planar420Valid),
+        hostCopyRefusedRow("host-copy-from-memory-past-the-420-chroma-plane-height", outsideLine, false,
+            {.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT, .width = extent / 2, .height = extent / 2 + 1,
+                .memoryBytes = (extent / 2) * (extent / 2 + 1) * 2},
+            planar420, planar420Valid),
+        hostCopyRefusedRow("host-copy-to-memory-past-the-422-chroma-plane-width", outsideLine, true,
+            {.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT, .width = extent / 2 + 1, .height = extent,
+                .memoryBytes = (extent / 2 + 1) * extent * 2},
+            planar422, planar422Valid),
+        hostCopyRefusedRow("host-copy-to-memory-past-the-third-plane", outsideLine, true,
+            {.aspect = VK_IMAGE_ASPECT_PLANE_2_BIT, .width = extent, .height = extent,
+                .memoryBytes = extent * extent},
+            planar3, planar420Valid),
 
         // A region the image holds is copied, and what was written is read
         // back, from memory padded to a longer row as well as packed.
@@ -855,6 +1007,129 @@ const std::vector<Row>& rows()
                 "a copy from memory padded to a longer row was refused");
             require(!rendererSaid("host image copy:"), "the renderer refused a padded region");
         }, false, setupOf(hostCopyDevice())},
+
+        // What a copy out of the image returns is what the image holds and
+        // zeros: the driver writes the texels of a padded row and leaves the
+        // padding between them, which is staging memory the renderer allocated
+        // (the row asks the runner to fill a fresh block with a pattern, so any
+        // byte the renderer did not clear shows) and not guest memory.
+        {"host-copy-to-memory-returns-zeros-in-the-padding", [](Session& session) {
+            hostCopyImageReady()(session);
+            const HostCopy packed;
+            const std::vector<std::uint8_t> data = patternOf(packed.memoryBytes);
+            Stream write;
+            encodeCopyMemoryToImage(write, imageId, packed, data);
+            requireAnswered(session.ask(write), copyMemoryToImage, VK_SUCCESS, "a copy into the image was refused");
+
+            // Four rows of 16 bytes into rows of 32: the reach is 112 bytes,
+            // more than the 64 the guest asks for, so the renderer stages it.
+            HostCopy padded;
+            padded.rowLength = 8;
+            padded.memoryBytes = 4 * 16;
+            Stream read;
+            encodeCopyImageToMemory(read, imageId, padded);
+            const Answer answer = session.ask(read);
+            requireAnswered(answer, copyImageToMemory, VK_SUCCESS, "a copy out of the image was refused");
+            const auto reply = answer.raw.begin() + 16;
+            require(std::equal(data.begin(), data.begin() + 16, reply) &&
+                        std::equal(data.begin() + 16, data.begin() + 32, reply + 32),
+                "the texels of the padded rows are not the ones written");
+            require(std::all_of(reply + 16, reply + 32, [](std::uint8_t b) { return b == 0; }) &&
+                        std::all_of(reply + 48, reply + 64, [](std::uint8_t b) { return b == 0; }),
+                "the padding of a copy out of the image carries bytes nobody wrote");
+        }, false, setupOf(hostCopyDevice()), true},
+
+        // A region the image holds is served whatever the image is: a smaller
+        // mip, several layers, a compressed format, a depth or a stencil
+        // aspect, a 3D image, and the planes of a multi-planar format.
+        hostCopyServedRow("host-copy-of-the-second-mip-level", {.mipLevels = 3},
+            {.mipLevel = 1, .width = 8, .height = 8, .memoryBytes = 8 * 8 * texelBytes}),
+        hostCopyServedRow("host-copy-of-the-last-mip-level", {.mipLevels = 3},
+            {.mipLevel = 2, .memoryBytes = 4 * 4 * texelBytes}),
+        hostCopyServedRow("host-copy-of-three-layers", {.arrayLayers = 3},
+            {.layers = 3, .memoryBytes = 3 * 4 * 4 * texelBytes}),
+        hostCopyServedRow("host-copy-of-a-compressed-image", {.format = VK_FORMAT_BC7_UNORM_BLOCK},
+            {.width = extent, .height = extent, .memoryBytes = (extent / 4) * (extent / 4) * 16}),
+        hostCopyServedRow("host-copy-of-a-compressed-image-in-bigger-blocks",
+            {.format = VK_FORMAT_ASTC_8x8_UNORM_BLOCK},
+            {.width = extent, .height = extent, .memoryBytes = (extent / 8) * (extent / 8) * 16}),
+        hostCopyServedRow("host-copy-of-a-depth-aspect",
+            {.format = VK_FORMAT_D32_SFLOAT, .aspects = VK_IMAGE_ASPECT_DEPTH_BIT},
+            {.aspect = VK_IMAGE_ASPECT_DEPTH_BIT, .memoryBytes = 4 * 4 * 4}, false),
+        hostCopyServedRow("host-copy-of-a-stencil-aspect",
+            {.format = VK_FORMAT_S8_UINT, .aspects = VK_IMAGE_ASPECT_STENCIL_BIT},
+            {.aspect = VK_IMAGE_ASPECT_STENCIL_BIT, .memoryBytes = 4 * 4}),
+        hostCopyServedRow("host-copy-of-a-3d-image", {.type = VK_IMAGE_TYPE_3D, .depth = extent},
+            {.depth = 4, .memoryBytes = 4 * 4 * 4 * texelBytes}),
+        hostCopyServedRow("host-copy-of-the-first-plane", planar420, planar420Valid),
+        hostCopyServedRow("host-copy-of-the-whole-420-chroma-plane", planar420,
+            {.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT, .width = extent / 2, .height = extent / 2,
+                .memoryBytes = (extent / 2) * (extent / 2) * 2}),
+        hostCopyServedRow("host-copy-of-the-whole-422-chroma-plane", planar422,
+            {.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT, .width = extent / 2, .height = extent,
+                .memoryBytes = (extent / 2) * extent * 2}),
+        hostCopyServedRow("host-copy-of-the-whole-third-plane", planar3,
+            {.aspect = VK_IMAGE_ASPECT_PLANE_2_BIT, .width = extent / 2, .height = extent / 2,
+                .memoryBytes = (extent / 2) * (extent / 2)}),
+
+        // The host copy from image to image holds both images to what the
+        // copies to and from memory hold them to.
+        {"image-to-image-copy-moves-the-bytes", [](Session& session) {
+            makes([](Stream& s) {
+                encodeHostCopyImage(s, imageId, imageMemoryId);
+                encodeHostCopyImage(s, otherImageId, otherImageMemoryId);
+            })(session);
+            const HostCopy copy;
+            const std::vector<std::uint8_t> data = patternOf(copy.memoryBytes);
+            Stream write;
+            encodeCopyMemoryToImage(write, imageId, copy, data);
+            requireAnswered(session.ask(write), copyMemoryToImage, VK_SUCCESS, "a copy into the image was refused");
+            Stream between;
+            encodeCopyImageToImage(between, {});
+            requireAnswered(session.ask(between), copyImageToImage, VK_SUCCESS,
+                "an image-to-image copy of a region both images hold was refused");
+            Stream read;
+            encodeCopyImageToMemory(read, otherImageId, copy);
+            const Answer answer = session.ask(read);
+            requireAnswered(answer, copyImageToMemory, VK_SUCCESS, "a copy out of the destination was refused");
+            require(std::equal(data.begin(), data.end(), answer.raw.begin() + 16),
+                "the destination does not hold what the source held");
+            require(!rendererSaid("host image copy:"), "the renderer refused a copy both images hold");
+        }, false, setupOf(hostCopyDevice())},
+        {"image-to-image-copy-of-layers-and-a-smaller-mip", [](Session& session) {
+            const HostImage image {.mipLevels = 2, .arrayLayers = 3};
+            makes([&](Stream& s) {
+                encodeHostCopyImage(s, imageId, imageMemoryId, image);
+                encodeHostCopyImage(s, otherImageId, otherImageMemoryId, image);
+            })(session);
+            Stream between;
+            encodeCopyImageToImage(between,
+                {.srcMip = 1, .dstMip = 1, .srcLayers = 3, .dstLayers = 3, .width = 8, .height = 8});
+            requireAnswered(session.ask(between), copyImageToImage, VK_SUCCESS,
+                "an image-to-image copy of layers of a smaller mip was refused");
+            require(!rendererSaid("host image copy:"), "the renderer refused a copy both images hold");
+        }, false, setupOf(hostCopyDevice())},
+        imageToImageRefusedRow("image-to-image-copy-from-past-the-source-edge",
+            "the source of an image-to-image copy does not hold its region", {.srcOffset = extent - 2}),
+        imageToImageRefusedRow("image-to-image-copy-to-past-the-destination-edge",
+            "the destination of an image-to-image copy does not hold its region", {.dstOffset = extent - 2}),
+        imageToImageRefusedRow("image-to-image-copy-from-past-the-last-mip-level",
+            "the source of an image-to-image copy does not hold its region", {.srcMip = 5}),
+        imageToImageRefusedRow("image-to-image-copy-to-past-the-last-mip-level",
+            "the destination of an image-to-image copy does not hold its region", {.dstMip = 5}),
+        imageToImageRefusedRow("image-to-image-copy-of-different-layer-counts",
+            "do not move the same layers and bytes", {.srcLayers = 2, .dstLayers = 1},
+            {.arrayLayers = 2}, {.arrayLayers = 2}),
+        imageToImageRefusedRow("image-to-image-copy-into-a-wider-format",
+            "do not move the same layers and bytes", {}, {.format = VK_FORMAT_R8_UNORM}, {}),
+        imageToImageRefusedRow("image-to-image-copy-of-the-null-destination",
+            "an image of an image-to-image copy is the null handle", {.dst = 0}),
+        imageToImageRefusedRow("image-to-image-copy-of-the-null-source",
+            "an image of an image-to-image copy is the null handle", {.src = 0}),
+
+        // A copy command that sends no info is valid and does nothing.
+        noInfoServedRow("copy-memory-to-image-with-no-info-is-served", cmdCopyMemoryToImage),
+        noInfoServedRow("copy-image-to-memory-with-no-info-is-served", cmdCopyImageToMemory),
     };
     return all;
 }
