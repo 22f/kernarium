@@ -1247,7 +1247,16 @@ public:
 #if TARGET_OS_IOS
         @try {
             const CameraInfo& info = entry.info;
-            // Exposure.
+            // A region is in the picture the camera delivers, which its video connection has turned (the square front
+            // camera's): the point of interest is in the device's own, so it is mapped back through that turn.
+            const auto pointOf = [&](const CameraRegion& region) {
+                const CameraRegion own = regionBeforeTurn(region, entry.mounting.connectionTurn);
+                return CGPointMake(own.x + own.width / 2, own.y + own.height / 2);
+            };
+            // Exposure. The point of interest comes first, as the focus's does: the device takes it up when the exposure
+            // mode is set, so a tap that moves only the region must not set the mode ahead of the point.
+            if (settings.aeRegion && settings.aeRegion->weight > 0 && device.exposurePointOfInterestSupported)
+                device.exposurePointOfInterest = pointOf(*settings.aeRegion);
             if (settings.exposureMode == CameraExposureMode::manual && info.manualExposure) {
                 const CMTime duration = CMTimeMake(std::int64_t(settings.exposureNanoseconds), 1'000'000'000);
                 const float iso = std::clamp<float>(float(settings.iso), device.activeFormat.minISO, device.activeFormat.maxISO);
@@ -1262,14 +1271,6 @@ public:
                 [device setExposureTargetBias:std::clamp(settings.exposureBiasStops, device.minExposureTargetBias,
                                                          device.maxExposureTargetBias)
                             completionHandler:nil];
-            // A region is in the picture the camera delivers, which its video connection has turned (the square front
-            // camera's): the point of interest is in the device's own, so it is mapped back through that turn.
-            const auto pointOf = [&](const CameraRegion& region) {
-                const CameraRegion own = regionBeforeTurn(region, entry.mounting.connectionTurn);
-                return CGPointMake(own.x + own.width / 2, own.y + own.height / 2);
-            };
-            if (settings.aeRegion && settings.aeRegion->weight > 0 && device.exposurePointOfInterestSupported)
-                device.exposurePointOfInterest = pointOf(*settings.aeRegion);
             // Focus. The point of interest comes first: the device takes it up when the
             // focus mode is set. A new trigger runs one scan in any mode (the device
             // locks where it ends). Otherwise a manual lens goes to the distance only
