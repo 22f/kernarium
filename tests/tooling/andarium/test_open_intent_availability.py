@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Shortcuts offers "Open Android App" from iOS 27 only.
+"""Shortcuts lists an Android action from iOS 27 only.
 
 Before iOS 27 an app of Andarium's is no entity (`IPadAppHost.offersAddToHomeScreen`),
-so the action would ask for an app that no query can give. The declarations
-say where the action is offered, and the App Intents metadata the build
-extracts says it to the system: the action and the automatic shortcut carry an
-`LNPlatformNameIOS` introduced version of 27.0 beside the wildcard that keeps
-them on the other platforms (a Mac and a Vision Pro of iOS 27 run the action by
-name). This reads both: the sources for the two declarations' availability, and
-the metadata of a built application when `--bundle` names one.
+so the action would ask for an app that no query can give, and the Find action
+the system lists for an entity and its query would list none. The declarations
+say where each is offered, and the App Intents metadata the build extracts says
+it to the system: the action, the automatic shortcut, the entity and its query
+carry an `LNPlatformNameIOS` introduced version of 27.0 beside the wildcard
+that keeps them on the other platforms (a Mac and a Vision Pro of iOS 27 run
+the action by name). This reads both: the sources for the four declarations'
+availability, and the metadata of a built application when `--bundle` names
+one.
 """
 
 from __future__ import annotations
@@ -24,8 +26,15 @@ import sys
 import unittest
 
 SOURCE = "Andarium/Andarium/Shared/AndroidAppIntents.swift"
-DECLARATIONS = ("struct OpenAndroidAppIntent", "struct AndroidAppShortcuts")
+DECLARATIONS = (
+    "struct OpenAndroidAppIntent",
+    "struct AndroidAppShortcuts",
+    "struct AndroidAppEntity",
+    "struct AndroidAppQuery",
+)
 ACTION = "OpenAndroidAppIntent"
+ENTITY = "AndroidAppEntity"
+QUERY = "AndroidAppQuery"
 # The iOS release that introduces the action: exactly it, since a later one
 # would leave that release without the action.
 FIRST_VERSION = (27,)
@@ -76,6 +85,14 @@ def metadata_problems(actions_data: dict) -> list[str]:
         found = availability_problem(entry.get("availabilityAnnotations"))
         if found:
             problems.append(f"the automatic shortcut for {ACTION} {found}")
+    for section, kind, name in (("entities", "entity", ENTITY), ("queries", "query", QUERY)):
+        entry = actions_data.get(section, {}).get(name)
+        if entry is None:
+            problems.append(f"the metadata has no {name}")
+            continue
+        found = availability_problem(entry.get("availabilityAnnotations"))
+        if found:
+            problems.append(f"{kind} {name} {found}")
     return problems
 
 
@@ -109,22 +126,25 @@ WILDCARD_ONLY = {WILDCARD: {"introducedVersion": "*"}}
 FROM_27 = {IOS: {"introducedVersion": "27.0"}, WILDCARD: {"introducedVersion": "*"}}
 
 
-def extraction(annotations: dict) -> dict:
+def extraction(annotations: dict, entity_annotations: dict | None = None) -> dict:
+    kept = annotations if entity_annotations is None else entity_annotations
     return {
         "actions": {ACTION: {"availabilityAnnotations": annotations}},
         "autoShortcuts": [{"actionIdentifier": ACTION, "availabilityAnnotations": annotations}],
+        "entities": {ENTITY: {"availabilityAnnotations": kept}},
+        "queries": {QUERY: {"availabilityAnnotations": kept}},
     }
 
 
 class Fixtures(unittest.TestCase):
     def test_a_wildcard_only_declaration_is_offered_on_ios_26(self) -> None:
         problems = metadata_problems(extraction(WILDCARD_ONLY))
-        self.assertEqual(len(problems), 2, problems)
+        self.assertEqual(len(problems), 4, problems)
         self.assertTrue(all("names no iOS version" in problem for problem in problems), problems)
 
     def test_an_earlier_ios_version_is_offered_on_ios_26(self) -> None:
         early = {IOS: {"introducedVersion": "26.0"}, WILDCARD: {"introducedVersion": "*"}}
-        self.assertEqual(len(metadata_problems(extraction(early))), 2)
+        self.assertEqual(len(metadata_problems(extraction(early))), 4)
 
     def test_the_action_and_the_shortcut_are_judged_each(self) -> None:
         data = extraction(FROM_27)
@@ -138,15 +158,21 @@ class Fixtures(unittest.TestCase):
 
     def test_dropping_the_wildcard_takes_the_other_platforms_off(self) -> None:
         only_ios = {IOS: {"introducedVersion": "27.0"}}
-        self.assertEqual(len(metadata_problems(extraction(only_ios))), 2)
+        self.assertEqual(len(metadata_problems(extraction(only_ios))), 4)
 
-    def test_a_missing_action_or_shortcut_is_reported(self) -> None:
-        self.assertEqual(len(metadata_problems({})), 2)
+    def test_an_entity_and_a_query_offered_on_ios_26_leave_shortcuts_a_find_action(self) -> None:
+        problems = metadata_problems(extraction(FROM_27, WILDCARD_ONLY))
+        self.assertEqual(len(problems), 2, problems)
+        self.assertTrue(problems[0].startswith(f"entity {ENTITY}"), problems)
+        self.assertTrue(problems[1].startswith(f"query {QUERY}"), problems)
+
+    def test_a_missing_action_shortcut_entity_or_query_is_reported(self) -> None:
+        self.assertEqual(len(metadata_problems({})), 4)
 
     def test_a_later_ios_27_version_leaves_ios_27_0_without_the_action(self) -> None:
         later = {IOS: {"introducedVersion": "27.1"}, WILDCARD: {"introducedVersion": "*"}}
         problems = metadata_problems(extraction(later))
-        self.assertEqual(len(problems), 2, problems)
+        self.assertEqual(len(problems), 4, problems)
         self.assertTrue(all("27.1" in problem for problem in problems), problems)
 
     def test_27_written_other_ways_is_still_27_0(self) -> None:
@@ -155,34 +181,35 @@ class Fixtures(unittest.TestCase):
             self.assertEqual(metadata_problems(extraction(annotations)), [], written)
 
     def test_an_annotation_in_a_comment_gates_nothing(self) -> None:
-        commented = (
-            "/// Opens. @available(iOS 27.0, *)\nstruct OpenAndroidAppIntent: OpenIntent {}\n"
-            "// @available(iOS 27.0, *)\nnonisolated struct AndroidAppShortcuts: AppShortcutsProvider {}\n"
-        )
-        self.assertEqual(len(source_problems(commented)), 2)
-        doc_only = (
-            "/// @available(iOS 27.0, *)\nstruct OpenAndroidAppIntent: OpenIntent {}\n"
-            "@available(iOS 27.0, *)\nnonisolated struct AndroidAppShortcuts: AppShortcutsProvider {}\n"
-        )
-        self.assertEqual(len(source_problems(doc_only)), 1)
+        commented = declarations("// @available(iOS 27.0, *)\n")
+        self.assertEqual(len(source_problems(commented)), 4)
+        doc_only = declarations("/// @available(iOS 27.0, *)\n")
+        self.assertEqual(len(source_problems(doc_only)), 4)
 
     def test_other_versions_and_platforms_do_not_gate_it(self) -> None:
         for annotation in ("@available(iOS 26.0, *)", "@available(macOS 27.0, *)", "@available(iOS 27.1, *)"):
-            text = (
-                f"{annotation}\nstruct OpenAndroidAppIntent: OpenIntent {{}}\n"
-                "@available(iOS 27.0, *)\nnonisolated struct AndroidAppShortcuts: AppShortcutsProvider {}\n"
-            )
-            self.assertEqual(len(source_problems(text)), 1, annotation)
+            self.assertEqual(len(source_problems(declarations(annotation + "\n"))), 4, annotation)
 
     def test_the_declarations_are_checked_in_the_source(self) -> None:
-        gated = (
-            "/// Opens.\n@available(iOS 27.0, *)\nstruct OpenAndroidAppIntent: OpenIntent {}\n"
-            "/// Tiles.\n@available(iOS 27.0, *)\nnonisolated struct AndroidAppShortcuts: AppShortcutsProvider {}\n"
-        )
-        self.assertEqual(source_problems(gated), [])
-        loose = gated.replace("@available(iOS 27.0, *)\nstruct", "struct")
-        self.assertEqual(len(source_problems(loose)), 1)
-        self.assertEqual(len(source_problems("")), 2)
+        self.assertEqual(source_problems(declarations("@available(iOS 27.0, *)\n")), [])
+        for index in range(4):
+            gated = ["@available(iOS 27.0, *)\n"] * 4
+            gated[index] = ""
+            self.assertEqual(len(source_problems(declarations(*gated))), 1, index)
+        self.assertEqual(len(source_problems("")), 4)
+
+
+def declarations(*annotations: str) -> str:
+    """Source with the four declarations, each preceded by its annotation line ("" for none)."""
+    heads = (
+        "struct OpenAndroidAppIntent: OpenIntent {}\n",
+        "nonisolated struct AndroidAppShortcuts: AppShortcutsProvider {}\n",
+        "nonisolated struct AndroidAppEntity: AppEntity, IndexedEntity {}\n",
+        "nonisolated struct AndroidAppQuery: EnumerableEntityQuery {}\n",
+    )
+    if len(annotations) == 1:
+        annotations = annotations * len(heads)
+    return "".join(f"/// A declaration.\n{note}{head}" for note, head in zip(annotations, heads))
 
 
 def main() -> int:

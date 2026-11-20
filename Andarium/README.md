@@ -1380,14 +1380,14 @@ is on. `AndariumCore/Adb` speaks the protocol.
   write to the index takes one ordered path (`AndroidAppsIndexWriter`), judged
   against the switch and the catalog as they are when it runs, and a launch
   finishes a write that failed. The tiles, the entities and the Siri phrase do
-  not follow the switch. The system's own request to index the apps again
-  (`IndexedEntityQuery`) exists from iOS 27. Shortcuts shows a tile for each app
-  from iOS 27 only, so the host offers the feature from there
+  not follow the switch. Shortcuts shows a tile for each app from iOS 27 only,
+  so the host offers the feature from there
   (`IPadAppHost.offersAddToHomeScreen`): an iOS 26 host is treated as a Mac or a
-  Vision Pro is, and the action and its automatic shortcut are declared
-  `@available(iOS 27.0, *)`, so Shortcuts offers neither before it
-  (`andarium-open-intent-availability` reads the declarations and, for a built
-  application, its extracted App Intents metadata). The feature is in every build
+  Vision Pro is, and the entity, its query, the action and its automatic
+  shortcut are all declared `@available(iOS 27.0, *)`, so Shortcuts lists no
+  Android action before it, the Find action the system makes for an entity
+  included (`andarium-open-intent-availability` reads the declarations and, for
+  a built application, its extracted App Intents metadata). The feature is in every build
   configuration. Tests:
   `AndariumCore`'s `AppOpen*`, `AndroidApp*` suites, the hosted
   `AndroidApps*Tests` and the preview's `AddToHomeUITests`

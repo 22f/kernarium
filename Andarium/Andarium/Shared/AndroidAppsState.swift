@@ -420,33 +420,36 @@ final class AndroidAppsState {
 @MainActor
 protocol AndroidAppsSearchIndexing: AnyObject {
     /// Offers these apps to Search, in place of what was offered.
-    func offer(_ entities: [AndroidAppEntity]) async -> Bool
+    func offer(_ apps: [AndroidApp]) async -> Bool
     /// Adds these apps to what is offered (the system asked for them again).
-    func add(_ entities: [AndroidAppEntity]) async -> Bool
+    func add(_ apps: [AndroidApp]) async -> Bool
     /// Takes every app back out of Search.
     func withdraw() async -> Bool
     /// Tells the system that the apps the shortcut tiles are made of changed.
     func shortcutsChanged()
 }
 
-/// The system's index.
+/// The system's index. The apps are entities from iOS 27; before it there is
+/// nothing to write, and no host there asks (`AndroidAppsHub.hostOffers`).
 @MainActor
 final class SpotlightAppsIndex: AndroidAppsSearchIndexing {
-    func offer(_ entities: [AndroidAppEntity]) async -> Bool {
+    func offer(_ apps: [AndroidApp]) async -> Bool {
+        guard #available(iOS 27.0, *) else { return true }
         let index = CSSearchableIndex.default()
         do {
             try await index.deleteAppEntities(ofType: AndroidAppEntity.self)
-            if !entities.isEmpty { try await index.indexAppEntities(entities) }
+            if !apps.isEmpty { try await index.indexAppEntities(apps.map(AndroidAppEntity.init)) }
             return true
         } catch {
             return false
         }
     }
 
-    func add(_ entities: [AndroidAppEntity]) async -> Bool {
-        guard !entities.isEmpty else { return true }
+    func add(_ apps: [AndroidApp]) async -> Bool {
+        guard !apps.isEmpty else { return true }
+        guard #available(iOS 27.0, *) else { return true }
         do {
-            try await CSSearchableIndex.default().indexAppEntities(entities)
+            try await CSSearchableIndex.default().indexAppEntities(apps.map(AndroidAppEntity.init))
             return true
         } catch {
             return false
@@ -454,6 +457,7 @@ final class SpotlightAppsIndex: AndroidAppsSearchIndexing {
     }
 
     func withdraw() async -> Bool {
+        guard #available(iOS 27.0, *) else { return true }
         do {
             try await CSSearchableIndex.default().deleteAppEntities(ofType: AndroidAppEntity.self)
             return true
@@ -518,21 +522,20 @@ final class AndroidAppsIndexWriter {
         let index = hub.searchIndex
         if let identifiers {
             let wanted = Set(identifiers)
-            let entities = apps.filter { wanted.contains($0.id) }.map(AndroidAppEntity.init)
+            let chosen = apps.filter { wanted.contains($0.id) }
             // An add changes what Spotlight holds whatever the saved state says
             // ("off" included): from here it is not known, and the next
             // reconcile writes what the switch says, offer or withdrawal.
-            if !entities.isEmpty { hub.preference.keepIndexed(nil) }
-            guard await index.add(entities) else { throw IndexWriteFailed() }
+            if !chosen.isEmpty { hub.preference.keepIndexed(nil) }
+            guard await index.add(chosen) else { throw IndexWriteFailed() }
         } else {
             // What is offered and the fingerprint recorded for it come from the
             // same instant: artwork that arrives during the offer is not in it.
             let wanted = "on:" + Self.key(of: apps, store: hub.store)
-            let entities = apps.map(AndroidAppEntity.init)
             // From the delete on, what Spotlight holds is not known: an offer
             // that fails or is cut short leaves the next reconcile to repair it.
             hub.preference.keepIndexed(nil)
-            guard await index.offer(entities) else { throw IndexWriteFailed() }
+            guard await index.offer(apps) else { throw IndexWriteFailed() }
             hub.preference.keepIndexed(wanted)
         }
     }
@@ -549,11 +552,10 @@ final class AndroidAppsIndexWriter {
         let on = hub.preference.isOn
         let wanted = on ? "on:" + key : "off"
         guard wanted != hub.preference.indexed else { return }
-        let entities = on ? apps.map(AndroidAppEntity.init) : []
         // Unknown from here to the acknowledgement: a launch that finds it so
         // writes again, whichever way the switch is by then.
         hub.preference.keepIndexed(nil)
-        let took = on ? await index.offer(entities) : await index.withdraw()
+        let took = on ? await index.offer(apps) : await index.withdraw()
         if took { hub.preference.keepIndexed(wanted) }
     }
 
@@ -685,6 +687,7 @@ nonisolated final class AndroidAppsHub: @unchecked Sendable {
     }
 
     /// The entities of the cache, as the query answers.
+    @available(iOS 27.0, *)
     func entities() -> [AndroidAppEntity] {
         listedApps().map(AndroidAppEntity.init)
     }

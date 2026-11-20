@@ -65,16 +65,16 @@ final class AddToHomeUITests: XCTestCase {
         XCTAssertFalse(app.buttons["settings-add-to-home-screen"].waitForExistence(timeout: 5), "Settings has an Add to Home Screen row")
     }
 
-    /// Shortcuts' own list of actions, searched for Andarium's. The action and its automatic shortcut
-    /// are declared @available(iOS 27.0, *), so Shortcuts offers "Open Android App" from iOS 27 and
-    /// not before. The test runs Andarium once, which is when the system learns its actions, then
+    /// Shortcuts' own list of actions, searched for Andarium's. The entity, its query, the action and
+    /// its automatic shortcut are declared @available(iOS 27.0, *), so Shortcuts lists "Open Android
+    /// App" and the Find the system makes for the entity from iOS 27, and no Android action before
+    /// it. The test runs Andarium once, which is when the system learns its actions, then
     /// launches Shortcuts, which runs in the test's language, English. The new shortcut's editor is
     /// opened by its URL; its search of actions is the search field that says "Action", or, from
     /// iOS 27, the only one, behind the Editor button of the panel that describes a shortcut. The
     /// words searched are "Safari", which proves the search works, and "Android". A result is a
-    /// button or a cell. Shortcuts offers Find for the app entity on every system, so "Android"
-    /// finds that one result before iOS 27 and Open with it from iOS 27. The extracted metadata
-    /// says the same of the build (`andarium-open-intent-availability`).
+    /// button or a cell. The extracted metadata says the same of the build
+    /// (`andarium-open-intent-availability`).
     func testShortcutsOffersOpenAndroidAppFromIOS27Only() throws {
         var offered = false
         if #available(iOS 27.0, *) { offered = true }
@@ -142,7 +142,7 @@ final class AddToHomeUITests: XCTestCase {
         XCTAssertEqual(proved, .completed, "the search of actions found no Safari: \(shortcuts.debugDescription)")
         forget("Safari")
         actionsSearch().typeText("Android")
-        // Open is the result that Shortcuts adds to its own Find for the app entity.
+        // From iOS 27 Shortcuts lists Open and the Find it makes for the app entity.
         func opens() -> Bool {
             let found = results(naming: "Android")
             return found.count >= 2 || found.matching(NSPredicate(format: "label CONTAINS[c] 'Open'")).count > 0
@@ -152,12 +152,9 @@ final class AddToHomeUITests: XCTestCase {
             let outcome = XCTWaiter().wait(for: [expectation(for: present, evaluatedWith: nil)], timeout: 40)
             XCTAssertEqual(outcome, .completed, "Shortcuts does not offer Open Android App: \(shortcuts.debugDescription)")
         } else {
-            // Find is the control: Shortcuts lists the app's actions, and not Open among them.
-            let listed = NSPredicate { _, _ in results(naming: "Android").count > 0 }
-            let control = XCTWaiter().wait(for: [expectation(for: listed, evaluatedWith: nil)], timeout: 40)
-            XCTAssertEqual(control, .completed, "Shortcuts lists no action of Andarium's: \(shortcuts.debugDescription)")
-            sleep(5)
-            XCTAssertFalse(opens(), "Shortcuts offers Open Android App: \(shortcuts.debugDescription)")
+            // The search of "Safari" listed its results, so the list of actions is searched and loaded.
+            sleep(15)
+            XCTAssertEqual(results(naming: "Android").count, 0, "Shortcuts lists an Android action: \(shortcuts.debugDescription)")
         }
         attachScreen("search-android")
     }

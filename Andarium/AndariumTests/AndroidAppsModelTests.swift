@@ -28,26 +28,26 @@ final class RecordingAppsIndex: AndroidAppsSearchIndexing {
     private var heldWithdraw: CheckedContinuation<Void, Never>?
     private var heldAdd: CheckedContinuation<Void, Never>?
 
-    func offer(_ entities: [AndroidAppEntity]) async -> Bool {
+    func offer(_ apps: [AndroidApp]) async -> Bool {
         if holdsNextOffer {
             holdsNextOffer = false
             events.append("offer-started")
             await withCheckedContinuation { held = $0 }
         }
         guard accepts else { events.append("offer-failed"); return false }
-        offered.append(entities.map(\.id))
+        offered.append(apps.map(\.id))
         events.append("offer")
         return true
     }
 
-    func add(_ entities: [AndroidAppEntity]) async -> Bool {
+    func add(_ apps: [AndroidApp]) async -> Bool {
         if holdsNextAdd {
             holdsNextAdd = false
             events.append("add-started")
             await withCheckedContinuation { heldAdd = $0 }
         }
         guard accepts else { return false }
-        added.append(entities.map(\.id))
+        added.append(apps.map(\.id))
         events.append("add")
         return true
     }
@@ -234,7 +234,7 @@ final class AndroidAppsModelTests {
         #expect(state.apps.count == ScriptedAndroidApps.sampleApps.count)
         #expect(state.store.icon(forID: comet.id) != nil)
         // The cache answers without a model: the App Intent's query reads it.
-        #expect(AndroidAppsHub.shared.entities().map(\.id) == state.apps.map(\.id))
+        #expect(AndroidAppsHub.shared.listedApps().map(\.id) == state.apps.map(\.id))
         #expect(rig.index.offered.count == 1 && rig.index.offered[0] == state.apps.map(\.id))
         #expect(rig.index.shortcutUpdates == 1)
     }
@@ -283,7 +283,7 @@ final class AndroidAppsModelTests {
         #expect(rig.state.unavailable)
         #expect(!rig.model.offersAddToHomeScreen)
         #expect(rig.state.apps.isEmpty && rig.state.store.catalog() == nil)
-        #expect(AndroidAppsHub.shared.entities().isEmpty)
+        #expect(AndroidAppsHub.shared.listedApps().isEmpty)
         #expect(rig.index.offered.last == [], "Spotlight holds none of them")
         #expect(rig.index.events.last != "offer-failed")
     }
@@ -308,7 +308,7 @@ final class AndroidAppsModelTests {
         #expect(await eventually { rig.index.withdrawn == 1 })
         #expect(!rig.state.searchOn && !AndroidAppsHub.shared.preference.isOn)
         // The list still reaches the shortcut tiles, which are the route to the Home Screen.
-        #expect(AndroidAppsHub.shared.entities().count == rig.state.apps.count)
+        #expect(AndroidAppsHub.shared.listedApps().count == rig.state.apps.count)
         rig.model.setAndroidAppsInSearch(true)
         #expect(await eventually { rig.index.offered.count == 2 })
         #expect(AndroidAppsHub.shared.preference.isOn)
@@ -506,12 +506,13 @@ final class AndroidAppsModelTests {
         #expect(rig.state.store.record(forID: comet.id)?.label == "Comet Hop")
         rig.model.androidAppsErased()
         #expect(rig.state.apps.isEmpty && rig.state.store.catalog() == nil)
-        #expect(AndroidAppsHub.shared.entities().isEmpty)
+        #expect(AndroidAppsHub.shared.listedApps().isEmpty)
         #expect(rig.state.store.record(forID: comet.id)?.label == "Comet Hop")
         // What was offered to Search is replaced by nothing.
         #expect(await eventually { rig.index.offered.last == [] })
     }
 
+    @available(iOS 27.0, *)
     @Test func anIconAfterAnEraseStillResolvesToItsAppAndWorksAfterAReinstall() async throws {
         let rig = try rig(phase: .running(.normal))
         await rig.model.refreshAndroidApps()
@@ -529,6 +530,7 @@ final class AndroidAppsModelTests {
         #expect(await eventually { rig.tool.opened == [comet.component] })
     }
 
+    @available(iOS 27.0, *)
     @Test func theQueryAnswersFromTheCacheWhileAndroidIsOff() async throws {
         let rig = try rig(phase: .running(.normal))
         await rig.model.refreshAndroidApps()
@@ -542,6 +544,7 @@ final class AndroidAppsModelTests {
         #expect(try await query.entities(for: ["nothing"]).isEmpty)
     }
 
+    @available(iOS 27.0, *)
     @Test func anEntityCarriesTheAppsNameItsIdentifierAndItsIcon() async throws {
         let rig = try rig(phase: .running(.normal))
         await rig.model.refreshAndroidApps()
@@ -579,7 +582,7 @@ final class AndroidAppsModelTests {
         let writes = rig.index.events.count
         AndroidAppsHub.shared.attach(rig.model)
         #expect(!AndroidAppsHub.shared.hostOffers)
-        #expect(AndroidAppsHub.shared.entities().isEmpty)
+        #expect(AndroidAppsHub.shared.listedApps().isEmpty)
         await rig.model.syncAndroidAppsIndex()
         #expect(rig.index.events.count == writes, "nothing is offered to Spotlight: \(rig.index.events)")
     }
@@ -616,13 +619,16 @@ final class AndroidAppsModelTests {
         rig.model.host.idiom = .mac
         AndroidAppsHub.shared.attach(rig.model)
         #expect(!AndroidAppsHub.shared.hostOffers)
-        #expect(AndroidAppsHub.shared.entities().isEmpty)
-        let query = AndroidAppQuery()
-        #expect(try await query.allEntities().isEmpty)
-        #expect(try await query.suggestedEntities().isEmpty)
-        #expect(try await query.entities(for: [comet.id]).isEmpty)
+        #expect(AndroidAppsHub.shared.listedApps().isEmpty)
+        if #available(iOS 27.0, *) {
+            let query = AndroidAppQuery()
+            #expect(try await query.allEntities().isEmpty)
+            #expect(try await query.suggestedEntities().isEmpty)
+            #expect(try await query.entities(for: [comet.id]).isEmpty)
+        }
         await rig.model.syncAndroidAppsIndex()
         if #available(iOS 27.0, *) {
+            let query = AndroidAppQuery()
             try await query.reindexAllEntities(indexDescription: CSSearchableIndexDescription())
             try await query.reindexEntities(for: [comet.id], indexDescription: CSSearchableIndexDescription())
         }
@@ -644,8 +650,10 @@ final class AndroidAppsModelTests {
         #expect(rig.index.offered.isEmpty)
         #expect(rig.index.events.contains("withdraw"))
         // The entities, and the parameters of the App Shortcut that are made of them, are as with the switch on.
-        #expect(AndroidAppsHub.shared.entities().count == rig.state.apps.count)
-        #expect(try await AndroidAppQuery().suggestedEntities().count == rig.state.apps.count)
+        #expect(AndroidAppsHub.shared.listedApps().count == rig.state.apps.count)
+        if #available(iOS 27.0, *) {
+            #expect(try await AndroidAppQuery().suggestedEntities().count == rig.state.apps.count)
+        }
         #expect(rig.index.shortcutUpdates >= 1, "the tiles are told of the apps")
         // An icon added while the switch is off reaches the tiles.
         let before = rig.index.shortcutUpdates
@@ -655,7 +663,7 @@ final class AndroidAppsModelTests {
         await rig.model.refreshAndroidApps()
         #expect(rig.index.shortcutUpdates == before + 1)
         #expect(rig.index.offered.isEmpty)
-        #expect(AndroidAppsHub.shared.entities().contains { $0.name == "Newcomer" })
+        #expect(AndroidAppsHub.shared.listedApps().contains { $0.label == "Newcomer" })
     }
 
     @available(iOS 27.0, *)
@@ -1524,8 +1532,10 @@ final class AndroidAppsModelTests {
         rig.model.phase = .running(.normal)
         rig.model.androidAppsBootFinished(recovery: false)
         #expect(!rig.state.listed, "the run's first listing is still to come")
-        let query = AndroidAppQuery()
-        #expect(try await query.entities(for: [comet.id]).map(\.name) == ["Comet Hop"])
+        if #available(iOS 27.0, *) {
+            let query = AndroidAppQuery()
+            #expect(try await query.entities(for: [comet.id]).map(\.name) == ["Comet Hop"])
+        }
         #expect(rig.model.requestAndroidApp(identifier: comet.id, label: "Comet Hop"))
         #expect(await eventually { rig.tool.opened == [comet.component] })
         #expect(rig.state.open.banner == nil)
@@ -1543,7 +1553,7 @@ final class AndroidAppsModelTests {
         try await Task.sleep(for: .milliseconds(300))
         #expect(rig.state.apps.isEmpty && rig.state.store.catalog() == nil)
         #expect(!rig.state.refreshing && rig.state.iconsLeft == 0)
-        #expect(AndroidAppsHub.shared.entities().isEmpty)
+        #expect(AndroidAppsHub.shared.listedApps().isEmpty)
     }
 
     @Test func aRefreshAfterAnInstallWaitsForTheOneUnderWayAndListsAgain() async throws {
@@ -1574,7 +1584,7 @@ final class AndroidAppsModelTests {
         await rig.model.refreshAndroidApps(afterAChange: true)
         _ = await first.value
         #expect(await eventually { rig.state.apps.contains { $0.id == extra.id } && !rig.state.refreshing })
-        #expect(AndroidAppsHub.shared.entities().contains { $0.id == extra.id })
+        #expect(AndroidAppsHub.shared.listedApps().contains { $0.id == extra.id })
     }
 
     @Test func anInstallThatLandsAfterTheListWasCapturedIsListedOnceAPauseForSpaceEnds() async throws {
@@ -1601,7 +1611,7 @@ final class AndroidAppsModelTests {
         // The person makes room and the guest resumes: the refresh that was owed is made.
         rig.model.spacePause = nil
         #expect(await eventually(3) { rig.state.apps.contains { $0.id == extra.id } && !rig.state.refreshing }, "the install is listed")
-        #expect(AndroidAppsHub.shared.entities().contains { $0.id == extra.id })
+        #expect(AndroidAppsHub.shared.listedApps().contains { $0.id == extra.id })
     }
 
     @Test func anInstallCommittedWhileAndroidIsPausedForSpaceIsListedOnceItResumes() async throws {
@@ -1620,7 +1630,7 @@ final class AndroidAppsModelTests {
         rig.model.spacePause = nil
         #expect(await eventually(3) { rig.state.apps.contains { $0.id == extra.id } && !rig.state.refreshing }, "the install is listed")
         #expect(rig.tool.listingsAsked == listings + 1)
-        #expect(AndroidAppsHub.shared.entities().contains { $0.id == extra.id })
+        #expect(AndroidAppsHub.shared.listedApps().contains { $0.id == extra.id })
     }
 
     // MARK: How an open ends, more
@@ -1633,7 +1643,7 @@ final class AndroidAppsModelTests {
         #expect(await eventually { rig.state.open.banner?.failure == .toolMissing })
         #expect(rig.state.open.banner?.component == nil, "no Try Again")
         #expect(await eventually { rig.state.unavailable && rig.state.apps.isEmpty })
-        #expect(AndroidAppsHub.shared.entities().isEmpty)
+        #expect(AndroidAppsHub.shared.listedApps().isEmpty)
     }
 
     @Test func aRenamedLauncherOpensOnlyWhereThePackageHadExactlyOne() async throws {
