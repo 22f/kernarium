@@ -19,17 +19,20 @@ step; only the 64-bit Android configurations set it, and a static_assert
 keeps all the offsets within an eighth of a region. The offset is part of
 RegionBeg, so the existing check that the mapped range ends within the
 region already accounts for it, and the existing random page offset is
-kept. An application sees different addresses, and each class's region
-now holds up to 16 MiB less: the class in the last slot maps 239.75 MiB
-instead of 255.75 MiB before its allocations fall back to a larger class
-and then to the secondary, so a process that holds about 240 MB in one
-size class can reach the secondary earlier. The 32-bit configuration
-uses the 32-bit primary and is not touched.
+kept. The batch class keeps its capacity because exhausting it is fatal:
+after the regions are shuffled, its region starts half a step past its
+base whatever its slot, which still keeps its first blocks off those of
+the other classes. An application sees different addresses, and each
+other class's region now holds up to 16 MiB less: the class in the last
+slot maps 239.75 MiB instead of 255.75 MiB before its allocations fall
+back to a larger class and then to the secondary, so a process that
+holds about 240 MB in one size class can reach the secondary earlier.
+The 32-bit configuration uses the 32-bit primary and is not touched.
 ---
  config/custom_scudo_config.h    |  4 ++++
  standalone/allocator_config.def |  8 ++++++++
- standalone/primary64.h          | 12 ++++++++++++
- 3 files changed, 24 insertions(+)
+ standalone/primary64.h          | 28 ++++++++++++++++++++++++++++
+ 3 files changed, 40 insertions(+)
 
 diff --git a/config/custom_scudo_config.h b/config/custom_scudo_config.h
 index 0cf08516201a2cccd439aee0770a6bf50501ec61..5ccaa16b226681ba1460fb7e68309b5e175363e4 100644
@@ -73,7 +76,7 @@ index e579a021db6c94a1ba0b888298484f2b25aba071..61bbe2bcb361f9b171263bf5bedf86fe
  // adjacency. This will reduce the fragmentation caused by region allocations
  // but may require a huge amount of contiguous pages at initialization.
 diff --git a/standalone/primary64.h b/standalone/primary64.h
-index a185d497e49633804869f7483494beb9a1fe5c3d..7fbce5ba3cacfc369dc126c4a9568252be7f70ee 100644
+index a185d497e49633804869f7483494beb9a1fe5c3d..4332cf85d8cc1d79946da4514ec4c94a5cf3255c 100644
 --- a/standalone/primary64.h
 +++ b/standalone/primary64.h
 @@ -146,6 +146,8 @@ private:
@@ -85,7 +88,28 @@ index a185d497e49633804869f7483494beb9a1fe5c3d..7fbce5ba3cacfc369dc126c4a9568252
    // Fill at most this number of batches from the newly map'd memory.
    static const u32 MaxNumBatches = SCUDO_ANDROID ? 4U : 8U;
  
-@@ -391,6 +393,16 @@ void SizeClassAllocator64<Config>::initRegion(RegionInfo *Region, uptr ClassId,
+@@ -362,6 +364,20 @@ void SizeClassAllocator64<Config>::init(s32 ReleaseToOsInterval)
+       initRegion(Region, I, RegionMemMap, Config::getEnableRandomOffset());
+     }
+     shuffle(RegionInfoArray, NumClasses, &Seed);
++
++    // Running out of the batch class is fatal (reportOutOfBatchClass), so it
++    // keeps the capacity every region had before the class offsets. Wherever
++    // the shuffle put its region, it starts half a step past the region's base
++    // instead of its slot's number of steps. That still keeps its first blocks
++    // off those of the other classes, which start a whole number of steps plus
++    // up to 16 pages past their bases. Nothing has used `RegionBeg` yet.
++    RegionInfo *BatchRegion = getRegionInfo(SizeClassMap::BatchClassId);
++    const uptr BatchSlot =
++        (BatchRegion->MemMapInfo.MemMap.getBase() - PrimaryBase) >>
++        RegionSizeLog;
++    BatchRegion->RegionBeg = BatchRegion->RegionBeg -
++                             BatchSlot * Config::getRegionClassOffset() +
++                             Config::getRegionClassOffset() / 2;
+   }
+ 
+   // The binding should be done after region shuffling so that it won't bind
+@@ -391,6 +407,18 @@ void SizeClassAllocator64<Config>::initRegion(RegionInfo *Region, uptr ClassId,
    if (EnableRandomOffset) {
      Region->RegionBeg += (getRandomModN(&Region->RandState, 16) + 1) * PageSize;
    }
@@ -96,7 +120,9 @@ index a185d497e49633804869f7483494beb9a1fe5c3d..7fbce5ba3cacfc369dc126c4a9568252
 +  // Direct-mapped caches of addresses indexed by a range of page-number bits
 +  // (the software TLB of an emulator, for one) then map them to the same slot
 +  // and evict each other. The usable range of the region is bounded by
-+  // `RegionBeg - MemMap.getBase()`, so the offset also shortens it.
++  // `RegionBeg - MemMap.getBase()`, so the offset also shortens it. `init()`
++  // gives the batch class's region another offset once the regions are
++  // shuffled.
 +  if (Config::getEnableContiguousRegions())
 +    Region->RegionBeg += ClassId * Config::getRegionClassOffset();
  
