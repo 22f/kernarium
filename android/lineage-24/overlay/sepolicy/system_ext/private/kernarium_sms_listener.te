@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The holder of the text message service's vsock port (overlay/sms/listener). It keeps port 5560 from boot, so
+# that the host's connections queue and no other guest domain can take the port, and it never reads it: it
+# does not accept, read, write, shut down or connect a vsock socket, and the check of the peer's CID and every
+# byte of the host's requests stay in the service (kernarium_sms.te), which runs only while messages are in
+# flight. When a connection waits, the holder sets the control property that starts the waker
+# (kernarium_sms_wake.te); the service connects to the holder's unix socket and the holder passes it the
+# listening socket. The holder is a plain daemon of the core domains, and holds no binder, no service lookup,
+# no file and no other socket, so that nothing that owns the port can also reach the framework.
+type kernarium_sms_listener, domain;
+typeattribute kernarium_sms_listener coredomain;
+type kernarium_sms_listener_exec, exec_type, system_file_type, file_type;
+
+init_daemon_domain(kernarium_sms_listener)
+
+# The handoff socket that init makes for it (the rc's socket line, /dev/socket/kernarium_sms): init creates and
+# listens on it with the holder's label, the holder accepts on it, reads its peer's credentials and context,
+# and writes the one byte that carries the descriptor.
+type kernarium_sms_socket, file_type, coredomain_socket;
+allow init kernarium_sms_listener:unix_stream_socket { create bind listen };
+allow kernarium_sms_listener self:unix_stream_socket { accept getattr getopt read write };
+
+# The vsock socket of port 5560: the holder makes it, binds it and listens on it, and holds no other right on
+# it. The platform requires the explicit classification for direct vsock access.
+typeattribute kernarium_sms_listener unconstrained_vsock_violators;
+allow kernarium_sms_listener self:vsock_socket { create bind listen };
+
+# Setting the control property that starts the waker is the one thing it asks of init.
+system_internal_prop(ctl_kernarium_sms_wake_prop)
+set_prop(kernarium_sms_listener, ctl_kernarium_sms_wake_prop)

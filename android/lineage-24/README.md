@@ -512,10 +512,20 @@ and expects the same cameras).
 
 ### Text messages
 
-The guest receives text messages from the host and sends none. `KernariumSms`
-(`overlay/sms/`) is a persistent system application in an SELinux domain of its
-own that listens on vsock port 5560 and takes a request only from host CID 2.
-It has no other entry point, so neither an adb shell, adb over the network
+The guest receives text messages from the host and sends none. Port 5560 on
+vsock is held from boot by `kernarium_sms_listener` (`overlay/sms/listener/`), a
+small native daemon in an SELinux domain of its own that creates, binds and
+listens on the socket and never accepts, reads, writes or connects it, so that
+the host's connections queue and no other guest domain can take the port. When a
+connection waits and no session runs, it sets the control property that starts
+`kernarium_sms_wake`, a script in a second domain that asks the activity manager
+to start the service as the system user; the service then takes the listening
+socket from the holder over its unix socket (`/dev/socket/kernarium_sms`), which
+only the service's domain may connect to. `KernariumSms` (`overlay/sms/`) is a
+system application with one non-exported, non-persistent service in a third
+domain. It serves the connections from the host's CID 2 alone, ends 30 s after
+the last message, and with it its process: nothing of it is resident in between.
+Nothing but the holder starts it, so neither an adb shell, adb over the network
 included, nor an application can deliver a message. `HostFrame.java` and
 `Andarium/AndariumCore/Sources/AndariumCore/GuestSmsChannel.swift` own the
 frame. A message is a sender (a number or a short name), a text of limited
@@ -523,14 +533,18 @@ length and an identifier the host chooses for it. `Message.java` and
 `Andarium/AndariumCore/Sources/AndariumCore/Adb/GuestSms.swift` own what is
 accepted and refused, each limit stated once.
 
-The target-files verifier holds that boundary. Only the reviewed types may
-create, bind or listen on a vsock socket, and no domain but the service holds a
-permission on its vsock sockets, except the platform's own `getattr` for
-`dumpstate`, which stats a socket and carries no data. Of the data, only the
-platform's managers of application data reach it. For the services it may find,
-`system_app_data_file` and the vsock sockets of other types, the service holds
-only what every ordinary application domain holds through one platform rule,
-plus the activity, package and role services.
+The target-files verifier holds that boundary. Only the reviewed types and the
+holder may create, bind or listen on a vsock socket; no domain but the holder
+and the service holds a permission on the holder's vsock sockets, the service
+only accept, read, write and shutdown, and the holder only the creation of its
+socket, none on the service's own. The waker holds no vsock socket and the holder
+no binder, service lookup or file; init alone enters their domains, and the
+control property that starts the waker is the holder's alone to set. The
+platform's own `getattr` for `dumpstate` stats a socket and carries no data. Of
+the data, only the platform's managers of application data reach it. For the
+services it may find, `system_app_data_file` and the vsock sockets of other types,
+the service holds only what every ordinary application domain holds through one
+platform rule, plus the activity, package and role services.
 
 The service hands Android the message as SMS-DELIVER PDUs, concatenated when
 the text needs more than one part: an `SMS_DELIVER` broadcast to the SMS role

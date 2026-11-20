@@ -18,6 +18,7 @@ import zipfile
 import zlib
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
+from collections.abc import Callable
 from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -320,8 +321,12 @@ REQUIRED_ENTRIES = {
     "VENDOR/overlay/KernariumWifiOverlay.apk",
     # The overlay that releases PinnerService's home app pin.
     "VENDOR/overlay/KernariumPinnerOverlay.apk",
-    # The service that delivers the host's text messages (overlay/sms).
+    # The service that delivers the host's text messages (overlay/sms), the holder of its vsock port, and the
+    # script that starts the service when a connection waits (overlay/sms/listener).
     "SYSTEM_EXT/app/KernariumSms/KernariumSms.apk",
+    "SYSTEM_EXT/bin/kernarium_sms_listener",
+    "SYSTEM_EXT/bin/kernarium_sms_wake.sh",
+    "SYSTEM_EXT/etc/init/kernarium_sms_listener.rc",
     # The application that draws the launcher applications' icons for kernarium_apps (overlay/app_icons).
     "SYSTEM_EXT/app/KernariumIcons/KernariumIcons.apk",
     *ABI_LIST_PROPERTY_FILES,
@@ -4312,6 +4317,7 @@ def check_kernel_policy(
             for name in SEAPP_CONTEXT_FILES
             if name in infos
         ),
+        read_small(archive, infos["SYSTEM_EXT/etc/selinux/system_ext_file_contexts"]),
     )
 
 
@@ -5509,15 +5515,54 @@ def cil_allows_file_read(policies: tuple[bytes, ...], domain: str, label: str) -
     )
 
 
-# The text message service listens on a vsock port itself, in a domain of its own: KernariumSms
+# The text message service runs only while messages are in flight, in a domain of its own: KernariumSms
 # (overlay/sms) in kernarium_sms with its data in kernarium_sms_data_file (overlay/sepolicy/system_ext/
-# private/kernarium_sms.te and seapp_contexts). It reads a request only from the host's CID, so what
-# keeps an adb shell or an installed application from causing a delivery is that none of them can
-# make a vsock socket or listen on one, and that none can reach the service's record or sockets.
+# private/kernarium_sms.te and seapp_contexts). A small native holder (overlay/sms/listener, domain
+# kernarium_sms_listener) keeps vsock port 5560 from boot and never reads it; when a connection waits it starts
+# the service through a waker (kernarium_sms_wake) and passes it the listening socket over its own unix socket.
+# The service reads a request only from the host's CID, so what keeps an adb shell or an installed application
+# from causing a delivery is that none of them can make a vsock socket or listen on one, and that none can reach
+# the holder's sockets, the service's record or the handoff.
 SMS_DOMAIN = "kernarium_sms"
 SMS_DATA_TYPE = "kernarium_sms_data_file"
 SMS_PACKAGE = "android.kernarium.sms"
 SMS_SERVICES = frozenset({"activity_service", "package_service", "role_service"})
+SMS_LISTENER = "kernarium_sms_listener"
+SMS_WAKE = "kernarium_sms_wake"
+SMS_SOCKET_TYPE = "kernarium_sms_socket"
+SMS_APK = "SYSTEM_EXT/app/KernariumSms/KernariumSms.apk"
+SMS_INIT_RC = "SYSTEM_EXT/etc/init/kernarium_sms_listener.rc"
+SMS_WAKE_SCRIPT = "SYSTEM_EXT/bin/kernarium_sms_wake.sh"
+SMS_SOCKET_PATH = "/dev/socket/kernarium_sms"
+# The init services of the one script: the holder starts with its class and the waker only through its control
+# property. The options are the whole list.
+SMS_INIT_SERVICES = {
+    SMS_LISTENER: ("/system_ext/bin/kernarium_sms_listener",
+                   ("class main", "user nobody", "socket kernarium_sms stream 0660 system system")),
+    SMS_WAKE: ("/system_ext/bin/kernarium_sms_wake.sh", ("user system", "group system", "oneshot", "disabled")),
+}
+SMS_WAKE_COMMAND = "exec cmd activity start-service --user 0 -n android.kernarium.sms/.HostService >/dev/null 2>&1"
+# The property the holder sets to start the waker, and the type that keeps every other domain from setting it.
+SMS_WAKE_PROPERTY = "ctl.start$kernarium_sms_wake"
+SMS_WAKE_PROPERTY_TYPE = "ctl_kernarium_sms_wake_prop"
+# What the service holds on the holder's vsock sockets: it accepts, and reads and writes the connections that
+# inherit the holder's label, and shuts them down.
+SMS_SERVICE_VSOCK_PERMISSIONS = frozenset({"accept", "read", "write", "shutdown", "getattr", "getopt"})
+# What the holder holds on its own: it makes the socket, binds it and listens, and never accepts, reads, writes,
+# shuts down or connects.
+SMS_HOLDER_VSOCK_PERMISSIONS = frozenset({"create", "bind", "listen", "getattr", "getopt", "setopt"})
+# The holder is not the framework's client and owns no file: what it may not hold of its own, whatever the
+# platform's grants through the attributes it carries.
+SMS_HOLDER_FORBIDDEN_CLASSES = frozenset({
+    "binder", "service_manager", "hwservice_manager", "vndservice_manager", "capability", "capability2", "dir",
+    "lnk_file", "blk_file", "chr_file", "fifo_file", "tcp_socket", "udp_socket", "rawip_socket", "packet_socket",
+    "netlink_socket", "netlink_route_socket",
+})
+# The platform grants of fd use over (nearly) every domain: the crash and trace daemons (crash_dump, tombstoned,
+# heapprofd, traced_perf) and mediaprovider_app. They reach the holder as they reach every other domain. A
+# platform update that adds one fails the image build here until someone has looked at it.
+SMS_PLATFORM_FD_USERS = frozenset({"crash_dump", "heapprofd", "mediaprovider_app", "tombstoned", "traced_perf"})
+CIL_TYPE_TRANSITION_RULE = re.compile(rb"^\(typetransition (\S+) (\S+) process (\S+)\)$", re.MULTILINE)
 # The types the platform's policy lets create, bind or listen on a vsock socket, platform version suffixes
 # removed (adbd and its compatibility type adbd_<version> are one). A platform update that adds a
 # listener fails the image build here until someone has looked at it.
@@ -5693,6 +5738,90 @@ def seapp_context_for(entries: list[dict[str, str]], user: str, seinfo: str, nam
     return best[2] if best else None
 
 
+def check_sms_holder_policy(contexts: list[str], policies: tuple[bytes, ...], sets: "CilSets",
+                            rules_of: Callable[[str], list["SmsRule"]], file_contexts: bytes) -> None:
+    """The holder of port 5560 and the waker are the plain daemons that init starts, and the handoff between
+    the holder and the service is the service's alone."""
+    for domain, path in ((SMS_LISTENER, SMS_INIT_SERVICES[SMS_LISTENER][0]), (SMS_WAKE, SMS_INIT_SERVICES[SMS_WAKE][0])):
+        if file_context_label(file_contexts, path) != f"u:object_r:{domain}_exec:s0":
+            fail(f"system_ext file contexts do not label {path} as {domain}_exec")
+        transitions = {
+            (CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode()),
+             CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(2).decode()))
+            for policy in policies
+            for match in CIL_TYPE_TRANSITION_RULE.finditer(policy)
+            if CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(3).decode()) == domain
+        }
+        if transitions != {("init", f"{domain}_exec")}:
+            fail(f"{domain} is entered by {sorted(transitions)}, not only by init through {domain}_exec")
+        for rule in rules_of("process"):
+            if rule.targets is not None and domain in rule.targets and "transition" in rule.permissions \
+                    and rule.sources - {"init"}:
+                fail(f"{sorted(rule.sources - {'init'})} may transition into {domain}: only init does")
+    if file_context_label(file_contexts, SMS_SOCKET_PATH) != f"u:object_r:{SMS_SOCKET_TYPE}:s0":
+        fail(f"system_ext file contexts do not label {SMS_SOCKET_PATH} as {SMS_SOCKET_TYPE}")
+
+    # The holder: no framework client, no file, no other socket of its own.
+    classes: set[str] = set()
+    for object_class in sorted(SMS_HOLDER_FORBIDDEN_CLASSES):
+        for rule in rules_of(object_class):
+            if rule.source == SMS_LISTENER.encode():
+                classes.add(object_class)
+    if classes:
+        fail(f"{SMS_LISTENER} holds rights of {sorted(classes)} classes: it is not the framework's client and owns "
+             "no file")
+
+    # The waker finds the activity manager and nothing else.
+    found = set()
+    for rule in rules_of("service_manager"):
+        if rule.source == SMS_WAKE.encode() and rule.targets is not None and "find" in rule.permissions:
+            found |= rule.targets
+    if "activity_service" not in found:
+        fail(f"{SMS_WAKE} may not find activity_service: it could not start the service")
+    if found != {"activity_service"}:
+        fail(f"{SMS_WAKE} may find {sorted(found)}; it needs only ['activity_service']")
+
+    # The handoff: the service alone connects to the holder's unix socket, writes its file and takes the descriptor.
+    for rule in rules_of("unix_stream_socket"):
+        if rule.targets is not None and SMS_LISTENER in rule.targets and "connectto" in rule.permissions \
+                and rule.sources - {SMS_DOMAIN}:
+            fail(f"{sorted(rule.sources - {SMS_DOMAIN})} may connect to the socket of {SMS_LISTENER}: only "
+                 f"{SMS_DOMAIN} does")
+    if not any(rule.targets is not None and SMS_LISTENER in rule.targets and "connectto" in rule.permissions
+               and SMS_DOMAIN in rule.sources for rule in rules_of("unix_stream_socket")):
+        fail(f"{SMS_DOMAIN} may not connect to the socket of {SMS_LISTENER}: it could not take the port")
+    writers: set[str] = set()
+    for rule in rules_of("sock_file"):
+        if rule.targets is not None and SMS_SOCKET_TYPE in rule.targets and rule.permissions & {"write", "append"}:
+            writers |= rule.sources
+    if SMS_DOMAIN not in writers:
+        fail(f"{SMS_DOMAIN} may not write {SMS_SOCKET_TYPE}: it could not connect to the holder's socket")
+    if writers != {SMS_DOMAIN}:
+        fail(f"{sorted(writers - {SMS_DOMAIN})} may write {SMS_SOCKET_TYPE}: only {SMS_DOMAIN} does")
+    users: set[str] = set()
+    for rule in rules_of("fd"):
+        if rule.targets is not None and SMS_LISTENER in rule.targets and "use" in rule.permissions:
+            users |= rule.sources
+    if SMS_DOMAIN not in users:
+        fail(f"{SMS_DOMAIN} may not use the listening descriptor of {SMS_LISTENER}: it could not take the port")
+    if users - {SMS_DOMAIN} - SMS_PLATFORM_FD_USERS:
+        fail(f"{sorted(users - {SMS_DOMAIN} - SMS_PLATFORM_FD_USERS)} may use the descriptors of {SMS_LISTENER}")
+
+    # The control property that starts the waker is the holder's alone.
+    label = property_label(SMS_WAKE_PROPERTY, contexts)
+    if label != SMS_WAKE_PROPERTY_TYPE:
+        fail(f"the property contexts label {SMS_WAKE_PROPERTY} {label}, not {SMS_WAKE_PROPERTY_TYPE}")
+    setters: set[str] = set()
+    for policy in policies:
+        for source, target, _object_class, permissions in cil_rules(policy, CIL_PROPERTY_SET_RULE):
+            if b"set" in permissions and label in sets.members(cil_type_name(target)):
+                setters |= sets.members(cil_type_name(source))
+    if SMS_LISTENER not in setters:
+        fail(f"{SMS_LISTENER} may not set {SMS_WAKE_PROPERTY}, labelled {label}: it could not start the waker")
+    if setters != {SMS_LISTENER}:
+        fail(f"{sorted(setters - {SMS_LISTENER})} may set {SMS_WAKE_PROPERTY}, labelled {label}: only {SMS_LISTENER} does")
+
+
 class SmsRule(NamedTuple):
     """An allow rule as the text-message check reads it: the types its source and target stand for (a target of
     None is the rule's own domain), its permissions, the source and target as the policy writes them, and
@@ -5706,14 +5835,19 @@ class SmsRule(NamedTuple):
     from_platform: bool
 
 
-def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_contexts: str) -> None:
+def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_contexts: str,
+                     file_contexts: bytes) -> None:
     """Only the host can cause a text message to be delivered: of the types that may create, bind or listen
-    on a vsock socket exactly the reviewed ones and the service's may, whatever attribute grants it; nothing
-    else holds the service's sockets or its data, except the platform's own getattr for dumpstate
-    (SMS_PLATFORM_VSOCK_GRANT); the service holds nothing beyond what every ordinary application domain holds
-    (SMS_ORDINARY_APP_DOMAINS) and the reviewed list (it finds only the services it needs); its
-    package selects its domain and no other package does; and the shell cannot move adbd's own listener.
-    Every grant counts, through attributes and set expressions. The first policy is the platform's."""
+    on a vsock socket exactly the reviewed ones and the holder of port 5560 may, whatever attribute grants it;
+    nothing else holds the holder's sockets or the service's data, except the platform's own getattr for
+    dumpstate (SMS_PLATFORM_VSOCK_GRANT), and the service holds only accept, read, write and shutdown on the
+    sockets of the holder, none on its own, and nothing beyond what every ordinary application domain holds
+    (SMS_ORDINARY_APP_DOMAINS) and the reviewed list (it finds only the services it needs); the holder never
+    accepts, reads, writes or connects a vsock socket and is not the framework's client; init alone enters the
+    holder's and the waker's domains, the handoff socket is the service's alone to connect to, and the control
+    property that starts the waker is the holder's alone to set; the package selects the service's domain and
+    no other package does; and the shell cannot move adbd's own listener. Every grant counts, through
+    attributes and set expressions. The first policy is the platform's."""
     sets = CilSets(policies)
     if not sets.members("appdomain") or not sets.members("coredomain"):
         fail("the policy lists no type for appdomain or coredomain: the check could not tell who runs applications")
@@ -5745,14 +5879,14 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
         return found
 
     creators = holders({"create", "bind", "listen"})
-    reviewed = VSOCK_SOCKET_TYPES | {SMS_DOMAIN}
+    reviewed = VSOCK_SOCKET_TYPES | {SMS_LISTENER}
     if creators != reviewed:
         fail(
             "the types that may create, bind or listen on a vsock socket are not the reviewed ones "
             f"(unreviewed: {sorted(creators - reviewed)}; reviewed and missing: {sorted(reviewed - creators)})"
         )
     listeners = holders({"listen"})
-    reviewed_listeners = (VSOCK_SOCKET_TYPES - VSOCK_TYPES_WITHOUT_LISTEN) | {SMS_DOMAIN}
+    reviewed_listeners = (VSOCK_SOCKET_TYPES - VSOCK_TYPES_WITHOUT_LISTEN) | {SMS_LISTENER}
     if listeners != reviewed_listeners:
         fail(
             "the types that may listen on a vsock socket are not the reviewed ones "
@@ -5762,6 +5896,12 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
     shut_out = {"shell", "system_app", "platform_app", "priv_app"} | set(sets.members("untrusted_app_all"))
     if creators & shut_out:
         fail(f"{sorted(creators & shut_out)} may create, bind or listen on a vsock socket")
+
+    # An application domain inherits the platform's grants to every one of them, among them vsock rights: the
+    # holder and the waker are plain daemons.
+    if "appdomain" in cil_types_and_attributes(policies, SMS_LISTENER) \
+            or "appdomain" in cil_types_and_attributes(policies, SMS_WAKE):
+        fail(f"{SMS_LISTENER} and {SMS_WAKE} are plain daemons: neither is an application domain")
 
     exact = CilSets(policies, exact=True)
 
@@ -5775,23 +5915,53 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
             rule.from_platform and exact.members(rule.source.decode()) >= SMS_ORDINARY_APP_DOMAINS | {SMS_DOMAIN}
         )
 
-    # The service's sockets: nothing but the service holds a permission on them (the platform's grant to
-    # dumpstate apart), and what the service holds on the sockets of other types is only what every ordinary
-    # application domain holds.
+    # The holder's sockets: nothing but the holder and the service holds a permission on them (the platform's
+    # grant to dumpstate apart), the service only what it needs to accept from the descriptor it is given, the
+    # holder only what makes and binds the socket. The service owns no vsock socket, so nothing holds a
+    # permission on one of its own either, and what it holds on the sockets of other types is only what every
+    # ordinary application domain holds.
     for rule in vsock:
         if rule.from_platform and (rule.source, rule.target, rule.permissions) == SMS_PLATFORM_VSOCK_GRANT:
             continue
         if rule.targets is not None and SMS_DOMAIN in rule.targets and rule.sources - {SMS_DOMAIN}:
             fail(f"{sorted(rule.sources - {SMS_DOMAIN})} hold {sorted(rule.permissions)} on a vsock socket of "
                  f"{SMS_DOMAIN}")
-        if rule.targets is not None and rule.targets - {SMS_DOMAIN} and specific(rule):
+        if rule.targets is not None and rule.targets - {SMS_DOMAIN, SMS_LISTENER} and specific(rule):
             fail(f"{SMS_DOMAIN} holds {sorted(rule.permissions)} on the vsock sockets of "
-                 f"{sorted(rule.targets - {SMS_DOMAIN})}: only what every ordinary application domain holds is allowed")
+                 f"{sorted(rule.targets - {SMS_DOMAIN, SMS_LISTENER})}: only what every ordinary application domain "
+                 "holds is allowed")
+        if SMS_DOMAIN in rule.sources and (rule.targets is None or rule.targets == {SMS_DOMAIN}) and specific(rule):
+            fail(f"{SMS_DOMAIN} holds {sorted(rule.permissions)} on its own vsock sockets: it makes none, it accepts "
+                 f"from the descriptor that {SMS_LISTENER} passes it")
+        if rule.targets is not None and SMS_LISTENER in rule.targets:
+            if rule.sources - {SMS_LISTENER, SMS_DOMAIN}:
+                fail(f"{sorted(rule.sources - {SMS_LISTENER, SMS_DOMAIN})} hold {sorted(rule.permissions)} on a vsock "
+                     f"socket of {SMS_LISTENER}")
+            if SMS_DOMAIN in rule.sources and rule.permissions - SMS_SERVICE_VSOCK_PERMISSIONS:
+                fail(f"{SMS_DOMAIN} holds {sorted(rule.permissions - SMS_SERVICE_VSOCK_PERMISSIONS)} on the vsock "
+                     f"sockets of {SMS_LISTENER}: only {sorted(SMS_SERVICE_VSOCK_PERMISSIONS)} are allowed")
+        if SMS_LISTENER in rule.sources:
+            if rule.targets is not None and rule.targets != {SMS_LISTENER}:
+                fail(f"{SMS_LISTENER} holds {sorted(rule.permissions)} on the vsock sockets of "
+                     f"{sorted(rule.targets - {SMS_LISTENER})}: it connects to none")
+            if rule.permissions - SMS_HOLDER_VSOCK_PERMISSIONS:
+                fail(f"{SMS_LISTENER} holds {sorted(rule.permissions - SMS_HOLDER_VSOCK_PERMISSIONS)} on its vsock "
+                     "sockets: it never accepts, reads, writes, shuts down or connects")
+        if rule.source == SMS_WAKE.encode():
+            fail(f"{SMS_WAKE} holds {sorted(rule.permissions)} on a vsock socket: the waker touches none")
 
     attributes = cil_types_and_attributes(policies, SMS_DOMAIN)
     for attribute in ("coredomain", "appdomain", "unconstrained_vsock_violators"):
         if attribute not in attributes:
             fail(f"{SMS_DOMAIN} is not in {attribute}")
+    holder_attributes = cil_types_and_attributes(policies, SMS_LISTENER)
+    for attribute in ("coredomain", "unconstrained_vsock_violators"):
+        if attribute not in holder_attributes:
+            fail(f"{SMS_LISTENER} is not in {attribute}")
+    if "coredomain" not in cil_types_and_attributes(policies, SMS_WAKE):
+        fail(f"{SMS_WAKE} is not in coredomain")
+    if "unconstrained_vsock_violators" in cil_types_and_attributes(policies, SMS_WAKE):
+        fail(f"{SMS_WAKE} is in unconstrained_vsock_violators: the waker touches no vsock socket")
     found: set[str] = set()
     for rule in rules_of("service_manager"):
         if rule.targets is not None and "find" in rule.permissions and specific(rule):
@@ -5818,6 +5988,8 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
         fail(f"{sorted(data_holders - {SMS_DOMAIN} - SMS_DATA_MANAGERS)} hold rights on {SMS_DATA_TYPE}: only "
              f"{SMS_DOMAIN} and the managers of application data may")
 
+    check_sms_holder_policy(contexts, policies, sets, rules_of, file_contexts)
+
     # service.adb.listen_addrs: who may set it.
     label = property_label(ADB_LISTEN_ADDRS_PROPERTY, contexts)
     if label is None:
@@ -5842,6 +6014,65 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
         other = seapp_context_for(entries, "system", "platform", package)
         if other is None or other.get("domain") != "system_app":
             fail(f"seapp_contexts select {other} for {package}: it stays in system_app")
+
+
+def check_sms_service_files(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The text message service runs only while messages are in flight: its application has one service that no
+    application can start and is not persistent; the holder of its vsock port starts with its class and the waker
+    only through the holder's control property, and the waker runs one command."""
+    rc = read_small(archive, infos[SMS_INIT_RC]).decode("utf-8", errors="strict")
+    services = init_services(rc)
+    if sorted(services) != sorted(SMS_INIT_SERVICES):
+        fail(f"the text message init script must define the services {sorted(SMS_INIT_SERVICES)}: {sorted(services)}")
+    for name, (executable, options) in SMS_INIT_SERVICES.items():
+        found_executable, found_options = services[name]
+        if found_executable != executable:
+            fail(f"the text message service {name} runs {found_executable}, not {executable}")
+        if sorted(found_options) != sorted(options):
+            fail(f"the text message service {name} has the options {found_options}, not exactly {list(options)}: it "
+                 "takes its domain from its file label and holds no capability")
+    if init_actions(rc):
+        fail("the text message init script has a trigger: the holder starts with its class and the waker only "
+             "through its control property")
+    code = [
+        line.strip() for line in read_small(archive, infos[SMS_WAKE_SCRIPT]).decode("utf-8", errors="strict").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if code != [SMS_WAKE_COMMAND]:
+        fail(f"{SMS_WAKE_SCRIPT} must run exactly '{SMS_WAKE_COMMAND}': {code}")
+    try:
+        with zipfile.ZipFile(io.BytesIO(read_small(archive, infos[SMS_APK], 4 << 20))) as apk:
+            elements = manifest_elements(apk.read("AndroidManifest.xml"))
+    except (KeyError, OSError, ValueError, struct.error, IndexError, zipfile.BadZipFile) as problem:
+        fail(f"{SMS_APK} has no readable manifest: {problem}")
+    names = [name for name, _ in elements]
+    first = {name: attributes for name, attributes in reversed(elements)}
+    if names[:1] != ["manifest"] or first["manifest"].get("package") != SMS_PACKAGE:
+        fail(f"{SMS_APK} is the package {first.get('manifest', {}).get('package')}, not {SMS_PACKAGE}")
+    if first["manifest"].get("sharedUserId") != "android.uid.system":
+        fail(f"{SMS_APK} does not share the system uid: the protected SMS broadcasts need it")
+    for kind, wanted in (("application", 1), ("service", 1)):
+        if names.count(kind) != wanted:
+            fail(f"{SMS_APK} has {names.count(kind)} {kind} elements, not {wanted}: the application has one service "
+                 "and nothing else")
+    allowed = {"manifest", "application", "service"}
+    if set(names) - allowed:
+        fail(f"{SMS_APK} has {sorted(set(names) - allowed)}: the application has one service, no activity, receiver, "
+             "provider, filter or permission request, so that nothing but the holder's wake reaches it")
+    application = first["application"]
+    if "persistent" in application:
+        fail(f"{SMS_APK}: the application sets persistent: nothing may run between messages")
+    if "name" in application:
+        fail(f"{SMS_APK}: the application names a class of its own")
+    service = first["service"]
+    if manifest_component_class(SMS_PACKAGE, service.get("name")) != f"{SMS_PACKAGE}.HostService":
+        fail(f"{SMS_APK}: the service is {service.get('name')!r}, not .HostService")
+    if service.get("exported") is not False:
+        fail(f"{SMS_APK}: the service's exported is {service.get('exported')!r}, not false")
+    for attribute in ("permission", "process", "enabled", "isolatedProcess", "externalService", "foregroundServiceType",
+                      "useAppZygote", "directBootAware"):
+        if attribute in service:
+            fail(f"{SMS_APK}: the service sets {attribute}")
 
 
 def check_adbd_launch_policy(contexts: list[str], policies: tuple[bytes, ...]) -> None:
@@ -6786,6 +7017,7 @@ def main() -> None:
         check_thermal_hal(archive, infos)
         check_camera(archive, infos)
         check_gamepad_relay(archive, infos)
+        check_sms_service_files(archive, infos)
         check_cas_hal(archive, infos)
         check_wifi_hals(archive, infos)
         check_adbd_launch_properties(archive, infos)
