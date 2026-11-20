@@ -16,12 +16,15 @@ nonisolated final class ScriptedAppsTool: AndroidAppsTool, @unchecked Sendable {
     private var current: [AndroidApp]
     private var version = 1
     private var counts = (digests: 0, lists: 0, icons: 0)
+    private var listingsNow = 0
+    private var listingsMost = 0
     private var asked: [AndroidComponent] = []
     private var answers: [AndroidComponent: AndroidAppOpenAnswer] = [:]
     private var pictures: [String: Data] = [:]
     private var listingOverride: AndroidAppListing?
     private var digestOverride: AndroidAppDigestAnswer?
     private var delayValue = Duration.milliseconds(120)
+    private var holdsDigestsValue = false
 
     init(apps: [AndroidApp] = ScriptedAndroidApps.sampleApps) {
         current = apps
@@ -33,10 +36,19 @@ nonisolated final class ScriptedAppsTool: AndroidAppsTool, @unchecked Sendable {
         set { lock.withLock { delayValue = newValue } }
     }
 
+    /// While set, a digest is not answered (the guest does not reply), and no cancellation ends the wait.
+    var holdsDigests: Bool {
+        get { lock.withLock { holdsDigestsValue } }
+        set { lock.withLock { holdsDigestsValue = newValue } }
+    }
+
     var apps: [AndroidApp] { lock.withLock { current } }
     var digestsAsked: Int { lock.withLock { counts.digests } }
     var listingsAsked: Int { lock.withLock { counts.lists } }
+    var iconsAsked: Int { lock.withLock { counts.icons } }
     var opened: [AndroidComponent] { lock.withLock { asked } }
+    /// The most digest and listing asks that were under way at once: the guest is asked one at a time.
+    var mostListingsAtOnce: Int { lock.withLock { listingsMost } }
 
     /// What a listing answers in place of the apps, and what the digest does.
     func answer(listing: AndroidAppListing?, digest: AndroidAppDigestAnswer? = nil) {
@@ -71,18 +83,27 @@ nonisolated final class ScriptedAppsTool: AndroidAppsTool, @unchecked Sendable {
     func digest(limit: Duration) async -> AndroidAppDigestAnswer {
         let (answer, wait): (AndroidAppDigestAnswer, Duration) = lock.withLock {
             counts.digests += 1
+            listingsNow += 1
+            listingsMost = max(listingsMost, listingsNow)
             return (digestOverride ?? .digest("scripted-\(version)"), delayValue)
         }
         try? await Task.sleep(for: wait)
+        while lock.withLock({ holdsDigestsValue }) {
+            await Task { try? await Task.sleep(for: .milliseconds(10)) }.value
+        }
+        lock.withLock { listingsNow -= 1 }
         return answer
     }
 
     func list(limit: Duration) async -> AndroidAppListing {
         let (answer, wait): (AndroidAppListing, Duration) = lock.withLock {
             counts.lists += 1
+            listingsNow += 1
+            listingsMost = max(listingsMost, listingsNow)
             return (listingOverride ?? .apps(AndroidAppList(apps: current, digest: "scripted-\(version)")), delayValue)
         }
         try? await Task.sleep(for: wait)
+        lock.withLock { listingsNow -= 1 }
         return answer
     }
 
