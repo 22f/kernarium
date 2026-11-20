@@ -139,9 +139,10 @@ final class AndroidAppsState {
     /// The preview keeps a waiting request and a banner as they are, for a
     /// screen that must stay still.
     @ObservationIgnored var holdsForever = false
-    /// The first refresh waits this long after Android's storage is up, so it
-    /// does not compete with the end of the boot.
-    @ObservationIgnored var startDelay = Duration.seconds(5)
+    /// The first refresh waits this long after Android reports its boot
+    /// complete, so that it starts nothing in the guest while the guest settles
+    /// from its boot.
+    @ObservationIgnored var startDelay = Duration.seconds(60)
     /// The first refresh's attempts wait twice as long as the one before.
     @ObservationIgnored var retryInterval = Duration.seconds(5)
     /// How many times the run's first refresh is asked.

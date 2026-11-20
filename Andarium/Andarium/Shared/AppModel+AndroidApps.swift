@@ -117,21 +117,27 @@ extension AppModel {
         Task { await refreshAndroidApps() }
     }
 
-    /// Android is up (the boot screen ends): the run lists the apps once, a few
-    /// seconds after its storage is up so that the end of the boot is not
-    /// slowed, and again a few times if it got no answer, each after twice the
-    /// wait of the one before; then the task ends, as it does at the first
-    /// answer, so that nothing keeps waking an idle run.
-    func refreshAndroidAppsAtStart() {
+    /// Android is up (the boot screen ends, which is Android's own report that
+    /// its boot completed): the run lists the apps once, `startDelay` after
+    /// that, so that the guest has settled and nothing is started in it during
+    /// the busiest part of the boot, and again a few times if it got no answer,
+    /// each after twice the wait of the one before; then the task ends, as it
+    /// does at the first answer, so that nothing keeps waking an idle run. A
+    /// listing made meanwhile (the chooser opened) is the run's: the wait asks
+    /// nothing more. `listNeeded` says that a request needs the list now, and
+    /// the first ask is made without the wait.
+    func refreshAndroidAppsAtStart(listNeeded: Bool = false) {
         let state = androidApps
         guard state.first == nil, !state.listed, canAskAndroidApps else { return }
         state.first = Task { [weak self, weak state] in
             for attempt in 0..<AndroidAppsState.startAttempts {
                 if let state {
-                    let wait = attempt == 0 ? state.startDelay : state.retryInterval * (1 << (attempt - 1))
+                    let firstWait: Duration = listNeeded ? .zero : state.startDelay
+                    let wait = attempt == 0 ? firstWait : state.retryInterval * (1 << (attempt - 1))
                     try? await Task.sleep(for: wait)
                 }
                 guard let self, let state, !Task.isCancelled, self.androidApps === state else { return }
+                if state.listed { break }
                 // An app that is being opened has Android's attention first.
                 var opening = false
                 switch state.open.pending?.stage {
@@ -306,7 +312,12 @@ extension AppModel {
         if !recovery { state.bootRequest = state.open.pending?.stage == .starting ? state.open.pending?.request : nil }
         let effect = state.open.androidIsUp(recovery: recovery, now: Date())
         performAndroidAppEffect(effect)
-        if !recovery { refreshAndroidAppsAtStart() }
+        if !recovery {
+            // A request that began this boot for an app the cached list does not
+            // name needs the list: the wait for the guest to settle is not kept for it.
+            let needsList = state.bootRequest.map { state.store.catalog()?.app(withID: $0.component.identifier) == nil } ?? false
+            refreshAndroidAppsAtStart(listNeeded: needsList)
+        }
     }
 
     /// The person answered what Home asked (Start, Update and start): a
