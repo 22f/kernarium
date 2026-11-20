@@ -44,68 +44,26 @@
 // venus_render_pass_lifetime_tests.cpp. A row asks for a reply and reads the
 // VkResult the host answered with, or finds that the context was lost.
 //
-// The overruns and the stale pointers these rows provoke lie past the end of a
-// heap block or in freed memory, so they fault deterministically only under
-// Guard Malloc, which ends every allocation at a page boundary and unmaps what
-// is freed. The test therefore runs each row in a child process that this one
-// starts with Guard Malloc inserted, and the child names the frames of a fault
-// on its standard error. The parent passes when every child exits with
-// status 0.
-//
-// An object the renderer fails to free leaves nothing for Guard Malloc to
-// fault on, so the rows that name one are run a second time under the leak
-// checker (leaks --atExit), which examines the process when the row, the
-// context and the renderer are gone, and fails the row when it reports a leak
-// that a renderer function allocated.
-//
-// It is not run under AddressSanitizer, whose allocator Guard Malloc cannot
-// share a process with.
+// Each row runs in a child process under Guard Malloc, and the rows that name
+// a leak run a second time under the leak checker, as venus_row_runner.hpp
+// describes.
 
 #include "require.hpp"
-#include "venus_wire.hpp"
-
-#include <execinfo.h>
-#include <mach-o/dyld.h>
-#include <poll.h>
-#include <signal.h>
-#include <spawn.h>
-#include <sys/mman.h>
-#include <sys/wait.h>
-#include <unistd.h>
+#include "venus_pipeline_wire.hpp"
+#include "venus_row_runner.hpp"
 
 #include <algorithm>
-#include <array>
-#include <chrono>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
-#include <thread>
 #include <vector>
-
-extern char** environ;
-
-#if defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#define UML_TEST_ADDRESS_SANITIZER 1
-#endif
-#endif
 
 namespace {
 
 using uml::testing::require;
-using namespace std::chrono_literals;
 using namespace uml::gpu::testing::venus;
 
-constexpr const char* childArgument = "--child";
-constexpr const char* leaksArgument = "--leaks";
-constexpr const char* leaksTool = "/usr/bin/leaks";
-constexpr const char* guardMalloc = "/usr/lib/libgmalloc.dylib";
-constexpr int guardMallocMissingExitCode = 2;
-constexpr int skippedExitCode = 77;
-constexpr auto childTimeBudget = 100s;
 
 // The object ids the guest assigns.
 enum Id : std::uint64_t {
@@ -113,8 +71,6 @@ enum Id : std::uint64_t {
     pipelineId = 20, poolId = 30, otherPoolId = 31, commandBufferId = 40, neverMadeId = 77,
 };
 constexpr std::uint32_t keyBytes = VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR;
-constexpr std::uint32_t replyResourceId = 900;
-constexpr std::uint64_t replySize = 16384;       // one host page
 constexpr std::size_t binaryDataBytes = 8;
 
 // A request to import binaries, or to make them from another source.
@@ -209,46 +165,26 @@ void encodeComputePipelineFromBinary(Stream& s, std::uint64_t binary)
     s.u64(deviceId);
     s.u64(0);                                   // pipelineCache
     s.u32(1); s.arraySize(1);                   // pCreateInfos
-    s.u32(VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO);
-    s.ptr(true);                                // pNext: the binaries
-    s.u32(VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR); s.ptr(false);
-    s.u32(1); s.arraySize(1); s.u64(binary);
-    s.u32(0);                                   // flags
-    s.u32(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO); s.ptr(false);
-    s.u32(0);                                   // stage flags
-    s.u32(VK_SHADER_STAGE_COMPUTE_BIT);
-    s.u64(0);                                   // module: none
-    s.string("main");
-    s.ptr(false);                               // pSpecializationInfo
-    s.u64(0);                                   // layout
-    s.u64(0);                                   // basePipelineHandle
-    s.u32(0);                                   // basePipelineIndex
+    encodeComputeInfo(s, {}, 0, {.binaries = true, .binary = binary});
     s.ptr(false);                               // pAllocator
     s.arraySize(1); s.u64(pipelineId);          // pPipelines
 }
 
 // vkCreateGraphicsPipelines for one pipeline, its guest id `pipelineId`, that
-// reads one pipeline binary the guest names by id. It names no stage, no state
-// and no layout: the binary is what the driver builds the pipeline from.
+// reads one pipeline binary the guest names by id. The create info is one the
+// runtime accepts up to the point where it reads the binary: a complete
+// pipeline whose rasterization state discards every primitive, with one vertex
+// stage that has no module (the binary is what the driver builds the pipeline
+// from), no layout and no render pass. Anything less faults earlier, in the
+// runtime's own reading of the create info, and the row would not show the
+// check it names.
 void encodeGraphicsPipelineFromBinary(Stream& s, std::uint64_t binary)
 {
     s.command(createGraphicsPipelines, true);
     s.u64(deviceId);
     s.u64(0);                                   // pipelineCache
     s.u32(1); s.arraySize(1);                   // pCreateInfos
-    s.u32(VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO);
-    s.ptr(true);                                // pNext: the binaries
-    s.u32(VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR); s.ptr(false);
-    s.u32(1); s.arraySize(1); s.u64(binary);
-    s.u32(0);                                   // flags
-    s.u32(0); s.arraySize(0);                   // stageCount, pStages: none
-    for (int state = 0; state < 9; ++state)
-        s.ptr(false);                           // vertex input ... dynamic state
-    s.u64(0);                                   // layout
-    s.u64(0);                                   // renderPass
-    s.u32(0);                                   // subpass
-    s.u64(0);                                   // basePipelineHandle
-    s.u32(0);                                   // basePipelineIndex
+    encodeGraphicsInfo(s, {.vertex = true}, {.binaries = true, .binary = binary});
     s.ptr(false);                               // pAllocator
     s.arraySize(1); s.u64(pipelineId);          // pPipelines
 }
@@ -313,116 +249,28 @@ void encodeSetup(Stream& s)
     encodeInstanceAndDevice(s, VK_API_VERSION_1_3, instanceId, physDevId, deviceId, extras);
 }
 
-// The renderer says why it refuses a command; the log makes a failure here
-// read as one.
-std::string& rendererLog()
-{
-    static std::string log;
-    return log;
-}
-void logRenderer(int, const char* message, void*)
-{
-    std::fprintf(stderr, "  renderer: %s", message);
-    rendererLog() += message;
-}
-
-// True when the renderer has logged a line with this text since the row began.
-bool rendererSaid(const char* text)
-{
-    return rendererLog().find(text) != std::string::npos;
-}
-
 // The lines the renderer logs when it refuses a request of this extension.
 constexpr const char* noSourceLine = "names no source for its binaries";
 constexpr const char* keySizeLine = "a key is not 32 bytes";
 constexpr const char* chainHeadLine =
     "does not begin with a graphics, compute or ray tracing pipeline's";
-void retireFence(std::uint32_t, std::uint32_t, std::uint64_t) {}
-void contextFatal(std::uint32_t) {}
-
-// What the host did with a command that asked for a reply.
-struct Answer {
-    bool submitted = false;      // false: the renderer lost the context
-    std::int32_t command = 0;    // the reply's command type, when there is one
-    std::int32_t result = 0;     // ... and its VkResult
-    std::uint64_t dataSize = 0;  // vkGetPipelineBinaryDataKHR's size, when asked
-    // vkGetPipelineKeyKHR's reply: command, result, the key as a pointer and a
-    // structure of its type, chain, size and 32 bytes.
-    std::uint32_t keySize = 0;
-    std::array<std::uint8_t, keyBytes> key {};
-};
-
-// A Venus context with a device that has pipeline binaries and a
-// shared-memory reply stream, all gone again when the session ends.
-class Session {
-public:
-    explicit Session(std::uint32_t ctxId) : ctxId_(ctxId)
-    {
-        require(vkr_renderer_create_context(ctxId_, virtgpuDrmCapsetVenus, 4, "test"),
-            "the Venus context could not be created");
-        Stream setup;
-        encodeSetup(setup);
-        require(vkr_renderer_submit_cmd(ctxId_, setup.bytes().data(), setup.size()),
-            "the context was lost bringing the device up; the host driver may be "
-            "unavailable in this environment, or lacks pipeline binaries");
-
-        int fdType = 0;
-        int fd = -1;
-        std::uint32_t mapInfo = 0;
-        alignas(16) unsigned char vulkanInfo[256] {};
-        require(vkr_renderer_create_resource(ctxId_, replyResourceId, 0, replySize,
-                    blobFlagUseMappable, &fdType, &fd, &mapInfo, vulkanInfo),
-            "the reply stream could not be created");
-        fd_ = fd;
-        reply_ = mmap(nullptr, replySize, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
-        require(reply_ != MAP_FAILED, "the reply stream could not be mapped");
-    }
-    Session(const Session&) = delete;
-    Session& operator=(const Session&) = delete;
-    ~Session()
-    {
-        munmap(reply_, replySize);
-        close(fd_);
-        vkr_renderer_destroy_resource(ctxId_, replyResourceId);
-        vkr_renderer_destroy_context(ctxId_);
-    }
-
-    // Sends one command, with the reply stream set first, and reads the reply.
-    Answer ask(Stream& command)
-    {
-        std::memset(reply_, 0, 128);
-        Stream stream;
-        stream.command(setReplyCommandStream);
-        stream.ptr(true);
-        stream.u32(replyResourceId); stream.u64(0); stream.u64(replySize);
-        stream.bytes().insert(stream.bytes().end(), command.bytes().begin(),
-            command.bytes().end());
-        Answer answer;
-        answer.submitted = vkr_renderer_submit_cmd(ctxId_, stream.bytes().data(), stream.size());
-        std::int32_t words[2] {};
-        std::memcpy(words, reply_, sizeof(words));
-        answer.command = words[0];
-        answer.result = words[1];
-        // vkGetPipelineBinaryDataKHR's reply: command, result, the key as a
-        // pointer and a 56-byte structure, then the size's pointer and the
-        // size.
-        std::memcpy(&answer.dataSize, static_cast<const std::uint8_t*>(reply_) + 80, 8);
-        std::memcpy(&answer.keySize, static_cast<const std::uint8_t*>(reply_) + 28, 4);
-        std::memcpy(answer.key.data(), static_cast<const std::uint8_t*>(reply_) + 40, keyBytes);
-        return answer;
-    }
-
-    // Sends a command no reply is asked for; false when the context was lost.
-    bool send(Stream& command)
-    {
-        return vkr_renderer_submit_cmd(ctxId_, command.bytes().data(), command.size());
-    }
-
-private:
-    std::uint32_t ctxId_;
-    int fd_ = -1;
-    void* reply_ = nullptr;
-};
+// What vkGetPipelineBinaryDataKHR's and vkGetPipelineKeyKHR's replies hold
+// beyond the result. A data reply is the command, the result, the key as a
+// pointer and a 56-byte structure, then the size's pointer and the size; a key
+// reply is the command, the result, the key as a pointer and a structure of
+// its type, chain, size and 32 bytes.
+std::uint64_t dataSizeOf(const Answer& answer)
+{
+    std::uint64_t size = 0;
+    std::memcpy(&size, answer.raw.data() + 80, 8);
+    return size;
+}
+std::uint32_t keySizeOf(const Answer& answer)
+{
+    std::uint32_t size = 0;
+    std::memcpy(&size, answer.raw.data() + 28, 4);
+    return size;
+}
 
 // An import under a key of the size every key has, into the guest's id; true
 // when the host made the binary.
@@ -434,22 +282,6 @@ bool importsABinary(Session& session, std::uint64_t id)
     return answer.submitted && answer.command == static_cast<std::int32_t>(createPipelineBinaries)
         && answer.result == VK_SUCCESS;
 }
-
-void requireAnswered(const Answer& answer, Cmd command, std::int32_t result, const char* what)
-{
-    require(answer.submitted, std::string(what) + ": the context was lost instead of the command being answered");
-    require(answer.command == static_cast<std::int32_t>(command),
-        std::string(what) + ": the reply names another command");
-    if (answer.result != result)
-        std::fprintf(stderr, "  answered %d, expected %d\n", answer.result, result);
-    require(answer.result == result, what);
-}
-
-struct Row {
-    const char* name;
-    std::function<void(Session&)> run;
-    bool leakChecked = false;  // also run under the leak checker
-};
 
 // A row that imports under a key of one size and is answered with the result.
 // The driver refuses a key of the wrong size with the same result, so the row
@@ -515,8 +347,9 @@ void dirtyTheTempPool(Session& session)
 
 bool keyIsZero(const Answer& answer)
 {
-    return answer.keySize == 0
-        && std::all_of(answer.key.begin(), answer.key.end(), [](std::uint8_t b) { return b == 0; });
+    return keySizeOf(answer) == 0
+        && std::all_of(answer.raw.begin() + 40, answer.raw.begin() + 40 + keyBytes,
+            [](std::uint8_t b) { return b == 0; });
 }
 
 // A create info that names no pipeline is refused, the renderer says so, the
@@ -568,8 +401,8 @@ const std::vector<Row>& rows()
             const Answer answer = session.ask(s);
             requireAnswered(answer, getPipelineKey, VK_SUCCESS,
                 "the key of the device was not served");
-            require(answer.keySize == keyBytes, "the key of the device is not a key's size");
-            require(!keyIsZero(answer) && answer.keySize == keyBytes,
+            require(keySizeOf(answer) == keyBytes, "the key of the device is not a key's size");
+            require(!keyIsZero(answer) && keySizeOf(answer) == keyBytes,
                 "the key of the device is zero");
             require(!rendererSaid(chainHeadLine), "the renderer refused the key of the device");
         }},
@@ -588,7 +421,7 @@ const std::vector<Row>& rows()
             encodeGetData(s, binaryId);
             const Answer answer = session.ask(s);
             requireAnswered(answer, getPipelineBinaryData, VK_SUCCESS, "a binary's data size was refused");
-            require(answer.dataSize == binaryDataBytes, "the binary's data size is not the imported one");
+            require(dataSizeOf(answer) == binaryDataBytes, "the binary's data size is not the imported one");
         }},
         contextLostRow("get-data-of-the-null-handle",
             [](Session&, Stream& s) { encodeGetData(s, 0); }),
@@ -681,272 +514,10 @@ const std::vector<Row>& rows()
     return all;
 }
 
-// Names the frames of a fault, so that a row that crashes the host says where.
-void reportFault(int sig, siginfo_t* info, void*)
-{
-    char text[128];
-    const int length = std::snprintf(text, sizeof(text),
-        "FAULT: signal %d at address %p\n", sig, info->si_addr);
-    (void)!write(STDERR_FILENO, text, static_cast<std::size_t>(length));
-    void* frames[40];
-    const int count = backtrace(frames, 40);
-    backtrace_symbols_fd(frames, count, STDERR_FILENO);
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
-
-void installFaultReport()
-{
-    struct sigaction action {};
-    action.sa_sigaction = reportFault;
-    action.sa_flags = SA_SIGINFO | SA_NODEFER;
-    sigemptyset(&action.sa_mask);
-    for (const int sig : {SIGSEGV, SIGBUS, SIGILL, SIGABRT})
-        sigaction(sig, &action, nullptr);
-}
-
-[[nodiscard]] bool guardMallocLoaded()
-{
-    for (std::uint32_t i = 0; i < _dyld_image_count(); ++i) {
-        const char* const name = _dyld_get_image_name(i);
-        if (name != nullptr && std::strstr(name, "libgmalloc") != nullptr)
-            return true;
-    }
-    return false;
-}
-
-// Runs one row in this process and ends the renderer, so that nothing but a
-// leak is left of what the row made.
-int runRow(const char* name)
-{
-    for (const Row& row : rows()) {
-        if (std::strcmp(name, row.name) != 0)
-            continue;
-        const vkr_renderer_callbacks callbacks {
-            .debug_logger = logRenderer,
-            .retire_fence = retireFence,
-            .context_fatal = contextFatal,
-        };
-        require(vkr_renderer_init(
-                    vkrRendererThreadSync | vkrRendererAsyncFenceCb, &callbacks),
-            "the Venus renderer could not be initialised");
-        {
-            Session session(1);
-            row.run(session);
-        }
-        vkr_renderer_fini();
-        return 0;
-    }
-    uml::testing::fail("no row has the name given");
-}
-
-// The body of a child: runs one row, with Guard Malloc.
-int runChild(const char* name)
-{
-    if (!guardMallocLoaded()) {
-        std::fprintf(stderr, "Guard Malloc is not loaded in the child\n");
-        return guardMallocMissingExitCode;
-    }
-    installFaultReport();
-    return runRow(name);
-}
-
-[[nodiscard]] std::string executablePath()
-{
-    std::vector<char> path(4096);
-    auto size = static_cast<std::uint32_t>(path.size());
-    require(_NSGetExecutablePath(path.data(), &size) == 0,
-        "the test's own path is too long");
-    return path.data();
-}
-
-// Starts this binary as the child for one row, under Guard Malloc, and returns
-// its wait status.
-[[nodiscard]] int runChildUnderGuardMalloc(const char* name)
-{
-    std::vector<std::string> variables;
-    for (char** entry = environ; *entry != nullptr; ++entry) {
-        const std::string text = *entry;
-        if (text.starts_with("DYLD_INSERT_LIBRARIES="))
-            continue;
-        variables.push_back(text);
-    }
-    variables.push_back(std::string("DYLD_INSERT_LIBRARIES=") + guardMalloc);
-    std::vector<char*> environment;
-    for (std::string& text : variables)
-        environment.push_back(text.data());
-    environment.push_back(nullptr);
-
-    const std::string path = executablePath();
-    std::array<char*, 4> arguments {
-        const_cast<char*>(path.c_str()),
-        const_cast<char*>(childArgument),
-        const_cast<char*>(name),
-        nullptr,
-    };
-    pid_t child = 0;
-    const int spawned = posix_spawn(&child, path.c_str(), nullptr, nullptr,
-        arguments.data(), environment.data());
-    require(spawned == 0, "the child could not be started");
-
-    const auto deadline = std::chrono::steady_clock::now() + childTimeBudget;
-    int status = 0;
-    for (;;) {
-        const pid_t waited = waitpid(child, &status, WNOHANG);
-        if (waited == child)
-            return status;
-        require(waited == 0, "waiting for the child failed");
-        if (std::chrono::steady_clock::now() >= deadline) {
-            ::kill(child, SIGKILL);
-            (void)waitpid(child, &status, 0);
-            uml::testing::fail("the child did not finish in time");
-        }
-        std::this_thread::sleep_for(50ms);
-    }
-}
-
-// What the leak checker said about a row, run again under it.
-struct LeakReport {
-    int status = 0;          // the checker's wait status
-    std::string text;        // its output, and the row's
-};
-
-// Runs a row under `leaks --atExit`, which starts this binary as the row's
-// process and examines it as it exits.
-[[nodiscard]] LeakReport runUnderLeakChecker(const char* name)
-{
-    int pipes[2] {};
-    require(pipe(pipes) == 0, "the pipe for the leak checker could not be made");
-    posix_spawn_file_actions_t actions;
-    require(posix_spawn_file_actions_init(&actions) == 0, "spawn file actions");
-    posix_spawn_file_actions_adddup2(&actions, pipes[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, pipes[1], STDERR_FILENO);
-    posix_spawn_file_actions_addclose(&actions, pipes[0]);
-    posix_spawn_file_actions_addclose(&actions, pipes[1]);
-
-    const std::string path = executablePath();
-    std::array<char*, 7> arguments {
-        const_cast<char*>(leaksTool),
-        const_cast<char*>("--atExit"),
-        const_cast<char*>("--"),
-        const_cast<char*>(path.c_str()),
-        const_cast<char*>(leaksArgument),
-        const_cast<char*>(name),
-        nullptr,
-    };
-    pid_t child = 0;
-    const int spawned = posix_spawn(&child, leaksTool, &actions, nullptr, arguments.data(), environ);
-    posix_spawn_file_actions_destroy(&actions);
-    close(pipes[1]);
-    require(spawned == 0, "the leak checker could not be started");
-
-    LeakReport report;
-    const auto deadline = std::chrono::steady_clock::now() + childTimeBudget;
-    bool finished = false;
-    while (std::chrono::steady_clock::now() < deadline) {
-        pollfd descriptor {pipes[0], POLLIN, 0};
-        const int ready = poll(&descriptor, 1, 1000);
-        if (ready > 0) {
-            char chunk[4096];
-            const ssize_t count = read(pipes[0], chunk, sizeof(chunk));
-            if (count <= 0) {
-                finished = true;
-                break;
-            }
-            report.text.append(chunk, static_cast<std::size_t>(count));
-        }
-    }
-    close(pipes[0]);
-    if (!finished)
-        ::kill(child, SIGKILL);
-    (void)waitpid(child, &report.status, 0);
-    require(finished, "the leak checker did not finish in time");
-    return report;
-}
-
-// What a leak that a renderer function allocated says, or nothing: the
-// allocation site is a vkr_ function or object_array_init. The test ends when
-// the checker did not examine the process at all.
-[[nodiscard]] std::string rendererLeak(const char* name)
-{
-    const LeakReport report = runUnderLeakChecker(name);
-    require(report.text.find("nodes malloced") != std::string::npos,
-        "the leak checker did not examine the row's process");
-    std::string leaked;
-    std::size_t begin = 0;
-    while (begin < report.text.size()) {
-        std::size_t end = report.text.find('\n', begin);
-        if (end == std::string::npos)
-            end = report.text.size();
-        const std::string line = report.text.substr(begin, end - begin);
-        begin = end + 1;
-        const bool leak = line.find("ROOT LEAK") != std::string::npos
-            || line.find("ROOT CYCLE") != std::string::npos;
-        if (leak && (line.find("vkr_") != std::string::npos
-                || line.find("object_array") != std::string::npos))
-            leaked += line + "\n";
-    }
-    return leaked;
-}
-
 } // namespace
 
-// With no argument every row runs, each in a child of its own under Guard
-// Malloc, and the rows that name a leak again under the leak checker; with
-// `--only NAME`, that row alone the same way; with `--child NAME`, that row
-// alone, in this process.
 int main(int argc, char** argv)
 {
-    const char* only = argc > 2 && std::strcmp(argv[1], "--only") == 0 ? argv[2] : nullptr;
-    if (argc > 2 && std::strcmp(argv[1], childArgument) == 0)
-        return runChild(argv[2]);
-    if (argc > 2 && std::strcmp(argv[1], leaksArgument) == 0)
-        return runRow(argv[2]);
-
-#ifdef UML_TEST_ADDRESS_SANITIZER
-    std::fprintf(stderr,
-        "Guard Malloc cannot share a process with AddressSanitizer; skipping\n");
-    return skippedExitCode;
-#else
-    if (::access(guardMalloc, R_OK) != 0) {
-        std::fprintf(stderr, "Guard Malloc is not installed; skipping\n");
-        return skippedExitCode;
-    }
-
-    std::uint32_t failures = 0;
-    for (const Row& row : rows()) {
-        if (only != nullptr && std::strcmp(only, row.name) != 0)
-            continue;
-        const int status = runChildUnderGuardMalloc(row.name);
-        if (WIFSIGNALED(status)) {
-            std::fprintf(stderr, "row %s: FAILED, the child ended with signal %d\n",
-                row.name, WTERMSIG(status));
-            ++failures;
-            continue;
-        }
-        require(WIFEXITED(status), "the child neither exited nor was signalled");
-        const int code = WEXITSTATUS(status);
-        if (code == skippedExitCode)
-            return code;
-        require(code != guardMallocMissingExitCode,
-            "the child ran without Guard Malloc, so it cannot show the fault");
-        if (code != 0) {
-            std::fprintf(stderr, "row %s: FAILED, status %d\n", row.name, code);
-            ++failures;
-            continue;
-        }
-        if (row.leakChecked) {
-            const std::string leaked = rendererLeak(row.name);
-            if (!leaked.empty()) {
-                std::fprintf(stderr, "%srow %s: FAILED, the renderer leaked an object the row made\n",
-                    leaked.c_str(), row.name);
-                ++failures;
-                continue;
-            }
-        }
-        std::fprintf(stderr, "row %s: ok\n", row.name);
-    }
-    require(failures == 0, std::to_string(failures) + " pipeline binary request rows failed");
-    return 0;
-#endif
+    const row_runner::Suite suite {rows(), encodeSetup, "pipeline binary request"};
+    return row_runner::main(argc, argv, suite);
 }
