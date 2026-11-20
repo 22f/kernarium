@@ -848,6 +848,19 @@ requires reopening Andarium.
   rate in one tap; Dismiss only dismisses. A harness launch runs with the
   default and keeps nothing; `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states it for
   the run ([Automation](#automation)).
+  Performance also has "120 Hz" (`HighRefreshPreference`, off by default),
+  drawn in a normal session only where the screen can show more than 60 frames
+  a second (an iPhone Pro, an iPad Pro) and not in Recovery.
+  Turned on, the next start of Android asks the runtime for the 120 Hz display
+  ([Display refresh rate](../Kernarium/README.md#display-refresh-rate)); a
+  change applies at that start, as the row's footnote says, and the display
+  stays as started until then. While iOS is in Low Power Mode, which shows at
+  most 60, a run that started with the 120 Hz display tells Android MODERATE
+  (the thermal wire's severity between light and severe), which holds Android's
+  render rate to 60 Hz; "When hot" still decides the heat levels, and the
+  heavier severity wins. A harness launch starts with the setting off, and
+  `ANDARIUM_HIGH_REFRESH` (`1` or `0`) states it for the run, which keeps
+  nothing; a screen that cannot show 120 never asks.
 - **Game controllers.** Each game controller iOS has connected is a HID
   device in the guest, made through the guest's relay over vsock 5558
   (`GamepadSession`; the wire is `GamepadProtocol`, whose golden frames the
@@ -1493,7 +1506,8 @@ one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation; only `critical`
 reaches the guest as heat. `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states
-Settings' "When hot" for the run: `0` tells the guest nothing of the heat. A
+Settings' "When hot" for the run: `0` tells the guest nothing of the heat.
+`ANDARIUM_HIGH_REFRESH` (`1` or `0`) states Settings' "120 Hz" for the run. A
 UI test's probe session (`ANDARIUM_INPUT_PROBE`) that states the thermal state
 runs the thermal session against a stand-in for the guest's HAL, and its log
 says what the guest would be told (`heat told <severity>`).

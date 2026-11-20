@@ -355,8 +355,8 @@ and the notice that iOS denies the network, from the path's mapping to
 the watcher's start and stop on a fake path source);
 `andarium-motion-protocol`, `andarium-device-orientation`,
 `andarium-haptics-protocol`, `andarium-haptics-player`,
-`andarium-thermal-protocol`, `andarium-thermal-levels` and
-`andarium-gamepad-protocol` (unit), `andarium-stage-system-image`,
+`andarium-thermal-protocol` (the MODERATE record included),
+`andarium-thermal-levels` and `andarium-gamepad-protocol` (unit), `andarium-stage-system-image`,
 `andarium-capture-screens` and `andarium-localization` (tooling) cover the
 motion wire format (its device-orientation and magnetic field records and its
 control frames, "ANC3" included, against the golden frames in
@@ -380,7 +380,14 @@ ranges of every field and the frame reader), system image staging, the
 screenshot script, the String Catalogs' check and their sync with the
 compiler's extraction ([the gate after a build](../Andarium/README.md#languages)),
 and `kernarium-host-features` (unit) the table of host features the boot
-request carries to an Android guest. `kernarium-camera` (unit) checks
+request carries to an Android guest (the high-refresh bit included). The 120 Hz
+display is covered without a device: `gpu-device-command-atomicity` has the
+EDID's 60 Hz bytes unchanged and the 120 Hz timing only where its pixel clock
+fits, and `gpu-present-pacer` runs the display link's decisions (the rate it
+asks for as the guest's rate changes, the wake, the sleep and the ceiling of
+Low Power Mode) against a fake clock; `HighRefreshTests` (in `andarium-core`
+and in `AndariumTests`) cover the setting, its launch rules and the Low Power
+Mode hold. `kernarium-camera` (unit) checks
 what the runtime tells an Android guest about the host's cameras (the camera
 fields of the boot request, the composed layout and its recomposition at each
 boot, the lens cover, the host memory a live session reserves (none for a
@@ -1445,8 +1452,8 @@ power off cleanly (the loop guard, `emulator/src/restart_loop_guard.hpp`).
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
 names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's
-render rate and the frame rates at each severity, on a fresh data disk or, with
-`--instance`, over an older release's.
+render rate and the frame rates at each severity (MODERATE's 60 Hz vote
+included), on a fresh data disk or, with `--instance`, over an older release's.
 `android-orientation` (integration) registers when
 `UML_ANDROID_ORIENTATION_RELEASE` names the release: the runner plays the host
 application over a vsock forward to the motion port with the
