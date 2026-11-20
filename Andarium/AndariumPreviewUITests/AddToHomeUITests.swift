@@ -336,6 +336,8 @@ final class AddToHomeUITests: XCTestCase {
             ("add-home-banner-slow", "app-open-banner"),
         ]
         for (screen, ready) in screens {
+            // The row, the chooser and the guide are offered from iOS 27 (`testBefore27NothingOffersAddToHomeScreen`).
+            if #unavailable(iOS 27.0), ["add-home-row", "add-home-page", "add-home-guide"].contains(where: screen.hasPrefix) { continue }
             let app = XCUIApplication()
             app.launchArguments = previewTestLanguage + ["-screen", screen]
             app.launch()
