@@ -49,6 +49,8 @@ RUN_TIMEOUT_SECONDS = 360
 SETTLE_TIMEOUT_SECONDS = 240
 SETTLE_PERCENT = 100.0
 SETTLE_SAMPLES = 3
+# One row of `ps -o pid=,ppid=,pcpu=,args=`.
+PROCESS_ROW = re.compile(r"\s*(\d+)\s+(\d+)\s+(\d+(?:\.\d+)?)\s+(\S.*)")
 
 
 class Deadline:
@@ -133,14 +135,16 @@ def device_cpu(udid: str) -> float | None:
     usage: dict[int, float] = {}
     root = None
     for line in listing.splitlines():
-        fields = line.split(None, 3)
-        if len(fields) < 4:
+        row = PROCESS_ROW.fullmatch(line)
+        if row is None:
+            # A process whose arguments span lines leaves rows of its own text
+            # in the listing, which are no process.
             continue
-        pid, parent = int(fields[0]), int(fields[1])
-        usage[pid] = float(fields[2])
+        pid, parent = int(row[1]), int(row[2])
+        usage[pid] = float(row[3])
         children.setdefault(parent, []).append(pid)
-        program = os.path.basename(fields[3].split(" ", 1)[0])
-        if program == "launchd_sim" and f"/{udid}/" in fields[3]:
+        program = os.path.basename(row[4].split(" ", 1)[0])
+        if program == "launchd_sim" and f"/{udid}/" in row[4]:
             root = pid
     if root is None:
         return None
