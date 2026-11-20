@@ -13,7 +13,7 @@ script neither builds nor signs anything.
 A developer build can stage an unsigned proof image instead (`--release DIR
 --unsigned-proof`): the proof of a change before a release carries it, built
 from unsigned target files. It is staged with a manifest that still says it is
-an unsigned proof, and the AppStore and TestFlight configurations refuse it
+an unsigned proof, and an archive of the Release configuration refuses it
 (`scripts/check-embedded-artifacts.py`).
 """
 
@@ -333,7 +333,7 @@ def proof_notes(manifest: dict, staged: dict) -> list[str]:
     if "system_disk_sha256" not in manifest["producer"]:
         unchecked.append("the producer's own disk digest (the proof records none)")
     notes = [
-        "for a developer build only: an AppStore or TestFlight build refuses it",
+        "for a developer build only: a Release archive refuses it",
         revision_note(manifest),
         # InstanceRules.decide: a proof starts only a fresh instance (or one with no
         # data), and an instance it created starts only it; any other is a mismatch.
@@ -390,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--unsigned-proof", action="store_true",
         help="stage the unsigned proof image --release names, for a developer build only: "
-             "an AppStore or TestFlight build refuses it",
+             "a Release archive refuses it",
     )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--acceptance", type=Path, default=DEFAULT_ACCEPTANCE, help=argparse.SUPPRESS)
@@ -425,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
         elif is_proof:
             raise StageError(
                 "the release is an unsigned proof image, which only a developer build stages: "
-                "pass --unsigned-proof (an AppStore or TestFlight build refuses it)")
+                "pass --unsigned-proof (a Release archive refuses it)")
         else:
             check_release(release, manifest, accepted)
         stage(release, arguments.output, staged_manifest)

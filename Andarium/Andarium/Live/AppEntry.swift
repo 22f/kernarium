@@ -26,10 +26,6 @@ struct AppEntry {
     var hints: ScreenHints { ScreenHints() }
 
     static func fromArguments() -> AppEntry {
-        #if APP_STORE
-        // An App Store build reads no launch setting.
-        return AppEntry(overrides: LaunchOverrides(), announcesWhatsNew: true)
-        #else
         let info = ProcessInfo.processInfo
         let overrides = LaunchOverrides(
             environment: info.environment,
@@ -39,20 +35,14 @@ struct AppEntry {
             overrides: overrides,
             announcesWhatsNew: Self.isPersonsLaunch(overrides: overrides, environment: info.environment)
         )
-        #endif
     }
 
     /// The adb key of the guest this launch runs.
     var adbKeyStore: AdbKeyStore {
-        #if APP_STORE
-        return AdbKeyStore()
-        #else
         return AdbKeyStore(instance: overrides.instance)
-        #endif
     }
 
     func configureTips() {
-        #if !APP_STORE
         // The input probe's UI tests tap the side keys and Settings; a tip's
         // popover over them is no part of what they check, but for the one
         // that checks the first tap on the keys with the tip up.
@@ -63,7 +53,6 @@ struct AppEntry {
         } else if InputProbeLaunch.requested(in: environment) {
             Tips.hideAllTipsForTesting()
         }
-        #endif
         try? Tips.configure([.displayFrequency(.immediate)])
     }
 
@@ -82,13 +71,11 @@ struct AppEntry {
         let version = Self.appVersion(bundle)
         let systemFolder = bundle.resourceURL?.appendingPathComponent(SystemFolder.name)
         let host = Self.hostDevice()
-        #if !APP_STORE
         // A UI test of the hardware keyboard and mouse opens the session with
         // no guest behind it.
         if InputProbeLaunch.requested(in: environment) {
             return Self.makeInputProbeModel(host: host, version: version, environment: environment)
         }
-        #endif
 
         var problem: String?
         var system = SystemInfo(
@@ -109,12 +96,10 @@ struct AppEntry {
         }
 
         let locations = GuestLocations(directory: Self.guestDirectory(instance: launch.instance))
-        #if !APP_STORE
         // An isolated test guest keeps its own list of Android's apps, beside its disks.
         if launch.instance != nil {
             AndroidAppsHub.shared.configure(directory: locations.directory.appendingPathComponent("AndroidApps", isDirectory: true))
         }
-        #endif
         let storage = TwoDiskStorage(
             locations: locations,
             release: carried?.identity ?? ReleaseIdentity(
@@ -150,10 +135,10 @@ struct AppEntry {
             createRequirementBytes: storage.createRequirementBytes
         )
         // An iPhone's guest follows the device's orientation; a harness launch
-        // may state it for another device (an App Store build states nothing).
+        // may state it for another device.
         model.followsDeviceOrientation = launch.followsDeviceOrientation
             ?? (UIDevice.current.userInterfaceIdiom == .phone)
-        #if !APP_STORE && !targetEnvironment(simulator)
+        #if !targetEnvironment(simulator)
         // A development build on a device can run the guest on the JIT engine
         // when a debugger prepares its memory.
         model.jitAvailable = true
@@ -170,7 +155,7 @@ struct AppEntry {
         model.memoryLimitBytes = MemoryLimit.bytes()
         // The statistics show from the start where the person left them,
         // unless the launch is a harness's, which decides for its run alone
-        // (`StatsPreference.launch`). An App Store build carries no setting.
+        // (`StatsPreference.launch`).
         let stats = StatsPreference().launch(for: launch)
         model.session.showStats = stats.showOnScreen
         model.statsDecidedByLaunch = !stats.keepsChanges
@@ -180,19 +165,12 @@ struct AppEntry {
         model.pointerAsTouch = pointer.isOn
         model.pointerAsTouchDecidedByLaunch = !pointer.keepsChanges
         // Settings' "When hot" is the person's last choice, unless the launch
-        // is a harness's and decides for its run alone (`HeatLimitPreference`);
-        // an App Store build has no launch environment and so keeps the
-        // person's own.
-        #if APP_STORE
-        let heat = HeatLimitPreference().launch(automated: false)
-        #else
+        // is a harness's and decides for its run alone (`HeatLimitPreference`).
         let heat = HeatLimitPreference().launch(
             automated: !launch.isEmpty || ThermalOverride.stated(in: environment) != nil,
             stated: HeatLimitLaunch.stated(in: environment))
-        #endif
         model.heatLimitOn = heat.isOn
         model.heatLimitDecidedByLaunch = !heat.keepsChanges
-        #if !APP_STORE
         model.printsStatistics = launch.statistics == true
         // The JIT row follows the person's last choice, unless the launch is a
         // harness's and decides for its run alone (`JitPreference.launch`).
@@ -204,13 +182,8 @@ struct AppEntry {
         // A harness launch can keep the device's haptics silent for its run
         // (`HapticsLaunch`); the person's switch stays as stored.
         model.hapticsSilencedByLaunch = HapticsLaunch.silences(in: environment)
-        #endif
 
-        #if APP_STORE
-        let markerDirectory = Self.supportDirectory()
-        #else
         let markerDirectory = launch.instance == nil ? Self.supportDirectory() : locations.directory
-        #endif
         let marker = PauseMarker(url: markerDirectory.appendingPathComponent("pause.json"))
         let closedInBackground = marker.consume()
         if closedInBackground, guest != nil {
@@ -223,16 +196,12 @@ struct AppEntry {
             in: markerDirectory, containers: Self.containerPaths(), endedOutOfForeground: closedInBackground)
         ExitReports.shared.start(keepingIn: markerDirectory)
         if carried != nil {
-            #if APP_STORE
-            let watched = freeSpace
-            #else
             // A harness launch of an isolated instance may state the free space.
             let watched = launch.instance == nil
                 ? freeSpace : Self.harnessFreeSpace(in: locations.directory, fallback: freeSpace)
             if launch.instance != nil {
                 Self.answerSpaceScreenFromHarness(model: model, directory: locations.directory)
             }
-            #endif
             // The colour data's folder: the boot reads it and the planner asks the runtime
             // about it, and the planner's figure is the boot's only while they are one value.
             let calibration = markerDirectory.appendingPathComponent("Camera", isDirectory: true)
@@ -255,7 +224,6 @@ struct AppEntry {
             model.microphone?.refresh()
             model.location?.refresh()
             model.camera?.refresh()
-            #if !APP_STORE
             // A debugger attached at launch (StikDebug) is asked for what the
             // JIT row says at once: it spins until it is served, and the
             // system ends it within a minute. A guest the launch is about to
@@ -264,7 +232,6 @@ struct AppEntry {
             model.prepareJitAtLaunch(
                 standard: JitShape(memoryMiB: offered.memoryMiB, processorCount: offered.cores),
                 replacingGuest: launch.erase)
-            #endif
         }
         announceWhatsNew(
             on: model, hasGuest: guest != nil, vCPUs: guest?.cores ?? host.processorCount)
@@ -272,7 +239,6 @@ struct AppEntry {
         return model
     }
 
-    #if !APP_STORE
     /// The model of a UI test's launch of the hardware keyboard and mouse
     /// (`InputProbeLaunch`): a guest that exists only in memory and a session
     /// that is open as if its run had booted, so the display takes the keys
@@ -393,18 +359,13 @@ struct AppEntry {
         }
         return model.alert == nil
     }
-    #endif
 
     /// What the application offers on the device: the runtime's, with text
     /// messages held back until a release image carries the service. A
     /// development launch can switch them on (`TextMessagesLaunch`); an App
     /// Store build has no such launch.
     private static func deviceCapabilities() -> Capabilities {
-        #if APP_STORE
-        .device
-        #else
         TextMessagesLaunch.capabilities(in: ProcessInfo.processInfo.environment)
-        #endif
     }
 
     // MARK: Device
@@ -424,18 +385,15 @@ struct AppEntry {
     /// `Library/Guest/`. The disk's path goes to Linux in a kernel argument
     /// that cannot carry a space, so the guest does not live in `Application
     /// Support`; the library directory's name is safe on a device and on a Mac.
-    /// A harness launch's isolated `instance` lives beside it; an App Store
-    /// build has only the one guest.
+    /// A harness launch's isolated `instance` lives beside it.
     static func guestDirectory(instance: String? = nil) -> URL {
         let library = (try? FileManager.default.url(
             for: .libraryDirectory, in: .userDomainMask, appropriateFor: nil, create: true
         )) ?? FileManager.default.temporaryDirectory
-        #if !APP_STORE
         if let instance {
             return library.appendingPathComponent("TestGuests", isDirectory: true)
                 .appendingPathComponent(instance, isDirectory: true)
         }
-        #endif
         return library.appendingPathComponent("Guest", isDirectory: true)
     }
 

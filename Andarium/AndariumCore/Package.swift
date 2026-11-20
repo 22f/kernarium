@@ -29,8 +29,8 @@ let package = Package(
             resources: [.process("Resources/Localizable.xcstrings")]
         ),
         // Simulated controllers and the guest end of the gamepad wire, for tests
-        // and the probe tool. The application never links it (the App Store
-        // bundle check refuses a build that does); the hosted tests do.
+        // and the probe tool. The application never links it; the hosted
+        // tests do.
         .target(
             name: "AndariumCoreTestSupport",
             dependencies: ["AndariumCore"]

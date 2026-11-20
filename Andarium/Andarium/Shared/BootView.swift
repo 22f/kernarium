@@ -113,11 +113,7 @@ struct BootView: View {
     /// The Simulator preview holds the steps still and lets the clock run, to
     /// capture one clock on the status line and the notice at two moments.
     private var clockRuns: Bool {
-        #if APP_STORE
-        false
-        #else
         model.previewClockRuns
-        #endif
     }
 
     /// The guest's display shows through, dimmed, on every boot but Recovery's.
@@ -147,11 +143,9 @@ struct BootView: View {
                 ?? String(localized: "Preparing")
             steps[0] = Step(title: steps[0].title, detail: detail, seconds: 0)
         }
-        #if !APP_STORE
         if model.preparingJit {
             steps[0] = Step(title: steps[0].title, detail: JitStatus.preparing, seconds: 0)
         }
-        #endif
         return steps
     }
 
@@ -244,7 +238,6 @@ struct BootView: View {
                 .modifier(BootPanel(dimmed: dimmed, radius: 22))
             }
 
-            #if !APP_STORE
             if let sentence = model.jitLastStart?.fallbackSentence {
                 Label {
                     Text(sentence)
@@ -259,7 +252,6 @@ struct BootView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .modifier(BootPanel(dimmed: dimmed, radius: 22))
             }
-            #endif
 
             // Last, below every sentence the boot says of itself.
             if NoGoogleNotice.showsOnBoot(kind, firstBootPending: model.bootStartedUnfinished) {

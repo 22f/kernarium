@@ -8,7 +8,7 @@ import Foundation
 /// nothing.
 public struct WhatsNewRelease: Identifiable, Hashable, Decodable, Sendable {
     /// The build (`CFBundleVersion`) that first carried these notes. The
-    /// TestFlight builds share one marketing version, so the build orders
+    /// Every build shares one marketing version, so the build orders
     /// releases; every archive's is above the one before.
     public let build: Int
     /// The version as Info shows it: "1.0 (12)".
@@ -371,7 +371,7 @@ public enum WhatsNewRules {
     /// last one seen, up to this build, newest first, with only the entries
     /// this device can use; it offers nothing when none is left, and nothing
     /// after `ribbonLaunchLimit` launches. A build older than the last one
-    /// seen (TestFlight installs any) offers nothing and keeps the record.
+    /// seen offers nothing and keeps the record.
     public static func launch(
         releases: [WhatsNewRelease], record: WhatsNewRecord?, currentBuild: Int, hasGuest: Bool,
         offers: (WhatsNewEntry) -> Bool

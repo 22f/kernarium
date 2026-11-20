@@ -167,7 +167,6 @@ struct RootView: View {
             Text(alert.message.keepingTogether)
         }
         .legacyInstallAlert()
-        #if !APP_STORE
         .task {
             // The launch's automation work happens once per model: a scene
             // that connects again must not create, erase or start the guest
@@ -176,7 +175,6 @@ struct RootView: View {
             model.launchApplied = true
             await entry.applyDeferred(to: model)
         }
-        #endif
     }
 }
 

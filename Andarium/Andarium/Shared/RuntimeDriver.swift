@@ -251,7 +251,6 @@ protocol RuntimeDriver: AnyObject, OldAppsSource, AndroidAppsSource {
     /// a guest that sleeps. The caller keeps the last figures then. It may
     /// wait up to half a second, and never on the main thread.
     func readGuestMemory() async -> GuestMemorySample?
-    #if !APP_STORE
     /// Whether a debugger that serves the JIT is attached to Andarium now.
     func jitDebuggerAttached() -> Bool
     /// Prepares the JIT's executable memory for `shape` when `wanted`, or
@@ -259,7 +258,6 @@ protocol RuntimeDriver: AnyObject, OldAppsSource, AndroidAppsSource {
     /// out. It takes the seconds the debugger takes and never blocks the main
     /// thread. Without a servicing debugger it asks the runtime nothing.
     func prepareJit(wanted: Bool, shape: JitShape) async -> JitAnswer
-    #endif
 }
 
 extension RuntimeDriver {

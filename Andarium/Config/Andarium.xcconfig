@@ -3,38 +3,22 @@
 // Andarium's base settings: the shared signing settings, and what decides
 // whether Follow developer on X is compiled in.
 //
-// Release, AppStore and TestFlight read the ignored Developer.local.xcconfig
-// and carry Follow developer on X when it names a handle.
-//
-// The app icon is DuskJade (Shared/DuskJade.icon) in every configuration but
-// TestFlight, which has DuskEmber (Shared/DuskEmber.icon) so that a TestFlight
-// build is told from the others in App Store Connect. APP_ICON_NAME names the
-// one a build compiles, and the other document is left out of the build, so an
-// AppStore bundle holds nothing of DuskEmber.
+// Release reads the ignored Developer.local.xcconfig and carries Follow
+// developer on X when it names a handle.
 
 #include "../../GuestHost/Config/Signing.xcconfig"
 
 SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(FOLLOW_X_CONDITION)
-
-// The app icon a build compiles (the target's ASSETCATALOG_COMPILER_APPICON_NAME),
-// and the document of the other icon, which the build leaves out. Only the
-// compiled icon's assets go in, not every app icon asset of the target.
-APP_ICON_NAME = DuskJade
-APP_ICON_NAME[config=TestFlight] = DuskEmber
-APP_ICON_ABSENT_DuskJade = DuskEmber.icon
-APP_ICON_ABSENT_DuskEmber = DuskJade.icon
-ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO
 
 // Follow developer on X, an Info row, shows the developer's profile on X. The
 // maker names the handle in the ignored Developer.local.xcconfig
 // (Developer.local.xcconfig.example: a handle, never an address, as `//` starts
 // a comment here and the code builds the address) and puts the logo in the
 // ignored Local directory beside this file (Local/x-logo.svg). FOLLOW_X_HANDLE
-// is that handle in Release, AppStore and TestFlight and empty elsewhere; a
-// non-empty one adds the FOLLOW_X compilation condition, the
-// AndariumFollowXHandle key of Info.plist, the FollowX string table and the X
-// logo, and a build that names a handle and lacks the logo fails its first
-// build phase. A fork, or a Debug build, carries none of it. The tests and the
+// is that handle in Release and empty elsewhere; a non-empty one adds the
+// FOLLOW_X compilation condition, the AndariumFollowXHandle key of Info.plist,
+// the FollowX string table and the X logo, and a build that names a handle and
+// lacks the logo fails its first build phase. A fork, or a Debug build, carries none of it. The tests and the
 // screen captures state FOLLOW_X_HANDLE=example_handle on the xcodebuild
 // command line to build the row into a Debug build, with the plain glyph the
 // tracked catalog draws in place of the logo; adding FOLLOW_X_LOGO_SOURCE=local
@@ -46,8 +30,6 @@ DEVELOPER_X_HANDLE =
 
 FOLLOW_X_HANDLE =
 FOLLOW_X_HANDLE[config=Release] = $(DEVELOPER_X_HANDLE)
-FOLLOW_X_HANDLE[config=AppStore] = $(DEVELOPER_X_HANDLE)
-FOLLOW_X_HANDLE[config=TestFlight] = $(DEVELOPER_X_HANDLE)
 
 // An empty handle names the setting FOLLOW_X_ARRANGED_ and gets NO_FOLLOW_X;
 // any other lands on an undefined name and gets FOLLOW_X.
@@ -59,12 +41,10 @@ FOLLOW_X_PLIST_ = FOLLOW_X_OFF=1
 FOLLOW_X_PLIST_DEFINITION = $(FOLLOW_X_PLIST_$(FOLLOW_X_HANDLE:identifier):default=FOLLOW_X=1)
 
 // The maker's logo is the catalog linked to Local/x-logo.svg ("local"), the
-// tracked glyph the tests draw is the other (empty). Each configuration that
-// carries the row takes the maker's.
+// tracked glyph the tests draw is the other (empty). Release takes the
+// maker's.
 FOLLOW_X_LOGO_SOURCE =
 FOLLOW_X_LOGO_SOURCE[config=Release] = local
-FOLLOW_X_LOGO_SOURCE[config=AppStore] = local
-FOLLOW_X_LOGO_SOURCE[config=TestFlight] = local
 
 // What the row adds is left out the same way: the logo's catalogs and the
 // row's string table are wanted only with a handle, and of the two logo
@@ -74,4 +54,4 @@ FOLLOW_X_ABSENT_ = FollowX.xcstrings
 FOLLOW_X_UNUSED_ = XLogoLocal.xcassets
 FOLLOW_X_UNUSED_local = XLogoGlyph.xcassets
 
-EXCLUDED_SOURCE_FILE_NAMES = $(FOLLOW_X_ABSENT_$(FOLLOW_X_HANDLE:identifier):default=) $(X_LOGO_ABSENT_$(FOLLOW_X_HANDLE:identifier):default=) $(FOLLOW_X_UNUSED_$(FOLLOW_X_LOGO_SOURCE:identifier):default=) $(APP_ICON_ABSENT_$(APP_ICON_NAME))
+EXCLUDED_SOURCE_FILE_NAMES = $(FOLLOW_X_ABSENT_$(FOLLOW_X_HANDLE:identifier):default=) $(X_LOGO_ABSENT_$(FOLLOW_X_HANDLE:identifier):default=) $(FOLLOW_X_UNUSED_$(FOLLOW_X_LOGO_SOURCE:identifier):default=)

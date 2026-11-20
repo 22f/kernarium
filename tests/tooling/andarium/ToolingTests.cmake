@@ -44,26 +44,6 @@ uml_add_tooling_test(
     LABELS andarium;android
     TIMEOUT 30)
 
-# The AppStore and TestFlight configurations build an application that passes
-# this check as its last build phase; the fixtures show it finds each problem the
-# script's header lists, and leaves the guest kernel image alone. They also show
-# Send feedback present only where the build names a receiver and Follow
-# developer on X only where it names a handle, in either direction; and that an
-# AppStore bundle holds the App Store track of the
-# What's New notes and not the beta track, a TestFlight bundle the reverse, and
-# that each has its configuration's app icon and an AppStore bundle holds
-# nothing of the TestFlight one. A supplied value is searched in every file in
-# UTF-8 and both UTF-16 byte orders, a feature's resources in nested bundles,
-# property lists and asset catalogs too, and no line of the report spells a
-# value, even in a path.
-uml_add_tooling_test(
-    NAME andarium-app-store-bundle
-    COMMAND ${Python3_EXECUTABLE} -B
-        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_check_app_store_bundle.py
-        --checker ${PROJECT_SOURCE_DIR}/Andarium/scripts/check-app-store-bundle.py
-    LABELS andarium;package
-    TIMEOUT 600)
-
 # The application's own touch feedback (the side keys, the rulers) plays through
 # one modifier that a launch silencing haptics reaches: no view calls SwiftUI's
 # or UIKit's feedback directly.
@@ -75,36 +55,11 @@ uml_add_tooling_test(
     LABELS andarium
     TIMEOUT 60)
 
-# The document pickers open files in place in the App Store configuration and
-# present the copy-mode picker in every other: the sources are read as the
-# compiler reads them with and without APP_STORE, and the changes a later edit
-# could make to the condition must fail, as must a bundle-check name for the
-# presenter that no source defines and an in-place importer in any other
-# production source that the test does not name as an exception.
-uml_add_tooling_test(
-    NAME andarium-document-pickers
-    COMMAND ${Python3_EXECUTABLE} -B
-        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_document_pickers.py
-        --root ${PROJECT_SOURCE_DIR}
-    LABELS andarium
-    TIMEOUT 60)
-
-# Each configuration compiles its own app icon: the target's resolved build
-# settings name it, leave the other icon's document out of the build and include no
-# other app icon asset.
-uml_add_tooling_test(
-    NAME andarium-app-icon
-    COMMAND ${Python3_EXECUTABLE} -B
-        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_app_icon.py
-        --root ${PROJECT_SOURCE_DIR}
-    LABELS andarium
-    TIMEOUT 180)
-
 # The release build refuses an embedded artifact that is behind the commit it
 # archives; the fixtures build a repository, a staged system and an application
 # with a kernel carrying a banner and a configuration, and change one thing each.
-# An unsigned proof image, in the staged or the packaged system, stops the
-# AppStore and TestFlight build phase and no other configuration's.
+# An unsigned proof image, in the staged or the packaged system, stops the build
+# phase of an archive of Release and no other build's.
 uml_add_tooling_test(
     NAME andarium-embedded-artifacts
     COMMAND ${Python3_EXECUTABLE} -B
@@ -133,7 +88,7 @@ uml_add_tooling_test(
 # The String Catalogs of the application: every string translated into each
 # language in the state the editor writes, specifiers and plural categories
 # that fit, no Google name but the notice's own, the permission texts and
-# What's New notes of both tracks present, and the catalog sync that follows the
+# What's New notes present, and the catalog sync that follows the
 # compiler's extraction.
 uml_add_tooling_test(
     NAME andarium-localization

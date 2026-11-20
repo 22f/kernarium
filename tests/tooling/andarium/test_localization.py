@@ -13,10 +13,8 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
-import contextlib
 import copy
 import importlib.util
-import io
 import json
 import pathlib
 import shutil
@@ -445,7 +443,7 @@ class SyncTests(unittest.TestCase):
         self.data.write_text(json.dumps(body), encoding="utf-8")
 
     def sync(self, *extra: str) -> list[str]:
-        return self.script.sync(self.root, [self.data.parent], "--check" in extra, "--app-store" in extra)
+        return self.script.sync(self.root, [self.data.parent], "--check" in extra)
 
     def catalog(self) -> dict:
         return json.loads((self.root / self.script.CATALOGS["Localizable"]).read_text(encoding="utf-8"))["strings"]
@@ -481,10 +479,6 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("JIT: is out of step with the code: 1 to add ['A new JIT text']", problems[0])
 
-    def test_an_app_store_build_without_a_feature_has_no_table_to_compare(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), follow=())
-        self.assertEqual(self.sync("--check", "--app-store"), [])
-
     def test_a_follow_x_string_of_the_arranged_build_is_in_step(self) -> None:
         self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
         self.assertEqual(self.sync("--check"), [])
@@ -502,17 +496,6 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("FollowX: has no extracted strings: build with FOLLOW_X_HANDLE=example_handle", problems[0])
 
-    def test_an_app_store_build_without_a_handle_has_no_follow_x_table_to_compare(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), follow=())
-        self.assertEqual(self.sync("--check", "--app-store"), [])
-
-    def test_an_app_store_build_with_a_handle_is_held_to_the_follow_x_keys_it_lacks(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(),
-                     follow=("Follow developer on %@", "A new row text"))
-        problems = self.sync("--check", "--app-store")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("FollowX: is out of step with the code: 1 to add ['A new row text']", problems[0])
-
     def test_an_app_shortcut_phrase_of_the_arranged_build_is_in_step(self) -> None:
         self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
         self.assertEqual(self.sync("--check"), [])
@@ -523,26 +506,6 @@ class SyncTests(unittest.TestCase):
         problems = self.sync("--check")
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("AppShortcuts: is out of step with the code: 1 to add ['Close ${target} in ${applicationName}']", problems[0])
-
-    def test_an_app_store_build_that_compiled_a_jit_string_is_refused(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
-        problems = self.sync("--check", "--app-store")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("has strings in an App Store build", problems[0])
-
-    def test_an_app_store_build_may_lack_the_keys_of_code_it_left_out(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=())
-        self.assertEqual(self.sync("--check", "--app-store"), [])
-
-    def test_an_app_store_build_with_a_key_the_catalogs_lack_is_found(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of", "Brand new", jit=())
-        problems = self.sync("--check", "--app-store")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("1 to add ['Brand new']", problems[0])
-
-    def test_app_store_only_checks(self) -> None:
-        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            self.script.main(["sync", "--root", str(self.root), "--stringsdata", str(self.data.parent), "--app-store"])
 
     def test_a_build_without_extracted_strings(self) -> None:
         empty = self.scratch / "empty"

@@ -612,14 +612,7 @@ instead.
 
 Tooling tests cover `scripts/check-privacy-manifests.py`
 (`ios-privacy-manifests`, which `package-ios-frameworks.sh` also runs on every
-device slice it packages), `Andarium/scripts/check-app-store-bundle.py`
-(`andarium-app-store-bundle`, the last build phase of the AppStore and
-TestFlight configurations,
-[configurations](../Andarium/README.md#configurations)), the
-document pickers' build conditions (`andarium-document-pickers`: the App Store
-configuration opens files in place, every other presents the copy-mode picker,
-and an in-place importer anywhere else is in an App Store branch or a named
-exception), the application's own touch feedback
+device slice it packages), the application's own touch feedback
 (`andarium-interface-feedback`: no view plays it around the one modifier; that
 a launch silencing haptics silences it, on both model paths of a launch, is
 held by the hosted `LaunchEnvironmentTests` and `CapabilitiesFlowTests`),

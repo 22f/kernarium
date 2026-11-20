@@ -661,7 +661,7 @@ struct CameraFlowTests {
             graphicsMemory: { _, _ in 534 },
             cameraReserve: { Int(kernarium_runtime_loader_camera_reserve_mib(UInt32(clamping: $0))) })
         #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 1, cameraLive: true) == 337)
-        // The runtime serves the synthetic phone (a development knob; an App Store runtime has none): one
+        // The runtime serves the synthetic phone (a development knob): one
         // stream, a RAW still and the working storage its source states.
         let name = "KERNARIUM_CAMERA_SOURCE"
         let before = getenv(name).map { String(cString: $0) }

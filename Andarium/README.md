@@ -21,8 +21,7 @@ AndariumUITests/      UI tests of the device app in the Simulator
 AndariumPreviewUITests/ UI tests of the Simulator preview
 Config/               entitlements, Info.plist, privacy manifest, bridging header,
                       build settings (Andarium.xcconfig)
-scripts/              system staging, the App Store bundle check,
-                      acknowledgements, screen capture
+scripts/              system staging, acknowledgements, screen capture
 Andarium.xcodeproj/   JSON project (project.xcproj) and its shared schemes
 ../GuestHost/Sources  host code shared with Kernarium: the runtime loader, the
                       display and touch view, zstd, the shader caches
@@ -50,8 +49,7 @@ and the runtime belong to the process (`AndariumProcess`), so a scene that
 connects again shows the same ones.
 
 `AndariumUITests` is the UI-test target of `Andarium`, in the scheme's test
-action. It is never part of the application: an App Store build contains no
-test bundle ([configurations](#configurations)).
+action. It is never part of the application.
 
 `AndariumPreview` is a Simulator-only target built from `Shared` and `Preview`
 with mock data. It embeds no runtime and boots nothing. Its launch arguments
@@ -73,9 +71,8 @@ capability key names the chip, so `UIRequiredDeviceCapabilities` names `metal`
 and the application asks the GPU for the Metal 4 family at launch
 (`HostDevice.runsGuestGraphics`), refusing to start a guest without it; the
 Simulator draws on the CPU and always passes. iPhone and iPad are supported,
-and so is an Apple silicon Mac in Designed for iPad mode: TestFlight and the
-App Store offer the application to Macs, and every configuration sets
-`SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD` to YES, which gives Xcode its Mac
+and so is an Apple silicon Mac in Designed for iPad mode: every configuration
+sets `SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD` to YES, which gives Xcode its Mac
 destination and adds nothing to the built application.
 `ITSAppUsesNonExemptEncryption` is NO in `Config/Info.plist`.
 
@@ -171,7 +168,7 @@ disk, partition layout, kernel command line and manifest into
 A developer build can stage an unsigned proof image instead
 (`stage-system-image.py --release DIR --unsigned-proof`), whose manifest stays
 a proof's, completed from the tracked image line and the accepted Android
-kernel, and which the AppStore and TestFlight configurations refuse. The
+kernel, and which a Release archive refuses. The
 application starts it only on a fresh or isolated guest instance
 (`ANDARIUM_GUEST_INSTANCE`): a guest with data of another system cannot start
 until it is erased, and nor can a guest made from a proof start another system.
@@ -197,51 +194,31 @@ destination rules).
 
 ### Configurations
 
-The project has Debug, Release, AppStore and TestFlight. Release is the
-development and harness build: it reads the automation environment and prints
-the console lines the iPad harness reads. AppStore builds as Release does and
-leaves out everything that exists for automation or only pretends. TestFlight
-is AppStore in every respect below (the same compilation condition, runtime,
-embedded-artifact check and bundle check) except in the last item, which
-names the optional features it carries. It also defines `TESTFLIGHT`.
+The project has Debug and Release. Release is the distributed build, with its
+JIT option; it reads the automation environment and prints the console lines
+the iPad harness reads, as Debug does. A launch that sets no `ANDARIUM_` or
+`KERNARIUM_` name uses none of that.
 
-- `APP_STORE` is a Swift compilation condition that compiles out the launch
-  environment (`Live/LaunchEnvironment.swift`, so no `ANDARIUM_` or
-  `KERNARIUM_` name is in the application or in `AndariumCore`, nor the thermal
-  state a launch can state in place of iOS's), the harness's
+- The launch environment (`Live/LaunchEnvironment.swift`), the harness's
   console lines (`Shared/ConsoleReport.swift`), the launch's deferred work
-  (create, erase, start) and the isolated guest instance.
-- It defines `UML_APP_STORE_APPLICATION` for the loader it compiles, which
-  leaves out the display mirror, console input, the automation lookups and the
-  JIT's preparation entries ([`GuestHost/README.md`](../GuestHost/README.md)).
-  The JIT's policy and words (`Shared/Jit.swift`), debugger side
-  (`Live/JitDebugger.swift`) and Home row are under `!APP_STORE`, in the
-  application and not in AndariumCore, which the package builds without that
-  condition.
-- It embeds the App Store runtime, which reads no environment knob and carries
-  no debugging or automation support (the `kernarium-ios-device-android-app-store`
-  preset, packaged with `package-ios-frameworks.sh --app-store --runtimes
-  android`; [`Kernarium/README.md`](../Kernarium/README.md#automation-runs)).
-- It opens the files of Install APK and of the file browser's Import in place
-  (SwiftUI's `fileImporter`); every other configuration presents the document
-  picker in copy mode (`Shared/CopyDocumentPicker.swift`, compiled out by
-  `APP_STORE`), moves each copy at once into a folder of its own under
-  `tmp/PickedFiles/` and removes it when the install or import that uses it is
-  over (Install anyway and Try Again still find it) and at the next launch. A
-  picker that fails shows an alert in every configuration.
-- The scheme's Archive action uses AppStore. The archive for the App Store is
-  made with `-configuration AppStore` and the archive for TestFlight with
-  `-configuration TestFlight`; both are the builds offered to Macs.
-- The app icon is `DuskJade` (`Shared/DuskJade.icon`) in every configuration
-  but TestFlight, whose icon is `DuskEmber` (`Shared/DuskEmber.icon`).
-  `APP_ICON_NAME` in `Config/Andarium.xcconfig` names the document a build
-  compiles and the other is left out; the bundle check requires each bundle
-  to have its own icon in Info.plist and as the one app icon of the compiled
-  `Assets.car`, so an AppStore bundle holds nothing of DuskEmber.
-- It refuses an embedded artifact that is behind the archived commit: a build
-  phase runs [`scripts/check-embedded-artifacts.py`](../scripts/check-embedded-artifacts.py),
-  which compares the accepted Android release and kernel descriptors with the
-  commit's inputs, and the staged and packaged system and runtime with the
+  (create, erase, start), the isolated guest instance and the UI tests' probes
+  are in both configurations.
+- The JIT's policy and words (`Shared/Jit.swift`), debugger side
+  (`Live/JitDebugger.swift`) and Home row are in the application and not in
+  AndariumCore.
+- The document picker of Install APK and of the file browser's Import is the
+  one in copy mode (`Shared/CopyDocumentPicker.swift`): it moves each copy at
+  once into a folder of its own under `tmp/PickedFiles/` and removes it when
+  the install or import that uses it is over (Install anyway and Try Again
+  still find it) and at the next launch. A picker that fails shows an alert.
+- The scheme's Archive action uses Release, the build offered to Macs as an
+  iPad app too. The app icon is `DuskJade` (`Shared/DuskJade.icon`).
+- An archive refuses an embedded artifact that is behind the archived commit: a
+  build phase of Release runs
+  [`scripts/check-embedded-artifacts.py`](../scripts/check-embedded-artifacts.py)
+  when the action is an archive, and an ordinary Release build is not checked.
+  The check compares the accepted Android release and kernel descriptors with
+  the commit's inputs, and the staged and packaged system and runtime with the
   descriptors, and fails naming the changed paths and commits. The staged and
   packaged system disk must be the one of the accepted release installed below
   `.build/android/releases`, not only the one their own layout names. It also
@@ -252,38 +229,20 @@ names the optional features it carries. It also defines `TESTFLIGHT`.
   `android/lineage-24/metadata/accepted-aot.env` accepts it for archives, and
   the framework's blob is the accepted one. A release that records no input trees, a
   dirty input, or a staged or packaged artifact that is not the accepted one
-  (an unsigned proof image included) stops the build; only the user decides to
+  (an unsigned proof image included) stops the archive; only the user decides to
   ship pending changes, by naming the release ID in `PENDING_INPUTS_DECISION`.
-- Its last build phase runs `scripts/check-app-store-bundle.py`, which fails the
-  build on a missing Info.plist key, an environment knob, a symbol or log text
-  of the debugging and automation support, the JIT (its symbols and text and
-  the `brk #0xf00d` instruction), a test bundle or XCTest framework, a
-  trace of the build host, a harness console line, the copy-mode document
-  picker or a missing in-place importer, or a privacy manifest that
-  does not cover a binary
-  ([`scripts/check-privacy-manifests.py`](../scripts/check-privacy-manifests.py));
-  the script's header is the complete list.
-- [Follow developer on X](#follow-developer-on-x) is carried by this
-  configuration and by Release alike, and only when the handle is in the
-  ignored `Config/Developer.local.xcconfig` and the logo in the ignored
-  `Config/Local/`. TestFlight carries it under the same conditions.
+- [Follow developer on X](#follow-developer-on-x) is carried by Release when
+  the handle is in the ignored `Config/Developer.local.xcconfig` and the logo
+  in the ignored `Config/Local/`.
 
-```sh
-cmake --preset kernarium-ios-device-android-app-store
-cmake --build --preset kernarium-ios-device-android-app-store
-Kernarium/scripts/package-ios-frameworks.sh --app-store --runtimes android
-Andarium/scripts/stage-system-image.py
-xcodebuild -project Andarium/Andarium.xcodeproj -scheme Andarium \
-    -configuration AppStore -destination 'generic/platform=iOS' build
-```
-
-The same build with `-configuration TestFlight` is the TestFlight product.
+An archive is made after the steps of [Build](#build), with
+`xcodebuild -project Andarium/Andarium.xcodeproj -scheme Andarium archive`.
 
 The privacy manifests of the application (`Config/PrivacyInfo.xcprivacy`) and
-of the frameworks (`Kernarium/PrivacyManifests`) declare exactly what the App
-Store build and the runtimes use. A release or harness build also reads the
-system uptime for its thermal report, which the application's manifest does
-not declare because only an AppStore or TestFlight build is uploaded.
+of the frameworks (`Kernarium/PrivacyManifests`) declare the required-reason
+APIs the binaries use, which `scripts/check-privacy-manifests.py` checks for
+the frameworks as they are packaged. The application also reads the system
+uptime for its thermal report, which its manifest does not declare.
 
 ### Follow developer on X
 
@@ -296,8 +255,7 @@ inline at the text's size and colour as a template image, and the same logo is
 the row's leading icon; VoiceOver reads "Follow developer on X" with the link
 trait. The profile and the logo belong to the developer and are tracked nowhere:
 the row is compiled in, under the `FOLLOW_X` condition, only in a Release build
-(and, until those configurations go, an AppStore or TestFlight one) whose
-ignored `Config/Developer.local.xcconfig` (from
+whose ignored `Config/Developer.local.xcconfig` (from
 `Developer.local.xcconfig.example`) names the handle (`DEVELOPER_X_HANDLE`: a
 handle, never an address, as `//` starts an xcconfig comment; the code builds
 the address) and whose ignored `Config/Local/` directory holds `x-logo.svg`, a
@@ -606,9 +564,9 @@ requires reopening Andarium.
   changed; until the first answer, and where the runtime cannot discover the
   cameras, the sheet uses the tier's ceiling. The Simulator has
   no camera: the preview states the access (`-systemCamera` reads the
-  Simulator's own permission) and the non-App Store runtime serves a synthetic
-  camera (`KERNARIUM_CAMERA_SOURCE`) to a run that has none, and no camera at
-  all for a value it does not know; an App Store build has neither. No test
+  Simulator's own permission) and the runtime serves a synthetic camera
+  (`KERNARIUM_CAMERA_SOURCE`) to a run that has none, and no camera at all for a
+  value it does not know. No test
   captures a real camera. The default suites boot no guest; the opt-in
   `CameraGuestTests` boots one through this runtime on the synthetic camera and
   reads the vendor SKU, the camera IDs and the lens cover of a live and a
@@ -700,7 +658,7 @@ requires reopening Andarium.
   is stored as a scale and stays. Native's host allocations count against the
   same iOS process limit as guest RAM; neither the graphics-memory estimate
   nor the memory default counts the display's pixels.
-- **JIT.** A development build on a device has a JIT row on Home, off until
+- **JIT.** A build on a device has a JIT row on Home, off until
   the person turns it on and kept for the install (`JitPreference`). An iOS
   device gives the JIT its executable memory only through a debugger attached to
   the process ([`docs/architecture.md`](../docs/architecture.md#executable-code)):
@@ -727,9 +685,7 @@ requires reopening Andarium.
   starts it off. The JIT compiles every process's code again for itself
   ([cold code](../darwin/cpu/arm64/jit/README.md#cold-code)), so an Android
   guest's boot, application launches and background work run several times
-  slower than on gadgets, and a long single-process computation runs faster. An
-  App Store build carries none of this: its runtime has no JIT and the
-  application has no row, preference, entries or sentences.
+  slower than on gadgets, and a long single-process computation runs faster.
 - **Motion.** The guest has the device's accelerometer and gyroscope wherever
   the device has them, with no setting and no permission. An iPad app on a Mac
   and the Simulator have none, so nothing is read there, and Android still
@@ -750,10 +706,9 @@ requires reopening Andarium.
   accelerometer and gyroscope are tried again as above. A run ends with the
   foreground, a changed mount or a restart, not with a reconnect. From iOS 27.2
   a motion status of denied or restricted hides it from the guest; nothing is
-  requested. A development build launched with `ANDARIUM_COMPASS_READOUT=1`
+  requested. A launch with `ANDARIUM_COMPASS_READOUT=1`
   prints, at most about twice a second, the Core Motion sample behind the
-  guest's field with iOS's own attitude and heading; App Store builds compile it
-  out.
+  guest's field with iOS's own attitude and heading.
 - **Text messages.** The Developer section of Settings has Send text
   message… under ADB over network, in every build configuration, but the
   device application holds the capability back until an accepted release image
@@ -1124,12 +1079,9 @@ Andarium is in English, Simplified Chinese, Traditional Chinese (Taiwan usage)
 and Japanese, and follows the language of iOS and the per-app language setting.
 The strings are String Catalogs in `Localization/` (screens, permission texts,
 What's New notes) and in `AndariumCore`'s resources. The JIT texts are their own
-catalog, table `JIT`, which the App Store configuration leaves out of the
-bundle and its check asserts is absent. The text of Follow developer on X is a
+catalog, table `JIT`. The text of Follow developer on X is a
 catalog of its own, table `FollowX`, built only where the feature is compiled
-in (`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`); the bundle
-check refuses the table, by its file name, in a product without the feature
-and asks for it in every language of one with it. English is the key (a readout or a
+in (`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`). English is the key (a readout or a
 joined list has a named key whose comment says which readout it serves), and
 the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
 and 仮想マシン, and its storage is 存储空间 in Simplified Chinese; the name of
@@ -1145,7 +1097,7 @@ short quoted Chinese or Japanese name is not cut across two lines.
 or the reverse. It runs on a development build made with
 `FOLLOW_X_HANDLE=example_handle` (the output of
 `Andarium` and `AndariumPreview` together; one without the feature has none of
-its strings and fails) and on an App Store build with `--app-store`. A
+its strings and fails). A
 string no catalog reaches (a `String` built in code) shows as English under
 Xcode's Accented Pseudolanguage, so a run with it on is part of adding a
 screen.
@@ -1154,8 +1106,8 @@ screen.
 
 A harness launch (`xcrun devicectl device process launch`, environment given
 as `DEVICECTL_CHILD_` variables) reaches a state without touching the screen.
-The names are the application's, in `Live/LaunchEnvironment.swift`, which the
-App Store configuration leaves out; `AndariumCore` knows the settings
+The names are the application's, in `Live/LaunchEnvironment.swift`;
+`AndariumCore` knows the settings
 (`LaunchOverrides.Setting`) and not the names. The `KERNARIUM_` names mean what
 they mean in Kernarium; the automation Android runtime
 (`package-ios-frameworks.sh --runtimes android --android-automation`)
@@ -1219,7 +1171,7 @@ setting given as a `TEST_RUNNER_`-prefixed variable. The test run ends the
 application, so `TEST_RUNNER_ANDARIUM_HOLD_SECONDS` keeps the host up that
 long. The opt-in test switches are in
 [`docs/testing.md`](../docs/testing.md#andarium). The console lines the harness
-reads are `Shared/ConsoleReport.swift`'s, and an App Store build prints none.
+reads are `Shared/ConsoleReport.swift`'s.
 
 The container's `Documents` is the harness's; Andarium never deletes a file it
 did not create. The guest is under `Library/Guest/` and is not the harness's to

@@ -17,8 +17,7 @@ nonisolated enum FollowXProfile {
     static let host = "x.com"
 
     /// Whether `handle` can be one of X's: 1 to 15 letters, digits and
-    /// underscores. The App Store bundle check holds the build's handle to the
-    /// same shape (`Andarium/scripts/check-app-store-bundle.py`).
+    /// underscores.
     static func isWellFormed(handle: String) -> Bool {
         let bytes = handle.utf8
         return (1...15).contains(bytes.count) && bytes.allSatisfy { byte in

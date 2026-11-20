@@ -9,14 +9,14 @@ text is the key. The strings live in:
   Andarium/Localization/Localizable.xcstrings   the application's screens
   Andarium/Localization/InfoPlist.xcstrings     the permission explanations
   Andarium/Localization/WhatsNew.xcstrings      the release notes, Shared/WhatsNew.json
-  Andarium/Localization/JIT.xcstrings           the JIT texts (table "JIT"), carried by the builds that have JIT only
-  Andarium/Localization/FollowX.xcstrings       the text of Follow developer on X (table "FollowX"), carried by the builds that have it only
+  Andarium/Localization/JIT.xcstrings           the JIT texts (table "JIT")
+  Andarium/Localization/FollowX.xcstrings       the text of Follow developer on X (table "FollowX"), carried by the builds that name a handle only
   Andarium/Localization/AppShortcuts.xcstrings  the phrases Siri and Search understand for Add to Home Screen (table "AppShortcuts")
   Andarium/AndariumCore/Sources/AndariumCore/Resources/Localizable.xcstrings
                                                 the words the model says
 
     localization.py check [--root DIR]
-    localization.py sync --stringsdata DIR [--stringsdata DIR ...] [--check] [--app-store] [--root DIR]
+    localization.py sync --stringsdata DIR [--stringsdata DIR ...] [--check] [--root DIR]
 
 `check` fails on anything a person would see as a defect in a translation: a
 key with no value, or a value that is not marked translated, in a language; a
@@ -45,17 +45,12 @@ it merges the strings the Swift compiler extracted (`*.stringsdata`, found
 under each DIR after a build with `SWIFT_EMIT_LOC_STRINGS`) into the
 catalogs, adding a new key in the state `new` and marking a key no code uses
 `stale`. Give it the output of every target that shares a catalog. With
-`--check` it changes nothing and fails when a catalog would change. The output
-of an App Store build is checked with `--app-store --check`: that build has no
-JIT, so it must have extracted no string of the JIT table and no catalog of it
-is compared, and only a string the catalogs lack is a problem (a key of
-`#if !APP_STORE` code is not in its output).
+`--check` it changes nothing and fails when a catalog would change.
 
-Follow developer on X (Andarium/README.md#follow-developer-on-x) is the same
-with its FollowX table, built only where the build names a handle: a
-development check needs `FOLLOW_X_HANDLE=example_handle` on the `xcodebuild`
-line, fails on one that extracted no string of the table, and an App Store
-build without the row does not compare its catalog.
+Follow developer on X (Andarium/README.md#follow-developer-on-x) has its own
+FollowX table, built only where the build names a handle: a check needs
+`FOLLOW_X_HANDLE=example_handle` on the `xcodebuild` line and fails on a build
+that extracted no string of the table.
 """
 
 from __future__ import annotations
@@ -509,15 +504,10 @@ def extracted_tables(files: list[pathlib.Path]) -> set[str]:
     return tables
 
 
-def sync(root: pathlib.Path, directories: list[pathlib.Path], check_only: bool, app_store: bool = False) -> list[str]:
+def sync(root: pathlib.Path, directories: list[pathlib.Path], check_only: bool) -> list[str]:
     files = stringsdata_files(directories)
     parts = partition(files, root)
     problems = Problems()
-    if app_store:
-        # The App Store build carries no JIT text: nothing of the JIT table may have been compiled into it.
-        if "JIT" in extracted_tables(files):
-            problems.add("JIT", "has strings in an App Store build, which carries no JIT text")
-        parts["JIT"] = []
     if not any(parts.values()):
         problems.add("sync", "no .stringsdata of the application or the package found: build with SWIFT_EMIT_LOC_STRINGS=YES first")
         return problems.items
@@ -527,8 +517,7 @@ def sync(root: pathlib.Path, directories: list[pathlib.Path], check_only: bool, 
     for table, arrangement in FEATURE_TABLES.items():
         if table not in extracted:
             parts[table] = []
-            if not app_store:
-                problems.add(table, f"has no extracted strings: build with {arrangement}")
+            problems.add(table, f"has no extracted strings: build with {arrangement}")
     with tempfile.TemporaryDirectory() as scratch:
         for name, data in parts.items():
             if not data:
@@ -549,11 +538,6 @@ def sync(root: pathlib.Path, directories: list[pathlib.Path], check_only: bool, 
                 added = sorted(set(after) - set(before))
                 removed = sorted(set(before) - set(after))
                 changed = sorted(key for key in set(before) & set(after) if before[key] != after[key])
-                if app_store:
-                    # The catalogs hold the keys of code this build compiled out: only a key it lacks is a defect.
-                    removed, changed = [], []
-                    if not added:
-                        continue
                 problems.add(
                     name,
                     f"is out of step with the code: {len(added)} to add {added[:5]}, {len(removed)} to remove {removed[:5]}, "
@@ -572,16 +556,12 @@ def main(argv: list[str] | None = None) -> int:
     sync_parser = commands.add_parser("sync", parents=[common], help="merge the compiler's extracted strings into the catalogs")
     sync_parser.add_argument("--stringsdata", type=pathlib.Path, action="append", required=True, metavar="DIR")
     sync_parser.add_argument("--check", action="store_true", help="change nothing; fail when a catalog would change")
-    sync_parser.add_argument("--app-store", action="store_true",
-                             help="the output is an App Store build's: no JIT table, and only a missing key fails (needs --check)")
     args = parser.parse_args(argv)
     if args.command == "check":
         problems = check(args.root)
         what = "the String Catalogs are complete"
     else:
-        if args.app_store and not args.check:
-            parser.error("--app-store only checks: give --check")
-        problems = sync(args.root, args.stringsdata, args.check, args.app_store)
+        problems = sync(args.root, args.stringsdata, args.check)
         what = "the String Catalogs match the code" if args.check else "the String Catalogs are updated"
     for problem in problems:
         print(f"localization.py: {problem}", file=sys.stderr)

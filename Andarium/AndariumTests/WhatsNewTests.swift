@@ -471,7 +471,6 @@ struct WhatsNewTests {
         }
     }
 
-    #if !APP_STORE
     @Test func onlyALaunchWithNoSettingAndOutsideATestAnnounces() {
         func announces(_ environment: [String: String]) -> Bool {
             AppEntry.isPersonsLaunch(
@@ -497,5 +496,4 @@ struct WhatsNewTests {
         #expect(!model.whatsNew.showsRibbon)
         #expect(model.whatsNew.releases.map(\.build) == [12, 11, 9])
     }
-    #endif
 }
