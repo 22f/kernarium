@@ -148,6 +148,7 @@ class Verdicts(unittest.TestCase):
     # Each camera's chart carries its own tag (the platform index): the phone profile's front camera is the platform's 3.
     FRONT = nv21_of(rotated_clockwise(upright_chart(tag=0x5A03), 2))
     BACK = nv21_of(upright_chart(tag=0x5A00))
+    BACK_TURNED = nv21_of(rotated_clockwise(upright_chart(tag=0x5A00), 2))
     FRONT_UNTURNED = nv21_of(upright_chart(tag=0x5A03))
     BACK_OF_ANOTHER_LENS = nv21_of(upright_chart(tag=0x5A01))
 
@@ -173,6 +174,9 @@ class Verdicts(unittest.TestCase):
             self.assertTrue(any(text in problem for problem in problems), f"{name}: {problems}")
         problems = runner.check_camera(runner.BACK, self.info(90, 0, 0), self.FRONT)
         self.assertTrue(any("another camera's chart" in problem for problem in problems), problems)
+        # The back camera's own chart, turned half around, is a frame the host must not have turned.
+        problems = runner.check_camera(runner.BACK, self.info(90, 0, 0), self.BACK_TURNED)
+        self.assertTrue(any("upright after the turns [(180, False)]" in problem for problem in problems), problems)
 
     def test_a_chart_of_another_camera_is_not_the_cameras_own(self) -> None:
         # The back camera the guest calls 0 is the platform's 0 and draws the tag 0x5a00; a frame of the chart of another
