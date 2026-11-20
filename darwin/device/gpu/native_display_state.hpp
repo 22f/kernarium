@@ -30,12 +30,15 @@ struct NativeDisplayStateCore {
     NativeDisplayStateCore& operator=(const NativeDisplayStateCore&) = delete;
 
     [[nodiscard]] bool drainResizeEvent();
-    /* The rate of the one mode the guest sees (Display::refreshRate). Only
-     * the iOS display paces its presents to anything but 60 Hz. */
+    /* The rate the host granted the display's one mode
+     * (Display::refreshRate), and the rate of the mode the guest was last
+     * given (Display::noteModeRefreshRate). Only the iOS display paces its
+     * presents to anything but 60 Hz. */
     [[nodiscard]] virtual std::uint32_t refreshRate() const noexcept
     {
         return 60;
     }
+    virtual void modeRefreshRateNoted(std::uint32_t) noexcept {}
     [[nodiscard]] virtual bool guestScanoutChanged(
         std::uint32_t width,
         std::uint32_t height) noexcept = 0;

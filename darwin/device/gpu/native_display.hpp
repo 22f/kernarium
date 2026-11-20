@@ -29,13 +29,22 @@ public:
     explicit NativeDisplay(std::shared_ptr<NativeDisplayStateCore> state);
     ~NativeDisplay() override;
 
-    /* The refresh rate a native display gives the guest when `requested` is
-     * asked of it: 120 when requested is 120 and this device's screen can show
-     * more than 60 frames a second (an iOS screen with a variable refresh
-     * rate), else 60. The one mode's rate is decided before the guest boots,
-     * so a caller that tells the guest about it asks here first. */
-    [[nodiscard]] static std::uint32_t supportedRefreshRate(
-        std::uint32_t requested) noexcept;
+    /* The refresh rate a run is granted, decided once before the guest boots:
+     * 120 when `requested` is 120 and every one of these holds, else 60. The
+     * screen of `nativeView`'s own window scene (never another scene) shows at
+     * least 100 frames a second (an iOS screen with a variable refresh rate;
+     * 61 to 99 would give a 120 Hz mode that the display link cannot pace);
+     * the host is an iPhone or iPad, not an iPad app on a Mac or on a Vision
+     * Pro; and a mode of `width` x `height` can state 120 Hz in its EDID
+     * (edid_timing.hpp). The caller states the answer to everything that
+     * depends on it: the EDID and the display's rate, the host-feature bit and
+     * the guest's boot property, the display link's pacing, and the
+     * application's run state. */
+    [[nodiscard]] static std::uint32_t grantedRefreshRate(
+        std::uint32_t requested,
+        void* nativeView,
+        std::uint32_t width,
+        std::uint32_t height) noexcept;
 
     NativeDisplay(const NativeDisplay&) = delete;
     NativeDisplay& operator=(const NativeDisplay&) = delete;
@@ -43,6 +52,7 @@ public:
     [[nodiscard]] std::uint32_t width() const noexcept override;
     [[nodiscard]] std::uint32_t height() const noexcept override;
     [[nodiscard]] std::uint32_t refreshRate() const noexcept override;
+    void noteModeRefreshRate(std::uint32_t rate) noexcept override;
     [[nodiscard]] int resizeEventDescriptor() const noexcept override;
     [[nodiscard]] bool drainResizeEvent() override;
     [[nodiscard]] bool guestScanoutChanged(

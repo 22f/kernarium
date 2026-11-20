@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <exception>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -38,6 +39,16 @@ public:
 
     void setGuestRate(double framesPerSecond) { guestRate_ = framesPerSecond; }
     void setCeiling(double ceiling) { ceiling_ = ceiling; }
+    /* The next `count` draws find no drawable (a transient failure of the
+     * view's drawable or render pass), and show nothing. */
+    void failNextDraws(unsigned count) { failures_ = count; }
+    /* One frame, now, whatever the guest rate. */
+    void offer()
+    {
+        ++frames_;
+        arrived();
+        wake();
+    }
 
     /* Runs `seconds` more. */
     void run(double seconds)
@@ -53,7 +64,11 @@ public:
 
     [[nodiscard]] double now() const { return now_; }
     [[nodiscard]] std::uint64_t frames() const { return frames_; }
+    /* Draws that showed a frame, and draws made (a failed one included). */
     [[nodiscard]] std::uint64_t presents() const { return presents_; }
+    [[nodiscard]] std::uint64_t draws() const { return draws_; }
+    /* A frame has arrived that no draw has shown. */
+    [[nodiscard]] bool frameWaiting() const { return unshown_; }
     [[nodiscard]] std::uint64_t ticks() const { return ticks_; }
     [[nodiscard]] std::uint64_t wakes() const { return wakes_; }
     [[nodiscard]] bool asleep() const { return asleep_; }
@@ -78,9 +93,7 @@ private:
             nextFrame_ = now_;
         while (nextFrame_ <= now_) {
             ++frames_;
-            if (!waiting_)
-                waitingSince_ = now_;
-            waiting_ = true;
+            arrived();
             wake();
             seed_ = seed_ * 1103515245U + 12345U;
             const double jitter =
@@ -88,6 +101,16 @@ private:
                 0.001;
             nextFrame_ += 1.0 / guestRate_ + jitter;
         }
+    }
+
+    /* The producer's side: the flag the tick takes, and the frame that stays
+     * unshown until a draw shows it. */
+    void arrived()
+    {
+        if (!unshown_)
+            waitingSince_ = now_;
+        unshown_ = true;
+        waiting_ = true;
     }
 
     void wake()
@@ -115,13 +138,23 @@ private:
     void tick()
     {
         ++ticks_;
-        const auto decision = pacer_.tick(now_, frames_, waiting_, ceiling_);
+        /* The tick takes the flag before it decides, as the display does. */
+        const bool waiting = std::exchange(waiting_, false);
+        const auto decision = pacer_.tick(now_, frames_, waiting, ceiling_);
         if (decision.range)
             request(*decision.range);
         if (decision.present) {
-            ++presents_;
-            longestWait_ = std::max(longestWait_, now_ - waitingSince_);
-            waiting_ = false;
+            ++draws_;
+            /* The tick draws, and says whether the drawable was there. */
+            const bool unavailable = failures_ > 0;
+            if (unavailable)
+                --failures_;
+            pacer_.drew(unavailable);
+            if (!unavailable) {
+                ++presents_;
+                longestWait_ = std::max(longestWait_, now_ - waitingSince_);
+                unshown_ = false;
+            }
         }
         if (decision.sleep) {
             asleep_ = true;
@@ -145,9 +178,12 @@ private:
     std::uint32_t seed_ {1};
     std::uint64_t frames_ {};
     std::uint64_t presents_ {};
+    std::uint64_t draws_ {};
+    unsigned failures_ {};
     std::uint64_t ticks_ {};
     std::uint64_t wakes_ {};
     bool waiting_ {};
+    bool unshown_ {};
     bool asleep_ {true};
     std::vector<LinkFrameRate> requests_;
 };
@@ -158,6 +194,12 @@ void aLinkThatWakesAsksForTheFastestRateTheCeilingAllows()
     require(pacer.wake(1.0, 0, 120.0) == high, "a 120 Hz ceiling");
     require(pacer.rate() == 120);
     require(pacer.wake(2.0, 0, 90.0) == normal, "a 90 Hz ceiling is a 60 step");
+    /* The 120 step needs a screen that shows 100 or more: the display is
+     * granted the 120 Hz mode only on one (uml::gpu::highStepMinimumCeiling),
+     * so a ceiling under it is never the mode's. */
+    require(uml::gpu::highStepMinimumCeiling == 100.0);
+    require(pacer.wake(2.5, 0, 99.0) == normal, "a 99 Hz ceiling is a 60 step");
+    require(pacer.wake(2.6, 0, 100.0) == high, "a 100 Hz ceiling is the 120 step");
     require(pacer.wake(3.0, 0, 60.0) == normal, "a 60 Hz ceiling");
     require(pacer.wake(4.0, 0, 30.0) == low, "a 30 Hz ceiling");
     require(pacer.wake(5.0, 0, 0.0) == low, "no ceiling is the slowest step");
@@ -252,34 +294,152 @@ void aGuestThatSpeedsUpFromThirtyRisesToSixtyAndToOneHundredTwenty()
     require(link.rate() == 120);
 }
 
-void aGuestNearAStepDoesNotMakeTheLinkFlip()
+/* The step a guest of `guestRate` settles on after `startRate`, a guest that
+ * has put the link on its own step first. */
+unsigned settledStep(double startRate, double guestRate)
 {
-    /* 80 frames a second is between the fall from 120 (72) and the rise to
-     * 120 (92): the link stays on whichever step it is on. */
-    Link onHigh;
-    onHigh.setGuestRate(80.0);
-    onHigh.run(6.0);
-    require(onHigh.rate() == 120);
-    require(onHigh.requests().size() == 1, "no step down at 80");
+    Link link;
+    link.setGuestRate(startRate);
+    link.run(1.5);
+    link.setGuestRate(guestRate);
+    link.run(4.0);
+    return link.rate();
+}
 
-    Link onNormal;
-    onNormal.setGuestRate(60.0);
-    onNormal.run(1.5);
-    require(onNormal.rate() == 60);
-    const auto requests = onNormal.requests().size();
-    onNormal.setGuestRate(80.0);
-    onNormal.run(6.0);
-    require(onNormal.rate() == 60, "no step up at 80");
-    require(onNormal.requests().size() == requests);
+/* The rule the steps follow: a guest whose rate is above a step's own rate by
+ * the margin the windows can tell does not stay on that step, from whichever
+ * step it came, so no link shows fewer frames than the guest renders for
+ * more than the margin. */
+void aGuestAboveAStepsOwnRateDoesNotStayOnIt()
+{
+    for (const double start : {20.0, 120.0}) {
+        for (const double guest : {20.0, 25.0, 30.0})
+            require(settledStep(start, guest) == 30, "a guest at or under 30");
+        for (const double guest : {40.0, 45.0, 47.0, 50.0, 55.0, 60.0})
+            require(settledStep(start, guest) == 60,
+                "a guest between 40 and 60 is on the 60 step");
+        for (const double guest : {75.0, 80.0, 85.0, 100.0, 120.0})
+            require(settledStep(start, guest) == 120,
+                "a guest over 75 is on the 120 step");
+    }
+}
 
-    /* Likewise a guest at 40 on the 60 step and the 30 step. */
-    Link onLow;
-    onLow.setGuestRate(30.0);
-    onLow.run(1.5);
-    require(onLow.rate() == 30);
-    onLow.setGuestRate(40.0);
-    onLow.run(3.0);
-    require(onLow.rate() == 30, "no step up at 40");
+/* A guest that has slowed under the 36 fps of the 60 step, then speeds up to
+ * the 45 of an ordinary scroll, must not be held at 30 shown frames a second
+ * (a guest at 45 gives 45 and 30 would be presented). */
+void aGuestThatSpeedsUpToFortyFiveAfterASlowSecondIsShownAtFortyFive()
+{
+    Link link;
+    link.setGuestRate(25.0);
+    link.run(1.0);
+    require(link.rate() == 30, "slow second");
+    link.setGuestRate(45.0);
+    link.run(1.0);
+    const auto frames = link.frames();
+    const auto presents = link.presents();
+    link.run(1.0);
+    require(link.rate() == 60, "the link rose");
+    require((link.presents() - presents) * 10U >=
+                (link.frames() - frames) * 9U,
+        "nearly every frame of the second after the rise is presented");
+}
+
+/* The same at the 60 step: a guest at 85 after a slower phase. */
+void aGuestThatSpeedsUpToEightyFiveAfterASlowerPhaseIsShownAtEightyFive()
+{
+    Link link;
+    link.setGuestRate(50.0);
+    link.run(1.0);
+    require(link.rate() == 60);
+    link.setGuestRate(85.0);
+    link.run(1.0);
+    const auto frames = link.frames();
+    const auto presents = link.presents();
+    link.run(1.0);
+    require(link.rate() == 120, "the link rose");
+    require((link.presents() - presents) * 100U >=
+                (link.frames() - frames) * 85U,
+        "most of the frames of the second after the rise are presented");
+}
+
+/* A guest between a step's rise and the fall of the step above stays where it
+ * is and makes no requests: no steady guest makes the link flip. */
+void aSteadyGuestMakesNoLinkFlip()
+{
+    for (const double guest : {20.0, 30.0, 33.0, 60.0, 66.0, 80.0, 120.0}) {
+        Link link;
+        link.setGuestRate(guest);
+        link.run(4.0);
+        const auto requests = link.requests().size();
+        link.run(8.0);
+        if (link.requests().size() != requests)
+            std::fprintf(stderr, "guest %.0f changed the range\n", guest);
+        require(link.requests().size() == requests,
+            "a steady guest changed the range");
+    }
+}
+
+/* A draw that finds no drawable shows nothing: with no later frame to ask
+ * again, the link must try the same frame at its next ticks, and sleep only
+ * when it is shown. */
+void aDrawThatFindsNoDrawableIsRetriedUntilTheFrameIsShown()
+{
+    Link link;
+    link.offer();
+    link.failNextDraws(5);
+    link.run(0.3);
+    require(link.presents() == 1, "the frame was shown once");
+    require(link.draws() == 6, "five failed draws and the one that showed it");
+    require(!link.frameWaiting());
+    link.run(0.3);
+    require(link.asleep(), "the link sleeps after the frame is shown");
+    require(link.draws() == 6, "no further draws");
+}
+
+/* A drawable that never comes costs a bounded number of draws, and the link
+ * sleeps after them: an idle link does not tick for ever. */
+void aDrawThatNeverFindsADrawableIsRetriedAtMostThirtyTimes()
+{
+    Link link;
+    link.offer();
+    link.failNextDraws(1000);
+    link.run(1.0);
+    require(link.draws() == 31, "the first draw and thirty retries");
+    require(link.presents() == 0);
+    require(link.asleep(), "the link slept once the retries were spent");
+    /* A new frame has its own retries, and a drawable that is back shows it
+     * at the next tick. */
+    link.failNextDraws(2);
+    link.offer();
+    link.run(0.2);
+    require(link.presents() == 1, "the next frame was shown");
+    require(link.draws() == 31 + 3);
+    link.run(0.3);
+    require(link.asleep());
+}
+
+/* The pacer's side of it, with no link: a retry is a present that no frame
+ * asked for, a shown draw ends the debt, and a frame renews it. */
+void aRetryIsAPresentNoFrameAskedFor()
+{
+    PresentPacer pacer;
+    (void)pacer.wake(0.0, 0, 120.0);
+    require(pacer.tick(0.0083, 1, true, 120.0).present);
+    pacer.drew(true);
+    const auto retry = pacer.tick(0.0166, 1, false, 120.0);
+    require(retry.present && !retry.sleep, "the retry presents");
+    pacer.drew(false);
+    const auto done = pacer.tick(0.0249, 1, false, 120.0);
+    require(!done.present && !done.sleep, "a shown frame owes nothing");
+    /* Never asleep while a retry is owed, though no frame has waited. */
+    PresentPacer owing;
+    (void)owing.wake(0.0, 0, 120.0);
+    require(owing.tick(0.01, 1, true, 120.0).present);
+    owing.drew(true);
+    require(owing.tick(0.5, 1, false, 120.0).present, "owed after 0.5 s");
+    owing.drew(false);
+    require(owing.tick(0.51, 1, false, 120.0).sleep == false);
+    require(owing.tick(0.7, 1, false, 120.0).sleep);
 }
 
 void theLinkSleepsWhenNoFrameHasWaitedForTheIdleTime()
@@ -390,7 +550,13 @@ int main()
         aGuestThatRendersFasterMakesTheLinkRiseAtOnce();
         aGuestThatSlowsDownMakesTheLinkFallInSteps();
         aGuestThatSpeedsUpFromThirtyRisesToSixtyAndToOneHundredTwenty();
-        aGuestNearAStepDoesNotMakeTheLinkFlip();
+        aGuestAboveAStepsOwnRateDoesNotStayOnIt();
+        aGuestThatSpeedsUpToFortyFiveAfterASlowSecondIsShownAtFortyFive();
+        aGuestThatSpeedsUpToEightyFiveAfterASlowerPhaseIsShownAtEightyFive();
+        aSteadyGuestMakesNoLinkFlip();
+        aDrawThatFindsNoDrawableIsRetriedUntilTheFrameIsShown();
+        aDrawThatNeverFindsADrawableIsRetriedAtMostThirtyTimes();
+        aRetryIsAPresentNoFrameAskedFor();
         theLinkSleepsWhenNoFrameHasWaitedForTheIdleTime();
         aFrameThatArrivesBeforeTheIdleTimeKeepsTheLinkAwake();
         aTickPresentsOnlyWhenAFrameWaits();

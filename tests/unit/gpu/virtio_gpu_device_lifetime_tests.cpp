@@ -116,6 +116,10 @@ public:
     {
         return displayRefreshRate;
     }
+    void noteModeRefreshRate(std::uint32_t rate) noexcept override
+    {
+        modeRefreshRates.push_back(rate);
+    }
 
     [[nodiscard]] bool guestScanoutChanged(
         std::uint32_t width,
@@ -694,6 +698,8 @@ public:
     std::uint32_t displayWidth {64};
     std::uint32_t displayHeight {64};
     std::uint32_t displayRefreshRate {60};
+    /* The rate of each mode the device stated to the display. */
+    std::vector<std::uint32_t> modeRefreshRates;
     std::uint32_t lastDisplaySourceWidth {};
     std::uint32_t lastDisplaySourceHeight {};
     std::size_t lastDisplaySourceRowBytes {};
@@ -1767,7 +1773,8 @@ protocol::GpuEdid edidOf(
     std::uint32_t width,
     std::uint32_t height,
     std::uint32_t dotsPerInch,
-    std::uint32_t refreshRate)
+    std::uint32_t refreshRate,
+    std::vector<std::uint32_t>* modeRates = nullptr)
 {
     FakeGpuDependencies dependencies;
     dependencies.displayWidth = width;
@@ -1786,6 +1793,8 @@ protocol::GpuEdid edidOf(
     for (std::size_t index = 0; index < response.size; ++index)
         checksum += response.edid[index];
     require((checksum & 0xffU) == 0);
+    if (modeRates != nullptr)
+        *modeRates = dependencies.modeRefreshRates;
     return response;
 }
 
@@ -1849,6 +1858,40 @@ void edidFallsBackToSixtyHertzWhenTheClockDoesNotFit()
     require(std::abs(edidRefreshRate(fits) - 60.0) < 0.2);
     require(std::equal(
         fits.edid.begin(), fits.edid.end(), tooBig.edid.begin()));
+}
+
+/* The rate of the mode that is made is told to the display, which paces its
+ * presents by it: a size that cannot state 120 Hz is a 60 Hz mode for a
+ * display that was granted 120, in the EDID and for the display alike, and
+ * the next size that can is a 120 Hz mode again. */
+void edidTellsTheDisplayTheRateOfTheModeItStates()
+{
+    std::vector<std::uint32_t> notes;
+    (void)edidOf(860, 1678, 320, 120, &notes);
+    require(notes == std::vector<std::uint32_t> {120}, "a size that fits");
+    const auto big = edidOf(2752, 2064, 264, 120, &notes);
+    require(notes == std::vector<std::uint32_t> {60},
+        "a size that cannot state 120 Hz is a 60 Hz mode");
+    require(std::abs(edidRefreshRate(big) - 60.0) < 0.2);
+    (void)edidOf(860, 1678, 320, 60, &notes);
+    require(notes == std::vector<std::uint32_t> {60}, "a display not granted it");
+    /* The one display that is granted 120 and is resized across the limit:
+     * each EDID it is asked for is the mode of its size. */
+    FakeGpuDependencies dependencies;
+    dependencies.displayRefreshRate = 120;
+    VirtioGpuDevice device {dependencies, noGuestReads, noGuestMappings, 264};
+    auto request = newRequest<protocol::GpuGetEdid>(GpuCommand::getEdid);
+    request.scanoutId = protocol::primaryScanoutId;
+    for (const auto [width, height] : {
+             std::pair {860U, 1678U}, std::pair {2752U, 2064U},
+             std::pair {1668U, 2388U}}) {
+        dependencies.displayWidth = width;
+        dependencies.displayHeight = height;
+        (void)device.process(requestBytes(request), false);
+    }
+    require(dependencies.modeRefreshRates ==
+                std::vector<std::uint32_t> {120, 60, 120},
+        "the mode's rate follows the size across a resize");
 }
 
 void displayChangeEventsPreserveAResizeThatRacesGuestClear()
@@ -4021,6 +4064,7 @@ int main()
     edidReportsDisplayPixelsAndEffectiveDensity();
     edidAtTheDefaultRateIsTheSixtyHertzMode();
     edidAtOneHundredTwentyHertzChangesOnlyTheClock();
+    edidTellsTheDisplayTheRateOfTheModeItStates();
     edidFallsBackToSixtyHertzWhenTheClockDoesNotFit();
     displayChangeEventsPreserveAResizeThatRacesGuestClear();
     contextInitUsesVirgl2ForTheDeviceSelectedDefault();

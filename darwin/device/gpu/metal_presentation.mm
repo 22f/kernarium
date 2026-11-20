@@ -526,6 +526,9 @@ struct MetalPresentationState final :
 #ifndef UML_APP_STORE_RUNTIME
             markTapDirty();
 #endif
+            /* An accepted scanout is one offered frame, counted before the
+             * redraw that shows it can look. */
+            offeredFrames.fetch_add(1, std::memory_order_release);
             requestRedraw();
             maybeReport();
             return superseded ? PresentOutcome::dropped
@@ -596,8 +599,11 @@ struct MetalPresentationState final :
     }
 
     /* Draws the newest frame into the next drawable of a view, or, with no
-     * view, of a layer that belongs to no window. */
-    void draw(MTKView* view, CAMetalLayer* layer) noexcept
+     * view, of a layer that belongs to no window. It says when the frame is
+     * owed and the view had no drawable or render pass to draw it into
+     * (DrawResult::unavailable), the one case in which the frame is neither
+     * shown nor retired and nothing else will ask for it again. */
+    DrawResult draw(MTKView* view, CAMetalLayer* layer) noexcept
     {
         @autoreleasepool {
             std::uint64_t contentGeneration = 0;
@@ -610,13 +616,13 @@ struct MetalPresentationState final :
             id<MTLTexture> sourceTexture;
             try {
                 if (view == nil && layer == nil)
-                    return;
+                    return DrawResult::done;
                 {
                     std::lock_guard lock(presentationMutex);
                     if (presentationInFlight ||
                         latestPresentationGeneration <=
                             presentedPresentationGeneration) {
-                        return;
+                        return DrawResult::done;
                     }
                     contentGeneration = latestContentGeneration;
                     presentationGeneration = latestPresentationGeneration;
@@ -631,7 +637,7 @@ struct MetalPresentationState final :
                      * framebuffer is locked; it may have none. */
                     sourceTexture = useCpu ? nil : latestTexture;
                     if (!activeSampling || (!useCpu && sourceTexture == nil))
-                        return;
+                        return DrawResult::done;
                     presentationInFlight = true;
                 }
                 /* Acquiring a drawable can block until the display releases
@@ -657,10 +663,11 @@ struct MetalPresentationState final :
                 if (pass == nil || drawable == nil) {
                     /* Release the claim without retiring the generation: the
                      * frame was not shown, and the next guest frame asks for
-                     * this one again. */
+                     * this one again. A caller that has no next frame to wait
+                     * for draws it again itself (the result). */
                     std::lock_guard lock(presentationMutex);
                     presentationInFlight = false;
-                    return;
+                    return DrawResult::unavailable;
                 }
                 if (useCpu) {
                     bool current = false;
@@ -676,7 +683,7 @@ struct MetalPresentationState final :
                     if (!current) {
                         finishPresentation(
                             contentGeneration, presentationGeneration);
-                        return;
+                        return DrawResult::done;
                     }
                 }
                 /* A CPU frame with no pixels, the first after a resize or a
@@ -695,7 +702,7 @@ struct MetalPresentationState final :
                     if (fitted.width <= 0.0 || fitted.height <= 0.0) {
                         finishPresentation(
                             contentGeneration, presentationGeneration);
-                        return;
+                        return DrawResult::done;
                     }
                     viewport = {
                         .originX = fitted.x,
@@ -710,7 +717,7 @@ struct MetalPresentationState final :
                 if (buffer == nil) {
                     finishPresentation(
                         contentGeneration, presentationGeneration);
-                    return;
+                    return DrawResult::done;
                 }
                 pass.colorAttachments[0].loadAction = MTLLoadActionClear;
                 pass.colorAttachments[0].clearColor = clearColor;
@@ -719,7 +726,7 @@ struct MetalPresentationState final :
                 if (encoder == nil) {
                     finishPresentation(
                         contentGeneration, presentationGeneration);
-                    return;
+                    return DrawResult::done;
                 }
                 if (drawSource) {
                     encodeScanoutPass(
@@ -759,6 +766,7 @@ struct MetalPresentationState final :
                 }
             }
         }
+        return DrawResult::done;
     }
 
 #if !defined(UML_APP_STORE_RUNTIME) && TARGET_OS_IOS
@@ -823,6 +831,7 @@ struct MetalPresentationState final :
             .droppedFrames = droppedFrames.load(std::memory_order_relaxed),
             .cpuFallbackFrames =
                 cpuFallbackFrames.load(std::memory_order_relaxed),
+            .offeredFrames = offeredFrames.load(std::memory_order_acquire),
         };
     }
 
@@ -932,6 +941,7 @@ struct MetalPresentationState final :
     std::atomic_uint64_t presentedFrames {};
     std::atomic_uint64_t droppedFrames {};
     std::atomic_uint64_t cpuFallbackFrames {};
+    std::atomic_uint64_t offeredFrames {};
     std::atomic_uint64_t reportedAt {};
     std::uint64_t reportedGuestFrames {};
     std::uint64_t reportedPresentedFrames {};
@@ -1008,14 +1018,14 @@ PresentOutcome MetalPresentation::present(
     return state_->present(scanout);
 }
 
-void MetalPresentation::draw(void* nativeView) noexcept
+DrawResult MetalPresentation::draw(void* nativeView) noexcept
 {
-    state_->draw((__bridge MTKView*)nativeView, nil);
+    return state_->draw((__bridge MTKView*)nativeView, nil);
 }
 
 void MetalPresentation::drawLayer(void* metalLayer) noexcept
 {
-    state_->draw(nil, (__bridge CAMetalLayer*)metalLayer);
+    (void)state_->draw(nil, (__bridge CAMetalLayer*)metalLayer);
 }
 
 DisplayStatistics MetalPresentation::statistics() const noexcept
@@ -1026,6 +1036,11 @@ DisplayStatistics MetalPresentation::statistics() const noexcept
 void MetalPresentation::recordCpuFallbackFrame() noexcept
 {
     state_->cpuFallbackFrames.fetch_add(1, std::memory_order_relaxed);
+}
+
+void MetalPresentation::recordGuestUpdate() noexcept
+{
+    state_->offeredFrames.fetch_add(1, std::memory_order_release);
 }
 
 void MetalPresentation::shutdown() noexcept

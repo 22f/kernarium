@@ -2385,6 +2385,7 @@ int runtimeRun(
             return -UML_EMULATOR_INVALID_ARGUMENT;
         }
         GuestRequest request;
+        std::uint32_t grantedRefreshRate = 60;
         request.adbPublicKey = std::move(adbPublicKey);
         request.timeZone = std::move(timeZone);
         if (boot->struct_size >= bootSizeBeforeJit &&
@@ -2422,18 +2423,26 @@ int runtimeRun(
                     "Kernarium: ignoring unknown host features 0x%x\n",
                     unknown);
             request.hostFeatures = boot->android_host_features & ~unknown;
-            /* The one 120 Hz mode is advertised only by a screen that can
-             * show it: a request on any other keeps the 60 Hz display, and
-             * the guest is not told of a mode it will not find. */
+            /* The one 120 Hz mode is granted here, once: to a run on an iPhone
+             * or iPad whose boot view's own screen shows 100 frames a second
+             * or more, for a display size whose EDID can state 120 Hz. The
+             * answer is the host-feature bit and the guest's boot property,
+             * the display's rate (EDID and pacing), and what the application
+             * reads of the run (statistics.display_refresh_hz). A request on
+             * any other keeps the 60 Hz display, and the guest is not told of
+             * a mode it will not find. */
             if ((request.hostFeatures &
-                 KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH) != 0 &&
-                uml::gpu::NativeDisplay::supportedRefreshRate(120U) != 120U) {
-                std::fputs(
-                    "Kernarium: this screen has no 120 Hz mode: keeping "
-                    "60 Hz\n",
-                    stderr);
-                request.hostFeatures &=
-                    ~KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH;
+                 KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH) != 0) {
+                grantedRefreshRate = uml::gpu::NativeDisplay::grantedRefreshRate(
+                    120U, (__bridge void*)view, width, height);
+                if (grantedRefreshRate != 120U) {
+                    std::fputs(
+                        "Kernarium: this display has no 120 Hz mode: keeping "
+                        "60 Hz\n",
+                        stderr);
+                    request.hostFeatures &=
+                        ~KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH;
+                }
             }
         }
         /* The identity a request states is kept as given: a value that is not
@@ -2642,12 +2651,6 @@ int runtimeRun(
                     static_cast<unsigned long long>(cameraReserve >> 20),
                     static_cast<unsigned long long>(deviceMemoryLimit >> 20));
 #endif
-            std::uint32_t displayRefreshRate = 60;
-#if KERNARIUM_RUNTIME_ANDROID_GUEST
-            if ((request.hostFeatures &
-                 KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH) != 0)
-                displayRefreshRate = 120;
-#endif
             /* The display outlives the guest: the GPU service keeps the view and
              * the frame mirror, and hands each boot its own connection. */
             uml::gpu::InProcessGpuService gpuService(
@@ -2658,7 +2661,7 @@ int runtimeRun(
                     .dotsPerInch = dotsPerInch,
                     .nativeView = (__bridge void*)view,
                     .autoResizeGuest = boot->auto_resize_guest != 0,
-                    .refreshRate = displayRefreshRate,
+                    .refreshRate = grantedRefreshRate,
                     .sharedMemoryRegions = sharedMemoryRegions,
                     .deviceMemoryLimit = deviceMemoryLimit,
                 });
@@ -3059,6 +3062,8 @@ int runtimeReadStatistics(kernarium_runtime_statistics* statistics)
                 display = kernarium::statistics::DisplayFigures {
                     .presentedFrames = frames->presentedFrames,
                     .offeredFrames = frames->guestFrames,
+                    .refreshRate =
+                        activeGpu->displayRefreshRate().value_or(0U),
                 };
             scanout = activeGpu->guestScanoutActive();
             memoryRefusals = activeGpu->memoryRefusals();

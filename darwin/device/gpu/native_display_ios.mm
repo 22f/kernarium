@@ -2,6 +2,7 @@
 
 #include "native_display.hpp"
 
+#include "edid_timing.hpp"
 #include "native_display_state.hpp"
 #include "present_pacer.hpp"
 
@@ -31,23 +32,41 @@ NSString* const resizeDidEndNotification =
 constexpr std::int64_t resizeSettleNanoseconds =
     150LL * NSEC_PER_MSEC;
 
-/* The window scene a view's display link belongs to: the view's own, or the
- * application's active (else first) one when the view is not in a window yet.
- * Main thread. */
+/* The window scene a view's display link belongs to: the view's own, and none
+ * while the view is in no window. Never another scene: a run is granted the
+ * 120 Hz mode by the screen of the scene its view is in, and a link made on
+ * any other would pace for a screen that does not show the guest. Main
+ * thread. */
 [[nodiscard]] UIWindowScene* displaySceneFor(UIView* view) noexcept
 {
-    if (view.window.windowScene != nil)
-        return view.window.windowScene;
-    UIWindowScene* first = nil;
-    for (UIScene* scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class])
-            continue;
-        if (scene.activationState == UISceneActivationStateForegroundActive)
-            return (UIWindowScene*)scene;
-        if (first == nil)
-            first = (UIWindowScene*)scene;
-    }
-    return first;
+    return view.window.windowScene;
+}
+
+/* A host that has the iOS runtime but whose display is not an iPhone's or an
+ * iPad's: an iPad app on a Mac or on a Vision Pro. Its display link does not
+ * pace a ProMotion screen, so it is never granted the 120 Hz mode. */
+[[nodiscard]] bool hostIsMacOrVision() noexcept
+{
+    NSProcessInfo* info = NSProcessInfo.processInfo;
+    if (info.isiOSAppOnMac)
+        return true;
+    if (@available(iOS 26.1, *))
+        return info.isiOSAppOnVision;
+    return false;
+}
+
+/* The display link of a window scene, which is what follows the scene to the
+ * screen it is on. The scene's own is iOS 27's; below it the screen's does the
+ * same for the one screen the scene is on. */
+[[nodiscard]] CADisplayLink* makeDisplayLink(
+    UIWindowScene* scene, id target, SEL selector) noexcept
+{
+    if (@available(iOS 27.0, *))
+        return [scene displayLinkWithTarget:target selector:selector];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return [scene.screen displayLinkWithTarget:target selector:selector];
+#pragma clang diagnostic pop
 }
 
 #ifndef UML_APP_STORE_RUNTIME
@@ -74,13 +93,18 @@ struct NativeDisplayState final :
         std::uint32_t refreshRate)
         : NativeDisplayStateCore(
               width, height, maximumDimension, autoResizeGuest)
-        , modeRate(refreshRate)
+        , grantedRate(refreshRate == 120U ? 120U : 60U)
+        , modeRate(grantedRate)
     {
     }
 
     [[nodiscard]] std::uint32_t refreshRate() const noexcept override
     {
-        return modeRate;
+        return grantedRate;
+    }
+    void modeRefreshRateNoted(std::uint32_t rate) noexcept override
+    {
+        modeRate.store(rate == 120U ? 120U : 60U, std::memory_order_release);
     }
 
     void attachView(void* nativeView);
@@ -94,24 +118,39 @@ struct NativeDisplayState final :
     void publishGuestSize(DisplaySize size) noexcept;
     void requestRedraw() noexcept;
     void shutdown() noexcept override;
-    /* The display link of a 120 Hz mode (modeRate above 60): it paces the
-     * presents, runs only while frames arrive and asks iOS for the rate the
-     * guest renders at (present_pacer.hpp). All of it runs on the main
-     * thread but requestPacedRedraw, which any thread may call. */
+    /* The display link of a run that was granted the 120 Hz mode (grantedRate
+     * above 60): it paces the presents, runs only while frames arrive and asks
+     * iOS for the rate the guest renders at (present_pacer.hpp). All of it runs
+     * on the main thread but requestPacedRedraw, which any thread may call. */
     void requestPacedRedraw() noexcept;
-    void wakeLink() noexcept;
+    /* `retry`: the wake is one this display asked for after it found no scene
+     * to make a link on, not a frame's. */
+    void wakeLink(bool retry) noexcept;
     void linkTick(CADisplayLink* ticking) noexcept;
     void applyLinkRange(LinkFrameRate range) noexcept;
     [[nodiscard]] double linkCeiling(UIWindowScene* scene) const noexcept;
     [[nodiscard]] std::uint64_t guestFramesOffered() const noexcept;
     void stopLink() noexcept;
+    /* The link follows the view's window scene: it goes when its scene is not
+     * the view's (the view moved to another scene, or its scene disconnected)
+     * and is made again on the view's scene at once if it was running. */
+    void dropLink() noexcept;
+    void followScene() noexcept;
+    /* Draws the newest frame as the 60 Hz path does, for a view that has no
+     * scene to make a link on, and asks again shortly if there was no
+     * drawable. */
+    void drawWithoutLink() noexcept;
 #ifndef UML_APP_STORE_RUNTIME
     void reportLink(double now) noexcept;
 #endif
 
-    /* The rate of the one mode the guest sees: 60, or 120 when the screen
-     * can show it (NativeDisplay::supportedRefreshRate). */
-    const std::uint32_t modeRate;
+    /* The rate the run was granted, once and for all before the guest booted
+     * (NativeDisplay::grantedRefreshRate), and the rate of the mode the guest
+     * has now: the granted rate for a size that can state it, 60 for one that
+     * cannot (the device notes each mode it states). The path follows the
+     * grant and the pacer's ceiling follows the mode. */
+    const std::uint32_t grantedRate;
+    std::atomic_uint32_t modeRate;
     /* A frame, or a change of what is shown, that no tick has presented yet,
      * and whether the link is running: the two flags every thread shares. */
     std::atomic_bool frameWaiting {};
@@ -123,6 +162,10 @@ struct NativeDisplayState final :
     __weak UIWindowScene* linkScene;
     PresentPacer pacer;
     LinkFrameRate requestedRange {};
+    /* Set by the view's draw (the delegate) when it found no drawable. */
+    bool drawUnavailable {};
+    /* Draws asked for again after a wake that found no scene. */
+    unsigned windowlessRetries {};
 #ifndef UML_APP_STORE_RUNTIME
     double reportStart {};
     double grantedSum {};
@@ -135,6 +178,8 @@ struct NativeDisplayState final :
     id<MTKViewDelegate> delegate;
     id resizeWillBeginObserver;
     id resizeDidEndObserver;
+    id sceneDisconnectObserver;
+    id sceneActivateObserver;
     __weak MTKView* view;
     std::atomic_bool running {true};
     std::atomic_bool redrawScheduled {};
@@ -208,8 +253,11 @@ struct NativeDisplayState final :
 
 - (void)drawInMTKView:(MTKView*)view
 {
-    if (auto state = _state.lock())
-        state->presentation.draw((__bridge void*)view);
+    if (auto state = _state.lock()) {
+        state->drawUnavailable =
+            state->presentation.draw((__bridge void*)view) ==
+            uml::gpu::DrawResult::unavailable;
+    }
 }
 
 @end
@@ -265,6 +313,36 @@ void NativeDisplayState::attachView(void* nativeView)
                     usingBlock:^(NSNotification*) {
                         if (auto locked = weak.lock())
                             locked->commitResize(metalView.drawableSize);
+                    }];
+        /* A display link follows its view's scene: one whose scene
+         * disconnects goes, and one that is running when a scene becomes
+         * active looks again at the scene it should be on. */
+        state->sceneDisconnectObserver = [center
+            addObserverForName:UISceneDidDisconnectNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(NSNotification* notification) {
+                        if (auto locked = weak.lock()) {
+                            if (notification.object != locked->linkScene)
+                                return;
+                            /* The scene the link was made on is gone, whatever
+                             * its window still says: the link goes, and a
+                             * frame that waits is drawn on the view's scene
+                             * or without a link. */
+                            locked->dropLink();
+                            if (locked->frameWaiting.load(
+                                    std::memory_order_seq_cst)) {
+                                locked->wakeLink(false);
+                            }
+                        }
+                    }];
+        state->sceneActivateObserver = [center
+            addObserverForName:UISceneDidActivateNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(NSNotification*) {
+                        if (auto locked = weak.lock())
+                            locked->followScene();
                     }];
         const bool transitionActive =
             [metalView respondsToSelector:@selector(umlGuestResizeInProgress)] &&
@@ -425,7 +503,7 @@ void NativeDisplayState::resetGuestSession() noexcept
 
 void NativeDisplayState::requestRedraw() noexcept
 {
-    if (modeRate > 60U) {
+    if (grantedRate > 60U) {
         requestPacedRedraw();
         return;
     }
@@ -461,22 +539,24 @@ void NativeDisplayState::requestPacedRedraw() noexcept
     auto state = shared_from_this();
     dispatch_async(dispatch_get_main_queue(), ^{
         state->wakeScheduled.store(false, std::memory_order_release);
-        state->wakeLink();
+        state->wakeLink(false);
     });
 }
 
 std::uint64_t NativeDisplayState::guestFramesOffered() const noexcept
 {
-    const DisplayStatistics counts = presentation.statistics();
-    return counts.guestFrames + counts.cpuFallbackFrames;
+    /* Every accepted guest update once, whichever path showed it. */
+    return presentation.statistics().offeredFrames;
 }
 
 double NativeDisplayState::linkCeiling(UIWindowScene* scene) const noexcept
 {
-    /* The fastest rate the screen can show now. Low Power Mode holds an
-     * iPhone to 60 whatever the screen says, and the guest is told to render
-     * no faster (the application's thermal reports). */
-    double ceiling = static_cast<double>(modeRate);
+    /* The fastest rate the screen can show now, up to the rate of the mode the
+     * guest has. Low Power Mode holds an iPhone to 60 whatever the screen
+     * says, and so does a screen that shows less than the mode; the guest is
+     * told to render no faster (the application's thermal reports). */
+    double ceiling =
+        static_cast<double>(modeRate.load(std::memory_order_acquire));
     const NSInteger maximum = scene.screen.maximumFramesPerSecond;
     if (maximum > 0)
         ceiling = std::min(ceiling, static_cast<double>(maximum));
@@ -494,7 +574,7 @@ void NativeDisplayState::applyLinkRange(LinkFrameRate range) noexcept
         CAFrameRateRangeMake(range.minimum, range.maximum, range.preferred);
 }
 
-void NativeDisplayState::wakeLink() noexcept
+void NativeDisplayState::wakeLink(bool retry) noexcept
 {
     if (!running.load(std::memory_order_acquire) ||
         linkAwake.load(std::memory_order_seq_cst)) {
@@ -503,27 +583,35 @@ void NativeDisplayState::wakeLink() noexcept
     MTKView* nativeView = view;
     if (nativeView == nil)
         return;
+    if (!retry)
+        windowlessRetries = 0;
     /* The link belongs to the scene the view is in: a view that moved to
-     * another scene, and so another screen, is followed when the link next
-     * wakes. */
+     * another scene, and so another screen, is followed (followScene) and at
+     * the latest when the link next wakes. */
     UIWindowScene* scene = displaySceneFor(nativeView);
-    if (scene == nil)
+    if (scene == nil) {
+        drawWithoutLink();
         return;
+    }
     if (link == nil || linkScene != scene) {
         [link invalidate];
+        link = nil;
+        linkScene = nil;
         if (linkTarget == nil) {
             linkTarget = [[UmlIOSDisplayLinkTarget alloc]
                 initWithState:weak_from_this()];
         }
-        link = [scene displayLinkWithTarget:linkTarget
-                                   selector:@selector(tick:)];
-        if (link == nil)
+        link = makeDisplayLink(scene, linkTarget, @selector(tick:));
+        if (link == nil) {
+            drawWithoutLink();
             return;
+        }
         link.paused = YES;
         [link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
         linkScene = scene;
         requestedRange = {};
     }
+    windowlessRetries = 0;
     applyLinkRange(pacer.wake(
         CACurrentMediaTime(), guestFramesOffered(), linkCeiling(scene)));
     linkAwake.store(true, std::memory_order_seq_cst);
@@ -533,10 +621,81 @@ void NativeDisplayState::wakeLink() noexcept
 #endif
 }
 
+void NativeDisplayState::drawWithoutLink() noexcept
+{
+    MTKView* nativeView = view;
+    if (nativeView == nil)
+        return;
+    /* The frame is drawn now, as the 60 Hz path draws it, so that it is not
+     * left unshown for want of a link. The flag goes with the draw; a draw
+     * that found no drawable puts it back and asks again shortly, a few
+     * times, because a view with no scene may find one. */
+    frameWaiting.store(false, std::memory_order_seq_cst);
+    drawUnavailable = false;
+    [nativeView draw];
+    if (!drawUnavailable) {
+        windowlessRetries = 0;
+        return;
+    }
+    frameWaiting.store(true, std::memory_order_seq_cst);
+    constexpr unsigned maximumRetries = 20;
+    if (windowlessRetries >= maximumRetries)
+        return;
+    ++windowlessRetries;
+    auto state = shared_from_this();
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, 50LL * NSEC_PER_MSEC),
+        dispatch_get_main_queue(),
+        ^{
+            if (state->running.load(std::memory_order_acquire) &&
+                state->frameWaiting.load(std::memory_order_seq_cst)) {
+                state->wakeLink(true);
+            }
+        });
+}
+
+void NativeDisplayState::dropLink() noexcept
+{
+    /* Main thread. */
+    linkAwake.store(false, std::memory_order_seq_cst);
+    [link invalidate];
+    link = nil;
+    linkScene = nil;
+    requestedRange = {};
+}
+
+void NativeDisplayState::followScene() noexcept
+{
+    if (!running.load(std::memory_order_acquire))
+        return;
+    MTKView* nativeView = view;
+    UIWindowScene* current =
+        nativeView != nil ? displaySceneFor(nativeView) : nil;
+    if (link != nil && current != nil && current == linkScene)
+        return;
+    /* A link made on a scene the view is not in any more may not tick again.
+     * It goes; a link that was running, or a frame that waits (one that no
+     * link could be made for earlier included), makes another on the view's
+     * scene now, or draws without one if there is none. */
+    const bool wasAwake = linkAwake.load(std::memory_order_seq_cst);
+    if (link != nil)
+        dropLink();
+    if (wasAwake || frameWaiting.load(std::memory_order_seq_cst))
+        wakeLink(false);
+}
+
 void NativeDisplayState::linkTick(CADisplayLink* ticking) noexcept
 {
     if (!running.load(std::memory_order_acquire))
         return;
+    /* A tick of a link that is not the view's scene's is not paced by what
+     * shows the guest: the link is made again on the view's scene. */
+    MTKView* nativeView = view;
+    if (ticking != link ||
+        (nativeView != nil && displaySceneFor(nativeView) != linkScene)) {
+        followScene();
+        return;
+    }
     /* A frame that arrives from here on is a frame for the next tick, so the
      * flag is taken before the decision is made. */
     const bool waiting = frameWaiting.exchange(false, std::memory_order_seq_cst);
@@ -546,9 +705,14 @@ void NativeDisplayState::linkTick(CADisplayLink* ticking) noexcept
     if (decision.range)
         applyLinkRange(*decision.range);
     if (decision.present) {
-        MTKView* nativeView = view;
-        if (nativeView != nil)
+        if (nativeView != nil) {
+            drawUnavailable = false;
             [nativeView draw];
+            /* A draw that found no drawable is owed again at the next ticks,
+             * a bounded number of them: the newest frame must not stay unshown
+             * while the link sleeps. */
+            pacer.drew(drawUnavailable);
+        }
 #ifndef UML_APP_STORE_RUNTIME
         ++reportDraws;
 #endif
@@ -576,11 +740,8 @@ void NativeDisplayState::linkTick(CADisplayLink* ticking) noexcept
 void NativeDisplayState::stopLink() noexcept
 {
     /* Main thread. */
-    linkAwake.store(false, std::memory_order_seq_cst);
-    [link invalidate];
-    link = nil;
+    dropLink();
     linkTarget = nil;
-    linkScene = nil;
 }
 
 #ifndef UML_APP_STORE_RUNTIME
@@ -638,27 +799,45 @@ void NativeDisplayState::shutdown() noexcept
             [center removeObserver:state->resizeWillBeginObserver];
         if (state->resizeDidEndObserver != nil)
             [center removeObserver:state->resizeDidEndObserver];
+        if (state->sceneDisconnectObserver != nil)
+            [center removeObserver:state->sceneDisconnectObserver];
+        if (state->sceneActivateObserver != nil)
+            [center removeObserver:state->sceneActivateObserver];
         state->view = nil;
         state->delegate = nil;
         state->resizeWillBeginObserver = nil;
         state->resizeDidEndObserver = nil;
+        state->sceneDisconnectObserver = nil;
+        state->sceneActivateObserver = nil;
     });
 }
 
-std::uint32_t NativeDisplay::supportedRefreshRate(
-    std::uint32_t requested) noexcept
+std::uint32_t NativeDisplay::grantedRefreshRate(
+    std::uint32_t requested,
+    void* nativeView,
+    std::uint32_t width,
+    std::uint32_t height) noexcept
 {
-    if (requested != 120U)
+    if (requested != 120U || nativeView == nullptr ||
+        !edidCarries120Hz(width, height)) {
         return 60U;
-    __block NSInteger maximum = 60;
+    }
+    __block NSInteger maximum = 0;
+    __block bool ineligibleHost = false;
     const auto read = ^{
-        maximum = displaySceneFor(nil).screen.maximumFramesPerSecond;
+        ineligibleHost = hostIsMacOrVision();
+        UIWindowScene* scene = displaySceneFor((__bridge MTKView*)nativeView);
+        if (scene != nil)
+            maximum = scene.screen.maximumFramesPerSecond;
     };
     if ([NSThread isMainThread])
         read();
     else
         dispatch_sync(dispatch_get_main_queue(), read);
-    return maximum > 60 ? 120U : 60U;
+    return !ineligibleHost &&
+            maximum >= static_cast<NSInteger>(highStepMinimumCeiling)
+        ? 120U
+        : 60U;
 }
 
 NativeDisplay::NativeDisplay(
@@ -676,7 +855,7 @@ NativeDisplay::NativeDisplay(
         height,
         maximumDimension,
         autoResizeGuest,
-        supportedRefreshRate(refreshRate));
+        refreshRate);
     state->attachView(nativeView);
     state_ = std::move(state);
 }

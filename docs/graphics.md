@@ -53,11 +53,15 @@ Presentation:
   needs no host fence of its own: the guest flushes a scanout only after the
   fence of the rendering it shows has retired.
 - The iOS display presents on each guest flush at its one 60 Hz mode. When the
-  boot asks for the 120 Hz mode (Andarium's "120 Hz" setting), the mode's EDID
-  says 120 and a display link (`darwin/device/gpu/present_pacer.hpp`) paces the
-  presents instead, following the rate the guest renders at and pausing when no
-  frame waits ([Display refresh rate](../Kernarium/README.md#display-refresh-rate)).
-  macOS and visionOS keep the flush-driven path.
+  boot asks for the 120 Hz mode (Andarium's "120 Hz" setting) and the runtime
+  grants it for the boot view's screen and size, the mode's EDID says 120 and a
+  display link (`darwin/device/gpu/present_pacer.hpp`) paces the presents
+  instead, following the rate the guest renders at, retrying a present that
+  found no drawable and pausing when no frame waits
+  ([Display refresh rate](../Kernarium/README.md#display-refresh-rate)). A
+  refused run, macOS and visionOS keep the flush-driven path. The statistics'
+  `offered_frames` count every accepted guest update once (direct scanout,
+  2-D flush and readback).
 - VNC is a macOS consumer of the same renderer for diagnostics and remote
   display, not a second backend. Its framebuffer keeps the size it was created
   with and aspect-fits every guest mode. Readback is asynchronous and never

@@ -13,6 +13,16 @@ namespace uml::gpu {
 
 struct MetalPresentationState;
 
+/* What a draw left owed. `unavailable`: the newest frame is owed and the view
+ * had no drawable or render pass to draw it into (a transient failure), so it
+ * is neither shown nor retired, and with no later frame nothing asks for it
+ * again; a caller that paces its draws draws again. `done`: nothing is owed,
+ * or the frame is shown or in flight, or it was retired. */
+enum class DrawResult : std::uint8_t {
+    done,
+    unavailable,
+};
+
 // Common newest-frame-wins Metal timeline used by the AppKit and UIKit shells.
 // Objective-C and Metal types remain inside the implementation.
 class MetalPresentation final {
@@ -42,13 +52,17 @@ public:
     void publishCpuFrame() noexcept;
     [[nodiscard]] PresentOutcome present(
         const MetalScanout& scanout) noexcept;
-    void draw(void* nativeView) noexcept;
+    DrawResult draw(void* nativeView) noexcept;
     /* The same into the next drawable of a CAMetalLayer, which need belong to
      * no window and then has no display link to ask for a frame: whoever owns
      * the layer calls this from the redraw callback. */
     void drawLayer(void* metalLayer) noexcept;
     [[nodiscard]] DisplayStatistics statistics() const noexcept;
     void recordCpuFallbackFrame() noexcept;
+    /* A CPU update of the guest's pixels was accepted: one offered frame
+     * (DisplayStatistics::offeredFrames), counted before the frame is
+     * published. A direct scanout counts itself in present(). */
+    void recordGuestUpdate() noexcept;
     void shutdown() noexcept;
 
 private:

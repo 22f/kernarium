@@ -168,6 +168,12 @@ public:
     [[nodiscard]] std::optional<DisplayStatistics> displayStatistics()
         const noexcept;
 
+    /* The rate the host granted the display's mode (Display::refreshRate): 60,
+     * or 120 for a run granted the 120 Hz display. Nothing once stop() has let
+     * the display go. Any thread. */
+    [[nodiscard]] std::optional<std::uint32_t> displayRefreshRate()
+        const noexcept;
+
     /* How many times the device answered the guest that the host GPU had no
      * room for an allocation, since the display was made (a guest that
      * restarts does not reset it). Only an answer the guest received counts:

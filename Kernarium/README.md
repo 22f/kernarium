@@ -317,20 +317,31 @@ scene manifest does not support multiple scenes.
 ### Display refresh rate
 
 The guest's display has one mode, 60 Hz. When the boot request carries
-`KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH` (runtime API 44) and the device's
-screen can show more than 60 frames a second, an Android guest gets one 120 Hz
-mode instead (the EDID's detailed timing; the 60 Hz bytes do not change, and a
-size whose pixel clock does not fit the EDID keeps 60), and the runtime tells
-the guest with `androidboot.kernarium.high_refresh=1`. A screen that cannot show
-120 drops the bit, with a line on stderr. At 60 Hz, and on a Mac, a present
-follows each guest flush. At 120 Hz a display link paces the presents
+`KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH` (runtime API 44), the runtime
+decides once, at boot, whether this run has 120 Hz (`grantedRefreshRate` of
+`NativeDisplay`): the boot view's own screen must show at least 100 frames
+a second (a screen between 61 and 99 is refused), and the boot size's 120 Hz
+detailed timing must fit the EDID (`darwin/device/gpu/edid_timing.hpp`; the
+12.9" and 13" iPad Pro at native size do not). Granted, an Android guest gets
+one 120 Hz mode (the 60 Hz bytes do not change) and
+`androidboot.kernarium.high_refresh=1`. Refused, the run is a 60 Hz run in
+every respect (no bit, no property, no pacer), with a line on stderr, and macOS
+and visionOS always refuse. `display_refresh_hz` of the runtime's statistics
+(120 or 60; 0 with no display) is what the run was granted, which the
+application follows. After a resize, the mode's rate follows the mode the
+runtime makes: 120 only where granted and the new size fits the EDID.
+At 60 Hz, and on a Mac, a present follows each guest flush. At 120 Hz a display
+link on the view's own window scene (it follows the view to another scene,
+and a missing link or scene leaves a retry) paces the presents
 (`darwin/device/gpu/present_pacer.hpp`): it runs only while frames wait, asks
 iOS for the rate the guest renders at in three steps (120, 60 and 30 frames a
-second), takes the screen's maximum and Low Power Mode as its ceiling, and
-pauses after 100 ms without a frame. `CADisableMinimumFrameDurationOnPhone` in
-the application's `Info.plist` lets an iPhone exceed 60. What the guest does with
-the property is in
-[`android/lineage-24/README.md`](../android/lineage-24/README.md).
+second; a guest above a step's own rate leaves that step), takes the mode's
+rate, the screen's maximum and Low Power Mode as its ceiling, retries a
+present that found no drawable (bounded) and pauses after 100 ms without a
+frame. When the ceiling is below the mode's rate the guest is held, as under
+Low Power Mode. `CADisableMinimumFrameDurationOnPhone` in the application's
+`Info.plist` lets an iPhone exceed 60. What the guest does with the property
+is in [`android/lineage-24/README.md`](../android/lineage-24/README.md).
 
 ### Microphone
 

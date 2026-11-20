@@ -72,13 +72,15 @@ enum {
      * orientation that navigation applications take their heading from;
      * without the bit it lists none and declares none. */
     KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS = 1u << 2,
-    /* The application asks for a 120 Hz display (runtime API 44), on a device
-     * whose screen can show it. The runtime then advertises one 120 Hz mode in
-     * place of the 60 Hz one and paces its presents to the guest's rate (a
-     * screen that cannot show more than 60 keeps the 60 Hz mode), and the
-     * guest then runs the 120 Hz configuration of Android's frame scheduler;
-     * without the bit the display and the guest are what they have always
-     * been. */
+    /* The application asks for a 120 Hz display (runtime API 44). The runtime
+     * decides once at boot, against the boot view's own screen (at least 100
+     * frames a second) and the boot size (the EDID must carry the 120 Hz
+     * timing), and on a Mac or Vision Pro always refuses. Granted, it
+     * advertises one 120 Hz mode in place of the 60 Hz one and paces its
+     * presents to the guest's rate, and the guest then runs the 120 Hz
+     * configuration of Android's frame scheduler; refused, or without the bit,
+     * the display and the guest are what they have always been. The
+     * statistics' display_refresh_hz says what the run was granted. */
     KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH = 1u << 3,
 };
 
@@ -534,6 +536,14 @@ typedef struct kernarium_runtime_statistics {
     uint32_t boot_index;
     /* As guest_display_active: 1 on, 0 off, -1 unknown. */
     int32_t display_active;
+    /* The refresh rate the host granted the run's display (runtime API 44):
+     * 120 when the run was given the 120 Hz mode, 60 for the 60 Hz display, and
+     * 0 while there is no display. It is decided once, before the guest boots
+     * (ANDROID_HOST_HIGH_REFRESH), and the guest's own mode follows it only
+     * while a display size can state it. The application learns from it
+     * whether a run has the 120 Hz display, whatever it asked. */
+    uint32_t display_refresh_hz;
+    uint32_t reserved;
     /* When the CPU time was read, in nanoseconds of the steady clock, which
      * does not count the time the device sleeps. */
     uint64_t timestamp_ns;

@@ -11,7 +11,7 @@ PresentPacer::PresentPacer(Parameters parameters)
 
 unsigned PresentPacer::rateForCeiling(double ceiling) noexcept
 {
-    if (ceiling >= 100.0)
+    if (ceiling >= highStepMinimumCeiling)
         return 120;
     return ceiling >= 50.0 ? 60 : 30;
 }
@@ -44,7 +44,21 @@ LinkFrameRate PresentPacer::wake(
     remember(now, guestFrames);
     rate_ = rateForCeiling(ceiling);
     lastPresent_ = now;
+    retryOwed_ = false;
+    retries_ = 0;
     return rangeFor(rate_);
+}
+
+void PresentPacer::drew(bool unavailable) noexcept
+{
+    if (!unavailable) {
+        retryOwed_ = false;
+        retries_ = 0;
+        return;
+    }
+    retryOwed_ = retries_ < parameters_.maximumDrawRetries;
+    if (retryOwed_)
+        ++retries_;
 }
 
 void PresentPacer::remember(double now, std::uint64_t guestFrames) noexcept
@@ -58,7 +72,7 @@ void PresentPacer::remember(double now, std::uint64_t guestFrames) noexcept
 }
 
 std::optional<double> PresentPacer::framesPerSecond(
-    double now, double window) const noexcept
+    double now, double window, bool wholeWindow) const noexcept
 {
     if (count_ < 2)
         return std::nullopt;
@@ -77,7 +91,11 @@ std::optional<double> PresentPacer::framesPerSecond(
     /* Fewer samples than most of the window cannot say a rate. */
     if (span < 0.6 * window)
         return std::nullopt;
-    return static_cast<double>(newest.frames - start.frames) / span;
+    /* A rise judges the frames the window holds against the whole window: a
+     * window the samples cover only most of has fewer frames, never a
+     * higher rate than a whole one. */
+    return static_cast<double>(newest.frames - start.frames) /
+        (wholeWindow ? window : span);
 }
 
 PresentPacer::Decision PresentPacer::tick(
@@ -89,7 +107,8 @@ PresentPacer::Decision PresentPacer::tick(
     remember(now, guestFrames);
     Decision decision;
     unsigned next = rate_;
-    if (const auto fast = framesPerSecond(now, parameters_.riseWindowSeconds)) {
+    if (const auto fast =
+            framesPerSecond(now, parameters_.riseWindowSeconds, true)) {
         if (*fast >= parameters_.riseToHigh)
             next = 120;
         else if (next == 30 && *fast >= parameters_.riseToNormal)
@@ -97,7 +116,7 @@ PresentPacer::Decision PresentPacer::tick(
     }
     if (next == rate_) {
         if (const auto slow =
-                framesPerSecond(now, parameters_.fallWindowSeconds)) {
+                framesPerSecond(now, parameters_.fallWindowSeconds, false)) {
             if (*slow < parameters_.fallFromNormal && rate_ > 30)
                 next = 30;
             else if (*slow < parameters_.fallFromHigh && rate_ == 120)
@@ -111,9 +130,13 @@ PresentPacer::Decision PresentPacer::tick(
         rate_ = next;
         decision.range = rangeFor(next);
     }
-    if (frameWaiting) {
+    /* A frame that arrived has its own retries. */
+    if (frameWaiting)
+        retries_ = 0;
+    if (frameWaiting || retryOwed_) {
         decision.present = true;
         lastPresent_ = now;
+        retryOwed_ = false;
     } else if (now - lastPresent_ >= parameters_.idleSeconds) {
         decision.sleep = true;
     }

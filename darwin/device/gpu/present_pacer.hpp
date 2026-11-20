@@ -8,6 +8,13 @@
 
 namespace uml::gpu {
 
+/* The slowest screen that can show the 120 step: a ceiling at or above it asks
+ * for 120 (iOS gives a 100 Hz screen its 100), and one below it can ask for no
+ * more than 60, so a screen that shows 61 to 99 would be given a 120 Hz mode
+ * that it cannot pace. The 120 Hz display is granted only to a screen at or
+ * above it, and the application offers the setting only for such a screen. */
+inline constexpr double highStepMinimumCeiling = 100.0;
+
 /* What a display link asks the system for, in frames per second: the
  * minimum, the maximum and the preferred rate of a CAFrameRateRange. */
 struct LinkFrameRate {
@@ -28,16 +35,22 @@ struct LinkFrameRate {
  * 30 frames a second. A guest that renders at 60 on a 120 Hz mode, which is
  * what Android does for most content, would keep the display at 120 for
  * ticks that carry no frame, so the link asks for the rate the frames come
- * at: it rises at once when the guest renders faster and falls when the
- * recent frames show a slower guest. A link that wakes asks for the fastest
- * rate the ceiling allows, because the first frame of a burst should wait for
- * the shortest tick, and settles on the evidence of the burst. The ceiling is
- * the fastest rate the host allows now (the mode's rate, or less when the
- * screen can show less, as in Low Power Mode).
+ * at: it rises at once when the guest renders faster than its step and falls
+ * when the recent frames show a slower guest. A guest above a step's own rate
+ * by more than a window can tell does not stay on that step, because a tick
+ * shows only the newest frame, so a link that stayed would show fewer frames
+ * than the guest renders. A link that wakes asks for the fastest rate the
+ * ceiling allows, because the first frame of a burst should wait for the
+ * shortest tick, and settles on the evidence of the burst. The ceiling is the
+ * fastest rate the host allows now (the mode's rate, or less when the screen
+ * can show less, as in Low Power Mode).
  *
  * The link sleeps when no frame has been waiting for idleSeconds. Whoever
  * runs the link keeps one flag, whether a frame waits, and clears it when a
- * tick presents. */
+ * tick presents. A tick that presents draws, and tells the pacer when the
+ * drawable was not there (`drew`): the frame is then drawn again on the next
+ * ticks, up to maximumDrawRetries of them, so that a transient failure
+ * does not leave the newest frame unshown while the link sleeps. */
 class PresentPacer final {
 public:
     struct Parameters {
@@ -47,14 +60,25 @@ public:
         double riseWindowSeconds {0.2};
         double fallWindowSeconds {0.4};
         /* A rate in frames a second: at or above this the guest renders
-         * faster than the next step down, and the link rises to it ... */
-        double riseToHigh {92.0};
-        double riseToNormal {50.0};
+         * faster than the step the link is on, and the link rises to the
+         * step above. It is just above the step's own rate, by the frame or
+         * two that the 0.2 s window counts (a frame is 5 fps in it): 36 over
+         * the 30 step is 8 frames in the window, 72 over the 60 step is 15 ...
+         * */
+        double riseToHigh {72.0};
+        double riseToNormal {36.0};
         /* ... and below this the guest renders slower than the step, and the
-         * link falls from it. A guest between the two on a step stays on it:
-         * the gap is wider than a frame or two counted in either window. */
-        double fallFromHigh {72.0};
-        double fallFromNormal {36.0};
+         * link falls from it. The fall is under the rise by more than the
+         * window's frame, so that a guest between the two stays on its step
+         * and no steady guest makes the link flip: 33 is over the 30 step's
+         * own rate and under what 8 frames of 0.2 s count, 64 is over the 60
+         * step's. */
+        double fallFromHigh {64.0};
+        double fallFromNormal {33.0};
+        /* How many times a frame is drawn again after a draw that found no
+         * drawable, at the next ticks: 30 is a quarter of a second at the
+         * 120 step and a second at the 30 step. */
+        unsigned maximumDrawRetries {30};
     };
 
     /* What a tick is to do. */
@@ -85,6 +109,12 @@ public:
         bool frameWaiting,
         double ceiling) noexcept;
 
+    /* A tick that presented has drawn: `unavailable` says the draw found no
+     * drawable or render pass, so that nothing was shown and the frame is
+     * still the newest. The next ticks present again, up to the limit, and a
+     * draw that shows the frame ends them. */
+    void drew(bool unavailable) noexcept;
+
     /* The rate the link now asks for, 120, 60 or 30. */
     [[nodiscard]] unsigned rate() const noexcept;
 
@@ -102,13 +132,18 @@ private:
     [[nodiscard]] static unsigned rateForCeiling(double ceiling) noexcept;
     void remember(double now, std::uint64_t guestFrames) noexcept;
     /* Frames a second over the last `window` seconds, when the samples span
-     * most of it. */
+     * most of it: the frames counted over the span the samples cover, or over
+     * the whole window with `wholeWindow`. */
     [[nodiscard]] std::optional<double> framesPerSecond(
-        double now, double window) const noexcept;
+        double now, double window, bool wholeWindow) const noexcept;
 
     Parameters parameters_;
     unsigned rate_ {60};
     double lastPresent_ {};
+    /* A draw owed to the newest frame, and how many have been tried since a
+     * frame last arrived. */
+    bool retryOwed_ {};
+    unsigned retries_ {};
     std::array<Sample, capacity> samples_ {};
     std::size_t first_ {};
     std::size_t count_ {};

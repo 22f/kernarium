@@ -1135,7 +1135,8 @@ void NativeDisplayState::shutdown() noexcept
     });
 }
 
-std::uint32_t NativeDisplay::supportedRefreshRate(std::uint32_t) noexcept
+std::uint32_t NativeDisplay::grantedRefreshRate(
+    std::uint32_t, void*, std::uint32_t, std::uint32_t) noexcept
 {
     /* The window of a Mac keeps its 60 Hz mode and its on-demand presents. */
     return 60;

@@ -30,6 +30,9 @@ public:
     {
         return 60;
     }
+    /* The rate of the mode the device stated
+     * (Display::noteModeRefreshRate). */
+    virtual void noteModeRefreshRate(std::uint32_t) noexcept {}
     [[nodiscard]] virtual bool guestScanoutChanged(
         std::uint32_t width,
         std::uint32_t height) noexcept = 0;
