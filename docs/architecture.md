@@ -1102,8 +1102,7 @@ values of the launch's `androidboot.serialno`, `androidboot.kernarium.adb_key`
 and `androidboot.kernarium.timezone` arguments wherever they stand (also a
 write that ends inside one), the assignments of those names and any hardware
 address in its colon spelling are replaced by `<masked>`, `<time zone>` and
-`<address>`, the words the application's start log uses, so no reader of the
-file has them. An end is the last state on disk unless the process dies between
+`<address>`, so no reader of the file has them. An end is the last state on disk unless the process dies between
 a delayed checkpoint's write and its repair: the end formats its record before
 it writes it, and a checkpoint whose write lands after it writes that record
 again at once. The file is text of a fixed layout (`uml-session 8`) of 19200
