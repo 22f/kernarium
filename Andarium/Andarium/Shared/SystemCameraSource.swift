@@ -4,6 +4,16 @@ import AndariumCore
 import AVFoundation
 import Foundation
 
+extension ProcessInfo {
+    /// The application runs as an iPad app on an Apple Vision Pro. The system
+    /// answers from iOS 26.1; a system below it gives none, and the answer is
+    /// no.
+    nonisolated var runsAsIOSAppOnVision: Bool {
+        if #available(iOS 26.1, *) { return isiOSAppOnVision }
+        return false
+    }
+}
+
 /// What the Camera row's availability asks of the system: the two platforms
 /// that run the application as an iPad app, and the built-in front camera. A
 /// test plays another host by giving its own.
@@ -17,7 +27,7 @@ struct CameraPlatform {
     static var system: CameraPlatform {
         let info = ProcessInfo.processInfo
         return CameraPlatform(
-            isiOSAppOnMac: info.isiOSAppOnMac, isiOSAppOnVision: info.isiOSAppOnVision,
+            isiOSAppOnMac: info.isiOSAppOnMac, isiOSAppOnVision: info.runsAsIOSAppOnVision,
             hasFrontCamera: { SystemCameraSource.hasFrontCamera })
     }
 

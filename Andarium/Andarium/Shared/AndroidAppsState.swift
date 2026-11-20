@@ -480,7 +480,7 @@ nonisolated final class AndroidAppsHub: @unchecked Sendable {
     /// feature is offered there.
     static var processOffersAddToHomeScreen: Bool {
         let info = ProcessInfo.processInfo
-        return !info.isiOSAppOnMac && !info.isiOSAppOnVision
+        return !info.isiOSAppOnMac && !info.runsAsIOSAppOnVision
     }
 
     /// Whether the apps are entities, in Spotlight and in the tiles.

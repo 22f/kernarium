@@ -245,11 +245,20 @@ void installHooks()
         imp_implementationWithBlock(^AVAudioFormat*(id, AVAudioNodeBus) {
           return format;
         }));
+#ifdef UML_AUDIO_LEGACY_SESSION
+    // Before iOS 27 the only tap call is the one that raises on failure.
+    Method tap = class_getInstanceMethod([AVAudioInputNode class],
+        @selector(installTapOnBus:bufferSize:format:block:));
+    method_setImplementation(tap, imp_implementationWithBlock(
+        ^(id, AVAudioNodeBus, AVAudioFrameCount, AVAudioFormat*,
+            AVAudioNodeTapBlock) {}));
+#else
     Method tap = class_getInstanceMethod([AVAudioInputNode class],
         @selector(installTapOnBus:bufferSize:format:error:block:));
     method_setImplementation(tap, imp_implementationWithBlock(
         ^BOOL(id, AVAudioNodeBus, AVAudioFrameCount, AVAudioFormat*,
             NSError* __autoreleasing*, AVAudioNodeTapBlock) { return YES; }));
+#endif
     Method untap = class_getInstanceMethod(
         [AVAudioInputNode class], @selector(removeTapOnBus:));
     method_setImplementation(untap,
@@ -271,8 +280,9 @@ struct Recording final {
     uml::audio::CaptureRing ring;
 };
 
+#ifndef UML_AUDIO_LEGACY_SESSION
 // The resumption notification with no context, as a recommendation the
-// system does not give.
+// system does not give. Systems before iOS 27 have no such notification.
 void postRecommendationWithoutContext()
 {
     [[NSNotificationCenter defaultCenter]
@@ -280,6 +290,7 @@ void postRecommendationWithoutContext()
                       object:[AVAudioSession sharedInstance]
                     userInfo:nil];
 }
+#endif
 
 void startsAndStops()
 {
@@ -303,8 +314,8 @@ void deactivationsThatInterruptNothing()
     Recording recording;
     check(recording.start(), "the microphone starts before the deactivations");
     const auto before = Counts::now();
-    postDeactivation(AVAudioSessionDeactivationSourceApp, false);
-    postDeactivation(AVAudioSessionDeactivationSourceSystem, false);
+    postDeactivation(DeactivationSource::app, false);
+    postDeactivation(DeactivationSource::system, false);
     const auto seen = since(before);
     check(seen == Counts {},
         "the app's own deactivation and a system deactivation that "
@@ -378,11 +389,13 @@ void noAdviceWhileAnotherAppPlays()
         "a recommendation not to resume while another app plays starts "
         "nothing and takes no session",
         seen.text());
+#ifndef UML_AUDIO_LEGACY_SESSION
     before = Counts::now();
     postRecommendationWithoutContext();
     seen = since(before);
     check(seen == Counts {},
         "so does a recommendation that carries no advice", seen.text());
+#endif
 
     // It stays closed until the next recommendation to resume.
     otherAudioPlaying = false;
@@ -407,12 +420,14 @@ void noAdviceWhileNoAppPlays()
         "app plays",
         seen.text());
 
+#ifndef UML_AUDIO_LEGACY_SESSION
     postInterruptionBegan();
     before = Counts::now();
     postRecommendationWithoutContext();
     seen = since(before);
     check(seen.starts == 1 && seen.activations == 1,
         "so does a recommendation that carries no advice", seen.text());
+#endif
 }
 
 void guestRestartsRecording()
@@ -968,6 +983,7 @@ void aRefusedReopenAfterTheAdviceIsTriedAgain()
     recording.stop();
 }
 
+#ifndef UML_AUDIO_LEGACY_SESSION
 // The notification iOS 27 deprecates is no longer observed.
 void deprecatedNotificationIsIgnored()
 {
@@ -989,6 +1005,7 @@ void deprecatedNotificationIsIgnored()
     check(seen == Counts {},
         "the deprecated interruption notification does nothing", seen.text());
 }
+#endif
 
 } // namespace
 
@@ -1014,7 +1031,9 @@ int main()
         refusedBluetoothOptionsAreAskedAgainWhenTheMicrophoneIsBuiltAgain();
         aChangeBetweenTheSetAndTheReadingIsNotRemembered();
         aChangeBetweenTwoReadingsIsCaught();
+#ifndef UML_AUDIO_LEGACY_SESSION
         deprecatedNotificationIsIgnored();
+#endif
     }
     std::printf("%s: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL",
         failures);

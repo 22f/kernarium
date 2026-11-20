@@ -58,7 +58,9 @@ without asking each other.
   carry. VP9 is Profile 0 (8-bit 4:2:0) and, where the hardware decodes it,
   Profile 2 (10-bit 4:2:0), up to 4096 x 4096 each; the driver's VP9 profile
   menu lists the profiles the host lists and it publishes no VP9 level
-  control. The range is the square Android states for `c2.v4l2.vp9.decoder`,
+  control. VideoToolbox's supplemental VP9 decoder is registered from iOS 26.2;
+  on an iOS below it the host reports no VP9 hardware decode. The range is the
+  square Android states for `c2.v4l2.vp9.decoder`,
   which it applies to both axes, from 64 samples on each. A 10-bit stream
   reaches an 8-bit capture format narrowed with rounding, as HEVC Main 10 does.
   `platform-video-decoder` decodes at the stated maximums, so a host whose

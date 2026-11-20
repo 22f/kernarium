@@ -150,13 +150,23 @@ final class Interrupter {
 
     private func play() throws {
         if !connected {
-            try engine.connectNode(player, to: engine.mainMixerNode, format: silence.format)
+            // The calls that throw exist from iOS 27; before it the plain ones
+            // are the only ones.
+            if #available(iOS 27.0, *) {
+                try engine.connectNode(player, to: engine.mainMixerNode, format: silence.format)
+            } else {
+                engine.connect(player, to: engine.mainMixerNode, format: silence.format)
+            }
             connected = true
         }
         if !engine.isRunning { try engine.start() }
         player.stop()
         player.scheduleBuffer(silence, at: nil, options: .loops)
-        try player.playAudio()
+        if #available(iOS 27.0, *) {
+            try player.playAudio()
+        } else {
+            player.play()
+        }
         MPNowPlayingInfoCenter.default().playbackState = .playing
     }
 

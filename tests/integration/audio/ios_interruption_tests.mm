@@ -811,11 +811,11 @@ void interruptionMutesAndResumes()
         "every played period reports the output's latency, and only that",
         seen.text());
 
-    postDeactivation(AVAudioSessionDeactivationSourceApp, false);
+    postDeactivation(DeactivationSource::app, false);
     seen = stream.window(400ms, 1500ms);
     check(seen.playing(), "the app's own deactivation leaves playback running",
         seen.text());
-    postDeactivation(AVAudioSessionDeactivationSourceSystem, false);
+    postDeactivation(DeactivationSource::system, false);
     seen = stream.window(400ms, 1500ms);
     check(seen.playing(),
         "a system deactivation that interrupts nothing leaves playback running",

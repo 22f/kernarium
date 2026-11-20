@@ -513,8 +513,10 @@ final class AndroidAppsModelTests {
         #expect(try await query.suggestedEntities().isEmpty)
         #expect(try await query.entities(for: [comet.id]).isEmpty)
         await rig.model.syncAndroidAppsIndex()
-        try await query.reindexAllEntities(indexDescription: CSSearchableIndexDescription())
-        try await query.reindexEntities(for: [comet.id], indexDescription: CSSearchableIndexDescription())
+        if #available(iOS 27.0, *) {
+            try await query.reindexAllEntities(indexDescription: CSSearchableIndexDescription())
+            try await query.reindexEntities(for: [comet.id], indexDescription: CSSearchableIndexDescription())
+        }
         #expect(rig.index.events.count == writes, "no index write, no tile update: \(rig.index.events)")
         // And a refresh on such a host tells the system nothing.
         rig.model.setAndroidAppsInSearch(false)
@@ -547,6 +549,7 @@ final class AndroidAppsModelTests {
         #expect(AndroidAppsHub.shared.entities().contains { $0.name == "Newcomer" })
     }
 
+    @available(iOS 27.0, *)
     @Test func theSystemsReindexAsksAreJudgedByTheSwitchAndOfferOnlyListedApps() async throws {
         let rig = try rig(phase: .running(.normal))
         await rig.model.refreshAndroidApps()
@@ -638,6 +641,7 @@ final class AndroidAppsModelTests {
         try await Task.sleep(for: .milliseconds(150))
     }
 
+    @available(iOS 27.0, *)
     @Test func aFullReindexThatDeletedAndFailedToInsertIsRepairedAtTheNextLaunch() async throws {
         let rig = try rig(phase: .running(.normal))
         await rig.model.refreshAndroidApps()
@@ -657,6 +661,7 @@ final class AndroidAppsModelTests {
         #expect(rig.index.offered.count == offers + 1, "the next launch offers the apps again: Spotlight holds none")
     }
 
+    @available(iOS 27.0, *)
     @Test func aSelectiveAddQueuedBehindAWithdrawalIsWithdrawnWhenTheSwitchEndsOff() async throws {
         let rig = try rig(phase: .running(.normal))
         await rig.model.refreshAndroidApps()
@@ -680,6 +685,7 @@ final class AndroidAppsModelTests {
         #expect(await eventually { rig.index.events.last == "withdraw" }, "\(rig.index.events)")
     }
 
+    @available(iOS 27.0, *)
     @Test func artworkThatArrivesWhileAFullReindexIsOfferedIsOfferedAgain() async throws {
         let rig = try rig(phase: .running(.normal))
         let app = AndroidApp(component: comet.component, label: "Comet Hop", builtIn: false, iconTag: "00000000000000aa")

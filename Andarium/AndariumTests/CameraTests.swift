@@ -732,7 +732,7 @@ struct CameraFlowTests {
         let device = SystemCameraSource.hasCamera
         let info = ProcessInfo.processInfo
         let mac = info.isiOSAppOnMac
-        let vision = info.isiOSAppOnVision
+        let vision = info.runsAsIOSAppOnVision
         #expect(device == CameraAvailability.isAvailable(
             hasFrontCamera: SystemCameraSource.hasFrontCamera, isiOSAppOnMac: mac, isiOSAppOnVision: vision))
         if mac || vision { #expect(!device) }

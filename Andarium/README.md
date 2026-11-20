@@ -894,7 +894,8 @@ requires reopening Andarium.
   camera shows the row off and disabled with a note and keeps the person's
   choice; a device has one when it has a built-in front camera, the rule the
   guest's layout follows, and the iPad app running on a Mac or on an Apple
-  Vision Pro has none and looks for none (`CameraAvailability`). On an iPad, a
+  Vision Pro has none and looks for none (`CameraAvailability`; the system
+  answers for a Vision Pro from iOS 26.1). On an iPad, a
   session that other apps share the screen with pauses the camera (black
   frames) and shows a notice that goes with the interruption. When a guest app
   opens a camera while the session is blocked, the runtime reports it
@@ -1366,7 +1367,9 @@ is on. `AndariumCore/Adb` speaks the protocol.
   write to the index takes one ordered path (`AndroidAppsIndexWriter`), judged
   against the switch and the catalog as they are when it runs, and a launch
   finishes a write that failed. The tiles, the entities and the Siri phrase do
-  not follow the switch. The feature is in every build configuration. Tests:
+  not follow the switch. The system's own request to index the apps again
+  (`IndexedEntityQuery`) exists from iOS 27: on iOS 26 the entries Andarium
+  writes are all there is. The feature is in every build configuration. Tests:
   `AndariumCore`'s `AppOpen*`, `AndroidApp*` suites, the hosted
   `AndroidApps*Tests` and the preview's `AddToHomeUITests`
   (`-screen add-home-*`, `Preview/AddToHomePreview.swift`).

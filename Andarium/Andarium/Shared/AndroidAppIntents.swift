@@ -53,7 +53,7 @@ nonisolated struct AndroidAppEntity: AppEntity, IndexedEntity {
 /// record remembers (an app removed from Android, or Android erased) is still
 /// an entity, so that a Home Screen icon made for it can say the app is gone,
 /// and works again after a reinstall.
-nonisolated struct AndroidAppQuery: EnumerableEntityQuery, IndexedEntityQuery {
+nonisolated struct AndroidAppQuery: EnumerableEntityQuery {
     func allEntities() async throws -> [AndroidAppEntity] {
         AndroidAppsHub.shared.entities()
     }
@@ -74,7 +74,14 @@ nonisolated struct AndroidAppQuery: EnumerableEntityQuery, IndexedEntityQuery {
     func suggestedEntities() async throws -> [AndroidAppEntity] {
         AndroidAppsHub.shared.entities()
     }
+}
 
+/// The system's own request to index the apps again exists from iOS 27. Below
+/// it the entries the application writes are all there is: the application
+/// indexes them itself (`AndroidAppsIndexWriter`), and the system starts
+/// nothing.
+@available(iOS 27.0, *)
+extension AndroidAppQuery: IndexedEntityQuery {
     /// The system asks for apps to be indexed again: through the one ordered
     /// path to the index, which judges the switch and the catalog as they are
     /// then and offers only the apps that are listed. A write the index did not
