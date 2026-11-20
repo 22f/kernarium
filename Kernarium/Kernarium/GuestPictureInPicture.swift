@@ -181,7 +181,8 @@ final class GuestPictureInPicture: NSObject, PictureInPictureWindow {
     let layer = AVSampleBufferDisplayLayer()
     private var feed: (any PictureInPictureFeed)?
     private var pictureInPicture: AVPictureInPictureController?
-    private var relay: FrameRelay?
+    /// The relay the runtime delivers frames through while the window is armed.
+    private(set) var relay: FrameRelay?
     private var guestRunning = false
     private var armedRate: UInt32?
     private var starting = false
@@ -292,7 +293,8 @@ final class GuestPictureInPicture: NSObject, PictureInPictureWindow {
         }
     }
 
-    private func arm(rate: (width: UInt32, framesPerSecond: UInt32)) {
+    /// Internal for the tests, which arm and disarm without a window.
+    func arm(rate: (width: UInt32, framesPerSecond: UInt32)) {
         if armedRate == rate.framesPerSecond { return }
         let owner: FrameRelay
         if let relay {
@@ -319,7 +321,8 @@ final class GuestPictureInPicture: NSObject, PictureInPictureWindow {
         }
     }
 
-    private func disarm() {
+    /// Internal for the tests, as `arm` is.
+    func disarm() {
         guard armedRate != nil || relay != nil || pictureInPicture != nil else {
             return
         }
@@ -328,6 +331,12 @@ final class GuestPictureInPicture: NSObject, PictureInPictureWindow {
             _ = kernarium_runtime_loader_set_frame_sink(nil, nil, 0, 0)
             armedRate = nil
         }
+        // A delivery the runtime made before it let go may still be waiting
+        // on the main queue, and that block holds the relay whatever this
+        // window does with it. Its handler goes here, on the main thread the
+        // block runs on, so that it finds nothing to show once the display
+        // below is flushed.
+        relay?.handler = nil
         relay = nil
         feed?.flushRemovingDisplayedImage()
         format = nil
