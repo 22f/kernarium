@@ -87,6 +87,11 @@ void tornPoint(int point)
 }
 // The engine the microphone started last, to post its configuration change.
 AVAudioEngine* __weak startedEngine {};
+// The callback the microphone gave the notification center for the engine's
+// configuration change, as the center would call it. A route change that was
+// already running when an interruption began calls it later; removing the
+// observer does not stop that.
+void (^routeChangeCallback)(NSNotification*) = nil;
 
 void changeSession(NSString* category, NSString* mode, NSUInteger options)
 {
@@ -133,6 +138,22 @@ struct Counts final {
 
 void installHooks()
 {
+    Method observe = class_getInstanceMethod([NSNotificationCenter class],
+        @selector(addObserverForName:object:queue:usingBlock:));
+    using ObserveFunction = id (*)(id, SEL, NSNotificationName, id,
+        NSOperationQueue*, void (^)(NSNotification*));
+    const auto observeOriginal =
+        reinterpret_cast<ObserveFunction>(method_getImplementation(observe));
+    method_setImplementation(observe, imp_implementationWithBlock(
+        ^id(NSNotificationCenter* center, NSNotificationName name, id object,
+            NSOperationQueue* queue, void (^block)(NSNotification*)) {
+          if ([name isEqualToString:AVAudioEngineConfigurationChangeNotification])
+              routeChangeCallback = [block copy];
+          return observeOriginal(center,
+              @selector(addObserverForName:object:queue:usingBlock:), name,
+              object, queue, block);
+        }));
+
     Method hint = class_getInstanceMethod([AVAudioSession class],
         @selector(secondaryAudioShouldBeSilencedHint));
     method_setImplementation(hint, imp_implementationWithBlock(^BOOL(id) {
@@ -907,6 +928,45 @@ void routeChangeRebuildsTheEngineOnTheSameSession()
 // opens the engine again, at most once a second. An interruption leaves the
 // engine to the system's advice instead, and a stopped microphone opens
 // nothing.
+/* A route change reaches the microphone through a callback that takes the
+ * microphone's lock. One that was entered before another app took the session
+ * runs after the interruption began, and must not open the microphone: it
+ * would take the session from the app that has it. Nor may one that was
+ * entered for an engine that has since been replaced rebuild the engine that
+ * replaced it. */
+void aRouteChangeThatBeganBeforeAnInterruptionStartsNothing()
+{
+    otherAudioPlaying = false;
+    refuseBluetoothOptions = false;
+    Recording recording;
+    check(recording.start(), "the microphone starts before the late route change");
+    const auto entered = routeChangeCallback;
+    check(entered != nil, "the microphone listens for its engine's route");
+
+    otherAudioPlaying = true;
+    postInterruptionBegan();
+    auto before = Counts::now();
+    entered(nil);
+    auto seen = since(before);
+    check(seen == Counts {},
+        "a route change that began before the interruption leaves the "
+        "microphone closed while another app plays",
+        seen.text());
+
+    // The interruption ends and the microphone opens a new engine; a route
+    // change that was entered for the old one does not touch the new one.
+    postInterruptionEnded(true);
+    AVAudioEngine* const resumed = startedEngine;
+    before = Counts::now();
+    entered(nil);
+    seen = since(before);
+    check(seen == Counts {} && startedEngine == resumed,
+        "and one entered for the engine that was replaced leaves the new "
+        "engine alone",
+        seen.text());
+    recording.stop();
+}
+
 void aRebuildThatCannotTakeTheSessionIsTriedAgain()
 {
     otherAudioPlaying = false;
@@ -1024,6 +1084,7 @@ int main()
         sessionAllowsTheHeadsetMicrophone();
         refusedBluetoothOptionsFallBack();
         routeChangeRebuildsTheEngineOnTheSameSession();
+        aRouteChangeThatBeganBeforeAnInterruptionStartsNothing();
         aRebuildThatCannotTakeTheSessionIsTriedAgain();
         aRefusedReopenAfterTheAdviceIsTriedAgain();
         sessionCategoryIsSetOnlyWhenItChanges();

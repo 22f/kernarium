@@ -54,11 +54,18 @@ struct Capture final : std::enable_shared_from_this<Capture> {
      * would return the category to playback, which moves a Bluetooth headset
      * from the hands-free profile to A2DP and back, and every such switch is
      * a route change of its own. Taking it again is idempotent, and activates
-     * a session the system has deactivated meanwhile. */
-    void rebuild() noexcept
+     * a session the system has deactivated meanwhile.
+     *
+     * `from` is the generation of the engine whose observer called. The
+     * callback is entered before it takes the lock, so what it saw may be gone
+     * by then: an interruption began (the microphone must stay closed until
+     * its end), or another engine replaced the one it speaks for. Removing an
+     * observer does not cancel a callback already running, so both are
+     * judged here, under the lock. */
+    void rebuild(std::uint64_t from) noexcept
     {
         const std::lock_guard guard(lock);
-        if (!wanted)
+        if (!wanted || interrupted || from != generation)
             return;
         closeEngine();
         (void)open();
@@ -119,6 +126,9 @@ struct Capture final : std::enable_shared_from_this<Capture> {
     id __strong routeObserver {};
     bool sessionHeld {};
     bool interrupted {};
+    // Numbers the engines this microphone has built, so that a route change
+    // reported for one that has since gone is not taken for the current one's.
+    std::uint64_t generation {};
 
 private:
     [[nodiscard]] bool open() noexcept
@@ -126,6 +136,7 @@ private:
         if (engine != nil)
             return true;
         lastAttempt = std::chrono::steady_clock::now();
+        const std::uint64_t built = ++generation;
         @try {
             if (!session::acquire(session::Client::capture)) {
                 closeSession();
@@ -202,7 +213,7 @@ private:
                              queue:nil
                         usingBlock:^(NSNotification*) {
                           if (const auto capture = weak.lock())
-                              capture->rebuild();
+                              capture->rebuild(built);
                         }];
             return true;
         } @catch (NSException*) {
