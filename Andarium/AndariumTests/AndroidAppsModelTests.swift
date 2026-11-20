@@ -1054,6 +1054,22 @@ final class AndroidAppsModelTests {
         #expect(rig.waits.durations.isEmpty)
     }
 
+    /// An iOS before 27 has a Home Screen and no tile in Shortcuts to add an app to it from, so it
+    /// takes the path of a host with no Home Screen (`hostOffersAddToHomeScreen` is false).
+    @Test func anIOSBefore27NeverAsksAndroidForTheApps() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.model.playedPadAppHost = IPadAppHost(
+            isiOSAppOnMac: false, isiOSAppOnVision: false, hasAppTilesInShortcuts: false)
+        rig.model.androidAppsBootFinished(recovery: false)
+        #expect(rig.state.first == nil, "no task waits to ask")
+        #expect(await rig.model.refreshAndroidApps() == false)
+        #expect(await rig.model.refreshAndroidApps(afterAChange: true) == false)
+        #expect(rig.tool.digestsAsked == 0 && rig.tool.listingsAsked == 0)
+        #expect(!rig.state.listed && !rig.state.refreshing)
+        #expect(rig.waits.durations.isEmpty)
+    }
+
     @Test func anIPadAsksAsAnIPhoneDoes() async throws {
         let rig = try rig(phase: .running(.normal))
         defer { rig.stop() }
@@ -1300,6 +1316,20 @@ final class AndroidAppsModelTests {
         #expect(await eventually { rig.tool.opened == [comet.component] })
         #expect(rig.tool.listingsAsked == 1 && rig.tool.digestsAsked == 0 && rig.tool.iconsAsked == 0, "one listing, no digest, no icons")
         #expect(rig.state.store.record(forID: comet.id)?.launchers == 1, "the listing is recorded")
+        rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
+        #expect(await eventually { rig.tool.opened == [comet.component, inkleaf.component] })
+        #expect(rig.tool.listingsAsked == 2 && rig.tool.digestsAsked == 0, "one listing at every open")
+        #expect(rig.waits.durations.isEmpty, "nothing is asked at the boot")
+    }
+
+    @Test func anExplicitOpenOnAnIOSBefore27TakesOneListingWithNoIconsEachTime() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.model.playedPadAppHost = IPadAppHost(
+            isiOSAppOnMac: false, isiOSAppOnVision: false, hasAppTilesInShortcuts: false)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened == [comet.component] })
+        #expect(rig.tool.listingsAsked == 1 && rig.tool.digestsAsked == 0 && rig.tool.iconsAsked == 0, "one listing, no digest, no icons")
         rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
         #expect(await eventually { rig.tool.opened == [comet.component, inkleaf.component] })
         #expect(rig.tool.listingsAsked == 2 && rig.tool.digestsAsked == 0, "one listing at every open")
