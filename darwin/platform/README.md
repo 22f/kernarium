@@ -132,11 +132,20 @@ interface to the wire.
   apply by default; a Mac's cameras take none of this and state 0, and so do
   an iPad app's on a Mac or a Vision Pro, where the coordinator does not take
   the call (it is unavailable there and raises: it is asked, never sent, so the
-  camera keeps the mounting its sensor states). A built-in
-  front camera mounted with its sensor's top at the device's top (portrait 0 or
-  180) is presented like an earlier front camera instead
-  (`presentedMountingOf`): the guest is told 90, the video connection is turned
-  by the difference before the output's size is set, and the photo output's
+  camera keeps the mounting its sensor states). A built-in front camera states
+  270, which Android's face-scan applications assume of a front camera, and the
+  host turns every picture of it half around (`presentedMountingOf`,
+  `CameraInfo::presentationTurn` 180): the camera device turns each frame of its
+  video in the stream write, and a still is taken as an uncompressed full-range
+  4:2:0 photo that the backend turns and encodes itself in the hardware JPEG
+  encoder at the guest's quality, with the photo's colour profile
+  (`turned_still.hpp`). A photo that cannot be turned, and a Bayer still of such
+  a camera, is refused with a recorded reason and never passed on unturned. The
+  guest's metering and focus regions are mapped back through the turn, and
+  through the connection's turn where there is one. A built-in front camera
+  mounted with its sensor's top at the device's top (portrait 0 or 180) is
+  presented like an earlier front camera as well: its video connection is turned
+  by a quarter turn before the output's size is set, and the photo output's
   orientation compensation, which turns the stills, is on, read only after the
   configuration is committed (before that its answer is not valid) and switched
   on where it is supported and off; the photo connection keeps its default

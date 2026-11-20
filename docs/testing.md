@@ -393,7 +393,8 @@ orientation of every interface orientation and facing,
 `camera-still-exposure` (unit) the exposure a still reports from a photo's
 metadata, fed literal metadata and an in-memory image, never a camera, and
 `camera-photo-dimensions` (unit) which photo size a camera is asked for, on
-fake format tables
+fake format tables, and `camera-apple-turned-still` (unit) a photo turned half
+around and encoded in the hardware JPEG encoder, from a pixel buffer
 ([Cameras](../darwin/device/camera/README.md)). The Camera setting's hosted
 tests (`CameraFlowTests`, and `CameraOffNoticeBannerTests` for the notice that
 Camera is off, drawn in a window) play iOS's
