@@ -909,6 +909,30 @@ final class AndroidAppsModelTests {
         #expect(rig.state.open.banner == nil)
     }
 
+    // MARK: The run's first listing
+
+    @Test func aHostWithNoHomeScreenNeverAsksAndroidForTheApps() async throws {
+        let rig = try rig(phase: .running(.normal))
+        rig.model.host.idiom = .mac
+        rig.state.startDelay = .milliseconds(10)
+        rig.state.retryInterval = .milliseconds(10)
+        rig.model.androidAppsBootFinished(recovery: false)
+        #expect(rig.state.first == nil, "no task waits to ask")
+        // No other asker gets an answer either: an install, a request that found its app gone, a page.
+        #expect(await rig.model.refreshAndroidApps() == false)
+        #expect(await rig.model.refreshAndroidApps(afterAChange: true) == false)
+        #expect(rig.tool.digestsAsked == 0 && rig.tool.listingsAsked == 0)
+        #expect(!rig.state.listed && !rig.state.refreshing)
+    }
+
+    @Test func anIPadAsksAsAnIPhoneDoes() async throws {
+        let rig = try rig(phase: .running(.normal))
+        rig.model.host.idiom = .pad
+        rig.state.startDelay = .milliseconds(10)
+        rig.model.androidAppsBootFinished(recovery: false)
+        #expect(await eventually(5) { rig.state.listed })
+    }
+
     // MARK: Refresh ownership
 
     @Test func anEraseDuringARefreshLeavesNothingOfIt() async throws {

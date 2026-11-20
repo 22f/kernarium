@@ -24,9 +24,11 @@ extension AppModel {
         return driver
     }
 
-    /// The tool can be asked now: a normal session, not paused for space.
+    /// The tool can be asked now: a normal session, not paused for space, on a
+    /// host that offers Add to Home Screen (a Mac or a Vision Pro has no use
+    /// for the list, so Android is not asked for it).
     var canAskAndroidApps: Bool {
-        guard case .running(.normal) = phase, spacePause == nil else { return false }
+        guard hostOffersAddToHomeScreen, case .running(.normal) = phase, spacePause == nil else { return false }
         return androidAppsSource?.androidAppsTool != nil
     }
 
@@ -57,7 +59,9 @@ extension AppModel {
         let state = androidApps
         guard canAskAndroidApps, !state.unavailable, let tool = androidAppsSource?.androidAppsTool else {
             // A change announced while the guest is paused for space is listed once it resumes (`listTheChangeOwed`).
-            if afterAChange, !state.unavailable, case .running(.normal) = phase, spacePause != nil { state.refreshAgain = true }
+            if afterAChange, hostOffersAddToHomeScreen, !state.unavailable, case .running(.normal) = phase, spacePause != nil {
+                state.refreshAgain = true
+            }
             return false
         }
         if let running = state.inFlight {

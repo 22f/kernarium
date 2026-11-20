@@ -1349,7 +1349,8 @@ is on. `AndariumCore/Adb` speaks the protocol.
   an erase), so the tiles and the chooser answer while Android is off. The row
   exists only in a normal session whose image has the tool. A Mac and a Vision
   Pro have no Home Screen: there the intent runs, but the apps are no entities,
-  nothing is written to Spotlight and the tiles are not told of them. An icon
+  nothing is written to Spotlight, the tiles are not told of them, and Android
+  is never asked for the list. An icon
   is stored only as a picture the host drew itself (`FlatteningAppsTool`), and a
   label as the tool's own sanitising makes it, whatever the tool or the cache
   file says.
