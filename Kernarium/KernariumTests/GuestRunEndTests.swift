@@ -40,6 +40,32 @@ struct GuestRunEndTests {
         #expect(failed.message.contains("-4"))
     }
 
+    /// A run the host could not give the guest's memory never started its
+    /// kernel: the notice names that and what to change, not a bare status.
+    @Test
+    func theNoticeNamesAMemoryTheHostWouldNotGive() {
+        let refused = GuestRunEnd(
+            result: Int32(KERNARIUM_RUNTIME_RESULT_OUT_OF_MEMORY)
+        )
+        #expect(refused.hostRefusedMemory)
+        #expect(refused.title == "The virtual machine can\u{2019}t start")
+        #expect(refused.message.contains("memory"))
+        #expect(refused.message.contains("smaller size"))
+        #expect(!refused.message.contains("returned"))
+        #expect(
+            refused.message.hasSuffix("Relaunch Kernarium to start it again.")
+        )
+        #expect(refused.systemName == "memorychip")
+        // Another status, and a stop the application asked for, are not it.
+        #expect(!GuestRunEnd(result: -4).hostRefusedMemory)
+        #expect(
+            !GuestRunEnd(
+                result: Int32(KERNARIUM_RUNTIME_RESULT_OUT_OF_MEMORY),
+                requested: true
+            ).hostRefusedMemory
+        )
+    }
+
     /// A guest that restarted itself again and again is not an error of the
     /// runtime, and the notice does not print the status the runtime used to
     /// say so.
