@@ -333,13 +333,22 @@ public enum DiagnosticRedaction {
 
 /// The previous session's record at launch: read once, then kept as
 /// `previous-session.txt` for the bug report, so the next boot can write its
-/// own and a second launch says nothing more.
+/// own and a second launch says nothing more. The start's record
+/// (`StartRecord`) is kept as `previous-start.txt` the same way.
 public enum PreviousSession {
     /// The record and the notice Home shows for it. `endedOutOfForeground`
     /// is whether the pause marker said the previous process ended paused.
     public static func consume(in diagnostics: URL, endedOutOfForeground: Bool)
         -> (record: SessionRecord, notice: HomeNotice?)?
     {
+        // The start's own record goes with the session's, whether or not the
+        // runtime got as far as writing the session's.
+        let start = diagnostics.appendingPathComponent(BugReportAttachments.startRecord)
+        if FileManager.default.fileExists(atPath: start.path) {
+            let keptStart = diagnostics.appendingPathComponent(BugReportAttachments.previousStartRecord)
+            try? FileManager.default.removeItem(at: keptStart)
+            try? FileManager.default.moveItem(at: start, to: keptStart)
+        }
         let current = diagnostics.appendingPathComponent(BugReportAttachments.sessionRecord)
         guard let record = SessionRecord.read(at: current) else { return nil }
         let kept = diagnostics.appendingPathComponent(BugReportAttachments.previousSessionRecord)
