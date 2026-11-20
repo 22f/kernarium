@@ -16,11 +16,14 @@ struct MetalPresentationState;
 /* What a draw left owed. `unavailable`: the newest frame is owed and the view
  * had no drawable or render pass to draw it into (a transient failure), so it
  * is neither shown nor retired, and with no later frame nothing asks for it
- * again; a caller that paces its draws draws again. `done`: nothing is owed,
- * or the frame is shown or in flight, or it was retired. */
+ * again; a caller that paces its draws draws again. `stalled`: the same, after
+ * the drawable's own timeout (a wait of about a second on the calling thread),
+ * which a caller that draws again would pay once more. `done`: nothing is
+ * owed, or the frame is shown or in flight, or it was retired. */
 enum class DrawResult : std::uint8_t {
     done,
     unavailable,
+    stalled,
 };
 
 // Common newest-frame-wins Metal timeline used by the AppKit and UIKit shells.

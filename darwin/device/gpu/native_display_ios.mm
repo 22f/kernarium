@@ -123,9 +123,9 @@ struct NativeDisplayState final :
      * iOS for the rate the guest renders at (present_pacer.hpp). All of it runs
      * on the main thread but requestPacedRedraw, which any thread may call. */
     void requestPacedRedraw() noexcept;
-    /* `retry`: the wake is one this display asked for after it found no scene
-     * to make a link on, not a frame's. */
-    void wakeLink(bool retry) noexcept;
+    /* Wakes the link, or draws the frame itself if the view has no scene to
+     * make one on (drawWithoutLink). */
+    void wakeLink() noexcept;
     void linkTick(CADisplayLink* ticking) noexcept;
     void applyLinkRange(LinkFrameRate range) noexcept;
     [[nodiscard]] double linkCeiling(UIWindowScene* scene) const noexcept;
@@ -136,9 +136,17 @@ struct NativeDisplayState final :
      * and is made again on the view's scene at once if it was running. */
     void dropLink() noexcept;
     void followScene() noexcept;
+    /* A scene disconnected: a link on it goes, and the scene is never one to
+     * make another on, though UIKit still names it on the view's window while
+     * the notification runs. */
+    void sceneDisconnected(UIScene* gone) noexcept;
+    /* The scene a link is to be made on: the view's, but not one that has
+     * disconnected. */
+    [[nodiscard]] UIWindowScene* viewScene() const noexcept;
     /* Draws the newest frame as the 60 Hz path does, for a view that has no
      * scene to make a link on, and asks again shortly if there was no
-     * drawable. */
+     * drawable: one delay at a time, up to the pacer's limit for the frame
+     * (which a frame that arrives renews and nothing else does). */
     void drawWithoutLink() noexcept;
 #ifndef UML_APP_STORE_RUNTIME
     void reportLink(double now) noexcept;
@@ -160,12 +168,11 @@ struct NativeDisplayState final :
     CADisplayLink* link;
     id linkTarget;
     __weak UIWindowScene* linkScene;
+    __weak UIScene* disconnectedScene;
     PresentPacer pacer;
     LinkFrameRate requestedRange {};
-    /* Set by the view's draw (the delegate) when it found no drawable. */
-    bool drawUnavailable {};
-    /* Draws asked for again after a wake that found no scene. */
-    unsigned windowlessRetries {};
+    /* Set by the view's draw (the delegate): what the draw came to. */
+    DrawResult drawResult {DrawResult::done};
 #ifndef UML_APP_STORE_RUNTIME
     double reportStart {};
     double grantedSum {};
@@ -254,9 +261,7 @@ struct NativeDisplayState final :
 - (void)drawInMTKView:(MTKView*)view
 {
     if (auto state = _state.lock()) {
-        state->drawUnavailable =
-            state->presentation.draw((__bridge void*)view) ==
-            uml::gpu::DrawResult::unavailable;
+        state->drawResult = state->presentation.draw((__bridge void*)view);
     }
 }
 
@@ -322,19 +327,8 @@ void NativeDisplayState::attachView(void* nativeView)
                         object:nil
                          queue:NSOperationQueue.mainQueue
                     usingBlock:^(NSNotification* notification) {
-                        if (auto locked = weak.lock()) {
-                            if (notification.object != locked->linkScene)
-                                return;
-                            /* The scene the link was made on is gone, whatever
-                             * its window still says: the link goes, and a
-                             * frame that waits is drawn on the view's scene
-                             * or without a link. */
-                            locked->dropLink();
-                            if (locked->frameWaiting.load(
-                                    std::memory_order_seq_cst)) {
-                                locked->wakeLink(false);
-                            }
-                        }
+                        if (auto locked = weak.lock())
+                            locked->sceneDisconnected(notification.object);
                     }];
         state->sceneActivateObserver = [center
             addObserverForName:UISceneDidActivateNotification
@@ -539,7 +533,7 @@ void NativeDisplayState::requestPacedRedraw() noexcept
     auto state = shared_from_this();
     dispatch_async(dispatch_get_main_queue(), ^{
         state->wakeScheduled.store(false, std::memory_order_release);
-        state->wakeLink(false);
+        state->wakeLink();
     });
 }
 
@@ -574,7 +568,7 @@ void NativeDisplayState::applyLinkRange(LinkFrameRate range) noexcept
         CAFrameRateRangeMake(range.minimum, range.maximum, range.preferred);
 }
 
-void NativeDisplayState::wakeLink(bool retry) noexcept
+void NativeDisplayState::wakeLink() noexcept
 {
     if (!running.load(std::memory_order_acquire) ||
         linkAwake.load(std::memory_order_seq_cst)) {
@@ -583,12 +577,10 @@ void NativeDisplayState::wakeLink(bool retry) noexcept
     MTKView* nativeView = view;
     if (nativeView == nil)
         return;
-    if (!retry)
-        windowlessRetries = 0;
     /* The link belongs to the scene the view is in: a view that moved to
      * another scene, and so another screen, is followed (followScene) and at
      * the latest when the link next wakes. */
-    UIWindowScene* scene = displaySceneFor(nativeView);
+    UIWindowScene* scene = viewScene();
     if (scene == nil) {
         drawWithoutLink();
         return;
@@ -611,7 +603,6 @@ void NativeDisplayState::wakeLink(bool retry) noexcept
         linkScene = scene;
         requestedRange = {};
     }
-    windowlessRetries = 0;
     applyLinkRange(pacer.wake(
         CACurrentMediaTime(), guestFramesOffered(), linkCeiling(scene)));
     linkAwake.store(true, std::memory_order_seq_cst);
@@ -621,35 +612,59 @@ void NativeDisplayState::wakeLink(bool retry) noexcept
 #endif
 }
 
+UIWindowScene* NativeDisplayState::viewScene() const noexcept
+{
+    MTKView* nativeView = view;
+    UIWindowScene* scene = nativeView != nil ? displaySceneFor(nativeView) : nil;
+    return scene != nil && scene == disconnectedScene ? nil : scene;
+}
+
+/* How a draw came out, for the pacer. */
+[[nodiscard]] static DrawOutcome outcomeOf(DrawResult result) noexcept
+{
+    switch (result) {
+    case DrawResult::unavailable:
+        return DrawOutcome::unavailable;
+    case DrawResult::stalled:
+        return DrawOutcome::stalled;
+    case DrawResult::done:
+        break;
+    }
+    return DrawOutcome::shown;
+}
+
 void NativeDisplayState::drawWithoutLink() noexcept
 {
     MTKView* nativeView = view;
     if (nativeView == nil)
         return;
     /* The frame is drawn now, as the 60 Hz path draws it, so that it is not
-     * left unshown for want of a link. The flag goes with the draw; a draw
-     * that found no drawable puts it back and asks again shortly, a few
-     * times, because a view with no scene may find one. */
-    frameWaiting.store(false, std::memory_order_seq_cst);
-    drawUnavailable = false;
+     * left unshown for want of a link. A frame that has arrived since the last
+     * draw renews the retries; with none arrived and none owed there is
+     * nothing to draw. */
+    if (frameWaiting.exchange(false, std::memory_order_seq_cst))
+        pacer.frameArrived();
+    else if (!pacer.retryOwed())
+        return;
+    drawResult = DrawResult::done;
     [nativeView draw];
-    if (!drawUnavailable) {
-        windowlessRetries = 0;
+    /* A draw that found no drawable owes the frame again, a few times: a view
+     * with no scene may find one. One delay is pending at a time, whatever
+     * frames arrive, and a pending one that finds a link made leaves the
+     * retry to it. */
+    pacer.drew(outcomeOf(drawResult));
+    if (!pacer.arrangeRetry())
         return;
-    }
-    frameWaiting.store(true, std::memory_order_seq_cst);
-    constexpr unsigned maximumRetries = 20;
-    if (windowlessRetries >= maximumRetries)
-        return;
-    ++windowlessRetries;
     auto state = shared_from_this();
     dispatch_after(
         dispatch_time(DISPATCH_TIME_NOW, 50LL * NSEC_PER_MSEC),
         dispatch_get_main_queue(),
         ^{
+            state->pacer.retryDelayRan();
             if (state->running.load(std::memory_order_acquire) &&
-                state->frameWaiting.load(std::memory_order_seq_cst)) {
-                state->wakeLink(true);
+                (state->pacer.retryOwed() ||
+                    state->frameWaiting.load(std::memory_order_seq_cst))) {
+                state->wakeLink();
             }
         });
 }
@@ -668,20 +683,39 @@ void NativeDisplayState::followScene() noexcept
 {
     if (!running.load(std::memory_order_acquire))
         return;
-    MTKView* nativeView = view;
-    UIWindowScene* current =
-        nativeView != nil ? displaySceneFor(nativeView) : nil;
+    UIWindowScene* current = viewScene();
     if (link != nil && current != nil && current == linkScene)
         return;
     /* A link made on a scene the view is not in any more may not tick again.
-     * It goes; a link that was running, or a frame that waits (one that no
-     * link could be made for earlier included), makes another on the view's
-     * scene now, or draws without one if there is none. */
+     * It goes; a link that was running, a frame that waits (one that no link
+     * could be made for earlier included) or a frame owed another draw makes
+     * another on the view's scene now, or draws without one if there is
+     * none. */
     const bool wasAwake = linkAwake.load(std::memory_order_seq_cst);
     if (link != nil)
         dropLink();
-    if (wasAwake || frameWaiting.load(std::memory_order_seq_cst))
-        wakeLink(false);
+    if (wasAwake || frameWaiting.load(std::memory_order_seq_cst) ||
+        pacer.retryOwed()) {
+        wakeLink();
+    }
+}
+
+void NativeDisplayState::sceneDisconnected(UIScene* gone) noexcept
+{
+    MTKView* nativeView = view;
+    const bool linkIsOnIt = gone != nil && gone == linkScene;
+    const bool viewIsIn = gone != nil && nativeView != nil &&
+        nativeView.window.windowScene == gone;
+    if (!linkIsOnIt && !viewIsIn)
+        return;
+    /* The scene is gone, whatever the view's window still says: no link is
+     * made on it again, and one that was is dropped. A frame that waits, or
+     * is owed another draw, goes to the view's other scene or is drawn
+     * without a link. */
+    disconnectedScene = gone;
+    dropLink();
+    if (frameWaiting.load(std::memory_order_seq_cst) || pacer.retryOwed())
+        wakeLink();
 }
 
 void NativeDisplayState::linkTick(CADisplayLink* ticking) noexcept
@@ -691,8 +725,7 @@ void NativeDisplayState::linkTick(CADisplayLink* ticking) noexcept
     /* A tick of a link that is not the view's scene's is not paced by what
      * shows the guest: the link is made again on the view's scene. */
     MTKView* nativeView = view;
-    if (ticking != link ||
-        (nativeView != nil && displaySceneFor(nativeView) != linkScene)) {
+    if (ticking != link || viewScene() != linkScene) {
         followScene();
         return;
     }
@@ -706,12 +739,12 @@ void NativeDisplayState::linkTick(CADisplayLink* ticking) noexcept
         applyLinkRange(*decision.range);
     if (decision.present) {
         if (nativeView != nil) {
-            drawUnavailable = false;
+            drawResult = DrawResult::done;
             [nativeView draw];
             /* A draw that found no drawable is owed again at the next ticks,
              * a bounded number of them: the newest frame must not stay unshown
              * while the link sleeps. */
-            pacer.drew(drawUnavailable);
+            pacer.drew(outcomeOf(drawResult));
         }
 #ifndef UML_APP_STORE_RUNTIME
         ++reportDraws;
