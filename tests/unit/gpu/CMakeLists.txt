@@ -821,6 +821,12 @@ if(TARGET uml_gpu_service)
 endif()
 
 if(TARGET uml_gpu_display)
+    # The decisions of the 120 Hz display link: a state machine, no clock.
+    uml_add_gpu_unit_test(gpu-present-pacer
+        uml_gpu_present_pacer_tests present_pacer_tests.cpp
+        LIBRARIES uml_gpu_display
+        UNIT_DIRECTORY)
+
     # The resize path's objects come from the shipped display library.
     uml_add_gpu_unit_test(gpu-display-resize
         uml_gpu_display_resize_tests display_resize_tests.cpp

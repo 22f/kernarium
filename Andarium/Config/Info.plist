@@ -47,6 +47,8 @@
 	<key>AndariumStoreLinkID</key>
 	<string>$(STORE_LINK_ID)</string>
 #endif
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>GCSupportedGameControllers</key>
 	<array>
 		<dict>

@@ -3,19 +3,33 @@
 #include "native_display.hpp"
 
 #include "native_display_state.hpp"
+#include "present_pacer.hpp"
 
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 #import <UIKit/UIKit.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
+#ifndef UML_APP_STORE_RUNTIME
+#include <cstdio>
+#include <cstdlib>
+#endif
 
 namespace uml::gpu {
 namespace {
+
+NSString* const resizeWillBeginNotification =
+    @"org.linux-um-darwin.guest-display-resize-will-begin";
+NSString* const resizeDidEndNotification =
+    @"org.linux-um-darwin.guest-display-resize-did-end";
+constexpr std::int64_t resizeSettleNanoseconds =
+    150LL * NSEC_PER_MSEC;
 
 /* The window scene a view's display link belongs to: the view's own, or the
  * application's active (else first) one when the view is not in a window yet.
@@ -36,12 +50,16 @@ namespace {
     return first;
 }
 
-NSString* const resizeWillBeginNotification =
-    @"org.linux-um-darwin.guest-display-resize-will-begin";
-NSString* const resizeDidEndNotification =
-    @"org.linux-um-darwin.guest-display-resize-did-end";
-constexpr std::int64_t resizeSettleNanoseconds =
-    150LL * NSEC_PER_MSEC;
+#ifndef UML_APP_STORE_RUNTIME
+/* The display link's own report, on the frame statistics switch of the other
+ * display reports (metal_presentation.mm): what rate it asked for and what iOS
+ * gave. */
+[[nodiscard]] bool linkReportsEnabled() noexcept
+{
+    static const bool enabled = std::getenv("UML_GPU_FRAME_STATS") != nullptr;
+    return enabled;
+}
+#endif
 
 } // namespace
 
@@ -76,10 +94,43 @@ struct NativeDisplayState final :
     void publishGuestSize(DisplaySize size) noexcept;
     void requestRedraw() noexcept;
     void shutdown() noexcept override;
+    /* The display link of a 120 Hz mode (modeRate above 60): it paces the
+     * presents, runs only while frames arrive and asks iOS for the rate the
+     * guest renders at (present_pacer.hpp). All of it runs on the main
+     * thread but requestPacedRedraw, which any thread may call. */
+    void requestPacedRedraw() noexcept;
+    void wakeLink() noexcept;
+    void linkTick(CADisplayLink* ticking) noexcept;
+    void applyLinkRange(LinkFrameRate range) noexcept;
+    [[nodiscard]] double linkCeiling(UIWindowScene* scene) const noexcept;
+    [[nodiscard]] std::uint64_t guestFramesOffered() const noexcept;
+    void stopLink() noexcept;
+#ifndef UML_APP_STORE_RUNTIME
+    void reportLink(double now) noexcept;
+#endif
 
     /* The rate of the one mode the guest sees: 60, or 120 when the screen
      * can show it (NativeDisplay::supportedRefreshRate). */
     const std::uint32_t modeRate;
+    /* A frame, or a change of what is shown, that no tick has presented yet,
+     * and whether the link is running: the two flags every thread shares. */
+    std::atomic_bool frameWaiting {};
+    std::atomic_bool linkAwake {};
+    std::atomic_bool wakeScheduled {};
+    /* Main thread only. */
+    CADisplayLink* link;
+    id linkTarget;
+    __weak UIWindowScene* linkScene;
+    PresentPacer pacer;
+    LinkFrameRate requestedRange {};
+#ifndef UML_APP_STORE_RUNTIME
+    double reportStart {};
+    double grantedSum {};
+    std::uint64_t reportTicks {};
+    std::uint64_t reportDraws {};
+    std::uint64_t reportWakes {};
+    std::uint64_t reportSleeps {};
+#endif
 
     id<MTKViewDelegate> delegate;
     id resizeWillBeginObserver;
@@ -98,12 +149,39 @@ struct NativeDisplayState final :
     (std::weak_ptr<uml::gpu::NativeDisplayState>)state;
 @end
 
+@interface UmlIOSDisplayLinkTarget : NSObject
+- (instancetype)initWithState:
+    (std::weak_ptr<uml::gpu::NativeDisplayState>)state;
+- (void)tick:(CADisplayLink*)ticking;
+@end
+
 @protocol UmlIOSGuestResizeLifecycle <NSObject>
 @property(nonatomic, readonly) BOOL umlGuestResizeInProgress;
 @end
 
 @protocol UmlIOSGuestDisplayGeometry <NSObject>
 - (void)umlSetGuestDisplayWidth:(uint32_t)width height:(uint32_t)height;
+@end
+
+@implementation UmlIOSDisplayLinkTarget {
+    std::weak_ptr<uml::gpu::NativeDisplayState> _state;
+}
+
+- (instancetype)initWithState:
+    (std::weak_ptr<uml::gpu::NativeDisplayState>)state
+{
+    self = [super init];
+    if (self != nil)
+        _state = std::move(state);
+    return self;
+}
+
+- (void)tick:(CADisplayLink*)ticking
+{
+    if (auto state = _state.lock())
+        state->linkTick(ticking);
+}
+
 @end
 
 @implementation UmlIOSMetalViewDelegate {
@@ -347,6 +425,10 @@ void NativeDisplayState::resetGuestSession() noexcept
 
 void NativeDisplayState::requestRedraw() noexcept
 {
+    if (modeRate > 60U) {
+        requestPacedRedraw();
+        return;
+    }
     if (!running.load(std::memory_order_acquire) ||
         redrawScheduled.exchange(true, std::memory_order_acq_rel)) {
         return;
@@ -362,6 +444,179 @@ void NativeDisplayState::requestRedraw() noexcept
     });
 }
 
+void NativeDisplayState::requestPacedRedraw() noexcept
+{
+    if (!running.load(std::memory_order_acquire))
+        return;
+    /* A running link presents it at its next tick, with no work on the main
+     * queue; a sleeping one is woken there, once however many frames arrive
+     * before it runs. The two flags are sequentially consistent so that a
+     * frame never falls between a tick that decides to sleep and this check:
+     * the tick looks again after it stops the link. */
+    frameWaiting.store(true, std::memory_order_seq_cst);
+    if (linkAwake.load(std::memory_order_seq_cst) ||
+        wakeScheduled.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    auto state = shared_from_this();
+    dispatch_async(dispatch_get_main_queue(), ^{
+        state->wakeScheduled.store(false, std::memory_order_release);
+        state->wakeLink();
+    });
+}
+
+std::uint64_t NativeDisplayState::guestFramesOffered() const noexcept
+{
+    const DisplayStatistics counts = presentation.statistics();
+    return counts.guestFrames + counts.cpuFallbackFrames;
+}
+
+double NativeDisplayState::linkCeiling(UIWindowScene* scene) const noexcept
+{
+    /* The fastest rate the screen can show now. Low Power Mode holds an
+     * iPhone to 60 whatever the screen says, and the guest is told to render
+     * no faster (the application's thermal reports). */
+    double ceiling = static_cast<double>(modeRate);
+    const NSInteger maximum = scene.screen.maximumFramesPerSecond;
+    if (maximum > 0)
+        ceiling = std::min(ceiling, static_cast<double>(maximum));
+    if (NSProcessInfo.processInfo.lowPowerModeEnabled)
+        ceiling = std::min(ceiling, 60.0);
+    return ceiling;
+}
+
+void NativeDisplayState::applyLinkRange(LinkFrameRate range) noexcept
+{
+    if (range == requestedRange)
+        return;
+    requestedRange = range;
+    link.preferredFrameRateRange =
+        CAFrameRateRangeMake(range.minimum, range.maximum, range.preferred);
+}
+
+void NativeDisplayState::wakeLink() noexcept
+{
+    if (!running.load(std::memory_order_acquire) ||
+        linkAwake.load(std::memory_order_seq_cst)) {
+        return;
+    }
+    MTKView* nativeView = view;
+    if (nativeView == nil)
+        return;
+    /* The link belongs to the scene the view is in: a view that moved to
+     * another scene, and so another screen, is followed when the link next
+     * wakes. */
+    UIWindowScene* scene = displaySceneFor(nativeView);
+    if (scene == nil)
+        return;
+    if (link == nil || linkScene != scene) {
+        [link invalidate];
+        if (linkTarget == nil) {
+            linkTarget = [[UmlIOSDisplayLinkTarget alloc]
+                initWithState:weak_from_this()];
+        }
+        link = [scene displayLinkWithTarget:linkTarget
+                                   selector:@selector(tick:)];
+        if (link == nil)
+            return;
+        link.paused = YES;
+        [link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+        linkScene = scene;
+        requestedRange = {};
+    }
+    applyLinkRange(pacer.wake(
+        CACurrentMediaTime(), guestFramesOffered(), linkCeiling(scene)));
+    linkAwake.store(true, std::memory_order_seq_cst);
+    link.paused = NO;
+#ifndef UML_APP_STORE_RUNTIME
+    ++reportWakes;
+#endif
+}
+
+void NativeDisplayState::linkTick(CADisplayLink* ticking) noexcept
+{
+    if (!running.load(std::memory_order_acquire))
+        return;
+    /* A frame that arrives from here on is a frame for the next tick, so the
+     * flag is taken before the decision is made. */
+    const bool waiting = frameWaiting.exchange(false, std::memory_order_seq_cst);
+    const double now = ticking.timestamp;
+    const PresentPacer::Decision decision = pacer.tick(
+        now, guestFramesOffered(), waiting, linkCeiling(linkScene));
+    if (decision.range)
+        applyLinkRange(*decision.range);
+    if (decision.present) {
+        MTKView* nativeView = view;
+        if (nativeView != nil)
+            [nativeView draw];
+#ifndef UML_APP_STORE_RUNTIME
+        ++reportDraws;
+#endif
+    }
+#ifndef UML_APP_STORE_RUNTIME
+    ++reportTicks;
+    grantedSum += ticking.targetTimestamp - ticking.timestamp;
+    reportLink(now);
+#endif
+    if (!decision.sleep)
+        return;
+    linkAwake.store(false, std::memory_order_seq_cst);
+    if (frameWaiting.load(std::memory_order_seq_cst)) {
+        /* A frame arrived while the link was deciding, and its request saw a
+         * running link: the link stays and presents it at the next tick. */
+        linkAwake.store(true, std::memory_order_seq_cst);
+        return;
+    }
+    ticking.paused = YES;
+#ifndef UML_APP_STORE_RUNTIME
+    ++reportSleeps;
+#endif
+}
+
+void NativeDisplayState::stopLink() noexcept
+{
+    /* Main thread. */
+    linkAwake.store(false, std::memory_order_seq_cst);
+    [link invalidate];
+    link = nil;
+    linkTarget = nil;
+    linkScene = nil;
+}
+
+#ifndef UML_APP_STORE_RUNTIME
+void NativeDisplayState::reportLink(double now) noexcept
+{
+    if (!linkReportsEnabled())
+        return;
+    if (reportStart == 0.0) {
+        reportStart = now;
+        return;
+    }
+    const double span = now - reportStart;
+    if (span < 1.0)
+        return;
+    std::fprintf(
+        stderr,
+        "Display link: asked %.0f-%.0f (preferred %.0f), ticks %.1f/s at "
+        "%.2f ms, draws %.1f/s, wakes %llu, sleeps %llu\n",
+        static_cast<double>(requestedRange.minimum),
+        static_cast<double>(requestedRange.maximum),
+        static_cast<double>(requestedRange.preferred),
+        static_cast<double>(reportTicks) / span,
+        reportTicks != 0 ? grantedSum * 1000.0 / static_cast<double>(reportTicks)
+                         : 0.0,
+        static_cast<double>(reportDraws) / span,
+        static_cast<unsigned long long>(reportWakes),
+        static_cast<unsigned long long>(reportSleeps));
+    reportStart = now;
+    reportTicks = 0;
+    reportDraws = 0;
+    reportWakes = 0;
+    reportSleeps = 0;
+    grantedSum = 0.0;
+}
+#endif
+
 void NativeDisplayState::shutdown() noexcept
 {
     if (!running.exchange(false, std::memory_order_acq_rel))
@@ -374,6 +629,7 @@ void NativeDisplayState::shutdown() noexcept
     presentation.shutdown();
     auto state = shared_from_this();
     dispatch_async(dispatch_get_main_queue(), ^{
+        state->stopLink();
         MTKView* nativeView = state->view;
         if (nativeView.delegate == state->delegate)
             nativeView.delegate = nil;

@@ -322,8 +322,14 @@ screen can show more than 60 frames a second, an Android guest gets one 120 Hz
 mode instead (the EDID's detailed timing; the 60 Hz bytes do not change, and a
 size whose pixel clock does not fit the EDID keeps 60), and the runtime tells
 the guest with `androidboot.kernarium.high_refresh=1`. A screen that cannot show
-120 drops the bit, with a line on stderr. A Mac keeps its 60 Hz mode. What the
-guest does with the property is in
+120 drops the bit, with a line on stderr. At 60 Hz, and on a Mac, a present
+follows each guest flush. At 120 Hz a display link paces the presents
+(`darwin/device/gpu/present_pacer.hpp`): it runs only while frames wait, asks
+iOS for the rate the guest renders at in three steps (120, 60 and 30 frames a
+second), takes the screen's maximum and Low Power Mode as its ceiling, and
+pauses after 100 ms without a frame. `CADisableMinimumFrameDurationOnPhone` in
+the application's `Info.plist` lets an iPhone exceed 60. What the guest does with
+the property is in
 [`android/lineage-24/README.md`](../android/lineage-24/README.md).
 
 ### Microphone

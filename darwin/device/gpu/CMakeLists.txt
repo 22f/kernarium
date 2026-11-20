@@ -100,6 +100,7 @@ set(_uml_gpu_display_sources
     metal_presentation.mm
     metal_scanout_shader.mm
     native_display_common.cpp
+    present_pacer.cpp
     scanout_framebuffer.cpp)
 # The frame mirror (frame_tap.hpp) copies the guest's display out of the
 # process: an App Store runtime has none.
