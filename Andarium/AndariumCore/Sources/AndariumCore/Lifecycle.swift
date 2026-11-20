@@ -147,8 +147,8 @@ public struct RunEnd: Equatable, Sendable {
     public var stoppedByUser: Bool
     /// The size of memory, in MiB, that this device would not give the
     /// virtual machine: the run ended before its kernel started, because the
-    /// host could not map the guest's memory (the runtime's out-of-memory
-    /// result, `KERNARIUM_RUNTIME_RESULT_OUT_OF_MEMORY`), or the size was one
+    /// host could not map the guest's memory (the runtime's own result,
+    /// `KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED`), or the size was one
     /// the runtime does not admit. A smaller size starts, so the failure
     /// screen names the cause and what to change.
     public var memoryRefusedMiB: Int?

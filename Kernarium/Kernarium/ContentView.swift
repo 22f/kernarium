@@ -414,7 +414,7 @@ struct GuestRunEnd: Equatable {
     /// The host would not map the guest's memory: nothing started, and a
     /// smaller size does.
     var hostRefusedMemory: Bool {
-        result == Int32(KERNARIUM_RUNTIME_RESULT_OUT_OF_MEMORY) && !requested
+        result == Int32(KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED) && !requested
     }
 
     var title: String {

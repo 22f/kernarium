@@ -6,6 +6,7 @@
 #include "require.hpp"
 #include "runtime/guest_memory_budget.hpp"
 #include "runtime/native_kernel_layout.hpp"
+#include "runtime/start_refusal.hpp"
 #include "testing.hpp"
 
 #include <cstdio>
@@ -93,11 +94,26 @@ void test_a_refused_heap_or_window_leaves_the_room_a_smaller_guest_needs()
 		"with the out-of-memory result");
 	require(entries == 0, "a guest the process could not hold entered its "
 		"kernel");
+	require(uml::runtime::start_refused_for_memory(),
+		"a run the host refused for want of memory carries no mark that says "
+		"so");
 	require(run_with_memory(emulator.get(), "mem=1536M") == 0 && entries == 1,
 		"a refused run took the room a smaller guest needed");
+	require(!uml::runtime::start_refused_for_memory(),
+		"a run that started carries the mark of the refused run before it");
 	require(run_with_memory(emulator.get(), "mem=2176M") ==
 			-UML_EMULATOR_OUT_OF_MEMORY && entries == 1,
 		"the larger guest was started once the smaller one had been");
+	require(uml::runtime::start_refused_for_memory(),
+		"the second refusal carries no mark");
+	/* A run that fails for another reason clears what the refusal before it
+	 * left: the number a failed allocation of the library's own returns is the
+	 * same, and must not read as a refusal of the guest's size. */
+	require(uml_emulator_run(emulator.get(), -1, nullptr, nullptr) ==
+			-UML_EMULATOR_INVALID_ARGUMENT,
+		"a run with a negative argument count was not refused");
+	require(!uml::runtime::start_refused_for_memory(),
+		"a run that failed for another reason kept the mark of a refusal");
 }
 
 /* A process with no room for its heap region refuses every guest before it
@@ -116,6 +132,8 @@ void test_a_refused_heap_leaves_no_window_behind()
 	require(run_with_memory(emulator.get(), "mem=1536M") ==
 			-UML_EMULATOR_OUT_OF_MEMORY && entries == 0,
 		"a process without room for its heap region started a guest");
+	require(uml::runtime::start_refused_for_memory(),
+		"a refused heap region carries no mark of a refusal for memory");
 	require(uml::runtime::process_native_window().begin == 0,
 		"a refused heap region left the guest's window in the process");
 }
@@ -132,6 +150,8 @@ void test_a_refused_ram_trial_ends_the_run_before_its_kernel()
 	require(run_with_memory(emulator.get(), "mem=1536M") ==
 			-UML_EMULATOR_OUT_OF_MEMORY && entries == 0,
 		"a host that maps no RAM for the guest started it");
+	require(uml::runtime::start_refused_for_memory(),
+		"a refused RAM trial carries no mark of a refusal for memory");
 	uml::emulator::testing::place_guest_ram_trial(0);
 	require(run_with_memory(emulator.get(), "mem=1536M") == 0 && entries == 1,
 		"a refused trial spent the process's guest");

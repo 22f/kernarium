@@ -14,6 +14,7 @@
 #include "native_kernel_layout.hpp"
 #include "session_record.hpp"
 #include "stall_watch.hpp"
+#include "start_refusal.hpp"
 #include "thread_fence.hpp"
 #include "virtual_jetsam.hpp"
 #include "x86_runtime_support.hpp"
@@ -379,6 +380,15 @@ std::atomic<std::uintptr_t> test_guest_ram_trial_start{0};
 	return ::uml::runtime::prepare_native_kernel_layout(guest_memory);
 }
 
+/* The result of a run the host refused for want of memory before its kernel
+ * started, with the mark that says so (runtime/start_refusal.hpp): the same
+ * number also comes from a failed allocation of the library's own. */
+[[nodiscard]] int refused_for_memory() noexcept
+{
+	::uml::runtime::note_start_refused_for_memory();
+	return -UML_EMULATOR_OUT_OF_MEMORY;
+}
+
 /* The layout the pre-start RAM trial is made in: the run's own. A test
  * variant can make it elsewhere, where the host maps no RAM. */
 [[nodiscard]] ::uml::runtime::NativeKernelLayout guest_ram_trial_layout(
@@ -556,6 +566,10 @@ public:
 	[[nodiscard]] int run(int argc, const char *const argv[],
 			      const char *const envp[])
 	{
+		/* The mark of the last run is gone before anything of this one can
+		 * fail, so that a result this run returns for another reason never
+		 * reads as a refusal for memory. */
+		::uml::runtime::clear_start_refusal();
 		if (argc < 0 || (argc != 0 && argv == nullptr))
 			return -UML_EMULATOR_INVALID_ARGUMENT;
 		if (kernel_view_.empty())
@@ -669,7 +683,7 @@ public:
 		 * kept (reserve_process_heap). */
 		if (!prepared.informational &&
 		    !::uml::runtime::reserve_process_heap())
-			return -UML_EMULATOR_OUT_OF_MEMORY;
+			return refused_for_memory();
 		const auto native_layout = run_native_kernel_layout(
 			prepared.guest_memory_bytes);
 		/* A host that has not the address space or the memory limit for
@@ -678,13 +692,13 @@ public:
 		 * answers a refused mapping by ending the process. */
 		if (!native_layout.valid)
 			return native_layout.reservation_failed ?
-				-UML_EMULATOR_OUT_OF_MEMORY :
+				refused_for_memory() :
 				-UML_EMULATOR_INVALID_ARGUMENT;
 		if (!prepared.informational &&
 		    !::uml::runtime::native_guest_memory_mappable(
 			    guest_ram_trial_layout(native_layout),
 			    prepared.guest_memory_bytes))
-			return -UML_EMULATOR_OUT_OF_MEMORY;
+			return refused_for_memory();
 		const ::uml::runtime::NativeKernelLayoutScope layout_scope{
 			native_layout};
 		if (!layout_scope.entered())

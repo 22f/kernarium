@@ -45,7 +45,7 @@ struct GuestRunEndTests {
     @Test
     func theNoticeNamesAMemoryTheHostWouldNotGive() {
         let refused = GuestRunEnd(
-            result: Int32(KERNARIUM_RUNTIME_RESULT_OUT_OF_MEMORY)
+            result: Int32(KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED)
         )
         #expect(refused.hostRefusedMemory)
         #expect(refused.title == "The virtual machine can\u{2019}t start")
@@ -58,9 +58,12 @@ struct GuestRunEndTests {
         #expect(refused.systemName == "memorychip")
         // Another status, and a stop the application asked for, are not it.
         #expect(!GuestRunEnd(result: -4).hostRefusedMemory)
+        // The library's own out-of-memory status, which a failed allocation
+        // of its own also returns, names nothing of the guest's size.
+        #expect(!GuestRunEnd(result: -2).hostRefusedMemory)
         #expect(
             !GuestRunEnd(
-                result: Int32(KERNARIUM_RUNTIME_RESULT_OUT_OF_MEMORY),
+                result: Int32(KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED),
                 requested: true
             ).hostRefusedMemory
         )

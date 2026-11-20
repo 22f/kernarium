@@ -68,6 +68,7 @@
 #include "runtime/guest_memory_budget.hpp"
 #include "runtime/memory_pressure_response.hpp"
 #include "runtime/session_record.hpp"
+#include "runtime/start_refusal.hpp"
 #include "uml/emulator.h"
 #include "uml_slirp_net.h"
 
@@ -1693,6 +1694,11 @@ public:
             static_cast<int>(boot_->pointers.size()),
             boot_->pointers.data(),
             nullptr);
+    }
+
+    bool startRefusedForMemory() noexcept override
+    {
+        return uml::runtime::start_refused_for_memory();
     }
 
     bool runEnd(kernarium::restart::RunEnd& end) override

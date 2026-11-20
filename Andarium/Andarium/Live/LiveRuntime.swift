@@ -1117,9 +1117,10 @@ final class LiveRuntime: RuntimeDriver {
         // than before it.
         model?.host.freeStorageBytes = freeSpace()
         let loop = result == Int32(KERNARIUM_RUNTIME_RESULT_RESTART_LOOP)
-        // The host would not map the guest's memory: the run never started its
-        // kernel, and a smaller size is what starts.
-        let memoryRefused = result == Int32(KERNARIUM_RUNTIME_RESULT_OUT_OF_MEMORY) ? runMemoryMiB : nil
+        // The runtime says the host would not give the guest's memory: the
+        // run never started its kernel, and a smaller size is what starts. A
+        // bare out-of-memory status of the library (-2) is not that.
+        let memoryRefused = result == Int32(KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED) ? runMemoryMiB : nil
         let stopped = userStopped
         userStopped = false
         model?.runEnded(

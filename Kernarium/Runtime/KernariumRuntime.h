@@ -238,7 +238,8 @@ typedef struct kernarium_runtime_gpu_budget {
  * call returns only when the guest powers off, the application stops it, a run
  * fails, or the restart-loop guard ends the loop. It returns the guest's own
  * status (0 for a power-off or a stop), a negated uml_emulator error constant
- * for a run or start-up that failed, or KERNARIUM_RUNTIME_RESULT_RESTART_LOOP.
+ * for a run or start-up that failed, KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED
+ * or KERNARIUM_RUNTIME_RESULT_RESTART_LOOP.
  * For Android, 0 means the guest powered off cleanly and all its resources have
  * been released: another run may start in this process. A host stop or an
  * unreported shutdown returns an error. */
@@ -248,11 +249,15 @@ typedef int (*kernarium_runtime_run_function)(
 
 enum {
     /* The host could not give the guest what its size needs, the address space
-     * for its kernel window or the memory limit for its RAM, and nothing was
-     * started: the run ended before its kernel began. The size can be lowered
-     * and the run tried again; no other run result means that. It is
-     * -UML_EMULATOR_OUT_OF_MEMORY. */
-    KERNARIUM_RUNTIME_RESULT_OUT_OF_MEMORY = -2,
+     * for its kernel window and heap or the memory limit for its RAM, and
+     * nothing was started: the run ended before its kernel began. The size can
+     * be lowered and the run tried again. The runtime returns it only for that
+     * refusal, which the library marks (runtime/start_refusal.hpp): the
+     * library's -UML_EMULATOR_OUT_OF_MEMORY also comes from a failed
+     * allocation of its own, and a guest's own status can be any number, so
+     * that value on its own says nothing of the guest's size. It is outside
+     * the range of the negated uml_emulator errors (-1 through -4). */
+    KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED = -101,
     /* The guest restarted itself five times in a row within 15 seconds of its
      * boot, or, for Android, eight times in a row each within 15 seconds or
      * before its boot had finished (init processed sys.boot_completed=1,

@@ -321,7 +321,7 @@ struct LifecycleTests {
             kernel: "Linux 6.18.54", architecture: "arm64, 4 KiB pages", appVersion: "1.0 (1)"
         )
         let guest = Guest(cores: 2, memoryMiB: 2048, capacityGiB: 8)
-        let refused = RunEnd(result: -2, memoryRefusedMiB: 2048)
+        let refused = RunEnd(result: -101, memoryRefusedMiB: 2048)
         // The run never began, so it did not run for any time.
         #expect(refused.report(appVersion: "1.0 (1)", system: system, guest: guest, uptimeSeconds: nil) == """
             Andarium 1.0 (1) · 20261031-los24-r4
@@ -337,7 +337,9 @@ struct LifecycleTests {
         #expect(
             launch.report(appVersion: "1.0 (1)", system: system, guest: guest, uptimeSeconds: nil)
                 .hasSuffix("it could not start (2 GiB of memory is more than this device can give)"))
-        // Without the cause a result of -2 is only a runtime result.
+        // Without the cause a result of -2, the library's own out-of-memory
+        // status, is only a runtime result: a failed allocation of its own
+        // returns it too.
         #expect(
             RunEnd(result: -2).report(appVersion: "1.0 (1)", system: system, guest: guest, uptimeSeconds: nil)
                 .hasSuffix("Virtual machine ended: runtime result -2"))
