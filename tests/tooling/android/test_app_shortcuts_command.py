@@ -21,7 +21,13 @@ application's icon key, kill a child by anything but its pid, draw or decode any
 must reach the renderer (the provider held for the foreground user and released, a dead provider asked for again
 once, the request that is the resource id and the files and nothing else) is checked on its text, and each of those
 checks has its own mutant. The Java rows run on a 64 MiB heap, so that a label of megabytes does not fit a copy of
-itself (the cleaning's bound is a row). Skipped (status 77) where the host has no JDK.
+itself (the cleaning's bound is a row). The rows start real processes, some that ignore SIGTERM, and end each by
+SIGKILL through its handle before the row returns. Each JVM also runs as the leader of a process group of its own,
+which pins ownership: a process of that group that is still alive once the JVM has ended and a short grace has passed
+is a leftover of this test and no one else's, so the test fails on it after ending the group by SIGKILL while the
+JVM, not yet reaped, still holds the group's number (a mutant that stops a row halfway must not leave one behind). A
+process listing is read for numbers only and a pid taken from it is never signalled; a listing that fails fails the
+test; a timeout or an interrupt of the driver ends the groups too. Skipped (status 77) where the host has no JDK.
 """
 
 from __future__ import annotations
@@ -31,10 +37,14 @@ import concurrent.futures
 import os
 import pathlib
 import re
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPOSITORY = HERE.parents[2]
@@ -793,7 +803,314 @@ def jdk_tool(name: str) -> str | None:
     return path if probe.returncode == 0 else None
 
 
-def compile_and_run(javac: str, java: str, scratch: pathlib.Path, sources: list[pathlib.Path]) -> tuple[int, str]:
+# The rows start real processes, some of which ignore SIGTERM. Each JVM runs as the leader of a process group (and
+# session) of its own, and that group is what pins ownership: its leader is not reaped until the group has been dealt
+# with, so the kernel cannot give the group's number to another process, and the only signal ever sent is
+# killpg(group, SIGKILL). A pid that was read from a process listing is never signalled: the listing says which
+# processes are in the group (numeric columns only) and, asked separately, what they run (for the message).
+SWEEP_SLACK = 10.0  # how long past its grace the sweep may take (the scans and the wait for the kill included)
+_OWNED_LOCK = threading.Lock()
+_OWNED_GROUPS: set[int] = set()  # the groups whose leader this driver has not reaped
+_STOPPED = False  # the driver was interrupted: no group is started any more
+
+
+class GroupError(RuntimeError):
+    """A process group could not be looked at, so nothing can be said of what it holds."""
+
+
+def _ps(arguments: list[str], limit: float) -> str:
+    """The output of one ps, asked again (at most three times, within `limit` seconds) when it fails or does not
+    answer; a ps that keeps failing is an error (GroupError) and never an empty listing. Known, and left: the
+    attempts are counted and each is bounded, but their sum (and the half second a short `limit` is raised to) is not
+    under one deadline shared with the sweep."""
+    end = time.monotonic() + limit
+    failure = ""
+    for attempt in range(3):
+        try:
+            done = subprocess.run(["ps", *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True, errors="replace",
+                                  timeout=max(0.5, end - time.monotonic()), check=False)
+        except (subprocess.TimeoutExpired, OSError) as problem:
+            failure = str(problem)
+        else:
+            if done.returncode == 0:
+                return done.stdout
+            failure = f"exited {done.returncode}: {done.stderr.strip()}"
+        if time.monotonic() >= end:
+            break
+        time.sleep(0.1)
+    raise GroupError(f"ps {' '.join(arguments)}: {failure}")
+
+
+def live_members(group: int, limit: float) -> list[int]:
+    """The pids of the live (not zombie) processes of a group, from the numeric columns of one listing alone."""
+    members = []
+    for line in _ps(["-axo", "pid=,ppid=,pgid=,stat="], limit).splitlines():
+        fields = line.split()
+        if len(fields) != 4 or not all(field.isdigit() for field in fields[:3]):
+            raise GroupError(f"unreadable line of the process listing: {line!r}")
+        if int(fields[2]) == group and not fields[3].startswith("Z"):
+            members.append(int(fields[0]))
+    return members
+
+
+def describe(pid: int, limit: float) -> str:
+    """What a process runs, for the message only (the pid is not signalled; it may be another process's by now)."""
+    try:
+        text = _ps(["-o", "command=", "-p", str(pid)], limit)
+    except GroupError:
+        return "(gone)"
+    return text.strip().replace("\n", "\\n")[:200]
+
+
+def signal_group(group: int) -> None:
+    """SIGKILL to every process of a group whose leader is not reaped, so that the number is still the group's."""
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass  # only the leader's zombie is left in it (macOS answers EPERM for that); the scan after it decides
+
+
+class _Pipe:
+    """The read end of a child's output, read without blocking: what is there is taken, and the end is noted."""
+
+    def __init__(self, stream) -> None:
+        self.fd = stream.fileno()
+        os.set_blocking(self.fd, False)
+        self.data = bytearray()
+        self.eof = False
+
+    def pump(self, wait: float) -> None:
+        """Takes what the pipe holds, waiting up to `wait` seconds for the first of it (all of them once it is at its end)."""
+        if self.eof:
+            time.sleep(wait)
+            return
+        if not select.select([self.fd], [], [], wait)[0]:
+            return
+        while True:
+            try:
+                chunk = os.read(self.fd, 65536)
+            except BlockingIOError:
+                return
+            if not chunk:
+                self.eof = True
+                return
+            self.data += chunk
+
+
+def _exited(pid: int) -> bool:
+    """Whether a child has ended, without reaping it (the group keeps its number while the leader is a zombie)."""
+    return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+
+
+def sweep_group(group: int, pipe: _Pipe, settle: float) -> list[str]:
+    """What is left of a group whose leader has ended and is not reaped: one line for each process, ended.
+
+    A process that ends by itself within the grace (a `sleep 1` whose shell was killed) is no leftover. The deciding
+    look is a scan that starts after the grace, or any scan that finds the group empty, for nothing joins an empty
+    group. Every scan is bounded (its time and the retries' are not under one deadline of the sweep: a scan is
+    milliseconds, and the sweep ends before its own hard end) ; a scan that fails raises (GroupError). What is still
+    there is ended by SIGKILL to the group, whose leader still holds its number, and then seen gone.
+    """
+    grace_end = time.monotonic() + settle
+    hard_end = grace_end + SWEEP_SLACK
+    while True:
+        # The look that decides is one that starts after the grace: a snapshot that was taken before it and came back
+        # after it says what was there then, and what it shows may have ended by itself since.
+        deciding = time.monotonic() >= grace_end
+        members = live_members(group, min(5.0, hard_end - time.monotonic()))
+        if not members:
+            return []
+        if deciding:
+            break
+        pipe.pump(min(0.1, max(0.0, grace_end - time.monotonic())))
+    left = [f"pid {pid}: {describe(pid, min(5.0, hard_end - time.monotonic()))}" for pid in members]
+    while members:
+        signal_group(group)
+        if time.monotonic() >= hard_end:
+            left += [f"pid {pid} could not be ended" for pid in members]
+            break
+        time.sleep(0.05)
+        members = live_members(group, min(5.0, hard_end - time.monotonic()))
+    return left
+
+
+def end_all_owned() -> None:
+    """The driver is interrupted: no group is started any more, and each whose leader is not reaped is ended."""
+    global _STOPPED
+    with _OWNED_LOCK:
+        _STOPPED = True
+        for group in _OWNED_GROUPS:
+            signal_group(group)
+
+
+def run_owned(argv: list[str], timeout: float, settle: float = 5.0) -> tuple[int, str, list[str]]:
+    """Runs `argv` as the leader of a process group of its own: (status, output, problems).
+
+    The problems are one line for each process of the group still alive after the leader ended and the grace (ended
+    by SIGKILL to the group; the test fails on them), and a line when the group could not be looked at. However the
+    run ends (a timeout, an interrupt, an error), the group is ended while its leader still holds its number, and
+    only then is the leader reaped; each wait is bounded.
+    """
+    process = None
+    pipe = None
+    problems: list[str] = []
+    # Known, and left: a signal that lands in the main thread between the fork inside Popen and the registration below
+    # (the Python handler runs between two bytecodes) loses the child before it is owned. That is a window of a few
+    # bytecodes, and the JVM then ends by itself within its own limits.
+    try:
+        with _OWNED_LOCK:
+            if _STOPPED:
+                raise KeyboardInterrupt("the driver was interrupted")
+            process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT, start_new_session=True)
+            _OWNED_GROUPS.add(process.pid)
+        pipe = _Pipe(process.stdout)
+        deadline = time.monotonic() + timeout
+        while not _exited(process.pid):
+            pipe.pump(0.05)
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(argv, timeout)
+        pipe.pump(0)
+        try:
+            problems = sweep_group(process.pid, pipe, settle)
+        except GroupError as error:
+            problems = [f"the process group could not be checked: {error}"]
+    finally:
+        if process is not None:
+            signal_group(process.pid)
+            end = time.monotonic() + SWEEP_SLACK
+            while pipe is not None and not pipe.eof and time.monotonic() < end:
+                pipe.pump(0.05)
+            with _OWNED_LOCK:
+                _OWNED_GROUPS.discard(process.pid)
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
+            process.stdout.close()
+    return process.returncode, pipe.data.decode("utf-8", errors="replace"), problems
+
+
+def _gone(pid: int, wait: float = 5.0) -> bool:
+    """Whether the process of a number has ended, by signal 0 (which sends nothing; a zombie still answers)."""
+    end = time.monotonic() + wait
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.05)
+
+
+def check_leftover_detection() -> int:
+    """The check on leftovers can tell a leftover from none, and its clean-up holds (a check that cannot is no check).
+
+    Each case's fixture writes its own pid, and the result is judged by asking the kernel about that pid, not by what
+    the check reports. A shell that leaves a process that ignores SIGTERM behind is reported and the process ended; a
+    process that ends by itself within the grace is not reported, after the sweep waited for it (so it was in the
+    group that the sweep looks at), nor when the scan that saw it comes back after the grace is over; a timeout and
+    a listing that fails end the group too.
+    """
+    stubborn = 'echo $$ > "$1"; trap "" TERM; exec sleep 600'  # one process: exec keeps the pid and the ignored signal
+    # A leader that ends when the process it left has written its pid (so the pid is there whatever the check does).
+    leaves_one = (f"sh -c '{stubborn}' sh \"$1\" </dev/null >/dev/null 2>&1 & "
+                  'until [ -s "$1" ]; do sleep 0.05; done; exit 0')
+    with tempfile.TemporaryDirectory(prefix="uml-leftover-check-") as directory:
+        def fixture(name: str) -> pathlib.Path:
+            return pathlib.Path(directory) / name
+
+        def pid_of(path: pathlib.Path) -> int | None:
+            try:
+                return int(path.read_text().strip())
+            except (OSError, ValueError):
+                return None
+
+        left_behind = fixture("left")
+        status, _, problems = run_owned(
+            ["/bin/sh", "-c", leaves_one, "sh", str(left_behind)],
+            30, settle=0.5)
+        pid = pid_of(left_behind)
+        if (status != 0 or pid is None or not any(line.startswith(f"pid {pid}: ") for line in problems)
+                or any("could not" in line for line in problems) or not _gone(pid)):
+            print(f"FAIL: a process left behind is not reported and ended (status {status}, pid {pid}): {problems}",
+                  file=sys.stderr)
+            return 1
+
+        transient = fixture("transient")
+        begin = time.monotonic()
+        status, _, problems = run_owned(
+            ["/bin/sh", "-c", 'sleep 2 </dev/null >/dev/null 2>&1 & echo $! > "$1"; exit 0', "sh", str(transient)],
+            30, settle=5.0)
+        pid = pid_of(transient)
+        if (status != 0 or problems or pid is None or time.monotonic() - begin < 1.0 or not _gone(pid)):
+            print(f"FAIL: a process that ends by itself is reported, or was not waited for (status {status}, pid "
+                  f"{pid}, {time.monotonic() - begin:.1f} s): {problems}", file=sys.stderr)
+            return 1
+
+        timed_out = fixture("timeout")
+        try:
+            run_owned(["/bin/sh", "-c", stubborn, "sh", str(timed_out)], 1, settle=0.5)
+        except subprocess.TimeoutExpired:
+            pid = pid_of(timed_out)
+            if pid is None or not _gone(pid):
+                print(f"FAIL: a run that timed out left its process behind (pid {pid})", file=sys.stderr)
+                return 1
+        else:
+            print("FAIL: a run that outlasts its timeout does not raise", file=sys.stderr)
+            return 1
+
+        late = fixture("late")
+        real_live = globals()["live_members"]
+        pending = [True]
+
+        def late_scan(group: int, limit: float) -> list[int]:
+            members = real_live(group, limit)
+            if members and pending:
+                pending.clear()
+                time.sleep(2.2)  # a snapshot of the group that comes back after the grace is over
+            return members
+
+        globals()["live_members"] = late_scan
+        try:
+            status, _, problems = run_owned(
+                ["/bin/sh", "-c", 'sleep 1 </dev/null >/dev/null 2>&1 & echo $! > "$1"; exit 0', "sh", str(late)],
+                30, settle=2.0)
+        finally:
+            globals()["live_members"] = real_live
+        pid = pid_of(late)
+        if status != 0 or problems or pid is None or not _gone(pid):
+            print(f"FAIL: a scan that came back late decided what is left, though its process had ended by itself "
+                  f"(status {status}, pid {pid}): {problems}", file=sys.stderr)
+            return 1
+
+        blind = fixture("blind")
+        real_ps = globals()["_ps"]
+
+        def failing_ps(arguments: list[str], limit: float) -> str:
+            raise GroupError("injected")
+
+        globals()["_ps"] = failing_ps
+        try:
+            status, _, problems = run_owned(
+                ["/bin/sh", "-c", leaves_one, "sh", str(blind)],
+                30, settle=0.5)
+        finally:
+            globals()["_ps"] = real_ps
+        pid = pid_of(blind)
+        if not any("could not be checked" in line for line in problems) or pid is None or not _gone(pid):
+            print(f"FAIL: a listing that fails is taken for an empty group, or the group is left (pid {pid}): {problems}",
+                  file=sys.stderr)
+            return 1
+    return 0
+
+
+def compile_and_run(javac: str, java: str, scratch: pathlib.Path,
+                    sources: list[pathlib.Path]) -> tuple[int, str, list[str]]:
+    """Compiles the sources and the test and runs it: (status, output, problems). The test's rows start real
+    processes; the problems are those of run_owned (processes still alive when it has ended, which are ended)."""
     classes = scratch / "classes"
     if classes.exists():
         shutil.rmtree(classes)
@@ -804,15 +1121,47 @@ def compile_and_run(javac: str, java: str, scratch: pathlib.Path, sources: list[
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240,
         check=False)
     if compiled.returncode != 0:
-        return -1, f"javac:\n{compiled.stdout}"
-    ran = subprocess.run([java, "-Xmx64m", "-Dfile.encoding=UTF-8", "-cp", str(classes), "com.kernarium.apps.AppsCommandTest"],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                         timeout=120, check=False)
-    return ran.returncode, ran.stdout
+        return -1, f"javac:\n{compiled.stdout}", []
+    return run_owned([java, "-Xmx64m", "-Dfile.encoding=UTF-8", "-cp", str(classes),
+                      "com.kernarium.apps.AppsCommandTest"], 120)
 
 
 def failed_rows(output: str) -> set[str]:
     return {m.group(1) for m in re.finditer(r"^FAIL ([a-z0-9-]+)", output, re.MULTILINE)}
+
+
+def unchecked_rows(output: str) -> set[str]:
+    """The rows that could not check their processes (their listing failed every attempt): an error of the run."""
+    return {m.group(1) for m in re.finditer(r"^ERROR ([a-z0-9-]+): could not be checked", output, re.MULTILINE)}
+
+
+def judge_mutant(name: str, source: str, must_fail: set[str], status: int, output: str) -> tuple[bool, str]:
+    """(caught, the line to print) for one mutant's run. A row that could not be checked is an error of the run and
+    never a catch, whatever the other rows say: the run did not look at everything it is there to look at."""
+    unchecked = unchecked_rows(output)
+    if unchecked:
+        return False, (f"FAIL: mutation {name} ({source}): the rows {sorted(unchecked)} could not check their processes "
+                       f"(an error of the run, not a catch; the end of its output:\n{output[-1500:]})")
+    missed = must_fail - failed_rows(output)
+    if status == 0 or missed:
+        return False, (f"FAIL: mutation {name} ({source}) was not caught by {sorted(missed) or 'any row'} "
+                       f"(status {status}; the end of its output:\n{output[-1500:]})")
+    return True, f"mutation {name}: caught by {sorted(failed_rows(output) & must_fail)}"
+
+
+def check_judging() -> int:
+    """A mutant that a row seems to catch is not credited when a row could not check its processes (the control: a
+    behaviour-preserving mutant whose only failure is a listing that failed every attempt)."""
+    must = {"row-a"}
+    caught = judge_mutant("m", "S.java", must, 1, "ok row-b\nFAIL row-a: wrong\nFAILED 1\n")
+    errored = judge_mutant("m", "S.java", must, 1, "ERROR row-a: could not be checked: the processes of this JVM could "
+                           "not be listed (java.lang.RuntimeException: Cannot allocate memory)\nFAILED 1\n")
+    errored_too = judge_mutant("m", "S.java", must, 1, "FAIL row-a: wrong\nERROR row-b: could not be checked: x\nFAILED 2\n")
+    if not caught[0] or errored[0] or errored_too[0] or "could not check their processes" not in errored[1]:
+        print(f"FAIL: a mutant is credited with a row that could not check its processes: {caught} {errored} {errored_too}",
+              file=sys.stderr)
+        return 1
+    return 0
 
 
 def strip_comments(text: str) -> str:
@@ -930,13 +1279,30 @@ def check_sources() -> int:
     return 1 if problems else 0
 
 
+def _interrupted(number: int, frame) -> None:
+    raise KeyboardInterrupt(f"signal {number}")
+
+
 def main() -> int:
+    """Runs the test; an interrupt (SIGINT, SIGTERM, SIGHUP) ends every process group it owns before it leaves."""
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, _interrupted)
+    try:
+        return run()
+    except BaseException:
+        end_all_owned()
+        raise
+
+
+def run() -> int:
     if check_sources() != 0:
         return 1
     javac, java = jdk_tool("javac"), jdk_tool("java")
     if javac is None or java is None:
         print("SKIP: no JDK (javac and java) on PATH")
         return SKIP
+    if check_judging() != 0 or check_leftover_detection() != 0:
+        return 1
     package_dir = SOURCES / PACKAGE_DIR
     sources = sorted(path for path in package_dir.glob("*.java") if path.name not in ANDROID_GLUE)
     expected = {"AppsCommand.java", "ChildProcess.java", "Component.java", "Entry.java", "Icon.java", "LabelText.java",
@@ -952,10 +1318,15 @@ def main() -> int:
             return 1
     with tempfile.TemporaryDirectory(prefix="uml-app-shortcuts-") as directory:
         scratch = pathlib.Path(directory)
-        status, output = compile_and_run(javac, java, scratch / "base", [*sources, PROTOCOL])
+        status, output, left = compile_and_run(javac, java, scratch / "base", [*sources, PROTOCOL])
         print(output, end="")
-        if status != 0 or not output.rstrip().endswith("PASS"):
-            print("FAIL: the command's test", file=sys.stderr)
+        if status != 0 or not output.rstrip().endswith("PASS") or unchecked_rows(output):
+            print("FAIL: the command's test" + (f" (rows that could not check their processes: "
+                                               f"{sorted(unchecked_rows(output))})" if unchecked_rows(output) else ""),
+                  file=sys.stderr)
+            return 1
+        if left:
+            print("FAIL: the command's test left processes behind (ended):\n  " + "\n  ".join(left), file=sys.stderr)
             return 1
         rows = set(re.findall(r"^ok ([a-z0-9-]+)", output, re.MULTILINE))
 
@@ -974,19 +1345,26 @@ def main() -> int:
                 return False, f"FAIL: mutation {name}: the text to remove occurs {text.count(old)} times in {source}"
             target.write_text(text.replace(old, new), encoding="utf-8")
             mutated = sorted(path for path in copy.glob("*.java") if path.name not in ANDROID_GLUE)
-            mutant_status, mutant_output = compile_and_run(javac, java, scratch / f"run-{name}", mutated)
+            mutant_status, mutant_output, left = compile_and_run(javac, java, scratch / f"run-{name}", mutated)
             shutil.rmtree(copy)
             if mutant_status == -1:
                 return False, f"FAIL: mutation {name} does not compile:\n{mutant_output}"
-            missed = must_fail - failed_rows(mutant_output)
-            if mutant_status == 0 or missed:
-                return False, f"FAIL: mutation {name} ({source}) was not caught by {sorted(missed) or 'any row'}"
-            return True, f"mutation {name}: caught by {sorted(failed_rows(mutant_output) & must_fail)}"
+            if left:
+                return False, (f"FAIL: mutation {name} ({source}) left processes behind (ended):\n  "
+                               + "\n  ".join(left))
+            return judge_mutant(name, source, must_fail, mutant_status, mutant_output)
 
         # The mutants are independent processes: a few at a time keeps the whole under the test's timeout.
         workers = max(1, min(3, (os.cpu_count() or 1) - 1))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        try:
             results = list(pool.map(mutate, MUTATIONS))
+        except BaseException:
+            pool.shutdown(wait=False, cancel_futures=True)  # no mutant starts after an interrupt
+            end_all_owned()
+            raise
+        finally:
+            pool.shutdown(wait=True)
         failures = 0
         for caught, line in results:
             print(line, file=sys.stdout if caught else sys.stderr)
