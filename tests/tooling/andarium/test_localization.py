@@ -82,7 +82,6 @@ class Tree:
                 "Retina": {"shouldTranslate": False},
             }),
             "JIT": catalog({"Preparing JIT": entry(ja="JITを準備中", zh_Hans="正在准备JIT", zh_Hant="正在準備JIT")}),
-            "Feedback": catalog({"Send feedback": entry(ja="フィードバックを送信", zh_Hans="发送反馈", zh_Hant="傳送回饋")}),
             "FollowX": catalog({"Follow developer on %@": entry(
                 ja="%@でデベロッパをフォロー", zh_Hans="在%@上关注开发者", zh_Hant="在%@上追蹤開發者")}),
             "AppShortcuts": catalog({PHRASE: {"localizations": {
@@ -231,7 +230,7 @@ class CheckTests(unittest.TestCase):
 
     def put_notice(self, catalog_name: str, translations: dict[str, str] | None = None) -> str:
         """The no-Google-apps notice's own title in a catalog, as the application carries it."""
-        key = "No Google apps" if catalog_name == "Localizable" else "Missing Google apps?"
+        key = "No Google apps"
         self.assertIn(key, self.script.GOOGLE_NOTICE_KEYS[catalog_name])
         values = {"ja": "Googleのアプリは意図的に非搭載", "zh_Hans": "有意不含Google应用", "zh_Hant": "刻意不內建Google應用程式"}
         values.update(translations or {})
@@ -239,8 +238,7 @@ class CheckTests(unittest.TestCase):
         return key
 
     def test_the_notice_may_name_google_in_every_language(self) -> None:
-        for catalog_name in ("Localizable", "Feedback"):
-            self.put_notice(catalog_name)
+        self.put_notice("Localizable")
         body = next(iter(sorted(self.script.GOOGLE_NOTICE_KEYS["Localizable"] - {"No Google apps"})))
         self.tree.files["Localizable"]["strings"][body] = entry(
             ja="Googleは、自社のアプリとGoogle Play開発者サービスを、認定済みデバイスのメーカーにのみライセンス供与しています。",
@@ -270,15 +268,15 @@ class CheckTests(unittest.TestCase):
         self.assertFinds("names a Google product")
 
     def test_another_key_may_not_name_google_beside_the_notice(self) -> None:
-        self.put_notice("Feedback")
-        self.tree.files["Feedback"]["strings"]["Open Google Play"] = entry(ja="開く", zh_Hans="打开", zh_Hant="開啟")
+        self.put_notice("Localizable")
+        self.tree.files["Localizable"]["strings"]["Open Google Play"] = entry(ja="開く", zh_Hans="打开", zh_Hant="開啟")
         self.assertFinds("names a Google product")
 
     def test_the_notice_in_another_catalog_may_not_name_google(self) -> None:
-        # The Feedback table's key in the Localizable catalog, or the reverse, is not the notice.
-        feedback_key = self.put_notice("Feedback")
-        del self.tree.files["Feedback"]["strings"][feedback_key]
-        self.tree.files["Localizable"]["strings"][feedback_key] = entry(
+        # The notice's key in another catalog is not the notice.
+        key = self.put_notice("Localizable")
+        del self.tree.files["Localizable"]["strings"][key]
+        self.tree.files["JIT"]["strings"][key] = entry(
             ja="Googleのアプリが見つかりませんか？", zh_Hans="找不到Google应用？", zh_Hant="找不到Google應用程式？")
         self.assertFinds("names a Google product")
 
@@ -456,7 +454,6 @@ class SyncTests(unittest.TestCase):
         self.data = self.scratch / "build" / "Home.stringsdata"
 
     def extract(self, *keys: str, jit: tuple[str, ...] = ("Preparing JIT",),
-                feedback: tuple[str, ...] = ("Send feedback",),
                 follow: tuple[str, ...] = ("Follow developer on %@",),
                 shortcuts: tuple[str, ...] = (PHRASE,)) -> None:
         self.data.parent.mkdir(parents=True, exist_ok=True)
@@ -465,7 +462,7 @@ class SyncTests(unittest.TestCase):
             return [{"comment": "", "key": key, "location": {"startingColumn": 1, "startingLine": 1}} for key in texts]
 
         body = {"source": str(self.root / self.source), "tables": {
-            "Localizable": table(keys), "JIT": table(jit), "Feedback": table(feedback),
+            "Localizable": table(keys), "JIT": table(jit),
             "FollowX": table(follow),
             "AppShortcuts": [
                 {"key": key, "location": {"startingColumn": 1, "startingLine": 1},
@@ -510,25 +507,8 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("JIT: is out of step with the code: 1 to add ['A new JIT text']", problems[0])
 
-    def test_a_feedback_string_of_the_arranged_build_is_in_step(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
-        self.assertEqual(self.sync("--check"), [])
-
-    def test_a_missing_feedback_string_is_found(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of",
-                     feedback=("Send feedback", "A new feedback text"))
-        problems = self.sync("--check")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("Feedback: is out of step with the code: 1 to add ['A new feedback text']", problems[0])
-
-    def test_a_development_build_without_send_feedback_is_refused_not_read_as_stale(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of", feedback=())
-        problems = self.sync("--check")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("Feedback: has no extracted strings: build with FEEDBACK_ADDRESS=feedback@example.com", problems[0])
-
     def test_an_app_store_build_without_a_feature_has_no_table_to_compare(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(), follow=())
+        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), follow=())
         self.assertEqual(self.sync("--check", "--app-store"), [])
 
     def test_a_follow_x_string_of_the_arranged_build_is_in_step(self) -> None:
@@ -549,11 +529,11 @@ class SyncTests(unittest.TestCase):
         self.assertIn("FollowX: has no extracted strings: build with FOLLOW_X_HANDLE=example_handle", problems[0])
 
     def test_an_app_store_build_without_a_handle_has_no_follow_x_table_to_compare(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(), follow=())
+        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), follow=())
         self.assertEqual(self.sync("--check", "--app-store"), [])
 
     def test_an_app_store_build_with_a_handle_is_held_to_the_follow_x_keys_it_lacks(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(),
+        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(),
                      follow=("Follow developer on %@", "A new row text"))
         problems = self.sync("--check", "--app-store")
         self.assertEqual(len(problems), 1, problems)
@@ -569,17 +549,6 @@ class SyncTests(unittest.TestCase):
         problems = self.sync("--check")
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("AppShortcuts: is out of step with the code: 1 to add ['Close ${target} in ${applicationName}']", problems[0])
-
-    def test_an_app_store_build_without_a_receiver_has_no_feedback_table_to_compare(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(), follow=())
-        self.assertEqual(self.sync("--check", "--app-store"), [])
-
-    def test_an_app_store_build_with_a_receiver_is_held_to_the_feedback_keys_it_lacks(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=("Send feedback", "A new feedback text"),
-                     follow=())
-        problems = self.sync("--check", "--app-store")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("Feedback: is out of step with the code: 1 to add ['A new feedback text']", problems[0])
 
     def test_an_app_store_build_that_compiled_a_jit_string_is_refused(self) -> None:
         self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")

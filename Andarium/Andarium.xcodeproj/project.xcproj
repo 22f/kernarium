@@ -41,7 +41,6 @@
         { "path": "Info.plist" },
         { "path": "PrivacyInfo.xcprivacy", "target-membership": [ "Andarium/resources" ] },
         { "path": "Andarium.xcconfig" },
-        { "path": "Feedback.local.xcconfig.example" },
         { "path": "Developer.local.xcconfig.example" },
       ],
     }, {
@@ -68,12 +67,6 @@
           ],
         }, {
           "path": "JIT.xcstrings",
-          "target-membership": [
-            "Andarium/resources",
-            "AndariumPreview/resources",
-          ],
-        }, {
-          "path": "Feedback.xcstrings",
           "target-membership": [
             "Andarium/resources",
             "AndariumPreview/resources",
@@ -190,21 +183,7 @@
           "shell": "/bin/sh",
           "script": [
             "case \"$CONFIGURATION\" in AppStore|TestFlight) ;; *) exit 0 ;; esac",
-            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --configuration \"$CONFIGURATION\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --follow-x-handle \"$FOLLOW_X_HANDLE\" --developer-x-handle \"$DEVELOPER_X_HANDLE\" --info-source \"$SRCROOT/Config/Info.plist\" --beta-notes \"$SRCROOT/Andarium/Shared/WhatsNew.json\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
-            "",
-          ],
-        }, {
-          "kind": "script",
-          "name": "Check Send feedback",
-          "input-paths": [
-            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
-            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
-          ],
-          "run-on-every-build": true,
-          "shell": "/bin/sh",
-          "script": [
-            "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
-            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --feedback --configuration \"$CONFIGURATION\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --configuration \"$CONFIGURATION\" --follow-x-handle \"$FOLLOW_X_HANDLE\" --developer-x-handle \"$DEVELOPER_X_HANDLE\" --info-source \"$SRCROOT/Config/Info.plist\" --beta-notes \"$SRCROOT/Andarium/Shared/WhatsNew.json\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
         }, {
@@ -257,7 +236,7 @@
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
         "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
         "INFOPLIST_PREPROCESS": "YES",
-        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(FOLLOW_X_PLIST_DEFINITION)",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FOLLOW_X_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
@@ -389,7 +368,6 @@
         "CODE_SIGN_STYLE": "Automatic",
         "CURRENT_PROJECT_VERSION": "1",
         "ENABLE_PREVIEWS": "YES",
-        "FEEDBACK_ADDRESS": "",
         "FOLLOW_X_HANDLE": "",
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "Config/Info.plist",
@@ -404,7 +382,7 @@
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
         "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
         "INFOPLIST_PREPROCESS": "YES",
-        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(FOLLOW_X_PLIST_DEFINITION)",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FOLLOW_X_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",

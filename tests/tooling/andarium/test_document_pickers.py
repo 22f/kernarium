@@ -38,11 +38,7 @@ PRESENTER_NAMES = ("CopyDocumentPicker", "documentCopyPicker", "PickedCopies", "
 # checked below): path from the repository root -> why it is meant. A source
 # that adds an in-place importer on purpose names it here, and the entry must
 # keep matching one.
-PERMITTED_IN_PLACE_IMPORTERS: dict[str, str] = {
-    "Andarium/Andarium/Shared/Feedback/SendFeedbackFilePicker.swift":
-        "Send feedback attaches a picked file where it is kept (a file of any size is mapped for the mail, "
-        "never copied first), in every configuration that has the feature",
-}
+PERMITTED_IN_PLACE_IMPORTERS: dict[str, str] = {}
 
 SWIFTUI_IMPORTER = re.compile(r"\bfileImporter\s*\(")
 UIKIT_PICKER = re.compile(r"\bUIDocumentPickerViewController\s*\(")

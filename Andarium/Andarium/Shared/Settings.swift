@@ -85,9 +85,6 @@ struct SessionSettingsSheet: View {
                 AddToHomeScreenPage(query: model.sessionPreset.addToHomeQuery ?? "")
             }
         }
-        #if FEEDBACK_MAIL
-        .sendFeedbackSheet(model)
-        #endif
         // A picker that failed (Install APK and the file browser's Import are
         // here): the alert is the sheet's own, which keeps the sheet open.
         .background {
@@ -273,9 +270,6 @@ struct SessionSettingsSheet: View {
     /// Tapping the row starts at once.
     private var diagnostics: some View {
         Section("Diagnostics") {
-            #if FEEDBACK_MAIL
-            if model.feedbackAddress != nil { SendFeedbackEntrance() }
-            #endif
             Button {
                 dismiss()
                 model.createBugReport()

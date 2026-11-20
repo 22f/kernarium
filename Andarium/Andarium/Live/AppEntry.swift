@@ -330,9 +330,6 @@ struct AppEntry {
         model.phase = .running(.normal)
         runtime.beginInputProbe()
         if thermalStated { runtime.beginThermalProbe() }
-        #if FEEDBACK_MAIL
-        if FeedbackProbe.requested(in: environment) { FeedbackProbe.install(on: model) }
-        #endif
         if let script = OldAppsProbeLaunch.script(in: environment) {
             let scripted = ScriptedOldApps(open: ["com.example.rally"])
             switch script {

@@ -10,7 +10,6 @@ text is the key. The strings live in:
   Andarium/Localization/InfoPlist.xcstrings     the permission explanations
   Andarium/Localization/WhatsNew.xcstrings      the notes of both tracks, Shared/WhatsNew.json and Shared/WhatsNewAppStore.json
   Andarium/Localization/JIT.xcstrings           the JIT texts (table "JIT"), carried by the builds that have JIT only
-  Andarium/Localization/Feedback.xcstrings      the texts of Send feedback (table "Feedback"), carried by the builds that have it only
   Andarium/Localization/FollowX.xcstrings       the text of Follow developer on X (table "FollowX"), carried by the builds that have it only
   Andarium/Localization/AppShortcuts.xcstrings  the phrases Siri and Search understand for Add to Home Screen (table "AppShortcuts")
   Andarium/AndariumCore/Sources/AndariumCore/Resources/Localizable.xcstrings
@@ -52,14 +51,6 @@ JIT, so it must have extracted no string of the JIT table and no catalog of it
 is compared, and only a string the catalogs lack is a problem (a key of
 `#if !APP_STORE` code is not in its output).
 
-Send feedback is compiled in only where the build names a receiver
-(Andarium/README.md#send-feedback), and then its strings are extracted. A
-development check needs that build (`FEEDBACK_ADDRESS=feedback@example.com` on
-the `xcodebuild` line) and fails on one that extracted no string of the
-Feedback table, as the keys of code compiled out would read as stale. An App
-Store build with no receiver has none, and its Feedback catalog is not
-compared; one with a receiver is checked like the rest.
-
 Follow developer on X (Andarium/README.md#follow-developer-on-x) is the same
 with its FollowX table, built only where the build names a handle: a
 development check needs `FOLLOW_X_HANDLE=example_handle` on the `xcodebuild`
@@ -97,7 +88,6 @@ CATALOGS = {
     "InfoPlist": "Andarium/Localization/InfoPlist.xcstrings",
     "WhatsNew": "Andarium/Localization/WhatsNew.xcstrings",
     "JIT": "Andarium/Localization/JIT.xcstrings",
-    "Feedback": "Andarium/Localization/Feedback.xcstrings",
     "FollowX": "Andarium/Localization/FollowX.xcstrings",
     "AppShortcuts": "Andarium/Localization/AppShortcuts.xcstrings",
     "AndariumCore": CORE_CATALOG,
@@ -112,7 +102,6 @@ APPLICATION_TARGET = "Andarium"
 # The tables of the features that are compiled in only where the build names their value, and how a development
 # build names it.
 FEATURE_TABLES = {
-    "Feedback": "FEEDBACK_ADDRESS=feedback@example.com to compile Send feedback in",
     "FollowX": "FOLLOW_X_HANDLE=example_handle to compile Follow developer on X in",
 }
 
@@ -120,7 +109,6 @@ FEATURE_TABLES = {
 SYNC_SOURCES = {
     "Localizable": ("Andarium/Andarium/", "GuestHost/Sources/"),
     "JIT": ("Andarium/Andarium/",),
-    "Feedback": ("Andarium/Andarium/",),
     "FollowX": ("Andarium/Andarium/",),
     "AppShortcuts": ("Andarium/Andarium/",),
     "AndariumCore": ("Andarium/AndariumCore/Sources/AndariumCore/",),
@@ -135,8 +123,8 @@ GOOGLE_NAMES = re.compile(
 )
 
 # The one exception to that rule: the notice that Android has no Google apps, on
-# purpose (the boot screen's panel and Send feedback's line,
-# Andarium/README.md#runtime) names Google and Google Play services. Only
+# purpose (the boot screen's panel, Andarium/README.md#runtime) names Google
+# and Google Play services. Only
 # these keys may, and only by these two names, in Latin letters in every
 # language: "Google" not followed by another name ("Google Maps", "GoogleTV")
 # and "Google Play" followed by the word for services in the language. The rule
@@ -145,12 +133,6 @@ GOOGLE_NAMES = re.compile(
 GOOGLE_NOTICE_KEYS = {
     "Localizable": {
         "No Google apps",
-        "Google licenses its apps and Google Play services only to makers of certified devices. "
-        "Install apps from files you have; many work without them.",
-    },
-    "Feedback": {
-        "Missing Google apps?",
-        "Dismiss Google apps note",
         "Google licenses its apps and Google Play services only to makers of certified devices. "
         "Install apps from files you have; many work without them.",
     },

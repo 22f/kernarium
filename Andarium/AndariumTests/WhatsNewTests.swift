@@ -8,15 +8,11 @@ import Testing
 import UIKit
 @testable import Andarium
 
-/// A build made with Send feedback: what the tests' launches have unless they
-/// say otherwise, whatever the build that runs them was made with.
-private let withSendFeedback: Set<WhatsNewFeature> = [.sendFeedback]
-
 private extension AppEntry {
-    /// The launch's notes for a six-vCPU guest, in a build with `features`.
+    /// The launch's notes for a six-vCPU guest.
     @MainActor
-    func announce(on model: AppModel, hasGuest: Bool, features: Set<WhatsNewFeature> = withSendFeedback) {
-        announceWhatsNew(on: model, hasGuest: hasGuest, vCPUs: 6, features: features)
+    func announce(on model: AppModel, hasGuest: Bool) {
+        announceWhatsNew(on: model, hasGuest: hasGuest, vCPUs: 6)
     }
 }
 
@@ -74,7 +70,7 @@ struct WhatsNewTests {
     /// iPad with a camera are told it.
     private static let buildElevenIDs = [
         "snapshots", "resolution", "ipad-rotation", "keyboard-mouse-controllers", "location", "camera", "haptics",
-        "legacy-apk", "send-feedback", "more-fixes",
+        "legacy-apk", "more-fixes",
     ]
     private static let buildElevenIDsOnAnIPhone = buildElevenIDs.filter { $0 != "ipad-rotation" }
     private static let buildElevenIDsOnAnIPad = buildElevenIDs.filter { $0 != "haptics" }
@@ -156,7 +152,7 @@ struct WhatsNewTests {
             }
         }
         // A requirement the code does not know fails to decode, so the notes
-        // would not be here; these five entries are the ones that have any.
+        // would not be here; these four entries are the ones that have any.
         let requirements = WhatsNewCatalog.load().flatMap(\.entries).compactMap { entry in
             entry.requirement.map { (entry.id, $0) }
         }
@@ -165,7 +161,6 @@ struct WhatsNewTests {
             "ipad-rotation": WhatsNewRequirement(device: .pad),
             "camera": WhatsNewRequirement(camera: true),
             "haptics": WhatsNewRequirement(device: .haptics),
-            "send-feedback": WhatsNewRequirement(feature: .sendFeedback),
         ])
     }
 
@@ -176,15 +171,15 @@ struct WhatsNewTests {
         let titles = try #require(releases.first { $0.build == 11 }).entries.map(\.title)
         #expect(titles == [
             "Snapshots", "Resolution", "Rotation on iPad", "Keyboard, mouse and controllers", "Location", "Camera",
-            "Haptics", "Install older Android apps", "Send feedback", "More fixes",
+            "Haptics", "Install older Android apps", "More fixes",
         ])
         // The dot keeps to the end of its line: a no-break space before it.
         let separator = "\u{00A0}\u{00B7} "
-        #expect(WhatsNewRibbon.summary(titles, naming: 10, language: "en") == titles.joined(separator: separator))
+        #expect(WhatsNewRibbon.summary(titles, naming: 9, language: "en") == titles.joined(separator: separator))
         #expect(
             WhatsNewRibbon.summary(titles, naming: 2, language: "en")
-                == "Snapshots\(separator)Resolution\(separator)8 more")
-        #expect(WhatsNewRibbon.summary(titles, naming: 0) == "10 new features")
+                == "Snapshots\(separator)Resolution\(separator)7 more")
+        #expect(WhatsNewRibbon.summary(titles, naming: 0) == "9 new features")
         #expect(WhatsNewRibbon.summary(twelveTitles, naming: 0) == "2 new features")
     }
 
@@ -199,9 +194,9 @@ struct WhatsNewTests {
         #expect(WhatsNewRibbon.summary(["A", "B", "C"], naming: 1, language: "ja") == "A \u{00B7} 2 more")
     }
 
-    /// The ribbon lists what the device is told, in the order written: eleven
+    /// The ribbon lists what the device is told, in the order written: ten
     /// entries each (an update from build 9 carries builds 12 and 11), but not
-    /// the same eleven.
+    /// the same ten.
     @Test func theRibbonNamesWhatAnIPhoneAndAnIPadAreTold() {
         func ribbon(on host: HostDevice, naming named: Int) -> String {
             withDefaultsReturning { defaults in
@@ -214,13 +209,13 @@ struct WhatsNewTests {
         let separator = "\u{00A0}\u{00B7} "
         let twelve = ["Old app compatibility", "Fixes and improvements"]
         #expect(ribbon(on: host(maximumMiB: 4096), naming: 5) == (twelve + [
-            "Snapshots", "Resolution", "Keyboard, mouse and controllers", "6 more",
+            "Snapshots", "Resolution", "Keyboard, mouse and controllers", "5 more",
         ]).joined(separator: separator))
         #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 5) == (twelve + [
-            "Snapshots", "Resolution", "Rotation on iPad", "6 more",
+            "Snapshots", "Resolution", "Rotation on iPad", "5 more",
         ]).joined(separator: separator))
-        #expect(ribbon(on: host(maximumMiB: 4096), naming: 0) == "11 new features")
-        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 0) == "11 new features")
+        #expect(ribbon(on: host(maximumMiB: 4096), naming: 0) == "10 new features")
+        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 0) == "10 new features")
     }
 
     @Test func eachKindOfDeviceIsToldItsOwnEntries() {
@@ -257,77 +252,14 @@ struct WhatsNewTests {
                 == withoutACamera(Self.buildTwelveIDs + Self.buildElevenIDsOnAnIPad))
     }
 
-    /// A build without Send feedback (a sideload, a Debug build, an App Store
-    /// build made with no receiver) neither announces the entry nor lists it,
-    /// which a device that lacks a haptic engine or an iPad's turn does not do:
-    /// Info keeps those as written.
-    @Test func aBuildWithoutSendFeedbackLeavesItOutOfTheRibbonTheSheetAndInfo() {
-        withDefaults { defaults in
-            WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 9))
-            let model = model(on: host(maximumMiB: 4096))
-            entry(announces: true, defaults: defaults).announce(on: model, hasGuest: true, features: [])
-            let withoutFeedback = Self.buildElevenIDs.filter { $0 != "send-feedback" }
-            let toldWithoutFeedback = Self.buildElevenIDsOnAnIPhone.filter { $0 != "send-feedback" }
-            #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildTwelveIDs + toldWithoutFeedback)
-            #expect(model.whatsNew.pending.map(\.entries.count) == [2, 8])
-            // Info: the device's entries as written (Rotation on iPad, here on an
-            // iPhone), but not the feature the build lacks.
-            #expect(model.whatsNew.releases.first?.entries.map(\.id) == Self.buildTwelveIDs)
-            #expect(model.whatsNew.releases.dropFirst().first?.entries.map(\.id) == withoutFeedback)
-            #expect(model.whatsNew.releases.map(\.build) == [12, 11, 9])
-            #expect(WhatsNewRibbon.summary(model.whatsNew.pendingEntries.map(\.title), naming: 0) == "10 new features")
-        }
-    }
-
-    @Test func aLaunchThatIsNotThePersonsListsOnlyWhatTheBuildHas() {
+    @Test func aLaunchThatIsNotThePersonsListsTheNotesWithoutARibbon() {
         withDefaults { defaults in
             let model = model(on: host(maximumMiB: 4096))
-            entry(announces: false, defaults: defaults).announce(on: model, hasGuest: true, features: [])
+            entry(announces: false, defaults: defaults).announce(on: model, hasGuest: true)
             #expect(!model.whatsNew.showsRibbon)
-            #expect(model.whatsNew.releases.flatMap(\.entries).map(\.id).contains("send-feedback") == false)
-        }
-    }
-
-    /// A release whose entries are all about a feature the build lacks is in
-    /// no screen.
-    @Test func aReleaseThatTheMissingFeatureEmptiesIsDropped() {
-        withDefaults { defaults in
-            let only = WhatsNewRelease(
-                build: 13, version: "1.0 (13)",
-                entries: [WhatsNewEntry(
-                    id: "only", title: "Only", text: "T", symbol: "star",
-                    requirement: WhatsNewRequirement(feature: .sendFeedback))])
-            let model = model(on: host(maximumMiB: 4096))
-            let notes = WhatsNewCatalog.load() + [only]
-            let launch = entry(announces: false, defaults: defaults)
-            launch.announceWhatsNew(on: model, hasGuest: true, vCPUs: 6, features: [], notes: notes)
             #expect(model.whatsNew.releases.map(\.build) == [12, 11, 9])
-            launch.announceWhatsNew(on: model, hasGuest: true, vCPUs: 6, features: [.sendFeedback], notes: notes)
-            #expect(model.whatsNew.releases.map(\.build) == [13, 12, 11, 9])
+            #expect(WhatsNewStore(defaults: defaults).record == nil)
         }
-    }
-
-    /// What the model says its build has is what Send feedback's own entrances
-    /// use: a receiver, and `#if FEEDBACK_MAIL` is the build's own switch.
-    @Test func theModelsBuildHasSendFeedbackExactlyWhenItHasAReceiver() {
-        let model = model(on: host(maximumMiB: 4096))
-        #if FEEDBACK_MAIL
-        model.feedbackServices.address = { "feedback@example.com" }
-        #expect(model.buildFeatures == [.sendFeedback])
-        model.feedbackServices.address = { nil }
-        #expect(model.buildFeatures.isEmpty)
-        // A launch that is given none asks the model.
-        withDefaults { defaults in
-            WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 9))
-            entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
-            #expect(model.whatsNew.pendingEntries.map(\.id).contains("send-feedback") == false)
-            model.feedbackServices.address = { "feedback@example.com" }
-            entry(announces: false, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
-            #expect(model.whatsNew.releases.flatMap(\.entries).map(\.id).contains("send-feedback") == true)
-        }
-        #else
-        #expect(model.buildFeatures.isEmpty)
-        #endif
     }
 
     /// The host the application builds reports what the entries ask about, and
@@ -445,8 +377,7 @@ struct WhatsNewTests {
                 install.record.map { WhatsNewStore(defaults: defaults).keep($0) }
                 let model = model(on: host(maximumMiB: 6144))
                 entry(announces: true, build: 12, defaults: defaults)
-                    .announceWhatsNew(
-                        on: model, hasGuest: install.hasGuest, vCPUs: 6, features: withSendFeedback, notes: [])
+                    .announceWhatsNew(on: model, hasGuest: install.hasGuest, vCPUs: 6, notes: [])
                 #expect(!model.whatsNew.showsRibbon)
                 #expect(model.whatsNew.pendingEntries.isEmpty)
                 #expect(model.whatsNew.releases.isEmpty)

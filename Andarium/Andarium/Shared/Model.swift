@@ -450,17 +450,6 @@ final class AppModel {
     /// way itself, and the screens do not: set for the task a sheet starts,
     /// and cleared with it.
     var busyOverSheet = false
-    #if FEEDBACK_MAIL
-    /// What Send feedback asks of the system (`SendFeedbackServices`); a test
-    /// or the Simulator preview replaces it.
-    @ObservationIgnored var feedbackServices = SendFeedbackServices()
-    /// The Send feedback sheet is open, over Home or over the session's Settings.
-    var feedbackSheetOpen = false
-    /// The Send feedback sheet the boot screen's notice opened is open. The
-    /// root presents it, so it stays up, with what the person typed, when the
-    /// boot ends or the run does.
-    var feedbackFromBoot = false
-    #endif
     #if FOLLOW_X
     /// The handle Follow developer on X opens, from Info.plist, which only a
     /// build that names one has; a test replaces it.
@@ -521,10 +510,6 @@ final class AppModel {
     /// The preview's frozen boot screen shows the start's own clock, which runs.
     @ObservationIgnored var previewClockRuns = false
     #endif
-    /// What tells the runtime's session record of the boot under way from any
-    /// other (`BootRecordBinding`): made as a start begins, and counted on at
-    /// each restart of the guest in place. nil before the first start.
-    @ObservationIgnored var bootRecord: BootRecordBinding?
     /// The time the boot screen counts a start by, in seconds: a monotonic
     /// reading that does not run while the guest is held (a background span, a
     /// pause for space). A runtime supplies its pause-aware clock; a test
@@ -1425,13 +1410,8 @@ final class AppModel {
         }
         try FileManager.default.createDirectory(at: BugReportStaging.directory, withIntermediateDirectories: true)
         let file = BugReportStaging.directory.appendingPathComponent("bugreport-preview.zip")
-        #if FEEDBACK_MAIL && !APP_STORE
-        // A small made-up report the Send feedback viewer can read.
-        try SendFeedbackSampleReport.write(to: file)
-        #else
         // An empty zip: its end-of-central-directory record.
         try Data([0x50, 0x4B, 0x05, 0x06] + [UInt8](repeating: 0, count: 18)).write(to: file)
-        #endif
         return file
     }
 
@@ -1703,12 +1683,6 @@ final class AppModel {
             bootTracker = BootTracker()
             bootStartedUnfinished = driver?.firstBootPending() ?? false
             slowStart.begin(at: clock(), kind: kind, firstBootPending: bootStartedUnfinished)
-            // The record the file holds now is not the run's: the runtime rewrites it for the run, after this.
-            bootRecord = BootRecordBinding(
-                processID: Int(ProcessInfo.processInfo.processIdentifier),
-                recordAtStart: diagnosticsDirectory.flatMap {
-                    SessionRecord.read(at: $0.appendingPathComponent(BugReportAttachments.sessionRecord))
-                })
             preparingDisk = false
             diskProgress = nil
             #if !APP_STORE
@@ -1806,13 +1780,6 @@ final class AppModel {
         if let driver { lifecycle.guest?.usedBytes = driver.measuredUsedBytes() }
         persistNow()
         refreshPlan()
-    }
-
-    /// The runtime began to boot the guest again in place for the `count`th time
-    /// in this run: the session record of the boot that follows says that
-    /// number, and the record of the boot before is not this boot's.
-    func guestRestartsCounted(_ count: Int) {
-        bootRecord?.restarts = count
     }
 
     /// Android's own Restart boots the guest again in place. ADB and the

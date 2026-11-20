@@ -32,9 +32,8 @@ The project file is the JSON format Xcode 27 reads, kept in the canonical form
 `xcrun xcprojformatter --update Andarium/Andarium.xcodeproj` produces: format
 after every hand edit. Every configuration takes its base settings from
 `Config/Andarium.xcconfig`, which includes
-`../GuestHost/Config/Signing.xcconfig` and sets what decides
-[Send feedback](#send-feedback) and
-[Follow developer on X](#follow-developer-on-x); the
+`../GuestHost/Config/Signing.xcconfig` and sets whether
+[Follow developer on X](#follow-developer-on-x) is compiled in; the
 signer's team is only in the ignored `Signing.local.xcconfig` beside the
 signing file ([`GuestHost/README.md`](../GuestHost/README.md#signing)), so the
 project names no team.
@@ -204,9 +203,7 @@ the console lines the iPad harness reads. AppStore builds as Release does and
 leaves out everything that exists for automation or only pretends. TestFlight
 is AppStore in every respect below (the same compilation condition, runtime,
 embedded-artifact check and bundle check) except in the last item, which
-names the optional features it carries. It also defines `TESTFLIGHT`, which
-only names the configuration in [Send feedback](#send-feedback)'s information
-block.
+names the optional features it carries. It also defines `TESTFLIGHT`.
 
 - `APP_STORE` is a Swift compilation condition that compiles out the launch
   environment (`Live/LaunchEnvironment.swift`, so no `ANDARIUM_` or
@@ -266,13 +263,10 @@ block.
   does not cover a binary
   ([`scripts/check-privacy-manifests.py`](../scripts/check-privacy-manifests.py));
   the script's header is the complete list.
-- It alone can carry [Send feedback](#send-feedback), and only when the
-  receiver's address is in the ignored `Config/Feedback.local.xcconfig`.
-  [Follow developer on X](#follow-developer-on-x) is carried by this
+- [Follow developer on X](#follow-developer-on-x) is carried by this
   configuration and by Release alike, and only when the handle is in the
   ignored `Config/Developer.local.xcconfig` and the logo in the ignored
-  `Config/Local/`. TestFlight carries Send feedback and Follow developer on X
-  under the same conditions.
+  `Config/Local/`. TestFlight carries it under the same conditions.
 
 ```sh
 cmake --preset kernarium-ios-device-android-app-store
@@ -290,82 +284,6 @@ of the frameworks (`Kernarium/PrivacyManifests`) declare exactly what the App
 Store build and the runtimes use. A release or harness build also reads the
 system uptime for its thermal report, which the application's manifest does
 not declare because only an AppStore or TestFlight build is uploaded.
-
-### Send feedback
-
-Home's toolbar menu and a running session's Settings open a sheet that writes
-an email to the developer (`Shared/Feedback/`, the system's Mail composer sends
-it). It is compiled in, under the `FEEDBACK_MAIL` condition, only in an AppStore
-or TestFlight build whose ignored `Config/Feedback.local.xcconfig` (from
-`Feedback.local.xcconfig.example`) names the receiver, so a fork, a sideload or
-a Debug or Release build holds none of it, and every configuration's bundle
-check says whether it does: it also fails on the local receiver's bytes in any
-file of a bundle that does not name it (never printing it), and on an
-`Info.plist` whose values differ from `Config/Info.plist` (the preprocessing
-changes the keys of these features alone).
-Tests and captures turn it on in a Debug build with
-`FEEDBACK_ADDRESS=feedback@example.com` on the `xcodebuild` line, which the
-bundle check accepts in Debug alone; `AndariumPreview` takes that arrangement
-only, never the local receiver, and its hooks into the sheet are not in the
-AppStore product. Its logic (`Shared/Feedback/Logic`) is also built, and
-tested, by AndariumCore's tests through a symlinked target no product links.
-The feature's words are looked up in the `Feedback` string table (zh-Hans,
-zh-Hant and ja are in [Languages](#languages)); the mail's subject prefix and
-its information block are English whatever the interface language, and the bug
-report's overlay text is the app's own.
-
-Send needs both a problem (the mail's subject) and details (its body); white
-space counts as empty, and a file or the start log is neither. Send stays
-enabled while one is empty: its tap opens no composer and shows one alert that
-names what is missing, and the first empty field takes the focus after OK. With
-both written, no bug report attached and one that can be made now, Send asks
-first (Create bug report, which stays in the sheet, or Send without bug report),
-and the bug report's row leads in to read-only pages inside the sheet's own
-navigation (Back, no Done): the file as the mail carries it, its top level as
-folders and files (at most sixteen levels of folders: what a deeper path has
-beyond them is the file's name), a text as one page that scrolls on with a thumb on the edge (only a band
-around it takes a touch, until it is held),
-and the screenshot (a PNG, rebuilt from its critical chunks before it is decoded
-as a bounded thumbnail; a JPEG is not shown). Nothing is
-extracted, and a file that is not text is dimmed and opens nothing. The start
-log's row shows its text the same way
-(`Shared/Feedback/Logic/SendFeedbackArchive*.swift`, `SendFeedbackReportPages.swift`). Once
-the mail is sent, the Feedback sent notice stays over the sheet, which keeps what
-was sent and takes no touch; the notice's Done closes both and ends the draft,
-and a swipe down or the toolbar's close does nothing meanwhile.
-
-The sheet attaches the bug report, a screenshot, photos and videos from the
-photo library, and any number of files from Files, except an Android package
-(`.apk`, `.apks`, `.xapk`, `.apkm`, told by the name or the type a provider
-gives, never by opening it), which mail services reject: one alert per pick
-says so and asks for a download link in the details. The bar has three buttons:
-Bug report, Screenshot and Add, a paperclip whose menu offers Photos and Files
-(the system's menu, anchored on the button). A file is opened where it is kept
-(the document picker in place,
-`Shared/Feedback/SendFeedbackFilePicker.swift`), never copied
-first: the sheet holds the access the picker gave it from the pick until the
-row is removed or the sheet closes (a file still being looked at keeps its own
-until that ends), each start stopped once, and Send maps the file from there
-for the composer, so a file of any size is never read into memory. A file that
-cannot be used in place (its provider has not downloaded it, or its volume
-refuses mapping) is copied into the sheet's folder instead, after a free-space
-check, under the app's progress overlay with Cancel; a copy that is cancelled or
-fails leaves nothing. Cancel ends the whole batch: what was attached before it
-stays, the files that were not yet taken in are not. Send looks at every file
-again and maps it before the composer opens: one that is gone or can no longer
-be mapped is taken out of the list, and nothing is sent. The mail names
-what the app makes itself `bugreport-yyyyMMdd-HHmmss.zip` and
-`screenshot-yyyyMMdd-HHmmss.png`: fixed English words and a fixed date (Gregorian,
-ASCII digits, the device's time zone) whatever the interface language or the
-device's calendar and digits. The mail carries a picked
-file's name as written, in any script; only path separators, control
-characters (the ones that reverse text among them) and a leading dot are
-replaced or removed, and a long name is cut to 100 characters and 200 bytes
-with its extension kept; a name another attachment has is numbered. The row
-keeps the name as the person knows it. Above 20 MiB in all, files included,
-the sheet warns that a mail service may refuse the mail; Send is never
-blocked. Nothing about a picked file (name, size, place) is logged or kept
-once the sheet closes.
 
 ### Follow developer on X
 
@@ -394,15 +312,6 @@ for them (`XLogoGlyph.xcassets`) in place of the logo; adding
 handle's shape and the address are in `Shared/FollowX/Logic`, which
 AndariumCore's tests build through a symlinked target no product links, and the
 words are in the `FollowX` string table.
-
-### Home toolbar menu
-
-When Send feedback is compiled in, Home's toolbar holds one menu in place of
-the Info button: it keeps Info's glyph and accessibility label, so the toolbar
-looks as it does without a menu, and holds Info, a separator, then Send
-feedback (`Shared/HomeMenu.swift`). Welcome has the menu too, so Send feedback
-is reachable before a virtual machine is set up. Without it Info stays the
-plain button and the build holds no menu code that names a feature.
 
 ## Model and storage
 
@@ -527,13 +436,7 @@ control out.
   own number and no later ones. An entry can name the devices it is for (more
   guest memory than a limit, an iPad, a device with haptics, a compass or a
   camera): the ribbon and its sheet announce only the entries the device meets.
-  An entry can also name a feature the build may lack (Send feedback): a build
-  without it shows the entry nowhere, though the notes and their strings are
-  bundled whole, so the bundle check leaves that entry's strings, and no other
-  of the notes' table, out of its search for Send feedback text (the table of
-  an AppStore bundle holds the beta track's strings too, which the check names
-  from `WhatsNew.json` in the source). Info keeps
-  every other entry as written (`WhatsNewRules`, `WhatsNewStore`). A launch
+  Info keeps every entry as written (`WhatsNewRules`, `WhatsNewStore`). A launch
   with a launch setting, or one a test runs, shows no ribbon and keeps no
   record, and neither does a track with no notes, whose build also has no
   What's New row in Info.
@@ -550,18 +453,16 @@ requires reopening Andarium.
 
 - **No Google apps, on purpose.** The boot screen of a new installation's
   first Android boot (a first start, and the retry of one that ended before
-  Android booted) carries a panel saying that Android has no Google apps.
-  Every presentation of Send feedback opens with a line that answers the same
-  question in place, closed; closing it takes it away from that presentation
-  alone, and nothing about it is kept. Their strings are the only ones that
-  name Google, which `scripts/localization.py` allows by key.
+  Android booted) carries a panel saying that Android has no Google apps. Its
+  strings are the only ones that name Google, which `scripts/localization.py`
+  allows by key.
 - **Slow start.** A start still on the boot screen after three minutes
   (`SlowStart`; eight for a guest's first start and the first start after an
   update, which also get a title that does not say the start is slower than
   usual; a first start that ended before Android booted is still the first,
   by the guest's `first-boot-pending` record, kept until `sys.boot_completed`
-  is seen) puts a notice above the steps: the step under way and the time, Stop
-  and, where Send feedback is compiled in, Send feedback. The boot goes on
+  is seen) puts a notice above the steps: the step under way and the time, and
+  Stop. The boot goes on
   behind it and the notice goes with the boot; it has no dismissal. It sits
   above the steps and pushes them down; where the screen is short, the screen
   scrolls. The time is the start's, on the runtime's pause-aware run clock
@@ -569,8 +470,8 @@ requires reopening Andarium.
   application is away before the runtime runs) and kept through the restarts
   of a start that had not finished. Stop asks first (an alert with Stop and Cancel, in the
   screen's own appearance: the boot's dark screen asks the window for dark, so the
-  alert and the Send feedback sheet over it are dark whatever the system's is, and Recovery's
-  light screen leaves them to the system), then the
+  alert over it is dark whatever the system's is, and Recovery's
+  light screen leaves it to the system), then the
   application states the intent at once and the runtime's stop is requested
   off the main actor, on the queue of the runtime's other waiting calls, again
   every second until the run has ended (`RunStop`: the runtime drops a stop
@@ -584,32 +485,10 @@ requires reopening Andarium.
   (`RunEnd.stoppedByUser`), not Home, and a stop before the runtime runs ends
   at Home. A start the person stopped leaves its preparation to end: the
   guest's files stay its own until then, and a start asked for since, Erase,
-  Create, the update's Restore and a snapshot rename wait for it. Send
-  feedback opens the sheet the root presents (`feedbackFromBoot`), which stays
-  up with its draft when the boot completes or the run ends. During the start
-  its tip says that a bug report and a screenshot wait for the start to finish
-  and that the start log is attached, and the sheet attaches the log
-  once, when it opens: the step, the time on the notice's clock, the kind of
-  start and this boot's printed output, from the session record's last 4 KiB.
-  Only the running record of the boot under way counts (this process, with the
-  run's count of the guest's restarts, and not the record the file held as the
-  run began: `BootRecordBinding`, which compares no clock); an ended record,
-  another process's or an earlier boot's gives "(nothing yet)". What
-  identifies the installation is masked: the serial, the adb key, the hardware
-  address and the time zone the application knows, wherever they stand, and by
-  shape every `adb_key=`, `serialno=` and `timezone=` value,
-  init's `Init cannot set 'NAME' to 'VALUE'`, any UUID, any IPv6 address
-  (`::1` stays), any colon hardware address and the application's folders. Its
-  name in the mail is
-  `start-log-yyyyMMdd-HHmmss.txt`, the moment it was made, in the device's
-  clock and never localized (English, Gregorian, ASCII digits). It is a row the person can remove, counted in the total;
-  a removed log is not made again, and the file is not refreshed while the sheet
-  is open. When the boot completes the tip becomes the running one and the log
-  stays. The information block gains a Boot line with the step, the time and
-  the restarts. A process that ended in the
-  boot leaves the runtime's session record with the console's last output of
-  that boot, which the next bug report carries as the previous session's
-  record.
+  Create, the update's Restore and a snapshot rename wait for it. A process
+  that ended in the boot leaves the runtime's session record with the console's
+  last output of that boot, which the next bug report carries as the previous
+  session's record.
 - **Recovery the guest asked for.** `init: starting service 'recovery'` on the
   console (`ConsoleScanner.recoveryStartedCount`) makes the session a recovery
   session, as the launch's recovery mode does, whatever the start was: `adb
@@ -648,13 +527,11 @@ requires reopening Andarium.
   nothing of, serious included, has no hold. While critical is told Android
   lowers the guest's frame rate to 30, and the first time in a run that this
   starts the session screen says so once. The session and stall records, the
-  statistics and the feedback information keep iOS's real state, serious
-  included. A system without the HAL hears nothing and shows no notice; the
+  statistics keep iOS's real state, serious included. A system without the HAL hears nothing and shows no notice; the
   [Android README](../android/lineage-24/README.md) owns the HAL.
   Settings' Performance section, after Stats in a normal session, has "When
   hot": Limit frame rate, the default, or Full frame rate
-  (`HeatLimitPreference`, stored until it is turned back on; the feedback
-  information says it in "Frame rate limit when hot"). Full frame rate tells
+  (`HeatLimitPreference`, stored until it is turned back on). Full frame rate tells
   Android none at every state of iOS's, critical included, at once when it is
   chosen, and shows no notice at any heat; Limit frame rate again tells it the
   policy's severity at once. The policy runs either way (`deviceIsHot` says
@@ -1257,12 +1134,11 @@ and Japanese, and follows the language of iOS and the per-app language setting.
 The strings are String Catalogs in `Localization/` (screens, permission texts,
 What's New notes) and in `AndariumCore`'s resources. The JIT texts are their own
 catalog, table `JIT`, which the App Store configuration leaves out of the
-bundle and its check asserts is absent. The texts of Send feedback and Follow
-developer on X are catalogs of their own, tables `Feedback` and `FollowX`,
-built only where their feature is compiled in (`EXCLUDED_SOURCE_FILE_NAMES` in
-`Config/Andarium.xcconfig`); the bundle check refuses a table, by its file
-name, in a product without its feature and asks for it in every language of one
-with it. English is the key (a readout or a
+bundle and its check asserts is absent. The text of Follow developer on X is a
+catalog of its own, table `FollowX`, built only where the feature is compiled
+in (`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`); the bundle
+check refuses the table, by its file name, in a product without the feature
+and asks for it in every language of one with it. English is the key (a readout or a
 joined list has a named key whose comment says which readout it serves), and
 the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
 and 仮想マシン, and its storage is 存储空间 in Simplified Chinese; the name of
@@ -1276,10 +1152,9 @@ short quoted Chinese or Japanese name is not cut across two lines.
 `SWIFT_EMIT_LOC_STRINGS=YES`, `scripts/localization.py sync --check
 --stringsdata <DerivedData>` fails on a key the code uses and a catalog lacks,
 or the reverse. It runs on a development build made with
-`FEEDBACK_ADDRESS=feedback@example.com` and
 `FOLLOW_X_HANDLE=example_handle` (the output of
-`Andarium` and `AndariumPreview` together; one without a feature has none of its
-strings and fails) and on an App Store build with `--app-store`. A
+`Andarium` and `AndariumPreview` together; one without the feature has none of
+its strings and fails) and on an App Store build with `--app-store`. A
 string no catalog reaches (a `String` built in code) shows as English under
 Xcode's Accented Pseudolanguage, so a run with it on is part of adding a
 screen.

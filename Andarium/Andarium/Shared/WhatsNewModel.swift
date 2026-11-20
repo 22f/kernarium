@@ -60,19 +60,6 @@ final class WhatsNewModel {
     }
 }
 
-extension AppModel {
-    /// What this build has that an entry of the notes can be about: Send
-    /// feedback when the build has a receiver for it (the entrances show only
-    /// then). Nothing else is optional so far.
-    var buildFeatures: Set<WhatsNewFeature> {
-        #if FEEDBACK_MAIL
-        feedbackAddress == nil ? [] : [.sendFeedback]
-        #else
-        []
-        #endif
-    }
-}
-
 /// The two tracks of release notes, each its own file of `Shared`. A build
 /// bundles and reads one: the build setting `WHATS_NEW_TRACK` (Andarium.xcconfig)
 /// leaves the other's file out of the bundle and defines the compilation

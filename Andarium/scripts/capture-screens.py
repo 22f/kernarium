@@ -45,17 +45,6 @@ check above refuses, so the shots that raise the alert run last, and
 SpringBoard is restarted after each: rotate the iPad again before the next
 run.
 
-The shots of Send feedback exist only in a Preview built with the arrangement
-that turns the feature on, which gives it the example receiver and never reads
-the local file:
-
-    xcodebuild -project Andarium/Andarium.xcodeproj -scheme AndariumPreview \\
-        -destination 'generic/platform=iOS Simulator' \\
-        FEEDBACK_ADDRESS=feedback@example.com build
-
-Without it the Preview has no Send feedback, its shots are skipped and said
-so, and the rest is unaffected.
-
 The Info shots show Follow developer on X in a Preview built with
 `FOLLOW_X_HANDLE=example_handle` (and `FOLLOW_X_LOGO_SOURCE=local` for the real
 logo from `Config/Local/`); without it the row is absent from them.
@@ -114,8 +103,6 @@ class Shot:
     # The shot raises the system's own alert, which stays up over whatever launches next: it runs last, and
     # SpringBoard is restarted after it.
     alert: bool = False
-    # The screen is Send feedback's, which only a Preview built with FEEDBACK_ADDRESS has.
-    feedback: bool = False
 
     def launch_arguments(self, language: str | None = None) -> list[str]:
         arguments = ["-screen", self.screen, *self.args]
@@ -126,11 +113,6 @@ class Shot:
 
 def s(id: str, group: str, screen: str, description: str, *args: str, dark: bool = False, wait: float = 3.0) -> Shot:
     return Shot(id, group, screen, description, tuple(args), dark, wait)
-
-
-def feedback(id: str, screen: str, description: str, *args: str, dark: bool = False, wait: float = 14.0) -> Shot:
-    """A shot of Send feedback, which exists only in a Preview built with `FEEDBACK_ADDRESS=feedback@example.com`."""
-    return Shot(id, "Feedback", screen, description, tuple(args), dark, wait, feedback=True)
 
 
 SYSTEM = ("-systemMicrophone", "YES")
@@ -263,7 +245,7 @@ SHOTS: list[Shot] = [
     s("boot-first-start", "Boot", "boot-first", "First start: Storage prepares the disk and Startup sets up for the first time; the panel last in the column, below the note, says Android has no Google apps, on purpose."),
     s("boot-update", "Boot", "boot-upgrade", "The first start after an update: Startup updates the apps."),
     s("boot-restart", "Boot", "boot-restart", "The guest restarting."),
-    s("boot-slow", "Boot", "boot-slow", "A start that has run 3 minutes 17 seconds, still at Startup: the notice above the steps says it is taking longer than usual, that it can be waited out or stopped, and that stopping needs Andarium closed in the App Switcher and opened again to start again; a red Stop and, in a build with Send feedback, Send feedback, both of one width. The steps stay in view below it.", dark=True),
+    s("boot-slow", "Boot", "boot-slow", "A start that has run 3 minutes 17 seconds, still at Startup: the notice above the steps says it is taking longer than usual, that it can be waited out or stopped, and that stopping needs Andarium closed in the App Switcher and opened again to start again; a red Stop. The steps stay in view below it.", dark=True),
     s("boot-slow-clock-early", "Boot", "boot-slow-live", "The notice over a start that began 3 minutes 17 seconds ago, the clock running, 3 seconds after the launch: the status line and the notice show one time.", wait=3.0),
     s("boot-slow-clock-later", "Boot", "boot-slow-live", "The same launch 9 seconds after it: the status line and the notice have both moved on by the same seconds.", wait=9.0),
     s("boot-slow-first-start", "Boot", "boot-slow-first", "A first start 8 minutes 17 seconds in: the notice comes at eight minutes and its title does not say the start is slower than usual; the first-start note stays under the steps."),
@@ -273,11 +255,6 @@ SHOTS: list[Shot] = [
     s("boot-slow-recovery-stop-dialog", "Boot", "boot-slow-recovery-stop", "Stop chosen on a Recovery start's notice: the same dialog over Recovery's own screen, which follows the system's appearance, and so does the dialog.", dark=True),
     s("boot-slow-storage", "Boot", "boot-slow-storage", "The notice over an earlier step (Storage under way): the step and the time name where the start is.", "-bootStage", "2"),
     s("boot-slow-stopping", "Boot", "boot-slow-stopping", "Stop confirmed: the status line says Stopping\u2026, Stop's label says it too (with a spinner where the buttons are side by side) and is disabled until the run ends, and the buttons keep their size."),
-    feedback("feedback-boot", "feedback-boot", "Send feedback opened from the slow-start notice: the sheet the root presents over the boot screen. The card says a bug report and a screenshot need the virtual machine to finish starting and that the start log is attached; the log is a row of its own with its size and a remove button, and the information block carries the start's step, time and restarts."),
-    feedback("feedback-boot-filled", "feedback-boot-filled", "The same sheet with a typed problem, details and a photo: the start log stays the first row, counted in the total."),
-    feedback("feedback-boot-details", "feedback-boot-details", "The same sheet with the information block expanded: the Boot line says the step and time of the start."),
-    feedback("feedback-boot-removed", "feedback-boot-removed", "The same sheet after the start log was taken out: no row, no total, and the sheet does not attach it again."),
-    feedback("feedback-boot-finished", "feedback-boot-finished", "The sheet opened over the boot screen with a typed draft, after the start finished: it is still open, with the draft and the start log, over the running session, where the card now offers the bug report."),
     s("boot-jit", "Boot", "boot-jit", "The debugger preparing the JIT: the System image step says Preparing JIT."),
     s("boot-jit-fallback", "Boot", "boot-jit-fallback", "A boot that ran without the JIT it was asked for: a note under the steps says why."),
     *boot_stages("boot-recovery", "boot-recovery", ["System image", "Linux kernel", "Storage", "Recovery"], "Recovery boot (opaque, own stage list, no progress bar)", dark_step=3),
@@ -365,31 +342,6 @@ SHOTS: list[Shot] = [
     s("overlay-install-damaged", "Operations", "install-damaged", "A file that is damaged, cut short, or whose parts do not fit together, refused once it is read."),
     s("overlay-install-missing-split", "Operations", "install-missing-split", "The package manager's refusal of an app that lacks parts it requires."),
     s("overlay-install-part-too-large", "Operations", "install-part-too-large", "An app with a part of 4 GiB or more, which Android cannot install, refused once the file is read."),
-    # Send feedback: needs a Preview built with FEEDBACK_ADDRESS=feedback@example.com (see --help)
-    feedback("feedback-menu-home", "home-menu", "Home's toolbar menu open on a configured guest: Info, then Send feedback after a separator.", dark=True, wait=3.0),
-    feedback("feedback-menu-welcome", "welcome-menu", "The same menu open on the welcome screen, before any guest exists: Send feedback is reachable from the first screen.", dark=True, wait=3.0),
-    feedback("feedback-entrance-settings", "settings-feedback", "Settings scrolled to Diagnostics: Send feedback is the first row, above Create bug report.", dark=True, wait=3.0),
-    feedback("feedback-empty", "feedback", "Send feedback opened from a running session's Settings, empty: the subject and body lines, the information block folded, the card that asks for a bug report and the bar (Bug report, Screenshot, Add, Send feedback). Send is enabled: a tap with the problem or the details empty says which."),
-    feedback("feedback-filled", "feedback-filled", "Send feedback from a session with a problem and details, and three attachments (bug report, screenshot, photo) with their sizes and remove buttons and the total under them; the bar shows the bug report as attached.", dark=True),
-    feedback("feedback-ask", "feedback-ask", "Send tapped with the problem and the details written, no bug report attached and the virtual machine running: the alert asks before the mail opens, with two buttons, Create bug report (the preferred one) and Send without bug report, and says that without a bug report a problem will most likely not get fixed."),
-    feedback("feedback-report", "feedback-report", "Send feedback after Create bug report from that alert: the report is attached, its row leads in (a chevron, a hairline, then its remove button) and says its size and how many files it holds, and the sheet is still open with the draft as it was; no mail composer."),
-    feedback("feedback-viewer", "feedback-viewer", "The bug report's row opened inside the sheet's own navigation (Back, no Done): the file as it goes with the mail (its name, size, file count, unpacked size and the sentence that it goes as it is), then its top level as folders and files; a folder that holds one folder is one row, a text, a picture and an archive open, and a file that is not text is dimmed, says so and opens nothing.", dark=True),
-    feedback("feedback-viewer-folder", "feedback-viewer-folder", "A folder of the bug report opened: its files, each with its size and what it is, as Files shows a folder."),
-    feedback("feedback-viewer-text", "feedback-viewer-text", "A long text of the bug report opened: one page of plain lines that scrolls on, with its name and size in the bar and the thumb on the trailing edge held, saying where it points (a percentage and the bytes of the whole)."),
-    feedback("feedback-viewer-picture", "feedback-viewer-picture", "The screenshot of the bug report opened as a picture, scaled to fit with its pixels and size under it; nothing to zoom, share or save."),
-    feedback("feedback-viewer-nested", "feedback-viewer-nested", "An archive stored inside the bug report, opened like a folder: its name, size and file count, then its files."),
-    feedback("feedback-viewer-damaged", "feedback-viewer-damaged", "A bug report that is damaged (cut short): the first page says it can't be read, and the row on the sheet says nothing of files."),
-    feedback("feedback-details", "feedback-details", "Send feedback filled, with the app and device details opened in full at the end of the mail."),
-    feedback("feedback-large", "feedback-large", "Send feedback with attachments over 20 MiB: the total turns orange and says some mail services refuse mail over 20 MiB; Send still works."),
-    feedback("feedback-file", "feedback-file", "Send feedback with one file from Files attached, a ZIP: a document tile, its name and size, a remove button and the total under it. The bar has three buttons, Bug report, Screenshot and Add (a paperclip whose menu offers Photos and Files).", dark=True),
-    feedback("feedback-file-bar-xxxlarge", "feedback-file", "The same sheet at the largest standard text size: no label is cut in the bar.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryXXXL"),
-    feedback("feedback-file-long", "feedback-file-long", "A file with a long name (the end of the base cut in the middle, the extension kept) at the default text size."),
-    feedback("feedback-file-names", "feedback-file-names", "Two files named in Chinese and in Japanese: the rows keep the names as written, and so does the mail."),
-    feedback("feedback-file-mixed", "feedback-file-mixed", "Send feedback with a bug report, a screenshot, a photo and a file together, in the order they were added, one total under them."),
-    feedback("feedback-file-large", "feedback-file-large", "A file of about 1.9 GiB attached: its size is its own and the total turns orange with the warning that some mail services refuse mail over 20 MiB; Send still works. The file is mapped, never read, for the size.", dark=True),
-    feedback("feedback-file-copying", "feedback-file-copying", "The card over the sheet while a file that cannot be used where it is kept (not downloaded from its cloud storage) is copied first: a progress bar and Cancel. Send and the bar are dimmed and the file's row is not there yet; the screenshot attached before stays.", dark=True),
-    feedback("feedback-file-refused", "feedback-file-refused", "The alert after a folder and an empty file were chosen: two items weren't added, one line for each reason.", dark=True),
-    feedback("feedback-file-refused-one", "feedback-file-refused-one", "The alert for one file that was not added: the title for one item and its reason."),
     s("add-home-row", "Add to Home Screen", "add-home-row", "Settings as the side keys open it while Android runs and lists apps: the Apps section has the Add to Home Screen row, Shortcuts on its right.", dark=True),
     s("add-home-page", "Add to Home Screen", "add-home-page", "The chooser: the apps Android lists with their icons, installed ones first and the ones built into Android after, each leading to the guide.", dark=True, wait=4.0),
     s("add-home-page-search", "Add to Home Screen", "add-home-page-search", "The chooser with a short list, so that its last section is in view: the switch for Search, on, and the sentence under it that the apps stay available in Shortcuts and Siri when it is off.", dark=True, wait=4.0),
@@ -411,22 +363,6 @@ SHOTS: list[Shot] = [
     s("add-home-banner-setup", "Add to Home Screen", "add-home-banner-setup", "The banner when Android's first-run setup is not finished: it names the app and offers Try again."),
     s("add-home-banner-tool", "Add to Home Screen", "add-home-banner-tool", "The banner when the installed Android has no tool that opens apps: a short title with the app, the text that says to update Andarium, and no Try again."),
     s("add-home-alert-no-android", "Add to Home Screen", "add-home-alert-no-android", "An icon used when there is no virtual machine (erased, or never set up): the alert that the app is not in Android and the icon works again once it is installed in a new virtual machine."),
-    feedback("feedback-file-refused-four", "feedback-file-refused-four", "The alert for four items that were not added for four different reasons: not enough space, a folder or a package, an empty file and a file that could not be read, a line each.", dark=True),
-    feedback("feedback-file-apk", "feedback-file-apk", "One pick of an ordinary file and an APK: the file is attached, and the alert says that mail services reject a message that carries an APK, so the APK was not attached, and asks for a download link in the details."),
-    feedback("feedback-file-apk-several", "feedback-file-apk-several", "One pick of a file and three Android packages (.apk, .apks, .xapk): the file is attached, and one alert says the packages were not attached, in the plural."),
-    feedback("feedback-file-gone", "feedback-file-gone", "Send, after the only file attached was deleted from where it was kept: Attachment not available, the file taken out of the list.", dark=True),
-    feedback("feedback-file-picker", "feedback-file-picker", "The system's document picker over the sheet, as a tap on Files in the Add menu opens it.", wait=20.0),
-    feedback("feedback-file-menu", "feedback-file-menu", "The bar's Add menu open: Photos and Files, anchored on the button."),
-    feedback("feedback-generating", "feedback-generating", "Send feedback while the bug report is made: the app's progress overlay with Cancel over the whole sheet, Settings still open beneath."),
-    feedback("feedback-sent", "feedback-sent", "Send feedback once the mail was sent: the Feedback sent card with Done over the sheet, which still shows the problem, the details, the attachments and the information block that were sent."),
-    feedback("feedback-missing-both", "feedback-missing-both", "Send tapped with the problem and the details both empty: Can't send yet, and what to write in each.", dark=True),
-    feedback("feedback-missing-problem", "feedback-missing-problem", "Send tapped with the details written and the problem empty: the alert asks for the Problem line."),
-    feedback("feedback-missing-details", "feedback-missing-details", "Send tapped with the problem written and the details empty: the alert asks for what was done and what happened."),
-    feedback("feedback-discard", "feedback-discard", "Cancel after something is typed or attached: Discard or Keep editing."),
-    feedback("feedback-nomail", "feedback-nomail", "Send feedback where Mail cannot send (no account): the error and the way to fix it, and every control disabled."),
-    feedback("feedback-home", "feedback-home", "Send feedback opened from Home's toolbar menu, where no virtual machine runs: the no-Google-apps line is at the top, collapsed; the card says that without a bug report a problem will most likely not get fixed and gives three steps to one (start the virtual machine, make the problem happen again, open Send feedback from there with a bug report attached); the rest of the form works.", dark=True),
-    feedback("feedback-home-answer", "feedback-home-answer", "Send feedback from Home with the no-Google-apps line opened in place: the question, That's on purpose, and the reason."),
-    feedback("feedback-home-filled", "feedback-home-filled", "Feedback that is not a bug, from Home: a suggestion with a photo; Send is ready."),
     # End: a clean power-off returns to Home; only a failed run keeps an end screen
     s("end-failed", "End", "failed", "The screen after the guest stopped unexpectedly."),
     s("end-stopped", "End", "stopped", "The screen after Stop on the slow-start notice: it says the person stopped the virtual machine and that Andarium must be closed in the App Switcher and opened again to start it; no fault mark, the report block starts Virtual machine ended.", dark=True),
@@ -527,10 +463,6 @@ def not_in_front(udid: str, pid: int, shot: Shot, *, after: bool = False) -> str
         return f"the app that reported is process {state.get('pid')}, not the launched {pid}"
     if state.get("screen") != shot.screen:
         return f"the app reported screen {state.get('screen')!r}, not {shot.screen!r}"
-    if shot.feedback and state.get("feedback") is not True:
-        return "this Preview has no Send feedback: build it with FEEDBACK_ADDRESS=feedback@example.com on the command line"
-    if shot.feedback and shot.screen.startswith("feedback") and state.get("feedbackReady") is not True:
-        return "the sheet of Send feedback is not open with its draft made"
     if state.get("state") != "active" and not (after and shot.alert):
         return f"the app is {state.get('state')}, not active: a system alert, another app or the Home screen is in front"
     return None
@@ -776,16 +708,7 @@ def capture_all(args: argparse.Namespace) -> int:
             print(f"capture-screens.py: {name} ({udid}): the Preview does not come to the front; nothing captured", file=sys.stderr)
             status = 1
             continue
-        # The Preview reports (from the launch that preflight made) whether it was built with Send feedback.
-        reported = app_state(udid) or {}
-        has_feedback = reported.get("feedback") is True
-        wanted = [shot for shot in selected if has_feedback or not shot.feedback]
-        skipped = sum(1 for shot in selected if shot.feedback and not has_feedback)
-        if skipped:
-            print(
-                f"{name}: skipping {skipped} shots of Send feedback: this Preview was built without it (see --help)",
-                file=sys.stderr,
-            )
+        wanted = selected
         # The shot of the system's own alert runs last: the alert outlives its shot and covers whatever launches next.
         plain = [shot for shot in wanted if not shot.alert]
         passes = [("light", plain), ("dark", [shot for shot in plain if shot.dark]),

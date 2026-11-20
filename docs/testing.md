@@ -418,7 +418,7 @@ mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
-FEEDBACK_ADDRESS=feedback@example.com FOLLOW_X_HANDLE=example_handle`;
+FOLLOW_X_HANDLE=example_handle`;
 the scheme without the filter also runs `AndariumUITests`). A row that asserts
 what an iPad app on a Mac does not do (accessibility activation of an alert's
 buttons, text that scales with the content size category, a menu's items as
@@ -432,20 +432,10 @@ checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
-screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`,
-`SendFeedbackStartLogTests` (the sheet's tip and start log during a start),
-`SendFeedbackAskScreenTests` (Send's question about a bug report and the
-pages of its row) and
-`SendFeedbackFilesScreenTests` (files from Files: in place, the copy of a file
-that cannot be used there, the access held and stopped once) exist only in a
-build with `FEEDBACK_ADDRESS=feedback@example.com` on the command line, as the
-command above has it ([Send feedback](../Andarium/README.md#send-feedback)); a
-run without it does not build them. `FollowXRowTests` needs the example value of
-its own, `FOLLOW_X_HANDLE=example_handle`
+screens' flows, refusals and words on a fake driver. `FollowXRowTests` needs
+the example value of its own, `FOLLOW_X_HANDLE=example_handle`
 ([Follow developer on X](../Andarium/README.md#follow-developer-on-x)).
-`HomeMenuTests` (Home's toolbar menu) exist with Send feedback, and
-`HomePlainInfoTests` (the plain Info button) only without it
-([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
+`HomePlainInfoTests` checks that Home's toolbar holds the plain Info button.
 `GuestSmsTests`, `GuestSmsChannelTests` and `TextMessageNoticeTests` (`AndariumCoreTests`)
 read the golden bytes of the text message channel and its payload, which the guest
 service's tests read too, and run the exchange over socket pairs and a scripted
@@ -455,12 +445,11 @@ and what VoiceOver has been told.
 `AndariumCoreTests` holds the state of the no-Google-apps notice (the panel
 on a first start and on the retry of a first Android boot that did not finish,
 and nothing else) as pure logic.
-`NoGoogleNoticeScreenTests` host the real boot screen and Send feedback sheet
-for it (the panel reached on those starts and gone with the boot, the starts
-that show none, the line opening and closing in place and coming back with each
-sheet, the words in each language), and `NoGoogleNoticeUITests` boot a real first start and reach the
-line (see the UI-test target below).
-The Mail composer, the picker and the guest's display are stand-ins. The hosted tests
+`NoGoogleNoticeScreenTests` host the real boot screen for it (the panel reached
+on those starts and gone with the boot, the starts that show none, the words in
+each language), and `NoGoogleNoticeUITests` boot a real first start and reach
+the panel (see the UI-test target below).
+The picker and the guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class
@@ -489,11 +478,10 @@ is injected there; the real turns are checked on an iPhone.
 the test moves, so no test waits three minutes: when the notice comes (also for
 a start whose boot line never comes, the case it is for), what Stop asks of the
 runtime (after the dialog's answer) and the stopped end screen's words, the
-later notice and plain title of a first start, the controls with and without
-the feedback receiver and their size (the application's ordinary 44 points at the
-default text size, no less at any size), that the sheet the notice opens outlives the boot, that
-the alert and the sheet take the appearance of the screen under them, the
-Boot line of the information block, and that the notice goes with the boot.
+later notice and plain title of a first start, Stop alone and its size (the
+application's ordinary 44 points at the default text size, no less at any
+size), that the alert takes the appearance of the screen under it, and that the
+notice goes with the boot.
 `StartHandoverTests` run the real runtime object with the files' preparation
 held, and check that a stopped start's preparation is the only one at a time,
 that what changes the files waits for it and is not overtaken by a start asked
@@ -550,12 +538,7 @@ creates a virtual machine in the Simulator and starts it for real, so it needs
 the Simulator Android runtime packaged and the system image staged
 ([Build](../Andarium/README.md#build)), and it takes about a minute to reach
 Android (the test allows ten minutes to create the machine and 25 for the
-boot). Its other test, in a build with Send feedback, reaches the Send feedback
-line from a probe session's Settings. `FeedbackAskUITests` (the same build) adds
-`ANDARIUM_FEEDBACK_PROBE` to the probe session, which gives the sheet mail that can be
-sent, a composer stand-in and the preview's bug report, and walks Send's
-question, Create bug report, the pages of the report's row and Send without
-bug report. `AddToHomeUITests` (`ANDARIUM_ANDROID_APPS_PROBE`, a played list of
+boot). `AddToHomeUITests` (`ANDARIUM_ANDROID_APPS_PROBE`, a played list of
 Android apps) walks Settings > Apps > Add to Home Screen to the guide and presses
 Apple's Shortcuts button: Shortcuts opens on Andarium's page with a tile for each
 app.

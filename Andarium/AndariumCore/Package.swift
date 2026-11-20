@@ -35,18 +35,11 @@ let package = Package(
             name: "AndariumCoreTestSupport",
             dependencies: ["AndariumCore"]
         ),
-        // Send feedback's logic, for the package's tests only. Its sources are the
-        // application's own, which the application compiles only where Send
-        // feedback is compiled in (a symlink to Andarium/Shared/Feedback/Logic),
-        // so no product of the package carries any of it; here the condition is
-        // always set. Neither application links it.
-        .target(
-            name: "AndariumFeedbackLogic",
-            dependencies: ["AndariumCore"],
-            swiftSettings: [.define("FEEDBACK_MAIL")]
-        ),
-        // Follow developer on X's logic, for the package's tests only, built the
-        // way Send feedback's is (a symlink to Andarium/Shared/FollowX/Logic).
+        // Follow developer on X's logic, for the package's tests only. Its sources
+        // are the application's own, which the application compiles only where the
+        // row is compiled in (a symlink to Andarium/Shared/FollowX/Logic), so no
+        // product of the package carries any of it; here the condition is always
+        // set. Neither application links it.
         .target(
             name: "AndariumFollowXLogic",
             swiftSettings: [.define("FOLLOW_X")]
@@ -58,7 +51,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AndariumCoreTests",
-            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic", "AndariumFollowXLogic"]
+            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFollowXLogic"]
         ),
     ]
 )

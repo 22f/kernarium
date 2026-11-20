@@ -51,11 +51,7 @@ struct HomeView: View {
             .navigationTitle("Andarium")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    #if FEEDBACK_MAIL
-                    HomeToolbarMenu()
-                    #else
                     HomeInfoButton()
-                    #endif
                 }
             }
         }
@@ -79,9 +75,6 @@ struct HomeView: View {
             .environment(model)
             .foldSheet(model)
         }
-        #if FEEDBACK_MAIL
-        .sendFeedbackSheet(model)
-        #endif
         .microphoneAccessAlert()
         .locationAccessAlert()
         .cameraAccessAlert()

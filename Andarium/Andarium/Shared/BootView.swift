@@ -18,7 +18,7 @@ import SwiftUI
 /// A start that has run for three minutes (`SlowStart`; eight for a first
 /// start and the first after an update) without reaching Android puts a notice
 /// above the steps: what the screen is waiting for, the step and the time, Stop
-/// (which asks first) and, where Send feedback is compiled in, Send feedback.
+/// (which asks first).
 /// The boot goes on behind it, and it goes away when the boot completes. There
 /// is no way to dismiss it. It sits above the steps and pushes them down;
 /// where the screen is short, the screen scrolls.
@@ -64,8 +64,8 @@ struct BootView: View {
         .onCardHalf(.boot)
         .background { backdrop }
         // The screen is dark over the guest's display, whatever the system's
-        // appearance is. UIKit presents the Stop alert and the feedback sheet
-        // in the window's appearance, which a SwiftUI preference leaves
+        // appearance is. UIKit presents the Stop alert in the window's
+        // appearance, which a SwiftUI preference leaves
         // alone: the window is asked for dark while this screen is in it.
         // Recovery's own screen follows the system, and so does what follows
         // the boot.
@@ -334,24 +334,15 @@ struct BootView: View {
         .accessibilityIdentifier("boot-slow-notice")
     }
 
-    /// The notice has Send feedback beside Stop.
-    private var offersFeedback: Bool {
-        #if FEEDBACK_MAIL
-        model.feedbackAddress != nil
-        #else
-        false
-        #endif
-    }
-
-    /// Both buttons are the application's ordinary size: 44 points at the
+    /// Stop is the application's ordinary size: 44 points at the
     /// default text size, as the end screen's Copy report is, and no less at
     /// any size (the minimum touch target). The bordered style pads its label
     /// by 7 points above and below, so a label this tall makes 44.
     private static let slowButtonLabelHeight: CGFloat = 30
 
-    /// Side by side, at one width (`EqualWidthRow`), only where both labels fit
-    /// at their own; stacked, a label wraps. Stop's label is as wide as its
-    /// longer state, so that choosing it moves nothing.
+    /// In a row (`EqualWidthRow`) only where the label fits at its own width;
+    /// stacked, a label wraps. Stop's label is as wide as its longer state, so
+    /// that choosing it moves nothing.
     @ViewBuilder
     private func slowButtons(lineLimit: Int?, axis: Axis) -> some View {
         let layout = axis == .horizontal
@@ -364,9 +355,7 @@ struct BootView: View {
                     stopLabel(stopping: true, lineLimit: lineLimit, axis: axis).hidden()
                     stopLabel(stopping: model.slowStart.stopping, lineLimit: lineLimit, axis: axis)
                 }
-                // Beside Send feedback, one width with it; alone, as wide as
-                // its label and no more.
-                .frame(maxWidth: offersFeedback ? .infinity : nil, minHeight: Self.slowButtonLabelHeight)
+                .frame(minHeight: Self.slowButtonLabelHeight)
             }
             .buttonStyle(.bordered)
             .tint(.red)
@@ -388,23 +377,6 @@ struct BootView: View {
             // dark alert's glass, this one 4.1:1 to 4.7:1. After the alert,
             // so the alert is inside it; Stop's own red is inside it too.
             .tint(alertIsDark ? Self.darkAlertTint : Color.accentColor)
-            #if FEEDBACK_MAIL
-            if model.feedbackAddress != nil {
-                Button {
-                    model.feedbackFromBoot = true
-                } label: {
-                    Text("Send feedback", tableName: "Feedback")
-                        .font(.body.weight(.semibold))
-                        .lineLimit(lineLimit)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: axis == .horizontal, vertical: true)
-                        .frame(maxWidth: .infinity, minHeight: Self.slowButtonLabelHeight)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                .accessibilityIdentifier("boot-send-feedback")
-            }
-            #endif
         }
     }
 

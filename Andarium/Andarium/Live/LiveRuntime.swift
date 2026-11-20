@@ -77,9 +77,6 @@ final class LiveRuntime: RuntimeDriver {
     private let cameraDirectory: URL?
     /// The guest's adb key, made before the start that boots with it.
     private var adbIdentity: AdbKeyStore.Identity?
-    /// The time zone the run's guest was booted with, which the person may
-    /// have left since (`guestIdentifiers`).
-    private var bootTimeZone: String?
     /// What this run puts in the names of its imports' partial files, new at
     /// every start and at every restart of the guest inside the run
     /// (`GuestRunMark`).
@@ -383,12 +380,6 @@ final class LiveRuntime: RuntimeDriver {
         storage.measuredUsedBytes()
     }
 
-    func guestIdentifiers() -> GuestIdentifiers {
-        GuestIdentifiers.reading(
-            identityFile: InstanceFiles(directory: storage.locations.directory).identity,
-            adbKey: adbIdentity?.publicKeyLine, timeZones: [bootTimeZone, GuestTimeZone.current()].compactMap { $0 })
-    }
-
     /// The update's Restore: after the snapshot operation under way, as a
     /// start is. It changes the guest's files (it completes a snapshot
     /// restore that did not finish first), so what a screen has listed is stale.
@@ -663,7 +654,6 @@ final class LiveRuntime: RuntimeDriver {
         // The zone the host is in now, read at every start: the guest follows
         // it while its own automatic time zone is on.
         let timeZone = GuestTimeZone.current()
-        bootTimeZone = timeZone
         let sessionRecordPath = sessionRecord?.path
         // The run occupies its thread for the guest's whole life and the GPU
         // service reaches the main queue while it starts, so it must not be
@@ -1040,8 +1030,7 @@ final class LiveRuntime: RuntimeDriver {
 
     func guestRestarted(_ event: GuestRestartEvent) {
         print("Andarium: \(event)")
-        guard case let .began(restartCount) = event, let model else { return }
-        model.guestRestartsCounted(restartCount)
+        guard case .began = event, let model else { return }
         // The boot that follows is another one: it ends an update only by
         // reaching sys.boot_completed itself, and its console is read afresh.
         reachedBootCompleted = false

@@ -2,9 +2,6 @@
 
 import AndariumCore
 import Foundation
-#if FEEDBACK_MAIL
-import UIKit
-#endif
 
 /// What the Cancel button of a long task does. Two are equal when they are the
 /// same button, so a state that only changes its words stays equal to itself.
@@ -128,11 +125,6 @@ protocol RuntimeDriver: AnyObject, OldAppsSource, AndroidAppsSource {
     /// which outlasts a start that ended before it: the next start is long by
     /// its nature (`SlowStart`) though its disk exists.
     func firstBootPending() -> Bool
-    /// The values that tell this installation from another (its serial number,
-    /// its hardware address, the adb key and the time zone it was given), which
-    /// a text the guest printed has taken out wherever they stand
-    /// (`SendFeedbackStartLog.masked`); none for a driver with no guest.
-    func guestIdentifiers() -> GuestIdentifiers
     /// What the guest's data disk occupies now, measured from its file; the
     /// guest changes it while it runs.
     func measuredUsedBytes() -> UInt64
@@ -259,14 +251,6 @@ protocol RuntimeDriver: AnyObject, OldAppsSource, AndroidAppsSource {
     /// a guest that sleeps. The caller keeps the last figures then. It may
     /// wait up to half a second, and never on the main thread.
     func readGuestMemory() async -> GuestMemorySample?
-    #if FEEDBACK_MAIL
-    /// The guest's display as the host presents it now, at the guest's own
-    /// pixels and nothing of the application's screens over it; nil when no
-    /// guest runs or the display is not there.
-    func captureGuestDisplay() -> UIImage?
-    /// Seconds the guest has run in this session; nil while none runs.
-    func runningSeconds() -> Int?
-    #endif
     #if !APP_STORE
     /// Whether a debugger that serves the JIT is attached to Andarium now.
     func jitDebuggerAttached() -> Bool
@@ -292,13 +276,6 @@ extension RuntimeDriver {
     func setNetworkNotice(_ denial: NetworkDenial?) {}
     /// A driver with no thermal session tells Android nothing either way.
     func setHeatLimit(_ on: Bool) {}
-    /// A driver with no guest has no values that tell an installation apart.
-    func guestIdentifiers() -> GuestIdentifiers { .none }
-    #if FEEDBACK_MAIL
-    /// A driver with no display has no picture, and no run to time.
-    func captureGuestDisplay() -> UIImage? { nil }
-    func runningSeconds() -> Int? { nil }
-    #endif
 }
 
 /// What a screen needs from its launch arguments to open a state directly.
