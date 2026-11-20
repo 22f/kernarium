@@ -1284,6 +1284,56 @@ struct KernariumTests {
         )
     }
 
+    /// A zero is not a size to keep: settings saved where no size fits do not
+    /// replace the size stored, so a later launch with room starts from it, or
+    /// from the default where none was stored, and not from the stepper's
+    /// least.
+    @Test
+    func aSaveWithNoRoomKeepsTheStoredSizeForALaterLaunchWithRoom() {
+        let (defaults, suiteName) = isolatedDefaults()
+        let (fresh, freshName) = isolatedDefaults()
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            fresh.removePersistentDomain(forName: freshName)
+        }
+        let none = { (_: Int) in 0 }
+        let room = { (_: Int) in 8192 }
+        let key = "emulator.guestMemoryMiB"
+
+        defaults.set(3072, forKey: key)
+        let shown = EmulatorConfiguration.load(
+            defaults: defaults,
+            physicalProcessorCount: 6,
+            guestMemoryBound: none
+        )
+        #expect(shown.guestMemoryMiB == 0)
+        shown.save(defaults: defaults)
+        #expect(defaults.integer(forKey: key) == 3072)
+        #expect(
+            EmulatorConfiguration.load(
+                defaults: defaults,
+                physicalProcessorCount: 6,
+                guestMemoryBound: room
+            ).guestMemoryMiB == 3072
+        )
+
+        EmulatorConfiguration.load(
+            defaults: fresh,
+            physicalProcessorCount: 6,
+            guestMemoryBound: none,
+            defaultGuestMemory: none
+        ).save(defaults: fresh)
+        #expect(fresh.object(forKey: key) == nil)
+        #expect(
+            EmulatorConfiguration.load(
+                defaults: fresh,
+                physicalProcessorCount: 6,
+                guestMemoryBound: room,
+                defaultGuestMemory: { _ in 2048 }
+            ).guestMemoryMiB == 2048
+        )
+    }
+
     @Test
     func aStoredOrDefaultGuestMemoryAboveTheMaximumComesDownOnLoad() {
         let (defaults, suiteName) = isolatedDefaults()

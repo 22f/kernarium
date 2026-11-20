@@ -323,7 +323,13 @@ struct EmulatorConfiguration: Equatable {
 
     func save(defaults: UserDefaults = .standard) {
         defaults.set(vCPUCount, forKey: Key.vCPUCount)
-        defaults.set(guestMemoryMiB, forKey: Key.guestMemoryMiB)
+        // A zero is not a size: it is the maximum where no size fits
+        // (`guestMemoryBound`), shown for that launch alone, so the size
+        // stored stays and a later launch with room starts from it, or from
+        // the default where none was stored.
+        if guestMemoryMiB > 0 {
+            defaults.set(guestMemoryMiB, forKey: Key.guestMemoryMiB)
+        }
         defaults.set(overlaySizeGiB, forKey: Key.overlaySizeGiB)
         defaults.set(androidDiskSizeGiB, forKey: Key.androidDiskSizeGiB)
         defaults.set(
