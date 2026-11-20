@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 03:59:29 +0900
+Subject: [PATCH] venus: tear down an object the context refused by its id
+
+A guest names each object it creates by an id of its own choosing, and the
+context refuses an id that another object already holds: it ends the
+context and leaves the object out of its table. The creator has already made
+the object and tracks it in its device, command pool or descriptor pool,
+which later removes every tracked object from the table by id. The id finds
+the object that holds it, so removing the refused one freed the original,
+which its owner still tracked. Tearing the context down then walked a freed
+list entry, and the host process died.
+
+An object is now freed by the removal only when the table holds that object
+under its id. One the table refused is freed where it is removed from its
+owner, which was the only thing left undone for it.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/venus/vkr_context.h | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/src/venus/vkr_context.h b/src/venus/vkr_context.h
+index 3974ea49eb80c49884576576967e18ba822281fb..3cc586f41bf9292d7b47238638f68654b0b52614 100644
+--- a/src/venus/vkr_context.h
++++ b/src/venus/vkr_context.h
+@@ -258,9 +258,20 @@ vkr_context_add_object(struct vkr_context *ctx, struct vkr_object *obj)
+ static inline void
+ vkr_context_remove_object_locked(struct vkr_context *ctx, struct vkr_object *obj)
+ {
+-   assert(_mesa_hash_table_search(ctx->object_table, &obj->id));
+-
+    struct hash_entry *entry = _mesa_hash_table_search(ctx->object_table, &obj->id);
++
++   /* An object the table refused, because the guest chose an id that another
++    * object holds, was never entered under that id, though its creator still
++    * tracks it and removes it with the rest.  The id then finds the object
++    * that holds it, and removing that one frees an object that is still
++    * tracked.  Free only what the table holds; what it refused is freed
++    * here. */
++   if (unlikely(entry && entry->data != obj)) {
++      free(obj);
++      return;
++   }
++
++   assert(entry);
+    if (likely(entry)) {
+       vkr_context_free_object(entry);
+       _mesa_hash_table_remove(ctx->object_table, entry);
