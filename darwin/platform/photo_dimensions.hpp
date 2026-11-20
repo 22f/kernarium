@@ -905,15 +905,20 @@ enum class Refusal : std::uint8_t {
 [[nodiscard]] std::string_view refusalName(Refusal reason) noexcept;
 
 // One line per camera and reason until the camera's configuration changes: a
-// guest that asks again and again must not fill the log.
+// guest that asks again and again must not fill the log. The photo callback's
+// thread and the session's queue both write it (a still that fails, a stream that
+// stops), so every access takes the log's own lock.
 class RefusalLog {
 public:
     // True the first time a camera is refused for a reason since the camera was
     // last reset.
     [[nodiscard]] bool first(std::size_t camera, Refusal reason);
     void reset(std::size_t camera);
+    // Every camera is reset.
+    void clear();
 
 private:
+    std::mutex mutex_;
     std::map<std::size_t, std::uint32_t> seen_;
 };
 

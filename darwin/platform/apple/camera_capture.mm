@@ -1086,7 +1086,7 @@ public:
         onQueue([&] {
             limits_ = limits;
             anchors_.assign(entries_.size(), nullptr);
-            refusals_ = RefusalLog {};
+            refusals_.clear();
             {
                 std::lock_guard lock(notesMutex_);
                 notes_.assign(entries_.size(), CameraPresentation {});

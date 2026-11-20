@@ -1704,6 +1704,30 @@ void aRefusalIsLoggedOncePerCameraAndReasonUntilTheCameraChanges()
         require(!refusalName(reason).empty() && refusalName(reason) != "unknown", "every reason has a name");
 }
 
+// The photo callback's thread logs a still that failed while the session's queue resets the camera (a stream stops, a still
+// is captured): one log, two threads. Under a thread sanitizer this is a data race on the map without the log's lock.
+void theRefusalLogIsUsedFromTwoThreads()
+{
+    RefusalLog log;
+    std::atomic<bool> stop {false};
+    std::thread queue([&] {
+        for (std::size_t round = 0; !stop.load(); ++round) {
+            if (round % 16 == 15) log.clear();
+            else log.reset(round % 4);
+        }
+    });
+    std::size_t logged = 0;
+    for (std::size_t round = 0; round < 20000; ++round) {
+        logged += log.first(round % 4, Refusal::stillNotTurned) ? 1 : 0;
+        logged += log.first(round % 4, Refusal::stillNotMade) ? 1 : 0;
+    }
+    stop = true;
+    queue.join();
+    require(logged > 0, "a refusal is logged while the camera is reset from another thread");
+    log.clear();
+    require(log.first(0, Refusal::stillNotTurned) && !log.first(0, Refusal::stillNotTurned), "a cleared log logs again, once");
+}
+
 // ---------------------------------------------------------------------------
 // Generated tables
 // ---------------------------------------------------------------------------
@@ -2854,6 +2878,7 @@ int main()
     aSampleIsDeliveredWhileTheLockIsHeld();
     aPressureNotificationIsAppliedWhileTheStreamRunsAndNeverAfterIt();
     aRefusalIsLoggedOncePerCameraAndReasonUntilTheCameraChanges();
+    theRefusalLogIsUsedFromTwoThreads();
     everyGeneratedTableHoldsTheInvariants();
     theFrontStillLimitIsAboutThreeMegapixelsOnAnyTable();
     theFrontStillLimitChangesOnlyThePhotoSizesOfTheTablesTheTestsModel();

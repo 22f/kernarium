@@ -897,6 +897,7 @@ std::string_view refusalName(Refusal reason) noexcept
 
 bool RefusalLog::first(std::size_t camera, Refusal reason)
 {
+    std::lock_guard lock(mutex_);
     std::uint32_t& seen = seen_[camera];
     const std::uint32_t bit = 1u << static_cast<unsigned>(reason);
     if ((seen & bit) != 0) return false;
@@ -906,7 +907,14 @@ bool RefusalLog::first(std::size_t camera, Refusal reason)
 
 void RefusalLog::reset(std::size_t camera)
 {
+    std::lock_guard lock(mutex_);
     seen_.erase(camera);
+}
+
+void RefusalLog::clear()
+{
+    std::lock_guard lock(mutex_);
+    seen_.clear();
 }
 
 } // namespace uml::platform
