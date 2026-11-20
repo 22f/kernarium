@@ -1373,6 +1373,46 @@ class ProbeSourceTests(unittest.TestCase):
             self.fail(compiled.stdout)
         return [error for error in errors if not self.UNRESOLVED.search(error)]
 
+    PROBE_STUBS = TESTS / "tooling/android/sms/probe-stubs"
+
+    def test_the_shell_probe_uses_only_the_public_surface_and_answers_as_the_runner_reads(self) -> None:
+        """build-apk.sh compiles the shell's probe against the platform's public android.jar, which leaves out every
+        @hide class (android.system.UnixSocketAddress among them). The stubs in tooling/android/sms/probe-stubs
+        declare only the public members the probe uses, so a call to anything else does not compile here; the probe
+        then runs against them for the answers that row N5 and the shell's vsock row read."""
+        javac, java = jdk_tool("javac"), jdk_tool("java")
+        if javac is None or java is None:
+            self.skipTest("no JDK on PATH")
+        sources = [PROBE / "tool/VsockProbe.java", *sorted(self.PROBE_STUBS.glob("**/*.java"))]
+        with tempfile.TemporaryDirectory(prefix="sms-probe-run-") as classes:
+            compiled = subprocess.run(
+                [javac, "-source", "11", "-target", "11", "-Xlint:all", "-encoding", "UTF-8", "-d", classes,
+                 *(str(path) for path in sources)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120,
+                check=False)
+            self.assertEqual(compiled.returncode, 0, compiled.stdout)
+
+            def answer(arguments: list[str], **properties: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [java, *(f"-D{name.replace('_', '.')}={value}" for name, value in properties.items()),
+                     "-cp", classes, "VsockProbe", *arguments],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120,
+                    check=False)
+
+            handoff = "/dev/socket/kernarium_sms"
+            refused = answer(["unix", handoff], probe_connect="Permission denied")
+            self.assertEqual(refused.stdout, "connect: errno=13 EACCES\n", refused)
+            self.assertIn(f"LocalSocket.connect FILESYSTEM {handoff}", refused.stderr)
+            self.assertEqual(answer(["unix", handoff], probe_connect="Connection refused").stdout,
+                             "connect: errno=111 ECONNREFUSED\n")
+            self.assertEqual(answer(["unix", handoff], probe_connect="No such file or directory").stdout,
+                             "connect: errno=2 ENOENT\n")
+            self.assertEqual(answer(["unix", handoff]).stdout, "connect: ok\n")
+            self.assertEqual(answer(["unix", handoff], probe_connect="Broken pipe").stdout,
+                             "connect: error: Broken pipe\n")
+            self.assertEqual(answer([]).stdout, "socket: ok\n")
+            self.assertEqual(answer([], probe_socket="errno:13").stdout, "socket: errno=13 EACCES\n")
+
     def test_the_build_script_names_the_probe_and_its_dex(self) -> None:
         script = (PROBE / "build-apk.sh").read_text()
         self.assertIn("AndariumSmsProbe.apk", script)
