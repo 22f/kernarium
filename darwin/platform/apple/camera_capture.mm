@@ -15,6 +15,8 @@
 #include "photo_dimensions.hpp"
 #include "rotation_angles.h"
 #include "still_exposure.hpp"
+#include "turned_still.hpp"
+#include "video_encoder.hpp"
 #include "video_stabilization.hpp"
 
 #import <AVFoundation/AVFoundation.h>
@@ -529,6 +531,9 @@ std::vector<Entry> discover()
         entry.discovered.stated = std::uint16_t(entry.mounting.stated);
         entry.discovered.turn = std::uint16_t(entry.mounting.connectionTurn);
         entry.discovered.presentationTurn = std::uint16_t(entry.mounting.presentationTurn);
+        // A camera whose stills are turned half around (turnedStillOf) needs the hardware encoder's capabilities at its
+        // first still: discovery starts now, off this thread.
+        if (entry.mounting.presentationTurn == 180) prepareVideoEncodeCapabilities();
         entry.discovered.earlier = entry.mounting.emulatesEarlierFront;
 #if TARGET_OS_IOS
         // Only a zoom camera's factor is scaled (see zoomRatioScale): every range holds 1.0.
@@ -719,6 +724,8 @@ using uml::platform::SessionState;
                       jpegSize:(uml::platform::CameraStillSize)jpegSize
                   maximumBytes:(uint64_t)maximumBytes
                        wantRaw:(BOOL)wantRaw
+                      turnHalf:(BOOL)turnHalf
+                   jpegQuality:(unsigned)jpegQuality
                        attempt:(unsigned)attempt
                          state:(std::shared_ptr<SessionState>)state;
 @end
@@ -1387,6 +1394,15 @@ public:
             AVVideoCodecKey: AVVideoCodecTypeJPEG,
             AVVideoCompressionPropertiesKey: @{AVVideoQualityKey: @(request.jpegQuality / 100.0)},
         };
+        // A camera whose pictures the host presents half around (CameraInfo::presentationTurn) gives its still as a photo
+        // that is turned and encoded here (turnedStillOf), or none: a Bayer still is not turned, and an unturned still is
+        // never passed on.
+        const bool turnsStill = entry.mounting.presentationTurn == 180;
+        if (turnsStill && request.raw) {
+            refuse(camera, Refusal::stillNotTurned, "a Bayer still is not turned");
+            return false;
+        }
+        const bool turnsJpeg = turnsStill && request.jpegWidth != 0;
         if (request.raw) {
 #if TARGET_OS_IOS
             OSType rawFormat = 0;
@@ -1406,6 +1422,14 @@ public:
             refuse(camera, Refusal::rawUnavailable, "macOS has no Bayer still");
             return false;
 #endif
+        } else if (turnsJpeg) {
+            // The photo's pixels, full range 4:2:0: JFIF's own samples, which the encoder takes as they are.
+            NSNumber* format = @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+            if (![output.availablePhotoPixelFormatTypes containsObject:format]) {
+                refuse(camera, Refusal::stillNotTurned, "the photo output makes no full-range 4:2:0 photo");
+                return false;
+            }
+            settings = [AVCapturePhotoSettings photoSettingsWithFormat:@{(id)kCVPixelBufferPixelFormatTypeKey: format}];
         } else {
             settings = [AVCapturePhotoSettings photoSettingsWithFormat:jpeg];
         }
@@ -1441,6 +1465,8 @@ public:
                                                                       jpegSize:wanted
                                                                   maximumBytes:request.maximumJpegBytes
                                                                        wantRaw:request.raw
+                                                                      turnHalf:turnsJpeg
+                                                                   jpegQuality:request.jpegQuality
                                                                        attempt:attempt
                                                                          state:state_];
         // The photo output holds its delegate weakly, so the session keeps it
@@ -1822,6 +1848,13 @@ public:
     void noteStillExif(std::size_t camera, std::uint8_t orientation)
     {
         note(camera, [&](CameraPresentation& held) { held.exifOrientation = orientation; });
+    }
+
+    // A photo that could not be turned half around and encoded (turnedStillOf): the still failed, and the reason is
+    // recorded as a refusal of the camera.
+    void noteStillNotTurned(std::size_t camera, TurnedStillFailure failure)
+    {
+        refuse(camera, Refusal::stillNotTurned, std::string(turnedStillFailureName(failure)));
     }
 
     // The completion of a dynamic aspect ratio change arrives (the device's own queue), under the state's mutex: `operation`
@@ -3072,6 +3105,11 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
     // The largest file the host takes; zero for no bound.
     uint64_t _maximumBytes;
     BOOL _wantRaw;
+    // The photo is uncompressed and turned half around into the JPEG (turnedStillOf), at the guest's quality; why it was
+    // not, if it was not.
+    BOOL _turnHalf;
+    unsigned _jpegQuality;
+    uml::platform::TurnedStillFailure _turnFailure;
     // Which capture of the request this is (from one); a photo of another size makes the next.
     unsigned _attempt;
     std::shared_ptr<SessionState> _state;
@@ -3092,10 +3130,15 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
                       jpegSize:(uml::platform::CameraStillSize)jpegSize
                   maximumBytes:(uint64_t)maximumBytes
                        wantRaw:(BOOL)wantRaw
+                      turnHalf:(BOOL)turnHalf
+                   jpegQuality:(unsigned)jpegQuality
                        attempt:(unsigned)attempt
                          state:(std::shared_ptr<SessionState>)state
 {
     if ((self = [super init])) {
+        _turnHalf = turnHalf;
+        _jpegQuality = jpegQuality;
+        _turnFailure = uml::platform::TurnedStillFailure::none;
         _attempt = attempt;
         _camera = camera;
         _token = token;
@@ -3121,6 +3164,10 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
         // without this part. A photo that is not there at all is missing data.
         noteFrameworkError(_result.failure, error);
         noteStillFailure(_result.failure, uml::platform::CameraStillStage::missingData);
+        return;
+    }
+    if (_turnHalf) {
+        [self takeTurnedPhoto:photo];
         return;
     }
     NSData* data = photo.fileDataRepresentation;
@@ -3189,6 +3236,36 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
     }
 }
 
+// The camera's pictures are presented half around, so the photo was asked for uncompressed: its pixels are turned and
+// encoded here, and its readings are those of its metadata (an uncompressed photo has no file to read them from).
+- (void)takeTurnedPhoto:(AVCapturePhoto*)photo
+{
+#if TARGET_OS_IOS
+    const auto readings = uml::platform::photoReadingsOf((__bridge CFDictionaryRef)photo.metadata);
+#else
+    const uml::platform::PhotoReadings readings;
+#endif
+    if (readings.orientation && *readings.orientation >= 1 && *readings.orientation <= 8) _exifOrientation = uint8_t(*readings.orientation);
+    auto turned = uml::platform::turnedStillOf(photo.pixelBuffer, _jpegQuality);
+    if (turned.failure != uml::platform::TurnedStillFailure::none) {
+        _turnFailure = turned.failure;
+        std::fprintf(stderr, "Camera: camera %zu: the photo could not be turned half around: %s\n", _camera,
+                     std::string(uml::platform::turnedStillFailureName(turned.failure)).c_str());
+        noteStillFailure(_result.failure, uml::platform::CameraStillStage::missingData);
+        return;
+    }
+    // The same bound as a photo's own file (takeJpegFile): a file larger than the guest's buffer is not passed on.
+    if (_maximumBytes != 0 && turned.jpeg.size() > _maximumBytes) {
+        std::fprintf(stderr, "Camera: the photo's file is %lu bytes, more than the %llu a %ux%u photo may take\n",
+                     static_cast<unsigned long>(turned.jpeg.size()), static_cast<unsigned long long>(_maximumBytes), _jpegSize.width,
+                     _jpegSize.height);
+        _result.failure.stage = uml::platform::CameraStillStage::fileSize;
+        return;
+    }
+    _result.jpeg = std::move(turned.jpeg);
+    _jpegReadings = readings;
+}
+
 - (void)captureOutput:(AVCapturePhotoOutput*)output
     didFinishCaptureForResolvedSettings:(AVCaptureResolvedPhotoSettings*)resolvedSettings
                                   error:(NSError*)error
@@ -3244,6 +3321,7 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
     auto* session = static_cast<uml::platform::AppleSession*>(_state->session);
     _result.failure.hostExifOrientation = _exifOrientation;
     if (_wantJpeg && _exifOrientation != 0) session->noteStillExif(_camera, _exifOrientation);
+    if (_turnFailure != uml::platform::TurnedStillFailure::none) session->noteStillNotTurned(_camera, _turnFailure);
     const bool haveJpegReadings = _jpegReadings.exposureSeconds || _jpegReadings.iso || _jpegReadings.fNumber ||
         _jpegReadings.focalLengthMillimetres || _jpegReadings.flash;
     // The photo's own readings come from its Exif. The 3A states, white balance,

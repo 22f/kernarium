@@ -238,6 +238,17 @@ void reverseChromaRow(const std::uint8_t* row, std::uint8_t* out, std::size_t pa
     }
 }
 
+void turnPlaneHalf(const std::uint8_t* source, std::size_t sourceStride, std::uint8_t* target, std::size_t targetStride,
+                   std::uint32_t width, std::uint32_t height, bool pairs) noexcept
+{
+    for (std::uint32_t row = 0; row < height; ++row) {
+        const std::uint8_t* from = source + std::size_t(height - 1 - row) * sourceStride;
+        std::uint8_t* to = target + std::size_t(row) * targetStride;
+        if (pairs) reverseChromaRow(from, to, width);
+        else reverseLumaRow(from, to, width);
+    }
+}
+
 void fillNv12Black(const Nv12Target& target) noexcept
 {
     for (std::uint32_t row = 0; row < target.height; ++row)

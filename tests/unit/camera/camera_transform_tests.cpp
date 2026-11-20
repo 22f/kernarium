@@ -2,6 +2,7 @@
 #include "nv12_transform.hpp"
 #include "require.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -112,6 +113,36 @@ void aRowReversedIsTheHalfTurn()
     require(spare == 0x5a);
 }
 
+void aPlaneTurnedHalfAroundIsTheTransformsHalfTurn()
+{
+    for (const std::uint32_t width : {2u, 8u, 18u, 34u, 130u}) {
+        const std::uint32_t height = 8;
+        Picture source(width, height);
+        for (std::size_t i = 0; i < source.luma.size(); ++i) source.luma[i] = std::uint8_t((i * 5 + i / 7) ^ 0x6b);
+        for (std::size_t i = 0; i < source.chroma.size(); ++i) source.chroma[i] = std::uint8_t((i * 3 + i / 9) ^ 0xc2);
+        Picture reference(width, height);
+        require(transformNv12(source.source(), {0, 0, width, height}, 180, reference.target()));
+        // Planes with a stride wider than the row, as a photo's pixel buffer has.
+        const std::size_t stride = width + 16;
+        std::vector<std::uint8_t> lumaIn(stride * height, 0xee), chromaIn(stride * (height / 2), 0xee);
+        for (std::uint32_t row = 0; row < height; ++row)
+            std::copy_n(source.luma.data() + std::size_t(row) * width, width, lumaIn.data() + row * stride);
+        for (std::uint32_t row = 0; row < height / 2; ++row)
+            std::copy_n(source.chroma.data() + std::size_t(row) * width, width, chromaIn.data() + row * stride);
+        std::vector<std::uint8_t> lumaOut(stride * height, 0x11), chromaOut(stride * (height / 2), 0x11);
+        turnPlaneHalf(lumaIn.data(), stride, lumaOut.data(), stride, width, height, false);
+        turnPlaneHalf(chromaIn.data(), stride, chromaOut.data(), stride, width / 2, height / 2, true);
+        for (std::uint32_t row = 0; row < height; ++row) {
+            require(std::equal(reference.luma.begin() + std::size_t(row) * width, reference.luma.begin() + std::size_t(row + 1) * width,
+                               lumaOut.begin() + row * stride), "each luma row is the half turn's");
+            require(lumaOut[row * stride + width] == 0x11, "and nothing past the row is written");
+        }
+        for (std::uint32_t row = 0; row < height / 2; ++row)
+            require(std::equal(reference.chroma.begin() + std::size_t(row) * width, reference.chroma.begin() + std::size_t(row + 1) * width,
+                               chromaOut.begin() + row * stride), "each chroma row is, its pairs kept in order");
+    }
+}
+
 void cropAndScale()
 {
     const auto source = ramp(8, 8);
@@ -183,6 +214,7 @@ int main()
     crops();
     identityAndRotation();
     aRowReversedIsTheHalfTurn();
+    aPlaneTurnedHalfAroundIsTheTransformsHalfTurn();
     cropAndScale();
     refusals();
     black();

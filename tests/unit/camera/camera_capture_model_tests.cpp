@@ -1700,7 +1700,7 @@ void aRefusalIsLoggedOncePerCameraAndReasonUntilTheCameraChanges()
     for (const auto reason : {Refusal::noAnchor, Refusal::formatChanged, Refusal::notJoinable, Refusal::inputRefused, Refusal::outputRefused,
                               Refusal::overBudget, Refusal::stillNotMade, Refusal::rawUnavailable, Refusal::raised, Refusal::notRestored,
                               Refusal::ratioMoved, Refusal::turnNotHeld, Refusal::stillsNotTurned, Refusal::ratioFailed,
-                              Refusal::ratioTimedOut})
+                              Refusal::ratioTimedOut, Refusal::stillNotTurned})
         require(!refusalName(reason).empty() && refusalName(reason) != "unknown", "every reason has a name");
 }
 
