@@ -472,8 +472,14 @@ struct AppEntry {
             model.fail()
         case "failed-memory":
             // What a run ends with where the host would not map the guest's
-            // memory: it never began.
-            model.fail(RunEnd(result: -101, memoryRefusedMiB: 2048), uptimeSeconds: nil)
+            // memory: it never began. The size is the guest's own, as the
+            // report's second line states it. The result is the runtime's
+            // memory-refused one (-101); the screen shows the size.
+            model.fail(
+                RunEnd(
+                    result: -101,
+                    memoryRefusedMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound),
+                uptimeSeconds: nil)
         case "stopped":
             // What Stop on the slow-start notice leaves: the run ended by the person.
             model.fail(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: 203)
