@@ -224,6 +224,26 @@ struct AndroidAppStoreTests {
         #expect(AndroidAppStore(directory: directory).catalog()?.digest == "d1")
     }
 
+    @Test func aRefreshWithoutIconsAsksTheToolForNoneAndOneWithThemAsksForThem() async throws {
+        let directory = makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AndroidAppStore(directory: directory)
+        let comet = app("com.example.comet", "Comet Hop")
+        let tool = FakeTool(.apps(AndroidAppList(apps: [comet], digest: "d1")))
+        tool.icons[comet.id] = .noIcon
+        guard case .refreshed = await AndroidAppRefresh.run(tool: tool, store: store, now: Date(timeIntervalSince1970: 1), withIcons: false)
+        else {
+            Issue.record("the listing was not kept")
+            return
+        }
+        #expect(tool.listAsks == 1 && store.catalog()?.apps == [comet])
+        // An unchanged digest asks for no icon either.
+        _ = await AndroidAppRefresh.run(tool: tool, store: store, now: Date(timeIntervalSince1970: 2), withIcons: false)
+        #expect(tool.listAsks == 1 && tool.askedIcons.isEmpty)
+        _ = await AndroidAppRefresh.run(tool: tool, store: store, now: Date(timeIntervalSince1970: 3))
+        #expect(tool.askedIcons == [comet.id], "the next refresh with icons asks for what is missing")
+    }
+
     @Test func aListingIsKeptAndReadBackByAnotherStore() throws {
         let directory = makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

@@ -36,6 +36,7 @@ nonisolated final class ScriptedAppsTool: AndroidAppsTool, @unchecked Sendable {
     var apps: [AndroidApp] { lock.withLock { current } }
     var digestsAsked: Int { lock.withLock { counts.digests } }
     var listingsAsked: Int { lock.withLock { counts.lists } }
+    var iconsAsked: Int { lock.withLock { counts.icons } }
     var opened: [AndroidComponent] { lock.withLock { asked } }
 
     /// What a listing answers in place of the apps, and what the digest does.

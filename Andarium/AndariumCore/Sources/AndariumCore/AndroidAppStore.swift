@@ -429,8 +429,10 @@ public enum AndroidAppRefresh {
     /// store's generation at its start and hands it back with each change, so
     /// a refresh that the run ending, an erase or a restore ended stores
     /// nothing, whatever the tool still answers, and tells nothing.
+    ///
+    /// `withIcons` false leaves the icons alone (the screens that show none do not ask for them).
     public static func run(
-        tool: any AndroidAppsTool, store: AndroidAppStore, now: Date = Date(),
+        tool: any AndroidAppsTool, store: AndroidAppStore, now: Date = Date(), withIcons: Bool = true,
         progress: @Sendable (AndroidAppCatalog, _ iconsLeft: Int) -> Void = { _, _ in }
     ) async -> Result {
         let generation = store.refreshGeneration
@@ -444,7 +446,9 @@ public enum AndroidAppRefresh {
         if case let .digest(digest) = remote, let kept = store.catalog(), kept.digest == digest {
             // Nothing that is cached is out of date; an icon that never arrived is still owed.
             guard store.touch(at: now, generation: generation), let catalog = store.catalog() else { return .failed }
-            await fetchIcons(tool: tool, store: store, generation: generation, catalog: catalog, progress: progress)
+            if withIcons {
+                await fetchIcons(tool: tool, store: store, generation: generation, catalog: catalog, progress: progress)
+            }
             return .refreshed(catalog)
         }
         switch await tool.list(limit: AndroidAppLimits.listLimit) {
@@ -457,7 +461,9 @@ public enum AndroidAppRefresh {
             let sorted = AndroidAppList(apps: list.apps.sorted(by: AndroidAppText.inOrder), digest: list.digest)
             do { try store.apply(sorted, at: now, generation: generation) } catch { return .failed }
             guard let catalog = store.catalog() else { return .failed }
-            await fetchIcons(tool: tool, store: store, generation: generation, catalog: catalog, progress: progress)
+            if withIcons {
+                await fetchIcons(tool: tool, store: store, generation: generation, catalog: catalog, progress: progress)
+            }
             return .refreshed(catalog)
         }
     }

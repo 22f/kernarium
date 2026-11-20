@@ -132,6 +132,19 @@ final class AndroidAppsState {
     @ObservationIgnored var inFlight: Task<AndroidAppRefresh.Result, Never>?
     /// The run's first refresh, asked again a few times if it got no answer.
     @ObservationIgnored var first: Task<Void, Never>?
+    /// Whose `first` is: each task made takes the next number, and only the
+    /// one that holds the current number clears the handle or goes on after a wait.
+    @ObservationIgnored private(set) var firstToken = 0
+    /// The run's first listing is still to be made: Android was paused for
+    /// space before the boot ended, or while the task waited, and the pause
+    /// ending starts it again. Cleared by the answer and by the run's end.
+    @ObservationIgnored var firstOwed = false
+    /// A request that began the boot needs the list: the first listing is not made to wait.
+    @ObservationIgnored var firstNeedsList = false
+    /// The request that began this boot (Start's own boot is no request's).
+    @ObservationIgnored var bootStartedBy: AppOpenRequest?
+    /// This run took its one listing for opening an app on a host with no Home Screen.
+    @ObservationIgnored var listedForAnOpen = false
     /// Android being made ready for the request, then the app being opened.
     @ObservationIgnored var opening: Task<Void, Never>?
     /// The wait for the next request or banner to run out.
@@ -145,6 +158,10 @@ final class AndroidAppsState {
     @ObservationIgnored var startDelay = Duration.seconds(60)
     /// The first refresh's attempts wait twice as long as the one before.
     @ObservationIgnored var retryInterval = Duration.seconds(5)
+    /// How the first refresh waits: a test holds the wait and lets it go.
+    @ObservationIgnored var sleep: @MainActor (Duration) async -> Void = { duration in
+        try? await Task.sleep(for: duration)
+    }
     /// How many times the run's first refresh is asked.
     static let startAttempts = 5
 
@@ -185,6 +202,19 @@ final class AndroidAppsState {
 
     func owns(_ token: Int) -> Bool { refreshToken == token }
 
+    /// A task for the run's first listing starts: the number it holds.
+    func beginFirst() -> Int {
+        firstToken &+= 1
+        return firstToken
+    }
+
+    func ownsFirst(_ token: Int) -> Bool { firstToken == token }
+
+    /// The task that holds `token` ends: the handle is cleared only if it is still that task's.
+    func endFirst(_ token: Int) {
+        if firstToken == token { first = nil }
+    }
+
     /// A catalog is in the store (the listing, then each batch of icons).
     func progressed(_ catalog: AndroidAppCatalog, iconsLeft left: Int) {
         if apps != catalog.apps { apps = catalog.apps }
@@ -200,11 +230,13 @@ final class AndroidAppsState {
         case let .refreshed(catalog):
             progressed(catalog, iconsLeft: 0)
             listed = true
+            firstOwed = false
             unavailable = false
             failed = false
         case .unavailable:
             unavailable = true
             listed = true
+            firstOwed = false
         case .failed:
             failed = true
         }
@@ -234,6 +266,11 @@ final class AndroidAppsState {
         endRefreshUnderWay()
         first?.cancel()
         first = nil
+        firstToken &+= 1
+        firstOwed = false
+        firstNeedsList = false
+        bootStartedBy = nil
+        listedForAnOpen = false
         opening?.cancel()
         opening = nil
         open.runEnded()
@@ -256,8 +293,12 @@ final class AndroidAppsState {
 
     /// The disk may not be what was listed (a restored snapshot or update):
     /// the next refresh lists again, and a refresh under way is no longer the store's.
+    /// A refresh that a change owed stays owed: the new listing it asks for may be kept
+    /// from being made (Android paused for space), and the change is still in the disk.
     func invalidated() {
+        let owed = refreshAgain
         endRefreshUnderWay()
+        refreshAgain = owed
         store.invalidate()
         listed = false
     }

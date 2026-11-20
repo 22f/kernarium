@@ -85,6 +85,54 @@ final class RecordingAppsIndex: AndroidAppsSearchIndexing {
     }
 }
 
+/// The waits of the run's first listing, held until a test lets them go: nothing of it depends on a clock.
+/// A wait that is cancelled ends at once.
+nonisolated final class HeldWaits: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var cancelled: Set<Int> = []
+    private var asked: [Duration] = []
+    private var next = 0
+
+    /// Every wait asked for, in order, and how many are still held.
+    var durations: [Duration] { lock.withLock { asked } }
+    var holding: Int { lock.withLock { waiters.count } }
+
+    func wait(_ duration: Duration) async {
+        let id = lock.withLock { () -> Int in
+            next += 1
+            asked.append(duration)
+            return next
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let endsAtOnce = lock.withLock { () -> Bool in
+                    if cancelled.remove(id) != nil { return true }
+                    waiters[id] = continuation
+                    return false
+                }
+                if endsAtOnce { continuation.resume() }
+            }
+        } onCancel: {
+            let held = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+                if let held = waiters.removeValue(forKey: id) { return held }
+                cancelled.insert(id)
+                return nil
+            }
+            held?.resume()
+        }
+    }
+
+    /// Ends every wait that is held now.
+    func releaseAll() {
+        let held = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            defer { waiters = [:] }
+            return Array(waiters.values)
+        }
+        held.forEach { $0.resume() }
+    }
+}
+
 /// Add to Home Screen as the model plays it: the list a refresh keeps and what
 /// it tells the system, a request made as an App Intent makes it while Android
 /// runs, while it starts and while it is off, what a request that must wait
@@ -109,8 +157,17 @@ final class AndroidAppsModelTests {
         let scripted: ScriptedAndroidApps
         let index: RecordingAppsIndex
         let directory: URL
+        /// The run's first listing waits here, until a test lets it go.
+        let waits: HeldWaits
         var state: AndroidAppsState { model.androidApps }
         var tool: ScriptedAppsTool { scripted.tool }
+
+        /// Ends what the test left waiting (an hour-long wait would outlive it).
+        func stop() {
+            state.first?.cancel()
+            state.opening?.cancel()
+            waits.releaseAll()
+        }
     }
 
     /// A model over a stub runtime, a cache of its own and the played tool.
@@ -140,7 +197,9 @@ final class AndroidAppsModelTests {
             defaults: try #require(UserDefaults(suiteName: "andarium-apps-test-\(UUID().uuidString)")))
         state.searchOn = true
         state.adoptCache()
-        return Rig(model: model, driver: driver, scripted: scripted, index: index, directory: directory)
+        let waits = HeldWaits()
+        state.sleep = { await waits.wait($0) }
+        return Rig(model: model, driver: driver, scripted: scripted, index: index, directory: directory, waits: waits)
     }
 
     private func eventually(_ seconds: Double = 10, _ condition: () -> Bool) async -> Bool {
@@ -150,6 +209,17 @@ final class AndroidAppsModelTests {
             try? await Task.sleep(for: .milliseconds(5))
         }
         return condition()
+    }
+
+    /// Whether `task` ends within `seconds`; one that does not is left to `rig.stop()`.
+    private func ends(_ task: Task<Void, Never>, within seconds: Double = 5) async -> Bool {
+        final class Ended { var value = false }
+        let ended = Ended()
+        Task {
+            await task.value
+            ended.value = true
+        }
+        return await eventually(seconds) { ended.value }
     }
 
     // MARK: The list
@@ -819,6 +889,7 @@ final class AndroidAppsModelTests {
 
     @Test func aSecondAppOpensWhileTheFirstIsInFrontWithoutWaitingForHomeAgain() async throws {
         let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
         rig.scripted.requiresHomeResumed = true
         rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
         #expect(await eventually(3) { rig.tool.opened == [comet.component] })
@@ -828,7 +899,6 @@ final class AndroidAppsModelTests {
         #expect(await eventually(3) { rig.tool.opened == [comet.component, inkleaf.component] }, "one launch of the second app")
         #expect(rig.state.open.banner == nil, "no timeout")
         // A new run's boot is begun by a request: that request waits for Home, and an app in front keeps it from coming.
-        rig.state.startDelay = .seconds(3600)
         rig.model.androidAppsRunEnded()
         rig.model.phase = .home
         rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
@@ -840,7 +910,7 @@ final class AndroidAppsModelTests {
 
     @Test func theFirstOpenOfARunPastItsBootDoesNotWaitForHome() async throws {
         let rig = try rig(phase: .running(.normal))
-        rig.state.startDelay = .seconds(3600)
+        defer { rig.stop() }
         rig.scripted.requiresHomeResumed = true
         // An app is in front, and no request of this run has asked anything: the run's boot completed, nobody waited for it.
         rig.scripted.homeInFront = false
@@ -853,7 +923,7 @@ final class AndroidAppsModelTests {
 
     @Test func aRequestThatStartedTheBootStillWaitsForHomesFirstResume() async throws {
         let rig = try rig(phase: .home, plan: .normal)
-        rig.state.startDelay = .seconds(3600)
+        defer { rig.stop() }
         rig.scripted.requiresHomeResumed = true
         rig.scripted.homeInFront = false
         rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
@@ -876,7 +946,7 @@ final class AndroidAppsModelTests {
 
     @Test func aRequestAfterTheBootDoesNotWaitForHomeWhenTheRequestThatBeganItStoppedAtSetup() async throws {
         let rig = try rig(phase: .home, plan: .normal)
-        rig.state.startDelay = .seconds(3600)
+        defer { rig.stop() }
         rig.scripted.requiresHomeResumed = true
         rig.scripted.readiness = .setupUnfinished
         // Icon A starts Android; the boot completes and Android's own setup is still on the screen.
@@ -913,23 +983,22 @@ final class AndroidAppsModelTests {
 
     @Test func theRunsFirstListingWaitsForTheGuestToSettleAfterItsBootCompleted() async throws {
         let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
         // The one number: the guest is given a minute after Android reports its boot done.
         #expect(rig.state.startDelay == .seconds(60))
-        // The wait counts from the boot's end, whatever it is: nothing is asked as the boot ends or before the wait does.
-        let wait = Duration.milliseconds(150)
-        rig.state.startDelay = wait
-        let began = ContinuousClock.now
         rig.model.androidAppsBootFinished(recovery: false)
         #expect(rig.tool.digestsAsked == 0, "nothing is asked as the boot ends")
-        #expect(await eventually(5) { rig.tool.digestsAsked > 0 })
-        #expect(ContinuousClock.now - began >= wait, "nothing is asked before the wait is over")
+        #expect(await eventually { rig.waits.durations == [.seconds(60)] }, "the first ask waits the minute")
+        #expect(rig.tool.digestsAsked == 0)
+        rig.waits.releaseAll()
+        #expect(await eventually { rig.state.listed })
+        #expect(rig.tool.digestsAsked == 1)
     }
 
     @Test func aHostWithNoHomeScreenNeverAsksAndroidForTheApps() async throws {
         let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
         rig.model.host.idiom = .mac
-        rig.state.startDelay = .milliseconds(10)
-        rig.state.retryInterval = .milliseconds(10)
         rig.model.androidAppsBootFinished(recovery: false)
         #expect(rig.state.first == nil, "no task waits to ask")
         // No other asker gets an answer either: an install, a request that found its app gone, a page.
@@ -937,19 +1006,22 @@ final class AndroidAppsModelTests {
         #expect(await rig.model.refreshAndroidApps(afterAChange: true) == false)
         #expect(rig.tool.digestsAsked == 0 && rig.tool.listingsAsked == 0)
         #expect(!rig.state.listed && !rig.state.refreshing)
+        #expect(rig.waits.durations.isEmpty)
     }
 
     @Test func anIPadAsksAsAnIPhoneDoes() async throws {
         let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
         rig.model.host.idiom = .pad
-        rig.state.startDelay = .milliseconds(10)
         rig.model.androidAppsBootFinished(recovery: false)
+        #expect(await eventually { rig.waits.holding == 1 })
+        rig.waits.releaseAll()
         #expect(await eventually(5) { rig.state.listed })
     }
 
     @Test func theChoosersListingDoesNotWaitForTheGuestToSettle() async throws {
         let rig = try rig(phase: .running(.normal))
-        rig.state.startDelay = .seconds(3600)
+        defer { rig.stop() }
         rig.model.androidAppsBootFinished(recovery: false)
         // The person opens Add to Home Screen while the guest is still settling: it is asked at once.
         #expect(await rig.model.refreshAndroidApps())
@@ -959,56 +1031,205 @@ final class AndroidAppsModelTests {
 
     @Test func aListingTheChooserMadeIsNotAskedForAgainWhenTheWaitIsOver() async throws {
         let rig = try rig(phase: .running(.normal))
-        rig.state.startDelay = .milliseconds(200)
+        defer { rig.stop() }
         rig.model.androidAppsBootFinished(recovery: false)
+        // The run's first listing is the task's: take its handle before anything yields.
+        let waiting = try #require(rig.state.first)
         #expect(await rig.model.refreshAndroidApps())
         let asked = rig.tool.digestsAsked
-        let waiting = try #require(rig.state.first)
-        await waiting.value
+        #expect(await eventually { rig.waits.holding == 1 })
+        rig.waits.releaseAll()
+        #expect(await ends(waiting), "the wait ends")
         #expect(rig.tool.digestsAsked == asked, "the run's list was answered; the wait asks nothing more")
         #expect(rig.state.first == nil)
     }
 
-    @Test func aShortcutThatStartedAndroidForAnAppTheListLacksAsksForTheListWithoutTheWait() async throws {
+    @Test func anEarlierRunsTaskDoesNotClearTheNextRunsTimerNorAskItsGuest() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        // Run A: its wait is over and its listing is under way, held at the write to the index.
+        rig.index.holdsNextOffer = true
+        rig.model.androidAppsBootFinished(recovery: false)
+        let a = try #require(rig.state.first)
+        #expect(await eventually { rig.waits.holding == 1 })
+        rig.waits.releaseAll()
+        #expect(await eventually { rig.index.events.contains("offer-started") })
+        // Run B begins while A's reply is held; B's chooser lists.
+        rig.model.androidAppsRunEnded()
+        rig.model.session = SessionState()
+        rig.model.phase = .running(.normal)
+        rig.model.session.storageReady = true
+        rig.model.androidAppsBootFinished(recovery: false)
+        let b = try #require(rig.state.first)
+        #expect(await eventually { rig.waits.holding == 1 })
+        // (The write to the index is ordered behind A's, which is held: B's listing is kept, its write waits.)
+        let chooser = Task { await rig.model.refreshAndroidApps() }
+        #expect(await eventually { rig.state.listed })
+        // A's reply comes: A ends, and the timer is still B's.
+        rig.index.letGo()
+        #expect(await ends(a), "A's task ends")
+        _ = await chooser.value
+        #expect(rig.state.first == b, "A cleared the handle of B's timer")
+        // Run C begins during B's wait: B's wait ends with B, and C's guest is asked by C's timer alone.
+        rig.model.androidAppsRunEnded()
+        rig.model.session = SessionState()
+        rig.model.phase = .running(.normal)
+        rig.model.session.storageReady = true
+        rig.model.androidAppsBootFinished(recovery: false)
+        #expect(await eventually(3) { rig.waits.holding == 1 && rig.waits.durations.count == 3 }, "waits: \(rig.waits.holding) of \(rig.waits.durations)")
+    }
+
+    @Test func aListingMadeDuringTheStartupStorageCheckIsNotAskedAgain() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.driver.holdsStorageReads = true
+        rig.model.androidAppsBootFinished(recovery: false)
+        let first = try #require(rig.state.first)
+        #expect(await eventually { rig.waits.holding == 1 })
+        rig.waits.releaseAll()
+        #expect(await eventually { rig.driver.storageReads > 0 }, "the task is at the storage check")
+        // The person opens Add to Home Screen meanwhile.
+        #expect(await rig.model.refreshAndroidApps())
+        let asked = rig.tool.digestsAsked
+        rig.driver.holdsStorageReads = false
+        #expect(await ends(first), "the task ends")
+        #expect(rig.tool.digestsAsked == asked, "the run's list was answered during the check")
+    }
+
+    @Test func anUncachedShortcutThatStartedAndroidAsksForTheListAtOnceWhileItsAppOpens() async throws {
         let rig = try rig(phase: .home, plan: .normal)
-        rig.state.startDelay = .seconds(3600)
-        rig.state.retryInterval = .milliseconds(20)
+        defer { rig.stop() }
+        rig.scripted.readyDelay = .milliseconds(300)
         // The cache has no list: nothing says that Comet Hop is in Android.
         #expect(rig.state.store.catalog() == nil)
         rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
         #expect(rig.state.open.pending?.stage == .starting)
         rig.model.phase = .running(.normal)
         rig.model.androidAppsBootFinished(recovery: false)
+        #expect(rig.state.open.pending?.stage == .opening)
+        // The list is asked for, with the app still opening and no wait let go.
+        #expect(await eventually(3) { rig.tool.digestsAsked > 0 }, "waits held: \(rig.waits.durations)")
+        #expect(!rig.waits.durations.contains(rig.state.startDelay))
         #expect(await eventually(5) { rig.tool.opened == [comet.component] })
-        #expect(await eventually(5) { rig.state.listed }, "the list is asked for, not left for the end of the wait")
+    }
+
+    @Test func aShortcutDuringABootTheStartButtonBeganWaitsForTheGuestToSettle() async throws {
+        let rig = try rig(phase: .home, plan: .normal)
+        defer { rig.stop() }
+        rig.model.start(.normal)
+        // Android is starting, and a shortcut for an app the list lacks arrives during the boot.
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(rig.state.open.pending?.stage == .starting)
+        rig.model.phase = .running(.normal)
+        rig.model.androidAppsBootFinished(recovery: false)
+        #expect(await eventually { rig.waits.durations == [rig.state.startDelay] }, "waits: \(rig.waits.durations)")
+        #expect(rig.tool.digestsAsked == 0)
     }
 
     @Test func aShortcutForAnAppTheListHasLeavesTheListForTheEndOfTheWait() async throws {
         let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
         await rig.model.refreshAndroidApps()
         let baseline = rig.tool.digestsAsked
         // A new run: the cache keeps its list, and this run has listed nothing yet.
         rig.model.androidAppsRunEnded()
         rig.model.phase = .home
-        let wait = Duration.milliseconds(150)
-        rig.state.startDelay = wait
         rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
         #expect(rig.state.open.pending?.stage == .starting)
         rig.model.phase = .running(.normal)
-        let began = ContinuousClock.now
         rig.model.androidAppsBootFinished(recovery: false)
         #expect(await eventually(5) { rig.tool.opened == [comet.component] })
-        #expect(await eventually(5) { rig.tool.digestsAsked > baseline })
-        #expect(ContinuousClock.now - began >= wait, "the list the cache holds is enough until the wait is over")
+        #expect(await eventually { rig.waits.durations == [rig.state.startDelay] })
+        #expect(rig.tool.digestsAsked == baseline, "the list the cache holds is enough until the wait is over")
+        rig.waits.releaseAll()
+        #expect(await eventually { rig.tool.digestsAsked > baseline })
+    }
+
+    @Test func aPauseForSpaceBeforeTheBootScreenEndsStillOwesTheFirstListing() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.model.spacePause = SpacePause(freeBytes: 0, stage: .pausing)
+        rig.model.androidAppsBootFinished(recovery: false)
+        #expect(rig.state.first == nil, "nothing is asked while Android is paused")
+        rig.model.spacePause = nil
+        #expect(await eventually { rig.waits.durations == [rig.state.startDelay] }, "the pause ending starts the wait: \(rig.waits.durations)")
+        rig.waits.releaseAll()
+        #expect(await eventually { rig.state.listed })
+    }
+
+    @Test func aPauseForSpaceDuringTheWaitKeepsTheFirstListingOwed() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.model.androidAppsBootFinished(recovery: false)
+        let first = try #require(rig.state.first)
+        #expect(await eventually { rig.waits.holding == 1 })
+        rig.model.spacePause = SpacePause(freeBytes: 0, stage: .pausing)
+        rig.waits.releaseAll()
+        #expect(await ends(first), "the task ends when Android is paused")
+        #expect(rig.tool.digestsAsked == 0, "Android is paused when the wait ends")
+        rig.model.spacePause = nil
+        #expect(await eventually { rig.waits.durations == [rig.state.startDelay, rig.state.startDelay] }, "waits: \(rig.waits.durations)")
+        rig.waits.releaseAll()
+        #expect(await eventually { rig.state.listed })
+    }
+
+    @Test func aRefreshOwedForAnInstallSurvivesAMissingAppAnswerDuringAPause() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        await rig.model.refreshAndroidApps()
+        let gone = try #require(AndroidComponent(packageName: "com.example.gone", activityClass: "com.example.gone.Main"))
+        // The launch of an app that is not there is under way, listing the apps to learn why.
+        rig.tool.delay = .milliseconds(150)
+        rig.model.requestAndroidApp(gone, label: "Gone")
+        #expect(await eventually { rig.tool.opened == [gone] })
+        // Android is paused for space, and an install is announced meanwhile.
+        rig.model.spacePause = SpacePause(freeBytes: 0, stage: .pausing)
+        #expect(await rig.model.refreshAndroidApps(afterAChange: true) == false)
+        #expect(await eventually(5) { rig.state.open.banner != nil }, "the missing-app answer arrived")
+        rig.tool.delay = .milliseconds(1)
+        let asked = rig.tool.digestsAsked
+        rig.model.spacePause = nil
+        #expect(await eventually(5) { rig.tool.digestsAsked > asked }, "the resume lists what the install changed")
+    }
+
+    @Test func anExplicitOpenOnAHostWithNoHomeScreenTakesOneListingFirstAndOnlyOne() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.model.host.idiom = .mac
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened == [comet.component] })
+        #expect(rig.tool.digestsAsked == 1 && rig.tool.iconsAsked == 0, "one listing, no icons")
+        #expect(rig.state.store.record(forID: comet.id)?.launchers == 1, "the listing is recorded")
+        rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
+        #expect(await eventually { rig.tool.opened == [comet.component, inkleaf.component] })
+        #expect(rig.tool.digestsAsked == 1, "once for the run")
+        #expect(rig.waits.durations.isEmpty, "nothing is asked at the boot")
+    }
+
+    @Test func anAppThatRenamedItsLauncherIsStillOpenedOnAHostWithNoHomeScreen() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.model.host.idiom = .mac
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened == [comet.component] && rig.state.open.pending == nil })
+        // The app renames its only launcher.
+        let renamed = AndroidApp(
+            component: try #require(AndroidComponent(packageName: comet.component.packageName, activityClass: "com.example.comethop.Renamed")),
+            label: "Comet Hop", builtIn: false, iconTag: "0000000000000001")
+        rig.tool.remove(comet.id)
+        rig.tool.install(renamed)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened.last == renamed.component }, "opened: \(rig.tool.opened)")
+        #expect(rig.state.open.banner == nil)
     }
 
     @Test func theCachedListAndRecordsAnswerBeforeTheRunsFirstListing() async throws {
         let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
         await rig.model.refreshAndroidApps()
         // Android restarts, and then Android is erased: the cache goes and the record of each icon stays.
         rig.model.androidAppsRunEnded()
         rig.model.androidAppsErased()
-        rig.state.startDelay = .seconds(3600)
         rig.model.phase = .running(.normal)
         rig.model.androidAppsBootFinished(recovery: false)
         #expect(!rig.state.listed, "the run's first listing is still to come")
