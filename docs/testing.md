@@ -766,10 +766,11 @@ blocker in every one of them.
   of its own;
   `emulator-options` holds the `--aot=` and `--aot-release=` parsing and
   `android-release-identity` the launcher's reading of the release identity.
-  `aot-archive-switch` (tooling) holds the descriptor's archive switch that the
-  iOS device runtimes read. `arm64-aot-release-artifact` holds the artifact check
-  to what it must refuse (another release, partition, blob, tool or library
-  list). The differential runs functions of every rewritten library through
+  `aot-archive-switch` (tooling) selects the accepted artifact for each Apple
+  product on an installed fixture under both values of the descriptor's
+  archive switch, and fails a module whose yes/no predicate is turned round.
+  `arm64-aot-release-artifact` holds the artifact check to what it must refuse
+  (another release, partition, blob, tool or library list). The differential runs functions of every rewritten library through
   the gadget engine with and without ahead-of-time code and requires the same
   guest state, memory, ending event and exception syndrome, and the same
   registers, flags, vector registers and memory at every fault. The unhappy

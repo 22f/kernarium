@@ -105,58 +105,17 @@ elseif(UML_TARGET_MACOS OR UML_KERNEL_PRODUCT STREQUAL "android-17")
     # The accepted artifact: the descriptor names the release it was built
     # from, and it is installed beside the accepted release. An iOS runtime
     # of the Linux product has no Android library to rewrite and takes none.
-    set(_uml_aot_accepted
-        ${PROJECT_SOURCE_DIR}/android/lineage-24/metadata/accepted-aot.env)
-    set(_uml_aot_release
-        ${PROJECT_SOURCE_DIR}/android/lineage-24/metadata/accepted-release.env)
-    if(EXISTS "${_uml_aot_accepted}")
-        file(STRINGS "${_uml_aot_accepted}" _uml_aot_accepted_id
-            REGEX "^LINEAGE24_ACCEPTED_AOT_RELEASE_ID='.*'$")
-        file(STRINGS "${_uml_aot_release}" _uml_aot_release_id_line
-            REGEX "^LINEAGE24_ACCEPTED_RELEASE_ID='.*'$")
-        file(STRINGS "${_uml_aot_release}" _uml_aot_release_dir_line
-            REGEX "^LINEAGE24_ACCEPTED_DIRECTORY_NAME='.*'$")
-        string(REGEX REPLACE "^[A-Z0-9_]+='(.*)'$" "\\1"
-            _uml_aot_accepted_id "${_uml_aot_accepted_id}")
-        string(REGEX REPLACE "^[A-Z0-9_]+='(.*)'$" "\\1"
-            _uml_aot_release_id_line "${_uml_aot_release_id_line}")
-        string(REGEX REPLACE "^[A-Z0-9_]+='(.*)'$" "\\1"
-            _uml_aot_release_dir "${_uml_aot_release_dir_line}")
-        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-            "${_uml_aot_accepted}" "${_uml_aot_release}")
-        if(NOT _uml_aot_accepted_id STREQUAL _uml_aot_release_id_line)
-            message(FATAL_ERROR
-                "accepted-aot.env accepts the artifact of "
-                "'${_uml_aot_accepted_id}', but the accepted release is "
-                "'${_uml_aot_release_id_line}'")
-        endif()
-        # An archive takes it only when the descriptor says so
-        # (LINEAGE24_ACCEPTED_AOT_ARCHIVES): the device runtimes are the ones
-        # an archive of Andarium's Release configuration embeds. macOS and the
-        # Simulator take every accepted artifact.
-        include(UmlAotArchives)
-        uml_aot_archives_state(_uml_aot_archives "${_uml_aot_accepted}")
-        set(_uml_aot_archive_product FALSE)
-        if(UML_APPLE_PLATFORM STREQUAL "ios")
-            set(_uml_aot_archive_product TRUE)
-        endif()
-        set(_uml_aot_default
-            "${PROJECT_SOURCE_DIR}/.build/android/aot/${_uml_aot_release_dir}")
-        if(_uml_aot_archive_product AND NOT _uml_aot_archives STREQUAL "yes")
-            message(STATUS
-                "The accepted AOT artifact is not accepted for archives "
-                "yet (LINEAGE24_ACCEPTED_AOT_ARCHIVES): building without the "
-                "AOT component")
-        elseif(EXISTS "${_uml_aot_default}/artifact.json")
-            set(UML_AOT_SOURCE artifact)
-            set(UML_AOT_ARTIFACT_DIR "${_uml_aot_default}")
-            set(UML_AOT_ARTIFACT_ACCEPTED "${_uml_aot_accepted}")
-        elseif(UML_AOT_MODE STREQUAL "AUTO")
-            message(STATUS
-                "The accepted AOT artifact is not installed at "
-                "${_uml_aot_default}: building without the AOT component")
-        endif()
-    endif()
+    # An iOS device runtime, the one an archive of Andarium's Release
+    # configuration embeds, takes it only when the descriptor says so
+    # (LINEAGE24_ACCEPTED_AOT_ARCHIVES); macOS and the Simulator take every
+    # accepted artifact (cmake/UmlAotArchives.cmake).
+    include(UmlAotArchives)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${PROJECT_SOURCE_DIR}/android/lineage-24/metadata/accepted-aot.env"
+        "${PROJECT_SOURCE_DIR}/android/lineage-24/metadata/accepted-release.env")
+    uml_aot_accepted_artifact("${PROJECT_SOURCE_DIR}" "${UML_APPLE_PLATFORM}"
+        "${UML_AOT_MODE}"
+        UML_AOT_SOURCE UML_AOT_ARTIFACT_DIR UML_AOT_ARTIFACT_ACCEPTED)
 endif()
 if(UML_AOT_MODE STREQUAL "ON" AND NOT UML_AOT_SOURCE)
     message(FATAL_ERROR

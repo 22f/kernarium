@@ -62,8 +62,10 @@ uml_add_tooling_test(
     TIMEOUT 60)
 
 # The archive switch of the AOT component (cmake/UmlAotArchives.cmake): an iOS
-# runtime takes the accepted artifact only when the accepted descriptor says
-# yes, and darwin/cpu/CMakeLists.txt reads the switch for it.
+# device runtime takes the accepted artifact only when the accepted descriptor
+# says yes, macOS and the Simulator take it under either value, and a module
+# whose predicate is turned round fails the rows; darwin/cpu/CMakeLists.txt
+# selects the artifact through that module.
 uml_add_tooling_test(
     NAME aot-archive-switch
     COMMAND ${Python3_EXECUTABLE} -B
