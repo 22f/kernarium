@@ -50,14 +50,15 @@ enum Cmd : std::uint32_t {
     allocateMemory = 21, bindBufferMemory = 28, bindImageMemory = 29,
     getImageMemoryRequirements = 31, createBuffer = 50, destroyBuffer = 51,
     createImage = 54, destroyImage = 55, createImageView = 57,
-    destroyImageView = 58, createComputePipelines = 66, createFramebuffer = 80,
+    destroyImageView = 58, createGraphicsPipelines = 65, createComputePipelines = 66,
+    createFramebuffer = 80,
     createRenderPass = 82,
     createCommandPool = 85, resetCommandPool = 87, allocateCommandBuffers = 88,
     beginCommandBuffer = 90, endCommandBuffer = 91, cmdCopyBuffer = 112,
     cmdCopyBufferToImage = 115, cmdBeginRenderPass = 133,
     cmdEndRenderPass = 135, cmdBeginRenderPass2 = 168,
     setReplyCommandStream = 178, getImageDrmFormatModifierProperties = 187,
-    createPipelineBinaries = 371, destroyPipelineBinary = 372,
+    createPipelineBinaries = 371, destroyPipelineBinary = 372, getPipelineKey = 373,
     getPipelineBinaryData = 374, releaseCapturedPipelineData = 375,
 };
 

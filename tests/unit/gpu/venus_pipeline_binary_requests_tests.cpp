@@ -24,8 +24,20 @@
 //    handler. The context is lost instead, as it is for every other null
 //    handle a command needs. An id the renderer never made, or made and then
 //    destroyed, is refused by the lookup itself.
-//  - A second object created under an id that is already in use loses the
-//    context, and tearing it down must still be clean.
+//  - A second object created under an id that is already in use, or under id 0,
+//    loses the context, and tearing it down must still be clean: the object the
+//    context refused is freed whichever order its owner and the owner of the
+//    other object are torn down in, and the other object is left alone.
+//  - vkGetPipelineKeyKHR takes its pipeline from the first structure of the
+//    create info's chain, which the driver reads by that structure's type. A
+//    request whose chain is empty, or begins with a structure that is not a
+//    graphics, compute or ray tracing pipeline's, is refused with
+//    VK_ERROR_VALIDATION_FAILED, and the key it replies with is zero. No
+//    create info at all is the key of the device, which is served.
+//
+// A refusal that the driver would also make is told apart from the renderer's
+// own by the line the renderer logs when it refuses: a row that expects the
+// renderer to refuse names that line.
 //
 // The test drives the real vkr renderer in-process against the real host
 // Vulkan driver and submits hand-encoded Venus command streams, in the style of
@@ -40,6 +52,12 @@
 // on its standard error. The parent passes when every child exits with
 // status 0.
 //
+// An object the renderer fails to free leaves nothing for Guard Malloc to
+// fault on, so the rows that name one are run a second time under the leak
+// checker (leaks --atExit), which examines the process when the row, the
+// context and the renderer are gone, and fails the row when it reports a leak
+// that a renderer function allocated.
+//
 // It is not run under AddressSanitizer, whose allocator Guard Malloc cannot
 // share a process with.
 
@@ -48,12 +66,14 @@
 
 #include <execinfo.h>
 #include <mach-o/dyld.h>
+#include <poll.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -80,6 +100,8 @@ using namespace std::chrono_literals;
 using namespace uml::gpu::testing::venus;
 
 constexpr const char* childArgument = "--child";
+constexpr const char* leaksArgument = "--leaks";
+constexpr const char* leaksTool = "/usr/bin/leaks";
 constexpr const char* guardMalloc = "/usr/lib/libgmalloc.dylib";
 constexpr int guardMallocMissingExitCode = 2;
 constexpr int skippedExitCode = 77;
@@ -88,7 +110,7 @@ constexpr auto childTimeBudget = 100s;
 // The object ids the guest assigns.
 enum Id : std::uint64_t {
     instanceId = 1, physDevId = 2, deviceId = 3, binaryId = 10, otherBinaryId = 11,
-    pipelineId = 20, neverMadeId = 77,
+    pipelineId = 20, poolId = 30, otherPoolId = 31, commandBufferId = 40, neverMadeId = 77,
 };
 constexpr std::uint32_t keyBytes = VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR;
 constexpr std::uint32_t replyResourceId = 900;
@@ -205,6 +227,84 @@ void encodeComputePipelineFromBinary(Stream& s, std::uint64_t binary)
     s.arraySize(1); s.u64(pipelineId);          // pPipelines
 }
 
+// vkCreateGraphicsPipelines for one pipeline, its guest id `pipelineId`, that
+// reads one pipeline binary the guest names by id. It names no stage, no state
+// and no layout: the binary is what the driver builds the pipeline from.
+void encodeGraphicsPipelineFromBinary(Stream& s, std::uint64_t binary)
+{
+    s.command(createGraphicsPipelines, true);
+    s.u64(deviceId);
+    s.u64(0);                                   // pipelineCache
+    s.u32(1); s.arraySize(1);                   // pCreateInfos
+    s.u32(VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO);
+    s.ptr(true);                                // pNext: the binaries
+    s.u32(VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR); s.ptr(false);
+    s.u32(1); s.arraySize(1); s.u64(binary);
+    s.u32(0);                                   // flags
+    s.u32(0); s.arraySize(0);                   // stageCount, pStages: none
+    for (int state = 0; state < 9; ++state)
+        s.ptr(false);                           // vertex input ... dynamic state
+    s.u64(0);                                   // layout
+    s.u64(0);                                   // renderPass
+    s.u32(0);                                   // subpass
+    s.u64(0);                                   // basePipelineHandle
+    s.u32(0);                                   // basePipelineIndex
+    s.ptr(false);                               // pAllocator
+    s.arraySize(1); s.u64(pipelineId);          // pPipelines
+}
+
+// What the create info of vkGetPipelineKeyKHR carries.
+enum class KeyRequest {
+    device,           // no create info: the key of the device
+    emptyChain,       // a create info with no chain
+    robustnessFirst,  // a chain that begins with VkPipelineRobustnessCreateInfo
+};
+
+// vkGetPipelineKeyKHR. The key is written by the host and the request carries
+// only its type.
+void encodeGetKey(Stream& s, KeyRequest request)
+{
+    s.command(getPipelineKey, true);
+    s.u64(deviceId);
+    s.ptr(request != KeyRequest::device);       // pPipelineCreateInfo
+    if (request != KeyRequest::device) {
+        s.u32(VK_STRUCTURE_TYPE_PIPELINE_CREATE_INFO_KHR);
+        if (request == KeyRequest::robustnessFirst) {
+            s.ptr(true);
+            s.u32(VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO); s.ptr(false);
+            for (int field = 0; field < 4; ++field)
+                s.u32(0);                       // every behaviour: the device default
+        } else {
+            s.ptr(false);
+        }
+    }
+    s.ptr(true);                                // pPipelineKey
+    s.u32(VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR); s.ptr(false);
+}
+
+// A command pool of the device, under the guest's id.
+void encodeCreatePool(Stream& s, std::uint64_t pool)
+{
+    s.command(createCommandPool);
+    s.u64(deviceId);
+    s.ptr(true);
+    s.u32(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO); s.u64(0);
+    s.u32(0); s.u32(0);
+    s.ptr(false);
+    s.ptr(true); s.u64(pool);
+}
+
+// One command buffer of a pool, under the guest's id.
+void encodeAllocateCommandBuffer(Stream& s, std::uint64_t pool, std::uint64_t commandBuffer)
+{
+    s.command(allocateCommandBuffers);
+    s.u64(deviceId);
+    s.ptr(true);
+    s.u32(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO); s.u64(0);
+    s.u64(pool); s.u32(VK_COMMAND_BUFFER_LEVEL_PRIMARY); s.u32(1);
+    s.arraySize(1); s.u64(commandBuffer);
+}
+
 void encodeSetup(Stream& s)
 {
     DeviceExtras extras;
@@ -215,10 +315,28 @@ void encodeSetup(Stream& s)
 
 // The renderer says why it refuses a command; the log makes a failure here
 // read as one.
+std::string& rendererLog()
+{
+    static std::string log;
+    return log;
+}
 void logRenderer(int, const char* message, void*)
 {
     std::fprintf(stderr, "  renderer: %s", message);
+    rendererLog() += message;
 }
+
+// True when the renderer has logged a line with this text since the row began.
+bool rendererSaid(const char* text)
+{
+    return rendererLog().find(text) != std::string::npos;
+}
+
+// The lines the renderer logs when it refuses a request of this extension.
+constexpr const char* noSourceLine = "names no source for its binaries";
+constexpr const char* keySizeLine = "a key is not 32 bytes";
+constexpr const char* chainHeadLine =
+    "does not begin with a graphics, compute or ray tracing pipeline's";
 void retireFence(std::uint32_t, std::uint32_t, std::uint64_t) {}
 void contextFatal(std::uint32_t) {}
 
@@ -228,6 +346,10 @@ struct Answer {
     std::int32_t command = 0;    // the reply's command type, when there is one
     std::int32_t result = 0;     // ... and its VkResult
     std::uint64_t dataSize = 0;  // vkGetPipelineBinaryDataKHR's size, when asked
+    // vkGetPipelineKeyKHR's reply: command, result, the key as a pointer and a
+    // structure of its type, chain, size and 32 bytes.
+    std::uint32_t keySize = 0;
+    std::array<std::uint8_t, keyBytes> key {};
 };
 
 // A Venus context with a device that has pipeline binaries and a
@@ -285,6 +407,8 @@ public:
         // pointer and a 56-byte structure, then the size's pointer and the
         // size.
         std::memcpy(&answer.dataSize, static_cast<const std::uint8_t*>(reply_) + 80, 8);
+        std::memcpy(&answer.keySize, static_cast<const std::uint8_t*>(reply_) + 28, 4);
+        std::memcpy(answer.key.data(), static_cast<const std::uint8_t*>(reply_) + 40, keyBytes);
         return answer;
     }
 
@@ -324,9 +448,12 @@ void requireAnswered(const Answer& answer, Cmd command, std::int32_t result, con
 struct Row {
     const char* name;
     std::function<void(Session&)> run;
+    bool leakChecked = false;  // also run under the leak checker
 };
 
 // A row that imports under a key of one size and is answered with the result.
+// The driver refuses a key of the wrong size with the same result, so the row
+// also asks the renderer to have refused it before the call was forwarded.
 Row keyRow(const char* name, std::uint32_t keySize, std::int32_t result)
 {
     return {name, [keySize, result](Session& session) {
@@ -335,18 +462,27 @@ Row keyRow(const char* name, std::uint32_t keySize, std::int32_t result)
         requireAnswered(session.ask(s), createPipelineBinaries, result,
             result == VK_SUCCESS ? "an import under a key of 32 bytes was refused"
                                  : "an import under a key of the wrong size was not refused");
+        require(rendererSaid(keySizeLine) == (result != VK_SUCCESS),
+            result == VK_SUCCESS ? "the renderer refused a key of 32 bytes"
+                                 : "the renderer did not refuse the key itself");
     }};
 }
 
 // A create request that has no source the binaries can come from is refused
-// and the context lives on: the next import is served.
-Row noSourceRow(const char* name, const CreateRequest& request)
+// and the context lives on: the next import is served. A request that names
+// nothing at all is refused by the renderer; one with only a pipeline create
+// info is the driver's to refuse, because a driver with an internal cache
+// would look it up.
+Row noSourceRow(const char* name, const CreateRequest& request, bool refusedByRenderer)
 {
-    return {name, [request](Session& session) {
+    return {name, [request, refusedByRenderer](Session& session) {
         Stream s;
         encodeCreate(s, request);
         requireAnswered(session.ask(s), createPipelineBinaries, VK_ERROR_VALIDATION_FAILED,
             "a request with no source for its binaries was not refused");
+        require(rendererSaid(noSourceLine) == refusedByRenderer,
+            refusedByRenderer ? "the renderer did not refuse the request itself"
+                              : "the renderer refused a request the driver answers");
         require(importsABinary(session, otherBinaryId),
             "the context did not serve an import after a refused request");
     }};
@@ -369,6 +505,51 @@ Row contextLostRow(const char* name, std::function<void(Session&, Stream&)> enco
     }};
 }
 
+// vkGetPipelineKeyKHR before which a request that dirties the decoder's temp
+// pool has been decoded. The refused request's key lands in memory the pool
+// held before, so a reply that is not zeroed carries what was left in it.
+void dirtyTheTempPool(Session& session)
+{
+    require(importsABinary(session, otherBinaryId), "the setup import was refused");
+}
+
+bool keyIsZero(const Answer& answer)
+{
+    return answer.keySize == 0
+        && std::all_of(answer.key.begin(), answer.key.end(), [](std::uint8_t b) { return b == 0; });
+}
+
+// A create info that names no pipeline is refused, the renderer says so, the
+// reply's key is zero, and the context lives on.
+Row keyRefusedRow(const char* name, KeyRequest request)
+{
+    return {name, [request](Session& session) {
+        dirtyTheTempPool(session);
+        Stream s;
+        encodeGetKey(s, request);
+        const Answer answer = session.ask(s);
+        require(answer.submitted, "a request that names no pipeline lost the context");
+        require(keyIsZero(answer), "a refused key request replied with a key that was never written");
+        requireAnswered(answer, getPipelineKey, VK_ERROR_VALIDATION_FAILED,
+            "a create info that names no pipeline was not refused");
+        require(rendererSaid(chainHeadLine), "the renderer did not refuse the request itself");
+        Stream next;
+        encodeGetKey(next, KeyRequest::device);
+        requireAnswered(session.ask(next), getPipelineKey, VK_SUCCESS,
+            "the context did not serve a key after a refused request");
+    }};
+}
+
+// The pipeline's binary is named by a null handle: a pipeline creation that
+// reads it loses the context, as the other commands that need a binary do.
+// Each row names the command it creates the pipeline with.
+
+// An object of a pool whose id the context refuses is freed with its pool,
+// whichever pool is torn down first, and so is one under id 0. The context is
+// lost when the object is made, so the teardown of the session does the rest.
+// A leak is the only trace a release renderer leaves, so these rows are also
+// run under the leak checker (see runLeakCheck).
+
 const std::vector<Row>& rows()
 {
     static const std::vector<Row> all = {
@@ -380,9 +561,24 @@ const std::vector<Row>& rows()
         keyRow("key-of-4096", 4096, VK_ERROR_VALIDATION_FAILED),
         keyRow("key-of-0xffffffff", 0xffffffffu, VK_ERROR_VALIDATION_FAILED),
 
+        // The key of a pipeline, and of the device.
+        {"get-the-key-of-the-device", [](Session& session) {
+            Stream s;
+            encodeGetKey(s, KeyRequest::device);
+            const Answer answer = session.ask(s);
+            requireAnswered(answer, getPipelineKey, VK_SUCCESS,
+                "the key of the device was not served");
+            require(answer.keySize == keyBytes, "the key of the device is not a key's size");
+            require(!keyIsZero(answer) && answer.keySize == keyBytes,
+                "the key of the device is zero");
+            require(!rendererSaid(chainHeadLine), "the renderer refused the key of the device");
+        }},
+        keyRefusedRow("get-the-key-of-an-empty-chain", KeyRequest::emptyChain),
+        keyRefusedRow("get-the-key-of-a-robustness-chain", KeyRequest::robustnessFirst),
+
         // The source of a create request.
-        noSourceRow("create-from-no-source", {}),
-        noSourceRow("create-from-a-create-info-only", {.createInfo = true}),
+        noSourceRow("create-from-no-source", {}, true),
+        noSourceRow("create-from-a-create-info-only", {.createInfo = true}, false),
 
         // vkGetPipelineBinaryDataKHR: a binary that is there, and the three
         // ways of naming one that is not.
@@ -425,9 +621,13 @@ const std::vector<Row>& rows()
         contextLostRow("release-a-pipeline-never-made",
             [](Session&, Stream& s) { encodeRelease(s, neverMadeId); }),
 
-        // A pipeline creation reads the binaries its create info names.
+        // A pipeline creation reads the binaries its create info names. The
+        // ray tracing form is the same code; this driver has no ray tracing,
+        // so there is no row for it.
         contextLostRow("compute-pipeline-from-the-null-binary",
             [](Session&, Stream& s) { encodeComputePipelineFromBinary(s, 0); }),
+        contextLostRow("graphics-pipeline-from-the-null-binary",
+            [](Session&, Stream& s) { encodeGraphicsPipelineFromBinary(s, 0); }),
 
         // An object id the guest already used.
         {"create-again-under-a-used-id", [](Session& session) {
@@ -437,7 +637,46 @@ const std::vector<Row>& rows()
             const Answer answer = session.ask(s);
             require(!answer.submitted, "a second object under a used id was accepted");
             // The session's end destroys the context with both objects in it.
-        }},
+        }, true},
+
+        // An object the context refuses is freed whichever owner is torn
+        // down first.  Id 0 names no object and finds none in the table.
+        {"command-buffer-under-id-0", [](Session& session) {
+            Stream pool;
+            encodeCreatePool(pool, poolId);
+            require(session.send(pool), "a command pool was refused");
+            Stream s;
+            encodeAllocateCommandBuffer(s, poolId, 0);
+            require(!session.send(s), "a command buffer under id 0 was accepted");
+        }, true},
+        // The older pool holds the duplicate and the newer one the original,
+        // and the device tears the newer pool down first: the original leaves
+        // the table before the duplicate is removed.
+        {"command-buffer-in-another-pool-under-a-used-id", [](Session& session) {
+            Stream pools;
+            encodeCreatePool(pools, poolId);
+            encodeCreatePool(pools, otherPoolId);
+            require(session.send(pools), "a command pool was refused");
+            Stream original;
+            encodeAllocateCommandBuffer(original, otherPoolId, commandBufferId);
+            require(session.send(original), "the first command buffer was refused");
+            Stream duplicate;
+            encodeAllocateCommandBuffer(duplicate, poolId, commandBufferId);
+            require(!session.send(duplicate), "a second command buffer under a used id was accepted");
+        }, true},
+        // The same order in one pool: the original is removed with the pool
+        // while the duplicate is still tracked by it.
+        {"command-buffer-in-the-same-pool-under-a-used-id", [](Session& session) {
+            Stream pool;
+            encodeCreatePool(pool, poolId);
+            require(session.send(pool), "a command pool was refused");
+            Stream original;
+            encodeAllocateCommandBuffer(original, poolId, commandBufferId);
+            require(session.send(original), "the first command buffer was refused");
+            Stream duplicate;
+            encodeAllocateCommandBuffer(duplicate, poolId, commandBufferId);
+            require(!session.send(duplicate), "a second command buffer under a used id was accepted");
+        }, true},
     };
     return all;
 }
@@ -476,14 +715,10 @@ void installFaultReport()
     return false;
 }
 
-// The body: runs one row in the child, with Guard Malloc.
-int runChild(const char* name)
+// Runs one row in this process and ends the renderer, so that nothing but a
+// leak is left of what the row made.
+int runRow(const char* name)
 {
-    if (!guardMallocLoaded()) {
-        std::fprintf(stderr, "Guard Malloc is not loaded in the child\n");
-        return guardMallocMissingExitCode;
-    }
-    installFaultReport();
     for (const Row& row : rows()) {
         if (std::strcmp(name, row.name) != 0)
             continue;
@@ -503,6 +738,17 @@ int runChild(const char* name)
         return 0;
     }
     uml::testing::fail("no row has the name given");
+}
+
+// The body of a child: runs one row, with Guard Malloc.
+int runChild(const char* name)
+{
+    if (!guardMallocLoaded()) {
+        std::fprintf(stderr, "Guard Malloc is not loaded in the child\n");
+        return guardMallocMissingExitCode;
+    }
+    installFaultReport();
+    return runRow(name);
 }
 
 [[nodiscard]] std::string executablePath()
@@ -559,14 +805,103 @@ int runChild(const char* name)
     }
 }
 
+// What the leak checker said about a row, run again under it.
+struct LeakReport {
+    int status = 0;          // the checker's wait status
+    std::string text;        // its output, and the row's
+};
+
+// Runs a row under `leaks --atExit`, which starts this binary as the row's
+// process and examines it as it exits.
+[[nodiscard]] LeakReport runUnderLeakChecker(const char* name)
+{
+    int pipes[2] {};
+    require(pipe(pipes) == 0, "the pipe for the leak checker could not be made");
+    posix_spawn_file_actions_t actions;
+    require(posix_spawn_file_actions_init(&actions) == 0, "spawn file actions");
+    posix_spawn_file_actions_adddup2(&actions, pipes[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, pipes[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&actions, pipes[0]);
+    posix_spawn_file_actions_addclose(&actions, pipes[1]);
+
+    const std::string path = executablePath();
+    std::array<char*, 7> arguments {
+        const_cast<char*>(leaksTool),
+        const_cast<char*>("--atExit"),
+        const_cast<char*>("--"),
+        const_cast<char*>(path.c_str()),
+        const_cast<char*>(leaksArgument),
+        const_cast<char*>(name),
+        nullptr,
+    };
+    pid_t child = 0;
+    const int spawned = posix_spawn(&child, leaksTool, &actions, nullptr, arguments.data(), environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(pipes[1]);
+    require(spawned == 0, "the leak checker could not be started");
+
+    LeakReport report;
+    const auto deadline = std::chrono::steady_clock::now() + childTimeBudget;
+    bool finished = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        pollfd descriptor {pipes[0], POLLIN, 0};
+        const int ready = poll(&descriptor, 1, 1000);
+        if (ready > 0) {
+            char chunk[4096];
+            const ssize_t count = read(pipes[0], chunk, sizeof(chunk));
+            if (count <= 0) {
+                finished = true;
+                break;
+            }
+            report.text.append(chunk, static_cast<std::size_t>(count));
+        }
+    }
+    close(pipes[0]);
+    if (!finished)
+        ::kill(child, SIGKILL);
+    (void)waitpid(child, &report.status, 0);
+    require(finished, "the leak checker did not finish in time");
+    return report;
+}
+
+// What a leak that a renderer function allocated says, or nothing: the
+// allocation site is a vkr_ function or object_array_init. The test ends when
+// the checker did not examine the process at all.
+[[nodiscard]] std::string rendererLeak(const char* name)
+{
+    const LeakReport report = runUnderLeakChecker(name);
+    require(report.text.find("nodes malloced") != std::string::npos,
+        "the leak checker did not examine the row's process");
+    std::string leaked;
+    std::size_t begin = 0;
+    while (begin < report.text.size()) {
+        std::size_t end = report.text.find('\n', begin);
+        if (end == std::string::npos)
+            end = report.text.size();
+        const std::string line = report.text.substr(begin, end - begin);
+        begin = end + 1;
+        const bool leak = line.find("ROOT LEAK") != std::string::npos
+            || line.find("ROOT CYCLE") != std::string::npos;
+        if (leak && (line.find("vkr_") != std::string::npos
+                || line.find("object_array") != std::string::npos))
+            leaked += line + "\n";
+    }
+    return leaked;
+}
+
 } // namespace
 
 // With no argument every row runs, each in a child of its own under Guard
-// Malloc; with `--child NAME`, that row alone, in this process.
+// Malloc, and the rows that name a leak again under the leak checker; with
+// `--only NAME`, that row alone the same way; with `--child NAME`, that row
+// alone, in this process.
 int main(int argc, char** argv)
 {
+    const char* only = argc > 2 && std::strcmp(argv[1], "--only") == 0 ? argv[2] : nullptr;
     if (argc > 2 && std::strcmp(argv[1], childArgument) == 0)
         return runChild(argv[2]);
+    if (argc > 2 && std::strcmp(argv[1], leaksArgument) == 0)
+        return runRow(argv[2]);
 
 #ifdef UML_TEST_ADDRESS_SANITIZER
     std::fprintf(stderr,
@@ -580,6 +915,8 @@ int main(int argc, char** argv)
 
     std::uint32_t failures = 0;
     for (const Row& row : rows()) {
+        if (only != nullptr && std::strcmp(only, row.name) != 0)
+            continue;
         const int status = runChildUnderGuardMalloc(row.name);
         if (WIFSIGNALED(status)) {
             std::fprintf(stderr, "row %s: FAILED, the child ended with signal %d\n",
@@ -597,6 +934,15 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "row %s: FAILED, status %d\n", row.name, code);
             ++failures;
             continue;
+        }
+        if (row.leakChecked) {
+            const std::string leaked = rendererLeak(row.name);
+            if (!leaked.empty()) {
+                std::fprintf(stderr, "%srow %s: FAILED, the renderer leaked an object the row made\n",
+                    leaked.c_str(), row.name);
+                ++failures;
+                continue;
+            }
         }
         std::fprintf(stderr, "row %s: ok\n", row.name);
     }

@@ -27,6 +27,19 @@
 // in. A request with none of them, or with only a create info, used to fall
 // into the import and read the one it does not have.
 //
+// A pipeline's key is derived from the pipeline create info that begins the
+// chain of a VkPipelineCreateInfoKHR, which the runtime reads by that
+// structure's type. A chain that is empty, or that begins with another
+// structure, names no pipeline: reading it as a graphics pipeline's create
+// info took its stages from fields of another layout, so it is refused instead.
+// The key of the device, a create info of NULL, is served.
+//
+// A partly failed import returns the first failure and keeps the binaries it
+// made before it, which the caller owns (the Venus renderer relies on this, and
+// destroys them when it does not hand them on). VkPipelineBinaryCreateInfoKHR's
+// pPipelineCreateInfo is looked up only where pipelineBinaryInternalCache is
+// true, which this driver is not, so the chain it reads there is not reached.
+//
 // Each row runs in a process of its own and the parent reports it, so a row
 // that crashes the driver is one failed row rather than the end of the test:
 // on a driver without the checks, 33 and 4096 report success over a corrupted
@@ -232,6 +245,118 @@ std::vector<uint8_t> sampleData()
     return {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
 }
 
+// A key that nothing has written: any byte of it that is still 0xaa was not.
+VkPipelineBinaryKeyKHR unwrittenKey()
+{
+    auto key = structure<VkPipelineBinaryKeyKHR>(VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR);
+    key.keySize = 0xaaaaaaaau;
+    std::memset(key.key, 0xaa, sizeof(key.key));
+    return key;
+}
+
+// The key of the device, which names no pipeline, is served.
+void keyOfTheDevice()
+{
+    Context context;
+    VkPipelineBinaryKeyKHR key = unwrittenKey();
+    check(context.CALL(GetPipelineKeyKHR, context.device, nullptr, &key), "the key of the device");
+    require(key.keySize == keyBytes, "the key of the device is not a key's size");
+    VkPipelineBinaryKeyKHR again = unwrittenKey();
+    check(context.CALL(GetPipelineKeyKHR, context.device, nullptr, &again), "the key of the device, again");
+    require(std::memcmp(key.key, again.key, keyBytes) == 0, "the key of the device changed");
+}
+
+// A compute pipeline's create info chained first names it, and its key differs
+// from the device's and is stable.
+void keyOfAComputePipeline()
+{
+    Context context;
+    auto layoutInfo = structure<VkPipelineLayoutCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    check(context.CALL(CreatePipelineLayout, context.device, &layoutInfo, nullptr, &layout), "vkCreatePipelineLayout");
+    auto moduleInfo = structure<VkShaderModuleCreateInfo>(VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO);
+    moduleInfo.codeSize = sizeof(emptyCompute);
+    moduleInfo.pCode = emptyCompute;
+    VkShaderModule module = VK_NULL_HANDLE;
+    check(context.CALL(CreateShaderModule, context.device, &moduleInfo, nullptr, &module), "vkCreateShaderModule");
+
+    auto compute = structure<VkComputePipelineCreateInfo>(VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO);
+    compute.stage = structure<VkPipelineShaderStageCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO);
+    compute.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    compute.stage.module = module;
+    compute.stage.pName = "main";
+    compute.layout = layout;
+    auto pipelineInfo = structure<VkPipelineCreateInfoKHR>(VK_STRUCTURE_TYPE_PIPELINE_CREATE_INFO_KHR);
+    pipelineInfo.pNext = &compute;
+
+    VkPipelineBinaryKeyKHR key = unwrittenKey();
+    check(context.CALL(GetPipelineKeyKHR, context.device, &pipelineInfo, &key), "the key of a compute pipeline");
+    require(key.keySize == keyBytes, "the key of a compute pipeline is not a key's size");
+    VkPipelineBinaryKeyKHR again = unwrittenKey();
+    check(context.CALL(GetPipelineKeyKHR, context.device, &pipelineInfo, &again), "the key of a compute pipeline, again");
+    require(std::memcmp(key.key, again.key, keyBytes) == 0, "the key of a compute pipeline changed");
+    VkPipelineBinaryKeyKHR device = unwrittenKey();
+    check(context.CALL(GetPipelineKeyKHR, context.device, nullptr, &device), "the key of the device");
+    require(std::memcmp(key.key, device.key, keyBytes) != 0, "a compute pipeline has the key of the device");
+
+    context.CALL(DestroyShaderModule, context.device, module, nullptr);
+    context.CALL(DestroyPipelineLayout, context.device, layout, nullptr);
+}
+
+// A create info whose chain does not begin with a pipeline's is refused and
+// leaves the key as it was.
+void keyRefused(bool emptyChain)
+{
+    Context context;
+    auto robustness = structure<VkPipelineRobustnessCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO);
+    auto pipelineInfo = structure<VkPipelineCreateInfoKHR>(VK_STRUCTURE_TYPE_PIPELINE_CREATE_INFO_KHR);
+    if (!emptyChain)
+        pipelineInfo.pNext = &robustness;
+    VkPipelineBinaryKeyKHR key = unwrittenKey();
+    const VkResult result = context.CALL(GetPipelineKeyKHR, context.device, &pipelineInfo, &key);
+    require(result == VK_ERROR_VALIDATION_FAILED,
+            std::string(emptyChain ? "a create info with no chain" : "a create info that begins with another structure") +
+                " was not refused: " + std::to_string(result));
+    require(key.keySize == 0xaaaaaaaau, "a refused key request wrote the key");
+}
+
+// A key of the wrong size in the second entry fails the call after the first
+// binary was made: the first handle is valid and the second null, and the
+// call returns the failure.
+void partialImportKeepsItsSuccesses()
+{
+    Context context;
+    const std::vector<uint8_t> data = sampleData();
+    std::array<VkPipelineBinaryKeyKHR, 2> keys{};
+    std::array<VkPipelineBinaryDataKHR, 2> blobs{};
+    for (size_t i = 0; i < keys.size(); ++i) {
+        keys[i] = structure<VkPipelineBinaryKeyKHR>(VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR);
+        keys[i].keySize = keyBytes;
+        for (uint32_t b = 0; b < keyBytes; ++b)
+            keys[i].key[b] = static_cast<uint8_t>(0x40 + b + i);
+        blobs[i].dataSize = data.size();
+        blobs[i].pData = const_cast<uint8_t *>(data.data());
+    }
+    keys[1].keySize = keyBytes - 1;
+    VkPipelineBinaryKeysAndDataKHR keysAndData{};
+    keysAndData.binaryCount = 2;
+    keysAndData.pPipelineBinaryKeys = keys.data();
+    keysAndData.pPipelineBinaryData = blobs.data();
+    auto createInfo = structure<VkPipelineBinaryCreateInfoKHR>(VK_STRUCTURE_TYPE_PIPELINE_BINARY_CREATE_INFO_KHR);
+    createInfo.pKeysAndDataInfo = &keysAndData;
+    std::array<VkPipelineBinaryKHR, 2> binaries{VK_NULL_HANDLE, VK_NULL_HANDLE};
+    auto handles = structure<VkPipelineBinaryHandlesInfoKHR>(VK_STRUCTURE_TYPE_PIPELINE_BINARY_HANDLES_INFO_KHR);
+    handles.pipelineBinaryCount = 2;
+    handles.pPipelineBinaries = binaries.data();
+    const VkResult result = context.CALL(CreatePipelineBinariesKHR, context.device, &createInfo, nullptr, &handles);
+    require(result == VK_ERROR_VALIDATION_FAILED,
+            "a key of the wrong size in the second entry was not the call's result: " + std::to_string(result));
+    require(binaries[0] != VK_NULL_HANDLE, "the binary made before the failure was not kept");
+    require(binaries[1] == VK_NULL_HANDLE, "the entry that failed has a handle");
+    require(context.readBack(binaries[0]).data == data, "the binary made before the failure reads back differently");
+    context.CALL(DestroyPipelineBinaryKHR, context.device, binaries[0], nullptr);
+}
+
 // A key whose size is not a key's is refused before anything is copied or
 // allocated from it, and leaves no binary behind.
 void refused(uint32_t keySize)
@@ -407,7 +532,7 @@ struct Row {
     void (*run)();
 };
 
-const std::array<Row, 11> rows = {{
+const std::array<Row, 16> rows = {{
     {"refused-0", [] { refused(0); }},
     {"refused-31", [] { refused(keyBytes - 1); }},
     {"refused-33", [] { refused(keyBytes + 1); }},
@@ -417,6 +542,11 @@ const std::array<Row, 11> rows = {{
     {"refused-data-size-near-max", [] { dataSizeOverflow(SIZE_MAX - 8); }},
     {"refused-no-source", [] { noSource(false); }},
     {"refused-create-info-only", [] { noSource(true); }},
+    {"key-of-the-device", [] { keyOfTheDevice(); }},
+    {"key-of-a-compute-pipeline", [] { keyOfAComputePipeline(); }},
+    {"refused-key-of-an-empty-chain", [] { keyRefused(true); }},
+    {"refused-key-of-a-robustness-chain", [] { keyRefused(false); }},
+    {"partial-import-keeps-its-successes", [] { partialImportKeepsItsSuccesses(); }},
     {"accepted-32", [] { accepted(); }},
     {"imported-binaries-make-a-pipeline", [] { importedBinariesMakeAPipeline(); }},
 }};
@@ -477,6 +607,6 @@ int main(int argc, char **argv)
     for (const Row &row : rows)
         failures += runRow(self, row) ? 0 : 1;
     require(failures == 0, std::to_string(failures) + " pipeline binary request rows failed");
-    std::puts("PIPELINE_BINARY_REQUESTS_PASS key-sizes=0,31,33,4096,0xffffffff data-size-overflow=refused no-source=refused accepted=32 pipeline-from-import=pass");
+    std::puts("PIPELINE_BINARY_REQUESTS_PASS key-sizes=0,31,33,4096,0xffffffff data-size-overflow=refused no-source=refused pipeline-key=refused-or-served partial-import=kept accepted=32 pipeline-from-import=pass");
     return 0;
 }
