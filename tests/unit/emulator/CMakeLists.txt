@@ -198,6 +198,10 @@ uml_add_unit_test(NAME emulator-address-space-two-handles
     COMMAND uml_emulator_address_space_tests --two-handles)
 uml_add_unit_test(NAME emulator-address-space-kept-text
     COMMAND uml_emulator_address_space_tests --kept-text)
+uml_add_unit_test(NAME emulator-address-space-kept-text-by-the-host
+    COMMAND uml_emulator_address_space_tests --kept-text-by-the-host)
+uml_add_unit_test(NAME emulator-address-space-no-growth-leak
+    COMMAND uml_emulator_address_space_tests --no-growth-leak)
 uml_add_unit_test(NAME emulator-address-space-kept-text-replaced
     COMMAND uml_emulator_address_space_tests --kept-text-window-replaced)
 

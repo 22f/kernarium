@@ -158,9 +158,27 @@ struct NativeKernelPlacement final {
  *
  * A window longer than the one held, which only a process whose guest is not
  * spent asks for, extends the reservation at its exact address or, where the
- * host places the window, takes a new one and releases the old, which holds
- * no guest; an old window that holds kept signed kernel text stays mapped. Only one run uses the window at a time (the caller holds the
- * process address-space gate). Invalid when the host will not reserve it. */
+ * host places the window, takes a new one beside the held one. Only one run
+ * uses the window at a time (the caller holds the process address-space gate).
+ * Invalid when the host will not reserve it.
+ *
+ * THE RULE: a start that is refused leaves the process's window exactly as it
+ * was before the start. What a start reserves for itself, the growth of the
+ * held window or a new window, is an attempt, and the caller settles it once
+ * the start is past what can refuse it, either way and once: commit keeps it;
+ * undo gives back exactly the attempt and nothing else. The growth is shrunk
+ * off the end, and the new window is released with the window held before the
+ * start the process's again. The window held before is never given up until the
+ * start commits: committing releases it, unless it holds signed kernel text a
+ * load kept (no mapping can replace that on iOS), which stays mapped, inert.
+ * What an earlier start left, the window and the text kept in it, is never
+ * touched by an undo; the attempt has none, because a start loads no kernel
+ * before it can be refused. A start that does, an informational run (it asks
+ * for no heap region), commits. The pieces an undo gives back are empty
+ * reservations, which every product's host maps and unmaps, so every
+ * configuration can shrink and restore; a failed unmap leaves a reservation
+ * the process does not track. A reservation asked for while an attempt is
+ * unsettled keeps it. */
 [[nodiscard]] NativeKernelLayout reserve_process_native_window(
 	const NativeKernelLayout &geometry, WindowPlacement placement) noexcept;
 
@@ -173,28 +191,19 @@ struct NativeKernelPlacement final {
  * the kernel's first block with nothing, which ends the process. A run asks
  * for it after the window, the order a kernel's own start has always had, so
  * that no host's placement of a window is displaced by it; a refusal is then
- * answered with release_unused_process_window. True when the region is
+ * answered with undo_process_window. True when the region is
  * reserved, now or before; false, with a line on stderr, where the host has no
  * room for it. A refusal reserves nothing, and a later call tries again. The
  * caller holds the process address-space gate. */
 [[nodiscard]] bool reserve_process_heap() noexcept;
 
-/* Gives the process's window back to the host, whole, after a run that could
- * not start: the reservation it took (or found, unused, from an earlier run
- * that never started) holds no guest, and keeping it would keep address space
- * that a smaller guest tried next needs for the heap region, which a refused
- * run did not get. Nothing is released while a guest may use the window: the
- * caller states that none does, as a handle whose guest is not waiting to be
- * handed back, in a process whose guest is not spent.
- *
- * The rule is whole or not at all: a window that holds anything the host
- * keeps (keep_signed_kernel_text, the signed text a load aliased, which no
- * mapping can replace and the loader records as in place) is not released, and
- * false is returned; the window stays the process's, as it is when no heap
- * region is asked for. A window reserved for a larger guest, over one that
- * holds such text, leaves the old one mapped for the same reason. The caller
- * holds the process address-space gate. */
-bool release_unused_process_window() noexcept;
+/* Keeps what the start reserved in the process's window (THE RULE, above). */
+void commit_process_window() noexcept;
+
+/* Gives back what the start reserved in the process's window and nothing else
+ * (THE RULE, above): called for a start refused before its kernel, when the
+ * heap region is refused. The caller holds the process address-space gate. */
+void undo_process_window() noexcept;
 
 /* Whether the host maps the guest's RAM in this layout's window. The kernel
  * maps its RAM over the reservation with one read-write mapping and, where the

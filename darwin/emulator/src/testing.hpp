@@ -78,6 +78,11 @@ void set_guest_hand_back_hook(GuestHandBackHook hook, void *context) noexcept;
  * the host reserves, as on an iOS device, stays where the host put it. */
 void place_native_kernel_window(std::uintptr_t start) noexcept;
 
+/* Makes the native kernel window of every later run one the host places, as
+ * on an iOS device (WindowPlacement::anywhere), at the geometry of the
+ * product; false restores the placement above. */
+void place_native_kernel_window_by_the_host(bool by_the_host) noexcept;
+
 /* Makes the pre-start RAM trial of every later run at `start`, at the size of
  * the run's window, instead of in the window; 0 restores the window. An address
  * no process has stands for a host that maps no RAM where the kernel would. */

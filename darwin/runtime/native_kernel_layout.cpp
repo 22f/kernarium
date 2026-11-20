@@ -15,14 +15,68 @@
 namespace uml::runtime {
 namespace {
 
+/* What the start under way reserved for itself in the process's window, which
+ * an undo gives back (undo_process_window). */
+enum class WindowAttempt : std::uint8_t {
+	none,
+	/* The held window was grown at its end: `before_end` is where it ended. */
+	grown,
+	/* A new window was taken beside the held one: [before_begin, before_end)
+	 * is the window held before, or empty where there was none. It stays
+	 * mapped until the start commits. */
+	replaced,
+};
+
 struct ProcessWindow final {
 	std::mutex mutex;
 	std::uintptr_t begin{};
 	std::uintptr_t end{};
+	WindowAttempt attempt{WindowAttempt::none};
+	std::uintptr_t before_begin{};
+	std::uintptr_t before_end{};
 };
 
 /* Never destroyed: a guest thread can still run when the process ends. */
 [[clang::no_destroy]] constinit ProcessWindow process_window;
+
+/* The attempt is kept: nothing is given back. A window held before, which the
+ * attempt replaced, is released, unless it holds signed kernel text a load
+ * kept: no mapping can replace that text on iOS, so the window stays mapped,
+ * inert and no longer the process's. The caller holds the mutex. */
+void commit_locked() noexcept
+{
+	auto &window = process_window;
+	if (window.attempt == WindowAttempt::replaced &&
+	    window.before_end != window.before_begin &&
+	    !::uml::memory::host_range_kept_within(
+		    reinterpret_cast<const void *>(window.before_begin),
+		    window.before_end - window.before_begin))
+		munmap(reinterpret_cast<void *>(window.before_begin),
+			window.before_end - window.before_begin);
+	window.attempt = WindowAttempt::none;
+	window.before_begin = 0;
+	window.before_end = 0;
+}
+
+/* Gives back what the attempt reserved and nothing else, and the window is as
+ * it was before it. The caller holds the mutex. */
+void undo_locked() noexcept
+{
+	auto &window = process_window;
+	if (window.attempt == WindowAttempt::grown) {
+		munmap(reinterpret_cast<void *>(window.before_end),
+			window.end - window.before_end);
+		window.end = window.before_end;
+	} else if (window.attempt == WindowAttempt::replaced) {
+		munmap(reinterpret_cast<void *>(window.begin),
+			window.end - window.begin);
+		window.begin = window.before_begin;
+		window.end = window.before_end;
+	}
+	window.attempt = WindowAttempt::none;
+	window.before_begin = 0;
+	window.before_end = 0;
+}
 
 [[nodiscard]] NativeKernelLayout reserved_layout(std::uintptr_t base,
 	std::size_t length) noexcept
@@ -198,6 +252,8 @@ NativeKernelLayout reserve_process_native_window(
 	const std::size_t length = static_cast<std::size_t>(
 		geometry.window_end - geometry.window_start);
 	std::lock_guard lock{process_window.mutex};
+	/* A start that asks again without having settled its attempt has kept it. */
+	commit_locked();
 	const bool held = process_window.end != 0;
 	/* A window the host places is the window wherever it is; one at an exact
 	 * address must be at that address. */
@@ -208,52 +264,40 @@ NativeKernelLayout reserve_process_native_window(
 	    process_window.end - process_window.begin >= length)
 		return reserved_layout(process_window.begin, length);
 	if (fits_place && placement == WindowPlacement::exact) {
+		const std::uintptr_t old_end = process_window.end;
 		const std::uintptr_t new_end = process_window.begin +
 			host_reservation_length(length);
-		if (!extend_reservation(process_window.end, new_end))
+		if (!extend_reservation(old_end, new_end))
 			return {};
 		process_window.end = new_end;
+		process_window.attempt = WindowAttempt::grown;
+		process_window.before_end = old_end;
 		return reserved_layout(process_window.begin, length);
 	}
 	const auto window = reserve_native_kernel_window(geometry, placement);
 	if (!window.valid)
 		return {};
-	/* The new reservation is held first, so a failure above leaves the old
-	 * one. The old holds no guest: it was a window for a guest the process no
-	 * longer has, handed back or never booted. Signed kernel text a load kept
-	 * in it stays mapped, as release_unused_process_window leaves it: the
-	 * window is not tracked any more, and what is kept in it is inert. */
-	if (held &&
-	    !::uml::memory::host_range_kept_within(
-		    reinterpret_cast<const void *>(process_window.begin),
-		    process_window.end - process_window.begin))
-		munmap(reinterpret_cast<void *>(process_window.begin),
-			process_window.end - process_window.begin);
+	/* The new window is held beside the old, which stays mapped and recorded
+	 * until the start commits: a start that is refused has the old window
+	 * back, whole (undo_process_window). */
+	process_window.attempt = WindowAttempt::replaced;
+	process_window.before_begin = process_window.begin;
+	process_window.before_end = process_window.end;
 	process_window.begin = window.window_start;
 	process_window.end = window.window_start + host_reservation_length(length);
 	return window;
 }
 
-bool release_unused_process_window() noexcept
+void commit_process_window() noexcept
 {
 	std::lock_guard lock{process_window.mutex};
-	if (process_window.end == 0)
-		return true;
-	/* A window goes back whole or not at all. The signed kernel text a load
-	 * aliased and kept in it (an informational run loads a kernel before the
-	 * heap region is reserved, and the loader can fail after the first of its
-	 * text) is recorded as in place and no mapping can replace it on iOS, so a
-	 * window that holds any stays the process's, as it is when no heap region
-	 * is asked for. */
-	if (::uml::memory::host_range_kept_within(
-		    reinterpret_cast<const void *>(process_window.begin),
-		    process_window.end - process_window.begin))
-		return false;
-	munmap(reinterpret_cast<void *>(process_window.begin),
-		process_window.end - process_window.begin);
-	process_window.begin = 0;
-	process_window.end = 0;
-	return true;
+	commit_locked();
+}
+
+void undo_process_window() noexcept
+{
+	std::lock_guard lock{process_window.mutex};
+	undo_locked();
 }
 
 ProcessNativeWindow process_native_window() noexcept

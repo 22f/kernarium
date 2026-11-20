@@ -351,6 +351,8 @@ std::atomic<std::uintptr_t> test_native_kernel_window_start{
 /* Where the pre-start RAM trial of a run is made, instead of in the run's
  * window; 0 for the window. */
 std::atomic<std::uintptr_t> test_guest_ram_trial_start{0};
+/* Whether every run's window is one the host places, as on an iOS device. */
+std::atomic_bool test_native_kernel_window_by_the_host{false};
 #endif
 
 /* Where a run's native kernel window goes: the product's placement, or in the
@@ -364,6 +366,14 @@ std::atomic<std::uintptr_t> test_guest_ram_trial_start{0};
 	const auto start = test_native_kernel_window_start.load(
 		std::memory_order_acquire);
 	auto product = ::uml::runtime::native_kernel_placement(guest_memory);
+	if (test_native_kernel_window_by_the_host.load(
+		    std::memory_order_acquire) &&
+	    product.geometry.valid) {
+		const auto layout = ::uml::runtime::reserve_process_native_window(
+			product.geometry, ::uml::runtime::WindowPlacement::anywhere);
+		return layout.valid ? layout :
+			::uml::runtime::NativeKernelLayout{.reservation_failed = true};
+	}
 	if (start != 0 && product.geometry.valid &&
 	    product.placement == ::uml::runtime::WindowPlacement::exact) {
 		auto &geometry = product.geometry;
@@ -477,6 +487,12 @@ void set_linked_kernel(const void *start, std::size_t size) noexcept
 void place_native_kernel_window(std::uintptr_t start) noexcept
 {
 	test_native_kernel_window_start.store(start, std::memory_order_release);
+}
+
+void place_native_kernel_window_by_the_host(bool by_the_host) noexcept
+{
+	test_native_kernel_window_by_the_host.store(
+		by_the_host, std::memory_order_release);
 }
 
 void place_guest_ram_trial(std::uintptr_t start) noexcept
@@ -682,18 +698,19 @@ public:
 				refused_for_memory() :
 				-UML_EMULATOR_INVALID_ARGUMENT;
 		/* The kernel's first block of RAM comes from the process's heap
-		 * region, which the window may have left no room for. A refusal
-		 * gives the window back, which holds nothing of a guest that has not
-		 * started, so that a smaller guest tried next has the address space
-		 * the window took. It goes whole or not at all: signed kernel text an
-		 * informational run's load kept in it keeps the window
-		 * (release_unused_process_window). */
+		 * region, which the window may have left no room for. A start
+		 * refused for it leaves the process's window as it was before the
+		 * start (THE RULE, runtime/native_kernel_layout.hpp), so that the
+		 * guest tried next has the address space it had; every other start
+		 * keeps what it reserved. An informational run asks for no heap
+		 * region and loads a kernel, whose kept text the window then holds:
+		 * it keeps its window. */
 		if (!prepared.informational &&
 		    !::uml::runtime::reserve_process_heap()) {
-			if (!restartable_ && !::uml::runtime::process_guest_spent())
-				(void)::uml::runtime::release_unused_process_window();
+			::uml::runtime::undo_process_window();
 			return refused_for_memory();
 		}
+		::uml::runtime::commit_process_window();
 		if (!prepared.informational &&
 		    !::uml::runtime::native_guest_memory_mappable(
 			    guest_ram_trial_layout(native_layout),
