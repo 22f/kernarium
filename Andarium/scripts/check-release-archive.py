@@ -17,10 +17,10 @@ archive, and no other build is checked. The application must:
     link to it;
   - keep nothing of the machine that built it in the host code of its
     executable and of each embedded framework: no path under a home
-    directory, on a mounted volume or in a temporary build directory (the
-    guest's own sections, which carry a kernel built elsewhere, are not host
-    code), and no linker debug map in an embedded framework (the executable's
-    is stripped when Xcode archives);
+    directory, on a mounted volume or in a temporary build directory, whatever
+    the account or volume is called (the guest's own sections, which carry a
+    kernel built elsewhere, are not host code), and no linker debug map in an
+    embedded framework (the executable's is stripped when Xcode archives);
   - carry no test bundle and none of the frameworks and libraries that run
     one (XCTest, XCUIAutomation, Swift Testing); and
   - link no test-support library (AndariumCoreTestSupport and its like): the
@@ -54,11 +54,18 @@ FOLLOW_X_EXAMPLE = "example_handle"
 # dependency prefixes, and the build's temporary directories. A bare
 # "/Volumes/" or a format such as "/Volumes/%s" is no path of a build and does
 # not match.
+# The name of an account or a volume is any run of the characters a path
+# component can hold (spaces, parentheses and non-ASCII bytes included), up to
+# the limit of a component. It does not start with a blank or with a character
+# of a pattern or a placeholder ([ < { $ * \\ ^ ? ( + | @), and is not a printf
+# conversion: a regular expression such as /Users/[^/\s"']+ or a template
+# such as /Users/<name>/Library names no account.
+NAME = rb"(?!%[0-9.*lhzjtqL-]*[A-Za-z@])[^\x00-\x1f\x7f/ \[<{$*\\^?(+|@][^\x00-\x1f\x7f/]{0,254}"
 HOST_PATHS = (
     ("a path under a home directory",
-     re.compile(rb"/Users/[A-Za-z0-9._-]+/[\x21-\x7e]*")),
+     re.compile(rb"/Users/" + NAME + rb"/[\x21-\x7e\x80-\xff]*")),
     ("a path on a mounted volume",
-     re.compile(rb"/Volumes/[A-Za-z0-9._ -]+/[\x21-\x7e]*")),
+     re.compile(rb"/Volumes/" + NAME + rb"/[\x21-\x7e\x80-\xff]*")),
     ("a path in a temporary build directory",
      re.compile(rb"/(?:private/)?var/folders/[\x21-\x7e]+")),
 )
@@ -275,6 +282,9 @@ def test_support(app: Path) -> list[str]:
 
 
 def main() -> int:
+    # A path of the build host may be in any script.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="backslashreplace")
     parser = argparse.ArgumentParser()
     parser.add_argument("app", type=Path, help="the built application bundle")
     options = parser.parse_args()

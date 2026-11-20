@@ -110,7 +110,9 @@ TEMPORARY_PATH = (
 # dependency builds compile in.
 HARMLESS_PATHS = (
     "const char *const fixture[] = {\n"
-    '  "/Volumes/", "/Volumes/%s", "/var/folders/", "/tmp/mesa_%s",\n'
+    '  "/Volumes/", "/Volumes/%s", "/Volumes/%s/lib", "/Users/%s/Library", "/var/folders/", "/tmp/mesa_%s",\n'
+    # Patterns and templates, as a tool's own help or matching code carries them.
+    '  "/Users/[^/\\\\s\\"\']+", "/Users/<name>/Library", "/Users/$USER/Library", "/Volumes/{volume}/data",\n'
     '  "/nonexistent/share/locale",\n'
     "};\n"
 )
@@ -216,6 +218,20 @@ class HostTraces(Libraries):
         self.refuses(self.bundle(clean, framework=volumed),
                      "Runtime.framework/Runtime: names a path on a mounted volume")
         self.refuses(self.bundle(clean, framework=spaced), "/Volumes/NAME 2/prefix/lib")
+
+    def test_a_volume_or_home_directory_of_any_name_is_refused(self) -> None:
+        # Any character a path component can hold: spaces, parentheses, non-ASCII.
+        clean = self.build("clean", CLEAN)
+        for index, (kind, name) in enumerate((
+            ("volume", "Build (CI)"), ("volume", "ビルド"), ("volume", "Build Data"),
+            ("volume", "Build [2] & Co."), ("home", "Jane Doe"), ("home", "名前"), ("home", "o'brien (work)"),
+        )):
+            root = "Volumes" if kind == "volume" else "Users"
+            named = self.build(f"named{index}", f'const char *fixture(void) {{ return "/{root}/{name}/prefix/lib"; }}\n')
+            label = "a mounted volume" if kind == "volume" else "a home directory"
+            with self.subTest(kind=kind, name=name):
+                self.refuses(self.bundle(named), f"names a path on {label}" if kind == "volume" else f"names a path under {label}")
+                self.refuses(self.bundle(clean, framework=named), "Runtime.framework/Runtime: names a path")
 
     def test_a_temporary_directory_path_is_refused(self) -> None:
         temporary, clean = self.build("temporary", TEMPORARY_PATH), self.build("clean", CLEAN)
