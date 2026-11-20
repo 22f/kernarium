@@ -11230,6 +11230,28 @@
         }
       }
     },
+    "The virtual machine could not start" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンを起動できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机无法启动"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器無法啟動"
+          }
+        }
+      }
+    },
     "The virtual machine couldn’t change Android’s screen reader." : {
       "localizations" : {
         "ja" : {
@@ -12464,6 +12486,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此Andarium拷貝不含可用的系統：%@"
+          }
+        }
+      }
+    },
+    "This device could not give it %@ of memory. Close Andarium in the App Switcher and open it again, then lower the memory with Edit under Virtual machine." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスは仮想マシンに%@のメモリを割り当てられませんでした。AppスイッチャーでAndariumを終了してからもう一度開き、“仮想マシン”の“編集”でメモリを下げてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备无法为虚拟机提供%@内存。请在App切换器中关闭Andarium后重新打开，然后使用“虚拟机”下的“编辑”降低内存。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此裝置無法為虛擬機器提供%@記憶體。請在App切換器中關閉Andarium後重新打開，然後使用「虛擬機器」下的「編輯」降低記憶體。"
           }
         }
       }

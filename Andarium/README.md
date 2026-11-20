@@ -731,7 +731,11 @@ ready, on a thread of its own. Android's clean power-off releases the kernel's
 resources and guest RAM and returns to Home, which states the storage the data
 disk then holds and where Start boots again in the same process; an unclean
 shutdown, a host stop or a cleanup that fails keeps the failure screen and
-requires reopening Andarium.
+requires reopening Andarium. A run the host cannot give the guest's memory
+ends before the kernel starts with the runtime's out-of-memory result
+(`KERNARIUM_RUNTIME_RESULT_OUT_OF_MEMORY`), and the failure screen names the
+memory and says to lower it; the settings offer only sizes the process's
+address space holds, so this is a fallback.
 
 - **No Google apps, on purpose.** The boot screen of a new installation's
   first Android boot (a first start, and the retry of one that ended before

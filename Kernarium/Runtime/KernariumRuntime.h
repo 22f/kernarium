@@ -247,6 +247,12 @@ typedef int (*kernarium_runtime_run_function)(
     const kernarium_runtime_boot* boot);
 
 enum {
+    /* The host could not give the guest what its size needs, the address space
+     * for its kernel window or the memory limit for its RAM, and nothing was
+     * started: the run ended before its kernel began. The size can be lowered
+     * and the run tried again; no other run result means that. It is
+     * -UML_EMULATOR_OUT_OF_MEMORY. */
+    KERNARIUM_RUNTIME_RESULT_OUT_OF_MEMORY = -2,
     /* The guest restarted itself five times in a row within 15 seconds of its
      * boot, or, for Android, eight times in a row each within 15 seconds or
      * before its boot had finished (init processed sys.boot_completed=1,

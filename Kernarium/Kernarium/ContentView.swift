@@ -411,13 +411,25 @@ struct GuestRunEnd: Equatable {
         result == Int32(KERNARIUM_RUNTIME_RESULT_RESTART_LOOP)
     }
 
+    /// The host would not map the guest's memory: nothing started, and a
+    /// smaller size does.
+    var hostRefusedMemory: Bool {
+        result == Int32(KERNARIUM_RUNTIME_RESULT_OUT_OF_MEMORY)
+    }
+
     var title: String {
+        if hostRefusedMemory { return "The virtual machine can\u{2019}t start" }
         if restartedInALoop { return "Guest kept restarting" }
         return shutDown ? "Guest shut down" : "Guest stopped with an error"
     }
 
     var message: String {
         let relaunch = "Relaunch Kernarium to start it again."
+        if hostRefusedMemory {
+            return "This device could not give the virtual machine the memory " +
+                "it asked for. Choose a smaller size in Emulator settings. " +
+                relaunch
+        }
         if restartedInALoop {
             return "The guest restarted itself again and again within " +
                 "seconds of booting, so Kernarium stopped booting it. " +
@@ -429,6 +441,7 @@ struct GuestRunEnd: Equatable {
     }
 
     var systemName: String {
+        if hostRefusedMemory { return "memorychip" }
         if restartedInALoop { return "arrow.trianglehead.2.clockwise.rotate.90" }
         return shutDown ? "power" : "exclamationmark.triangle"
     }

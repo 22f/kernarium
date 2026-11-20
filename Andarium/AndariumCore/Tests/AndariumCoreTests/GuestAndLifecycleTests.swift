@@ -315,6 +315,34 @@ struct LifecycleTests {
         #expect(report.hasSuffix("Virtual machine ended: it was stopped from the boot screen after 3:17"))
     }
 
+    @Test func theFailureReportNamesTheMemoryTheDeviceWouldNotGive() {
+        let system = SystemInfo(
+            version: "17", release: "20261031-los24-r4",
+            kernel: "Linux 6.18.54", architecture: "arm64, 4 KiB pages", appVersion: "1.0 (1)"
+        )
+        let guest = Guest(cores: 2, memoryMiB: 2048, capacityGiB: 8)
+        let refused = RunEnd(result: -2, memoryRefusedMiB: 2048)
+        // The run never began, so it did not run for any time.
+        #expect(refused.report(appVersion: "1.0 (1)", system: system, guest: guest, uptimeSeconds: nil) == """
+            Andarium 1.0 (1) · 20261031-los24-r4
+            Linux 6.18.54 · 2 vCPUs · 2 GiB
+            Virtual machine ended: it could not start (this device could not give it 2 GiB of memory)
+            """)
+        // It is a failure that leads to the failure screen, and a clean
+        // power-off with the same size in it is not one.
+        #expect(refused.phase == .failed)
+        #expect(!refused.poweredOff)
+        // The report of a launch's own start failure keeps its own words.
+        let launch = RunEnd(result: -1, startFailure: "2 GiB of memory is more than this device can give", memoryRefusedMiB: 2048)
+        #expect(
+            launch.report(appVersion: "1.0 (1)", system: system, guest: guest, uptimeSeconds: nil)
+                .hasSuffix("it could not start (2 GiB of memory is more than this device can give)"))
+        // Without the cause a result of -2 is only a runtime result.
+        #expect(
+            RunEnd(result: -2).report(appVersion: "1.0 (1)", system: system, guest: guest, uptimeSeconds: nil)
+                .hasSuffix("Virtual machine ended: runtime result -2"))
+    }
+
     @Test func cleanPowerOffAllowsAnotherStartAndFailureRequiresRelaunch() {
         var life = Lifecycle(guest: Guest.fresh(on: ipad))
         #expect(life.start(.normal, host: ipad) == .allowed(.normal))

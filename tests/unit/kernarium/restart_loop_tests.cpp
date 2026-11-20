@@ -523,6 +523,10 @@ void fiveEarlyRestartsInARowEndTheLoopWithItsOwnResult()
             "the loop guard's end was not logged");
     require(KERNARIUM_RUNTIME_RESULT_RESTART_LOOP < -UML_EMULATOR_RUNTIME_ERROR,
             "the loop result collides with a uml_emulator error");
+    /* The applications name the host's refusal of the guest's memory by this
+     * constant, which is the emulator's result and no other value. */
+    require(KERNARIUM_RUNTIME_RESULT_OUT_OF_MEMORY == -UML_EMULATOR_OUT_OF_MEMORY,
+            "the out-of-memory result is not the emulator's");
 }
 
 void aBootThatLastsFifteenSecondsResetsTheCount()

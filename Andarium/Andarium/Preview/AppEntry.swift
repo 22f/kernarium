@@ -470,6 +470,10 @@ struct AppEntry {
         case "failed":
             // The failure path a real run takes: a crash after 42 minutes.
             model.fail()
+        case "failed-memory":
+            // What a run ends with where the host would not map the guest's
+            // memory: it never began.
+            model.fail(RunEnd(result: -2, memoryRefusedMiB: 2048), uptimeSeconds: nil)
         case "stopped":
             // What Stop on the slow-start notice leaves: the run ended by the person.
             model.fail(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: 203)

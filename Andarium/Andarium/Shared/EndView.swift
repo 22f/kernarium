@@ -17,11 +17,11 @@ struct EndView: View {
             Spacer(minLength: 24)
             StackMark(lit: false, width: 140, fault: !stopped)
                 .padding(.bottom, 36)
-            Text(stopped ? "You stopped the virtual machine" : "The virtual machine stopped unexpectedly")
+            Text(headline)
                 .font(.title2.weight(.bold))
                 .multilineTextAlignment(.center)
                 .accessibilityAddTraits(.isHeader)
-            Text("To start it again, close Andarium in the App Switcher and open it again.")
+            Text(advice)
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -63,4 +63,19 @@ struct EndView: View {
     }
 
     private var report: String { model.runReport }
+
+    /// What the screen says happened. A memory the device would not give is
+    /// named as the cause: nothing ran, and a smaller size starts.
+    private var headline: LocalizedStringKey {
+        if model.runEnd.memoryRefusedMiB != nil { return "The virtual machine could not start" }
+        return model.runEnd.stoppedByUser
+            ? "You stopped the virtual machine" : "The virtual machine stopped unexpectedly"
+    }
+
+    private var advice: LocalizedStringKey {
+        if let memoryRefusedMiB = model.runEnd.memoryRefusedMiB {
+            return "This device could not give it \(Formats.size(mib: memoryRefusedMiB)) of memory. Close Andarium in the App Switcher and open it again, then lower the memory with Edit under Virtual machine."
+        }
+        return "To start it again, close Andarium in the App Switcher and open it again."
+    }
 }

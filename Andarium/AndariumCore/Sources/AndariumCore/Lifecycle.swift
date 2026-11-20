@@ -145,14 +145,23 @@ public struct RunEnd: Equatable, Sendable {
     /// guest for good), so `phase` does not change; the screen that follows
     /// says whose choice it was.
     public var stoppedByUser: Bool
+    /// The size of memory, in MiB, that this device would not give the
+    /// virtual machine: the run ended before its kernel started, because the
+    /// host could not map the guest's memory (the runtime's out-of-memory
+    /// result, `KERNARIUM_RUNTIME_RESULT_OUT_OF_MEMORY`), or the size was one
+    /// the runtime does not admit. A smaller size starts, so the failure
+    /// screen names the cause and what to change.
+    public var memoryRefusedMiB: Int?
 
     public init(
-        result: Int32, restartedInALoop: Bool = false, startFailure: String? = nil, stoppedByUser: Bool = false
+        result: Int32, restartedInALoop: Bool = false, startFailure: String? = nil, stoppedByUser: Bool = false,
+        memoryRefusedMiB: Int? = nil
     ) {
         self.result = result
         self.restartedInALoop = restartedInALoop
         self.startFailure = startFailure
         self.stoppedByUser = stoppedByUser
+        self.memoryRefusedMiB = memoryRefusedMiB
     }
 
     public var poweredOff: Bool { result == 0 && !restartedInALoop && startFailure == nil }
@@ -169,6 +178,10 @@ public struct RunEnd: Equatable, Sendable {
         ]
         let reason = if let startFailure {
             String(localized: "it could not start (\(startFailure))", bundle: .module)
+        } else if let memoryRefusedMiB {
+            String(
+                localized: "it could not start (this device could not give it \(Formats.size(mib: memoryRefusedMiB)) of memory)",
+                bundle: .module)
         } else if stoppedByUser {
             String(localized: "it was stopped from the boot screen", bundle: .module)
         } else if restartedInALoop {
