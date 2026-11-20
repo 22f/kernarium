@@ -56,9 +56,9 @@ extension AppModel {
     /// A refresh already under way is joined; with `afterAChange` another
     /// follows it, made by the refresh's owner once it has cleared the one that
     /// finished, because what changed may have come after the listing it
-    /// captured. Returns whether one was asked. `forAnOpen` is the one listing a
-    /// host with no Home Screen takes, for the app the person opens by name; it
-    /// asks for no icons.
+    /// captured. Returns whether one was asked. `forAnOpen` is the listing a
+    /// host with no Home Screen takes before it opens an app by name: whatever
+    /// the digest says, and no icons.
     @discardableResult
     func refreshAndroidApps(afterAChange: Bool = false, forAnOpen: Bool = false) async -> Bool {
         let state = androidApps
@@ -81,7 +81,7 @@ extension AppModel {
         let store = state.store
         let token = state.begin()
         let task = Task.detached {
-            await AndroidAppRefresh.run(tool: flat, store: store, withIcons: !forAnOpen) { catalog, left in
+            await AndroidAppRefresh.run(tool: flat, store: store, forAnOpen: forAnOpen) { catalog, left in
                 Task { @MainActor in
                     // The progress of a refresh that was ended is not heard.
                     if state.owns(token) { state.progressed(catalog, iconsLeft: left) }
@@ -323,12 +323,11 @@ extension AppModel {
             case .timedOut:
                 state.open.opened(.failed, for: request, now: Date())
             case .ready:
-                // A host with no Home Screen asks for the list only to open an app by name: an
-                // open takes a listing before it resolves where none was answered this run, or
-                // where the current catalog lacks the app or no record has its launcher count,
-                // so that what it needs to know of a renamed launcher is on record (`launchersWhenSeen`).
+                // A host with no Home Screen asks for the list only to open an app by name: each
+                // open takes one listing before it resolves, so that what it needs to know of a
+                // renamed launcher is on record (`launchersWhenSeen`).
                 if !hostOffersAddToHomeScreen {
-                    await listForAnOpen(request.component)
+                    await refreshAndroidApps(forAnOpen: true)
                     guard session === run, !Task.isCancelled, state.open.pending?.request == request else { return }
                 }
                 // The wait took seconds: the run may have ended, or paused for space.
@@ -367,21 +366,6 @@ extension AppModel {
             }
             state.scheduleExpiry { }
         }
-    }
-
-    /// The listing a host with no Home Screen takes for an open: the run's first, which an
-    /// ask that got no answer leaves still to make, and one for an app the current catalog
-    /// lacks (installed since the last listing, or one whose retained record is of an
-    /// earlier install) or whose record has no launcher count. It joins a refresh under way
-    /// and asks for no icons.
-    private func listForAnOpen(_ component: AndroidComponent) async {
-        let state = androidApps
-        guard !hostOffersAddToHomeScreen else { return }
-        let id = component.identifier
-        guard !state.listed || state.store.catalog()?.app(withID: id) == nil
-            || state.store.record(forID: id)?.launchers == nil
-        else { return }
-        await refreshAndroidApps(forAnOpen: true)
     }
 
     /// The boot reached Android: a request that was starting opens now.

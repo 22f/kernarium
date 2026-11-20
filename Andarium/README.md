@@ -1357,11 +1357,9 @@ is on. `AndariumCore/Adb` speaks the protocol.
   the image has no tool. A Mac and a Vision Pro have no Home Screen: there the
   intent runs, but the apps are no entities, nothing is written to Spotlight,
   the tiles are not told of them, and Android is asked only when an app is
-  opened by name: an open asks first, with no icons, where no listing was
-  answered this run or the catalog lacks the app or the app's launcher count
-  (an unchanged digest restores a missing count), and a launch that found its
-  app missing lists again to learn why. The guest is asked for one listing at
-  a time. An icon
+  opened by name: every open takes one listing, with no icons, before it
+  resolves the app, and a launch that found its app missing lists again to
+  learn why. The guest is asked for one listing at a time. An icon
   is stored only as a picture the host drew itself (`FlatteningAppsTool`), and a
   label as the tool's own sanitising makes it, whatever the tool or the cache
   file says.

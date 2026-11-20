@@ -1247,17 +1247,17 @@ final class AndroidAppsModelTests {
         #expect(await eventually(5) { rig.tool.digestsAsked > asked }, "the resume lists what the install changed")
     }
 
-    @Test func anExplicitOpenOnAHostWithNoHomeScreenTakesOneListingFirstAndOnlyOne() async throws {
+    @Test func anExplicitOpenOnAHostWithNoHomeScreenTakesOneListingWithNoIconsEachTime() async throws {
         let rig = try rig(phase: .running(.normal))
         defer { rig.stop() }
         rig.model.host.idiom = .mac
         rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
         #expect(await eventually { rig.tool.opened == [comet.component] })
-        #expect(rig.tool.digestsAsked == 1 && rig.tool.iconsAsked == 0, "one listing, no icons")
+        #expect(rig.tool.listingsAsked == 1 && rig.tool.digestsAsked == 0 && rig.tool.iconsAsked == 0, "one listing, no digest, no icons")
         #expect(rig.state.store.record(forID: comet.id)?.launchers == 1, "the listing is recorded")
         rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
         #expect(await eventually { rig.tool.opened == [comet.component, inkleaf.component] })
-        #expect(rig.tool.digestsAsked == 1, "once for the run")
+        #expect(rig.tool.listingsAsked == 2 && rig.tool.digestsAsked == 0, "one listing at every open")
         #expect(rig.waits.durations.isEmpty, "nothing is asked at the boot")
     }
 
@@ -1303,20 +1303,20 @@ final class AndroidAppsModelTests {
         #expect(rig.state.open.banner == nil)
     }
 
-    @Test func aListingThatGotNoAnswerForAnOpenIsNotTheRunsListing() async throws {
+    @Test func aListingThatGotNoAnswerForAnOpenIsNotCountedAsDone() async throws {
         let rig = try rig(phase: .running(.normal))
         defer { rig.stop() }
         rig.model.host.idiom = .mac
-        rig.tool.answer(listing: nil, digest: .failed)
+        rig.tool.answer(listing: .failed)
         rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
         #expect(await eventually { rig.tool.opened == [comet.component] && rig.state.open.pending == nil })
-        #expect(rig.tool.digestsAsked == 1 && !rig.state.listed, "the first ask got no answer")
-        // The tool answers again, and the next open asks for the list.
-        rig.tool.answer(listing: nil, digest: nil)
+        #expect(rig.tool.listingsAsked == 1 && rig.state.failed && rig.state.store.record(forID: comet.id) == nil)
+        // The tool answers again, and the next open lists.
+        rig.tool.answer(listing: nil)
         rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
         #expect(await eventually { rig.tool.opened == [comet.component, inkleaf.component] && rig.state.open.pending == nil })
-        #expect(rig.tool.digestsAsked == 2, "the next open asks again")
-        #expect(rig.state.listed && rig.state.store.record(forID: inkleaf.id)?.launchers == 1)
+        #expect(rig.tool.listingsAsked == 2, "the next open lists again")
+        #expect(rig.state.store.record(forID: inkleaf.id)?.launchers == 1)
     }
 
     @Test func aReplacementOpenWaitsForTheListingTheOpenItReplacedBegan() async throws {
@@ -1333,7 +1333,7 @@ final class AndroidAppsModelTests {
         #expect(rig.tool.mostListingsAtOnce == 1, "the guest is asked for one listing at a time")
     }
 
-    @Test func aRetainedLauncherCountDoesNotStandInForAListingOfAnAppTheCatalogLacks() async throws {
+    @Test func aReinstalledAppsLauncherCountIsItsOwnAndNotTheRetainedOne() async throws {
         let rig = try rig(phase: .running(.normal))
         defer { rig.stop() }
         rig.model.host.idiom = .mac
@@ -1371,24 +1371,47 @@ final class AndroidAppsModelTests {
         #expect(rig.state.open.banner == nil)
     }
 
-    @Test func aLauncherCountTheRecordsLostIsRecoveredByAMatchingDigestOnAHostWithNoHomeScreen() async throws {
+    @Test func aFailedRecordsWriteIsMadeAgainByTheNextOpenOnAHostWithNoHomeScreen() async throws {
         let rig = try rig(phase: .running(.normal))
         defer { rig.stop() }
         rig.model.host.idiom = .mac
+        // The records cannot be written (a folder is where the file goes), and the store lives on.
+        let records = rig.directory.appendingPathComponent("records.json")
+        try FileManager.default.createDirectory(at: records, withIntermediateDirectories: true)
         rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
         #expect(await eventually { rig.tool.opened == [comet.component] && rig.state.open.pending == nil })
-        // The records did not get written with the catalog: the store is read again without them.
-        try FileManager.default.removeItem(at: rig.directory.appendingPathComponent("records.json"))
-        rig.state.store = AndroidAppStore(directory: rig.directory)
-        #expect(rig.state.store.catalog()?.app(withID: comet.id) != nil)
-        #expect(rig.state.store.record(forID: comet.id) == nil)
-        // An open of the app asks the digest, which matches: the count is learnt again, with nothing listed.
-        let listings = rig.tool.listingsAsked
-        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
-        #expect(await eventually { rig.tool.opened == [comet.component, comet.component] && rig.state.open.pending == nil })
-        #expect(rig.tool.listingsAsked == listings, "the digest matched")
-        #expect(rig.state.store.record(forID: comet.id)?.launchers == 1, "recovered")
+        #expect(rig.state.failed, "the write failed")
+        try FileManager.default.removeItem(at: records)
+        // The next open lists again, and the records reach the disk.
+        rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
+        #expect(await eventually { rig.tool.opened == [comet.component, inkleaf.component] && rig.state.open.pending == nil })
+        #expect(AndroidAppStore(directory: rig.directory).record(forID: comet.id)?.launchers == 1, "the count is on disk")
         // The app renames its only launcher, and the original intent still finds it.
+        let renamed = AndroidApp(
+            component: try #require(AndroidComponent(packageName: comet.component.packageName, activityClass: "com.example.comethop.Renamed")),
+            label: "Comet Hop", builtIn: false, iconTag: "0000000000000001")
+        rig.tool.remove(comet.id)
+        rig.tool.install(renamed)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened.last == renamed.component }, "opened: \(rig.tool.opened)")
+        #expect(rig.state.open.banner == nil)
+    }
+
+    @Test func anOpenOnAHostWithNoHomeScreenResolvesAnAppOfTheCurrentCatalogWhateverTheHistoryHolds() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.model.host.idiom = .mac
+        // The history is at its bound and dated after now (the clock went back).
+        let history = try (0..<AndroidAppLimits.mostRecords).map { index in
+            AndroidApp(
+                component: try #require(AndroidComponent(packageName: "com.example.history\(index)", activityClass: "com.example.history\(index).Main")),
+                label: "History \(index)", builtIn: false, iconTag: "0000000000000001")
+        }
+        try rig.state.store.apply(AndroidAppList(apps: history, digest: "history"), at: Date().addingTimeInterval(86_400))
+        #expect(rig.state.store.records().count == AndroidAppLimits.mostRecords)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened == [comet.component] && rig.state.open.pending == nil })
+        #expect(rig.state.store.record(forID: comet.id)?.launchers == 1, "an app of the current catalog keeps its record")
         let renamed = AndroidApp(
             component: try #require(AndroidComponent(packageName: comet.component.packageName, activityClass: "com.example.comethop.Renamed")),
             label: "Comet Hop", builtIn: false, iconTag: "0000000000000001")
