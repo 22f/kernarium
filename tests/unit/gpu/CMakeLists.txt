@@ -157,6 +157,17 @@ if(TARGET uml_third_party_kosmickrisp)
         LIBRARIES UML::ThirdPartyKosmicKrisp
         VULKAN TIMEOUT 120)
 
+    # What a caller of the pipeline binary commands chooses is checked before
+    # it is read, copied or dereferenced: the size of an imported key, the
+    # size of its data, and which of the three sources a create request
+    # names, and what chain a pipeline key request begins with. Each row runs in
+    # a process of its own.
+    uml_add_gpu_unit_test(gpu-kosmickrisp-pipeline-binary-requests
+        uml_gpu_kosmickrisp_pipeline_binary_requests_tests
+        kosmickrisp_pipeline_binary_requests_tests.cpp
+        LIBRARIES UML::ThirdPartyKosmicKrisp
+        VULKAN TIMEOUT 300)
+
     add_library(uml_gpu_vulkan_draw_test_support STATIC
         vulkan_draw_test.cpp)
     target_link_libraries(uml_gpu_vulkan_draw_test_support PUBLIC
@@ -276,6 +287,22 @@ if(TARGET uml_gpu_service)
         venus_bind_failure_tests.cpp
         LIBRARIES ${_uml_host_gl_libraries}
         VULKAN UNIT_DIRECTORY TIMEOUT 120)
+
+    # A guest chooses what the pipeline binary commands read: the size of each
+    # key it imports a binary under (a plain field beside a key array of 32
+    # bytes), which source a create request names, and which objects a command
+    # refers to, null or already in use. Each is refused or answered with an
+    # error, and none of it is read, copied or dereferenced past what the guest
+    # sent. The faults lie past the end of a heap block or in freed memory, so
+    # the test runs each row in a child under Guard Malloc, and the rows that
+    # name an object the renderer must free again under the leak checker.
+    uml_add_gpu_unit_test(gpu-venus-pipeline-binary-requests
+        uml_gpu_venus_pipeline_binary_requests_tests
+        venus_pipeline_binary_requests_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries}
+        VULKAN UNIT_DIRECTORY TIMEOUT 600)
+    set_tests_properties(gpu-venus-pipeline-binary-requests PROPERTIES
+        SKIP_RETURN_CODE 77)
 
     # A blob larger than the shared memory behind it is refused where it is
     # created, for Venus memory (POSIX shared memory and the unlinked files iOS
