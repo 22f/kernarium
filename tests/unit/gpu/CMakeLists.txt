@@ -157,13 +157,13 @@ if(TARGET uml_third_party_kosmickrisp)
         LIBRARIES UML::ThirdPartyKosmicKrisp
         VULKAN TIMEOUT 120)
 
-    # An imported pipeline binary's key is refused unless it is a key's size,
-    # before anything is copied from it: keySize is a plain field no generated
-    # check bounds, and the runtime used to copy that many bytes into a 32-byte
-    # key. Each row runs in a process of its own.
-    uml_add_gpu_unit_test(gpu-kosmickrisp-pipeline-binary-key-size
-        uml_gpu_kosmickrisp_pipeline_binary_key_size_tests
-        kosmickrisp_pipeline_binary_key_size_tests.cpp
+    # What a caller of the pipeline binary commands chooses is checked before
+    # it is read, copied or dereferenced: the size of an imported key, the
+    # size of its data, and which of the three sources a create request
+    # names. Each row runs in a process of its own.
+    uml_add_gpu_unit_test(gpu-kosmickrisp-pipeline-binary-requests
+        uml_gpu_kosmickrisp_pipeline_binary_requests_tests
+        kosmickrisp_pipeline_binary_requests_tests.cpp
         LIBRARIES UML::ThirdPartyKosmicKrisp
         VULKAN TIMEOUT 120)
 
@@ -287,17 +287,19 @@ if(TARGET uml_gpu_service)
         LIBRARIES ${_uml_host_gl_libraries}
         VULKAN UNIT_DIRECTORY TIMEOUT 120)
 
-    # A guest chooses the size of each key it imports a pipeline binary under,
-    # in a plain field beside a key array of 32 bytes. A key of any other size
-    # is refused, and none of it is read or copied past the key array. The
-    # overrun lies past the end of a heap block, so the test runs its body in a
-    # child under Guard Malloc.
-    uml_add_gpu_unit_test(gpu-venus-pipeline-binary-key-size
-        uml_gpu_venus_pipeline_binary_key_size_tests
-        venus_pipeline_binary_key_size_tests.cpp
+    # A guest chooses what the pipeline binary commands read: the size of each
+    # key it imports a binary under (a plain field beside a key array of 32
+    # bytes), which source a create request names, and which objects a command
+    # refers to, null or already in use. Each is refused or answered with an
+    # error, and none of it is read, copied or dereferenced past what the guest
+    # sent. The faults lie past the end of a heap block or in freed memory, so
+    # the test runs each row in a child under Guard Malloc.
+    uml_add_gpu_unit_test(gpu-venus-pipeline-binary-requests
+        uml_gpu_venus_pipeline_binary_requests_tests
+        venus_pipeline_binary_requests_tests.cpp
         LIBRARIES ${_uml_host_gl_libraries}
-        VULKAN UNIT_DIRECTORY TIMEOUT 240)
-    set_tests_properties(gpu-venus-pipeline-binary-key-size PROPERTIES
+        VULKAN UNIT_DIRECTORY TIMEOUT 300)
+    set_tests_properties(gpu-venus-pipeline-binary-requests PROPERTIES
         SKIP_RETURN_CODE 77)
 
     # A blob larger than the shared memory behind it is refused where it is

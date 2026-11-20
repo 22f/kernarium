@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
+// What a caller of vkCreatePipelineBinariesKHR chooses is checked before it is
+// read, copied or dereferenced, and a request the runtime cannot serve is
+// refused with VK_ERROR_VALIDATION_FAILED (or VK_ERROR_OUT_OF_HOST_MEMORY for
+// data too large to allocate) and a null handle; none of it ends the process.
+//
 // A pipeline binary an application imports names itself by a key, and the key
 // says how long it is. VkPipelineBinaryKeyKHR::keySize is the one field of the
 // import that no generated validation bounds (the registry marks it
@@ -9,15 +14,24 @@
 // only by an assert that release builds compile out.
 //
 // Every key the driver hands out is 32 bytes, so an import under any other size
-// is refused before anything is copied or allocated from it, with
-// VK_ERROR_VALIDATION_FAILED and a null handle. A key of 32 bytes still makes a
-// binary whose key and data read back as imported, and a pipeline created from
-// the imported binaries (and no shader module) works.
+// is refused before anything is copied or allocated from it. A key of 32 bytes
+// still makes a binary whose key and data read back as imported, and a
+// pipeline created from the imported binaries (and no shader module) works.
+//
+// The data of an imported binary is allocated beside the binary, so a data
+// size within the binary's own size of SIZE_MAX, added to it, wrapped to a
+// small allocation that the copy overran.
+//
+// The binaries come from keys and data to import, a pipeline, or a pipeline
+// create info, and this driver has no internal cache to look a create info up
+// in. A request with none of them, or with only a create info, used to fall
+// into the import and read the one it does not have.
 //
 // Each row runs in a process of its own and the parent reports it, so a row
 // that crashes the driver is one failed row rather than the end of the test:
-// on a driver without the check, 33 and 4096 report success over a corrupted
-// heap and 0xffffffff reads past the key's buffer.
+// on a driver without the checks, 33 and 4096 report success over a corrupted
+// heap, 0xffffffff reads past the key's buffer, and the other rows
+// dereference null or copy past their allocation.
 
 #include "require.hpp"
 #include "vulkan_draw_test.hpp"
@@ -34,6 +48,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -96,7 +111,7 @@ struct Context {
     void initialize()
     {
         auto application = structure<VkApplicationInfo>(VK_STRUCTURE_TYPE_APPLICATION_INFO);
-        application.pApplicationName = "pipeline binary key size regression";
+        application.pApplicationName = "pipeline binary requests regression";
         application.apiVersion = VK_API_VERSION_1_3;
         auto info = structure<VkInstanceCreateInfo>(VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO);
         info.pApplicationInfo = &application;
@@ -161,12 +176,14 @@ struct Context {
               "vkCreateDevice");
     }
 
-    // Imports `count` binaries whose keys all claim `keySize` bytes, over keys
-    // and data that are `keyBytes` and `data.size()` long, and returns the
-    // call's result. The key structure sits at the start of a buffer of its
-    // own that is far larger than any key, so a driver's read of keySize bytes
-    // stays inside this process whatever it is; only a write can go wrong.
-    VkResult import(uint32_t keySize, const std::vector<uint8_t> &data, VkPipelineBinaryKHR &binary) const
+    // Imports one binary whose key claims `keySize` bytes and whose data claims
+    // `claimedDataSize` bytes (`data.size()` when not given), over keys and
+    // data that are `keyBytes` and `data.size()` long, and returns the call's
+    // result. The key structure sits at the start of a buffer of its own that
+    // is far larger than any key, so a driver's read of keySize bytes stays
+    // inside this process whatever it is; only a write can go wrong.
+    VkResult import(uint32_t keySize, const std::vector<uint8_t> &data, VkPipelineBinaryKHR &binary,
+                    std::optional<size_t> claimedDataSize = std::nullopt) const
     {
         std::vector<uint8_t> keyBuffer(size_t{1} << 20);
         auto *key = reinterpret_cast<VkPipelineBinaryKeyKHR *>(keyBuffer.data());
@@ -175,7 +192,7 @@ struct Context {
         for (uint32_t i = 0; i < keyBytes; ++i)
             key->key[i] = static_cast<uint8_t>(0x40 + i);
         VkPipelineBinaryDataKHR binaryData{};
-        binaryData.dataSize = data.size();
+        binaryData.dataSize = claimedDataSize.value_or(data.size());
         binaryData.pData = const_cast<uint8_t *>(data.data());
         VkPipelineBinaryKeysAndDataKHR keysAndData{};
         keysAndData.binaryCount = 1;
@@ -228,6 +245,47 @@ void refused(uint32_t keySize)
     require(result == VK_ERROR_VALIDATION_FAILED,
             "a key of " + std::to_string(keySize) + " bytes was not refused: " + std::to_string(result));
     require(binary == VK_NULL_HANDLE, "a refused key left a binary behind");
+}
+
+// A data size the binary and its data cannot be allocated in is refused like an
+// allocation that cannot be satisfied, and leaves no binary behind.
+void dataSizeOverflow(size_t dataSize)
+{
+    Context context;
+    VkPipelineBinaryKHR binary = VK_NULL_HANDLE;
+    const VkResult result = context.import(keyBytes, sampleData(), binary, dataSize);
+    if (binary != VK_NULL_HANDLE)
+        context.deviceFunction<PFN_vkDestroyPipelineBinaryKHR>("vkDestroyPipelineBinaryKHR")(context.device, binary,
+                                                                                            nullptr);
+    require(result == VK_ERROR_OUT_OF_HOST_MEMORY,
+            "a data size of " + std::to_string(dataSize) + " bytes was not refused: " + std::to_string(result));
+    require(binary == VK_NULL_HANDLE, "a refused data size left a binary behind");
+}
+
+// A request that names no source for its binaries, or only a pipeline create
+// info this driver has no internal cache to look up, is refused.
+void noSource(bool createInfoOnly)
+{
+    Context context;
+    auto flags = structure<VkPipelineCreateFlags2CreateInfoKHR>(VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO_KHR);
+    auto pipelineInfo = structure<VkPipelineCreateInfoKHR>(VK_STRUCTURE_TYPE_PIPELINE_CREATE_INFO_KHR);
+    pipelineInfo.pNext = &flags;
+    auto createInfo = structure<VkPipelineBinaryCreateInfoKHR>(VK_STRUCTURE_TYPE_PIPELINE_BINARY_CREATE_INFO_KHR);
+    if (createInfoOnly)
+        createInfo.pPipelineCreateInfo = &pipelineInfo;
+    VkPipelineBinaryKHR binary = VK_NULL_HANDLE;
+    auto handles = structure<VkPipelineBinaryHandlesInfoKHR>(VK_STRUCTURE_TYPE_PIPELINE_BINARY_HANDLES_INFO_KHR);
+    handles.pipelineBinaryCount = 1;
+    handles.pPipelineBinaries = &binary;
+    const VkResult result = context.CALL(CreatePipelineBinariesKHR, context.device, &createInfo, nullptr, &handles);
+    if (binary != VK_NULL_HANDLE)
+        context.deviceFunction<PFN_vkDestroyPipelineBinaryKHR>("vkDestroyPipelineBinaryKHR")(context.device, binary,
+                                                                                            nullptr);
+    require(result == VK_ERROR_VALIDATION_FAILED,
+            std::string(createInfoOnly ? "a request with only a pipeline create info"
+                                       : "a request with no source") +
+                " was not refused: " + std::to_string(result));
+    require(binary == VK_NULL_HANDLE, "a refused request left a binary behind");
 }
 
 // A key of the size every key has makes a binary that reads back as imported.
@@ -349,12 +407,16 @@ struct Row {
     void (*run)();
 };
 
-const std::array<Row, 7> rows = {{
+const std::array<Row, 11> rows = {{
     {"refused-0", [] { refused(0); }},
     {"refused-31", [] { refused(keyBytes - 1); }},
     {"refused-33", [] { refused(keyBytes + 1); }},
     {"refused-4096", [] { refused(4096); }},
     {"refused-0xffffffff", [] { refused(0xffffffffu); }},
+    {"refused-data-size-max", [] { dataSizeOverflow(SIZE_MAX); }},
+    {"refused-data-size-near-max", [] { dataSizeOverflow(SIZE_MAX - 8); }},
+    {"refused-no-source", [] { noSource(false); }},
+    {"refused-create-info-only", [] { noSource(true); }},
     {"accepted-32", [] { accepted(); }},
     {"imported-binaries-make-a-pipeline", [] { importedBinariesMakeAPipeline(); }},
 }};
@@ -414,7 +476,7 @@ int main(int argc, char **argv)
     uint32_t failures = 0;
     for (const Row &row : rows)
         failures += runRow(self, row) ? 0 : 1;
-    require(failures == 0, std::to_string(failures) + " pipeline binary key size rows failed");
-    std::puts("PIPELINE_BINARY_KEY_SIZE_PASS refused=0,31,33,4096,0xffffffff accepted=32 pipeline-from-import=pass");
+    require(failures == 0, std::to_string(failures) + " pipeline binary request rows failed");
+    std::puts("PIPELINE_BINARY_REQUESTS_PASS key-sizes=0,31,33,4096,0xffffffff data-size-overflow=refused no-source=refused accepted=32 pipeline-from-import=pass");
     return 0;
 }
