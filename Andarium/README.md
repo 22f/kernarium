@@ -211,6 +211,11 @@ the iPad harness reads, as Debug does. A launch that sets no `ANDARIUM_` or
   once into a folder of its own under `tmp/PickedFiles/` and removes it when
   the install or import that uses it is over (Install anyway and Try Again
   still find it) and at the next launch. A picker that fails shows an alert.
+  The build phase "Check document pickers" runs
+  [`scripts/check-document-pickers.py`](scripts/check-document-pickers.py) on
+  every build: the sources hold no SwiftUI `fileImporter` and no document
+  picker made without `asCopy: true` outside that file, and both call sites
+  present the copy-mode picker.
 - The scheme's Archive action uses Release, the build offered to Macs as an
   iPad app too. The app icon is `DuskJade` (`Shared/DuskJade.icon`).
 - An archive refuses an embedded artifact that is behind the archived commit: a

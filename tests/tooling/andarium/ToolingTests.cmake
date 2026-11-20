@@ -77,6 +77,19 @@ uml_add_tooling_test(
     LABELS andarium;android;package
     TIMEOUT 180)
 
+# The document pickers open the files a person picks as copies: no fileImporter
+# in the application, no document picker without `asCopy: true` outside
+# Shared/CopyDocumentPicker.swift, and both call sites present the copy-mode
+# picker. The fixtures change one source each; the build phase "Check document
+# pickers" runs the check on every build.
+uml_add_tooling_test(
+    NAME andarium-document-pickers
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_document_pickers.py
+        --root ${PROJECT_SOURCE_DIR}
+    LABELS andarium
+    TIMEOUT 60)
+
 # What any archive of Release must satisfy beyond its embedded artifacts
 # (scripts/check-release-archive.py, run by the same build phase): a profile
 # link to X only with the developer's own handle. The fixtures are application

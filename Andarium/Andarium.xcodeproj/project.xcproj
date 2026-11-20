@@ -139,6 +139,12 @@
             "fi",
             "",
           ],
+        }, {
+          "kind": "script",
+          "name": "Check document pickers",
+          "run-on-every-build": true,
+          "shell": "/bin/sh",
+          "script": "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-document-pickers.py\" \"$SRCROOT/Andarium\"\n",
         },
         "compile-sources",
         "frameworks",
