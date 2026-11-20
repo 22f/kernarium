@@ -978,7 +978,7 @@ outcomes are known and not defects of the image:
   launcher applications, starts (Messaging, the SMS provider's process and the
   icon renderer among them) after boot completes. Each package is decided from a
   listing taken for it, by its complete process name, for user 0, and every row of
-  the process must be cached; a process that leaves the cached state in the instant
+  the process must be cached; a process that turns previous or service in the instant
   between its own listing and the kill can still be ended once, as a low-memory
   kill would end it. The next use starts them again: a text message from the host
   starts Messaging and then the provider.

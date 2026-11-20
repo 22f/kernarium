@@ -104,6 +104,8 @@ for entry in $reclaim_list; do
     busy=""
     kept=""
     for proc in $processes; do
+        is_cached=""
+        not_cached=""
         IFS=$nl
         for line in $lru; do
             unset IFS
@@ -111,12 +113,17 @@ for entry in $reclaim_list; do
             # The whole process name, of user 0, and every row that has it.
             [ "$row_name" = "$proc" ] && [ -n "$row_user0" ] || continue
             case "$label" in
-                cch*) cached="$cached $proc" ;;
-                svc|svcb|prev|home) busy="$busy $proc:$label" ;;
-                *) kept="$kept $proc:$label" ;;
+                cch*) is_cached=1 ;;
+                svc|svcb|prev|home) busy="$busy $proc:$label"; not_cached=1 ;;
+                *) kept="$kept $proc:$label"; not_cached=1 ;;
             esac
         done
         unset IFS
+        # A name counts as cached only when every one of its rows is: a row of another uid that
+        # took the name must not stand for the process that is not cached.
+        if [ -n "$is_cached" ] && [ -z "$not_cached" ]; then
+            cached="$cached $proc"
+        fi
     done
     if [ -n "$busy" ]; then
         note "$pkg left alone, not cached:$busy"
@@ -125,9 +132,10 @@ for entry in $reclaim_list; do
     else
         out=$(cmd activity kill --user 0 "$pkg" 2>&1 </dev/null)
         rc=$?
-        # The command says nothing of whether a process ended: a process that left the cached
-        # state since the listing is not touched, and neither is one that is not the activity
-        # manager's to end.
+        # The command says nothing of whether a process ended. The activity manager leaves what
+        # it keeps above service (persistent, visible, perceptible), but a process that turned
+        # previous or service since the listing can still be ended: that window is accepted, as
+        # a low memory kill would end it too.
         note "$pkg asked to end cached$cached (kept:${kept:- none}) rc=$rc $out"
     fi
 done

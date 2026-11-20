@@ -7983,6 +7983,30 @@ def verify_reclaim_boot_apps(android_root: Path) -> None:
             "  #40: cch  + 5 CEM  --------- 2500:com.android.messaging/u0a99",
             "  #26: svc      SVC  --------- 1870:com.android.messaging/u0a95")], [], [
             "com.android.messaging left alone, not cached: com.android.messaging:svc"]),
+        # A process name counts as cached only when every user 0 row that has it is cached: another uid's process that
+        # took the name must not stand for the real one, whichever row comes first.
+        ("the real Messaging in the foreground listed first, another uid's cached row of the same name after", [listing(
+            "  #35: fg       TOP  LCMNFUATI 1870:com.android.messaging/u0a95 act:activities|recents",
+            "  #40: cch  + 5 CEM  --------- 2300:com.android.messaging/u0a99")], [], [
+            "com.android.messaging has no cached process (kept: com.android.messaging:fg)"]),
+        ("another uid's cached row of the name of Messaging first, the real one in the foreground after", [listing(
+            "  #40: cch  + 5 CEM  --------- 2300:com.android.messaging/u0a99",
+            "  #35: fg       TOP  LCMNFUATI 1870:com.android.messaging/u0a95 act:activities|recents")], [], [
+            "com.android.messaging has no cached process (kept: com.android.messaging:fg)"]),
+        ("the provider's process perceptible beside another uid's cached row of its name", [listing(
+            "  #32: prcp + 1 IMPB -------TI 1860:com.android.phone/1001",
+            "  #40: cch  + 5 CEM  --------- 3000:com.android.phone/u0a200")], [], [
+            "com.android.providers.telephony has no cached process (kept: com.android.phone:prcp)"]),
+        # The one kill is the package's: cached processes of sibling packages and of private processes do not add to it.
+        ("the reviewed packages cached together with siblings by prefix", [listing(
+            "  #31: cch  + 7 CEM  --------- 1870:com.android.messaging/u0a95",
+            "  #32: cch  + 8 CEM  --------- 1860:com.android.phone/1001",
+            "  #40: cch  + 5 CEM  --------- 2600:com.android.messaging.demo/u0a97",
+            "  #41: cch  + 5 CEM  --------- 2602:com.android.phone.helper/u0a99",
+            "  #42: cch  + 5 CEM  --------- 2603:com.android.messaging:push/u0a95")],
+         ["com.android.messaging", "com.android.providers.telephony"], [
+            "com.android.messaging asked to end cached com.android.messaging (kept: none)",
+            "com.android.providers.telephony asked to end cached com.android.phone (kept: none)"]),
         # A package or a process name that only starts or ends like a listed one is not that process.
         ("processes whose names start or end like a listed process", [listing(
             "  #40: cch  + 5 CEM  --------- 2600:com.android.messaging.demo/u0a97",
@@ -8035,7 +8059,7 @@ def verify_reclaim_boot_apps(android_root: Path) -> None:
                                     env={"PATH": f"{stubs}:/usr/bin:/bin"}, capture_output=True, text=True,
                                     input="", cwd=temporary)
             recorded = calls.read_text().splitlines() if calls.exists() else []
-            kills = [line.split()[-1] for line in recorded if line.startswith("cmd activity kill --user 0 ")]
+            kills = [line for line in recorded if line.startswith("cmd activity kill --user 0 ")]
             other = [line for line in recorded if line.startswith("cmd ") and not line.startswith("cmd activity kill --user 0 ")]
             forbidden = [line for line in recorded if line.startswith("FORBIDDEN")] + other
             listings_taken = sum(1 for line in recorded if line.startswith("dumpsys "))
@@ -8054,8 +8078,10 @@ def verify_reclaim_boot_apps(android_root: Path) -> None:
                 problems.append(f"{name}: the script ran something outside the reviewed kill: {forbidden}")
             if recorded[:1] != ["sleep 120"]:
                 problems.append(f"{name}: the script does not wait 120 s first: {recorded[:1]}")
-            if kills != list(expected):
-                problems.append(f"{name}: the script killed {kills}, not {expected}")
+            # The complete call, so that a second package or an extra word in the one command is a failure.
+            wanted = [f"cmd activity kill --user 0 {package}" for package in expected]
+            if kills != wanted:
+                problems.append(f"{name}: the script asked for {kills}, not {wanted}")
             if name == "no process list":
                 if code == 0:
                     problems.append(f"{name}: the script exits 0 without a process list")
@@ -8091,17 +8117,28 @@ def verify_reclaim_boot_apps(android_root: Path) -> None:
             '[ "$row_name" = "$proc" ]', '[ "${row_name#"$proc"}" != "$row_name" ]'),
         "rows of every user": ('[ -n "$row_user0" ]', "true"),
         "the first row of a process decides": (
-            '                *) kept="$kept $proc:$label" ;;\n            esac\n',
-            '                *) kept="$kept $proc:$label" ;;\n            esac\n            break\n'),
+            '                *) kept="$kept $proc:$label"; not_cached=1 ;;\n            esac\n',
+            '                *) kept="$kept $proc:$label"; not_cached=1 ;;\n            esac\n            break\n'),
         "a log line that claims a kill": ("asked to end cached", "killed cached"),
+        "a cached row of the name stands although another row of it is not cached": (
+            'if [ -n "$is_cached" ] && [ -z "$not_cached" ]; then', 'if [ -n "$is_cached" ]; then'),
+        "the package named twice in the one kill": (kill_line, kill_line.replace('"$pkg" 2>&1', '"$pkg" "$pkg" 2>&1')),
+        "a loop over the cached siblings around the one kill": [
+            ('    cached=""\n', '    cached=""\n    siblings=""\n'),
+            ('            parse_row "$line"\n',
+             '            parse_row "$line"\n            case "$row_name:$label" in\n'
+             '                "$pkg".*:cch*) siblings="$siblings $row_name" ;;\n            esac\n'),
+            (kill_line, 'for pkg in "$pkg" $siblings; do\n            ' + kill_line + '\n        done')],
         "one listing for every package": (
             "lru=$(dumpsys activity lru 2>/dev/null </dev/null)",
             '[ -n "$lru" ] || lru=$(dumpsys activity lru 2>/dev/null </dev/null)'),
     }
-    for title, (old, new) in mutations.items():
-        if old not in script_text:
-            fail(f"the reclaim script lacks '{old}' for the mutation '{title}'")
-        mutated = script_text.replace(old, new, 1)
+    for title, edits in mutations.items():
+        mutated = script_text
+        for old, new in (edits if isinstance(edits, list) else [edits]):
+            if old not in mutated:
+                fail(f"the reclaim script lacks '{old}' for the mutation '{title}'")
+            mutated = mutated.replace(old, new, 1)
         try:
             verifier.check_reclaim_boot_apps(reclaim_rc, mutated.encode())
             caught = reclaim_problem(mutated, first_only=True)
