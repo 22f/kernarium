@@ -41,24 +41,51 @@ private:
     bool ok_ {};
 };
 
-// Whether the photo states colours that are not sRGB, by its primaries or by a colour space object or an ICC profile it
-// carries: a file with no profile is read as sRGB, so such a photo would show the wrong colours. A photo that states no
-// colour at all is the capture's own sRGB (the device's colour space is selected, camera_capture.mm).
-bool statesOtherColours(CVPixelBufferRef photo)
+// The colours a photo states, by its attachments, the colour space object it carries and its ICC profile. A photo is read
+// as sRGB when it has no profile, so what matters is whether what it states is sRGB: BT.709 primaries (sRGB's too) with an
+// sRGB or BT.709 transfer, which are the colour spaces kCGColorSpaceSRGB and kCGColorSpaceITUR_709 and the explicit
+// attachments of the same. A colour space made of an ICC profile compares equal to the named one it is the profile of.
+struct StatedColours {
+    bool other {};       // something it states is not that
+    bool primaries {};   // its primaries are stated, and are
+    bool transfer {};    // its transfer is stated, and is
+};
+
+bool isSrgbOrBt709Space(CGColorSpaceRef space)
 {
+    Cf<CGColorSpaceRef> srgb(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
+    Cf<CGColorSpaceRef> bt709(CGColorSpaceCreateWithName(kCGColorSpaceITUR_709));
+    return (srgb && CFEqual(space, srgb.get())) || (bt709 && CFEqual(space, bt709.get()));
+}
+
+StatedColours statedColours(CVPixelBufferRef photo)
+{
+    StatedColours colours;
     Cf<CFTypeRef> primaries(CVBufferCopyAttachment(photo, kCVImageBufferColorPrimariesKey, nullptr));
-    // The primaries of sRGB are BT.709's.
-    if (primaries && !CFEqual(primaries.get(), kCVImageBufferColorPrimaries_ITU_R_709_2)) return true;
-    Cf<CFTypeRef> object(CVBufferCopyAttachment(photo, kCVImageBufferCGColorSpaceKey, nullptr));
-    if (object && CFGetTypeID(object.get()) == CGColorSpaceGetTypeID() &&
-        CGColorSpaceIsWideGamutRGB(static_cast<CGColorSpaceRef>(const_cast<void*>(object.get()))))
-        return true;
-    Cf<CFTypeRef> profile(CVBufferCopyAttachment(photo, kCVImageBufferICCProfileKey, nullptr));
-    if (profile && CFGetTypeID(profile.get()) == CFDataGetTypeID()) {
-        Cf<CGColorSpaceRef> space(CGColorSpaceCreateWithICCData(static_cast<CFDataRef>(profile.get())));
-        if (!space || CGColorSpaceIsWideGamutRGB(space.get())) return true;
+    if (primaries) {
+        if (CFEqual(primaries.get(), kCVImageBufferColorPrimaries_ITU_R_709_2)) colours.primaries = true;
+        else colours.other = true;
     }
-    return false;
+    Cf<CFTypeRef> transfer(CVBufferCopyAttachment(photo, kCVImageBufferTransferFunctionKey, nullptr));
+    if (transfer) {
+        if (CFEqual(transfer.get(), kCVImageBufferTransferFunction_ITU_R_709_2) || CFEqual(transfer.get(), kCVImageBufferTransferFunction_sRGB)) colours.transfer = true;
+        else colours.other = true;
+    } else if (Cf<CFTypeRef> gamma(CVBufferCopyAttachment(photo, kCVImageBufferGammaLevelKey, nullptr)); gamma) {
+        colours.other = true;   // a gamma stated without a transfer function is no transfer this accepts
+    }
+    Cf<CFTypeRef> object(CVBufferCopyAttachment(photo, kCVImageBufferCGColorSpaceKey, nullptr));
+    if (object) {
+        if (CFGetTypeID(object.get()) == CGColorSpaceGetTypeID() && isSrgbOrBt709Space(static_cast<CGColorSpaceRef>(const_cast<void*>(object.get()))))
+            colours.primaries = colours.transfer = true;
+        else colours.other = true;
+    }
+    Cf<CFTypeRef> profile(CVBufferCopyAttachment(photo, kCVImageBufferICCProfileKey, nullptr));
+    if (profile) {
+        Cf<CGColorSpaceRef> space(CFGetTypeID(profile.get()) == CFDataGetTypeID() ? CGColorSpaceCreateWithICCData(static_cast<CFDataRef>(profile.get())) : nullptr);
+        if (space && isSrgbOrBt709Space(space.get())) colours.primaries = colours.transfer = true;
+        else colours.other = true;
+    }
+    return colours;
 }
 
 bool statesAnotherMatrix(CVPixelBufferRef photo)
@@ -69,7 +96,7 @@ bool statesAnotherMatrix(CVPixelBufferRef photo)
 
 } // namespace
 
-TurnedStill turnedStillOf(CVPixelBufferRef photo, std::uint32_t jpegQuality, std::uint64_t maximumBytes)
+TurnedStill turnedStillOf(CVPixelBufferRef photo, std::uint32_t jpegQuality, std::uint64_t maximumBytes, bool captureIsSrgb)
 {
     TurnedStill result;
     const auto fail = [&](TurnedStillFailure failure) {
@@ -84,7 +111,10 @@ TurnedStill turnedStillOf(CVPixelBufferRef photo, std::uint32_t jpegQuality, std
         CVPixelBufferGetPlaneCount(photo) != 2 || width == 0 || height == 0 || ((width | height) & 1) != 0 || width > 0xffff || height > 0xffff)
         return fail(TurnedStillFailure::unsupportedFormat);
     if (statesAnotherMatrix(photo)) return fail(TurnedStillFailure::notBt601);
-    if (statesOtherColours(photo)) return fail(TurnedStillFailure::notSrgb);
+    const StatedColours colours = statedColours(photo);
+    if (colours.other) return fail(TurnedStillFailure::notSrgb);
+    // What the photo does not state is the capture's colour space, which is sRGB only if the selection of it took effect.
+    if (!(colours.primaries && colours.transfer) && !captureIsSrgb) return fail(TurnedStillFailure::unknownColours);
 
     auto encoder = makeVideoEncoder();
     if (!encoder) return fail(TurnedStillFailure::noEncoder);

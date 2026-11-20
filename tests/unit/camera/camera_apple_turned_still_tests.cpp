@@ -41,16 +41,39 @@ private:
 constexpr std::size_t kWidth = 120;
 constexpr std::size_t kHeight = 96;
 
-// The colour the photo states: its primaries and, besides them, an object or an ICC profile of its colour space.
-enum class Primaries { none, bt709, p3 };
+// The colour the photo states: its primaries and transfer function and, besides them, a colour space object and an ICC
+// profile, each of which may be another colour space than sRGB.
+enum class Primaries { none, bt709, p3, smpteC };
+enum class Transfer { asPrimaries, none, bt709, srgb, linear };
+enum class Space { none, srgb, bt709, p3, smpteC, linear };
 
 struct Tags {
     bool matrix601 = true;
     bool matrix709 = false;
     Primaries primaries = Primaries::bt709;
-    bool p3Space = false;   // kCVImageBufferCGColorSpaceKey: Display P3
-    bool p3Profile = false; // kCVImageBufferICCProfileKey: Display P3
+    Transfer transfer = Transfer::asPrimaries;   // BT.709 when the primaries are stated, else none
+    Space space = Space::none;                   // kCVImageBufferCGColorSpaceKey
+    Space profile = Space::none;                 // kCVImageBufferICCProfileKey
 };
+
+Owned<CGColorSpaceRef> colourSpaceOf(Space space)
+{
+    switch (space) {
+    case Space::srgb: return Owned<CGColorSpaceRef>(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
+    case Space::bt709: return Owned<CGColorSpaceRef>(CGColorSpaceCreateWithName(kCGColorSpaceITUR_709));
+    case Space::p3: return Owned<CGColorSpaceRef>(CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3));
+    case Space::linear: return Owned<CGColorSpaceRef>(CGColorSpaceCreateWithName(kCGColorSpaceLinearSRGB));
+    case Space::smpteC: {
+        // SMPTE-C primaries over D65, with a 2.2 gamma: a colour space that is not sRGB and has no name of its own.
+        const CGFloat white[3] = {0.9505, 1.0, 1.089};
+        const CGFloat gamma[3] = {2.2, 2.2, 2.2};
+        const CGFloat matrix[9] = {0.3936, 0.2124, 0.0187, 0.3653, 0.7011, 0.1119, 0.1916, 0.0865, 0.9582};
+        return Owned<CGColorSpaceRef>(CGColorSpaceCreateCalibratedRGB(white, nullptr, gamma, matrix));
+    }
+    case Space::none: break;
+    }
+    return Owned<CGColorSpaceRef>();
+}
 
 // The upper half of the picture ramps up along x (16 to 254) and the lower half is flat grey; the left half of the
 // picture is red and the right half has no colour. Turned half around, the ramp is in the lower half and falls, and the
@@ -78,18 +101,23 @@ Owned<CVPixelBufferRef> photoOf(std::size_t width, std::size_t height, OSType fo
     if (tags.matrix601) CVBufferSetAttachment(pixels, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVAttachmentMode_ShouldPropagate);
     if (tags.matrix709) CVBufferSetAttachment(pixels, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
     if (tags.primaries != Primaries::none) {
-        CVBufferSetAttachment(pixels, kCVImageBufferColorPrimariesKey,
-                              tags.primaries == Primaries::p3 ? kCVImageBufferColorPrimaries_P3_D65 : kCVImageBufferColorPrimaries_ITU_R_709_2,
-                              kCVAttachmentMode_ShouldPropagate);
-        CVBufferSetAttachment(pixels, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+        CFStringRef primaries = tags.primaries == Primaries::p3 ? kCVImageBufferColorPrimaries_P3_D65
+            : tags.primaries == Primaries::smpteC ? kCVImageBufferColorPrimaries_SMPTE_C : kCVImageBufferColorPrimaries_ITU_R_709_2;
+        CVBufferSetAttachment(pixels, kCVImageBufferColorPrimariesKey, primaries, kCVAttachmentMode_ShouldPropagate);
     }
-    if (tags.p3Space) {
-        Owned<CGColorSpaceRef> p3(CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3));
-        CVBufferSetAttachment(pixels, kCVImageBufferCGColorSpaceKey, p3.get(), kCVAttachmentMode_ShouldPropagate);
+    const Transfer transfer = tags.transfer == Transfer::asPrimaries ? (tags.primaries == Primaries::none ? Transfer::none : Transfer::bt709) : tags.transfer;
+    if (transfer != Transfer::none) {
+        CFStringRef function = transfer == Transfer::srgb ? kCVImageBufferTransferFunction_sRGB
+            : transfer == Transfer::linear ? kCVImageBufferTransferFunction_Linear : kCVImageBufferTransferFunction_ITU_R_709_2;
+        CVBufferSetAttachment(pixels, kCVImageBufferTransferFunctionKey, function, kCVAttachmentMode_ShouldPropagate);
     }
-    if (tags.p3Profile) {
-        Owned<CGColorSpaceRef> p3(CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3));
-        Owned<CFDataRef> icc(CGColorSpaceCopyICCData(p3.get()));
+    if (tags.space != Space::none) {
+        const auto space = colourSpaceOf(tags.space);
+        CVBufferSetAttachment(pixels, kCVImageBufferCGColorSpaceKey, space.get(), kCVAttachmentMode_ShouldPropagate);
+    }
+    if (tags.profile != Space::none) {
+        const auto space = colourSpaceOf(tags.profile);
+        Owned<CFDataRef> icc(CGColorSpaceCopyICCData(space.get()));
         CVBufferSetAttachment(pixels, kCVImageBufferICCProfileKey, icc.get(), kCVAttachmentMode_ShouldPropagate);
     }
     return buffer;
@@ -145,7 +173,7 @@ std::vector<std::pair<std::uint8_t, std::vector<std::uint8_t>>> segmentsOf(const
 void aPhotoIsTurnedHalfAroundWithNoProfile()
 {
     const auto photo = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, {});
-    const auto turned = turnedStillOf(photo.get(), 90, 0);
+    const auto turned = turnedStillOf(photo.get(), 90, 0, true);
     require(turned.failure == TurnedStillFailure::none, "the photo is turned and encoded");
     require(turned.jpeg.size() > 4 && turned.jpeg[0] == 0xff && turned.jpeg[1] == 0xd8, "a JPEG");
     const auto segments = segmentsOf(turned.jpeg);
@@ -161,13 +189,35 @@ void aPhotoIsTurnedHalfAroundWithNoProfile()
     require(std::abs(redness(rgba, kWidth, 20, 40)) < 25, "and the left has none");
 
     // The quality is the caller's.
-    const auto rough = turnedStillOf(photo.get(), 10, 0);
+    const auto rough = turnedStillOf(photo.get(), 10, 0, true);
     require(rough.failure == TurnedStillFailure::none && rough.jpeg.size() < turned.jpeg.size(), "a lower quality is a smaller file");
-    // A photo that states no colour at all is as the platform's own files were: untagged, and delivered.
+    // A photo that states no colour at all is as the platform's own files were: untagged, and delivered when the capture was
+    // held in sRGB.
     Tags bare;
     bare.primaries = Primaries::none;
     const auto plain = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, bare);
-    require(turnedStillOf(plain.get(), 90, 0).failure == TurnedStillFailure::none, "a photo that states no colour is delivered untagged");
+    require(turnedStillOf(plain.get(), 90, 0, true).failure == TurnedStillFailure::none, "a photo that states no colour is delivered untagged");
+    // A photo that states its colours as sRGB's or BT.709's is delivered whatever the capture's colour space was.
+    const auto delivered = [&](const char* what, const Tags& tags) {
+        const auto photo = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, tags);
+        require(turnedStillOf(photo.get(), 90, 0, false).failure == TurnedStillFailure::none, what);
+    };
+    delivered("BT.709 primaries over the BT.709 transfer", {});
+    Tags tags;
+    tags.transfer = Transfer::srgb;
+    delivered("BT.709 primaries over the sRGB transfer", tags);
+    tags = {};
+    tags.primaries = Primaries::none;
+    tags.space = Space::srgb;
+    delivered("an sRGB colour space object alone", tags);
+    tags.space = Space::bt709;
+    delivered("a BT.709 colour space object", tags);
+    tags = {};
+    tags.primaries = Primaries::none;
+    tags.profile = Space::srgb;
+    delivered("an sRGB ICC profile alone", tags);
+    tags.profile = Space::bt709;
+    delivered("a BT.709 ICC profile", tags);
     std::printf("  %zux%zu photo: %zu bytes at quality 90, %zu at 10, no profile\n", kWidth, kHeight, turned.jpeg.size(), rough.jpeg.size());
 }
 
@@ -193,45 +243,70 @@ void aFileOverTheBoundIsNotDelivered()
     }
     CVPixelBufferUnlockBaseAddress(noisy.get(), 0);
     CVBufferSetAttachment(noisy.get(), kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVAttachmentMode_ShouldPropagate);
-    const auto whole = turnedStillOf(noisy.get(), 100, 0);
+    const auto whole = turnedStillOf(noisy.get(), 100, 0, true);
     require(whole.failure == TurnedStillFailure::none && whole.jpeg.size() > 100000, "the noisy picture makes a large file");
     const std::uint64_t exact = whole.jpeg.size();
-    require(turnedStillOf(noisy.get(), 100, exact).failure == TurnedStillFailure::none, "a file at the bound is delivered");
-    const auto over = turnedStillOf(noisy.get(), 100, exact - 1);
+    require(turnedStillOf(noisy.get(), 100, exact, true).failure == TurnedStillFailure::none, "a file at the bound is delivered");
+    const auto over = turnedStillOf(noisy.get(), 100, exact - 1, true);
     require(over.failure == TurnedStillFailure::failed && over.jpeg.empty(), "a file one byte over is not");
-    require(turnedStillOf(noisy.get(), 100, exact / 2).failure == TurnedStillFailure::failed, "nor is one far over");
+    require(turnedStillOf(noisy.get(), 100, exact / 2, true).failure == TurnedStillFailure::failed, "nor is one far over");
 }
 
 void aPhotoThatCannotBeTurnedIsRefused()
 {
-    require(turnedStillOf(nullptr, 90, 0).failure == TurnedStillFailure::noPixels, "no photo");
+    require(turnedStillOf(nullptr, 90, 0, true).failure == TurnedStillFailure::noPixels, "no photo");
     const auto video = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, {});
-    require(turnedStillOf(video.get(), 90, 0).failure == TurnedStillFailure::unsupportedFormat, "video range is not turned");
+    require(turnedStillOf(video.get(), 90, 0, true).failure == TurnedStillFailure::unsupportedFormat, "video range is not turned");
     const auto odd = photoOf(kWidth + 1, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, {});
-    require(turnedStillOf(odd.get(), 90, 0).failure == TurnedStillFailure::unsupportedFormat, "an odd side is not");
+    require(turnedStillOf(odd.get(), 90, 0, true).failure == TurnedStillFailure::unsupportedFormat, "an odd side is not");
     Tags bt709;
     bt709.matrix601 = false;
     bt709.matrix709 = true;
     const auto other = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, bt709);
-    require(turnedStillOf(other.get(), 90, 0).failure == TurnedStillFailure::notBt601, "a BT.709 photo is refused: a JPEG would state BT.601");
-    // The colours are sRGB or the photo is not delivered: other primaries, a wide-gamut colour space object or profile.
-    Tags p3;
-    p3.primaries = Primaries::p3;
-    const auto widePrimaries = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, p3);
-    require(turnedStillOf(widePrimaries.get(), 90, 0).failure == TurnedStillFailure::notSrgb, "Display P3 primaries are refused");
-    Tags space;
-    space.matrix601 = true;
-    space.primaries = Primaries::none;
-    space.p3Space = true;
-    const auto wideSpace = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, space);
-    require(turnedStillOf(wideSpace.get(), 90, 0).failure == TurnedStillFailure::notSrgb, "so is a Display P3 colour space object");
-    Tags profile;
-    profile.primaries = Primaries::none;
-    profile.p3Profile = true;
-    const auto wideProfile = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, profile);
-    require(turnedStillOf(wideProfile.get(), 90, 0).failure == TurnedStillFailure::notSrgb, "and a Display P3 profile");
+    require(turnedStillOf(other.get(), 90, 0, true).failure == TurnedStillFailure::notBt601, "a BT.709 photo is refused: a JPEG would state BT.601");
+    // The colours are verified sRGB or the photo is not delivered: other primaries, another transfer, or a colour space object
+    // or a profile that is not sRGB's (BT.709's and sRGB's primaries are the same, and either transfer is accepted).
+    const auto refused = [&](const char* what, const Tags& tags) {
+        const auto photo = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, tags);
+        // Whatever the capture's colour space is: what the photo states is what counts.
+        require(turnedStillOf(photo.get(), 90, 0, true).failure == TurnedStillFailure::notSrgb, what);
+    };
+    Tags tags;
+    tags.primaries = Primaries::p3;
+    refused("Display P3 primaries are refused", tags);
+    tags = {};
+    tags.primaries = Primaries::smpteC;
+    refused("SMPTE-C primaries are refused", tags);
+    tags = {};
+    tags.transfer = Transfer::linear;
+    refused("BT.709 primaries over a linear transfer are refused: the untagged file would be read as sRGB", tags);
+    for (const Space other : {Space::p3, Space::smpteC, Space::linear}) {
+        tags = {};
+        tags.primaries = Primaries::none;
+        tags.space = other;
+        refused("a colour space object that is not sRGB's is refused", tags);
+        tags = {};
+        tags.primaries = Primaries::none;
+        tags.profile = other;
+        refused("and so is an ICC profile that is not", tags);
+    }
+    tags = {};
+    tags.primaries = Primaries::none;
+    tags.profile = Space::srgb;
+    tags.space = Space::smpteC;
+    refused("one colour space that is not sRGB's decides, whatever the others say", tags);
+
+    // A photo that states no colours is taken as the capture's own sRGB only where the capture is held in sRGB.
+    Tags bare;
+    bare.primaries = Primaries::none;
+    const auto unstated = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, bare);
+    require(turnedStillOf(unstated.get(), 90, 0, false).failure == TurnedStillFailure::unknownColours, "a photo that states no colours is refused when its capture was not sRGB");
+    Tags half;
+    half.transfer = Transfer::none;   // BT.709 primaries and no transfer
+    const auto partial = photoOf(kWidth, kHeight, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, half);
+    require(turnedStillOf(partial.get(), 90, 0, false).failure == TurnedStillFailure::unknownColours, "so is one that states the primaries and no transfer");
     for (const auto failure : {TurnedStillFailure::noPixels, TurnedStillFailure::unsupportedFormat, TurnedStillFailure::notBt601,
-                               TurnedStillFailure::notSrgb, TurnedStillFailure::noEncoder, TurnedStillFailure::timedOut, TurnedStillFailure::failed})
+                               TurnedStillFailure::notSrgb, TurnedStillFailure::unknownColours, TurnedStillFailure::noEncoder, TurnedStillFailure::timedOut, TurnedStillFailure::failed})
         require(!turnedStillFailureName(failure).empty() && turnedStillFailureName(failure) != "unknown");
 }
 

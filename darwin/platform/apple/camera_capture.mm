@@ -725,6 +725,7 @@ using uml::platform::SessionState;
                   maximumBytes:(uint64_t)maximumBytes
                        wantRaw:(BOOL)wantRaw
                       turnHalf:(BOOL)turnHalf
+                captureIsSrgb:(BOOL)captureIsSrgb
                    jpegQuality:(unsigned)jpegQuality
                        attempt:(unsigned)attempt
                          state:(std::shared_ptr<SessionState>)state;
@@ -966,18 +967,20 @@ bool activate(AVCaptureDevice* device, const Anchor& anchor, const std::optional
 // The photos of a camera whose stills the host turns are encoded with no colour profile, which a reader takes as sRGB, so its
 // capture stays in that colour space: selected here where the active format supports it (the session does not choose a
 // wide one over it, see AppleSession), and checked on every photo (turned_still.mm), which is refused when it states
-// other colours.
-void keepSrgbColourSpace(AVCaptureDevice* device)
+// other colours, or none and the capture was not held in sRGB. Whether the device's capture is in sRGB afterwards.
+bool keepSrgbColourSpace(AVCaptureDevice* device)
 {
     NSError* error = nil;
-    if (![device lockForConfiguration:&error]) return;
-    @try {
-        if (device.activeColorSpace != AVCaptureColorSpace_sRGB &&
-            [device.activeFormat.supportedColorSpaces containsObject:@(AVCaptureColorSpace_sRGB)])
-            device.activeColorSpace = AVCaptureColorSpace_sRGB;
-    } @catch (NSException*) {
+    if ([device lockForConfiguration:&error]) {
+        @try {
+            if (device.activeColorSpace != AVCaptureColorSpace_sRGB &&
+                [device.activeFormat.supportedColorSpaces containsObject:@(AVCaptureColorSpace_sRGB)])
+                device.activeColorSpace = AVCaptureColorSpace_sRGB;
+        } @catch (NSException*) {
+        }
+        [device unlockForConfiguration];
     }
-    [device unlockForConfiguration];
+    return device.activeColorSpace == AVCaptureColorSpace_sRGB;
 }
 #endif
 
@@ -1487,6 +1490,12 @@ public:
             return false;
         }
         if (chosen) settings.maxPhotoDimensions = CMVideoDimensions {std::int32_t(chosen->width), std::int32_t(chosen->height)};
+        // What the photo's colours are when it states none: the device's sRGB, if it is held.
+#if TARGET_OS_IOS
+        const BOOL captureIsSrgb = entry.device.activeColorSpace == AVCaptureColorSpace_sRGB;
+#else
+        const BOOL captureIsSrgb = NO;
+#endif
         UMLPhotoDelegate* delegate = [[UMLPhotoDelegate alloc] initWithCamera:camera
                                                                          token:request.token
                                                                       wantJpeg:request.jpegWidth != 0
@@ -1494,6 +1503,7 @@ public:
                                                                   maximumBytes:request.maximumJpegBytes
                                                                        wantRaw:request.raw
                                                                       turnHalf:turnsJpeg
+                                                                 captureIsSrgb:captureIsSrgb
                                                                    jpegQuality:request.jpegQuality
                                                                        attempt:attempt
                                                                          state:state_];
@@ -2364,7 +2374,9 @@ private:
             return guarded(camera, [&] {
                 const bool activated = activate(entry.device, *anchor, rate, true, ratioDone(camera));
 #if TARGET_OS_IOS
-                if (activated && entry.mounting.presentationTurn == 180) keepSrgbColourSpace(entry.device);
+                if (activated && entry.mounting.presentationTurn == 180 && !keepSrgbColourSpace(entry.device))
+                    std::fprintf(stderr, "Camera: camera %zu: the capture is not held in sRGB (colour space %ld): a photo that states no colours is refused\n",
+                                 camera, long(entry.device.activeColorSpace));
                 if (anchor->facts.pinnedRatio != CameraAspectRatio::none) ratioFacts = ratioFactsOf(entry.device, anchor->facts.pinnedRatio);
 #endif
                 return activated;
@@ -3138,6 +3150,8 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
     // The photo is uncompressed and turned half around into the JPEG (turnedStillOf), at the guest's quality; why it was
     // not, if it was not.
     BOOL _turnHalf;
+    // The capture's colour space was the device's sRGB when the photo was asked for.
+    BOOL _captureIsSrgb;
     unsigned _jpegQuality;
     uml::platform::TurnedStillFailure _turnFailure;
     // Which capture of the request this is (from one); a photo of another size makes the next.
@@ -3161,12 +3175,14 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
                   maximumBytes:(uint64_t)maximumBytes
                        wantRaw:(BOOL)wantRaw
                       turnHalf:(BOOL)turnHalf
+                captureIsSrgb:(BOOL)captureIsSrgb
                    jpegQuality:(unsigned)jpegQuality
                        attempt:(unsigned)attempt
                          state:(std::shared_ptr<SessionState>)state
 {
     if ((self = [super init])) {
         _turnHalf = turnHalf;
+        _captureIsSrgb = captureIsSrgb;
         _jpegQuality = jpegQuality;
         _turnFailure = uml::platform::TurnedStillFailure::none;
         _attempt = attempt;
@@ -3278,7 +3294,7 @@ void noteCompensation(uml::platform::CameraStillFailure& failure, AVCapturePhoto
     if (readings.orientation && *readings.orientation >= 1 && *readings.orientation <= 8) _exifOrientation = uint8_t(*readings.orientation);
     // The same bound as a photo's own file (takeJpegFile), kept by the encoder: a file larger than the guest's buffer is
     // not copied out of it, and none of the host's copies of it is made.
-    auto turned = uml::platform::turnedStillOf(photo.pixelBuffer, _jpegQuality, _maximumBytes);
+    auto turned = uml::platform::turnedStillOf(photo.pixelBuffer, _jpegQuality, _maximumBytes, _captureIsSrgb);
     if (turned.failure != uml::platform::TurnedStillFailure::none) {
         _turnFailure = turned.failure;
         std::fprintf(stderr, "Camera: camera %zu: the photo could not be turned half around: %s\n", _camera,
