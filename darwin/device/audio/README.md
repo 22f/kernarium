@@ -66,8 +66,11 @@ carries an interruption context for the system's own, and the system's
 resumption recommendation. Earlier iOS reports both in
 `AVAudioSessionInterruptionNotification`, whose end carries the same advice in
 its options. The sink and the microphone observe whichever the running system
-posts. The engine and player calls that report an error exist from iOS 27;
-earlier systems use the calls without a report.
+posts. The sink acts on interruption events in the order they arrived, an end
+that a later beginning overtook being skipped, and the microphone ignores a
+route change that began before an interruption did. The engine and player calls
+that report an error exist from iOS 27; earlier systems use the calls without a
+report, and a player that is not playing after its start is a failed start.
 
 An engine made on an output route that was lost (the app spent time in the
 background) never starts again, so the sink replaces it. A start with no route,
