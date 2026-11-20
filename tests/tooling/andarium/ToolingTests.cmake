@@ -47,14 +47,9 @@ uml_add_tooling_test(
 # The AppStore and TestFlight configurations build an application that passes
 # this check as its last build phase; the fixtures show it finds each problem the
 # script's header lists, and leaves the guest kernel image alone. They also show
-# Send feedback present only where the build names a receiver, Buy me tokens only
-# where it names its four product identifiers, Review on the App Store only where
-# it names the application's identifier, Follow developer on X only where it names
-# a handle, the ICP filing number only where it names the number, and the tip
-# header's developer only where the product has Buy me tokens and the build names
-# the value, in either direction; and that a TestFlight product carries none of
-# Buy me tokens, Review on the App Store and the ICP filing number, whatever the
-# local values are, and that an AppStore bundle holds the App Store track of the
+# Send feedback present only where the build names a receiver and Follow
+# developer on X only where it names a handle, in either direction; and that an
+# AppStore bundle holds the App Store track of the
 # What's New notes and not the beta track, a TestFlight bundle the reverse, and
 # that each has its configuration's app icon and an AppStore bundle holds
 # nothing of the TestFlight one. A supplied value is searched in every file in
@@ -79,20 +74,6 @@ uml_add_tooling_test(
         --root ${PROJECT_SOURCE_DIR}
     LABELS andarium
     TIMEOUT 60)
-
-# Buy me tokens' words are held to App Store Review Guideline 3.1.1: no donation,
-# plan, subscription, unlock, upgrade, premium, credit, balance or token amount
-# in any language of the table, and the English source says a tip is a voluntary
-# one-time purchase and every feature is free either way. The fixtures show the
-# check finds each, and the application's own table passes.
-uml_add_tooling_test(
-    NAME andarium-tip-words
-    COMMAND ${Python3_EXECUTABLE} -B
-        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_check_tip_words.py
-        --checker ${PROJECT_SOURCE_DIR}/Andarium/scripts/check-tip-words.py
-        --table ${PROJECT_SOURCE_DIR}/Andarium/Localization/TipJar.xcstrings
-    LABELS andarium
-    TIMEOUT 120)
 
 # The document pickers open files in place in the App Store configuration and
 # present the copy-mode picker in every other: the sources are read as the
@@ -121,20 +102,6 @@ uml_add_tooling_test(
         --root ${PROJECT_SOURCE_DIR}
     LABELS andarium
     TIMEOUT 180)
-
-# The App Store notice of TestFlight builds is built in by the TestFlight
-# configuration alone: the resolved build settings of each configuration, with an
-# identifier stated as the local file would hold it and with none, name its
-# identifier, compilation condition, Info.plist key and String Catalog table
-# only there, leave Review on the App Store to AppStore, and leave the preview
-# target to the command line's arrangement.
-uml_add_tooling_test(
-    NAME andarium-store-link-configuration
-    COMMAND ${Python3_EXECUTABLE} -B
-        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_store_link_configuration.py
-        --root ${PROJECT_SOURCE_DIR}
-    LABELS andarium
-    TIMEOUT 300)
 
 # The release build refuses an embedded artifact that is behind the commit it
 # archives; the fixtures build a repository, a staged system and an application

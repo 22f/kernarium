@@ -83,13 +83,8 @@ class Tree:
             }),
             "JIT": catalog({"Preparing JIT": entry(ja="JITを準備中", zh_Hans="正在准备JIT", zh_Hant="正在準備JIT")}),
             "Feedback": catalog({"Send feedback": entry(ja="フィードバックを送信", zh_Hans="发送反馈", zh_Hant="傳送回饋")}),
-            "TipJar": catalog({"Buy me tokens": entry(ja="トークンをおごる", zh_Hans="请我喝点Token", zh_Hant="請我喝點Token")}),
-            "Review": catalog({"Review on the App Store": entry(
-                ja="App Storeでレビューを書く", zh_Hans="在App Store中撰写评论", zh_Hant="在App Store中撰寫評論")}),
             "FollowX": catalog({"Follow developer on %@": entry(
                 ja="%@でデベロッパをフォロー", zh_Hans="在%@上关注开发者", zh_Hant="在%@上追蹤開發者")}),
-            "StoreLink": catalog({"View in App Store": entry(
-                ja="App Storeで見る", zh_Hans="在App Store中查看", zh_Hant="在App Store中檢視")}),
             "AppShortcuts": catalog({PHRASE: {"localizations": {
                 "en": phrases("Open ${target} in ${applicationName}", "Open an Android app in ${applicationName}"),
                 "ja": phrases("${applicationName}で${target}を開く", "${applicationName}でAndroidアプリを開く"),
@@ -461,10 +456,8 @@ class SyncTests(unittest.TestCase):
         self.data = self.scratch / "build" / "Home.stringsdata"
 
     def extract(self, *keys: str, jit: tuple[str, ...] = ("Preparing JIT",),
-                feedback: tuple[str, ...] = ("Send feedback",), tipjar: tuple[str, ...] = ("Buy me tokens",),
-                review: tuple[str, ...] = ("Review on the App Store",),
+                feedback: tuple[str, ...] = ("Send feedback",),
                 follow: tuple[str, ...] = ("Follow developer on %@",),
-                storelink: tuple[str, ...] = ("View in App Store",),
                 shortcuts: tuple[str, ...] = (PHRASE,)) -> None:
         self.data.parent.mkdir(parents=True, exist_ok=True)
 
@@ -472,8 +465,8 @@ class SyncTests(unittest.TestCase):
             return [{"comment": "", "key": key, "location": {"startingColumn": 1, "startingLine": 1}} for key in texts]
 
         body = {"source": str(self.root / self.source), "tables": {
-            "Localizable": table(keys), "JIT": table(jit), "Feedback": table(feedback), "TipJar": table(tipjar),
-            "Review": table(review), "FollowX": table(follow), "StoreLink": table(storelink),
+            "Localizable": table(keys), "JIT": table(jit), "Feedback": table(feedback),
+            "FollowX": table(follow),
             "AppShortcuts": [
                 {"key": key, "location": {"startingColumn": 1, "startingLine": 1},
                  "values": [key, "Open an Android app in ${applicationName}"] if key == PHRASE else [key]}
@@ -534,38 +527,9 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("Feedback: has no extracted strings: build with FEEDBACK_ADDRESS=feedback@example.com", problems[0])
 
-    def test_a_missing_tip_or_review_string_is_found(self) -> None:
-        keys = ("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
-        self.extract(*keys, tipjar=("Buy me tokens", "A new tip text"))
-        problems = self.sync("--check")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("TipJar: is out of step with the code: 1 to add ['A new tip text']", problems[0])
-        self.extract(*keys, review=("Review on the App Store", "A new review text"))
-        problems = self.sync("--check")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("Review: is out of step with the code: 1 to add ['A new review text']", problems[0])
-
-    def test_a_development_build_without_a_feature_is_refused_not_read_as_stale(self) -> None:
-        keys = ("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
-        self.extract(*keys, tipjar=())
-        problems = self.sync("--check")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("TipJar: has no extracted strings: build with TIP_LITE", problems[0])
-        self.extract(*keys, review=())
-        problems = self.sync("--check")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("Review: has no extracted strings: build with REVIEW_ID=id0000000000", problems[0])
-
     def test_an_app_store_build_without_a_feature_has_no_table_to_compare(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(), tipjar=(), review=(), follow=())
+        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(), follow=())
         self.assertEqual(self.sync("--check", "--app-store"), [])
-
-    def test_an_app_store_build_with_a_tip_or_review_key_the_catalog_lacks_is_found(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(), review=(), follow=(),
-                     tipjar=("Buy me tokens", "A new tip text"))
-        problems = self.sync("--check", "--app-store")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("TipJar: is out of step with the code: 1 to add ['A new tip text']", problems[0])
 
     def test_a_follow_x_string_of_the_arranged_build_is_in_step(self) -> None:
         self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
@@ -585,11 +549,11 @@ class SyncTests(unittest.TestCase):
         self.assertIn("FollowX: has no extracted strings: build with FOLLOW_X_HANDLE=example_handle", problems[0])
 
     def test_an_app_store_build_without_a_handle_has_no_follow_x_table_to_compare(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(), tipjar=(), review=(), follow=())
+        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(), follow=())
         self.assertEqual(self.sync("--check", "--app-store"), [])
 
     def test_an_app_store_build_with_a_handle_is_held_to_the_follow_x_keys_it_lacks(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(), tipjar=(), review=(),
+        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(),
                      follow=("Follow developer on %@", "A new row text"))
         problems = self.sync("--check", "--app-store")
         self.assertEqual(len(problems), 1, problems)
@@ -606,35 +570,13 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("AppShortcuts: is out of step with the code: 1 to add ['Close ${target} in ${applicationName}']", problems[0])
 
-    def test_a_store_link_string_of_the_arranged_build_is_in_step(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
-        self.assertEqual(self.sync("--check"), [])
-
-    def test_a_missing_store_link_string_is_found(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of",
-                     storelink=("View in App Store", "A new notice text"))
-        problems = self.sync("--check")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("StoreLink: is out of step with the code: 1 to add ['A new notice text']", problems[0])
-
-    def test_a_development_build_without_the_notice_is_refused_not_read_as_stale(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of", storelink=())
-        problems = self.sync("--check")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("StoreLink: has no extracted strings: build with STORE_LINK_ID=id0000000000", problems[0])
-
-    def test_an_app_store_build_has_no_store_link_table_to_compare(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(), tipjar=(), review=(), follow=(),
-                     storelink=())
-        self.assertEqual(self.sync("--check", "--app-store"), [])
-
     def test_an_app_store_build_without_a_receiver_has_no_feedback_table_to_compare(self) -> None:
-        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(), tipjar=(), review=(), follow=())
+        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(), follow=())
         self.assertEqual(self.sync("--check", "--app-store"), [])
 
     def test_an_app_store_build_with_a_receiver_is_held_to_the_feedback_keys_it_lacks(self) -> None:
         self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=("Send feedback", "A new feedback text"),
-                     tipjar=(), review=(), follow=())
+                     follow=())
         problems = self.sync("--check", "--app-store")
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("Feedback: is out of step with the code: 1 to add ['A new feedback text']", problems[0])

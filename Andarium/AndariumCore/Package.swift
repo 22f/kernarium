@@ -45,38 +45,11 @@ let package = Package(
             dependencies: ["AndariumCore"],
             swiftSettings: [.define("FEEDBACK_MAIL")]
         ),
-        // Buy me tokens' logic, for the package's tests only, built the way
-        // Send feedback's is: its sources are the application's own (a symlink to
-        // Andarium/Shared/TipJar/Logic), which the application compiles only where
-        // the tip jar is compiled in, so no product of the package carries any of
-        // it; here the condition is always set. Neither application links it.
-        .target(
-            name: "AndariumTipJarLogic",
-            swiftSettings: [.define("TIP_JAR")]
-        ),
-        // Review on the App Store's logic, for the package's tests only, built the
-        // same way (a symlink to Andarium/Shared/Review/Logic).
-        .target(
-            name: "AndariumReviewLogic",
-            swiftSettings: [.define("APP_REVIEW")]
-        ),
-        // The App Store notice's logic (TestFlight builds), for the package's tests
-        // only, by the same rule (a symlink to Andarium/Shared/StoreLink/Logic).
-        .target(
-            name: "AndariumStoreLinkLogic",
-            swiftSettings: [.define("TESTFLIGHT_STORE_LINK")]
-        ),
-        // Follow developer on X's logic, for the package's tests only, by the same
-        // rule (a symlink to Andarium/Shared/FollowX/Logic).
+        // Follow developer on X's logic, for the package's tests only, built the
+        // way Send feedback's is (a symlink to Andarium/Shared/FollowX/Logic).
         .target(
             name: "AndariumFollowXLogic",
             swiftSettings: [.define("FOLLOW_X")]
-        ),
-        // The ICP filing footnote's logic, for the package's tests only, by the same
-        // rule (a symlink to Andarium/Shared/ICP/Logic).
-        .target(
-            name: "AndariumICPLogic",
-            swiftSettings: [.define("ICP_FILING")]
         ),
         // A test-only tool that plays a gamepad script to the guest's relay.
         .executableTarget(
@@ -85,7 +58,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AndariumCoreTests",
-            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic", "AndariumFollowXLogic", "AndariumICPLogic", "AndariumTipJarLogic", "AndariumReviewLogic", "AndariumStoreLinkLogic"]
+            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic", "AndariumFollowXLogic"]
         ),
     ]
 )

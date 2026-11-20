@@ -418,12 +418,7 @@ mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
-FEEDBACK_ADDRESS=feedback@example.com REVIEW_ID=id0000000000 STORE_LINK_ID=id0000000000
-FOLLOW_X_HANDLE=example_handle
-TIP_LITE=com.example.andarium.tip.lite TIP_PRO=com.example.andarium.tip.pro
-TIP_MAX=com.example.andarium.tip.max TIP_ULTRA=com.example.andarium.tip.ultra
-SHEET_DEVELOPER_NAME=example SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle
-ICP_NUMBER=示例ICP备00000000号-0A`;
+FEEDBACK_ADDRESS=feedback@example.com FOLLOW_X_HANDLE=example_handle`;
 the scheme without the filter also runs `AndariumUITests`). A row that asserts
 what an iPad app on a Mac does not do (accessibility activation of an alert's
 buttons, text that scales with the content size category, a menu's items as
@@ -445,23 +440,11 @@ pages of its row) and
 that cannot be used there, the access held and stopped once) exist only in a
 build with `FEEDBACK_ADDRESS=feedback@example.com` on the command line, as the
 command above has it ([Send feedback](../Andarium/README.md#send-feedback)); a
-run without it does not build them. Each other feature's tests need the example
-values of its own: `FollowXRowTests` `FOLLOW_X_HANDLE=example_handle`
-([Follow developer on X](../Andarium/README.md#follow-developer-on-x)),
-`ICPFootnoteTests` `ICP_NUMBER=示例ICP备00000000号-0A`
-([ICP filing number](../Andarium/README.md#icp-filing-number)),
-`TipJarScreenTests`, `TipJarHeaderTests` and `TipJarStoreKitTests` the four
-`TIP_` settings and the `SHEET_DEVELOPER_*` placeholders
-([Buy me tokens](../Andarium/README.md#buy-me-tokens); the last plays
-StoreKit's test session over `AndariumTests/TipJar.storekit`, example
-identifiers only, never the App Store), and `ReviewScreenTests`,
-`ReviewAskFlowTests` and `ReviewAskStoreTests` `REVIEW_ID`
-([Review on the App Store](../Andarium/README.md#review-on-the-app-store); the
-system's rating prompt is never asked for), and `StoreNoticeTests` `STORE_LINK_ID`
-([App Store notice](../Andarium/README.md#app-store-notice); the system's `open`
-is replaced, so no address opens). `HomeMenuTests` (Home's toolbar
-menu) exist with any of Send feedback, Review and Buy me tokens, and
-`HomePlainInfoTests` (the plain Info button) only with none
+run without it does not build them. `FollowXRowTests` needs the example value of
+its own, `FOLLOW_X_HANDLE=example_handle`
+([Follow developer on X](../Andarium/README.md#follow-developer-on-x)).
+`HomeMenuTests` (Home's toolbar menu) exist with Send feedback, and
+`HomePlainInfoTests` (the plain Info button) only without it
 ([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
 `GuestSmsTests`, `GuestSmsChannelTests` and `TextMessageNoticeTests` (`AndariumCoreTests`)
 read the golden bytes of the text message channel and its payload, which the guest
@@ -469,10 +452,9 @@ service's tests read too, and run the exchange over socket pairs and a scripted
 system (deadline, cancellation); the hosted `TextMessageTests` play the bar over a
 fake driver: every state, the durable notice at each point where a session can end,
 and what VoiceOver has been told.
-`AndariumCoreTests` holds the tip sheet's states and the rating rule, counter
-and record as pure logic, and the state of the no-Google-apps notice (the panel
+`AndariumCoreTests` holds the state of the no-Google-apps notice (the panel
 on a first start and on the retry of a first Android boot that did not finish,
-and nothing else).
+and nothing else) as pure logic.
 `NoGoogleNoticeScreenTests` host the real boot screen and Send feedback sheet
 for it (the panel reached on those starts and gone with the boot, the starts
 that show none, the line opening and closing in place and coming back with each
@@ -651,15 +633,6 @@ device slice it packages), `Andarium/scripts/check-app-store-bundle.py`
 (`andarium-app-store-bundle`, the last build phase of the AppStore and
 TestFlight configurations,
 [configurations](../Andarium/README.md#configurations)), the
-tip sheet's words (`andarium-tip-words`: `Andarium/scripts/check-tip-words.py`
-rejects the forbidden terms of each language and a token amount in the
-`TipJar` table, and requires the statement that a tip is voluntary, one-time
-and the features free; the bundle check also covers the developer header's
-keys and artwork),
-the App Store notice's build conditions (`andarium-store-link-configuration`: the
-resolved build settings of each configuration build it into TestFlight alone, and
-`AndariumCore`'s `StoreLinkTests` hold its address, its dismissal record and its
-visibility rule),
 document pickers' build conditions (`andarium-document-pickers`: the App Store
 configuration opens files in place, every other presents the copy-mode picker,
 and an in-place importer anywhere else is in an App Store branch or a named

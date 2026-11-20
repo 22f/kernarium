@@ -42,8 +42,6 @@
         { "path": "PrivacyInfo.xcprivacy", "target-membership": [ "Andarium/resources" ] },
         { "path": "Andarium.xcconfig" },
         { "path": "Feedback.local.xcconfig.example" },
-        { "path": "TipJar.local.xcconfig.example" },
-        { "path": "Review.local.xcconfig.example" },
         { "path": "Developer.local.xcconfig.example" },
       ],
     }, {
@@ -76,24 +74,6 @@
           ],
         }, {
           "path": "Feedback.xcstrings",
-          "target-membership": [
-            "Andarium/resources",
-            "AndariumPreview/resources",
-          ],
-        }, {
-          "path": "TipJar.xcstrings",
-          "target-membership": [
-            "Andarium/resources",
-            "AndariumPreview/resources",
-          ],
-        }, {
-          "path": "Review.xcstrings",
-          "target-membership": [
-            "Andarium/resources",
-            "AndariumPreview/resources",
-          ],
-        }, {
-          "path": "StoreLink.xcstrings",
           "target-membership": [
             "Andarium/resources",
             "AndariumPreview/resources",
@@ -163,12 +143,8 @@
             "    exit 1",
             "  }",
             "}",
-            "if [ \"$FOLLOW_X_LOGO_SOURCE\" = local ] && { [ -n \"$FOLLOW_X_HANDLE\" ] || [ -n \"$SHEET_DEVELOPER_X\" ]; }; then",
+            "if [ \"$FOLLOW_X_LOGO_SOURCE\" = local ] && [ -n \"$FOLLOW_X_HANDLE\" ]; then",
             "  need x-logo.svg \"the X logo\"",
-            "fi",
-            "if [ \"$SHEET_ARTWORK_SOURCE\" = local ]; then",
-            "  [ -z \"$SHEET_DEVELOPER_GITHUB\" ] || need github-logo.svg \"the GitHub mark\"",
-            "  [ -z \"$SHEET_DEVELOPER_NAME\" ] || need developer-avatar.jpeg \"the developer's avatar\"",
             "fi",
             "",
           ],
@@ -214,7 +190,7 @@
           "shell": "/bin/sh",
           "script": [
             "case \"$CONFIGURATION\" in AppStore|TestFlight) ;; *) exit 0 ;; esac",
-            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --configuration \"$CONFIGURATION\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --tip-products \"$TIP_LITE,$TIP_PRO,$TIP_MAX,$TIP_ULTRA\" --tip-local-products \"$TIP_PRODUCT_LITE,$TIP_PRODUCT_PRO,$TIP_PRODUCT_MAX,$TIP_PRODUCT_ULTRA\" --review-id \"$REVIEW_ID\" --review-local-id \"$REVIEW_APP_ID\" --store-link-id \"$STORE_LINK_ID\" --follow-x-handle \"$FOLLOW_X_HANDLE\" --developer-x-handle \"$DEVELOPER_X_HANDLE\" --developer-name \"$SHEET_DEVELOPER_NAME\" --developer-github \"$SHEET_DEVELOPER_GITHUB\" --developer-x \"$SHEET_DEVELOPER_X\" --developer-local-github \"$DEVELOPER_GITHUB_HANDLE\" --icp-number \"$ICP_NUMBER\" --icp-local-number \"$DEVELOPER_ICP_NUMBER\" --info-source \"$SRCROOT/Config/Info.plist\" --beta-notes \"$SRCROOT/Andarium/Shared/WhatsNew.json\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --configuration \"$CONFIGURATION\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --follow-x-handle \"$FOLLOW_X_HANDLE\" --developer-x-handle \"$DEVELOPER_X_HANDLE\" --info-source \"$SRCROOT/Config/Info.plist\" --beta-notes \"$SRCROOT/Andarium/Shared/WhatsNew.json\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
         }, {
@@ -229,78 +205,6 @@
           "script": [
             "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
             "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --feedback --configuration \"$CONFIGURATION\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
-            "",
-          ],
-        }, {
-          "kind": "script",
-          "name": "Check Buy me tokens",
-          "input-paths": [
-            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
-            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
-            "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Assets.car",
-          ],
-          "run-on-every-build": true,
-          "shell": "/bin/sh",
-          "script": [
-            "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
-            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --tip-jar --configuration \"$CONFIGURATION\" --tip-products \"$TIP_LITE,$TIP_PRO,$TIP_MAX,$TIP_ULTRA\" --tip-local-products \"$TIP_PRODUCT_LITE,$TIP_PRODUCT_PRO,$TIP_PRODUCT_MAX,$TIP_PRODUCT_ULTRA\" --developer-name \"$SHEET_DEVELOPER_NAME\" --developer-github \"$SHEET_DEVELOPER_GITHUB\" --developer-x \"$SHEET_DEVELOPER_X\" --developer-local-github \"$DEVELOPER_GITHUB_HANDLE\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
-            "",
-          ],
-        }, {
-          "kind": "script",
-          "name": "Check Review on the App Store",
-          "input-paths": [
-            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
-            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
-          ],
-          "run-on-every-build": true,
-          "shell": "/bin/sh",
-          "script": [
-            "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
-            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --review --configuration \"$CONFIGURATION\" --review-id \"$REVIEW_ID\" --review-local-id \"$REVIEW_APP_ID\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
-            "",
-          ],
-        }, {
-          "kind": "script",
-          "name": "Check App Store notice",
-          "input-paths": [
-            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
-            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
-          ],
-          "run-on-every-build": true,
-          "shell": "/bin/sh",
-          "script": [
-            "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
-            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --store-link --configuration \"$CONFIGURATION\" --store-link-id \"$STORE_LINK_ID\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
-            "",
-          ],
-        }, {
-          "kind": "script",
-          "name": "Check Follow developer on X",
-          "input-paths": [
-            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
-            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
-            "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Assets.car",
-          ],
-          "run-on-every-build": true,
-          "shell": "/bin/sh",
-          "script": [
-            "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
-            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --follow-x --configuration \"$CONFIGURATION\" --follow-x-handle \"$FOLLOW_X_HANDLE\" --developer-x \"$SHEET_DEVELOPER_X\" --developer-x-handle \"$DEVELOPER_X_HANDLE\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
-            "",
-          ],
-        }, {
-          "kind": "script",
-          "name": "Check ICP filing number",
-          "input-paths": [
-            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
-            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
-          ],
-          "run-on-every-build": true,
-          "shell": "/bin/sh",
-          "script": [
-            "case \"$CONFIGURATION\" in AppStore|TestFlight) exit 0 ;; esac",
-            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --icp --configuration \"$CONFIGURATION\" --icp-number \"$ICP_NUMBER\" --icp-local-number \"$DEVELOPER_ICP_NUMBER\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
         }, {
@@ -353,7 +257,7 @@
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
         "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
         "INFOPLIST_PREPROCESS": "YES",
-        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(TIP_JAR_PLIST_DEFINITION) $(REVIEW_PLIST_DEFINITION) $(STORE_LINK_PLIST_DEFINITION) $(DEVELOPER_PLIST_DEFINITIONS) $(FOLLOW_X_PLIST_DEFINITION) $(ICP_PLIST_DEFINITION)",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(FOLLOW_X_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
@@ -488,7 +392,6 @@
         "FEEDBACK_ADDRESS": "",
         "FOLLOW_X_HANDLE": "",
         "GENERATE_INFOPLIST_FILE": "YES",
-        "ICP_NUMBER": "",
         "INFOPLIST_FILE": "Config/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "Andarium",
         "INFOPLIST_KEY_NSCameraUsageDescription": "Andarium uses the camera only when you turn on Camera, so that apps in the virtual machine can use it.",
@@ -501,7 +404,7 @@
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
         "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
         "INFOPLIST_PREPROCESS": "YES",
-        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(TIP_JAR_PLIST_DEFINITION) $(REVIEW_PLIST_DEFINITION) $(STORE_LINK_PLIST_DEFINITION) $(DEVELOPER_PLIST_DEFINITIONS) $(FOLLOW_X_PLIST_DEFINITION) $(ICP_PLIST_DEFINITION)",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(FOLLOW_X_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
@@ -509,11 +412,6 @@
         "MARKETING_VERSION": "1.0",
         "PRODUCT_BUNDLE_IDENTIFIER": "com.imxieyi.AndariumPreview",
         "PRODUCT_NAME": "$(TARGET_NAME)",
-        "REVIEW_ID": "",
-        "SHEET_DEVELOPER_GITHUB": "",
-        "SHEET_DEVELOPER_NAME": "",
-        "SHEET_DEVELOPER_X": "",
-        "STORE_LINK_ID": "",
         "SUPPORTED_PLATFORMS": "iphonesimulator",
         "SUPPORTS_MACCATALYST": "NO",
         "SWIFT_APPROACHABLE_CONCURRENCY": "YES",
@@ -521,10 +419,6 @@
         "SWIFT_EMIT_LOC_STRINGS": "YES",
         "SWIFT_VERSION": "6.0",
         "TARGETED_DEVICE_FAMILY": "1,2",
-        "TIP_LITE": "",
-        "TIP_MAX": "",
-        "TIP_PRO": "",
-        "TIP_ULTRA": "",
         "WHATS_NEW_TRACK": "BETA",
       },
     }, {

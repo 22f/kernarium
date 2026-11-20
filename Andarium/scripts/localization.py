@@ -11,9 +11,6 @@ text is the key. The strings live in:
   Andarium/Localization/WhatsNew.xcstrings      the notes of both tracks, Shared/WhatsNew.json and Shared/WhatsNewAppStore.json
   Andarium/Localization/JIT.xcstrings           the JIT texts (table "JIT"), carried by the builds that have JIT only
   Andarium/Localization/Feedback.xcstrings      the texts of Send feedback (table "Feedback"), carried by the builds that have it only
-  Andarium/Localization/TipJar.xcstrings        the texts of Buy me tokens (table "TipJar"), carried by the builds that have it only
-  Andarium/Localization/Review.xcstrings        the text of Review on the App Store (table "Review"), carried by the builds that have it only
-  Andarium/Localization/StoreLink.xcstrings     the texts of the App Store notice (table "StoreLink"), carried by the TestFlight builds that have it only
   Andarium/Localization/FollowX.xcstrings       the text of Follow developer on X (table "FollowX"), carried by the builds that have it only
   Andarium/Localization/AppShortcuts.xcstrings  the phrases Siri and Search understand for Add to Home Screen (table "AppShortcuts")
   Andarium/AndariumCore/Sources/AndariumCore/Resources/Localizable.xcstrings
@@ -63,17 +60,11 @@ Feedback table, as the keys of code compiled out would read as stale. An App
 Store build with no receiver has none, and its Feedback catalog is not
 compared; one with a receiver is checked like the rest.
 
-Buy me tokens and Review on the App Store are the same: each has a table
-(TipJar, Review) built only where the feature is compiled in
-(Andarium/README.md#buy-me-tokens, #review-on-the-app-store). A development
-check needs a build that has them (the four `TIP_` settings and
-`REVIEW_ID=id0000000000` on the `xcodebuild` line) and fails on one that
-extracted no string of the table; an App Store build without the feature does
-not compare its catalog. Follow developer on X
-(Andarium/README.md#follow-developer-on-x) is the same with its FollowX table
-and `FOLLOW_X_HANDLE=example_handle`, and the App Store notice of TestFlight
-builds (Andarium/README.md#app-store-notice) with its StoreLink table and
-`STORE_LINK_ID=id0000000000`.
+Follow developer on X (Andarium/README.md#follow-developer-on-x) is the same
+with its FollowX table, built only where the build names a handle: a
+development check needs `FOLLOW_X_HANDLE=example_handle` on the `xcodebuild`
+line, fails on one that extracted no string of the table, and an App Store
+build without the row does not compare its catalog.
 """
 
 from __future__ import annotations
@@ -107,9 +98,6 @@ CATALOGS = {
     "WhatsNew": "Andarium/Localization/WhatsNew.xcstrings",
     "JIT": "Andarium/Localization/JIT.xcstrings",
     "Feedback": "Andarium/Localization/Feedback.xcstrings",
-    "TipJar": "Andarium/Localization/TipJar.xcstrings",
-    "Review": "Andarium/Localization/Review.xcstrings",
-    "StoreLink": "Andarium/Localization/StoreLink.xcstrings",
     "FollowX": "Andarium/Localization/FollowX.xcstrings",
     "AppShortcuts": "Andarium/Localization/AppShortcuts.xcstrings",
     "AndariumCore": CORE_CATALOG,
@@ -125,9 +113,6 @@ APPLICATION_TARGET = "Andarium"
 # build names it.
 FEATURE_TABLES = {
     "Feedback": "FEEDBACK_ADDRESS=feedback@example.com to compile Send feedback in",
-    "TipJar": "TIP_LITE, TIP_PRO, TIP_MAX and TIP_ULTRA (com.example.andarium.tip.lite and so on) to compile Buy me tokens in",
-    "Review": "REVIEW_ID=id0000000000 to compile Review on the App Store in",
-    "StoreLink": "STORE_LINK_ID=id0000000000 to compile the App Store notice in",
     "FollowX": "FOLLOW_X_HANDLE=example_handle to compile Follow developer on X in",
 }
 
@@ -136,9 +121,6 @@ SYNC_SOURCES = {
     "Localizable": ("Andarium/Andarium/", "GuestHost/Sources/"),
     "JIT": ("Andarium/Andarium/",),
     "Feedback": ("Andarium/Andarium/",),
-    "TipJar": ("Andarium/Andarium/",),
-    "Review": ("Andarium/Andarium/",),
-    "StoreLink": ("Andarium/Andarium/",),
     "FollowX": ("Andarium/Andarium/",),
     "AppShortcuts": ("Andarium/Andarium/",),
     "AndariumCore": ("Andarium/AndariumCore/Sources/AndariumCore/",),

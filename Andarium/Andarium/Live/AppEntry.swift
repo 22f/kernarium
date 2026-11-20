@@ -211,10 +211,6 @@ struct AppEntry {
         #else
         let markerDirectory = launch.instance == nil ? Self.supportDirectory() : locations.directory
         #endif
-        #if APP_REVIEW
-        // Before the previous session's record is read: it tells the prompt how the last run ended.
-        Self.addRatingPrompt(to: model)
-        #endif
         let marker = PauseMarker(url: markerDirectory.appendingPathComponent("pause.json"))
         let closedInBackground = marker.consume()
         if closedInBackground, guest != nil {
@@ -273,10 +269,6 @@ struct AppEntry {
         announceWhatsNew(
             on: model, hasGuest: guest != nil, vCPUs: guest?.cores ?? host.processorCount)
         model.alert = problem.map { AppAlert(title: String(localized: "Andarium is incomplete"), message: $0) }
-        #if APP_REVIEW
-        // Last: the ribbon and the alert above are part of what Home shows.
-        model.reviewAsk?.start()
-        #endif
         return model
     }
 

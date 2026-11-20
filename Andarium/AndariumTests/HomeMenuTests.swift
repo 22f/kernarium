@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#if FEEDBACK_MAIL || TIP_JAR || APP_REVIEW
+#if FEEDBACK_MAIL
 
 import AndariumCore
 import AndariumCoreTestSupport
@@ -16,9 +16,6 @@ import UIKit
 @MainActor
 @Suite(.serialized)
 struct HomeMenuTests {
-    #if TIP_JAR
-    private static let arranged = TipJarProductsFixture.arranged
-    #endif
 
     private func model(guest: Bool = true, feedback: Bool = true, review: Bool = true, tips: Bool = true) -> AppModel {
         let host = HostDevice(
@@ -34,12 +31,6 @@ struct HomeMenuTests {
         model.phase = .home
         #if FEEDBACK_MAIL
         model.feedbackServices.address = { feedback ? "feedback@example.com" : nil }
-        #endif
-        #if APP_REVIEW
-        model.reviewServices.link = { review ? ReviewLink(identifier: "id1234567890") : nil }
-        #endif
-        #if TIP_JAR
-        model.tipJarServices.products = { tips ? Self.arranged : nil }
         #endif
         return model
     }
@@ -60,12 +51,6 @@ struct HomeMenuTests {
         items.append(.sendFeedback)
         #endif
         if onHome {
-            #if APP_REVIEW
-            items.append(.reviewOnAppStore)
-            #endif
-            #if TIP_JAR
-            items.append(.buyMeTokens)
-            #endif
         }
         return items
     }
@@ -81,36 +66,6 @@ struct HomeMenuTests {
 
     // MARK: What the menu holds
 
-    #if FEEDBACK_MAIL && TIP_JAR && APP_REVIEW
-    /// All three features: the eight combinations, in the order the menu shows them.
-    @Test func theMenuFollowsTheFeaturesInEachOfTheEightCombinations() {
-        for feedback in [false, true] {
-            for review in [false, true] {
-                for tips in [false, true] {
-                    var expected: [HomeMenuItem] = [.info]
-                    if feedback { expected.append(.sendFeedback) }
-                    if review { expected.append(.reviewOnAppStore) }
-                    if tips { expected.append(.buyMeTokens) }
-                    #expect(
-                        model(feedback: feedback, review: review, tips: tips).homeMenuItems == expected,
-                        "feedback \(feedback), review \(review), tips \(tips)")
-                }
-            }
-        }
-        #expect(model().homeMenuItems == [.info, .sendFeedback, .reviewOnAppStore, .buyMeTokens])
-    }
-
-    /// Welcome, before a virtual machine is set up: Send feedback is there, the other two never are.
-    @Test func onWelcomeTheMenuHoldsInfoAndSendFeedbackAndNothingElse() {
-        for review in [true, false] {
-            for tips in [true, false] {
-                #expect(
-                    model(guest: false, feedback: true, review: review, tips: tips).homeMenuItems == [.info, .sendFeedback])
-                #expect(model(guest: false, feedback: false, review: review, tips: tips).homeMenuItems == [.info])
-            }
-        }
-    }
-    #endif
 
     /// Whatever the build compiled in: each item is there exactly where its feature is configured
     /// and, for the two that need a virtual machine, where one is set up.
@@ -130,18 +85,6 @@ struct HomeMenuTests {
         #expect(model.feedbackSheetOpen)
         #expect(model.sheet == nil, "Send feedback is its own sheet, not a page of Info")
         model.feedbackSheetOpen = false
-        #endif
-        #if APP_REVIEW
-        var opened: [URL] = []
-        model.reviewServices.open = { opened.append($0) }
-        model.choose(.reviewOnAppStore)
-        #expect(opened.map(\.absoluteString) == ["https://apps.apple.com/app/id1234567890?action=write-review"])
-        #expect(model.sheet == nil, "the item opens the App Store, not a sheet")
-        #endif
-        #if TIP_JAR
-        model.choose(.buyMeTokens)
-        #expect(model.tipJarSheetOpen)
-        model.tipJarSheetOpen = false
         #endif
         #expect(model.sheet == nil)
     }
@@ -223,12 +166,6 @@ struct HomeMenuTests {
         #if FEEDBACK_MAIL
         case .sendFeedback: "Send feedback"
         #endif
-        #if APP_REVIEW
-        case .reviewOnAppStore: "Review on the App Store"
-        #endif
-        #if TIP_JAR
-        case .buyMeTokens: String(localized: TipJarWords.name)
-        #endif
         }
     }
 
@@ -301,17 +238,6 @@ struct HomeMenuTests {
         expectPlainInfo(controller)
     }
 
-    #if TIP_JAR || APP_REVIEW
-    /// On Welcome the review and tip items never show, so without Send feedback Info is plain there.
-    @Test func withNothingAvailableOnWelcomeInfoIsThePlainButtonAgain() async throws {
-        let model = model(guest: false, feedback: false, review: true, tips: true)
-        let (controller, lease) = try await host(model)
-        defer { lease.give() }
-        try await Task.sleep(for: .seconds(1))
-        #expect(model.homeMenuItems == [.info])
-        expectPlainInfo(controller)
-    }
-    #endif
 
     #if FEEDBACK_MAIL
     @Test func sendFeedbackOpensOverHomeFromTheMenu() async throws {
@@ -325,20 +251,6 @@ struct HomeMenuTests {
     }
     #endif
 
-    #if TIP_JAR
-    @Test func buyMeTokensOpensOverHomeFromTheMenuAndNeverByItself() async throws {
-        let model = model()
-        let (controller, lease) = try await host(model)
-        defer { lease.give() }
-        // Nothing prompts: Home stays as it is while the app waits.
-        try await Task.sleep(for: .seconds(2))
-        #expect(controller.presentedViewController == nil && !model.tipJarSheetOpen)
-        model.choose(.buyMeTokens)
-        #expect(await eventually { controller.presentedViewController != nil }, "the sheet is over Home")
-        model.tipJarSheetOpen = false
-        #expect(await eventually { controller.presentedViewController == nil })
-    }
-    #endif
 
     // MARK: Info
 

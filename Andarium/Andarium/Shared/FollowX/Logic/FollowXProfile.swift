@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#if FOLLOW_X || SHEET_X
+#if FOLLOW_X
 
 import Foundation
 
 // Follow developer on X's logic: plain values and rules, no UIKit. The
-// application compiles this file where the row is compiled in and where the
-// Buy me tokens header has an X button, which builds its address the same way
-// from a handle of its own; the AndariumCore package compiles the same file
-// for its tests (Andarium/README.md#follow-developer-on-x).
+// application compiles this file where the row is compiled in; the
+// AndariumCore package compiles the same file for its tests
+// (Andarium/README.md#follow-developer-on-x).
 
 /// The developer's profile on X: a handle and the address built from it. The
 /// address is made here and nowhere else, so no file holds a profile address;

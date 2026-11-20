@@ -486,15 +486,6 @@ struct AppEntry {
         #if FEEDBACK_MAIL
         FeedbackPreview.configure(screen: screen, model: model)
         #endif
-        #if TIP_JAR
-        TipJarPreview.configure(screen: screen, model: model)
-        #endif
-        #if ICP_FILING
-        ICPPreview.configure(model: model)
-        #endif
-        #if TESTFLIGHT_STORE_LINK
-        StoreNoticePreview.configure(model: model)
-        #endif
         if let statsReadings {
             model.session.readout = Readout(
                 previewReadings: statsReadings, memoryMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound
@@ -772,11 +763,6 @@ struct AppEntry {
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",
              "whatsnew-history", "whatsnew-history-nofeedback":
             model.sheet = .info
-        case "info-bottom":
-            // Info scrolled to its end, where the footnote of the filing number is.
-            model.sheet = .info
-            try? await Task.sleep(for: .milliseconds(1200))
-            await PreviewScroll.toBottomOfFrontSheet()
         #if FEEDBACK_MAIL
         case "home-menu", "welcome-menu":
             // Home's toolbar menu open, as a tap leaves it.
