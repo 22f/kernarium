@@ -34,6 +34,12 @@
 // info took its stages from fields of another layout, so it is refused instead.
 // The key of the device, a create info of NULL, is served.
 //
+// A shader stage that names no shader (no module, nothing chained, no
+// identifier) or no entry point name is invalid, and the runtime's hash of the
+// stage used to read the identifier and measure the name it does not have. The
+// pipeline is refused with an error and a null handle, and the key of such a
+// pipeline is answered, not crashed on.
+//
 // A partly failed import returns the first failure and keeps the binaries it
 // made before it, which the caller owns (the Venus renderer relies on this, and
 // destroys them when it does not hand them on). VkPipelineBinaryCreateInfoKHR's
@@ -524,6 +530,57 @@ void importedBinariesMakeAPipeline()
     context.CALL(DestroyPipelineLayout, context.device, layout, nullptr);
 }
 
+// A compute create info whose stage's module is null and whose chain names no
+// shader, or whose entry point name is absent.
+struct StageWithNoShader {
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo moduleInfo = structure<VkShaderModuleCreateInfo>(VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO);
+    VkComputePipelineCreateInfo info = structure<VkComputePipelineCreateInfo>(VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO);
+
+    StageWithNoShader(Context &context, bool chainedModule, const char *name)
+    {
+        auto layoutInfo = structure<VkPipelineLayoutCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
+        check(context.CALL(CreatePipelineLayout, context.device, &layoutInfo, nullptr, &layout), "vkCreatePipelineLayout");
+        moduleInfo.codeSize = sizeof(emptyCompute);
+        moduleInfo.pCode = emptyCompute;
+        info.stage = structure<VkPipelineShaderStageCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO);
+        info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        info.stage.module = VK_NULL_HANDLE;
+        if (chainedModule)
+            info.stage.pNext = &moduleInfo;
+        info.stage.pName = name;
+        info.layout = layout;
+    }
+};
+
+void stageRefused(bool chainedModule, const char *name)
+{
+    Context context;
+    StageWithNoShader stage(context, chainedModule, name);
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    const VkResult result =
+        context.CALL(CreateComputePipelines, context.device, VK_NULL_HANDLE, 1, &stage.info, nullptr, &pipeline);
+    require(result != VK_SUCCESS, "a stage that names no shader or no entry point was made into a pipeline");
+    require(pipeline == VK_NULL_HANDLE, "a refused pipeline has a handle");
+    context.CALL(DestroyPipelineLayout, context.device, stage.layout, nullptr);
+}
+
+// The key of such a pipeline hashes what it has: it is answered and stable.
+void keyOfAStageWithNoShader()
+{
+    Context context;
+    StageWithNoShader stage(context, false, "main");
+    auto pipelineInfo = structure<VkPipelineCreateInfoKHR>(VK_STRUCTURE_TYPE_PIPELINE_CREATE_INFO_KHR);
+    pipelineInfo.pNext = &stage.info;
+    VkPipelineBinaryKeyKHR key = unwrittenKey();
+    const VkResult result = context.CALL(GetPipelineKeyKHR, context.device, &pipelineInfo, &key);
+    require(result == VK_SUCCESS || result == VK_ERROR_VALIDATION_FAILED,
+            "the key of a stage that names no shader was answered with " + std::to_string(result));
+    if (result == VK_SUCCESS)
+        require(key.keySize == keyBytes, "the key of a stage that names no shader is not a key's size");
+    context.CALL(DestroyPipelineLayout, context.device, stage.layout, nullptr);
+}
+
 #undef CHECK
 #undef CALL
 
@@ -532,7 +589,7 @@ struct Row {
     void (*run)();
 };
 
-const std::array<Row, 16> rows = {{
+const std::array<Row, 19> rows = {{
     {"refused-0", [] { refused(0); }},
     {"refused-31", [] { refused(keyBytes - 1); }},
     {"refused-33", [] { refused(keyBytes + 1); }},
@@ -549,6 +606,9 @@ const std::array<Row, 16> rows = {{
     {"partial-import-keeps-its-successes", [] { partialImportKeepsItsSuccesses(); }},
     {"accepted-32", [] { accepted(); }},
     {"imported-binaries-make-a-pipeline", [] { importedBinariesMakeAPipeline(); }},
+    {"refused-stage-with-no-module", [] { stageRefused(false, "main"); }},
+    {"refused-stage-with-no-entry-point-name", [] { stageRefused(true, nullptr); }},
+    {"key-of-a-stage-with-no-module", [] { keyOfAStageWithNoShader(); }},
 }};
 
 // The path of this executable, which each row runs again: Metal's compiler

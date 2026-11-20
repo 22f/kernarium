@@ -265,8 +265,12 @@ begun on a framebuffer whose attachment view, or the view's image, the guest
 has destroyed marks the context lost before the command reaches the driver
 (`gpu-venus-render-pass-lifetime`). Nor can it make the host call a driver
 entry point that is not there: a command the device's version and enabled
-extensions do not expose marks the context lost (same test). The guest binds
-image and buffer memory without waiting for the answer, so a bind the driver
+extensions do not expose marks the context lost (same test). Nor can it hand a
+driver a null it reads: a handle the specification requires that arrives as
+object id 0 marks the context lost, a pipeline stage that names no shader is
+refused, and a host image copy is bounded by the image's mip levels, aspects
+and extent and by the memory the guest gave it
+(`gpu-venus-required-handles`). The guest binds image and buffer memory without waiting for the answer, so a bind the driver
 refused marks the context lost before the next command runs
 (`gpu-venus-bind-failure`), and a copy that names an image or buffer the
 driver never bound is refused by the driver
