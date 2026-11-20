@@ -59,6 +59,23 @@ struct ProcessWindow final {
 	return true;
 }
 
+/* The span at the start of the window that the mapping trial leaves alone: the
+ * signed kernel image and the reserved physical prefix after it, which the
+ * kernel maps by other calls. The image is a few tens of MiB; guest RAM is at
+ * least 512 MiB. */
+constexpr std::size_t guest_ram_trial_skip = 64U << 20;
+
+/* Makes [begin, begin + length) the window's protectionless reservation again:
+ * a mapping over it in place frees no address. */
+[[nodiscard]] bool hand_back_to_reservation(std::uintptr_t begin,
+	std::size_t length) noexcept
+{
+	void *const reserved = mmap(reinterpret_cast<void *>(begin), length,
+		PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+	return reserved != MAP_FAILED &&
+		reinterpret_cast<std::uintptr_t>(reserved) == begin;
+}
+
 } // namespace
 
 NativeKernelPlacement native_kernel_placement(
@@ -84,6 +101,51 @@ NativeKernelPlacement native_kernel_placement(
 	return {DeviceNativeKernelGeometry::derive(guest_memory),
 		WindowPlacement::anywhere};
 #endif
+}
+
+bool native_guest_memory_mappable(const NativeKernelLayout &layout,
+	std::size_t guest_memory) noexcept
+{
+	if (!layout.valid || layout.window_end <= layout.window_start ||
+	    guest_memory == 0)
+		return false;
+	const auto page = static_cast<std::uintptr_t>(getpagesize());
+	const std::uintptr_t window = layout.window_end - layout.window_start;
+	const std::uintptr_t ram =
+		(guest_memory + DARWIN_UML_GUEST_PAGE_SIZE - 1U) &
+		~static_cast<std::uintptr_t>(DARWIN_UML_GUEST_PAGE_SIZE - 1U);
+	if (ram < guest_memory || ram > window)
+		return false;
+	if (ram <= guest_ram_trial_skip)
+		return true;
+	/* The host maps whole host pages: the span is the host pages the RAM
+	 * covers beyond the skipped prefix. */
+	const std::uintptr_t begin =
+		(layout.window_start + guest_ram_trial_skip + page - 1U) & ~(page - 1U);
+	const std::uintptr_t end = (layout.window_start + ram) & ~(page - 1U);
+	if (end <= begin)
+		return true;
+	const std::size_t length = end - begin;
+	void *const mapping = mmap(reinterpret_cast<void *>(begin), length,
+		PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+	const int error = errno;
+	/* Whatever the host answered, the range is the window's reservation
+	 * again; a failed mapping may have left it empty. */
+	const bool whole = hand_back_to_reservation(begin, length);
+	if (mapping == MAP_FAILED || reinterpret_cast<std::uintptr_t>(mapping) != begin) {
+		std::fprintf(stderr,
+			"UML: the host cannot map %llu bytes of guest RAM at %p, errno=%d\n",
+			static_cast<unsigned long long>(length),
+			reinterpret_cast<void *>(begin), error);
+		return false;
+	}
+	if (!whole) {
+		std::fprintf(stderr,
+			"UML: the guest RAM trial left %llu bytes of the window mapped\n",
+			static_cast<unsigned long long>(length));
+		return false;
+	}
+	return true;
 }
 
 NativeKernelLayout prepare_native_kernel_layout(

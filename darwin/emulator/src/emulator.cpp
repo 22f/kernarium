@@ -640,10 +640,18 @@ public:
 			!prepared.informational && prepared.host_console_directory};
 		const auto native_layout = run_native_kernel_layout(
 			prepared.guest_memory_bytes);
+		/* A host that has not the address space or the memory limit for
+		 * the guest's size says so here, before the kernel starts, and the
+		 * run fails with a result of its own: past this point the kernel
+		 * answers a refused mapping by ending the process. */
 		if (!native_layout.valid)
 			return native_layout.reservation_failed ?
-				-UML_EMULATOR_RUNTIME_ERROR :
+				-UML_EMULATOR_OUT_OF_MEMORY :
 				-UML_EMULATOR_INVALID_ARGUMENT;
+		if (!prepared.informational &&
+		    !::uml::runtime::native_guest_memory_mappable(
+			    native_layout, prepared.guest_memory_bytes))
+			return -UML_EMULATOR_OUT_OF_MEMORY;
 		const ::uml::runtime::NativeKernelLayoutScope layout_scope{
 			native_layout};
 		if (!layout_scope.entered())

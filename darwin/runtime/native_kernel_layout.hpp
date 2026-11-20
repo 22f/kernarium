@@ -164,6 +164,23 @@ struct NativeKernelPlacement final {
 [[nodiscard]] NativeKernelLayout reserve_process_native_window(
 	const NativeKernelLayout &geometry, WindowPlacement placement) noexcept;
 
+/* Whether the host maps the guest's RAM in this layout's window. The kernel
+ * maps its RAM over the reservation with one read-write mapping and, where the
+ * host refuses it, can only exit, which ends the process; a refusal is known
+ * here, before the kernel starts, and the run fails with a result of its own.
+ * The host refuses it where the process does not have the address space or the
+ * memory limit for it, and which of the two is the host's to say.
+ *
+ * It makes that mapping, at the place and the size the kernel does, and gives
+ * the range back to the window's reservation in place, so that the window is
+ * whole and protectionless as before and nothing is freed. The span the kernel
+ * image and its reserved prefix take is left alone: the kernel maps it by
+ * other calls, and a signed text alias of an earlier guest in it is permanent.
+ * The caller holds the process address-space gate and has not yet started the
+ * guest. A guest too large for the window is not mappable. */
+[[nodiscard]] bool native_guest_memory_mappable(const NativeKernelLayout &layout,
+	std::size_t guest_memory) noexcept;
+
 /* The layout for this process: the placement's window, reserved. It is invalid
  * when guest_memory does not fit the product's envelope, and with
  * `reservation_failed` set when the process cannot reserve its window. */

@@ -713,6 +713,67 @@ void test_process_native_window_is_one_reservation()
 		"an invalid geometry took the process's window");
 }
 
+/* The check before the kernel starts maps the guest's RAM in the window as the
+ * kernel does and gives it back: the window is whole and protectionless
+ * afterwards, and a host that will not map the RAM is told so. */
+void test_native_guest_memory_trial_leaves_the_window_whole()
+{
+	constexpr std::uint64_t gib = 1024ULL * 1024ULL * 1024ULL;
+	constexpr std::uintptr_t start = uml::testing::native_test_window_start;
+	using Macos = uml::runtime::MacosNativeKernelGeometry;
+	const auto geometry = Macos::derive_at(2U * gib, start);
+	require(geometry.valid, "the test window did not derive");
+	const auto window = uml::runtime::reserve_process_native_window(
+		geometry, uml::runtime::WindowPlacement::exact);
+	require(window.valid && window.window_start == start,
+		"the test window was not reserved");
+	const auto whole = [&](const char *what) {
+		mach_vm_address_t cursor = window.window_start;
+		while (cursor < window.window_end) {
+			const auto query = uml::testing::query_vm_region(
+				static_cast<std::uintptr_t>(cursor));
+			require(query.status == KERN_SUCCESS &&
+				query.region.start == cursor &&
+				query.region.size != 0 &&
+				query.region.protection == VM_PROT_NONE, what);
+			cursor = query.region.start + query.region.size;
+		}
+	};
+	require(uml::runtime::native_guest_memory_mappable(window, 2U * gib),
+		"a host that has the address space did not map a guest's RAM");
+	whole("the trial left the window with a gap or an accessible range");
+	require(uml::runtime::native_guest_memory_mappable(window, gib) &&
+		uml::runtime::native_guest_memory_mappable(window, 512U << 20),
+		"the trial refused a smaller guest in the same window");
+	whole("the smaller trials left the window with a gap or an accessible "
+		"range");
+
+	/* RAM longer than the window, and nothing at all, have nothing to map. */
+	require(!uml::runtime::native_guest_memory_mappable(window,
+			window.window_end - window.window_start + 1U),
+		"a guest larger than its window was mappable");
+	require(!uml::runtime::native_guest_memory_mappable(window, 0),
+		"a guest without RAM was mappable");
+	require(!uml::runtime::native_guest_memory_mappable({}, gib),
+		"an invalid layout was mappable");
+
+	/* A window where the host has no address space maps nothing, and the
+	 * trial leaves nothing behind there. */
+	constexpr std::uintptr_t beyond = 1ULL << 48;
+	const uml::runtime::NativeKernelLayout unreachable{
+		.load_bias = beyond - DARWIN_UML_NATIVE_LINK_ADDRESS,
+		.window_start = beyond,
+		.window_end = beyond + 4U * gib,
+		.valid = true,
+		.reserved = true,
+	};
+	require(!uml::runtime::native_guest_memory_mappable(unreachable, 2U * gib),
+		"a host without the address space mapped a guest's RAM");
+	require(uml::testing::query_vm_region(beyond + gib).status !=
+			KERN_SUCCESS,
+		"the refused trial left a mapping behind");
+}
+
 void test_guest_cpu_count_matches_kernel_policy()
 {
 	const auto online = sysconf(_SC_NPROCESSORS_ONLN);
@@ -883,6 +944,7 @@ int main()
 		test_session_record_option();
 		test_scalable_native_kernel_layout_geometry();
 		test_process_native_window_is_one_reservation();
+		test_native_guest_memory_trial_leaves_the_window_whole();
 		test_guest_cpu_count_matches_kernel_policy();
 		test_application_default_cpu_count_is_the_physical_cores_at_most_eight();
 		test_launch_guest_cpu_count_is_the_count_the_launch_boots_with();
