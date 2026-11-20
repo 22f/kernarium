@@ -65,6 +65,13 @@ struct Nv12Rect {
 [[nodiscard]] bool validNv12Transform(const Nv12Source& source, Nv12Rect crop, std::uint32_t rotation,
                                       const Nv12Target& target) noexcept;
 
+// A row of an NV12 plane turned half around: the `samples` bytes of a luma row, or the `pairs` interleaved Cb, Cr pairs
+// of a chroma row (a pair keeps its order), last first, into `out`. The two rows do not overlap. A half turn of a
+// picture is each row so turned, taken from the last row up, which is what a transform with rotation 180 does without
+// the scaling.
+void reverseLumaRow(const std::uint8_t* row, std::uint8_t* out, std::size_t samples) noexcept;
+void reverseChromaRow(const std::uint8_t* row, std::uint8_t* out, std::size_t pairs) noexcept;
+
 // A picture of black: luma 0 and neutral chroma, which full-range YCbCr takes
 // for black.
 void fillNv12Black(const Nv12Target& target) noexcept;

@@ -84,6 +84,34 @@ void identityAndRotation()
     require(back.luma == source.luma && back.chroma == source.chroma);
 }
 
+// A half turn of a picture the rows' way, which the camera device writes into the guest's rows without a second pass: each
+// row reversed, from the last row up, is the transform's rotation of 180 degrees, whatever the width (the vector loops and
+// the tail of a row both).
+void aRowReversedIsTheHalfTurn()
+{
+    for (const std::uint32_t width : {2u, 4u, 6u, 8u, 18u, 30u, 34u, 66u, 130u, 258u}) {
+        const std::uint32_t height = 6;
+        Picture source(width, height);
+        for (std::size_t i = 0; i < source.luma.size(); ++i) source.luma[i] = std::uint8_t((i * 7 + i / 13) ^ 0x35);
+        for (std::size_t i = 0; i < source.chroma.size(); ++i) source.chroma[i] = std::uint8_t((i * 11 + i / 5) ^ 0xa7);
+        Picture reference(width, height);
+        require(transformNv12(source.source(), {0, 0, width, height}, 180, reference.target()));
+        Picture rows(width, height);
+        for (std::uint32_t row = 0; row < height; ++row)
+            reverseLumaRow(source.luma.data() + std::size_t(height - 1 - row) * width, rows.luma.data() + std::size_t(row) * width, width);
+        for (std::uint32_t row = 0; row < height / 2; ++row)
+            reverseChromaRow(source.chroma.data() + std::size_t(height / 2 - 1 - row) * width,
+                             rows.chroma.data() + std::size_t(row) * width, width / 2);
+        require(rows.luma == reference.luma, "the luma rows are the half turn's");
+        require(rows.chroma == reference.chroma, "so are the chroma rows, each pair kept in order");
+    }
+    // A row of no samples has nothing to turn.
+    std::uint8_t spare = 0x5a;
+    reverseLumaRow(&spare, &spare, 0);
+    reverseChromaRow(&spare, &spare, 0);
+    require(spare == 0x5a);
+}
+
 void cropAndScale()
 {
     const auto source = ramp(8, 8);
@@ -154,6 +182,7 @@ int main()
 {
     crops();
     identityAndRotation();
+    aRowReversedIsTheHalfTurn();
     cropAndScale();
     refusals();
     black();
