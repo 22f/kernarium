@@ -4,47 +4,68 @@ Date: Sat, 21 Nov 2026 03:59:29 +0900
 Subject: [PATCH] venus: tear down an object the context refused by its id
 
 A guest names each object it creates by an id of its own choosing, and the
-context refuses an id that another object already holds: it ends the
-context and leaves the object out of its table. The creator has already made
-the object and tracks it in its device, command pool or descriptor pool,
-which later removes every tracked object from the table by id. The id finds
-the object that holds it, so removing the refused one freed the original,
-which its owner still tracked. Tearing the context down then walked a freed
-list entry, and the host process died.
+context refuses an id it cannot take: 0, which names no object, or one that
+another object already holds. It ends the context and leaves the object out of
+its table. The creator has already made the object and tracks it in its
+device, command pool or descriptor pool, which later removes every tracked
+object from the table by id. An id another object holds finds that object, so
+removing the refused one freed the original, which its owner still tracked,
+and tearing the context down then walked a freed list entry. An id of 0 finds
+nothing, so the refused object was never freed. Whichever owner removes the
+original first, the table entry of that id is no longer the refused object's to
+touch.
 
-An object is now freed by the removal only when the table holds that object
-under its id. One the table refused is freed where it is removed from its
-owner, which was the only thing left undone for it.
+The object now carries the refusal: the table marks it when it turns the id
+down, and its removal frees a marked object directly, without a look at the
+table. An object the table holds is removed as before.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- src/venus/vkr_context.h | 15 +++++++++++++--
- 1 file changed, 13 insertions(+), 2 deletions(-)
+ src/venus/vkr_common.h  |  3 +++
+ src/venus/vkr_context.h | 13 +++++++++++++
+ 2 files changed, 16 insertions(+)
 
+diff --git a/src/venus/vkr_common.h b/src/venus/vkr_common.h
+index bb541e91ffc3104f1ccafe32051506f917329f63..bb69fc1d6f5ead71478487db99f490b8922660d4 100644
+--- a/src/venus/vkr_common.h
++++ b/src/venus/vkr_common.h
+@@ -125,6 +125,9 @@ enum vkr_debug_flags {
+ /* base class for all objects */
+ struct vkr_object {
+    VkObjectType type;
++
++   /* set when the context refused id: the object is not in its table */
++   bool id_refused;
+    vkr_object_id id;
+ 
+    union {
 diff --git a/src/venus/vkr_context.h b/src/venus/vkr_context.h
-index 3974ea49eb80c49884576576967e18ba822281fb..3cc586f41bf9292d7b47238638f68654b0b52614 100644
+index 3974ea49eb80c49884576576967e18ba822281fb..432ebbda29d271ddbca70208b25caa783b62ead1 100644
 --- a/src/venus/vkr_context.h
 +++ b/src/venus/vkr_context.h
-@@ -258,9 +258,20 @@ vkr_context_add_object(struct vkr_context *ctx, struct vkr_object *obj)
+@@ -252,12 +252,25 @@ vkr_context_add_object(struct vkr_context *ctx, struct vkr_object *obj)
+    mtx_lock(&ctx->object_mutex);
+    if (vkr_context_validate_object_id_locked(ctx, obj->id))
+       _mesa_hash_table_insert(ctx->object_table, &obj->id, obj);
++   else
++      obj->id_refused = true;
+    mtx_unlock(&ctx->object_mutex);
+ }
+ 
  static inline void
  vkr_context_remove_object_locked(struct vkr_context *ctx, struct vkr_object *obj)
  {
--   assert(_mesa_hash_table_search(ctx->object_table, &obj->id));
--
-    struct hash_entry *entry = _mesa_hash_table_search(ctx->object_table, &obj->id);
-+
-+   /* An object the table refused, because the guest chose an id that another
-+    * object holds, was never entered under that id, though its creator still
-+    * tracks it and removes it with the rest.  The id then finds the object
-+    * that holds it, and removing that one frees an object that is still
-+    * tracked.  Free only what the table holds; what it refused is freed
-+    * here. */
-+   if (unlikely(entry && entry->data != obj)) {
++   /* An object whose id the table refused, because it is 0 or another object
++    * holds it, was never entered in the table, though its creator still tracks
++    * it and removes it with the rest.  Its id is not its own: it finds the
++    * other object, whose owner may have removed it already or still tracks it,
++    * or none.  It owns nothing but itself, so it is freed here, and the table
++    * entry of that id is left to the object that holds it. */
++   if (unlikely(obj->id_refused)) {
 +      free(obj);
 +      return;
 +   }
 +
-+   assert(entry);
-    if (likely(entry)) {
-       vkr_context_free_object(entry);
-       _mesa_hash_table_remove(ctx->object_table, entry);
+    assert(_mesa_hash_table_search(ctx->object_table, &obj->id));
+ 
+    struct hash_entry *entry = _mesa_hash_table_search(ctx->object_table, &obj->id);
