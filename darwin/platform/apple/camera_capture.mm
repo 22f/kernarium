@@ -427,10 +427,10 @@ void logFormatTables(const std::vector<Entry>& entries)
         // How the camera is presented (presentedMountingOf): the rotation coordinator's angles for portrait, portrait upside
         // down, landscape right and landscape left, the orientation stated, and the turn set on the video connection.
         const CameraPresentation& mounted = entries[camera].discovered;
-        std::fprintf(stderr, "Camera: camera %zu mounting: angles %d %d %d %d, stated %u, video turn %u%s\n", camera,
+        std::fprintf(stderr, "Camera: camera %zu mounting: angles %d %d %d %d, stated %u, video turn %u, picture turn %u%s\n", camera,
                      int(mounted.coordinatorAngles[0]), int(mounted.coordinatorAngles[1]), int(mounted.coordinatorAngles[2]),
                      int(mounted.coordinatorAngles[3]), unsigned(mounted.stated), unsigned(mounted.turn),
-                     mounted.earlier ? " (presented like an earlier front camera)" : "");
+                     unsigned(mounted.presentationTurn), mounted.earlier ? " (presented like an earlier front camera)" : "");
     }
 }
 
@@ -528,6 +528,7 @@ std::vector<Entry> discover()
 #endif
         entry.discovered.stated = std::uint16_t(entry.mounting.stated);
         entry.discovered.turn = std::uint16_t(entry.mounting.connectionTurn);
+        entry.discovered.presentationTurn = std::uint16_t(entry.mounting.presentationTurn);
         entry.discovered.earlier = entry.mounting.emulatesEarlierFront;
 #if TARGET_OS_IOS
         // Only a zoom camera's factor is scaled (see zoomRatioScale): every range holds 1.0.

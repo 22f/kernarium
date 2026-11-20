@@ -2452,6 +2452,7 @@ void aCamerasLastUseSurvivesTheNextSessionsDiscovery()
     discovered.coordinatorAngles = {0, 180, 90, 270};
     discovered.stated = 90;
     discovered.turn = 270;
+    discovered.presentationTurn = 180;
     discovered.earlier = true;
     discovered.anchorWidth = 1920;
     discovered.anchorHeight = 1440;
@@ -2462,7 +2463,7 @@ void aCamerasLastUseSurvivesTheNextSessionsDiscovery()
     discovered.dynamicRatios = true;
     const CameraPresentation merged = withDiscovery(kept, discovered);
     require(merged.deviceType == CameraDeviceType::wide && merged.coordinatorAngles == discovered.coordinatorAngles && merged.turn == 270 &&
-                merged.earlier && merged.anchorRatios == discovered.anchorRatios && merged.anchorFieldOfView == 85 &&
+                merged.presentationTurn == 180 && merged.earlier && merged.anchorRatios == discovered.anchorRatios && merged.anchorFieldOfView == 85 &&
                 merged.frontDevices == 2 && merged.squareFormats && merged.dynamicRatios,
             "the discovery is the new session's");
     require(merged.ratioKnown && merged.ratioPinned == CameraAspectRatio::r3x4 && merged.ratioWidth == 1512 && merged.videoKnown &&

@@ -929,7 +929,12 @@ void camera_line(FixedText &text, CameraLineKind kind,
 		 * (a tablet that boots turned). */
 		if (c.platformStated != c.stated)
 			text.text(" platform ").number(c.platformStated);
-		text.text(" turn ").number(c.turn).text(" earlier ");
+		text.text(" turn ").number(c.turn);
+		/* The half turn the host applies to every picture of the camera
+		 * (a front camera mounted at 90 states 270), where it does. */
+		if (c.presentationTurn != 0)
+			text.text(" hostturn ").number(c.presentationTurn);
+		text.text(" earlier ");
 		camera_yes_no(text, c.earlier);
 		text.text(" anchor ");
 		camera_size(text, c.anchorWidth, c.anchorHeight);
