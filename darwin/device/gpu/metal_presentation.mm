@@ -14,6 +14,7 @@
 #import <MetalKit/MetalKit.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -731,6 +732,14 @@ struct MetalPresentationState final :
                 }
                 [encoder endEncoding];
                 [buffer presentDrawable:drawable];
+#if !defined(UML_APP_STORE_RUNTIME) && TARGET_OS_IOS
+                if (frameStatisticsInterval() > 0.0) {
+                    auto shown = shared_from_this();
+                    [drawable addPresentedHandler:^(id<MTLDrawable> presented) {
+                        shown->notePresented(presented.presentedTime);
+                    }];
+                }
+#endif
                 auto state = shared_from_this();
                 [buffer addCompletedHandler:^(id<MTLCommandBuffer>) {
                     state->presentedFrames.fetch_add(
@@ -751,6 +760,60 @@ struct MetalPresentationState final :
             }
         }
     }
+
+#if !defined(UML_APP_STORE_RUNTIME) && TARGET_OS_IOS
+    /* The drawable's own presentation time says when iOS showed a frame, where
+     * presentedFrames counts the end of the GPU work. The gaps between shown
+     * frames fall in five bins: under 10 ms, 10-14, 14-20, 20-50, 50 or more.
+     * Only a run that prints statistics keeps them. */
+    void notePresented(CFTimeInterval shownAt) noexcept
+    {
+        if (!(shownAt > 0.0)) {
+            onscreenMissed.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        onscreenFrames.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard lock(onscreenMutex);
+        if (lastShownAt > 0.0) {
+            const double gap = shownAt - lastShownAt;
+            ++onscreenGaps[gap < 0.010 ? 0 : (gap < 0.014 ? 1 : (gap < 0.020 ? 2 : (gap < 0.050 ? 3 : 4)))];
+        }
+        lastShownAt = shownAt;
+    }
+
+    void reportOnscreen(double seconds) noexcept
+    {
+        std::array<std::uint64_t, 5> gaps;
+        {
+            std::lock_guard lock(onscreenMutex);
+            gaps = onscreenGaps;
+            onscreenGaps = {};
+        }
+        const auto shown = onscreenFrames.load(std::memory_order_relaxed);
+        const auto missed = onscreenMissed.load(std::memory_order_relaxed);
+        std::fprintf(
+            stderr,
+            "Native display onscreen: shown %.1f/s missed %llu/total "
+            "shown-gap-ms <10 %llu 10-14 %llu 14-20 %llu 20-50 %llu >=50 %llu "
+            "| totals shown %llu\n",
+            static_cast<double>(shown - reportedOnscreen) / seconds,
+            static_cast<unsigned long long>(missed),
+            static_cast<unsigned long long>(gaps[0]),
+            static_cast<unsigned long long>(gaps[1]),
+            static_cast<unsigned long long>(gaps[2]),
+            static_cast<unsigned long long>(gaps[3]),
+            static_cast<unsigned long long>(gaps[4]),
+            static_cast<unsigned long long>(shown));
+        reportedOnscreen = shown;
+    }
+
+    std::atomic_uint64_t onscreenFrames {};
+    std::atomic_uint64_t onscreenMissed {};
+    std::mutex onscreenMutex;
+    std::array<std::uint64_t, 5> onscreenGaps {};
+    CFTimeInterval lastShownAt {};
+    std::uint64_t reportedOnscreen {};
+#endif
 
     DisplayStatistics snapshot() const noexcept
     {
@@ -826,6 +889,9 @@ struct MetalPresentationState final :
             static_cast<unsigned long long>(total.presentedFrames),
             static_cast<unsigned long long>(total.droppedFrames),
             static_cast<unsigned long long>(total.cpuFallbackFrames));
+#if !defined(UML_APP_STORE_RUNTIME) && TARGET_OS_IOS
+        reportOnscreen(seconds);
+#endif
     }
 
     ScanoutFramebuffer framebuffer;
