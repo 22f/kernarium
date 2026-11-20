@@ -2279,6 +2279,21 @@ void aRegionIsMappedBackThroughATurnOfThePicture()
 // then by the host's half turn. The guest's region is in the twice turned picture, the device maps it back through the half
 // turn and the backend through the connection's quarter turn, and what reaches the platform is the area of the camera's own
 // picture the guest meant, whichever turn the connection has.
+// The session's own choice of its devices' colour spaces is left alone unless a camera whose stills the host turns is in it.
+void theSessionKeepsItsColourChoiceUnlessATurnedCameraIsIn()
+{
+    const std::uint32_t notTurned[] = {0};
+    const std::uint32_t backAndExternal[] = {0, 0};
+    const std::uint32_t front[] = {180};
+    const std::uint32_t frontAndBack[] = {180, 0};
+    const std::uint32_t backAndFront[] = {0, 180};
+    require(!sessionHoldsColourSpaces({}), "an empty session keeps the system's choice");
+    require(!sessionHoldsColourSpaces(notTurned) && !sessionHoldsColourSpaces(backAndExternal),
+            "a session of cameras that are not turned keeps it, a back-only one included");
+    require(sessionHoldsColourSpaces(front) && sessionHoldsColourSpaces(frontAndBack) && sessionHoldsColourSpaces(backAndFront),
+            "a session with a camera presented half around does not, in either order of the cameras");
+}
+
 void aRegionIsMappedBackThroughTheConnectionAndTheHalfTurnTogether()
 {
     const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-5f; };
@@ -2934,6 +2949,7 @@ int main()
     aFrontCameraStates270AndIsTurnedHalfAroundUnlessItAlreadyIs();
     aRegionIsMappedBackThroughATurnOfThePicture();
     aRegionIsMappedBackThroughTheConnectionAndTheHalfTurnTogether();
+    theSessionKeepsItsColourChoiceUnlessATurnedCameraIsIn();
     aSquareFormatThatListsRatiosIsDescribedByItsPinnedCrop();
     aCamerasLastUseSurvivesTheNextSessionsDiscovery();
     aCameraThatImitatesAnEarlierOneKeepsItsPhotoConnectionAngle();

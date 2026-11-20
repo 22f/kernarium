@@ -999,14 +999,6 @@ public:
         } else {
             session_ = [[AVCaptureSession alloc] init];
         }
-        // A session sets its devices to wide colour (Display P3) whenever it commits a configuration, and a device's own colour
-        // space selection does not hold against it. The stills of a camera the host turns are encoded with no colour profile, so
-        // their capture stays in sRGB (keepSrgbColourSpace), and the session leaves the colour spaces to the host.
-        for (const Entry& entry : entries) {
-            if (entry.mounting.presentationTurn != 180) continue;
-            session_.automaticallyConfiguresCaptureDeviceForWideColor = NO;
-            break;
-        }
 #else
         session_ = [[AVCaptureSession alloc] init];
 #endif
@@ -2139,7 +2131,7 @@ private:
                 std::fprintf(stderr, "Camera: camera %zu: the photo output kept its orientation compensation: %s\n", camera,
                              exception.reason != nil ? exception.reason.UTF8String : "");
             }
-            [session_ commitConfiguration];
+            commitConfiguration();
             photoPipelinesSettle();
             facts = readCompensation(output, CameraReading::afterCommit);
             step = stillCompensationStep(true, facts.compensationSupported, facts.compensationEnabled, facts.reading);
@@ -2364,7 +2356,7 @@ private:
         AdmitSteps steps;
         steps.begin = [&] { [session_ beginConfiguration]; };
         steps.commit = [&] {
-            [session_ commitConfiguration];
+            commitConfiguration();
             photoPipelinesSettle();
         };
         steps.addInput = [&] { return guarded(camera, [&] { return addInput(entry, running); }); };
@@ -2610,7 +2602,7 @@ private:
         ResizeSteps steps;
         steps.begin = [&] { [session_ beginConfiguration]; };
         steps.commit = [&] {
-            [session_ commitConfiguration];
+            commitConfiguration();
             photoPipelinesSettle();
         };
         steps.snapshotTiming = [&] { held = timingOf(entry.device); };
@@ -2743,7 +2735,7 @@ private:
                     running.photoOutput.maxPhotoDimensions = CMVideoDimensions {std::int32_t(maximum->width), std::int32_t(maximum->height)};
             return true;
         });
-        [session_ commitConfiguration];
+        commitConfiguration();
         photoPipelinesSettle();
 #if TARGET_OS_IOS
         noteRepair(camera, running, ratioFacts);
@@ -2754,6 +2746,22 @@ private:
         // The ratio pinned again is under way until its completion: the time it may take begins now.
         armRatioWatch(camera);
         return ok;
+    }
+
+    // Commits the session's configuration. A session sets its devices to wide colour (Display P3, preferred for photos) at a
+    // commit, and a device's own colour space selection does not hold against it. The stills of a camera whose stills the
+    // host turns are encoded with no colour profile, so its capture is held in sRGB (keepSrgbColourSpace): the session's
+    // choice is the host's while such a camera's input is in the session, set before the commit that applies it, and is the
+    // system's for every other session (back-only and external-only ones included), as it always was.
+    void commitConfiguration()
+    {
+#if TARGET_OS_IOS
+        std::vector<std::uint32_t> turns;
+        for (const auto& [index, running] : cameras_)
+            if (running.input != nil) turns.push_back(entries_[index].mounting.presentationTurn);
+        session_.automaticallyConfiguresCaptureDeviceForWideColor = !sessionHoldsColourSpaces(turns);
+#endif
+        [session_ commitConfiguration];
     }
 
     void startSession()
@@ -2834,7 +2842,7 @@ private:
             running.format = nil;
             forgetRatio(camera);
         }
-        [session_ commitConfiguration];
+        commitConfiguration();
         photoPipelinesSettle();
     }
 

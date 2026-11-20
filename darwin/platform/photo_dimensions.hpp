@@ -200,6 +200,17 @@ enum class RatioFrameStep : std::uint8_t { deliver, hold, failed, timedOut };
 {
     return hasInput && !videoOutputRemains && !photoOutputRemains;
 }
+// Whether a session leaves its devices' colour spaces to the host, given the presentation turn of each camera whose input is in
+// it. The stills of a camera presented half around (a turn of 180) are encoded with no colour profile, so its capture is held
+// in sRGB, which the session's own choice (wide colour, for photos) undoes at every commit: while such a camera is in the
+// session, the choice is the host's. A session without one keeps the system's choice for every device in it, as it always
+// had, a back-only or external-only session included.
+[[nodiscard]] constexpr bool sessionHoldsColourSpaces(std::span<const std::uint32_t> turnsOfInputs) noexcept
+{
+    for (const std::uint32_t turn : turnsOfInputs)
+        if (turn == 180) return true;
+    return false;
+}
 
 // The ratio changes of a session's cameras, by camera (the caller holds one lock for it): each camera's operation lives
 // from its asking until the camera's last input or output leaves the session (`invalidate`); a watch or a completion of
