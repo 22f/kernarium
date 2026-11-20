@@ -904,6 +904,59 @@ void interruptionMutesAndResumes()
     stream.close();
 }
 
+/* The device thread looks at what the system posted only now and then, so an
+ * end and the beginning of the next interruption can be waiting together. They
+ * are acted on in the order they came: an end that a later beginning overtook
+ * resumes nothing, because the session is another app's again, and the advice
+ * of an end is that end's alone. */
+void endsAndBeginningsThatWaitTogetherAreActedOnInOrder()
+{
+    routeComesBack();
+    otherAudioPlaying = false;
+    Stream stream;
+    check(stream.open(), "the stream opens before the queued events");
+    auto seen = stream.window(300ms, 600ms);
+    check(seen.playing(), "the stream plays before the queued events",
+        seen.text());
+
+    otherAudioPlaying = true;
+    postInterruptionBegan();
+    seen = stream.window(300ms, 600ms);
+    check(seen.muted(), "an interruption mutes the stream", seen.text());
+
+    // The system gives the session back with the advice to resume, and
+    // another app takes it again, before the device thread looks.
+    auto mark = activations.load();
+    postInterruptionEnded(true);
+    postInterruptionBegan();
+    seen = stream.window(700ms, 1000ms, true);
+    check(seen.muted(),
+        "an end that a new interruption overtook leaves the sink muted while "
+        "another app plays",
+        seen.text());
+    check(activations.load() == mark,
+        "and takes no session from the app that has it again",
+        std::to_string(activations.load() - mark) + " activations");
+
+    // The advice of the first end does not carry over to the last.
+    postInterruptionEnded(true);
+    postInterruptionBegan();
+    postInterruptionEnded(false);
+    seen = stream.window(700ms, 1000ms, true);
+    check(seen.muted() && activations.load() == mark,
+        "the advice to resume is that of its own end, not of an earlier one",
+        seen.text());
+    check(stream.healthy(), "the sink refused nothing");
+
+    // The other app stops: the sink takes the session back once.
+    otherAudioPlaying = false;
+    const auto polled = stream.untilPlayed(recoveryLimit);
+    check(polled < recoveryLimit && activations.load() == mark + 1,
+        "the sink resumes by one activation once that app has stopped",
+        std::to_string(polled.count()) + " ms");
+    stream.close();
+}
+
 // iOS posts no end when the interrupter stops or is killed, and the sink has
 // to notice by itself.
 void beganWithNoEnd()
@@ -1687,6 +1740,7 @@ int main()
         installHooks();
         firstOutputOfTheProcessComesUp();
         interruptionMutesAndResumes();
+        endsAndBeginningsThatWaitTogetherAreActedOnInOrder();
         beganWithNoEnd();
         slowActivationKeepsTheClock();
         idleMuteBuildsNoCredit();

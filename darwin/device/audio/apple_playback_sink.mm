@@ -30,6 +30,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace uml::audio {
 namespace {
@@ -63,10 +64,39 @@ struct NotificationFlags final {
     std::atomic_bool engineChanged {};
     std::atomic<std::uint64_t> engineNumber {};
 #if TARGET_OS_IPHONE
-    std::atomic_bool interruptionBegan {};
-    std::atomic_bool interruptionEnded {};
-    // A recommendation since the last look said to resume.
-    std::atomic_bool resumeRecommended {};
+    /* What the system reported about an interruption: its beginning, or its
+     * end with the system's advice on resuming, which belongs to that end. The
+     * events are kept in the order they came, because the device thread acts on
+     * them later and an end followed by a new beginning is not a beginning
+     * followed by an end: the first leaves the sink interrupted, and the second
+     * would resume it on the advice of an interruption that is over. */
+    struct InterruptionEvent final {
+        bool began {};
+        bool resumeRecommended {};
+    };
+
+    void report(InterruptionEvent event)
+    {
+        {
+            const std::lock_guard guard(eventsLock);
+            // A device thread that never looks cannot be answered, and only
+            // the latest events can matter.
+            if (events.size() == maximumEvents)
+                events.erase(events.begin());
+            events.push_back(event);
+        }
+        wake->notify();
+    }
+
+    [[nodiscard]] std::vector<InterruptionEvent> takeInterruptionEvents()
+    {
+        const std::lock_guard guard(eventsLock);
+        return std::exchange(events, {});
+    }
+
+    static constexpr std::size_t maximumEvents = 32;
+    std::mutex eventsLock;
+    std::vector<InterruptionEvent> events;
 #endif
 };
 
@@ -388,7 +418,7 @@ public:
                               notification.userInfo[
                                   AVAudioSessionDeactivationContextKey];
                           if (context.interruptionContext != nil)
-                              flags->signal(flags->interruptionBegan);
+                              flags->report({.began = true});
                         }];
             resumptionObserver_ = [[NSNotificationCenter defaultCenter]
                 addObserverForName:
@@ -402,12 +432,9 @@ public:
                           const AVAudioSessionResumptionContext* context =
                               notification.userInfo[
                                   AVAudioSessionResumptionContextKey];
-                          if (context.recommendation ==
-                              AVAudioSessionResumptionRecommendationShouldResume) {
-                              flags->resumeRecommended.store(
-                                  true, std::memory_order_release);
-                          }
-                          flags->signal(flags->interruptionEnded);
+                          flags->report({.resumeRecommended =
+                                  context.recommendation ==
+                                  AVAudioSessionResumptionRecommendationShouldResume});
                         }];
         } else {
             /* Before iOS 27 the system posts one notification, for an
@@ -430,17 +457,14 @@ public:
                               AVAudioSessionInterruptionTypeKey];
                           if (type.unsignedIntegerValue ==
                               AVAudioSessionInterruptionTypeBegan) {
-                              flags->signal(flags->interruptionBegan);
+                              flags->report({.began = true});
                               return;
                           }
                           const NSNumber* options = notification.userInfo[
                               AVAudioSessionInterruptionOptionKey];
-                          if ((options.unsignedIntegerValue &
-                                  AVAudioSessionInterruptionOptionShouldResume) != 0) {
-                              flags->resumeRecommended.store(
-                                  true, std::memory_order_release);
-                          }
-                          flags->signal(flags->interruptionEnded);
+                          flags->report({.resumeRecommended =
+                                  (options.unsignedIntegerValue &
+                                      AVAudioSessionInterruptionOptionShouldResume) != 0});
                         }];
 #pragma clang diagnostic pop
         }
@@ -919,8 +943,20 @@ private:
     // request that follows them sees the interruption they report.
     void applyInterruptionEvents()
     {
-        if (notifications_->interruptionBegan.exchange(
-                false, std::memory_order_acq_rel)) {
+        const auto events = notifications_->takeInterruptionEvents();
+        for (std::size_t index = 0; index < events.size(); ++index) {
+            const auto& event = events[index];
+            if (!event.began) {
+                // An end that a later beginning has overtaken is not acted
+                // on: taking the session back now would take it from the app
+                // that has it again.
+                const bool overtaken = std::any_of(
+                    events.begin() + static_cast<std::ptrdiff_t>(index) + 1,
+                    events.end(), [](const auto& later) { return later.began; });
+                if (!overtaken)
+                    endInterruption(event.resumeRecommended);
+                continue;
+            }
             interrupted_ = true;
             ++interruptions_;
             // The interruption owns the mute now and has its own way back. A
@@ -929,11 +965,6 @@ private:
             routeWait_.end();
             if (running_ && !muted_)
                 enterMute();
-        }
-        if (notifications_->interruptionEnded.exchange(
-                false, std::memory_order_acq_rel)) {
-            endInterruption(notifications_->resumeRecommended.exchange(
-                false, std::memory_order_acq_rel));
         }
     }
 
