@@ -3,6 +3,7 @@
 #import "KernariumRuntimeLoader.h"
 
 #include "../../darwin/device/camera/camera_tiers.hpp"
+#include "../../darwin/platform/apple/os_address_space.hpp"
 #include "../../darwin/platform/apple/os_memory_limit.hpp"
 #include "../../darwin/runtime/guest_memory_budget.hpp"
 
@@ -623,10 +624,18 @@ uml::runtime::guest_memory::LaunchMemorySet launchMemorySet(
         parameters.headroom_mib);
 }
 
-/* C of runtime/guest_memory_budget.hpp for this process, the one the runtime's
- * run admits sizes under: the window the runtime puts the kernel in (a macOS
- * process, and an iOS application on a Mac, get the macOS window; a device and
- * the Simulator get the signed iOS envelope) and the RAM of the host. */
+/* C of runtime/guest_memory_budget.hpp for this process: the window the
+ * runtime puts the kernel in (a macOS process, and an iOS application on a Mac,
+ * get the macOS window; a device and the Simulator get the signed iOS
+ * envelope), the RAM of the host and, for a window the system places, the
+ * address space the process has: the widest run of it free above the lowest
+ * address a window may begin at, which the system sets by the process's
+ * signing. It is measured once, at the first answer, before any run of the
+ * process has reserved a window of its own, so every size, default and bound
+ * the settings show, and the check before a start, follow the process's own
+ * address space and stay as they were while a guest runs. The runtime's run
+ * admits the sizes of the ceiling without the address space: its reservation
+ * of the window is the check there. */
 uint32_t guestMemoryCeilingMiB()
 {
     static const uint32_t ceiling = [] {
@@ -636,8 +645,16 @@ uint32_t guestMemoryCeilingMiB()
 #else
         const bool macosWindow = info.isiOSAppOnMac;
 #endif
+        uint64_t addressSpace = 0;
+        if (!macosWindow) {
+            const auto run = uml::platform::os_largest_free_address_run(
+                uml::runtime::guest_memory::native_window_floor_bytes);
+            /* A measured run is never taken for an unmeasured one. */
+            if (run)
+                addressSpace = *run > 0 ? *run : 1;
+        }
         return uml::runtime::guest_memory::process_guest_memory_ceiling_mib(
-            macosWindow, info.physicalMemory);
+            macosWindow, info.physicalMemory, addressSpace);
     }();
     return ceiling;
 }
@@ -723,7 +740,10 @@ extern "C" uint32_t kernarium_runtime_loader_default_guest_memory_mib_for_limit(
     kernarium_launch_memory_set parameters)
 {
     return uml::runtime::guest_memory::default_guest_memory_mib(
-        limitBytes, guestProcessorCount, launchMemorySet(parameters));
+        limitBytes,
+        guestProcessorCount,
+        launchMemorySet(parameters),
+        guestMemoryCeilingMiB());
 }
 
 extern "C" uint32_t kernarium_runtime_loader_default_guest_memory_mib(
@@ -743,7 +763,10 @@ kernarium_runtime_loader_default_guest_memory_holds_gpu_budget_for_limit(
     kernarium_launch_memory_set parameters)
 {
     return uml::runtime::guest_memory::default_guest_memory(
-               limitBytes, guestProcessorCount, launchMemorySet(parameters))
+               limitBytes,
+               guestProcessorCount,
+               launchMemorySet(parameters),
+               guestMemoryCeilingMiB())
                    .holds_gpu_budget
         ? 1
         : 0;

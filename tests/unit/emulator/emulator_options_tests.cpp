@@ -561,6 +561,26 @@ void test_scalable_native_kernel_layout_geometry()
 	require(device_maximum <= envelope_fill &&
 		device_maximum + step > envelope_fill,
 		"the device bound is not the envelope's fill taken down to the steps");
+	/* The budget keeps the window's arithmetic for the address space a process
+	 * has (address_space_guest_memory_mib): it is the layout's, figure for
+	 * figure and for every size a run starts. */
+	namespace budget = uml::runtime::guest_memory;
+	static_assert(budget::native_window_floor_bytes ==
+		DARWIN_UML_NATIVE_LINK_ADDRESS);
+	static_assert(budget::native_window_allowance_minimum_bytes ==
+		DARWIN_UML_NATIVE_AUXILIARY_MINIMUM);
+	static_assert(budget::native_window_allowance_maximum_bytes ==
+		DARWIN_UML_NATIVE_AUXILIARY_MAXIMUM);
+	static_assert(budget::native_window_fixed_bytes == product_reserved);
+	for (std::uint64_t size = budget::guest_memory_minimum_mib;
+	     size <= budget::device_window_guest_memory_maximum_mib;
+	     size += budget::guest_memory_step_mib) {
+		const auto window = Device::derive(size * mib);
+		require(window.valid &&
+			window.window_end - window.window_start ==
+				budget::native_window_bytes(size * mib),
+			"the budget's window length is not the layout's");
+	}
 	/* A macOS window sits in the 128 TiB range: the largest RAM any range
 	 * holds fits there. */
 	require(uml::runtime::MacosNativeKernelGeometry::derive_at(
