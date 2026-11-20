@@ -582,7 +582,8 @@ bug report. `AddToHomeUITests` (`ANDARIUM_ANDROID_APPS_PROBE`, a played list of
 Android apps) walks Settings > Apps > Add to Home Screen to the guide and presses
 Apple's Shortcuts button: Shortcuts opens on Andarium's page with a tile for each
 app. The feature is offered from iOS 27: on an iOS 26 Simulator those walks are
-skipped and a test asserts that Settings has no row.
+skipped and tests assert that Settings has no row and that Shortcuts' search of
+actions finds no Open Android App (it finds it from iOS 27).
 
 `AndariumPreviewUITests` drives `AndariumPreview` in the Simulator
 (`xcodebuild test -scheme AndariumPreview`): the screens it lists pass the

@@ -1374,7 +1374,11 @@ is on. `AndariumCore/Adb` speaks the protocol.
   (`IndexedEntityQuery`) exists from iOS 27. Shortcuts shows a tile for each app
   from iOS 27 only, so the host offers the feature from there
   (`IPadAppHost.offersAddToHomeScreen`): an iOS 26 host is treated as a Mac or a
-  Vision Pro is. The feature is in every build configuration. Tests:
+  Vision Pro is, and the action and its automatic shortcut are declared
+  `@available(iOS 27.0, *)`, so Shortcuts offers neither before it
+  (`andarium-open-intent-availability` reads the declarations and, for a built
+  application, its extracted App Intents metadata). The feature is in every build
+  configuration. Tests:
   `AndariumCore`'s `AppOpen*`, `AndroidApp*` suites, the hosted
   `AndroidApps*Tests` and the preview's `AddToHomeUITests`
   (`-screen add-home-*`, `Preview/AddToHomePreview.swift`).

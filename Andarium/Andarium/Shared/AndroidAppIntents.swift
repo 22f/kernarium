@@ -103,6 +103,12 @@ nonisolated struct AndroidAppRequestError: Error, CustomLocalizedStringResourceC
 /// Opens an app in Android. Andarium comes to the front and starts Android first
 /// when it is not running; what happens then is the application's
 /// (`AppModel.requestAndroidApp`): the intent only hands the request over.
+///
+/// From iOS 27, where Shortcuts has a tile for each app; before it the apps are
+/// no entities (`IPadAppHost.offersAddToHomeScreen`), so Shortcuts offers no
+/// action to choose one for. The declaration says so, and a Mac and a Vision
+/// Pro of iOS 27 keep the action, which runs by name.
+@available(iOS 27.0, *)
 struct OpenAndroidAppIntent: OpenIntent {
     static let title: LocalizedStringResource = "Open Android App"
     static let description = IntentDescription("Opens an app in Android.")
@@ -132,7 +138,9 @@ struct OpenAndroidAppIntent: OpenIntent {
     }
 }
 
-/// The tiles under Andarium in Shortcuts, and what Siri understands.
+/// The tiles under Andarium in Shortcuts, and what Siri understands: from iOS
+/// 27, as the intent is.
+@available(iOS 27.0, *)
 nonisolated struct AndroidAppShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(

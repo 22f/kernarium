@@ -350,7 +350,10 @@ final class SpotlightAppsIndex: AndroidAppsSearchIndexing {
     }
 
     func shortcutsChanged() {
-        AndroidAppShortcuts.updateAppShortcutParameters()
+        // Before iOS 27 there are no tiles to tell of the apps.
+        if #available(iOS 27.0, *) {
+            AndroidAppShortcuts.updateAppShortcutParameters()
+        }
     }
 }
 

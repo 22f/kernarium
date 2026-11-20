@@ -65,6 +65,56 @@ final class AddToHomeUITests: XCTestCase {
         XCTAssertFalse(app.buttons["settings-add-to-home-screen"].waitForExistence(timeout: 5), "Settings has an Add to Home Screen row")
     }
 
+    /// Shortcuts' own list of actions, searched for Andarium's. The action and its automatic shortcut
+    /// are declared @available(iOS 27.0, *), so Shortcuts offers "Open Android App" from iOS 27 and
+    /// not before. The search is proved first with an action every system has (Open App), so that an
+    /// absence is not a search that did not run. The extracted metadata says the same of the build
+    /// (`andarium-open-intent-availability`).
+    func testShortcutsOffersOpenAndroidAppFromIOS27Only() throws {
+        var offered = false
+        if #available(iOS 27.0, *) { offered = true }
+        continueAfterFailure = false
+        let shortcuts = XCUIApplication(bundleIdentifier: "com.apple.shortcuts")
+        shortcuts.launch()
+        func attachScreen(_ name: String) {
+            let attachment = XCTAttachment(string: shortcuts.debugDescription)
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        // The first launch may show what is new.
+        let next = shortcuts.buttons["Continue"]
+        if next.waitForExistence(timeout: 8) { next.tap() }
+        // A new shortcut, and its list of actions.
+        let create = shortcuts.buttons.matching(NSPredicate(
+            format: "label IN {'Add', 'New Shortcut', 'Create Shortcut', 'New'}")).firstMatch
+        XCTAssertTrue(create.waitForExistence(timeout: 30), "Shortcuts has no button for a new shortcut: \(shortcuts.debugDescription)")
+        create.tap()
+        let addAction = shortcuts.descendants(matching: .any).matching(NSPredicate(
+            format: "label CONTAINS[c] 'Add Action'")).firstMatch
+        XCTAssertTrue(addAction.waitForExistence(timeout: 20), "no Add Action: \(shortcuts.debugDescription)")
+        addAction.tap()
+        let search = shortcuts.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 20), "no search of actions: \(shortcuts.debugDescription)")
+        search.tap()
+        func result(_ name: String) -> XCUIElement {
+            shortcuts.descendants(matching: .any).matching(NSPredicate(
+                format: "label CONTAINS[c] %@", name)).firstMatch
+        }
+        search.typeText("Open App")
+        XCTAssertTrue(result("Open App").waitForExistence(timeout: 30), "the search of actions found no Open App: \(shortcuts.debugDescription)")
+        attachScreen("search-control")
+        search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "Open App".count))
+        search.typeText("Open Android App")
+        if offered {
+            XCTAssertTrue(result("Open Android App").waitForExistence(timeout: 30), "Shortcuts does not offer Open Android App: \(shortcuts.debugDescription)")
+        } else {
+            sleep(15)
+            XCTAssertFalse(result("Open Android App").exists, "Shortcuts offers Open Android App: \(shortcuts.debugDescription)")
+        }
+        attachScreen("search-open-android-app")
+    }
+
     func testTheRowTheChooserAndTheGuideOfTheBuiltApplication() throws {
         try requireShortcutTiles()
         let app = launch()
