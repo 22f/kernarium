@@ -22,8 +22,9 @@ reads has to be in the key: an immutable sampler's flags in the layout
 hash, and whether the depth attachment is an input attachment in the
 state hash, were not, and are now. The content hash of a deferred shader
 read back from a pipeline cache blob is never taken from the blob (the
-binary format is 3 and carries none): it is taken again from the NIR the
-shader holds, when its parent first asks for it.
+binary format is 3 and carries none), and neither is the primitive a
+geometry or tessellation evaluation shader outputs: both are taken again
+from the NIR the shader holds, when its parent first asks for them.
 
 An entry is a small descriptor with the shaders' info and one name per
 MSL text, and the texts are separate entries named by the hash of their
@@ -35,10 +36,15 @@ lengths, the name it echoes and the hash of its bytes, and a length or
 count is checked against what is there before anything is allocated
 from it. What a shader's description holds is checked against what a
 writer writes before it is used for anything: stage bits, raster
-classes, the geometry records and their sizes, the sample count, and
-every field that reaches a Metal descriptor, which aborts the process on
-a value it does not take. A variant must also be one of its parent: its
-frames are the parent's stages, once each and read to their end, and the
+classes, the geometry records (one of the five modes a draw has a Metal
+type for, and an index count the advertised geometry limits allow, which
+are the output vertices of all the invocations and the restarts of the
+primitives), the sample count, and every field that reaches a Metal
+descriptor, which aborts the process on a value it does not take. A
+variant must also be one of its parent: its frames are the parent's
+stages, once each and read to their end, the primitive it outputs is the
+one its parent's own shaders output (a geometry or tessellation
+evaluation stage decides it, never the record being checked), and the
 raster classes it owns are those the parent's state reaches. One load
 holds a bounded number of stored text bytes. An entry that fails any
 check is removed and counts as a miss, so the variant is translated and
@@ -56,8 +62,11 @@ test_variant_entry covers the entry format and its readers without
 Metal, test_variant_disk_cache the driver: it runs boots against one
 cache directory, damages the entries between them in every way a file
 can be damaged, forges descriptors that are whole as bytes and wrong as
-shaders, and has two threads record the same first draw.
-test_descriptor_layout_hash covers the layout hash.
+shaders, and has two threads record the same first draw. It also
+stores, finds and refuses the variants of a geometry parent of 32
+invocations and of a tessellation parent, and offers the driver's shader
+deserializer the vertex shader record a pipeline cache holds, whole and
+edited. test_descriptor_layout_hash covers the layout hash.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
@@ -67,26 +76,33 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/kosmickrisp/vulkan/kk_cmd_draw.c          |    4 +-
  .../vulkan/kk_descriptor_set_layout.c         |   19 +-
  src/kosmickrisp/vulkan/kk_device.h            |    4 +
- src/kosmickrisp/vulkan/kk_physical_device.c   |    3 +
+ src/kosmickrisp/vulkan/kk_physical_device.c   |    7 +-
  src/kosmickrisp/vulkan/kk_physical_device.h   |    6 +
- src/kosmickrisp/vulkan/kk_shader.c            | 1218 ++++++++++++++--
- src/kosmickrisp/vulkan/kk_shader.h            |   27 +-
- src/kosmickrisp/vulkan/kk_variant_entry.c     |  408 ++++++
- src/kosmickrisp/vulkan/kk_variant_entry.h     |  191 +++
+ src/kosmickrisp/vulkan/kk_private.h           |   12 +
+ src/kosmickrisp/vulkan/kk_shader.c            | 1290 +++++++++++--
+ src/kosmickrisp/vulkan/kk_shader.h            |   29 +-
+ src/kosmickrisp/vulkan/kk_variant_entry.c     |  408 ++++
+ src/kosmickrisp/vulkan/kk_variant_entry.h     |  191 ++
  src/kosmickrisp/vulkan/meson.build            |   11 +
  .../tests/descriptor_layout_hash_state.c      |   18 +
  .../tests/descriptor_layout_hash_state.h      |   18 +
  .../tests/test_descriptor_layout_hash.cpp     |  119 ++
- .../vulkan/tests/test_variant_disk_cache.cpp  | 1293 +++++++++++++++++
- .../vulkan/tests/test_variant_entry.c         | 1032 +++++++++++++
+ .../vulkan/tests/test_variant_disk_cache.cpp  | 1693 +++++++++++++++++
+ .../vulkan/tests/test_variant_entry.c         | 1032 ++++++++++
  .../variant_disk_cache_shaders/cache.frag     |    4 +
  .../variant_disk_cache_shaders/cache.frag.h   |   18 +
  .../variant_disk_cache_shaders/cache.vert     |    4 +
  .../variant_disk_cache_shaders/cache.vert.h   |   33 +
- .../vulkan/tests/variant_disk_cache_state.c   |  120 ++
- .../vulkan/tests/variant_disk_cache_state.h   |   30 +
+ .../variant_disk_cache_shaders/instanced.geom |   19 +
+ .../instanced.geom.h                          |   74 +
+ .../variant_disk_cache_shaders/isolines.tesc  |    9 +
+ .../isolines.tesc.h                           |   65 +
+ .../variant_disk_cache_shaders/isolines.tese  |    8 +
+ .../isolines.tese.h                           |   61 +
+ .../vulkan/tests/variant_disk_cache_state.c   |  149 ++
+ .../vulkan/tests/variant_disk_cache_state.h   |   36 +
  src/util/disk_cache.c                         |    3 +
- 25 files changed, 4486 insertions(+), 116 deletions(-)
+ 32 files changed, 5238 insertions(+), 125 deletions(-)
  create mode 100644 src/kosmickrisp/vulkan/kk_variant_entry.c
  create mode 100644 src/kosmickrisp/vulkan/kk_variant_entry.h
  create mode 100644 src/kosmickrisp/vulkan/tests/descriptor_layout_hash_state.c
@@ -98,6 +114,12 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.frag.h
  create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.vert
  create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/cache.vert.h
+ create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/instanced.geom
+ create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/instanced.geom.h
+ create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tesc
+ create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tesc.h
+ create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tese
+ create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tese.h
  create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c
  create mode 100644 src/kosmickrisp/vulkan/tests/variant_disk_cache_state.h
 
@@ -219,9 +241,22 @@ index aa22e62eab1d2050878966b891fcb7bd383fab87..20a52f5a7f4ba24631a48e26e5388a58
  
  VK_DEFINE_HANDLE_CASTS(kk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
 diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
-index 728c665b043315c0e11c6d28aff31aef69a7cec9..20c1401d6879226a7e5548161aab0eb306e56a20 100644
+index 728c665b043315c0e11c6d28aff31aef69a7cec9..4768c9d15d8fd8c7f4bb89784ab90f79f5ba7e9d 100644
 --- a/src/kosmickrisp/vulkan/kk_physical_device.c
 +++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -641,10 +641,10 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
+       .maxTessellationControlTotalOutputComponents = 4216,
+       .maxTessellationEvaluationInputComponents = 128,
+       .maxTessellationEvaluationOutputComponents = 128,
+-      .maxGeometryShaderInvocations = 32,
++      .maxGeometryShaderInvocations = KK_MAX_GEOMETRY_SHADER_INVOCATIONS,
+       .maxGeometryInputComponents = 128,
+       .maxGeometryOutputComponents = 128,
+-      .maxGeometryOutputVertices = 1024,
++      .maxGeometryOutputVertices = KK_MAX_GEOMETRY_OUTPUT_VERTICES,
+       .maxGeometryTotalOutputComponents = 1024,
+       .maxFragmentInputComponents = 128,
+       .maxFragmentOutputAttachments = KK_MAX_RTS,
 @@ -1283,6 +1283,8 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
     if (result != VK_SUCCESS)
        goto fail_disk_cache;
@@ -263,8 +298,31 @@ index 135850ac3f92676d765825272047218a46e29a14..2c09eeb75ec8cbcd562040ebe0d62685
  };
  
  static inline uint32_t
+diff --git a/src/kosmickrisp/vulkan/kk_private.h b/src/kosmickrisp/vulkan/kk_private.h
+index 4e246852333186c87ebaa80e892f09cc0f24c0ae..f554c07a8ccd7658712ea53267b8fa0f2658074f 100644
+--- a/src/kosmickrisp/vulkan/kk_private.h
++++ b/src/kosmickrisp/vulkan/kk_private.h
+@@ -56,6 +56,18 @@
+    (KK_MAX_PUSH_DESCRIPTORS * KK_MAX_DESCRIPTOR_SIZE)
+ #define KK_SSBO_BOUNDS_CHECK_ALIGNMENT 4
+ #define KK_MAX_MULTIVIEW_VIEW_COUNT    32
++
++/* The geometry shader limits the device advertises: the output vertices of one
++ * invocation, and the invocations of one shader.  Poly flattens the
++ * invocations into the output vertices, and an output primitive adds a restart
++ * index for the vertices it is made of, a line strip two of them at the most,
++ * so a geometry stage's index count reaches this many and no more
++ * (kk_gs_info_is_valid bounds a stored one by it). */
++#define KK_MAX_GEOMETRY_OUTPUT_VERTICES    1024
++#define KK_MAX_GEOMETRY_SHADER_INVOCATIONS 32
++#define KK_MAX_GEOMETRY_OUTPUT_INDICES                                         \
++   (KK_MAX_GEOMETRY_OUTPUT_VERTICES * KK_MAX_GEOMETRY_SHADER_INVOCATIONS +     \
++    KK_MAX_GEOMETRY_OUTPUT_VERTICES * KK_MAX_GEOMETRY_SHADER_INVOCATIONS / 2)
+ #define KK_TEXTURE_BUFFER_WIDTH        (1u << 14)
+ #define KK_MAX_OCCLUSION_QUERIES       (32768)
+ #define KK_MIN_SAMPLE_LOCATION         (0.0f)
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034cd55abf6b 100644
+index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..de597ea0dc659bcdb279a2c6c59b580fe843872b 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
 @@ -13,6 +13,7 @@
@@ -359,10 +417,31 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
  
     simple_mtx_lock(&attachment_variants_lock);
     util_dynarray_foreach(&vs->attachment_variants,
-@@ -5101,6 +5132,30 @@ kk_precompile_library_stages(struct kk_device *dev, uint32_t shader_count,
+@@ -5101,6 +5132,51 @@ kk_precompile_library_stages(struct kk_device *dev, uint32_t shader_count,
     }
  }
  
++/* The primitive a geometry or tessellation evaluation shader outputs: the one
++ * a pipeline with such a stage rasterizes, whatever its input assembly says. */
++static enum mesa_prim
++kk_nir_output_primitive(const nir_shader *nir)
++{
++   if (nir->info.stage == MESA_SHADER_GEOMETRY)
++      return nir->info.gs.output_primitive;
++
++   assert(nir->info.stage == MESA_SHADER_TESS_EVAL);
++   return nir->info.tess.point_mode ? MESA_PRIM_POINTS
++          : nir->info.tess._primitive_mode == TESS_PRIMITIVE_ISOLINES
++             ? MESA_PRIM_LINES
++             : MESA_PRIM_TRIANGLES;
++}
++
++static bool
++kk_stage_outputs_a_fixed_primitive(mesa_shader_stage stage)
++{
++   return stage == MESA_SHADER_GEOMETRY || stage == MESA_SHADER_TESS_EVAL;
++}
++
 +/* The hash of what a NIR shader computes: its serialization without names
 + * and debug information, and without the hash of the SPIR-V it came from,
 + * which is a property of how the guest wrote the shader.  The same shader of
@@ -390,27 +469,48 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
  static VkResult
  kk_defer_graphics_shaders(struct kk_device *dev, uint32_t shader_count,
                            struct vk_shader_compile_info *infos,
-@@ -5129,6 +5184,8 @@ kk_defer_graphics_shaders(struct kk_device *dev, uint32_t shader_count,
+@@ -5129,6 +5205,10 @@ kk_defer_graphics_shaders(struct kk_device *dev, uint32_t shader_count,
        shader->deferred_robustness = *compile->robustness;
        blob_init(&shader->deferred_nir);
        nir_serialize(&shader->deferred_nir, compile->nir, false);
 +      shader->deferred_content_valid =
 +         kk_nir_content_hash(compile->nir, shader->deferred_content_hash);
++      if (kk_stage_outputs_a_fixed_primitive(compile->stage))
++         shader->deferred_primitive = kk_nir_output_primitive(compile->nir);
  
        if (shader->deferred_nir.out_of_memory) {
           kk_shader_destroy(&dev->vk, shader, pAllocator);
-@@ -6161,6 +6218,10 @@ struct kk_deferred_graphics_shader {
+@@ -5176,13 +5256,9 @@ kk_graphics_raster_primitive(
+    for (uint32_t i = 0; i < shader_count; i++) {
+       const nir_shader *nir = infos[i].nir;
+       if (nir->info.stage == MESA_SHADER_GEOMETRY)
+-         return nir->info.gs.output_primitive;
+-      if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
+-         primitive = nir->info.tess.point_mode ? MESA_PRIM_POINTS
+-                     : nir->info.tess._primitive_mode == TESS_PRIMITIVE_ISOLINES
+-                        ? MESA_PRIM_LINES
+-                        : MESA_PRIM_TRIANGLES;
+-      }
++         return kk_nir_output_primitive(nir);
++      if (nir->info.stage == MESA_SHADER_TESS_EVAL)
++         primitive = kk_nir_output_primitive(nir);
+    }
+    return primitive;
+ }
+@@ -6161,6 +6237,12 @@ struct kk_deferred_graphics_shader {
     mesa_shader_stage stage;
     struct vk_pipeline_robustness_state robustness;
     struct blob nir;
 +   /* What the NIR computes, free of how the guest wrote it
-+    * (kk_nir_content_hash); valid when it could be taken. */
++    * (kk_nir_content_hash), and the primitive of a geometry or tessellation
++    * evaluation stage; valid when they could be taken. */
 +   bool content_valid;
 +   blake3_hash content_hash;
++   enum mesa_prim primitive;
  };
  
  struct kk_linked_graphics_pipeline {
-@@ -6191,6 +6252,12 @@ struct kk_linked_graphics_pipeline {
+@@ -6191,6 +6273,12 @@ struct kk_linked_graphics_pipeline {
  
        struct hash_table *variants;
        simple_mtx_t lock;
@@ -423,17 +523,18 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
     } dynamic;
  };
  
-@@ -6333,6 +6400,9 @@ kk_create_dynamic_vertex_input_pipeline(
+@@ -6333,6 +6421,10 @@ kk_create_dynamic_vertex_input_pipeline(
           &linked->dynamic.sources[linked->dynamic.shader_count++];
        source->stage = shader->info.stage;
        source->robustness = shader->deferred_robustness;
 +      source->content_valid = shader->deferred_content_valid;
 +      memcpy(source->content_hash, shader->deferred_content_hash,
 +             sizeof(source->content_hash));
++      source->primitive = shader->deferred_primitive;
        blob_init(&source->nir);
        blob_write_bytes(&source->nir, shader->deferred_nir.data,
                         shader->deferred_nir.size);
-@@ -6361,9 +6431,13 @@ fail:
+@@ -6361,9 +6453,13 @@ fail:
     return result;
  }
  
@@ -447,7 +548,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
     dev->linked_graphics_pipelines = _mesa_hash_table_create(
        NULL, kk_blake3_key_hash, kk_blake3_key_equal);
     if (dev->linked_graphics_pipelines == NULL)
-@@ -6482,8 +6556,8 @@ kk_shader_drop_msl(struct kk_shader *shader,
+@@ -6482,8 +6578,8 @@ kk_shader_drop_msl(struct kk_shader *shader,
  /* The Metal pipelines of a variant are built, and the MSL they were built
   * from is of no use again unless a render pass binds fewer colour attachments
   * than the pipeline declares (VK_EXT_dynamic_rendering_unused_attachments),
@@ -458,7 +559,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
   * the largest), so keep what compiles it again instead: the parent holds the
   * NIR, and the variant the vertex input and stride choice it was compiled for.
   */
-@@ -6556,6 +6630,32 @@ kk_new_render_pipeline_state_from_origin(struct kk_device *dev,
+@@ -6556,6 +6652,32 @@ kk_new_render_pipeline_state_from_origin(struct kk_device *dev,
     return result;
  }
  
@@ -491,7 +592,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
  static void
  kk_linked_graphics_pipeline_key(
     struct vk_device *vk_dev, uint32_t shader_count,
-@@ -6574,23 +6674,7 @@ kk_linked_graphics_pipeline_key(
+@@ -6574,23 +6696,7 @@ kk_linked_graphics_pipeline_key(
        stages |= mesa_to_vk_shader_stage(shaders[i]->stage);
     }
  
@@ -516,7 +617,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
     _mesa_blake3_final(&hash, key);
  }
  
-@@ -6621,6 +6705,95 @@ kk_dynamic_vertex_input_parent_key(
+@@ -6621,6 +6727,102 @@ kk_dynamic_vertex_input_parent_key(
     _mesa_blake3_final(&hash, key);
  }
  
@@ -524,17 +625,18 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
 +                           uint64_t us, size_t bytes, uint32_t stages,
 +                           const char *reason);
 +
-+/* What a deferred stage computes, taken from the NIR it holds, for a stage that
-+ * has no hash of that kind: one read back from a pipeline cache.  The bytes of
-+ * a pipeline cache may be a guest's, and a hash that came with them says only
-+ * what their writer wants the disk cache to believe, so the hash is computed
-+ * here from the NIR that would be compiled and from nothing else.  The cost is
-+ * a read of the NIR and a hash of it, paid once for the parent of each such
-+ * pipeline and only when the variants are kept on disk. */
++/* What a deferred stage computes, and the primitive it outputs, taken from the
++ * NIR it holds, for a stage that has neither: one read back from a pipeline
++ * cache.  The bytes of a pipeline cache may be a guest's, and a hash or a
++ * primitive that came with them says only what their writer wants the disk
++ * cache to believe, so both are taken here from the NIR that would be compiled
++ * and from nothing else.  The cost is a read of the NIR and a hash of it, paid
++ * once for the parent of each such pipeline and only when the variants are
++ * kept on disk. */
 +static bool
-+kk_deferred_content_hash_from_nir(struct kk_device *dev,
-+                                  const struct kk_deferred_graphics_shader *source,
-+                                  blake3_hash hash)
++kk_deferred_facts_from_nir(struct kk_device *dev,
++                           const struct kk_deferred_graphics_shader *source,
++                           blake3_hash hash, enum mesa_prim *primitive)
 +{
 +   const uint64_t start = os_time_get_nano();
 +   const nir_shader_compiler_options *nir_options =
@@ -542,12 +644,15 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
 +   struct blob_reader reader;
 +   blob_reader_init(&reader, source->nir.data, source->nir.size);
 +   nir_shader *nir = nir_deserialize(NULL, nir_options, &reader);
-+   if (nir == NULL || reader.overrun) {
++   if (nir == NULL || reader.overrun || nir->info.stage != source->stage) {
 +      ralloc_free(nir);
 +      return false;
 +   }
 +
 +   const bool ok = kk_nir_content_hash(nir, hash);
++   *primitive = kk_stage_outputs_a_fixed_primitive(source->stage)
++                   ? kk_nir_output_primitive(nir)
++                   : MESA_PRIM_POINTS;
 +   ralloc_free(nir);
 +   if (ok) {
 +      kk_variant_log("rehash", hash, (os_time_get_nano() - start) / 1000,
@@ -561,11 +666,13 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
 + * pipeline state the compile lowers, and the contents of the descriptor set
 + * layouts.  A variant's disk key adds the vertex input and the device
 + * (kk_variant_disk_key).  Returns false when the pipeline has no such
-+ * identity, in which case its variants are not kept on disk.
++ * identity, in which case its variants are not kept on disk.  A pipeline that
++ * has one has taken from its own shaders everything a variant read back from
++ * the disk is held to (kk_loaded_variant_matches_parent).
 + */
 +static bool
 +kk_dynamic_vertex_input_disk_base(
-+   struct kk_device *dev, const struct kk_linked_graphics_pipeline *linked,
++   struct kk_device *dev, struct kk_linked_graphics_pipeline *linked,
 +   uint32_t shader_count, struct vk_shader *const *shaders,
 +   const struct vk_graphics_pipeline_state *state, uint32_t set_layout_count,
 +   struct vk_descriptor_set_layout *const *set_layouts, blake3_hash key)
@@ -584,17 +691,18 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
 +      stages |= mesa_to_vk_shader_stage(shaders[i]->stage);
 +
 +   for (uint32_t i = 0; i < linked->dynamic.shader_count; i++) {
-+      const struct kk_deferred_graphics_shader *source =
-+         &linked->dynamic.sources[i];
-+      blake3_hash content_hash;
-+      if (source->content_valid)
-+         memcpy(content_hash, source->content_hash, sizeof(content_hash));
-+      else if (!kk_deferred_content_hash_from_nir(dev, source, content_hash))
-+         return false;
++      struct kk_deferred_graphics_shader *source = &linked->dynamic.sources[i];
++      if (!source->content_valid) {
++         if (!kk_deferred_facts_from_nir(dev, source, source->content_hash,
++                                         &source->primitive))
++            return false;
++         source->content_valid = true;
++      }
 +      _mesa_blake3_update(&hash, &source->stage, sizeof(source->stage));
 +      _mesa_blake3_update(&hash, &source->robustness,
 +                          sizeof(source->robustness));
-+      _mesa_blake3_update(&hash, content_hash, sizeof(content_hash));
++      _mesa_blake3_update(&hash, source->content_hash,
++                          sizeof(source->content_hash));
 +   }
 +   kk_update_pipeline_state_key(&hash, vk_dev, state, stages);
 +
@@ -612,7 +720,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
  static void
  kk_destroy_linked_graphics_pipeline(
     struct vk_device *vk_dev, void *linked_data,
-@@ -6711,6 +6884,9 @@ kk_link_graphics_pipeline(
+@@ -6711,6 +6913,9 @@ kk_link_graphics_pipeline(
  
        memcpy(linked->key, dynamic_key, sizeof(linked->key));
        linked->refcount = 1;
@@ -622,7 +730,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
  
        simple_mtx_lock(&dev->linked_graphics_pipelines_lock);
        dynamic_cached =
-@@ -6854,40 +7030,27 @@ kk_link_graphics_pipeline(
+@@ -6854,40 +7059,27 @@ kk_link_graphics_pipeline(
  }
  
  /* The text goes to the blob in the form the shader holds it, so a pipeline
@@ -675,7 +783,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
  {
     struct kk_shader *shader = container_of(vk_shader, struct kk_shader, vk);
  
-@@ -6901,35 +7064,35 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
+@@ -6901,35 +7093,35 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
        return !blob->out_of_memory;
     }
  
@@ -721,7 +829,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
                 return false;
           }
        }
-@@ -6938,67 +7101,292 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
+@@ -6938,67 +7130,310 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
     return !blob->out_of_memory;
  }
  
@@ -832,23 +940,41 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
 +}
 +
 +/* The geometry stage's description of the draw it emulates.  The writer takes
-+ * its mode from the output primitive of the geometry shader (or its
-+ * decomposition), a shape poly_nir_lower_gs chose, one count word per vertex
-+ * stream at most, and a number of indices that is the shader's output vertex
-+ * count (at most maxGeometryOutputVertices, 1024) plus the restarts of the
-+ * primitives, 1536 in the worst case.  A draw sizes buffers with these in 32
-+ * bits and copies the static topology of a static-indexed output into an array
-+ * of the topology's size, as many indices as the description says. */
-+#define KK_GS_MAX_INDICES 2048
++ * its mode from the output primitive of the geometry shader (a point, line
++ * strip or triangle strip) or from its decomposition (points, lines or
++ * triangles): those five, and the draw has a Metal primitive type for no other
++ * (mesa_prim_to_mtl_primitive_type).  The shape is one poly_nir_lower_gs
++ * chose, the count words are one for each vertex stream at most, and the
++ * number of indices is the shader's output vertices of all its invocations
++ * plus the restarts of the primitives, which the limits the device advertises
++ * bound (KK_MAX_GEOMETRY_OUTPUT_INDICES).  A draw sizes buffers with these in
++ * 32 bits (the draw checks the products in 64) and copies the static topology
++ * of a static-indexed output into an array of the topology's size, as many
++ * indices as the description says. */
 +#define KK_TESS_LOCAL_THREAD_LIMIT 1024
++
++static bool
++kk_gs_mode_is_valid(enum mesa_prim mode)
++{
++   switch (mode) {
++   case MESA_PRIM_POINTS:
++   case MESA_PRIM_LINES:
++   case MESA_PRIM_LINE_STRIP:
++   case MESA_PRIM_TRIANGLES:
++   case MESA_PRIM_TRIANGLE_STRIP:
++      return true;
++   default:
++      return false;
++   }
++}
 +
 +static bool
 +kk_gs_info_is_valid(const struct poly_gs_info *gsi)
 +{
-+   if ((unsigned)gsi->mode >= MESA_PRIM_PATCHES ||
++   if (!kk_gs_mode_is_valid(gsi->mode) ||
 +       (unsigned)gsi->shape > POLY_GS_SHAPE_STATIC_PER_INSTANCE ||
 +       gsi->count_words > POLY_MAX_VERTEX_STREAMS ||
-+       gsi->max_indices > KK_GS_MAX_INDICES)
++       gsi->max_indices > KK_MAX_GEOMETRY_OUTPUT_INDICES)
 +      return false;
 +   return gsi->shape != POLY_GS_SHAPE_STATIC_INDEXED ||
 +          gsi->max_indices <= ARRAY_SIZE(gsi->topology);
@@ -1053,14 +1179,14 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
     }
  
     struct kk_shader *shader = vk_shader_zalloc(
-@@ -7031,56 +7419,62 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
+@@ -7031,56 +7466,62 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
           goto fail;
        }
  
-+      /* What the NIR computes is not in the blob: it is taken from the NIR
-+       * when the disk cache of the variants asks for it
-+       * (kk_deferred_content_hash_from_nir), because a value that came with
-+       * the bytes is only what the writer of the bytes says it is. */
++      /* What the NIR computes, and the primitive it outputs, are not in the
++       * blob: they are taken from the NIR when the disk cache of the variants
++       * asks for them (kk_deferred_facts_from_nir), because a value that came
++       * with the bytes is only what the writer of the bytes says it is. */
 +      shader->deferred_content_valid = false;
 +
        *shader_out = &shader->vk;
@@ -1124,7 +1250,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
           if (result != VK_SUCCESS)
              goto fail;
        }
-@@ -7090,7 +7484,8 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
+@@ -7090,7 +7531,8 @@ kk_deserialize_shader_impl(struct vk_device *vk_dev, struct blob_reader *blob,
           u_foreach_bit(stage, shader->info.vs.raster_variant_stages) {
              struct vk_shader *child = NULL;
              result = kk_deserialize_shader_impl(vk_dev, blob, binary_version,
@@ -1134,7 +1260,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
              if (result != VK_SUCCESS)
                 goto fail;
              struct kk_shader *raster = container_of(child, struct kk_shader, vk);
-@@ -7135,7 +7530,592 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+@@ -7135,7 +7577,603 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
                        struct vk_shader **shader_out)
  {
     return kk_deserialize_shader_impl(vk_dev, blob, binary_version, pAllocator,
@@ -1462,10 +1588,21 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
 +      (parent_stages & (BITFIELD_BIT(MESA_SHADER_TESS_EVAL) |
 +                        BITFIELD_BIT(MESA_SHADER_GEOMETRY))) != 0;
 +   /* The final primitive of a pipeline with a tessellation or geometry shader
-+    * is the shader's own, which only the shader says. */
-+   const enum mesa_prim primitive =
-+      fixed_primitive ? vertex->info.vs.raster_primitive
-+                      : vk_topology_to_mesa(ia.primitive_topology);
++    * is the shader's own (kk_graphics_raster_primitive), which the parent took
++    * from its NIR (kk_dynamic_vertex_input_disk_base): never from the record,
++    * which is what is being checked. */
++   enum mesa_prim primitive = vk_topology_to_mesa(ia.primitive_topology);
++   for (uint32_t i = 0; i < parent->dynamic.shader_count; i++) {
++      const struct kk_deferred_graphics_shader *source =
++         &parent->dynamic.sources[i];
++      assert(source->content_valid);
++      if (source->stage == MESA_SHADER_GEOMETRY) {
++         primitive = source->primitive;
++         break;
++      }
++      if (source->stage == MESA_SHADER_TESS_EVAL)
++         primitive = source->primitive;
++   }
 +   if (vertex->info.vs.raster_primitive != primitive)
 +      return false;
 +
@@ -1728,7 +1865,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
  }
  
  void
-@@ -7240,10 +8220,22 @@ kk_resolve_dynamic_vertex_input_pipeline(struct kk_cmd_buffer *cmd)
+@@ -7240,10 +8278,22 @@ kk_resolve_dynamic_vertex_input_pipeline(struct kk_cmd_buffer *cmd)
  
     if (variant == NULL) {
        struct kk_linked_graphics_pipeline *candidate = NULL;
@@ -1755,7 +1892,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
  
        memcpy(candidate->key, key, sizeof(candidate->key));
        kk_variant_drop_msl(candidate, linked, vi, byte_strides);
-@@ -7297,8 +8289,12 @@ kk_cmd_select_line_raster_variant(struct kk_cmd_buffer *cmd)
+@@ -7297,8 +8347,12 @@ kk_cmd_select_line_raster_variant(struct kk_cmd_buffer *cmd)
     if (owner->info.vs.raster_variant_mask) {
        const enum kk_raster_variant variant =
           kk_raster_variant_select(primitive, &dyn->rs);
@@ -1771,7 +1908,7 @@ index c8399f59c1d7874ff0a14c39b3f323efd9c05a49..fbb5244a636fd0d77eaf3178363d034c
              selected[stage] = owner->raster_variant_shaders[variant][stage];
        }
 diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
-index f817df5a6789d8e388e7b4c8878e7cf1b61e73d6..6135f56a37c13415016c1cebf6575268218ea272 100644
+index f817df5a6789d8e388e7b4c8878e7cf1b61e73d6..dc3db041a5ab813b650b8cd74eeb16e9348d2835 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.h
 +++ b/src/kosmickrisp/vulkan/kk_shader.h
 @@ -23,6 +23,8 @@
@@ -1794,20 +1931,22 @@ index f817df5a6789d8e388e7b4c8878e7cf1b61e73d6..6135f56a37c13415016c1cebf6575268
  
  /* A Metal render pipeline trimmed to the colour attachments a render pass
   * bound.  Only VK_EXT_dynamic_rendering_unused_attachments can bind fewer
-@@ -245,6 +247,12 @@ struct kk_shader {
+@@ -245,6 +247,14 @@ struct kk_shader {
                                              [MESA_SHADER_STAGES];
     struct vk_pipeline_robustness_state deferred_robustness;
     struct blob deferred_nir;
 +   /* What the deferred NIR computes (kk_nir_content_hash), the identity of the
-+    * shader the disk cache of its variants goes by.  Only a shader this driver
-+    * compiled has it: one read back from a blob is not valid until it is taken
-+    * again from its NIR. */
++    * shader the disk cache of its variants goes by, and, for a geometry or
++    * tessellation evaluation shader, the primitive it outputs.  Only a shader
++    * this driver compiled has them: one read back from a blob is not valid
++    * until they are taken again from its NIR. */
 +   bool deferred_content_valid;
 +   blake3_hash deferred_content_hash;
++   enum mesa_prim deferred_primitive;
     /* MSL sources this shader registered in the device's MTLLibrary cache when
      * it was created as a graphics pipeline library, by stage.  A link that
      * regenerates the same source finds Metal's front-end compile already done.
-@@ -344,4 +352,19 @@ void kk_cmd_select_line_raster_variant(struct kk_cmd_buffer *cmd);
+@@ -344,4 +354,19 @@ void kk_cmd_select_line_raster_variant(struct kk_cmd_buffer *cmd);
  VkResult
  kk_resolve_dynamic_vertex_input_pipeline(struct kk_cmd_buffer *cmd);
  
@@ -2649,10 +2788,10 @@ index 0000000000000000000000000000000000000000..07324355f9033e6648bff0acafd24ace
 +}
 diff --git a/src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp b/src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2af14857ae
+index 0000000000000000000000000000000000000000..c4f5aee4e9cda173ec4cb962c0a016713d365fa6
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/tests/test_variant_disk_cache.cpp
-@@ -0,0 +1,1293 @@
+@@ -0,0 +1,1693 @@
 +/*
 + * Copyright 2026 Google LLC
 + * SPDX-License-Identifier: MIT
@@ -2709,6 +2848,32 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +static const uint32_t fragment_spirv[] =
 +#include "variant_disk_cache_shaders/cache.frag.h"
 +;
++static const uint32_t geometry_spirv[] =
++#include "variant_disk_cache_shaders/instanced.geom.h"
++;
++static const uint32_t control_spirv[] =
++#include "variant_disk_cache_shaders/isolines.tesc.h"
++;
++static const uint32_t evaluation_spirv[] =
++#include "variant_disk_cache_shaders/isolines.tese.h"
++;
++
++/* The phases that build a pipeline with a geometry stage, and with a
++ * tessellation stage. */
++static bool
++is_geometry_phase(const char *phase)
++{
++   return strncmp(phase, "gs-", 3) == 0;
++}
++
++static bool
++is_tessellation_phase(const char *phase)
++{
++   return strncmp(phase, "tess-", 5) == 0;
++}
++
++static int gs_blob_phase(const kk_test_device &t, VkDevice device,
++                         const VkGraphicsPipelineCreateInfo &pipeline_info);
 +
 +/* ---------------------------------------------------------------- child -- */
 +
@@ -2815,15 +2980,37 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +   features13.dynamicRendering = VK_TRUE;
 +   const char *extensions[] = {
 +      VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME};
-+   kk_test_create_device(&t, &features13, nullptr, 1, extensions);
++   const bool geometry = is_geometry_phase(phase);
++   VkPhysicalDeviceFeatures enabled{};
++   enabled.geometryShader = geometry;
++   const bool tessellation = is_tessellation_phase(phase);
++   enabled.tessellationShader = tessellation;
++   kk_test_create_device(&t, &features13, &enabled, 1, extensions);
 +   KK_LOAD_DEVICE_FUNCTIONS(t);
 +
-+   std::array<VkShaderModule, 2> modules{};
-+   const std::array<const uint32_t *, 2> sources{vertex_spirv, fragment_spirv};
-+   const std::array<size_t, 2> sizes{sizeof(vertex_spirv),
-+                                     sizeof(fragment_spirv)};
-+   for (unsigned i = 0; i < modules.size(); ++i)
-+      modules[i] = kk_test_shader_module(&t, sources[i], sizes[i]);
++   /* The geometry phases put a geometry shader between the two: its 32
++    * invocations of up to 64 vertices are what the stored records of such a
++    * pipeline must be able to hold. */
++   std::vector<VkShaderModule> modules;
++   std::vector<VkPipelineShaderStageCreateInfo> stages;
++   const auto add_stage = [&](VkShaderStageFlagBits stage, const uint32_t *code,
++                              size_t size) {
++      modules.push_back(kk_test_shader_module(&t, code, size));
++      stages.push_back({VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
++                        nullptr, 0, stage, modules.back(), "main", nullptr});
++   };
++   add_stage(VK_SHADER_STAGE_VERTEX_BIT, vertex_spirv, sizeof(vertex_spirv));
++   if (tessellation) {
++      add_stage(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, control_spirv,
++                sizeof(control_spirv));
++      add_stage(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, evaluation_spirv,
++                sizeof(evaluation_spirv));
++   }
++   if (geometry)
++      add_stage(VK_SHADER_STAGE_GEOMETRY_BIT, geometry_spirv,
++                sizeof(geometry_spirv));
++   add_stage(VK_SHADER_STAGE_FRAGMENT_BIT, fragment_spirv,
++             sizeof(fragment_spirv));
 +
 +   VkPipelineLayoutCreateInfo layout_info{
 +      VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -2831,17 +3018,28 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +   result = vkCreatePipelineLayout(device, &layout_info, nullptr, &layout);
 +   require(result == VK_SUCCESS, "create layout", result);
 +
-+   const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
-+      {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
-+       VK_SHADER_STAGE_VERTEX_BIT, modules[0], "main", nullptr},
-+      {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
-+       VK_SHADER_STAGE_FRAGMENT_BIT, modules[1], "main", nullptr},
-+   }};
++   /* The blob phase's pipeline has its vertex input as state; every other
++    * has it dynamic. */
++   const bool static_vertex_input = strcmp(phase, "gs-blob") == 0;
++   const VkVertexInputBindingDescription static_binding{
++      0, 4, VK_VERTEX_INPUT_RATE_VERTEX};
++   const VkVertexInputAttributeDescription static_attribute{
++      0, 0, VK_FORMAT_R8G8B8A8_UNORM, 0};
 +   VkPipelineVertexInputStateCreateInfo vi{
 +      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
++   if (static_vertex_input) {
++      vi.vertexBindingDescriptionCount = 1;
++      vi.pVertexBindingDescriptions = &static_binding;
++      vi.vertexAttributeDescriptionCount = 1;
++      vi.pVertexAttributeDescriptions = &static_attribute;
++   }
 +   VkPipelineInputAssemblyStateCreateInfo ia{
 +      VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-+   ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++   ia.topology = tessellation ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST
++                              : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++   VkPipelineTessellationStateCreateInfo tess_state{
++      VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO};
++   tess_state.patchControlPoints = 2;
 +   VkPipelineViewportStateCreateInfo vp{
 +      VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
 +   vp.viewportCount = vp.scissorCount = 1;
@@ -2850,7 +3048,10 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +   rs.lineWidth = 1.0f;
 +   VkPipelineMultisampleStateCreateInfo ms{
 +      VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-+   ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
++   /* A geometry pipeline is drawn with four samples: the render pass of a
++    * draw sets the sample positions the output primitive decides. */
++   ms.rasterizationSamples =
++      geometry ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
 +   VkPipelineColorBlendAttachmentState attachment{};
 +   attachment.colorWriteMask = 15;
 +   VkPipelineColorBlendStateCreateInfo cb{
@@ -2862,7 +3063,7 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +      VK_DYNAMIC_STATE_VERTEX_INPUT_EXT};
 +   VkPipelineDynamicStateCreateInfo dynamic{
 +      VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-+   dynamic.dynamicStateCount = 3;
++   dynamic.dynamicStateCount = static_vertex_input ? 2 : 3;
 +   dynamic.pDynamicStates = dynamic_states;
 +   const VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
 +   VkPipelineRenderingCreateInfo rendering{
@@ -2894,6 +3095,8 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +   pipeline_info.pStages = stages.data();
 +   pipeline_info.pVertexInputState = &vi;
 +   pipeline_info.pInputAssemblyState = &ia;
++   if (tessellation)
++      pipeline_info.pTessellationState = &tess_state;
 +   pipeline_info.pViewportState = &vp;
 +   pipeline_info.pRasterizationState = &rs;
 +   pipeline_info.pMultisampleState = &ms;
@@ -2904,8 +3107,10 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +   result = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info,
 +                                      nullptr, &pipeline);
 +   require(result == VK_SUCCESS, "pipeline", result);
++   int phase_result = 0;
 +
-+   if (strcmp(phase, "draw") == 0) {
++   if (strcmp(phase, "draw") == 0 || strcmp(phase, "gs-draw") == 0 ||
++       strcmp(phase, "tess-draw") == 0) {
 +      /* Two vertex-input states, so two variants of the one parent. */
 +      const struct kk_shader *a = record_variant(t, device, pipeline, 0);
 +      const struct kk_shader *b = record_variant(t, device, pipeline, 1);
@@ -2913,7 +3118,8 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +      /* And the first again: the parent's own table answers. */
 +      require(record_variant(t, device, pipeline, 0) == a,
 +              "a variant resolved twice is one variant");
-+   } else if (strcmp(phase, "cache") == 0) {
++   } else if (strcmp(phase, "cache") == 0 || strcmp(phase, "gs-cache") == 0 ||
++              strcmp(phase, "tess-cache") == 0) {
 +      /* The same pipeline built again from the pipeline cache data of a
 +       * first one: its shaders are read back by the driver's deserializer
 +       * instead of compiled, and its variants must still be found under the
@@ -2963,6 +3169,10 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +      vkDestroyPipeline(device, pipeline, nullptr);
 +      pipeline = VK_NULL_HANDLE;
 +      vkDestroyPipelineCache(device, second_cache, nullptr);
++   } else if (static_vertex_input) {
++      /* The shaders of a pipeline whose vertex input is state, as a pipeline
++       * cache holds them. */
++      phase_result = gs_blob_phase(t, device, pipeline_info);
 +   } else if (input_attachment) {
 +      require(record_variant(t, device, pipeline, 0) != nullptr,
 +              "a variant of the input attachment pipeline");
@@ -2994,7 +3204,7 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +   for (auto module : modules)
 +      vkDestroyShaderModule(device, module, nullptr);
 +   kk_test_destroy(&t);
-+   return 0;
++   return phase_result;
 +}
 +
 +/* --------------------------------------------------------------- parent -- */
@@ -3244,6 +3454,196 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +   exit(2);
 +}
 +
++/* ------------------------------------------------- pipeline cache blob -- */
++
++/* The objects of a pipeline cache's data: a header, a count, and for each
++ * object a type, key and data sizes, the key, and the data from the next
++ * eight-byte boundary (vk_pipeline_cache_load). */
++static std::vector<std::vector<uint8_t>>
++cache_objects(const std::vector<uint8_t> &data)
++{
++   std::vector<std::vector<uint8_t>> objects;
++   const auto get32 = [&](size_t at) {
++      uint32_t value = 0;
++      if (at + 4 <= data.size())
++         memcpy(&value, data.data() + at, 4);
++      return value;
++   };
++   size_t at = get32(0);
++   const uint32_t count = get32(at);
++   at += 4;
++   for (uint32_t i = 0; i < count; i++) {
++      at = (at + 3) & ~(size_t)3;
++      const uint32_t key_size = get32(at + 4), data_size = get32(at + 8);
++      at = (at + 12 + key_size + 7) & ~(size_t)7;
++      if (at + data_size > data.size())
++         break;
++      objects.emplace_back(data.begin() + at, data.begin() + at + data_size);
++      at += data_size;
++   }
++   return objects;
++}
++
++/* The stored vertex shader of a pipeline built with its vertex input as state:
++ * the one object whose bytes begin with the description of a vertex-stage
++ * shader that is no deferred stand-in. */
++static std::vector<uint8_t>
++vertex_object(const std::vector<std::vector<uint8_t>> &objects)
++{
++   std::vector<uint8_t> found;
++   unsigned n = 0;
++   for (const auto &object : objects) {
++      if (object.size() < driver("sizeof info"))
++         continue;
++      uint32_t stage;
++      memcpy(&stage, object.data() + driver("info.stage"), 4);
++      if (stage == driver("MESA_SHADER_VERTEX") &&
++          object[driver("info.deferred")] == 0) {
++         found = object;
++         n++;
++      }
++   }
++   if (n != 1) {
++      fprintf(stderr, "%u vertex shaders in the pipeline cache data\n", n);
++      exit(2);
++   }
++   return found;
++}
++
++/* The shader a pipeline cache, or a pipeline binary, holds is read back by the
++ * driver's own deserializer, which takes what no writer wrote for a shader
++ * that was never compiled.  The phase builds the geometry pipeline with its
++ * vertex input as state, so that its vertex shader is a record that carries
++ * the geometry stage's description, takes that record from the data a
++ * pipeline cache hands out and offers it to the deserializer - whole, and
++ * edited in the ways a record can be wrong.  Each line it prints says what the
++ * deserializer did and what it should have done. */
++static int
++gs_blob_phase(const kk_test_device &t, VkDevice device,
++              const VkGraphicsPipelineCreateInfo &pipeline_info)
++{
++   PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr = t.get_device_proc_addr;
++   LOAD_D(vkCreatePipelineCache);
++   LOAD_D(vkGetPipelineCacheData);
++   LOAD_D(vkDestroyPipelineCache);
++   LOAD_D(vkCreateGraphicsPipelines);
++   LOAD_D(vkDestroyPipeline);
++
++   VkPipelineCacheCreateInfo cache_info{
++      VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
++   VkPipelineCache cache = VK_NULL_HANDLE;
++   require(vkCreatePipelineCache(device, &cache_info, nullptr, &cache) ==
++              VK_SUCCESS,
++           "pipeline cache");
++   VkPipeline pipeline = VK_NULL_HANDLE;
++   require(vkCreateGraphicsPipelines(device, cache, 1, &pipeline_info, nullptr,
++                                     &pipeline) == VK_SUCCESS,
++           "geometry pipeline into the pipeline cache");
++   size_t data_size = 0;
++   require(vkGetPipelineCacheData(device, cache, &data_size, nullptr) ==
++              VK_SUCCESS && data_size > 0,
++           "pipeline cache data size");
++   std::vector<uint8_t> data(data_size);
++   require(vkGetPipelineCacheData(device, cache, &data_size, data.data()) ==
++              VK_SUCCESS,
++           "pipeline cache data");
++   vkDestroyPipeline(device, pipeline, nullptr);
++   vkDestroyPipelineCache(device, cache, nullptr);
++
++   const std::vector<uint8_t> vertex = vertex_object(cache_objects(data));
++   const auto get32 = [&](const char *name) {
++      uint32_t value;
++      memcpy(&value, vertex.data() + driver(name), 4);
++      return value;
++   };
++   /* What the record says of its geometry stage: the index count of 32
++    * invocations of 64 vertices, which poly writes for a triangle strip whose
++    * vertex count is not static. */
++   const uint32_t vertices = 64 * 32;
++   printf("  geometry record: shape %u, %u indices, mode %u\n",
++          get32("vs.geometry.shape"), get32("vs.geometry.max_indices"),
++          get32("vs.geometry.mode"));
++   fprintf(stderr, "kkblob facts %d\n",
++           get32("vs.geometry.shape") == driver("POLY_GS_SHAPE_DYNAMIC_INDEXED") &&
++              get32("vs.geometry.max_indices") == vertices + vertices / 3 &&
++              get32("vs.geometry.mode") == driver("MESA_PRIM_TRIANGLE_STRIP"));
++
++   struct blob_row {
++      std::string name;
++      bool taken;
++      std::function<void(std::vector<uint8_t> &)> edit;
++   };
++   std::vector<blob_row> rows;
++   rows.push_back({"the record the driver wrote", true, [](auto &) {}});
++
++   /* The modes a geometry stage's draw is made in: a mode that is not one of
++    * the five is a mode no writer wrote, and a primitive type the draw has no
++    * Metal type for. */
++   const char *accepted[] = {"MESA_PRIM_POINTS", "MESA_PRIM_LINES",
++                             "MESA_PRIM_LINE_STRIP", "MESA_PRIM_TRIANGLES",
++                             "MESA_PRIM_TRIANGLE_STRIP"};
++   const char *refused[] = {"MESA_PRIM_LINE_LOOP", "MESA_PRIM_TRIANGLE_FAN",
++                            "MESA_PRIM_QUADS", "MESA_PRIM_PATCHES"};
++   for (const char *field : {"vs.geometry.mode", "vs.transform_feedback.mode"}) {
++      const auto name = [&](const char *prim, const char *what) {
++         return std::string(field) + " " + (prim + 10) + what;
++      };
++      for (const char *prim : accepted) {
++         const uint64_t value = driver(prim);
++         rows.push_back({name(prim, ""), true, [field, value](auto &b) {
++                            set_field(b, field, value, 4);
++                         }});
++      }
++      for (const char *prim : refused) {
++         const uint64_t value = driver(prim);
++         rows.push_back({name(prim, ""), false, [field, value](auto &b) {
++                            set_field(b, field, value, 4);
++                         }});
++      }
++      rows.push_back({std::string(field) + " 99", false, [field](auto &b) {
++                         set_field(b, field, 99, 4);
++                      }});
++   }
++
++   /* The most indices a geometry stage's draw sizes its buffers for: what the
++    * advertised limits allow, and 64 for a static topology, which is copied
++    * into an array of that size. */
++   const uint64_t limit = driver("KK_MAX_GEOMETRY_OUTPUT_INDICES");
++   const uint64_t dynamic = driver("POLY_GS_SHAPE_DYNAMIC_INDEXED");
++   const uint64_t indexed = driver("POLY_GS_SHAPE_STATIC_INDEXED");
++   const struct {
++      const char *name;
++      bool taken;
++      uint64_t shape, indices;
++   } sizes[] = {
++      {"dynamic indices: as many as the limits allow", true, dynamic, limit},
++      {"dynamic indices: one more", false, dynamic, limit + 1},
++      {"static indexed: 64", true, indexed, 64},
++      {"static indexed: 65", false, indexed, 65},
++   };
++   for (const auto &size : sizes) {
++      rows.push_back({size.name, size.taken, [size](auto &b) {
++                         set_field(b, "vs.geometry.shape", size.shape, 4);
++                         set_field(b, "vs.geometry.max_indices", size.indices,
++                                   4);
++                      }});
++   }
++
++   unsigned wrong = 0;
++   for (const auto &row : rows) {
++      std::vector<uint8_t> edited = vertex;
++      row.edit(edited);
++      const bool taken =
++         kk_test_deserialize_shader(device, edited.data(), edited.size()) ==
++         VK_SUCCESS;
++      /* One line a row, which the parent tells apart by its name. */
++      fprintf(stderr, "kkblob row %d %d %s\n", taken, row.taken,
++              row.name.c_str());
++      wrong += taken != row.taken;
++   }
++   return wrong != 0;
++}
++
 +struct damage {
 +   const char *name;
 +   bool descriptors; /* all descriptors, or the first text only */
@@ -3346,16 +3746,17 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 + * driver must refuse it as `reason` and translate and store the variant, never
 + * crash on it. */
 +struct forgery {
-+   const char *name;
++   std::string name;
 +   const char *reason;
 +   std::function<void(frames_t &)> edit;
 +};
 +
 +static void
 +forge_row(const forgery &row, struct disk_cache *cache,
-+          const std::vector<entry_file> &cold_entries)
++          const std::vector<entry_file> &cold_entries,
++          const char *phase = "draw", const char *what = "forged")
 +{
-+   const std::string label = std::string("forged: ") + row.name;
++   const std::string label = std::string(what) + ": " + row.name;
 +   if (!row_selected(label))
 +      return;
 +   fresh_cache();
@@ -3371,14 +3772,14 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +   disk_cache_wait_for_idle(cache);
 +
 +   bool ok;
-+   auto next = boot("draw", ok);
++   auto next = boot(phase, ok);
 +   ROW(ok, label.c_str());
 +   ROW(count(next, "invalid", row.reason) == 2 &&
 +          count(next, "invalid") == 2 && count(next, "load") == 0,
 +       label.c_str());
 +   ROW(count(next, "compile") == 2 && count(next, "store") == 2,
 +       label.c_str());
-+   auto healed = boot("draw", ok);
++   auto healed = boot(phase, ok);
 +   ROW(ok && count(healed, "compile") == 0 && count(healed, "invalid") == 0 &&
 +          count(healed, "load") == 2,
 +       label.c_str());
@@ -3466,6 +3867,22 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +                   [vs_of, patches](frames_t &f) {
 +                      set_field(vs_of(f), "vs.geometry.mode", patches, 4);
 +                   }});
++   /* A mode below the patches is not yet a mode the writer writes: only the
++    * five of a geometry shader's output primitive and its decomposition are,
++    * and a draw has a Metal primitive type for no other. */
++   for (const char *prim : {"MESA_PRIM_LINE_LOOP", "MESA_PRIM_TRIANGLE_FAN",
++                            "MESA_PRIM_QUADS"}) {
++      const uint64_t value = driver(prim);
++      rows.push_back({std::string("geometry mode ") + (prim + 10),
++                      "info", [vs_of, value](frames_t &f) {
++                         set_field(vs_of(f), "vs.geometry.mode", value, 4);
++                      }});
++      rows.push_back({std::string("transform feedback mode ") + (prim + 10),
++                      "info", [vs_of, value](frames_t &f) {
++                         set_field(vs_of(f), "vs.transform_feedback.mode",
++                                   value, 4);
++                      }});
++   }
 +   rows.push_back({"geometry count words, 4G bytes of them", "info",
 +                   [vs_of](frames_t &f) {
 +                      set_field(vs_of(f), "vs.geometry.count_words",
@@ -3475,9 +3892,11 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +                   [vs_of](frames_t &f) {
 +                      set_field(vs_of(f), "vs.geometry.count_words", 5, 4);
 +                   }});
-+   rows.push_back({"geometry indices past the output vertex limit", "info",
++   rows.push_back({"geometry indices past what the limits allow", "info",
 +                   [vs_of](frames_t &f) {
-+                      set_field(vs_of(f), "vs.geometry.max_indices", 4097, 4);
++                      set_field(vs_of(f), "vs.geometry.max_indices",
++                                driver("KK_MAX_GEOMETRY_OUTPUT_INDICES") + 1,
++                                4);
 +                   }});
 +   rows.push_back({"geometry indices, 1G of them for each primitive", "info",
 +                   [vs_of](frames_t &f) {
@@ -3822,6 +4241,126 @@ index 0000000000000000000000000000000000000000..5e7947ab67f6b051bc6a15d209896a2a
 +      printf("variant disk cache forged descriptors:\n");
 +      for (const auto &row : forgeries())
 +         forge_row(row, cache, cold_entries);
++   }
++
++   /* A parent with a geometry stage, of 32 invocations of up to 64 vertices:
++    * its variants are stored, found again, and what a variant's record says of
++    * the primitive it outputs is the geometry shader's own. */
++   if (row_selected("geometry parent")) {
++      fresh_cache();
++      auto cold_gs = boot("gs-draw", ok);
++      ROW(ok && count(cold_gs, "compile") == 2 && count(cold_gs, "store") == 2 &&
++             count(cold_gs, "skip") == 0 && count(cold_gs, "load") == 0,
++          "geometry parent: both variants are translated and stored");
++      auto warm_gs = boot("gs-draw", ok);
++      ROW(ok && count(warm_gs, "load") == 2 && count(warm_gs, "compile") == 0 &&
++             count(warm_gs, "invalid") == 0,
++          "geometry parent: both variants are found again");
++      /* The same pipeline built from pipeline cache data, whose deferred
++       * shaders the driver read back: the primitive its variants are held to
++       * is taken from their NIR again. */
++      auto cached_gs = boot("gs-cache", ok);
++      ROW(ok && count(cached_gs, "rehash") >= 1 &&
++             count(cached_gs, "load") == 2 && count(cached_gs, "compile") == 0 &&
++             count(cached_gs, "miss") == 0 && count(cached_gs, "invalid") == 0,
++          "geometry parent: from pipeline cache data, both variants are "
++          "found under the compiled pipeline's keys");
++      printf("  geometry parent: compile %u store %u skip %u, then load %u, "
++             "from pipeline cache data load %u (rehash %u)\n",
++             count(cold_gs, "compile"), count(cold_gs, "store"),
++             count(cold_gs, "skip"), count(warm_gs, "load"),
++             count(cached_gs, "load"), count(cached_gs, "rehash"));
++
++      disk_cache_wait_for_idle(cache);
++      const auto gs_entries = list_entries(cache);
++      const uint32_t lines = driver("MESA_PRIM_LINES");
++      const uint32_t points = driver("MESA_PRIM_POINTS");
++      const auto vertex_record = [](frames_t &f) -> std::vector<uint8_t> & {
++         return frame_of(f, driver("MESA_SHADER_VERTEX")).record;
++      };
++      /* The parent's output is the geometry shader's triangle strip, whatever
++       * its input assembly says and whatever else the record is made of. */
++      forge_row({"output primitive lines, the geometry shader's is a triangle "
++                 "strip",
++                 "info",
++                 [vertex_record, lines](frames_t &f) {
++                    set_field(vertex_record(f), "vs.raster_primitive", lines,
++                              4);
++                 }},
++                cache, gs_entries, "gs-draw", "forged (geometry parent)");
++      forge_row({"output primitive points, the geometry shader's is a "
++                 "triangle strip",
++                 "info",
++                 [vertex_record, points](frames_t &f) {
++                    set_field(vertex_record(f), "vs.raster_primitive", points,
++                              4);
++                 }},
++                cache, gs_entries, "gs-draw", "forged (geometry parent)");
++   }
++
++   /* A parent with a tessellation stage: the primitive it outputs is its
++    * evaluation shader's, here the lines of an isoline domain. */
++   if (row_selected("tessellation parent")) {
++      fresh_cache();
++      auto cold_tess = boot("tess-draw", ok);
++      ROW(ok && count(cold_tess, "compile") == 2 &&
++             count(cold_tess, "store") == 2 && count(cold_tess, "skip") == 0 &&
++             count(cold_tess, "load") == 0,
++          "tessellation parent: both variants are translated and stored");
++      auto warm_tess = boot("tess-draw", ok);
++      ROW(ok && count(warm_tess, "load") == 2 &&
++             count(warm_tess, "compile") == 0 &&
++             count(warm_tess, "invalid") == 0,
++          "tessellation parent: both variants are found again");
++      auto cached_tess = boot("tess-cache", ok);
++      ROW(ok && count(cached_tess, "rehash") >= 1 &&
++             count(cached_tess, "load") == 2 &&
++             count(cached_tess, "compile") == 0 &&
++             count(cached_tess, "miss") == 0 &&
++             count(cached_tess, "invalid") == 0,
++          "tessellation parent: from pipeline cache data, both variants are "
++          "found under the compiled pipeline's keys");
++      printf("  tessellation parent: compile %u store %u skip %u, then load "
++             "%u, from pipeline cache data load %u (rehash %u)\n",
++             count(cold_tess, "compile"), count(cold_tess, "store"),
++             count(cold_tess, "skip"), count(warm_tess, "load"),
++             count(cached_tess, "load"), count(cached_tess, "rehash"));
++
++      disk_cache_wait_for_idle(cache);
++      const auto tess_entries = list_entries(cache);
++      const uint32_t triangles = driver("MESA_PRIM_TRIANGLES");
++      forge_row({"output primitive triangles, the evaluation shader's is "
++                 "lines",
++                 "info",
++                 [triangles](frames_t &f) {
++                    set_field(frame_of(f, driver("MESA_SHADER_VERTEX")).record,
++                              "vs.raster_primitive", triangles, 4);
++                 }},
++                cache, tess_entries, "tess-draw", "forged (tessellation parent)");
++   }
++
++   /* What the driver's deserializer takes of a shader record, as a pipeline
++    * cache or a pipeline binary hands it over. */
++   if (row_selected("pipeline cache blob")) {
++      auto blob = boot("gs-blob", ok);
++      (void)blob;
++      ROW(ok, "the pipeline cache blob rows ran");
++      std::ifstream in(log_path);
++      std::string line;
++      unsigned rows = 0, wrong = 0;
++      while (std::getline(in, line)) {
++         if (line.compare(0, 13, "kkblob facts ") == 0) {
++            ROW(line.substr(13) == "1",
++                "the record is a 2730-index dynamic geometry record");
++         } else if (line.compare(0, 11, "kkblob row ") == 0) {
++            const bool taken = line[11] == '1', should = line[13] == '1';
++            rows++;
++            wrong += taken != should;
++            ROW(taken == should, line.c_str() + 15);
++         }
++      }
++      ROW(rows > 20, "the blob rows were read");
++      printf("  pipeline cache blob: %u rows, %u wrong\n", rows, wrong);
 +   }
 +
 +   /* The variants of a pipeline made from pipeline cache data, whose shaders
@@ -5067,12 +5606,284 @@ index 0000000000000000000000000000000000000000..012ba6f5bd421aa0f8f163ce8082b8f4
 +0x00000013,0x00000014,0x0000000d,0x0000000f,
 +0x0003003e,0x00000014,0x00000012,0x000100fd,
 +0x00010038}
+diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/instanced.geom b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/instanced.geom
+new file mode 100644
+index 0000000000000000000000000000000000000000..dd89f4b16dabfe394f26aa64bdaadee1b01fd6a4
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/instanced.geom
+@@ -0,0 +1,19 @@
++// SPDX-License-Identifier: MIT
++#version 450
++layout(triangles, invocations = 32) in;
++layout(triangle_strip, max_vertices = 64) out;
++
++/* How many vertices this emits depends on the primitive, so the output keeps
++ * its dynamic index buffer.  The 32 invocations are flattened into the output
++ * vertices (64 for each of them: 2048), and a restart index for every third
++ * vertex comes with them: the index count is 2730. */
++void main()
++{
++   for (int i = 0; i < 64; ++i) {
++      if (i >= 3 + gl_PrimitiveIDIn % 5)
++         break;
++      gl_Position = gl_in[i % 3].gl_Position;
++      EmitVertex();
++   }
++   EndPrimitive();
++}
+diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/instanced.geom.h b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/instanced.geom.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3010c7084abb15fa37f733ff3b7130ce22913dd1
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/instanced.geom.h
+@@ -0,0 +1,74 @@
++{0x07230203,0x00010600,0x000d000b,0x00000037,
++0x00000000,0x00020011,0x00000002,0x0006000b,
++0x00000001,0x4c534c47,0x6474732e,0x3035342e,
++0x00000000,0x0003000e,0x00000000,0x00000001,
++0x0008000f,0x00000003,0x00000004,0x6e69616d,
++0x00000000,0x00000016,0x00000026,0x0000002b,
++0x00030010,0x00000004,0x00000016,0x00040010,
++0x00000004,0x00000000,0x00000020,0x00030010,
++0x00000004,0x0000001d,0x00040010,0x00000004,
++0x0000001a,0x00000040,0x00040047,0x00000016,
++0x0000000b,0x00000007,0x00030047,0x00000024,
++0x00000002,0x00050048,0x00000024,0x00000000,
++0x0000000b,0x00000000,0x00050048,0x00000024,
++0x00000001,0x0000000b,0x00000001,0x00050048,
++0x00000024,0x00000002,0x0000000b,0x00000003,
++0x00050048,0x00000024,0x00000003,0x0000000b,
++0x00000004,0x00030047,0x00000027,0x00000002,
++0x00050048,0x00000027,0x00000000,0x0000000b,
++0x00000000,0x00050048,0x00000027,0x00000001,
++0x0000000b,0x00000001,0x00050048,0x00000027,
++0x00000002,0x0000000b,0x00000003,0x00050048,
++0x00000027,0x00000003,0x0000000b,0x00000004,
++0x00020013,0x00000002,0x00030021,0x00000003,
++0x00000002,0x00040015,0x00000006,0x00000020,
++0x00000001,0x0004002b,0x00000006,0x00000009,
++0x00000000,0x0004002b,0x00000006,0x00000010,
++0x00000040,0x00020014,0x00000011,0x0004002b,
++0x00000006,0x00000014,0x00000003,0x00040020,
++0x00000015,0x00000001,0x00000006,0x0004003b,
++0x00000015,0x00000016,0x00000001,0x0004002b,
++0x00000006,0x00000018,0x00000005,0x00030016,
++0x0000001f,0x00000020,0x00040017,0x00000020,
++0x0000001f,0x00000004,0x00040015,0x00000021,
++0x00000020,0x00000000,0x0004002b,0x00000021,
++0x00000022,0x00000001,0x0004001c,0x00000023,
++0x0000001f,0x00000022,0x0006001e,0x00000024,
++0x00000020,0x0000001f,0x00000023,0x00000023,
++0x00040020,0x00000025,0x00000003,0x00000024,
++0x0004003b,0x00000025,0x00000026,0x00000003,
++0x0006001e,0x00000027,0x00000020,0x0000001f,
++0x00000023,0x00000023,0x0004002b,0x00000021,
++0x00000028,0x00000003,0x0004001c,0x00000029,
++0x00000027,0x00000028,0x00040020,0x0000002a,
++0x00000001,0x00000029,0x0004003b,0x0000002a,
++0x0000002b,0x00000001,0x00040020,0x0000002e,
++0x00000001,0x00000020,0x00040020,0x00000031,
++0x00000003,0x00000020,0x0004002b,0x00000006,
++0x00000034,0x00000001,0x00050036,0x00000002,
++0x00000004,0x00000000,0x00000003,0x000200f8,
++0x00000005,0x000200f9,0x0000000a,0x000200f8,
++0x0000000a,0x000700f5,0x00000006,0x00000036,
++0x00000009,0x00000005,0x00000035,0x0000000d,
++0x000500b1,0x00000011,0x00000012,0x00000036,
++0x00000010,0x000400f6,0x0000000c,0x0000000d,
++0x00000000,0x000400fa,0x00000012,0x0000000b,
++0x0000000c,0x000200f8,0x0000000b,0x0004003d,
++0x00000006,0x00000017,0x00000016,0x0005008b,
++0x00000006,0x00000019,0x00000017,0x00000018,
++0x00050080,0x00000006,0x0000001a,0x00000014,
++0x00000019,0x000500af,0x00000011,0x0000001b,
++0x00000036,0x0000001a,0x000300f7,0x0000001d,
++0x00000000,0x000400fa,0x0000001b,0x0000001c,
++0x0000001d,0x000200f8,0x0000001c,0x000200f9,
++0x0000000c,0x000200f8,0x0000001d,0x0005008b,
++0x00000006,0x0000002d,0x00000036,0x00000014,
++0x00060041,0x0000002e,0x0000002f,0x0000002b,
++0x0000002d,0x00000009,0x0004003d,0x00000020,
++0x00000030,0x0000002f,0x00050041,0x00000031,
++0x00000032,0x00000026,0x00000009,0x0003003e,
++0x00000032,0x00000030,0x000100da,0x000200f9,
++0x0000000d,0x000200f8,0x0000000d,0x00050080,
++0x00000006,0x00000035,0x00000036,0x00000034,
++0x000200f9,0x0000000a,0x000200f8,0x0000000c,
++0x000100db,0x000100fd,0x00010038}
+diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tesc b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tesc
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1712961406f49a73e92ec170277e6c88163c57b
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tesc
+@@ -0,0 +1,9 @@
++// SPDX-License-Identifier: MIT
++#version 450
++layout(vertices = 2) out;
++void main()
++{
++   gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;
++   gl_TessLevelOuter[0] = 1.0;
++   gl_TessLevelOuter[1] = 4.0;
++}
+diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tesc.h b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tesc.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d8caea47cfcf0e4ab400c707e7f4a5d927bf6c8
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tesc.h
+@@ -0,0 +1,65 @@
++{0x07230203,0x00010600,0x000d000b,0x0000002a,
++0x00000000,0x00020011,0x00000003,0x0006000b,
++0x00000001,0x4c534c47,0x6474732e,0x3035342e,
++0x00000000,0x0003000e,0x00000000,0x00000001,
++0x0009000f,0x00000001,0x00000004,0x6e69616d,
++0x00000000,0x0000000f,0x00000012,0x00000019,
++0x00000023,0x00040010,0x00000004,0x0000001a,
++0x00000002,0x00030047,0x0000000b,0x00000002,
++0x00050048,0x0000000b,0x00000000,0x0000000b,
++0x00000000,0x00050048,0x0000000b,0x00000001,
++0x0000000b,0x00000001,0x00050048,0x0000000b,
++0x00000002,0x0000000b,0x00000003,0x00050048,
++0x0000000b,0x00000003,0x0000000b,0x00000004,
++0x00040047,0x00000012,0x0000000b,0x00000008,
++0x00030047,0x00000015,0x00000002,0x00050048,
++0x00000015,0x00000000,0x0000000b,0x00000000,
++0x00050048,0x00000015,0x00000001,0x0000000b,
++0x00000001,0x00050048,0x00000015,0x00000002,
++0x0000000b,0x00000003,0x00050048,0x00000015,
++0x00000003,0x0000000b,0x00000004,0x00040047,
++0x00000023,0x0000000b,0x0000000b,0x00030047,
++0x00000023,0x0000000f,0x00020013,0x00000002,
++0x00030021,0x00000003,0x00000002,0x00030016,
++0x00000006,0x00000020,0x00040017,0x00000007,
++0x00000006,0x00000004,0x00040015,0x00000008,
++0x00000020,0x00000000,0x0004002b,0x00000008,
++0x00000009,0x00000001,0x0004001c,0x0000000a,
++0x00000006,0x00000009,0x0006001e,0x0000000b,
++0x00000007,0x00000006,0x0000000a,0x0000000a,
++0x0004002b,0x00000008,0x0000000c,0x00000002,
++0x0004001c,0x0000000d,0x0000000b,0x0000000c,
++0x00040020,0x0000000e,0x00000003,0x0000000d,
++0x0004003b,0x0000000e,0x0000000f,0x00000003,
++0x00040015,0x00000010,0x00000020,0x00000001,
++0x00040020,0x00000011,0x00000001,0x00000010,
++0x0004003b,0x00000011,0x00000012,0x00000001,
++0x0004002b,0x00000010,0x00000014,0x00000000,
++0x0006001e,0x00000015,0x00000007,0x00000006,
++0x0000000a,0x0000000a,0x0004002b,0x00000008,
++0x00000016,0x00000020,0x0004001c,0x00000017,
++0x00000015,0x00000016,0x00040020,0x00000018,
++0x00000001,0x00000017,0x0004003b,0x00000018,
++0x00000019,0x00000001,0x00040020,0x0000001b,
++0x00000001,0x00000007,0x00040020,0x0000001e,
++0x00000003,0x00000007,0x0004002b,0x00000008,
++0x00000020,0x00000004,0x0004001c,0x00000021,
++0x00000006,0x00000020,0x00040020,0x00000022,
++0x00000003,0x00000021,0x0004003b,0x00000022,
++0x00000023,0x00000003,0x0004002b,0x00000006,
++0x00000024,0x3f800000,0x00040020,0x00000025,
++0x00000003,0x00000006,0x0004002b,0x00000010,
++0x00000027,0x00000001,0x0004002b,0x00000006,
++0x00000028,0x40800000,0x00050036,0x00000002,
++0x00000004,0x00000000,0x00000003,0x000200f8,
++0x00000005,0x0004003d,0x00000010,0x00000013,
++0x00000012,0x00060041,0x0000001b,0x0000001c,
++0x00000019,0x00000013,0x00000014,0x0004003d,
++0x00000007,0x0000001d,0x0000001c,0x00060041,
++0x0000001e,0x0000001f,0x0000000f,0x00000013,
++0x00000014,0x0003003e,0x0000001f,0x0000001d,
++0x00050041,0x00000025,0x00000026,0x00000023,
++0x00000014,0x0003003e,0x00000026,0x00000024,
++0x00050041,0x00000025,0x00000029,0x00000023,
++0x00000027,0x0003003e,0x00000029,0x00000028,
++0x000100fd,0x00010038}
+diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tese b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tese
+new file mode 100644
+index 0000000000000000000000000000000000000000..13e1a688f74e1d42fc10840734b6ebb183d178c8
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tese
+@@ -0,0 +1,8 @@
++// SPDX-License-Identifier: MIT
++#version 450
++layout(isolines) in;
++void main()
++{
++   gl_Position =
++      mix(gl_in[0].gl_Position, gl_in[1].gl_Position, gl_TessCoord.x);
++}
+diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tese.h b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tese.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a378ce2cc681d3a61b9212b7383e3ad964c621eb
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_shaders/isolines.tese.h
+@@ -0,0 +1,61 @@
++{0x07230203,0x00010600,0x000d000b,0x00000026,
++0x00000000,0x00020011,0x00000003,0x0006000b,
++0x00000001,0x4c534c47,0x6474732e,0x3035342e,
++0x00000000,0x0003000e,0x00000000,0x00000001,
++0x0008000f,0x00000002,0x00000004,0x6e69616d,
++0x00000000,0x0000000d,0x00000014,0x0000001d,
++0x00030010,0x00000004,0x00000019,0x00030010,
++0x00000004,0x00000001,0x00030010,0x00000004,
++0x00000005,0x00030047,0x0000000b,0x00000002,
++0x00050048,0x0000000b,0x00000000,0x0000000b,
++0x00000000,0x00050048,0x0000000b,0x00000001,
++0x0000000b,0x00000001,0x00050048,0x0000000b,
++0x00000002,0x0000000b,0x00000003,0x00050048,
++0x0000000b,0x00000003,0x0000000b,0x00000004,
++0x00030047,0x00000010,0x00000002,0x00050048,
++0x00000010,0x00000000,0x0000000b,0x00000000,
++0x00050048,0x00000010,0x00000001,0x0000000b,
++0x00000001,0x00050048,0x00000010,0x00000002,
++0x0000000b,0x00000003,0x00050048,0x00000010,
++0x00000003,0x0000000b,0x00000004,0x00040047,
++0x0000001d,0x0000000b,0x0000000d,0x00020013,
++0x00000002,0x00030021,0x00000003,0x00000002,
++0x00030016,0x00000006,0x00000020,0x00040017,
++0x00000007,0x00000006,0x00000004,0x00040015,
++0x00000008,0x00000020,0x00000000,0x0004002b,
++0x00000008,0x00000009,0x00000001,0x0004001c,
++0x0000000a,0x00000006,0x00000009,0x0006001e,
++0x0000000b,0x00000007,0x00000006,0x0000000a,
++0x0000000a,0x00040020,0x0000000c,0x00000003,
++0x0000000b,0x0004003b,0x0000000c,0x0000000d,
++0x00000003,0x00040015,0x0000000e,0x00000020,
++0x00000001,0x0004002b,0x0000000e,0x0000000f,
++0x00000000,0x0006001e,0x00000010,0x00000007,
++0x00000006,0x0000000a,0x0000000a,0x0004002b,
++0x00000008,0x00000011,0x00000020,0x0004001c,
++0x00000012,0x00000010,0x00000011,0x00040020,
++0x00000013,0x00000001,0x00000012,0x0004003b,
++0x00000013,0x00000014,0x00000001,0x00040020,
++0x00000015,0x00000001,0x00000007,0x0004002b,
++0x0000000e,0x00000018,0x00000001,0x00040017,
++0x0000001b,0x00000006,0x00000003,0x00040020,
++0x0000001c,0x00000001,0x0000001b,0x0004003b,
++0x0000001c,0x0000001d,0x00000001,0x0004002b,
++0x00000008,0x0000001e,0x00000000,0x00040020,
++0x0000001f,0x00000001,0x00000006,0x00040020,
++0x00000024,0x00000003,0x00000007,0x00050036,
++0x00000002,0x00000004,0x00000000,0x00000003,
++0x000200f8,0x00000005,0x00060041,0x00000015,
++0x00000016,0x00000014,0x0000000f,0x0000000f,
++0x0004003d,0x00000007,0x00000017,0x00000016,
++0x00060041,0x00000015,0x00000019,0x00000014,
++0x00000018,0x0000000f,0x0004003d,0x00000007,
++0x0000001a,0x00000019,0x00050041,0x0000001f,
++0x00000020,0x0000001d,0x0000001e,0x0004003d,
++0x00000006,0x00000021,0x00000020,0x00070050,
++0x00000007,0x00000022,0x00000021,0x00000021,
++0x00000021,0x00000021,0x0008000c,0x00000007,
++0x00000023,0x00000001,0x0000002e,0x00000017,
++0x0000001a,0x00000022,0x00050041,0x00000024,
++0x00000025,0x0000000d,0x0000000f,0x0003003e,
++0x00000025,0x00000023,0x000100fd,0x00010038}
 diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..2539267e5c672547799a4916d60b024fc04debd7
+index 0000000000000000000000000000000000000000..70e1d396cc0059ba21e58697db46b34ef5905681
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.c
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,149 @@
 +/*
 + * Copyright 2026 Google LLC
 + * SPDX-License-Identifier: MIT
@@ -5085,8 +5896,11 @@ index 0000000000000000000000000000000000000000..2539267e5c672547799a4916d60b024f
 +
 +#include "kosmickrisp/bridge/mtl_format.h"
 +#include "kosmickrisp/bridge/mtl_types.h"
++#include "kosmickrisp/vulkan/kk_device.h"
 +#include "kosmickrisp/vulkan/kk_physical_device.h"
 +#include "kosmickrisp/vulkan/kk_shader.h"
++#include "util/blob.h"
++#include "vk_shader.h"
 +
 +struct disk_cache *
 +kk_test_variant_disk_cache(VkPhysicalDevice physical)
@@ -5165,6 +5979,8 @@ index 0000000000000000000000000000000000000000..2539267e5c672547799a4916d60b024f
 +      VALUE("MESA_SHADER_COMPUTE", MESA_SHADER_COMPUTE),
 +      VALUE("MESA_SHADER_STAGES", MESA_SHADER_STAGES),
 +      VALUE("POLY_GS_SHAPE_STATIC_INDEXED", POLY_GS_SHAPE_STATIC_INDEXED),
++      VALUE("POLY_GS_SHAPE_DYNAMIC_INDEXED", POLY_GS_SHAPE_DYNAMIC_INDEXED),
++      VALUE("KK_MAX_GEOMETRY_OUTPUT_INDICES", KK_MAX_GEOMETRY_OUTPUT_INDICES),
 +      VALUE("KK_RASTER_BASE", KK_RASTER_BASE),
 +      VALUE("KK_RASTER_POINT", KK_RASTER_POINT),
 +      VALUE("KK_RASTER_LINE", KK_RASTER_LINE),
@@ -5176,7 +5992,14 @@ index 0000000000000000000000000000000000000000..2539267e5c672547799a4916d60b024f
 +            offsetof(struct kk_shader_info, vs.vertex_layouts[0].step_rate) -
 +               offsetof(struct kk_shader_info, vs.vertex_layouts)),
 +      VALUE("KK_MAX_NATIVE_VBUFS", KK_MAX_NATIVE_VBUFS),
++      VALUE("MESA_PRIM_POINTS", MESA_PRIM_POINTS),
 +      VALUE("MESA_PRIM_LINES", MESA_PRIM_LINES),
++      VALUE("MESA_PRIM_LINE_LOOP", MESA_PRIM_LINE_LOOP),
++      VALUE("MESA_PRIM_LINE_STRIP", MESA_PRIM_LINE_STRIP),
++      VALUE("MESA_PRIM_TRIANGLES", MESA_PRIM_TRIANGLES),
++      VALUE("MESA_PRIM_TRIANGLE_STRIP", MESA_PRIM_TRIANGLE_STRIP),
++      VALUE("MESA_PRIM_TRIANGLE_FAN", MESA_PRIM_TRIANGLE_FAN),
++      VALUE("MESA_PRIM_QUADS", MESA_PRIM_QUADS),
 +      VALUE("MESA_PRIM_COUNT", MESA_PRIM_COUNT),
 +      VALUE("MESA_PRIM_PATCHES", MESA_PRIM_PATCHES),
 +      VALUE("MTL_VERTEX_FORMAT_FLOAT4", MTL_VERTEX_FORMAT_FLOAT4),
@@ -5193,12 +6016,29 @@ index 0000000000000000000000000000000000000000..2539267e5c672547799a4916d60b024f
 +   }
 +   return SIZE_MAX;
 +}
++
++VkResult
++kk_test_deserialize_shader(VkDevice device, const void *data, size_t size)
++{
++   struct kk_device *dev = kk_device_from_handle(device);
++   struct vk_device *vk_dev = &dev->vk;
++
++   struct blob_reader reader;
++   blob_reader_init(&reader, data, size);
++   struct vk_shader *shader = NULL;
++   const VkResult result = vk_dev->shader_ops->deserialize(
++      vk_dev, &reader, vk_dev->physical->properties.shaderBinaryVersion,
++      &vk_dev->alloc, &shader);
++   if (result == VK_SUCCESS)
++      vk_shader_destroy(vk_dev, shader, &vk_dev->alloc);
++   return result;
++}
 diff --git a/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.h b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..01e87403830676699e4f7dcc5a049c074cf182cc
+index 0000000000000000000000000000000000000000..97f40239795575380294e664ca90116dd69a7703
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/tests/variant_disk_cache_state.h
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,36 @@
 +/* SPDX-License-Identifier: MIT */
 +#pragma once
 +
@@ -5225,6 +6065,12 @@ index 0000000000000000000000000000000000000000..01e87403830676699e4f7dcc5a049c07
 + * "info.stage", "vs.view_mask", "sizeof info", "MESA_SHADER_FRAGMENT" and so
 + * on.  SIZE_MAX for a name the driver does not have. */
 +size_t kk_test_driver_value(const char *name);
++
++/* Offers `size` bytes to the driver's shader deserializer, the one a pipeline
++ * cache and a pipeline binary are read back by, as a shader of the device, and
++ * returns what it answered.  A shader it takes is released again. */
++VkResult kk_test_deserialize_shader(VkDevice device, const void *data,
++                                    size_t size);
 +
 +#ifdef __cplusplus
 +}
