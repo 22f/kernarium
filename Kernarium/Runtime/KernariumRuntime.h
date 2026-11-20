@@ -251,12 +251,15 @@ enum {
     /* The host could not give the guest what its size needs, the address space
      * for its kernel window and heap or the memory limit for its RAM, and
      * nothing was started: the run ended before its kernel began. The size can
-     * be lowered and the run tried again. The runtime returns it only for that
-     * refusal, which the library marks on the handle (emulator/src/start_refusal.hpp): the
+     * be lowered and the run tried again. The runtime returns it for a run
+     * that the library marked, on its handle, as refused for that reason
+     * (emulator/src/start_refusal.hpp), and for no other failure: the
      * library's -UML_EMULATOR_OUT_OF_MEMORY also comes from a failed
-     * allocation of its own, and a guest's own status can be any number, so
-     * that value on its own says nothing of the guest's size. It is outside
-     * the range of the negated uml_emulator errors (-1 through -4). */
+     * allocation of its own, and is returned as it is. A guest's own exit
+     * status is returned as it is too, so a guest whose user writes exactly
+     * this value as its status (root, through /proc/exitcode) returns it
+     * without any refusal. It is outside the range of the negated
+     * uml_emulator errors (-1 through -4). */
     KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED = -101,
     /* The guest restarted itself five times in a row within 15 seconds of its
      * boot, or, for Android, eight times in a row each within 15 seconds or
