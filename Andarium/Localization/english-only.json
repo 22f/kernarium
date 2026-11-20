@@ -4,6 +4,7 @@
     { "catalog": "Localizable", "key": "CPU", "reason": "A name every language keeps, as iOS does." },
     { "catalog": "Localizable", "key": "CPU %@", "reason": "A name every language keeps, as iOS does." },
     { "catalog": "Localizable", "key": "VRAM", "reason": "A technical name every language keeps." },
+    { "catalog": "Localizable", "key": "120 Hz", "reason": "The unit of a display's refresh rate, kept by every language." },
     { "catalog": "Localizable", "key": "TalkBack", "reason": "The name of Android's screen reader, which a person looks for by that name in Android and every language keeps." },
     { "catalog": "Localizable", "key": "%lld dpi", "reason": "The unit of a pixel density, kept by every language as Android writes it." },
     { "catalog": "Localizable", "key": "Android", "reason": "The name of the system, shown as the subtitle under an app in Shortcuts and Search; every language keeps it." },

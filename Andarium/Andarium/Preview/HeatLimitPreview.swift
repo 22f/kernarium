@@ -6,17 +6,29 @@ import UIKit
 
 /// The preview's states of Settings' Performance section and of the heat
 /// notice's alert. The heat is stated here (the model is told the device is
-/// held at critical), so no device is heated and no runtime runs.
+/// held at critical), so no device is heated and no runtime runs. The 120 Hz
+/// screens state a screen that shows 120 frames a second, which no Simulator
+/// has.
 @MainActor
 enum HeatLimitPreview {
     /// Settings' screens, which scroll to Stats and show Performance below it.
     static let settingsScreens: Set<String> = [
         "settings-performance", "settings-performance-menu", "settings-performance-off",
         "settings-performance-hot", "settings-performance-hot-off",
+        "settings-high-refresh", "settings-high-refresh-on", "settings-high-refresh-hot",
     ]
 
     static func apply(screen: String, to model: AppModel) {
+        if screen.hasPrefix("settings-high-refresh") {
+            model.statedMaximumFramesPerSecond = 120
+            model.screenDidChange(nativeScale: model.screenNativeScale, maximumFramesPerSecond: 120)
+        }
         switch screen {
+        case "settings-high-refresh-on":
+            model.setHighRefresh(true)
+        case "settings-high-refresh-hot":
+            model.setHighRefresh(true)
+            model.deviceHeatChanged(hot: true)
         case "settings-performance-off":
             model.setHeatLimit(false)
         case "settings-performance-hot":

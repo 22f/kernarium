@@ -9,10 +9,35 @@ import SwiftUI
 /// menu of the two; the footnote says what the choice does, and, while the
 /// device is held hot, what is happening now. Every row of the menu applies at
 /// once and asks nothing: the warning is in the menu and the footnote.
+///
+/// Below it, on a screen that can show more than 60 frames a second, "120 Hz"
+/// (`AppModel.highRefreshOn`): a switch whose footnote says it applies the next
+/// time Android starts, because the display's rate is fixed at the start.
 struct PerformanceSection: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        heatSection
+        if model.highRefreshOffered { highRefreshSection }
+    }
+
+    private var highRefreshSection: some View {
+        Section {
+            Toggle(isOn: Binding(get: { model.highRefreshOn }, set: { model.setHighRefresh($0) })) {
+                HStack(spacing: 12) {
+                    IconTile(symbol: "speedometer")
+                    Text("120 Hz")
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .accessibilityIdentifier("high-refresh")
+        } footer: {
+            Text("Smoother motion on this display, and more battery use. Takes effect the next time Android starts.")
+        }
+        .id("high-refresh")
+    }
+
+    private var heatSection: some View {
         Section {
             Menu {
                 choice(limit: true, title: "Limit frame rate", subtitle: "Lets this device cool down")

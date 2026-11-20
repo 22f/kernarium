@@ -137,6 +137,14 @@ final class LiveRuntime: RuntimeDriver {
     private var thermalProbe = false
     #endif
     private lazy var thermalMonitor = ThermalMonitor { [weak self] state in self?.thermal.observe(state) }
+    /// Whether the run in progress started with the 120 Hz display, and so
+    /// whether Low Power Mode holds its render rate to 60
+    /// (`HighRefresh.holdsAtSixty`).
+    private var runHasHighRefresh = false
+    private lazy var lowPowerMonitor = LowPowerMonitor { [weak self] on in
+        guard let self else { return }
+        thermal.setSixtyHertzHold(HighRefresh.holdsAtSixty(displayIs120: runHasHighRefresh, lowPowerMode: on))
+    }
     /// The device's position for the guest's GNSS receiver, read from Core
     /// Location only while the person's Location switch, iOS, the foreground,
     /// a normal run and the guest's own receiver all say so
@@ -640,6 +648,13 @@ final class LiveRuntime: RuntimeDriver {
         reachedBootCompleted = false
         normalRun = run.mode == .normal
         beginPartialSweep()
+        // The 120 Hz display is asked for at the start and holds until the
+        // guest powers off; Low Power Mode then holds what the guest renders
+        // to what that screen shows.
+        let asksForHighRefresh = model?.asksForHighRefresh == true
+        runHasHighRefresh = asksForHighRefresh
+        model?.runStarted(withHighRefresh: asksForHighRefresh)
+        if normalRun { lowPowerMonitor.start() }
         updateThermal()
         if normalRun { thermalMonitor.start() }
         motionMount.begin(interface: interfaceMotionAxes)
@@ -652,7 +667,7 @@ final class LiveRuntime: RuntimeDriver {
         updateKeyboardMouse()
         let hostFeatures = Self.hostFeatures(
             hapticsAvailable: hapticsAvailable, followsDeviceOrientation: model?.followsDeviceOrientation == true,
-            compassAvailable: motion.compassAvailable)
+            compassAvailable: motion.compassAvailable, highRefresh: asksForHighRefresh)
         let cameraMode = cameraBootMode()
         let cameraPath = cameraDirectory.map { Self.prepareCalibrationDirectory($0) }?.path
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
@@ -756,14 +771,17 @@ final class LiveRuntime: RuntimeDriver {
 
     /// What the boot request tells the guest the host has
     /// (`android_host_features`): a vibrator, on a device with haptics, a
-    /// device orientation to follow, where the guest follows it, and a
-    /// magnetic field, on a device that can give one.
+    /// device orientation to follow, where the guest follows it, a magnetic
+    /// field, on a device that can give one, and a 120 Hz display, where the
+    /// person asked for it and the screen can show it.
     nonisolated static func hostFeatures(
-        hapticsAvailable: Bool, followsDeviceOrientation: Bool = false, compassAvailable: Bool = false
+        hapticsAvailable: Bool, followsDeviceOrientation: Bool = false, compassAvailable: Bool = false,
+        highRefresh: Bool = false
     ) -> UInt32 {
         (hapticsAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) : 0)
             | (followsDeviceOrientation ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION) : 0)
             | (compassAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS) : 0)
+            | (highRefresh ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH) : 0)
     }
 
     /// The camera mode the boot request states. iOS may have changed the
@@ -1085,6 +1103,8 @@ final class LiveRuntime: RuntimeDriver {
         updateSpaceWatch()
         updateThermal()
         thermalMonitor.stop()
+        lowPowerMonitor.stop()
+        runHasHighRefresh = false
         stopThermalObservation()
         kernarium_runtime_loader_set_restart_handler(nil)
         kernarium_runtime_loader_set_console_output_handler(nil)
@@ -1695,7 +1715,10 @@ final class LiveRuntime: RuntimeDriver {
         #endif
         active = true
         updateGuestRotation()
-        if normalRun { thermalMonitor.refresh() }
+        if normalRun {
+            thermalMonitor.refresh()
+            lowPowerMonitor.refresh()
+        }
         guard let model else { return }
         model.applicationActive = true
         let free = freeSpace()

@@ -192,6 +192,19 @@ struct AppEntry {
         #endif
         model.heatLimitOn = heat.isOn
         model.heatLimitDecidedByLaunch = !heat.keepsChanges
+        // Settings' "120 Hz" is the person's last choice, off at first, unless
+        // the launch is a harness's and decides for its run alone
+        // (`HighRefreshPreference`); an App Store build has no launch
+        // environment and so keeps the person's own.
+        #if APP_STORE
+        let refresh = HighRefreshPreference().launch(automated: false)
+        #else
+        let refresh = HighRefreshPreference().launch(
+            automated: !launch.isEmpty || ThermalOverride.stated(in: environment) != nil,
+            stated: HighRefreshLaunch.stated(in: environment))
+        #endif
+        model.highRefreshOn = refresh.isOn
+        model.highRefreshDecidedByLaunch = !refresh.keepsChanges
         #if !APP_STORE
         model.printsStatistics = launch.statistics == true
         // The JIT row follows the person's last choice, unless the launch is a
@@ -314,6 +327,9 @@ struct AppEntry {
         let heat = HeatLimitPreference().launch(automated: true, stated: HeatLimitLaunch.stated(in: environment))
         model.heatLimitOn = heat.isOn
         model.heatLimitDecidedByLaunch = true
+        model.highRefreshOn = HighRefreshPreference().launch(
+            automated: true, stated: HighRefreshLaunch.stated(in: environment)).isOn
+        model.highRefreshDecidedByLaunch = true
         // The side keys play their feedback here too: a launch that keeps the
         // phone silent does so on this path as on the ordinary one.
         model.hapticsSilencedByLaunch = HapticsLaunch.silences(in: environment)

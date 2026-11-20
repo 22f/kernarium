@@ -1108,6 +1108,29 @@
         }
       }
     },
+    "120 Hz" : {
+      "comment" : "The switch in Settings under Performance, on a screen that can show more than 60 frames a second: the display Android gets is 120 Hz. The unit is kept by every language.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "120 Hz"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "120 Hz"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "120 Hz"
+          }
+        }
+      }
+    },
     "A file with that name is already there." : {
       "localizations" : {
         "ja" : {
@@ -9570,6 +9593,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "略過"
+          }
+        }
+      }
+    },
+    "Smoother motion on this display, and more battery use. Takes effect the next time Android starts." : {
+      "comment" : "The footnote of the 120 Hz switch: what it does, what it costs, and that it applies when Android next starts, because the display's rate is fixed at the start.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このディスプレイでより滑らかに動きますが、バッテリーの消費が増えます。次にAndroidを起動したときに反映されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此显示屏上的动画更流畅，但会更耗电。下次启动Android时生效。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此顯示器上的動態更流暢，但會更耗電。下次啟動Android時生效。"
           }
         }
       }

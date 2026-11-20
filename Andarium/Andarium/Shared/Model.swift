@@ -202,10 +202,16 @@ final class AppModel {
     /// devices; nothing in the application does.
     var statedNativeScale: Double?
     var statedDisplayPoints: CGSize?
-    /// What the scene reads of the screen the window is on.
-    func screenDidChange(nativeScale: Double) {
+    var statedMaximumFramesPerSecond: Int?
+    /// What the scene reads of the screen the window is on. A caller that
+    /// does not read the frame rate leaves it as it was.
+    func screenDidChange(nativeScale: Double, maximumFramesPerSecond: Int? = nil) {
         let scale = statedNativeScale ?? nativeScale
         if screenNativeScale != scale { screenNativeScale = scale }
+        if let rate = statedMaximumFramesPerSecond ?? maximumFramesPerSecond,
+           screenMaximumFramesPerSecond != rate {
+            screenMaximumFramesPerSecond = rate
+        }
     }
     /// What Home reads of the window: the display's size as the guest will
     /// get it.
@@ -781,6 +787,51 @@ final class AppModel {
     /// What is kept of the option across launches; nil where the launch
     /// decided it.
     var heatLimitToKeep: Bool? { heatLimitDecidedByLaunch ? nil : heatLimitOn }
+    /// The most frames a second the screen the window is on can show: 60 until
+    /// the scene says (`screenDidChange`), and then 120 on a ProMotion iPhone
+    /// or iPad.
+    private(set) var screenMaximumFramesPerSecond = 60
+    /// Whether Settings offers "120 Hz": the screen can show more than 60
+    /// frames a second.
+    var highRefreshOffered: Bool {
+        HighRefresh.isOffered(maximumFramesPerSecond: screenMaximumFramesPerSecond)
+    }
+    /// Settings' "120 Hz" under Performance: whether the next Android start
+    /// asks for a 120 Hz display. Off is the default. Kept for the install
+    /// (`HighRefreshPreference`).
+    var highRefreshOn = false
+    /// The launch decided it (automation): the value belongs to that run and
+    /// is not kept.
+    var highRefreshDecidedByLaunch = false
+    /// What is kept of the setting across launches; nil where the launch
+    /// decided it.
+    var highRefreshToKeep: Bool? { highRefreshDecidedByLaunch ? nil : highRefreshOn }
+    /// Whether a start now asks for the 120 Hz display: the setting is on and
+    /// the screen can show it.
+    var asksForHighRefresh: Bool {
+        HighRefresh.asksAtBoot(isOn: highRefreshOn, maximumFramesPerSecond: screenMaximumFramesPerSecond)
+    }
+    /// Whether the run in progress started with the 120 Hz display, which no
+    /// change of the setting alters until Android next starts.
+    private(set) var runHasHighRefresh = false
+    /// The setting now asks for something other than the running display has:
+    /// it applies the next time Android starts.
+    var highRefreshWaitsForRestart: Bool {
+        guard case .running = phase else { return false }
+        return asksForHighRefresh != runHasHighRefresh
+    }
+    /// Settings' "120 Hz". It applies at the next start; the display of a run
+    /// that is going does not change.
+    func setHighRefresh(_ on: Bool) {
+        guard on != highRefreshOn else { return }
+        highRefreshOn = on
+    }
+    /// A start asked for the 120 Hz display, or did not: what this run's
+    /// display is.
+    func runStarted(withHighRefresh asked: Bool) {
+        runHasHighRefresh = asked
+    }
+
     /// The thermal policy holds the device hot (iOS's critical state, the
     /// policy's hold after it included), whether or not Android is told.
     /// Settings' footnote reads it.

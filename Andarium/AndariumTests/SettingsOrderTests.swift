@@ -178,6 +178,40 @@ struct SettingsOrderTests {
         #expect(!unlimited.contains(hotLimited))
     }
 
+    private let smoother = "Smoother motion on this display, and more battery use. Takes effect the next time Android starts."
+
+    /// "120 Hz" sits below "When hot" and is drawn only on a screen that can
+    /// show more than 60 frames a second, which the scene says.
+    @Test func theHundredAndTwentyHertzRowIsOfferedOnlyWhereTheScreenShowsMoreThanSixty() async throws {
+        let sixty = try await settled(of: model()).map(\.label)
+        #expect(!sixty.contains("120 Hz") && !sixty.contains(smoother), "a 60 Hz screen was offered 120 Hz: \(sixty)")
+
+        let promotion = model()
+        promotion.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 120)
+        let elements = try await settled(of: promotion)
+        let labels = elements.map(\.label)
+        let heat = try #require(labels.firstIndex { $0 == "When hot" }, "no When hot row")
+        let refresh = try #require(labels.firstIndex { $0 == "120 Hz" }, "no 120 Hz row: \(labels)")
+        #expect(refresh > heat, "120 Hz is above When hot")
+        #expect(labels.contains(smoother), "no footnote: \(labels)")
+        // Recovery has no frame scheduler to tell: no row.
+        let recovery = model(mode: .recovery)
+        recovery.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 120)
+        #expect(!(try await settled(of: recovery)).map(\.label).contains("120 Hz"))
+    }
+
+    @Test func theHundredAndTwentyHertzSwitchFollowsTheChoice() async throws {
+        let model = model()
+        model.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 120)
+        let off = try await settled(of: model)
+        let before = try #require(off.first { $0.label == "120 Hz" })
+        #expect(before.value == "0", "the switch says \(before.value ?? "nothing")")
+        model.setHighRefresh(true)
+        let on = try await settled(of: model)
+        let after = try #require(on.first { $0.label == "120 Hz" })
+        #expect(after.value == "1", "the switch says \(after.value ?? "nothing")")
+    }
+
     @Test func theRowReadsItsNameAndItsValueAndFollowsTheChoice() async throws {
         let model = model()
         let on = try await settled(of: model)
