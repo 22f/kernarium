@@ -225,7 +225,8 @@ the iPad harness reads, as Debug does. A launch that sets no `ANDARIUM_` or
 - An archive refuses an embedded artifact that is behind the archived commit: a
   build phase of Release runs
   [`scripts/check-embedded-artifacts.py`](../scripts/check-embedded-artifacts.py)
-  when the action is an archive, and an ordinary Release build is not checked.
+  when the action is install, which an archive and an explicit install of
+  Release both run, and an ordinary Release build is not checked.
   The check compares the accepted Android release and kernel descriptors with
   the commit's inputs, and the staged and packaged system and runtime with the
   descriptors, and fails naming the changed paths and commits. The staged and
@@ -242,7 +243,7 @@ the iPad harness reads, as Debug does. A launch that sets no `ANDARIUM_` or
   ship pending changes, by naming the release ID in `PENDING_INPUTS_DECISION`.
 - [Follow developer on X](#follow-developer-on-x) is carried by Release when
   the handle is in the ignored `Config/Developer.local.xcconfig` and the logo
-  in the ignored `Config/Local/`. The same build phase of an archive runs
+  in the ignored `Config/Local/`. The same build phase runs
   [`scripts/check-release-archive.py`](scripts/check-release-archive.py), which
   refuses a handle that is not a handle of X and the placeholder of
   `Developer.local.xcconfig.example` in any letter case (no handle is no

@@ -26,7 +26,13 @@ archive, and no other build is checked. The application must:
     the SDK's developer directory), embedded or not: a load command of an
     executable or framework that names one is refused as well; and
   - link no test-support library (AndariumCoreTestSupport and its like): the
-    code only tests and the probe tools use.
+    code only tests and the probe tools use. Linkage is read from the load
+    commands and the symbols and strings of the code; the paths of a debug
+    map (a Derived Data directory called after a library) are no evidence.
+
+An archive and an explicit install of Release both run the build phase (Xcode
+gives both the action install), and both produce what is handed out, so both
+are checked.
 """
 
 from __future__ import annotations
@@ -103,6 +109,10 @@ LC_SYMTAB = 0x2
 LOAD_DYLIB_COMMANDS = {0xC, 0x80000018, 0x8000001F, 0x80000023, 0x20}
 N_STAB = 0xE0
 N_OSO = 0x66
+# The stabs whose strings name a function or a variable: the linker shares the
+# string with the symbol of the same name, so it is evidence of what is linked
+# and no part of a debug map's paths.
+SYMBOL_STABS = frozenset({0x20, 0x24, 0x26, 0x28, 0x4E})
 
 
 def emit(text: str, error: bool = False) -> None:
@@ -204,12 +214,13 @@ def debug_stabs(data: bytes, base: int) -> tuple[int, int]:
     return sum(1 for kind in kinds if kind & N_STAB), kinds.count(N_OSO)
 
 
-def without_debug_map(data: bytes, base: int) -> bytes:
+def without_debug_map(data: bytes, base: int, keep: frozenset[int] = frozenset()) -> bytes:
     """The Mach-O with the strings of its debug stabs blanked: the names of the
     objects, sources and functions the linker recorded. A framework that
     carries them fails for that, and Xcode strips them from the application's
     own executable when it archives, so neither is a path the build host left
-    in the code."""
+    in the code. `keep` names stab types whose strings stay (SYMBOL_STABS: the
+    symbol the code carries shares its string)."""
     table = symbol_table(data, base)
     if table is None:
         return data
@@ -217,7 +228,7 @@ def without_debug_map(data: bytes, base: int) -> bytes:
     buffer = bytearray(data)
     for entry in range(symbols):
         string, kind = struct.unpack_from("<IB", data, offset + 16 * entry)
-        if kind & N_STAB and 0 < string < size:
+        if kind & N_STAB and kind not in keep and 0 < string < size:
             end = data.find(b"\0", strings + string, strings + size)
             if end > 0:
                 buffer[strings + string:end] = bytes(end - strings - string)
@@ -277,12 +288,15 @@ def is_test_library(install_name: str) -> bool:
 
 def test_support_links(path: Path) -> list[str]:
     """How one Mach-O file links test support: a load command that names a test
-    library, and a test-support library whose code is in the file."""
+    library, and a test-support library whose code is in the file. The strings
+    of a debug map's paths are no evidence, only the load commands and what
+    the code and its symbols carry."""
     code = host_code(path)
     if code is None:
         return []
     data, base = code
     found = [f"loads {name}, which only tests load" for name in loaded_libraries(data, base) if is_test_library(name)]
+    data = without_debug_map(data, base, keep=SYMBOL_STABS)
     found.extend(f"links {name.decode()}, which only tests link" for name in TEST_SUPPORT_LIBRARIES if name in data)
     return found
 

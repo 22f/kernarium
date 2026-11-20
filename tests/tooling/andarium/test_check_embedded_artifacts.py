@@ -1087,6 +1087,17 @@ class BuildPhaseTests(unittest.TestCase):
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_an_explicit_release_install_is_checked_like_an_archive(self) -> None:
+        # Xcode gives an archive and an explicit `xcodebuild install` of Release the
+        # same action, and both produce what is handed out: the phase checks both,
+        # so an explicit install refuses the example handle too (no archive
+        # variable is set here, as for an explicit install).
+        fixture = Fixture(self.root)
+        fixture.write_info(fixture.app, AndariumFollowXHandle="example_handle")
+        result = self.run_phase("Release", "install", fixture)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("example handle", result.stderr)
+
     def test_an_archive_with_no_follow_handle_or_the_developers_own_passes(self) -> None:
         fixture = Fixture(self.root)
         for info in ({}, {"AndariumFollowXHandle": ""}, {"AndariumFollowXHandle": "a_developer"}):

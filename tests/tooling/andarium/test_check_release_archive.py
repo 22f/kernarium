@@ -162,22 +162,24 @@ class Libraries(Fixtures):
         return output
 
     @classmethod
-    def build_with_debug_map(cls, name: str, directory: str | None = None) -> Path:
+    def build_with_debug_map(cls, name: str, directory: str | None = None, work_name: str = "Volumes/NAME",
+                             stubs: tuple[Path, ...] = (), source: str = CLEAN) -> Path:
         """A library linked from an object compiled with -g: the linker keeps a
-        debug map whose N_OSO entry names the object file, which sits in a
-        directory that looks like a mounted volume. `directory` is the
-        compilation directory the map's N_SO entries name."""
+        debug map whose N_OSO entry names the object file, which sits in
+        `work_name` below the fixtures' directory (by default one that looks
+        like a mounted volume). `directory` is the compilation directory the
+        map's N_SO entries name. `stubs` are linked in."""
         output = cls.libraries / f"lib{name}.dylib"
         if not output.exists():
-            work = cls.libraries / "Volumes" / "NAME"
+            work = cls.libraries / work_name
             work.mkdir(parents=True, exist_ok=True)
-            (work / f"{name}.c").write_text(CLEAN, encoding="utf-8")
+            (work / f"{name}.c").write_text(source, encoding="utf-8")
             tool([*SDK, "-g", *([f"-fdebug-compilation-dir={directory}"] if directory else []),
                   "-c", f"{name}.c" if directory else str(work / f"{name}.c"), "-o", str(work / f"{name}.o")],
                  cwd=work)
-            tool([*SDK, "-dynamiclib", str(work / f"{name}.o"), "-o", str(output),
+            tool([*SDK, "-dynamiclib", str(work / f"{name}.o"), *map(str, stubs), "-o", str(output),
                   f"-Wl,-install_name,@rpath/{output.name}"])
-            assert b"/Volumes/NAME/" in output.read_bytes(), "the debug map names no object under a volume"
+            assert f"/{work_name}/".encode() in output.read_bytes(), "the debug map names no object under the directory"
         return output
 
     @classmethod
@@ -362,6 +364,27 @@ class LinkedTestSupport(Libraries):
         linked, clean = self.build("linked", TEST_SUPPORT_SYMBOL), self.build("clean", CLEAN)
         self.refuses(self.bundle(linked), "Andarium: links AndariumCoreTestSupport")
         self.refuses(self.bundle(clean, framework=linked), "Runtime.framework/Runtime: links AndariumCoreTestSupport")
+
+    def test_the_name_in_a_debug_map_only_is_not_linkage(self) -> None:
+        # A Derived Data directory of that name puts it in the object paths and
+        # the source directory of the executable's debug map, which Xcode
+        # strips when it archives.
+        mapped = self.build_with_debug_map(
+            "mapped-support", "/derived/AndariumCoreTestSupport-build/src", "derived/AndariumCoreTestSupport-build")
+        self.assertIn(b"AndariumCoreTestSupport-build", mapped.read_bytes())
+        self.passes(self.bundle(mapped))
+
+    def test_a_real_load_command_still_fails_beside_the_debug_map(self) -> None:
+        stub = self.stub("support", "@rpath/AndariumCoreTestSupport.framework/AndariumCoreTestSupport")
+        mapped = self.build_with_debug_map(
+            "mapped-loading", None, "derived/AndariumCoreTestSupport-build", stubs=(stub,))
+        self.refuses(self.bundle(mapped), "Andarium: loads @rpath/AndariumCoreTestSupport.framework/AndariumCoreTestSupport")
+
+    def test_a_symbol_of_the_library_still_fails_with_a_debug_map(self) -> None:
+        # Symbol names that a function's debug stab shares with the symbol are evidence too.
+        mapped = self.build_with_debug_map(
+            "mapped-symbol", None, "derived/Other-build", source=TEST_SUPPORT_SYMBOL)
+        self.refuses(self.bundle(mapped), "Andarium: links AndariumCoreTestSupport")
 
 
 if __name__ == "__main__":
