@@ -2275,6 +2275,49 @@ void aRegionIsMappedBackThroughATurnOfThePicture()
     }
 }
 
+// An imitated front camera (the square sensor of the newest phones) is turned twice: by its video connection's quarter turn and
+// then by the host's half turn. The guest's region is in the twice turned picture, the device maps it back through the half
+// turn and the backend through the connection's quarter turn, and what reaches the platform is the area of the camera's own
+// picture the guest meant, whichever turn the connection has.
+void aRegionIsMappedBackThroughTheConnectionAndTheHalfTurnTogether()
+{
+    const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-5f; };
+    const auto same = [&](const CameraRegion& a, const CameraRegion& b) {
+        return near(a.x, b.x) && near(a.y, b.y) && near(a.width, b.width) && near(a.height, b.height) && a.weight == b.weight;
+    };
+    // The picture turned clockwise by `turn`: the area of it the region of the picture before the turn is. (A corner at the top
+    // left goes to the top right, so a quarter turn sends (x, y, w, h) to (1 - y - h, x, h, w).)
+    const auto turned = [](CameraRegion region, std::uint32_t turn) {
+        for (std::uint32_t quarter = 0; quarter < turn / 90; ++quarter)
+            region = {1.0f - region.y - region.height, region.x, region.height, region.width, region.weight};
+        return region;
+    };
+    const CameraRegion regions[] = {{0.25f, 0.5f, 0.125f, 0.25f, 7}, {0.0f, 0.0f, 1.0f, 1.0f, 1}, {0.7f, 0.1f, 0.2f, 0.3f, 3}, {0.4f, 0.4f, 0.05f, 0.05f, 255}};
+    std::size_t imitated = 0;
+    for (const double angle : {0.0, 180.0, 90.0, 270.0}) {
+        const auto mounting = presentedMountingOf(CameraPosition::front, angle);
+        for (const auto& own : regions) {
+            // What the platform holds is its own picture's area; the guest's picture is that turned by the connection and then
+            // by the host.
+            const CameraRegion guests = turned(turned(own, mounting.connectionTurn), mounting.presentationTurn);
+            const CameraRegion afterDevice = regionBeforeTurn(guests, mounting.presentationTurn);
+            const CameraRegion afterBackend = regionBeforeTurn(afterDevice, mounting.connectionTurn);
+            require(same(afterBackend, own), "the area the guest meant is the area of the camera's own picture");
+            require(same(afterBackend, regionBeforeTurn(guests, (mounting.connectionTurn + mounting.presentationTurn) % 360)),
+                    "the two layers together are the one turn of both");
+            // The device's layer alone is not enough where the connection turns, and the backend's alone is never enough.
+            if (mounting.connectionTurn != 0 && !same(own, turned(own, 180)))
+                require(!same(afterDevice, own), "a connection that turns leaves the region turned after the device's layer");
+        }
+        imitated += mounting.connectionTurn != 0 ? 1 : 0;
+    }
+    require(imitated == 2, "the two imitated mountings are the ones with a quarter turn in the connection (portrait 0 and 180)");
+    const auto bottom = presentedMountingOf(CameraPosition::front, 0.0);
+    const auto top = presentedMountingOf(CameraPosition::front, 180.0);
+    require(bottom.connectionTurn == 270 && top.connectionTurn == 90 && bottom.presentationTurn == 180 && top.presentationTurn == 180,
+            "their connections turn by 270 and by 90, and the host by half a turn");
+}
+
 // A square format that lists dynamic aspect ratios is described by the crop the device is pinned at: 3x4 where the video
 // connection is turned a quarter turn, else 4x3, a landscape frame of N x 3N/4 either way, with the landscape 4:3 photo
 // sizes it lists. A format that lists none is as listed. One that cannot be described is dropped, never offered in
@@ -2890,6 +2933,7 @@ int main()
     aCameraStatesThePlatformsMountingAndAFrontCameraStates270();
     aFrontCameraStates270AndIsTurnedHalfAroundUnlessItAlreadyIs();
     aRegionIsMappedBackThroughATurnOfThePicture();
+    aRegionIsMappedBackThroughTheConnectionAndTheHalfTurnTogether();
     aSquareFormatThatListsRatiosIsDescribedByItsPinnedCrop();
     aCamerasLastUseSurvivesTheNextSessionsDiscovery();
     aCameraThatImitatesAnEarlierOneKeepsItsPhotoConnectionAngle();
