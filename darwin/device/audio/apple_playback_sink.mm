@@ -281,8 +281,11 @@ struct Output final {
 {
     if (@available(iOS 27.0, *))
         return [player playAndReturnError:error];
+    // `play` reports nothing, and it returns with the player stopped when its
+    // engine stopped between the engine's start and this call, as a change of
+    // the format or the route does. What counts is that the player plays.
     [player play];
-    return true;
+    return player.isPlaying;
 }
 #pragma clang diagnostic pop
 

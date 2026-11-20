@@ -1672,6 +1672,32 @@ void aStreamThatFailedForGoodStaysFailed()
         "the failure is reported");
 }
 
+// An engine that stopped between its start and the player's: before iOS 27 the
+// player's start reports nothing and returns with the player stopped, and the
+// sink must not take that for a playing stream and hand it periods.
+void aPlayerThatDidNotStartIsNotTakenForPlaying()
+{
+    StderrCapture lines;
+    routeComesBack();
+    otherAudioPlaying = false;
+    Stream stream;
+    afterStart = [](AVAudioEngine* engine) { [engine stop]; };
+    const auto queued = scheduledPeriods.load();
+    (void)stream.open();
+    stream.idle(1000ms);
+    stream.forgetFailures();
+    const auto seen = stream.window(100ms, 800ms);
+    check(scheduledPeriods.load() == queued,
+        "a player that is not playing is handed no periods", seen.text());
+    check(!stream.healthy(),
+        "and the stream is failed, not running", seen.text());
+    stream.close();
+    afterStart = nullptr;
+    const auto text = lines.finish();
+    check(StderrCapture::count(text, "Audio output unavailable (") >= 1,
+        "the failure is reported");
+}
+
 // The guest resumes before the app is active, and the system would not
 // activate the session yet: the stream plays muted and the sink asks again
 // every second, then plays.
@@ -1758,6 +1784,7 @@ int main()
         interruptionDuringTheWaitForTheRoute();
         routeLostDuringTheHandback();
         aStreamThatFailedForGoodStaysFailed();
+        aPlayerThatDidNotStartIsNotTakenForPlaying();
         refusedActivationAtStartIsTriedAgain();
         aSessionThatNeverActivatesIsReported();
     }
