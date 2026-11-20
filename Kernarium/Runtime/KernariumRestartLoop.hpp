@@ -180,8 +180,9 @@ public:
     /* How the last run ended. False when the library cannot say. */
     [[nodiscard]] virtual bool runEnd(RunEnd& end) = 0;
 
-    /* Whether the last run was refused for want of memory before its kernel
-     * started (runtime/start_refusal.hpp). */
+    /* Whether the last run of this machine's handle was refused for want of
+     * memory before its kernel started (emulator/src/start_refusal.hpp): the
+     * reason belongs to that run, whatever any other handle ran since. */
     [[nodiscard]] virtual bool startRefusedForMemory() noexcept = 0;
 
     /* The guest is gone: stops every service of the boot, which must not
