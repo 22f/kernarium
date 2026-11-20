@@ -3,6 +3,7 @@
 #include "KernariumRuntime.h"
 #include "KernariumAdbChannel.hpp"
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
+#include "KernariumAotRelease.hpp"
 #include "KernariumCamera.hpp"
 #endif
 #include "KernariumConsoleInput.hpp"
@@ -1448,6 +1449,9 @@ struct GuestRequest final {
      * request's android_host_features; a Linux guest ignores them. */
     std::uint32_t hostFeatures {};
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
+    /* The boot request asked for a launch without the ahead-of-time component
+     * (android_aot_disabled): the release is not stated to the emulator. */
+    bool aotDisabled {};
     /* What the boot request states about the guest's cameras, and the host GPU
      * budget in bytes that sets their memory tier. */
     kernarium::camera::Request camera;
@@ -2017,8 +2021,15 @@ private:
             arguments.push_back(std::move(argument));
         /* The release the guest boots, as its files state it: the
          * ahead-of-time component runs only with the release it was made
-         * from. A release that states none gets no such code. */
-        if (const auto identity = request_.androidStorage->releaseIdentity()) {
+         * from. A release that states none gets no such code, and neither
+         * does a launch whose request keeps it out (android_aot_disabled). */
+        if (request_.aotDisabled)
+            std::fputs(
+                "Kernarium: the launch states no ahead-of-time release; the "
+                "guest runs on the engine alone\n",
+                stderr);
+        else if (const auto identity =
+                     request_.androidStorage->releaseIdentity()) {
             auto argument = uml::emulator::aot_release_argument(
                 identity->id, identity->manifestSha256, identity->systemSha256);
             if (!argument.empty())
@@ -2378,6 +2389,7 @@ int runtimeRun(
                     unknown);
             request.hostFeatures = boot->android_host_features & ~unknown;
         }
+        request.aotDisabled = kernarium::aot::aotDisabled(*boot);
         /* The identity a request states is kept as given: a value that is not
          * valid fails the run, since the caller wants exactly that one. */
         const auto statedIdentity = kernarium::identity::readRequest(*boot);
