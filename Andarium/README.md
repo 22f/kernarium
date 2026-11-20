@@ -1350,10 +1350,10 @@ is on. `AndariumCore/Adb` speaks the protocol.
   first listing is asked 60 s after Android reports its boot complete, so that
   nothing starts in the guest while it settles; opening the chooser asks at
   once, and so does a request that started the boot for an app the cached list
-  does not name. The row exists only in a normal session whose image has the tool. A Mac and a Vision
-  Pro have no Home Screen: there the intent runs, but the apps are no entities,
-  nothing is written to Spotlight, the tiles are not told of them, and Android
-  is never asked for the list. An icon
+  does not name. The row exists only in a normal session whose image has the
+  tool. A Mac and a Vision Pro have no Home Screen: there the intent runs, but
+  the apps are no entities, nothing is written to Spotlight, the tiles are not
+  told of them, and Android is never asked for the list. An icon
   is stored only as a picture the host drew itself (`FlatteningAppsTool`), and a
   label as the tool's own sanitising makes it, whatever the tool or the cache
   file says.
