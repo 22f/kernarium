@@ -77,7 +77,7 @@ extension AppModel {
             return true
         }
         let run = session
-        let flat = FlatteningAppsTool(base: tool)
+        let flat = FlatteningAppsTool(base: OneListingAtATimeTool(base: tool, lane: state.listingLane))
         let store = state.store
         let token = state.begin()
         let task = Task.detached {
@@ -157,29 +157,44 @@ extension AppModel {
         let listNeeded = state.firstNeedsList
         state.first = Task { [weak self, weak state] in
             defer { state?.endFirst(token) }
-            for attempt in 0..<AndroidAppsState.startAttempts {
+            // An ask made, or one that storage not being up kept from being made, is one of the
+            // attempts. An app being opened is not: it has Android's attention first, and the wait
+            // starts over without spending an attempt.
+            var attempt = 0
+            var holdingForAnOpen = false
+            while attempt < AndroidAppsState.startAttempts {
                 guard let state else { return }
-                let firstWait: Duration = listNeeded ? .zero : state.startDelay
-                let wait = attempt == 0 ? firstWait : state.retryInterval * (1 << (attempt - 1))
+                let wait: Duration
+                if holdingForAnOpen {
+                    wait = state.retryInterval
+                } else if attempt == 0 {
+                    wait = listNeeded ? .zero : state.startDelay
+                } else {
+                    wait = state.retryInterval * (1 << (attempt - 1))
+                }
+                holdingForAnOpen = false
                 if wait > .zero { await state.sleep(wait) }
                 guard let self, self.ownsFirstListing(token, in: run) else { return }
                 if state.listed { break }
                 // Android paused for space: the listing stays owed, and the pause ending makes it.
                 guard self.canAskAndroidApps else { return }
-                // An app that is being opened has Android's attention first, except where
-                // the app is the reason the list is wanted.
-                var opening = false
+                // Except where the app is the reason the list is wanted (`listNeeded`).
                 switch state.open.pending?.stage {
-                case .opening?, .launching?: opening = !(attempt == 0 && listNeeded)
+                case .opening?, .launching?:
+                    if !listNeeded {
+                        holdingForAnOpen = true
+                        continue
+                    }
                 default: break
                 }
                 let storageUp = if let driver = self.driver { await driver.storageReady() == true } else { true }
                 guard self.ownsFirstListing(token, in: run) else { return }
                 if state.listed { break }
                 guard self.canAskAndroidApps else { return }
-                if !opening, storageUp { await self.refreshAndroidApps() }
+                if storageUp { await self.refreshAndroidApps() }
                 guard self.ownsFirstListing(token, in: run) else { return }
                 if state.listed { break }
+                attempt += 1
             }
             // Asked as often as it is asked: nothing is owed any more.
             if let self, self.ownsFirstListing(token, in: run) { state?.firstOwed = false }
@@ -308,11 +323,12 @@ extension AppModel {
             case .timedOut:
                 state.open.opened(.failed, for: request, now: Date())
             case .ready:
-                // A host with no Home Screen asks for the list only to open an app by name: the
-                // first open of a run takes one listing before it resolves, so that what it needs
-                // to know of a renamed launcher is on record (`launchersWhenSeen`).
+                // A host with no Home Screen asks for the list only to open an app by name: an
+                // open takes a listing before it resolves where none was answered this run, or
+                // where none has recorded the app, so that what it needs to know of a renamed
+                // launcher is on record (`launchersWhenSeen`).
                 if !hostOffersAddToHomeScreen {
-                    await listOnceForAnOpen()
+                    await listForAnOpen(request.component)
                     guard session === run, !Task.isCancelled, state.open.pending?.request == request else { return }
                 }
                 // The wait took seconds: the run may have ended, or paused for space.
@@ -325,7 +341,8 @@ extension AppModel {
                     let launchers = state.store.record(forID: request.component.identifier)?.launchers
                     // A renamed launcher's replacement is a command not yet sent when the apps are listed
                     // again: it goes only where the request, the run and the pause still allow it.
-                    result = await tool.open(request.component, launchersWhenSeen: launchers) {
+                    let ordered = OneListingAtATimeTool(base: tool, lane: state.listingLane)
+                    result = await ordered.open(request.component, launchersWhenSeen: launchers) {
                         await MainActor.run {
                             state.open.mayReplaceLaunch(request, in: self.androidAppOpenSituation, now: Date())
                         }
@@ -352,11 +369,13 @@ extension AppModel {
         }
     }
 
-    /// The one listing a host with no Home Screen takes for a run, joining one under way.
-    private func listOnceForAnOpen() async {
+    /// The listing a host with no Home Screen takes for an open: the run's first, which an
+    /// ask that got no answer leaves still to make, and one for an app no listing has recorded
+    /// (installed since the last). It joins a refresh under way and asks for no icons.
+    private func listForAnOpen(_ component: AndroidComponent) async {
         let state = androidApps
-        guard !hostOffersAddToHomeScreen, !state.listed, !state.listedForAnOpen else { return }
-        state.listedForAnOpen = true
+        guard !hostOffersAddToHomeScreen else { return }
+        guard !state.listed || state.store.record(forID: component.identifier)?.launchers == nil else { return }
         await refreshAndroidApps(forAnOpen: true)
     }
 

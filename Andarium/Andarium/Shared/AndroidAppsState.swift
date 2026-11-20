@@ -28,6 +28,62 @@ protocol AndroidAppsSource: AnyObject {
     func awaitAndroidReady(homeReached: Bool) async -> AndroidAppReadiness.Outcome
 }
 
+/// The guest is asked for one listing at a time: the run's refresh, the
+/// chooser's, a launch's own look at the apps after a missing-app answer. A
+/// second asker waits its turn, in order, and the answer it gets is its own.
+@MainActor
+final class ListingLane {
+    private var held = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func enter() async {
+        guard held else {
+            held = true
+            return
+        }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    func leave() {
+        if waiting.isEmpty {
+            held = false
+        } else {
+            waiting.removeFirst().resume()
+        }
+    }
+}
+
+/// The tool, with its digest and listing asked through the lane. The turn is
+/// held for one ask, and an ask whose task ended while it waited sends nothing.
+nonisolated struct OneListingAtATimeTool: AndroidAppsTool {
+    let base: any AndroidAppsTool
+    let lane: ListingLane
+
+    func digest(limit: Duration) async -> AndroidAppDigestAnswer {
+        await lane.enter()
+        var answer = AndroidAppDigestAnswer.failed
+        if !Task.isCancelled { answer = await base.digest(limit: limit) }
+        await lane.leave()
+        return answer
+    }
+
+    func list(limit: Duration) async -> AndroidAppListing {
+        await lane.enter()
+        var answer = AndroidAppListing.failed
+        if !Task.isCancelled { answer = await base.list(limit: limit) }
+        await lane.leave()
+        return answer
+    }
+
+    func icons(of apps: [AndroidApp], limit: Duration) async -> [String: AndroidAppIconAnswer] {
+        await base.icons(of: apps, limit: limit)
+    }
+
+    func open(_ component: AndroidComponent, limit: Duration) async -> AndroidAppOpenAnswer {
+        await base.open(component, limit: limit)
+    }
+}
+
 /// The tool, with every icon made one the host drew itself: the picture is
 /// decoded whole, at the size the tool says it has, and kept as a PNG this
 /// process rendered on an opaque white square, whatever the tool said of its
@@ -143,8 +199,8 @@ final class AndroidAppsState {
     @ObservationIgnored var firstNeedsList = false
     /// The request that began this boot (Start's own boot is no request's).
     @ObservationIgnored var bootStartedBy: AppOpenRequest?
-    /// This run took its one listing for opening an app on a host with no Home Screen.
-    @ObservationIgnored var listedForAnOpen = false
+    /// Whose turn it is to ask the guest for a listing.
+    @ObservationIgnored let listingLane = ListingLane()
     /// Android being made ready for the request, then the app being opened.
     @ObservationIgnored var opening: Task<Void, Never>?
     /// The wait for the next request or banner to run out.
@@ -270,7 +326,6 @@ final class AndroidAppsState {
         firstOwed = false
         firstNeedsList = false
         bootStartedBy = nil
-        listedForAnOpen = false
         opening?.cancel()
         opening = nil
         open.runEnded()

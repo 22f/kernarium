@@ -1111,6 +1111,61 @@ final class AndroidAppsModelTests {
         #expect(await eventually(3) { rig.tool.digestsAsked > 0 }, "waits held: \(rig.waits.durations)")
         #expect(!rig.waits.durations.contains(rig.state.startDelay))
         #expect(await eventually(5) { rig.tool.opened == [comet.component] })
+        #expect(await eventually(5) { rig.state.listed }, "the list the shortcut needed was made")
+    }
+
+    @Test func anUncachedStartersFirstListingSurvivesStorageThatWasDownAndAnOpenStillUnderWay() async throws {
+        let rig = try rig(phase: .home, plan: .normal)
+        defer { rig.stop() }
+        // The app stays opening for the whole test, and the guest's storage is not up at the first check.
+        rig.scripted.readyDelay = .seconds(30)
+        rig.driver.storage = false
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        rig.model.phase = .running(.normal)
+        rig.model.androidAppsBootFinished(recovery: false)
+        #expect(rig.state.open.pending?.stage == .opening)
+        #expect(await eventually { rig.driver.storageReads >= 1 }, "the first check was made")
+        #expect(rig.tool.digestsAsked == 0, "storage was down")
+        // Storage comes up; every retry finds the app still opening, and the list is still owed.
+        rig.driver.storage = true
+        let asked = await eventually(4) {
+            rig.waits.releaseAll()
+            return rig.tool.digestsAsked > 0
+        }
+        #expect(asked, "the list the request needs is asked at a retry, with the app still opening")
+        #expect(rig.state.open.pending?.stage == .opening)
+        #expect(await eventually { rig.state.listed })
+    }
+
+    @Test func anOpenUnderWayAtEveryRetryDoesNotSpendTheFirstListing() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.scripted.readyDelay = .seconds(1)
+        rig.model.androidAppsBootFinished(recovery: false)
+        // An app is opened while the guest settles, and takes longer than every retry of the listing together.
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(rig.state.open.pending?.stage == .opening)
+        let listed = await eventually(5) {
+            rig.waits.releaseAll()
+            return rig.state.listed
+        }
+        #expect(listed, "the listing the open held back is made once the open is over")
+        #expect(rig.tool.opened == [comet.component])
+    }
+
+    @Test func theListingAMissingAppsOpenMakesDoesNotOverlapTheStartersCatalogListing() async throws {
+        let rig = try rig(phase: .home, plan: .normal)
+        defer { rig.stop() }
+        let gone = try #require(AndroidComponent(packageName: "com.example.gone", activityClass: "com.example.gone.Main"))
+        rig.tool.delay = .milliseconds(120)
+        rig.scripted.readyDelay = .milliseconds(40)
+        // The cache has no list, and the app the request began the boot for is not in Android.
+        rig.model.requestAndroidApp(gone, label: "Gone")
+        rig.model.phase = .running(.normal)
+        rig.model.androidAppsBootFinished(recovery: false)
+        #expect(await eventually(8) { rig.state.open.banner != nil }, "the missing-app answer arrived")
+        #expect(await eventually(8) { rig.state.listed })
+        #expect(rig.tool.mostListingsAtOnce == 1, "the guest is asked for one listing at a time")
     }
 
     @Test func aShortcutDuringABootTheStartButtonBeganWaitsForTheGuestToSettle() async throws {
@@ -1221,6 +1276,61 @@ final class AndroidAppsModelTests {
         rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
         #expect(await eventually { rig.tool.opened.last == renamed.component }, "opened: \(rig.tool.opened)")
         #expect(rig.state.open.banner == nil)
+    }
+
+    @Test func anAppInstalledAfterTheRunsListingKeepsItsLauncherHistoryOnAHostWithNoHomeScreen() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.model.host.idiom = .mac
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened == [comet.component] && rig.state.open.pending == nil })
+        // An app is installed after the run's listing, and the person opens it by name.
+        let newcomer = AndroidApp(
+            component: try #require(AndroidComponent(packageName: "com.example.newcomer", activityClass: "com.example.newcomer.Main")),
+            label: "Newcomer", builtIn: false, iconTag: "0000000000000001")
+        rig.tool.install(newcomer)
+        rig.model.requestAndroidApp(newcomer.component, label: "Newcomer")
+        #expect(await eventually { rig.tool.opened.last == newcomer.component && rig.state.open.pending == nil })
+        #expect(rig.state.store.record(forID: newcomer.id)?.launchers == 1, "its launcher is on record")
+        // It renames its only launcher, and the original intent is run again.
+        let renamed = AndroidApp(
+            component: try #require(AndroidComponent(packageName: "com.example.newcomer", activityClass: "com.example.newcomer.Renamed")),
+            label: "Newcomer", builtIn: false, iconTag: "0000000000000001")
+        rig.tool.remove(newcomer.id)
+        rig.tool.install(renamed)
+        rig.model.requestAndroidApp(newcomer.component, label: "Newcomer")
+        #expect(await eventually { rig.tool.opened.last == renamed.component }, "opened: \(rig.tool.opened)")
+        #expect(rig.state.open.banner == nil)
+    }
+
+    @Test func aListingThatGotNoAnswerForAnOpenIsNotTheRunsListing() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.model.host.idiom = .mac
+        rig.tool.answer(listing: nil, digest: .failed)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.tool.opened == [comet.component] && rig.state.open.pending == nil })
+        #expect(rig.tool.digestsAsked == 1 && !rig.state.listed, "the first ask got no answer")
+        // The tool answers again, and the next open asks for the list.
+        rig.tool.answer(listing: nil, digest: nil)
+        rig.model.requestAndroidApp(inkleaf.component, label: "Inkleaf Notes")
+        #expect(await eventually { rig.tool.opened == [comet.component, inkleaf.component] && rig.state.open.pending == nil })
+        #expect(rig.tool.digestsAsked == 2, "the next open asks again")
+        #expect(rig.state.listed && rig.state.store.record(forID: inkleaf.id)?.launchers == 1)
+    }
+
+    @Test func aReplacementOpenWaitsForTheListingTheOpenItReplacedBegan() async throws {
+        let rig = try rig(phase: .running(.normal))
+        defer { rig.stop() }
+        rig.model.host.idiom = .mac
+        let gone = try #require(AndroidComponent(packageName: "com.example.gone", activityClass: "com.example.gone.Main"))
+        rig.tool.delay = .milliseconds(120)
+        rig.model.requestAndroidApp(comet.component, label: "Comet Hop")
+        #expect(await eventually { rig.state.inFlight != nil }, "the first open's listing is under way")
+        // Another request replaces it, for an app that is not in Android: its launch lists the apps to learn why.
+        rig.model.requestAndroidApp(gone, label: "Gone")
+        #expect(await eventually(8) { rig.state.open.banner != nil }, "the missing-app answer arrived")
+        #expect(rig.tool.mostListingsAtOnce == 1, "the guest is asked for one listing at a time")
     }
 
     @Test func theCachedListAndRecordsAnswerBeforeTheRunsFirstListing() async throws {
