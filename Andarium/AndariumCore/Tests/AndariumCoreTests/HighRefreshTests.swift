@@ -9,11 +9,47 @@ import Testing
 /// how the choice is kept, and what the thermal session tells Android while
 /// Low Power Mode holds the 120 Hz display to 60.
 struct HighRefreshPolicyTests {
-    @Test func theSettingIsOfferedOnAScreenThatShowsMoreThanSixty() {
+    @Test func theSettingIsOfferedOnAScreenThatShowsAtLeastOneHundred() {
         #expect(!HighRefresh.isOffered(maximumFramesPerSecond: 60))
         #expect(!HighRefresh.isOffered(maximumFramesPerSecond: 0))
         #expect(HighRefresh.isOffered(maximumFramesPerSecond: 120))
-        #expect(HighRefresh.isOffered(maximumFramesPerSecond: 90))
+        #expect(HighRefresh.isOffered(maximumFramesPerSecond: 100))
+        // 61 to 99 would be given the 120 Hz mode that the display link cannot pace.
+        for rate in [61, 72, 75, 90, 99] {
+            #expect(!HighRefresh.isOffered(maximumFramesPerSecond: rate), "a screen at \(rate)")
+        }
+    }
+
+    @Test func theSettingIsNotOfferedOnAMacOrAVisionPro() {
+        #expect(HighRefresh.isOffered(maximumFramesPerSecond: 120, hostIsMacOrVision: false))
+        #expect(!HighRefresh.isOffered(maximumFramesPerSecond: 120, hostIsMacOrVision: true))
+        #expect(!HighRefresh.asksAtBoot(isOn: true, maximumFramesPerSecond: 120, hostIsMacOrVision: true))
+    }
+
+    @Test func aSizeThatTheEDIDCannotStateAt120HzIsNotOffered() {
+        #expect(HighRefresh.isOffered(maximumFramesPerSecond: 120, displaySize: (860, 1678)))
+        #expect(!HighRefresh.isOffered(maximumFramesPerSecond: 120, displaySize: (2752, 2064)))
+        #expect(!HighRefresh.asksAtBoot(isOn: true, maximumFramesPerSecond: 120, displaySize: (2048, 2732)))
+        // A size not yet known offers by the screen and the host alone: the
+        // runtime decides the size at the start.
+        #expect(HighRefresh.isOffered(maximumFramesPerSecond: 120, displaySize: nil))
+    }
+
+    /// The runtime's EDID decides the sizes (`edid_timing.hpp`); both read one
+    /// table.
+    @Test func everySizeOfTheSharedTableCarriesOrDoesNot() throws {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { url.deleteLastPathComponent() }
+        url.append(path: "tests/unit/gpu/fixtures/edid-120hz-sizes.txt")
+        let rows = try String(contentsOf: url, encoding: .utf8).split(separator: "\n").filter { !$0.hasPrefix("#") }
+        #expect(rows.count >= 10)
+        for row in rows {
+            let columns = row.split(separator: " ").compactMap { Int($0) }
+            try #require(columns.count == 3, Comment(rawValue: String(row)))
+            #expect(
+                HighRefresh.carries(width: columns[0], height: columns[1]) == (columns[2] == 1),
+                Comment(rawValue: String(row)))
+        }
     }
 
     @Test func theBootAsksOnlyWhenTheSettingIsOnAndTheScreenCanShowIt() {
@@ -21,14 +57,20 @@ struct HighRefreshPolicyTests {
         #expect(!HighRefresh.asksAtBoot(isOn: false, maximumFramesPerSecond: 120))
         // A device that cannot never asks, whatever was stored or stated.
         #expect(!HighRefresh.asksAtBoot(isOn: true, maximumFramesPerSecond: 60))
+        #expect(!HighRefresh.asksAtBoot(isOn: true, maximumFramesPerSecond: 90))
         #expect(!HighRefresh.asksAtBoot(isOn: false, maximumFramesPerSecond: 60))
     }
 
-    @Test func lowPowerModeHoldsOnlyTheHundredAndTwentyHertzDisplay() {
-        #expect(HighRefresh.holdsAtSixty(displayIs120: true, lowPowerMode: true))
-        #expect(!HighRefresh.holdsAtSixty(displayIs120: true, lowPowerMode: false))
-        #expect(!HighRefresh.holdsAtSixty(displayIs120: false, lowPowerMode: true))
-        #expect(!HighRefresh.holdsAtSixty(displayIs120: false, lowPowerMode: false))
+    @Test func lowPowerModeOrAScreenThatShowsLessHoldsOnlyTheHundredAndTwentyHertzDisplay() {
+        #expect(HighRefresh.holdsAtSixty(displayIs120: true, lowPowerMode: true, screenMaximumFramesPerSecond: 120))
+        #expect(!HighRefresh.holdsAtSixty(displayIs120: true, lowPowerMode: false, screenMaximumFramesPerSecond: 120))
+        #expect(!HighRefresh.holdsAtSixty(displayIs120: false, lowPowerMode: true, screenMaximumFramesPerSecond: 120))
+        #expect(!HighRefresh.holdsAtSixty(displayIs120: false, lowPowerMode: false, screenMaximumFramesPerSecond: 120))
+        // A run on the 120 Hz display that moved to a screen showing 60 is held like Low Power Mode.
+        #expect(HighRefresh.holdsAtSixty(displayIs120: true, lowPowerMode: false, screenMaximumFramesPerSecond: 60))
+        #expect(HighRefresh.holdsAtSixty(displayIs120: true, lowPowerMode: false, screenMaximumFramesPerSecond: 99))
+        #expect(!HighRefresh.holdsAtSixty(displayIs120: true, lowPowerMode: false, screenMaximumFramesPerSecond: 100))
+        #expect(!HighRefresh.holdsAtSixty(displayIs120: false, lowPowerMode: false, screenMaximumFramesPerSecond: 60))
     }
 
     @Test func theWordsAreFixedEnglish() {

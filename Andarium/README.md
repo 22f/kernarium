@@ -849,18 +849,23 @@ requires reopening Andarium.
   default and keeps nothing; `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states it for
   the run ([Automation](#automation)).
   Performance also has "120 Hz" (`HighRefreshPreference`, off by default),
-  drawn in a normal session only where the screen can show more than 60 frames
-  a second (an iPhone Pro, an iPad Pro) and not in Recovery.
+  drawn in a normal session only where the screen shows at least 100 frames a
+  second (an iPhone Pro, an iPad Pro; a screen between 61 and 99 does not
+  qualify), where the display size the next start would have can carry the 120
+  Hz mode, never on a Mac or Vision Pro, and not in Recovery.
   Turned on, the next start of Android asks the runtime for the 120 Hz display
   ([Display refresh rate](../Kernarium/README.md#display-refresh-rate)); a
-  change applies at that start, as the row's footnote says, and the display
-  stays as started until then. While iOS is in Low Power Mode, which shows at
-  most 60, a run that started with the 120 Hz display tells Android MODERATE
-  (the thermal wire's severity between light and severe), which holds Android's
-  render rate to 60 Hz; "When hot" still decides the heat levels, and the
-  heavier severity wins. A harness launch starts with the setting off, and
+  change applies at that start, as the row's footnote says. The runtime
+  decides once, at boot, whether the run has the mode, and the application
+  uses what it granted (`display_refresh_hz` of the runtime's statistics) for
+  the run. While iOS is in Low Power Mode, or after the window moves to a
+  screen that shows under 100 frames a second, a granted run tells Android
+  MODERATE (the thermal wire's severity between light and severe), which holds
+  Android's render rate to 60 Hz; "When hot" still decides the heat levels,
+  and the heavier severity wins. The screen's maximum is read again at each
+  geometry update. A harness launch starts with the setting off, and
   `ANDARIUM_HIGH_REFRESH` (`1` or `0`) states it for the run, which keeps
-  nothing; a screen that cannot show 120 never asks.
+  nothing.
 - **Game controllers.** Each game controller iOS has connected is a HID
   device in the guest, made through the guest's relay over vsock 5558
   (`GamepadSession`; the wire is `GamepadProtocol`, whose golden frames the

@@ -26,7 +26,7 @@ struct HighRefreshTests {
 
     // MARK: The model
 
-    @Test func theSettingIsOffAndNotOfferedUntilTheScreenSaysItShowsMoreThanSixty() {
+    @Test func theSettingIsOffAndNotOfferedUntilTheScreenSaysItShowsAtLeastOneHundred() {
         let model = model()
         #expect(!model.highRefreshOn)
         #expect(!model.highRefreshOffered)
@@ -36,8 +36,28 @@ struct HighRefreshTests {
         // A reader of the window that does not read the rate leaves it.
         model.screenDidChange(nativeScale: 3)
         #expect(model.screenMaximumFramesPerSecond == 120)
+        // A screen that shows 61 to 99 is given a 120 Hz mode that the link cannot pace.
+        for rate in [61, 90, 99] {
+            model.screenDidChange(nativeScale: 3, maximumFramesPerSecond: rate)
+            #expect(!model.highRefreshOffered, "a screen at \(rate)")
+        }
+        model.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 100)
+        #expect(model.highRefreshOffered)
         model.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 60)
         #expect(!model.highRefreshOffered)
+    }
+
+    @Test func aMoveToAnotherScreenChangesTheOfferAndAnyReadingOfItsRate() {
+        let model = model()
+        model.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 120)
+        #expect(model.highRefreshOffered)
+        // The scene moves to a 60 Hz external display, and back.
+        model.screenDidChange(nativeScale: 2, maximumFramesPerSecond: 60)
+        #expect(!model.highRefreshOffered)
+        model.setHighRefresh(true)
+        #expect(!model.asksForHighRefresh, "the old screen's maximum asked for the mode")
+        model.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 120)
+        #expect(model.asksForHighRefresh)
     }
 
     @Test func aStatedScreenWinsOverTheReadOne() {
@@ -45,6 +65,37 @@ struct HighRefreshTests {
         model.statedMaximumFramesPerSecond = 120
         model.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 60)
         #expect(model.highRefreshOffered)
+    }
+
+    @Test func theSettingIsNotOfferedOnAMac() {
+        let model = model()
+        model.host.idiom = .mac
+        model.screenDidChange(nativeScale: 2, maximumFramesPerSecond: 120)
+        #expect(!model.highRefreshOffered)
+        model.setHighRefresh(true)
+        #expect(!model.asksForHighRefresh, "a Mac asked for the 120 Hz display")
+        model.host.idiom = .pad
+        #expect(model.highRefreshOffered)
+        #expect(model.asksForHighRefresh)
+    }
+
+    @Test func theSettingIsNotOfferedWhileTheDisplaySizeCannotStateIt() {
+        let model = model()
+        model.screenDidChange(nativeScale: 2, maximumFramesPerSecond: 120)
+        // A 13-inch iPad Pro at its native size: 2752 x 2064 pixels.
+        model.displayPointsDidChange(CGSize(width: 1376, height: 1032))
+        model.chooseResolution(.native)
+        #expect(model.resolutionLayout?.width == 2752)
+        #expect(!model.highRefreshOffered, "the size's clock does not fit the EDID")
+        model.setHighRefresh(true)
+        #expect(!model.asksForHighRefresh)
+        // The same iPad at a smaller resolution can state it.
+        model.chooseResolution(.factor(1.5))
+        #expect(model.highRefreshOffered)
+        #expect(model.asksForHighRefresh)
+        // A start decides by the size it boots at.
+        #expect(!model.asksForHighRefresh(displaySize: (2752, 2064)))
+        #expect(model.asksForHighRefresh(displaySize: (860, 1678)))
     }
 
     @Test func aStartAsksForTheDisplayOnlyWhenTheSettingIsOnAndTheScreenCanShowIt() {
@@ -56,6 +107,20 @@ struct HighRefreshTests {
         #expect(model.asksForHighRefresh)
         model.setHighRefresh(false)
         #expect(!model.asksForHighRefresh)
+    }
+
+    @Test func theRunHasWhatTheRuntimeGrantedNotWhatTheStartAsked() {
+        let model = model()
+        model.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 120)
+        model.setHighRefresh(true)
+        model.phase = .running(.normal)
+        // The start asked and the runtime refused: the run has the 60 Hz display.
+        model.runStarted(withHighRefresh: false)
+        #expect(!model.runHasHighRefresh)
+        // The runtime's grant, once known, is the run's.
+        model.runStarted(withHighRefresh: true)
+        #expect(model.runHasHighRefresh)
+        #expect(!model.highRefreshWaitsForRestart)
     }
 
     @Test func aChangeWhileAndroidRunsWaitsForTheNextStart() {
