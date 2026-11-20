@@ -1116,16 +1116,23 @@ final class LiveRuntime: RuntimeDriver {
         // The run wrote to the data disk, so the device has less free space
         // than before it.
         model?.host.freeStorageBytes = freeSpace()
-        let loop = result == Int32(KERNARIUM_RUNTIME_RESULT_RESTART_LOOP)
-        // The runtime says the host would not give the guest's memory: the
-        // run never started its kernel, and a smaller size is what starts. A
-        // bare out-of-memory status of the library (-2) is not that.
-        let memoryRefused = result == Int32(KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED) ? runMemoryMiB : nil
         let stopped = userStopped
         userStopped = false
         model?.runEnded(
-            RunEnd(result: result, restartedInALoop: loop, stoppedByUser: stopped, memoryRefusedMiB: memoryRefused),
-            uptimeSeconds: uptime)
+            Self.runEnd(result: result, memoryMiB: runMemoryMiB, stoppedByUser: stopped), uptimeSeconds: uptime)
+    }
+
+    /// How a run that returned `result` ended, as the screens tell it.
+    /// `memoryMiB` is the size the run asked for. The runtime says the host
+    /// would not give the guest's memory with a result of its own: the run
+    /// never started its kernel, and a smaller size is what starts. A bare
+    /// out-of-memory status of the library (-2) is not that.
+    static func runEnd(result: Int32, memoryMiB: Int, stoppedByUser: Bool) -> RunEnd {
+        RunEnd(
+            result: result,
+            restartedInALoop: result == Int32(KERNARIUM_RUNTIME_RESULT_RESTART_LOOP),
+            stoppedByUser: stoppedByUser,
+            memoryRefusedMiB: result == Int32(KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED) ? memoryMiB : nil)
     }
 
     // MARK: Keys

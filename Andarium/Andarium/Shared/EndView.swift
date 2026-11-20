@@ -64,18 +64,29 @@ struct EndView: View {
 
     private var report: String { model.runReport }
 
-    /// What the screen says happened. A memory the device would not give is
-    /// named as the cause: nothing ran, and a smaller size starts.
-    private var headline: LocalizedStringKey {
-        if model.runEnd.memoryRefusedMiB != nil { return "The virtual machine could not start" }
-        return model.runEnd.stoppedByUser
-            ? "You stopped the virtual machine" : "The virtual machine stopped unexpectedly"
-    }
+    private var headline: String { EndWords(model.runEnd).headline }
 
-    private var advice: LocalizedStringKey {
-        if let memoryRefusedMiB = model.runEnd.memoryRefusedMiB {
-            return "This device could not give it \(Formats.size(mib: memoryRefusedMiB)) of memory. Close Andarium in the App Switcher and open it again, then lower the memory with Edit under Virtual machine."
+    private var advice: String { EndWords(model.runEnd).advice }
+}
+
+/// What the failure screen says of an end, in the person's language. A memory
+/// the device would not give is named as the cause: nothing ran, and a smaller
+/// size starts.
+struct EndWords: Equatable {
+    let headline: String
+    let advice: String
+
+    init(_ end: RunEnd) {
+        if let memoryRefusedMiB = end.memoryRefusedMiB {
+            headline = String(localized: "The virtual machine could not start")
+            advice = String(
+                localized: "This device could not give it \(Formats.size(mib: memoryRefusedMiB)) of memory. Close Andarium in the App Switcher and open it again, then lower the memory with Edit under Virtual machine."
+            )
+        } else {
+            headline = end.stoppedByUser
+                ? String(localized: "You stopped the virtual machine")
+                : String(localized: "The virtual machine stopped unexpectedly")
+            advice = String(localized: "To start it again, close Andarium in the App Switcher and open it again.")
         }
-        return "To start it again, close Andarium in the App Switcher and open it again."
     }
 }
