@@ -130,6 +130,8 @@ final class AndroidAppsModelTests {
         scripted.tool.delay = .milliseconds(1)
         scripted.readyDelay = .milliseconds(1)
         model.scriptedAndroidApps = scripted
+        // The host the rows are about is an iPhone of iOS 27, whatever system the tests run on.
+        model.padAppHost = IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false)
         AndroidAppsHub.shared.configure(directory: directory)
         AndroidAppsHub.shared.attach(model)
         let index = RecordingAppsIndex()
@@ -497,13 +499,12 @@ final class AndroidAppsModelTests {
         #expect(!rig.model.offersAddToHomeScreen)
     }
 
-    @Test func aVisionProOn26HasNoHomeScreenToAddTo() async throws {
-        let rig = try rig(phase: .running(.normal))
-        // visionOS 26.0 does not say it runs the iPad app; the hardware's name does.
-        rig.model.padAppHost = IPadAppHost(isiOSAppOnMac: false, visionAnswer: nil, machine: "RealityDevice14,1")
+    /// Nothing of Add to Home Screen is offered to `host`: no row, and the apps are neither entities
+    /// nor written to Spotlight.
+    private func expectNothingOffered(to host: IPadAppHost, _ rig: Rig) async {
+        rig.model.padAppHost = host
         #expect(!rig.model.hostOffersAddToHomeScreen)
         #expect(!rig.model.offersAddToHomeScreen)
-        // Nor are its apps entities or offered to Spotlight.
         await rig.model.refreshAndroidApps()
         let writes = rig.index.events.count
         AndroidAppsHub.shared.attach(rig.model)
@@ -511,6 +512,28 @@ final class AndroidAppsModelTests {
         #expect(AndroidAppsHub.shared.entities().isEmpty)
         await rig.model.syncAndroidAppsIndex()
         #expect(rig.index.events.count == writes, "nothing is offered to Spotlight: \(rig.index.events)")
+    }
+
+    @Test func aVisionProOn26HasNoHomeScreenToAddTo() async throws {
+        let rig = try rig(phase: .running(.normal))
+        // visionOS 26.0 does not say it runs the iPad app; the hardware's name does.
+        await expectNothingOffered(
+            to: IPadAppHost(isiOSAppOnMac: false, visionAnswer: nil, machine: "RealityDevice14,1"), rig)
+    }
+
+    @Test func anIOSBefore27OffersNoAddToHomeScreen() async throws {
+        let rig = try rig(phase: .running(.normal))
+        // A Home Screen, and no tile in Shortcuts for the guide to send the person to.
+        await expectNothingOffered(
+            to: IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false, hasAppTilesInShortcuts: false), rig)
+    }
+
+    @Test func theSystemsOwnHostOffersAddToHomeScreenFromIOS27() {
+        var tilesExpected = false
+        if #available(iOS 27.0, *) { tilesExpected = true }
+        let system = IPadAppHost.system
+        #expect(system.hasAppTilesInShortcuts == tilesExpected)
+        #expect(system.offersAddToHomeScreen == (system.hasHomeScreen && tilesExpected))
     }
 
     // MARK: Where the feature is not offered

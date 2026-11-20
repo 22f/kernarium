@@ -475,11 +475,12 @@ nonisolated final class AndroidAppsHub: @unchecked Sendable {
     private var hostOffersKept = AndroidAppsHub.processOffersAddToHomeScreen
     private var writerKept: AndroidAppsIndexWriter?
 
-    /// The host has a Home Screen to add to (an iPhone or an iPad): a Mac and
-    /// a Vision Pro run the application but have none, so nothing of this
-    /// feature is offered there.
+    /// The host has a Home Screen to add to (an iPhone or an iPad) and
+    /// Shortcuts has the tile for each app (iOS 27 and later): a Mac, a Vision
+    /// Pro and an earlier iOS run the application but offer none of this
+    /// feature.
     static var processOffersAddToHomeScreen: Bool {
-        IPadAppHost.system.hasHomeScreen
+        IPadAppHost.system.offersAddToHomeScreen
     }
 
     /// Whether the apps are entities, in Spotlight and in the tiles.

@@ -13,7 +13,11 @@ extension IPadAppHost {
         let info = ProcessInfo.processInfo
         var answer: Bool?
         if #available(iOS 26.1, *) { answer = info.isiOSAppOnVision }
-        return IPadAppHost(isiOSAppOnMac: info.isiOSAppOnMac, visionAnswer: answer, machine: hardwareMachine())
+        var tiles = false
+        if #available(iOS 27.0, *) { tiles = true }
+        return IPadAppHost(
+            isiOSAppOnMac: info.isiOSAppOnMac, visionAnswer: answer, machine: hardwareMachine(),
+            hasAppTilesInShortcuts: tiles)
     }
 
     /// The hardware's own name: `uname`'s machine, which an iPad app on a

@@ -32,6 +32,10 @@ final class AddToHomeUITests: XCTestCase {
         return app
     }
 
+    private func requireShortcutTiles() throws {
+        if #unavailable(iOS 27.0) { throw XCTSkip("Add to Home Screen is offered from iOS 27") }
+    }
+
     private func attach(_ name: String, of element: XCUIElement) {
         let attachment = XCTAttachment(screenshot: element.screenshot())
         attachment.name = name
@@ -51,7 +55,18 @@ final class AddToHomeUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["add-to-home-screen-guide"].waitForExistence(timeout: 20), "the guide did not open")
     }
 
-    func testTheRowTheChooserAndTheGuideOfTheBuiltApplication() {
+    /// Add to Home Screen is offered from iOS 27, where Shortcuts has a tile for each app of
+    /// Andarium's. Before it Settings has no row, and the test says so (the others are skipped).
+    func testBefore27SettingsHasNoAddToHomeScreenRow() throws {
+        if #available(iOS 27.0, *) { throw XCTSkip("Add to Home Screen is offered from iOS 27") }
+        let app = launch()
+        // The Apps section is on screen (the row would follow Install APK).
+        XCTAssertTrue(app.staticTexts["Install APK\u{2026}"].firstMatch.waitForExistence(timeout: 30), "the Apps section is not on screen")
+        XCTAssertFalse(app.buttons["settings-add-to-home-screen"].waitForExistence(timeout: 5), "Settings has an Add to Home Screen row")
+    }
+
+    func testTheRowTheChooserAndTheGuideOfTheBuiltApplication() throws {
+        try requireShortcutTiles()
         let app = launch()
         openTheGuide(app)
         XCTAssertTrue(app.staticTexts["Touch and hold \u{201C}Comet Hop\u{201D}"].exists)
@@ -68,6 +83,7 @@ final class AddToHomeUITests: XCTestCase {
     /// its children, written where the run's owner reads them
     /// (`ANDARIUM_LINK_REPORT`, a file), and the picture of the foot of the guide.
     func testApplesShortcutsButtonReadsInTheLanguageOfTheRun() throws {
+        try requireShortcutTiles()
         let app = launch()
         openTheGuide(app)
         // Apple's button, by its identifier or by the word Shortcuts in each of the languages.
@@ -127,7 +143,8 @@ final class AddToHomeUITests: XCTestCase {
         }
     }
 
-    func testApplesShortcutsButtonOpensShortcutsOnAndariumsPage() {
+    func testApplesShortcutsButtonOpensShortcutsOnAndariumsPage() throws {
+        try requireShortcutTiles()
         let app = launch()
         openTheGuide(app)
         let link = app.descendants(matching: .any).matching(NSPredicate(

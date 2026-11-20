@@ -61,7 +61,7 @@ struct SessionSettingsSheet: View {
                     oldAppsOpen = true
                 }
                 .task {
-                    guard model.sessionPreset.addToHomePage else { return }
+                    guard model.sessionPreset.addToHomePage, model.hostOffersAddToHomeScreen else { return }
                     try? await Task.sleep(for: .milliseconds(400))
                     addToHomeOpen = true
                 }

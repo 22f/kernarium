@@ -34,6 +34,15 @@ struct IPadAppHostTests {
         #expect(!IPadAppHost(isiOSAppOnMac: false, visionAnswer: nil, machine: "RealityDevice14,1").hasHomeScreen)
     }
 
+    @Test func addToHomeScreenNeedsAHomeScreenAndTheTilesInShortcuts() {
+        #expect(IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false).offersAddToHomeScreen)
+        // An iOS before 27: a Home Screen, and no tile in Shortcuts to send the person to.
+        #expect(!IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: false, hasAppTilesInShortcuts: false).offersAddToHomeScreen)
+        #expect(!IPadAppHost(isiOSAppOnMac: true, isiOSAppOnVision: false).offersAddToHomeScreen)
+        #expect(!IPadAppHost(isiOSAppOnMac: false, isiOSAppOnVision: true).offersAddToHomeScreen)
+        #expect(!IPadAppHost(isiOSAppOnMac: false, visionAnswer: nil, machine: "RealityDevice14,1").offersAddToHomeScreen)
+    }
+
     @Test func aVisionProOn26OffersNoCameraAndLooksForNone() {
         var looks = 0
         let host = IPadAppHost(isiOSAppOnMac: false, visionAnswer: nil, machine: "RealityDevice14,1")
