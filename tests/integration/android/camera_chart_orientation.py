@@ -71,15 +71,17 @@ def edge_at_bottom(width: int, height: int, sample: Sample) -> int:
     return spread(height * 15 // 16) - spread(height // 32)
 
 
-def upright_views(luma: bytes, width: int, height: int) -> list[tuple[int, bool]]:
+def upright_views(luma: bytes, width: int, height: int, tag: int | None = None) -> list[tuple[int, bool]]:
     """The (turn, mirror) pairs that show the chart as the camera drew it: the marker's check word holds, its tag
-    is the chart's and the edge is at the bottom. A frame of the chart has exactly one."""
+    is the chart's and the edge is at the bottom. A frame of the chart has exactly one. With `tag`, the marker
+    must carry exactly that tag (the camera's own: 0x5a00 and the camera's platform index), not any chart's."""
     found = []
     for turn in (0, 90, 180, 270):
         for mirror in (False, True):
             turned_width, turned_height, sample = view(luma, width, height, turn, mirror)
-            valid, tag, _ = decode_marker(turned_width, turned_height, sample)
-            if valid and tag >> 8 == TAG_HIGH_BYTE and edge_at_bottom(turned_width, turned_height, sample) > 0:
+            valid, read, _ = decode_marker(turned_width, turned_height, sample)
+            named = read == tag if tag is not None else read >> 8 == TAG_HIGH_BYTE
+            if valid and named and edge_at_bottom(turned_width, turned_height, sample) > 0:
                 found.append((turn, mirror))
     return found
 

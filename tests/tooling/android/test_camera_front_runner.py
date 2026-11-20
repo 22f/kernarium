@@ -39,18 +39,18 @@ chart = runner.chart
 probe = runner.probe
 
 WIDTH, HEIGHT = 640, 480
-TAG = 0x5A01
+TAG = 0x5A01  # a chart of the reading tests, not a camera's
 
 
-def upright_chart(width: int = WIDTH, height: int = HEIGHT, counter: int = 77) -> list[list[int]]:
+def upright_chart(width: int = WIDTH, height: int = HEIGHT, counter: int = 77, tag: int = TAG) -> list[list[int]]:
     """The chart as the synthetic camera draws it, in the parts the reading uses: the ramp along every row, the
     slanted edge in the bottom quarter and the marker on the middle row."""
     grid = [[16 + 219 * x // (width - 1) for x in range(width)] for _ in range(height)]
     for y in range(height * 3 // 4, height):
         for x in range(width):
             grid[y][x] = 220 if x * 2 + (y - height * 3 // 4) > width else 40
-    first48 = (TAG << 32) | counter
-    bits = (first48 << 16) | ((TAG ^ ((first48 >> 16) & 0xFFFF) ^ (first48 & 0xFFFF)) & 0xFFFF)
+    first48 = (tag << 32) | counter
+    bits = (first48 << 16) | ((tag ^ ((first48 >> 16) & 0xFFFF) ^ (first48 & 0xFFFF)) & 0xFFFF)
     top = ((height - 8) // 2) & ~1
     for index in range(chart.MARKER_CELLS):
         one = (bits >> (chart.MARKER_CELLS - 1 - index)) & 1
@@ -145,11 +145,14 @@ class Statements(unittest.TestCase):
 
 
 class Verdicts(unittest.TestCase):
-    FRONT = nv21_of(rotated_clockwise(upright_chart(), 2))
-    BACK = nv21_of(upright_chart())
+    # Each camera's chart carries its own tag (the platform index): the phone profile's front camera is the platform's 3.
+    FRONT = nv21_of(rotated_clockwise(upright_chart(tag=0x5A03), 2))
+    BACK = nv21_of(upright_chart(tag=0x5A00))
+    FRONT_UNTURNED = nv21_of(upright_chart(tag=0x5A03))
+    BACK_OF_ANOTHER_LENS = nv21_of(upright_chart(tag=0x5A01))
 
-    def info(self, orientation: int, facing: int, camera: int) -> object:
-        return runner.Info(orientation, facing, WIDTH, HEIGHT, 17, camera)
+    def info(self, orientation: int, facing: int, camera: int, preview_format: int = 17) -> object:
+        return runner.Info(orientation, facing, WIDTH, HEIGHT, preview_format, camera)
 
     def test_the_cameras_the_host_presents_pass(self) -> None:
         self.assertEqual(runner.check_camera(runner.FRONT, self.info(270, 1, 1), self.FRONT), [])
@@ -161,14 +164,23 @@ class Verdicts(unittest.TestCase):
             "orientation": (self.info(90, 1, 1), self.FRONT, "an orientation of 90"),
             "facing": (self.info(270, 0, 1), self.FRONT, "facing 0"),
             "camera": (self.info(270, 1, 0), self.FRONT, "opened camera 0"),
-            "frame not turned": (self.info(270, 1, 1), self.BACK, "upright after the turns [(0, False)]"),
+            "frame not turned": (self.info(270, 1, 1), self.FRONT_UNTURNED, "upright after the turns [(0, False)]"),
             "short frame": (self.info(270, 1, 1), b"\0" * 10, "fewer than an NV21"),
+            "preview format": (self.info(270, 1, 1, 42), self.FRONT, "the preview format is 42, not NV21 (17)"),
         }
         for name, (info, frame, text) in cases.items():
             problems = runner.check_camera(front, info, frame)
             self.assertTrue(any(text in problem for problem in problems), f"{name}: {problems}")
         problems = runner.check_camera(runner.BACK, self.info(90, 0, 0), self.FRONT)
-        self.assertTrue(any("upright after the turns [(180, False)]" in problem for problem in problems), problems)
+        self.assertTrue(any("another camera's chart" in problem for problem in problems), problems)
+
+    def test_a_chart_of_another_camera_is_not_the_cameras_own(self) -> None:
+        # The back camera the guest calls 0 is the platform's 0 and draws the tag 0x5a00; a frame of the chart of another
+        # lens (0x5a01), turned the right way for it, was taken for it when only the tag's prefix was read.
+        problems = runner.check_camera(runner.BACK, self.info(90, 0, 0), self.BACK_OF_ANOTHER_LENS)
+        self.assertTrue(any("another camera's chart" in problem and "0x5a00" in problem for problem in problems), problems)
+        problems = runner.check_camera(runner.BACK, self.info(90, 0, 0, 42), self.BACK)
+        self.assertTrue(any("not NV21" in problem for problem in problems), problems)
 
 
 class Package(unittest.TestCase):

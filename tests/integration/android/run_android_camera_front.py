@@ -46,6 +46,11 @@ FRONT, BACK = 1, 0
 CAMERA_FACING_BACK, CAMERA_FACING_FRONT = 0, 1
 # What the guest states of each camera: SENSOR_ORIENTATION and the facing API 1 reports.
 EXPECTED = {FRONT: (270, CAMERA_FACING_FRONT), BACK: (90, CAMERA_FACING_BACK)}
+# The tag of each camera's chart: 0x5a00 and the camera's index in the platform's list (chartTag in the synthetic camera). In
+# the phone profile the back camera the guest calls 0 is the platform's 0 and the front camera it calls 1 is the platform's 3.
+CHART_TAG = {FRONT: 0x5A03, BACK: 0x5A00}
+# android.graphics.ImageFormat.NV21, the preview format the probe asks for and the check reads the frame as.
+NV21 = 17
 # The turn the host gives the chart's frame before the guest reads it, in degrees clockwise: the frame that shows
 # the chart as the camera drew it needs this turn, and an application turns it by the stated orientation
 # (the front camera's, 270, plus the half turn the host already made).
@@ -104,14 +109,19 @@ def check_camera(camera: int, info: Info, frame: bytes) -> list[str]:
         problems.append(f"camera {camera} states an orientation of {info.orientation}, not {orientation}")
     if info.facing != facing:
         problems.append(f"camera {camera} states facing {info.facing}, not {facing}")
+    if info.preview_format != NV21:
+        # The frame is read as NV21 only if that is what the framework says it is.
+        return problems + [f"camera {camera}: the preview format is {info.preview_format}, not NV21 ({NV21})"]
     try:
         luma = chart.luma_of_nv21(frame, info.width, info.height)
     except ValueError as problem:
         return problems + [f"camera {camera}: {problem}"]
-    views = chart.upright_views(luma, info.width, info.height)
+    views = chart.upright_views(luma, info.width, info.height, CHART_TAG[camera])
     if views != [(FRAME_TURN[camera], False)]:
-        problems.append(f"camera {camera}: the chart is upright after the turns {views} of the frame, not after "
-                        f"{[(FRAME_TURN[camera], False)]}")
+        others = chart.upright_views(luma, info.width, info.height)
+        other = f" (it is another camera's chart: upright after {others})" if not views and others else ""
+        problems.append(f"camera {camera}: the chart of tag {CHART_TAG[camera]:#06x} is upright after the turns {views} of the frame, "
+                        f"not after {[(FRAME_TURN[camera], False)]}{other}")
     return problems
 
 
