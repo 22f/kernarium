@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 06:51:25 +0900
+Subject: [PATCH] venus: refuse a pipeline stage that names no shader
+
+A shader stage names its shader by its module or by the
+VkShaderModuleCreateInfo chained to it.  The registry lets the module be
+null, so the codec cannot refuse a stage with neither, and the Vulkan
+runtime hashes such a stage by reading the module identifier it does not
+have; it also measures the entry point name, which a guest may send as
+absent.  In the product the renderer runs in the app's own process, so
+either ends the whole virtual machine.
+
+The graphics, compute and ray tracing creation commands, and a key
+request, refuse a stage with no module and no chained module, or with no
+entry point name.  A pipeline that chains a VkPipelineBinaryInfoKHR with
+binaries ignores the shaders and names of its stages, as the specification
+says, and is held to neither.  The creation commands end the context, as
+for a null binary or library; the key request answers
+VK_ERROR_VALIDATION_FAILED, as for its other refusals.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/venus/vkr_pipeline.c | 80 ++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 77 insertions(+), 3 deletions(-)
+
+diff --git a/src/venus/vkr_pipeline.c b/src/venus/vkr_pipeline.c
+index 77e13e3df597ed6061848961938a97687a27908a..f8353edb56a35089bd670335326e016a83dcbc50 100644
+--- a/src/venus/vkr_pipeline.c
++++ b/src/venus/vkr_pipeline.c
+@@ -144,6 +144,43 @@ vkr_pipeline_chain_holds_handles(const void *pnext)
+    return true;
+ }
+ 
++/* A shader stage names its shader by its module, or by the
++ * VkShaderModuleCreateInfo chained to it (the protocol carries no module
++ * identifier).  The registry lets the module be null, so the codec cannot
++ * refuse a stage with neither, and the runtime hashes such a stage by reading
++ * the identifier it does not have.  A stage also needs the name of its entry
++ * point, which the runtime measures.  A pipeline created from binaries ignores
++ * the shaders and names of its stages, so it is held to neither. */
++static bool
++vkr_pipeline_stages_name_shaders(const void *pnext,
++                                 uint32_t count,
++                                 const VkPipelineShaderStageCreateInfo *stages)
++{
++   for (const VkBaseInStructure *chain = pnext; chain; chain = chain->pNext) {
++      if (chain->sType == VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR &&
++          ((const VkPipelineBinaryInfoKHR *)chain)->binaryCount)
++         return true;
++   }
++
++   if (count && !stages) {
++      vkr_log("a pipeline names stages but sends none");
++      return false;
++   }
++   for (uint32_t i = 0; i < count; i++) {
++      if (!stages[i].module &&
++          !vkr_find_struct(stages[i].pNext, VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO)) {
++         vkr_log("a pipeline stage names no shader: its module is the null handle "
++                 "and no module is chained to it");
++         return false;
++      }
++      if (!stages[i].pName) {
++         vkr_log("a pipeline stage names no entry point");
++         return false;
++      }
++   }
++   return true;
++}
++
+ static void
+ vkr_dispatch_vkCreateGraphicsPipelines(struct vn_dispatch_context *dispatch,
+                                        struct vn_command_vkCreateGraphicsPipelines *args)
+@@ -154,7 +191,10 @@ vkr_dispatch_vkCreateGraphicsPipelines(struct vn_dispatch_context *dispatch,
+    struct object_array arr;
+ 
+    for (uint32_t i = 0; i < args->createInfoCount; i++) {
+-      if (!vkr_pipeline_chain_holds_handles(args->pCreateInfos[i].pNext)) {
++      const VkGraphicsPipelineCreateInfo *info = &args->pCreateInfos[i];
++      if (!vkr_pipeline_chain_holds_handles(info->pNext) ||
++          !vkr_pipeline_stages_name_shaders(info->pNext, info->stageCount,
++                                            info->pStages)) {
+          vkr_context_set_fatal(ctx);
+          return;
+       }
+@@ -176,7 +216,9 @@ vkr_dispatch_vkCreateComputePipelines(struct vn_dispatch_context *dispatch,
+    struct object_array arr;
+ 
+    for (uint32_t i = 0; i < args->createInfoCount; i++) {
+-      if (!vkr_pipeline_chain_holds_handles(args->pCreateInfos[i].pNext)) {
++      const VkComputePipelineCreateInfo *info = &args->pCreateInfos[i];
++      if (!vkr_pipeline_chain_holds_handles(info->pNext) ||
++          !vkr_pipeline_stages_name_shaders(info->pNext, 1, &info->stage)) {
+          vkr_context_set_fatal(ctx);
+          return;
+       }
+@@ -206,7 +248,10 @@ vkr_dispatch_vkCreateRayTracingPipelinesKHR(
+    struct object_array arr;
+ 
+    for (uint32_t i = 0; i < args->createInfoCount; i++) {
+-      if (!vkr_pipeline_chain_holds_handles(args->pCreateInfos[i].pNext)) {
++      const VkRayTracingPipelineCreateInfoKHR *info = &args->pCreateInfos[i];
++      if (!vkr_pipeline_chain_holds_handles(info->pNext) ||
++          !vkr_pipeline_stages_name_shaders(info->pNext, info->stageCount,
++                                            info->pStages)) {
+          vkr_context_set_fatal(ctx);
+          return;
+       }
+@@ -453,6 +498,35 @@ vkr_dispatch_vkGetPipelineKeyKHR(UNUSED struct vn_dispatch_context *dispatch,
+          args->ret = VK_ERROR_VALIDATION_FAILED;
+          return;
+       }
++
++      /* The key hashes every stage the pipeline names, which the runtime does
++       * by reading its shader and its entry point. */
++      bool stages_name_shaders;
++      switch (first->sType) {
++      case VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO: {
++         const VkGraphicsPipelineCreateInfo *info = (const VkGraphicsPipelineCreateInfo *)first;
++         stages_name_shaders =
++            vkr_pipeline_stages_name_shaders(info->pNext, info->stageCount, info->pStages);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO: {
++         const VkComputePipelineCreateInfo *info = (const VkComputePipelineCreateInfo *)first;
++         stages_name_shaders = vkr_pipeline_stages_name_shaders(info->pNext, 1, &info->stage);
++         break;
++      }
++      default: {
++         const VkRayTracingPipelineCreateInfoKHR *info =
++            (const VkRayTracingPipelineCreateInfoKHR *)first;
++         stages_name_shaders =
++            vkr_pipeline_stages_name_shaders(info->pNext, info->stageCount, info->pStages);
++         break;
++      }
++      }
++      if (!stages_name_shaders) {
++         vkr_log("vkGetPipelineKeyKHR: a stage of the pipeline names no shader");
++         args->ret = VK_ERROR_VALIDATION_FAILED;
++         return;
++      }
+    }
+ 
+    vn_replace_vkGetPipelineKeyKHR_args_handle(args);
