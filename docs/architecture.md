@@ -194,14 +194,16 @@ signed 14 GiB envelope (`device_window_guest_memory_maximum_mib`, pinned by the
 layout tests against `runtime/native_kernel_layout.hpp`), and the host's RAM
 (at most 1 TiB, the largest limit a launch states) in a macOS window, which a
 Mac and an iOS application on a Mac use; where the host sets no limit `G_max`
-is C. On an iOS device C is also held to the address space the process has: the
-system gives an application signed without Extended Virtual Addressing one run
-of a few GiB, and the guest's window (`native_window_bytes`) and the process's
-heap region (1 GiB, `memory/heap_region_size.hpp`, which has no other hole of
-that size there) must fit in it. The loader measures the run once at launch
-(`platform/apple/os_address_space.hpp`) and `address_space_guest_memory_mib`
-turns it into the largest RAM that fits, which bounds C, the offered sizes and
-the defaults alike. A run starts exactly the sizes from 512 MiB through C in
+is C. In an iOS application signed without Extended Virtual Addressing C is also
+held to the address space the process has: the system gives such an application
+one run of a few GiB (its highest mappable address is under 512 GiB), and the
+guest's window (`native_window_bytes`) and the process's heap region (1 GiB,
+`memory/heap_region_size.hpp`, which has no other hole of that size there) must
+fit in it. The loader measures the run once at launch, for that process alone
+(`platform/apple/os_address_space.hpp`: the Simulator, a macOS process and an
+entitled application are not measured and are answered as they always were), and
+`address_space_guest_memory_mib` turns it into the largest RAM that fits, which
+bounds C, the offered sizes and the defaults alike. A run starts exactly the sizes from 512 MiB through C in
 64 MiB steps (`guest_memory_admitted`, with `process_guest_memory_ceiling_mib`
 for a process): the runtime refuses any other, and the loader answers both
 applications with the same two functions. The settings of Kernarium and

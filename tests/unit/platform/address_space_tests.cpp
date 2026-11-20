@@ -99,7 +99,7 @@ void aWalkThatMakesNoProgressEnds()
  * size within it, is what mmap gives, wherever the host puts it. */
 void aReservationOfTheMeasuredRunSucceeds()
 {
-	const auto run = platform::os_largest_free_address_run(48 * gib);
+	const auto run = platform::os_largest_free_address_run(48 * gib, 1024 * gib);
 	require(run.has_value(), "the system answers");
 	require(*run > 0, "a process has address space free");
 	const std::uint64_t size = std::min<std::uint64_t>(*run, 4 * gib);
@@ -113,18 +113,41 @@ void aReservationOfTheMeasuredRunSucceeds()
  * leaves no wider run, and handing it back leaves none narrower. */
 void aReservationNeverGrowsTheRunItWasTakenFrom()
 {
-	const auto before = platform::os_largest_free_address_run(0);
+	const auto before = platform::os_largest_free_address_run(0, 1024 * gib);
 	require(before.has_value());
 	/* Everything the walk calls free is free: reserve a quarter GiB, and the
 	 * widest run is never larger afterwards. */
 	void *const mapping = ::mmap(nullptr, 256 * mib, PROT_NONE,
 		MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
 	require(mapping != MAP_FAILED);
-	const auto after = platform::os_largest_free_address_run(0);
+	const auto after = platform::os_largest_free_address_run(0, 1024 * gib);
 	require(after.has_value() && *after <= *before);
 	::munmap(mapping, 256 * mib);
-	const auto restored = platform::os_largest_free_address_run(0);
+	const auto restored = platform::os_largest_free_address_run(0, 1024 * gib);
 	require(restored.has_value() && *restored >= *after);
+}
+
+/* Only a process the system limits to a small span has a bound to measure: a
+ * process with the entitlement, the Simulator's (a macOS process) and one that
+ * cannot say have the address space they always had. */
+void onlyAProcessTheSystemLimitsIsMeasured()
+{
+	static_assert(platform::address_space_is_limited(454 * gib),
+		"an application signed without Extended Virtual Addressing maps up "
+		"to 454 GiB");
+	static_assert(platform::address_space_is_limited(0x7180000000ULL));
+	static_assert(platform::address_space_is_limited(511 * gib));
+	static_assert(!platform::address_space_is_limited(512 * gib),
+		"with the entitlement the system gives 512 GiB");
+	static_assert(!platform::address_space_is_limited(0x8000000000ULL));
+	static_assert(!platform::address_space_is_limited(0x7ffffe000000ULL),
+		"a macOS process maps up to 128 TiB");
+	static_assert(!platform::address_space_is_limited(0),
+		"a process that cannot say is not limited");
+	/* This test is a macOS process: nothing to measure, whatever the floor. */
+	require(!platform::os_limited_free_address_run(48 * gib).has_value(),
+		"a process that is not limited was measured");
+	require(!platform::os_limited_free_address_run(0).has_value());
 }
 
 } // namespace
@@ -143,6 +166,8 @@ int main()
 			aReservationOfTheMeasuredRunSucceeds},
 		{"a-reservation-never-grows-the-run-it-was-taken-from",
 			aReservationNeverGrowsTheRunItWasTakenFrom},
+		{"only-a-process-the-system-limits-is-measured",
+			onlyAProcessTheSystemLimitsIsMeasured},
 	};
 	return uml::testing::runNamedTests(tests);
 }
