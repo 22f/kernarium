@@ -328,6 +328,12 @@ struct LifecycleTests {
             Linux 6.18.54 · 2 vCPUs · 2 GiB
             Virtual machine ended: it could not start (this device could not give it 2 GiB of memory)
             """)
+        // The report of the run as the application makes it measures the time
+        // from the call that began it, which the refusal ends within seconds:
+        // the line still says the run never ran for any time.
+        #expect(
+            refused.report(appVersion: "1.0 (1)", system: system, guest: guest, uptimeSeconds: 3)
+                == refused.report(appVersion: "1.0 (1)", system: system, guest: guest, uptimeSeconds: nil))
         // It is a failure that leads to the failure screen, and a clean
         // power-off with the same size in it is not one.
         #expect(refused.phase == .failed)

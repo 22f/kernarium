@@ -189,7 +189,9 @@ public struct RunEnd: Equatable, Sendable {
         } else {
             String(localized: "runtime result \(Int(result))", bundle: .module)
         }
-        if let uptimeSeconds {
+        // A run the host refused for its memory never began, so it did not run
+        // for any time, whatever the caller measured from its start.
+        if let uptimeSeconds, memoryRefusedMiB == nil {
             lines.append(String(
                 localized: "Virtual machine ended: \(reason) after \(Formats.elapsed(uptimeSeconds))", bundle: .module))
         } else {
