@@ -363,6 +363,23 @@ struct LifecycleTests {
         #expect(!RunEnd(result: -5, stoppedByUser: true).canLowerMemory(leastOfferedMiB: 1536))
     }
 
+    /// The start of a process with no room for any virtual machine ends before
+    /// the runtime with the loader's own reason, and no size is one to lower.
+    @Test func aProcessWithNoRoomEndsWithTheReasonAndNoAdviceToLowerTheMemory() {
+        let system = SystemInfo(
+            version: "17", release: "20261031-los24-r4",
+            kernel: "Linux 6.18.54", architecture: "arm64, 4 KiB pages", appVersion: "1.0 (1)"
+        )
+        let guest = Guest(cores: 2, memoryMiB: 0, capacityGiB: 8)
+        let end = RunEnd(
+            result: -1, startFailure: MemoryRefusal.reason(memoryMiB: 0, ceilingMiB: 0), memoryRefusedMiB: 0)
+        #expect(end.phase == .failed)
+        #expect(!end.canLowerMemory(leastOfferedMiB: 0))
+        #expect(
+            end.report(appVersion: "1.0 (1)", system: system, guest: guest, uptimeSeconds: nil)
+                .hasSuffix("Virtual machine ended: it could not start (this device has no room for the virtual machine\u{2019}s memory)"))
+    }
+
     @Test func cleanPowerOffAllowsAnotherStartAndFailureRequiresRelaunch() {
         var life = Lifecycle(guest: Guest.fresh(on: ipad))
         #expect(life.start(.normal, host: ipad) == .allowed(.normal))

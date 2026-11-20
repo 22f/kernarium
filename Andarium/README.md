@@ -608,7 +608,9 @@ control out.
   from 1.5 GiB, so a guest has at least that (`Limits.minimumMemoryMiB`,
   Andarium's own: the runtime still accepts less for Kernarium's guests); a
   stored smaller size is raised to it on load, and a device whose bound is
-  lower offers the bound alone. The runtime starts every size the picker
+  lower offers the bound alone, and a bound of zero (the loader's answer where
+  the process has no room for even the smallest window) offers none: the
+  System sheet leaves the memory row out. The runtime starts every size the picker
   offers: a start whose memory the loader refuses
   (`kernarium_runtime_loader_guest_memory_admitted`) ends before the run with
   that reason. `MemoryPolicy` holds those bounds, defaults
