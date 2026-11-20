@@ -150,13 +150,18 @@ kernarium_launch_memory_set kernarium_runtime_loader_maximum_memory_set(void);
 /* The most guest RAM, in MiB, this host admits whatever the budget says (C of
  * runtime/guest_memory_budget.hpp): the RAM the runtime's native kernel window
  * holds for this process, 9152 on an iOS device or the Simulator and 1 TiB in
- * a macOS window, and no more than the host's own RAM, on the 64 MiB steps. The
- * settings' ruler ends here at most. */
+ * a macOS window, and no more than the host's own RAM, on the 64 MiB steps; in
+ * an application signed without Extended Virtual Addressing, no more than the
+ * address space the system leaves it holds a window of. Zero where that holds
+ * none of even the smallest guest: nothing is admitted. The settings' ruler
+ * ends here at most. */
 uint32_t kernarium_runtime_loader_guest_memory_ceiling_mib(void);
-/* 1 when a run starts a guest of `memory_mib` MiB on this host, 0 when the
- * runtime refuses that size: the runtime's own test, the sizes from the
- * range's minimum through the ceiling above in its steps. Every size the
- * settings offer is one. */
+/* 1 when a run starts a guest of `memory_mib` MiB on this host, 0 when it is
+ * refused: the sizes from the range's minimum through the ceiling above in
+ * its steps, none where the ceiling is zero. Every size the settings offer is
+ * one. The runtime's own test is the same without the address space of an
+ * application the system limits, whose reservation of the window is the check
+ * there. */
 uint32_t kernarium_runtime_loader_guest_memory_admitted(uint32_t memory_mib);
 /* The shape of that test, for the applications' own restatements of it to be
  * checked against: the least size, the step and the top of any host's range

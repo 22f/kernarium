@@ -1204,11 +1204,61 @@ void anAddressSpaceHoldsTheCeilingTheDefaultAndEverySizeOffered()
 	static_assert(budget::process_guest_memory_ceiling_mib(false, 8192 * mib,
 		0) == 8192, "an address space that was not measured bounds nothing");
 	static_assert(budget::process_guest_memory_ceiling_mib(false, 8192 * mib,
-		2 * gib) == budget::guest_memory_minimum_mib,
-		"the ceiling is never under the smallest size");
+		2 * gib) == 0,
+		"a measured run that holds no window admits no size");
 	static_assert(budget::process_guest_memory_ceiling_mib(true, 8192 * mib,
 		6 * gib) == 8192, "a macOS window is not placed in what is left");
 }
+
+/* A process the system leaves no room for even the smallest guest's window has
+ * a ceiling of zero, and a ceiling of zero is carried to every answer the
+ * loader gives the applications: no size is admitted, offered or defaulted, at
+ * any limit, vCPU count or set. It is never raised to the smallest size, which
+ * is a size the reservation of its window would then fail. */
+void aProcessWithNoRoomForAWindowAdmitsNoSizeAndOffersNone()
+{
+	static_assert(budget::address_space_guest_memory_mib(1) == 0);
+	static_assert(budget::guest_memory_ceiling_mib(
+		budget::device_window_guest_memory_maximum_mib, 8192 * mib, 0) == 0);
+	static_assert(budget::guest_memory_ceiling_mib(
+		budget::device_window_guest_memory_maximum_mib, 0, 0) == 0);
+	static_assert(budget::process_guest_memory_ceiling_mib(false, 0, 1) == 0,
+		"a measured run of one byte, the loader's measure of none");
+	static_assert(budget::process_guest_memory_ceiling_mib(false, 8192 * mib,
+		budget::address_space_reserve_bytes) == 0);
+	static_assert(budget::process_guest_memory_ceiling_mib(false, 8192 * mib,
+		budget::native_window_bytes(512 * mib) +
+			budget::address_space_reserve_bytes - 1) == 0,
+		"a byte short of the smallest guest's window and the reserve");
+	static_assert(budget::process_guest_memory_ceiling_mib(false, 8192 * mib,
+		budget::native_window_bytes(512 * mib) +
+			budget::address_space_reserve_bytes) ==
+			budget::guest_memory_minimum_mib,
+		"room for exactly the smallest guest");
+	/* A host that measured nothing is not one that measured none. */
+	static_assert(budget::process_guest_memory_ceiling_mib(false, 0, 0) == 9152);
+	for (std::uint32_t size = 0; size <= 9152 + 64; ++size)
+		require(!budget::guest_memory_admitted(size, 0),
+			"a size was admitted where no window fits");
+	for (const std::uint64_t limit_mib : {2867ULL, 3376ULL, 4096ULL, 6144ULL,
+		     8192ULL, 0ULL})
+		for (unsigned vcpus = 0; vcpus <= 8; ++vcpus) {
+			const auto limit = limit_mib * mib;
+			const std::string what = "limit " + std::to_string(limit_mib) +
+				" MiB, " + std::to_string(vcpus) + " vCPUs";
+			require(budget::maximum_guest_memory_mib(limit, vcpus,
+					budget::maximum_memory_set, 0) == 0,
+				"offered maximum: " + what);
+			require(budget::conservative_guest_memory_mib(limit, vcpus,
+					budget::launch_memory_set, 0) == 0,
+				"conservative size: " + what);
+			const auto standard = budget::default_guest_memory(limit, vcpus,
+				budget::launch_memory_set, 0);
+			require(standard.mib == 0 && !standard.holds_gpu_budget,
+				"default: " + what);
+		}
+}
+
 } // namespace
 
 int main()
@@ -1275,6 +1325,8 @@ int main()
 			theAddressSpaceBoundsTheRamByTheWindowItNeeds},
 		{"an-address-space-holds-the-ceiling-the-default-and-every-size-offered",
 			anAddressSpaceHoldsTheCeilingTheDefaultAndEverySizeOffered},
+		{"a-process-with-no-room-for-a-window-admits-no-size-and-offers-none",
+			aProcessWithNoRoomForAWindowAdmitsNoSizeAndOffersNone},
 	};
 	return uml::testing::runNamedTests(tests);
 }

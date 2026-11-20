@@ -635,7 +635,9 @@ uml::runtime::guest_memory::LaunchMemorySet launchMemorySet(
  * once, at the first answer, before any run of the process has reserved a
  * window of its own, so every size, default and bound the settings show, and
  * the check before a start, follow the process's own address space and stay as
- * they were while a guest runs. The runtime's run admits the sizes of the
+ * they were while a guest runs. The ceiling is zero where the span holds no
+ * window of even the smallest guest: no size is admitted, offered or
+ * defaulted, and a start is refused. The runtime's run admits the sizes of the
  * ceiling without the address space: its reservation of the window is the
  * check there. */
 uint32_t guestMemoryCeilingMiB()
@@ -662,8 +664,11 @@ uint32_t guestMemoryCeilingMiB()
         if (addressSpace != 0)
             std::fprintf(stderr,
                 "Kernarium: the process has a run of %llu MiB of address "
-                "space; a guest may have up to %u MiB\n",
-                static_cast<unsigned long long>(addressSpace >> 20), answer);
+                "space; %s%u MiB\n",
+                static_cast<unsigned long long>(addressSpace >> 20),
+                answer == 0 ? "no guest fits it, a guest may have up to " :
+                              "a guest may have up to ",
+                answer);
         return answer;
     }();
     return ceiling;

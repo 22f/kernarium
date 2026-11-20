@@ -40,14 +40,17 @@
  * (guest_memory_admitted), so every size the settings offer is one the run
  * starts: the runtime, the loader and the applications all ask this header.
  *
- * On an iOS device C is also held to the address space the process has: the
- * system gives an application signed without Extended Virtual Addressing only
- * a few GiB of address space above its guard region, and the native kernel
- * window of a guest (native_window_bytes) must fit in one run of it with the
- * rest of the process's mappings to spare (address_space_guest_memory_mib).
- * The applications' loader measures that run once at launch
- * (platform/apple/os_address_space.hpp) and answers every size, default and
- * bound from the resulting ceiling.
+ * In an iOS application signed without Extended Virtual Addressing C is also
+ * held to the address space the process has, and only there: the system gives
+ * such an application only a few GiB of address space above its guard region,
+ * and the native kernel window of a guest (native_window_bytes) must fit in
+ * one run of it with the rest of the process's mappings to spare
+ * (address_space_guest_memory_mib). The applications' loader measures that run
+ * once at launch (platform/apple/os_address_space.hpp), for such a process
+ * alone, and answers every size, default and bound from the resulting
+ * ceiling; every other process is answered as it was before. A process with no
+ * room for even the smallest guest's window has a ceiling of zero: it admits
+ * no size, offers none and has no default, and a start there is refused.
  *
  * Header-only and standard library only, so the application's loader includes
  * it too and answers the settings without the runtime, which is loaded once
@@ -321,9 +324,10 @@ inline constexpr LaunchMemorySet maximum_memory_set =
  * window fits `free_bytes` of address space with address_space_reserve_bytes
  * of it left over: `free_bytes` is the widest run of address space the process
  * has free from native_window_floor_bytes up
- * (platform::os_largest_free_address_run). Zero where not even the smallest
+ * (platform::os_limited_free_address_run). Zero where not even the smallest
  * guest fits, and the whole range where `free_bytes` is zero, which is how a
- * host that cannot say, or has no such bound (a macOS window), asks for none. */
+ * host that cannot say, or has no such bound (a macOS window, a process the
+ * system does not limit), asks for none. A measured run of none is a byte's. */
 [[nodiscard]] constexpr std::uint32_t address_space_guest_memory_mib(
 	std::uint64_t free_bytes) noexcept
 {
@@ -353,7 +357,9 @@ inline constexpr LaunchMemorySet maximum_memory_set =
 }
 
 /* C: the most guest RAM, in MiB, the host admits whatever the budget says,
- * taken down to the 64 MiB steps. `window_maximum_mib` is what the product's
+ * taken down to the 64 MiB steps, or zero where `address_space_mib` is zero,
+ * which is what address_space_guest_memory_mib answers for a process whose
+ * address space holds no window: nothing is admitted there. `window_maximum_mib` is what the product's
  * native kernel window holds (device_window_guest_memory_maximum_mib on an iOS
  * device or the Simulator, guest_memory_range_maximum_mib where the window is
  * a macOS one); `physical_memory` is the host's RAM in bytes, zero when
@@ -368,6 +374,8 @@ inline constexpr LaunchMemorySet maximum_memory_set =
 	std::uint64_t physical_memory,
 	std::uint64_t address_space_mib = guest_memory_range_maximum_mib) noexcept
 {
+	if (address_space_mib == 0)
+		return 0;
 	std::uint64_t top = std::min<std::uint64_t>(window_maximum_mib,
 		guest_memory_range_maximum_mib);
 	if (physical_memory != 0)
@@ -440,6 +448,8 @@ namespace detail {
 	std::uint64_t memory_limit, unsigned executors,
 	const LaunchMemorySet &set, std::uint32_t ceiling_mib) noexcept
 {
+	if (ceiling_mib == 0)
+		return 0;
 	const auto top = on_guest_memory_steps(ceiling_mib);
 	if (memory_limit == 0)
 		return top;
@@ -559,6 +569,8 @@ struct DefaultGuestMemory {
 	const LaunchMemorySet &set = launch_memory_set,
 	std::uint32_t ceiling_mib = device_window_guest_memory_maximum_mib) noexcept
 {
+	if (ceiling_mib == 0)
+		return {0, false};
 	/* The top of the range the default is held to, and the host's ceiling where
 	 * that is lower (the address space of a process signed without the
 	 * entitlement for more): the conservative size stays under it, so the
