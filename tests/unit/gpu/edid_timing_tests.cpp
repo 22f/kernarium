@@ -14,6 +14,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -56,6 +57,28 @@ void theModeRateFollowsTheGrantAndTheSize()
     require(modeRefreshRate(2752, 2064, 60) == 60);
 }
 
+void theStatedRateIsWhatTheClockCarries()
+{
+    using uml::gpu::statedRefreshRate;
+    require(statedRefreshRate(860, 1678, 120) == 120);
+    require(statedRefreshRate(860, 1678, 60) == 60);
+    require(statedRefreshRate(2752, 2064, 120) == 60,
+        "a size that cannot state 120 states 60");
+    /* A size whose 60 Hz clock overflows the field too (13.9 million pixels
+     * with their blanking) states what the largest clock makes of it: the
+     * EDID is main's, and the display paces by that. */
+    require(statedRefreshRate(3840, 2880, 120) == 47);
+    require(statedRefreshRate(3840, 2880, 60) == 47);
+    /* The clock's rounding never takes a size that fits under its rate. */
+    for (const auto [width, height] :
+        {std::pair {640U, 480U}, std::pair {1280U, 720U}, std::pair {860U, 1678U},
+            std::pair {1668U, 2388U}, std::pair {2732U, 2048U},
+            std::pair {2752U, 2064U}, std::pair {3000U, 2000U}}) {
+        require(statedRefreshRate(width, height, 60) == 60,
+            "a size that fits states its rate");
+    }
+}
+
 void theClockOfTheSixtyHertzModeIsWhatTheDeviceAlwaysStated()
 {
     /* A phone's guest display, 860 x 1678: a 1032 x 1761 total at 60 Hz is a
@@ -74,6 +97,7 @@ int main(int argc, char** argv)
         require(argc == 2, "usage: edid_timing_tests <edid-120hz-sizes.txt>");
         everySizeOfTheTableCarriesOrDoesNot(argv[1]);
         theModeRateFollowsTheGrantAndTheSize();
+        theStatedRateIsWhatTheClockCarries();
         theClockOfTheSixtyHertzModeIsWhatTheDeviceAlwaysStated();
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {

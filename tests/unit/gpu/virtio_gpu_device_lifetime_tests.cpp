@@ -1884,14 +1884,21 @@ void edidTellsTheDisplayTheRateOfTheModeItStates()
     request.scanoutId = protocol::primaryScanoutId;
     for (const auto [width, height] : {
              std::pair {860U, 1678U}, std::pair {2752U, 2064U},
-             std::pair {1668U, 2388U}}) {
+             std::pair {1668U, 2388U}, std::pair {3840U, 2880U}}) {
         dependencies.displayWidth = width;
         dependencies.displayHeight = height;
         (void)device.process(requestBytes(request), false);
     }
     require(dependencies.modeRefreshRates ==
-                std::vector<std::uint32_t> {120, 60, 120},
-        "the mode's rate follows the size across a resize");
+                std::vector<std::uint32_t> {120, 60, 120, 47},
+        "the mode's rate follows the size across a resize, and the rate the "
+        "timing states where even 60 Hz does not fit");
+    /* That size's EDID is the one a display not granted 120 has always had. */
+    const auto grantedHuge = edidOf(3840, 2880, 264, 120);
+    const auto ungrantedHuge = edidOf(3840, 2880, 264, 60);
+    require(std::equal(grantedHuge.edid.begin(), grantedHuge.edid.end(),
+                ungrantedHuge.edid.begin()),
+        "an EDID that cannot state 60 Hz is the one a 60 Hz display has");
 }
 
 void displayChangeEventsPreserveAResizeThatRacesGuestClear()

@@ -332,13 +332,20 @@ application follows. After a resize, the mode's rate follows the mode the
 runtime makes: 120 only where granted and the new size fits the EDID.
 At 60 Hz, and on a Mac, a present follows each guest flush. At 120 Hz a display
 link on the view's own window scene (it follows the view to another scene,
-and a missing link or scene leaves a retry) paces the presents
-(`darwin/device/gpu/present_pacer.hpp`): it runs only while frames wait, asks
-iOS for the rate the guest renders at in three steps (120, 60 and 30 frames a
-second; a guest above a step's own rate leaves that step), takes the mode's
-rate, the screen's maximum and Low Power Mode as its ceiling, retries a
-present that found no drawable (bounded) and pauses after 100 ms without a
-frame. When the ceiling is below the mode's rate the guest is held, as under
+never makes one on a scene that is disconnecting, and a missing link or scene
+leaves a retry) paces the presents (`darwin/device/gpu/present_pacer.hpp`): it
+runs only while frames wait and asks iOS for the rate the guest renders at in
+three steps (120, 60 and 30 frames a second). A rise is judged over a second
+and a fall over two, so a guest that holds a rate is shown at no fewer frames
+a second than with the setting off, less 2, one at 63 or more has the 120
+step, and one that alternates across a step's band for under two seconds
+stays on the higher step. The ceiling is the rate the EDID's timing states
+for the mode (the largest clock the field holds, for a size beyond it), the
+screen's maximum and Low Power Mode. A frame whose draw found no drawable is
+drawn again, 30 times at most and none after a wait of the drawable's own
+timeout; the debt outlives a link made again, and only a new frame renews it.
+The link pauses after 100 ms without a frame. When the ceiling is below the
+mode's rate the guest is held, as under
 Low Power Mode. `CADisableMinimumFrameDurationOnPhone` in the application's
 `Info.plist` lets an iPhone exceed 60. What the guest does with the property
 is in [`android/lineage-24/README.md`](../android/lineage-24/README.md).

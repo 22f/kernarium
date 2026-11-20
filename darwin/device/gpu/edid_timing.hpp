@@ -73,4 +73,28 @@ inline constexpr std::uint64_t maximumDetailedTimingClock = 65535U;
                                                                          : 60U;
 }
 
+/* The rate the detailed timing of a mode of this size states, for a display
+ * granted `grantedRefreshRate`: `modeRefreshRate`, or less for a size so large
+ * that even its 60 Hz clock overflows the field (the clock is then the
+ * field's largest, which is about 47 Hz at 3840 x 2880, and the EDID has
+ * always been that). The display paces by the rate the guest is told. */
+[[nodiscard]] constexpr std::uint32_t statedRefreshRate(
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t grantedRefreshRate) noexcept
+{
+    const std::uint64_t rate =
+        modeRefreshRate(width, height, grantedRefreshRate);
+    const EdidBlanking blanking = edidBlanking(width, height);
+    const std::uint64_t pixels =
+        (static_cast<std::uint64_t>(width) + blanking.horizontal) *
+        (static_cast<std::uint64_t>(height) + blanking.vertical);
+    const std::uint64_t clock = std::clamp<std::uint64_t>(
+        detailedTimingClock(width, height, blanking, rate),
+        1U,
+        maximumDetailedTimingClock);
+    const std::uint64_t stated = (clock * 10000U + pixels / 2U) / pixels;
+    return static_cast<std::uint32_t>(std::min(rate, stated));
+}
+
 } // namespace uml::gpu

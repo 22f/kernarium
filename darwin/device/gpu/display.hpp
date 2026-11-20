@@ -120,16 +120,19 @@ public:
      * booted, and that paces its presents from a display link at the rate the
      * guest renders at (present_pacer.hpp). Any other value is the 60 Hz mode.
      * It is the highest rate the mode can have and does not change while the
-     * display lives. The mode the guest is shown at a moment has the rate of
-     * its size (modeRefreshRate in edid_timing.hpp): a size whose 120 Hz clock
-     * the EDID cannot state is a 60 Hz mode while that size lasts. */
+     * display lives. The mode the guest is shown at a moment has the rate its
+     * size's EDID timing states (statedRefreshRate in edid_timing.hpp): a size
+     * whose 120 Hz clock the EDID cannot state is a 60 Hz mode while that size
+     * lasts, and one whose 60 Hz clock it cannot state has the rate of the
+     * largest clock. */
     [[nodiscard]] virtual std::uint32_t refreshRate() const noexcept
     {
         return 60;
     }
     /* The device tells the display the rate of the mode it just stated to the
-     * guest, 60 or 120 (the EDID of the size the display has now), so that a
-     * display that paces by the mode follows it across a resize. */
+     * guest (the EDID of the size the display has now: 120, 60, or the rate of
+     * the largest clock for a size beyond it), so that a display that paces by
+     * the mode follows it across a resize. */
     virtual void noteModeRefreshRate(std::uint32_t) noexcept {}
     /* Native AppKit/UIKit surfaces publish resize readiness from the UI
      * thread. The transport drains and applies it on its GPU owner thread. */

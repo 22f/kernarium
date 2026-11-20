@@ -383,12 +383,14 @@ and `kernarium-host-features` (unit) the table of host features the boot
 request carries to an Android guest (the high-refresh bit included). The 120 Hz
 display is covered without a device: `gpu-device-command-atomicity` has the
 EDID's 60 Hz bytes unchanged, the 120 Hz timing only where its pixel clock
-fits and the mode's rate told to the display; `gpu-edid-timing` checks the
-size rule against one fixture table that the app's check also reads;
+fits and the mode's rate told to the display (a size beyond 60 Hz included);
+`gpu-edid-timing` checks the size rule against one fixture table that the app's
+check also reads;
 `gpu-present-pacer` runs the display link's decisions (the rate it asks for as
-the guest's rate changes, a guest above a step's own rate, the wake, the sleep,
-the bounded retry of a present that found no drawable and the ceiling of Low
-Power Mode) against a fake clock; `gpu-offscreen-display` counts each accepted
+the guest's rate changes, steady and alternating guests against the setting-off
+rule, the wake, the sleep, the bounded retry of a present that found no
+drawable across a link made again, and the ceiling of Low Power Mode) against a
+fake clock; `gpu-offscreen-display` counts each accepted
 guest update once; `HighRefreshTests` (in `andarium-core` and in
 `AndariumTests`) cover the setting, its launch rules (screen maximum, size,
 Mac and Vision Pro) and the Low Power Mode hold. `kernarium-camera` (unit) checks

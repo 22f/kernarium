@@ -1043,8 +1043,9 @@ std::vector<std::uint8_t> VirtioGpuDevice::edid(
     information.size = protocol::baseEdidSize;
     const auto granted = UML_GPU_DISPLAY.refreshRate();
     const auto base = makeEdid(width, height, dotsPerInch_, granted);
-    /* The display paces by the mode the guest is given. */
-    UML_GPU_DISPLAY.noteModeRefreshRate(modeRefreshRate(width, height, granted));
+    /* The display paces by the rate the mode states. */
+    UML_GPU_DISPLAY.noteModeRefreshRate(
+        statedRefreshRate(width, height, granted));
     std::copy(base.begin(), base.end(), information.edid.begin());
     std::vector<std::uint8_t> bytes(sizeof(information));
     std::memcpy(bytes.data(), &information, sizeof(information));
