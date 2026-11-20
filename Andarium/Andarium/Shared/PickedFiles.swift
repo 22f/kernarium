@@ -11,8 +11,11 @@ import Foundation
 /// next launch's sweep.
 nonisolated final class PickedFolder: @unchecked Sendable {
     /// The one folder of the temporary directory that holds every pick's.
-    static var directory: URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent("PickedFiles", isDirectory: true)
+    static var directory: URL { directory(in: FileManager.default.temporaryDirectory) }
+
+    /// The folder in `temporary`: a test (the launch's sweep) gives a root of its own.
+    static func directory(in temporary: URL) -> URL {
+        temporary.appendingPathComponent("PickedFiles", isDirectory: true)
     }
 
     /// Removes the folders an ended process left, by the exact path of the one

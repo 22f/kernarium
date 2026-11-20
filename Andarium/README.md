@@ -216,6 +216,10 @@ the iPad harness reads, as Debug does. A launch that sets no `ANDARIUM_` or
   every build: the sources hold no SwiftUI `fileImporter` and no document
   picker made without `asCopy: true` outside that file, and both call sites
   present the copy-mode picker.
+- A launch removes what an ended process staged in the temporary directory
+  (`BugReports/`, `GuestFiles/`, `PickedFiles/`) and `Feedback/`, where an older
+  build staged the files of an email feedback draft
+  (`Shared/LegacyFeedbackFolder.swift`; the hosted `LaunchSweepTests`).
 - The scheme's Archive action uses Release, the build offered to Macs as an
   iPad app too. The app icon is `DuskJade` (`Shared/DuskJade.icon`).
 - An archive refuses an embedded artifact that is behind the archived commit: a

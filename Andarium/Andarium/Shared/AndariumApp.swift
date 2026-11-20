@@ -34,15 +34,23 @@ final class AndariumProcess {
     let entry: AppEntry
     let model: AppModel
 
+    /// What a process that ended left in the temporary directory is of no use: a
+    /// report staged for sharing, a file staged for an export, the copies of a
+    /// pick, and what an older build staged for a feedback draft. A test gives
+    /// a root of its own.
+    static func sweepLeftovers(in temporary: URL = FileManager.default.temporaryDirectory) {
+        BugReportStaging.sweep(in: temporary)
+        GuestFileStaging.sweep(in: temporary)
+        PickedFolder.sweep(in: PickedFolder.directory(in: temporary))
+        LegacyFeedbackFolder.sweep(in: temporary)
+    }
+
     private init() {
         entry = AppEntry.fromArguments()
         entry.configureTips()
-        // A report staged for sharing by a process that ended is of no use.
         // This is the process's launch: a test that builds a model does not
-        // sweep the folder a running test stages its files in.
-        BugReportStaging.sweep()
-        GuestFileStaging.sweep()
-        PickedFolder.sweep()
+        // sweep the folders a running test stages its files in.
+        Self.sweepLeftovers()
         model = entry.makeModel()
         // An App Intent that runs in this process hands its request to this model.
         AndroidAppsHub.shared.attach(model)
