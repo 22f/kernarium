@@ -162,23 +162,24 @@ struct NativeKernelPlacement final {
  * uses the window at a time (the caller holds the process address-space gate).
  * Invalid when the host will not reserve it.
  *
- * THE RULE: a start that is refused leaves the process's window exactly as it
- * was before the start. What a start reserves for itself, the growth of the
- * held window or a new window, is an attempt, and the caller settles it once
- * the start is past what can refuse it, either way and once: commit keeps it;
- * undo gives back exactly the attempt and nothing else. The growth is shrunk
- * off the end, and the new window is released with the window held before the
- * start the process's again. The window held before is never given up until the
- * start commits: committing releases it, unless it holds signed kernel text a
- * load kept (no mapping can replace that on iOS), which stays mapped, inert.
- * What an earlier start left, the window and the text kept in it, is never
- * touched by an undo; the attempt has none, because a start loads no kernel
- * before it can be refused. A start that does, an informational run (it asks
- * for no heap region), commits. The pieces an undo gives back are empty
- * reservations, which every product's host maps and unmaps, so every
- * configuration can shrink and restore; a failed unmap leaves a reservation
- * the process does not track. A reservation asked for while an attempt is
- * unsettled keeps it. */
+ * THE RULE: a start that is refused before the heap region is reserved leaves
+ * the process's window exactly as it was before the start. (The region stays
+ * once reserved, and with it the start has committed: a refused RAM trial
+ * keeps the window.) What a start reserves for itself, the growth of the held
+ * window or a new window, is an attempt, and the caller settles it once the
+ * start is past what can refuse it, either way and once: commit keeps it; undo
+ * gives back exactly the attempt and nothing else. The growth is shrunk off the
+ * end, and the new window is released with the window held before the start the
+ * process's again. The window held before is never given up until the start
+ * commits: committing releases it, unless it holds signed kernel text a load
+ * kept (no mapping can replace that on iOS), which stays mapped, inert. What an
+ * earlier start left, the window and the text kept in it, is never touched by
+ * an undo; the attempt has none, because a start loads no kernel before it can
+ * be refused. A start that does, an informational run (it asks for no heap
+ * region), commits. The pieces an undo gives back are empty reservations, which
+ * every product's host maps and unmaps, so every configuration can shrink and
+ * restore; a failed unmap leaves a reservation the process does not track. A
+ * reservation asked for while an attempt is unsettled keeps it. */
 [[nodiscard]] NativeKernelLayout reserve_process_native_window(
 	const NativeKernelLayout &geometry, WindowPlacement placement) noexcept;
 
