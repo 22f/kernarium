@@ -1324,8 +1324,8 @@ the list. An object ID follows content, so it survives a history rewrite and a
 builder that works from an exported snapshot; the publisher takes it from the
 clean checkout it runs in. The accepted descriptor repeats the IDs
 (`LINEAGE24_ACCEPTED_INPUT_TREES`), and `install-release.py --print-acceptance`
-prints the whole descriptor for a candidate. The AppStore and TestFlight
-configurations of Andarium compare them with the commit they archive
+prints the whole descriptor for a candidate. Andarium's Release configuration
+compares them with the commit it archives
 ([`scripts/check-embedded-artifacts.py`](../../scripts/check-embedded-artifacts.py)).
 Verifier-only tools, documentation and tests are excluded, and a tracked file
 under this directory that the list does not classify fails
@@ -1344,8 +1344,8 @@ hash, and installs it atomically below `.build/android/releases`. It never
 replaces an existing release. `--aot-artifact` also installs the release's AOT
 artifact (`tools/aot/release_artifact.py`) below `.build/android/aot`, once it
 verifies against the release; `metadata/accepted-aot.env` accepts it, and its
-`LINEAGE24_ACCEPTED_AOT_ARCHIVES` field is whether the App Store and TestFlight
-configurations may carry it. The artifact is not part of the release's file
+`LINEAGE24_ACCEPTED_AOT_ARCHIVES` field is whether an archive of Andarium's
+Release configuration may carry it. The artifact is not part of the release's file
 inventory. Apple CMake does not import the rootfs release
 and does not invoke Repo, Soong, Kbuild, image assembly, publication, or
 transport.

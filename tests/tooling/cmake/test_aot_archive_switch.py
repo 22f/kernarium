@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""The archive switch of the AOT component gates every way a build names it.
+"""The archive switch of the AOT component gates the accepted artifact.
 
 cmake/UmlAotArchives.cmake reads LINEAGE24_ACCEPTED_AOT_ARCHIVES from the
-accepted AOT descriptor. The rows run its two functions with `cmake -P` on
-synthetic descriptors, then check that darwin/cpu/CMakeLists.txt calls them: an
-explicit UML_AOT_ARTIFACT in an App Store runtime is a configure error unless
-the descriptor says yes, as the accepted artifact is, and the iOS development
-runtimes that name an artifact are left alone.
+accepted AOT descriptor. The rows run its function with `cmake -P` on synthetic
+descriptors, then check that darwin/cpu/CMakeLists.txt reads it for the accepted
+artifact: an iOS runtime takes the artifact only when the descriptor says yes,
+and an image blob is never an archive input.
 """
 
 from __future__ import annotations
@@ -52,10 +51,6 @@ class ArchiveSwitchTests(unittest.TestCase):
         return cmake('uml_aot_archives_state(state "${DESCRIPTOR}")\n'
                      'message("state=${state}")', DESCRIPTOR=str(descriptor))
 
-    def require(self, descriptor: Path) -> subprocess.CompletedProcess:
-        return cmake('uml_aot_require_archives("${DESCRIPTOR}" "/artifact")',
-                     DESCRIPTOR=str(descriptor))
-
     def test_the_state_is_what_the_descriptor_says(self) -> None:
         for text, expected in (
             ("LINEAGE24_ACCEPTED_AOT_ARCHIVES='yes'\n", "yes"),
@@ -75,32 +70,12 @@ class ArchiveSwitchTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("LINEAGE24_ACCEPTED_AOT_ARCHIVES of yes or no", result.stderr)
 
-    def test_a_named_artifact_is_taken_only_when_the_switch_is_yes(self) -> None:
-        accepted = self.require(self.descriptor("LINEAGE24_ACCEPTED_AOT_ARCHIVES='yes'\n"))
-        self.assertEqual(accepted.returncode, 0, accepted.stderr)
-        refused = self.require(self.descriptor("LINEAGE24_ACCEPTED_AOT_ARCHIVES='no'\n"))
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertIn("sets LINEAGE24_ACCEPTED_AOT_ARCHIVES to no", refused.stderr)
-        self.assertIn("/artifact", refused.stderr)
-        none = self.require(self.descriptor(None))
-        self.assertNotEqual(none.returncode, 0)
-        self.assertIn("accepts no AOT artifact", none.stderr)
-
 
 class WiringTests(unittest.TestCase):
     """darwin/cpu/CMakeLists.txt takes the component under the switch."""
 
     def setUp(self) -> None:
         self.text = Path(ARGUMENTS.cpu_lists).read_text(encoding="utf-8")
-
-    def test_an_explicit_artifact_in_an_app_store_runtime_calls_the_gate_first(self) -> None:
-        explicit = re.search(
-            r"if\(UML_APP_STORE_RUNTIME\)\s+include\(UmlAotArchives\)\s+"
-            r"uml_aot_require_archives\([^)]*UML_AOT_ARTIFACT[^)]*\)\s+endif\(\)\s+"
-            r"set\(UML_AOT_SOURCE artifact\)",
-            self.text)
-        self.assertIsNotNone(
-            explicit, "the explicit artifact branch must gate an App Store runtime before it names the source")
 
     def test_the_accepted_artifact_reads_the_same_switch(self) -> None:
         self.assertIn("uml_aot_archives_state(_uml_aot_archives", self.text)

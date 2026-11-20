@@ -77,8 +77,8 @@ ACCEPTED_FIELDS = (
     ("LINEAGE24_ACCEPTED_AOT_BLOB_VERSION", True),
     ("LINEAGE24_ACCEPTED_AOT_ARCHIVES", False),
 )
-# The one switch for the archive configurations (App Store, TestFlight): the
-# component is in their runtimes, and allowed in their apps, only when the
+# The one switch for an archive of Andarium's Release configuration: the
+# component is in its iOS device runtimes, and allowed in its app, only when the
 # descriptor says "yes". Every other product takes an accepted artifact.
 ARCHIVES_KEY = "LINEAGE24_ACCEPTED_AOT_ARCHIVES"
 ARCHIVE_STATES = ("no", "yes")

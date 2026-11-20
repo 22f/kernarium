@@ -157,7 +157,7 @@ artifact it waits for.
 Before archiving a release build of an application:
 
 - check each artifact it embeds against the commit being archived; Andarium's
-  AppStore and TestFlight configurations enforce it with
+  Release configuration enforces it on an archive with
   `scripts/check-embedded-artifacts.py`.
   When an input changed after the source revision or tree that the artifact's
   descriptor records, build and accept a new artifact first. Otherwise, name

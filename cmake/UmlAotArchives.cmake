@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-# The one switch for the archive configurations (App Store, TestFlight) and the
-# runtimes they embed: android/lineage-24/metadata/accepted-aot.env says
+# The one switch for the archive of Andarium's Release configuration and the
+# device runtimes it embeds: android/lineage-24/metadata/accepted-aot.env says
 # whether the accepted AOT artifact may be in them
 # (LINEAGE24_ACCEPTED_AOT_ARCHIVES). darwin/cpu/CMakeLists.txt takes the
-# component in a device or App Store runtime only when it says "yes", for the
-# accepted artifact and for one a build names (UML_AOT_ARTIFACT) alike.
+# accepted artifact into an iOS runtime only when it says "yes"; an artifact a
+# build names (UML_AOT_ARTIFACT) is for measuring on a device, and
+# scripts/check-embedded-artifacts.py refuses an archive that carries the
+# component while it says "no".
 
 # uml_aot_archives_state(<variable> <descriptor>)
 #
@@ -25,25 +27,4 @@ function(uml_aot_archives_state variable descriptor)
             "or no")
     endif()
     set(${variable} ${_state} PARENT_SCOPE)
-endfunction()
-
-# uml_aot_require_archives(<descriptor> <artifact>)
-#
-# An App Store runtime that names an artifact is a configure error unless the
-# descriptor accepts the component for archives: it is not built without the
-# component in silence, since the build asked for it.
-function(uml_aot_require_archives descriptor artifact)
-    uml_aot_archives_state(_state "${descriptor}")
-    if(_state STREQUAL "none")
-        message(FATAL_ERROR
-            "UML_AOT_ARTIFACT (${artifact}) names the AOT component for an "
-            "App Store runtime, but ${descriptor} accepts no AOT artifact. "
-            "Leave UML_AOT_ARTIFACT empty.")
-    elseif(NOT _state STREQUAL "yes")
-        message(FATAL_ERROR
-            "UML_AOT_ARTIFACT (${artifact}) names the AOT component for an "
-            "App Store runtime, but ${descriptor} sets "
-            "LINEAGE24_ACCEPTED_AOT_ARCHIVES to no. "
-            "Leave UML_AOT_ARTIFACT empty.")
-    endif()
 endfunction()

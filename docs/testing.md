@@ -463,8 +463,7 @@ TCP port, where the macOS launcher's `--vsock-forward` reaches a guest's relay.
 The script and the guest end of the wire are the package's
 `AndariumCoreTestSupport` target, which only the package's tests, the probe
 and `AndariumTests` link, and the test bundle carries in its own Frameworks
-folder, so a device can load it; the application never does (the App Store
-bundle check refuses a build that does).
+folder, so a device can load it; the application never does.
 `DeviceOrientationTests` checks UIKit's orientation numbers against the
 application's readings, the mapping to Android's rotation, the observer's begin
 and end of the device's notifications, the path from a turn to the record a
@@ -765,9 +764,8 @@ blocker in every one of them.
   of its own;
   `emulator-options` holds the `--aot=` and `--aot-release=` parsing and
   `android-release-identity` the launcher's reading of the release identity.
-  `aot-archive-switch-gates-explicit-artifacts` (tooling) holds the archive
-  switch to the App Store runtime's configure: an explicit artifact needs the
-  descriptor's `yes`. `arm64-aot-release-artifact` holds the artifact check
+  `aot-archive-switch` (tooling) holds the descriptor's archive switch that the
+  iOS device runtimes read. `arm64-aot-release-artifact` holds the artifact check
   to what it must refuse (another release, partition, blob, tool or library
   list). The differential runs functions of every rewritten library through
   the gadget engine with and without ahead-of-time code and requires the same

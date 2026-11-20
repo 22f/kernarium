@@ -10,8 +10,8 @@
 
 namespace uml::camera {
 
-/* Diagnostic readings for a development run (the launcher and a runtime that
- * is not an App Store build print them); an App Store build uses none. */
+/* Diagnostic readings for a development run (the launcher and the runtime
+ * print them). */
 
 [[nodiscard]] constexpr const char* checkpointName(CameraCheckpoint where) noexcept
 {
