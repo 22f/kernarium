@@ -78,6 +78,14 @@ uml_add_unit_test(NAME platform-video-encoder-recovery
     COMMAND uml_video_encoder_recovery_tests ${PROJECT_SOURCE_DIR}/tests/support/video
     LABELS video TIMEOUT 300)
 
+# The JPEG size bound, with the sample delivered in two Core Media blocks (the test variant splits it on demand).
+add_executable(uml_video_encoder_jpeg_bound_tests video_encoder_jpeg_bound_tests.cpp)
+target_link_libraries(uml_video_encoder_jpeg_bound_tests PRIVATE
+    uml_video_encoder_test_variant)
+uml_add_unit_test(NAME platform-video-encoder-jpeg-bound
+    COMMAND uml_video_encoder_jpeg_bound_tests
+    LABELS video TIMEOUT 300)
+
 # Discovery against a scripted host, which needs no hardware: a refusal and a
 # ceiling are answers and are stored; a probe the host did not answer is not an
 # answer, leaves the discovery incomplete and out of the cache, and is asked
