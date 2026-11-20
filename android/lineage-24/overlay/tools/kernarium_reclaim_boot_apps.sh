@@ -5,12 +5,18 @@
 # uses. Privacy sandbox services, the backup apps, key provisioning, domain
 # verification and Health Connect each start from a boot receiver or a bind by
 # the system and then sit cached, holding memory until the low memory killer
-# wants it. Their receivers and bindings stay: this runs once, after boot has
-# settled, and kills the processes of the listed packages that are cached, which
-# is a death the system could have chosen itself. Alarms, jobs and bindings
-# survive it, and the next use starts the app again. A package with a process
-# that is not cached (a started service, the previous app, the home app) is
-# logged and left alone; so is one the system keeps higher than cached.
+# wants it. So do Messaging, whose boot receiver queries the SMS provider and so
+# starts the provider's process (named com.android.phone, not after its
+# package), and the icon renderer's provider, which the first listing of the
+# launcher applications leaves cached. Their receivers and bindings stay: this
+# runs once, after boot has settled, and kills the processes of the listed
+# packages that are cached, which is a death the system could have chosen
+# itself. Alarms, jobs and bindings survive it, and the next use starts the app
+# again: a text message from the host is a broadcast to the SMS application and
+# starts Messaging, then the provider when the message is stored. A package with
+# a process that is not cached (a started service, the previous app, the home
+# app, a renderer a listing holds) is logged and left alone; so is one the
+# system keeps higher than cached.
 #
 # Each line below is a package and the names of its processes. The list is
 # reviewed: the target-files verifier requires exactly this one.
@@ -25,6 +31,9 @@ com.android.localtransport com.android.localtransport
 com.android.rkpdapp com.android.rkpdapp
 com.android.statementservice com.android.statementservice
 com.android.healthconnect.controller com.android.healthconnect.controller
+com.android.messaging com.android.messaging
+com.android.providers.telephony com.android.phone
+com.kernarium.icons com.kernarium.icons
 '
 
 tag=kernarium_reclaim_boot_apps

@@ -830,7 +830,8 @@ WIFI_NETWORK_TRANSITION = re.compile(
     re.MULTILINE,
 )
 # Once boot has settled a script kills the cached processes of a reviewed list of apps the
-# system starts at boot (overlay/tools/kernarium_reclaim_boot_apps.sh), in a core domain of its
+# system starts at boot, or that the first listing of the launcher applications starts
+# (overlay/tools/kernarium_reclaim_boot_apps.sh), in a core domain of its
 # own on system_ext (overlay/sepolicy/system_ext/private). Their receivers and bindings stay;
 # only `cmd activity kill` runs on them, which kills nothing the system would not have chosen,
 # and never `kill-all` or `force-stop`, which cancel alarms and jobs. Each entry is a package
@@ -849,6 +850,10 @@ RECLAIM_APPS = (
     ("com.android.rkpdapp", ("com.android.rkpdapp",)),
     ("com.android.statementservice", ("com.android.statementservice",)),
     ("com.android.healthconnect.controller", ("com.android.healthconnect.controller",)),
+    ("com.android.messaging", ("com.android.messaging",)),
+    # The SMS provider's process is named com.android.phone.
+    ("com.android.providers.telephony", ("com.android.phone",)),
+    ("com.kernarium.icons", ("com.kernarium.icons",)),
 )
 RECLAIM_SCRIPT_REQUIRED = (
     "dumpsys activity lru",

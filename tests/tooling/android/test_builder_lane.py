@@ -2189,6 +2189,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "extra-package": ("com.android.rkpdapp com.android.rkpdapp\n",
                                       "com.android.rkpdapp com.android.rkpdapp\ncom.example.app com.example.app\n"),
                     "missing-package": ("com.stevesoltys.seedvault com.stevesoltys.seedvault\n", ""),
+                    "missing-messaging": ("com.android.messaging com.android.messaging\n", ""),
+                    "missing-telephony-provider": ("com.android.providers.telephony com.android.phone\n", ""),
+                    "missing-icons": ("com.kernarium.icons com.kernarium.icons\n", ""),
+                    "telephony-package-as-process": (
+                        "com.android.providers.telephony com.android.phone",
+                        "com.android.providers.telephony com.android.providers.telephony"),
                     "missing-process": ("android.ext.services .adservices android.ext.services",
                                         "android.ext.services android.ext.services"),
                     "no-settle": ("settle=120", "settle=0"),
@@ -4515,6 +4521,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("reclaim-kill-9", {"reclaim_variant": "kill-9"}),
             ("reclaim-extra-package", {"reclaim_variant": "extra-package"}),
             ("reclaim-missing-package", {"reclaim_variant": "missing-package"}),
+            ("reclaim-missing-messaging", {"reclaim_variant": "missing-messaging"}),
+            ("reclaim-missing-telephony-provider", {"reclaim_variant": "missing-telephony-provider"}),
+            ("reclaim-missing-icons", {"reclaim_variant": "missing-icons"}),
+            ("reclaim-telephony-package-as-process", {"reclaim_variant": "telephony-package-as-process"}),
             ("reclaim-missing-process", {"reclaim_variant": "missing-process"}),
             ("reclaim-no-settle", {"reclaim_variant": "no-settle"}),
             ("reclaim-no-lru", {"reclaim_variant": "no-lru"}),
@@ -5595,6 +5605,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("reclaim-extra-package-cause", {"reclaim_variant": "extra-package"},
              "lists .*com.example.app.*not the reviewed packages"),
             ("reclaim-missing-package-cause", {"reclaim_variant": "missing-package"},
+             "not the reviewed packages"),
+            ("reclaim-missing-messaging-cause", {"reclaim_variant": "missing-messaging"},
+             "not the reviewed packages"),
+            ("reclaim-missing-telephony-provider-cause", {"reclaim_variant": "missing-telephony-provider"},
+             "not the reviewed packages"),
+            ("reclaim-missing-icons-cause", {"reclaim_variant": "missing-icons"},
+             "not the reviewed packages"),
+            ("reclaim-telephony-package-as-process-cause", {"reclaim_variant": "telephony-package-as-process"},
              "not the reviewed packages"),
             ("reclaim-missing-process-cause", {"reclaim_variant": "missing-process"},
              "not the reviewed packages"),
@@ -7886,6 +7904,13 @@ def verify_reclaim_boot_apps(android_root: Path) -> None:
         # not listed
         "  #23: cch  + 5 CEM  --------- 1999:com.example.unlisted/u0a200",
         "  #24: cch  + 5 CEM  --------- 1744:com.android.ondevicepersonalization.services.extra/u0a113",
+        # Messaging, cached since its boot receiver ran
+        "  #31: cch  + 7 CEM  --------- 1870:com.android.messaging/u0a95",
+        # the SMS provider's process is not named after its package
+        "  #32: cch  + 8 CEM  --------- 1860:com.android.phone/1001",
+        # the icon renderer's provider, cached after the last listing; its isolated worker is another process
+        "  #33: cch  + 9 CEM  --------- 1900:com.kernarium.icons/u0a30",
+        "  #34: cch  +10 CEM  --------- 1901:com.kernarium.icons:IconRenderService/u0i1",
     ))
     with tempfile.TemporaryDirectory(prefix="reclaim-script-") as temporary:
         stubs = Path(temporary)
@@ -7911,6 +7936,9 @@ def verify_reclaim_boot_apps(android_root: Path) -> None:
             "cmd activity kill --user 0 android.ext.services",
             "cmd activity kill --user 0 com.android.localtransport",
             "cmd activity kill --user 0 com.android.statementservice",
+            "cmd activity kill --user 0 com.android.messaging",
+            "cmd activity kill --user 0 com.android.providers.telephony",
+            "cmd activity kill --user 0 com.kernarium.icons",
         ]
         if kills != expected:
             fail(f"the reclaim script killed {kills}, not {expected}")
@@ -7920,6 +7948,32 @@ def verify_reclaim_boot_apps(android_root: Path) -> None:
             "com.stevesoltys.seedvault has no cached process (kept: com.stevesoltys.seedvault:prcp)",
             "android.ext.services killed cached .adservices (kept: android.ext.services:vis)",
             "com.android.federatedcompute.services has no cached process (kept: none)",
+            "com.android.messaging killed cached com.android.messaging (kept: none)",
+            "com.android.providers.telephony killed cached com.android.phone (kept: none)",
+            "com.kernarium.icons killed cached com.kernarium.icons (kept: none)",
+        ):
+            if needle not in text:
+                fail(f"the reclaim script did not log '{needle}': {text}")
+        # An icon renderer that a listing holds (the shell tool's hold on its provider keeps the process above
+        # cached) is left alone, and Messaging in the foreground is too.
+        (stubs / "lru").write_text("\n".join((
+            "ACTIVITY MANAGER LRU PROCESSES (dumpsys activity lru)",
+            "  Other:",
+            "  #33: fg       FGS  --------- 1900:com.kernarium.icons/u0a30",
+            "  #34: cch  +10 CEM  --------- 1901:com.kernarium.icons:IconRenderService/u0i1",
+            "  #35: fg       TOP  LCMNFUATI 1870:com.android.messaging/u0a95 act:activities|recents",
+        )) + "\n")
+        calls.unlink()
+        result = subprocess.run(["/bin/sh", str(script)], env=env, capture_output=True, text=True)
+        if result.returncode != 0:
+            fail(f"the reclaim script exited {result.returncode}: {result.stderr}")
+        recorded = calls.read_text().splitlines()
+        if any(line.startswith("cmd ") for line in recorded):
+            fail(f"the reclaim script killed a held renderer or the foreground application: {recorded}")
+        text = "\n".join(recorded)
+        for needle in (
+            "com.kernarium.icons has no cached process (kept: com.kernarium.icons:fg)",
+            "com.android.messaging has no cached process (kept: com.android.messaging:fg)",
         ):
             if needle not in text:
                 fail(f"the reclaim script did not log '{needle}': {text}")

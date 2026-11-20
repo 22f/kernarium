@@ -974,7 +974,10 @@ outcomes are known and not defects of the image:
 - The guest has a compressed swap of half its RAM (one zram entry in
   `fstab.uml`), enabled at `sys.boot_completed`. PinnerService does not lock the
   home app's files, and `kernarium_reclaim_boot_apps.sh` kills only the cached
-  processes of a reviewed list of boot-started apps after boot completes.
+  processes of a reviewed list of apps that boot, or the first listing of the
+  launcher applications, starts (Messaging, the SMS provider's process and the
+  icon renderer among them) after boot completes. The next use starts them
+  again: a text message from the host starts Messaging and then the provider.
 - lmkd ends the cached app that holds the most host graphics memory while the
   kernel reports host GPU pressure in `/sys/class/drm/card0/gpu_memory_report`
   (route `p0027`; `ro.lmk.gpu_reclaim`, set by the product, turns it on). It does
