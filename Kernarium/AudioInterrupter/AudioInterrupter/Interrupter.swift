@@ -166,8 +166,19 @@ final class Interrupter {
             try player.playAudio()
         } else {
             player.play()
+            // Before iOS 27 `play` reports nothing, and it returns with the
+            // player stopped when the engine stopped since it started. A
+            // takeover that is not playing is not a takeover.
+            guard player.isPlaying else { throw PlayerError.notPlaying }
         }
         MPNowPlayingInfoCenter.default().playbackState = .playing
+    }
+
+    /// What the earlier systems' `play` leaves to the caller to find out.
+    private enum PlayerError: LocalizedError {
+        case notPlaying
+
+        var errorDescription: String? { "the player did not start" }
     }
 
     /// Takes the session as the owner and starts the hold.
