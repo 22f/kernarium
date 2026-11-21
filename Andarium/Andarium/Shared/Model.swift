@@ -747,7 +747,7 @@ final class AppModel {
     /// nothing of the setting is offered or asked there (the gate the list of
     /// Android's apps uses).
     var hostOffersHighRefresh: Bool {
-        host.idiom != .mac && !ProcessInfo.processInfo.isiOSAppOnVision
+        host.idiom != .mac && padAppHost.hasHomeScreen
     }
     /// Whether Settings offers "120 Hz": the screen shows at least 100 frames a
     /// second, the host is an iPhone or an iPad, and the display the next
