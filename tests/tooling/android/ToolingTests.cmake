@@ -409,6 +409,17 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 60)
 
+# The front camera runner without a guest: the chart read at each of a frame's
+# turns and mirrors, the probe's statement and the camera service's dump, the
+# verdict for each camera, and the probe application's package (skipped where the
+# host has no keytool and jarsigner).
+uml_add_tooling_test(
+    NAME android17-camera-front-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_camera_front_runner.py
+    LABELS android
+    TIMEOUT 120)
+
 # What the camera HAL does when the host ends the video of a camera (the
 # application left the foreground): the callback path of the sensor is run, the
 # series' own source compiled against stub headers, and the wiring of the rest

@@ -93,6 +93,14 @@ target_link_libraries(uml_camera_apple_transform_tests PRIVATE UML::AppleCamera)
 uml_add_unit_test(NAME camera-apple-transform COMMAND uml_camera_apple_transform_tests
     LABELS "device;camera")
 
+# A photo of a camera presented half around is turned and encoded in the hardware JPEG encoder (a pixel buffer stands
+# in for the photo; no camera is opened).
+add_executable(uml_camera_apple_turned_still_tests camera_apple_turned_still_tests.cpp)
+target_link_libraries(uml_camera_apple_turned_still_tests PRIVATE UML::AppleCamera UML::VideoEncoder
+    "-framework CoreFoundation" "-framework CoreGraphics" "-framework CoreVideo" "-framework ImageIO")
+uml_add_unit_test(NAME camera-apple-turned-still COMMAND uml_camera_apple_turned_still_tests
+    LABELS "device;camera")
+
 # The synthetic camera is the platform camera that the other camera tests use.
 add_executable(uml_camera_synthetic_tests camera_synthetic_tests.cpp)
 target_link_libraries(uml_camera_synthetic_tests PRIVATE UML::SyntheticCamera)
