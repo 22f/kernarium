@@ -339,9 +339,11 @@ two steps, 60 and 120 frames a second. A guest above 62.5 frames a second,
 judged over a second, has the 120 step, and one at 60 or less the 60 step,
 which shows every frame the setting off does. The 120 step is left only after
 a fall measure over two seconds is below 61 and the one over a second no
-longer supports it, so a guest that alternates across the threshold changes
-the step at most once in each half of its cycle and a steady speed-up changes
-it once. The ceiling is the rate the EDID's timing states for the mode (the
+longer supports it, and a step changes no sooner than two seconds after the
+last change, so a guest that alternates across the threshold, or whose frames
+arrive early and late, changes the step at most once in each half of its cycle
+(halves of two seconds or less) and a steady speed-up changes it once. Every
+time here is the time plus one tick of the link. The ceiling is the rate the EDID's timing states for the mode (the
 largest clock the field holds, for a size beyond it), the screen's maximum and
 Low Power Mode; from 100 it is the 120 step, and any lower rate, a mode of 47
 Hz included, is the 60 step. A frame whose draw found no drawable is drawn

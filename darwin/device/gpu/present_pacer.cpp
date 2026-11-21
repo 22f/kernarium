@@ -36,6 +36,8 @@ LinkFrameRate PresentPacer::wake(
 {
     first_ = 0;
     count_ = 0;
+    /* The evidence and the last change are those of the burst before. */
+    changedAt_.reset();
     remember(now, guestFrames);
     rate_ = rateForCeiling(ceiling);
     lastPresent_ = now;
@@ -136,7 +138,17 @@ PresentPacer::Decision PresentPacer::tick(
                 next = 60;
         }
     }
+    /* A step change waits until the dwell has passed since the last one,
+     * whatever the measures say: a guest whose rate wobbles about a
+     * threshold changes the step at most once in the dwell. The ceiling is
+     * not a measure: a step it forbids is left at once. */
     const unsigned cap = rateForCeiling(ceiling);
+    if (next != rate_ && next <= cap) {
+        if (changedAt_ && now - *changedAt_ < parameters_.minimumDwellSeconds)
+            next = rate_;
+        else
+            changedAt_ = now;
+    }
     if (next > cap)
         next = cap;
     if (next != rate_) {

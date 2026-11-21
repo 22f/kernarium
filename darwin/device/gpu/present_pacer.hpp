@@ -40,8 +40,17 @@ struct LinkFrameRate {
  * step, judged over a second. The 120 step is left only when the rise measure
  * no longer supports it and a fall measure over 2 s, which lags it, is below
  * it too: a guest that alternates across the threshold for less than that
- * stays on the 120 step, and no steady guest makes the link flip (a rise needs
- * 62.5, a fall under 61). A link that wakes asks for the fastest rate the
+ * stays on the 120 step. A step changes no sooner than the dwell (2 s) after
+ * the last change, whatever the measures say, so that frames that arrive early
+ * and late (which move the count of a second by two between ticks, over a gap
+ * of 1.5 frames a second between a rise at 62.5 and a hold under 61) or a rate
+ * that wobbles about a threshold change the step at most once in the dwell.
+ * Once the link has settled a steady guest of 60 or less, or 63 or more, makes
+ * no change; one between them changes it at most once when its frames are
+ * early or late by up to 4 ms, or when the interval between them has up to
+ * 2 ms of jitter, and never twice within the dwell. The time that a rule
+ * states (the second of a rise, the 2 s of a fall and of the dwell) is a time
+ * plus one tick: the link decides at its ticks. A link that wakes asks for the fastest rate the
  * ceiling allows, because the first frame of a burst should wait for the
  * shortest tick, and settles after the first second of the burst. The ceiling
  * is the fastest rate the host allows now (the mode's rate, or less when the
@@ -74,6 +83,8 @@ public:
         /* ... and falls from it when that measure does not and the fall
          * measure is below this. */
         double fallFromHigh {61.0};
+        /* The least time between two step changes. */
+        double minimumDwellSeconds {2.0};
         /* How many times a frame is drawn again after a draw that found no
          * drawable, at the next ticks: 30 is a quarter of a second at the
          * 120 step and half a second at the 60 step. */
@@ -163,6 +174,8 @@ private:
     bool retryOwed_ {};
     unsigned retries_ {};
     bool retryArranged_ {};
+    /* When the step last changed since the last wake. */
+    std::optional<double> changedAt_;
     std::array<Sample, capacity> samples_ {};
     std::size_t first_ {};
     std::size_t count_ {};

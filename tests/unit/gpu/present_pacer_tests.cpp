@@ -262,7 +262,8 @@ void aGuestThatRendersFasterMakesTheLinkRiseAtOnce()
 {
     Link link;
     link.setGuestRate(60.0);
-    link.run(2.0);
+    /* Settled at 60 after the first second, and 2 s after that change. */
+    link.run(4.0);
     require(link.rate() == 60);
     const double at = link.now();
     link.setGuestRate(120.0);
@@ -346,9 +347,10 @@ void aSteadyGuestIsNeverShownFewerFramesThanTheSettingOffPathBeyondTwo()
     }
 }
 
-/* A guest that speeds up to 63 or more, from any step, has the 120 step
- * within 2 s. */
-void aGuestThatSpeedsUpToSixtyThreeOrMoreReachesTheHighStepWithinTwoSeconds()
+/* A guest that speeds up to 63 or more, from any step the link has settled
+ * on, has the 120 step within 2 s and one tick (1/60 s on the 60 step) of the
+ * speed-up. */
+void aGuestThatSpeedsUpToSixtyThreeOrMoreReachesTheHighStepWithinTwoSecondsAndATick()
 {
     for (const double before : {24.0, 45.0, 58.0}) {
         for (const double guest : {63.0, 64.0, 65.0, 70.0, 90.0, 119.0}) {
@@ -356,11 +358,11 @@ void aGuestThatSpeedsUpToSixtyThreeOrMoreReachesTheHighStepWithinTwoSeconds()
             link.setGuestRate(before);
             link.run(4.0);
             link.setGuestRate(guest);
-            link.run(2.0);
+            link.run(2.0 + 1.0 / 60.0);
             if (link.rate() != 120)
                 std::fprintf(stderr, "guest %.0f after %.0f is on the %u step\n",
                     guest, before, link.rate());
-            require(link.rate() == 120, "the 120 step within 2 s");
+            require(link.rate() == 120, "the 120 step within 2 s and a tick");
         }
     }
 }
@@ -487,6 +489,337 @@ void aSteadyGuestMakesNoLinkFlip()
                 "a steady guest changed the range");
         }
     }
+}
+
+/* The step changes of a guest given as the times its frames arrive, driven
+ * as the display link runs: a tick on a 120 Hz grid, every other one on the
+ * 60 step, and a wake at the start. Returns the seconds after `from` of each
+ * change in (from, from + length]. */
+std::vector<double> stepChanges(
+    const std::vector<double>& arrivals, double from, double length)
+{
+    PresentPacer pacer;
+    (void)pacer.wake(0.0, 0, 120.0);
+    std::size_t offered = 0;
+    std::vector<double> changes;
+    const auto last = static_cast<unsigned>((from + length) * 120.0 + 0.5);
+    for (unsigned tick = 1; tick <= last;) {
+        const double now = static_cast<double>(tick) / 120.0;
+        const auto before = offered;
+        while (offered < arrivals.size() && arrivals[offered] <= now + 1e-11)
+            ++offered;
+        const auto decision = pacer.tick(now, offered, offered != before, 120.0);
+        if (decision.present)
+            pacer.drew(false);
+        if (decision.range && now > from)
+            changes.push_back(now - from);
+        tick += pacer.rate() == 120 ? 1U : 2U;
+    }
+    return changes;
+}
+
+/* A uniform pseudo-random number in [-1, 1) from a seed that advances. */
+double nextOffset(std::uint32_t& seed)
+{
+    seed = seed * 1103515245U + 12345U;
+    return static_cast<double>((seed >> 16U) % 2000U) / 1000.0 - 1.0;
+}
+
+/* Frame times of a guest whose rate is `rateAt(time)` (none for 0), each
+ * `jitter` seconds early or late at most, from `phase`, to `seconds`. */
+template <typename RateAt>
+std::vector<double> jitteredArrivals(
+    RateAt rateAt, double seconds, double jitter, double phase, std::uint32_t seed)
+{
+    std::vector<double> arrivals;
+    double ideal = phase;
+    while (ideal < seconds) {
+        const double rate = rateAt(ideal);
+        if (rate <= 0.0) {
+            ideal += 0.001;
+            continue;
+        }
+        arrivals.push_back(ideal + jitter * nextOffset(seed));
+        ideal += 1.0 / rate;
+    }
+    std::sort(arrivals.begin(), arrivals.end());
+    return arrivals;
+}
+
+/* The pattern two reviewers used: 4 s at 45 frames a second, then halves of
+ * `half` seconds alternating `slow` and `fast`, the frames of a half placed in
+ * groups, early and late by `amplitude` seconds a frame in a cosine of
+ * `slowCycles` or `fastCycles` cycles from an eighth-turn `slowShift` or
+ * `fastShift`, and the last of a half on its boundary. */
+struct Groups {
+    int slow;
+    int fast;
+    int half;
+    int slowCycles;
+    int fastCycles;
+    int slowShift;
+    int fastShift;
+    double amplitude;
+};
+
+std::vector<double> groupedArrivals(const Groups& g)
+{
+    constexpr double pi = 3.141592653589793;
+    std::vector<double> arrivals;
+    for (int i = 1; i <= 180; ++i)
+        arrivals.push_back(i / 45.0);
+    for (int half = 0; half < 24 / g.half; ++half) {
+        const double origin = 4.0 + half * g.half;
+        double time = origin;
+        const int rate = half % 2 != 0 ? g.fast : g.slow;
+        const int frames = rate * g.half;
+        const int cycles = half % 2 != 0 ? g.fastCycles : g.slowCycles;
+        const int shift = half % 2 != 0 ? g.fastShift : g.slowShift;
+        for (int frame = 0; frame < frames; ++frame) {
+            const int slot = (frame * cycles + frames * shift / 8) % frames;
+            double factor = slot < frames / 2 ? -1.0 : slot >= frames - frames / 2 ? 1.0 : 0.0;
+            if (frames % cycles != 0)
+                factor = std::cos(2.0 * pi * ((frame + 0.5) * cycles / frames + shift / 8.0));
+            time += 1.0 / rate + g.amplitude * factor;
+            arrivals.push_back(frame + 1 == frames ? origin + g.half : time);
+        }
+    }
+    return arrivals;
+}
+
+/* The changes of a grouped guest in the 12 s that follow its settling. */
+std::size_t changesOfGroups(const Groups& g)
+{
+    return stepChanges(groupedArrivals(g), 4.0 + (g.half == 2 ? 8.0 : 6.0), 12.0).size();
+}
+
+/* A step changes at most once in the dwell (2 s) whatever the guest does, so
+ * a guest that alternates in halves of 2 s or less changes it at most once
+ * per half cycle and one more, as the rows above bound it, and a source whose
+ * frames arrive early and late in groups is no different. With the rise
+ * measure of 62.5 and the hold under 61 (1.5 apart) alone deciding, such a
+ * source made the step flip up to 44 times in 12 s, because early and late
+ * frames move the count of a second by two between ticks. The first patterns
+ * are those two reviewers found; the rest is a scan around them. */
+void aGuestWhoseFramesArriveInGroupsAlternatesAtMostOncePerHalfCycle()
+{
+    struct Found {
+        double amplitude;
+        int half, slow, fast, slowCycles, fastCycles, slowShift, fastShift;
+    };
+    for (const Found f : {Found {0.001, 2, 57, 64, 1, 1, 0, 2}, Found {0.002, 2, 57, 64, 1, 1, 5, 2},
+             Found {0.002, 2, 58, 66, 3, 1, 3, 3}, Found {0.002, 1, 57, 64, 1, 1, 5, 2},
+             Found {0.003, 2, 57, 64, 1, 1, 6, 2}, Found {0.003, 2, 58, 66, 1, 1, 6, 2},
+             Found {0.003, 2, 50, 70, 1, 1, 0, 2}, Found {0.003, 2, 40, 70, 1, 1, 0, 2},
+             Found {0.003, 2, 60, 80, 2, 1, 6, 4}, Found {0.003, 1, 57, 64, 1, 1, 6, 2},
+             Found {0.004, 2, 57, 64, 3, 3, 2, 7}, Found {0.004, 2, 58, 66, 1, 1, 6, 2},
+             Found {0.004, 2, 50, 70, 1, 1, 5, 3}, Found {0.004, 2, 40, 70, 1, 1, 0, 2},
+             Found {0.004, 2, 60, 80, 3, 1, 0, 0}, Found {0.004, 2, 62, 82, 3, 1, 5, 0},
+             Found {0.004, 2, 30, 80, 1, 1, 0, 2}, Found {0.004, 1, 57, 64, 3, 1, 6, 2},
+             Found {0.004, 1, 50, 70, 1, 1, 5, 2}}) {
+        const Groups g {f.slow, f.fast, f.half, f.slowCycles, f.fastCycles,
+            f.slowShift, f.fastShift, f.amplitude};
+        const auto changes = changesOfGroups(g);
+        const auto bound = static_cast<std::size_t>(12 / g.half) + 1U;
+        if (changes > bound)
+            std::fprintf(stderr, "%d/%d half %d s amplitude %.3f: %zu changes, bound %zu\n",
+                g.slow, g.fast, g.half, g.amplitude, changes, bound);
+        require(changes <= bound, "a found pattern changed the step too often");
+    }
+    for (const double amplitude : {0.0, 0.001, 0.002, 0.003, 0.004}) {
+        for (const int half : {2, 1}) {
+            for (const auto [slow, fast] : {std::pair {57, 64}, std::pair {58, 66},
+                     std::pair {50, 70}, std::pair {40, 70}, std::pair {60, 80},
+                     std::pair {62, 82}, std::pair {60, 120}, std::pair {30, 80}}) {
+                for (const int slowCycles : {1, 3}) {
+                    for (const int fastCycles : {1, 3}) {
+                        for (const int slowShift : {0, 6}) {
+                            for (const int fastShift : {0, 2}) {
+                                const Groups g {slow, fast, half, slowCycles, fastCycles,
+                                    slowShift, fastShift, amplitude};
+                                const auto changes = changesOfGroups(g);
+                                const auto bound = static_cast<std::size_t>(12 / half) + 1U;
+                                if (changes > bound)
+                                    std::fprintf(stderr,
+                                        "%d/%d half %d s amplitude %.3f cycles %d/%d shifts %d/%d: %zu changes, bound %zu\n",
+                                        slow, fast, half, amplitude, slowCycles, fastCycles,
+                                        slowShift, fastShift, changes, bound);
+                                require(changes <= bound, "a grouped guest changed the step too often");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* The same bound for a guest whose frames are each early or late by up to 0,
+ * 1, 2 or 4 ms around the ideal times of a rate that alternates, among them
+ * pairs that straddle the threshold closely (60.5 and 62.5). */
+void aGuestWhoseFramesAreEarlyAndLateAlternatesAtMostOncePerHalfCycle()
+{
+    for (const auto [slow, fast] : {std::pair {57.0, 64.0}, std::pair {58.0, 66.0},
+             std::pair {50.0, 70.0}, std::pair {40.0, 70.0}, std::pair {20.0, 40.0},
+             std::pair {60.0, 80.0}, std::pair {62.0, 82.0}, std::pair {60.0, 120.0},
+             std::pair {30.0, 80.0}, std::pair {60.0, 63.0}, std::pair {61.0, 63.0},
+             std::pair {60.0, 62.6}, std::pair {59.0, 64.0}, std::pair {55.0, 68.0},
+             std::pair {60.5, 62.5}}) {
+        for (const double half : {0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0}) {
+            for (const double jitter : {0.0, 0.001, 0.002, 0.004}) {
+                for (unsigned phase = 0; phase < 3; ++phase) {
+                    for (const double lead : {0.0, 50.0}) {
+                        const auto arrivals = jitteredArrivals(
+                            [&](double time) {
+                                if (time < 4.0 && lead > 0.0)
+                                    return lead;
+                                return std::fmod(time, 2.0 * half) < half ? slow : fast;
+                            },
+                            20.0, jitter, phase * 0.0037, 11U + phase);
+                        const auto changes = stepChanges(arrivals, 8.0, 12.0).size();
+                        const auto bound = static_cast<std::size_t>(12.0 / half) + 1U;
+                        if (changes > bound)
+                            std::fprintf(stderr,
+                                "%.1f/%.1f half %.2f s jitter %.3f phase %u lead %.0f: %zu changes, bound %zu\n",
+                                slow, fast, half, jitter, phase, lead, changes, bound);
+                        require(changes <= bound, "an early and late guest changed the step too often");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* A steady guest of 59 to 63 frames a second, whose frames are early or late
+ * by up to 0, 1, 2 or 4 ms (which moves the count of a second by two between
+ * ticks), makes no change after the link has settled when it renders 60 or
+ * less or 63 or more, and one at most between them (a rise where the rise
+ * measure is reached, never left again, or a fall). */
+void aSteadyGuestOfFiftyNineToSixtyThreeChangesTheStepAtMostOnceAfterSettling()
+{
+    for (const double jitter : {0.0, 0.001, 0.002, 0.004}) {
+        for (int tenths = 590; tenths <= 630; ++tenths) {
+            const double guest = tenths / 10.0;
+            for (unsigned phase = 0; phase < 12; ++phase) {
+                for (const double lead : {0.0, 50.0}) {
+                    const auto arrivals = jitteredArrivals(
+                        [&](double time) { return time < 4.0 && lead > 0.0 ? lead : guest; },
+                        24.0, jitter, phase * 0.00113, 101U + phase);
+                    const auto changes = stepChanges(arrivals, 10.0, 12.0).size();
+                    const bool between = guest > 60.0 && guest < 63.0;
+                    if (changes > (between ? 1U : 0U))
+                        std::fprintf(stderr, "guest %.1f jitter %.3f phase %u lead %.0f: %zu changes\n",
+                            guest, jitter, phase, lead, changes);
+                    require(changes <= (between ? 1U : 0U), "a steady guest changed the step");
+                }
+            }
+        }
+    }
+}
+
+/* The same through the link of the other rows, whose jitter is in the interval
+ * between frames, so that the frame times drift: with up to 2 ms a guest of 59
+ * to 63 changes the step at most once in the 12 s after it settles, and not at
+ * all at 60 or less or 63 or more. */
+void aSteadyGuestOfFiftyNineToSixtyThreeWithIntervalJitterChangesTheStepAtMostOnce()
+{
+    for (const double jitter : {0.0, 0.001, 0.002}) {
+        for (int tenths = 590; tenths <= 630; ++tenths) {
+            const double guest = tenths / 10.0;
+            for (const Start start : allStarts) {
+                Link link;
+                link.setJitter(jitter);
+                putOnStep(link, start);
+                link.setGuestRate(guest);
+                link.run(6.0);
+                const auto requests = link.requests().size();
+                link.run(12.0);
+                const auto changes = link.requests().size() - requests;
+                const bool between = guest > 60.0 && guest < 63.0;
+                if (changes > (between ? 1U : 0U))
+                    std::fprintf(stderr, "guest %.1f jitter %.3f from start %d: %zu changes\n",
+                        guest, jitter, static_cast<int>(start), changes);
+                require(changes <= (between ? 1U : 0U), "a steady guest changed the step");
+            }
+        }
+    }
+}
+
+/* With 4 ms in the interval between frames (the frame times of a second drift
+ * by a tenth of a frame, and the count of a second by two) a steady guest
+ * between 60 and 63 can still change the step more than once in 12 s: the
+ * guarantee is the dwell, no two changes within 2 s of each other, where the
+ * reviewers' fixture changed it five times, two of them 100 ms apart. A
+ * guest of 60 or less, or 63 or more, makes no change after it settles. */
+void aSteadyGuestWithFourMillisecondsOfIntervalJitterNeverChangesTheStepTwiceInTheDwell()
+{
+    for (int tenths = 590; tenths <= 630; ++tenths) {
+        const double guest = tenths / 10.0;
+        for (const Start start : allStarts) {
+            Link link;
+            link.setJitter(0.004);
+            putOnStep(link, start);
+            link.setGuestRate(guest);
+            link.run(6.0);
+            std::size_t requests = link.requests().size();
+            double last = -1.0;
+            unsigned changes = 0;
+            for (double done = 0.0; done < 12.0; done += 0.01) {
+                link.run(0.01);
+                if (link.requests().size() == requests)
+                    continue;
+                requests = link.requests().size();
+                ++changes;
+                if (last >= 0.0 && link.lastRequestAt() - last < 2.0 - 1e-9)
+                    std::fprintf(stderr, "guest %.1f from start %d: changes %.3f s apart\n",
+                        guest, static_cast<int>(start), link.lastRequestAt() - last);
+                require(last < 0.0 || link.lastRequestAt() - last >= 2.0 - 1e-9,
+                    "two changes within the dwell");
+                last = link.lastRequestAt();
+            }
+            const bool between = guest > 60.0 && guest < 63.0;
+            require(between || changes == 0, "a steady guest outside 60 to 63 changed the step");
+        }
+    }
+}
+
+/* A step change waits for 2 s after the last one. A guest of 40 frames a
+ * second settles the link on the 60 step, 90 takes it up as soon as the rise
+ * measure is reached, and 20 right after takes it down no sooner than 2 s
+ * after that rise (the measures would take it down in a second); 90 again
+ * takes it up no sooner than 2 s after the fall. A ceiling under the step is
+ * not waited for. */
+void aStepChangeWaitsForTheDwellSinceTheLastOne()
+{
+    const auto runUntil = [](Link& link, unsigned step) {
+        for (double waited = 0.0; link.rate() != step && waited < 6.0; waited += 0.01)
+            link.run(0.01);
+        require(link.rate() == step, "the step was not reached");
+    };
+    Link link;
+    link.setJitter(0.0);
+    link.setGuestRate(40.0);
+    link.run(5.0);
+    require(link.rate() == 60, "settled on the 60 step");
+    link.setGuestRate(90.0);
+    runUntil(link, 120);
+    const double rose = link.lastRequestAt();
+    link.setGuestRate(20.0);
+    link.run(1.5);
+    require(link.rate() == 120, "held by the dwell");
+    runUntil(link, 60);
+    const double fell = link.lastRequestAt();
+    require(fell - rose >= 2.0 - 1e-9, "no sooner than 2 s after the rise");
+    link.setGuestRate(90.0);
+    link.run(1.5);
+    require(link.rate() == 60, "a rise waits for the dwell since the fall too");
+    runUntil(link, 120);
+    require(link.lastRequestAt() - fell >= 2.0 - 1e-9, "no sooner than 2 s after the fall");
+
+    /* A ceiling that falls is not a measure: the step goes at once. */
+    link.setCeiling(60.0);
+    link.run(0.05);
+    require(link.rate() == 60, "a ceiling under the step is left at once");
 }
 
 /* A draw that finds no drawable shows nothing: with no later frame to ask
@@ -756,14 +1089,26 @@ int main(int argc, char** argv)
             aGuestThatSlowsDownMakesTheLinkFallAfterASustainedStretch},
         {"aSteadyGuestIsNeverShownFewerFramesThanTheSettingOffPathBeyondTwo",
             aSteadyGuestIsNeverShownFewerFramesThanTheSettingOffPathBeyondTwo},
-        {"aGuestThatSpeedsUpToSixtyThreeOrMoreReachesTheHighStepWithinTwoSeconds",
-            aGuestThatSpeedsUpToSixtyThreeOrMoreReachesTheHighStepWithinTwoSeconds},
+        {"aGuestThatSpeedsUpToSixtyThreeOrMoreReachesTheHighStepWithinTwoSecondsAndATick",
+            aGuestThatSpeedsUpToSixtyThreeOrMoreReachesTheHighStepWithinTwoSecondsAndATick},
         {"aSteadySpeedUpChangesTheRateOnce", aSteadySpeedUpChangesTheRateOnce},
         {"aGuestThatAlternatesAcrossTheThresholdChangesTheRateAtMostOncePerHalfCycle",
             aGuestThatAlternatesAcrossTheThresholdChangesTheRateAtMostOncePerHalfCycle},
         {"aGuestThatAlternatesAboveTheThresholdOnAverageStaysOnTheHighStep",
             aGuestThatAlternatesAboveTheThresholdOnAverageStaysOnTheHighStep},
         {"aSteadyGuestMakesNoLinkFlip", aSteadyGuestMakesNoLinkFlip},
+        {"aGuestWhoseFramesArriveInGroupsAlternatesAtMostOncePerHalfCycle",
+            aGuestWhoseFramesArriveInGroupsAlternatesAtMostOncePerHalfCycle},
+        {"aGuestWhoseFramesAreEarlyAndLateAlternatesAtMostOncePerHalfCycle",
+            aGuestWhoseFramesAreEarlyAndLateAlternatesAtMostOncePerHalfCycle},
+        {"aSteadyGuestOfFiftyNineToSixtyThreeChangesTheStepAtMostOnceAfterSettling",
+            aSteadyGuestOfFiftyNineToSixtyThreeChangesTheStepAtMostOnceAfterSettling},
+        {"aSteadyGuestOfFiftyNineToSixtyThreeWithIntervalJitterChangesTheStepAtMostOnce",
+            aSteadyGuestOfFiftyNineToSixtyThreeWithIntervalJitterChangesTheStepAtMostOnce},
+        {"aSteadyGuestWithFourMillisecondsOfIntervalJitterNeverChangesTheStepTwiceInTheDwell",
+            aSteadyGuestWithFourMillisecondsOfIntervalJitterNeverChangesTheStepTwiceInTheDwell},
+        {"aStepChangeWaitsForTheDwellSinceTheLastOne",
+            aStepChangeWaitsForTheDwellSinceTheLastOne},
         {"aDrawThatFindsNoDrawableIsRetriedUntilTheFrameIsShown",
             aDrawThatFindsNoDrawableIsRetriedUntilTheFrameIsShown},
         {"aDrawThatNeverFindsADrawableIsRetriedAtMostThirtyTimes",

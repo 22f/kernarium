@@ -387,8 +387,9 @@ fits and the mode's rate told to the display (a size beyond 60 Hz included);
 `gpu-edid-timing` checks the size rule against one fixture table that the app's
 check also reads;
 `gpu-present-pacer` runs the display link's decisions (the 60 and 120 steps as
-the guest's rate changes, steady, speeding-up and alternating guests with the
-bound on the changes, the wake, the sleep, the bounded retry of a present that
+the guest's rate changes, steady, speeding-up and alternating guests, frames
+early and late in groups, the two seconds between changes and the bound on the
+changes, the wake, the sleep, the bounded retry of a present that
 found no drawable across a link made again, and the ceiling of Low Power Mode
 and of a mode that states neither rate) against a fake clock; `gpu-offscreen-display` counts each accepted
 guest update once; `HighRefreshTests` (in `andarium-core` and in
