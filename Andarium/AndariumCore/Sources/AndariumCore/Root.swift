@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+import Foundation
+
+/// What the Android release Andarium carries holds for root: a copy of its own
+/// ramdisk with Magisk patched in and the official Magisk app, in the release's
+/// `root/` directory. A release made before root has none, and the switch is
+/// then not offered. The runtime takes the ramdisk from the release itself and
+/// from no other file (`darwin/device/block/README.md`, "Boot selection"); the
+/// application reads here what it needs to install the app.
+public struct RootRelease: Equatable, Sendable {
+    /// Where the runtime finds the patched ramdisk, relative to the release.
+    public static let bootImage = "root/init_boot-magisk.img"
+
+    /// "v31.1".
+    public var versionName: String
+    /// Magisk's own version code, 31100 for v31.1: the daemon accepts a
+    /// manager app whose code is at least its own.
+    public var versionCode: Int
+    /// The unmodified official app, relative to the release.
+    public var apkPath: String
+
+    public init(versionName: String, versionCode: Int, apkPath: String) {
+        self.versionName = versionName
+        self.versionCode = versionCode
+        self.apkPath = apkPath
+    }
+
+    /// The `root` object of a release manifest (schema 8), or nil when the
+    /// release carries none or it is not one this reader accepts: a version
+    /// that is no positive integer, or a path that leaves the release's
+    /// `root/` directory.
+    public init?(manifest: Data) {
+        guard let object = try? JSONSerialization.jsonObject(with: manifest) as? [String: Any],
+            let root = object["root"] as? [String: Any],
+            let magisk = root["magisk"] as? [String: Any],
+            let name = magisk["version_name"] as? String, !name.isEmpty, name.count <= 32,
+            let number = magisk["version_code"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+            number.intValue >= 1,
+            let apk = root["apk"] as? [String: Any], let apkPath = apk["path"] as? String,
+            Self.isRootPath(apkPath),
+            let image = root["boot_image"] as? [String: Any], let imagePath = image["path"] as? String,
+            imagePath == Self.bootImage
+        else { return nil }
+        self.init(versionName: name, versionCode: number.intValue, apkPath: apkPath)
+    }
+
+    /// A release-relative path inside `root/`, with no dot segments.
+    static func isRootPath(_ path: String) -> Bool {
+        guard path.hasPrefix("root/"), path.count > "root/".count, path.count <= 128 else { return false }
+        return !path.split(separator: "/", omittingEmptySubsequences: false)
+            .contains { $0.isEmpty || $0 == "." || $0 == ".." }
+    }
+
+    /// The release in `folder`, when its manifest has a `root` object whose
+    /// two files are both there as regular files: a partial `root/` is no root.
+    public static func carried(in folder: URL, manifest: Data) -> RootRelease? {
+        guard let release = RootRelease(manifest: manifest) else { return nil }
+        func regular(_ path: String) -> Bool {
+            var isDirectory: ObjCBool = false
+            let url = folder.appendingPathComponent(path)
+            // A link is not the release's own file.
+            if (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) != nil { return false }
+            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && !isDirectory.boolValue
+        }
+        guard regular(bootImage), regular(release.apkPath) else { return nil }
+        return release
+    }
+
+    /// The Magisk app file inside the release `folder`.
+    public func apkURL(in folder: URL) -> URL { folder.appendingPathComponent(apkPath) }
+}
+
+/// The guest's root: the person's switch, and what the application keeps so
+/// that a start that cannot boot with Magisk does not trap the person
+/// (`RootFallbackRule`) and the Magisk app is put in once and not forced back
+/// (`RootInstallRule`). It belongs to the guest: erasing the guest returns it
+/// to off.
+public struct RootState: Equatable, Codable, Sendable {
+    /// What Home says of a root the application changed or paused itself.
+    public enum Attention: String, Codable, Sendable {
+        /// A start with root ended before Android booted: starts are without
+        /// root until the person decides.
+        case failedStart
+        /// The same, and the switch was turned off with it.
+        case turnedOffAfterFailure
+        /// The person stopped a start with root before Android booted.
+        case stoppedStart
+    }
+
+    /// The person's switch. Off for a new guest and for one stored before the
+    /// switch existed.
+    public var on = false
+    /// The last start booted the Magisk ramdisk. Written before the runtime is
+    /// handed the start, so that a process that ends in the guest's panic
+    /// still says which ramdisk it had.
+    public var rooted = false
+    /// What Home owes the person, if anything.
+    public var attention: Attention?
+    /// The version code the Magisk app had when this period of root being on
+    /// installed it or saw it; nil before. Turning root off ends the period.
+    public var appVersionCode: Int?
+    /// The application has put the Magisk app in this guest, or seen it there,
+    /// at some time. Turning root off does not clear it.
+    public var appEverHandled = false
+
+    public init() {}
+
+    /// Starts are without root while a failed start waits for the person.
+    public var paused: Bool { attention == .failedStart }
+
+    /// The switch changed by the person. Off ends the period (and what waited
+    /// for a decision); on, with nothing pending, begins a new one.
+    public mutating func setOn(_ on: Bool) {
+        self.on = on
+        attention = nil
+        if !on { appVersionCode = nil }
+    }
+
+    /// "Try with root again": the pause ends and the next start boots Magisk.
+    public mutating func tryAgain() {
+        on = true
+        attention = nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case on, rooted, attention, appVersionCode, appEverHandled
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        on = try values.decodeIfPresent(Bool.self, forKey: .on) ?? false
+        rooted = try values.decodeIfPresent(Bool.self, forKey: .rooted) ?? false
+        attention = try? values.decodeIfPresent(Attention.self, forKey: .attention)
+        appVersionCode = try values.decodeIfPresent(Int.self, forKey: .appVersionCode)
+        appEverHandled = try values.decodeIfPresent(Bool.self, forKey: .appEverHandled) ?? false
+    }
+}
+
+extension Guest {
+    /// Whether a start in `mode` boots the Magisk ramdisk: a normal start, with
+    /// the switch on, in a release that carries root, and no failed start
+    /// waiting for the person. `withoutRootOnce` is the person's "Start without
+    /// root" for this start alone.
+    public func bootsRooted(mode: StartMode, releaseCarriesRoot: Bool, withoutRootOnce: Bool = false) -> Bool {
+        mode == .normal && root.on && releaseCarriesRoot && !root.paused && !withoutRootOnce
+    }
+}
+
+/// The Magisk app and how the guest is asked about it.
+public enum MagiskApp {
+    public static let package = "com.topjohnwu.magisk"
+
+    /// One line per package whose name contains the filter:
+    /// `package:com.topjohnwu.magisk versionCode:31100`.
+    static let probeCommand = "pm list packages --show-versioncode \(package)"
+    /// Opens the app's launcher activity on the guest's screen.
+    static let openCommand =
+        "am start --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p \(package)"
+
+    /// What the guest says of the app.
+    public enum Presence: Equatable, Sendable {
+        case absent
+        case installed(versionCode: Int)
+        /// The guest could not be asked, or its answer was not the line.
+        case unknown
+    }
+
+    /// The presence an answer states. Only the exact package counts, and a
+    /// line that is not `package:<name> versionCode:<digits>` is no answer.
+    static func presence(of output: GuestShellOutput) -> Presence {
+        guard output.exitCode == 0 else { return .unknown }
+        var found: Presence = .absent
+        for line in output.text.split(whereSeparator: \.isNewline) {
+            let words = line.split(separator: " ")
+            guard words.count >= 2, words[0].hasPrefix("package:") else { return .unknown }
+            guard words[0].dropFirst("package:".count) == package else { continue }
+            guard words[1].hasPrefix("versionCode:"),
+                let code = Int(words[1].dropFirst("versionCode:".count)), code >= 0
+            else { return .unknown }
+            found = .installed(versionCode: code)
+        }
+        return found
+    }
+
+    public static func presence(shell: any GuestShell, limit: Duration) async -> Presence {
+        guard let output = try? await shell.run(probeCommand, limit: limit) else { return .unknown }
+        return presence(of: output)
+    }
+
+    /// Opens the app; whether the guest took the command. Nothing depends on it.
+    @discardableResult
+    public static func open(shell: any GuestShell, limit: Duration) async -> Bool {
+        guard let output = try? await shell.run(openCommand, limit: limit) else { return false }
+        return output.exitCode == 0
+    }
+
+    static let uninstallCommand = "pm uninstall --user 0 \(package)"
+
+    /// Removes the app; whether the guest says it did.
+    public static func uninstall(shell: any GuestShell, limit: Duration) async -> Bool {
+        guard let output = try? await shell.run(uninstallCommand, limit: limit) else { return false }
+        return output.exitCode == 0
+    }
+}
