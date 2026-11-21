@@ -304,6 +304,22 @@ if(TARGET uml_gpu_service)
     set_tests_properties(gpu-venus-pipeline-binary-requests PROPERTIES
         SKIP_RETURN_CODE 77)
 
+    # A handle the specification does not allow to be VK_NULL_HANDLE reaches its
+    # handler as a null pointer when the guest sends object id 0, because the
+    # codec refuses id 0 only for the first argument of a command; a shader
+    # stage that names no shader or entry point reaches the runtime's hash, and
+    # a host image copy names a mip level, aspect, region and row length the
+    # image does not have. Each is refused and the host lives on, and a request
+    # the specification allows is served. The faults lie past the end of a
+    # heap block, so the test runs each row in a child under Guard Malloc.
+    uml_add_gpu_unit_test(gpu-venus-required-handles
+        uml_gpu_venus_required_handles_tests
+        venus_required_handles_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries}
+        VULKAN UNIT_DIRECTORY TIMEOUT 900)
+    set_tests_properties(gpu-venus-required-handles PROPERTIES
+        SKIP_RETURN_CODE 77)
+
     # A blob larger than the shared memory behind it is refused where it is
     # created, for Venus memory (POSIX shared memory and the unlinked files iOS
     # uses) and for a coherent GL buffer. The render server is a thread of the
