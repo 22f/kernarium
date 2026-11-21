@@ -126,8 +126,8 @@ bool passListener(int connection, int listener) {
     return sent == 1;
 }
 
-// Whether the session's end shows on its connection: it has gone, or it sent bytes, which are read and dropped (the
-// service sends none, and a peer that did cannot lengthen the session or make it end).
+// Whether the session's connection has ended: the service closed it, or it failed. Bytes on it are read and dropped
+// and do not end the session (the service sends none, and a peer that did cannot lengthen the session or make it end).
 bool sessionEnded(int connection, short events) {
     if ((events & (POLLHUP | POLLERR | POLLNVAL | POLLRDHUP)) != 0) return true;
     if ((events & POLLIN) == 0) return false;
