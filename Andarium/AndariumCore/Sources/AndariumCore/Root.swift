@@ -29,21 +29,36 @@ public struct RootRelease: Equatable, Sendable {
 
     /// The `root` object of a release manifest (schema 8), or nil when the
     /// release carries none or it is not one this reader accepts: a version
-    /// that is no positive integer, or a path that leaves the release's
+    /// that is no positive integer, a name that is no single short line, or a path that leaves the release's
     /// `root/` directory.
     public init?(manifest: Data) {
         guard let object = try? JSONSerialization.jsonObject(with: manifest) as? [String: Any],
             let root = object["root"] as? [String: Any],
             let magisk = root["magisk"] as? [String: Any],
-            let name = magisk["version_name"] as? String, !name.isEmpty, name.count <= 32,
-            let number = magisk["version_code"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
-            number.intValue >= 1,
+            let name = magisk["version_name"] as? String, Self.isVersionName(name),
+            let number = magisk["version_code"] as? NSNumber, Self.isVersionCode(number),
             let apk = root["apk"] as? [String: Any], let apkPath = apk["path"] as? String,
             Self.isRootPath(apkPath),
             let image = root["boot_image"] as? [String: Any], let imagePath = image["path"] as? String,
             imagePath == Self.bootImage
         else { return nil }
         self.init(versionName: name, versionCode: number.intValue, apkPath: apkPath)
+    }
+
+    /// One line of at most 32 bytes: the name goes into a bug report's line.
+    static func isVersionName(_ name: String) -> Bool {
+        guard !name.isEmpty, name.utf8.count <= 32 else { return false }
+        return !name.unicodeScalars.contains {
+            CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0)
+        }
+    }
+
+    /// An integer from 1 to what an Android version code holds (2^31 - 1),
+    /// written as one: 3.5, 31100.0 and a boolean are not.
+    static func isVersionCode(_ number: NSNumber) -> Bool {
+        guard CFGetTypeID(number) != CFBooleanGetTypeID(), !CFNumberIsFloatType(number) else { return false }
+        guard let code = Int(exactly: number) else { return false }
+        return code >= 1 && code <= Int(Int32.max)
     }
 
     /// A release-relative path inside `root/`, with no dot segments.

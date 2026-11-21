@@ -34,10 +34,24 @@ struct RootReleaseTests {
     @Test func aReleaseWithoutRootOrWithAnUnreadableOneIsNoRoot() {
         #expect(RootRelease(manifest: manifest(withRoot: false)) == nil)
         #expect(RootRelease(manifest: Data("not json".utf8)) == nil)
-        for version: Any in [0, -1, "31100", true, 3.5 as Double] where !(version is Double) {
+        for version: Any in [0, -1, "31100", true, 3.5, 1e30, 2_147_483_648, UInt64.max] {
             #expect(RootRelease(manifest: manifest(version: version)) == nil, "version \(version)")
         }
+        #expect(RootRelease(manifest: manifest(version: 2_147_483_647))?.versionCode == 2_147_483_647)
+        // A number written as a fraction or an exponent is no integer, whatever its value.
+        for written in ["31100.0", "3.11e4", "31100.5"] {
+            let text = String(decoding: manifest(), as: UTF8.self).replacingOccurrences(
+                of: "\"version_code\":31100", with: "\"version_code\":\(written)")
+            #expect(text.contains(written))
+            #expect(RootRelease(manifest: Data(text.utf8)) == nil, "written \(written)")
+        }
         #expect(RootRelease(manifest: manifest(name: "")) == nil)
+        // The name is one short line: it becomes a line of a bug report.
+        for name in ["v31.1\nroot: on", "v31.1\r", "v\u{2028}31", "v\u{85}31", "v\u{0}31", String(repeating: "\u{E9}", count: 17)] {
+            #expect(RootRelease(manifest: manifest(name: name)) == nil, "name \(name.debugDescription)")
+        }
+        #expect(RootRelease(manifest: manifest(name: String(repeating: "v", count: 32))) != nil)
+        #expect(RootRelease(manifest: manifest(name: String(repeating: "v", count: 33))) == nil)
         // The patched image is the one name the runtime reads.
         #expect(RootRelease(manifest: manifest(image: "root/other.img")) == nil)
         for path in ["Magisk.apk", "/root/Magisk.apk", "root/../Magisk.apk", "root//Magisk.apk", "root/./a.apk", "root/", "other/Magisk.apk"] {
