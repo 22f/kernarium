@@ -71,8 +71,8 @@ final class TranslatedLibrariesUITests: XCTestCase {
         let toggle = app.switches[Self.identifier].firstMatch
         reveal(toggle, in: app)
         XCTAssertEqual(value(toggle), "1", "AOT starts on")
-        // VoiceOver reads the switch by its title, and the note follows as the hint.
-        XCTAssertEqual(toggle.label, Self.title, "the switch's label is \(toggle.label)")
+        // VoiceOver reads the title and then the note, both as the label.
+        XCTAssertEqual(toggle.label, "\(Self.title), \(Self.note)", "the switch's label is \(toggle.label)")
         XCTAssertTrue(text(Self.note, in: app).exists, "the note under the title is missing")
         XCTAssertFalse(text(Self.jitNote, in: app).exists, "the JIT line shows while JIT is off")
 
@@ -102,7 +102,8 @@ final class TranslatedLibrariesUITests: XCTestCase {
         let app = launch("home-aot", words: ["-aotTitle", "translated", "-aotNote", "explained"])
         let toggle = app.switches[Self.identifier].firstMatch
         reveal(toggle, in: app)
-        XCTAssertEqual(toggle.label, Self.explainedTitle, "the switch's label is \(toggle.label)")
+        XCTAssertEqual(
+            toggle.label, "\(Self.explainedTitle), \(Self.explainedNote)", "the switch's label is \(toggle.label)")
         XCTAssertTrue(text(Self.explainedNote, in: app).exists, "the longer note is missing")
         XCTAssertFalse(text(Self.note, in: app).exists, "the short note shows beside the longer one")
     }
@@ -131,6 +132,8 @@ final class TranslatedLibrariesUITests: XCTestCase {
         reveal(toggle, in: app)
         XCTAssertTrue(text(Self.jitNote, in: app).waitForExistence(timeout: 10), "no word says AOT is not used")
         XCTAssertFalse(text(Self.note, in: app).exists, "the note shows beside the reason")
+        // The reason is heard with the title, not as a hint that hints-off drops.
+        XCTAssertEqual(toggle.label, "\(Self.title), \(Self.jitNote)", "the dimmed switch's label is \(toggle.label)")
         // A touch on the dimmed switch changes nothing.
         tapControl(of: toggle)
         Thread.sleep(forTimeInterval: 1)
@@ -144,6 +147,7 @@ final class TranslatedLibrariesUITests: XCTestCase {
         let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: text(Self.jitNote, in: app))
         wait(for: [gone], timeout: 10)
         XCTAssertTrue(text(Self.note, in: app).waitForExistence(timeout: 10), "the note did not come back")
+        XCTAssertEqual(toggle.label, "\(Self.title), \(Self.note)", "the label did not follow: \(toggle.label)")
         // The switch works again.
         tapControl(of: toggle)
         expect(toggle, value: "0", "the switch stayed dimmed after JIT went off")

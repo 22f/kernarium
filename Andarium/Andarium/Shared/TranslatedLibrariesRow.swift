@@ -59,9 +59,9 @@ enum TranslatedLibrariesWords {
 /// ahead of time (`AppModel.translatedLibrariesOn`), the second row of Home's
 /// Performance section, between "120 Hz" and JIT. It is drawn only in a build
 /// that carries the translated-code framework, and applies when Android next
-/// starts: Home shows only while no guest runs. While the next start runs on the JIT engine, which
-/// does not use the translated code, the row is dimmed, its switch cannot be
-/// changed, and the line under the title says so.
+/// starts: Home shows only while no guest runs. While the next start runs on
+/// the JIT engine, which does not use the translated code, the row is dimmed,
+/// its switch cannot be changed, and the line under the title says so.
 struct TranslatedLibrariesRow: View {
     @Environment(AppModel.self) private var model
 
@@ -80,9 +80,10 @@ struct TranslatedLibrariesRow: View {
             .disabled(unused)
             .accessibilityIdentifier("home-aot-switch")
         }
-        // VoiceOver says the name first and the line under it after the state.
-        .accessibilityLabel(title)
-        .accessibilityHint(detail)
+        // VoiceOver says the name first and then the line under it (the note, or
+        // why the switch is dimmed), as a label, so that it is heard with hints
+        // off; the switch's own state follows.
+        .accessibilityLabel("\(title), \(detail)")
         .id("aot")
     }
 }

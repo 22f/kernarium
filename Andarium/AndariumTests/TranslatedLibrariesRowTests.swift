@@ -65,6 +65,33 @@ struct TranslatedLibrariesRowTests {
         }
     }
 
+    /// Every accessibility node under `node`.
+    private func nodes(in node: NSObject, depth: Int = 0) -> [NSObject] {
+        guard depth < 64 else { return [] }
+        var children = (node.accessibilityElements ?? []).compactMap { $0 as? NSObject }
+        if let view = node as? UIView { children += view.subviews }
+        return [node] + children.flatMap { nodes(in: $0, depth: depth + 1) }
+    }
+
+    /// The nodes of the AOT row (the ones whose label starts with its title)
+    /// once the label `expected` is there, or after ten seconds. SwiftUI
+    /// publishes its accessibility elements only while application
+    /// accessibility is on (the Simulator preference
+    /// `ApplicationAccessibilityEnabled`, as `Kernarium/scripts/run-ios-simulator-tests.sh`
+    /// sets it).
+    private func aotRow(in view: UIView, expecting expected: String) async -> [NSObject] {
+        var found: [NSObject] = []
+        let deadline = ContinuousClock.now + .seconds(10)
+        repeat {
+            view.setNeedsLayout()
+            view.layoutIfNeeded()
+            found = nodes(in: view).filter { ($0.accessibilityLabel ?? "").hasPrefix("AOT") }
+            if found.contains(where: { $0.accessibilityLabel == expected }) { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        } while ContinuousClock.now < deadline
+        return found
+    }
+
     /// Hosts the section the rows are in, on the application's window at a
     /// phone's width. A section that is not there draws nothing, so the caller
     /// says how many switches to wait for, and an absent one is given the time
@@ -208,11 +235,21 @@ struct TranslatedLibrariesRowTests {
         // The choice itself is kept as it was.
         #expect(control.isOn)
         #expect(model.translatedLibrariesOn)
+        // VoiceOver hears the title and then the reason, as the label and so
+        // with hints off, and nothing is left to a hint that would repeat it.
+        let reason = "AOT, Not used while JIT is on."
+        let dimmed = await aotRow(in: controller.view, expecting: reason)
+        #expect(Set(dimmed.compactMap(\.accessibilityLabel)) == [reason], "\(dimmed.map(\.accessibilityLabel))")
+        #expect(dimmed.allSatisfy { ($0.accessibilityHint ?? "").isEmpty }, "the reason is also a hint")
 
         // The JIT off, or no debugger to prepare it: the start runs on the engine
         // that uses them, and the switch works.
         model.jitOn = false
         #expect(await eventually { switches(in: controller.view).first?.isEnabled == true })
+        let note = "AOT, Faster. Turn this off only to troubleshoot."
+        let working = await aotRow(in: controller.view, expecting: note)
+        #expect(Set(working.compactMap(\.accessibilityLabel)) == [note], "\(working.map(\.accessibilityLabel))")
+        #expect(working.allSatisfy { ($0.accessibilityHint ?? "").isEmpty }, "the note is also a hint")
         model.jitOn = true
         driver.debuggerAttached = false
         model.refreshJit()
