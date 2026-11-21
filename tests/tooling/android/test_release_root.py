@@ -240,6 +240,27 @@ class AcceptanceTests(unittest.TestCase):
             self.run_installer("--source", str(plain.release), "--print-acceptance")
         self.assertEqual(printed.getvalue(), plain.acceptance.read_text())
 
+    def test_the_record_that_is_checked_is_the_record_that_was_read(self) -> None:
+        # The descriptor a candidate prints names the record that was read, and the pin
+        # and the deep check apply to that record, not to whatever the manifest path
+        # holds when the deep check comes: the manifest is replaced between the two.
+        rooted = self.make()
+        later = copy.deepcopy(rooted.manifest)
+        later["root"]["magisk"]["version_name"] = "v98.0"
+        later["root"]["apk"]["path"] = "root/Magisk-v98.0.apk"
+        text = json.dumps(later, indent=2, sort_keys=True) + "\n"
+        real = release_common.verify_inventory
+
+        def swapping(*arguments, **keywords):
+            real(*arguments, **keywords)
+            (rooted.release / "release-manifest.json").write_text(text)
+
+        with tools_stubbed(), mock.patch.object(release_common, "verify_inventory", swapping):
+            manifest = release_common.verify_release(
+                rooted.release, rooted.android_root, acceptance_path=rooted.acceptance,
+                semantic=True, pin=rooted.pin)
+        self.assertEqual(manifest["root"], rooted.manifest["root"])
+
     def test_installing_an_accepted_release_is_checked_against_its_descriptor_alone(self) -> None:
         # History is not held to a pin that has moved: the descriptor binds the record.
         rooted = self.make()
@@ -581,7 +602,12 @@ class RootVerificationTests(unittest.TestCase):
                     (fixture.release / "release-manifest.json").read_text()) if not (
                         fixture.release / "release-manifest.json").is_symlink() else fixture.manifest
                 with self.assertRaisesRegex(SystemExit, pattern):
-                    release_common.verify_root(fixture.release, manifest, pin=None)
+                    if label == "a manifest that is a link":
+                        # The manifest read by path is the standalone verifier's: the
+                        # release tooling is handed the manifest it has already read.
+                        magisk_image.verify_release_root(fixture.release, SystemExit)
+                    else:
+                        release_common.verify_root(fixture.release, manifest, pin=None)
                 refused = subprocess.run(
                     [sys.executable, "-B", str(TOOLS / "verify-magisk-boot.py"), "--release", str(fixture.release)],
                     capture_output=True, text=True, check=False)

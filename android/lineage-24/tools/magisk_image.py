@@ -48,6 +48,9 @@ Error = android_image.Error
 ANDROID_ROOT = Path(__file__).resolve().parents[1]
 PIN_PATH = ANDROID_ROOT / "metadata/magisk.env"
 
+# The release manifest schema that carries a root record (and the accepted descriptor
+# schema that binds one).
+ROOT_SCHEMA = 8
 ROOT_DIRECTORY = "root"
 PATCHED_PATH = f"{ROOT_DIRECTORY}/init_boot-magisk.img"
 PATCHED_PAYLOAD = ("magisk-init-boot", "boot-image-v4-kernelless")
@@ -800,18 +803,23 @@ def verify_patched(
         )
 
 
-def verify_release_root(release_root: Path, error: Error, pin: Pin | None = None) -> dict:
+def verify_release_root(
+    release_root: Path, error: Error, pin: Pin | None = None, manifest: dict | None = None
+) -> dict:
     """Verify the root files of a release directory against its own manifest.
 
     The manifest's root record is well formed, both files are the recorded
     ones, the recorded stock digests are those of the release's own init_boot
     partition, and the patched image verifies against that partition and the
     APK. With a pin, the record is the pinned Magisk release. Returns the record.
+    `manifest` is the manifest as the caller already read it: its record is the one
+    verified, and the file is not read again.
     """
-    manifest_path = real_path_below(release_root, MANIFEST, error)
-    manifest = contract_checks.parse_json_object(
-        read_file(manifest_path, MAX_MANIFEST, "the release manifest", error),
-        str(manifest_path), error)
+    if manifest is None:
+        manifest_path = real_path_below(release_root, MANIFEST, error)
+        manifest = contract_checks.parse_json_object(
+            read_file(manifest_path, MAX_MANIFEST, "the release manifest", error),
+            str(manifest_path), error)
     if "root" not in manifest:
         raise error("the release manifest has no root record")
     record = validate_root_record(manifest["root"], error)

@@ -186,8 +186,11 @@ class Fixture:
         self.app = self.package()
 
     def set_descriptors(
-        self, trees=None, schema: int = 7, kernel_tree: str = TREE, release_id: str = RELEASE_ID
+        self, trees=None, schema: int = 7, kernel_tree: str = TREE, release_id: str = RELEASE_ID,
+        root: str | None = None,
     ) -> None:
+        """The accepted descriptors, committed. `root` is the root record digest a schema 8
+        descriptor binds (a digest, or "none"); without it a schema 8 descriptor binds nothing."""
         trees = self.trees if trees is None else trees
         lines = [
             f"LINEAGE24_ACCEPTED_SCHEMA={schema}",
@@ -196,13 +199,17 @@ class Fixture:
         ]
         if schema >= 7:
             lines.append(f"LINEAGE24_ACCEPTED_INPUT_TREES='{release_inputs.render_trees(trees)}'")
+        if root is not None:
+            lines.append(f"LINEAGE24_ACCEPTED_ROOT_RECORD_SHA256='{root}'")
         write(self.repo, DESCRIPTOR, "\n".join(lines) + "\n")
         write(
             self.repo, KERNEL_DESCRIPTOR,
             f"UML_KERNEL_ARTIFACT_RELEASE_ID='{KERNEL_ID}'\n"
             f"UML_KERNEL_ARTIFACT_RELEASE='{KERNEL_RELEASE}'\n"
             f"UML_KERNEL_ARTIFACT_FINAL_TREE='{kernel_tree}'\n")
-        commit(self.repo, "accept the artifacts")
+        git(self.repo, "add", "-A")
+        if git(self.repo, "status", "--porcelain"):
+            commit(self.repo, "accept the artifacts")
         self.install(release_id)
 
     def install(self, release_id: str = RELEASE_ID, disk: bytes = DISK, root: dict | None = None) -> Path:
@@ -406,6 +413,7 @@ class CheckTests(unittest.TestCase):
         """The accepted release carries root files (`installed`, the default record), and the
         staged and the packaged system are the staged ones given."""
         record = root_record() if installed is None else installed
+        self.fixture.set_descriptors(schema=8, root=magisk_image.root_record_digest(record))
         self.fixture.install(root=record)
         self.fixture.stage(**{"root": record, **staged})
         self.fixture.app = self.fixture.package()
@@ -413,11 +421,14 @@ class CheckTests(unittest.TestCase):
     def test_the_root_files_of_the_accepted_release_pass(self) -> None:
         self.with_root()
         self.passes(self.fixture.run())
-        # A release without them, staged without them, passes as before.
-        self.fixture.install()
-        self.fixture.stage()
-        self.fixture.app = self.fixture.package()
-        self.passes(self.fixture.run())
+        # A release without them, staged without them, passes as before: under a
+        # descriptor that binds no root record, and under a schema 7 one.
+        for descriptor in (dict(schema=8, root="none"), dict(schema=7)):
+            with self.subTest(**descriptor):
+                self.fixture.set_descriptors(**descriptor)
+                self.fixture.stage()
+                self.fixture.app = self.fixture.package()
+                self.passes(self.fixture.run())
 
     def test_a_staged_system_without_the_root_files_of_the_accepted_release_fails(self) -> None:
         self.with_root(root=None)
@@ -521,7 +532,6 @@ class CheckTests(unittest.TestCase):
         # The installed release is the reference of the check, so it must be that one.
         record = root_record()
         self.with_root()
-        descriptor = (self.repo / DESCRIPTOR).read_text()
         other = root_record(apk=b"another apk")
         for bound, accepted in (
             (magisk_image.root_record_digest(record), True),
@@ -529,20 +539,48 @@ class CheckTests(unittest.TestCase):
             (magisk_image.root_record_digest(other), False),
         ):
             with self.subTest(bound=bound[:8]):
-                write(self.repo, DESCRIPTOR, descriptor + f"LINEAGE24_ACCEPTED_ROOT_RECORD_SHA256='{bound}'\n")
-                commit(self.repo, f"bind {bound[:8]}")
+                self.fixture.set_descriptors(schema=8, root=bound)
+                self.fixture.install(root=record)
                 result = self.fixture.run(app=False, decision=RELEASE_ID)
                 if accepted:
                     self.passes(result)
                 else:
                     self.fails(result, "root record is not the one the accepted descriptor binds")
 
+    def test_a_descriptor_of_schema_6_or_7_admits_no_root_files(self) -> None:
+        # The descriptor of a release without root files names none, so one release
+        # with them and one without cannot both pass under it.
+        record = root_record()
+        for schema in (6, 7):
+            with self.subTest(schema=schema):
+                self.fixture.set_descriptors(schema=schema)
+                self.fixture.install(root=record)
+                self.fixture.stage(root=record)
+                self.fixture.app = self.fixture.package()
+                self.fails(self.fixture.run(decision=RELEASE_ID), f"descriptor is schema {schema}",
+                           "admits no root files")
+        # A release without them still passes under a schema 7 descriptor.
+        self.fixture.set_descriptors(schema=7)
+        self.fixture.stage()
+        self.fixture.app = self.fixture.package()
+        self.passes(self.fixture.run())
+
+    def test_a_schema_8_descriptor_must_bind_the_root_record_or_its_absence(self) -> None:
+        record = root_record()
+        for label, installed in (("a release with root files", record), ("a release without", None)):
+            with self.subTest(label):
+                self.fixture.set_descriptors(schema=8)
+                self.fixture.install(root=installed)
+                self.fixture.stage(root=installed)
+                self.fixture.app = self.fixture.package()
+                self.fails(self.fixture.run(decision=RELEASE_ID), "binds no root record")
+
     def test_a_root_file_no_record_declares_fails(self) -> None:
         self.with_root()
         (self.repo / ".build/andarium-system/root/extra.bin").write_bytes(b"x")
         self.fails(self.fixture.run(app=False, decision=RELEASE_ID), "holds root files the accepted release does not")
         # A root/ directory in a system whose release has no root files.
-        self.fixture.install()
+        self.fixture.set_descriptors()
         self.fixture.stage()
         (self.repo / ".build/andarium-system/root").mkdir()
         (self.repo / ".build/andarium-system/root/init_boot-magisk.img").write_bytes(ROOT_PATCHED)

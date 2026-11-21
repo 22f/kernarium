@@ -1470,7 +1470,9 @@ descriptor. `install-release.py --print-acceptance` also checks the candidate's
 Magisk release against the tracked pin; an accepted release installed later is
 history and is checked against its descriptor alone.
 `scripts/check-embedded-artifacts.py` ties the staged and the packaged root files
-to the installed accepted release's.
+to the installed accepted release's, and that release to the descriptor: a
+schema 6 or 7 descriptor admits no root files, and a schema 8 one must name the
+installed record's digest, or `none`.
 
 ### Superseded releases
 

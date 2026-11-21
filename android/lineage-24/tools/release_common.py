@@ -45,7 +45,7 @@ parse_env = _CHECKS.parse_env
 # a release is built as the newest schema.
 LEGACY_SCHEMA_VERSION = 6
 INPUT_TREES_SCHEMA = 7
-ROOT_SCHEMA = 8
+ROOT_SCHEMA = magisk_image.ROOT_SCHEMA
 SCHEMA_VERSION = ROOT_SCHEMA
 SCHEMA_VERSIONS = (LEGACY_SCHEMA_VERSION, INPUT_TREES_SCHEMA, ROOT_SCHEMA)
 ROOT_KEY = "root"
@@ -807,8 +807,11 @@ def verify_root(release_root: Path, manifest: dict, *, pin: Path | None) -> None
     """
     if ROOT_KEY not in manifest:
         return
+    # The record verified is the manifest's own, as already read and compared with the
+    # descriptor: a manifest the path holds later is not what was accepted.
     magisk_image.verify_release_root(
-        release_root, error, magisk_image.read_pin(pin, error) if pin is not None else None
+        release_root, error, magisk_image.read_pin(pin, error) if pin is not None else None,
+        manifest,
     )
 
 

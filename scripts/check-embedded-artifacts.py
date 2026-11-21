@@ -444,15 +444,46 @@ def installed_release(repo, report, descriptor, release_id):
             f"{installed / LAYOUT}: system_disk.sha256 must be 64 lowercase hexadecimal digits",
         )
         return None
-    bound = descriptor.get(ROOT_RECORD_KEY)
-    if bound is not None and bound != magisk_image.root_record_digest(manifest.get("root")):
-        report.error(
-            "the installed root record is not the one the accepted descriptor binds",
-            f"{installed / MANIFEST} and {ANDROID_DESCRIPTOR} ({ROOT_RECORD_KEY}) disagree: install "
-            "the accepted release again",
-        )
+    if not root_binding_holds(report, descriptor, manifest, installed / MANIFEST):
         return None
     return digest, manifest.get("root")
+
+
+def root_binding_holds(report, descriptor, manifest, installed):
+    """The accepted descriptor and the installed release agree on the root files. A
+    schema 6 or 7 descriptor names none, so the release has no root record; a schema
+    8 descriptor names the digest of its root record, or none. Without this a
+    release with root files and one without would both pass under one descriptor."""
+    schema = descriptor.get("LINEAGE24_ACCEPTED_SCHEMA", "")
+    bound = descriptor.get(ROOT_RECORD_KEY)
+    if not schema.isdigit():
+        report.error("the accepted descriptor names no schema", ANDROID_DESCRIPTOR)
+        return False
+    if int(schema) < magisk_image.ROOT_SCHEMA:
+        if bound is None and "root" not in manifest:
+            return True
+        report.error(
+            f"the accepted descriptor is schema {schema}, which admits no root files, but "
+            f"{'it binds a root record' if bound is not None else 'the installed release carries one'}",
+            f"{ANDROID_DESCRIPTOR} and {installed}: a release with root files is accepted by a "
+            f"schema {magisk_image.ROOT_SCHEMA} descriptor",
+        )
+        return False
+    if bound is None:
+        report.error(
+            f"the accepted descriptor is schema {schema} and binds no root record",
+            f"{ANDROID_DESCRIPTOR} must name {ROOT_RECORD_KEY}: the digest of the reviewed root "
+            "record, or none",
+        )
+        return False
+    if bound != magisk_image.root_record_digest(manifest.get("root")):
+        report.error(
+            "the installed root record is not the one the accepted descriptor binds",
+            f"{installed} and {ANDROID_DESCRIPTOR} ({ROOT_RECORD_KEY}) disagree: install "
+            "the accepted release again",
+        )
+        return False
+    return True
 
 
 def check_root_files(report, system, manifest, expected, label):
