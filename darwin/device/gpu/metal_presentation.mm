@@ -30,11 +30,6 @@
 namespace uml::gpu {
 namespace {
 
-/* A layer's own wait for a drawable is a second (CAMetalLayer's
- * nextDrawable): an acquisition that took this long and found none waited
- * it out, where one that failed at once did not. */
-constexpr std::chrono::milliseconds drawableTimeoutWait {900};
-
 /* The CPU fallback texture holds exactly the framebuffer, top row first. */
 [[nodiscard]] std::optional<ScanoutSampling> framebufferSampling(
     std::uint32_t width,
@@ -606,9 +601,8 @@ struct MetalPresentationState final :
     /* Draws the newest frame into the next drawable of a view, or, with no
      * view, of a layer that belongs to no window. It says when the frame is
      * owed and the view had no drawable or render pass to draw it into
-     * (DrawResult::unavailable, or stalled when the layer's own timeout was
-     * waited out), the one case in which the frame is neither shown nor
-     * retired and nothing else will ask for it again. */
+     * (DrawResult::unavailable), the one case in which the frame is neither
+     * shown nor retired and nothing else will ask for it again. */
     DrawResult draw(MTKView* view, CAMetalLayer* layer) noexcept
     {
         @autoreleasepool {
@@ -653,7 +647,6 @@ struct MetalPresentationState final :
                 MTLRenderPassDescriptor* pass = nil;
                 id<CAMetalDrawable> drawable = nil;
                 MTLClearColor clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
-                const auto acquireStart = std::chrono::steady_clock::now();
                 if (view != nil) {
                     pass = view.currentRenderPassDescriptor;
                     drawable = view.currentDrawable;
@@ -674,12 +667,7 @@ struct MetalPresentationState final :
                      * for draws it again itself (the result). */
                     std::lock_guard lock(presentationMutex);
                     presentationInFlight = false;
-                    /* A layer waits up to a second for a drawable that the
-                     * display holds (a stalled GPU), then gives none. */
-                    return std::chrono::steady_clock::now() - acquireStart >=
-                            drawableTimeoutWait ?
-                        DrawResult::stalled :
-                        DrawResult::unavailable;
+                    return DrawResult::unavailable;
                 }
                 if (useCpu) {
                     bool current = false;

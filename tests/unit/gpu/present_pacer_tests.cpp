@@ -17,14 +17,12 @@
 
 namespace {
 
-using uml::gpu::DrawOutcome;
 using uml::gpu::LinkFrameRate;
 using uml::gpu::PresentPacer;
 using uml::testing::require;
 
 constexpr LinkFrameRate high {80.0F, 120.0F, 120.0F};
 constexpr LinkFrameRate normal {60.0F, 60.0F, 60.0F};
-constexpr LinkFrameRate low {30.0F, 30.0F, 30.0F};
 
 /* The link as the display runs it, on a clock the test moves a millisecond at
  * a time: a guest that offers frames at a rate that can change, a link that
@@ -47,8 +45,6 @@ public:
     /* The next `count` draws find no drawable (a transient failure of the
      * view's drawable or render pass), and show nothing. */
     void failNextDraws(unsigned count) { failures_ = count; }
-    /* The next draw waits out the drawable's timeout and finds none. */
-    void stallNextDraw() { stalls_ = 1; }
     /* The link is made again, as when the scene it was on disconnects and
      * another activates before the next tick: the pacer wakes at once, with
      * whatever the display owes the newest frame. */
@@ -163,15 +159,10 @@ private:
         if (decision.present) {
             ++draws_;
             /* The tick draws, and says whether the drawable was there. */
-            const bool stalled = stalls_ > 0;
-            const bool unavailable = stalled || failures_ > 0;
-            if (stalled)
-                --stalls_;
-            else if (unavailable)
+            const bool unavailable = failures_ > 0;
+            if (unavailable)
                 --failures_;
-            pacer_.drew(stalled ? DrawOutcome::stalled :
-                    unavailable ? DrawOutcome::unavailable :
-                                  DrawOutcome::shown);
+            pacer_.drew(unavailable);
             if (!unavailable) {
                 ++presents_;
                 longestWait_ = std::max(longestWait_, now_ - waitingSince_);
@@ -203,7 +194,6 @@ private:
     std::uint64_t presents_ {};
     std::uint64_t draws_ {};
     unsigned failures_ {};
-    unsigned stalls_ {};
     std::uint64_t ticks_ {};
     std::uint64_t wakes_ {};
     bool waiting_ {};
@@ -225,11 +215,13 @@ void aLinkThatWakesAsksForTheFastestRateTheCeilingAllows()
     require(pacer.wake(2.5, 0, 99.0) == normal, "a 99 Hz ceiling is a 60 step");
     require(pacer.wake(2.6, 0, 100.0) == high, "a 100 Hz ceiling is the 120 step");
     require(pacer.wake(3.0, 0, 60.0) == normal, "a 60 Hz ceiling");
-    /* A mode between 30 and 60 is shown whole by the 60 step. */
-    require(pacer.wake(3.5, 0, 47.0) == normal, "a 47 Hz ceiling is a 60 step");
-    require(pacer.wake(3.6, 0, 30.5) == normal);
-    require(pacer.wake(4.0, 0, 30.0) == low, "a 30 Hz ceiling");
-    require(pacer.wake(5.0, 0, 0.0) == low, "no ceiling is the slowest step");
+    /* A display that reports neither 60 nor 120 gets the step it fits: the
+     * 120 step from 100 up, the 60 step for any lower rate, a mode of 47 Hz
+     * (a size too large for a 60 Hz timing), 30 Hz or none included. */
+    for (const double ceiling : {47.0, 31.0, 30.0, 1.0, 0.0})
+        require(pacer.wake(4.0, 0, ceiling) == normal, "under 100 is the 60 step");
+    for (const double ceiling : {100.0, 119.0, 120.0, 144.0})
+        require(pacer.wake(5.0, 0, ceiling) == high, "100 and over is the 120 step");
 }
 
 void aSixtyHertzGuestSettlesAtSixtyAndKeepsNoFasterLink()
@@ -280,101 +272,63 @@ void aGuestThatRendersFasterMakesTheLinkRiseAtOnce()
     require(link.requests().back() == high);
 }
 
-void aGuestThatSlowsDownMakesTheLinkFallInSteps()
+void aGuestThatSlowsDownMakesTheLinkFallAfterASustainedStretch()
 {
     Link link;
     link.setGuestRate(120.0);
     link.run(1.0);
     require(link.rate() == 120);
-    double at = link.now();
+    const double at = link.now();
     link.setGuestRate(60.0);
     link.run(1.5);
     require(link.rate() == 120, "not before a sustained stretch below");
     link.run(1.0);
     require(link.rate() == 60, "fell to 60");
+    require(link.requests().back() == normal);
     require(link.lastRequestAt() - at < 2.2, "within the fall window");
-    at = link.now();
-    link.setGuestRate(30.0);
-    link.run(2.5);
-    require(link.rate() == 30, "fell to 30");
-    require(link.requests().back() == low);
-    require(link.lastRequestAt() - at < 2.2);
-    /* A guest that goes straight from 120 to 30 passes 60 without stopping,
-     * or at most for a tick. */
-    Link straight;
-    straight.setGuestRate(120.0);
-    straight.run(1.0);
-    straight.setGuestRate(30.0);
-    straight.run(2.5);
-    require(straight.rate() == 30);
-}
-
-void aGuestThatSpeedsUpFromThirtyRisesToSixtyAndToOneHundredTwenty()
-{
-    Link link;
-    link.setGuestRate(30.0);
-    link.run(1.5);
-    require(link.rate() == 30);
-    link.setGuestRate(60.0);
-    link.run(0.6);
+    /* A slower guest stays on the 60 step, which is the lowest. */
+    link.setGuestRate(24.0);
+    link.run(6.0);
     require(link.rate() == 60);
-    link.setGuestRate(120.0);
-    link.run(0.6);
-    require(link.rate() == 120);
+    require(link.requests().back() == normal);
 }
 
 /* Where a link starts: asleep, so that it wakes at the fastest step ("high"),
- * or settled on the step of a slower guest first, the 30 step after 20 frames
- * a second and the 60 step after 45 ("low" and "mid"). */
-enum class Start { high, low, mid };
-constexpr Start allStarts[] = {Start::high, Start::low, Start::mid};
+ * or settled on the 60 step by a guest of 45 frames a second ("mid"). */
+enum class Start { high, mid };
+constexpr Start allStarts[] = {Start::high, Start::mid};
 
 void putOnStep(Link& link, Start start)
 {
-    switch (start) {
-    case Start::high:
+    if (start == Start::high)
         return;
-    case Start::low:
-        link.setGuestRate(20.0);
-        link.run(4.0);
-        require(link.rate() == 30, "the slow phase is on the 30 step");
-        return;
-    case Start::mid:
-        link.setGuestRate(45.0);
-        link.run(4.0);
-        require(link.rate() == 60, "the middle phase is on the 60 step");
-        return;
-    }
+    link.setGuestRate(45.0);
+    link.run(4.0);
+    require(link.rate() == 60, "the middle phase is on the 60 step");
 }
 
 /* The rule the steps follow. With the setting on, a guest that holds a rate
  * is shown at no fewer frames a second than with the setting off, which
- * shows every frame up to the 60 of its mode, beyond 2 frames a second; and a
- * guest at 63 or more has the 120 step. What a step shows is at most its own
- * rate, so the step is what is checked for any guest, and what is shown for
- * a guest well under it. */
+ * shows every frame up to the 60 of its mode: a guest of 60 or less is on the
+ * 60 step, which shows 60, and one at 63 or more has the 120 step. What a
+ * step shows is checked for a guest well under it. */
 void aSteadyGuestIsNeverShownFewerFramesThanTheSettingOffPathBeyondTwo()
 {
     for (const Start start : allStarts) {
-        for (const double guest : {20.0, 28.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0,
-                 36.0, 40.0, 45.0, 55.0, 60.0, 61.0, 62.0, 63.0, 65.0, 70.0,
-                 80.0, 100.0, 119.0, 120.0}) {
+        for (const double guest : {20.0, 30.0, 31.0, 33.0, 35.0, 45.0, 55.0,
+                 59.0, 60.0, 63.0, 65.0, 70.0, 80.0, 100.0, 119.0, 120.0}) {
             Link link;
             link.setJitter(0.0);
             putOnStep(link, start);
             link.setGuestRate(guest);
             link.run(6.0);
-            const double off = std::min(guest, 60.0);
-            if (static_cast<double>(link.rate()) < off - 2.0)
-                std::fprintf(stderr, "guest %.0f from start %d is on the %u step\n",
-                    guest, static_cast<int>(start), link.rate());
-            require(static_cast<double>(link.rate()) >= off - 2.0,
-                "a step under what the setting off shows, beyond 2");
+            if (guest <= 60.0)
+                require(link.rate() == 60, "a guest of 60 or less is on the 60 step");
             if (guest >= 63.0)
                 require(link.rate() == 120, "63 or more has the 120 step");
             /* A guest well under its step is shown whole. One near it can have
-             * two frames in a tick and none in the next, whatever the step
-             * is, so only its step is checked. */
+             * two frames in a tick and none in the next, whatever the step is,
+             * so only its step is checked. */
             if (guest > 0.8 * static_cast<double>(link.rate()))
                 continue;
             const auto frames = link.frames();
@@ -396,105 +350,130 @@ void aSteadyGuestIsNeverShownFewerFramesThanTheSettingOffPathBeyondTwo()
  * within 2 s. */
 void aGuestThatSpeedsUpToSixtyThreeOrMoreReachesTheHighStepWithinTwoSeconds()
 {
-    for (const Start start : {Start::low, Start::mid}) {
+    for (const double before : {24.0, 45.0, 58.0}) {
         for (const double guest : {63.0, 64.0, 65.0, 70.0, 90.0, 119.0}) {
             Link link;
-            putOnStep(link, start);
+            link.setGuestRate(before);
+            link.run(4.0);
             link.setGuestRate(guest);
             link.run(2.0);
             if (link.rate() != 120)
-                std::fprintf(stderr, "guest %.0f from start %d is on the %u step\n",
-                    guest, static_cast<int>(start), link.rate());
+                std::fprintf(stderr, "guest %.0f after %.0f is on the %u step\n",
+                    guest, before, link.rate());
             require(link.rate() == 120, "the 120 step within 2 s");
         }
     }
 }
 
-/* A guest that alternates between two rates across a step's band, in halves
- * of a second or less, stays on the higher step: a rise is quick, a fall
- * needs a sustained stretch below, so the link does not flip every second. */
-void aGuestThatAlternatesAcrossAStepBandStaysOnTheHigherStep()
+/* A steady speed-up changes the rate once: the rise measure supports the
+ * step it has risen to, so the fall measure (which lags it) is not asked. */
+void aSteadySpeedUpChangesTheRateOnce()
+{
+    struct Change {
+        double before;
+        double after;
+        unsigned step;
+    };
+    for (const Change change : {Change {50.0, 70.0, 120}, Change {25.0, 63.0, 120},
+             Change {30.0, 70.0, 120}, Change {55.0, 65.0, 120},
+             Change {58.0, 63.0, 120}, Change {45.0, 64.0, 120},
+             Change {60.0, 120.0, 120}, Change {20.0, 40.0, 60}}) {
+        Link link;
+        link.setGuestRate(change.before);
+        link.run(6.0);
+        const auto requests = link.requests().size();
+        link.setGuestRate(change.after);
+        link.run(8.0);
+        const auto changes = link.requests().size() - requests;
+        if (changes != (change.step == 120 ? 1U : 0U))
+            std::fprintf(stderr, "%.0f -> %.0f made %zu changes\n", change.before,
+                change.after, changes);
+        require(changes == (change.step == 120 ? 1U : 0U),
+            "one change for a speed-up over the threshold, none under it");
+        require(link.rate() == change.step);
+    }
+}
+
+/* A guest that alternates across the threshold changes the rate a bounded
+ * number of times: at most once in each half of a cycle, and one more (the
+ * step it settles on), whatever the pair, so that a fall measure and a rise
+ * measure that disagree cannot take the link up and down on every tick. The
+ * reviewers counted 169 changes in 12 s for 57 and 64 before the fall waited
+ * for the rise measure. */
+void aGuestThatAlternatesAcrossTheThresholdChangesTheRateAtMostOncePerHalfCycle()
 {
     struct Pair {
         double slow;
         double fast;
-        unsigned step;
     };
-    for (const Pair pair : {Pair {32.0, 36.0, 60}, Pair {31.0, 35.0, 60},
-             Pair {34.0, 38.0, 60}, Pair {30.0, 40.0, 60},
-             Pair {60.0, 80.0, 120}, Pair {62.0, 82.0, 120},
-             Pair {60.0, 120.0, 120}, Pair {70.0, 74.0, 120}}) {
-        for (const double period : {0.5, 1.0, 2.0}) {
+    for (const Pair pair : {Pair {57.0, 64.0}, Pair {58.0, 66.0}, Pair {50.0, 70.0},
+             Pair {40.0, 70.0}, Pair {20.0, 40.0}, Pair {60.0, 80.0},
+             Pair {62.0, 82.0}, Pair {60.0, 120.0}, Pair {30.0, 80.0}}) {
+        for (const double half : {0.25, 0.5, 1.0, 1.5, 2.0}) {
             for (const Start start : allStarts) {
                 Link link;
                 putOnStep(link, start);
                 const auto alternate = [&](double seconds) {
-                    for (double done = 0.0; done < seconds; done += period) {
+                    for (double done = 0.0; done < seconds; done += 2.0 * half) {
                         link.setGuestRate(pair.slow);
-                        link.run(period / 2.0);
+                        link.run(half);
                         link.setGuestRate(pair.fast);
-                        link.run(period / 2.0);
+                        link.run(half);
                     }
                 };
                 alternate(6.0);
                 const auto requests = link.requests().size();
-                alternate(8.0);
-                if (link.requests().size() != requests || link.rate() != pair.step)
+                alternate(12.0);
+                const auto changes = link.requests().size() - requests;
+                const auto bound = static_cast<std::size_t>(12.0 / half) + 1U;
+                if (changes > bound)
                     std::fprintf(stderr,
-                        "%.0f<->%.0f every %.1f s from start %d: %zu new requests, on the %u step\n",
-                        pair.slow, pair.fast, period, static_cast<int>(start),
-                        link.requests().size() - requests, link.rate());
-                require(link.requests().size() == requests,
-                    "the range did not change after settling");
-                require(link.rate() == pair.step, "the higher step");
+                        "%.0f/%.0f half %.2f s from start %d: %zu changes in 12 s, bound %zu\n",
+                        pair.slow, pair.fast, half, static_cast<int>(start), changes, bound);
+                require(changes <= bound, "more than one change per half cycle");
             }
         }
     }
 }
 
-/* A guest that speeds up after a slow second is shown at its rate: 45 after
- * 25 on the 30 step (a link held at 30 shows 30 of them). */
-void aGuestThatSpeedsUpToFortyFiveAfterASlowSecondIsShownAtFortyFive()
+/* A guest that alternates across the threshold in halves of a second or
+ * less, with its mean over it, stays on the 120 step and makes no change
+ * once the link has settled. */
+void aGuestThatAlternatesAboveTheThresholdOnAverageStaysOnTheHighStep()
 {
-    Link link;
-    link.setGuestRate(25.0);
-    link.run(2.0);
-    require(link.rate() == 30, "slow phase");
-    link.setGuestRate(45.0);
-    link.run(1.0);
-    const auto frames = link.frames();
-    const auto presents = link.presents();
-    link.run(1.0);
-    require(link.rate() == 60, "the link rose");
-    require((link.presents() - presents) * 10U >=
-                (link.frames() - frames) * 9U,
-        "nearly every frame of the second after the rise is presented");
-}
-
-/* The same at the 60 step: a guest at 85 after a slower phase. */
-void aGuestThatSpeedsUpToEightyFiveAfterASlowerPhaseIsShownAtEightyFive()
-{
-    Link link;
-    link.setGuestRate(50.0);
-    link.run(2.0);
-    require(link.rate() == 60);
-    link.setGuestRate(85.0);
-    link.run(1.0);
-    const auto frames = link.frames();
-    const auto presents = link.presents();
-    link.run(1.0);
-    require(link.rate() == 120, "the link rose");
-    require((link.presents() - presents) * 100U >=
-                (link.frames() - frames) * 85U,
-        "most of the frames of the second after the rise are presented");
+    for (const auto [slow, fast] : {std::pair {60.0, 80.0}, std::pair {62.0, 82.0},
+             std::pair {60.0, 120.0}, std::pair {70.0, 74.0}}) {
+        for (const double half : {0.25, 0.5, 1.0}) {
+            for (const Start start : allStarts) {
+                Link link;
+                putOnStep(link, start);
+                const auto alternate = [&](double seconds) {
+                    for (double done = 0.0; done < seconds; done += 2.0 * half) {
+                        link.setGuestRate(slow);
+                        link.run(half);
+                        link.setGuestRate(fast);
+                        link.run(half);
+                    }
+                };
+                alternate(6.0);
+                const auto requests = link.requests().size();
+                alternate(8.0);
+                if (link.requests().size() != requests || link.rate() != 120)
+                    std::fprintf(stderr, "%.0f<->%.0f half %.2f s from start %d changed\n",
+                        slow, fast, half, static_cast<int>(start));
+                require(link.requests().size() == requests);
+                require(link.rate() == 120, "the 120 step");
+            }
+        }
+    }
 }
 
 /* A steady guest makes no request after the link has settled. */
 void aSteadyGuestMakesNoLinkFlip()
 {
     for (const Start start : allStarts) {
-        for (const double guest : {20.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0,
-                 60.0, 61.0, 62.0, 63.0, 66.0, 80.0, 120.0}) {
+        for (const double guest : {20.0, 30.0, 45.0, 59.0, 60.0, 61.0, 62.0,
+                 63.0, 66.0, 80.0, 120.0}) {
             Link link;
             putOnStep(link, start);
             link.setGuestRate(guest);
@@ -556,19 +535,19 @@ void aRetryIsAPresentNoFrameAskedFor()
     PresentPacer pacer;
     (void)pacer.wake(0.0, 0, 120.0);
     require(pacer.tick(0.0083, 1, true, 120.0).present);
-    pacer.drew(DrawOutcome::unavailable);
+    pacer.drew(true);
     const auto retry = pacer.tick(0.0166, 1, false, 120.0);
     require(retry.present && !retry.sleep, "the retry presents");
-    pacer.drew(DrawOutcome::shown);
+    pacer.drew(false);
     const auto done = pacer.tick(0.0249, 1, false, 120.0);
     require(!done.present && !done.sleep, "a shown frame owes nothing");
     /* Never asleep while a retry is owed, though no frame has waited. */
     PresentPacer owing;
     (void)owing.wake(0.0, 0, 120.0);
     require(owing.tick(0.01, 1, true, 120.0).present);
-    owing.drew(DrawOutcome::unavailable);
+    owing.drew(true);
     require(owing.tick(0.5, 1, false, 120.0).present, "owed after 0.5 s");
-    owing.drew(DrawOutcome::shown);
+    owing.drew(false);
     require(owing.tick(0.51, 1, false, 120.0).sleep == false);
     require(owing.tick(0.7, 1, false, 120.0).sleep);
 }
@@ -618,22 +597,6 @@ void aLinkMadeAgainAndAgainDoesNotRenewTheRetries()
     require(link.presents() == 1 && link.draws() == 32);
 }
 
-/* A draw that waited out the drawable's timeout is not tried again: each try
- * would hold the main thread for as long. The next frame is drawn. */
-void aDrawThatWaitedOutTheDrawablesTimeoutIsNotRetried()
-{
-    Link link;
-    link.offer();
-    link.stallNextDraw();
-    link.run(0.5);
-    require(link.draws() == 1, "one draw, no retry");
-    require(link.presents() == 0);
-    require(link.asleep());
-    link.offer();
-    link.run(0.1);
-    require(link.presents() == 1 && link.draws() == 2, "the next frame is shown");
-}
-
 /* The display with no link retries after a delay it arranges: one delay at a
  * time, whatever frames arrive, and none when nothing is owed. */
 void theDelayedRetryOfADisplayWithNoLinkIsOneAtATime()
@@ -641,19 +604,19 @@ void theDelayedRetryOfADisplayWithNoLinkIsOneAtATime()
     PresentPacer pacer;
     require(!pacer.arrangeRetry(), "nothing owed, nothing arranged");
     pacer.frameArrived();
-    pacer.drew(DrawOutcome::unavailable);
+    pacer.drew(true);
     require(pacer.retryOwed());
     require(pacer.arrangeRetry(), "the first is arranged");
     /* More frames, more failed draws: still the one. */
     for (int frame = 0; frame < 100; ++frame) {
         pacer.frameArrived();
-        pacer.drew(DrawOutcome::unavailable);
+        pacer.drew(true);
         require(!pacer.arrangeRetry(), "a delay is pending already");
     }
     pacer.retryDelayRan();
     require(pacer.arrangeRetry(), "the next after the first ran");
     pacer.retryDelayRan();
-    pacer.drew(DrawOutcome::shown);
+    pacer.drew(false);
     require(!pacer.arrangeRetry(), "a frame shown owes nothing");
     /* The limit of a frame is thirty, however many delays it takes, and
      * delays alone do not renew it. */
@@ -661,7 +624,7 @@ void theDelayedRetryOfADisplayWithNoLinkIsOneAtATime()
     spent.frameArrived();
     unsigned draws = 0;
     for (int tries = 0; tries < 100; ++tries) {
-        spent.drew(DrawOutcome::unavailable);
+        spent.drew(true);
         ++draws;
         if (!spent.retryOwed())
             break;
@@ -670,7 +633,7 @@ void theDelayedRetryOfADisplayWithNoLinkIsOneAtATime()
     spent.retryDelayRan();
     require(!spent.retryOwed() && !spent.arrangeRetry(), "nothing more is owed");
     spent.frameArrived();
-    spent.drew(DrawOutcome::unavailable);
+    spent.drew(true);
     require(spent.retryOwed(), "a frame that arrives has its own");
 }
 
@@ -755,14 +718,14 @@ void theCeilingCapsTheLinkAndItRisesAgainWhenTheCeilingRises()
 void aWakeForgetsTheEvidenceOfTheLastBurst()
 {
     Link link;
-    link.setGuestRate(30.0);
+    link.setGuestRate(45.0);
     link.run(1.5);
-    require(link.rate() == 30);
+    require(link.rate() == 60);
     link.setGuestRate(0.0);
     link.run(0.5);
     require(link.asleep());
     /* The next burst is at 120, and the first request is the fastest step
-     * again, not the 30 the last burst ended on. */
+     * again, not the 60 the last burst ended on. */
     const auto before = link.requests().size();
     link.setGuestRate(120.0);
     link.run(0.2);
@@ -789,20 +752,17 @@ int main(int argc, char** argv)
             aOneHundredTwentyHertzGuestKeepsTheFastLink},
         {"aGuestThatRendersFasterMakesTheLinkRiseAtOnce",
             aGuestThatRendersFasterMakesTheLinkRiseAtOnce},
-        {"aGuestThatSlowsDownMakesTheLinkFallInSteps",
-            aGuestThatSlowsDownMakesTheLinkFallInSteps},
-        {"aGuestThatSpeedsUpFromThirtyRisesToSixtyAndToOneHundredTwenty",
-            aGuestThatSpeedsUpFromThirtyRisesToSixtyAndToOneHundredTwenty},
+        {"aGuestThatSlowsDownMakesTheLinkFallAfterASustainedStretch",
+            aGuestThatSlowsDownMakesTheLinkFallAfterASustainedStretch},
         {"aSteadyGuestIsNeverShownFewerFramesThanTheSettingOffPathBeyondTwo",
             aSteadyGuestIsNeverShownFewerFramesThanTheSettingOffPathBeyondTwo},
         {"aGuestThatSpeedsUpToSixtyThreeOrMoreReachesTheHighStepWithinTwoSeconds",
             aGuestThatSpeedsUpToSixtyThreeOrMoreReachesTheHighStepWithinTwoSeconds},
-        {"aGuestThatAlternatesAcrossAStepBandStaysOnTheHigherStep",
-            aGuestThatAlternatesAcrossAStepBandStaysOnTheHigherStep},
-        {"aGuestThatSpeedsUpToFortyFiveAfterASlowSecondIsShownAtFortyFive",
-            aGuestThatSpeedsUpToFortyFiveAfterASlowSecondIsShownAtFortyFive},
-        {"aGuestThatSpeedsUpToEightyFiveAfterASlowerPhaseIsShownAtEightyFive",
-            aGuestThatSpeedsUpToEightyFiveAfterASlowerPhaseIsShownAtEightyFive},
+        {"aSteadySpeedUpChangesTheRateOnce", aSteadySpeedUpChangesTheRateOnce},
+        {"aGuestThatAlternatesAcrossTheThresholdChangesTheRateAtMostOncePerHalfCycle",
+            aGuestThatAlternatesAcrossTheThresholdChangesTheRateAtMostOncePerHalfCycle},
+        {"aGuestThatAlternatesAboveTheThresholdOnAverageStaysOnTheHighStep",
+            aGuestThatAlternatesAboveTheThresholdOnAverageStaysOnTheHighStep},
         {"aSteadyGuestMakesNoLinkFlip", aSteadyGuestMakesNoLinkFlip},
         {"aDrawThatFindsNoDrawableIsRetriedUntilTheFrameIsShown",
             aDrawThatFindsNoDrawableIsRetriedUntilTheFrameIsShown},
@@ -813,8 +773,6 @@ int main(int argc, char** argv)
             aLinkMadeAgainWhileAFrameIsOwedStillShowsIt},
         {"aLinkMadeAgainAndAgainDoesNotRenewTheRetries",
             aLinkMadeAgainAndAgainDoesNotRenewTheRetries},
-        {"aDrawThatWaitedOutTheDrawablesTimeoutIsNotRetried",
-            aDrawThatWaitedOutTheDrawablesTimeoutIsNotRetried},
         {"theDelayedRetryOfADisplayWithNoLinkIsOneAtATime",
             theDelayedRetryOfADisplayWithNoLinkIsOneAtATime},
         {"theLinkSleepsWhenNoFrameHasWaitedForTheIdleTime",

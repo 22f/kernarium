@@ -335,17 +335,19 @@ link on the view's own window scene (it follows the view to another scene,
 never makes one on a scene that is disconnecting, and a missing link or scene
 leaves a retry) paces the presents (`darwin/device/gpu/present_pacer.hpp`): it
 runs only while frames wait and asks iOS for the rate the guest renders at in
-three steps (120, 60 and 30 frames a second). A rise is judged over a second
-and a fall over two, so a guest that holds a rate is shown at no fewer frames
-a second than with the setting off, less 2, one at 63 or more has the 120
-step, and one that alternates across a step's band for under two seconds
-stays on the higher step. The ceiling is the rate the EDID's timing states
-for the mode (the largest clock the field holds, for a size beyond it), the
-screen's maximum and Low Power Mode. A frame whose draw found no drawable is
-drawn again, 30 times at most and none after a wait of the drawable's own
-timeout; the debt outlives a link made again, and only a new frame renews it.
-The link pauses after 100 ms without a frame. When the ceiling is below the
-mode's rate the guest is held, as under
+two steps, 60 and 120 frames a second. A guest above 62.5 frames a second,
+judged over a second, has the 120 step, and one at 60 or less the 60 step,
+which shows every frame the setting off does. The 120 step is left only after
+a fall measure over two seconds is below 61 and the one over a second no
+longer supports it, so a guest that alternates across the threshold changes
+the step at most once in each half of its cycle and a steady speed-up changes
+it once. The ceiling is the rate the EDID's timing states for the mode (the
+largest clock the field holds, for a size beyond it), the screen's maximum and
+Low Power Mode; from 100 it is the 120 step, and any lower rate, a mode of 47
+Hz included, is the 60 step. A frame whose draw found no drawable is drawn
+again, 30 times at most; the debt outlives a link made again, and only a new
+frame renews it. The link pauses after 100 ms without a frame. When the
+ceiling is below the mode's rate the guest is held, as under
 Low Power Mode. `CADisableMinimumFrameDurationOnPhone` in the application's
 `Info.plist` lets an iPhone exceed 60. What the guest does with the property
 is in [`android/lineage-24/README.md`](../android/lineage-24/README.md).

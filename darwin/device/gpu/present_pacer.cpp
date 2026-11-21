@@ -11,26 +11,19 @@ PresentPacer::PresentPacer(Parameters parameters)
 
 unsigned PresentPacer::rateForCeiling(double ceiling) noexcept
 {
-    if (ceiling >= highStepMinimumCeiling)
-        return 120;
-    /* A mode between 30 and 60 (one whose timing cannot state 60) is shown
-     * whole by the 60 step and not by the 30. */
-    return ceiling > 30.0 ? 60 : 30;
+    /* Any ceiling under the 120 step's is the 60 step: a mode that states 47
+     * (a size too large for even a 60 Hz timing) is shown whole by it. */
+    return ceiling >= highStepMinimumCeiling ? 120 : 60;
 }
 
 LinkFrameRate PresentPacer::rangeFor(unsigned rate) noexcept
 {
     /* The top step asks for a range that cannot be met by 60, so that iOS
      * gives a ProMotion screen its fastest rate (Apple's guidance for
-     * content that wants it); the others state one rate. */
-    switch (rate) {
-    case 120:
+     * content that wants it); the 60 step states one rate. */
+    if (rate == 120)
         return {80.0F, 120.0F, 120.0F};
-    case 30:
-        return {30.0F, 30.0F, 30.0F};
-    default:
-        return {60.0F, 60.0F, 60.0F};
-    }
+    return {60.0F, 60.0F, 60.0F};
 }
 
 unsigned PresentPacer::rate() const noexcept
@@ -49,23 +42,16 @@ LinkFrameRate PresentPacer::wake(
     return rangeFor(rate_);
 }
 
-void PresentPacer::drew(DrawOutcome outcome) noexcept
+void PresentPacer::drew(bool unavailable) noexcept
 {
-    switch (outcome) {
-    case DrawOutcome::shown:
+    if (!unavailable) {
         retryOwed_ = false;
         retries_ = 0;
         return;
-    case DrawOutcome::stalled:
-        retryOwed_ = false;
-        retries_ = parameters_.maximumDrawRetries;
-        return;
-    case DrawOutcome::unavailable:
-        retryOwed_ = retries_ < parameters_.maximumDrawRetries;
-        if (retryOwed_)
-            ++retries_;
-        return;
     }
+    retryOwed_ = retries_ < parameters_.maximumDrawRetries;
+    if (retryOwed_)
+        ++retries_;
 }
 
 bool PresentPacer::retryOwed() const noexcept
@@ -134,19 +120,19 @@ PresentPacer::Decision PresentPacer::tick(
     remember(now, guestFrames);
     Decision decision;
     unsigned next = rate_;
-    if (const auto fast = framesPerSecond(
-            now, parameters_.riseWindowSeconds, parameters_.riseMinimumSpanSeconds)) {
-        if (*fast >= parameters_.riseToHigh)
-            next = 120;
-        else if (next == 30 && *fast >= parameters_.riseToNormal)
-            next = 60;
-    }
-    if (next == rate_) {
-        if (const auto slow = framesPerSecond(
+    /* The rise measure decides the step, and the fall test runs only where
+     * the rise measure no longer supports it: a fall measure over 2 s lags the
+     * one over a second, and would otherwise take the link down as it rises,
+     * tick after tick. The step is supported down to the fall threshold, which
+     * is under the rise one by more than the measure's frame. */
+    const auto rise = framesPerSecond(
+        now, parameters_.riseWindowSeconds, parameters_.riseMinimumSpanSeconds);
+    if (rise && *rise >= parameters_.riseToHigh) {
+        next = 120;
+    } else if (rate_ == 120 && (!rise || *rise < parameters_.fallFromHigh)) {
+        if (const auto fall = framesPerSecond(
                 now, parameters_.fallWindowSeconds, parameters_.fallMinimumSpanSeconds)) {
-            if (*slow < parameters_.fallFromNormal && rate_ > 30)
-                next = 30;
-            else if (*slow < parameters_.fallFromHigh && rate_ == 120)
+            if (*fall < parameters_.fallFromHigh)
                 next = 60;
         }
     }

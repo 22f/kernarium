@@ -15,16 +15,6 @@ namespace uml::gpu {
  * above it, and the application offers the setting only for such a screen. */
 inline constexpr double highStepMinimumCeiling = 100.0;
 
-/* What a draw came to: the frame was shown, the drawable or the render pass
- * was not there (the frame is still the newest), or it was not there after
- * the drawable's own timeout, a wait of about a second on the main thread
- * that a retry would repeat. */
-enum class DrawOutcome : std::uint8_t {
-    shown,
-    unavailable,
-    stalled,
-};
-
 /* What a display link asks the system for, in frames per second: the
  * minimum, the maximum and the preferred rate of a CAFrameRateRange. */
 struct LinkFrameRate {
@@ -41,24 +31,23 @@ struct LinkFrameRate {
  * no platform call: the caller gives the time (seconds, monotonic) and the
  * guest's frame counter, and does what the answer says.
  *
- * The link follows the rate the guest renders at, in three steps, 120, 60 and
- * 30 frames a second. A guest that renders at 60 on a 120 Hz mode, which is
- * what Android does for most content, would keep the display at 120 for
- * ticks that carry no frame, so the link asks for the rate the frames come
- * at. A tick shows only the newest frame, so a link on a step shows at most
- * that step's rate: a guest above it by more than 2 frames a second must
- * not stay on it (the setting off shows every frame up to the 60 of its
- * mode), and a rise is judged over a second, which a frame more or less
- * moves by 1 frame a second only. A fall is judged over 2 s, so that a guest
- * that alternates across a step's band for less than that stays on the
- * higher step, and the thresholds leave the two quantizations between them
- * (a rise needs 32.3 over the 30 step and 62.5 over the 60 step, a fall
- * under 30.7 and 61), so that no steady guest makes the link flip. A link that
- * wakes asks for the fastest rate the ceiling allows, because the first
- * frame of a burst should wait for the shortest tick, and settles after the
- * first second of the burst. The ceiling is the fastest rate the host allows
- * now (the mode's rate, or less when the screen can show less, as in Low
- * Power Mode).
+ * The link follows the rate the guest renders at, in two steps, 120 and 60
+ * frames a second: a guest that renders at 60 on a 120 Hz mode, which is what
+ * Android does for most content, would keep the display at 120 for ticks that
+ * carry no frame, so the link asks for 60 for it. A tick shows only the newest
+ * frame, so a link on the 60 step shows at most 60: a guest above it (the
+ * setting off shows every frame up to the 60 of its mode) rises to the 120
+ * step, judged over a second. The 120 step is left only when the rise measure
+ * no longer supports it and a fall measure over 2 s, which lags it, is below
+ * it too: a guest that alternates across the threshold for less than that
+ * stays on the 120 step, and no steady guest makes the link flip (a rise needs
+ * 62.5, a fall under 61). A link that wakes asks for the fastest rate the
+ * ceiling allows, because the first frame of a burst should wait for the
+ * shortest tick, and settles after the first second of the burst. The ceiling
+ * is the fastest rate the host allows now (the mode's rate, or less when the
+ * screen can show less, as in Low Power Mode): the 120 step is for a ceiling
+ * of 100 or more, and any lower ceiling, a mode of 47 Hz included, is the 60
+ * step.
  *
  * The link sleeps when no frame has been waiting for idleSeconds. Whoever
  * runs the link keeps one flag, whether a frame waits, and clears it when a
@@ -79,17 +68,15 @@ public:
         double fallWindowSeconds {2.0};
         double fallMinimumSpanSeconds {1.0};
         /* A rate in frames a second: at or above this the guest renders
-         * faster than the step the link is on, and the link rises to the
-         * step above. */
+         * faster than the 60 step shows, and the link rises to the 120 step.
+         * It stays there while the rise measure holds this ... */
         double riseToHigh {62.5};
-        double riseToNormal {32.3};
-        /* ... and below this the guest renders slower than the step, and the
-         * link falls from it. */
+        /* ... and falls from it when that measure does not and the fall
+         * measure is below this. */
         double fallFromHigh {61.0};
-        double fallFromNormal {30.7};
         /* How many times a frame is drawn again after a draw that found no
          * drawable, at the next ticks: 30 is a quarter of a second at the
-         * 120 step and a second at the 30 step. */
+         * 120 step and half a second at the 60 step. */
         unsigned maximumDrawRetries {30};
     };
 
@@ -123,12 +110,11 @@ public:
         double ceiling) noexcept;
 
     /* A draw has been made for the newest frame (a tick that presented, or
-     * the display's own draw when it has no link). A draw that found no
-     * drawable owes the frame another one at the next ticks, up to the
-     * limit, and a draw that shows the frame ends them; a draw that waited
-     * out the drawable's timeout spends the whole limit, so that a stalled
-     * GPU does not hold the main thread again and again. */
-    void drew(DrawOutcome outcome) noexcept;
+     * the display's own draw when it has no link): `unavailable` says it
+     * found no drawable or render pass, which owes the frame another draw at
+     * the next ticks, up to the limit; a draw that shows the frame ends
+     * them. */
+    void drew(bool unavailable) noexcept;
 
     /* Whether the newest frame is owed another draw. The debt, and what is
      * left of the limit, outlive a wake: a link made again (the scene it was
@@ -146,7 +132,7 @@ public:
     [[nodiscard]] bool arrangeRetry() noexcept;
     void retryDelayRan() noexcept;
 
-    /* The rate the link now asks for, 120, 60 or 30. */
+    /* The rate the link now asks for, 120 or 60. */
     [[nodiscard]] unsigned rate() const noexcept;
 
     [[nodiscard]] static LinkFrameRate rangeFor(unsigned rate) noexcept;

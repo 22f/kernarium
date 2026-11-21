@@ -104,7 +104,10 @@ struct NativeDisplayState final :
     }
     void modeRefreshRateNoted(std::uint32_t rate) noexcept override
     {
-        modeRate.store(rate == 120U ? 120U : 60U, std::memory_order_release);
+        /* The stated rate as it is: the pacer's ceiling (present_pacer.hpp)
+         * puts a mode that states neither 60 nor 120 on the step it fits, and
+         * a number that is not the mode's would hide a wrong one. */
+        modeRate.store(rate, std::memory_order_release);
     }
 
     void attachView(void* nativeView);
@@ -619,20 +622,6 @@ UIWindowScene* NativeDisplayState::viewScene() const noexcept
     return scene != nil && scene == disconnectedScene ? nil : scene;
 }
 
-/* How a draw came out, for the pacer. */
-[[nodiscard]] static DrawOutcome outcomeOf(DrawResult result) noexcept
-{
-    switch (result) {
-    case DrawResult::unavailable:
-        return DrawOutcome::unavailable;
-    case DrawResult::stalled:
-        return DrawOutcome::stalled;
-    case DrawResult::done:
-        break;
-    }
-    return DrawOutcome::shown;
-}
-
 void NativeDisplayState::drawWithoutLink() noexcept
 {
     MTKView* nativeView = view;
@@ -652,7 +641,7 @@ void NativeDisplayState::drawWithoutLink() noexcept
      * with no scene may find one. One delay is pending at a time, whatever
      * frames arrive, and a pending one that finds a link made leaves the
      * retry to it. */
-    pacer.drew(outcomeOf(drawResult));
+    pacer.drew(drawResult == DrawResult::unavailable);
     if (!pacer.arrangeRetry())
         return;
     auto state = shared_from_this();
@@ -744,7 +733,7 @@ void NativeDisplayState::linkTick(CADisplayLink* ticking) noexcept
             /* A draw that found no drawable is owed again at the next ticks,
              * a bounded number of them: the newest frame must not stay unshown
              * while the link sleeps. */
-            pacer.drew(outcomeOf(drawResult));
+            pacer.drew(drawResult == DrawResult::unavailable);
         }
 #ifndef UML_APP_STORE_RUNTIME
         ++reportDraws;
