@@ -12,10 +12,17 @@ import Foundation
 /// name. Search and Siri find the same entities. There is no URL scheme, no
 /// extension and no shared container: the intent runs in Andarium's process.
 ///
+/// The entity, its query, the intent and the shortcut are all from iOS 27: the
+/// system lists an action for an entity and its query (Find) by what the
+/// build's metadata says of them, so an entity that exists before iOS 27 would
+/// leave Shortcuts a Find action for apps that no query gives
+/// (`IPadAppHost.offersAddToHomeScreen`).
+///
 /// An entity's identity is `package/class` of the app's launcher activity,
 /// which is the same on every launch and after a reinstall and needs no table
 /// to be read back: a Home Screen icon made before Android was erased finds its
 /// app again when the app is installed again.
+@available(iOS 27.0, *)
 nonisolated struct AndroidAppEntity: AppEntity, IndexedEntity {
     static let typeDisplayRepresentation: TypeDisplayRepresentation = "Android App"
     static let defaultQuery = AndroidAppQuery()
@@ -53,7 +60,8 @@ nonisolated struct AndroidAppEntity: AppEntity, IndexedEntity {
 /// record remembers (an app removed from Android, or Android erased) is still
 /// an entity, so that a Home Screen icon made for it can say the app is gone,
 /// and works again after a reinstall.
-nonisolated struct AndroidAppQuery: EnumerableEntityQuery, IndexedEntityQuery {
+@available(iOS 27.0, *)
+nonisolated struct AndroidAppQuery: EnumerableEntityQuery {
     func allEntities() async throws -> [AndroidAppEntity] {
         AndroidAppsHub.shared.entities()
     }
@@ -74,7 +82,11 @@ nonisolated struct AndroidAppQuery: EnumerableEntityQuery, IndexedEntityQuery {
     func suggestedEntities() async throws -> [AndroidAppEntity] {
         AndroidAppsHub.shared.entities()
     }
+}
 
+/// The system's own request to index the apps again.
+@available(iOS 27.0, *)
+extension AndroidAppQuery: IndexedEntityQuery {
     /// The system asks for apps to be indexed again: through the one ordered
     /// path to the index, which judges the switch and the catalog as they are
     /// then and offers only the apps that are listed. A write the index did not
@@ -96,6 +108,12 @@ nonisolated struct AndroidAppRequestError: Error, CustomLocalizedStringResourceC
 /// Opens an app in Android. Andarium comes to the front and starts Android first
 /// when it is not running; what happens then is the application's
 /// (`AppModel.requestAndroidApp`): the intent only hands the request over.
+///
+/// From iOS 27, where Shortcuts has a tile for each app; before it the apps are
+/// no entities, so Shortcuts offers no action to choose one for. The
+/// declaration says so, and a Mac and a Vision Pro of iOS 27 keep the action,
+/// which runs by name.
+@available(iOS 27.0, *)
 struct OpenAndroidAppIntent: OpenIntent {
     static let title: LocalizedStringResource = "Open Android App"
     static let description = IntentDescription("Opens an app in Android.")
@@ -125,7 +143,9 @@ struct OpenAndroidAppIntent: OpenIntent {
     }
 }
 
-/// The tiles under Andarium in Shortcuts, and what Siri understands.
+/// The tiles under Andarium in Shortcuts, and what Siri understands: from iOS
+/// 27, as the intent is.
+@available(iOS 27.0, *)
 nonisolated struct AndroidAppShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(

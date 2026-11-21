@@ -730,9 +730,9 @@ struct CameraFlowTests {
     @Test func theDeviceOffersACameraByTheLayoutsRuleAndTheIPadAppOnAMacOrAVisionProNone() {
         // The system's own answer for this process is a front camera, a Mac and a Vision Pro.
         let device = SystemCameraSource.hasCamera
-        let info = ProcessInfo.processInfo
-        let mac = info.isiOSAppOnMac
-        let vision = info.isiOSAppOnVision
+        let system = IPadAppHost.system
+        let mac = system.isiOSAppOnMac
+        let vision = system.isiOSAppOnVision
         #expect(device == CameraAvailability.isAvailable(
             hasFrontCamera: SystemCameraSource.hasFrontCamera, isiOSAppOnMac: mac, isiOSAppOnVision: vision))
         if mac || vision { #expect(!device) }
@@ -758,6 +758,16 @@ struct CameraFlowTests {
         #expect(SystemCameraSource(platform: elsewhere).access != .unavailable)
         let without = CameraPlatform(isiOSAppOnMac: false, isiOSAppOnVision: false, hasFrontCamera: { false })
         #expect(SystemCameraSource(platform: without).access == .unavailable)
+    }
+
+    @Test func theIPadAppOnAVisionProOn26IsOfferedNoCameraAndNothingIsDiscoveredForIt() {
+        // visionOS 26.0 does not say it runs the iPad app; the hardware's name does.
+        let host = IPadAppHost(isiOSAppOnMac: false, visionAnswer: nil, machine: "RealityDevice14,1")
+        var looks = 0
+        let platform = CameraPlatform(host: host, hasFrontCamera: { looks += 1; return true })
+        #expect(SystemCameraSource(platform: platform).access == .unavailable)
+        #expect(!platform.hasCamera)
+        #expect(looks == 0, "no camera is looked for")
     }
 
     /// The row on a Vision Pro is the Mac's: off and disabled with the note, the

@@ -163,6 +163,18 @@ uml_add_tooling_test(
     LABELS audit;package
     TIMEOUT 60)
 
+# The iPad applications offered on a Mac take the Mac's minimum from the
+# processed Info.plist's LSMinimumSystemVersion, and from the iOS minimum
+# otherwise, which is now below the macOS floor. Each plist, processed as the
+# build does, names the macOS floor of the toolchain.
+uml_add_tooling_test(
+    NAME ipad-apps-mac-minimum
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/cmake/test_ipad_apps_mac_minimum.py
+        --repository ${PROJECT_SOURCE_DIR}
+    LABELS audit;package
+    TIMEOUT 60)
+
 # scripts/build-xcframework.sh takes its exact public API from the headers
 # through this check, so a public change needs no second list.
 uml_add_tooling_test(

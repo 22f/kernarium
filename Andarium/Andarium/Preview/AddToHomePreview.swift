@@ -159,8 +159,8 @@ enum AddToHomePreview {
 /// The preview takes nothing of the system's index.
 @MainActor
 final class SilentAppsIndex: AndroidAppsSearchIndexing {
-    func offer(_ entities: [AndroidAppEntity]) async -> Bool { true }
-    func add(_ entities: [AndroidAppEntity]) async -> Bool { true }
+    func offer(_ apps: [AndroidApp]) async -> Bool { true }
+    func add(_ apps: [AndroidApp]) async -> Bool { true }
     func withdraw() async -> Bool { true }
     func shortcutsChanged() {}
 }
