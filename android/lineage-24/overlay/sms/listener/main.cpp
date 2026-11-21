@@ -22,6 +22,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <string>
 #include <utility>
 
@@ -44,9 +45,14 @@ constexpr const char* kHandoffSocket = "kernarium_sms";
 // Who may take the listening socket: the service, as the system user in its own domain.
 constexpr uid_t kSystemUid = 1000;
 constexpr const char* kServiceContext = "u:r:kernarium_sms:s0";
-// A wake that no session answered is repeated after this long; a session that ended, after the shorter one.
+// A wake that no session answered is repeated after this long. A session that ended is followed by a wake after
+// the shorter wait, which doubles to the attach timeout for every session in a row that ended before the service's
+// idle window (HostService.IDLE_MILLIS) with a connection still waiting: it ended abnormally, because a session
+// that serves lasts the window after its last message, and a service that fails at once is not started every second.
 constexpr int kAttachTimeoutMillis = 20000;
 constexpr int kAfterSessionMillis = 500;
+constexpr int kMaxAfterSessionMillis = kAttachTimeoutMillis;
+constexpr int64_t kIdleWindowMillis = 30000;
 constexpr int kBindRetryMillis = 1000;
 // Wakes and ended sessions are logged for the first and then one in this many.
 constexpr unsigned kLogEvery = 256;
@@ -204,14 +210,32 @@ class Holder {
             return;
         }
         session_ = std::move(connection);
+        attachedAt_ = nowMillis();
         if (attachedLogged_++ % kLogEvery == 0) ALOGI("handed the listening socket to the service");
     }
 
     void endSession() {
+        const int64_t now = nowMillis();
+        const bool lasted = now - attachedAt_ >= kIdleWindowMillis;
         session_.reset();
-        // The connections that queued in the meantime are the next session's: one second at most.
-        nextWake_ = nowMillis() + kAfterSessionMillis;
+        // The connections that queued in the meantime are the next session's. After a session that served (it lasted
+        // the idle window, or took every connection that waited) the wait is the shortest; after one that ended early
+        // with a connection still waiting it is the current one, and the next is twice as long, up to the attach
+        // timeout, so that a service that fails at once is woken once in 20 s and a single lost session in half a second.
+        if (lasted || !connectionWaits()) {
+            afterSessionMillis_ = kAfterSessionMillis;
+            nextWake_ = now + afterSessionMillis_;
+        } else {
+            nextWake_ = now + afterSessionMillis_;
+            afterSessionMillis_ = std::min(afterSessionMillis_ * 2, kMaxAfterSessionMillis);
+        }
         if (endedLogged_++ % kLogEvery == 0) ALOGI("the session ended");
+    }
+
+    // Whether a connection is queued on the listening socket.
+    bool connectionWaits() const {
+        pollfd waiting = {listener_.get(), POLLIN, 0};
+        return poll(&waiting, 1, 0) > 0 && (waiting.revents & POLLIN) != 0;
     }
 
     void wake() {
@@ -227,6 +251,8 @@ class Holder {
     android::base::unique_fd listener_;
     android::base::unique_fd session_;
     int64_t nextWake_ = 0;
+    int64_t attachedAt_ = 0;
+    int afterSessionMillis_ = kAfterSessionMillis;
     unsigned attachedLogged_ = 0;
     unsigned endedLogged_ = 0;
     unsigned wokenLogged_ = 0;

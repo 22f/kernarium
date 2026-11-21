@@ -26,7 +26,7 @@ REPOSITORY = HERE.parents[2]
 HOLDER = REPOSITORY / "android" / "lineage-24" / "overlay" / "sms" / "listener" / "main.cpp"
 SUPPORT = HERE / "sms" / "holder"
 SKIP = 77
-SCENARIOS = ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")
+SCENARIOS = ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11")
 
 
 def compiler() -> str | None:

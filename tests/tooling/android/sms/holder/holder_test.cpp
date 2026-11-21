@@ -9,6 +9,8 @@
 //     interposed for it and for the peer's credentials; listen, poll, accept, sendmsg and recv are the host's own);
 //   - the properties it sets, the peer's user and SELinux context, and its log lines are the test's to read and set.
 // The scenarios run one after the other against one holder thread; the first one that does not hold ends the test.
+// The holder's clock and its poll timeouts run kTimeScale times faster than the test's, so that the wake backoff
+// (half a second to 20 s, a 30 s idle window) shows in seconds; only the holder's thread is scaled.
 
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -46,6 +48,10 @@ std::string gPeerContext = "u:r:kernarium_sms:s0";
 std::string gVsockPath;
 std::atomic<bool> gReturned{false};
 std::atomic<int> gStatus{-1};
+// The holder's time runs this many times faster than the test's.
+constexpr long long kTimeScale = 20;
+thread_local bool tHolderThread = false;
+std::vector<long long> gWakeTimes;  // the holder's milliseconds at each property set
 
 template <typename Function>
 Function realFunction(const char* name) {
@@ -55,6 +61,14 @@ Function realFunction(const char* name) {
 long long nowMillis() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// The holder's milliseconds now: the test's monotonic clock, times kTimeScale.
+long long holderNow() {
+    static const auto real = realFunction<int (*)(clockid_t, timespec*)>("clock_gettime");
+    timespec now{};
+    real(CLOCK_MONOTONIC, &now);
+    return (static_cast<long long>(now.tv_sec) * 1000 + now.tv_nsec / 1000000) * kTimeScale;
 }
 
 template <typename Condition>
@@ -168,10 +182,28 @@ namespace base {
 bool SetProperty(const std::string& key, const std::string& value) {
     std::lock_guard<std::mutex> guard(gLock);
     gProperties.push_back(key + "=" + value);
+    gWakeTimes.push_back(holderNow());
     return true;
 }
 }  // namespace base
 }  // namespace android
+
+// The holder's thread sees time and poll timeouts kTimeScale times faster; every other thread sees them as they are.
+extern "C" int clock_gettime(clockid_t clock, timespec* out) {
+    static const auto real = realFunction<int (*)(clockid_t, timespec*)>("clock_gettime");
+    const int result = real(clock, out);
+    if (result != 0 || clock != CLOCK_MONOTONIC || !tHolderThread) return result;
+    const long long nanos = (static_cast<long long>(out->tv_sec) * 1000000000LL + out->tv_nsec) * kTimeScale;
+    out->tv_sec = nanos / 1000000000LL;
+    out->tv_nsec = nanos % 1000000000LL;
+    return 0;
+}
+
+extern "C" int poll(pollfd* fds, nfds_t count, int timeout) {
+    static const auto real = realFunction<int (*)(pollfd*, nfds_t, int)>("poll");
+    if (tHolderThread && timeout > 0) timeout = static_cast<int>((timeout + kTimeScale - 1) / kTimeScale);
+    return real(fds, count, timeout);
+}
 
 extern "C" int accept4(int fd, sockaddr* address, socklen_t* length, int flags) {
     const int connection = accept(fd, address, length);
@@ -234,6 +266,7 @@ int main(int argc, char** argv) {
     gHandoffFd.store(handoff);
 
     std::thread([] {
+        tHolderThread = true;
         gStatus.store(holder_main());
         gReturned.store(true);
     }).detach();
@@ -289,6 +322,7 @@ int main(int argc, char** argv) {
 
     // S5: the session ends with the service's connection, and the next waiting connection wakes the waker again.
     close(service);
+    usleep(150 * 1000);  // the holder has seen the session end; nothing waited, so the wait after it is the shortest
     const int next = connectTo(gVsockPath);
     if (next < 0) fail("S5", "the vsock socket takes no connection after the session");
     if (!until(5000, [] { return propertyCount() >= 2; })) fail("S5", "no second waker after the session ended");
@@ -314,8 +348,94 @@ int main(int argc, char** argv) {
     pass("S6", "a connection of another user is closed and passed nothing");
     pass("S7", "a connection of another domain is closed and passed nothing");
 
-    if (gReturned.load()) fail("S8", "the holder ended during the scenarios");
-    pass("S8", "the holder ran through every scenario");
+    // The service, as a peer of the handoff socket: connects, is passed the listening socket, and is the session.
+    struct Session {
+        int connection = -1;
+        int listener = -1;
+    };
+    auto attach = [&](const char* scenario) {
+        Session session;
+        session.connection = connectTo(handoffPath);
+        if (session.connection < 0) fail(scenario, "the handoff socket takes no connection from the service");
+        const Received got = receive(session.connection, 3000);
+        if (got.timedOut || got.closed || got.descriptor < 0) fail(scenario, "the service was not passed the socket");
+        session.listener = got.descriptor;
+        return session;
+    };
+    // Waits for the next wake, and returns the holder's time at which it happened.
+    size_t woken = propertyCount();
+    auto nextWake = [&](const char* scenario) {
+        if (!until(8000, [&] { return propertyCount() > woken; })) fail(scenario, "no waker was started again");
+        std::lock_guard<std::mutex> guard(gLock);
+        return gWakeTimes[woken++];
+    };
+
+    // S8: a session that ends before it accepts anything, with a connection still waiting, is woken again after a wait
+    // that doubles from half a second to 20 s: a service that cannot serve is not started once a second without end. The
+    // first wake here is the one that no session answered (20 s); a session then attaches and ends at once, each time.
+    {
+        std::lock_guard<std::mutex> guard(gLock);
+        gPeerContext = "u:r:kernarium_sms:s0";
+    }
+    long long previous = nextWake("S8");
+    const long long expected[] = {500, 1000, 2000, 4000, 8000, 16000, 20000, 20000};
+    for (size_t index = 0; index < sizeof(expected) / sizeof(expected[0]); ++index) {
+        const Session lost = attach("S8");
+        close(lost.connection);
+        close(lost.listener);
+        const long long at = nextWake("S8");
+        const long long gap = at - previous;
+        const long long wait = expected[index];
+        if (gap < wait - 100 || gap > wait + wait / 4 + 700) {
+            fail("S8", "the wake after the session that ended early number " + std::to_string(index + 1) +
+                           " came after " + std::to_string(gap) + " ms, not about " + std::to_string(wait) + " ms");
+        }
+        previous = at;
+    }
+    pass("S8", "sessions that end early are woken again after 0.5, 1, 2, 4, 8, 16 and then 20 s");
+
+    // S9: a session that lasted the idle window (30 s) worked: the wait after it is the first again.
+    const Session served = attach("S9");
+    until(1700, [] { return false; });  // 34 s of the holder's time
+    close(served.connection);
+    close(served.listener);
+    const long long ended = holderNow();
+    const long long afterServed = nextWake("S9") - ended;
+    if (afterServed < 300 || afterServed > 1500) {
+        fail("S9", "the wake after a session of the idle window came after " + std::to_string(afterServed) + " ms");
+    }
+    pass("S9", "a session that lasted the idle window resets the wait to half a second");
+
+    // S10: a session that took every waiting connection worked, however short: it does not lengthen the wait. Two early
+    // ends first (0.5 s and 1 s, the next would be 2 s); then a session that accepts what waits and ends at once.
+    for (int index = 0; index < 2; ++index) {
+        const Session lost = attach("S10");
+        close(lost.connection);
+        close(lost.listener);
+        nextWake("S10");
+    }
+    const Session drain = attach("S10");
+    for (;;) {
+        const int taken = accept(drain.listener, nullptr, nullptr);
+        if (taken < 0) break;
+        close(taken);
+    }
+    close(drain.connection);
+    close(drain.listener);
+    const long long drained = holderNow();
+    usleep(20 * 1000);  // the holder sees the session end with nothing waiting (0.4 s of its time, under the 2 s doubled)
+    const int fresh = connectTo(gVsockPath);
+    if (fresh < 0) fail("S10", "the vsock socket takes no connection after the drained session");
+    const long long afterDrained = nextWake("S10") - drained;
+    if (afterDrained < 300 || afterDrained > 1500) {
+        fail("S10", "the wake after a short session that took every connection came after " +
+                        std::to_string(afterDrained) + " ms");
+    }
+    close(fresh);
+    pass("S10", "a short session that took every waiting connection does not lengthen the wait");
+
+    if (gReturned.load()) fail("S11", "the holder ended during the scenarios");
+    pass("S11", "the holder ran through every scenario");
     close(next);
     std::printf("PASS\n");
     std::fflush(stdout);
