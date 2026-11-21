@@ -6,8 +6,10 @@ package {
 // The holder of the text message service's vsock port (overlay/sms): it keeps
 // port 5560 from boot without reading it, starts the service through the waker
 // when a connection waits, and passes the service the listening socket. It is a
-// plain daemon of the core domains, installed on system_ext, so that no process
-// that holds the vsock socket can also be the framework's client.
+// plain daemon of the core domains, installed on system_ext, with no rule of its
+// own for binder, so that the process that holds the vsock socket between
+// sessions is not the framework's client. The service holds the same socket
+// during a session and is a binder client, as it was when it held the port itself.
 cc_binary {
     name: "kernarium_sms_listener",
     init_rc: ["kernarium_sms_listener.rc"],
