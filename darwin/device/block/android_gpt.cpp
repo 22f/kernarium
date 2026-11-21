@@ -238,7 +238,10 @@ File::File(const std::filesystem::path &path)
 
 File::File(int directory, const char *name)
 {
-	descriptor_ = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+	/* O_NONBLOCK: a pipe at this name must be refused below, not waited on
+	 * until a writer comes. It means nothing to a regular file. */
+	descriptor_ = openat(directory, name,
+			     O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
 	if (descriptor_ < 0)
 		throw std::system_error(errno, std::generic_category(),
 					std::string{"cannot open "} + name);
@@ -250,6 +253,9 @@ File::File(int directory, const char *name)
 		throw std::invalid_argument(std::string{"unsafe regular file: "} + name);
 	}
 	size_ = static_cast<std::uint64_t>(details.st_size);
+	const int flags = fcntl(descriptor_, F_GETFL);
+	if (flags >= 0)
+		(void)fcntl(descriptor_, F_SETFL, flags & ~O_NONBLOCK);
 }
 
 File::~File()

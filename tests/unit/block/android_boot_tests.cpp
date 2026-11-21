@@ -10,15 +10,19 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #include <fcntl.h>
@@ -821,6 +825,20 @@ void testBootloaderCommandIsConsumed(const Fixture &fixture, const fs::path &dir
 	fs::remove(disk);
 }
 
+/* Runs `body` on a thread of its own and fails, instead of hanging, when it
+ * has not returned within `limit`. */
+template <typename Body>
+void requireReturns(std::chrono::seconds limit, const char *what, Body body)
+{
+	auto finished = std::make_shared<std::promise<void>>();
+	auto done = finished->get_future();
+	std::thread([finished, &body] {
+		body();
+		finished->set_value();
+	}).detach();
+	require(done.wait_for(limit) == std::future_status::ready, what);
+}
+
 /* The release's own root image (the Magisk-patched copy of init_boot, beside
  * the system disk) replaces the normal boot's ramdisk on every boot and
  * restart when the guest is asked for root. Only its ramdisk is used, recovery
@@ -919,6 +937,15 @@ void testRootBootImage(const Fixture &fixture, const fs::path &directory)
 	fs::create_directory(image);
 	require(!storage.carriesRoot());
 	refuse();
+	fs::remove(image);
+	/* A pipe with no writer is refused too, and opening it does not wait for
+	 * one: the check of the type runs on the descriptor, after the open. */
+	require(mkfifo(image.c_str(), 0600) == 0);
+	requireReturns(std::chrono::seconds(10),
+		"opening a pipe at the root image's name did not return", [&] {
+			require(!storage.carriesRoot());
+			refuse();
+		});
 	fs::remove(image);
 	fs::rename(original, image);
 	/* `root/` itself is a real directory, never a link to one, whatever the
