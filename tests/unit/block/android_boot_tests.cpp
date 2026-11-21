@@ -954,6 +954,13 @@ void testRootBootImage(const Fixture &fixture, const fs::path &directory)
 	mutate(12, "\x01\x20\x00\x00", 4); /* one byte past the file */
 	/* A ramdisk in no format the kernel unpacks. */
 	mutate(pageSize, "junk", 4);
+	/* The magic is the ramdisk's own, not the file's padding after it: a
+	 * ramdisk of one byte followed by padding that completes gzip's. */
+	fs::copy_file(image, original, fs::copy_options::overwrite_existing);
+	writeAt(image, 12, bytesOf(std::string("\x01\x00\x00\x00", 4)));
+	writeAt(image, pageSize, bytesOf(std::string("\x1f\x8b", 2)));
+	refuse();
+	fs::rename(original, image);
 	/* Every format the kernel unpacks is taken. */
 	using namespace std::string_view_literals;
 	for (const auto magic : {"\x1f\x8b"sv, "BZh"sv, "\xfd" "7zXZ\x00"sv,

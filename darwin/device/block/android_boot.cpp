@@ -150,9 +150,13 @@ FileRange rootBootRamdisk(const File &file)
 			"the Android root boot image holds no ramdisk");
 	const auto range = kernellessRamdisk(file, 0, file.size(),
 					     "Android root boot image");
+	/* Only the ramdisk's own bytes are probed, and a magic must lie whole
+	 * inside it: the padding that follows a short one is not the format. */
 	std::array<std::byte, 8> head {};
-	file.read(range.offset, head);
-	if (!knownRamdiskFormat(head))
+	const auto probe = static_cast<std::size_t>(
+		std::min<std::uint64_t>(head.size(), range.size));
+	file.read(range.offset, std::span{head}.first(probe));
+	if (!knownRamdiskFormat(std::span<const std::byte>{head}.first(probe)))
 		throw std::invalid_argument(
 			"the Android root boot image holds no ramdisk the kernel unpacks");
 	return range;
