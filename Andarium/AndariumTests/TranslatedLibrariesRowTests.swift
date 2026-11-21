@@ -230,9 +230,23 @@ struct TranslatedLibrariesRowTests {
     }
 
     @Test func theLineUnderTheTitleIsTheNoteOrTheReasonItIsNotUsed() {
-        #expect(!TranslatedLibrariesWords.note.isEmpty)
         #expect(TranslatedLibrariesWords.notUsedWithJit == "Not used while JIT is on.")
-        #expect(TranslatedLibrariesWords.title == "AOT")
+        // Both candidate wordings are there, in English, and differ.
+        #expect(TranslatedLibrariesWords.text(for: .aot) == "AOT")
+        #expect(TranslatedLibrariesWords.text(for: .translatedLibraries) == "Translated system libraries")
+        #expect(TranslatedLibrariesWords.text(for: .short) == "Faster. Turn this off only to troubleshoot.")
+        #expect(
+            TranslatedLibrariesWords.text(for: .explained)
+                == "Android\u{2019}s system libraries run from translated code, which is faster. Turn this off only to troubleshoot.")
+    }
+
+    @Test func aFreshModelUsesTheChosenWords() {
+        let model = fixture(carried: true).model
+        #expect(model.translatedLibrariesTitle == TranslatedLibrariesWords.chosenTitle)
+        #expect(model.translatedLibrariesNote == TranslatedLibrariesWords.chosenNote)
+        // The chosen pair is the default the owner was shown: AOT, and the short note.
+        #expect(TranslatedLibrariesWords.chosenTitle == .aot)
+        #expect(TranslatedLibrariesWords.chosenNote == .short)
     }
 
     @Test func aStartStatesTheReleaseOnlyWhileTheSwitchIsOnInABuildThatCarriesIt() {

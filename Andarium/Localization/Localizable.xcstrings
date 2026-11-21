@@ -5013,6 +5013,29 @@
         }
       }
     },
+    "Faster. Turn this off only to troubleshoot." : {
+      "comment" : "Under the AOT switch on Home. AOT is a name and stays as it is. Says that the switch makes Android faster and is for trouble-shooting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "高速化されます。オフにするのはトラブルシューティングのときだけにしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "速度更快。仅在排查问题时才关闭。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "速度更快。僅在排解問題時才關閉。"
+          }
+        }
+      }
+    },
     "Fastest" : {
       "comment" : "Name of the resolution with the fewest pixels, which the virtual machine draws fastest, shown after the density: 160 dpi · Fastest.",
       "localizations" : {
@@ -13210,7 +13233,7 @@
       }
     },
     "Translated system libraries" : {
-      "comment" : "Title of the page of notices, and of the row that opens it, for the Android system libraries that Andarium translates to machine code ahead of time.",
+      "comment" : "Title of the page of notices, of the row that opens it, and of the AOT switch on Home when Home words it in place of the name AOT, for the Android system libraries that Andarium translates to machine code ahead of time.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {

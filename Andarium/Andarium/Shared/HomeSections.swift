@@ -65,9 +65,6 @@ struct OptionRow<Control: View>: View {
     let title: String
     let symbol: String
     var detail: String?
-    /// The most lines the line under the title shows: two, or all of it (nil)
-    /// for a row whose note must never be cut, in any language.
-    var detailLines: Int? = 2
     /// What the line under the title does when it is touched; the line then
     /// reads as a button. None leaves it plain text.
     var detailAction: (() -> Void)?
@@ -103,7 +100,7 @@ struct OptionRow<Control: View>: View {
                         Text(detail)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
-                            .lineLimit(detailLines)
+                            .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }

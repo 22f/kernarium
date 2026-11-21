@@ -164,7 +164,7 @@ extension Acknowledgements.Project {
     var displayName: String {
         switch id {
         case "aot-libraries":
-            String(localized: "Translated system libraries", comment: "Title of the page of notices, and of the row that opens it, for the Android system libraries that Andarium translates to machine code ahead of time.")
+            String(localized: "Translated system libraries", comment: "Title of the page of notices, of the row that opens it, and of the AOT switch on Home when Home words it in place of the name AOT, for the Android system libraries that Andarium translates to machine code ahead of time.")
         default: name
         }
     }

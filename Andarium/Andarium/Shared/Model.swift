@@ -286,6 +286,11 @@ final class AppModel {
     /// Whether the person wants them. On is the default. Kept for the install
     /// (`TranslatedLibrariesPreference`).
     var translatedLibrariesOn = true
+    /// The words of the row: the constant's choice
+    /// (`TranslatedLibrariesWords.chosenTitle`, `chosenNote`). Only the
+    /// Simulator preview sets another, to show every pair.
+    var translatedLibrariesTitle = TranslatedLibrariesWords.chosenTitle
+    var translatedLibrariesNote = TranslatedLibrariesWords.chosenNote
     /// The launch decided it (automation): the value belongs to that run and
     /// is not kept.
     var translatedLibrariesDecidedByLaunch = false
