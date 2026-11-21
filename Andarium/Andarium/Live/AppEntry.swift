@@ -215,6 +215,9 @@ struct AppEntry {
             runtime.rootRelease = carried?.root
             model.rootAvailable = carried?.root != nil
             model.driver = runtime
+            // A start with root that the last session's record shows ended
+            // before Android booted was found before there was a driver.
+            model.saveRootStateIfPending()
             model.snapshotDriver = runtime
             model.cameraReservePlanner = { policy in
                 LiveRuntime.cameraReservePlan(for: policy, calibration: calibration)

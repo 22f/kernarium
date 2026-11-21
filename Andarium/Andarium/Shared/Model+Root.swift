@@ -41,7 +41,73 @@ extension AppModel {
     func cancelRootWarning() {
         rootWarningShowing = false
     }
+
+    // MARK: A failed or stopped start with root
+
+    /// A start with root ended before Android booted (`RootFallbackRule`):
+    /// the switch's state follows the rule's behaviour, and the state is
+    /// saved as soon as a driver is there to save it.
+    func applyRootFallback() {
+        guard guest != nil else { return }
+        var state = guest?.root ?? RootState()
+        if RootFallbackRule.failed(&state) {
+            guest?.root = state
+            if driver == nil { rootStateUnsaved = true } else { persistNow() }
+        } else {
+            guest?.root.rooted = false
+        }
+    }
+
+    /// After the driver is attached: saves a fallback decided at launch,
+    /// before there was one.
+    func saveRootStateIfPending() {
+        guard rootStateUnsaved, driver != nil else { return }
+        rootStateUnsaved = false
+        persistNow()
+    }
+
+    /// The run of a start with root ended: a restart loop before Android booted
+    /// is a failed start; a stop by the person before it is a stopped one.
+    func rootRunEnded(_ end: RunEnd) {
+        guard guest?.root.rooted == true else { return }
+        let booted = bootTracker.isReady
+        if RootFallbackRule.endedBeforeBoot(end, bootCompleted: booted) {
+            applyRootFallback()
+        } else if end.stoppedByUser, !booted {
+            var state = guest?.root ?? RootState()
+            RootFallbackRule.stopped(&state)
+            guest?.root = state
+        }
+    }
+
+    /// Android booted with the Magisk ramdisk: a stopped start that waited for
+    /// the person's decision is answered by it.
+    func rootBootFinished(_ kind: BootKind) {
+        guard kind != .recovery, guest?.root.rooted == true, guest?.root.attention == .stoppedStart else { return }
+        guest?.root.attention = nil
+    }
+
+    /// The paused card's "Try with root again".
+    func tryRootAgain() {
+        guard guest != nil else { return }
+        guest?.root.tryAgain()
+        persistNow()
+    }
+
+    /// The cards' close button, for the two that only inform.
+    func dismissRootNotice() {
+        guard let attention = rootAttention, attention != .failedStart else { return }
+        guest?.root.attention = nil
+        persistNow()
+    }
+
+    /// The report entry for a bug report.
+    func rootReportEntry() -> BugReportArchive.Entry? {
+        guard rootAvailable || rootOn, let state = guest?.root else { return nil }
+        return RootReport.entry(state: state, release: driver?.rootRelease)
+    }
 }
+
 
 /// The boot screen's Magisk app step.
 extension AppModel {

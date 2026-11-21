@@ -4,8 +4,8 @@ import AndariumCore
 import SwiftUI
 
 /// The preview's states of the root switch: Home with the row off, on and
-/// paused, the warning that asks before it turns on, and the screens of the
-/// boot and the notices. The mock release carries root only in these
+/// paused, the warning that asks before it turns on, the cards after a start
+/// that did not finish, and the boot screen's step. The mock release carries root only in these
 /// screens, so every other screen is what it was without the feature.
 @MainActor
 enum RootPreview {
@@ -36,6 +36,14 @@ enum RootPreview {
         case "home-root-paused":
             model.guest?.root.setOn(true)
             model.guest?.root.attention = .failedStart
+        case "home-root-notice-paused":
+            model.guest?.root.setOn(true)
+            model.guest?.root.attention = .failedStart
+        case "home-root-notice-turned-off":
+            model.guest?.root.attention = .turnedOffAfterFailure
+        case "home-root-notice-stopped":
+            model.guest?.root.setOn(true)
+            model.guest?.root.attention = .stoppedStart
         case "home-root-app-alert":
             // The alert a start with root leaves when the Magisk app could not be put in.
             model.guest?.root.setOn(true)

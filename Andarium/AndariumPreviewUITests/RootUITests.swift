@@ -133,4 +133,51 @@ final class RootUITests: XCTestCase {
         alert.buttons["OK"].tap()
         XCTAssertTrue(app.alerts.firstMatch.waitForNonExistence(timeout: 5))
     }
+
+    @MainActor
+    func testThePausedCardOffersTryAgainAndTurnOffAndTryAgainEndsThePause() {
+        let app = launch("home-root-notice-paused")
+        XCTAssertTrue(app.staticTexts["Root is paused"].firstMatch.waitForExistence(timeout: 20), "no paused card")
+        XCTAssertTrue(app.buttons["Turn off root"].firstMatch.exists)
+        app.buttons["Try with root again"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["Root is paused"].firstMatch.waitForNonExistence(timeout: 5), "the card stayed")
+        // Root stays on, and nothing says paused any more.
+        let toggle = rootSwitch(app)
+        app.swipeUp()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertEqual(toggle.value as? String, "1")
+        XCTAssertFalse(app.staticTexts["Paused after a failed start"].exists)
+    }
+
+    @MainActor
+    func testTurnOffRootOnThePausedCardTurnsTheSwitchOff() {
+        let app = launch("home-root-notice-paused")
+        XCTAssertTrue(app.staticTexts["Root is paused"].firstMatch.waitForExistence(timeout: 20))
+        app.buttons["Turn off root"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["Root is paused"].firstMatch.waitForNonExistence(timeout: 5))
+        let toggle = rootSwitch(app)
+        app.swipeUp()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertEqual(toggle.value as? String, "0")
+    }
+
+    @MainActor
+    func testTheTurnedOffCardInformsAndCanBeDismissed() {
+        let app = launch("home-root-notice-turned-off")
+        let title = app.staticTexts["Root turned off"].firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 20), "no card")
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'turn it on again under Root'")).firstMatch.exists)
+        app.buttons["Dismiss"].firstMatch.tap()
+        XCTAssertTrue(title.waitForNonExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testAStoppedStartOffersAStartWithoutRootWhichStartsTheMachine() {
+        let app = launch("home-root-notice-stopped")
+        XCTAssertTrue(app.staticTexts["Start was stopped"].firstMatch.waitForExistence(timeout: 20), "no card")
+        app.buttons["Start without root"].firstMatch.tap()
+        // The start leaves Home, and a start without root has no Magisk app step.
+        XCTAssertTrue(app.staticTexts["Start was stopped"].firstMatch.waitForNonExistence(timeout: 10), "the card stayed")
+        XCTAssertFalse(app.staticTexts["Magisk app"].exists)
+    }
 }

@@ -326,3 +326,40 @@ actor RootCounter {
     private(set) var value = 0
     func bump() { value += 1 }
 }
+
+@Suite struct RootReportTests {
+    private let release = RootRelease(versionName: "v31.1", versionCode: 31100, apkPath: "root/Magisk-v31.1.apk")
+
+    @Test func aStockGuestSaysSoInFourLines() {
+        let text = RootReport.text(state: RootState(), release: nil)
+        #expect(text.split(separator: "\n").count == 4)
+        #expect(text.contains("root switch: off"))
+        #expect(text.contains("the release carries root: no"))
+    }
+
+    @Test func aRootedGuestNamesTheMagiskVersionAndWhatTheApplicationRecorded() {
+        var state = RootState()
+        state.on = true
+        state.rooted = true
+        state.appVersionCode = 31100
+        let text = RootReport.text(state: state, release: release)
+        #expect(text.contains("root switch: on"))
+        #expect(text.contains("booted the Magisk ramdisk: yes"))
+        #expect(text.contains("Magisk v31.1 (31100)"))
+        #expect(text.contains("version code the application recorded: 31100"))
+    }
+
+    @Test func aPausedGuestSaysWhy() {
+        var state = RootState()
+        state.on = true
+        state.attention = .failedStart
+        #expect(RootReport.text(state: state, release: release).contains("paused: a start with root ended before Android booted"))
+    }
+
+    @Test func theEntryIsNamedForTheReportAndCarriesNoPathOrIdentifier() {
+        let entry = RootReport.entry(state: RootState(), release: nil)
+        #expect(entry.name == "andarium/root.txt")
+        let text = String(decoding: entry.data, as: UTF8.self)
+        #expect(!text.contains("/"))
+    }
+}

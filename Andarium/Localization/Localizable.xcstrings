@@ -2153,6 +2153,52 @@
         }
       }
     },
+    "Android did not finish starting with root, so it starts without root until you choose. Try root again, or turn it off." : {
+      "comment" : "Text of Home's card after a start with root ended before Android finished starting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootでのAndroidの起動が完了しなかったため、選択するまでrootなしで起動します。もう一度rootを試すか、オフにしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用Root启动Android未能完成，因此在你做出选择之前将不使用Root启动。你可以再次尝试Root，或将其关闭。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用Root啟動Android未能完成，因此在你做出選擇之前將不使用Root啟動。你可以再次嘗試Root，或將其關閉。"
+          }
+        }
+      }
+    },
+    "Android did not finish starting with root, so root was turned off. You can turn it on again under Root." : {
+      "comment" : "Text of Home's card after a start with root failed and root was turned off with it.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootでのAndroidの起動が完了しなかったため、rootをオフにしました。「root」の項目からもう一度オンにできます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用Root启动Android未能完成，因此已关闭Root。你可以在“Root”中重新开启。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用Root啟動Android未能完成，因此已關閉Root。你可以在「Root」中重新開啟。"
+          }
+        }
+      }
+    },
     "Android did not power off." : {
       "localizations" : {
         "ja" : {
@@ -9045,6 +9091,52 @@
         }
       }
     },
+    "Root is paused" : {
+      "comment" : "Title of Home's card after a start with root ended before Android finished starting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootは一時停止中です"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root已暂停"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root已暫停"
+          }
+        }
+      }
+    },
+    "Root turned off" : {
+      "comment" : "Title of Home's card after a start with root failed and root was turned off with it.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootをオフにしました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root已关闭"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Root已關閉"
+          }
+        }
+      }
+    },
     "Save" : {
       "localizations" : {
         "ja" : {
@@ -10006,6 +10098,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "請先啟動一次虛擬機器。在此之前沒有可保留的資料。"
+          }
+        }
+      }
+    },
+    "Start was stopped" : {
+      "comment" : "Title of Home's card after the person stopped a start with root before Android finished starting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動を停止しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启动已停止"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "啟動已停止"
+          }
+        }
+      }
+    },
+    "Start without root" : {
+      "comment" : "Button on Home's card: starts the virtual machine once without root.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootなしで起動"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不使用Root启动"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不使用Root啟動"
           }
         }
       }
@@ -13415,6 +13553,29 @@
         }
       }
     },
+    "Try with root again" : {
+      "comment" : "Button on Home's card: starts with root again after a failed start.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "もう一度rootで試す"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "再次尝试使用Root"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "再次嘗試使用Root"
+          }
+        }
+      }
+    },
     "Turn it on only for an app that crashes: it can make an app that works today behave differently. Turning it on or off closes the app if it’s open. Only apps it can apply to are listed." : {
       "comment" : "The second paragraph of the Old app compatibility page's footer: when to use the switch and what it does.",
       "localizations" : {
@@ -13503,6 +13664,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "要為「%@」關閉舊版應用程式相容性嗎？"
+          }
+        }
+      }
+    },
+    "Turn off root" : {
+      "comment" : "Button on Home's card: turns root access off.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "rootをオフにする"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭Root"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "關閉Root"
           }
         }
       }
@@ -14218,6 +14402,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "處理中"
+          }
+        }
+      }
+    },
+    "You stopped a start with root before Android finished starting. If root is the problem, start once without it." : {
+      "comment" : "Text of Home's card after the person stopped a start with root before Android finished starting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidの起動が完了する前に、rootでの起動を停止しました。rootが原因の場合は、一度rootなしで起動してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在Android启动完成之前，你停止了使用Root的启动。如果问题出在Root，可以不使用Root启动一次。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在Android啟動完成之前，你停止了使用Root的啟動。如果問題出在Root，可以不使用Root啟動一次。"
           }
         }
       }

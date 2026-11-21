@@ -32,4 +32,25 @@ enum RootWords {
         localized:
             "The Magisk app couldn’t be installed. Root is on, but no app can be given root until it is. Andarium tries again at the next start."
     )
+
+    // MARK: Home's cards after a start with root that did not finish
+
+    static let pausedTitle = String(localized: "Root is paused")
+    static let pausedText = String(
+        localized:
+            "Android did not finish starting with root, so it starts without root until you choose. Try root again, or turn it off."
+    )
+    static let tryAgain = String(localized: "Try with root again")
+    static let turnOff = String(localized: "Turn off root")
+    static let turnedOffTitle = String(localized: "Root turned off")
+    static let turnedOffText = String(
+        localized:
+            "Android did not finish starting with root, so root was turned off. You can turn it on again under Root."
+    )
+    static let stoppedTitle = String(localized: "Start was stopped")
+    static let stoppedText = String(
+        localized:
+            "You stopped a start with root before Android finished starting. If root is the problem, start once without it."
+    )
+    static let startWithoutRoot = String(localized: "Start without root")
 }

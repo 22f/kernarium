@@ -70,3 +70,46 @@ struct RootWarningAlert: ViewModifier {
 extension View {
     func rootWarningAlert() -> some View { modifier(RootWarningAlert()) }
 }
+
+/// What Home owes the person after a start with root that did not finish
+/// (`RootFallbackRule`): paused with the two ways out, turned off, or a start
+/// the person stopped. Only where the release carries root.
+struct RootNoticeCard: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if model.rootAvailable, let attention = model.rootAttention {
+            switch attention {
+            case .failedStart:
+                NoticeCard(
+                    symbol: "exclamationmark.triangle.fill", color: .orange,
+                    title: RootWords.pausedTitle, text: RootWords.pausedText,
+                    action: NoticeAction(
+                        label: RootWords.tryAgain, identifier: "root-notice-try-again",
+                        perform: { withAnimation { model.tryRootAgain() } }),
+                    secondAction: NoticeAction(
+                        label: RootWords.turnOff, identifier: "root-notice-turn-off",
+                        perform: { withAnimation { model.setRoot(false) } })
+                )
+                .accessibilityIdentifier("home-root-notice")
+            case .turnedOffAfterFailure:
+                NoticeCard(
+                    symbol: "key.fill", color: .orange,
+                    title: RootWords.turnedOffTitle, text: RootWords.turnedOffText,
+                    onClose: { withAnimation { model.dismissRootNotice() } }
+                )
+                .accessibilityIdentifier("home-root-notice")
+            case .stoppedStart:
+                NoticeCard(
+                    symbol: "stop.circle.fill", color: .orange,
+                    title: RootWords.stoppedTitle, text: RootWords.stoppedText,
+                    action: NoticeAction(
+                        label: RootWords.startWithoutRoot, identifier: "root-notice-start-without",
+                        perform: { model.start(.normal, withoutRoot: true) }),
+                    onClose: { withAnimation { model.dismissRootNotice() } }
+                )
+                .accessibilityIdentifier("home-root-notice")
+            }
+        }
+    }
+}

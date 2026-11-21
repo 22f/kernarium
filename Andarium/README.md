@@ -665,7 +665,15 @@ address space holds, so this is a fallback.
   channel) and puts the release's own copy in when it is not: the screen adds
   a fifth step, Magisk app, after Startup only for a start that installs, and
   the check and install are bound together to 45 s. A failure is an alert and
-  the boot goes on with root on. The wording is in `RootWords`. Three rules are one constant each in AndariumCore:
+  the boot goes on with root on. A start with root that ends before Android
+  boots (a guest panic or exit the previous session's record shows, a restart
+  loop, or a Stop by the person) is the fallback's: starts boot without root
+  until the person chooses, and a Home card offers Try with root again and Turn
+  off root (or, after a Stop, Start without root); a panic ends the process, so
+  the application writes the start's ramdisk (`Guest.root.rooted`) before the
+  runtime is handed it. The bug report carries `andarium/root.txt` (the
+  switch, the ramdisk of the last start, the Magisk version the release
+  carries). The wording is in `RootWords`. Three rules are one constant each in AndariumCore:
   when an absent Magisk app is installed again (`RootInstallRule`), what becomes
   of the app when root is off (`RootOffRule`), and what a failed start with root
   does to the switch (`RootFallbackRule`).

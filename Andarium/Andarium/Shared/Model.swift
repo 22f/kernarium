@@ -539,6 +539,9 @@ final class AppModel {
     /// root and the app is being put in the guest (`runRootAppStep`). The
     /// screen adds its fifth step only while this is set.
     var rootAppInstalling = false
+    /// A fallback decided at launch, before a driver could save the guest.
+    @ObservationIgnored
+    var rootStateUnsaved = false
     /// Settings' "Use the pointer as touch": the system pointer's clicks are the
     /// guest's touches and the guest has no mouse. Kept for the install
     /// (`PointerPreference`); off, Android sees a mouse with its own cursor.
@@ -812,6 +815,10 @@ final class AppModel {
         else { return }
         print("Andarium: \(previous.record.summary)")
         if guest != nil, let notice = previous.notice { self.notice = notice }
+        // A start with root that ended before Android booted is told by the
+        // record alone: a guest kernel's panic ends the process, so no run
+        // end is seen (`RootFallbackRule`).
+        if guest?.root.rooted == true, RootFallbackRule.endedBeforeBoot(previous.record) { applyRootFallback() }
     }
 
     var canCreate: Bool { host.hasRoom(for: createRequirementBytes) }
@@ -1363,7 +1370,8 @@ final class AppModel {
     /// What making a bug report does, whoever asks for it: Android's report,
     /// and the host's records and the guest's counters inside it.
     func bugReportWork() -> @MainActor (@escaping @Sendable (BusyUpdate) -> Void) async throws -> URL {
-        { [driver, diagnosticsDirectory, diagnosticsContainers, plays = playsBugReport] update in
+        let root = rootReportEntry()
+        return { [driver, diagnosticsDirectory, diagnosticsContainers, plays = playsBugReport] update in
             let file = if let driver, !plays {
                 try await driver.createBugReport(update: update)
             } else {
@@ -1372,7 +1380,8 @@ final class AppModel {
             // The host's records and the guest's counters travel inside
             // Android's own report.
             if let diagnosticsDirectory {
-                let guest = await driver?.guestStallFiles() ?? []
+                let stalls = await driver?.guestStallFiles() ?? []
+                let guest = root.map { stalls + [$0] } ?? stalls
                 _ = await Task.detached(priority: .userInitiated) {
                     BugReportAttachments.attach(
                         to: file, from: diagnosticsDirectory, containers: diagnosticsContainers, guest: guest)
@@ -1671,7 +1680,7 @@ final class AppModel {
     /// operation under way is not a reason to say anything: the start is
     /// ignored, as the screens offer none while one runs (`snapshotGate`); a
     /// rename is not one, and the start waits for it.
-    func start(_ mode: StartMode) {
+    func start(_ mode: StartMode, withoutRoot: Bool = false) {
         guard !snapshotActivity.holdsGuestFiles else { return }
         switch lifecycle.start(mode, host: host, plan: plan) {
         case let .allowed(kind):
@@ -1693,7 +1702,10 @@ final class AppModel {
             // runtime is handed the start, so that a process that ends in the
             // guest's panic still says which ramdisk it had (`RootFallbackRule`).
             if let current = guest {
-                guest?.root.rooted = current.bootsRooted(mode: mode, releaseCarriesRoot: rootAvailable)
+                guest?.root.rooted = current.bootsRooted(
+                    mode: mode, releaseCarriesRoot: rootAvailable, withoutRootOnce: withoutRoot)
+                // "Start without root" is the person's answer to a stopped start.
+                if withoutRoot, current.root.attention == .stoppedStart { guest?.root.attention = nil }
             }
             if let driver, let guest {
                 persistNow()
@@ -1719,6 +1731,7 @@ final class AppModel {
         let kind = bootTracker.recovery ? BootKind.recovery : started
         let firstStart = plan == .firstStart
         lifecycle.finishBoot(kind)
+        rootBootFinished(kind)
         // The display lets touches through to Android's screen reader only
         // while it is on, so a run under VoiceOver reads it as soon as Android
         // is up and goes on reading; without VoiceOver Settings reads it when
@@ -1784,6 +1797,7 @@ final class AppModel {
         // The run changed the data disk: what Home states of the storage is
         // what the disk holds now, not what it held when the guest loaded.
         if let driver { lifecycle.guest?.usedBytes = driver.measuredUsedBytes() }
+        rootRunEnded(end)
         persistNow()
         refreshPlan()
     }
