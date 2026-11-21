@@ -166,10 +166,10 @@ index 9343e4d77c5433eff6aeca41c135622bed6ac74f..3e538229d5aa79f25ef2b0aa8fae18cf
  
  /* Look up the entry points of the extensions the renderer enabled for its own
 diff --git a/src/venus/vkr_host_copy.c b/src/venus/vkr_host_copy.c
-index c0d08075939ae191816a9c5a3922d74ad7b4e408..791565b50a8717600347897c9add5f88c280338a 100644
+index d5a00868150800f909cdbb97f7270b2f8655cb85..b63c322b539080b2305144b4ed3ef4fc87cf0dfc 100644
 --- a/src/venus/vkr_host_copy.c
 +++ b/src/venus/vkr_host_copy.c
-@@ -589,7 +589,7 @@ vkr_host_copy_footprint(const struct vkr_host_copy_target *target,
+@@ -707,7 +707,7 @@ vkr_host_copy_footprint(const struct vkr_host_copy_target *target,
     }
  
     if (target->flags & VK_HOST_IMAGE_COPY_MEMCPY_BIT) {
@@ -179,10 +179,10 @@ index c0d08075939ae191816a9c5a3922d74ad7b4e408..791565b50a8717600347897c9add5f88
  
        size_t memcpy_reach = 0;
 diff --git a/src/venus/vkr_image.c b/src/venus/vkr_image.c
-index a4bc30c7655fd9517802d337285984f52021cf7e..56efcc3189cd41867b88e4be2cd5e7de4b54ded6 100644
+index 481b827bca648befba16543bb12570024391a0d7..23eb8b58cd85a679abeb4c3144cd6e70c3b3a811 100644
 --- a/src/venus/vkr_image.c
 +++ b/src/venus/vkr_image.c
-@@ -339,7 +339,7 @@ vkr_dispatch_vkGetImageDrmFormatModifierPropertiesEXT(
+@@ -341,7 +341,7 @@ vkr_dispatch_vkGetImageDrmFormatModifierPropertiesEXT(
  
     /* An Apple host has no DRM format modifiers, so the entry point is not
      * loaded and calling through the table would fault. */

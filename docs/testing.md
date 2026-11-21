@@ -122,7 +122,7 @@ test's header holds the mechanics.
 | `guest-gbm-dmabuf` | `UML_GBM_DMABUF_PROBE_BINARY` | the virtio-gpu dma-buf contract |
 | `guest-drm-vblank` | `UML_DRM_FLIP_PROBE_BINARY` | Virtio-GPU's vblank pacing and the grid it keeps across idle gaps |
 | `guest-aarch32-kernel` | built from `tests/integration/aarch32/` | the kernel's AArch32 task support (needs `python3`, `as`, `ld` in the rootfs) |
-| `apple-audio-playback`, `-interruption`, `guest-virtio-sound-delay-host` | `UML_TEST_APPLE_AUDIO=ON` | the real macOS audio output, the iOS interruption behavior (which needs an iOS Simulator runtime, and runs in a simulator device it creates and deletes) and a guest's stream delay on the real output |
+| `apple-audio-playback`, `-interruption`, `-interruption-ios26`, `guest-virtio-sound-delay-host` | `UML_TEST_APPLE_AUDIO=ON` | the real macOS audio output, the iOS interruption behavior (which needs an iOS Simulator runtime, an iOS 27 one for the first row and an iOS 26 one for `-ios26`, which checks the earlier-API fallbacks; each runs in a simulator device it creates and deletes) and a guest's stream delay on the real output |
 
 The probe sources are built for the guest architecture; each header says how.
 The real microphone is checked by hand because granting access is the user's
@@ -393,7 +393,8 @@ orientation of every interface orientation and facing,
 `camera-still-exposure` (unit) the exposure a still reports from a photo's
 metadata, fed literal metadata and an in-memory image, never a camera, and
 `camera-photo-dimensions` (unit) which photo size a camera is asked for, on
-fake format tables
+fake format tables, and `camera-apple-turned-still` (unit) a photo turned half
+around and encoded in the hardware JPEG encoder, from a pixel buffer
 ([Cameras](../darwin/device/camera/README.md)). The Camera setting's hosted
 tests (`CameraFlowTests`, and `CameraOffNoticeBannerTests` for the notice that
 Camera is off, drawn in a window) play iOS's
@@ -418,67 +419,43 @@ mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
-FEEDBACK_ADDRESS=feedback@example.com REVIEW_ID=id0000000000 STORE_LINK_ID=id0000000000
-FOLLOW_X_HANDLE=example_handle
-TIP_LITE=com.example.andarium.tip.lite TIP_PRO=com.example.andarium.tip.pro
-TIP_MAX=com.example.andarium.tip.max TIP_ULTRA=com.example.andarium.tip.ultra
-SHEET_DEVELOPER_NAME=example SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle
-ICP_NUMBER=示例ICP备00000000号-0A`;
+FOLLOW_X_HANDLE=example_handle`;
 the scheme without the filter also runs `AndariumUITests`). A row that asserts
 what an iPad app on a Mac does not do (accessibility activation of an alert's
 buttons, text that scales with the content size category, a menu's items as
 UIKit elements) is disabled there with its reason and shows as skipped. The
-scheme's Test action pins English, so the tests that read the application's
-words do not depend on the language of the device; `LocalizationTests` names a
-lost pin and looks each language up by name, and the language a `-testLanguage`
-run asks for fails only the tests that read the English words.
+tests run on an iOS 26 and an iOS 27 Simulator; a row that asserts what only
+iOS 27 does (an alert's preferred action, a toolbar button's inner label, a
+popover card's width, a sheet's custom detent on the iPad, the rows an iPad
+shows at once) expects the earlier system's value or leaves that case out below
+iOS 27; from iOS 27 it asserts the full value. The scheme's Test action pins English, so the tests that read the
+application's words do not depend on the language of the device;
+`LocalizationTests` names a lost pin and looks each language up by name, and
+the language a `-testLanguage` run asks for fails only the tests that read the
+English words.
 `SnapshotFileApiTests`
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
-screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`,
-`SendFeedbackStartLogTests` (the sheet's tip and start log during a start),
-`SendFeedbackAskScreenTests` (Send's question about a bug report and the
-pages of its row) and
-`SendFeedbackFilesScreenTests` (files from Files: in place, the copy of a file
-that cannot be used there, the access held and stopped once) exist only in a
-build with `FEEDBACK_ADDRESS=feedback@example.com` on the command line, as the
-command above has it ([Send feedback](../Andarium/README.md#send-feedback)); a
-run without it does not build them. Each other feature's tests need the example
-values of its own: `FollowXRowTests` `FOLLOW_X_HANDLE=example_handle`
-([Follow developer on X](../Andarium/README.md#follow-developer-on-x)),
-`ICPFootnoteTests` `ICP_NUMBER=示例ICP备00000000号-0A`
-([ICP filing number](../Andarium/README.md#icp-filing-number)),
-`TipJarScreenTests`, `TipJarHeaderTests` and `TipJarStoreKitTests` the four
-`TIP_` settings and the `SHEET_DEVELOPER_*` placeholders
-([Buy me tokens](../Andarium/README.md#buy-me-tokens); the last plays
-StoreKit's test session over `AndariumTests/TipJar.storekit`, example
-identifiers only, never the App Store), and `ReviewScreenTests`,
-`ReviewAskFlowTests` and `ReviewAskStoreTests` `REVIEW_ID`
-([Review on the App Store](../Andarium/README.md#review-on-the-app-store); the
-system's rating prompt is never asked for), and `StoreNoticeTests` `STORE_LINK_ID`
-([App Store notice](../Andarium/README.md#app-store-notice); the system's `open`
-is replaced, so no address opens). `HomeMenuTests` (Home's toolbar
-menu) exist with any of Send feedback, Review and Buy me tokens, and
-`HomePlainInfoTests` (the plain Info button) only with none
-([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
+screens' flows, refusals and words on a fake driver. `FollowXRowTests` needs
+the example value of its own, `FOLLOW_X_HANDLE=example_handle`
+([Follow developer on X](../Andarium/README.md#follow-developer-on-x)).
+`HomePlainInfoTests` checks that Home's toolbar holds the plain Info button.
 `GuestSmsTests`, `GuestSmsChannelTests` and `TextMessageNoticeTests` (`AndariumCoreTests`)
 read the golden bytes of the text message channel and its payload, which the guest
 service's tests read too, and run the exchange over socket pairs and a scripted
 system (deadline, cancellation); the hosted `TextMessageTests` play the bar over a
 fake driver: every state, the durable notice at each point where a session can end,
 and what VoiceOver has been told.
-`AndariumCoreTests` holds the tip sheet's states and the rating rule, counter
-and record as pure logic, and the state of the no-Google-apps notice (the panel
+`AndariumCoreTests` holds the state of the no-Google-apps notice (the panel
 on a first start and on the retry of a first Android boot that did not finish,
-and nothing else).
-`NoGoogleNoticeScreenTests` host the real boot screen and Send feedback sheet
-for it (the panel reached on those starts and gone with the boot, the starts
-that show none, the line opening and closing in place and coming back with each
-sheet, the words in each language), and `NoGoogleNoticeUITests` boot a real first start and reach the
-line (see the UI-test target below).
-The Mail composer, the picker and the guest's display are stand-ins. The hosted tests
+and nothing else) as pure logic.
+`NoGoogleNoticeScreenTests` host the real boot screen for it (the panel reached
+on those starts and gone with the boot, the starts that show none, the words in
+each language), and `NoGoogleNoticeUITests` boot a real first start and reach
+the panel (see the UI-test target below).
+The picker and the guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class
@@ -492,8 +469,7 @@ TCP port, where the macOS launcher's `--vsock-forward` reaches a guest's relay.
 The script and the guest end of the wire are the package's
 `AndariumCoreTestSupport` target, which only the package's tests, the probe
 and `AndariumTests` link, and the test bundle carries in its own Frameworks
-folder, so a device can load it; the application never does (the App Store
-bundle check refuses a build that does).
+folder, so a device can load it; the application never does.
 `DeviceOrientationTests` checks UIKit's orientation numbers against the
 application's readings, the mapping to Android's rotation, the observer's begin
 and end of the device's notifications, the path from a turn to the record a
@@ -507,11 +483,10 @@ is injected there; the real turns are checked on an iPhone.
 the test moves, so no test waits three minutes: when the notice comes (also for
 a start whose boot line never comes, the case it is for), what Stop asks of the
 runtime (after the dialog's answer) and the stopped end screen's words, the
-later notice and plain title of a first start, the controls with and without
-the feedback receiver and their size (the application's ordinary 44 points at the
-default text size, no less at any size), that the sheet the notice opens outlives the boot, that
-the alert and the sheet take the appearance of the screen under them, the
-Boot line of the information block, and that the notice goes with the boot.
+later notice and plain title of a first start, Stop alone and its size (the
+application's ordinary 44 points at the default text size, no less at any
+size), that the alert takes the appearance of the screen under it, and that the
+notice goes with the boot.
 `StartHandoverTests` run the real runtime object with the files' preparation
 held, and check that a stopped start's preparation is the only one at a time,
 that what changes the files waits for it and is not overtaken by a start asked
@@ -568,15 +543,12 @@ creates a virtual machine in the Simulator and starts it for real, so it needs
 the Simulator Android runtime packaged and the system image staged
 ([Build](../Andarium/README.md#build)), and it takes about a minute to reach
 Android (the test allows ten minutes to create the machine and 25 for the
-boot). Its other test, in a build with Send feedback, reaches the Send feedback
-line from a probe session's Settings. `FeedbackAskUITests` (the same build) adds
-`ANDARIUM_FEEDBACK_PROBE` to the probe session, which gives the sheet mail that can be
-sent, a composer stand-in and the preview's bug report, and walks Send's
-question, Create bug report, the pages of the report's row and Send without
-bug report. `AddToHomeUITests` (`ANDARIUM_ANDROID_APPS_PROBE`, a played list of
+boot). `AddToHomeUITests` (`ANDARIUM_ANDROID_APPS_PROBE`, a played list of
 Android apps) walks Settings > Apps > Add to Home Screen to the guide and presses
 Apple's Shortcuts button: Shortcuts opens on Andarium's page with a tile for each
-app.
+app. The feature is offered from iOS 27: on an iOS 26 Simulator those walks are
+skipped and tests assert that Settings has no row and that Shortcuts' search of
+actions finds no Open Android App (it finds it from iOS 27).
 
 `AndariumPreviewUITests` drives `AndariumPreview` in the Simulator
 (`xcodebuild test -scheme AndariumPreview`): the screens it lists pass the
@@ -647,27 +619,17 @@ instead.
 
 Tooling tests cover `scripts/check-privacy-manifests.py`
 (`ios-privacy-manifests`, which `package-ios-frameworks.sh` also runs on every
-device slice it packages), `Andarium/scripts/check-app-store-bundle.py`
-(`andarium-app-store-bundle`, the last build phase of the AppStore and
-TestFlight configurations,
-[configurations](../Andarium/README.md#configurations)), the
-tip sheet's words (`andarium-tip-words`: `Andarium/scripts/check-tip-words.py`
-rejects the forbidden terms of each language and a token amount in the
-`TipJar` table, and requires the statement that a tip is voluntary, one-time
-and the features free; the bundle check also covers the developer header's
-keys and artwork),
-the App Store notice's build conditions (`andarium-store-link-configuration`: the
-resolved build settings of each configuration build it into TestFlight alone, and
-`AndariumCore`'s `StoreLinkTests` hold its address, its dismissal record and its
-visibility rule),
-document pickers' build conditions (`andarium-document-pickers`: the App Store
-configuration opens files in place, every other presents the copy-mode picker,
-and an in-place importer anywhere else is in an App Store branch or a named
-exception), the application's own touch feedback
+device slice it packages), the application's own touch feedback
 (`andarium-interface-feedback`: no view plays it around the one modifier; that
 a launch silencing haptics silences it, on both model paths of a launch, is
 held by the hosted `LaunchEnvironmentTests` and `CapabilitiesFlowTests`),
-the Acknowledgements resource (`andarium-acknowledgements`) and the stand-in
+the Acknowledgements resource (`andarium-acknowledgements`), the ignore rule that
+keeps every developer-owned `*.local.xcconfig` of Andarium out of Git
+(`andarium-local-config-ignore`), the copy-mode document pickers
+(`andarium-document-pickers`), what any archive of Release must satisfy
+beyond its embedded artifacts (`andarium-release-archive`: the profile link to
+X, the build host's paths and debug map, test bundles and linked test
+support) and the stand-in
 debugger that serves the JIT's request for executable memory on a device
 (`andarium-ios-jit-debugger`). The JIT's region route has host tests that run
 on macOS (`arm64-jit-debugger-region`, `arm64-jit-debugger-request` for a
@@ -816,11 +778,11 @@ blocker in every one of them.
   of its own;
   `emulator-options` holds the `--aot=` and `--aot-release=` parsing and
   `android-release-identity` the launcher's reading of the release identity.
-  `aot-archive-switch-gates-explicit-artifacts` (tooling) holds the archive
-  switch to the App Store runtime's configure: an explicit artifact needs the
-  descriptor's `yes`. `arm64-aot-release-artifact` holds the artifact check
-  to what it must refuse (another release, partition, blob, tool or library
-  list). The differential runs functions of every rewritten library through
+  `aot-archive-switch` (tooling) selects the accepted artifact for each Apple
+  product on an installed fixture under both values of the descriptor's
+  archive switch, and fails a module whose yes/no predicate is turned round.
+  `arm64-aot-release-artifact` holds the artifact check to what it must refuse
+  (another release, partition, blob, tool or library list). The differential runs functions of every rewritten library through
   the gadget engine with and without ahead-of-time code and requires the same
   guest state, memory, ending event and exception syndrome, and the same
   registers, flags, vector registers and memory at every fault. The unhappy

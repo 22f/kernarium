@@ -119,7 +119,6 @@ struct AppEntry {
     /// Where Settings scrolls to for a screen that shows a lower section.
     private static let settingsScrolls: [String: String] = [
         "settings-stats": "stats",
-        "settings-feedback": "diagnostics",
         "settings-text-message": "developer",
         "settings-accessibility": "accessibility",
         "settings-accessibility-left": "accessibility",
@@ -133,7 +132,6 @@ struct AppEntry {
         "info-license": .license("mesa"),
         "info-license-gpl": .license("linux"),
         "whatsnew-history": .whatsNew,
-        "whatsnew-history-nofeedback": .whatsNew,
     ]
 
     var hints: ScreenHints {
@@ -412,7 +410,7 @@ struct AppEntry {
             }
             model.previewTextMessage(screen)
         case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
-             "settings-feedback", "settings-text-message", "settings-accessibility", "settings-accessibility-left",
+             "settings-text-message", "settings-accessibility", "settings-accessibility-left",
              "settings-performance", "settings-performance-menu", "settings-performance-off",
              "settings-performance-hot", "settings-performance-hot-off", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
              "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container",
@@ -470,12 +468,19 @@ struct AppEntry {
         case "failed":
             // The failure path a real run takes: a crash after 42 minutes.
             model.fail()
+        case "failed-memory":
+            // What a run ends with where the host would not map the guest's
+            // memory: it never began. The size is the guest's own, as the
+            // report's second line states it. The result is the runtime's
+            // memory-refused one (-101); the screen shows the size.
+            model.fail(
+                RunEnd(
+                    result: -101,
+                    memoryRefusedMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound),
+                uptimeSeconds: nil)
         case "stopped":
             // What Stop on the slow-start notice leaves: the run ended by the person.
             model.fail(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: 203)
-        case "feedback-boot", "feedback-boot-filled", "feedback-boot-details", "feedback-boot-finished",
-             "feedback-boot-removed":
-            slowBoot(stage: 3, seconds: 197)
         case let name where AddToHomePreview.handles(name):
             AddToHomePreview.prepare(screen: name, model: model, freeze: freeze)
         default:
@@ -483,18 +488,6 @@ struct AppEntry {
         }
         HeatLimitPreview.apply(screen: screen, to: model)
         WhatsNewPreview.apply(screen: screen, to: model)
-        #if FEEDBACK_MAIL
-        FeedbackPreview.configure(screen: screen, model: model)
-        #endif
-        #if TIP_JAR
-        TipJarPreview.configure(screen: screen, model: model)
-        #endif
-        #if ICP_FILING
-        ICPPreview.configure(model: model)
-        #endif
-        #if TESTFLIGHT_STORE_LINK
-        StoreNoticePreview.configure(model: model)
-        #endif
         if let statsReadings {
             model.session.readout = Readout(
                 previewReadings: statsReadings, memoryMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound
@@ -770,19 +763,8 @@ struct AppEntry {
         case "erase":
             model.confirmingErase = true
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",
-             "whatsnew-history", "whatsnew-history-nofeedback":
+             "whatsnew-history":
             model.sheet = .info
-        case "info-bottom":
-            // Info scrolled to its end, where the footnote of the filing number is.
-            model.sheet = .info
-            try? await Task.sleep(for: .milliseconds(1200))
-            await PreviewScroll.toBottomOfFrontSheet()
-        #if FEEDBACK_MAIL
-        case "home-menu", "welcome-menu":
-            // Home's toolbar menu open, as a tap leaves it.
-            try? await Task.sleep(for: .milliseconds(600))
-            PreviewMenu.openToolbarMenu()
-        #endif
         case "whatsnew-open", "whatsnew-skipped-open":
             model.sheet = .whatsNew
         case "start-low-space":

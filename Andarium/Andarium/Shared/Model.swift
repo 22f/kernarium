@@ -122,6 +122,13 @@ final class AppModel {
         }
     }
     var host: HostDevice
+    /// Whether the iPad app runs on a Mac or on an Apple Vision Pro, and what
+    /// its system offers: this process's.
+    private let processPadAppHost = IPadAppHost.system
+    var padAppHost: IPadAppHost {
+        if let playedPadAppHost { return playedPadAppHost }
+        return processPadAppHost
+    }
     /// The guest's files, when the runtime behind the screens can reach them.
     var fileBrowser: FileBrowserModel? {
         didSet { fileBrowser?.isAvailable = { [weak self] in self?.filesAvailable ?? false } }
@@ -260,10 +267,9 @@ final class AppModel {
     /// What is kept of Settings' "Show on screen" across launches
     /// (`StatsPreference`); nil where the launch decided it.
     var showStatsToKeep: Bool? { statsDecidedByLaunch ? nil : session.showStats }
-    #if !APP_STORE
     // JIT (Home's JIT row): the guest runs on the JIT engine when the person
     // turned it on and a debugger they attached has prepared the executable
-    // memory. A development build only; an App Store build has no JIT.
+    // memory.
     /// This build on this device can run the guest on the JIT engine: a
     /// development build on a device. The Simulator and the preview offer it
     /// only as a mock.
@@ -393,7 +399,6 @@ final class AppModel {
     }
     /// Whether the preview, which has no runtime, plays a debugger.
     var previewJitDebugger = true
-    #endif
     /// How the last run ended, for the screen that says so.
     var runEnd = RunEnd(result: 0)
     var runUptimeSeconds: Int?
@@ -404,11 +409,9 @@ final class AppModel {
     /// Seconds the boot screen shows when it is held.
     var frozenElapsed = 9
 
-    #if !APP_STORE
     /// The launch's automation work (create, erase, start) has run; a scene
     /// that connects to this model again does not repeat it.
     var launchApplied = false
-    #endif
 
     /// The runtime and storage behind the screens; nil plays mock data.
     var driver: (any RuntimeDriver)? {
@@ -450,54 +453,10 @@ final class AppModel {
     /// way itself, and the screens do not: set for the task a sheet starts,
     /// and cleared with it.
     var busyOverSheet = false
-    #if FEEDBACK_MAIL
-    /// What Send feedback asks of the system (`SendFeedbackServices`); a test
-    /// or the Simulator preview replaces it.
-    @ObservationIgnored var feedbackServices = SendFeedbackServices()
-    /// The Send feedback sheet is open, over Home or over the session's Settings.
-    var feedbackSheetOpen = false
-    /// The Send feedback sheet the boot screen's notice opened is open. The
-    /// root presents it, so it stays up, with what the person typed, when the
-    /// boot ends or the run does.
-    var feedbackFromBoot = false
-    #endif
-    #if TIP_JAR
-    /// What Buy me tokens asks of the App Store and of the build
-    /// (`TipJarServices`); a test or the Simulator preview replaces it.
-    @ObservationIgnored var tipJarServices = TipJarServices()
-    /// The Buy me tokens sheet is open, over Home. Nothing else about it is
-    /// kept: the sheet's state belongs to one opening.
-    var tipJarSheetOpen = false
-    #endif
-    #if APP_REVIEW
-    /// What Review on the App Store asks of the build and of the system
-    /// (`ReviewServices`); a test replaces it.
-    @ObservationIgnored var reviewServices = ReviewServices()
-    /// The rating prompt (`ReviewAsk`): made by the application's own launch,
-    /// so a model built any other way (a test, the preview) never asks.
-    @ObservationIgnored var reviewAsk: ReviewAsk?
-    #endif
-    #if TESTFLIGHT_STORE_LINK
-    /// What the App Store notice asks of the build and of the system
-    /// (`StoreNoticeServices`); a test or the Simulator preview replaces it,
-    /// and the dismissal is read from the new record.
-    @ObservationIgnored var storeNoticeServices = StoreNoticeServices() {
-        didSet { storeNoticeDismissed = storeNoticeServices.record.isDismissed }
-    }
-    /// The card was put away. Info keeps its row.
-    var storeNoticeDismissed = StoreNoticeRecord().isDismissed
-    #endif
     #if FOLLOW_X
     /// The handle Follow developer on X opens, from Info.plist, which only a
     /// build that names one has; a test replaces it.
     @ObservationIgnored var followXHandle: () -> String? = { FollowXProfile.handle }
-    #endif
-    #if ICP_FILING
-    /// The filing number Info's footnote shows, from Info.plist, which only a
-    /// build that names one has, and the storefront that decides whether it
-    /// shows; a test replaces each.
-    @ObservationIgnored var icpNumber: () -> String? = { ICPFiling.number }
-    @ObservationIgnored var icpStorefront = ICPStorefrontServices.live
     #endif
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
     private var restoringUpdate = false
@@ -550,14 +509,8 @@ final class AppModel {
     var slowStart = SlowStart()
     /// The notice's Stop asked first (`askToStop`): the dialog is up.
     var confirmingStop = false
-    #if !APP_STORE
     /// The preview's frozen boot screen shows the start's own clock, which runs.
     @ObservationIgnored var previewClockRuns = false
-    #endif
-    /// What tells the runtime's session record of the boot under way from any
-    /// other (`BootRecordBinding`): made as a start begins, and counted on at
-    /// each restart of the guest in place. nil before the first start.
-    @ObservationIgnored var bootRecord: BootRecordBinding?
     /// The time the boot screen counts a start by, in seconds: a monotonic
     /// reading that does not run while the guest is held (a background span, a
     /// pause for space). A runtime supplies its pause-aware clock; a test
@@ -598,11 +551,9 @@ final class AppModel {
     /// An Android application captured the pointer and the guest should have
     /// the pointer lock; the scene's root asks iOS for it.
     var pointerLockWanted = false
-    #if !APP_STORE
     /// A UI test's launch: the guest's keyboard and mouse send to a log the
     /// test reads, and Settings carries a text field to take the keys.
     var inputProbe: InputProbe?
-    #endif
     var microphoneState = MicrophoneState.notAsked
     /// How far iOS lets Andarium use the device's cameras, and `unavailable`
     /// for a device that has none.
@@ -720,9 +671,7 @@ final class AppModel {
                 refreshStatistics()
                 refreshGraphicsNotice()
                 refreshNetworkWatch()
-                #if !APP_STORE
                 refreshJit()
-                #endif
             }
         }
     }
@@ -730,10 +679,8 @@ final class AppModel {
     private(set) var statisticsMeter = StatsMeter()
     /// Holds back the readings that draw what the views show already.
     @ObservationIgnored private var statisticsGate = StatsPublishGate<Readout.Drawn>()
-    #if !APP_STORE
     /// A launch for automation prints each reading.
     var printsStatistics = false
-    #endif
     /// Waits between readings; a test paces them by hand.
     @ObservationIgnored var statisticsSleep: @MainActor (Duration) async -> Void = { duration in
         try? await Task.sleep(for: duration)
@@ -850,11 +797,6 @@ final class AppModel {
         else { return }
         print("Andarium: \(previous.record.summary)")
         if guest != nil, let notice = previous.notice { self.notice = notice }
-        #if APP_REVIEW
-        // The record is the run's end as the runtime wrote it, also when the
-        // application was not running to say so.
-        reviewAsk?.previousRunEnded(normally: previous.record.orderly)
-        #endif
     }
 
     var canCreate: Bool { host.hasRoom(for: createRequirementBytes) }
@@ -1463,29 +1405,20 @@ final class AppModel {
         }
         try FileManager.default.createDirectory(at: BugReportStaging.directory, withIntermediateDirectories: true)
         let file = BugReportStaging.directory.appendingPathComponent("bugreport-preview.zip")
-        #if FEEDBACK_MAIL && !APP_STORE
-        // A small made-up report the Send feedback viewer can read.
-        try SendFeedbackSampleReport.write(to: file)
-        #else
         // An empty zip: its end-of-central-directory record.
         try Data([0x50, 0x4B, 0x05, 0x06] + [UInt8](repeating: 0, count: 18)).write(to: file)
-        #endif
         return file
     }
 
-    #if !APP_STORE
     /// What the hosted tests put in place of the picked file's access, to see
-    /// when it is held. The App Store configuration leaves this out.
+    /// when it is held.
     @ObservationIgnored
     var accessPickedFileStub: (@MainActor (URL) -> (@MainActor () -> Void))?
-    #endif
 
     /// Starts the access that a picked file's URL carries and returns what
     /// ends it.
     private func accessPickedFile(_ url: URL) -> @MainActor () -> Void {
-        #if !APP_STORE
         if let accessPickedFileStub { return accessPickedFileStub(url) }
-        #endif
         guard url.startAccessingSecurityScopedResource() else { return {} }
         return { url.stopAccessingSecurityScopedResource() }
     }
@@ -1673,41 +1606,35 @@ final class AppModel {
         documentPickerProblem = AppAlert(title: title, message: error.localizedDescription)
     }
 
-    #if !APP_STORE
     /// What one attempt of the preview's install does instead of
     /// `playInstall`, for a preview that plays how the install can end.
-    /// The App Store configuration leaves this out.
     @ObservationIgnored
     var previewInstallAttempt: (@Sendable (_ bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws -> Void)?
-    /// How the preview's install ends. The App Store configuration leaves
-    /// this out, and its install always ends as installed.
+    /// How the preview's install ends; an install ends as installed by default.
     @ObservationIgnored
     var previewInstallOutcome = ApkInstallOutcome.installed
     /// The list of old apps the preview and a UI test's probe session play,
-    /// in place of the runtime's (`ScriptedOldApps`). The App Store
-    /// configuration leaves this out.
+    /// in place of the runtime's (`ScriptedOldApps`).
     @ObservationIgnored
     var scriptedOldApps: (any OldAppsSource)?
     /// Android's apps and the way to open one that a preview or a UI test's
     /// probe session plays in place of the runtime's (`ScriptedAndroidApps`).
     @ObservationIgnored
     var scriptedAndroidApps: (any AndroidAppsSource)?
+    /// The iPad-app host a test plays in place of this process's
+    /// (`padAppHost`).
+    @ObservationIgnored
+    var playedPadAppHost: IPadAppHost?
     /// A UI test's probe session makes the preview's bug report (`playBugReport`) though a runtime is
-    /// there: its guest is none. The App Store configuration leaves this out.
+    /// there: its guest is none.
     @ObservationIgnored
     var playsBugReport = false
-    #else
-    private var playsBugReport: Bool { false }
-    private var previewInstallOutcome: ApkInstallOutcome { .installed }
-    #endif
 
     private func playInstall(bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws {
-        #if !APP_STORE
         if let previewInstallAttempt {
             try await previewInstallAttempt(bypassLowTargetSdkBlock, update)
             return
         }
-        #endif
         try await Self.playInstall(update)
     }
 
@@ -1735,27 +1662,16 @@ final class AppModel {
         case let .allowed(kind):
             // A request to open an Android app that waited for this answer starts with it.
             androidAppsPersonStarted()
-            #if APP_REVIEW
-            reviewAsk?.runBegan()
-            #endif
             restoredSnapshot = nil
             snapshots.cancelReads()
             frozenBootStage = nil
             bootTracker = BootTracker()
             bootStartedUnfinished = driver?.firstBootPending() ?? false
             slowStart.begin(at: clock(), kind: kind, firstBootPending: bootStartedUnfinished)
-            // The record the file holds now is not the run's: the runtime rewrites it for the run, after this.
-            bootRecord = BootRecordBinding(
-                processID: Int(ProcessInfo.processInfo.processIdentifier),
-                recordAtStart: diagnosticsDirectory.flatMap {
-                    SessionRecord.read(at: $0.appendingPathComponent(BugReportAttachments.sessionRecord))
-                })
             preparingDisk = false
             diskProgress = nil
-            #if !APP_STORE
             jitLastStart = nil
             preparingJit = false
-            #endif
             if case let .update(from, _) = plan { bootFrom = from } else { bootFrom = nil }
             if let driver, let guest {
                 persistNow()
@@ -1812,9 +1728,6 @@ final class AppModel {
         runEnd = end
         runUptimeSeconds = uptimeSeconds
         lifecycle.fail()
-        #if APP_REVIEW
-        reviewAsk?.runEnded(normally: false)
-        #endif
     }
 
     /// The runtime's run returned: the guest powered off, or stopped for a
@@ -1850,16 +1763,6 @@ final class AppModel {
         if let driver { lifecycle.guest?.usedBytes = driver.measuredUsedBytes() }
         persistNow()
         refreshPlan()
-        #if APP_REVIEW
-        reviewAsk?.runEnded(normally: end.poweredOff)
-        #endif
-    }
-
-    /// The runtime began to boot the guest again in place for the `count`th time
-    /// in this run: the session record of the boot that follows says that
-    /// number, and the record of the boot before is not this boot's.
-    func guestRestartsCounted(_ count: Int) {
-        bootRecord?.restarts = count
     }
 
     /// Android's own Restart boots the guest again in place. ADB and the
@@ -1947,19 +1850,15 @@ final class AppModel {
     /// is on until the person turns it off.
     var hapticsOn: Bool { guest?.haptics ?? true }
 
-    #if !APP_STORE
     /// The launch plays none of the guest's haptics on the device, whatever
     /// the switch says (`HapticsLaunch`): the switch and the stored choice stay
     /// the person's, and the guest keeps its vibrator.
     var hapticsSilencedByLaunch = false
-    #endif
 
     /// Whether the device plays what the guest's vibrator asks for: the
     /// switch, unless the launch silences it.
     var hapticsPlays: Bool {
-        #if !APP_STORE
         if hapticsSilencedByLaunch { return false }
-        #endif
         return hapticsOn
     }
 
@@ -1967,9 +1866,7 @@ final class AppModel {
     /// rulers' tick) plays. The Haptics switch does not govern it; only a
     /// launch that silences haptics does.
     var interfaceFeedbackPlays: Bool {
-        #if !APP_STORE
         if hapticsSilencedByLaunch { return false }
-        #endif
         return true
     }
 
@@ -2261,14 +2158,11 @@ final class AppModel {
         cameraNotice.dismiss()
     }
 
-    #if !APP_STORE
     /// The Simulator preview plays a camera notice: it has no runtime to
-    /// interrupt, and its guest has no camera to open. The App Store
-    /// configuration leaves this out.
+    /// interrupt, and its guest has no camera to open.
     func previewCameraNotice(_ capture: CameraCapture = .interruptedByMultitasking) {
         cameraCaptureChanged(capture)
     }
-    #endif
 
     // MARK: Statistics
 
@@ -2348,11 +2242,9 @@ final class AppModel {
         if statisticsGate.admits(readout.drawn(memoryMiB: memoryMiB)) {
             session.readout = readout
         }
-        #if !APP_STORE
         if printsStatistics {
             print(ConsoleReport.statistics(statisticsMeter, guestMemoryMiB: guest?.memoryMiB ?? 0))
         }
-        #endif
     }
 
     // MARK: Graphics notice
@@ -2511,13 +2403,10 @@ final class AppModel {
         setHeatLimit(false)
     }
 
-    #if !APP_STORE
     /// The Simulator preview plays the notice: it has no runtime to start a cap.
-    /// The App Store configuration leaves this out.
     func previewThermalNotice() {
         thermalNotice.show()
     }
-    #endif
 
     // MARK: Network notice
 
@@ -2560,21 +2449,15 @@ final class AppModel {
         networkWatcher?.dismiss()
     }
 
-    #if !APP_STORE
     /// The Simulator cannot be denied the network, so the preview plays a
-    /// denial. The App Store configuration leaves this out.
+    /// denial.
     func previewNetworkNotice(_ denial: NetworkDenial) {
         networkNotice.apply(.denied(denial))
     }
-    #endif
 
     /// The debugger is preparing the JIT, which keeps the boot at its first step.
     private var preparingJitNow: Bool {
-        #if APP_STORE
-        false
-        #else
         preparingJit
-        #endif
     }
 
     /// The step of the boot under way, from the runtime's milestones.

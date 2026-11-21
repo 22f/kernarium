@@ -70,29 +70,6 @@
         }
       }
     },
-    "Email the developer from the Info menu on Home, or from Settings while the virtual machine runs, with screenshots and a bug report if you like." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "“ホーム”の“情報”メニュー、または仮想マシンの実行中に“設定”から、デベロッパにメールを送信できます。スクリーンショットやバグレポートも添付できます。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "在“主页”的“信息”菜单中或虚拟机运行时的“设置”中向开发者发送电子邮件，还可以附上截屏和错误报告。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "在「首頁」的「資訊」選單中或虛擬機器執行時的「設定」中傳送電子郵件給開發者，還可以附上截圖和錯誤報告。"
-          }
-        }
-      }
-    },
     "File browser" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -848,29 +825,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "儲存虛擬機器的資料，之後可在「首頁」中回復。"
-          }
-        }
-      }
-    },
-    "Send feedback" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "フィードバックを送信"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "发送反馈"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "傳送回饋"
           }
         }
       }

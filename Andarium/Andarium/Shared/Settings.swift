@@ -40,9 +40,7 @@ struct SessionSettingsSheet: View {
                     // The thermal session runs in a normal run; Recovery has no HAL.
                     if normalSession { PerformanceSection() }
                     if model.host.supportsPointer { pointer }
-                    #if !APP_STORE
                     if let probe = model.inputProbe { inputProbe(probe) }
-                    #endif
                     if normalSession, model.capabilities.adbOverNetwork || model.capabilities.textMessages {
                         developer(session)
                     }
@@ -61,7 +59,7 @@ struct SessionSettingsSheet: View {
                     oldAppsOpen = true
                 }
                 .task {
-                    guard model.sessionPreset.addToHomePage else { return }
+                    guard model.sessionPreset.addToHomePage, model.hostOffersAddToHomeScreen else { return }
                     try? await Task.sleep(for: .milliseconds(400))
                     addToHomeOpen = true
                 }
@@ -85,9 +83,6 @@ struct SessionSettingsSheet: View {
                 AddToHomeScreenPage(query: model.sessionPreset.addToHomeQuery ?? "")
             }
         }
-        #if FEEDBACK_MAIL
-        .sendFeedbackSheet(model)
-        #endif
         // A picker that failed (Install APK and the file browser's Import are
         // here): the alert is the sheet's own, which keeps the sheet open.
         .background {
@@ -137,20 +132,7 @@ struct SessionSettingsSheet: View {
         .presentationDetents([.medium, .large], selection: $detent)
         .presentationBackground(Color(.systemGroupedBackground))
         .presentationBackgroundInteraction(.enabled(upThrough: .medium))
-        #if APP_STORE
-        .fileImporter(isPresented: $importing, allowedContentTypes: InstallRefusal.pickerTypes) { result in
-            switch result {
-            case .success(let url):
-                // Settings goes; the install, or the refusal of a file that is not
-                // an .apk, .apks, .xapk or .apkm, is on the full-screen overlay.
-                model.installPicked(url)
-                dismiss()
-            case .failure(let error):
-                model.documentPickerFailed(error, title: AppModel.installFailure)
-            }
-        }
-        #else
-        // Every other build takes a copy of the file (`CopyDocumentPicker`).
+        // The picker takes a copy of the file (`CopyDocumentPicker`).
         .documentCopyPicker(isPresented: $importing, types: InstallRefusal.pickerTypes) { result in
             switch result {
             case .success(let picked):
@@ -161,7 +143,6 @@ struct SessionSettingsSheet: View {
                 model.documentPickerFailed(error, title: AppModel.installFailure)
             }
         }
-        #endif
     }
 
     private var fileRoute: Binding<[FolderRoute]> {
@@ -273,9 +254,6 @@ struct SessionSettingsSheet: View {
     /// Tapping the row starts at once.
     private var diagnostics: some View {
         Section("Diagnostics") {
-            #if FEEDBACK_MAIL
-            if model.feedbackAddress != nil { SendFeedbackEntrance() }
-            #endif
             Button {
                 dismiss()
                 model.createBugReport()
@@ -447,7 +425,6 @@ struct SessionSettingsSheet: View {
         }
     }
 
-    #if !APP_STORE
     /// The text field a UI test types into while Settings is open.
     private func inputProbe(_ probe: InputProbe) -> some View {
         @Bindable var probe = probe
@@ -458,7 +435,6 @@ struct SessionSettingsSheet: View {
                 .accessibilityIdentifier("inputProbeField")
         }
     }
-    #endif
 
     // MARK: Stats
 

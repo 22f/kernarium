@@ -61,11 +61,13 @@ uml_add_tooling_test(
     LABELS audit;package
     TIMEOUT 60)
 
-# The archive switch of the AOT component (cmake/UmlAotArchives.cmake): an
-# explicit artifact in an App Store runtime is a configure error unless the
-# accepted descriptor says yes, and darwin/cpu/CMakeLists.txt calls the gate.
+# The archive switch of the AOT component (cmake/UmlAotArchives.cmake): an iOS
+# device runtime takes the accepted artifact only when the accepted descriptor
+# says yes, macOS and the Simulator take it under either value, and a module
+# whose predicate is turned round fails the rows; darwin/cpu/CMakeLists.txt
+# selects the artifact through that module.
 uml_add_tooling_test(
-    NAME aot-archive-switch-gates-explicit-artifacts
+    NAME aot-archive-switch
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/cmake/test_aot_archive_switch.py
         --cmake ${CMAKE_COMMAND}
@@ -139,8 +141,7 @@ uml_add_tooling_test(
     TIMEOUT 120)
 
 # A bundle's privacy manifest declares every required-reason API the bundle
-# uses. The framework packaging and the Andarium App Store build run this
-# check; the fixtures show it finds a C symbol, an Objective-C class, a
+# uses. The framework packaging runs this check; the fixtures show it finds a C symbol, an Objective-C class, a
 # selector with no symbol, a missing or malformed manifest and an
 # Info.plist with an empty version or no MinimumOSVersion.
 uml_add_tooling_test(
@@ -159,6 +160,18 @@ uml_add_tooling_test(
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/cmake/test_check_run_location.py
         --checker ${PROJECT_SOURCE_DIR}/scripts/check-run-location.py
+    LABELS audit;package
+    TIMEOUT 60)
+
+# The iPad applications offered on a Mac take the Mac's minimum from the
+# processed Info.plist's LSMinimumSystemVersion, and from the iOS minimum
+# otherwise, which is now below the macOS floor. Each plist, processed as the
+# build does, names the macOS floor of the toolchain.
+uml_add_tooling_test(
+    NAME ipad-apps-mac-minimum
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/cmake/test_ipad_apps_mac_minimum.py
+        --repository ${PROJECT_SOURCE_DIR}
     LABELS audit;package
     TIMEOUT 60)
 

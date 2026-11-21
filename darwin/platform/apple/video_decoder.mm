@@ -132,13 +132,18 @@ bool high10Available()
 
 /* VP9 is a supplemental VideoToolbox decoder: `VTIsHardwareDecodeSupported`
  * answers no until the process asks for it, which is what Chromium and FFmpeg
- * do before probing. Asking once is harmless where no such decoder exists.
+ * do before probing. Asking once is harmless where no such decoder exists. The
+ * registration call needs iOS 26.2; below it the host reports no VP9 hardware
+ * decode.
  */
 bool vp9Available()
 {
     static const bool available = [] {
-        VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9);
-        return bool(VTIsHardwareDecodeSupported(kCMVideoCodecType_VP9));
+        if (@available(iOS 26.2, *)) {
+            VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9);
+            return bool(VTIsHardwareDecodeSupported(kCMVideoCodecType_VP9));
+        }
+        return false;
     }();
     return available;
 }

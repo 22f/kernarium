@@ -18,9 +18,7 @@ extension AppModel {
     /// Where the list and the opening come from: the runtime, or the list a
     /// preview or a UI test's probe session plays.
     var androidAppsSource: (any AndroidAppsSource)? {
-        #if !APP_STORE
         if let scriptedAndroidApps { return scriptedAndroidApps }
-        #endif
         return driver
     }
 
@@ -35,11 +33,13 @@ extension AppModel {
         return androidAppsSource?.androidAppsTool != nil
     }
 
-    /// The host has a Home Screen to add to. A Mac and a Vision Pro have
-    /// none: nothing of this feature is offered there, neither the row nor the
-    /// entities, the Spotlight index or the shortcut tiles.
+    /// The host has a Home Screen to add to, and Shortcuts shows the tile for
+    /// each app (iOS 27 and later). A Mac and a Vision Pro have no Home Screen,
+    /// and an earlier iOS has no tile: nothing of this feature is offered
+    /// there, neither the row nor the entities, the Spotlight index or the
+    /// shortcut tiles.
     var hostOffersAddToHomeScreen: Bool {
-        host.idiom != .mac && !ProcessInfo.processInfo.isiOSAppOnVision
+        host.idiom != .mac && padAppHost.offersAddToHomeScreen
     }
 
     /// Settings' Apps section offers Add to Home Screen: Android runs, and its

@@ -76,8 +76,29 @@ never returns address space while the process lives: the first run reserves it
 once (`runtime::reserve_process_native_window`) and every later run takes the
 same window. Guest pages are mapped over it with `MAP_FIXED`, and releasing one
 hands its range back as a reservation, never with `munmap`, which would let an
-unrelated `mmap(NULL)` take the gap. Guest RAM that a host-service view still
-borrows stays mapped until the last view is released. The linear physical window
+unrelated `mmap(NULL)` take the gap. Before the kernel starts, a run checks the
+geometry of the guest's size and reserves its window, and then the process's
+heap region (`runtime::reserve_process_heap`), whose first block the kernel's
+mapping takes; no host's placement of the window is displaced by the region,
+and a size with no layout reserves nothing. A start refused the region leaves the
+process's window as it was before the start: what the start reserved for itself
+(the window's growth, or a new window beside the held one) is given back and
+nothing else (`runtime::undo_process_window`), so that a smaller guest tried
+next has its room and the signed kernel text an earlier load kept stays where
+it is; a region once reserved stays. The run
+then maps its RAM beyond the first 64 MiB of the window (the kernel image and
+its reserved prefix, where a signed text alias of an earlier guest is
+permanent) as the kernel will and hands the range back to the reservation
+(`runtime::native_guest_memory_mappable`); a refusal of that trial keeps the
+window and the region. A host that will not reserve the window or the region or
+map the RAM ends the run with `-UML_EMULATOR_OUT_OF_MEMORY`, which leaves the
+process's guest unspent, where the kernel would end the process, and marks the
+run of that handle (`emulator/src/start_refusal.hpp`): the same status also
+comes from a failed allocation of the library's own, so the Kernarium runtime
+returns its own result (`KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED`) for a
+marked run of its handle alone, whatever another handle's run did. Guest
+RAM that a host-service view still borrows stays mapped until the last view is
+released. The linear physical window
 is the anonymous RAM root; consumers borrow it or create non-copying Mach
 aliases, and disks stay file-backed.
 
@@ -186,9 +207,18 @@ signed 14 GiB envelope (`device_window_guest_memory_maximum_mib`, pinned by the
 layout tests against `runtime/native_kernel_layout.hpp`), and the host's RAM
 (at most 1 TiB, the largest limit a launch states) in a macOS window, which a
 Mac and an iOS application on a Mac use; where the host sets no limit `G_max`
-is C. A run starts exactly the sizes from 512 MiB through C in 64 MiB steps
-(`guest_memory_admitted`, with `process_guest_memory_ceiling_mib` for a
-process): the runtime refuses any other, and the loader answers both
+is C. In an iOS application signed without Extended Virtual Addressing C is also
+held to the address space the process has: the system gives such an application
+one run of a few GiB (its highest mappable address is under 512 GiB), and the
+guest's window (`native_window_bytes`) and the process's heap region (1 GiB,
+`memory/heap_region_size.hpp`, which has no other hole of that size there) must
+fit in it. The loader measures the run once at launch, for that process alone
+(`platform/apple/os_address_space.hpp`: the Simulator, a macOS process and an
+entitled application are not measured and are answered as they always were), and
+`address_space_guest_memory_mib` turns it into the largest RAM that fits, which
+bounds C, the offered sizes and the defaults alike. A run starts exactly the sizes from 512 MiB through C in
+64 MiB steps (`guest_memory_admitted`, with `process_guest_memory_ceiling_mib`
+for a process): the runtime refuses any other, and the loader answers both
 applications with the same two functions. The settings of Kernarium and
 Andarium offer no more than `G_max(v)` under a set that counts none of A,
 E_rest and S (`maximum_memory_set`), so every size they offer is one a run
@@ -343,12 +373,9 @@ The region is sized from the process's JIT cache budget, which is the gadget
 cache's term of the guest memory budget (executors times the arena, the tracked
 store and the single-instruction arena), so the GPU budget and the memory limit
 do not move; a process prepares it once, for the guest memory and vCPU count of
-its first run. Only the development configurations compile it
-(`UML_IOS_DEBUGGER_JIT`): the App Store runtime has no JIT engine, no owner and
-no entry, Andarium's JIT row and the loader's preparation entries are compiled
-out of its application, and `check-app-store-bundle.py` refuses the symbols,
-text and the `brk` instruction. A start that cannot have the JIT runs on
-gadgets and says why; it never fails. Andarium asks for the preparation through
+its first run. Only the iOS device product compiles it
+(`UML_IOS_DEBUGGER_JIT`). A start that cannot have the JIT runs on gadgets and
+says why; it never fails. Andarium asks for the preparation through
 runtime API 30 (`prepare_jit`, `use_jit`) as it opens, because StikDebug spins
 until it is served and is ended by the system within a minute; the region then
 sits wired until the process ends, and a run that does not use it (the JIT is
@@ -376,9 +403,13 @@ translated by its engines, never loaded. Kernarium's app embeds every selectable
 runtime framework, links none at launch, and loads exactly one guest flavour for
 the process lifetime.
 
-The macOS, iOS device, and iOS Simulator products build at a 27.0 minimum
-(`cmake/toolchains/Apple.cmake`), so their code carries no availability guard or
-fallback for an older release. Apple products consume accepted kernel bundles
+The macOS product builds at a 27.0 minimum and the iOS device and iOS Simulator
+products at 26.0 (`cmake/toolchains/Apple.cmake`); the iPad applications that
+also run on a Mac name that 27.0 in their `LSMinimumSystemVersion`, which the
+App Store would otherwise take from the iOS minimum. Code that reaches an iOS API
+newer than 26.0 sits behind an availability check with the earlier API as its
+fallback, and a floor-driven fallback names the release that introduced the
+API. Apple products consume accepted kernel bundles
 and never invoke Kbuild: one mainline artifact for arm64 userspace on macOS and
 the iOS device, a separately identified 4 KiB mainline slice for macOS x86_64
 userspace, and a separate accepted 4 KiB `android-6.18` artifact (the same
@@ -666,14 +697,11 @@ through the executor's TLB and `StaticGuestMemory::fetch`.
   word beats the environment. Each run makes the choice before its first
   executor and any per-thread table exist; a restart in the same process
   decides again, and a release the blob no longer fits runs on the engine.
-  A process that ran without the component does not turn it on later. The
-  App Store runtime
-  reads no environment for it. An archive
-  configuration (App Store, TestFlight) carries the component only when
-  `accepted-aot.env` sets `LINEAGE24_ACCEPTED_AOT_ARCHIVES` to `yes`: the
-  device runtimes take no accepted artifact before, and the App Store runtime
-  configuration fails to configure with an explicit `UML_AOT_ARTIFACT` unless
-  the field is `yes`. `scripts/check-embedded-artifacts.py --aot` fails a
+  A process that ran without the component does not turn it on later. An
+  archive of Andarium's Release configuration carries the component only when
+  `accepted-aot.env` sets `LINEAGE24_ACCEPTED_AOT_ARCHIVES` to `yes`: the iOS
+  device runtimes take the accepted artifact only then.
+  `scripts/check-embedded-artifacts.py --aot` fails a
   packaged framework without an accepted artifact or while the field is `no`,
   one whose blob is not the accepted digest or was not made from the packaged
   system (the three values the launch compares, below), and an application whose
@@ -1108,8 +1136,7 @@ values of the launch's `androidboot.serialno`, `androidboot.kernarium.adb_key`
 and `androidboot.kernarium.timezone` arguments wherever they stand (also a
 write that ends inside one), the assignments of those names and any hardware
 address in its colon spelling are replaced by `<masked>`, `<time zone>` and
-`<address>`, the words the application's start log uses, so no reader of the
-file has them. An end is the last state on disk unless the process dies between
+`<address>`, so no reader of the file has them. An end is the last state on disk unless the process dies between
 a delayed checkpoint's write and its repair: the end formats its record before
 it writes it, and a checkpoint whose write lands after it writes that record
 again at once. The file is text of a fixed layout (`uml-session 8`) of 19200

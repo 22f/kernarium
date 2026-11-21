@@ -364,6 +364,24 @@ if(UML_ANDROID_CAMERA_RELEASE AND TARGET uml-darwin-android17)
     endforeach()
 endif()
 
+# The front camera's stated orientation of 270 and the picture an application gets through
+# Camera API 1: the runner boots Android with the launcher's synthetic phone whose front camera
+# is presented half around, opens each camera with a probe application, and checks the
+# orientation and facing the framework states and the frame the application receives. It boots
+# Android with the macOS launcher, so it is opt-in: it takes the release the camera tests name.
+if(UML_ANDROID_CAMERA_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-camera-front-orientation
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_camera_front.py
+            --release ${UML_ANDROID_CAMERA_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 1800
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
 # The thermal HAL and the 30 fps cap (route p0007's display topic): the runner
 # plays the host application over a vsock forward to the HAL's port and checks
 # the thermal manager, the display manager's vote, SurfaceFlinger's render rate
