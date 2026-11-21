@@ -1368,7 +1368,8 @@ verification, and `tools/verify-lineage-recovery.py` checks the recovery image.
 
 `support/release/release-manifest.schema.json` defines the compact rootfs
 release. It binds the system disk and its layout, boot ranges, command line,
-target-file support, and source provenance. The Android section records the
+target-file support, source provenance and, when the release has them, the
+[Magisk root files](#root-files). The Android section records the
 security patch level and the build number (`ro.build.version.incremental`),
 which a release sets to its release number (`build-aosp.sh --build-number N`:
 `r26` is 26 and `r10000` is 10000, up to ten digits), and so does every proof
@@ -1462,6 +1463,22 @@ stock `/init`; `overlay.d/sbin/{magisk,init-ld}.xz` as the APK's arm64 binaries;
 and `.backup/.magisk` as the fixed flags, the pre-init partition and the SHA-1
 of the stock image. `root/init_boot-magisk.img` and the unmodified
 `root/Magisk-<version>.apk` land in the output directory.
+
+A schema 8 manifest records them as a `root` object (the Magisk name, version and
+version code; the APK's path, size and SHA-256; the patched image's path, size and
+SHA-256 and the SHA-256 and SHA-1 of the stock `init_boot` it was made from) and
+lists both files in its inventory. A release without root files is valid, as is
+every release of schema 6 and 7, which cannot carry them.
+`tools/publish-release.py` takes exactly one of `--magisk-apk APK`, which it
+passes to `assemble-image.sh`, and `--without-root`, so a release cannot lose its
+root files by omission. `install-release.py` verifies and installs the files with
+the rest, and the verification refuses by name: a `root/` that is partial or
+holds files the record does not declare, a file that is not the recorded one, a
+patched image that is not its own disk's `init_boot` plus what Magisk adds, and,
+for a release the tracked tree builds, an APK that is not the pinned one. The
+accepted descriptor needs no field of its own: the pin is a release input, so
+`LINEAGE24_ACCEPTED_INPUT_TREES` records it. `tools/verify-magisk-boot.py
+--release DIR` runs the same check on a release directory.
 
 ### Superseded releases
 

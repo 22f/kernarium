@@ -123,6 +123,7 @@ def main() -> None:
         PRODUCT_FAMILY,
         SCHEMA_VERSION,
         LEGACY_SCHEMA_VERSION,
+        INPUT_TREES_SCHEMA,
         ACCEPTANCE_KEYS,
         LEGACY_ACCEPTANCE_KEYS,
         INPUT_TREES_KEY,
@@ -152,10 +153,10 @@ def main() -> None:
     abi = parse_env(root / "kernel/common/abi/identity.env")
     tracked_acceptance = parse_env(android_root / "metadata/accepted-release.env")
     # The accepted release may predate the recorded input trees (schema 6); the
-    # embedded-artifact check then refuses it as unverifiable until a schema 7
-    # release is accepted.
+    # embedded-artifact check then refuses it as unverifiable until a release of
+    # schema 7 or later is accepted.
     tracked_schema = tracked_acceptance.get("LINEAGE24_ACCEPTED_SCHEMA")
-    if tracked_schema == str(SCHEMA_VERSION):
+    if tracked_schema in (str(INPUT_TREES_SCHEMA), str(SCHEMA_VERSION)):
         tracked_keys = ACCEPTANCE_KEYS
     elif tracked_schema == str(LEGACY_SCHEMA_VERSION):
         tracked_keys = LEGACY_ACCEPTANCE_KEYS
@@ -279,10 +280,10 @@ def main() -> None:
         rendered = parse_env(acceptance)
         if rendered != acceptance_values(manifest) or set(rendered) != ACCEPTANCE_KEYS:
             fail("the rendered descriptor does not repeat the manifest")
-        if rendered["LINEAGE24_ACCEPTED_SCHEMA"] != "7" or not acceptance.read_text().startswith(
+        if rendered["LINEAGE24_ACCEPTED_SCHEMA"] != str(SCHEMA_VERSION) or not acceptance.read_text().startswith(
             "# SPDX-License-Identifier: GPL-2.0-or-later\n"
         ):
-            fail("the rendered descriptor is not a schema 7 descriptor with its header")
+            fail(f"the rendered descriptor is not a schema {SCHEMA_VERSION} descriptor with its header")
         for path, tree in manifest["outer"]["input_trees"].items():
             if f"{path}={tree}" not in rendered[INPUT_TREES_KEY].split(" "):
                 fail(f"the rendered descriptor omits the input tree of {path}")
@@ -389,7 +390,7 @@ def main() -> None:
             lambda: verify_release(
                 release_root, android_root, acceptance_path=acceptance, semantic=False
             ),
-            "a schema 6 release against a schema 7 descriptor",
+            "a schema 6 release against a schema 8 descriptor",
         )
         expect_failure(
             lambda: verify_release(release_root, android_root, semantic=False),
@@ -400,12 +401,12 @@ def main() -> None:
             lambda: verify_release(
                 release_root, android_root, acceptance_path=legacy_acceptance, semantic=False
             ),
-            "a schema 7 release against a schema 6 descriptor",
+            "a schema 8 release against a schema 6 descriptor",
         )
         for label, edit in (
             ("a schema 6 release that records input trees",
              lambda value: value.update(schema_version=LEGACY_SCHEMA_VERSION)),
-            ("a schema 7 release without input trees",
+            ("a schema 8 release without input trees",
              lambda value: value["outer"].pop("input_trees")),
             ("no input trees",
              lambda value: value["outer"].update(input_trees={})),

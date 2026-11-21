@@ -132,6 +132,17 @@ uml_add_tooling_test(
     LABELS android;audit
     TIMEOUT 120)
 
+# The release manifest, installer and publisher carry the root files, and refuse
+# a release whose root/ is partial, whose patched image does not verify against
+# its own stock init_boot, or whose APK is not the pin.
+uml_add_tooling_test(
+    NAME lineage24-release-root
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_release_root.py
+        --source-root ${PROJECT_SOURCE_DIR}
+    LABELS android;audit
+    TIMEOUT 120)
+
 uml_add_tooling_test(
     NAME android17-macos-launcher-options
     COMMAND ${Python3_EXECUTABLE} -B

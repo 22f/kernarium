@@ -7,6 +7,7 @@ __import__("sys").dont_write_bytecode = True
 
 import csv
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -23,6 +24,7 @@ if _ARTIFACTS not in sys.path:
 from contract_checks import ContractChecks, parse_config, sha256_path  # noqa: E402
 from kernel_artifact import verify_config_policy  # noqa: E402
 
+import magisk_image  # noqa: E402
 import release_inputs  # noqa: E402
 
 _CHECKS = ContractChecks("Android release verifier")
@@ -36,11 +38,17 @@ safe_relative = _CHECKS.safe_relative
 parse_env = _CHECKS.parse_env
 
 # Schema 7 records the object IDs of the release's input paths (outer.input_trees,
-# android/lineage-24/support/release/input-paths.tsv). Releases of schema 6 were
-# published before that and stay valid as history; no release is built as one.
-SCHEMA_VERSION = 7
+# android/lineage-24/support/release/input-paths.tsv). Schema 8 may also carry the
+# Magisk root files of the release (the `root` record and its two files under
+# root/); a release without them is valid. Releases of schema 6 were published
+# before the input trees and stay valid as history, and so do those of schema 7;
+# a release is built as the newest schema.
 LEGACY_SCHEMA_VERSION = 6
-SCHEMA_VERSIONS = (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION)
+INPUT_TREES_SCHEMA = 7
+ROOT_SCHEMA = 8
+SCHEMA_VERSION = ROOT_SCHEMA
+SCHEMA_VERSIONS = (LEGACY_SCHEMA_VERSION, INPUT_TREES_SCHEMA, ROOT_SCHEMA)
+ROOT_KEY = "root"
 PRODUCT_FAMILY = "lineage-24-mainline-6.18-4k"
 DIRECTORY_PREFIX = "lineage24-mainline6.18-4k-"
 # The kernel artifact family of the Android product. Kernarium and CMake key
@@ -231,6 +239,14 @@ LEGACY_ACCEPTANCE_KEYS = {key for key, _ in ACCEPTANCE_FIELDS}
 ACCEPTANCE_KEYS = LEGACY_ACCEPTANCE_KEYS | {INPUT_TREES_KEY}
 
 
+def payload_specs(manifest: dict) -> dict[str, tuple[str, str]]:
+    """The inventory role and format of every file a manifest's release holds."""
+    specs = dict(PAYLOAD_SPECS)
+    if ROOT_KEY in manifest:
+        specs.update(magisk_image.root_payload_specs(manifest[ROOT_KEY]))
+    return specs
+
+
 def load_manifest(release_root: Path) -> dict:
     path = release_root / "release-manifest.json"
     if not path.is_file() or path.is_symlink():
@@ -243,10 +259,15 @@ def load_manifest(release_root: Path) -> dict:
 
 
 def validate_manifest(value: object) -> dict:
-    manifest = require_exact_keys(value, TOP_LEVEL_KEYS, "release manifest")
+    keys = TOP_LEVEL_KEYS | {ROOT_KEY} if isinstance(value, dict) and ROOT_KEY in value else TOP_LEVEL_KEYS
+    manifest = require_exact_keys(value, keys, "release manifest")
     schema_version = manifest["schema_version"]
     if isinstance(schema_version, bool) or schema_version not in SCHEMA_VERSIONS:
         fail("release manifest schema version is unsupported")
+    if ROOT_KEY in manifest:
+        if schema_version < ROOT_SCHEMA:
+            fail(f"a schema {schema_version} release manifest cannot carry a root record")
+        magisk_image.validate_root_record(manifest[ROOT_KEY], error)
     release_id = require_string(manifest["release_id"], "release ID")
     if RELEASE_ID_RE.fullmatch(release_id) is None:
         fail("release ID has an unsafe format")
@@ -326,13 +347,13 @@ def validate_manifest(value: object) -> dict:
 
     outer = require_exact_keys(
         manifest["outer"],
-        OUTER_KEYS_WITH_INPUTS if schema_version == SCHEMA_VERSION else OUTER_KEYS,
+        OUTER_KEYS_WITH_INPUTS if schema_version >= INPUT_TREES_SCHEMA else OUTER_KEYS,
         "outer",
     )
     require_hex(outer["revision"], 40, "outer revision")
     if outer["dirty"] is not False:
         fail("accepted release records a dirty outer project")
-    if schema_version == SCHEMA_VERSION:
+    if schema_version >= INPUT_TREES_SCHEMA:
         validate_input_trees(outer["input_trees"])
 
     producer = require_exact_keys(manifest["producer"], PRODUCER_KEYS, "producer")
@@ -354,7 +375,8 @@ def validate_manifest(value: object) -> dict:
     inventory = manifest["inventory"]
     if not isinstance(inventory, list):
         fail("release inventory must be an array")
-    expected_paths = set(PAYLOAD_SPECS)
+    specs = payload_specs(manifest)
+    expected_paths = set(specs)
     seen_paths: set[str] = set()
     ordered_paths: list[str] = []
     for index, raw_entry in enumerate(inventory):
@@ -364,9 +386,9 @@ def validate_manifest(value: object) -> dict:
             fail(f"duplicate inventory path: {path}")
         seen_paths.add(path)
         ordered_paths.append(path)
-        if path not in PAYLOAD_SPECS:
+        if path not in specs:
             fail(f"undeclared release payload: {path}")
-        role, file_format = PAYLOAD_SPECS[path]
+        role, file_format = specs[path]
         if entry["role"] != role or entry["format"] != file_format:
             fail(f"inventory role or format differs for {path}")
         require_integer(entry["size"], f"inventory size for {path}", minimum=1)
@@ -539,8 +561,9 @@ def tracked_identity(android_root: Path) -> dict[str, dict]:
 def verify_tracked_identity(manifest: dict, android_root: Path) -> None:
     if manifest["schema_version"] != SCHEMA_VERSION:
         fail(
-            f"a schema {manifest['schema_version']} release records no input "
-            "trees, so it cannot be the tracked tree's own release"
+            f"a schema {manifest['schema_version']} release is not the schema "
+            f"{SCHEMA_VERSION} the tracked tree builds, so it cannot be the tracked "
+            "tree's own release"
         )
     for section, expected in tracked_identity(android_root).items():
         for key, value in expected.items():
@@ -570,7 +593,7 @@ def acceptance_values(manifest: dict) -> dict[str, str]:
         "LINEAGE24_ACCEPTED_ABI_VERSION": str(manifest["kernel"]["abi_version"]),
         "LINEAGE24_ACCEPTED_ABI_FINGERPRINT": manifest["kernel"]["abi_fingerprint"],
     }
-    if manifest["schema_version"] == SCHEMA_VERSION:
+    if manifest["schema_version"] >= INPUT_TREES_SCHEMA:
         values[INPUT_TREES_KEY] = release_inputs.render_trees(manifest["outer"]["input_trees"])
     return values
 
@@ -604,7 +627,8 @@ def inventory_map(manifest: dict) -> dict[str, dict]:
 
 
 def verify_inventory(release_root: Path, manifest: dict) -> None:
-    expected_files = set(PAYLOAD_SPECS) | {"release-manifest.json"}
+    specs = payload_specs(manifest)
+    expected_files = set(specs) | {"release-manifest.json"}
     expected_dirs = {"."}
     for relative in expected_files:
         parent = PurePosixPath(relative).parent
@@ -629,6 +653,17 @@ def verify_inventory(release_root: Path, manifest: dict) -> None:
             if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
                 fail(f"unsafe release payload: {path.relative_to(release_root)}")
             actual_files.add(str((relative_root / name).as_posix()))
+    # root/ is all or nothing: its two files are declared by the root record, and
+    # a file of it without the record, or the record without a file, is refused by name.
+    declared_root = {path for path in specs if path.startswith(f"{magisk_image.ROOT_DIRECTORY}/")}
+    present_root = {path for path in actual_files if path.startswith(f"{magisk_image.ROOT_DIRECTORY}/")}
+    if declared_root - present_root:
+        fail(f"release root/ is partial: missing {sorted(declared_root - present_root)}")
+    if present_root - declared_root:
+        fail(
+            "release root/ holds files its manifest's root record does not declare: "
+            f"{sorted(present_root - declared_root)}"
+        )
     if actual_files != expected_files:
         fail(
             "release file set differs from its manifest "
@@ -643,10 +678,12 @@ def verify_inventory(release_root: Path, manifest: dict) -> None:
         )
 
     entries = inventory_map(manifest)
-    for relative in PAYLOAD_SPECS:
+    for relative in specs:
         observed = (release_root / relative).stat().st_size
         if observed != entries[relative]["size"]:
             fail(f"release payload size differs for {relative}")
+    if ROOT_KEY in manifest:
+        magisk_image.check_root_files(release_root, manifest[ROOT_KEY], error)
 
 
 def verify_kernel_config(
@@ -754,9 +791,60 @@ def verify_disk_boot_payloads(
     ])
 
 
+def verify_root(release_root: Path, manifest: dict, *, pin: Path | None) -> None:
+    """The release's root files verify against its own init_boot and the APK.
+
+    A release the tracked tree builds is also the pinned Magisk release (`pin`,
+    metadata/magisk.env): an accepted release, which is history, is not held to
+    a pin that has moved since.
+    """
+    if ROOT_KEY not in manifest:
+        return
+    magisk_image.verify_release_root(
+        release_root, error, magisk_image.read_pin(pin, error) if pin is not None else None
+    )
+
+
+def root_record(root_dir: Path, disk: Path, layout: Path, pin: Path | None = None) -> dict:
+    """The manifest's root record for a producer's root/ directory.
+
+    `root_dir` holds what assemble-image.sh --magisk-apk wrote. The APK must be
+    the pinned one; the stock digests are those of the disk's own init_boot. The
+    record is the producer's statement: the release verifier checks the files
+    against it.
+    """
+    pinned = magisk_image.read_pin(pin or magisk_image.PIN_PATH, error)
+    apk = root_dir / Path(magisk_image.apk_path(pinned.version)).name
+    patched = root_dir / Path(magisk_image.PATCHED_PATH).name
+    magisk_image.check_apk_is_pin(apk, pinned, error)
+    if patched.is_symlink() or not patched.is_file():
+        fail(f"the Magisk-patched init_boot is missing: {patched}")
+    stock = magisk_image.read_partition(disk, layout, "init_boot", error)
+    return magisk_image.validate_root_record({
+        "magisk": {
+            "name": pinned.name,
+            "version": pinned.version,
+            "version_code": pinned.version_code,
+        },
+        "apk": {
+            "path": magisk_image.apk_path(pinned.version),
+            "sha256": pinned.apk_sha256,
+            "size": pinned.apk_size,
+        },
+        "init_boot": {
+            "path": magisk_image.PATCHED_PATH,
+            "sha256": magisk_image.sha256_file(patched),
+            "size": patched.stat().st_size,
+            "stock_sha256": magisk_image.sha256_bytes(stock),
+            "stock_sha1": hashlib.sha1(stock).hexdigest(),
+        },
+    }, error)
+
+
 def verify_semantics(
     release_root: Path,
     android_root: Path,
+    manifest: dict,
     *,
     enforce_tracked_policy: bool,
 ) -> None:
@@ -832,6 +920,11 @@ def verify_semantics(
         android_root,
         structural=not enforce_tracked_policy,
     )
+    verify_root(
+        release_root,
+        manifest,
+        pin=android_root / "metadata/magisk.env" if enforce_tracked_policy else None,
+    )
 
     schema = android_root / "support/release/release-manifest.schema.json"
     if not schema.is_file():
@@ -867,6 +960,7 @@ def verify_release(
         verify_semantics(
             release_root,
             android_root,
+            manifest,
             enforce_tracked_policy=acceptance_path is None,
         )
     return manifest
