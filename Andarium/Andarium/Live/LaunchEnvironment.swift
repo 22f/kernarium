@@ -195,6 +195,18 @@ extension AppEntry {
             && environment["XCTestConfigurationFilePath"] == nil
     }
 
+    /// How Home's AOT row begins for a launch: the person's last choice for
+    /// their own launch, and on, keeping nothing, for every launch
+    /// `isPersonsLaunch` refuses, so that a harness whose only mark is an
+    /// environment value (the JIT's, the thermal state's) never inherits the
+    /// person's choice or stores a change.
+    static func translatedLibrariesLaunch(
+        overrides: LaunchOverrides, environment: [String: String],
+        preference: TranslatedLibrariesPreference = TranslatedLibrariesPreference()
+    ) -> TranslatedLibrariesPreference.Launch {
+        preference.launch(automated: !isPersonsLaunch(overrides: overrides, environment: environment))
+    }
+
     /// The file in an isolated guest instance's directory whose number, in
     /// mebibytes, stands for the device's free space while it exists, so that
     /// a harness launch drives the run's low-space pause without filling the

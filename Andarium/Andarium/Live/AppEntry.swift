@@ -173,9 +173,9 @@ struct AppEntry {
         model.heatLimitDecidedByLaunch = !heat.keepsChanges
         // Home's AOT row exists where the build carries the translated-code
         // framework (what Acknowledgements reads), and is the person's last
-        // choice unless the launch is a harness's.
+        // choice unless the launch is a harness's, whichever way it is told.
         model.translatedLibrariesAvailable = Acknowledgements.carries(Acknowledgements.aotFramework)
-        let translated = TranslatedLibrariesPreference().launch(automated: !launch.isEmpty)
+        let translated = Self.translatedLibrariesLaunch(overrides: launch, environment: environment)
         model.translatedLibrariesOn = translated.isOn
         model.translatedLibrariesDecidedByLaunch = !translated.keepsChanges
         model.printsStatistics = launch.statistics == true
