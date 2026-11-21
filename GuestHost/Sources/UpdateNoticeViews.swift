@@ -74,7 +74,7 @@ struct UpdateDetailList<Glyph: View>: View {
                     glyph()
                         .frame(width: 80)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(title).font(.title3.weight(.semibold))
+                        Text(notice.app.name).font(.title3.weight(.semibold))
                         Text(UpdateWords.versionLine(offer.label))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
