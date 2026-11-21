@@ -6651,9 +6651,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "kernarium_sms_wake may find \\['activity_service', 'window_service'\\]"),
             ("sms-waker-finds-nothing", {"sms_policy_variant": "waker-finds-nothing"},
              "kernarium_sms_wake may not find activity_service"),
-            ("sms-holder-calls-binder", {"sms_policy_variant": "holder-calls-binder"},
-             "kernarium_sms_listener holds rights of \\['binder'\\] classes"),
-            ("sms-holder-finds-a-service", {"sms_policy_variant": "holder-finds-a-service"},
             # What each holds in effect, through any group: the platform's grants to every domain are the reviewed
             # set and nothing more is accepted.
             ("sms-holder-binder-through-a-group", {"sms_policy_variant": "holder-binder-through-a-group"},
@@ -6709,6 +6706,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "\\['kernarium_sms_listener'\\] may start kernarium_sms_listener through ctl.kernarium_sms_listener"),
             ("sms-control-stop-by-the-holder", {"sms_policy_variant": "control-stop-by-the-holder"},
              "\\['kernarium_sms_listener'\\] may stop kernarium_sms_listener through ctl.stop\\$kernarium_sms_listener"),
+            ("sms-holder-calls-binder", {"sms_policy_variant": "holder-calls-binder"},
+             "kernarium_sms_listener holds rights of \\['binder'\\] classes"),
+            ("sms-holder-finds-a-service", {"sms_policy_variant": "holder-finds-a-service"},
              "kernarium_sms_listener holds rights of \\['service_manager'\\] classes"),
             ("sms-holder-owns-files", {"sms_policy_variant": "holder-owns-files"},
              "kernarium_sms_listener holds rights of \\['dir'\\] classes"),
@@ -8383,13 +8383,13 @@ def verify_sms_holder(android_root: Path) -> None:
         "allow kernarium_sms_listener self:unix_stream_socket { accept getattr getopt listen read write };",
         "system_internal_prop(ctl_kernarium_sms_wake_prop)",
         "set_prop(kernarium_sms_listener, ctl_kernarium_sms_wake_prop)",
+        "system_internal_prop(ctl_kernarium_sms_locked_prop)",
     ):
         if needle not in holder:
             fail(f"the holder's policy lacks '{needle}'")
     for line in holder.splitlines():
         if not line.startswith("#") and "vsock_socket" in line and "self:vsock_socket { create bind listen };" not in line:
             fail(f"the holder's policy has a vsock rule beyond the socket's creation: {line}")
-        "system_internal_prop(ctl_kernarium_sms_locked_prop)",
     for needle in ("binder", "appdomain", "service_manager"):
         if re.search(rf"^[^#\n]*{needle}", holder, re.M):
             fail(f"the holder's policy has {needle}: it is a plain daemon and not the framework's client")
@@ -8427,12 +8427,6 @@ def verify_sms_holder(android_root: Path) -> None:
     properties = (private / "property_contexts").read_text()
     if f"{verifier.SMS_WAKE_PROPERTY}    u:object_r:{verifier.SMS_WAKE_PROPERTY_TYPE}:s0" not in properties:
         fail("the system_ext property contexts do not label the control property that starts the waker")
-    listener = overlay / "sms/listener"
-    blueprint = (listener / "Android.bp").read_text()
-    for needle in (
-        'name: "kernarium_sms_listener"',
-        'init_rc: ["kernarium_sms_listener.rc"]',
-        "system_ext_specific: true,",
     # Every control key of the two services that the product labels carries an exact entry; all but the one the holder
     # sets are the locked type, which nothing in the policy sources lets any domain set but init.
     for key in verifier.SMS_CONTROL_OWN_KEYS:
@@ -8445,6 +8439,12 @@ def verify_sms_holder(android_root: Path) -> None:
             line for line in (holder + waker + service).splitlines() if not line.lstrip().startswith("#")
             and "system_internal_prop(ctl_kernarium_sms_locked_prop)" not in line)):
         fail("a policy source names ctl_kernarium_sms_locked_prop beyond its declaration: nothing sets it but init")
+    listener = overlay / "sms/listener"
+    blueprint = (listener / "Android.bp").read_text()
+    for needle in (
+        'name: "kernarium_sms_listener"',
+        'init_rc: ["kernarium_sms_listener.rc"]',
+        "system_ext_specific: true,",
         'name: "kernarium_sms_wake_script"',
         'src: "kernarium_sms_wake.sh"',
     ):
