@@ -68,13 +68,14 @@ def main() -> None:
     if pin is not None:
         magisk_image.check_apk_is_pin(apk, pin, error)
     if args.stock_image is not None:
-        stock = regular_file(args.stock_image, "stock image").read_bytes()
+        stock = magisk_image.read_file(
+            args.stock_image, magisk_image.MAX_BOOT_IMAGE, "the stock image", error)
     else:
         stock = magisk_image.read_partition(
             regular_file(args.disk, "system disk"), layout, "init_boot", error)
     with magisk_image.open_apk(apk, error) as archive:
         magisk_image.verify_patched(
-            patched.read_bytes(), stock, archive,
+            magisk_image.read_file(patched, len(stock), "the patched image", error), stock, archive,
             magisk_image.preinit_device(layout, error), error,
         )
     print(f"verified Magisk-patched init_boot: {patched}")

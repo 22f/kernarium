@@ -24,8 +24,10 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
 import zipfile
+import zlib
 from unittest import mock
 from pathlib import Path
 
@@ -170,6 +172,55 @@ class FormatTests(unittest.TestCase):
         ):
             with self.subTest(label), self.assertRaises(SystemExit):
                 magisk_image.lz4_legacy_decode(bad, SystemExit)
+
+    def test_decoders_are_bounded_before_they_allocate(self) -> None:
+        magic = b"\x02\x21\x4c\x18"
+        # A block larger than the largest LZ4 block of an 8 MiB chunk is refused by its size field.
+        bound = 8 * 1024 * 1024 + 8 * 1024 * 1024 // 255 + 16
+        oversized = magic + struct.pack("<I", bound + 1) + bytes(bound + 1)
+        with self.assertRaisesRegex(SystemExit, "larger than an lz4 block"):
+            magisk_image.lz4_legacy_decode(oversized, SystemExit)
+        # A literal run past the limit is refused without being copied: the peak
+        # allocation while decoding stays far below the run.
+        run = 9 * 1024 * 1024
+        extension = b"\xff" * ((run - 15) // 255) + bytes([(run - 15) % 255])
+        block = bytes([0xF0]) + extension + bytes(run)
+        stream = magic + struct.pack("<I", len(block)) + block
+        tracemalloc.start()
+        try:
+            with self.assertRaises(SystemExit):
+                magisk_image.lz4_legacy_decode(stream, SystemExit)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 1024 * 1024)
+        # An xz stream that declares a dictionary of 4 GiB is refused by the decoder's
+        # memory limit; the members of a real patch need 16 MiB.
+        packed = lzma.compress(b"hello" * 10, format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC64,
+                               filters=[{"id": lzma.FILTER_LZMA2, "dict_size": 1 << 20}])
+        header_size = (packed[12] + 1) * 4
+        header = bytearray(packed[12:12 + header_size])
+        header[header.index(b"\x21\x01", 2) + 2] = 40
+        header[-4:] = struct.pack("<I", zlib.crc32(bytes(header[:-4])))
+        huge = packed[:12] + bytes(header) + packed[12 + header_size:]
+        with self.assertRaisesRegex(SystemExit, "(?i)memory"):
+            magisk_image.xz_decode(huge, SystemExit)
+        self.assertEqual(magisk_image.xz_decode(packed, SystemExit), b"hello" * 10)
+
+    def test_a_partition_larger_than_a_boot_image_can_be_is_refused_before_it_is_read(self) -> None:
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        size = 80 * 1024 * 1024
+        disk = directory / "system.img"
+        with disk.open("wb") as handle:
+            handle.truncate(size)
+        layout = directory / "partition-layout.json"
+        layout.write_text(json.dumps({
+            "schema_version": 2,
+            "system_disk": {"size_bytes": size, "partitions": [
+                {"name": "init_boot", "start_bytes": 4096, "size_bytes": size - 8192}]},
+        }))
+        with self.assertRaisesRegex(SystemExit, "larger than"):
+            magisk_image.read_partition(disk, layout, "init_boot", SystemExit)
 
     def test_xz_members_decode_and_bad_ones_are_refused(self) -> None:
         packed = lzma.compress(b"member", format=lzma.FORMAT_XZ)

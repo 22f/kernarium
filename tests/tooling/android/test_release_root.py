@@ -353,6 +353,14 @@ class RootVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "changed the stock entry system/bin/toolbox"):
             self.verify_root()
 
+    def test_a_patched_image_larger_than_the_stock_partition_is_refused_before_it_is_read(self) -> None:
+        # The image is bounded by the partition it replaces, and the bound is checked
+        # on the file's size, not on what was read.
+        payload = self.fixture.synthetic.patched_reference() + bytes(1 << 20)
+        self.replace_root_file("init_boot-magisk.img", payload)
+        with self.assertRaisesRegex(SystemExit, "larger than the stock init_boot"):
+            self.verify_root()
+
     def test_an_apk_whose_binaries_are_not_the_ones_in_the_image_is_refused(self) -> None:
         other = self.directory / "other.apk"
         make_apk_bytes(other, magisk_fixture.apk_members(patch_script()) | {

@@ -110,6 +110,13 @@ LZ4_LEGACY_MAGIC = b"\x02\x21\x4c\x18"
 LZ4_LEGACY_BLOCK = 8 * 1024 * 1024
 MAX_RAMDISK = 256 * 1024 * 1024
 MAX_DECODED_MEMBER = 64 * 1024 * 1024
+# The most a legacy block's compressed form can be (LZ4_compressBound of one
+# chunk), the memory an xz decoder may use (a real member needs 16 MiB) and how
+# large a boot image partition or an APK file may be before it is read.
+LZ4_COMPRESS_BOUND = LZ4_LEGACY_BLOCK + LZ4_LEGACY_BLOCK // 255 + 16
+MAX_XZ_MEMORY = 64 * 1024 * 1024
+MAX_BOOT_IMAGE = 64 * 1024 * 1024
+MAX_APK_FILE = 128 * 1024 * 1024
 
 
 def apk_path(version: str) -> str:
@@ -282,9 +289,30 @@ def check_root_files(release_root: Path, record: dict, error: Error) -> None:
 # ------------------------------------------------------------ the disk side --
 
 
+def read_file(path: Path, limit: int, label: str, error: Error) -> bytes:
+    """A regular file of at most `limit` bytes, whose size is checked before it is
+    read, opened without following a link."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except OSError as failure:
+        raise error(f"{label} must be a regular non-symlink file: {path} ({failure})") from failure
+    with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise error(f"{label} must be a regular non-symlink file: {path}")
+        if info.st_size > limit:
+            raise error(f"{label} is larger than {limit} bytes: {path}")
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise error(f"{label} is larger than {limit} bytes: {path}")
+    return data
+
+
 def read_partition(disk: Path, layout: Path, name: str, error: Error) -> bytes:
     """The bytes of a system disk partition, by the release's partition layout."""
     start, size = android_image.partition_range(layout, disk, name, error)
+    if size > MAX_BOOT_IMAGE:
+        raise error(f"partition {name} is larger than {MAX_BOOT_IMAGE} bytes")
     with disk.open("rb") as handle:
         handle.seek(start)
         return android_image.read_exact(handle, size, f"partition {name}", error)
@@ -422,6 +450,8 @@ def lz4_legacy_decode(data: bytes, error: Error, limit: int = MAX_RAMDISK) -> by
             raise error("truncated lz4 legacy block size")
         (size,) = struct.unpack_from("<I", data, index)
         index += 4
+        if size > LZ4_COMPRESS_BOUND:
+            raise error("an lz4 legacy block is larger than an lz4 block of an 8 MiB chunk can be")
         if size == 0 or index + size > len(data):
             raise error("lz4 legacy block exceeds the stream")
         out += _lz4_block(data[index:index + size], LZ4_LEGACY_BLOCK, error)
@@ -433,11 +463,11 @@ def lz4_legacy_decode(data: bytes, error: Error, limit: int = MAX_RAMDISK) -> by
 
 def xz_decode(data: bytes, error: Error, limit: int = MAX_DECODED_MEMBER) -> bytes:
     """Decode a whole xz stream, refusing trailing data and an oversized result."""
-    decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
+    decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=MAX_XZ_MEMORY)
     try:
         out = decoder.decompress(data, max_length=limit + 1)
     except lzma.LZMAError as failure:
-        raise error(f"xz member does not decode: {failure}") from failure
+        raise error(f"xz member does not decode (or needs more than {MAX_XZ_MEMORY} bytes of memory): {failure}") from failure
     if len(out) > limit:
         raise error("xz member decodes to more than its limit")
     if not decoder.eof or decoder.unused_data:
@@ -692,9 +722,11 @@ def verify_release_root(release_root: Path, error: Error, pin: Pin | None = None
         or hashlib.sha1(stock).hexdigest() != patched["stock_init_boot_sha1"]
     ):
         raise error("the root record's stock digests are not those of the release's init_boot")
+    if patched["size"] > len(stock):
+        raise error("the patched init_boot is larger than the stock init_boot partition")
     with open_apk(release_root / record["apk"]["path"], error) as apk:
         verify_patched(
-            (release_root / patched["path"]).read_bytes(),
+            read_file(release_root / patched["path"], len(stock), "the patched init_boot", error),
             stock,
             apk,
             preinit_device(layout, error),

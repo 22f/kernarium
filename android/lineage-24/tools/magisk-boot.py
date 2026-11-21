@@ -118,7 +118,7 @@ def patch_once(archive, stock: bytes, preinit: str, work: Path) -> bytes:
     produced = work / NEW_IMAGE
     if produced.is_symlink() or not produced.is_file():
         raise error(f"boot_patch.sh produced no {NEW_IMAGE}")
-    image = produced.read_bytes()
+    image = magisk_image.read_file(produced, len(stock), f"the {NEW_IMAGE} of boot_patch.sh", error)
 
     # The script reads the data disk's partition from the guest's own magisk,
     # which cannot run here: complete .backup/.magisk when it left the line out.
@@ -151,7 +151,7 @@ def patch_once(archive, stock: bytes, preinit: str, work: Path) -> bytes:
     final = work / "final-boot.img"
     if final.is_symlink() or not final.is_file():
         raise error("magiskboot repack produced no image")
-    return final.read_bytes()
+    return magisk_image.read_file(final, len(stock), "the image magiskboot repacked", error)
 
 
 def patch(arguments: argparse.Namespace) -> None:
