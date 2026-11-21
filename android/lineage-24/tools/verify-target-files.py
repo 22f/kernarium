@@ -5556,7 +5556,6 @@ SMS_WAKE_COMMAND = "exec cmd activity start-service --user 0 -n android.kernariu
 # The property the holder sets to start the waker, and the type that keeps every other domain from setting it.
 SMS_WAKE_PROPERTY = "ctl.start$kernarium_sms_wake"
 SMS_WAKE_PROPERTY_TYPE = "ctl_kernarium_sms_wake_prop"
-# What the service holds on the holder's vsock sockets: it accepts, and reads and writes the connections that
 # The control messages init accepts for a service (its control message table; the interface_ forms look a service up
 # by an interface name, which neither service declares). init authorises a request through the property key
 # ctl.<message>$<service>; for start, stop and restart it checks the legacy key ctl.<service> first and acts when
@@ -5589,6 +5588,7 @@ SMS_PLATFORM_DOMAIN_GRANTS: dict[str, dict[str, frozenset[str]]] = {
     "service_manager": {"binder_stats_consumer_service": frozenset({"find"})},
 }
 SMS_WAKE_REVIEWED_LOOKUPS = {"activity_service": frozenset({"find"}), **SMS_PLATFORM_DOMAIN_GRANTS["service_manager"]}
+# What the service holds on the holder's vsock sockets: it accepts, and reads and writes the connections that
 # inherit the holder's label, and shuts them down.
 SMS_SERVICE_VSOCK_PERMISSIONS = frozenset({"accept", "read", "write", "shutdown", "getattr", "getopt"})
 # What the holder holds on its own: it makes the socket, binds it and listens, and never accepts, reads, writes,
@@ -5824,7 +5824,6 @@ def check_sms_holder_policy(contexts: list[str], policies: tuple[bytes, ...], se
     if found != {"activity_service"}:
         fail(f"{SMS_WAKE} may find {sorted(found)}; it needs only ['activity_service']")
 
-    # The handoff socket: init makes it and binds it and does not listen on it, so the holder listens and accepts on it
     # In effect, whatever attribute grants it: what each of the two holds in the classes that reach the framework or
     # the network. The rules above judge the rules that name them; these judge every rule that stands for them,
     # among them the platform's grants to every domain.
@@ -5853,6 +5852,7 @@ def check_sms_holder_policy(contexts: list[str], policies: tuple[bytes, ...], se
                          f"the platform's grants to every domain ({sorted(accepted)}) are accepted"
                          + (", and the lookup of the activity manager" if domain == SMS_WAKE else ""))
 
+    # The handoff socket: init makes it and binds it and does not listen on it, so the holder listens and accepts on it
     # itself (a socket that is only bound polls as hung up and takes no connection).
     own: set[str] = set()
     for rule in rules_of("unix_stream_socket"):
@@ -5903,7 +5903,6 @@ def check_sms_holder_policy(contexts: list[str], policies: tuple[bytes, ...], se
     if setters - {SMS_LISTENER, "init"}:
         fail(f"{sorted(setters - {SMS_LISTENER, 'init'})} may set {SMS_WAKE_PROPERTY}, labelled {label}: only "
              f"{SMS_LISTENER} does, and init, which owns the property service")
-
     check_sms_control_properties(contexts, policies, sets)
 
 
@@ -5937,6 +5936,7 @@ def check_sms_control_properties(contexts: list[str], policies: tuple[bytes, ...
                 if extra:
                     fail(f"{sorted(extra)} may {message} {service} through {key}, labelled {label}: only "
                          f"{sorted(allowed)} may")
+
 
 class SmsRule(NamedTuple):
     """An allow rule as the text-message check reads it: the types its source and target stand for (a target of
