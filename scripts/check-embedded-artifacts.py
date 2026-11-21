@@ -39,7 +39,7 @@ AOT artifact (--aot):
   - without an accepted descriptor (android/lineage-24/metadata/accepted-aot.env)
     an application that packages UmlArm64Aot.framework fails. The descriptor's
     archive field (LINEAGE24_ACCEPTED_AOT_ARCHIVES) is the one switch that lets
-    an App Store or TestFlight archive carry the component: a framework in an
+    an archive of Andarium's Release configuration carry the component: a framework in an
     archive while it is "no" fails, and so does an archive without one while
     it is "yes";
   - a packaged runtime framework whose load commands name UmlArm64Aot.framework
@@ -72,8 +72,8 @@ covers nothing, so it cannot carry over to a later release. A dirty input, a
 staged or packaged artifact that is not the accepted one and a kernel that is
 not the descriptor's are never covered.
 
-Andarium's AppStore and TestFlight configurations run it as a build phase
-before check-app-store-bundle.py.
+Andarium's Release configuration runs it as a build phase when the action is an
+archive; any other build is not checked.
 """
 
 from __future__ import annotations

@@ -63,13 +63,11 @@ struct GuestLayer: View {
         ) { view, geometry in
             (model.driver as? LiveRuntime)?.viewDidLayout(view, geometry)
         }
-        #if !APP_STORE
         // A UI test's launch sees which touches reach the guest's
-        // touchscreen. An App Store build has no such seam.
+        // touchscreen.
         display.contactDidChange = { [model] slot, pressed in
             model.inputProbe?.record("touch \(slot) \(pressed ? "down" : "up")")
         }
-        #endif
         return display
     }
 

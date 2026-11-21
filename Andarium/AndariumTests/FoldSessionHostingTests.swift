@@ -619,41 +619,18 @@ struct FoldSessionHostingTests {
 
     // MARK: The other screens
 
-    /// What `welcome(on:)` read: Welcome's column and its footer, whether it is
-    /// in a scroll view, and, for a column that scrolls, how far it overflows
-    /// and where Set up and the footer are once it is scrolled to its end.
-    private struct WelcomeReading {
-        var column: CGRect
-        var footer: CGRect
-        var scrolls: Bool
-        var heading: CGRect
-        var overflow: CGFloat = 0
-        var atTop = true
-        var endSetUp: CGRect?
-        var endFooter: CGRect?
-    }
-
     /// Welcome as `pose` lays it out, or as a display with no hinge does in
     /// the same window when `plain`: its column and its footer, and whether it
     /// is in a scroll view. Welcome is the view alone in a view the size of the
     /// pose, with the pose's safe area: the navigation stack Home puts it in
     /// lays out by the window the system has, which is not the pose's here, and
-    /// its bar and strip are the captures'; `bar` takes that much more of the
-    /// top, as Home's large title does. The App Store notice is put away unless
-    /// `notice`. With `toEnd` the scroll view is then scrolled to its end.
-    private func welcome(
-        on pose: Pose, plain: Bool = false, notice: Bool = false, bar: CGFloat = 0, toEnd: Bool = false
-    ) async throws -> WelcomeReading {
+    /// its bar and strip are the captures'.
+    private func welcome(on pose: Pose, plain: Bool = false) async throws -> (column: CGRect, footer: CGRect, scrolls: Bool) {
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let model = steadyModel()
         model.guest = nil
         model.fold = plain ? nil : pose.reading
-        #if TESTFLIGHT_STORE_LINK
-        // The App Store notice is a card in Welcome's column, which then outgrows a short display and
-        // scrolls there; the placement tests are of Welcome's own layout, and `notice` has tests of its own.
-        model.storeNoticeDismissed = !notice
-        #endif
         let container = UIViewController()
         lease.window.rootViewController = container
         let holder = UIView(frame: pose.reading.window)
@@ -675,52 +652,24 @@ struct FoldSessionHostingTests {
         let window = pose.reading.window, safe = pose.reading.safeArea
         let have = host.view.safeAreaInsets, extra = host.additionalSafeAreaInsets
         host.additionalSafeAreaInsets = UIEdgeInsets(
-            top: extra.top + safe.minY - window.minY - have.top + bar,
+            top: extra.top + safe.minY - window.minY - have.top,
             left: extra.left + safe.minX - window.minX - have.left,
             bottom: extra.bottom + window.maxY - safe.maxY - have.bottom,
             right: extra.right + window.maxX - safe.maxX - have.right)
         try await Task.sleep(for: .milliseconds(800))
         host.view.layoutIfNeeded()
-        func read() -> (column: CGRect, footer: CGRect, heading: CGRect, setUp: CGRect?, footerLabelled: CGRect?) {
-            let elements = Self.labelled(in: host.view, relativeTo: holder)
-            let shown = elements.filter {
-                $0.label.contains("No virtual machine yet") || $0.label.contains("Set up virtual machine")
-            }
-            let column = shown.map(\.frame).reduce(nil as CGRect?) { $0?.union($1) ?? $1 } ?? .null
-            let heading = elements.first { $0.label.contains("No virtual machine yet") }?.frame ?? .null
-            let setUp = elements.first { $0.label.contains("Set up virtual machine") }?.frame
-            let footer = elements.first { $0.label.contains("free on this") }?.frame
-            return (column, footer ?? .null, heading, setUp, footer)
+        let elements = Self.labelled(in: host.view, relativeTo: holder)
+        let shown = elements.filter {
+            $0.label.contains("No virtual machine yet") || $0.label.contains("Set up virtual machine")
         }
-        func scrollView(in view: UIView) -> UIScrollView? {
-            if let scroller = view as? UIScrollView { return scroller }
-            for subview in view.subviews { if let found = scrollView(in: subview) { return found } }
-            return nil
-        }
-        let first = read()
-        let column = try #require(first.column.isNull ? nil : first.column, "no Welcome")
-        let footer = try #require(first.footerLabelled, "no footer")
+        let column = try #require(shown.map(\.frame).reduce(nil as CGRect?) { $0?.union($1) ?? $1 }, "no Welcome")
+        let footer = try #require(elements.first { $0.label.contains("free on this") }?.frame, "no footer")
         // An iPad app on a Mac has no accessibility element for a scroll indicator: there Welcome scrolls when a
         // scroll view holds it.
         func holdsScrollView(_ view: UIView) -> Bool { view is UIScrollView || view.subviews.contains(where: holdsScrollView) }
         let scrolls = ProcessInfo.processInfo.isiOSAppOnMac
-            ? holdsScrollView(host.view) : Self.labelled(in: host.view, relativeTo: holder).contains { $0.label.hasPrefix("Vertical scroll bar") }
-        var reading = WelcomeReading(column: column, footer: footer, scrolls: scrolls, heading: first.heading)
-        if let scroller = scrollView(in: host.view) {
-            let inset = scroller.adjustedContentInset
-            reading.overflow = max(0, scroller.contentSize.height - (scroller.bounds.height - inset.top - inset.bottom))
-            reading.atTop = abs(scroller.contentOffset.y + inset.top) < 1
-            if toEnd {
-                scroller.setContentOffset(
-                    CGPoint(x: 0, y: scroller.contentSize.height - scroller.bounds.height + inset.bottom), animated: false)
-                host.view.layoutIfNeeded()
-                try await Task.sleep(for: .milliseconds(400))
-                let end = read()
-                reading.endSetUp = end.setUp
-                reading.endFooter = end.footerLabelled
-            }
-        }
-        return reading
+            ? holdsScrollView(host.view) : elements.contains { $0.label.hasPrefix("Vertical scroll bar") }
+        return (column, footer, scrolls)
     }
 
     /// Flat, Welcome is where it is on a display that does not fold, as on an
@@ -744,8 +693,7 @@ struct FoldSessionHostingTests {
     /// Welcome scrolls when taller than its place only while the device is
     /// bent, where a half can be shorter than the column (the end screen has
     /// the same modifier); flat and on the cover it is what a display with no
-    /// hinge shows. (The App Store notice, put away here, adds a case of its
-    /// own, below.)
+    /// hinge shows.
     @Test(arguments: Pose.allCases)
     func welcomeIsInAScrollViewOnlyWhileBent(_ pose: Pose) async throws {
         let shown = try await welcome(on: pose)
@@ -755,46 +703,6 @@ struct FoldSessionHostingTests {
             #expect(!plain.scrolls, "with no hinge Welcome scrolls")
         }
     }
-
-    #if TESTFLIGHT_STORE_LINK
-    /// With the App Store notice up, the column is taller than a short display
-    /// or a half, so Welcome scrolls on every pose, and Set up and the footer
-    /// are reachable: inside the place Welcome has (the half while bent, the
-    /// safe area otherwise) once it is scrolled to its end.
-    @Test(arguments: Pose.allCases)
-    func welcomeWithTheNoticeUpScrollsAndSetUpIsReachable(_ pose: Pose) async throws {
-        let shown = try await welcome(on: pose, notice: true, toEnd: true)
-        #expect(shown.scrolls, "\(pose): Welcome with the notice up does not scroll")
-        let place: CGRect
-        if pose.reading.pose.spreads {
-            place = try #require(FoldHalves(pose.reading)).card
-        } else {
-            place = pose.reading.safeArea
-        }
-        let setUp = try #require(shown.endSetUp, "\(pose): no Set up at the end")
-        let footer = try #require(shown.endFooter, "\(pose): no footer at the end")
-        #expect(place.insetBy(dx: -1, dy: -1).contains(setUp), "\(pose): Set up at \(setUp) is not on \(place)")
-        #expect(place.insetBy(dx: -1, dy: -1).contains(footer), "\(pose): the footer at \(footer) is not on \(place)")
-    }
-
-    /// The cover display has 644 pt, and Home's large title and its bar take
-    /// about 98 of them. The column with the notice is taller than what is
-    /// left, so it scrolls from its top (nothing of it under the title) and
-    /// Set up and the footer are reachable at its end.
-    @Test func onTheCoverUnderHomesTitleTheNoticeLeavesWelcomeScrollingFromItsTop() async throws {
-        let bar: CGFloat = 98
-        let room = Pose.cover.reading.safeArea
-        let shown = try await welcome(on: .cover, notice: true, bar: bar, toEnd: true)
-        #expect(shown.scrolls)
-        #expect(shown.overflow > 0, "the column fits the room under the title: this case then checks nothing")
-        #expect(shown.atTop, "Welcome does not rest at its top")
-        #expect(shown.heading.minY >= room.minY + bar - 1, "the heading at \(shown.heading) is under the title")
-        let setUp = try #require(shown.endSetUp, "no Set up at the end")
-        let footer = try #require(shown.endFooter, "no footer at the end")
-        #expect(room.insetBy(dx: -1, dy: -1).contains(setUp), "Set up at \(setUp) is not on \(room)")
-        #expect(room.insetBy(dx: -1, dy: -1).contains(footer), "the footer at \(footer) is not on \(room)")
-    }
-    #endif
 
     /// Home's Start, as a screen reads it: the bar's button (not Start in
     /// recovery), on `pose` or, when `plain`, on a display with no hinge. The
@@ -920,8 +828,8 @@ struct FoldSessionHostingTests {
     }
 
     /// A card is kept to its place by the space it is given, not by the
-    /// window: in a sheet that is only the leading half wide, the Send
-    /// feedback's busy card must not be padded away, and in a sheet the
+    /// window: in a sheet that is only the leading half wide, the
+    /// busy card must not be padded away, and in a sheet the
     /// system centres on a flat display it is centred in the sheet.
     @Test(arguments: [(pose: Pose.uprightBook, sheet: CGRect(x: 0, y: 0, width: 455.5, height: 500)),
                       (pose: Pose.uprightFlat, sheet: CGRect(x: 150, y: 0, width: 651, height: 500)),

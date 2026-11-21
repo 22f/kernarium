@@ -361,7 +361,7 @@ class UnsignedProofTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for needle in (
             f"staged UNSIGNED PROOF {FAMILY} {PROOF_ID}",
-            "developer build only", "AppStore or TestFlight build refuses it",
+            "developer build only", "a Release archive refuses it",
             "only on a fresh or isolated guest instance (ANDARIUM_GUEST_INSTANCE=<name>)",
             "a guest with data of another system cannot start until Erase virtual machine",
             "a guest made from this proof cannot start another system",
