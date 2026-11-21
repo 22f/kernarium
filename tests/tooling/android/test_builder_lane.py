@@ -943,6 +943,9 @@ def sms_service_fixture(verifier: Path, variant: str | None) -> dict[str, bytes 
         "rc-holder-other-executable": ("/system_ext/bin/kernarium_sms_listener\n", "/system_ext/bin/other\n"),
         "rc-holder-not-in-main": ("    class main\n", "    class late_start\n"),
         "rc-holder-as-root": ("    user nobody\n", "    user root\n"),
+        "rc-holder-without-a-group": ("    group nobody\n", ""),
+        "rc-holder-in-group-root": ("    group nobody\n", "    group root\n"),
+        "rc-holder-extra-group": ("    group nobody\n", "    group nobody system\n"),
         "rc-holder-without-the-socket": ("    socket kernarium_sms stream 0660 system system\n", ""),
         "rc-holder-socket-open": ("socket kernarium_sms stream 0660 system system", "socket kernarium_sms stream 0666 system system"),
         "rc-holder-socket-for-shell": ("socket kernarium_sms stream 0660 system system", "socket kernarium_sms stream 0660 shell shell"),
@@ -6777,6 +6780,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 (f"sms-{name}", {"sms_service_variant": name}, f"service {service} has the options")
                 for name, service in (
                     ("rc-holder-not-in-main", "kernarium_sms_listener"), ("rc-holder-as-root", "kernarium_sms_listener"),
+                    ("rc-holder-without-a-group", "kernarium_sms_listener"),
+                    ("rc-holder-in-group-root", "kernarium_sms_listener"),
+                    ("rc-holder-extra-group", "kernarium_sms_listener"),
                     ("rc-holder-without-the-socket", "kernarium_sms_listener"),
                     ("rc-holder-socket-open", "kernarium_sms_listener"),
                     ("rc-holder-socket-for-shell", "kernarium_sms_listener"),

@@ -5,6 +5,7 @@
 service kernarium_sms_listener /system_ext/bin/kernarium_sms_listener
     class main
     user nobody
+    group nobody
     socket kernarium_sms stream 0660 system system
 
 # Started only by the holder, through the control property ctl.start, when a connection waits and no

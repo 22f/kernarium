@@ -5544,10 +5544,11 @@ SMS_INIT_RC = "SYSTEM_EXT/etc/init/kernarium_sms_listener.rc"
 SMS_WAKE_SCRIPT = "SYSTEM_EXT/bin/kernarium_sms_wake.sh"
 SMS_SOCKET_PATH = "/dev/socket/kernarium_sms"
 # The init services of the one script: the holder starts with its class and the waker only through its control
-# property. The options are the whole list.
+# property. The options are the whole list. The holder's group is nobody: init leaves the group at root when the
+# service names none.
 SMS_INIT_SERVICES = {
     SMS_LISTENER: ("/system_ext/bin/kernarium_sms_listener",
-                   ("class main", "user nobody", "socket kernarium_sms stream 0660 system system")),
+                   ("class main", "user nobody", "group nobody", "socket kernarium_sms stream 0660 system system")),
     SMS_WAKE: ("/system_ext/bin/kernarium_sms_wake.sh", ("user system", "group system", "oneshot", "disabled")),
 }
 # What the build's <uses-sdk> may carry in the text message application's manifest: SDK levels.
