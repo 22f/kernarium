@@ -32,7 +32,7 @@ import stat
 import struct
 import sys
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import android_image
@@ -445,33 +445,51 @@ def xz_decode(data: bytes, error: Error, limit: int = MAX_DECODED_MEMBER) -> byt
     return out
 
 
+NEWC_MAGIC = b"070701"
+
+
 @dataclass(frozen=True)
 class Entry:
+    """An archive entry as a guest sees it. The inode, link count and time are kept
+    for the checks of `parse_newc` and left out of the comparison: Magisk renumbers
+    them when it writes the archive."""
+
     mode: int
     uid: int
     gid: int
     rdev: tuple[int, int]
     payload: bytes
+    inode: int = field(default=0, compare=False)
+    links: int = field(default=1, compare=False)
 
 
-def parse_newc(data: bytes, error: Error) -> dict[str, Entry]:
-    """Map each path of an uncompressed newc archive to its entry, with the
-    fields a guest sees. The inode, link count and time are not kept: Magisk
-    renumbers them when it writes the archive. Only identical empty directories
-    may repeat, and only zero bytes may follow the trailer."""
+def parse_newc(data: bytes, error: Error, *, guest: bool = False) -> dict[str, Entry]:
+    """Map each path of an uncompressed newc archive (magic 070701) to its entry.
+    Only identical empty directories may repeat, and only zero bytes may follow the
+    trailer.
+
+    With `guest`, the archive is one a guest's kernel unpacks, and it must unpack to
+    what its entries say. The kernel makes a regular file whose link count is two or
+    more a hard link to the earlier entry of the same device and inode and writes the
+    body into that shared inode; it drops an entry whose parent directory is not
+    unpacked yet; and it checks the sum of a 070702 archive. So a non-directory entry
+    has a link count of one and an inode of its own (Magisk writes both), and a
+    directory entry comes before everything below it.
+    """
     entries: dict[str, Entry] = {}
+    inodes: dict[tuple[int, int, int], str] = {}
     index = 0
     while True:
         header = data[index:index + android_image.NEWC_HEADER_SIZE]
         if len(header) != android_image.NEWC_HEADER_SIZE:
             raise error("truncated newc header")
-        if header[:6] not in (b"070701", b"070702"):
-            raise error("archive is not an uncompressed newc archive")
+        if header[:6] != NEWC_MAGIC:
+            raise error("archive is not an uncompressed newc archive (magic 070701)")
         try:
             fields = [int(header[6 + 8 * n:14 + 8 * n], 16) for n in range(13)]
         except ValueError as failure:
             raise error(f"malformed newc header: {failure}") from failure
-        mode, uid, gid, file_size = fields[1], fields[2], fields[3], fields[6]
+        inode, mode, uid, gid, links, file_size = (fields[n] for n in (0, 1, 2, 3, 4, 6))
         rdev = (fields[9], fields[10])
         name_size = fields[11]
         if file_size > android_image.MAX_NEWC_ENTRY_SIZE or not 2 <= name_size <= 4096:
@@ -498,7 +516,17 @@ def parse_newc(data: bytes, error: Error) -> dict[str, Entry]:
             and previous.mode == mode and not previous.payload and not payload
         ):
             raise error(f"ambiguous duplicate archive entry: {name}")
-        entries[name] = Entry(mode, uid, gid, rdev, payload)
+        if guest:
+            parent = name.rpartition("/")[0]
+            if parent and not (parent in entries and stat.S_ISDIR(entries[parent].mode)):
+                raise error(f"newc entry {name} comes before its parent directory")
+            if not stat.S_ISDIR(mode):
+                if links != 1:
+                    raise error(f"newc entry {name} has {links} links: a guest unpacks it as a hard link")
+                owner = inodes.setdefault((fields[7], fields[8], inode), name)
+                if owner != name:
+                    raise error(f"newc entries {owner} and {name} share an inode")
+        entries[name] = Entry(mode, uid, gid, rdev, payload, inode, links)
 
 
 def boot_ramdisk(image: bytes, label: str, error: Error) -> tuple[android_image.BootImage, bytes]:
@@ -512,7 +540,7 @@ def boot_ramdisk(image: bytes, label: str, error: Error) -> tuple[android_image.
 
 def decode_ramdisk(ramdisk: bytes, label: str, error: Error) -> bytes:
     """The raw newc archive of a ramdisk that is raw or lz4 legacy."""
-    if ramdisk[:6] in (b"070701", b"070702"):
+    if ramdisk[:6] == NEWC_MAGIC:
         return ramdisk
     if ramdisk[:4] == LZ4_LEGACY_MAGIC:
         return lz4_legacy_decode(ramdisk, error)
@@ -552,11 +580,22 @@ def verify_patched(
 ) -> None:
     """The patched init_boot is its stock image plus what Magisk adds, and nothing else.
 
-    `patched` and `stock` are whole images. Refused: a header that differs from
-    the stock one beyond the ramdisk size; a ramdisk that is not raw or lz4 legacy;
-    an entry the patch removed or an unexpected one it added; a stock entry that
-    changed; an /init that is not the APK's arm64 magiskinit; a backup, overlay or
-    configuration that is not what the fixed patch inputs give.
+    `patched` and `stock` are whole images. "Stock plus what the patch adds" is:
+      - the 4 KiB header equal except the ramdisk size, and nothing but zeros after
+        the ramdisk;
+      - a ramdisk of the patched image that is lz4 legacy and unpacks, in a guest's
+        kernel, to its entries as listed (070701, link count one, an inode of its
+        own, parents before children: `parse_newc` with `guest`);
+      - exactly the entries of the stock archive plus .backup, .backup/.magisk,
+        .backup/.rmlist, .backup/init.xz, overlay.d, overlay.d/sbin and
+        overlay.d/sbin/{magisk,init-ld}.xz, which the stock archive does not hold;
+      - every stock entry but /init equal in mode, owner, device numbers and
+        payload (inode, link count, time and order are not compared);
+      - /init the APK's arm64 magiskinit, and .backup/init.xz the stock /init;
+      - overlay.d/sbin/{magisk,init-ld}.xz the APK's arm64 binaries;
+      - the added entries with their fixed modes and root ownership, the removal
+        list naming the entries the patch added, and .backup/.magisk the fixed
+        patch flags, the pre-init partition and the SHA-1 of the stock image.
     """
     _, stock_ramdisk = boot_ramdisk(stock, "stock init_boot", error)
     _, patched_ramdisk = boot_ramdisk(patched, "patched init_boot", error)
@@ -569,7 +608,7 @@ def verify_patched(
         raise error("the patched ramdisk is not lz4 legacy")
 
     before = parse_newc(decode_ramdisk(stock_ramdisk, "stock", error), error)
-    after = parse_newc(decode_ramdisk(patched_ramdisk, "patched", error), error)
+    after = parse_newc(decode_ramdisk(patched_ramdisk, "patched", error), error, guest=True)
     added = set(ADDED_DIRECTORIES) | set(ADDED_FILES) | {BACKUP_INIT}
     if set(before) & added:
         raise error("the stock ramdisk already holds entries the patch adds")

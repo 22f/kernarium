@@ -47,17 +47,21 @@ def pad4(length: int) -> bytes:
     return b"\0" * (-length % 4)
 
 
-def newc_dump(entries: dict, *, order: list[str] | None = None, mtime: int = 0, tail: int = 0) -> bytes:
+def newc_dump(entries: dict, *, order: list[str] | None = None, mtime: int = 0, tail: int = 0,
+              inodes: dict[str, int] | None = None, links: dict[str, int] | None = None,
+              magics: dict[str, bytes] | None = None) -> bytes:
     """A newc archive of {name: Entry}, in Magisk's way (sorted, inodes from 300001,
-    link count 1) unless `order` names the order."""
+    link count 1) unless `order` names the order. `inodes`, `links` and `magics` set
+    the inode number, the link count and the header magic of the entries they name."""
     out = bytearray()
     names = order if order is not None else sorted(entries)
     for number, name in enumerate(names, 300001):
         entry = entries[name]
         raw = name.encode() + b"\0"
-        fields = (number, entry.mode, entry.uid, entry.gid, 1, mtime, len(entry.payload),
+        fields = ((inodes or {}).get(name, number), entry.mode, entry.uid, entry.gid,
+                  (links or {}).get(name, 1), mtime, len(entry.payload),
                   0, 0, entry.rdev[0], entry.rdev[1], len(raw), 0)
-        out += b"070701" + b"".join(b"%08X" % value for value in fields)
+        out += (magics or {}).get(name, b"070701") + b"".join(b"%08X" % value for value in fields)
         out += raw + pad4(110 + len(raw)) + entry.payload + pad4(len(entry.payload))
     raw = b"TRAILER!!!\0"
     out += b"070701" + b"".join(b"%08X" % value for value in (0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, len(raw), 0))

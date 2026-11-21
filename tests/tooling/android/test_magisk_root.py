@@ -214,7 +214,7 @@ class VerifierTests(unittest.TestCase):
         self.apk_path = self.fixture.apk(script=patch_script())
 
     def patched(self, edit=None, *, preinit: str | None = None, compress=lz4_legacy,
-                os_version: int | None = None) -> bytes:
+                os_version: int | None = None, **archive) -> bytes:
         entries = reference_patched(
             self.fixture.stock, preinit or self.fixture.preinit, self.fixture.stock_sha1)
         if edit is not None:
@@ -222,7 +222,7 @@ class VerifierTests(unittest.TestCase):
         header = bytearray(self.fixture.stock_image[:4096])
         if os_version is not None:
             struct.pack_into("<I", header, 16, os_version)
-        ramdisk = compress(newc_dump(entries))
+        ramdisk = compress(newc_dump(entries, **archive))
         struct.pack_into("<I", header, 12, len(ramdisk))
         image = bytes(header) + ramdisk + b"\0" * (-len(ramdisk) % 4096)
         return image + b"\0" * max(0, len(self.fixture.stock_image) - len(image))
@@ -289,6 +289,42 @@ class VerifierTests(unittest.TestCase):
         ):
             with self.subTest(label), self.assertRaises(SystemExit):
                 self.verify(self.patched(edit))
+
+    def test_an_archive_the_kernel_would_unpack_differently_is_refused(self) -> None:
+        # "Stock plus what Magisk adds" is about the files the guest ends up with, and
+        # the kernel's unpacker does more than copy entries: a regular file with a link
+        # count of two or more becomes a hard link to the earlier entry of the same
+        # inode, written into the shared inode; a file whose parent is not yet unpacked
+        # is dropped; a CRC archive is checked and stops at its first bad sum. Real
+        # Magisk output has link count 1, unique inodes, parents first and 070701.
+        names = sorted(reference_patched(self.fixture.stock, "ubdb3", self.fixture.stock_sha1))
+        init, later, earlier = "init", "system/bin/toolbox", "first_stage_ramdisk/system/etc/fstab.uml"
+        self.assertLess(names.index(earlier), names.index(init))
+        self.assertLess(names.index(init), names.index(later))
+        shared = 4242
+        moved = [name for name in names if name != "overlay.d/sbin/magisk.xz"]
+        moved.insert(moved.index("overlay.d"), "overlay.d/sbin/magisk.xz")
+        stock_last = [name for name in names if name != "system/bin"]
+        stock_last.insert(stock_last.index("system/bin/toolbox") + 1, "system/bin")
+        for label, archive in (
+            ("a later file hard linked to /init (the kernel writes it into /init)",
+             dict(inodes={init: shared, later: shared}, links={init: 2, later: 2})),
+            ("an earlier file hard linked to /init (the kernel writes /init into it)",
+             dict(inodes={earlier: shared, init: shared}, links={earlier: 2, init: 2})),
+            ("a link count of two on a lone file", dict(links={later: 2})),
+            ("one inode on two files", dict(inodes={init: shared, later: shared})),
+            ("an overlay file before its directory", dict(order=moved)),
+            ("a stock file before its directory", dict(order=stock_last)),
+            ("a CRC archive entry", dict(magics={init: b"070702"})),
+        ):
+            with self.subTest(label), self.assertRaises(SystemExit):
+                self.verify(self.patched(**archive))
+        # A directory's own link count and inode are nobody's business: cpio writes 2.
+        self.verify(self.patched(links={"dev": 2, "system": 3, "overlay.d": 2}))
+        with self.assertRaisesRegex(SystemExit, "070701"):
+            magisk_image.parse_newc(
+                newc_dump(stock_entries(), order=list(stock_entries()), magics={"init": b"070702"}),
+                SystemExit)
 
     def test_header_and_ramdisk_departures_are_refused(self) -> None:
         good = self.patched()
