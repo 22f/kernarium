@@ -87,15 +87,6 @@
         "place": "sessionSettings"
       },
       {
-        "id": "send-feedback",
-        "title": "Send feedback",
-        "text": "Email the developer from the Info menu on Home, or from Settings while the virtual machine runs, with screenshots and a bug report if you like.",
-        "symbol": "envelope.fill",
-        "requirement": {
-          "feature": "sendFeedback"
-        }
-      },
-      {
         "id": "more-fixes",
         "title": "More fixes",
         "points": [

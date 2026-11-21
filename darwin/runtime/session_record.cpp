@@ -1244,8 +1244,7 @@ KnownValue<known_key_capacity> known_key;
 KnownValue<known_serial_capacity> known_serial;
 KnownValue<known_zone_capacity> known_zone;
 
-/* What stands where a value was taken out; the same words the application's
- * start log puts (`SendFeedbackStartLog.masked`). */
+/* What stands where a value was taken out. */
 constexpr std::string_view masked_value{"<masked>"};
 constexpr std::string_view masked_zone{"<time zone>"};
 constexpr std::string_view masked_address{"<address>"};

@@ -1805,11 +1805,6 @@ private:
 			if (prepared_.camera == CameraSource::synthetic ||
 			    (prepared_.camera == CameraSource::blocked &&
 			     prepared_.camera_profile)) {
-				if (!uml::camera::syntheticCameraAvailable()) {
-					std::fputs("--camera=synthetic needs the synthetic "
-						   "camera, which this build lacks\n", stderr);
-					return false;
-				}
 				uml::camera::SyntheticProfile profile {};
 				switch (prepared_.camera_profile.value_or(
 					CameraProfile::phone)) {

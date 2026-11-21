@@ -2,18 +2,15 @@
 
 import Foundation
 
-#if !APP_STORE
-
 // The JIT's policy and words. They live in the application target, not in
-// AndariumCore, so that an App Store build, which has no JIT, carries none of
-// it: the package is built without the `APP_STORE` condition.
+// AndariumCore.
 
 /// Whether the guest starts on the JIT engine (Home's JIT row), kept for the
 /// install across launches. A fresh install is off.
 ///
 /// The JIT needs a debugger the person attached to Andarium (StikDebug), so
 /// the value only says what the person wants; `JitStatus` says whether the
-/// next start can have it. An App Store build has no JIT and reads no value.
+/// next start can have it.
 struct JitPreference {
     /// The stored value's key in the defaults database.
     static let key = "andarium.jit"
@@ -214,5 +211,3 @@ struct JitStatus: Equatable, Sendable {
         return usable ? Self.ready : Self.needsStikDebug
     }
 }
-
-#endif

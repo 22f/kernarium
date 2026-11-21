@@ -176,10 +176,8 @@ target_link_libraries(uml_apple_camera PRIVATE
     "-framework VideoToolbox")
 
 # The camera without hardware, for tests and for the launchers that run a guest
-# against a chart. An App Store runtime carries none.
-if(NOT UML_APP_STORE_RUNTIME)
-    add_subdirectory(synthetic_camera)
-endif()
+# against a chart.
+add_subdirectory(synthetic_camera)
 
 add_library(uml_host_gpu_memory STATIC apple/host_gpu_memory.mm)
 add_library(UML::HostGpuMemory ALIAS uml_host_gpu_memory)

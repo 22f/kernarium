@@ -745,7 +745,7 @@ void require_no_identity(const std::string &record, const std::string &where)
  * number, the host's adb key and the time zone it was given, and init prints
  * a property it cannot set with the value: the record keeps the output and
  * none of the three values, wherever they stand, and no hardware address,
- * and it puts what the application's start log puts in their place. */
+ * and it puts masking words in their place. */
 void test_the_record_keeps_no_identity_values()
 {
 	uml::runtime::reset_session_record();

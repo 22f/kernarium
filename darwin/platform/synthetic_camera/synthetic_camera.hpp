@@ -3,8 +3,7 @@
 
 // A camera with no hardware. It implements darwin/platform/camera.hpp for unit
 // tests and for the launchers that run a guest against a deterministic chart.
-// It is never a real camera, on any device, and an App Store runtime does not
-// contain it.
+// It is never a real camera, on any device.
 //
 // The chart. Every frame is an NV12 picture of a luma gradient with a 6 x 4
 // grid of colour patches and, across the middle of the picture, a row of 64

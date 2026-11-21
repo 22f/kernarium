@@ -524,14 +524,11 @@ extension View {
     func cameraAccessAlert() -> some View { modifier(CameraAccessAlert()) }
 }
 
-#if !APP_STORE
-
 // MARK: JIT
 
 /// Whether the guest runs on the JIT engine, which a debugger the person
 /// attached (StikDebug) makes possible, and what the next start can do about
-/// it. It applies when the guest next starts. An App Store build has no JIT
-/// and no such section.
+/// it. It applies when the guest next starts.
 struct JitSection: View {
     @Environment(AppModel.self) private var model
 
@@ -553,8 +550,6 @@ struct JitSection: View {
         }
     }
 }
-
-#endif
 
 // MARK: Backup
 

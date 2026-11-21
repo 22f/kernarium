@@ -324,8 +324,7 @@ interface to the wire.
   `interrupt`, `interrupt background|multitasking|pressure`, `resume`; its path
   is the variable `UML_SYNTHETIC_CAMERA_CONTROL`, read when a launcher makes the
   camera, and nothing else reads it) for a guest in a process of its own; and,
-  with a manual clock, frames that a test pumps. App Store runtimes do not build
-  it. It is never a real camera. The test-only Android launcher
+  with a manual clock, frames that a test pumps. It is never a real camera. The test-only Android launcher
   (`uml-darwin-android17-edge-test`; no product launcher compiles the code) that
   makes it also reads a second pipe, `UML_BACKGROUND_EDGE_CONTROL` (a line each:
   `leave`, `return`), which plays an application's leaving and returning to the
