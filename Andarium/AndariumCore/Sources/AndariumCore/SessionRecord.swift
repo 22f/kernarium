@@ -393,26 +393,74 @@ public enum PreviousSession {
 /// The runtime's record of the runs of this process, in the diagnostics
 /// directory. A run's record is the file that is there once the run began: the
 /// record of an earlier run is moved aside as the new run is asked for
-/// (`retireEarlierRuns`), so that no time or counter has to tell them apart. A
-/// decision made from the earlier record is made and saved by then: a start
-/// is not begun while one is owed (`AppModel.start`).
-public struct RunRecord: Sendable {
+/// (`retire`), so that no time or counter has to tell them apart. A decision
+/// made from the earlier record is made and saved by then: a start is not
+/// begun while one is owed (`AppModel.start`).
+///
+/// A record that cannot be moved aside never reads as the run's. It is
+/// emptied where it is; and one that can be neither moved nor emptied is not
+/// read at all until a later `retire` gets it out of the way. The runtime
+/// puts its record in the file by opening it for writing, the access the
+/// emptying lacked, so a record that stays has not been replaced by one of
+/// this run's either.
+public final class RunRecord: @unchecked Sendable {
+    /// What `retire` found and did.
+    public enum Retirement: Equatable, Sendable {
+        /// No record was at the run's place.
+        case nothing
+        /// The record was moved aside for the bug report.
+        case moved
+        /// The record could not be moved aside (its place in the bug report
+        /// could not be cleared) and was emptied where it was. The bug report
+        /// does not carry it.
+        case emptied
+        /// The record could be neither moved nor emptied; it is not read.
+        case stays
+    }
+
     private let directory: URL
+    private let lock = NSLock()
+    private var staysInPlace = false
 
     public init(in diagnostics: URL) {
         directory = diagnostics
     }
 
-    /// Keeps the record of the run before as `previous-session.txt` for the
-    /// bug report, so that the next run writes its own at its place.
-    public func retireEarlierRuns() {
-        PreviousSession.keep(in: directory)
+    /// Takes the record at the run's place away: kept as `previous-session.txt`
+    /// for the bug report, so that the next run writes its own there.
+    @discardableResult
+    public func retire() -> Retirement {
+        let manager = FileManager.default
+        let current = directory.appendingPathComponent(BugReportAttachments.sessionRecord)
+        let kept = directory.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+        let outcome: Retirement
+        if !manager.fileExists(atPath: current.path) {
+            outcome = .nothing
+        } else {
+            try? manager.removeItem(at: kept)
+            if (try? manager.moveItem(at: current, to: kept)) != nil {
+                outcome = .moved
+            } else if Self.empty(current) {
+                outcome = .emptied
+            } else {
+                outcome = .stays
+            }
+        }
+        lock.withLock { staysInPlace = outcome == .stays }
+        return outcome
+    }
+
+    private static func empty(_ file: URL) -> Bool {
+        guard let handle = try? FileHandle(forWritingTo: file) else { return false }
+        defer { try? handle.close() }
+        return (try? handle.truncate(atOffset: 0)) != nil
     }
 
     /// The record as it stands; nil while the runtime has written none. The
     /// runtime rewrites the state in one write, and a read that lands in the
     /// middle of one is read again.
     public func read() -> SessionRecord? {
+        if lock.withLock({ staysInPlace }) { return nil }
         let file = directory.appendingPathComponent(BugReportAttachments.sessionRecord)
         for _ in 0..<3 {
             if let record = SessionRecord.read(at: file) { return record }
@@ -420,4 +468,3 @@ public struct RunRecord: Sendable {
         return nil
     }
 }
-

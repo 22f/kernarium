@@ -410,7 +410,7 @@ final class LiveRuntime: RuntimeDriver {
     func begin(guest: Guest, mode: StartMode, kind: BootKind) {
         // The record of the run before moves aside, so that the one at its
         // place from here on is this run's (`RunRecord`).
-        runRecord?.retireEarlierRuns()
+        runRecord?.retire()
         // The previous display is removed on return to Home. Wait for the
         // new boot's view to lay out before starting another runtime.
         view = nil
@@ -890,10 +890,10 @@ final class LiveRuntime: RuntimeDriver {
     var guestShell: (any GuestShell)? { AdbGuestShell(operations: operations) }
 
     /// The records of this process's runs, where the runtime writes them.
-    private var runRecord: RunRecord? {
+    private lazy var runRecord: RunRecord? = {
         guard let sessionRecord, sessionRecord.lastPathComponent == BugReportAttachments.sessionRecord else { return nil }
         return RunRecord(in: sessionRecord.deletingLastPathComponent())
-    }
+    }()
 
     func currentSessionRecord() -> SessionRecord? { runRecord?.read() }
 

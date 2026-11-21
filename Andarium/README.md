@@ -695,7 +695,8 @@ address space holds, so this is a fallback.
   no run begins while that save is owed, and a start with root whose settings
   cannot be saved begins without root. The record of a run is moved aside as
   the next run is asked for (`RunRecord`), so the one at its place is always
-  the current run's and no time has to tell them apart. Restoring a snapshot forgets what the application
+  the current run's and no time has to tell them apart; one that cannot be
+  moved is emptied, and one that can be neither moved nor emptied is not read. Restoring a snapshot forgets what the application
   remembers of the Magisk app (`RootState.dataDiskReplaced`), since the
   snapshot's disk may not have it, and so does a restore that replaced the
   disk and could not finish, at once and not at the recovery that ends it; the

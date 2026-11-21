@@ -657,7 +657,7 @@ struct RunRecordTests {
         try state("root", ended: true, started: second + 5).write(to: file)
         #expect(run.read()?.ramdisk == .root)
         // The next run is asked for: nothing of the earlier one stays at the place.
-        run.retireEarlierRuns()
+        run.retire()
         #expect(run.read() == nil, "the record of the run before was taken for the next run's")
         #expect(SessionRecord.read(at: kept)?.ramdisk == .root)
         // The runtime begins its record; that one is the run's.
@@ -665,8 +665,67 @@ struct RunRecordTests {
         let current = try #require(run.read())
         #expect(current.running && current.ramdisk == .stock)
         // And at the next run it goes the same way.
-        run.retireEarlierRuns()
+        run.retire()
         #expect(run.read() == nil)
         #expect(SessionRecord.read(at: kept)?.ramdisk == .stock)
+    }
+
+    /// Takes the write access to what is in `directory` away, as a file that
+    /// cannot be replaced does: `body` runs with the directory unwritable
+    /// (nothing in it can be moved or removed) and, when `file` is given,
+    /// that file unwritable too.
+    private func withoutWriteAccess(to directory: URL, file: URL? = nil, _ body: () throws -> Void) throws {
+        let manager = FileManager.default
+        if let file { try manager.setAttributes([.posixPermissions: 0o400], ofItemAtPath: file.path) }
+        try manager.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+        defer {
+            try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            if let file { try? manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path) }
+        }
+        try body()
+    }
+
+    @Test(.enabled(if: geteuid() != 0))
+    func aRecordThatCannotBeMovedAsideIsEmptiedAndNeverTakenForTheNextRuns() throws {
+        let diagnostics = try directory()
+        defer { try? FileManager.default.removeItem(at: diagnostics) }
+        let file = diagnostics.appendingPathComponent(BugReportAttachments.sessionRecord)
+        let run = RunRecord(in: diagnostics)
+        try state("root", ended: true, started: 100).write(to: file)
+        try withoutWriteAccess(to: diagnostics) {
+            // Nothing in the directory can be moved: the record can only be emptied where it is.
+            #expect(run.retire() == .emptied)
+        }
+        #expect(run.read() == nil, "the record of the run before was taken for the next run's")
+        // The runtime opens the same file and writes the run's own.
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.write(contentsOf: state("stock", ended: false, started: 200))
+        try handle.close()
+        let current = try #require(run.read())
+        #expect(current.running && current.ramdisk == .stock)
+    }
+
+    @Test(.enabled(if: geteuid() != 0))
+    func aRecordThatCanBeNeitherMovedNorEmptiedIsNotReadUntilItIsGotOutOfTheWay() throws {
+        let diagnostics = try directory()
+        defer { try? FileManager.default.removeItem(at: diagnostics) }
+        let file = diagnostics.appendingPathComponent(BugReportAttachments.sessionRecord)
+        let kept = diagnostics.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+        let run = RunRecord(in: diagnostics)
+        try state("root", ended: true, started: 100).write(to: file)
+        try withoutWriteAccess(to: diagnostics, file: file) {
+            #expect(run.retire() == .stays)
+            // The file is still a record, and it is not the run's.
+            #expect(SessionRecord.read(at: file)?.ramdisk == .root)
+            #expect(run.read() == nil, "a record that stays in place was taken for the next run's")
+            // And it stays unread at every look, whatever else changes.
+            #expect(run.read() == nil)
+        }
+        // Once it can be moved, the next run is asked for and its record is its own.
+        #expect(run.retire() == .moved)
+        #expect(run.read() == nil)
+        #expect(SessionRecord.read(at: kept)?.ramdisk == .root)
+        try state("stock", ended: false, started: 200).write(to: file)
+        #expect(run.read()?.ramdisk == .stock)
     }
 }

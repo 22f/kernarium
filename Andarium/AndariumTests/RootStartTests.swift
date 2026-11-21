@@ -481,6 +481,62 @@ final class RootStartTests {
         #expect(text.contains("paused: a start with root ended before Android booted"))
     }
 
+    // MARK: The record of a run that is asked for
+
+    /// The real runtime over empty storage, whose session record is the file
+    /// `diagnostics(record:)` wrote. A start handed to it waits for a display,
+    /// so nothing runs: only the record's place is looked at.
+    private func liveRuntime(in directory: URL) -> (LiveRuntime, AppModel) {
+        let identity = ReleaseIdentity(
+            releaseID: "20261031-los24-r4", buildFingerprint: "fp", buildNumber: 100, securityPatch: "2026-10-01",
+            systemDiskSHA256: String(repeating: "a", count: 64), dataLayout: 1, minimumGiB: 1, defaultGiB: 1,
+            maximumGiB: 8)
+        let storage = TwoDiskStorage(
+            locations: GuestLocations(directory: directory.appendingPathComponent("Guest")),
+            release: identity, releaseDirectory: directory.appendingPathComponent("system"))
+        let model = AppModel(
+            guest: Guest.fresh(on: host), host: host,
+            system: SystemInfo(version: "17", release: "r2", kernel: "Linux 6.18", architecture: "arm64, 4 KiB pages", appVersion: "1"),
+            capabilities: .device, createRequirementBytes: 1)
+        let runtime = LiveRuntime(
+            model: model, storage: storage, marker: PauseMarker(url: directory.appendingPathComponent("pause.json")),
+            sessionRecord: directory.appendingPathComponent(BugReportAttachments.sessionRecord))
+        return (runtime, model)
+    }
+
+    @Test func asARunIsAskedForTheRecordOfTheRunBeforeMovesAside() throws {
+        let directory = try diagnostics(record: record(end: "kernel-exit", status: 2, boot: "unobserved"))
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (runtime, model) = liveRuntime(in: directory)
+        withExtendedLifetime(model) {
+            #expect(runtime.currentSessionRecord()?.ramdisk == .root)
+            runtime.begin(guest: Guest.fresh(on: host), mode: .normal, kind: .normal)
+            // A start stopped during its preparation never began a record of its own.
+            #expect(runtime.currentSessionRecord() == nil)
+            let kept = directory.appendingPathComponent(BugReportAttachments.previousSessionRecord)
+            #expect(SessionRecord.read(at: kept)?.ramdisk == .root)
+        }
+    }
+
+    @Test(.enabled(if: geteuid() != 0))
+    func aRecordThatCannotBeMovedAsideIsNeverTakenForTheRunsOwn() throws {
+        let directory = try diagnostics(record: record(end: "kernel-exit", status: 2, boot: "unobserved"))
+        let current = directory.appendingPathComponent(BugReportAttachments.sessionRecord)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let (runtime, model) = liveRuntime(in: directory)
+        try withExtendedLifetime(model) {
+            // The record can be neither moved nor emptied, as one in a file that cannot be replaced.
+            try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: current.path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+            runtime.begin(guest: Guest.fresh(on: host), mode: .normal, kind: .normal)
+            #expect(SessionRecord.read(at: current)?.ramdisk == .root)
+            #expect(runtime.currentSessionRecord() == nil)
+        }
+    }
+
     @Test func theBugReportCarriesTheRootLineOnlyWhereRootIsOffered() {
         let (offered, _) = model(rootOn: true)
         #expect(offered.rootReportEntry()?.name == "andarium/root.txt")
