@@ -65,14 +65,18 @@ struct DrawableBudget {
  * no longer supports it and a fall measure over 2 s, which lags it, is below
  * it too: a guest that alternates across the threshold for less than that
  * stays on the 120 step. A step changes no sooner than the dwell (2 s) after
- * the last change, whatever the measures say, so that frames that arrive early
- * and late (which move the count of a second by two between ticks, over a gap
- * of 1.5 frames a second between a rise at 62.5 and a hold under 61) or a rate
- * that wobbles about a threshold change the step at most once in the dwell.
- * Once the link has settled a steady guest of 60 or less, or 63 or more, makes
- * no change; one between them changes it at most once when its frames are
- * early or late by up to 4 ms, or when the interval between them has up to
- * 2 ms of jitter, and never twice within the dwell. The time that a rule
+ * the last change since the link woke (a wake forgets it, and a ceiling that
+ * forbids the step lowers it at once), whatever the measures say, so that
+ * frames that arrive early and late (which move the count of a second by two
+ * between ticks, over a gap of 1.5 frames a second between a rise at 62.5 and
+ * a hold under 61) or a rate that wobbles about a threshold change the step
+ * at most once in the dwell. Once the link has settled a steady guest of 60 or
+ * less, or 63 or more, makes no change; one between them never changes it
+ * twice within the dwell, and changes it at most once when its frames are
+ * early or late by up to 4 ms. With 4 ms of jitter in the interval between its
+ * frames it can change it up to five times in 12 s, at rates from about 60.05
+ * to 62.05. A guest just over a threshold whose frames bunch at the boundaries
+ * of the second can stay on the old step for about 5 s. The time that a rule
  * states (the second of a rise, the 2 s of a fall and of the dwell) is a time
  * plus one tick: the link decides at its ticks. A link that wakes asks for the fastest rate the
  * ceiling allows, because the first frame of a burst should wait for the
