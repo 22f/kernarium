@@ -86,13 +86,11 @@ def read_strict_json(path: Path) -> dict:
     return contract_checks.load_json_object(path, StageError)
 
 
-MAX_MANIFEST = 16 * 1024 * 1024
-
-
 def read_manifest(release: Path) -> bytes:
     """The release manifest's bytes, read once through a regular file that is no link.
     Everything the script checks, stages or derives is taken from these bytes."""
-    return magisk_image.read_file(release / MANIFEST, MAX_MANIFEST, "the release manifest", StageError)
+    return magisk_image.read_file(
+        release / MANIFEST, magisk_image.MAX_MANIFEST, "the release manifest", StageError)
 
 
 def parse_object(data: bytes, label: str, *, strict: bool = False) -> dict:

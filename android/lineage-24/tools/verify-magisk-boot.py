@@ -62,23 +62,24 @@ def main() -> None:
         raise error("--image, --apk and --layout are required without --release")
     if (args.stock_image is None) == (args.disk is None):
         raise error("name the stock image as --stock-image or as the init_boot partition of --disk")
-    patched = regular_file(args.image, "patched image")
-    apk = regular_file(args.apk, "Magisk APK")
-    layout = regular_file(args.layout, "partition layout")
+    # Every file is read once, with a bound, and what is checked is those bytes: no
+    # path is opened a second time, so a file that changes meanwhile changes nothing.
+    layout = magisk_image.read_layout(args.layout, error)
     if pin is not None:
-        magisk_image.check_apk_is_pin(apk, pin, error)
+        apk = magisk_image.read_pinned_apk(args.apk, pin, error)
+    else:
+        apk = magisk_image.read_file(args.apk, magisk_image.MAX_APK_FILE, "the Magisk APK", error)
     if args.stock_image is not None:
         stock = magisk_image.read_file(
             args.stock_image, magisk_image.MAX_BOOT_IMAGE, "the stock image", error)
     else:
         stock = magisk_image.read_partition(
             regular_file(args.disk, "system disk"), layout, "init_boot", error)
+    patched = magisk_image.read_file(args.image, len(stock), "the patched image", error)
     with magisk_image.open_apk(apk, error) as archive:
         magisk_image.verify_patched(
-            magisk_image.read_file(patched, len(stock), "the patched image", error), stock, archive,
-            magisk_image.preinit_device(layout, error), error,
-        )
-    print(f"verified Magisk-patched init_boot: {patched}")
+            patched, stock, archive, magisk_image.preinit_device(layout, error), error)
+    print(f"verified Magisk-patched init_boot: {args.image}")
 
 
 if __name__ == "__main__":

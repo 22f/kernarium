@@ -833,7 +833,8 @@ def root_record(root_dir: Path, disk: Path, layout: Path, pin: Path | None = Non
     magisk_image.check_apk_is_pin(apk, pinned, error)
     if patched.name not in held or patched.is_symlink() or not patched.is_file():
         fail(f"the Magisk-patched init_boot is missing, a link or not a regular file: {patched}")
-    stock = magisk_image.read_partition(disk, layout, "init_boot", error)
+    stock = magisk_image.read_partition(
+        disk, magisk_image.read_layout(layout, error), "init_boot", error)
     return magisk_image.validate_root_record({
         "magisk": {
             "name": pinned.name,

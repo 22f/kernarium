@@ -245,7 +245,7 @@ class FormatTests(unittest.TestCase):
                 {"name": "init_boot", "start_bytes": 4096, "size_bytes": size - 8192}]},
         }))
         with self.assertRaisesRegex(SystemExit, "larger than"):
-            magisk_image.read_partition(disk, layout, "init_boot", SystemExit)
+            magisk_image.read_partition(disk, layout.read_bytes(), "init_boot", SystemExit)
 
     def test_xz_members_decode_and_bad_ones_are_refused(self) -> None:
         packed = lzma.compress(b"member", format=lzma.FORMAT_XZ)
@@ -439,10 +439,10 @@ class VerifierTests(unittest.TestCase):
                     self.patched(), self.fixture.stock_image, archive, "ubdb3", SystemExit)
 
     def test_the_preinit_partition_follows_the_layout(self) -> None:
-        self.assertEqual(magisk_image.preinit_device(self.fixture.layout, SystemExit), "ubdb3")
+        self.assertEqual(magisk_image.preinit_device(magisk_image.read_layout(self.fixture.layout, SystemExit), SystemExit), "ubdb3")
         other = Fixture(Path(self.enterContext(tempfile.TemporaryDirectory())), userdata=False)
         with self.assertRaises(SystemExit):
-            magisk_image.preinit_device(other.layout, SystemExit)
+            magisk_image.preinit_device(magisk_image.read_layout(other.layout, SystemExit), SystemExit)
 
 
 class PatcherTests(unittest.TestCase):

@@ -595,6 +595,74 @@ class RootVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "larger than the stock init_boot"):
             self.verify_root()
 
+    def test_the_standalone_reads_are_bounded_before_they_are_read(self) -> None:
+        # Each file that the verifier takes from a path is read with a bound that is
+        # checked on its size: 16 MiB for a manifest, 1 MiB for a layout, 128 MiB for an
+        # APK. A sparse file past the bound costs nothing to make, and what it holds is
+        # never read: the refusal is the bound's, by name.
+        def grow(path: Path, size: int) -> None:
+            with path.open("r+b") as handle:
+                handle.truncate(size)
+
+        def verify_release() -> None:
+            magisk_image.verify_release_root(self.release, SystemExit)
+
+        grow(self.release / "release-manifest.json", (16 << 20) + 1)
+        with self.assertRaisesRegex(SystemExit, "release manifest is larger than"):
+            verify_release()
+        self.fixture.write()
+        grow(self.release / "guest/partition-layout.json", (1 << 20) + 1)
+        with self.assertRaisesRegex(SystemExit, "partition layout is larger than"):
+            verify_release()
+        shutil.copyfile(self.fixture.synthetic.layout, self.release / "guest/partition-layout.json")
+        verify_release()
+
+        big = self.directory / "big.apk"
+        big.write_bytes(b"")
+        grow(big, (128 << 20) + 1)
+        stock = self.directory / "stock.img"
+        stock.write_bytes(self.fixture.synthetic.stock_image)
+        refused = subprocess.run(
+            [sys.executable, "-B", str(TOOLS / "verify-magisk-boot.py"), "--image", str(stock),
+             "--apk", str(big), "--layout", str(self.fixture.synthetic.layout),
+             "--stock-image", str(stock)],
+            capture_output=True, text=True, check=False, timeout=60)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertRegex(refused.stderr, "Magisk APK is larger than")
+
+    def test_the_standalone_verifier_checks_one_snapshot_of_the_apk(self) -> None:
+        # The APK is read once. What is checked against the pin and what the image is
+        # verified against are those same bytes, whatever happens to the path after.
+        spec = importlib.util.spec_from_file_location("verify_magisk_boot_tool", TOOLS / "verify-magisk-boot.py")
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        synthetic = self.fixture.synthetic
+        apk = self.directory / "swapped.apk"
+        shutil.copyfile(self.fixture.apk, apk)
+        other = self.directory / "other.apk"
+        make_apk_bytes(other, magisk_fixture.apk_members(patch_script()) | {
+            "lib/arm64-v8a/libmagiskinit.so": b"another build"})
+        stock = self.directory / "stock.img"
+        stock.write_bytes(synthetic.stock_image)
+        patched = self.directory / "patched.img"
+        patched.write_bytes(synthetic.patched_reference())
+        real_read_file = magisk_image.read_file
+
+        def swapping(path, *rest):
+            data = real_read_file(path, *rest)
+            if Path(path) == stock:
+                shutil.copyfile(other, apk)
+            return data
+
+        arguments = ["verify-magisk-boot.py", "--image", str(patched), "--apk", str(apk),
+                     "--layout", str(synthetic.layout), "--stock-image", str(stock),
+                     "--pin", str(self.fixture.pin)]
+        with mock.patch.object(magisk_image, "read_file", swapping), \
+                mock.patch.object(sys, "argv", arguments), contextlib.redirect_stdout(io.StringIO()) as output:
+            tool.main()
+        self.assertIn("verified Magisk-patched init_boot", output.getvalue())
+        self.assertEqual(apk.read_bytes(), other.read_bytes())
+
     def test_an_apk_whose_binaries_are_not_the_ones_in_the_image_is_refused(self) -> None:
         other = self.directory / "other.apk"
         make_apk_bytes(other, magisk_fixture.apk_members(patch_script()) | {

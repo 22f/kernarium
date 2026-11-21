@@ -189,9 +189,10 @@ def patch(arguments: argparse.Namespace) -> None:
         if path.exists() or path.is_symlink():
             raise error(f"{path.name} already exists: an existing file is never replaced")
 
-    stock = magisk_image.read_partition(arguments.disk, arguments.layout, "init_boot", error)
+    layout = magisk_image.read_layout(arguments.layout, error)
+    stock = magisk_image.read_partition(arguments.disk, layout, "init_boot", error)
     magisk_image.boot_ramdisk(stock, "the release's init_boot", error)
-    preinit = magisk_image.preinit_device(arguments.layout, error)
+    preinit = magisk_image.preinit_device(layout, error)
     results: list[bytes] = []
     with magisk_image.open_apk(snapshot, error) as archive:
         for _ in range(RUNS):

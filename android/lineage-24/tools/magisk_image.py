@@ -118,6 +118,8 @@ LZ4_COMPRESS_BOUND = LZ4_LEGACY_BLOCK + LZ4_LEGACY_BLOCK // 255 + 16
 MAX_XZ_MEMORY = 64 * 1024 * 1024
 MAX_BOOT_IMAGE = 64 * 1024 * 1024
 MAX_APK_FILE = 128 * 1024 * 1024
+MAX_MANIFEST = 16 * 1024 * 1024
+MAX_LAYOUT = android_image.MAX_LAYOUT
 
 
 def apk_path(version: str) -> str:
@@ -399,7 +401,14 @@ def read_file(path: Path, limit: int, label: str, error: Error) -> bytes:
     return data
 
 
-def read_partition(disk: Path, layout: Path, name: str, error: Error) -> bytes:
+def read_layout(path: Path, error: Error) -> bytes:
+    """The bytes of a partition layout, read once with a bound. A caller reads the
+    layout through this and passes the bytes on, so that the partition it reads and
+    the pre-init device it names come from one layout."""
+    return read_file(path, MAX_LAYOUT, "the partition layout", error)
+
+
+def read_partition(disk: Path, layout: bytes, name: str, error: Error) -> bytes:
     """The bytes of a system disk partition, by the release's partition layout."""
     start, size = android_image.partition_range(layout, disk, name, error)
     if size > MAX_BOOT_IMAGE:
@@ -409,13 +418,13 @@ def read_partition(disk: Path, layout: Path, name: str, error: Error) -> bytes:
         return android_image.read_exact(handle, size, f"partition {name}", error)
 
 
-def preinit_device(layout: Path, error: Error) -> str:
+def preinit_device(layout: bytes, error: Error) -> str:
     """The guest's name of the data disk's userdata partition, from the layout."""
     try:
-        document = json.loads(layout.read_text(encoding="utf-8"))
+        document = json.loads(layout.decode("utf-8"))
         partitions = document["data_disk"]["partitions"]
         names = [entry["name"] for entry in partitions]
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as failure:
+    except (UnicodeError, ValueError, KeyError, TypeError) as failure:
         raise error(f"cannot read the data disk partitions of the layout: {failure}") from failure
     if names.count(PREINIT_PARTITION) != 1:
         raise error(f"the data disk layout has no single {PREINIT_PARTITION} partition")
@@ -791,16 +800,15 @@ def verify_release_root(release_root: Path, error: Error, pin: Pin | None = None
     partition, and the patched image verifies against that partition and the
     APK. With a pin, the record is the pinned Magisk release. Returns the record.
     """
-    try:
-        manifest = contract_checks.load_json_object(
-            real_path_below(release_root, MANIFEST, error), error)
-    except (OSError, ValueError) as failure:
-        raise error(f"cannot read the release manifest: {failure}") from failure
+    manifest_path = real_path_below(release_root, MANIFEST, error)
+    manifest = contract_checks.parse_json_object(
+        read_file(manifest_path, MAX_MANIFEST, "the release manifest", error),
+        str(manifest_path), error)
     if "root" not in manifest:
         raise error("the release manifest has no root record")
     record = validate_root_record(manifest["root"], error)
     disk = real_path_below(release_root, SYSTEM_DISK, error)
-    layout = real_path_below(release_root, PARTITION_LAYOUT, error)
+    layout = read_layout(real_path_below(release_root, PARTITION_LAYOUT, error), error)
     stock = read_partition(disk, layout, "init_boot", error)
     contents = check_root_files(release_root, record, error, image_limit=len(stock))
     if pin is not None:
