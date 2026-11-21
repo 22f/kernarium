@@ -27,6 +27,7 @@
     { "kind": "folder", "path": "Andarium/Preview", "target-membership": [ "AndariumPreview" ] },
     { "kind": "folder", "path": "Andarium/Live", "target-membership": [ "Andarium" ] },
     { "kind": "folder", "path": "../GuestHost/Sources", "target-membership": [ "Andarium" ] },
+    { "path": "../GuestHost/Sources/UpdateNoticeViews.swift", "target-membership": [ "AndariumPreview/compile-sources" ] },
     { "kind": "folder", "path": "AndariumTests", "target-membership": [ "AndariumTests" ] },
     { "kind": "folder", "path": "AndariumUITests", "target-membership": [ "AndariumUITests" ] },
     { "kind": "folder", "path": "AndariumPreviewUITests", "target-membership": [ "AndariumPreviewUITests" ] },

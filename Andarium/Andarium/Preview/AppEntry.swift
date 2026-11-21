@@ -488,6 +488,7 @@ struct AppEntry {
         }
         HeatLimitPreview.apply(screen: screen, to: model)
         WhatsNewPreview.apply(screen: screen, to: model)
+        UpdatePreview.apply(screen: screen, to: model)
         if let statsReadings {
             model.session.readout = Readout(
                 previewReadings: statsReadings, memoryMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound
@@ -733,6 +734,7 @@ struct AppEntry {
             }
         }
         await AddToHomePreview.applyDeferred(screen: screen, model: model)
+        UpdatePreview.applyDeferred(screen: screen, model: model)
         switch screen {
         case "create", "create-low-space":
             model.sheet = .create

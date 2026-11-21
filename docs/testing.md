@@ -423,7 +423,7 @@ mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
-FOLLOW_X_HANDLE=example_handle`;
+FOLLOW_X_HANDLE=example_handle UPDATE_SOURCE_HOST=example.com UPDATE_SOURCE_PATH=/source.json`;
 the scheme without the filter also runs `AndariumUITests`). A row that asserts
 what an iPad app on a Mac does not do (accessibility activation of an alert's
 buttons, text that scales with the content size category, a menu's items as
@@ -445,6 +445,13 @@ fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `FollowXRowTests` needs
 the example value of its own, `FOLLOW_X_HANDLE=example_handle`
 ([Follow developer on X](../Andarium/README.md#follow-developer-on-x)).
+`AppUpdateNoticeTests` host Home, the detail and Info with the update notice on a
+fake store: the card first among the notices, the tools offered only when installed
+and none on a Mac or Vision Pro, Skip This Version, the switch, the launch's gates
+and the keys the build writes (`UPDATE_SOURCE_HOST=example.com` and
+`UPDATE_SOURCE_PATH=/source.json`: [Update notice](../Andarium/README.md#update-notice));
+`UpdateNoticeUITests` of `AndariumPreviewUITests` tap the same screens in the
+preview, where a made-up version file is read by the real rules.
 `HomePlainInfoTests` checks that Home's toolbar holds the plain Info button.
 `GuestSmsTests`, `GuestSmsChannelTests` and `TextMessageNoticeTests` (`AndariumCoreTests`)
 read the golden bytes of the text message channel and its payload, which the guest

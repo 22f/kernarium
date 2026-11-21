@@ -254,7 +254,9 @@ the iPad harness reads, as Debug does. A launch that sets no `ANDARIUM_` or
   code); the linker's debug map in an embedded framework; a test bundle or
   the frameworks that run tests (XCTest, XCUIAutomation, Swift Testing and the
   SDK's other test frameworks), embedded or only named by a load command; and
-  a linked test-support library (`AndariumCoreTestSupport`).
+  a linked test-support library (`AndariumCoreTestSupport`). It refuses an
+  update address the notice cannot read and the example host of
+  `Update.local.xcconfig.example` (see [Update notice](#update-notice)).
 
 An archive is made after the steps of [Build](#build), with
 `xcodebuild -project Andarium/Andarium.xcodeproj -scheme Andarium archive`.
@@ -293,6 +295,47 @@ for them (`XLogoGlyph.xcassets`) in place of the logo; adding
 handle's shape and the address are in `Shared/FollowX/Logic`, which
 AndariumCore's tests build through a symlinked target no product links, and the
 words are in the `FollowX` string table.
+
+### Update notice
+
+A sideloaded build tells the person when a newer version exists: Home's first
+notice (`Shared/AppUpdateCard.swift`: a title, one line, one button, and a close
+button that puts away that build only), a detail the button opens, and Info's
+Updates section with the Check for Updates switch (on by default). Which
+version exists comes from one AltStore-format file the maker hosts; what is
+read, checked and sent is
+[GuestHost's Update notice](../GuestHost/README.md#update-notice), whose
+`GuestHostCore` model and `GuestHost/Sources/UpdateNoticeViews.swift` the
+Kernarium application can use as well. Andarium supplies its name, the moment
+and the launch (`Live/AppUpdateLaunch.swift`).
+
+- The address is compiled in, under the `UPDATE_NOTICE` definition, only in a
+  Release build whose ignored `GuestHost/Config/Update.local.xcconfig` (from
+  `Update.local.xcconfig.example`: a host, a path and the hosts links may name
+  besides the file's own, never a whole address) names a host. The build writes
+  the `UpdateSourceHost`, `UpdateSourcePath`, `UpdateLinkHosts` and
+  `UpdateAppIdentifier` keys of `Info.plist`, with the original bundle
+  identifier, and the two `LSApplicationQueriesSchemes` (`altstore`,
+  `sidestore`) that let the detail offer an installed tool. A fork or a Debug
+  build has no address, no read and no notice. An archive refuses the
+  example host and a malformed address
+  (`scripts/check-release-archive.py`). Tests and captures name
+  `UPDATE_SOURCE_HOST=example.com UPDATE_SOURCE_PATH=/source.json` on the
+  `xcodebuild` line to build the keys into a Debug build; `AndariumPreview`
+  sets the host empty and shows a made-up file through the real reader.
+- The read is at most one a day, a few seconds after Home shows, while no run
+  is active, starting or pending, and never in a test or harness launch
+  (`announcesWhatsNew` is false there) or under Low Data Mode. Nothing waits
+  for it: a start cancels it.
+- The detail lists the version, its day, its size, the iOS it needs and the
+  installed version; "Update with AltStore" and "Update with SideStore" appear
+  only for an installed tool, then the app file and the release page, and Skip
+  This Version. On a Mac or Vision Pro the card shows and the detail offers the
+  app file and the release page, with the steps in words instead of the tool
+  rows.
+- The sentences are `UpdateWords` in the package's catalog, in the four
+  languages; the application's name is the only value inserted besides the
+  version, its build and its day.
 
 ## Model and storage
 

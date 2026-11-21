@@ -239,6 +239,16 @@ SHOTS: list[Shot] = [
     s("snapshots", "Snapshots", "snapshots", "The Snapshots sheet over Home with mock snapshots: the list newest first, the space they use and Take snapshot at the foot.", dark=True),
     s("snapshots-detail", "Snapshots", "snapshots-detail", "One snapshot's page: its name, when it was taken, what deleting frees, Restore and Delete."),
     s("whatsnew-open", "What's New", "whatsnew-open", "The notes of the update, opened from the ribbon above Start."),
+    # The update notice of a sideloaded build (Preview/UpdatePreview.swift: a made-up version file read by the real rules)
+    s("update-card", "Update notice", "update-card", "Home with the update card first among the notices: Update available, one line with the installed and the new version, Get Update and the close button.", dark=True),
+    s("update-card-closed", "Update notice", "update-card-closed", "Home after the card was put away: no card, Home as always.", dark=True),
+    s("update-detail", "Update notice", "update-detail", "The detail the card's button opens, with AltStore and SideStore installed: the version, its day, size, the iOS it needs and the installed version, then Update with AltStore, Update with SideStore, Download App File, Open Release Page, and Skip This Version.", dark=True),
+    s("update-detail-altstore", "Update notice", "update-detail-altstore", "The detail with only AltStore installed: one tool row.", dark=True),
+    s("update-detail-steps", "Update notice", "update-detail-steps", "The detail with neither sideloading app installed: the steps in words in place of the tool rows, then the app file and the release page.", dark=True),
+    s("update-detail-mac", "Update notice", "update-detail-mac", "The detail of an iPad app on a Mac or Vision Pro: no tool rows, the steps in words, the app file and the release page.", dark=True),
+    s("update-info", "Update notice", "update-info", "Info with its Updates section while a newer version exists: Update Available with the version, the Check for Updates switch on, and the sentence under it.", dark=True),
+    s("update-info-current", "Update notice", "update-info-current", "Info's Updates section with nothing newer: the Check for Updates switch alone and its sentence.", dark=True),
+    s("update-info-off", "Update notice", "update-info-off", "Info's Updates section with the switch off: no update row.", dark=True),
     # Boot
     *boot_stages("boot", "boot", ["System image", "Linux kernel", "Storage", "Startup"], "Normal boot over the dimmed guest display, no progress bar"),
     s("boot-single-vcpu", "Boot", "boot-single-vcpu", "Normal boot of a guest with a single vCPU: the Linux kernel line says \"1 vCPU\"."),
