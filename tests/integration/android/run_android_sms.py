@@ -1817,7 +1817,8 @@ def row_i2(run: Run) -> None:
     sender, text = run.sender_and_text("i2")
     identifier = new_identifier()
     run.expect(run.first(identifier, sender, text), "handed-over", identifier, "1")
-    # The log does not survive the power-off: count the lines before it and after it.
+    # The log does not survive the power-off: count the lines of the first message before it and after it, and those
+    # of the new message on their own.
     steps = step_lines(run.guest.service_log(), identifier)
     restart_instance(run)
     guest = run.guest
@@ -1831,9 +1832,13 @@ def row_i2(run: Run) -> None:
     again = run.first(fresh, sender, f"{text} again")
     if again != Answer("handed-over", fresh, "1"):
         problems.append(f"a new message after the restart was answered {again.payload()!r}, not handed-over")
-    steps += step_lines(guest.service_log(), identifier)
+    log = guest.service_log()
+    steps += step_lines(log, identifier)
     if steps != 1:
         problems.append(f"{steps} step-1 lines for the first message across the restart, expected 1")
+    steps = step_lines(log, fresh)
+    if steps != 1:
+        problems.append(f"{steps} step-1 lines for the new message after the restart, expected 1")
     # The second boot is where the platform relabels the user's directories with the user's categories: the service
     # must still read its record directory's label (the first line of this boot's log) and be denied no directory.
     problem = check_record_location(guest.logcat("-b", "all", "-v", "epoch", "-s", f"{TAG}:I"))

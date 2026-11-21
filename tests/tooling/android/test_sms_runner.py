@@ -1643,6 +1643,22 @@ class OnDemandTests(unittest.TestCase):
             self.run_row(runner.row_i2, simulation, RecordingHost)
         self.assertIn("restart the instance", simulation.commands)
         self.assertEqual(simulation.starts, 2, "the first message, and the session that the retry starts")
+        # The new message after the restart is counted on its own: two handovers of it beside one reply are a failure
+        # that the count of the first message's lines cannot show.
+        class Doubled(RecordingHost):
+            def reply(self, payload: bytes) -> tuple[str, str, str]:
+                answer = super().reply(payload)
+                if answer[0] == "handed-over" and len(self.known) == 2:
+                    self.sim.step_log.append(f"11-18 20:09:43.609  1402  1480 I AndariumSms: step 1 of {answer[1][:8]}\n")
+                return answer
+
+        doubled = Simulation()
+        with mock.patch.object(runner, "restart_instance", lambda run: (setattr(doubled, "pid", None),
+                                                                        doubled.step_log.clear(),
+                                                                        doubled.record_lines.clear())):
+            with self.assertRaisesRegex(runner.Failure, "2 step-1 lines for the new message after the restart, "
+                                                        "expected 1"):
+                self.run_row(runner.row_i2, doubled, Doubled)
         # A record that did not survive the restart answers the retry as uncertain, which is reported (and the new
         # message is still judged): the finding of the second boot of the first guest series.
         class Forgetful(RecordingHost):
