@@ -456,6 +456,13 @@ and the keys the build writes (`UPDATE_SOURCE_HOST=example.com` and
 `UpdateNoticeUITests` of `AndariumPreviewUITests` tap the same screens in the
 preview, where a made-up version file is read by the real rules.
 `HomePlainInfoTests` checks that Home's toolbar holds the plain Info button.
+`TranslatedLibrariesRowTests` and `TranslatedLibrariesUITests` (of
+`AndariumPreviewUITests`) check Home's AOT row: there only in a build that
+carries the translated-code framework, below JIT in the same section, on by
+default and the person's choice, dimmed with its reason while the next start
+runs on JIT, and what a start states to the runtime; `TranslatedLibrariesTests`
+(`AndariumCoreTests`) the preference, the start decision and the start record
+the bug report carries.
 `GuestSmsTests`, `GuestSmsChannelTests` and `TextMessageNoticeTests` (`AndariumCoreTests`)
 read the golden bytes of the text message channel and its payload, which the guest
 service's tests read too, and run the exchange over socket pairs and a scripted
