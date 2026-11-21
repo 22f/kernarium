@@ -146,6 +146,9 @@ public struct UpdateReader: UpdateFetching {
             if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
                 completionHandler(.performDefaultHandling, nil)
             } else {
+                // A server that asks for a login has answered: the read is an
+                // attempt that failed, and uses up the day.
+                refuse()
                 completionHandler(.cancelAuthenticationChallenge, nil)
             }
         }

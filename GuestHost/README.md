@@ -90,9 +90,10 @@ the views; a build with no address has no configuration and no notice.
 
 - The file is untrusted. Only a version, a build, a day, a size and links that
   pass the rules are shown or opened; every sentence is the application's own.
-  A file that is no JSON or JSON5, over 1 MiB, or of another `format` is no
-  answer; an entry that breaks a rule skips only itself; unknown fields and
-  other applications' entries are ignored. The offer is the highest build above
+  A file that is not plain JSON in UTF-8 (the owner publishes plain JSON: no
+  comments, no JSON5), over 1 MiB, or of another `format` is no answer; an
+  entry that breaks a rule skips only itself; unknown fields and other
+  applications' entries are ignored. The offer is the highest build above
   the installed one whose iOS range fits the device, never a lower build.
 - A link is `https` on the file's own host or a host the build names
   (`UpdateLinkHosts`: exact names and `*.` patterns), with no user name, no port
@@ -102,7 +103,10 @@ the views; a build with no address has no configuration and no notice.
   and only at the application's moment; it uses an ephemeral session with no
   cookies, cache or conditional header, a fixed `User-Agent` and
   `Accept-Language`, `https` only (redirects included), a 1 MiB and 15 s limit,
-  and never runs under Low Data Mode or after a cancelled task.
+  and never runs under Low Data Mode or after a cancelled task. Any answer,
+  a refused login included, uses up the day, and it does so before the body is
+  decoded, off the main actor. A kept record is held to the rules again when
+  it is loaded.
 - The address is the maker's, in the ignored `Config/Update.local.xcconfig`
   (from `Update.local.xcconfig.example`: a host and a path, never a whole
   address, and the hosts the file's links may name besides its own). Only a

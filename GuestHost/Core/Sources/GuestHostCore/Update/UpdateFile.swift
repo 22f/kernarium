@@ -19,9 +19,9 @@ public nonisolated enum UpdateFile {
     public static let format = 1
 
     public enum Reading: Equatable, Sendable {
-        /// Not an answer: a file that is not JSON (or JSON5), whose top level
-        /// is no object, that is over the limit, or whose block is of another
-        /// format. The last good answer stays.
+        /// Not an answer: a file that is not plain JSON in UTF-8, whose top
+        /// level is no object, that is over the limit, or whose block is of
+        /// another format. The last good answer stays.
         case unreadable
         /// The version to offer, or nil when the file offers none.
         case read(UpdateVersion?)
@@ -34,9 +34,11 @@ public nonisolated enum UpdateFile {
         _ data: Data, appIdentifier: String, installedBuild: Int, os: UpdateOSVersion, links: UpdateLinkPolicy
     ) -> Reading {
         guard data.count <= largestBytes else { return .unreadable }
-        let decoder = JSONDecoder()
-        decoder.allowsJSON5 = true
-        guard let root = try? decoder.decode(Root.self, from: data) else { return .unreadable }
+        // Plain JSON only: Foundation's JSON5 mode traps on a byte that is no
+        // UTF-8 where a key is expected, and the body is untrusted. A body
+        // that is not UTF-8 is no JSON either, so it is refused first.
+        guard String(data: data, encoding: .utf8) != nil else { return .unreadable }
+        guard let root = try? JSONDecoder().decode(Root.self, from: data) else { return .unreadable }
         let notes: [String: String]
         switch root.block {
         case .unsupported: return .unreadable

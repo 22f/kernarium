@@ -25,12 +25,13 @@ struct UpdateLinksTests {
     }
 
     @Test func aStarRuleAcceptsSubdomainsAndNotTheDomainItself() {
-        let rule = UpdateHostRule("*.example.net")!
-        #expect(rule.accepts("cdn.example.net"))
-        #expect(rule.accepts("a.b.example.net"))
-        #expect(!rule.accepts("example.net"))
-        #expect(!rule.accepts("evilexample.net"))
-        #expect(!rule.accepts("example.net.evil.com"))
+        // Only reserved names: example.* and the .test and .invalid top-level domains.
+        let rule = UpdateHostRule("*.example.test")!
+        #expect(rule.accepts("cdn.example.test"))
+        #expect(rule.accepts("a.b.example.test"))
+        #expect(!rule.accepts("example.test"))
+        #expect(!rule.accepts("evilexample.test"))
+        #expect(!rule.accepts("example.test.evil.invalid"))
     }
 
     // MARK: Links
@@ -48,8 +49,8 @@ struct UpdateLinksTests {
         let bad = [
             "http://example.com/a.ipa", "HTTPS://example.com/a.ipa", "ftp://example.com/a.ipa", "altstore://install?url=https://example.com/a.ipa",
             "javascript:alert(1)", "data:text/plain,hi", "file:///etc/passwd", "//example.com/a.ipa", "/a.ipa", "a.ipa", "",
-            "https://other.example.com/a.ipa", "https://example.org/a.ipa", "https://example.net/a.ipa", "https://evil.com/a.ipa",
-            "https://example.com.evil.com/a.ipa", "https://evilexample.com/a.ipa", "https://example.com@evil.com/a.ipa",
+            "https://other.example.com/a.ipa", "https://example.org/a.ipa", "https://example.net/a.ipa", "https://evil.invalid/a.ipa",
+            "https://example.com.evil.invalid/a.ipa", "https://example.com@evil.invalid/a.ipa",
             "https://user@example.com/a.ipa", "https://user:pass@example.com/a.ipa", "https://example.com:8443/a.ipa",
             "https://example.com:80/a.ipa", "https://exam%70le.com/a.ipa", "https://exämple.com/a.ipa", "https://example.com/a b.ipa",
             "https://example.com/a\n.ipa", "https://example.com/\u{7F}", "https://example.com/é", "https://example.com./a.ipa",
@@ -57,6 +58,14 @@ struct UpdateLinksTests {
             "https://example.com/" + String(repeating: "a", count: 2048),
         ]
         for text in bad { #expect(policy.link(text) == nil, "\(text.prefix(80))") }
+    }
+
+    @Test func aHostThatOnlyEndsWithTheFilesHostIsNotIt() {
+        let reserved = UpdateLinkPolicy(sourceHost: "example.test")
+        #expect(reserved.link("https://example.test/a.ipa") != nil)
+        #expect(reserved.link("https://evilexample.test/a.ipa") == nil)
+        #expect(reserved.link("https://example.test.evil.invalid/a.ipa") == nil)
+        #expect(reserved.link("https://example.test@evil.invalid/a.ipa") == nil)
     }
 
     @Test func aLinkAtTheSizeLimitPassesAndOneByteMoreDoesNot() {

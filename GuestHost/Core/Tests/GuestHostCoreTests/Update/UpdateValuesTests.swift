@@ -93,7 +93,10 @@ struct UpdateValuesTests {
         let version = UpdateVersion(
             version: "1.1", build: 16, released: UpdateDay(year: 2026, month: 11, day: 20), sizeBytes: 1,
             appFile: URL(string: "https://example.com/a.ipa")!)
-        #expect(version.label == "1.1 (16)")
+        // A no-break space keeps the version and its build on one line.
+        #expect(version.label == "1.1\u{A0}(16)")
+        #expect(version.label.contains(UpdateVersion.buildSeparator))
+        #expect(!version.label.contains(" "))
     }
 
     @Test func aVersionSurvivesTheRecordItIsKeptIn() throws {
@@ -104,5 +107,86 @@ struct UpdateValuesTests {
         let record = UpdateRecord(attempted: Date(timeIntervalSince1970: 1_700_000_000), found: version, hiddenBuild: 15)
         let data = try JSONEncoder().encode(record)
         #expect(try JSONDecoder().decode(UpdateRecord.self, from: data) == record)
+    }
+
+    // MARK: A kept record is held to the rules again
+
+    private static let kept = UpdateVersion(
+        version: "1.1", build: 16, released: UpdateDay(year: 2026, month: 11, day: 20), sizeBytes: 1_390_000_000,
+        minimumOS: UpdateOSVersion("26.0"), appFile: URL(string: "https://example.com/a.ipa")!)
+    private static let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+
+    /// The record as the application keeps it, with `edit` applied to its JSON
+    /// text, which is what someone changing the device's defaults does.
+    private func edited(_ edit: (String) -> String) throws -> UpdateRecord {
+        let record = UpdateRecord(attempted: Self.stamp, found: Self.kept, hiddenBuild: 15)
+        let text = String(decoding: try JSONEncoder().encode(record), as: UTF8.self)
+        let changed = edit(text)
+        #expect(changed != text, "the edit did not apply to \(text)")
+        return try JSONDecoder().decode(UpdateRecord.self, from: Data(changed.utf8))
+    }
+
+    @Test func aRecordThatIsNotTamperedWithIsKeptWhole() throws {
+        let record = try edited { $0.replacingOccurrences(of: "\"hiddenBuild\":15", with: "\"hiddenBuild\":15 ") }
+        #expect(record == UpdateRecord(attempted: Self.stamp, found: Self.kept, hiddenBuild: 15))
+    }
+
+    @Test(arguments: [
+        ("a sentence for a version", "\"version\":\"1.1\"", "\"version\":\"Visit evil.test now for the update!\""),
+        ("a version too long", "\"version\":\"1.1\"", "\"version\":\"1.1.1.1.1.1.1.1.1\""),
+        ("an empty version", "\"version\":\"1.1\"", "\"version\":\"\""),
+        ("a month 13", "\"month\":11", "\"month\":13"),
+        ("a day 45", "\"day\":20", "\"day\":45"),
+        ("the 31st of November", "\"day\":20", "\"day\":31"),
+        ("a year of Int.max", "\"year\":2026", "\"year\":9223372036854775807"),
+        ("a negative year", "\"year\":2026", "\"year\":-5"),
+        ("a build of 0", "\"build\":16", "\"build\":0"),
+        ("a negative build", "\"build\":16", "\"build\":-16"),
+        ("a build over nine digits", "\"build\":16", "\"build\":1000000000"),
+        ("a size of 0", "\"sizeBytes\":1390000000", "\"sizeBytes\":0"),
+        ("a size over a tebibyte", "\"sizeBytes\":1390000000", "\"sizeBytes\":1099511627777"),
+        ("an iOS version out of range", "\"major\":26", "\"major\":99999"),
+    ])
+    func aVersionTheRulesWouldNotKeepIsDroppedAndTheRestOfTheRecordStays(
+        name: String, from: String, to: String
+    ) throws {
+        let record = try edited { $0.replacingOccurrences(of: from, with: to) }
+        #expect(record.found == nil, "\(name)")
+        #expect(record.hiddenBuild == 15, "\(name)")
+        #expect(record.attempted == Self.stamp, "\(name)")
+    }
+
+    @Test func aVersionThatIsTheWrongTypeIsDroppedToo() throws {
+        let record = try edited { $0.replacingOccurrences(of: "\"build\":16", with: "\"build\":\"sixteen\"") }
+        #expect(record.found == nil)
+        #expect(record.hiddenBuild == 15)
+        let noVersion = try edited { $0.replacingOccurrences(of: "\"found\":{", with: "\"unknown\":{") }
+        #expect(noVersion.found == nil)
+    }
+
+    @Test func aTamperedValueNeverReachesTheScreen() throws {
+        let record = try edited {
+            $0.replacingOccurrences(of: "\"version\":\"1.1\"", with: "\"version\":\"Visit evil.test now for the update!\"")
+        }
+        #expect(record.found == nil)
+    }
+
+    @MainActor
+    @Test func theStoreReadsATamperedRecordAsOneWithoutAVersion() throws {
+        let suite = "UpdateValuesTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = DefaultsUpdateStore(defaults: defaults)
+        store.record = UpdateRecord(attempted: Self.stamp, found: Self.kept, hiddenBuild: 15)
+        #expect(store.record.found == Self.kept)
+        let text = String(decoding: try #require(defaults.data(forKey: DefaultsUpdateStore.recordKey)), as: UTF8.self)
+        defaults.set(
+            Data(text.replacingOccurrences(of: "\"month\":11", with: "\"month\":13").utf8),
+            forKey: DefaultsUpdateStore.recordKey)
+        #expect(store.record.found == nil)
+        #expect(store.record.hiddenBuild == 15)
+        // What is not JSON at all is an empty record.
+        defaults.set(Data([0xFF, 0x7B]), forKey: DefaultsUpdateStore.recordKey)
+        #expect(store.record == UpdateRecord())
     }
 }

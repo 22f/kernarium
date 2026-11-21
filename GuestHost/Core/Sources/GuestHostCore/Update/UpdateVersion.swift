@@ -5,7 +5,8 @@ import Foundation
 // The values the update notice keeps of a version file. The file is untrusted
 // input: each type is made only by an initializer that checks its text, so a
 // value that exists has passed the rules, and nothing of the file is shown
-// that did not come through one.
+// that did not come through one. The kept record is read back through the
+// same rules, so a record that was edited on the device is held to them too.
 
 /// An iOS version as the file writes it ("26.0", "26.2.1"): one to three
 /// numbers, compared as dotted numbers with the missing ones as zero.
@@ -18,6 +19,22 @@ public struct UpdateOSVersion: Comparable, Hashable, Codable, Sendable, CustomSt
         self.major = major
         self.minor = minor
         self.patch = patch
+    }
+
+    /// A kept version is held to the text rules: each number is at most four digits.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        major = try container.decode(Int.self, forKey: .major)
+        minor = try container.decode(Int.self, forKey: .minor)
+        patch = try container.decode(Int.self, forKey: .patch)
+        guard [major, minor, patch].allSatisfy({ (0...9999).contains($0) }) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .major, in: container, debugDescription: "an iOS version number out of range")
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case major, minor, patch
     }
 
     /// nil for text that is not one to three numbers of at most four digits.
@@ -61,6 +78,22 @@ public struct UpdateDay: Hashable, Codable, Sendable {
         self.year = year
         self.month = month
         self.day = day
+    }
+
+    /// A kept day is held to the text rules: a day of the calendar, in a year of four digits.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        year = try container.decode(Int.self, forKey: .year)
+        month = try container.decode(Int.self, forKey: .month)
+        day = try container.decode(Int.self, forKey: .day)
+        guard Self.isCalendarDay(year: year, month: month, day: day) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .year, in: container, debugDescription: "not a day of the calendar")
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case year, month, day
     }
 
     /// The two forms of ISO 8601 that AltStore and SideStore read, read
@@ -113,16 +146,23 @@ public struct UpdateDay: Hashable, Codable, Sendable {
                 return nil
             }
         }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = Self.zone
-        guard (1...12).contains(month), (1...31).contains(day),
-            let date = calendar.date(from: DateComponents(year: year, month: month, day: day, hour: 12)),
-            calendar.dateComponents([.year, .month, .day], from: date) == DateComponents(year: year, month: month, day: day)
-        else { return nil }
+        guard Self.isCalendarDay(year: year, month: month, day: day) else { return nil }
         self.init(year: year, month: month, day: day)
     }
 
     private static let zone = TimeZone(secondsFromGMT: 0)!
+
+    /// Whether the three numbers are a real day of the Gregorian calendar, in a
+    /// year of at most four digits.
+    private static func isCalendarDay(year: Int, month: Int, day: Int) -> Bool {
+        guard (0...9999).contains(year), (1...12).contains(month), (1...31).contains(day) else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        guard let date = calendar.date(from: DateComponents(year: year, month: month, day: day, hour: 12)) else {
+            return false
+        }
+        return calendar.dateComponents([.year, .month, .day], from: date) == DateComponents(year: year, month: month, day: day)
+    }
 
     /// The day in the reader's language and region, as "20 November 2026".
     public func formatted(locale: Locale = .autoupdatingCurrent) -> String {
@@ -167,6 +207,32 @@ public struct UpdateVersion: Hashable, Codable, Sendable {
         self.notes = notes
     }
 
+    /// A kept version is held to the rules of the file's own text: a version
+    /// of letters, digits and dots, a build of at most nine digits above zero,
+    /// a size above zero and within the limit. Its links are checked against
+    /// the build's policy each time the version is offered.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(String.self, forKey: .version)
+        build = try container.decode(Int.self, forKey: .build)
+        released = try container.decode(UpdateDay.self, forKey: .released)
+        sizeBytes = try container.decode(UInt64.self, forKey: .sizeBytes)
+        minimumOS = try container.decodeIfPresent(UpdateOSVersion.self, forKey: .minimumOS)
+        maximumOS = try container.decodeIfPresent(UpdateOSVersion.self, forKey: .maximumOS)
+        appFile = try container.decode(URL.self, forKey: .appFile)
+        notes = try container.decodeIfPresent(URL.self, forKey: .notes)
+        guard Self.isWellFormed(version: version), (1...999_999_999).contains(build), sizeBytes > 0,
+            sizeBytes <= UInt64(Self.largestSizeBytes)
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .version, in: container, debugDescription: "a version the file's rules would not keep")
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, build, released, sizeBytes, minimumOS, maximumOS, appFile, notes
+    }
+
     /// The same version without its release page.
     public var withoutNotes: UpdateVersion {
         UpdateVersion(
@@ -174,8 +240,12 @@ public struct UpdateVersion: Hashable, Codable, Sendable {
             minimumOS: minimumOS, maximumOS: maximumOS, appFile: appFile)
     }
 
-    /// "1.1 (16)": how Info writes a version.
-    public var label: String { "\(version) (\(build))" }
+    /// "1.1 (16)": how Info writes a version. A no-break space keeps the
+    /// version and its build on one line.
+    public var label: String { "\(version)\(Self.buildSeparator)(\(build))" }
+
+    /// U+00A0, between a version and its build.
+    public static let buildSeparator = "\u{A0}"
 
     /// A version string the file may carry: 1 to 16 ASCII letters, digits and dots.
     public static func isWellFormed(version text: String) -> Bool {

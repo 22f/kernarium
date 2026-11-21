@@ -162,7 +162,8 @@ struct AppUpdateNoticeTests {
         let card = try #require(spoken.firstIndex { $0.contains("Update available") }, "\(spoken)")
         let other = try #require(spoken.firstIndex { $0.contains("iOS closed Andarium") }, "\(spoken)")
         #expect(card < other, "the update card comes before the other notices: \(spoken)")
-        #expect(spoken[card].contains("Andarium 1.1 (16) is out. You have 1.0 (15)."), "\(spoken[card])")
+        // A version and its build stay on one line: a no-break space joins them.
+        #expect(spoken[card].contains("Andarium 1.1\u{A0}(16) is out. You have 1.0\u{A0}(15)."), "\(spoken[card])")
         // The card is one element whose action is Get Update, as every Home card with a button is.
         let element = try #require(nodes(in: controller.view).first { $0.accessibilityLabel == spoken[card] })
         #expect(element.accessibilityCustomActions?.map(\.name) == ["Get Update"])
@@ -326,7 +327,7 @@ struct AppUpdateNoticeTests {
         let spoken = labels(in: controller.view)
         #expect(spoken.contains { $0.contains("Once a day, Andarium reads one small file") }, "\(spoken)")
         let row = try #require(element("Update Available", in: controller.view))
-        #expect(row.accessibilityLabel?.contains("Update Available") == true && row.accessibilityLabel?.contains("1.1 (16)") == true)
+        #expect(row.accessibilityLabel?.contains("Update Available") == true && row.accessibilityLabel?.contains("1.1\u{A0}(16)") == true)
         // The Updates section follows the app's own header and precedes System info.
         let updates = try #require(spoken.firstIndex(of: "Updates"), "\(spoken)")
         let system = try #require(spoken.firstIndex(of: "System info"), "\(spoken)")
@@ -398,7 +399,7 @@ struct AppUpdateNoticeTests {
             #expect(notice?.configuration.address.absoluteString == "https://example.com/source.json")
             #expect(notice?.configuration.appIdentifier == "com.example.andarium")
             #expect(notice?.app.installedBuild == 15)
-            #expect(notice?.app.installedLabel == "1.0 (15)")
+            #expect(notice?.app.installedLabel == "1.0\u{A0}(15)")
             #expect(notice?.checks == true && notice?.offer == nil)
         }
     }

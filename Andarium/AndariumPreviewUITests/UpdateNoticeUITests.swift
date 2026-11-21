@@ -31,7 +31,7 @@ final class UpdateNoticeUITests: XCTestCase {
         let card = element(app, "home-update-notice")
         XCTAssertTrue(card.waitForExistence(timeout: 20), "the card is not on Home")
         XCTAssertTrue(app.staticTexts["Update available"].exists)
-        XCTAssertTrue(app.staticTexts["Andarium 1.1 (16) is out. You have 1.0 (15)."].exists)
+        XCTAssertTrue(app.staticTexts["Andarium 1.1\u{A0}(16) is out. You have 1.0\u{A0}(15)."].exists)
         app.buttons["Later"].firstMatch.tap()
         XCTAssertTrue(card.waitForNonExistence(timeout: 5), "the card stays after its close button")
     }

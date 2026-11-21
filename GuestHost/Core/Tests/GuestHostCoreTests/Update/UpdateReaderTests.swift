@@ -146,6 +146,20 @@ struct UpdateReaderTests {
         #expect(await StubProtocol.reader().fetch(address("dns.example.com")) == .failed)
     }
 
+    /// A server that asks for a login, a client certificate or any other
+    /// credential has answered: the read is an attempt that failed, which uses
+    /// up the day, and no credential is ever sent.
+    @Test(arguments: [
+        NSURLAuthenticationMethodHTTPBasic, NSURLAuthenticationMethodHTTPDigest, NSURLAuthenticationMethodNTLM,
+        NSURLAuthenticationMethodNegotiate, NSURLAuthenticationMethodClientCertificate,
+    ])
+    func anAuthenticationChallengeIsAReadThatFailed(method: String) async {
+        let host = "login-\(method.lowercased().filter(\.isLetter)).example.com"
+        StubProtocol.set(.challenge(method: method), for: host)
+        #expect(await StubProtocol.reader().fetch(address(host)) == .failed, "\(method)")
+        #expect(StubProtocol.requests(to: host).count == 1)
+    }
+
     @Test func noNetworkAndLowDataModeAreNoReadAtAll() async {
         StubProtocol.set(.fail(URLError(.notConnectedToInternet)), for: "offline.example.com")
         #expect(await StubProtocol.reader().fetch(address("offline.example.com")) == .notTried)

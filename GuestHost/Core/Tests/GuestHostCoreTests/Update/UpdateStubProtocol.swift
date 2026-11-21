@@ -14,6 +14,8 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         /// Redirects with a 302 to the address.
         case redirect(to: String)
         case fail(URLError)
+        /// Asks for a login (or another challenge) with the authentication method.
+        case challenge(method: String)
         /// Never answers until it is stopped.
         case hang
     }
@@ -62,6 +64,13 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
             client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: URL(string: target)!), redirectResponse: response)
         case .fail(let error)?:
             client?.urlProtocol(self, didFailWithError: error)
+        case .challenge(let method)?:
+            let space = URLProtectionSpace(
+                host: host, port: 443, protocol: "https", realm: "Placeholder", authenticationMethod: method)
+            let challenge = URLAuthenticationChallenge(
+                protectionSpace: space, proposedCredential: nil, previousFailureCount: 0, failureResponse: nil,
+                error: nil, sender: ChallengeSender())
+            client?.urlProtocol(self, didReceive: challenge)
         case .hang?:
             break
         case nil:
@@ -70,4 +79,14 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() {}
+}
+
+/// The sender of a challenge the stub raises. The session answers through its
+/// own, so this one is never used.
+private final class ChallengeSender: NSObject, URLAuthenticationChallengeSender, @unchecked Sendable {
+    func use(_ credential: URLCredential, for challenge: URLAuthenticationChallenge) {}
+    func continueWithoutCredential(for challenge: URLAuthenticationChallenge) {}
+    func cancel(_ challenge: URLAuthenticationChallenge) {}
+    func performDefaultHandling(for challenge: URLAuthenticationChallenge) {}
+    func rejectProtectionSpaceAndContinue(with challenge: URLAuthenticationChallenge) {}
 }

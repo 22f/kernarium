@@ -19,6 +19,19 @@ public struct UpdateRecord: Equatable, Codable, Sendable {
         self.found = found
         self.hiddenBuild = hiddenBuild
     }
+
+    /// Each part is read on its own, so that one that is not valid (a version
+    /// the rules of the file would not keep) is dropped and costs only itself.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        attempted = (try? container.decodeIfPresent(Date.self, forKey: .attempted)) ?? nil
+        found = (try? container.decodeIfPresent(UpdateVersion.self, forKey: .found)) ?? nil
+        hiddenBuild = (try? container.decodeIfPresent(Int.self, forKey: .hiddenBuild)) ?? nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case attempted, found, hiddenBuild
+    }
 }
 
 /// Where the record and the switch are kept.

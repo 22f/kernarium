@@ -8,7 +8,9 @@ import Testing
 /// A store in memory.
 @MainActor
 final class MemoryUpdateStore: UpdateStore {
-    var record = UpdateRecord()
+    /// Every record written, in order.
+    private(set) var writes: [UpdateRecord] = []
+    var record = UpdateRecord() { didSet { writes.append(record) } }
     var checks = true
 }
 
@@ -50,6 +52,24 @@ final class FakeUpdateFetcher: UpdateFetching, @unchecked Sendable {
             }
         }
         return lock.withLock { answers.isEmpty ? .failed : answers.removeFirst() }
+    }
+}
+
+/// Ticks on the main actor and keeps the longest time between two ticks, so a
+/// test can tell whether something held the main actor.
+@MainActor
+private final class Heartbeat {
+    private var last = ContinuousClock.now
+    private(set) var longest = Duration.zero
+    var running = true
+
+    func run() async {
+        while running {
+            let now = ContinuousClock.now
+            longest = max(longest, now - last)
+            last = now
+            try? await Task.sleep(for: .milliseconds(5))
+        }
     }
 }
 
@@ -201,6 +221,66 @@ struct UpdateNoticeTests {
         await h.notice.readWhenHomeShows(moment: { true })
         #expect(h.notice.offer?.build == 16)
         #expect(h.store.record.attempted == h.clock.now)
+    }
+
+    /// The day is used up before the body is looked at, so a body that ends the
+    /// process cannot make every launch read it again.
+    @Test func theDayIsUsedUpBeforeTheBodyIsDecoded() async {
+        let h = harness([file()])
+        await h.notice.readWhenHomeShows(moment: { true })
+        #expect(h.store.writes.count == 2)
+        #expect(h.store.writes.first?.attempted == h.clock.now)
+        #expect(h.store.writes.first?.found == nil, "the stamp is stored before the answer is known")
+        #expect(h.store.writes.last?.found?.build == 16)
+    }
+
+    @Test func aBodyThatIsNotUTF8IsNoAnswerAndUsesUpTheDay() async {
+        let bad = Data("{".utf8) + Data([0xFF]) + Data("\"apps\": []}".utf8)
+        let h = harness([.data(bad), file()])
+        await h.notice.readWhenHomeShows(moment: { true })
+        #expect(h.notice.offer == nil)
+        #expect(h.store.record.attempted == h.clock.now)
+        h.clock.advance(3600)
+        await h.notice.readWhenHomeShows(moment: { true })
+        #expect(h.fetcher.count == 1, "the day is used up")
+    }
+
+    /// A body of the largest size that is slow to decode (each element fails)
+    /// must not hold the main actor, which draws Home.
+    @Test func aLargeBodyIsDecodedOffTheMainActor() async {
+        let body = Data(("{\"apps\": [" + String(repeating: "{},", count: 340_000) + "{}]}").utf8)
+        #expect(body.count < UpdateFile.largestBytes)
+        let h = harness([.data(body)])
+        let beat = Heartbeat()
+        let ticking = Task { await beat.run() }
+        await h.notice.readWhenHomeShows(moment: { true })
+        // The ticker records a long gap when it next runs, so let it.
+        try? await Task.sleep(for: .milliseconds(50))
+        beat.running = false
+        await ticking.value
+        #expect(h.notice.offer == nil)
+        #expect(h.store.record.attempted != nil)
+        #expect(beat.longest < .milliseconds(300), "the main actor was held for \(beat.longest)")
+    }
+
+    @Test func aTamperedKeptVersionShowsNothing() throws {
+        let kept = UpdateVersion(
+            version: "1.1", build: 16, released: UpdateDay(year: 2026, month: 11, day: 20), sizeBytes: 1,
+            appFile: URL(string: "https://example.com/a.ipa")!)
+        let text = String(
+            decoding: try JSONEncoder().encode(UpdateRecord(attempted: nil, found: kept, hiddenBuild: nil)), as: UTF8.self)
+        let tampered = text.replacingOccurrences(
+            of: "\"version\":\"1.1\"", with: "\"version\":\"Visit evil.test now for the update!\"")
+        #expect(tampered != text)
+        let record = try JSONDecoder().decode(UpdateRecord.self, from: Data(tampered.utf8))
+        let h = harness([]) { $0.record = record }
+        #expect(h.notice.offer == nil)
+        #expect(!h.notice.showsCard)
+    }
+
+    @Test func theInstalledVersionKeepsItsBuildOnTheSameLine() {
+        let app = UpdateNotice.App(name: "Andarium", installedBuild: 15, installedLabel: "1.0 (15)")
+        #expect(app.installedLabel == "1.0\u{A0}(15)")
     }
 
     @Test func aWithdrawnVersionGoesAwayAtTheNextAnswer() async {

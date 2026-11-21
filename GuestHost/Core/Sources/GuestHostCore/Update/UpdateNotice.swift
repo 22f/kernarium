@@ -23,13 +23,14 @@ public final class UpdateNotice {
         public let name: String
         /// The installed `CFBundleVersion`.
         public let installedBuild: Int
-        /// The installed version as Info writes it: "1.0 (15)".
+        /// The installed version as Info writes it: "1.0 (15)", with the build kept to the version.
         public let installedLabel: String
 
         public init(name: String, installedBuild: Int, installedLabel: String) {
             self.name = name
             self.installedBuild = installedBuild
-            self.installedLabel = installedLabel
+            // A version and its build stay on one line (U+00A0 before the build).
+            self.installedLabel = installedLabel.replacingOccurrences(of: " (", with: UpdateVersion.buildSeparator + "(")
         }
     }
 
@@ -160,14 +161,26 @@ public final class UpdateNotice {
             return
         case .failed:
             record.attempted = now()
+            store.record = record
         case .data(let data):
+            // The day is used up before the body is looked at, so that a body
+            // that ends the process cannot make every launch read it again.
             record.attempted = now()
-            let reading = UpdateFile.read(
-                data, appIdentifier: configuration.appIdentifier, installedBuild: app.installedBuild, os: os,
-                links: configuration.links)
-            if case .read(let version) = reading { record.found = version }
+            store.record = record
+            let appIdentifier = configuration.appIdentifier
+            let installedBuild = app.installedBuild
+            let os = self.os
+            let links = configuration.links
+            // The body is untrusted and up to 1 MiB: it is decoded off the
+            // main actor, so that Home never waits for it.
+            let reading = await Task.detached(priority: .utility) {
+                UpdateFile.read(data, appIdentifier: appIdentifier, installedBuild: installedBuild, os: os, links: links)
+            }.value
+            if case .read(let version) = reading {
+                record.found = version
+                store.record = record
+            }
         }
-        store.record = record
     }
 
     private var isDue: Bool {

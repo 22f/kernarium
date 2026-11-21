@@ -21,7 +21,7 @@ struct UpdateFileTests {
         guard case .read(let version?) = reading else { Issue.record("no version: \(reading)"); return }
         #expect(version.build == 16)
         #expect(version.version == "1.1")
-        #expect(version.label == "1.1 (16)")
+        #expect(version.label == "1.1\u{A0}(16)")
         #expect(version.sizeBytes == 1_390_000_000)
         #expect(version.released == UpdateDay(year: 2026, month: 11, day: 20))
         #expect(version.minimumOS == UpdateOSVersion(major: 26))
@@ -148,16 +148,6 @@ struct UpdateFileTests {
         #expect(version.notes == nil)
     }
 
-    @Test func jsonFiveIsRead() {
-        let text = """
-            // a comment
-            { name: 'Placeholder', apps: [ { bundleIdentifier: 'com.example.andarium', versions: [
-              { version: '1.1', buildVersion: '16', date: '2026-11-20', size: 1390000000,
-                downloadURL: 'https://example.com/a.ipa', }, ], }, ], }
-            """
-        #expect(Fixture.offered(Fixture.read(Data(text.utf8))) == 16)
-    }
-
     // MARK: A bad entry skips only itself
 
     /// Each fault, in an entry that would otherwise be the highest build.
@@ -232,6 +222,79 @@ struct UpdateFileTests {
         ]
         for (name, data) in cases {
             #expect(Fixture.read(data) == .unreadable, "\(name)")
+        }
+    }
+
+    /// The reader decodes plain JSON only. Foundation's JSON5 mode traps on a
+    /// byte that is no UTF-8 where a key is expected, which no handler can
+    /// catch, so the reader neither turns that mode on nor passes such a body
+    /// on to the decoder.
+    @Test func aByteThatIsNoUTF8WhereAKeyIsExpectedIsNoAnswerAndNoCrash() {
+        let bad = Data([0xFF])
+        func data(_ head: String, _ tail: String) -> Data { Data(head.utf8) + bad + Data(tail.utf8) }
+        let cases: [(String, Data)] = [
+            ("the short form", data("{", "\"apps\": []}")),
+            ("after a member", data("{\"a\": 1,", "\"apps\": []}")),
+            ("after a comma in the block", data("{\"apps\": [], \"kernariumUpdates\": {\"format\": 1,", "\"apps\": {}}}")),
+            ("a lone byte", bad),
+            ("a truncated sequence", Data([0x7B, 0xE2, 0x82])),
+            ("an overlong sequence", Data([0x7B, 0xC0, 0xAF, 0x7D])),
+            ("a surrogate", Data([0x7B, 0xED, 0xA0, 0x80, 0x7D])),
+        ]
+        for (name, input) in cases {
+            #expect(Fixture.read(input) == .unreadable, "\(name)")
+        }
+    }
+
+    /// The input that trapped Foundation's JSON5 decoder in review: a source
+    /// file with one 0xFF where a key of its block is expected.
+    private static let crashInput = Data(
+        base64Encoded:
+        "eyAibmFtZSI6ICJQbGFjZWhvbGRlciBBcHBzIiwgImlkZW50aWZpZXIiOiAiY29tLmV4YW1wbGUuc291cmNlIiwgImFwcHMi" +
+        "OiBbeyAibmFtZSI6ICJQbGFjZWhvbGRlciIsICJidW5kbGVJZGVudGlmaWVyIjogImNvbS5leGFtcGxlLmFuZGFyaXVtIiwg" +
+        "ImRldmVsb3Blck5hbWUiOiAiRXhhbXBsZSBEZXZlbG9wZXIiLAogICJsb2NhbGl6ZWREZXNjcmlwdGlvbiI6ICJOZXZlciBz" +
+        "aG93bi4iLCAiaWNvblVSTCI6ICJodHRwczovL2V4YW1wbGUuY29tL2ljb24ucG5nIiwKICAidmVyc2lvbnMiOiBbeyAidmVz" +
+        "aW9uIjogIjEuMSIsICJidWlsZFZlcnNpb24iOiAiMTYiLCAiZGF0ZSI6ICIyMDI2LTExLTIwIiwgImRvd25sb2FkVVJMIjog" +
+        "Imh0dHBzOi8vZXhhbXBsZS5jb20vcmVsZWFzZXMvYW5kYXJpdW0tMS4xLTE2LmlwYSIsICJzaXplIjogMTM5MDAwMDAwMCwg" +
+        "Im1pbk9TVmVyc2lvbiI6ICIyNi4wIiB9LCB7ICJ2ZXJzaW9uIjogIjEuMiIsICJidWlsZFZlcnNpb24iOiAiMTciLCAiZGF0" +
+        "ZSI6ICIyMDI2LTExLTIxVDA5OjMwOjAwLjUrMDg6MDAiLCAiZG93bmxvYWRVUkwiOiAiaHR0cHM6Ly9leGFtcGxlLmNvbS9y" +
+        "ZWxlYXNlcy9hbmRhcml1bS0xLjEtMTYuaXBhIiwgInNpemUiOiAxMzkwMDAwMDAwLCAibWluT1NWZXJzaW9uIjogIjI2LjAi" +
+        "IH0sIHsgInZlcnNpb24iOiAiMC45IiwgImJ1aWxkVmVyc2lvbiI6ICIxNCIsICJkYXRlIjogIjIwMjYtMTEtMjAiLCAiZG93" +
+        "bmxvYWRVUkwiOiAiaHR0cHM6Ly9leGFtcGxlLmNvbS9yZWxlYXNlcy9hbmRhcml1bS0xLjEtMTYuaXBhIiwgInNpemUiOiAx" +
+        "MzkwMDAwMDAwLCAibWluT1NWZXJzaW9uIjogIjI2LjAuMSIsICJtYXhPU1ZlcnNpb24iOiAiMjciIH1dIH1dLCAia2VybmFy" +
+        "aXVtVXBkYXRlcyI6IHsgImZvcm1hdCI6IDEsICJhcHBzIjogeyAiY29tLmV4YW1wbGUuYW5kYXJpdW0iOiB7/yAidmVyc2lv" +
+        "bnMiOiB7ICIxNyI6IHsgIm5vdGVzVVJMIjogImh0dHBzOi8vZXhhbXBsZS5jb20vbiIgfSB9IH0gfSB9IH0=")!
+
+    @Test func theInputThatTrappedTheJSON5ReaderIsNoAnswer() {
+        #expect(Self.crashInput.contains(0xFF))
+        #expect(Fixture.read(Self.crashInput, installed: 15) == .unreadable)
+    }
+
+    /// The reviewer's input, rebuilt: a good file whose block holds one 0xFF
+    /// where the application's identifier is followed by its first key.
+    @Test func aGoodFileWithOneBadByteInItsBlockIsNoAnswer() {
+        let block = "{ \"format\": 1, \"apps\": { \"com.example.andarium\": {"
+            + " \"versions\": { \"16\": { \"notesURL\": \"https://example.com/releases/andarium-1.1\" } } } } }"
+        let good = Fixture.file(apps: [Fixture.app(versions: [Fixture.entry(build: "16")])], block: block)
+        #expect(Fixture.offered(Fixture.read(good)) == 16)
+        let marker = Data("\"com.example.andarium\": {".utf8)
+        guard let range = good.range(of: marker, options: .backwards) else { Issue.record("no marker"); return }
+        var broken = good
+        broken.insert(0xFF, at: range.upperBound)
+        #expect(Fixture.read(broken) == .unreadable)
+    }
+
+    /// The file's rules say it is plain JSON: a comment, an unquoted key, single
+    /// quotes and a hexadecimal number are JSON5, and the owner publishes plain JSON.
+    @Test func aFileThatIsJSON5AndNotJSONIsNoAnswer() {
+        let json5: [(String, String)] = [
+            ("a line comment", "{ // none\n \"apps\": [] }"),
+            ("an unquoted key", "{ apps: [] }"),
+            ("single quotes", "{ 'apps': [] }"),
+            ("hexadecimal", "{ \"apps\": [], \"n\": 0x10 }"),
+        ]
+        for (name, text) in json5 {
+            #expect(Fixture.read(Data(text.utf8)) == .unreadable, "\(name)")
         }
     }
 
