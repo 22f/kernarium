@@ -19,6 +19,11 @@ public struct StartRecord: Equatable, Sendable {
     /// The longest a record is read: it has a few short lines.
     public static let maximumBytes = 1024
 
+    /// The seconds a record may state: the whole numbers a time can hold
+    /// exactly, so that a record read is written back as it was. A time past
+    /// them is not a time any clock gave.
+    public static let seconds = 0...(1 << 53)
+
     /// Whether the translated system libraries were on for the start.
     public var translatedLibraries: TranslatedLibrariesStart.Word
     /// The process that made the start.
@@ -74,7 +79,7 @@ public struct StartRecord: Equatable, Sendable {
         }
         // A record that does not say whose start it is cannot be told from
         // another's, so it is not one.
-        guard let word, let process, let seconds else { return nil }
+        guard let word, let process, let seconds, Self.seconds.contains(seconds) else { return nil }
         translatedLibraries = word
         processID = process
         at = Date(timeIntervalSince1970: TimeInterval(seconds))

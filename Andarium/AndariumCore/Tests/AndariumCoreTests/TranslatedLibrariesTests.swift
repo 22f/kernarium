@@ -283,6 +283,25 @@ struct TranslatedLibrariesTests {
         #expect(!FileManager.default.fileExists(atPath: startFile.path))
     }
 
+    /// A time that does not survive being a `Date` would trap when the record
+    /// is written back for the rotation, at every launch that finds it.
+    @Test func aStartRecordWhoseTimeCannotRoundTripIsNotOne() throws {
+        let identity = "uml-start 1\ntranslated-libraries off\nprocess 7\n"
+        for time in [Int.max, Int.min, -1, (1 << 53) + 1] {
+            #expect(StartRecord(text: identity + "at \(time)\n") == nil, "\(time)")
+        }
+        for time in [0, 200, 1 << 53] {
+            let record = try #require(StartRecord(text: identity + "at \(time)\n"), "\(time)")
+            #expect(Int(record.at.timeIntervalSince1970) == time)
+        }
+        // The launch that finds one rotates nothing and goes on.
+        let directory = try scratch()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try put(identity + "at \(Int.max)\n", BugReportAttachments.startRecord, in: directory)
+        #expect(PreviousSession.consume(in: directory, endedOutOfForeground: false) == nil)
+        #expect(BugReportAttachments.entries(from: directory, containers: []).isEmpty)
+    }
+
     @Test func anOrphanedStartRecordReadsBackAndBelongsToNoSession() throws {
         let directory = try scratch()
         defer { try? FileManager.default.removeItem(at: directory) }
