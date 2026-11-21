@@ -35,8 +35,25 @@ final class RootStartTests {
         }
     }
 
+    /// A guest shell whose answer waits until the test lets it go, and that
+    /// a cancel does not end: a package list that is slow to come.
+    private final class GatedShell: GuestShell, @unchecked Sendable {
+        private let lock = NSLock()
+        private var asked = 0
+        private var open = false
+        func run(_ command: String, limit: Duration) async throws -> GuestShellOutput {
+            lock.withLock { asked += 1 }
+            while !lock.withLock({ open }) { try? await Task.sleep(for: .milliseconds(5)) }
+            return GuestShellOutput(text: "", exitCode: 0)
+        }
+        func release() { lock.withLock { open = true } }
+        func waitUntilAsked() async {
+            while lock.withLock({ asked }) == 0 { try? await Task.sleep(for: .milliseconds(5)) }
+        }
+    }
+
     private func model(
-        rootOn: Bool, available: Bool = true, shell: Shell? = nil, carries: Bool = true
+        rootOn: Bool, available: Bool = true, shell: (any GuestShell)? = nil, carries: Bool = true
     ) -> (AppModel, StubDriver) {
         let system = SystemInfo(
             version: "17", release: "r2", kernel: "Linux 6.18",
@@ -115,6 +132,41 @@ final class RootStartTests {
         #expect(model.alert?.title == RootWords.appFailedTitle)
         #expect(model.guest?.root.appVersionCode == nil)
         #expect(model.guest?.root.on == true)
+        // The fifth step is gone with the failure: it is never shown ticked.
+        #expect(!model.rootAppInstalling)
+    }
+
+    @Test func anAnswerThatArrivesAfterTheSwitchWasTurnedOffDoesNotTurnItBackOn() async {
+        let shell = GatedShell()
+        let (model, driver) = model(rootOn: true, shell: shell)
+        model.start(.normal)
+        let task = Task { await model.runRootAppStep(kind: .normal) {} }
+        await shell.waitUntilAsked()
+        // The boot screen's task ends and the person turns root off on Home.
+        task.cancel()
+        model.setRoot(false)
+        shell.release()
+        await task.value
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(model.guest?.root.on == false)
+        #expect(model.alert == nil && !model.rootAppInstalling)
+        #expect(driver.rootInstalls == 0)
+    }
+
+    @Test func aStepThatEndsAfterItsBootWasStoppedRaisesNoAlertAndNoStepInALaterBoot() async {
+        let shell = GatedShell()
+        let (model, driver) = model(rootOn: true, shell: shell)
+        driver.install = { _ in throw InstanceError.refused("No.") }
+        model.start(.normal)
+        let task = Task { await model.runRootAppStep(kind: .normal) {} }
+        await shell.waitUntilAsked()
+        model.runEnded(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: 10)
+        model.start(.normal)
+        shell.release()
+        await task.value
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(model.alert == nil, "a stopped boot's install told the person of its failure")
+        #expect(!model.rootAppInstalling, "a stopped boot's install added a step to the next boot")
     }
 
     @Test func aStartWithoutRootAsksTheGuestNothing() async {

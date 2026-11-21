@@ -179,6 +179,18 @@ public struct RootState: Equatable, Codable, Sendable {
         appInstall = nil
     }
 
+    /// What a Magisk app step that began earlier learned of the app, added to
+    /// the state as it is now. Only the app's own bookkeeping changes: the
+    /// switch, the pause and what Home owes are the person's and this
+    /// start's to change, and a step that ran while root was turned off
+    /// meanwhile starts no period.
+    public mutating func adoptApp(from learned: RootState) {
+        appEverHandled = appEverHandled || learned.appEverHandled
+        guard on else { return }
+        if let code = learned.appVersionCode { appVersionCode = max(appVersionCode ?? 0, code) }
+        if let install = learned.appInstall { appInstall = install }
+    }
+
     /// "Try with root again": the pause ends and the next start boots Magisk.
     public mutating func tryAgain() {
         on = true

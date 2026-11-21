@@ -4,9 +4,10 @@ import Foundation
 
 /// The boot screen's Magisk app step: after Android has booted with root, the
 /// application asks the guest whether the official Magisk app is there and puts
-/// it in when it is not (`RootInstallRule`). The check and the install are
-/// bounded together by `limit`; past it, or on a failure, the boot goes on
-/// with root on and no app, and Home says so.
+/// it in when it is not (`RootInstallRule`). The check, the install and the
+/// opening of the app are bounded together by `limit`; past it, or on a
+/// failure, the boot goes on with root on and no app, and Home says so. A
+/// cancelled caller is released at once.
 public enum RootAppStep {
     /// The hard bound on the check and the install together.
     public static let limit = Duration.seconds(45)
@@ -38,6 +39,8 @@ public enum RootAppStep {
         limit: Duration = RootAppStep.limit
     ) async -> Outcome {
         let attempt = Attempt(state)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: limit)
         let outcome = await bounded(limit) { () -> Outcome in
             let presence = await MagiskApp.presence(shell: shell, limit: commandLimit)
             if Task.isCancelled { return .failed(state) }
@@ -59,8 +62,13 @@ public enum RootAppStep {
             return .installed(done)
         }
         guard let outcome else { return .failed(attempt.state) }
+        // Opening the app is inside the same bound, with what is left of it,
+        // and says nothing of the install it follows.
         if case .installed = outcome, RootInstallRule.opensAppAfterInstall {
-            await MagiskApp.open(shell: shell, limit: commandLimit)
+            let remaining = clock.now.duration(to: deadline)
+            if remaining > .zero {
+                _ = await bounded(remaining) { await MagiskApp.open(shell: shell, limit: commandLimit) }
+            }
         }
         return outcome
     }
@@ -77,31 +85,44 @@ public enum RootAppStep {
         func set(_ state: RootState) { lock.withLock { value = state } }
     }
 
-    /// `work`'s value, or nil when `limit` passes first. The caller is released
-    /// at the bound even if the work ignores its cancellation.
+    /// `work`'s value, or nil when `limit` passes first or the caller is
+    /// cancelled. The caller is released at either even if the work ignores
+    /// its cancellation.
     static func bounded<Value: Sendable>(
         _ limit: Duration, _ work: @escaping @Sendable () async -> Value
     ) async -> Value? {
         let gate = Gate<Value>()
-        return await withCheckedContinuation { continuation in
-            gate.install(continuation)
-            let task = Task { gate.finish(await work()) }
-            Task {
-                try? await Task.sleep(for: limit)
-                task.cancel()
-                gate.finish(nil)
-            }
+        let task = Task { gate.finish(await work()) }
+        let timer = Task {
+            try? await Task.sleep(for: limit)
+            task.cancel()
+            gate.finish(nil)
+        }
+        defer { timer.cancel() }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { gate.install($0) }
+        } onCancel: {
+            task.cancel()
+            gate.finish(nil)
         }
     }
 
-    /// Resumes its continuation once, with whichever finishes first.
+    /// Resumes its continuation once, with whichever finishes first, even
+    /// when that came before the continuation was there.
     private final class Gate<Value: Sendable>: @unchecked Sendable {
         private let lock = NSLock()
         private var continuation: CheckedContinuation<Value?, Never>?
+        private var result: Value?
         private var finished = false
 
         func install(_ continuation: CheckedContinuation<Value?, Never>) {
             lock.lock()
+            if finished {
+                let result = result
+                lock.unlock()
+                continuation.resume(returning: result)
+                return
+            }
             self.continuation = continuation
             lock.unlock()
         }
@@ -110,7 +131,9 @@ public enum RootAppStep {
             lock.lock()
             guard !finished else { lock.unlock(); return }
             finished = true
+            result = value
             let continuation = continuation
+            self.continuation = nil
             lock.unlock()
             continuation?.resume(returning: value)
         }

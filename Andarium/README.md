@@ -666,7 +666,10 @@ address space holds, so this is a fallback.
   reached under `root/` with no link in its path, opened once without following
   one and sent from that descriptor, `RootRelease.openApk`): the screen adds
   a fifth step, Magisk app, after Startup only for a start that installs, and
-  the check and install are bound together to 45 s. A package of that name the
+  the check, the install and the opening of the app are bound together to
+  45 s, and the step belongs to its boot: after a Stop, a restart or a later
+  start it adds only the app's own bookkeeping to the state, never an alert or
+  a step. A package of that name the
   application did not put in for this release is installed over like an older
   one, since only its signature says whose it is and the package manager
   checks it and refuses another signer; it is never uninstalled. A failure is an alert and

@@ -197,6 +197,32 @@ struct RootStateTests {
         #expect(!guest.bootsRooted(mode: .normal, releaseCarriesRoot: true))
     }
 
+    @Test func aStepThatRanEarlierAddsOnlyTheAppsBookkeeping() {
+        var learned = RootState()
+        learned.on = true
+        learned.rooted = true
+        learned.appVersionCode = 31_100
+        learned.appEverHandled = true
+        learned.appInstall = .init(reason: .absent, installed: true)
+        // The state as it is now: the person turned root off and on again, and a start paused it.
+        var now = RootState()
+        now.on = true
+        now.attention = .failedStart
+        now.adoptApp(from: learned)
+        #expect(now.on && now.attention == .failedStart && !now.rooted)
+        #expect(now.appVersionCode == 31_100 && now.appEverHandled && now.appInstall == learned.appInstall)
+        // Root was turned off while the step ran: no period begins, and the switch stays off.
+        var off = RootState()
+        off.adoptApp(from: learned)
+        #expect(!off.on && off.appVersionCode == nil && off.appInstall == nil && off.appEverHandled)
+        // A newer code already recorded is not lowered.
+        var newer = RootState()
+        newer.on = true
+        newer.appVersionCode = 32_000
+        newer.adoptApp(from: learned)
+        #expect(newer.appVersionCode == 32_000)
+    }
+
     @Test func aFactoryResetKeepsTheChoiceAndForgetsTheApp() {
         var guest = Guest.fresh(on: host)
         guest.root.setOn(true)

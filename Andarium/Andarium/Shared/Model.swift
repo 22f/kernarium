@@ -539,6 +539,10 @@ final class AppModel {
     /// root and the app is being put in the guest (`runRootAppStep`). The
     /// screen adds its fifth step only while this is set.
     var rootAppInstalling = false
+    /// Counts the starts, restarts and run ends of the guest: a Magisk app
+    /// step belongs to the boot it began in and changes nothing of Home or
+    /// the boot screen once this number has moved (`runRootAppStep`).
+    private(set) var bootRun = 0
     /// A fallback decided at launch, before a driver could save the guest.
     @ObservationIgnored
     var rootStateUnsaved = false
@@ -1698,6 +1702,7 @@ final class AppModel {
             preparingJit = false
             if case let .update(from, _) = plan { bootFrom = from } else { bootFrom = nil }
             rootAppInstalling = false
+            bootRun &+= 1
             // The ramdisk this start boots is written with the guest before the
             // runtime is handed the start, so that a process that ends in the
             // guest's panic still says which ramdisk it had (`RootFallbackRule`).
@@ -1785,6 +1790,7 @@ final class AppModel {
         runEnd = end
         runUptimeSeconds = uptimeSeconds
         rootAppInstalling = false
+        bootRun &+= 1
         if end.poweredOff {
             sheet = nil
             sessionPreset = SessionPreset()
@@ -1824,6 +1830,7 @@ final class AppModel {
         statisticsMeter = StatsMeter()
         bootTracker = BootTracker()
         rootAppInstalling = false
+        bootRun &+= 1
         // A restart before the start finished is the same start; a running
         // session's restart begins a boot of its own.
         var unfinished = false

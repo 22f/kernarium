@@ -131,6 +131,48 @@ struct RootAppStepTests {
         #expect(ContinuousClock.now - started < .seconds(2))
     }
 
+    @Test func openingTheAppIsInsideTheBoundAndSaysNothingOfTheInstall() async {
+        let slowOpen = RootScriptedShell { command in
+            if command == MagiskApp.openCommand {
+                // A wait that a cancel does not end.
+                let deadline = ContinuousClock.now + .seconds(2)
+                while ContinuousClock.now < deadline { await Task.yield() }
+            }
+            return GuestShellOutput(text: "", exitCode: 0)
+        }
+        let started = ContinuousClock.now
+        let outcome = await RootAppStep.run(
+            shell: slowOpen, release: release, state: rooted, installing: {}, install: {}, limit: .milliseconds(400))
+        guard case .installed = outcome else { Issue.record("an installed app was reported as \(outcome)"); return }
+        #expect(ContinuousClock.now - started < .milliseconds(1_500), "the open waited past the bound")
+        #expect(slowOpen.commands.contains(MagiskApp.openCommand))
+    }
+
+    @Test func aCancelledCallerIsReleasedAtOnceAndInstallsNothing() async {
+        let slowAnswer = RootScriptedShell { _ in
+            let deadline = ContinuousClock.now + .seconds(2)
+            while ContinuousClock.now < deadline { await Task.yield() }
+            return GuestShellOutput(text: "", exitCode: 0)
+        }
+        let installed = RootCounter()
+        let release = release
+        let state = rooted
+        let started = ContinuousClock.now
+        let task = Task {
+            await RootAppStep.run(
+                shell: slowAnswer, release: release, state: state, installing: {}, install: { await installed.bump() })
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+        task.cancel()
+        let outcome = await task.value
+        #expect(outcome.isFailure)
+        #expect(ContinuousClock.now - started < .milliseconds(1_000), "a cancelled step kept its caller")
+        // The work that ignored the cancel ends without installing.
+        try? await Task.sleep(for: .seconds(2.2))
+        let done = await installed.value
+        #expect(done == 0)
+    }
+
     @Test func theBoundIsFortyFiveSeconds() {
         #expect(RootAppStep.limit == .seconds(45))
     }

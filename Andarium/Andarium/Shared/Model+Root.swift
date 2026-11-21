@@ -129,30 +129,38 @@ extension AppModel {
     /// where `RootOffRule` says so.
     func runRootAppStep(kind: BootKind, installing: @escaping @MainActor () -> Void) async {
         guard kind != .recovery, let driver, let shell = driver.guestShell else { return }
-        guard bootedRooted, let release = driver.rootRelease, let state = guest?.root
-        else {
+        guard bootedRooted, let release = driver.rootRelease, let state = guest?.root else {
             await runRootOffStep(driver: driver, shell: shell)
             return
         }
+        // The step belongs to this boot: a Stop, a restart or a later start
+        // moves `bootRun`, and nothing it finds after that reaches the screen.
+        let run = bootRun
         let outcome = await RootAppStep.run(
             shell: shell, release: release, state: state,
             installing: { @MainActor [weak self] in
-                self?.rootAppInstalling = true
+                guard let self, self.bootRun == run else { return }
+                self.rootAppInstalling = true
                 installing()
             },
             install: { [weak self] in
                 guard let self else { throw CancellationError() }
                 try await self.installRootApp()
             })
+        let current = bootRun == run && !Task.isCancelled
         switch outcome {
         case .notNeeded:
             break
-        case let .installed(next):
-            guest?.root = next
+        case let .installed(learned):
+            // The app is in the guest whichever boot this was; only its own
+            // bookkeeping is added to the state as it is now.
+            guest?.root.adoptApp(from: learned)
             persistNow()
-        case let .failed(next):
-            guest?.root.appInstall = next.appInstall
+        case let .failed(learned):
+            guard current else { break }
+            guest?.root.adoptApp(from: learned)
             persistNow()
+            rootAppInstalling = false
             alert = AppAlert(title: RootWords.appFailedTitle, message: RootWords.appFailedMessage)
         }
     }
