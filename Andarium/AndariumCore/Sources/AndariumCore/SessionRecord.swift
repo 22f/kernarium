@@ -342,15 +342,21 @@ public enum PreviousSession {
         -> (record: SessionRecord, notice: HomeNotice?)?
     {
         // The start's own record goes with the session's, whether or not the
-        // runtime got as far as writing the session's.
+        // runtime got as far as writing the session's. What is kept follows
+        // what this launch found: a session record with no start record before
+        // it leaves no kept start, so the one an earlier session kept is never
+        // read as this session's choice (`BugReportAttachments` pairs the two
+        // again by what they say of themselves).
         let start = diagnostics.appendingPathComponent(BugReportAttachments.startRecord)
-        if FileManager.default.fileExists(atPath: start.path) {
+        let current = diagnostics.appendingPathComponent(BugReportAttachments.sessionRecord)
+        let record = SessionRecord.read(at: current)
+        let started = FileManager.default.fileExists(atPath: start.path)
+        if started || record != nil {
             let keptStart = diagnostics.appendingPathComponent(BugReportAttachments.previousStartRecord)
             try? FileManager.default.removeItem(at: keptStart)
-            try? FileManager.default.moveItem(at: start, to: keptStart)
+            if started { try? FileManager.default.moveItem(at: start, to: keptStart) }
         }
-        let current = diagnostics.appendingPathComponent(BugReportAttachments.sessionRecord)
-        guard let record = SessionRecord.read(at: current) else { return nil }
+        guard let record else { return nil }
         let kept = diagnostics.appendingPathComponent(BugReportAttachments.previousSessionRecord)
         try? FileManager.default.removeItem(at: kept)
         try? FileManager.default.moveItem(at: current, to: kept)

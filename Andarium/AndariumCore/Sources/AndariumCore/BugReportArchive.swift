@@ -203,12 +203,17 @@ public enum BugReportAttachments {
             records.append(record)
             if let entry { entries.append(entry) }
         }
-        // The choices the application made for each start, next to the records.
-        for (file, name) in [
-            (previousStartRecord, "andarium/start-previous.txt"), (startRecord, "andarium/start-current.txt"),
+        // The choices the application made for each start, next to the records
+        // they belong to. A choice whose start left no session record of its
+        // own (the application ended first, or the session's was not written)
+        // is copied under a name that says so, never as a session's.
+        for (file, name, session) in [
+            (previousStartRecord, "andarium/start-previous", records[0]),
+            (startRecord, "andarium/start-current", records[1]),
         ] {
             if let record = StartRecord.read(at: diagnostics.appendingPathComponent(file)) {
-                entries.append(.init(name: name, data: Data(record.text.utf8)))
+                let matched = session.map(record.belongs(to:)) ?? false
+                entries.append(.init(name: name + (matched ? ".txt" : "-unmatched.txt"), data: Data(record.text.utf8)))
             }
         }
         if let report = stalls(previous: records[0], current: records[1]) {

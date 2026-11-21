@@ -662,7 +662,8 @@ final class LiveRuntime: RuntimeDriver {
         // What this start chose, beside the runtime's record of the session, for
         // a bug report to say.
         if let sessionRecord {
-            StartRecord(translatedLibraries: extras.translatedLibraries.word)
+            StartRecord(
+                translatedLibraries: extras.translatedLibraries.word, processID: Int(getpid()), at: Date())
                 .write(to: sessionRecord.deletingLastPathComponent().appendingPathComponent(BugReportAttachments.startRecord))
         }
         print("Andarium: AOT \(extras.translatedLibraries.word.rawValue)")

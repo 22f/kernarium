@@ -86,46 +86,97 @@ struct TranslatedLibrariesTests {
         return directory
     }
 
+    private func start(_ word: TranslatedLibrariesStart.Word, process: Int, at seconds: Int) -> StartRecord {
+        StartRecord(translatedLibraries: word, processID: process, at: Date(timeIntervalSince1970: TimeInterval(seconds)))
+    }
+
+    private func sessionText(process: Int, started: Int) -> String {
+        "uml-session 1\nstate ended\nend powered-off\nstatus 0\npid \(process)\nstarted \(started)\nended \(started + 50)\n"
+    }
+
+    private func put(_ text: String, _ file: String, in directory: URL) throws {
+        try text.write(to: directory.appendingPathComponent(file), atomically: true, encoding: .utf8)
+    }
+
+    private func text(of entry: BugReportArchive.Entry?) -> String? {
+        entry.map { String(decoding: $0.data, as: UTF8.self) }
+    }
+
     @Test func theStartRecordReadsBackAndHoldsOnlyItsFields() throws {
         let directory = try scratch()
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent(BugReportAttachments.startRecord)
         for word in TranslatedLibrariesStart.Word.allCases {
-            #expect(StartRecord(translatedLibraries: word).write(to: url))
-            #expect(StartRecord.read(at: url) == StartRecord(translatedLibraries: word))
+            let record = start(word, process: 7, at: 100)
+            #expect(record.write(to: url))
+            #expect(StartRecord.read(at: url) == record)
         }
-        #expect(StartRecord(translatedLibraries: .off).text == "uml-start 1\ntranslated-libraries off\n")
+        #expect(start(.off, process: 7, at: 100).text == "uml-start 1\ntranslated-libraries off\nprocess 7\nat 100\n")
+        // The second is whole, as the session record's times are.
+        let whole = StartRecord(
+            translatedLibraries: .on, processID: 7, at: Date(timeIntervalSince1970: 100.75))
+        #expect(whole.at == Date(timeIntervalSince1970: 100))
     }
 
     @Test func aFileThatIsNotAStartRecordIsNotOne() throws {
         let directory = try scratch()
         defer { try? FileManager.default.removeItem(at: directory) }
+        let identity = "process 7\nat 100\n"
         #expect(StartRecord(text: "") == nil)
         #expect(StartRecord(text: "uml-start 1\n") == nil)
-        #expect(StartRecord(text: "uml-start 1\ntranslated-libraries maybe\n") == nil)
-        #expect(StartRecord(text: "uml-start 2\ntranslated-libraries on\n") == nil)
+        #expect(StartRecord(text: "uml-start 1\ntranslated-libraries maybe\n\(identity)") == nil)
+        #expect(StartRecord(text: "uml-start 2\ntranslated-libraries on\n\(identity)") == nil)
+        // A record that does not say whose start it is cannot be told from another's.
+        #expect(StartRecord(text: "uml-start 1\ntranslated-libraries on\n") == nil)
+        #expect(StartRecord(text: "uml-start 1\ntranslated-libraries on\nprocess 7\n") == nil)
+        #expect(StartRecord(text: "uml-start 1\ntranslated-libraries on\nat 100\n") == nil)
+        #expect(StartRecord(text: "uml-start 1\ntranslated-libraries on\nprocess x\nat 100\n") == nil)
         let long = directory.appendingPathComponent("long.txt")
-        try (StartRecord(translatedLibraries: .on).text + String(repeating: "x", count: 4096))
+        try (start(.on, process: 7, at: 100).text + String(repeating: "x", count: 4096))
             .write(to: long, atomically: true, encoding: .utf8)
         #expect(StartRecord.read(at: long) == nil)
         #expect(StartRecord.read(at: directory.appendingPathComponent("missing.txt")) == nil)
         // A field a later version adds does not hide the one this reads.
-        #expect(StartRecord(text: "uml-start 1\nother 1\ntranslated-libraries off\n")?.translatedLibraries == .off)
+        #expect(
+            StartRecord(text: "uml-start 1\nother 1\ntranslated-libraries off\n\(identity)")?.translatedLibraries == .off)
     }
 
     @Test func aRecordThatCannotBeWrittenSaysSoAndCostsNothingElse() throws {
         let directory = try scratch()
         defer { try? FileManager.default.removeItem(at: directory) }
         let missing = directory.appendingPathComponent("absent").appendingPathComponent("start.txt")
-        #expect(!StartRecord(translatedLibraries: .on).write(to: missing))
+        #expect(!start(.on, process: 7, at: 100).write(to: missing))
+    }
+
+    @Test func aWriteReplacesTheEarlierStartsRecord() throws {
+        let directory = try scratch()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(BugReportAttachments.startRecord)
+        #expect(start(.on, process: 7, at: 100).write(to: url))
+        #expect(start(.off, process: 8, at: 200).write(to: url))
+        #expect(StartRecord.read(at: url) == start(.off, process: 8, at: 200))
+    }
+
+    @Test func aStartBelongsToTheSessionItsProcessBeganAtOrAfterIt() {
+        let record = start(.off, process: 8, at: 200)
+        func session(process: Int, started: Int?) -> SessionRecord {
+            SessionRecord(text: "uml-session 1\nstate running\nend running\npid \(process)"
+                + (started.map { "\nstarted \($0)" } ?? "") + "\n")!
+        }
+        #expect(record.belongs(to: session(process: 8, started: 200)))
+        #expect(record.belongs(to: session(process: 8, started: 260)))
+        // An earlier session of the same process, another process's, and one
+        // that says neither when it began.
+        #expect(!record.belongs(to: session(process: 8, started: 199)))
+        #expect(!record.belongs(to: session(process: 9, started: 260)))
+        #expect(!record.belongs(to: session(process: 8, started: nil)))
     }
 
     @Test func theNextLaunchKeepsTheStartRecordWithTheSessionRecord() throws {
         let directory = try scratch()
         defer { try? FileManager.default.removeItem(at: directory) }
-        try "uml-session 1\nstate ended\nend powered-off\nstatus 0\npid 7\nstarted 1\nended 2\n".write(
-            to: directory.appendingPathComponent(BugReportAttachments.sessionRecord), atomically: true, encoding: .utf8)
-        StartRecord(translatedLibraries: .off).write(to: directory.appendingPathComponent(BugReportAttachments.startRecord))
+        try put(sessionText(process: 7, started: 100), BugReportAttachments.sessionRecord, in: directory)
+        start(.off, process: 7, at: 90).write(to: directory.appendingPathComponent(BugReportAttachments.startRecord))
         #expect(PreviousSession.consume(in: directory, endedOutOfForeground: false) != nil)
         #expect(StartRecord.read(at: directory.appendingPathComponent(BugReportAttachments.startRecord)) == nil)
         #expect(
@@ -137,28 +188,82 @@ struct TranslatedLibrariesTests {
             StartRecord.read(at: directory.appendingPathComponent(BugReportAttachments.previousStartRecord)) != nil)
     }
 
-    @Test func theBugReportCopiesBothStartRecordsNextToTheSessionRecords() throws {
+    @Test func theBugReportCopiesEachStartRecordNextToTheSessionRecordItBelongsTo() throws {
         let directory = try scratch()
         defer { try? FileManager.default.removeItem(at: directory) }
         // No record: the report adds nothing.
         #expect(BugReportAttachments.entries(from: directory, containers: []).isEmpty)
-        StartRecord(translatedLibraries: .on).write(
+        start(.on, process: 7, at: 90).write(
             to: directory.appendingPathComponent(BugReportAttachments.previousStartRecord))
-        StartRecord(translatedLibraries: .notUsedWithJit).write(
+        start(.notUsedWithJit, process: 8, at: 190).write(
             to: directory.appendingPathComponent(BugReportAttachments.startRecord))
-        try "uml-session 1\nstate running\nend running\n".write(
-            to: directory.appendingPathComponent(BugReportAttachments.sessionRecord), atomically: true, encoding: .utf8)
+        try put(sessionText(process: 7, started: 100), BugReportAttachments.previousSessionRecord, in: directory)
+        try put(sessionText(process: 8, started: 200), BugReportAttachments.sessionRecord, in: directory)
         let entries = BugReportAttachments.entries(from: directory, containers: [])
         #expect(entries.map(\.name) == [
-            "andarium/session-current.txt", "andarium/start-previous.txt", "andarium/start-current.txt",
+            "andarium/session-previous.txt", "andarium/session-current.txt",
+            "andarium/start-previous.txt", "andarium/start-current.txt",
         ])
-        #expect(String(decoding: entries[1].data, as: UTF8.self) == "uml-start 1\ntranslated-libraries on\n")
-        #expect(String(decoding: entries[2].data, as: UTF8.self) == "uml-start 1\ntranslated-libraries not-used-with-jit\n")
+        #expect(text(of: entries[2]) == start(.on, process: 7, at: 90).text)
+        #expect(text(of: entries[3]) == start(.notUsedWithJit, process: 8, at: 190).text)
         // Text that is not a start record is not copied.
-        try "anything".write(
-            to: directory.appendingPathComponent(BugReportAttachments.startRecord), atomically: true, encoding: .utf8)
+        try put("anything", BugReportAttachments.startRecord, in: directory)
         #expect(!BugReportAttachments.entries(from: directory, containers: []).contains {
-            $0.name == "andarium/start-current.txt"
+            $0.name.hasPrefix("andarium/start-current")
         })
+    }
+
+    /// Session A ended and its record rotated to the previous one at the next
+    /// launch. That launch's own start, B, wrote its record and then the app
+    /// ended before the runtime opened a session record. The launch after
+    /// that must not say that A's session was started with B's choice.
+    @Test func aStartWhoseSessionNeverBeganIsNotTakenForTheEarlierSessions() throws {
+        let directory = try scratch()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try put(sessionText(process: 7, started: 100), BugReportAttachments.sessionRecord, in: directory)
+        start(.on, process: 7, at: 90).write(to: directory.appendingPathComponent(BugReportAttachments.startRecord))
+        // The launch of process 8 keeps A's pair, then makes the start B.
+        #expect(PreviousSession.consume(in: directory, endedOutOfForeground: false) != nil)
+        start(.off, process: 8, at: 200).write(to: directory.appendingPathComponent(BugReportAttachments.startRecord))
+        // The next launch finds a start and no session of it.
+        #expect(PreviousSession.consume(in: directory, endedOutOfForeground: false) == nil)
+        let entries = BugReportAttachments.entries(from: directory, containers: [])
+        // The session record stays; the choice is not its own.
+        #expect(entries.map(\.name).contains("andarium/session-previous.txt"))
+        #expect(!entries.map(\.name).contains("andarium/start-previous.txt"))
+        #expect(!entries.map(\.name).contains("andarium/start-current.txt"))
+        #expect(text(of: entries.first { $0.name == "andarium/start-previous-unmatched.txt" })
+            == start(.off, process: 8, at: 200).text)
+    }
+
+    /// The other way: B's session was written and its start record was not
+    /// (the write failed, or the application's earlier record was all there
+    /// was). A's choice must not appear as B's.
+    @Test(arguments: [7, 8]) func aSessionWithNoStartOfItsOwnDoesNotInheritTheEarlierChoice(process: Int) throws {
+        let directory = try scratch()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try put(sessionText(process: 7, started: 100), BugReportAttachments.sessionRecord, in: directory)
+        start(.on, process: 7, at: 90).write(to: directory.appendingPathComponent(BugReportAttachments.startRecord))
+        // The next launch keeps A's pair; its own start's record is never written,
+        // and the session B, of this process (the loader reuses one) or of the
+        // next, is.
+        #expect(PreviousSession.consume(in: directory, endedOutOfForeground: false) != nil)
+        try put(sessionText(process: process, started: 300), BugReportAttachments.sessionRecord, in: directory)
+        #expect(PreviousSession.consume(in: directory, endedOutOfForeground: false) != nil)
+        let entries = BugReportAttachments.entries(from: directory, containers: [])
+        #expect(entries.map(\.name) == ["andarium/session-previous.txt"])
+        #expect(text(of: entries.first)?.contains("pid \(process)") == true)
+    }
+
+    /// Whatever the files hold, a record is paired by what it says: an earlier
+    /// session's choice left beside a later session's record is not its own.
+    @Test func aChoiceLeftBesideAnotherProcessesSessionIsLabelledNotPaired() throws {
+        let directory = try scratch()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        start(.on, process: 7, at: 90).write(
+            to: directory.appendingPathComponent(BugReportAttachments.previousStartRecord))
+        try put(sessionText(process: 8, started: 300), BugReportAttachments.previousSessionRecord, in: directory)
+        let names = BugReportAttachments.entries(from: directory, containers: []).map(\.name)
+        #expect(names == ["andarium/session-previous.txt", "andarium/start-previous-unmatched.txt"])
     }
 }

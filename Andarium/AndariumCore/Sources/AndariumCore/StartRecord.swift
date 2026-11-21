@@ -5,9 +5,11 @@ import Foundation
 /// beside the runtime's session record (`session.txt`), so that a bug report
 /// says whether a feature that changes how Android runs was on for the start
 /// it describes. It holds one plain field per choice and nothing that identifies
-/// the device or the person. The next launch keeps it with the session record it
-/// belongs to (`PreviousSession`), and the bug report copies both
-/// (`BugReportAttachments`).
+/// the device or the person. It names the process and the second of the start
+/// it describes, which is how a session record is known to be the one the
+/// runtime wrote for that start (`belongs(to:)`). The next launch keeps it with
+/// the session record (`PreviousSession`), and the bug report copies the two
+/// together when they belong to each other (`BugReportAttachments`).
 public struct StartRecord: Equatable, Sendable {
     /// The first line.
     public static let layout = "uml-start 1"
@@ -17,14 +19,30 @@ public struct StartRecord: Equatable, Sendable {
 
     /// Whether the translated system libraries were on for the start.
     public var translatedLibraries: TranslatedLibrariesStart.Word
+    /// The process that made the start.
+    public var processID: Int
+    /// When it made it, to the second, as the session record's own times are.
+    public var at: Date
 
-    public init(translatedLibraries: TranslatedLibrariesStart.Word) {
+    public init(translatedLibraries: TranslatedLibrariesStart.Word, processID: Int, at: Date) {
         self.translatedLibraries = translatedLibraries
+        self.processID = processID
+        self.at = Date(timeIntervalSince1970: at.timeIntervalSince1970.rounded(.down))
     }
 
     /// The file's text.
     public var text: String {
         "\(Self.layout)\ntranslated-libraries \(translatedLibraries.rawValue)\n"
+            + "process \(processID)\nat \(Int(at.timeIntervalSince1970))\n"
+    }
+
+    /// Whether `session` is the one the runtime wrote for this start: the same
+    /// process, and begun no earlier than the start. A session that began
+    /// before it is an earlier one's, and a record the runtime never wrote for
+    /// this start (it ended first) has no session to belong to.
+    public func belongs(to session: SessionRecord) -> Bool {
+        guard let started = session.started else { return false }
+        return session.processID == processID && started >= at
     }
 
     /// Reads a record's text; nil when it is not one.
@@ -32,14 +50,24 @@ public struct StartRecord: Equatable, Sendable {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
         guard lines.first == Substring(Self.layout) else { return nil }
         var word: TranslatedLibrariesStart.Word?
+        var process: Int?
+        var seconds: Int?
         for line in lines.dropFirst() {
             guard let space = line.firstIndex(of: " ") else { continue }
-            if line[..<space] == "translated-libraries" {
-                word = TranslatedLibrariesStart.Word(rawValue: String(line[line.index(after: space)...]))
+            let value = String(line[line.index(after: space)...])
+            switch line[..<space] {
+            case "translated-libraries": word = TranslatedLibrariesStart.Word(rawValue: value)
+            case "process": process = Int(value)
+            case "at": seconds = Int(value)
+            default: break
             }
         }
-        guard let word else { return nil }
+        // A record that does not say whose start it is cannot be told from
+        // another's, so it is not one.
+        guard let word, let process, let seconds else { return nil }
         translatedLibraries = word
+        processID = process
+        at = Date(timeIntervalSince1970: TimeInterval(seconds))
     }
 
     /// The record at `url`, or nil when there is none, it is longer than
@@ -53,8 +81,11 @@ public struct StartRecord: Equatable, Sendable {
 
     /// Writes the record, replacing the one there; false when it could not be
     /// written, which costs the bug report this one field and nothing else.
+    /// The one there goes first, so that a write that fails leaves no earlier
+    /// start's record to be read as this one's.
     @discardableResult
     public func write(to url: URL) -> Bool {
+        try? FileManager.default.removeItem(at: url)
         do {
             try Data(text.utf8).write(to: url, options: .atomic)
             return true

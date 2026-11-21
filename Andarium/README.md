@@ -780,7 +780,13 @@ address space holds, so this is a fallback.
   record (`start.txt`, `StartRecord`), kept with it at the next launch, and a
   bug report carries both as `andarium/start-current.txt` and
   `andarium/start-previous.txt`: `translated-libraries` is `on`, `off`,
-  `not-used-with-jit` or `unavailable` (a build without the framework).
+  `not-used-with-jit` or `unavailable` (a build without the framework). The
+  record names the process and the second of its start, and is a session's
+  only when that session's record names the same process and began no earlier;
+  a choice whose start left no session record is copied as
+  `andarium/start-current-unmatched.txt` or
+  `andarium/start-previous-unmatched.txt`, and the session records are always
+  copied.
 - **Motion.** The guest has the device's accelerometer and gyroscope wherever
   the device has them, with no setting and no permission. An iPad app on a Mac
   and the Simulator have none, so nothing is read there, and Android still
