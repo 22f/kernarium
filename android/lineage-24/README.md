@@ -557,10 +557,17 @@ binder, a service lookup or a file; the platform's grants to every domain still
 reach it (the binder device nodes, a binder call to `system_server` and the lookup
 of the binder statistics service), the verifier pins that set, and it can obtain
 no binder handle with it, as no rule gives it a call permission to the service
-manager. Init alone enters their domains and controls them: of the keys of the
-control properties that init checks for either service (`ctl.<service>`, which it
-checks first for start, stop and restart, and `ctl.<action>$<service>`), init alone
-may set every one but the key that starts the waker, which the holder sets too.
+manager. The waker's binder rights are call and transfer to the service manager and
+to `system_server` and no others, and neither daemon holds more than the platform's
+rights on the binder and hardware binder device nodes or any on the vendor's (a
+debuggable build adds the platform's call and transfer on the root shell). Init
+alone enters their domains and controls them: of the keys of the control properties
+that init checks for either service (`ctl.<service>`, which it checks first for
+start, stop and restart, and `ctl.<action>$<service>`), init alone may set every
+one but the key that starts the waker, which the holder sets too.
+The holder's start of the waker is denied on the legacy key, which init checks first
+and allows on the qualified one; the policy silences that denial, and the verifier
+requires it.
 The platform labels the directories of the user (`/data/data`, and `/data/user_de/<id>` from the
 second boot of a data image) with the user's categories, which the service's level lacks, so
 the service alone is an `mlstrustedsubject`, as every system application is: otherwise it could
