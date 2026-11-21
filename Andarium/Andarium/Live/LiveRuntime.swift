@@ -239,6 +239,9 @@ final class LiveRuntime: RuntimeDriver {
     private var geometry: GuestDisplayGeometry?
     private var bootStartedAt = Date()
     private(set) var runStartedAt: Date?
+    /// The memory, in MiB, the run in progress was started with; what a
+    /// refusal of it by the host names.
+    private var runMemoryMiB = 0
     private var thermalObserver: NSObjectProtocol?
     /// The sink of the run's console; a test sets its own.
     var console: ConsoleSink?
@@ -554,12 +557,13 @@ final class LiveRuntime: RuntimeDriver {
         model.diskProgress = fraction
     }
 
-    private func end(startFailure: String) {
+    private func end(startFailure: String, memoryRefusedMiB: Int? = nil) {
         print("Andarium: cannot start the guest: \(startFailure)")
         // The start is over: nothing owns the launch any more.
         preparing = false
         launching = false
-        model?.runEnded(RunEnd(result: -1, startFailure: startFailure), uptimeSeconds: nil)
+        model?.runEnded(
+            RunEnd(result: -1, startFailure: startFailure, memoryRefusedMiB: memoryRefusedMiB), uptimeSeconds: nil)
     }
 
     /// What a start decides before the runtime runs, beyond the guest: in a
@@ -579,9 +583,11 @@ final class LiveRuntime: RuntimeDriver {
         // settings never offer one, so this is a safety net: say why rather
         // than end on the runtime's bare result.
         guard kernarium_runtime_loader_guest_memory_admitted(UInt32(clamping: run.guest.memoryMiB)) != 0 else {
-            end(startFailure: MemoryRefusal.reason(
-                memoryMiB: run.guest.memoryMiB,
-                ceilingMiB: Int(kernarium_runtime_loader_guest_memory_ceiling_mib())))
+            end(
+                startFailure: MemoryRefusal.reason(
+                    memoryMiB: run.guest.memoryMiB,
+                    ceilingMiB: Int(kernarium_runtime_loader_guest_memory_ceiling_mib())),
+                memoryRefusedMiB: run.guest.memoryMiB)
             return
         }
         // A denial of the network the notice is up for began before this run
@@ -638,6 +644,7 @@ final class LiveRuntime: RuntimeDriver {
         let cameraPath = cameraDirectory.map { Self.prepareCalibrationDirectory($0) }?.path
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
         let memoryMiB = UInt32(run.guest.memoryMiB)
+        runMemoryMiB = run.guest.memoryMiB
         let processorCount = UInt32(run.guest.cores)
         let dotsPerInch = geometry.dotsPerInch
         let adbKeyLine = adbIdentity?.publicKeyLine
@@ -1084,10 +1091,23 @@ final class LiveRuntime: RuntimeDriver {
         // The run wrote to the data disk, so the device has less free space
         // than before it.
         model?.host.freeStorageBytes = freeSpace()
-        let loop = result == Int32(KERNARIUM_RUNTIME_RESULT_RESTART_LOOP)
         let stopped = userStopped
         userStopped = false
-        model?.runEnded(RunEnd(result: result, restartedInALoop: loop, stoppedByUser: stopped), uptimeSeconds: uptime)
+        model?.runEnded(
+            Self.runEnd(result: result, memoryMiB: runMemoryMiB, stoppedByUser: stopped), uptimeSeconds: uptime)
+    }
+
+    /// How a run that returned `result` ended, as the screens tell it.
+    /// `memoryMiB` is the size the run asked for. The runtime says the host
+    /// would not give the guest's memory with a result of its own: the run
+    /// never started its kernel, and a smaller size is what starts. A bare
+    /// out-of-memory status of the library (-2) is not that.
+    static func runEnd(result: Int32, memoryMiB: Int, stoppedByUser: Bool) -> RunEnd {
+        RunEnd(
+            result: result,
+            restartedInALoop: result == Int32(KERNARIUM_RUNTIME_RESULT_RESTART_LOOP),
+            stoppedByUser: stoppedByUser,
+            memoryRefusedMiB: result == Int32(KERNARIUM_RUNTIME_RESULT_MEMORY_REFUSED) ? memoryMiB : nil)
     }
 
     // MARK: Keys

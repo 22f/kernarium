@@ -62,6 +62,7 @@
 #include "block/ubd_path.hpp"
 #include "gpu_budget_plan.hpp"
 #include "options.hpp"
+#include "start_refusal.hpp"
 #include "runtime/execution_engine.hpp"
 #include "runtime/guest_memory_budget.hpp"
 #include "runtime/memory_pressure_response.hpp"
@@ -1661,6 +1662,11 @@ public:
             static_cast<int>(boot_->pointers.size()),
             boot_->pointers.data(),
             nullptr);
+    }
+
+    bool startRefusedForMemory() noexcept override
+    {
+        return uml::emulator::start_refused_for_memory(emulator_);
     }
 
     bool runEnd(kernarium::restart::RunEnd& end) override
