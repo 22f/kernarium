@@ -13,10 +13,12 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import errno
 import hashlib
 import importlib.util
 import json
 import lzma
+import pathlib
 import re
 import shutil
 import stat
@@ -614,6 +616,57 @@ class PatcherTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertRegex(result.stderr, "already exists")
         self.assertEqual((self.output / "init_boot-magisk.img").read_bytes(), b"earlier")
+
+    def test_a_failed_invocation_leaves_nothing_that_a_retry_refuses(self) -> None:
+        # The pair is published together: a failure while the APK is written (the disk
+        # full) leaves neither file, so the same command can simply be run again.
+        apk = self.fixture.apk(script=patch_script())
+        pin = self.fixture.pin(apk)
+        real_open = pathlib.Path.open
+
+        def failing(path, mode="r", *arguments, **keywords):
+            handle = real_open(path, mode, *arguments, **keywords)
+            if mode != "xb" or not path.name.endswith(".apk"):
+                return handle
+
+            class Broken:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exception):
+                    handle.close()
+
+                def write(self, data):
+                    handle.write(data[:10])
+                    raise OSError(errno.ENOSPC, "No space left on device")
+
+            return Broken()
+
+        tool = self.load_tool()
+        with mock.patch.object(pathlib.Path, "open", failing), self.assertRaises(OSError):
+            self.patch_in_process(tool, apk, pin)
+        self.assertEqual(sorted(path.name for path in self.output.parent.iterdir()), [])
+        retry = self.patch(apk, pin=pin)
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        self.assertEqual(
+            (self.output / "init_boot-magisk.img").read_bytes(), self.fixture.patched_reference())
+        self.assertEqual((self.output / f"Magisk-{TEST_VERSION}.apk").read_bytes(), apk.read_bytes())
+        self.assertEqual(sorted(path.name for path in self.output.parent.iterdir()), ["root"])
+
+    def test_an_output_directory_with_other_files_is_refused_and_an_empty_one_is_filled(self) -> None:
+        apk = self.fixture.apk(script=patch_script())
+        pin = self.fixture.pin(apk)
+        self.output.mkdir(parents=True)
+        (self.output / "unrelated").write_bytes(b"mine")
+        refused = self.patch(apk, pin=pin)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual([path.name for path in self.output.iterdir()], ["unrelated"])
+        self.assertEqual(sorted(path.name for path in self.output.parent.iterdir()), ["root"])
+        (self.output / "unrelated").unlink()
+        self.assertEqual(self.patch(apk, pin=pin).returncode, 0)
+        self.assertEqual(
+            sorted(path.name for path in self.output.iterdir()),
+            [f"Magisk-{TEST_VERSION}.apk", "init_boot-magisk.img"])
 
     def test_an_output_directory_that_is_a_link_is_refused(self) -> None:
         apk = self.fixture.apk(script=patch_script())

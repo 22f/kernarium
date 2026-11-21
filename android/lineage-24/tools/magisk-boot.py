@@ -13,8 +13,9 @@ the disk and runs Magisk's own boot_patch.sh from the APK twice, in private
 directories, with the fixed patch inputs: Magisk's x86-64 magiskboot patches, and
 only the APK's arm64 magiskinit, magisk and init-ld go into the ramdisk. The two
 results must be identical, and the result must verify as the stock image plus exactly what Magisk
-adds (magisk_image.py). DIR then holds init_boot-magisk.img and the unmodified APK
-under its official name, which is how a release carries them as its root/ files.
+adds (magisk_image.py). DIR, which must not exist or be empty, then holds
+init_boot-magisk.img and the unmodified APK under its official name, which is how a
+release carries them as its root/ files; the pair appears together or not at all.
 
 The script cannot name the data disk's userdata partition, which it asks the
 guest's own magisk for; the tool therefore writes the missing PREINITDEVICE line
@@ -154,6 +155,14 @@ def patch_once(archive, stock: bytes, preinit: str, work: Path) -> bytes:
     return magisk_image.read_file(final, len(stock), "the image magiskboot repacked", error)
 
 
+def write_new(path: Path, data: bytes) -> None:
+    """Write a file that must not exist, and put it on disk."""
+    with path.open("xb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def patch(arguments: argparse.Namespace) -> None:
     pin = magisk_image.read_pin(arguments.pin, error)
     apk = arguments.magisk_apk
@@ -192,18 +201,26 @@ def patch(arguments: argparse.Namespace) -> None:
             )
         magisk_image.verify_patched(results[0], stock, archive, preinit, error)
 
+    # Both files are written in a private directory beside the output and published
+    # together by renaming it: a failure on the way leaves nothing behind, so the
+    # same command can be run again, and an existing directory must be empty.
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.mkdir(exist_ok=True)
-    magisk_image.real_directory(output, "--output-dir", error)
+    staging = Path(tempfile.mkdtemp(prefix=".magisk-root.", dir=output.parent))
     try:
-        with patched_path.open("xb") as handle:
-            handle.write(results[0])
-        with apk_copy.open("xb") as handle:
-            handle.write(snapshot)
-    except FileExistsError as failure:
-        raise error(f"{failure.filename} appeared meanwhile: an existing file is never replaced") from failure
-    os.chmod(patched_path, 0o644)
-    os.chmod(apk_copy, 0o644)
+        write_new(staging / PATCHED_NAME, results[0])
+        write_new(staging / apk_copy.name, snapshot)
+        for name in (PATCHED_NAME, apk_copy.name):
+            os.chmod(staging / name, 0o644)
+        os.chmod(staging, 0o755)
+        try:
+            os.rename(staging, output)
+        except OSError as failure:
+            raise error(
+                f"cannot publish the root files to {output}, which must not exist or must be "
+                f"an empty directory: {failure}"
+            ) from failure
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     print(
         f"made the Magisk-patched init_boot of {pin.name} {pin.version}: "
         f"{patched_path} ({len(results[0])} bytes, SHA-256 {magisk_image.sha256_bytes(results[0])})"
