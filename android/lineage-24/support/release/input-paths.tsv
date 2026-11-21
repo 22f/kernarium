@@ -25,6 +25,7 @@ excluded	android/lineage-24/build/preflight.sh	checks the builder's prerequisite
 excluded	android/lineage-24/build/verify-kernel-elf.py	verifier: accepts or refuses a kernel
 input	android/lineage-24/metadata/base-manifest.xml	pins every Repo project of the source tree
 input	android/lineage-24/metadata/lineage.env	the source snapshot, the product and the build variant, all of which the manifest records
+input	android/lineage-24/metadata/magisk.env	the pinned Magisk release that the root/ files are made from
 excluded	android/lineage-24/metadata/accepted-release.env	records which release was accepted, after the release exists
 input	android/lineage-24/overlay	the device/kernarium/andarium product tree, synchronized as one unit
 input	android/lineage-24/patches	the route table and the generated series for each project it changes

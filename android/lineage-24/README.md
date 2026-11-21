@@ -1439,6 +1439,14 @@ certificate. A presigned file keeps its upstream signature and is named in the
 build receipt. The key directory, its backup and the transfer to the builder are
 the maintainer's responsibility.
 
+### Root files
+
+A release can carry the Magisk root files of its own `init_boot`; the
+[`metadata/magisk.env`](metadata/magisk.env) pin names the Magisk release they
+are made from by name, version and SHA-256 of its official APK. The pin is a
+release input, the APK is given to the producer as a local file, and no Magisk
+file is in the repository.
+
 ### Superseded releases
 
 After a replacement release is validated, remove the superseded Android build,

@@ -121,6 +121,17 @@ uml_add_tooling_test(
     LABELS android;audit
     TIMEOUT 60)
 
+# The root files a release can carry beside its system disk: the pin of the
+# Magisk release they are made from, the patcher's orchestration, and the
+# verifier that checks the patched init_boot against its own stock image.
+uml_add_tooling_test(
+    NAME lineage24-magisk-root
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_magisk_root.py
+        --source-root ${PROJECT_SOURCE_DIR}
+    LABELS android;audit
+    TIMEOUT 120)
+
 uml_add_tooling_test(
     NAME android17-macos-launcher-options
     COMMAND ${Python3_EXECUTABLE} -B
