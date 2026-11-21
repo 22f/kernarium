@@ -46,11 +46,17 @@ constexpr const char* kHandoffSocket = "kernarium_sms";
 constexpr uid_t kSystemUid = 1000;
 constexpr const char* kServiceContext = "u:r:kernarium_sms:s0";
 // A wake that no session answered is repeated after this long. A session that ended is followed by a wake after
-// the shorter wait, which doubles to the attach timeout for every session in a row that ended before the service's
-// idle window (HostService.IDLE_MILLIS) with a connection still waiting: it ended abnormally, because a session
-// that serves lasts the window after its last message, and a service that fails at once is not started every second.
+// the shorter wait, which doubles for every session in a row that ended before the service's idle window
+// (HostService.IDLE_MILLIS) with a connection still waiting: it ended abnormally, because a session that serves
+// lasts the window after its last message, and a service that fails at once is not started every second. The host
+// waits 30 s for an answer (GuestSmsChannel.deadlineNanoseconds), and a fault that clears inside that window must
+// not leave its request for a long wait: the wait stops doubling at 2 s for the first kQuickEnds such sessions, which
+// outlast the window (0.5 + 1 + 15 * 2 s), and doubles to the attach timeout after them. The holder cannot see how
+// long a queued connection has waited (the kernel keeps no arrival time), so the count stands for the window.
 constexpr int kAttachTimeoutMillis = 20000;
 constexpr int kAfterSessionMillis = 500;
+constexpr int kQuickMaxAfterSessionMillis = 2000;
+constexpr int kQuickEnds = 16;
 constexpr int kMaxAfterSessionMillis = kAttachTimeoutMillis;
 constexpr int64_t kIdleWindowMillis = 30000;
 constexpr int kBindRetryMillis = 1000;
@@ -221,14 +227,18 @@ class Holder {
         session_.reset();
         // The connections that queued in the meantime are the next session's. After a session that served (it lasted
         // the idle window, or took every connection that waited) the wait is the shortest; after one that ended early
-        // with a connection still waiting it is the current one, and the next is twice as long, up to the attach
-        // timeout, so that a service that fails at once is woken once in 20 s and a single lost session in half a second.
+        // with a connection still waiting it is the current one, and the next is twice as long (2 s at most for the first
+        // kQuickEnds, the attach timeout after), so that a service that fails at once is woken once in 20 s, a fault
+        // that clears inside the host's window is answered inside it, and a single lost session in half a second.
         if (lasted || !connectionWaits()) {
             afterSessionMillis_ = kAfterSessionMillis;
+            earlyEnds_ = 0;
             nextWake_ = now + afterSessionMillis_;
         } else {
             nextWake_ = now + afterSessionMillis_;
-            afterSessionMillis_ = std::min(afterSessionMillis_ * 2, kMaxAfterSessionMillis);
+            ++earlyEnds_;
+            afterSessionMillis_ = std::min(
+                afterSessionMillis_ * 2, earlyEnds_ <= kQuickEnds ? kQuickMaxAfterSessionMillis : kMaxAfterSessionMillis);
         }
         if (endedLogged_++ % kLogEvery == 0) ALOGI("the session ended");
     }
@@ -254,6 +264,7 @@ class Holder {
     int64_t nextWake_ = 0;
     int64_t attachedAt_ = 0;
     int afterSessionMillis_ = kAfterSessionMillis;
+    int earlyEnds_ = 0;
     unsigned attachedLogged_ = 0;
     unsigned endedLogged_ = 0;
     unsigned wokenLogged_ = 0;

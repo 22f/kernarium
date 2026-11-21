@@ -93,7 +93,7 @@ bool until(int millis, Condition condition) {
     _exit(1);
 }
 
-void pass(const char* scenario, const char* what) { std::printf("PASS %s: %s\n", scenario, what); }
+void pass(const char* scenario, const std::string& what) { std::printf("PASS %s: %s\n", scenario, what.c_str()); }
 
 int connectTo(const std::string& path, int* error = nullptr) {
     const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -370,16 +370,22 @@ int main(int argc, char** argv) {
         return gWakeTimes[woken++];
     };
 
-    // S8: a session that ends before it accepts anything, with a connection still waiting, is woken again after a wait
-    // that doubles from half a second to 20 s: a service that cannot serve is not started once a second without end. The
-    // first wake here is the one that no session answered (20 s); a session then attaches and ends at once, each time.
+    // S8: a session that ends before it accepts anything, with a connection still waiting, is woken again after a wait that
+    // doubles from half a second: to 2 s for the first sixteen such sessions, which outlast the host's 30 s window, and then
+    // to 20 s. A service that cannot serve is not started once a second without end, and one that clears within the
+    // window is not left for 16 s. The first wake here is the one that no session answered (20 s); a session then attaches
+    // and ends at once, each time. At most 17 wakes fall in the 30 s after the first, and most of the 17 do.
     {
         std::lock_guard<std::mutex> guard(gLock);
         gPeerContext = "u:r:kernarium_sms:s0";
     }
-    long long previous = nextWake("S8");
-    const long long expected[] = {500, 1000, 2000, 4000, 8000, 16000, 20000, 20000};
-    for (size_t index = 0; index < sizeof(expected) / sizeof(expected[0]); ++index) {
+    const long long first = nextWake("S8");
+    long long previous = first;
+    std::vector<long long> expected = {500, 1000};
+    expected.insert(expected.end(), 15, 2000);
+    expected.insert(expected.end(), {4000, 8000, 16000, 20000, 20000});
+    int inWindow = 1;
+    for (size_t index = 0; index < expected.size(); ++index) {
         const Session lost = attach("S8");
         close(lost.connection);
         close(lost.listener);
@@ -390,9 +396,14 @@ int main(int argc, char** argv) {
             fail("S8", "the wake after the session that ended early number " + std::to_string(index + 1) +
                            " came after " + std::to_string(gap) + " ms, not about " + std::to_string(wait) + " ms");
         }
+        if (at - first < 30000) ++inWindow;
         previous = at;
     }
-    pass("S8", "sessions that end early are woken again after 0.5, 1, 2, 4, 8, 16 and then 20 s");
+    if (inWindow > 17 || inWindow < 12) {
+        fail("S8", std::to_string(inWindow) + " wakes fell in the 30 s after the first, not 12 to 17");
+    }
+    pass("S8", "sessions that end early are woken again after 0.5, 1 and 2 s (sixteen times), then 4, 8, 16 and 20 s, "
+               "with " + std::to_string(inWindow) + " wakes in the first 30 s");
 
     // S9: a session that lasted the idle window (30 s) worked: the wait after it is the first again.
     const Session served = attach("S9");
@@ -433,6 +444,45 @@ int main(int argc, char** argv) {
     }
     close(fresh);
     pass("S10", "a short session that took every waiting connection does not lengthen the wait");
+
+    // S12: a fault that clears at 17 s is answered inside the host's 30 s window: sessions end at once until then, and the
+    // first one after takes the waiting connection. (Waits of 0.5, 1, 2, 4, 8 and 16 s woke the service next at 31.5 s.)
+    {
+        const Session reset = attach("S12");  // takes whatever waits, so that the first wake after it is the first again
+        for (;;) {
+            const int taken = accept(reset.listener, nullptr, nullptr);
+            if (taken < 0) break;
+            close(taken);
+        }
+        close(reset.connection);
+        close(reset.listener);
+        usleep(20 * 1000);
+        const long long arrival = holderNow();
+        const int host = connectTo(gVsockPath);
+        if (host < 0) fail("S12", "the vsock socket takes no connection");
+        long long answered = -1;
+        for (int step = 0; step < 60 && answered < 0; ++step) {
+            nextWake("S12");
+            const Session session = attach("S12");
+            if (holderNow() - arrival >= 17000) {
+                const int taken = accept(session.listener, nullptr, nullptr);
+                if (taken >= 0) {
+                    answered = holderNow();
+                    close(taken);
+                }
+            }
+            close(session.connection);
+            close(session.listener);
+        }
+        if (answered < 0) fail("S12", "the waiting connection was never taken");
+        if (answered - arrival >= 30000) {
+            fail("S12", "a fault that cleared at 17 s was answered at " + std::to_string(answered - arrival) +
+                            " ms, after the host's 30 s window");
+        }
+        close(host);
+        pass("S12", "a fault that clears at 17 s is answered at " + std::to_string((answered - arrival) / 1000) +
+                        " s, inside the host's window");
+    }
 
     if (gReturned.load()) fail("S11", "the holder ended during the scenarios");
     pass("S11", "the holder ran through every scenario");

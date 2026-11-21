@@ -521,7 +521,8 @@ connection waits and no session runs, it sets the control property that starts
 `kernarium_sms_wake`, a script in a second domain that asks the activity manager
 to start the service as the system user (again after 20 s if no session attached,
 and after a session that ended early with a connection still waiting, after a wait
-that doubles from half a second to 20 s); the service then takes the listening
+that doubles from half a second to 2 s for the first sixteen such sessions, which
+outlast the host's 30 s window, and to 20 s after them); the service then takes the listening
 socket from the holder over its unix socket (`/dev/socket/kernarium_sms`), which
 only the service's domain may connect to; init makes and binds that socket and
 does not listen on it, so the holder listens on it itself. `KernariumSms` (`overlay/sms/`) is a
