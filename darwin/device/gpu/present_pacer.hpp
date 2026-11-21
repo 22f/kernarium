@@ -62,8 +62,10 @@ struct LinkFrameRate {
  * runs the link keeps one flag, whether a frame waits, and clears it when a
  * tick presents. A tick that presents draws, and tells the pacer when the
  * drawable was not there (`drew`): the frame is then drawn again on the next
- * ticks, up to maximumDrawRetries of them, so that a transient failure
- * does not leave the newest frame unshown while the link sleeps. */
+ * ticks, up to maximumDrawRetries of them and until its draws have waited
+ * maximumDrawableWaitSeconds for a drawable, so that a transient failure does
+ * not leave the newest frame unshown while the link sleeps, and a stalled one
+ * does not hold the thread that draws. */
 class PresentPacer final {
 public:
     struct Parameters {
@@ -89,6 +91,12 @@ public:
          * drawable, at the next ticks: 30 is a quarter of a second at the
          * 120 step and half a second at the 60 step. */
         unsigned maximumDrawRetries {30};
+        /* How long the draws of one frame may have waited for a drawable, in
+         * all, before they are not tried again: a layer waits a second for a
+         * drawable that the display holds, so a draw that waited it out ends
+         * the retries, where 30 of them would hold the thread that draws for
+         * half a minute. Only the wait for the drawable counts. */
+        double maximumDrawableWaitSeconds {0.9};
     };
 
     /* What a tick is to do. */
@@ -123,9 +131,10 @@ public:
     /* A draw has been made for the newest frame (a tick that presented, or
      * the display's own draw when it has no link): `unavailable` says it
      * found no drawable or render pass, which owes the frame another draw at
-     * the next ticks, up to the limit; a draw that shows the frame ends
-     * them. */
-    void drew(bool unavailable) noexcept;
+     * the next ticks, up to the limits (the draws, and the time they waited
+     * for a drawable: `drawableWaitSeconds`, the acquisition's own time); a
+     * draw that shows the frame ends them. */
+    void drew(bool unavailable, double drawableWaitSeconds = 0.0) noexcept;
 
     /* Whether the newest frame is owed another draw. The debt, and what is
      * left of the limit, outlive a wake: a link made again (the scene it was
@@ -173,6 +182,7 @@ private:
      * frame last arrived. */
     bool retryOwed_ {};
     unsigned retries_ {};
+    double drawableWait_ {};
     bool retryArranged_ {};
     /* When the step last changed since the last wake. */
     std::optional<double> changedAt_;

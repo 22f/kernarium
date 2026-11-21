@@ -390,7 +390,7 @@ check also reads;
 the guest's rate changes, steady, speeding-up and alternating guests, frames
 early and late in groups, the two seconds between changes and the bound on the
 changes, the wake, the sleep, the bounded retry of a present that
-found no drawable across a link made again, and the ceiling of Low Power Mode
+found no drawable, and the bound on its waits for one, across a link made again, and the ceiling of Low Power Mode
 and of a mode that states neither rate) against a fake clock; `gpu-offscreen-display` counts each accepted
 guest update once; `HighRefreshTests` (in `andarium-core` and in
 `AndariumTests`) cover the setting, its launch rules (screen maximum, size,

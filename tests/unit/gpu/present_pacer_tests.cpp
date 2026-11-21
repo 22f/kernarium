@@ -45,6 +45,10 @@ public:
     /* The next `count` draws find no drawable (a transient failure of the
      * view's drawable or render pass), and show nothing. */
     void failNextDraws(unsigned count) { failures_ = count; }
+    /* Each draw that finds no drawable has waited this long for it, on the
+     * thread that draws (a layer waits up to a second for a drawable that the
+     * display holds). */
+    void setDrawableWait(double seconds) { drawableWait_ = seconds; }
     /* The link is made again, as when the scene it was on disconnects and
      * another activates before the next tick: the pacer wakes at once, with
      * whatever the display owes the newest frame. */
@@ -80,6 +84,9 @@ public:
     /* Draws that showed a frame, and draws made (a failed one included). */
     [[nodiscard]] std::uint64_t presents() const { return presents_; }
     [[nodiscard]] std::uint64_t draws() const { return draws_; }
+    /* The time the draws spent waiting for a drawable, all on the thread that
+     * draws. */
+    [[nodiscard]] double mainThreadSeconds() const { return mainThread_; }
     /* A frame has arrived that no draw has shown. */
     [[nodiscard]] bool frameWaiting() const { return unshown_; }
     [[nodiscard]] std::uint64_t ticks() const { return ticks_; }
@@ -160,9 +167,11 @@ private:
             ++draws_;
             /* The tick draws, and says whether the drawable was there. */
             const bool unavailable = failures_ > 0;
-            if (unavailable)
+            if (unavailable) {
                 --failures_;
-            pacer_.drew(unavailable);
+                mainThread_ += drawableWait_;
+            }
+            pacer_.drew(unavailable, unavailable ? drawableWait_ : 0.0);
             if (!unavailable) {
                 ++presents_;
                 longestWait_ = std::max(longestWait_, now_ - waitingSince_);
@@ -194,6 +203,8 @@ private:
     std::uint64_t presents_ {};
     std::uint64_t draws_ {};
     unsigned failures_ {};
+    double drawableWait_ {};
+    double mainThread_ {};
     std::uint64_t ticks_ {};
     std::uint64_t wakes_ {};
     bool waiting_ {};
@@ -861,6 +872,88 @@ void aDrawThatNeverFindsADrawableIsRetriedAtMostThirtyTimes()
     require(link.asleep());
 }
 
+/* A draw that waited out a layer's own timeout (a second for a drawable that
+ * the display holds) is not drawn again, and the waits of a frame's draws are
+ * bounded in all: with every draw waiting a second, the thirty retries held
+ * the thread that draws for 31 s (the first draw and thirty retries); now the
+ * first draw is the only one. A wait that is shorter ends the retries when
+ * the waits add up to 0.9 s, so a frame costs under 0.9 s and one wait more,
+ * and a draw that fails at once keeps its thirty retries. */
+void aDrawWhoseDrawableWaitRanOutTheTimeoutIsNotDrawnAgain()
+{
+    /* Before: no limit on the wait. */
+    PresentPacer::Parameters unlimited;
+    unlimited.maximumDrawableWaitSeconds = 1e9;
+    Link before(120.0, unlimited);
+    before.setDrawableWait(1.0);
+    before.offer();
+    before.failNextDraws(1000);
+    before.run(1.0);
+    require(before.draws() == 31, "thirty retries without the limit");
+    require(std::abs(before.mainThreadSeconds() - 31.0) < 1e-9, "31 s of the thread that draws");
+
+    Link link;
+    link.setDrawableWait(1.0);
+    link.offer();
+    link.failNextDraws(1000);
+    link.run(1.0);
+    require(link.draws() == 1, "a draw that waited out the timeout is the only one");
+    require(std::abs(link.mainThreadSeconds() - 1.0) < 1e-9, "one wait of the thread that draws");
+    require(link.presents() == 0);
+    require(link.asleep(), "the link slept");
+
+    /* A frame that arrives has its own budget, and a drawable that is back
+     * shows it. */
+    link.failNextDraws(1);
+    link.offer();
+    link.run(0.2);
+    require(link.draws() == 2 && link.mainThreadSeconds() < 2.0 + 1e-9);
+    link.failNextDraws(0);
+    link.offer();
+    link.run(0.2);
+    require(link.presents() == 1, "the next frame was shown");
+
+    /* Waits that are shorter add up: the time of a frame's retries is under
+     * the 0.9 s limit and one wait more, whatever the wait. */
+    for (const double wait : {0.05, 0.25, 0.4, 0.89, 0.95, 1.0}) {
+        Link slow;
+        slow.setDrawableWait(wait);
+        slow.offer();
+        slow.failNextDraws(1000);
+        slow.run(1.0);
+        if (!(slow.mainThreadSeconds() < 0.9 + wait + 1e-9))
+            std::fprintf(stderr, "waits of %.2f s cost %.2f s\n", wait, slow.mainThreadSeconds());
+        require(slow.mainThreadSeconds() < 0.9 + wait + 1e-9, "the waits are bounded");
+        require(slow.mainThreadSeconds() < 2.0, "under two seconds for a frame");
+        require(slow.asleep(), "the link slept");
+    }
+
+    /* A draw that fails at once has no wait to count: its thirty retries. */
+    Link quick;
+    quick.setDrawableWait(0.0);
+    quick.offer();
+    quick.failNextDraws(1000);
+    quick.run(1.0);
+    require(quick.draws() == 31, "a draw that fails at once keeps its retries");
+}
+
+/* The waits of a frame are not renewed by a link made again: the scene went and
+ * another activated, which asks for the frame once more, not for its wait. */
+void aLinkMadeAgainDoesNotRenewTheDrawableWait()
+{
+    Link link;
+    link.setDrawableWait(1.0);
+    link.offer();
+    link.failNextDraws(1000);
+    link.run(0.05);
+    for (unsigned made = 0; made < 5; ++made) {
+        link.rebind();
+        link.run(0.05);
+    }
+    require(link.draws() == 1, "no draw after the wait was spent");
+    require(std::abs(link.mainThreadSeconds() - 1.0) < 1e-9, "one wait in all");
+}
+
 /* The pacer's side of it, with no link: a retry is a present that no frame
  * asked for, a shown draw ends the debt, and a frame renews it. */
 void aRetryIsAPresentNoFrameAskedFor()
@@ -1113,6 +1206,10 @@ int main(int argc, char** argv)
             aDrawThatFindsNoDrawableIsRetriedUntilTheFrameIsShown},
         {"aDrawThatNeverFindsADrawableIsRetriedAtMostThirtyTimes",
             aDrawThatNeverFindsADrawableIsRetriedAtMostThirtyTimes},
+        {"aDrawWhoseDrawableWaitRanOutTheTimeoutIsNotDrawnAgain",
+            aDrawWhoseDrawableWaitRanOutTheTimeoutIsNotDrawnAgain},
+        {"aLinkMadeAgainDoesNotRenewTheDrawableWait",
+            aLinkMadeAgainDoesNotRenewTheDrawableWait},
         {"aRetryIsAPresentNoFrameAskedFor", aRetryIsAPresentNoFrameAskedFor},
         {"aLinkMadeAgainWhileAFrameIsOwedStillShowsIt",
             aLinkMadeAgainWhileAFrameIsOwedStillShowsIt},

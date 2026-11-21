@@ -175,7 +175,7 @@ struct NativeDisplayState final :
     PresentPacer pacer;
     LinkFrameRate requestedRange {};
     /* Set by the view's draw (the delegate): what the draw came to. */
-    DrawResult drawResult {DrawResult::done};
+    DrawOutcome drawResult;
 #ifndef UML_APP_STORE_RUNTIME
     double reportStart {};
     double grantedSum {};
@@ -635,13 +635,14 @@ void NativeDisplayState::drawWithoutLink() noexcept
         pacer.frameArrived();
     else if (!pacer.retryOwed())
         return;
-    drawResult = DrawResult::done;
+    drawResult = {};
     [nativeView draw];
     /* A draw that found no drawable owes the frame again, a few times: a view
      * with no scene may find one. One delay is pending at a time, whatever
      * frames arrive, and a pending one that finds a link made leaves the
      * retry to it. */
-    pacer.drew(drawResult == DrawResult::unavailable);
+    pacer.drew(drawResult.result == DrawResult::unavailable,
+        drawResult.drawableWaitSeconds);
     if (!pacer.arrangeRetry())
         return;
     auto state = shared_from_this();
@@ -728,12 +729,13 @@ void NativeDisplayState::linkTick(CADisplayLink* ticking) noexcept
         applyLinkRange(*decision.range);
     if (decision.present) {
         if (nativeView != nil) {
-            drawResult = DrawResult::done;
+            drawResult = {};
             [nativeView draw];
             /* A draw that found no drawable is owed again at the next ticks,
              * a bounded number of them: the newest frame must not stay unshown
              * while the link sleeps. */
-            pacer.drew(drawResult == DrawResult::unavailable);
+            pacer.drew(drawResult.result == DrawResult::unavailable,
+                drawResult.drawableWaitSeconds);
         }
 #ifndef UML_APP_STORE_RUNTIME
         ++reportDraws;

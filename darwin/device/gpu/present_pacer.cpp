@@ -44,14 +44,20 @@ LinkFrameRate PresentPacer::wake(
     return rangeFor(rate_);
 }
 
-void PresentPacer::drew(bool unavailable) noexcept
+void PresentPacer::drew(bool unavailable, double drawableWaitSeconds) noexcept
 {
     if (!unavailable) {
         retryOwed_ = false;
         retries_ = 0;
+        drawableWait_ = 0.0;
         return;
     }
-    retryOwed_ = retries_ < parameters_.maximumDrawRetries;
+    if (drawableWaitSeconds > 0.0)
+        drawableWait_ += drawableWaitSeconds;
+    /* A frame is drawn again while its retries and the waits of its draws for
+     * a drawable are within their limits. */
+    retryOwed_ = retries_ < parameters_.maximumDrawRetries &&
+        drawableWait_ < parameters_.maximumDrawableWaitSeconds;
     if (retryOwed_)
         ++retries_;
 }
@@ -64,6 +70,7 @@ bool PresentPacer::retryOwed() const noexcept
 void PresentPacer::frameArrived() noexcept
 {
     retries_ = 0;
+    drawableWait_ = 0.0;
 }
 
 bool PresentPacer::arrangeRetry() noexcept
