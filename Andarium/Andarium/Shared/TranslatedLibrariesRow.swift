@@ -23,10 +23,10 @@ enum TranslatedLibrariesWords {
 }
 
 /// Whether Android's system libraries run from the code translated from them
-/// ahead of time (`AppModel.translatedLibrariesOn`), the third row of the
-/// section that holds the JIT row. It is drawn only in a build that carries the
-/// translated-code framework, and applies when Android next starts: Home shows
-/// only while no guest runs. While the next start runs on the JIT engine, which
+/// ahead of time (`AppModel.translatedLibrariesOn`), the second row of Home's
+/// Performance section, between "120 Hz" and JIT. It is drawn only in a build
+/// that carries the translated-code framework, and applies when Android next
+/// starts: Home shows only while no guest runs. While the next start runs on the JIT engine, which
 /// does not use the translated code, the row is dimmed, its switch cannot be
 /// changed, and the line under the title says so.
 struct TranslatedLibrariesRow: View {

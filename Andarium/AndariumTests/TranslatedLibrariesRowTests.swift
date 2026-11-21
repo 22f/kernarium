@@ -7,12 +7,13 @@ import Testing
 import UIKit
 @testable import Andarium
 
-/// Home's AOT row as the application draws it: the third row of the section
-/// that holds the JIT row, below it; there only in a build that carries the
-/// translated-code framework; its switch is the person's choice (on for a
-/// fresh model); and while the next start runs on the JIT engine, which does
-/// not use the translated code, it is dimmed and says so. What a start states
-/// to the runtime follows the same facts.
+/// Home's AOT row as the application draws it: the second row of the
+/// Performance section, below "120 Hz" where that is offered and above JIT;
+/// there only in a build that carries the translated-code framework; its
+/// switch is the person's choice (on for a fresh model); and while the next
+/// start runs on the JIT engine, which does not use the translated code, it is
+/// dimmed and says so. What a start states to the runtime follows the same
+/// facts.
 @MainActor
 @Suite(.serialized)
 struct TranslatedLibrariesRowTests {
@@ -20,7 +21,9 @@ struct TranslatedLibrariesRowTests {
         name: "iPhone", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 40_000_000_000
     )
 
-    private func fixture(carried: Bool, jit: Bool = true) -> (model: AppModel, driver: StubDriver) {
+    private func fixture(
+        carried: Bool, jit: Bool = true, highRefresh: Bool = false
+    ) -> (model: AppModel, driver: StubDriver) {
         let model = AppModel(
             guest: Guest.fresh(on: host), host: host,
             system: SystemInfo(version: "17", release: "r2", kernel: "Linux 6.18", architecture: "arm64, 4 KiB pages", appVersion: "1"),
@@ -30,6 +33,14 @@ struct TranslatedLibrariesRowTests {
         model.driver = driver
         model.jitAvailable = jit
         model.translatedLibrariesAvailable = carried
+        if highRefresh {
+            // A screen that shows 120 frames a second is offered "120 Hz".
+            model.statedNativeScale = 3
+            model.statedDisplayPoints = CGSize(width: 402, height: 778)
+            model.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 120)
+            model.displayPointsDidChange(CGSize(width: 402, height: 778))
+            model.launchApplied = true
+        }
         return (model, driver)
     }
 
@@ -61,7 +72,7 @@ struct TranslatedLibrariesRowTests {
     private func hosted(
         _ model: AppModel, switches count: Int, in lease: HostWindow.Lease
     ) async throws -> UIHostingController<some View> {
-        let controller = UIHostingController(rootView: JitSection().environment(model).frame(width: 390))
+        let controller = UIHostingController(rootView: HomePerformanceSection().environment(model).frame(width: 390))
         lease.window.rootViewController = controller
         controller.view.layoutIfNeeded()
         let drawn = await eventually {
@@ -91,14 +102,14 @@ struct TranslatedLibrariesRowTests {
         defer { lease.give() }
         // The JIT row alone: no framework, no row.
         _ = try await hosted(fixture(carried: false).model, switches: 1, in: lease)
-        // With the framework, a second switch is there.
+        // With the framework, a second switch is there, above JIT's.
         let carried = try await hosted(fixture(carried: true).model, switches: 2, in: lease)
-        let control = try #require(switches(in: carried.view).last)
+        let control = try #require(switches(in: carried.view).first)
         #expect(control.isOn)
         #expect(control.isEnabled)
     }
 
-    @Test func theRowIsTheSecondOneBelowJitInTheSameSection() async throws {
+    @Test func theRowIsAboveJitInTheSameSection() async throws {
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let (model, _) = fixture(carried: true)
@@ -106,13 +117,31 @@ struct TranslatedLibrariesRowTests {
         model.jitDebuggerAttached = false
         let controller = try await hosted(model, switches: 2, in: lease)
         let all = switches(in: controller.view)
-        // JIT's switch is on (the person asked for it) and AOT's is below it:
-        // JitSection draws both, so the AOT row is a row of that section.
-        #expect(all.first?.isOn == true)
+        // JIT's switch is on (the person asked for it) and AOT's, on by
+        // default, is above it: the Performance section draws both, so the AOT
+        // row is a row of that section.
+        #expect(all.map(\.isOn) == [true, true])
         let frames = all.map { $0.convert($0.bounds, to: controller.view) }
-        #expect(frames[1].minY > frames[0].maxY, "the AOT switch is not below the JIT switch")
+        #expect(frames[0].maxY < frames[1].minY, "the AOT switch is not above the JIT switch")
         // They are in one panel: the same width and trailing edge.
         #expect(abs(frames[0].maxX - frames[1].maxX) < 1)
+    }
+
+    @Test func theRowIsBetweenTheHundredAndTwentyHertzRowAndJit() async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let (model, _) = fixture(carried: true, highRefresh: true)
+        model.jitOn = true
+        model.jitDebuggerAttached = false
+        model.translatedLibrariesOn = false
+        let controller = try await hosted(model, switches: 3, in: lease)
+        let all = switches(in: controller.view)
+        // "120 Hz" is off at first, AOT is off here, JIT is on: the order is
+        // the section's, whatever the states.
+        #expect(all.map(\.isOn) == [false, false, true], "120 Hz, AOT, JIT")
+        let frames = all.map { $0.convert($0.bounds, to: controller.view) }
+        #expect(frames[0].maxY < frames[1].minY && frames[1].maxY < frames[2].minY, "\(frames)")
+        #expect(frames.allSatisfy { abs($0.maxX - frames[0].maxX) < 1 }, "one panel: \(frames)")
     }
 
     @Test func aBuildWithoutAJitHasTheRowAloneInTheSection() async throws {
@@ -140,7 +169,7 @@ struct TranslatedLibrariesRowTests {
         let (model, _) = fixture(carried: true)
         let before = model.guest
         let controller = try await hosted(model, switches: 2, in: lease)
-        var control = try #require(switches(in: controller.view).last)
+        var control = try #require(switches(in: controller.view).first)
         control.setOn(false, animated: false)
         control.sendActions(for: .valueChanged)
         #expect(await eventually { !model.translatedLibrariesOn })
@@ -148,7 +177,7 @@ struct TranslatedLibrariesRowTests {
         #expect(model.guest == before)
         #expect(!model.jitOn)
 
-        control = try #require(switches(in: controller.view).last)
+        control = try #require(switches(in: controller.view).first)
         #expect(!control.isOn)
         control.setOn(true, animated: false)
         control.sendActions(for: .valueChanged)
@@ -161,7 +190,7 @@ struct TranslatedLibrariesRowTests {
         let (model, _) = fixture(carried: true)
         model.translatedLibrariesOn = false
         let controller = try await hosted(model, switches: 2, in: lease)
-        #expect(try #require(switches(in: controller.view).last).isOn == false)
+        #expect(try #require(switches(in: controller.view).first).isOn == false)
     }
 
     @Test func whileTheNextStartRunsOnTheJitTheRowIsDimmedAndTheSwitchDisabled() async throws {
@@ -174,7 +203,7 @@ struct TranslatedLibrariesRowTests {
         model.jitDebuggerAttached = true
         #expect(model.jitInUseForNextStart)
         let controller = try await hosted(model, switches: 2, in: lease)
-        let control = try #require(switches(in: controller.view).last)
+        let control = try #require(switches(in: controller.view).first)
         #expect(!control.isEnabled)
         // The choice itself is kept as it was.
         #expect(control.isOn)
@@ -183,12 +212,12 @@ struct TranslatedLibrariesRowTests {
         // The JIT off, or no debugger to prepare it: the start runs on the engine
         // that uses them, and the switch works.
         model.jitOn = false
-        #expect(await eventually { switches(in: controller.view).last?.isEnabled == true })
+        #expect(await eventually { switches(in: controller.view).first?.isEnabled == true })
         model.jitOn = true
         driver.debuggerAttached = false
         model.refreshJit()
         #expect(!model.jitInUseForNextStart)
-        #expect(await eventually { switches(in: controller.view).last?.isEnabled == true })
+        #expect(await eventually { switches(in: controller.view).first?.isEnabled == true })
     }
 
     @Test func aBuildWithoutAJitNeverRunsOnIt() {

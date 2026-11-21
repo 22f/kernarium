@@ -171,6 +171,14 @@ struct AppEntry {
             stated: HeatLimitLaunch.stated(in: environment))
         model.heatLimitOn = heat.isOn
         model.heatLimitDecidedByLaunch = !heat.keepsChanges
+        // Home's "120 Hz" is the person's last choice, off at first, unless the
+        // launch is a harness's and decides for its run alone
+        // (`HighRefreshPreference`).
+        let refresh = HighRefreshPreference().launch(
+            automated: !launch.isEmpty || ThermalOverride.stated(in: environment) != nil,
+            stated: HighRefreshLaunch.stated(in: environment))
+        model.highRefreshOn = refresh.isOn
+        model.highRefreshDecidedByLaunch = !refresh.keepsChanges
         // Home's AOT row exists where the build carries the translated-code
         // framework (what Acknowledgements reads), and is the person's last
         // choice unless the launch is a harness's, whichever way it is told.
@@ -280,6 +288,9 @@ struct AppEntry {
         let heat = HeatLimitPreference().launch(automated: true, stated: HeatLimitLaunch.stated(in: environment))
         model.heatLimitOn = heat.isOn
         model.heatLimitDecidedByLaunch = true
+        model.highRefreshOn = HighRefreshPreference().launch(
+            automated: true, stated: HighRefreshLaunch.stated(in: environment)).isOn
+        model.highRefreshDecidedByLaunch = true
         model.translatedLibrariesDecidedByLaunch = true
         // The side keys play their feedback here too: a launch that keeps the
         // phone silent does so on this path as on the ordinary one.

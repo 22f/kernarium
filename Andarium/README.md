@@ -564,6 +564,27 @@ address space holds, so this is a fallback.
   rate in one tap; Dismiss only dismisses. A harness launch runs with the
   default and keeps nothing; `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states it for
   the run ([Automation](#automation)).
+  Home's Performance section has "120 Hz" (`HighRefreshPreference`, off by
+  default) above JIT, drawn only where the screen shows at least 100 frames a
+  second (an iPhone Pro, an iPad Pro; a screen between 61 and 99 does not
+  qualify), where the display size the next start would have can carry the 120
+  Hz mode, and never on a Mac or Vision Pro; Settings has no row of it,
+  because Home, which shows only while no guest runs, is where the guest's
+  configuration is. The section is drawn when one of its two rows is, and its
+  note beneath the panel is JIT's.
+  Turned on, the next start of Android asks the runtime for the 120 Hz display
+  ([Display refresh rate](../Kernarium/README.md#display-refresh-rate)); a
+  change applies at that start. The runtime
+  decides once, at boot, whether the run has the mode, and the application
+  uses what it granted (`display_refresh_hz` of the runtime's statistics) for
+  the run. While iOS is in Low Power Mode, or after the window moves to a
+  screen that shows under 100 frames a second, a granted run tells Android
+  MODERATE (the thermal wire's severity between light and severe), which holds
+  Android's render rate to 60 Hz; "When hot" still decides the heat levels,
+  and the heavier severity wins. The screen's maximum is read again at each
+  geometry update. A harness launch starts with the setting off, and
+  `ANDARIUM_HIGH_REFRESH` (`1` or `0`) states it for the run, which keeps
+  nothing.
 - **Game controllers.** Each game controller iOS has connected is a HID
   device in the guest, made through the guest's relay over vsock 5558
   (`GamepadSession`; the wire is `GamepadProtocol`, whose golden frames the
@@ -735,8 +756,9 @@ address space holds, so this is a fallback.
   is stored as a scale and stays. Native's host allocations count against the
   same iOS process limit as guest RAM; neither the graphics-memory estimate
   nor the memory default counts the display's pixels.
-- **JIT.** A build on a device has a JIT row on Home, off until
-  the person turns it on and kept for the install (`JitPreference`). An iOS
+- **JIT.** A build on a device has a JIT row in Home's Performance section,
+  off until the person turns it on and kept for the install
+  (`JitPreference`). An iOS
   device gives the JIT its executable memory only through a debugger attached to
   the process ([`docs/architecture.md`](../docs/architecture.md#executable-code)):
   the person assigns StikDebug's universal script to Andarium once in StikDebug
@@ -767,10 +789,10 @@ address space holds, so this is a fallback.
   translated ahead of time
   ([`docs/architecture.md`](../docs/architecture.md#ahead-of-time-code)). A
   build that embeds `UmlArm64Aot.framework` (what Acknowledgements reads) has an
-  AOT row on Home, below the JIT row in the same section: a switch, on by
-  default and kept for the install (`TranslatedLibrariesPreference`); a fresh
-  install and an update start on, and a harness launch starts on and keeps
-  nothing. The choice is read at each start. Off, the boot request keeps the
+  AOT row in Home's Performance section, between the 120 Hz row and the JIT
+  row: a switch, on by default and kept for the install
+  (`TranslatedLibrariesPreference`); a fresh install and an update start on,
+  and a harness launch starts on and keeps nothing. The choice is read at each start. Off, the boot request keeps the
   release out of the launch (`android_aot_disabled`,
   [Kernarium](../Kernarium/README.md#automation-runs)) and Android runs on
   the engine alone, as in a build without the framework; a running Android is
@@ -1238,7 +1260,8 @@ one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation; only `critical`
 reaches the guest as heat. `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states
-Settings' "When hot" for the run: `0` tells the guest nothing of the heat. A
+Settings' "When hot" for the run: `0` tells the guest nothing of the heat.
+`ANDARIUM_HIGH_REFRESH` (`1` or `0`) states Home's "120 Hz" for the run. A
 UI test's probe session (`ANDARIUM_INPUT_PROBE`) that states the thermal state
 runs the thermal session against a stand-in for the guest's HAL, and its log
 says what the guest would be told (`heat told <severity>`).

@@ -12,7 +12,7 @@
 namespace kernarium::aot {
 
 /* Whether an Android launch states the release it boots to the emulator
- * (runtime API 44). The ahead-of-time component runs only with the release it
+ * (runtime API 45). The ahead-of-time component runs only with the release it
  * was made from, and a launch that states none runs without it
  * (docs/architecture.md, "Ahead-of-time code"), so the boot request's
  * android_aot_disabled is how an application keeps the component out of one

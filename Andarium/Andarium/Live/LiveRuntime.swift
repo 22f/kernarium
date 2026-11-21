@@ -132,6 +132,19 @@ final class LiveRuntime: RuntimeDriver {
     /// does (`beginThermalProbe`).
     private var thermalProbe = false
     private lazy var thermalMonitor = ThermalMonitor { [weak self] state in self?.thermal.observe(state) }
+    /// Whether the run in progress has the 120 Hz display, as the runtime
+    /// granted it (it decides once at the start, whatever the start asked), and
+    /// so whether Low Power Mode, or a screen that shows less than 100 frames a
+    /// second, holds its render rate to 60 (`HighRefresh.holdsAtSixty`). False
+    /// until the runtime has said (`learnDisplayGrant`).
+    private var runHasHighRefresh = false
+    private var displayGrantKnown = false
+    private var lowPowerModeOn = false
+    private lazy var lowPowerMonitor = LowPowerMonitor { [weak self] on in
+        guard let self else { return }
+        lowPowerModeOn = on
+        updateSixtyHertzHold()
+    }
     /// The device's position for the guest's GNSS receiver, read from Core
     /// Location only while the person's Location switch, iOS, the foreground,
     /// a normal run and the guest's own receiver all say so
@@ -634,6 +647,18 @@ final class LiveRuntime: RuntimeDriver {
         reachedBootCompleted = false
         normalRun = run.mode == .normal
         beginPartialSweep()
+        // The 120 Hz display is asked for at the start, for the size it boots
+        // at, and the runtime decides once whether the run has it: the run
+        // has what it granted, which is read as soon as the guest's console
+        // answers (`learnDisplayGrant`). It holds until the guest powers off;
+        // Low Power Mode, or a screen that shows less, then holds what the
+        // guest renders to what that screen shows.
+        let asksForHighRefresh = model?.asksForHighRefresh(
+            displaySize: (Int(width), Int(height))) == true
+        runHasHighRefresh = false
+        displayGrantKnown = false
+        model?.runStarted(withHighRefresh: false)
+        if normalRun { lowPowerMonitor.start() }
         updateThermal()
         if normalRun { thermalMonitor.start() }
         motionMount.begin(interface: interfaceMotionAxes)
@@ -646,7 +671,7 @@ final class LiveRuntime: RuntimeDriver {
         updateKeyboardMouse()
         let hostFeatures = Self.hostFeatures(
             hapticsAvailable: hapticsAvailable, followsDeviceOrientation: model?.followsDeviceOrientation == true,
-            compassAvailable: motion.compassAvailable)
+            compassAvailable: motion.compassAvailable, highRefresh: asksForHighRefresh)
         let cameraMode = cameraBootMode()
         let cameraPath = cameraDirectory.map { Self.prepareCalibrationDirectory($0) }?.path
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
@@ -760,14 +785,17 @@ final class LiveRuntime: RuntimeDriver {
 
     /// What the boot request tells the guest the host has
     /// (`android_host_features`): a vibrator, on a device with haptics, a
-    /// device orientation to follow, where the guest follows it, and a
-    /// magnetic field, on a device that can give one.
+    /// device orientation to follow, where the guest follows it, a magnetic
+    /// field, on a device that can give one, and a 120 Hz display, where the
+    /// person asked for it and the screen can show it.
     nonisolated static func hostFeatures(
-        hapticsAvailable: Bool, followsDeviceOrientation: Bool = false, compassAvailable: Bool = false
+        hapticsAvailable: Bool, followsDeviceOrientation: Bool = false, compassAvailable: Bool = false,
+        highRefresh: Bool = false
     ) -> UInt32 {
         (hapticsAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) : 0)
             | (followsDeviceOrientation ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION) : 0)
             | (compassAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS) : 0)
+            | (highRefresh ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH) : 0)
     }
 
     /// The camera mode the boot request states. iOS may have changed the
@@ -1017,6 +1045,9 @@ final class LiveRuntime: RuntimeDriver {
 
     private func reached(_ milestones: [BootMilestone], bootCompleted: Bool, recoveryStarted: Bool) {
         guard let model else { return }
+        // The guest's display exists, so the runtime has decided what it
+        // granted the run: before the screen the run is shown on is.
+        learnDisplayGrant()
         // The guest console answers, so the emulator exists and takes requests
         // for the keyboard and the mouse.
         if !inputRunReady {
@@ -1088,6 +1119,10 @@ final class LiveRuntime: RuntimeDriver {
         updateSpaceWatch()
         updateThermal()
         thermalMonitor.stop()
+        // A run that has ended holds nothing: the hold goes with the grant.
+        runHasHighRefresh = false
+        displayGrantKnown = false
+        lowPowerMonitor.stop()
         stopThermalObservation()
         kernarium_runtime_loader_set_restart_handler(nil)
         kernarium_runtime_loader_set_console_output_handler(nil)
@@ -1170,6 +1205,9 @@ final class LiveRuntime: RuntimeDriver {
     /// per turn, and the mount restarts the sensors only when it moves.
     func sceneGeometryDidChange() {
         guard normalRun else { return }
+        // The scene may have moved to another screen, which shows a different
+        // number of frames a second than the last one did.
+        updateSixtyHertzHold()
         updateGuestRotation()
     }
 
@@ -1457,6 +1495,40 @@ final class LiveRuntime: RuntimeDriver {
     // uptime also go to the console for the iPad harness
     // (`Shared/ConsoleReport.swift`).
 
+    /// Reads what the runtime granted the run's display, once: the 120 Hz
+    /// display (the screen of the display's own view, the host and the size
+    /// were checked at the start, once, for everything that depends on it) or
+    /// the 60 Hz one. The run has that, whatever the start asked, and so does
+    /// the hold.
+    private func learnDisplayGrant() {
+        guard runActive, !displayGrantKnown, let rate = Self.displayRefreshReading() else { return }
+        displayGrantKnown = true
+        runHasHighRefresh = rate >= 120
+        model?.runStarted(withHighRefresh: runHasHighRefresh)
+        updateSixtyHertzHold()
+    }
+
+    /// Android is held to 60 Hz while the run has the 120 Hz display and what
+    /// the screen shows is 60 at the most: iOS in Low Power Mode, or a screen
+    /// the window moved to that shows less than 100 frames a second.
+    private func updateSixtyHertzHold() {
+        thermal.setSixtyHertzHold(
+            HighRefresh.holdsAtSixty(
+                displayIs120: runHasHighRefresh, lowPowerMode: lowPowerModeOn,
+                screenMaximumFramesPerSecond: model?.screenMaximumFramesPerSecond ?? 60))
+    }
+
+    /// The rate the runtime granted the run's display, nil while there is no
+    /// display (before the guest's kernel starts).
+    private nonisolated static func displayRefreshReading() -> UInt32? {
+        var reading = kernarium_runtime_statistics()
+        reading.struct_size = UInt32(MemoryLayout<kernarium_runtime_statistics>.size)
+        guard kernarium_runtime_loader_read_statistics(&reading) == 0, reading.display_refresh_hz != 0 else {
+            return nil
+        }
+        return reading.display_refresh_hz
+    }
+
     /// The guest's thermal HAL is told while a normal run goes on; Recovery
     /// has none.
     private func updateThermal() {
@@ -1690,7 +1762,10 @@ final class LiveRuntime: RuntimeDriver {
         print(ConsoleReport.application(active: true))
         active = true
         updateGuestRotation()
-        if normalRun { thermalMonitor.refresh() }
+        if normalRun {
+            thermalMonitor.refresh()
+            lowPowerMonitor.refresh()
+        }
         guard let model else { return }
         model.applicationActive = true
         let free = freeSpace()

@@ -62,7 +62,7 @@ void theWordIsTheLastMemberAndTheApiIsTheOneThatAddedIt()
             sizeof(kernarium_runtime_boot));
     require(sizeof(kernarium_runtime_boot) - bootSizeBeforeAotDisabled <=
             sizeof(void*));
-    require(KERNARIUM_RUNTIME_API_VERSION >= 44U);
+    require(KERNARIUM_RUNTIME_API_VERSION >= 45U);
 }
 
 /* The source of a release's identity, which counts the times it is read. */

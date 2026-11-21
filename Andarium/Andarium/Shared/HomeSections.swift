@@ -305,6 +305,30 @@ struct SnapshotsRow: View {
     }
 }
 
+/// Whether the next start of Android asks for the 120 Hz display
+/// (`AppModel.highRefreshOn`, kept for the install, off at first). It is read
+/// when Android starts and never during a run, so it is on Home, which shows
+/// only while no guest runs; the row is drawn only where the screen can show
+/// it (`AppModel.highRefreshOffered`), in Performance (`HomePerformanceSection`).
+struct HighRefreshRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        OptionRow(
+            title: String(localized: "120 Hz"), symbol: "speedometer",
+            detail: String(localized: "Smoother motion, more battery use.")
+        ) {
+            Toggle("120 Hz", isOn: Binding(
+                get: { model.highRefreshOn },
+                set: { model.setHighRefresh($0) }
+            ))
+            .labelsHidden()
+            .accessibilityIdentifier("home-high-refresh-switch")
+        }
+        .id("high-refresh")
+    }
+}
+
 // MARK: Capabilities
 
 /// What the guest may use of this device: the location, the microphone and the
@@ -527,37 +551,56 @@ extension View {
     func cameraAccessAlert() -> some View { modifier(CameraAccessAlert()) }
 }
 
-// MARK: JIT
+// MARK: Performance
 
-/// How Android runs, as rows of one section: whether the guest runs on the JIT
-/// engine, which a debugger the person attached (StikDebug) makes possible, and
-/// what the next start can do about it; and, below it, whether Android's system
-/// libraries run from the code translated from them ahead of time
-/// (`TranslatedLibrariesRow`), in a build that carries it. Both apply when the
-/// guest next starts.
-struct JitSection: View {
+/// Performance: what the guest runs with, in one section, top to bottom: "120 Hz"
+/// where the screen can show it (`AppModel.highRefreshOffered`), then AOT
+/// (`TranslatedLibrariesRow`) in a build that carries the translated-code
+/// framework (`AppModel.translatedLibrariesAvailable`), then JIT where a build
+/// can have it (`AppModel.jitAvailable`). The section is drawn when at least
+/// one of them is, and none draws it at all. JIT is the row next to the note
+/// beneath the panel, which says what JIT does at the next start
+/// (`JitStatus.footer`); with no JIT row there is no note.
+struct HomePerformanceSection: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        if model.jitAvailable || model.translatedLibrariesAvailable, model.guest != nil {
-            HomeSection(verbatim: model.jitAvailable ? "JIT" : String(localized: "Performance")) {
-                if model.jitAvailable {
-                    OptionRow(title: "JIT", symbol: "bolt.fill") {
-                        Toggle(isOn: Binding(
-                            get: { model.jitOn },
-                            set: { model.setJit($0) }
-                        )) { Text(verbatim: "JIT") }
-                        .labelsHidden()
-                    }
+        if model.guest != nil,
+            model.highRefreshOffered || model.translatedLibrariesAvailable || model.jitAvailable
+        {
+            HomeSection(title: "Performance") {
+                if model.highRefreshOffered {
+                    HighRefreshRow()
+                    if model.translatedLibrariesAvailable || model.jitAvailable { RowDivider() }
                 }
-                if model.jitAvailable, model.translatedLibrariesAvailable { RowDivider() }
-                if model.translatedLibrariesAvailable { TranslatedLibrariesRow() }
+                if model.translatedLibrariesAvailable {
+                    TranslatedLibrariesRow()
+                    if model.jitAvailable { RowDivider() }
+                }
+                if model.jitAvailable { JitRow() }
             } footer: {
                 if model.jitAvailable { SectionNote(model.jitStatus.footer) }
             }
-            .id("jit")
-            .task { model.refreshJit() }
+            .id("performance")
         }
+    }
+}
+
+/// Whether the guest runs on the JIT engine, which a debugger the person
+/// attached (StikDebug) makes possible, and what the next start can do about
+/// it. It applies when the guest next starts.
+struct JitRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        OptionRow(title: "JIT", symbol: "bolt.fill") {
+            Toggle(isOn: Binding(
+                get: { model.jitOn },
+                set: { model.setJit($0) }
+            )) { Text(verbatim: "JIT") }
+            .labelsHidden()
+        }
+        .task { model.refreshJit() }
     }
 }
 

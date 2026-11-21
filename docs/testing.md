@@ -359,8 +359,8 @@ and the notice that iOS denies the network, from the path's mapping to
 the watcher's start and stop on a fake path source);
 `andarium-motion-protocol`, `andarium-device-orientation`,
 `andarium-haptics-protocol`, `andarium-haptics-player`,
-`andarium-thermal-protocol`, `andarium-thermal-levels` and
-`andarium-gamepad-protocol` (unit), `andarium-stage-system-image`,
+`andarium-thermal-protocol` (the MODERATE record included),
+`andarium-thermal-levels` and `andarium-gamepad-protocol` (unit), `andarium-stage-system-image`,
 `andarium-capture-screens` and `andarium-localization` (tooling) cover the
 motion wire format (its device-orientation and magnetic field records and its
 control frames, "ANC3" included, against the golden frames in
@@ -384,10 +384,26 @@ ranges of every field and the frame reader), system image staging, the
 screenshot script, the String Catalogs' check and their sync with the
 compiler's extraction ([the gate after a build](../Andarium/README.md#languages)),
 and `kernarium-host-features` (unit) the table of host features the boot
-request carries to an Android guest, and `kernarium-aot-release` (unit) the boot
-request's word that keeps the ahead-of-time component out of a launch and the
-release argument a start then gives the emulator.
-`kernarium-camera` (unit) checks
+request carries to an Android guest (the high-refresh bit included), and
+`kernarium-aot-release` (unit) the boot request's word that keeps the
+ahead-of-time component out of a launch and the release argument a start then
+gives the emulator. The 120 Hz
+display is covered without a device: `gpu-device-command-atomicity` has the
+EDID's 60 Hz bytes unchanged, the 120 Hz timing only where its pixel clock
+fits and the mode's rate told to the display (a size beyond 60 Hz included);
+`gpu-edid-timing` checks the size rule against one fixture table that the app's
+check also reads;
+`gpu-present-pacer` runs the display link's decisions (the 60 and 120 steps as
+the guest's rate changes, steady, speeding-up and alternating guests, frames
+early and late in groups, the two seconds between changes and the bound on the
+changes, the wake, the sleep, the bounded retry of a present that
+found no drawable, and the bound on its waits for one (a frame's budget is the
+frame claimed, across a link made again and a frame that arrives while a tick
+decides), and the ceiling of Low Power Mode
+and of a mode that states neither rate) against a fake clock; `gpu-offscreen-display` counts each accepted
+guest update once; `HighRefreshTests` (in `andarium-core` and in
+`AndariumTests`) cover the setting, its launch rules (screen maximum, size,
+Mac and Vision Pro) and the Low Power Mode hold. `kernarium-camera` (unit) checks
 what the runtime tells an Android guest about the host's cameras (the camera
 fields of the boot request, the composed layout and its recomposition at each
 boot, the lens cover, the host memory a live session reserves (none for a
@@ -1446,8 +1462,8 @@ power off cleanly (the loop guard, `emulator/src/restart_loop_guard.hpp`).
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
 names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's
-render rate and the frame rates at each severity, on a fresh data disk or, with
-`--instance`, over an older release's.
+render rate and the frame rates at each severity (MODERATE's 60 Hz vote
+included), on a fresh data disk or, with `--instance`, over an older release's.
 `android-orientation` (integration) registers when
 `UML_ANDROID_ORIENTATION_RELEASE` names the release: the runner plays the host
 application over a vsock forward to the motion port with the

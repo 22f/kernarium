@@ -75,6 +75,23 @@ nonisolated enum HeatLimitLaunch {
     }
 }
 
+/// The state of Home's "120 Hz" a harness launch states for its run
+/// (`ANDARIUM_HIGH_REFRESH`): "1" asks for the 120 Hz display at the start of
+/// Android, where the screen can show it, and "0" does not, whatever the person
+/// chose; anything else is no setting. The stored choice stays as it is
+/// (`HighRefreshPreference.launch`).
+nonisolated enum HighRefreshLaunch {
+    static let environmentName = "ANDARIUM_HIGH_REFRESH"
+
+    static func stated(in environment: [String: String]) -> Bool? {
+        switch environment[environmentName] {
+        case "1"?: true
+        case "0"?: false
+        default: nil
+        }
+    }
+}
+
 /// A harness launch's silent phone (`ANDARIUM_HAPTICS=0`): for that launch the
 /// device plays none of the guest's haptics, as it does while the person's
 /// Haptics switch is off, and the stored switch stays as it is. Anything else
@@ -182,12 +199,13 @@ nonisolated enum CompassReadoutLaunch {
 extension AppEntry {
     /// Whether the launch is the person's own, which announces the release
     /// notes (`announceWhatsNew`). A launch that states any setting, the JIT
-    /// or the thermal state or the heat limit included, or runs under XCTest is a
+    /// or the thermal state or the heat limit or the 120 Hz display included, or runs under XCTest is a
     /// harness's.
     static func isPersonsLaunch(overrides: LaunchOverrides, environment: [String: String]) -> Bool {
         overrides.isEmpty && JitPreference.stated(in: environment) == nil
             && ThermalOverride.stated(in: environment) == nil
             && HeatLimitLaunch.stated(in: environment) == nil
+            && HighRefreshLaunch.stated(in: environment) == nil
             && !InputProbeLaunch.requested(in: environment)
             && !CompassReadoutLaunch.requested(in: environment)
             && environment[OldAppsProbeLaunch.environmentName] == nil

@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import XCTest
 
-/// Home's AOT row in the Simulator preview: shown, below JIT in the same
-/// section, in a build that carries the translated-code framework (the preview
-/// plays one with `-screen home-aot`), absent from one that does not (`home`),
-/// on by default, turned off and on again, and dimmed with its reason while the
-/// next start runs on the JIT engine, which does not use the translated code.
+/// Home's AOT row in the Simulator preview: shown, above JIT in the
+/// Performance section, in a build that carries the translated-code framework
+/// (the preview plays one with `-screen home-aot`), absent from one that does
+/// not (`home`), on by default, turned off and on again, and dimmed with its
+/// reason while the next start runs on the JIT engine, which does not use the
+/// translated code.
 final class TranslatedLibrariesUITests: XCTestCase {
     private static let identifier = "home-aot-switch"
     private static let title = "AOT"
@@ -79,17 +80,15 @@ final class TranslatedLibrariesUITests: XCTestCase {
     }
 
     @MainActor
-    func testTheRowIsBelowJitInTheSameSection() {
+    func testTheRowIsAboveJitInTheSameSection() {
         let app = launch("home-aot")
         let toggle = app.switches[Self.identifier].firstMatch
         reveal(toggle, in: app)
         let jit = app.switches["JIT"].firstMatch
         XCTAssertTrue(jit.exists, "the JIT row is missing")
-        XCTAssertGreaterThan(toggle.frame.minY, jit.frame.maxY, "the AOT row is not below the JIT row")
-        // One section: the heading above them is JIT's, and there is no second
-        // heading between the two rows.
-        XCTAssertTrue(app.staticTexts["JIT"].firstMatch.exists)
-        XCTAssertFalse(app.staticTexts["Performance"].firstMatch.exists)
+        XCTAssertLessThan(toggle.frame.maxY, jit.frame.minY, "the AOT row is not above the JIT row")
+        // One section: a single Performance heading above the rows.
+        XCTAssertEqual(app.staticTexts.matching(identifier: "Performance").count, 1)
     }
 
     @MainActor

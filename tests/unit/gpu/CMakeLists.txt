@@ -878,6 +878,22 @@ if(TARGET uml_gpu_service)
 endif()
 
 if(TARGET uml_gpu_display)
+    # The decisions of the 120 Hz display link: a state machine, no clock.
+    uml_add_gpu_unit_test(gpu-present-pacer
+        uml_gpu_present_pacer_tests present_pacer_tests.cpp
+        LIBRARIES uml_gpu_display
+        UNIT_DIRECTORY)
+
+    # The sizes whose 120 Hz mode the EDID can state, against the table that
+    # the application's offer reads too (the fixture's path is the test's
+    # argument, so the file has one copy).
+    add_executable(uml_gpu_edid_timing_tests edid_timing_tests.cpp)
+    target_link_libraries(uml_gpu_edid_timing_tests PRIVATE uml_gpu_display)
+    uml_add_unit_test(NAME gpu-edid-timing
+        COMMAND uml_gpu_edid_timing_tests
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/edid-120hz-sizes.txt
+        LABELS gpu)
+
     # The resize path's objects come from the shipped display library.
     uml_add_gpu_unit_test(gpu-display-resize
         uml_gpu_display_resize_tests display_resize_tests.cpp

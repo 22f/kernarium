@@ -189,8 +189,11 @@ table in `KernariumHostFeatures.hpp` (the haptics bit becomes the hardware SKU
 `haptics`, which declares the guest's vibrator; the orientation bit, API 37,
 becomes `androidboot.kernarium.orientation=1`, which lists the guest's
 device-orientation sensor; the compass bit, API 38, becomes
-`androidboot.kernarium.compass=1`, which lists its magnetometer), and ignores
-the others; Kernarium sends none. The
+`androidboot.kernarium.compass=1`, which lists its magnetometer; the
+high-refresh bit, API 44, becomes `androidboot.kernarium.high_refresh=1` and
+also makes the display's one mode 120 Hz on an iOS device whose screen can show
+it, see [Display refresh rate](#display-refresh-rate)), and ignores the others;
+Kernarium sends none. The
 runtime validates the values (`KernariumAdbChannel.hpp`,
 `KernariumGuestTimeZone.hpp`). An Android guest has its own serial number and
 eth0 address, which the runtime keeps in `identity.json` beside the data disk
@@ -199,7 +202,7 @@ request states values only for a run that needs fixed ones
 (`android_serial_number` and `android_ethernet_mac`, API 42). The launcher
 states the release an Android guest boots to the emulator, which the
 ahead-of-time component needs; a request keeps it out with
-`android_aot_disabled` (API 44), as Andarium's Home switch does, and Kernarium
+`android_aot_disabled` (API 45), as Andarium's Home switch does, and Kernarium
 sends none.
 
 ## Devices and display
@@ -299,6 +302,63 @@ The Metal and Mesa shader cache policies are in
 the scene's geometry (windows, tiling, Slide Over, Full Screen Apps and
 rotation). Kernarium runs one guest per process and so has one window: its
 scene manifest does not support multiple scenes.
+
+### Display refresh rate
+
+The guest's display has one mode, 60 Hz. When the boot request carries
+`KERNARIUM_RUNTIME_ANDROID_HOST_HIGH_REFRESH` (runtime API 44), the runtime
+decides once, at boot, whether this run has 120 Hz (`grantedRefreshRate` of
+`NativeDisplay`): the boot view's own screen must show at least 100 frames
+a second (a screen between 61 and 99 is refused), and the boot size's 120 Hz
+detailed timing must fit the EDID (`darwin/device/gpu/edid_timing.hpp`; the
+12.9" and 13" iPad Pro at native size do not). Granted, an Android guest gets
+one 120 Hz mode (the 60 Hz bytes do not change) and
+`androidboot.kernarium.high_refresh=1`. Refused, the run is a 60 Hz run in
+every respect (no bit, no property, no pacer), with a line on stderr, and macOS
+and visionOS always refuse. `display_refresh_hz` of the runtime's statistics
+(120 or 60; 0 with no display) is what the run was granted, which the
+application follows. After a resize, the mode's rate follows the mode the
+runtime makes: 120 only where granted and the new size fits the EDID.
+At 60 Hz, and on a Mac, a present follows each guest flush. At 120 Hz a display
+link on the view's own window scene (it follows the view to another scene,
+never makes one on a scene that is disconnecting, and a missing link or scene
+leaves a retry) paces the presents (`darwin/device/gpu/present_pacer.hpp`): it
+runs only while frames wait and asks iOS for the rate the guest renders at in
+two steps, 60 and 120 frames a second. A guest above 62.5 frames a second,
+judged over a second, has the 120 step, and one at 60 or less the 60 step,
+which shows every frame the setting off does. The 120 step is left only after
+a fall measure over two seconds is below 61 and the one over a second no
+longer supports it, and a step changes no sooner than two seconds after the
+last change since the link woke (a wake forgets it, and a ceiling that forbids
+the step lowers it at once), so a guest that alternates across the threshold,
+or whose frames arrive early and late, changes the step at most once in each
+half of its cycle (halves of two seconds or less) and a steady speed-up
+changes it once. Once the link has settled, a steady guest of 60 or less, or 63
+or more, makes no change. One between them never changes the step twice within
+the two seconds: with frames early or late by up to 4 ms it changes it once at
+most, and with 4 ms of jitter in the interval between its frames it can change
+it up to five times in 12 s, at rates from about 60.05 to 62.05 frames a
+second. A guest just over a threshold whose frames bunch at the boundaries of
+the second can stay on the old step for several seconds, longer the more frames
+bunch (at 63 frames a second about 4 s with three bunched, 5 s with four, 7 s
+with six). Every time here is the time plus one tick of the link. The ceiling
+is the rate the EDID's timing states for the mode (the
+largest clock the field holds, for a size beyond it), the screen's maximum and
+Low Power Mode; from 100 it is the 120 step, and any lower rate, a mode of 47
+Hz included, is the 60 step. A frame whose draw found no drawable is drawn
+again, 30 times at most and until its draws have waited 0.9 s in all for a
+drawable. A draw asks the layer for a drawable once, and only while the frame
+it claims has budget left (a layer waits a second for one that the display
+holds), so the thread that draws is held under 1.9 s for a frame, the 0.9 s
+and one wait of the layer, not half a minute; a drawable that arrives late is
+drawn into. The budget is the claimed frame's, so a frame that arrives while a
+tick decides is not given a second one; the debt outlives a link made again,
+and only a draw of another frame renews it. The link pauses after 100 ms
+without a frame. When the
+ceiling is below the mode's rate the guest is held, as under
+Low Power Mode. `CADisableMinimumFrameDurationOnPhone` in the application's
+`Info.plist` lets an iPhone exceed 60. What the guest does with the property
+is in [`android/lineage-24/README.md`](../android/lineage-24/README.md).
 
 ### Microphone
 
