@@ -8499,6 +8499,7 @@ def verify_sms_holder(android_root: Path) -> None:
         "system_internal_prop(ctl_kernarium_sms_wake_prop)",
         "set_prop(kernarium_sms_listener, ctl_kernarium_sms_wake_prop)",
         "system_internal_prop(ctl_kernarium_sms_locked_prop)",
+        "dontaudit kernarium_sms_listener ctl_kernarium_sms_locked_prop:property_service set;",
     ):
         if needle not in holder:
             fail(f"the holder's policy lacks '{needle}'")
@@ -8554,9 +8555,12 @@ def verify_sms_holder(android_root: Path) -> None:
         wanted = verifier.SMS_WAKE_PROPERTY_TYPE if key == verifier.SMS_WAKE_PROPERTY else "ctl_kernarium_sms_locked_prop"
         if verifier.property_label(key, properties.splitlines()) != wanted:
             fail(f"the system_ext property contexts do not label {key} as {wanted}")
+    # The one other line that may name it is the holder's dontaudit of its own denied start of the waker (a dontaudit
+    # grants nothing).
     if re.search(r"ctl_kernarium_sms_locked_prop", "\n".join(
             line for line in (holder + waker + service).splitlines() if not line.lstrip().startswith("#")
-            and "system_internal_prop(ctl_kernarium_sms_locked_prop)" not in line)):
+            and "system_internal_prop(ctl_kernarium_sms_locked_prop)" not in line
+            and line.strip() != "dontaudit kernarium_sms_listener ctl_kernarium_sms_locked_prop:property_service set;")):
         fail("a policy source names ctl_kernarium_sms_locked_prop beyond its declaration: nothing sets it but init")
     listener = overlay / "sms/listener"
     blueprint = (listener / "Android.bp").read_text()
