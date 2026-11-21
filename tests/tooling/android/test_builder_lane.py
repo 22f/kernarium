@@ -552,6 +552,14 @@ def sms_policy_fixture(verifier: Path, variant: str | None) -> dict[str, str]:
         ext += "(typeattributeset unconstrained_vsock_violators (kernarium_sms))\n"
     if variant != "holder-without-the-vsock-attribute":
         ext += "(typeattributeset unconstrained_vsock_violators (kernarium_sms_listener))\n"
+    # The platform labels the user's directories with the user's categories, which the service's level lacks: only a
+    # domain that is trusted against the multi-level constraints can search them. The daemons search none.
+    if variant != "no-mls-trust":
+        ext += "(typeattributeset mlstrustedsubject (kernarium_sms))\n"
+    if variant == "holder-mls-trusted":
+        ext += "(typeattributeset mlstrustedsubject (kernarium_sms_listener))\n"
+    if variant == "waker-mls-trusted":
+        ext += "(typeattributeset mlstrustedsubject (kernarium_sms_wake))\n"
     if variant != "no-core-domain":
         ext += "(typeattributeset coredomain (kernarium_sms))\n"
     if variant != "holder-not-a-core-domain":
@@ -6613,6 +6621,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "kernarium_sms is not in appdomain"),
             ("sms-service-without-the-vsock-attribute", {"sms_policy_variant": "no-vsock-attribute"},
              "kernarium_sms is not in unconstrained_vsock_violators"),
+            ("sms-service-not-mls-trusted", {"sms_policy_variant": "no-mls-trust"},
+             "kernarium_sms is not in mlstrustedsubject: the directories of the user it runs for carry categories"),
+            ("sms-holder-mls-trusted", {"sms_policy_variant": "holder-mls-trusted"},
+             "kernarium_sms_listener is in mlstrustedsubject: it searches no directory of the user"),
+            ("sms-waker-mls-trusted", {"sms_policy_variant": "waker-mls-trusted"},
+             "kernarium_sms_wake is in mlstrustedsubject: it searches no directory of the user"),
             ("sms-package-selects-no-domain", {"sms_policy_variant": "no-seapp-line"},
              "seapp_contexts do not select kernarium_sms"),
             ("sms-domain-for-another-package", {"sms_policy_variant": "settings-in-the-domain"},
@@ -8417,9 +8431,13 @@ def verify_sms_holder(android_root: Path) -> None:
         "allow kernarium_sms kernarium_sms_listener:fd use;",
         "unix_socket_connect(kernarium_sms, kernarium_sms, kernarium_sms_listener)",
         "typeattribute kernarium_sms unconstrained_vsock_violators;",
+        "typeattribute kernarium_sms mlstrustedsubject;",
     ):
         if needle not in service:
             fail(f"the service's policy lacks '{needle}'")
+    for name, text in (("holder", holder), ("waker", waker)):
+        if re.search(r"^[^#\n]*mlstrustedsubject", text, re.M):
+            fail(f"the {name}'s policy makes it an mlstrustedsubject: it searches no directory of the user")
     if re.search(r"^(?!neverallow)[^#\n]*self:vsock_socket", service, re.M):
         fail("the service's policy gives it rights on a vsock socket of its own: it makes none")
     contexts = (private / "file_contexts").read_text()

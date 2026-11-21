@@ -558,7 +558,11 @@ manager. Init alone enters their domains and controls them: of the keys of the
 control properties that init checks for either service (`ctl.<service>`, which it
 checks first for start, stop and restart, and `ctl.<action>$<service>`), init alone
 may set every one but the key that starts the waker, which the holder sets too.
-The compiled manifest of the
+The platform labels the directories of the user (`/data/data`, and `/data/user_de/<id>` from the
+second boot of a data image) with the user's categories, which the service's level lacks, so
+the service alone is an `mlstrustedsubject`, as every system application is: otherwise it could
+not search the path of its record, and every message after the first restart would be refused.
+Neither daemon is, and the verifier requires both. The compiled manifest of the
 service names SDK levels in a `uses-sdk` element, which the build adds, and no
 activity, receiver, provider, filter or permission request. The
 platform's own `getattr` for `dumpstate` stats a socket and carries no data. Of

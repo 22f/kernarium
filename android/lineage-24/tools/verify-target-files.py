@@ -6071,6 +6071,16 @@ def check_sms_policy(contexts: list[str], policies: tuple[bytes, ...], seapp_con
     for attribute in ("coredomain", "appdomain", "unconstrained_vsock_violators"):
         if attribute not in attributes:
             fail(f"{SMS_DOMAIN} is not in {attribute}")
+    # The platform's file contexts give a user's directories (/data/user_de/<id>, from the second boot on, and
+    # /data/data) that user's categories; the multi-level constraint on searching a directory that is not application
+    # data lets a subject through only when its level dominates, or it is mlstrustedsubject. The service has no
+    # categories and every system application is trusted: without it the service cannot reach its record at all.
+    if "mlstrustedsubject" not in attributes:
+        fail(f"{SMS_DOMAIN} is not in mlstrustedsubject: the directories of the user it runs for carry categories "
+             "that its level lacks, so it could not search the path of its record")
+    for daemon in (SMS_LISTENER, SMS_WAKE):
+        if "mlstrustedsubject" in cil_types_and_attributes(policies, daemon):
+            fail(f"{daemon} is in mlstrustedsubject: it searches no directory of the user")
     holder_attributes = cil_types_and_attributes(policies, SMS_LISTENER)
     for attribute in ("coredomain", "unconstrained_vsock_violators"):
         if attribute not in holder_attributes:

@@ -11,6 +11,13 @@ type kernarium_sms, domain;
 typeattribute kernarium_sms coredomain;
 app_domain(kernarium_sms)
 
+# The platform labels a user's directories with that user's categories (/data/user_de/<id> from a device's second
+# boot on, /data/data from its first), which this domain's level lacks. The multi-level constraint on searching a
+# directory that is not application data lets only a trusted subject through, as it does every system application;
+# without this the path of the record cannot be searched after the first boot. It widens nothing else: the type
+# enforcement below is what the verifier pins.
+typeattribute kernarium_sms mlstrustedsubject;
+
 # Its own data: the record of the messages it has handed over, which no other system application's
 # grants reach. The type carries the attributes of the platform's own application data types, so that
 # installd, vold and zygote handle it through their attribute rules.
