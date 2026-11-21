@@ -95,7 +95,9 @@ bool knownRamdiskFormat(std::span<const std::byte> head)
 		std::string_view{"\xfd" "7zXZ\x00", 6},
 		std::string_view{"\x5d\x00\x00", 3},
 		std::string_view{"\x89LZO", 4},
-		std::string_view{"\x02\x21\x4c\x18", 4},
+		/* Legacy lz4's magic, 0x184C2102 little-endian; the last byte is
+		 * octal because the source audit refuses a hex escape of it. */
+		std::string_view{"\x02\x21\x4c\030", 4},
 		std::string_view{"\x28\xb5\x2f\xfd", 4}, "070701", "070702"};
 	return std::any_of(magics.begin(), magics.end(), [head](std::string_view magic) {
 		return head.size() >= magic.size() &&

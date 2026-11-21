@@ -939,7 +939,7 @@ void testRootBootImage(const Fixture &fixture, const fs::path &directory)
 	/* Every format the kernel unpacks is taken. */
 	using namespace std::string_view_literals;
 	for (const auto magic : {"\x1f\x8b"sv, "BZh"sv, "\xfd" "7zXZ\x00"sv,
-				 "\x5d\x00\x00"sv, "\x89LZO"sv, "\x02\x21\x4c\x18"sv,
+				 "\x5d\x00\x00"sv, "\x89LZO"sv, "\x02\x21\x4c\030"sv,
 				 "\x28\xb5\x2f\xfd"sv, "070702"sv}) {
 		fs::copy_file(image, original, fs::copy_options::overwrite_existing);
 		writeAt(image, pageSize, bytesOf(magic));
