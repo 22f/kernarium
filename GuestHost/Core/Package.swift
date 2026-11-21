@@ -9,12 +9,16 @@ import PackageDescription
 // application and is not a package (GuestHost/README.md).
 let package = Package(
     name: "GuestHostCore",
+    defaultLocalization: "en",
     platforms: [.macOS("27.0"), .iOS("26.0")],
     products: [
         .library(name: "GuestHostCore", targets: ["GuestHostCore"]),
     ],
     targets: [
-        .target(name: "GuestHostCore"),
+        .target(
+            name: "GuestHostCore",
+            resources: [.process("Resources/Localizable.xcstrings")]
+        ),
         .testTarget(
             name: "GuestHostCoreTests",
             dependencies: ["GuestHostCore"]

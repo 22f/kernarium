@@ -336,7 +336,11 @@ guest, each of which has the guest write back first. The hosted
 free-space thresholds, suspension check and pause both applications share and
 the logic of the hardware keyboard and pointer (held keys, Caps Lock,
 positions, buttons, scroll), and the latch of a run's host stop with the
-guest's write-back before it (`RunStop`, `StopSettle`), and
+guest's write-back before it (`RunStop`, `StopSettle`), and the update notice
+(the version file's reading and every rule that decides what is offered or
+opened, the one request against an in-process network with no real address,
+the daily schedule and the record, the model's moments, and its words in each
+language), and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
 with `swift test` (it includes the hardware input's plug policy and pointer
 capture, the snapshot store on APFS clones of sparse

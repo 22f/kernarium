@@ -30,7 +30,12 @@ Core/                                  GuestHostCore, a Swift package both
                                        (RunStop: kept until the run ends;
                                        StopSettle: the guest's write-back before
                                        it, bounded), and a monotonic clock that is
-                                       not a required-reason API (MonotonicClock)
+                                       not a required-reason API (MonotonicClock), and
+                                       the update notice of a sideloaded application
+                                       (Update/: the version file's reading and rules,
+                                       the daily read, the record and its model, the
+                                       words, and a String Catalog for them: see
+                                       Update notice below)
 Sources/KernariumRuntimeLoader.h/.mm   loads the embedded runtime framework and
                                        wraps its C API (Runtime/KernariumRuntime.h)
 Sources/GuestDisplay.swift             the Metal view that shows the guest's display,
@@ -62,6 +67,38 @@ Config/Signing.xcconfig                the signing settings Kernarium's Xcode pr
                                        uses as its base configuration and Andarium's
                                        `Config/Andarium.xcconfig` includes
 ```
+
+## Update notice
+
+A sideloaded application learns of a newer version from one version file its
+maker hosts: an AltStore-format source (what AltStore and SideStore read) with
+one block of our own, `kernariumUpdates`, that adds a format number and a
+release page per build. `Core/Sources/GuestHostCore/Update/` holds what both
+applications decide the same way: the file's reading (`UpdateFile`), the link
+rules (`UpdateLinkPolicy`), the one request (`UpdateReader`), the record and the
+daily schedule (`UpdateStore`), the build's configuration
+(`UpdateConfiguration`), the words (`UpdateWords`, in the package's own catalog)
+and the model the screens read (`UpdateNotice`). An application supplies its
+original bundle identifier (the `UpdateAppIdentifier` key of its `Info.plist`,
+copied from `PRODUCT_BUNDLE_IDENTIFIER`: a sideloading tool re-signs the
+installed application under another one), its name, the moment it reads and
+the views; a build with no address has no configuration and no notice.
+
+- The file is untrusted. Only a version, a build, a day, a size and links that
+  pass the rules are shown or opened; every sentence is the application's own.
+  A file that is no JSON or JSON5, over 1 MiB, or of another `format` is no
+  answer; an entry that breaks a rule skips only itself; unknown fields and
+  other applications' entries are ignored. The offer is the highest build above
+  the installed one whose iOS range fits the device, never a lower build.
+- A link is `https` on the file's own host or a host the build names
+  (`UpdateLinkHosts`: exact names and `*.` patterns), with no user name, no port
+  but the default and at most 2 KiB. A sideloading app's link is built from a
+  fixed template, never taken from the file.
+- The read is one GET, at most once in 24 hours, a few seconds after Home shows
+  and only at the application's moment; it uses an ephemeral session with no
+  cookies, cache or conditional header, a fixed `User-Agent` and
+  `Accept-Language`, `https` only (redirects included), a 1 MiB and 15 s limit,
+  and never runs under Low Data Mode or after a cancelled task.
 
 ## Signing
 
