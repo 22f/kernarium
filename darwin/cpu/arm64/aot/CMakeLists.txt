@@ -33,7 +33,7 @@ set(_uml_aot_manifest ${_uml_aot_dir}/manifest.json)
 set(_uml_aot_fw_parent "${PROJECT_BINARY_DIR}/lib")
 set(_uml_aot_fw_dir "${_uml_aot_fw_parent}/UmlArm64Aot.framework")
 
-# An iOS framework states the lowest system that loads it, as App Store
+# An iOS framework states the lowest system that loads it, as the platform's
 # validation requires of every embedded framework.
 set(_uml_aot_plist_minimum)
 if(NOT UML_TARGET_MACOS)

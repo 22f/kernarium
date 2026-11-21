@@ -974,7 +974,14 @@ outcomes are known and not defects of the image:
 - The guest has a compressed swap of half its RAM (one zram entry in
   `fstab.uml`), enabled at `sys.boot_completed`. PinnerService does not lock the
   home app's files, and `kernarium_reclaim_boot_apps.sh` kills only the cached
-  processes of a reviewed list of boot-started apps after boot completes.
+  processes of a reviewed list of apps that boot, or the first listing of the
+  launcher applications, starts (Messaging, the SMS provider's process and the
+  icon renderer among them) after boot completes. Each package is decided from a
+  listing taken for it, by its complete process name, for user 0, and every row of
+  the process must be cached; a process that turns previous or service in the instant
+  between its own listing and the kill can still be ended once, as a low-memory
+  kill would end it. The next use starts them again: a text message from the host
+  starts Messaging and then the provider.
 - lmkd ends the cached app that holds the most host graphics memory while the
   kernel reports host GPU pressure in `/sys/class/drm/card0/gpu_memory_report`
   (route `p0027`; `ro.lmk.gpu_reclaim`, set by the product, turns it on). It does
@@ -1324,8 +1331,8 @@ the list. An object ID follows content, so it survives a history rewrite and a
 builder that works from an exported snapshot; the publisher takes it from the
 clean checkout it runs in. The accepted descriptor repeats the IDs
 (`LINEAGE24_ACCEPTED_INPUT_TREES`), and `install-release.py --print-acceptance`
-prints the whole descriptor for a candidate. The AppStore and TestFlight
-configurations of Andarium compare them with the commit they archive
+prints the whole descriptor for a candidate. Andarium's Release configuration
+compares them with the commit it archives
 ([`scripts/check-embedded-artifacts.py`](../../scripts/check-embedded-artifacts.py)).
 Verifier-only tools, documentation and tests are excluded, and a tracked file
 under this directory that the list does not classify fails
@@ -1344,8 +1351,8 @@ hash, and installs it atomically below `.build/android/releases`. It never
 replaces an existing release. `--aot-artifact` also installs the release's AOT
 artifact (`tools/aot/release_artifact.py`) below `.build/android/aot`, once it
 verifies against the release; `metadata/accepted-aot.env` accepts it, and its
-`LINEAGE24_ACCEPTED_AOT_ARCHIVES` field is whether the App Store and TestFlight
-configurations may carry it. The artifact is not part of the release's file
+`LINEAGE24_ACCEPTED_AOT_ARCHIVES` field is whether an archive of Andarium's
+Release configuration may carry it. The artifact is not part of the release's file
 inventory. Apple CMake does not import the rootfs release
 and does not invoke Repo, Soong, Kbuild, image assembly, publication, or
 transport.

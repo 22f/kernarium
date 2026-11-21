@@ -32,6 +32,10 @@ final class AddToHomeUITests: XCTestCase {
         return app
     }
 
+    private func requireShortcutTiles() throws {
+        if #unavailable(iOS 27.0) { throw XCTSkip("Add to Home Screen is offered from iOS 27") }
+    }
+
     private func attach(_ name: String, of element: XCUIElement) {
         let attachment = XCTAttachment(screenshot: element.screenshot())
         attachment.name = name
@@ -51,7 +55,112 @@ final class AddToHomeUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["add-to-home-screen-guide"].waitForExistence(timeout: 20), "the guide did not open")
     }
 
-    func testTheRowTheChooserAndTheGuideOfTheBuiltApplication() {
+    /// Add to Home Screen is offered from iOS 27, where Shortcuts has a tile for each app of
+    /// Andarium's. Before it Settings has no row, and the test says so (the others are skipped).
+    func testBefore27SettingsHasNoAddToHomeScreenRow() throws {
+        if #available(iOS 27.0, *) { throw XCTSkip("Add to Home Screen is offered from iOS 27") }
+        let app = launch()
+        // The Apps section is on screen (the row would follow Install APK).
+        XCTAssertTrue(app.staticTexts["Install APK\u{2026}"].firstMatch.waitForExistence(timeout: 30), "the Apps section is not on screen")
+        XCTAssertFalse(app.buttons["settings-add-to-home-screen"].waitForExistence(timeout: 5), "Settings has an Add to Home Screen row")
+    }
+
+    /// Shortcuts' own list of actions, searched for Andarium's. The entity, its query, the action and
+    /// its automatic shortcut are declared @available(iOS 27.0, *), so Shortcuts lists "Open Android
+    /// App" and the Find the system makes for the entity from iOS 27, and no Android action before
+    /// it. The test runs Andarium once, which is when the system learns its actions, then
+    /// launches Shortcuts, which runs in the test's language, English. The new shortcut's editor is
+    /// opened by its URL; its search of actions is the search field that says "Action", or, from
+    /// iOS 27, the only one, behind the Editor button of the panel that describes a shortcut. The
+    /// words searched are "Safari", which proves the search works, and "Android". A result is a
+    /// button or a cell. The extracted metadata says the same of the build
+    /// (`andarium-open-intent-availability`).
+    func testShortcutsOffersOpenAndroidAppFromIOS27Only() throws {
+        var offered = false
+        if #available(iOS 27.0, *) { offered = true }
+        continueAfterFailure = false
+        // The system learns what an app's actions are when the app first runs, and Shortcuts lists
+        // none of them before.
+        let own = XCUIApplication()
+        own.launch()
+        XCTAssertTrue(own.wait(for: .runningForeground, timeout: 60), "Andarium did not start")
+        sleep(10)
+        own.terminate()
+        let shortcuts = XCUIApplication(bundleIdentifier: "com.apple.shortcuts")
+        shortcuts.launch()
+        func attachScreen(_ name: String) {
+            let text = XCTAttachment(string: shortcuts.debugDescription)
+            text.name = name
+            text.lifetime = .keepAlways
+            add(text)
+            let picture = XCTAttachment(screenshot: shortcuts.screenshot())
+            picture.name = name + "-picture"
+            picture.lifetime = .keepAlways
+            add(picture)
+        }
+        // The search of actions: the one that says Action, or, once the editor is open, the only one
+        // (iOS 27 says Search; the list of shortcuts has a search of its own beside the panel that
+        // describes a shortcut, and none beside the editor).
+        var editorOpen = false
+        func actionsSearch() -> XCUIElement {
+            let named = shortcuts.searchFields.matching(NSPredicate(format: "placeholderValue CONTAINS[c] 'Action'")).firstMatch
+            return named.exists || !editorOpen ? named : shortcuts.searchFields.firstMatch
+        }
+        func waitForSearch(_ seconds: TimeInterval) -> Bool {
+            let found = NSPredicate { _, _ in actionsSearch().exists && actionsSearch().isHittable }
+            return XCTWaiter().wait(for: [expectation(for: found, evaluatedWith: nil)], timeout: seconds) == .completed
+        }
+        XCUIDevice.shared.system.open(try XCTUnwrap(URL(string: "shortcuts://create-shortcut")))
+        attachScreen("opened")
+        var found = waitForSearch(15)
+        if !found {
+            // Shortcuts' own introduction of what is new, then the panel that describes the shortcut,
+            // whose Editor button opens the editor with the actions beside it.
+            let proceed = shortcuts.buttons.matching(NSPredicate(format: "label ==[c] 'Continue'")).firstMatch
+            if proceed.waitForExistence(timeout: 3) { proceed.tap() }
+            let editor = shortcuts.buttons["Editor"]
+            if editor.waitForExistence(timeout: 20) { editor.tap() }
+            editorOpen = true
+            attachScreen("editor-toggled")
+            found = waitForSearch(40)
+        }
+        attachScreen("editor")
+        XCTAssertTrue(found, "the new shortcut's editor has no search of actions: \(shortcuts.debugDescription)")
+        actionsSearch().tap()
+        func results(naming word: String) -> XCUIElementQuery {
+            let rows = shortcuts.cells.matching(NSPredicate(format: "label CONTAINS[c] %@", word))
+            let buttons = shortcuts.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", word))
+            return rows.count > 0 ? rows : buttons
+        }
+        func forget(_ typed: String) {
+            actionsSearch().typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: typed.count))
+        }
+        actionsSearch().typeText("Safari")
+        let control = NSPredicate { _, _ in results(naming: "Safari").count > 0 }
+        let proved = XCTWaiter().wait(for: [expectation(for: control, evaluatedWith: nil)], timeout: 40)
+        attachScreen("search-control")
+        XCTAssertEqual(proved, .completed, "the search of actions found no Safari: \(shortcuts.debugDescription)")
+        forget("Safari")
+        actionsSearch().typeText("Android")
+        // From iOS 27 Shortcuts lists Open and the Find it makes for the app entity.
+        func opens() -> Bool {
+            let found = results(naming: "Android")
+            return found.count >= 2 || found.matching(NSPredicate(format: "label CONTAINS[c] 'Open'")).count > 0
+        }
+        if offered {
+            let present = NSPredicate { _, _ in opens() }
+            let outcome = XCTWaiter().wait(for: [expectation(for: present, evaluatedWith: nil)], timeout: 40)
+            XCTAssertEqual(outcome, .completed, "Shortcuts does not offer Open Android App: \(shortcuts.debugDescription)")
+        } else {
+            // The search of "Safari" listed its results, so the list of actions is searched and loaded.
+            sleep(15)
+            XCTAssertEqual(results(naming: "Android").count, 0, "Shortcuts lists an Android action: \(shortcuts.debugDescription)")
+        }
+        attachScreen("search-android")
+    }
+
+    func testTheRowTheChooserAndTheGuideOfTheBuiltApplication() throws {
+        try requireShortcutTiles()
         let app = launch()
         openTheGuide(app)
         XCTAssertTrue(app.staticTexts["Touch and hold \u{201C}Comet Hop\u{201D}"].exists)
@@ -68,6 +177,7 @@ final class AddToHomeUITests: XCTestCase {
     /// its children, written where the run's owner reads them
     /// (`ANDARIUM_LINK_REPORT`, a file), and the picture of the foot of the guide.
     func testApplesShortcutsButtonReadsInTheLanguageOfTheRun() throws {
+        try requireShortcutTiles()
         let app = launch()
         openTheGuide(app)
         // Apple's button, by its identifier or by the word Shortcuts in each of the languages.
@@ -127,7 +237,8 @@ final class AddToHomeUITests: XCTestCase {
         }
     }
 
-    func testApplesShortcutsButtonOpensShortcutsOnAndariumsPage() {
+    func testApplesShortcutsButtonOpensShortcutsOnAndariumsPage() throws {
+        try requireShortcutTiles()
         let app = launch()
         openTheGuide(app)
         let link = app.descendants(matching: .any).matching(NSPredicate(

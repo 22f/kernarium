@@ -3,12 +3,9 @@
 import AndariumCore
 import Foundation
 
-#if !APP_STORE
-
 /// The names a harness launch gives `LaunchOverrides` settings in the
 /// environment (`Andarium/README.md#automation`). The `KERNARIUM_` names mean
-/// what they mean in Kernarium; the `ANDARIUM_` ones are Andarium's own. An
-/// App Store build compiles this file out, so it reads no launch setting.
+/// what they mean in Kernarium; the `ANDARIUM_` ones are Andarium's own.
 extension LaunchOverrides {
     static func environmentName(_ setting: Setting) -> String {
         switch setting {
@@ -155,7 +152,7 @@ nonisolated enum AndroidAppsProbeLaunch {
 /// A development launch's text message entrance (`ANDARIUM_TEXT_MESSAGES=1`).
 /// The application offers no text message until an accepted release image
 /// carries the service (`Capabilities.device`); tests and proof images switch
-/// it on with this setting. An App Store build compiles it out.
+/// it on with this setting.
 nonisolated enum TextMessagesLaunch {
     static let environmentName = "ANDARIUM_TEXT_MESSAGES"
 
@@ -201,8 +198,7 @@ extension AppEntry {
     /// The file in an isolated guest instance's directory whose number, in
     /// mebibytes, stands for the device's free space while it exists, so that
     /// a harness launch drives the run's low-space pause without filling the
-    /// disk. Only an isolated instance reads it, and an App Store build
-    /// compiles it out.
+    /// disk. Only an isolated instance reads it.
     static let harnessFreeSpaceFile = "free-space-mib"
 
     static func harnessFreeSpace(
@@ -245,5 +241,3 @@ extension AppEntry {
         }
     }
 }
-
-#endif

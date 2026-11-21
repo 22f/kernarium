@@ -745,7 +745,7 @@ void require_no_identity(const std::string &record, const std::string &where)
  * number, the host's adb key and the time zone it was given, and init prints
  * a property it cannot set with the value: the record keeps the output and
  * none of the three values, wherever they stand, and no hardware address,
- * and it puts what the application's start log puts in their place. */
+ * and it puts masking words in their place. */
 void test_the_record_keeps_no_identity_values()
 {
 	uml::runtime::reset_session_record();
@@ -2635,6 +2635,18 @@ void test_camera_presentation()
 		count(slot, "video camera 1 ") == 1 &&
 		count(slot, "mount camera 1 ") == 1,
 		"a camera's earlier note was not replaced: " + slot);
+	/* The half turn the host applies to a camera's pictures is named next to
+	 * its connection's turn, and a camera with none says nothing. */
+	require(!has(slot, "hostturn"),
+		"a camera with no half turn names none: " + slot);
+	auto turned = camera_front_note();
+	turned.stated = turned.platformStated = 270;
+	turned.presentationTurn = 180;
+	uml::runtime::note_camera_presentation(turned);
+	slot = slot_of(read_file(path));
+	require(has(slot, " stated 270 turn 270 hostturn 180 earlier yes ") &&
+		count(slot, "mount camera 1 ") == 1,
+		"the half turn of a camera's pictures was not recorded: " + slot);
 	uml::runtime::note_camera_presentation(camera_front_note());
 	slot = slot_of(read_file(path));
 	require(has(slot, " first 1920x1440 stab standard\n") &&

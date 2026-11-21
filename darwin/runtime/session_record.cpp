@@ -929,7 +929,12 @@ void camera_line(FixedText &text, CameraLineKind kind,
 		 * (a tablet that boots turned). */
 		if (c.platformStated != c.stated)
 			text.text(" platform ").number(c.platformStated);
-		text.text(" turn ").number(c.turn).text(" earlier ");
+		text.text(" turn ").number(c.turn);
+		/* The half turn the host applies to every picture of the camera
+		 * (a front camera mounted at 90 states 270), where it does. */
+		if (c.presentationTurn != 0)
+			text.text(" hostturn ").number(c.presentationTurn);
+		text.text(" earlier ");
 		camera_yes_no(text, c.earlier);
 		text.text(" anchor ");
 		camera_size(text, c.anchorWidth, c.anchorHeight);
@@ -1239,8 +1244,7 @@ KnownValue<known_key_capacity> known_key;
 KnownValue<known_serial_capacity> known_serial;
 KnownValue<known_zone_capacity> known_zone;
 
-/* What stands where a value was taken out; the same words the application's
- * start log puts (`SendFeedbackStartLog.masked`). */
+/* What stands where a value was taken out. */
 constexpr std::string_view masked_value{"<masked>"};
 constexpr std::string_view masked_zone{"<time zone>"};
 constexpr std::string_view masked_address{"<address>"};
