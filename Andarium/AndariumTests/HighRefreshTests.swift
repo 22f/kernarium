@@ -4,9 +4,10 @@ import Foundation
 import Testing
 @testable import Andarium
 
-/// Settings' "120 Hz" in the model, in what it keeps, in what a launch states
+/// Home's "120 Hz" in the model, in what it keeps, in what a launch states
 /// of it, in the boot request and in what Low Power Mode does to the guest's
-/// render rate. The setting itself is drawn by `SettingsOrderTests`.
+/// render rate. The row is drawn by `ResolutionScreenTests`, and Settings has none
+/// (`SettingsOrderTests`).
 @MainActor
 struct HighRefreshTests {
     private func model() -> AppModel {
@@ -120,30 +121,21 @@ struct HighRefreshTests {
         // The runtime's grant, once known, is the run's.
         model.runStarted(withHighRefresh: true)
         #expect(model.runHasHighRefresh)
-        #expect(!model.highRefreshWaitsForRestart)
     }
 
-    @Test func aChangeWhileAndroidRunsWaitsForTheNextStart() {
+    @Test func theSettingDoesNotChangeTheDisplayOfARunThatIsGoing() {
         let model = model()
         model.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 120)
         model.phase = .running(.normal)
         model.runStarted(withHighRefresh: false)
-        #expect(!model.highRefreshWaitsForRestart)
         model.setHighRefresh(true)
-        #expect(model.highRefreshWaitsForRestart, "the running display cannot change")
-        // The run's display is still the one it started with.
-        #expect(!model.runHasHighRefresh)
+        #expect(!model.runHasHighRefresh, "the running display cannot change")
         model.setHighRefresh(false)
-        #expect(!model.highRefreshWaitsForRestart)
-        // After a start that asked, turning it off waits too.
+        // After a start that asked, turning it off leaves the run's display too.
         model.setHighRefresh(true)
         model.runStarted(withHighRefresh: true)
-        #expect(!model.highRefreshWaitsForRestart)
         model.setHighRefresh(false)
-        #expect(model.highRefreshWaitsForRestart)
-        // Nothing waits outside a run.
-        model.phase = .home
-        #expect(!model.highRefreshWaitsForRestart)
+        #expect(model.runHasHighRefresh)
     }
 
     // MARK: What is kept

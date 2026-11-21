@@ -75,7 +75,7 @@ nonisolated enum HeatLimitLaunch {
     }
 }
 
-/// The state of Settings' "120 Hz" a harness launch states for its run
+/// The state of Home's "120 Hz" a harness launch states for its run
 /// (`ANDARIUM_HIGH_REFRESH`): "1" asks for the 120 Hz display at the start of
 /// Android, where the screen can show it, and "0" does not, whatever the person
 /// chose; anything else is no setting. The stored choice stays as it is

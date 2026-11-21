@@ -1109,7 +1109,7 @@
       }
     },
     "120 Hz" : {
-      "comment" : "The switch in Settings under Performance, on a screen that can show more than 60 frames a second: the display Android gets is 120 Hz. The unit is kept by every language.",
+      "comment" : "The switch in Home's Virtual machine section, below Resolution, on a screen that can show more than 60 frames a second: the display Android gets is 120 Hz. The unit is kept by every language.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -9530,25 +9530,25 @@
         }
       }
     },
-    "Smoother motion on this display, and more battery use. Takes effect the next time Android starts." : {
-      "comment" : "The footnote of the 120 Hz switch: what it does, what it costs, and that it applies when Android next starts, because the display's rate is fixed at the start.",
+    "Smoother motion on this display, and more battery use." : {
+      "comment" : "The footnote of the 120 Hz row in Home's Virtual machine section: what it does and what it costs. Home shows only while Android is stopped, so the row says nothing of a restart.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このディスプレイでの動きがより滑らかになりますが、バッテリーの消費が増えます。次回のAndroid起動時に適用されます。"
+            "value" : "このディスプレイでの動きがより滑らかになりますが、バッテリーの消費が増えます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此显示屏上的动态画面更流畅，但会更耗电。下次启动Android时生效。"
+            "value" : "此显示屏上的动态画面更流畅，但会更耗电。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此顯示器上的動態更流暢，但會更耗電。下次啟動Android時生效。"
+            "value" : "此顯示器上的動態更流暢，但會更耗電。"
           }
         }
       }

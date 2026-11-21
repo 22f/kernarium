@@ -564,14 +564,16 @@ address space holds, so this is a fallback.
   rate in one tap; Dismiss only dismisses. A harness launch runs with the
   default and keeps nothing; `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states it for
   the run ([Automation](#automation)).
-  Performance also has "120 Hz" (`HighRefreshPreference`, off by default),
-  drawn in a normal session only where the screen shows at least 100 frames a
-  second (an iPhone Pro, an iPad Pro; a screen between 61 and 99 does not
-  qualify), where the display size the next start would have can carry the 120
-  Hz mode, never on a Mac or Vision Pro, and not in Recovery.
+  Home's Virtual machine section has "120 Hz" (`HighRefreshPreference`, off by
+  default) directly below Resolution, drawn only where the screen shows at
+  least 100 frames a second (an iPhone Pro, an iPad Pro; a screen between 61
+  and 99 does not qualify), where the display size the next start would have
+  can carry the 120 Hz mode, and never on a Mac or Vision Pro; Settings has no
+  row of it, because Home, which shows only while no guest runs, is where the
+  guest's configuration is.
   Turned on, the next start of Android asks the runtime for the 120 Hz display
   ([Display refresh rate](../Kernarium/README.md#display-refresh-rate)); a
-  change applies at that start, as the row's footnote says. The runtime
+  change applies at that start. The runtime
   decides once, at boot, whether the run has the mode, and the application
   uses what it granted (`display_refresh_hz` of the runtime's statistics) for
   the run. While iOS is in Low Power Mode, or after the window moves to a
@@ -1233,7 +1235,7 @@ one pixel to a point) is read where it is not stated.
 for iOS's thermal state in the Simulator and in automation; only `critical`
 reaches the guest as heat. `ANDARIUM_HEAT_LIMIT` (`1` or `0`) states
 Settings' "When hot" for the run: `0` tells the guest nothing of the heat.
-`ANDARIUM_HIGH_REFRESH` (`1` or `0`) states Settings' "120 Hz" for the run. A
+`ANDARIUM_HIGH_REFRESH` (`1` or `0`) states Home's "120 Hz" for the run. A
 UI test's probe session (`ANDARIUM_INPUT_PROBE`) that states the thermal state
 runs the thermal session against a stand-in for the guest's HAL, and its log
 says what the guest would be told (`heat told <severity>`).

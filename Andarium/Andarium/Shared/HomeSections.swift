@@ -97,10 +97,11 @@ struct OptionRow<Control: View>: View {
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("option-detail-button")
                     } else {
+                        // A long translation shows whole, up to three lines.
                         Text(detail)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
-                            .lineLimit(2)
+                            .lineLimit(3)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -122,12 +123,13 @@ struct RowDivider: View {
 
 // MARK: System
 
-/// The guest's system in one section, as four rows of one shape: CPU and
-/// memory states the vCPUs and RAM, with Edit opening the sheet that changes
-/// them; Resolution states the guest's display, with Change opening its
-/// choices (`ResolutionRow`); Storage states what the guest holds of its
-/// capacity under a bar, with Resize; Snapshots states how many there are and
-/// the space they use, with Manage opening them.
+/// The guest's system in one section: CPU and memory states the vCPUs and RAM,
+/// with Edit opening the sheet that changes them; Resolution states the guest's
+/// display, with Change opening its choices (`ResolutionRow`); on a screen that
+/// can show more than 60 frames a second, "120 Hz" below it (`HighRefreshRow`);
+/// Storage states what the guest holds of its capacity under a bar, with
+/// Resize; Snapshots states how many there are and the space they use, with
+/// Manage opening them.
 struct SystemSection: View {
     @Environment(AppModel.self) private var model
 
@@ -145,6 +147,10 @@ struct SystemSection: View {
                 RowDivider()
                 ResolutionRow()
                 RowDivider()
+                if model.highRefreshOffered {
+                    HighRefreshRow()
+                    RowDivider()
+                }
                 StorageRow(guest: guest, stops: model.capacityStopsGiB, resize: { model.sheet = .resize })
                 RowDivider()
                 SnapshotsRow()
@@ -299,6 +305,30 @@ struct SnapshotsRow: View {
             )
         )
         .task { await store.reload() }
+    }
+}
+
+/// Whether the next start of Android asks for the 120 Hz display
+/// (`AppModel.highRefreshOn`, kept for the install, off at first). It is read
+/// when Android starts and never during a run, so it is on Home, which shows
+/// only while no guest runs; the row is drawn only where the screen can show it
+/// (`AppModel.highRefreshOffered`), below Resolution in Virtual machine.
+struct HighRefreshRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        OptionRow(
+            title: String(localized: "120 Hz"), symbol: "speedometer",
+            detail: String(localized: "Smoother motion on this display, and more battery use.")
+        ) {
+            Toggle("120 Hz", isOn: Binding(
+                get: { model.highRefreshOn },
+                set: { model.setHighRefresh($0) }
+            ))
+            .labelsHidden()
+            .accessibilityIdentifier("home-high-refresh-switch")
+        }
+        .id("high-refresh")
     }
 }
 

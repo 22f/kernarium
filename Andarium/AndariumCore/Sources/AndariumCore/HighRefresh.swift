@@ -2,7 +2,7 @@
 
 import Foundation
 
-/// Settings' "120 Hz" under Performance: whether the next Android start asks
+/// Home's "120 Hz" in Virtual machine: whether the next Android start asks
 /// for a 120 Hz display. Off is the default and the display is what it has
 /// always been. The choice lasts across launches. A display that is 120 Hz is
 /// fixed at the start, so a change applies when Android next starts.

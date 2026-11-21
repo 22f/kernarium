@@ -124,8 +124,7 @@ struct AppEntry {
         "settings-accessibility-left": "accessibility",
         "settings-performance": "stats", "settings-performance-menu": "stats", "settings-performance-off": "stats",
         "settings-performance-hot": "stats", "settings-performance-hot-off": "stats",
-        "settings-high-refresh": "stats", "settings-high-refresh-on": "stats",
-        "settings-high-refresh-hot": "stats",
+        "settings-performance-120": "stats",
     ]
 
     /// The page of Info a screen opens on.
@@ -276,7 +275,7 @@ struct AppEntry {
         case "home-memory-warning", "system-memory-warning":
             model.guest = PreviewData.highMemoryGuest(on: host)
         case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit",
-             "home-location-ask", "home-camera-ask":
+             "home-location-ask", "home-camera-ask", "home-high-refresh", "home-high-refresh-on":
             break
         case "home-jit":
             model.jitOn = true
@@ -414,8 +413,8 @@ struct AppEntry {
         case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
              "settings-text-message", "settings-accessibility", "settings-accessibility-left",
              "settings-performance", "settings-performance-menu", "settings-performance-off",
-             "settings-performance-hot", "settings-performance-hot-off", "settings-high-refresh",
-             "settings-high-refresh-on", "settings-high-refresh-hot", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
+             "settings-performance-hot", "settings-performance-hot-off", "settings-performance-120",
+             "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
              "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container",
              "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split",
              "install-part-too-large", "install-legacy-hint", "install-legacy-hint-data",

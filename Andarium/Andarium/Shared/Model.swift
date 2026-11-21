@@ -749,7 +749,7 @@ final class AppModel {
     var hostOffersHighRefresh: Bool {
         host.idiom != .mac && padAppHost.hasHomeScreen
     }
-    /// Whether Settings offers "120 Hz": the screen shows at least 100 frames a
+    /// Whether Home offers "120 Hz": the screen shows at least 100 frames a
     /// second, the host is an iPhone or an iPad, and the display the next
     /// start gives the guest is a size whose 120 Hz mode the EDID can state (a
     /// 12.9- or 13-inch iPad Pro at its native size is not, and is offered the
@@ -764,8 +764,8 @@ final class AppModel {
     private var nextDisplaySize: (width: Int, height: Int)? {
         resolutionLayout.map { ($0.width, $0.height) }
     }
-    /// Settings' "120 Hz" under Performance: whether the next Android start
-    /// asks for a 120 Hz display. Off is the default. Kept for the install
+    /// Home's "120 Hz" in Virtual machine: whether the next Android start asks
+    /// for a 120 Hz display. Off is the default. Kept for the install
     /// (`HighRefreshPreference`).
     var highRefreshOn = false
     /// The launch decided it (automation): the value belongs to that run and
@@ -789,14 +789,8 @@ final class AppModel {
     /// granted it, which no change of the setting alters until Android next
     /// starts. False until the runtime has said.
     private(set) var runHasHighRefresh = false
-    /// The setting now asks for something other than the running display has:
-    /// it applies the next time Android starts.
-    var highRefreshWaitsForRestart: Bool {
-        guard case .running = phase else { return false }
-        return asksForHighRefresh != runHasHighRefresh
-    }
-    /// Settings' "120 Hz". It applies at the next start; the display of a run
-    /// that is going does not change.
+    /// Home's "120 Hz". It applies at the next start (Home shows only while no
+    /// guest runs).
     func setHighRefresh(_ on: Bool) {
         guard on != highRefreshOn else { return }
         highRefreshOn = on

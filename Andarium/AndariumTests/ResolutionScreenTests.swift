@@ -116,6 +116,42 @@ struct ResolutionScreenTests {
         }
     }
 
+    /// "120 Hz" is a row of Virtual machine, directly below Resolution, on a
+    /// screen that can show more than 60 frames a second (and a size whose
+    /// mode the EDID can state), with its footnote as the row's own line; on
+    /// any other screen the section is as it was. Like every row with a line
+    /// under its title, VoiceOver reads the row as that line and then the
+    /// control's own label.
+    @Test func theHundredAndTwentyHertzRowSitsBelowResolutionWhereTheScreenShowsMoreThanSixty() async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let footnote = "Smoother motion on this display, and more battery use."
+        let sixty = hostRow(model(native: 3, chosen: .native), in: lease)
+        _ = try await waitFor("Resolution, 1206 by 2334, Native", in: sixty.view)
+        #expect(
+            !labels(in: sixty.view).contains { $0.contains("120 Hz") || $0.contains(footnote) },
+            "a 60 Hz screen was offered 120 Hz")
+
+        let promotion = model(native: 3, chosen: .native)
+        promotion.screenDidChange(nativeScale: 3, maximumFramesPerSecond: 120)
+        let controller = hostRow(promotion, in: lease)
+        _ = try await waitFor("Resolution, 1206 by 2334, Native", in: controller.view)
+        let row = try await waitFor("\(footnote), 120 Hz", in: controller.view)
+        let all = labels(in: controller.view)
+        let resolution = try #require(all.firstIndex { $0.hasPrefix("Resolution") }, "\(all)")
+        let refresh = try #require(all.firstIndex { $0.hasSuffix("120 Hz") }, "\(all)")
+        let storage = try #require(all.firstIndex { $0.hasPrefix("Storage") }, "\(all)")
+        #expect(resolution < refresh && refresh < storage, "120 Hz is not between Resolution and Storage: \(all)")
+        #expect(row.accessibilityValue == "0", "the switch says \(row.accessibilityValue ?? "nothing")")
+        #expect(
+            !all.contains { $0.contains("Takes effect the next time Android starts") },
+            "Home says Android is running: \(all)")
+        promotion.setHighRefresh(true)
+        let on = hostRow(promotion, in: lease)
+        let after = try await waitFor("\(footnote), 120 Hz", in: on.view)
+        #expect(after.accessibilityValue == "1", "the switch says \(after.accessibilityValue ?? "nothing")")
+    }
+
     @Test func theRowSaysWhatTheGuestWillGetOnAScreenOfAnotherScale() async throws {
         let lease = try await HostWindow.take()
         defer { lease.give() }
