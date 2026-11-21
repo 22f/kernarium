@@ -9,7 +9,9 @@ import Foundation
 /// it describes, which is how a session record is known to be the one the
 /// runtime wrote for that start (`belongs(to:)`). The next launch keeps it with
 /// the session record (`PreviousSession`), and the bug report copies the two
-/// together when they belong to each other (`BugReportAttachments`).
+/// together when they belong to each other (`BugReportAttachments`). A launch
+/// that finds a start record and no session record of its own marks the start
+/// `orphaned`, which belongs to no session whatever its process and time say.
 public struct StartRecord: Equatable, Sendable {
     /// The first line.
     public static let layout = "uml-start 1"
@@ -23,25 +25,31 @@ public struct StartRecord: Equatable, Sendable {
     public var processID: Int
     /// When it made it, to the second, as the session record's own times are.
     public var at: Date
+    /// Whether the next launch found this record with no session record of
+    /// its own: the runtime never opened the session. Such a start stays
+    /// unmatched, though a retained session's process and time may also fit.
+    public var orphaned: Bool
 
-    public init(translatedLibraries: TranslatedLibrariesStart.Word, processID: Int, at: Date) {
+    public init(translatedLibraries: TranslatedLibrariesStart.Word, processID: Int, at: Date, orphaned: Bool = false) {
         self.translatedLibraries = translatedLibraries
         self.processID = processID
         self.at = Date(timeIntervalSince1970: at.timeIntervalSince1970.rounded(.down))
+        self.orphaned = orphaned
     }
 
     /// The file's text.
     public var text: String {
         "\(Self.layout)\ntranslated-libraries \(translatedLibraries.rawValue)\n"
-            + "process \(processID)\nat \(Int(at.timeIntervalSince1970))\n"
+            + "process \(processID)\nat \(Int(at.timeIntervalSince1970))\n" + (orphaned ? "orphan 1\n" : "")
     }
 
     /// Whether `session` is the one the runtime wrote for this start: the same
     /// process, and begun no earlier than the start. A session that began
     /// before it is an earlier one's, and a record the runtime never wrote for
-    /// this start (it ended first) has no session to belong to.
+    /// this start (it ended first) has no session to belong to, nor has one a
+    /// later launch found without a session of its own (`orphaned`).
     public func belongs(to session: SessionRecord) -> Bool {
-        guard let started = session.started else { return false }
+        guard !orphaned, let started = session.started else { return false }
         return session.processID == processID && started >= at
     }
 
@@ -52,6 +60,7 @@ public struct StartRecord: Equatable, Sendable {
         var word: TranslatedLibrariesStart.Word?
         var process: Int?
         var seconds: Int?
+        var orphan = false
         for line in lines.dropFirst() {
             guard let space = line.firstIndex(of: " ") else { continue }
             let value = String(line[line.index(after: space)...])
@@ -59,6 +68,7 @@ public struct StartRecord: Equatable, Sendable {
             case "translated-libraries": word = TranslatedLibrariesStart.Word(rawValue: value)
             case "process": process = Int(value)
             case "at": seconds = Int(value)
+            case "orphan": orphan = value == "1"
             default: break
             }
         }
@@ -68,6 +78,7 @@ public struct StartRecord: Equatable, Sendable {
         translatedLibraries = word
         processID = process
         at = Date(timeIntervalSince1970: TimeInterval(seconds))
+        orphaned = orphan
     }
 
     /// The record at `url`, or nil when there is none, it is longer than

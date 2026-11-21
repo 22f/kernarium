@@ -232,8 +232,49 @@ struct TranslatedLibrariesTests {
         #expect(entries.map(\.name).contains("andarium/session-previous.txt"))
         #expect(!entries.map(\.name).contains("andarium/start-previous.txt"))
         #expect(!entries.map(\.name).contains("andarium/start-current.txt"))
+        // What the launch found is marked, and the mark is in the copy.
         #expect(text(of: entries.first { $0.name == "andarium/start-previous-unmatched.txt" })
-            == start(.off, process: 8, at: 200).text)
+            == StartRecord(
+                translatedLibraries: .off, processID: 8, at: Date(timeIntervalSince1970: 200), orphaned: true
+            ).text)
+    }
+
+    /// The same start, with the process reused and the clock put back: the
+    /// retained session's process and time also fit it, and it is still not
+    /// that session's.
+    @Test func aStartRotatedWithoutASessionStaysUnmatchedWhateverItsProcessAndTimeSay() throws {
+        let directory = try scratch()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try put(sessionText(process: 7, started: 300), BugReportAttachments.sessionRecord, in: directory)
+        start(.on, process: 7, at: 290).write(to: directory.appendingPathComponent(BugReportAttachments.startRecord))
+        #expect(PreviousSession.consume(in: directory, endedOutOfForeground: false) != nil)
+        // Process 7 is made again, with the clock behind where session A began,
+        // and ends before the runtime opens a session.
+        start(.off, process: 7, at: 200).write(to: directory.appendingPathComponent(BugReportAttachments.startRecord))
+        #expect(PreviousSession.consume(in: directory, endedOutOfForeground: false) == nil)
+        let entries = BugReportAttachments.entries(from: directory, containers: [])
+        #expect(entries.map(\.name).contains("andarium/session-previous.txt"))
+        #expect(!entries.map(\.name).contains("andarium/start-previous.txt"))
+        #expect(text(of: entries.first { $0.name == "andarium/start-previous-unmatched.txt" })?
+            .contains("translated-libraries off") == true)
+    }
+
+    @Test func anOrphanedStartRecordReadsBackAndBelongsToNoSession() throws {
+        let directory = try scratch()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(BugReportAttachments.startRecord)
+        let orphan = StartRecord(
+            translatedLibraries: .off, processID: 7, at: Date(timeIntervalSince1970: 200), orphaned: true)
+        #expect(orphan.text == "uml-start 1\ntranslated-libraries off\nprocess 7\nat 200\norphan 1\n")
+        #expect(orphan.write(to: url))
+        #expect(StartRecord.read(at: url) == orphan)
+        let session = try #require(SessionRecord(text: sessionText(process: 7, started: 300)))
+        #expect(!orphan.belongs(to: session))
+        var ordinary = orphan
+        ordinary.orphaned = false
+        #expect(ordinary.belongs(to: session))
+        // A record that says nothing of it is not marked.
+        #expect(StartRecord(text: "uml-start 1\ntranslated-libraries off\nprocess 7\nat 200\n")?.orphaned == false)
     }
 
     /// The other way: B's session was written and its start record was not

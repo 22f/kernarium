@@ -354,12 +354,26 @@ public enum PreviousSession {
         if started || record != nil {
             let keptStart = diagnostics.appendingPathComponent(BugReportAttachments.previousStartRecord)
             try? FileManager.default.removeItem(at: keptStart)
-            if started { try? FileManager.default.moveItem(at: start, to: keptStart) }
+            if started { keep(start, as: keptStart, orphaned: record == nil) }
         }
         guard let record else { return nil }
         let kept = diagnostics.appendingPathComponent(BugReportAttachments.previousSessionRecord)
         try? FileManager.default.removeItem(at: kept)
         try? FileManager.default.moveItem(at: current, to: kept)
         return (record, record.notice(endedOutOfForeground: endedOutOfForeground).map { .sessionEnded($0) })
+    }
+
+    /// Moves the start record to its kept place. With no session record of its
+    /// own to go with it, the record is marked first, so that no retained
+    /// session whose process and time happen to fit can take it for its own.
+    private static func keep(_ start: URL, as kept: URL, orphaned: Bool) {
+        if orphaned, var record = StartRecord.read(at: start) {
+            record.orphaned = true
+            // A record that cannot be kept marked is not kept.
+            if !record.write(to: kept) { try? FileManager.default.removeItem(at: kept) }
+            try? FileManager.default.removeItem(at: start)
+            return
+        }
+        try? FileManager.default.moveItem(at: start, to: kept)
     }
 }
